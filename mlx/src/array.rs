@@ -165,6 +165,7 @@ impl Array {
     }
 
     /// Internal: wrap a raw `mlx_array` returned by a C op.
+    #[allow(dead_code)]
     pub(crate) fn from_raw(raw: sys::mlx_array) -> Self {
         Array(raw)
     }

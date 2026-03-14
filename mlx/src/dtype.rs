@@ -40,6 +40,7 @@ impl Dtype {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn to_raw(self) -> sys::mlx_dtype {
         match self {
             Dtype::Bool => sys::mlx_dtype__MLX_BOOL,
