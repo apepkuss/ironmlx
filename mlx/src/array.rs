@@ -38,7 +38,7 @@ impl Array {
                 data.as_ptr() as *const _,
                 shape.as_ptr(),
                 shape.len() as i32,
-                sys::mlx_dtype_MLX_FLOAT32,
+                sys::mlx_dtype__MLX_FLOAT32,
             )
         })
     }
@@ -51,7 +51,7 @@ impl Array {
                 data.as_ptr() as *const _,
                 shape.as_ptr(),
                 shape.len() as i32,
-                sys::mlx_dtype_MLX_INT32,
+                sys::mlx_dtype__MLX_INT32,
             )
         })
     }
@@ -119,6 +119,10 @@ impl Array {
 
     pub(crate) fn as_raw(&self) -> sys::mlx_array {
         self.0
+    }
+
+    pub(crate) fn as_raw_mut(&mut self) -> *mut sys::mlx_array {
+        &mut self.0
     }
 
     /// Internal: wrap a raw `mlx_array` returned by a C op.

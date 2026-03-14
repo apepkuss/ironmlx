@@ -10,15 +10,15 @@ pub enum DeviceType {
 impl DeviceType {
     fn to_raw(self) -> sys::mlx_device_type {
         match self {
-            DeviceType::Cpu => sys::mlx_device_type_MLX_CPU,
-            DeviceType::Gpu => sys::mlx_device_type_MLX_GPU,
+            DeviceType::Cpu => sys::mlx_device_type__MLX_CPU,
+            DeviceType::Gpu => sys::mlx_device_type__MLX_GPU,
         }
     }
 
     fn from_raw(raw: sys::mlx_device_type) -> Self {
         match raw {
-            sys::mlx_device_type_MLX_CPU => DeviceType::Cpu,
-            sys::mlx_device_type_MLX_GPU => DeviceType::Gpu,
+            sys::mlx_device_type__MLX_CPU => DeviceType::Cpu,
+            sys::mlx_device_type__MLX_GPU => DeviceType::Gpu,
             _ => panic!("Unknown mlx_device_type: {}", raw),
         }
     }
@@ -43,7 +43,7 @@ impl Device {
     }
 
     pub fn device_type(&self) -> DeviceType {
-        let mut kind: sys::mlx_device_type = sys::mlx_device_type_MLX_CPU;
+        let mut kind: sys::mlx_device_type = sys::mlx_device_type__MLX_CPU;
         unsafe { sys::mlx_device_get_type(&mut kind, self.0) };
         DeviceType::from_raw(kind)
     }

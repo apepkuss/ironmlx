@@ -12,7 +12,7 @@ macro_rules! binary_op {
         let mut res = Array::new_empty();
         check(unsafe {
             sys::$fn(
-                &mut res.as_raw() as *mut _,
+                res.as_raw_mut(),
                 $a.as_raw(),
                 $b.as_raw(),
                 $stream.as_raw(),
@@ -28,7 +28,7 @@ macro_rules! unary_op {
         let mut res = Array::new_empty();
         check(unsafe {
             sys::$fn(
-                &mut res.as_raw() as *mut _,
+                res.as_raw_mut(),
                 $a.as_raw(),
                 $stream.as_raw(),
             )
@@ -90,8 +90,8 @@ pub fn square(a: &Array, stream: &Stream) -> Result<Array> {
 pub fn sum_all(a: &Array, stream: &Stream) -> Result<Array> {
     let mut res = Array::new_empty();
     check(unsafe {
-        sys::mlx_sum_all(
-            &mut res.as_raw() as *mut _,
+        sys::mlx_sum(
+            res.as_raw_mut(),
             a.as_raw(),
             false, // keep_dims
             stream.as_raw(),
@@ -103,8 +103,8 @@ pub fn sum_all(a: &Array, stream: &Stream) -> Result<Array> {
 pub fn mean_all(a: &Array, stream: &Stream) -> Result<Array> {
     let mut res = Array::new_empty();
     check(unsafe {
-        sys::mlx_mean_all(
-            &mut res.as_raw() as *mut _,
+        sys::mlx_mean(
+            res.as_raw_mut(),
             a.as_raw(),
             false,
             stream.as_raw(),

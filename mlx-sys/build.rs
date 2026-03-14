@@ -30,7 +30,8 @@ fn main() {
     );
 
     // ── 1. Build mlx-c (mlx is pulled in as a FetchContent dependency) ──────
-    let dst = cmake::Config::new(&mlx_c_src)
+    let mut cmake_cfg = cmake::Config::new(&mlx_c_src);
+    cmake_cfg
         // Point FetchContent at the local mlx repo – no network access needed.
         .define(
             "FETCHCONTENT_SOURCE_DIR_MLX",
@@ -38,8 +39,14 @@ fn main() {
         )
         .define("MLX_C_BUILD_EXAMPLES", "OFF")
         .define("MLX_C_USE_SYSTEM_MLX", "OFF")
-        .define("CMAKE_BUILD_TYPE", "Release")
-        .build();
+        .define("CMAKE_BUILD_TYPE", "Release");
+
+    // Allow disabling Metal backend (e.g. when full Xcode is not installed).
+    if std::env::var("MLX_NO_METAL").is_ok() {
+        cmake_cfg.define("MLX_BUILD_METAL", "OFF");
+    }
+
+    let dst = cmake_cfg.build();
 
     // ── 2. Link mlxc (installed by cmake into dst/lib) ───────────────────────
     println!("cargo:rustc-link-search=native={}/lib", dst.display());

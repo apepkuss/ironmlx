@@ -14,7 +14,8 @@ impl Stream {
 
     /// Return the default stream for the given device.
     pub fn default_stream(device: &Device) -> Self {
-        let raw = unsafe { sys::mlx_default_stream(device.as_raw()) };
+        let mut raw: sys::mlx_stream = unsafe { std::mem::zeroed() };
+        unsafe { sys::mlx_get_default_stream(&mut raw, device.as_raw()) };
         Stream(raw)
     }
 
