@@ -22,23 +22,25 @@ fn find_lib(dir: &PathBuf, lib_name: &str) -> Option<PathBuf> {
 
 fn main() {
     // Allow overriding paths via environment variables for portability.
-    // MLX_C_DIR: path to mlx-c source (required; falls back to local dev path).
+    // MLX_C_DIR: path to mlx-c source. Defaults to the vendor/mlx-c submodule
+    //            (relative to the workspace root, i.e. one level above mlx-sys/).
     // MLX_DIR:   path to local mlx source; if absent, cmake FetchContent downloads it.
-    let mlx_c_src = PathBuf::from(
-        std::env::var("MLX_C_DIR").unwrap_or_else(|_| "/Volumes/CodeHub/mlx-c".to_string()),
-    );
+    let mlx_c_src = PathBuf::from(std::env::var("MLX_C_DIR").unwrap_or_else(|_| {
+        // Resolve vendor/mlx-c relative to CARGO_MANIFEST_DIR (= mlx-sys/)
+        let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        manifest
+            .parent()
+            .unwrap()
+            .join("vendor/mlx-c")
+            .to_string_lossy()
+            .into_owned()
+    }));
+    // If MLX_DIR points to an existing local checkout, use it to avoid a network
+    // download. Otherwise cmake FetchContent will fetch MLX v0.31.1 automatically.
     let mlx_src = std::env::var("MLX_DIR")
         .ok()
         .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .or_else(|| {
-            let default = PathBuf::from("/Volumes/CodeHub/mlx");
-            if default.exists() {
-                Some(default)
-            } else {
-                None
-            }
-        });
+        .filter(|p| p.exists());
 
     // ── 1. Build mlx-c (mlx is pulled in as a FetchContent dependency) ──────
     let mut cmake_cfg = cmake::Config::new(&mlx_c_src);
