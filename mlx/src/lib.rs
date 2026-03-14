@@ -22,3 +22,10 @@ pub fn init() {
         error::install_error_handler();
     });
 }
+
+/// Return the default stream for the given device type.
+///
+/// Convenience wrapper around `Stream::default_stream(&Device::new(kind))`.
+pub fn default_stream(kind: DeviceType) -> Stream {
+    Stream::default_stream(&Device::new(kind))
+}

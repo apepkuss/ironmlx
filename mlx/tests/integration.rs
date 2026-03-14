@@ -27,6 +27,17 @@ fn test_cpu_smoke() {
     assert_eq!(c.item_i32().unwrap(), 5);
 }
 
+// ── default_stream() ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_default_gpu_stream() {
+    ironmlx::init();
+    let s = ironmlx::default_stream(ironmlx::DeviceType::Gpu);
+    let a = Array::from_float(2.0);
+    let r = ironmlx::ops::square(&a, &s).unwrap();
+    assert!((r.item_f32().unwrap() - 4.0).abs() < 1e-6);
+}
+
 // ── Array enhancements ────────────────────────────────────────────────────────
 
 #[test]
