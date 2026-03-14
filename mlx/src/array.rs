@@ -2,7 +2,6 @@ use mlx_sys as sys;
 
 use crate::dtype::Dtype;
 use crate::error::{check, Result};
-use crate::stream::Stream;
 
 /// An N-dimensional array (lazy, reference-counted internally by MLX).
 pub struct Array(sys::mlx_array);
@@ -52,6 +51,23 @@ impl Array {
                 shape.as_ptr(),
                 shape.len() as i32,
                 sys::mlx_dtype__MLX_INT32,
+            )
+        })
+    }
+
+    /// N 维数组，row-major f32。shape 各维之积须等于 data.len()。
+    pub fn from_slice_f32_shape(data: &[f32], shape: &[i32]) -> Self {
+        assert_eq!(
+            data.len(),
+            shape.iter().map(|&d| d as usize).product::<usize>(),
+            "data length must match shape product"
+        );
+        Array(unsafe {
+            sys::mlx_array_new_data(
+                data.as_ptr() as *const _,
+                shape.as_ptr(),
+                shape.len() as i32,
+                sys::mlx_dtype__MLX_FLOAT32,
             )
         })
     }
@@ -106,6 +122,17 @@ impl Array {
         Ok(out)
     }
 
+    /// Copy evaluated `i32` data into a `Vec`.
+    pub fn to_vec_i32(&self) -> Result<Vec<i32>> {
+        self.eval()?;
+        let n = self.size();
+        let ptr = unsafe { sys::mlx_array_data_int32(self.0) };
+        if ptr.is_null() {
+            return Err(crate::error::Error::Mlx("null data pointer".into()));
+        }
+        Ok(unsafe { std::slice::from_raw_parts(ptr, n) }.to_vec())
+    }
+
     /// Copy evaluated `f32` data into a `Vec`.
     pub fn to_vec_f32(&self) -> Result<Vec<f32>> {
         self.eval()?;
@@ -115,6 +142,18 @@ impl Array {
             return Err(crate::error::Error::Mlx("null data pointer".into()));
         }
         Ok(unsafe { std::slice::from_raw_parts(ptr, n) }.to_vec())
+    }
+
+    /// Deep-copy this array via mlx_copy on the default GPU stream.
+    fn deep_clone(&self) -> Self {
+        let dev = unsafe { sys::mlx_device_new_type(sys::mlx_device_type__MLX_GPU, 0) };
+        let mut stream: sys::mlx_stream = unsafe { std::mem::zeroed() };
+        unsafe { sys::mlx_get_default_stream(&mut stream, dev) };
+        unsafe { sys::mlx_device_free(dev) };
+        let mut res = Array::new_empty();
+        unsafe { sys::mlx_copy(res.as_raw_mut(), self.0, stream) };
+        unsafe { sys::mlx_stream_free(stream) };
+        res
     }
 
     pub(crate) fn as_raw(&self) -> sys::mlx_array {
@@ -128,6 +167,14 @@ impl Array {
     /// Internal: wrap a raw `mlx_array` returned by a C op.
     pub(crate) fn from_raw(raw: sys::mlx_array) -> Self {
         Array(raw)
+    }
+}
+
+// ── Clone ─────────────────────────────────────────────────────────────────────
+
+impl Clone for Array {
+    fn clone(&self) -> Self {
+        self.deep_clone()
     }
 }
 
