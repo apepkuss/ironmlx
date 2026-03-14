@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build:
+    name: fmt / clippy / build
+    runs-on: macos-15  # Apple Silicon (M2), Xcode pre-installed
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── Rust toolchain ────────────────────────────────────────────────────────
+      - name: Install Rust (stable + nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # ── Caches ───────────────────────────────────────────────────────────────
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache MLX build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('mlx-sys/build.rs', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-
+
+      # ── System dependencies ───────────────────────────────────────────────────
+      - name: Install cmake
+        run: brew install cmake
+
+      - name: Set Xcode developer tools path
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Download Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      # ── Checks ───────────────────────────────────────────────────────────────
+      - name: fmt
+        run: cargo +nightly fmt --all -- --check
+
+      - name: clippy
+        run: cargo +nightly clippy --all-features -- -D warnings
+
+      # ── Build ─────────────────────────────────────────────────────────────────
+      - name: Build (release)
+        run: cargo build --release

@@ -7,7 +7,6 @@ fn gpu_stream() -> Stream {
 
 // ── Smoke tests ───────────────────────────────────────────────────────────────
 
-
 #[test]
 fn test_gpu_smoke() {
     let s = gpu_stream();
@@ -47,8 +46,14 @@ fn test_softmax() {
     let b = ironmlx::ops::softmax(&a, &[-1], &s).unwrap();
     let v = b.to_vec_f32().unwrap();
     let total: f32 = v.iter().sum();
-    assert!((total - 1.0).abs() < 1e-5, "softmax should sum to 1, got {total}");
-    assert!(v[2] > v[1] && v[1] > v[0], "larger input → larger probability");
+    assert!(
+        (total - 1.0).abs() < 1e-5,
+        "softmax should sum to 1, got {total}"
+    );
+    assert!(
+        v[2] > v[1] && v[1] > v[0],
+        "larger input → larger probability"
+    );
 }
 
 #[test]

@@ -10,14 +10,7 @@ use crate::stream::Stream;
 macro_rules! binary_op {
     ($fn:ident, $a:expr, $b:expr, $stream:expr) => {{
         let mut res = Array::new_empty();
-        check(unsafe {
-            sys::$fn(
-                res.as_raw_mut(),
-                $a.as_raw(),
-                $b.as_raw(),
-                $stream.as_raw(),
-            )
-        })?;
+        check(unsafe { sys::$fn(res.as_raw_mut(), $a.as_raw(), $b.as_raw(), $stream.as_raw()) })?;
         Ok(res)
     }};
 }
@@ -26,13 +19,7 @@ macro_rules! binary_op {
 macro_rules! unary_op {
     ($fn:ident, $a:expr, $stream:expr) => {{
         let mut res = Array::new_empty();
-        check(unsafe {
-            sys::$fn(
-                res.as_raw_mut(),
-                $a.as_raw(),
-                $stream.as_raw(),
-            )
-        })?;
+        check(unsafe { sys::$fn(res.as_raw_mut(), $a.as_raw(), $stream.as_raw()) })?;
         Ok(res)
     }};
 }
@@ -91,9 +78,7 @@ pub fn square(a: &Array, stream: &Stream) -> Result<Array> {
 pub fn sum(a: &Array, axes: &[i32], keep_dims: bool, stream: &Stream) -> Result<Array> {
     let mut res = Array::new_empty();
     if axes.is_empty() {
-        check(unsafe {
-            sys::mlx_sum(res.as_raw_mut(), a.as_raw(), keep_dims, stream.as_raw())
-        })?;
+        check(unsafe { sys::mlx_sum(res.as_raw_mut(), a.as_raw(), keep_dims, stream.as_raw()) })?;
     } else {
         check(unsafe {
             sys::mlx_sum_axes(
@@ -113,9 +98,7 @@ pub fn sum(a: &Array, axes: &[i32], keep_dims: bool, stream: &Stream) -> Result<
 pub fn mean(a: &Array, axes: &[i32], keep_dims: bool, stream: &Stream) -> Result<Array> {
     let mut res = Array::new_empty();
     if axes.is_empty() {
-        check(unsafe {
-            sys::mlx_mean(res.as_raw_mut(), a.as_raw(), keep_dims, stream.as_raw())
-        })?;
+        check(unsafe { sys::mlx_mean(res.as_raw_mut(), a.as_raw(), keep_dims, stream.as_raw()) })?;
     } else {
         check(unsafe {
             sys::mlx_mean_axes(
@@ -152,12 +135,15 @@ pub fn softmax(a: &Array, axes: &[i32], stream: &Stream) -> Result<Array> {
 /// ReLU: max(a, 0) — implemented as maximum(a, zeros_like(a)).
 pub fn relu(a: &Array, stream: &Stream) -> Result<Array> {
     let mut zeros = Array::new_empty();
-    check(unsafe {
-        sys::mlx_zeros_like(zeros.as_raw_mut(), a.as_raw(), stream.as_raw())
-    })?;
+    check(unsafe { sys::mlx_zeros_like(zeros.as_raw_mut(), a.as_raw(), stream.as_raw()) })?;
     let mut res = Array::new_empty();
     check(unsafe {
-        sys::mlx_maximum(res.as_raw_mut(), a.as_raw(), zeros.as_raw(), stream.as_raw())
+        sys::mlx_maximum(
+            res.as_raw_mut(),
+            a.as_raw(),
+            zeros.as_raw(),
+            stream.as_raw(),
+        )
     })?;
     Ok(res)
 }

@@ -36,7 +36,10 @@ pub(crate) fn check(code: i32) -> Result<()> {
 
 /// Install the MLX error handler.  Called once at crate initialisation.
 pub(crate) fn install_error_handler() {
-    unsafe extern "C" fn handler(msg: *const std::os::raw::c_char, _data: *mut std::os::raw::c_void) {
+    unsafe extern "C" fn handler(
+        msg: *const std::os::raw::c_char,
+        _data: *mut std::os::raw::c_void,
+    ) {
         if msg.is_null() {
             return;
         }

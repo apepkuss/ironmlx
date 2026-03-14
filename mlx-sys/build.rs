@@ -13,7 +13,7 @@ fn find_lib(dir: &PathBuf, lib_name: &str) -> Option<PathBuf> {
             if let Some(found) = find_lib(&path, lib_name) {
                 return Some(found);
             }
-        } else if path.file_name().map_or(false, |n| n == target.as_str()) {
+        } else if path.file_name().is_some_and(|n| n == target.as_str()) {
             return Some(path.parent().unwrap().to_path_buf());
         }
     }
@@ -56,10 +56,7 @@ fn main() {
     let build_dir = dst.join("build");
     let mlx_lib_dir =
         find_lib(&build_dir, "mlx").expect("Could not find libmlx.a in cmake build tree");
-    println!(
-        "cargo:rustc-link-search=native={}",
-        mlx_lib_dir.display()
-    );
+    println!("cargo:rustc-link-search=native={}", mlx_lib_dir.display());
     println!("cargo:rustc-link-lib=static=mlx");
 
     // ── 4. macOS system frameworks required by mlx on Apple Silicon ──────────
@@ -76,9 +73,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         mlx_c_src.join("mlx/c/mlx.h").display()
     );
-    println!(
-        "cargo:rerun-if-env-changed=MLX_C_DIR"
-    );
+    println!("cargo:rerun-if-env-changed=MLX_C_DIR");
     println!("cargo:rerun-if-env-changed=MLX_DIR");
 
     // ── 7. Generate Rust FFI bindings via bindgen ────────────────────────────
@@ -93,10 +88,7 @@ fn main() {
         .clang_arg(format!("-I{}", mlx_c_src.display()))
         // Pass the Rust target triple to clang so architecture-specific
         // types (e.g. __fp16 on ARM) resolve correctly.
-        .clang_arg(format!(
-            "--target={}",
-            std::env::var("TARGET").unwrap()
-        ))
+        .clang_arg(format!("--target={}", std::env::var("TARGET").unwrap()))
         // Only emit items that originate from mlx-c headers (avoids pulling in
         // system headers into the generated file).
         .allowlist_file(format!("{}.*", mlx_c_src.display()))
