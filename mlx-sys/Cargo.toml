@@ -1,0 +1,10 @@
+[package]
+name = "mlx-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI bindings to MLX via mlx-c"
+links = "mlxc"
+
+[build-dependencies]
+cmake = "0.1"
+bindgen = "0.71"

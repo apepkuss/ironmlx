@@ -1,0 +1,3 @@
+[workspace]
+members = ["mlx-sys", "mlx"]
+resolver = "2"
