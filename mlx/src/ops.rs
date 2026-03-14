@@ -87,29 +87,47 @@ pub fn square(a: &Array, stream: &Stream) -> Result<Array> {
 
 // ── Reductions ───────────────────────────────────────────────────────────────
 
-pub fn sum_all(a: &Array, stream: &Stream) -> Result<Array> {
+/// Sum along `axes`. Pass an empty slice to sum over all axes.
+pub fn sum(a: &Array, axes: &[i32], keep_dims: bool, stream: &Stream) -> Result<Array> {
     let mut res = Array::new_empty();
-    check(unsafe {
-        sys::mlx_sum(
-            res.as_raw_mut(),
-            a.as_raw(),
-            false, // keep_dims
-            stream.as_raw(),
-        )
-    })?;
+    if axes.is_empty() {
+        check(unsafe {
+            sys::mlx_sum(res.as_raw_mut(), a.as_raw(), keep_dims, stream.as_raw())
+        })?;
+    } else {
+        check(unsafe {
+            sys::mlx_sum_axes(
+                res.as_raw_mut(),
+                a.as_raw(),
+                axes.as_ptr(),
+                axes.len(),
+                keep_dims,
+                stream.as_raw(),
+            )
+        })?;
+    }
     Ok(res)
 }
 
-pub fn mean_all(a: &Array, stream: &Stream) -> Result<Array> {
+/// Mean along `axes`. Pass an empty slice to average over all axes.
+pub fn mean(a: &Array, axes: &[i32], keep_dims: bool, stream: &Stream) -> Result<Array> {
     let mut res = Array::new_empty();
-    check(unsafe {
-        sys::mlx_mean(
-            res.as_raw_mut(),
-            a.as_raw(),
-            false,
-            stream.as_raw(),
-        )
-    })?;
+    if axes.is_empty() {
+        check(unsafe {
+            sys::mlx_mean(res.as_raw_mut(), a.as_raw(), keep_dims, stream.as_raw())
+        })?;
+    } else {
+        check(unsafe {
+            sys::mlx_mean_axes(
+                res.as_raw_mut(),
+                a.as_raw(),
+                axes.as_ptr(),
+                axes.len(),
+                keep_dims,
+                stream.as_raw(),
+            )
+        })?;
+    }
     Ok(res)
 }
 

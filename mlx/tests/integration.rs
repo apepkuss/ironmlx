@@ -38,6 +38,48 @@ fn test_default_gpu_stream() {
     assert!((r.item_f32().unwrap() - 4.0).abs() < 1e-6);
 }
 
+// ── sum / mean with axes ──────────────────────────────────────────────────────
+
+#[test]
+fn test_sum_all() {
+    let s = gpu_stream();
+    let a = Array::from_slice_f32(&[1.0, 2.0, 3.0]);
+    let r = ironmlx::ops::sum(&a, &[], false, &s).unwrap();
+    assert!((r.item_f32().unwrap() - 6.0).abs() < 1e-5);
+}
+
+#[test]
+fn test_sum_axis() {
+    let s = gpu_stream();
+    // shape [2, 3], sum along axis 0 → shape [3]
+    let a = Array::from_slice_f32_shape(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+    let r = ironmlx::ops::sum(&a, &[0], false, &s).unwrap();
+    assert_eq!(r.shape(), vec![3]);
+    let v = r.to_vec_f32().unwrap();
+    assert!((v[0] - 5.0).abs() < 1e-5);
+    assert!((v[1] - 7.0).abs() < 1e-5);
+    assert!((v[2] - 9.0).abs() < 1e-5);
+}
+
+#[test]
+fn test_sum_keepdims() {
+    let s = gpu_stream();
+    let a = Array::from_slice_f32_shape(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+    let r = ironmlx::ops::sum(&a, &[1], true, &s).unwrap();
+    assert_eq!(r.shape(), vec![2, 1]);
+}
+
+#[test]
+fn test_mean_axis() {
+    let s = gpu_stream();
+    let a = Array::from_slice_f32_shape(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+    let r = ironmlx::ops::mean(&a, &[1], false, &s).unwrap();
+    assert_eq!(r.shape(), vec![2]);
+    let v = r.to_vec_f32().unwrap();
+    assert!((v[0] - 2.0).abs() < 1e-5); // mean of [1,2,3]
+    assert!((v[1] - 5.0).abs() < 1e-5); // mean of [4,5,6]
+}
+
 // ── reshape / transpose ───────────────────────────────────────────────────────
 
 #[test]
