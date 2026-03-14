@@ -131,6 +131,37 @@ pub fn mean(a: &Array, axes: &[i32], keep_dims: bool, stream: &Stream) -> Result
     Ok(res)
 }
 
+// ── Activations ──────────────────────────────────────────────────────────────
+
+/// Softmax along the given axes (use `&[-1]` for the last axis).
+pub fn softmax(a: &Array, axes: &[i32], stream: &Stream) -> Result<Array> {
+    let mut res = Array::new_empty();
+    check(unsafe {
+        sys::mlx_softmax_axes(
+            res.as_raw_mut(),
+            a.as_raw(),
+            axes.as_ptr(),
+            axes.len(),
+            false, // precise
+            stream.as_raw(),
+        )
+    })?;
+    Ok(res)
+}
+
+/// ReLU: max(a, 0) — implemented as maximum(a, zeros_like(a)).
+pub fn relu(a: &Array, stream: &Stream) -> Result<Array> {
+    let mut zeros = Array::new_empty();
+    check(unsafe {
+        sys::mlx_zeros_like(zeros.as_raw_mut(), a.as_raw(), stream.as_raw())
+    })?;
+    let mut res = Array::new_empty();
+    check(unsafe {
+        sys::mlx_maximum(res.as_raw_mut(), a.as_raw(), zeros.as_raw(), stream.as_raw())
+    })?;
+    Ok(res)
+}
+
 // ── Shape manipulation ────────────────────────────────────────────────────────
 
 pub fn reshape(a: &Array, shape: &[i32], stream: &Stream) -> Result<Array> {

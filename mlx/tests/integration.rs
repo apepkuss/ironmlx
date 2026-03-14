@@ -38,6 +38,30 @@ fn test_default_gpu_stream() {
     assert!((r.item_f32().unwrap() - 4.0).abs() < 1e-6);
 }
 
+// ── softmax / relu ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_softmax() {
+    let s = gpu_stream();
+    let a = Array::from_slice_f32(&[1.0, 2.0, 3.0]);
+    let b = ironmlx::ops::softmax(&a, &[-1], &s).unwrap();
+    let v = b.to_vec_f32().unwrap();
+    let total: f32 = v.iter().sum();
+    assert!((total - 1.0).abs() < 1e-5, "softmax should sum to 1, got {total}");
+    assert!(v[2] > v[1] && v[1] > v[0], "larger input → larger probability");
+}
+
+#[test]
+fn test_relu() {
+    let s = gpu_stream();
+    let a = Array::from_slice_f32(&[-2.0, 0.0, 3.0]);
+    let b = ironmlx::ops::relu(&a, &s).unwrap();
+    let v = b.to_vec_f32().unwrap();
+    assert!((v[0] - 0.0).abs() < 1e-6, "negative → 0");
+    assert!((v[1] - 0.0).abs() < 1e-6, "zero → 0");
+    assert!((v[2] - 3.0).abs() < 1e-6, "positive → unchanged");
+}
+
 // ── sum / mean with axes ──────────────────────────────────────────────────────
 
 #[test]
