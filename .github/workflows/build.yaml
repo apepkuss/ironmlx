@@ -1,4 +1,4 @@
-name: CI
+name: Build
 
 on:
   push:
@@ -48,13 +48,19 @@ jobs:
 
       # ── System dependencies ───────────────────────────────────────────────────
       - name: Install cmake
-        run: brew install cmake
+        run: brew install cmake || brew upgrade cmake || true
 
       - name: Set Xcode developer tools path
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
-      - name: Download Metal Toolchain
-        run: xcodebuild -downloadComponent MetalToolchain
+      - name: Ensure Metal Toolchain is available
+        run: |
+          if xcrun --find metal 2>/dev/null; then
+            echo "Metal toolchain already available: $(xcrun --find metal)"
+          else
+            echo "Metal not found, attempting download..."
+            xcodebuild -downloadComponent MetalToolchain
+          fi
 
       # ── Checks ───────────────────────────────────────────────────────────────
       - name: fmt
