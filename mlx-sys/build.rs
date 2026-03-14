@@ -22,24 +22,38 @@ fn find_lib(dir: &PathBuf, lib_name: &str) -> Option<PathBuf> {
 
 fn main() {
     // Allow overriding paths via environment variables for portability.
+    // MLX_C_DIR: path to mlx-c source (required; falls back to local dev path).
+    // MLX_DIR:   path to local mlx source; if absent, cmake FetchContent downloads it.
     let mlx_c_src = PathBuf::from(
         std::env::var("MLX_C_DIR").unwrap_or_else(|_| "/Volumes/CodeHub/mlx-c".to_string()),
     );
-    let mlx_src = PathBuf::from(
-        std::env::var("MLX_DIR").unwrap_or_else(|_| "/Volumes/CodeHub/mlx".to_string()),
-    );
+    let mlx_src = std::env::var("MLX_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| {
+            let default = PathBuf::from("/Volumes/CodeHub/mlx");
+            if default.exists() {
+                Some(default)
+            } else {
+                None
+            }
+        });
 
     // ── 1. Build mlx-c (mlx is pulled in as a FetchContent dependency) ──────
     let mut cmake_cfg = cmake::Config::new(&mlx_c_src);
     cmake_cfg
-        // Point FetchContent at the local mlx repo – no network access needed.
-        .define(
-            "FETCHCONTENT_SOURCE_DIR_MLX",
-            mlx_src.to_str().expect("mlx path is not valid UTF-8"),
-        )
         .define("MLX_C_BUILD_EXAMPLES", "OFF")
         .define("MLX_C_USE_SYSTEM_MLX", "OFF")
         .define("CMAKE_BUILD_TYPE", "Release");
+
+    // Point FetchContent at a local mlx repo if available — skips network download.
+    if let Some(ref src) = mlx_src {
+        cmake_cfg.define(
+            "FETCHCONTENT_SOURCE_DIR_MLX",
+            src.to_str().expect("mlx path is not valid UTF-8"),
+        );
+    }
 
     // Allow disabling Metal backend (e.g. when full Xcode is not installed).
     if std::env::var("MLX_NO_METAL").is_ok() {

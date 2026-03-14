@@ -50,6 +50,11 @@ jobs:
       - name: Install cmake
         run: brew install cmake || brew upgrade cmake || true
 
+      - name: Clone mlx-c (v0.5.0)
+        run: |
+          git clone --depth 1 --branch v0.5.0 https://github.com/ml-explore/mlx-c.git /tmp/mlx-c
+          echo "MLX_C_DIR=/tmp/mlx-c" >> $GITHUB_ENV
+
       - name: Set Xcode developer tools path
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
