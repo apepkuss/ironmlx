@@ -38,6 +38,38 @@ fn test_default_gpu_stream() {
     assert!((r.item_f32().unwrap() - 4.0).abs() < 1e-6);
 }
 
+// ── reshape / transpose ───────────────────────────────────────────────────────
+
+#[test]
+fn test_reshape() {
+    let s = gpu_stream();
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let a = Array::from_slice_f32_shape(&data, &[2, 3]);
+    let b = ironmlx::ops::reshape(&a, &[3, 2], &s).unwrap();
+    assert_eq!(b.shape(), vec![3, 2]);
+    assert_eq!(b.size(), 6);
+    assert_eq!(b.to_vec_f32().unwrap(), data);
+}
+
+#[test]
+fn test_transpose() {
+    let s = gpu_stream();
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let a = Array::from_slice_f32_shape(&data, &[2, 3]);
+    let b = ironmlx::ops::transpose(&a, &s).unwrap();
+    assert_eq!(b.shape(), vec![3, 2]);
+}
+
+#[test]
+fn test_transpose_axes() {
+    let s = gpu_stream();
+    // shape [2, 3, 4] → transpose axes [2, 0, 1] → shape [4, 2, 3]
+    let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+    let a = Array::from_slice_f32_shape(&data, &[2, 3, 4]);
+    let b = ironmlx::ops::transpose_axes(&a, &[2, 0, 1], &s).unwrap();
+    assert_eq!(b.shape(), vec![4, 2, 3]);
+}
+
 // ── Operator overloading ──────────────────────────────────────────────────────
 
 #[test]

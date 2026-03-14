@@ -112,3 +112,41 @@ pub fn mean_all(a: &Array, stream: &Stream) -> Result<Array> {
     })?;
     Ok(res)
 }
+
+// ── Shape manipulation ────────────────────────────────────────────────────────
+
+pub fn reshape(a: &Array, shape: &[i32], stream: &Stream) -> Result<Array> {
+    let mut res = Array::new_empty();
+    check(unsafe {
+        sys::mlx_reshape(
+            res.as_raw_mut(),
+            a.as_raw(),
+            shape.as_ptr(),
+            shape.len(),
+            stream.as_raw(),
+        )
+    })?;
+    Ok(res)
+}
+
+/// Reverse all dimension order (equivalent to numpy.transpose with no args).
+pub fn transpose(a: &Array, stream: &Stream) -> Result<Array> {
+    let mut res = Array::new_empty();
+    check(unsafe { sys::mlx_transpose(res.as_raw_mut(), a.as_raw(), stream.as_raw()) })?;
+    Ok(res)
+}
+
+/// Transpose with explicit axis permutation.
+pub fn transpose_axes(a: &Array, axes: &[i32], stream: &Stream) -> Result<Array> {
+    let mut res = Array::new_empty();
+    check(unsafe {
+        sys::mlx_transpose_axes(
+            res.as_raw_mut(),
+            a.as_raw(),
+            axes.as_ptr(),
+            axes.len(),
+            stream.as_raw(),
+        )
+    })?;
+    Ok(res)
+}
