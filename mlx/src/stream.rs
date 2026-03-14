@@ -31,6 +31,8 @@ impl Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
+        // Wait for all in-flight GPU work before releasing the stream.
+        unsafe { sys::mlx_synchronize(self.0) };
         unsafe { sys::mlx_stream_free(self.0) };
     }
 }

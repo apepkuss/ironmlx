@@ -1,4 +1,5 @@
 pub mod array;
+mod array_ops;
 pub mod device;
 pub mod dtype;
 pub mod error;

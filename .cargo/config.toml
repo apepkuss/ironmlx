@@ -1,0 +1,4 @@
+# MLX Metal backend has global GPU state that is not safe to access
+# from multiple threads concurrently. Run all tests single-threaded.
+[env]
+RUST_TEST_THREADS = "1"

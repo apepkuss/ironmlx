@@ -38,6 +38,44 @@ fn test_default_gpu_stream() {
     assert!((r.item_f32().unwrap() - 4.0).abs() < 1e-6);
 }
 
+// ── Operator overloading ──────────────────────────────────────────────────────
+
+#[test]
+fn test_operator_add() {
+    ironmlx::init();
+    let a = Array::from_float(3.0);
+    let b = Array::from_float(4.0);
+    let c = (&a + &b).unwrap();
+    assert!((c.item_f32().unwrap() - 7.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_operator_sub() {
+    ironmlx::init();
+    let a = Array::from_float(9.0);
+    let b = Array::from_float(4.0);
+    let c = (&a - &b).unwrap();
+    assert!((c.item_f32().unwrap() - 5.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_operator_mul() {
+    ironmlx::init();
+    let a = Array::from_float(3.0);
+    let b = Array::from_float(4.0);
+    let c = (&a * &b).unwrap();
+    assert!((c.item_f32().unwrap() - 12.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_operator_div() {
+    ironmlx::init();
+    let a = Array::from_float(8.0);
+    let b = Array::from_float(2.0);
+    let c = (&a / &b).unwrap();
+    assert!((c.item_f32().unwrap() - 4.0).abs() < 1e-6);
+}
+
 // ── Array enhancements ────────────────────────────────────────────────────────
 
 #[test]
