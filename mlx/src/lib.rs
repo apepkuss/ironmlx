@@ -3,8 +3,17 @@ mod array_ops;
 pub mod device;
 pub mod dtype;
 pub mod error;
+pub mod fast;
+pub mod generate;
+pub mod io;
+pub mod memory;
+pub mod metal;
+pub mod model;
+pub mod nn;
 pub mod ops;
+pub mod random;
 pub mod stream;
+pub mod vector;
 
 pub use array::Array;
 pub use device::{Device, DeviceType};

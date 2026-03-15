@@ -7,3 +7,6 @@ description = "Safe idiomatic Rust API for MLX"
 [dependencies]
 mlx-sys = { path = "../mlx-sys" }
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
