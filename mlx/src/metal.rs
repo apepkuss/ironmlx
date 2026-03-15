@@ -1,6 +1,6 @@
 use mlx_sys as sys;
 
-use crate::error::{check, Result};
+use crate::error::{Result, check};
 
 /// Check whether a Metal GPU device is available.
 pub fn is_available() -> Result<bool> {

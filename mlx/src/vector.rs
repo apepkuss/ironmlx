@@ -1,7 +1,7 @@
 use mlx_sys as sys;
 
 use crate::array::Array;
-use crate::error::{check, Result};
+use crate::error::{Result, check};
 
 // ── VectorArray ─────────────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@ mod sampler;
 mod tokenizer;
 
 pub use kv_cache::KVCache;
-pub use sampler::{sample, SamplerConfig};
+pub use sampler::{SamplerConfig, sample};
 pub use tokenizer::Tokenizer;
 
 use crate::array::Array;

@@ -1,3 +1,3 @@
 [workspace]
-members = ["mlx-sys", "mlx"]
+members = ["mlx-sys", "mlx", "ironmlx"]
 resolver = "2"

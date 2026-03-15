@@ -1,6 +1,6 @@
 use mlx_sys as sys;
 
-use crate::error::{check, Result};
+use crate::error::{Result, check};
 use crate::stream::Stream;
 use crate::vector::{MapStringToArray, MapStringToString};
 

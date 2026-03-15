@@ -1,4 +1,4 @@
-use ironmlx::{init, Array, Device, Stream};
+use ironmlx::{Array, Device, Stream, init};
 
 fn gpu_stream() -> Stream {
     init();

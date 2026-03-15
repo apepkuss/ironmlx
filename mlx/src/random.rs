@@ -2,7 +2,7 @@ use mlx_sys as sys;
 
 use crate::array::Array;
 use crate::dtype::Dtype;
-use crate::error::{check, Result};
+use crate::error::{Result, check};
 use crate::stream::Stream;
 
 /// Generate a PRNG key from a seed.

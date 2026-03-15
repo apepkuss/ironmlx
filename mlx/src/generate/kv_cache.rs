@@ -48,7 +48,7 @@ impl KVCache {
 
     /// Trim cache to max_len along the sequence dimension.
     pub fn trim(&mut self, max_len: usize, stream: &Stream) -> Result<()> {
-        if let (Some(ref k), Some(ref v)) = (&self.keys, &self.values) {
+        if let (Some(k), Some(v)) = (&self.keys, &self.values) {
             let seq = k.shape()[2];
             if seq > max_len as i32 {
                 let shape = k.shape();

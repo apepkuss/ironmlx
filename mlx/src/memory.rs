@@ -1,6 +1,6 @@
 use mlx_sys as sys;
 
-use crate::error::{check, Result};
+use crate::error::{Result, check};
 
 /// Get the currently allocated memory in bytes.
 pub fn get_active_memory() -> Result<usize> {

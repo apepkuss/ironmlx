@@ -1,8 +1,8 @@
 [package]
-name = "ironmlx"
+name = "ironmlx-core"
 version = "0.1.0"
-edition = "2021"
-description = "Safe idiomatic Rust API for MLX"
+edition = "2024"
+description = "Safe idiomatic Rust API for MLX — core library"
 
 [dependencies]
 mlx-sys = { path = "../mlx-sys" }

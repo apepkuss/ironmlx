@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::array::Array;
 use crate::device::Device;
 use crate::error::Result;
-use crate::nn::{Attention, Embedding, Linear, Module, RMSNorm, MLP};
+use crate::nn::{Attention, Embedding, Linear, MLP, Module, RMSNorm};
 use crate::ops;
 use crate::stream::Stream;
 

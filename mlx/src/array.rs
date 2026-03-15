@@ -1,7 +1,7 @@
 use mlx_sys as sys;
 
 use crate::dtype::Dtype;
-use crate::error::{check, Result};
+use crate::error::{Result, check};
 
 /// An N-dimensional array (lazy, reference-counted internally by MLX).
 pub struct Array(sys::mlx_array);

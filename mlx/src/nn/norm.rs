@@ -1,4 +1,4 @@
-use super::module::{get_weight, Module};
+use super::module::{Module, get_weight};
 use crate::array::Array;
 use crate::device::Device;
 use crate::error::Result;
