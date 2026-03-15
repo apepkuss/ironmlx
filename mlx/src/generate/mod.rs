@@ -13,6 +13,82 @@ use crate::model::LlamaModel;
 use crate::ops;
 use crate::stream::Stream;
 
+/// Reason a generation stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// Reached the EOS token.
+    Eos,
+    /// Reached the maximum number of tokens.
+    MaxTokens,
+}
+
+/// Generate tokens from a prompt, calling `on_token` for each generated token.
+/// Returns the stop reason.
+pub fn stream_generate(
+    model: &LlamaModel,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    sampler_config: &SamplerConfig,
+    eos_token_id: i32,
+    mut on_token: impl FnMut(i32) -> bool, // return false to abort
+) -> Result<StopReason> {
+    let stream = Stream::new(&Device::gpu());
+    let num_layers = model.layers.len();
+
+    let mut cache: Vec<(Option<Array>, Option<Array>)> =
+        (0..num_layers).map(|_| (None, None)).collect();
+
+    // Prefill
+    let prompt_arr = Array::from_slice_i32(prompt_tokens);
+    let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
+    let logits = model.forward(&prompt_2d, &mut cache, "causal", None)?;
+
+    let last_idx = prompt_tokens.len() as i32 - 1;
+    let last_logits = ops::slice(
+        &logits,
+        &[0, last_idx, 0],
+        &[1, last_idx + 1, logits.shape()[2]],
+        &[1, 1, 1],
+        &stream,
+    )?;
+    let last_logits = ops::reshape(&last_logits, &[1, logits.shape()[2]], &stream)?;
+
+    let mut next_token_arr = sample(&last_logits, sampler_config, &stream)?;
+    next_token_arr.eval()?;
+    let mut next_token = next_token_arr.item_i32()?;
+
+    if next_token == eos_token_id {
+        return Ok(StopReason::Eos);
+    }
+    if !on_token(next_token) {
+        return Ok(StopReason::Eos);
+    }
+
+    // Decode loop
+    for i in 1..max_tokens {
+        let input = Array::from_slice_i32(&[next_token]);
+        let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
+        let logits = model.forward(&input_2d, &mut cache, "causal", None)?;
+        let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;
+
+        next_token_arr = sample(&logits_2d, sampler_config, &stream)?;
+        next_token_arr.eval()?;
+        next_token = next_token_arr.item_i32()?;
+
+        if next_token == eos_token_id {
+            return Ok(StopReason::Eos);
+        }
+        if !on_token(next_token) {
+            return Ok(StopReason::Eos);
+        }
+        if i + 1 >= max_tokens {
+            return Ok(StopReason::MaxTokens);
+        }
+    }
+
+    Ok(StopReason::MaxTokens)
+}
+
 /// Generate tokens from a prompt.
 pub fn generate(
     model: &LlamaModel,

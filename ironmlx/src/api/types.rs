@@ -14,7 +14,6 @@ pub struct ChatCompletionRequest {
     #[serde(default = "default_top_p")]
     pub top_p: f32,
     #[serde(default)]
-    #[allow(dead_code)]
     pub stream: bool,
 }
 
@@ -113,6 +112,33 @@ pub struct ErrorResponse {
 pub struct ErrorDetail {
     pub message: String,
     pub r#type: String,
+}
+
+// -- SSE Streaming -----------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: i64,
+    pub model: String,
+    pub choices: Vec<ChatChunkChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatChunkChoice {
+    pub index: usize,
+    pub delta: ChatDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 fn default_max_tokens() -> usize {
