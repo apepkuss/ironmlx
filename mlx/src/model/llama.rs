@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::array::Array;
 use crate::device::Device;
 use crate::error::Result;
-use crate::nn::{Attention, Embedding, Linear, MLP, Module, RMSNorm};
+use crate::nn::{Attention, EmbeddingLayer, LinearLayer, MLP, Module, RMSNorm};
 use crate::ops;
 use crate::stream::Stream;
 
@@ -72,10 +72,10 @@ impl TransformerBlock {
 }
 
 pub struct LlamaModel {
-    pub embed_tokens: Embedding,
+    pub embed_tokens: EmbeddingLayer,
     pub layers: Vec<TransformerBlock>,
     pub norm: RMSNorm,
-    pub lm_head: Linear,
+    pub lm_head: LinearLayer,
 }
 
 impl LlamaModel {
@@ -86,6 +86,12 @@ impl LlamaModel {
         let head_dim = config.head_dim() as i32;
         let eps = config.rms_norm_eps as f32;
 
+        // Quantization config
+        let (group_size, bits) = match &config.quantization {
+            Some(qc) => (qc.group_size, qc.bits),
+            None => (64, 4), // defaults, only used if scales are present
+        };
+
         // Helper to get a weight
         let w = |name: &str| -> Result<Array> {
             weights
@@ -94,18 +100,24 @@ impl LlamaModel {
                 .ok_or_else(|| crate::error::Error::Mlx(format!("missing weight: {}", name)))
         };
 
-        // Embedding
-        let embed_tokens = Embedding::new(w("model.embed_tokens.weight")?);
+        // Helper to create a LinearLayer (auto-detects quantized vs full)
+        let linear = |prefix: &str| -> Result<LinearLayer> {
+            LinearLayer::from_weights(weights, prefix, group_size, bits)
+        };
+
+        // Embedding (auto-detects quantized)
+        let embed_tokens =
+            EmbeddingLayer::from_weights(weights, "model.embed_tokens", group_size, bits)?;
 
         // Transformer layers
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
             let lp = format!("model.layers.{}", i);
 
-            let wq = Linear::new(w(&format!("{}.self_attn.q_proj.weight", lp))?, None);
-            let wk = Linear::new(w(&format!("{}.self_attn.k_proj.weight", lp))?, None);
-            let wv = Linear::new(w(&format!("{}.self_attn.v_proj.weight", lp))?, None);
-            let wo = Linear::new(w(&format!("{}.self_attn.o_proj.weight", lp))?, None);
+            let wq = linear(&format!("{}.self_attn.q_proj", lp))?;
+            let wk = linear(&format!("{}.self_attn.k_proj", lp))?;
+            let wv = linear(&format!("{}.self_attn.v_proj", lp))?;
+            let wo = linear(&format!("{}.self_attn.o_proj", lp))?;
 
             let attention = Attention::new(
                 wq,
@@ -121,9 +133,9 @@ impl LlamaModel {
                 1.0, // rope_scale
             );
 
-            let gate_proj = Linear::new(w(&format!("{}.mlp.gate_proj.weight", lp))?, None);
-            let up_proj = Linear::new(w(&format!("{}.mlp.up_proj.weight", lp))?, None);
-            let down_proj = Linear::new(w(&format!("{}.mlp.down_proj.weight", lp))?, None);
+            let gate_proj = linear(&format!("{}.mlp.gate_proj", lp))?;
+            let up_proj = linear(&format!("{}.mlp.up_proj", lp))?;
+            let down_proj = linear(&format!("{}.mlp.down_proj", lp))?;
             let mlp = MLP::new(gate_proj, up_proj, down_proj);
 
             let input_layernorm = RMSNorm::new(w(&format!("{}.input_layernorm.weight", lp))?, eps);
@@ -141,13 +153,12 @@ impl LlamaModel {
         // Final norm
         let norm = RMSNorm::new(w("model.norm.weight")?, eps);
 
-        // LM head
-        let lm_head_weight = if config.tie_word_embeddings {
-            w("model.embed_tokens.weight")?
+        // LM head — when tied, shares embedding weights (may be quantized)
+        let lm_head = if config.tie_word_embeddings {
+            LinearLayer::from_weights(weights, "model.embed_tokens", group_size, bits)?
         } else {
-            w("lm_head.weight")?
+            LinearLayer::from_weights(weights, "lm_head", group_size, bits)?
         };
-        let lm_head = Linear::new(lm_head_weight, None);
 
         Ok(Self {
             embed_tokens,

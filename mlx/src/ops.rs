@@ -597,6 +597,102 @@ pub fn arange(start: f64, stop: f64, step: f64, dtype: Dtype, stream: &Stream) -
     Ok(res)
 }
 
+// ── Quantized ────────────────────────────────────────────────────────────
+
+/// Convert `Option<i32>` to the C `mlx_optional_int` struct.
+fn optional_int(v: Option<i32>) -> sys::mlx_optional_int_ {
+    match v {
+        Some(value) => sys::mlx_optional_int_ {
+            value,
+            has_value: true,
+        },
+        None => sys::mlx_optional_int_ {
+            value: 0,
+            has_value: false,
+        },
+    }
+}
+
+/// Dequantize a packed weight matrix back to full precision.
+///
+/// - `w`: quantized weight (packed uint32)
+/// - `scales`: per-group scale factors
+/// - `biases`: per-group biases (optional)
+/// - `group_size`: quantization group size (default 64)
+/// - `bits`: quantization bit-width (default 4)
+pub fn dequantize(
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    group_size: Option<i32>,
+    bits: Option<i32>,
+    stream: &Stream,
+) -> Result<Array> {
+    let mut res = Array::new_empty();
+    let biases_raw = match biases {
+        Some(b) => b.as_raw(),
+        None => unsafe { std::mem::zeroed() },
+    };
+    let mode = std::ffi::CString::new("affine").unwrap();
+    // mlx_optional_dtype with has_value=false to use default
+    let dtype = sys::mlx_optional_dtype_ {
+        value: 0, // placeholder
+        has_value: false,
+    };
+    check(unsafe {
+        sys::mlx_dequantize(
+            res.as_raw_mut(),
+            w.as_raw(),
+            scales.as_raw(),
+            biases_raw,
+            optional_int(group_size),
+            optional_int(bits),
+            mode.as_ptr(),
+            dtype,
+            stream.as_raw(),
+        )
+    })?;
+    Ok(res)
+}
+
+/// Quantized matrix multiplication.
+///
+/// Performs `x @ dequantize(w, scales, biases)^T` using the quantized weight
+/// representation directly, avoiding full dequantization.
+#[allow(clippy::too_many_arguments)]
+pub fn quantized_matmul(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    transpose: bool,
+    group_size: Option<i32>,
+    bits: Option<i32>,
+    stream: &Stream,
+) -> Result<Array> {
+    let mut res = Array::new_empty();
+    let biases_raw = match biases {
+        Some(b) => b.as_raw(),
+        None => unsafe { std::mem::zeroed() },
+    };
+    let mode = std::ffi::CString::new("affine").unwrap();
+    check(unsafe {
+        sys::mlx_quantized_matmul(
+            res.as_raw_mut(),
+            x.as_raw(),
+            w.as_raw(),
+            scales.as_raw(),
+            biases_raw,
+            transpose,
+            optional_int(group_size),
+            optional_int(bits),
+            mode.as_ptr(),
+            stream.as_raw(),
+        )
+    })?;
+    Ok(res)
+}
+
 /// Create `num` evenly-spaced values from `start` to `stop`.
 pub fn linspace(start: f64, stop: f64, num: i32, dtype: Dtype, stream: &Stream) -> Result<Array> {
     let mut res = Array::new_empty();

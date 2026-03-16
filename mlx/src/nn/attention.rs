@@ -1,4 +1,4 @@
-use super::linear::Linear;
+use super::linear::LinearLayer;
 use super::module::Module;
 use crate::array::Array;
 use crate::device::Device;
@@ -10,10 +10,10 @@ use crate::vector::VectorArray;
 use std::collections::HashMap;
 
 pub struct Attention {
-    pub wq: Linear,
-    pub wk: Linear,
-    pub wv: Linear,
-    pub wo: Linear,
+    pub wq: LinearLayer,
+    pub wk: LinearLayer,
+    pub wv: LinearLayer,
+    pub wo: LinearLayer,
     pub n_heads: i32,
     pub n_kv_heads: i32,
     pub head_dim: i32,
@@ -26,10 +26,10 @@ pub struct Attention {
 impl Attention {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        wq: Linear,
-        wk: Linear,
-        wv: Linear,
-        wo: Linear,
+        wq: LinearLayer,
+        wk: LinearLayer,
+        wv: LinearLayer,
+        wo: LinearLayer,
         n_heads: i32,
         n_kv_heads: i32,
         head_dim: i32,
@@ -171,18 +171,8 @@ impl Module for Attention {
         params
     }
 
-    fn load_weights(&mut self, weights: &HashMap<String, Array>, prefix: &str) -> Result<()> {
-        let p = |name: &str| {
-            if prefix.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}.{}", prefix, name)
-            }
-        };
-        self.wq.load_weights(weights, &p("wq"))?;
-        self.wk.load_weights(weights, &p("wk"))?;
-        self.wv.load_weights(weights, &p("wv"))?;
-        self.wo.load_weights(weights, &p("wo"))?;
-        Ok(())
+    fn load_weights(&mut self, _weights: &HashMap<String, Array>, _prefix: &str) -> Result<()> {
+        // LinearLayer is constructed with weights via from_weights; runtime reload not supported
+        unimplemented!("use LinearLayer::from_weights during model construction")
     }
 }

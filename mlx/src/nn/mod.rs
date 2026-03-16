@@ -8,8 +8,8 @@ mod norm;
 
 pub use activations::{gelu, silu};
 pub use attention::Attention;
-pub use embedding::Embedding;
-pub use linear::Linear;
+pub use embedding::{Embedding, EmbeddingLayer, QuantizedEmbedding};
+pub use linear::{Linear, LinearLayer, QuantizedLinear};
 pub use mlp::MLP;
 pub use module::Module;
 pub use norm::{LayerNorm, RMSNorm};

@@ -40,8 +40,9 @@ pub fn stream_generate(
     let mut cache: Vec<(Option<Array>, Option<Array>)> =
         (0..num_layers).map(|_| (None, None)).collect();
 
-    // Prefill
+    // Prefill — astype ensures the CPU-created array migrates to GPU stream
     let prompt_arr = Array::from_slice_i32(prompt_tokens);
+    let prompt_arr = ops::astype(&prompt_arr, crate::dtype::Dtype::Int32, &stream)?;
     let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
     let logits = model.forward(&prompt_2d, &mut cache, "causal", None)?;
 
@@ -68,7 +69,8 @@ pub fn stream_generate(
 
     // Decode loop
     for i in 1..max_tokens {
-        let input = Array::from_slice_i32(&[next_token]);
+        let input = Array::from_int(next_token);
+        let input = ops::astype(&input, crate::dtype::Dtype::Int32, &stream)?;
         let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
         let logits = model.forward(&input_2d, &mut cache, "causal", None)?;
         let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;
@@ -108,8 +110,9 @@ pub fn generate(
 
     let mut generated = Vec::new();
 
-    // Prefill: process all prompt tokens at once
+    // Prefill: process all prompt tokens at once — astype ensures GPU migration
     let prompt_arr = Array::from_slice_i32(prompt_tokens);
+    let prompt_arr = ops::astype(&prompt_arr, crate::dtype::Dtype::Int32, &stream)?;
     let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
     let logits = model.forward(&prompt_2d, &mut cache, "causal", None)?;
 
@@ -136,7 +139,8 @@ pub fn generate(
 
     // Decode loop
     for _ in 1..max_tokens {
-        let input = Array::from_slice_i32(&[next_token]);
+        let input = Array::from_int(next_token);
+        let input = ops::astype(&input, crate::dtype::Dtype::Int32, &stream)?;
         let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
         let logits = model.forward(&input_2d, &mut cache, "causal", None)?;
 

@@ -1,5 +1,5 @@
 use super::activations::silu;
-use super::linear::Linear;
+use super::linear::LinearLayer;
 use super::module::Module;
 use crate::array::Array;
 use crate::device::Device;
@@ -10,13 +10,13 @@ use std::collections::HashMap;
 
 /// Standard Llama-style MLP: down_proj(silu(gate_proj(x)) * up_proj(x))
 pub struct MLP {
-    pub gate_proj: Linear,
-    pub up_proj: Linear,
-    pub down_proj: Linear,
+    pub gate_proj: LinearLayer,
+    pub up_proj: LinearLayer,
+    pub down_proj: LinearLayer,
 }
 
 impl MLP {
-    pub fn new(gate_proj: Linear, up_proj: Linear, down_proj: Linear) -> Self {
+    pub fn new(gate_proj: LinearLayer, up_proj: LinearLayer, down_proj: LinearLayer) -> Self {
         Self {
             gate_proj,
             up_proj,
@@ -53,17 +53,8 @@ impl Module for MLP {
         params
     }
 
-    fn load_weights(&mut self, weights: &HashMap<String, Array>, prefix: &str) -> Result<()> {
-        let p = |name: &str| {
-            if prefix.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}.{}", prefix, name)
-            }
-        };
-        self.gate_proj.load_weights(weights, &p("gate_proj"))?;
-        self.up_proj.load_weights(weights, &p("up_proj"))?;
-        self.down_proj.load_weights(weights, &p("down_proj"))?;
-        Ok(())
+    fn load_weights(&mut self, _weights: &HashMap<String, Array>, _prefix: &str) -> Result<()> {
+        // LinearLayer is constructed with weights via from_weights; runtime reload not supported
+        unimplemented!("use LinearLayer::from_weights during model construction")
     }
 }

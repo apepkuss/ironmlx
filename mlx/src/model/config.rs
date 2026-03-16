@@ -21,6 +21,23 @@ pub struct ModelConfig {
     pub head_dim: Option<usize>,
     #[serde(default)]
     pub tie_word_embeddings: bool,
+    #[serde(default)]
+    pub quantization: Option<QuantizationConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct QuantizationConfig {
+    #[serde(default = "default_group_size")]
+    pub group_size: i32,
+    #[serde(default = "default_bits")]
+    pub bits: i32,
+}
+
+fn default_group_size() -> i32 {
+    64
+}
+fn default_bits() -> i32 {
+    4
 }
 
 fn default_model_type() -> String {
