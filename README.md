@@ -25,7 +25,7 @@ ironmlx targets full compatibility with [mlx-lm](https://github.com/ml-explore/m
 | **Llama** | Llama 2/3 | `llama` | :white_check_mark: | Verified (SmolLM-135M-4bit) |
 | | Llama 4 | `llama4` | :x: | |
 | **Qwen** | Qwen3 | `qwen3` | :white_check_mark: | Verified (Qwen3-0.6B-4bit, 19.3 tok/s) |
-| | Qwen3.5 | `qwen3_5` | :x: | |
+| | Qwen3.5 | `qwen3_5` | :white_check_mark: | Verified (Qwen3.5-4B-4bit, 6.4 tok/s, text-only) |
 | | Qwen2 | `qwen2` | :x: | |
 | | Qwen3 MoE | `qwen3_moe` | :x: | |
 | **Gemma** | Gemma 2 | `gemma2` | :x: | |
@@ -49,7 +49,7 @@ ironmlx targets full compatibility with [mlx-lm](https://github.com/ml-explore/m
 | | Qwen2 MoE | `qwen2_moe` | :x: |
 | | Qwen2 VL | `qwen2_vl` | :x: |
 | | Qwen3 | `qwen3` | :white_check_mark: |
-| | Qwen3.5 | `qwen3_5` | :x: |
+| | Qwen3.5 | `qwen3_5` | :white_check_mark: |
 | | Qwen3.5 MoE | `qwen3_5_moe` | :x: |
 | | Qwen3 MoE | `qwen3_moe` | :x: |
 | | Qwen3 Next | `qwen3_next` | :x: |
