@@ -36,8 +36,16 @@ pub struct ChatCompletionResponse {
 #[derive(Debug, Serialize)]
 pub struct ChatChoice {
     pub index: usize,
-    pub message: ChatMessage,
+    pub message: AssistantMessage,
     pub finish_reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssistantMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 // -- Completions -------------------------------------------------------------
@@ -139,6 +147,8 @@ pub struct ChatDelta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 fn default_max_tokens() -> usize {

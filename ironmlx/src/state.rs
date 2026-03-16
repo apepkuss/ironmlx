@@ -74,11 +74,32 @@ pub fn load_model(
         None
     };
 
-    // Derive model_id from directory name
-    let model_id = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // Derive model_id: try to extract from HuggingFace cache path
+    // (e.g., "models--mlx-community--Qwen3-0.6B-4bit/snapshots/abc123/" → "mlx-community/Qwen3-0.6B-4bit")
+    let model_id = extract_model_id(dir);
 
     Ok((model, tokenizer, chat_template, config, model_id))
+}
+
+/// Extract a human-readable model ID from a path.
+///
+/// For HuggingFace cache paths like
+/// `~/.cache/huggingface/hub/models--org--name/snapshots/hash/`
+/// returns `org/name`.
+///
+/// For regular paths, returns the directory name.
+fn extract_model_id(dir: &Path) -> String {
+    // Walk up the path looking for a "models--" component
+    for ancestor in dir.ancestors() {
+        if let Some(name) = ancestor.file_name().and_then(|n| n.to_str())
+            && let Some(rest) = name.strip_prefix("models--")
+        {
+            // "mlx-community--Qwen3-0.6B-4bit" → "mlx-community/Qwen3-0.6B-4bit"
+            return rest.replacen("--", "/", 1);
+        }
+    }
+    // Fallback: use directory name
+    dir.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }

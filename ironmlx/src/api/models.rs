@@ -12,6 +12,124 @@ use super::types::*;
 use crate::state::AppState;
 use ironmlx_core::generate::{ChatMessage as CoreChatMessage, SamplerConfig};
 
+// ── Thinking Mode ───────────────────────────────────────────────────────────
+
+/// Split generated text into (content, reasoning_content).
+/// Extracts text between `<think>` and `</think>` as reasoning_content.
+fn split_thinking(text: &str) -> (String, Option<String>) {
+    if let Some(think_start) = text.find("<think>") {
+        let after_tag = think_start + "<think>".len();
+        if let Some(think_end) = text.find("</think>") {
+            let reasoning = text[after_tag..think_end].trim().to_string();
+            let content = text[think_end + "</think>".len()..].trim().to_string();
+            let reasoning_opt = if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            };
+            (content, reasoning_opt)
+        } else {
+            // <think> opened but not closed — entire text is reasoning (still generating)
+            let reasoning = text[after_tag..].trim().to_string();
+            (String::new(), Some(reasoning))
+        }
+    } else {
+        (text.to_string(), None)
+    }
+}
+
+/// Tracks `<think>...</think>` state across streamed tokens.
+struct ThinkingState {
+    buffer: String,
+    in_thinking: bool,
+    thinking_done: bool,
+}
+
+impl ThinkingState {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            in_thinking: false,
+            thinking_done: false,
+        }
+    }
+
+    /// Process a new token. Returns (content, reasoning_content) to send in the SSE delta.
+    /// At most one of the two will be Some.
+    fn process_token(&mut self, token: &str) -> (Option<String>, Option<String>) {
+        if self.thinking_done {
+            // After </think>, everything is content
+            return (Some(token.to_string()), None);
+        }
+
+        self.buffer.push_str(token);
+
+        // Check for <think> tag
+        if !self.in_thinking {
+            if let Some(pos) = self.buffer.find("<think>") {
+                self.in_thinking = true;
+                // Discard the tag itself, keep any content before it as regular content
+                let before = self.buffer[..pos].to_string();
+                self.buffer = self.buffer[pos + "<think>".len()..].to_string();
+                let content = if before.is_empty() {
+                    None
+                } else {
+                    Some(before)
+                };
+                // Check if buffer already contains </think>
+                if let Some(end_pos) = self.buffer.find("</think>") {
+                    let reasoning = self.buffer[..end_pos].to_string();
+                    self.buffer = self.buffer[end_pos + "</think>".len()..].to_string();
+                    self.in_thinking = false;
+                    self.thinking_done = true;
+                    let r = if reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning)
+                    };
+                    return (content, r);
+                }
+                return (content, None);
+            }
+            // No <think> found yet, buffer might be partial — hold tokens
+            // But if buffer is long enough that it can't be a partial tag, flush
+            if self.buffer.len() > 10 && !self.buffer.contains('<') {
+                let flushed = self.buffer.clone();
+                self.buffer.clear();
+                return (Some(flushed), None);
+            }
+            return (None, None);
+        }
+
+        // Inside <think>, look for </think>
+        if let Some(end_pos) = self.buffer.find("</think>") {
+            let reasoning = self.buffer[..end_pos].to_string();
+            let after = self.buffer[end_pos + "</think>".len()..].to_string();
+            self.buffer.clear();
+            self.in_thinking = false;
+            self.thinking_done = true;
+            let r = if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            };
+            let c = if after.is_empty() { None } else { Some(after) };
+            return (c, r);
+        }
+
+        // Still inside thinking — emit buffered reasoning incrementally
+        // Keep last 10 chars in buffer in case </think> spans tokens
+        if self.buffer.len() > 10 {
+            let emit_len = self.buffer.len() - 10;
+            let emit = self.buffer[..emit_len].to_string();
+            self.buffer = self.buffer[emit_len..].to_string();
+            return (None, Some(emit));
+        }
+
+        (None, None)
+    }
+}
+
 /// POST /v1/chat/completions — supports both regular and streaming responses
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
@@ -56,6 +174,8 @@ async fn chat_completions_sync(
         completion_len += 1;
     }
 
+    let (content, reasoning_content) = split_thinking(&generated_text);
+
     Ok(Json(ChatCompletionResponse {
         id: request_id,
         object: "chat.completion".to_string(),
@@ -63,9 +183,10 @@ async fn chat_completions_sync(
         model: state.model_id.clone(),
         choices: vec![ChatChoice {
             index: 0,
-            message: ChatMessage {
+            message: AssistantMessage {
                 role: "assistant".to_string(),
-                content: generated_text,
+                content,
+                reasoning_content,
             },
             finish_reason,
         }],
@@ -111,6 +232,7 @@ async fn chat_completions_stream(
                 delta: ChatDelta {
                     role: Some("assistant".to_string()),
                     content: None,
+                    reasoning_content: None,
                 },
                 finish_reason: None,
             }],
@@ -121,7 +243,9 @@ async fn chat_completions_stream(
             ))
             .await;
 
-        // Stream tokens
+        // Stream tokens with thinking mode tracking
+        let mut thinking_state = ThinkingState::new();
+
         while let Some(output) = token_rx.recv().await {
             if let Some(ref reason) = output.finish_reason {
                 let final_chunk = ChatCompletionChunk {
@@ -134,6 +258,7 @@ async fn chat_completions_stream(
                         delta: ChatDelta {
                             role: None,
                             content: None,
+                            reasoning_content: None,
                         },
                         finish_reason: Some(reason.clone()),
                     }],
@@ -146,6 +271,9 @@ async fn chat_completions_stream(
                 break;
             }
 
+            // Route token to content or reasoning_content based on <think> state
+            let (content, reasoning_content) = thinking_state.process_token(&output.token_text);
+
             let chunk = ChatCompletionChunk {
                 id: chunk_id_clone.clone(),
                 object: "chat.completion.chunk".to_string(),
@@ -155,7 +283,8 @@ async fn chat_completions_stream(
                     index: 0,
                     delta: ChatDelta {
                         role: None,
-                        content: Some(output.token_text),
+                        content,
+                        reasoning_content,
                     },
                     finish_reason: None,
                 }],
