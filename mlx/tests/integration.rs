@@ -1,4 +1,5 @@
 use ironmlx_core::{Array, Device, Stream, init};
+use std::path::Path;
 
 fn gpu_stream() -> Stream {
     init();
@@ -202,4 +203,172 @@ fn test_array_2d() {
     assert_eq!(a.shape(), vec![2, 3]);
     assert_eq!(a.size(), 6);
     assert_eq!(a.to_vec_f32().unwrap(), data);
+}
+
+// ── Model-dependent tests (require Qwen3-0.6B-4bit) ────────────────────────
+//
+// Run with: cargo test -p ironmlx-core -- --ignored
+
+const QWEN3_MODEL_DIR: &str = "/Users/sam/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-4bit/snapshots/73e3e38d981303bc594367cd910ea6eb48349da8";
+
+fn load_test_model() -> Option<(
+    ironmlx_core::model::LlamaModel,
+    ironmlx_core::generate::Tokenizer,
+    ironmlx_core::model::ModelConfig,
+)> {
+    let dir = Path::new(QWEN3_MODEL_DIR);
+    if !dir.exists() {
+        return None;
+    }
+    init();
+    let config =
+        ironmlx_core::model::ModelConfig::from_file(dir.join("config.json").to_str().unwrap())
+            .ok()?;
+    let stream = Stream::new(&Device::gpu());
+    let weights = ironmlx_core::model::load_model_weights(dir, &stream).ok()?;
+    let model = ironmlx_core::model::build_model(&config, &weights).ok()?;
+    let tokenizer =
+        ironmlx_core::generate::Tokenizer::from_file(dir.join("tokenizer.json").to_str().unwrap())
+            .ok()?;
+    Some((model, tokenizer, config))
+}
+
+#[test]
+#[ignore]
+fn test_batch_generator_single_request() {
+    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+    let mut batch = ironmlx_core::generate::BatchGenerator::new(&model);
+
+    let prompt = tokenizer.encode("Hello").unwrap();
+    let sampler = ironmlx_core::generate::SamplerConfig::greedy();
+    let eos = config.eos_token_id as i32;
+
+    let (uid, first_response) = batch.insert(&prompt, sampler, eos, 10).unwrap();
+    assert_eq!(uid, 0);
+    assert!(first_response.finish_reason.is_none() || first_response.token_id != 0);
+    assert_eq!(batch.active_count(), 1);
+
+    // Step a few times
+    for _ in 0..5 {
+        if !batch.is_active(uid) {
+            break;
+        }
+        let responses = batch.step().unwrap();
+        assert!(!responses.is_empty());
+    }
+}
+
+#[test]
+#[ignore]
+fn test_batch_generator_multiple_requests() {
+    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+    let mut batch = ironmlx_core::generate::BatchGenerator::new(&model);
+
+    let eos = config.eos_token_id as i32;
+
+    // Insert two requests
+    let prompt_a = tokenizer.encode("What is 1+1?").unwrap();
+    let prompt_b = tokenizer.encode("Say hello").unwrap();
+
+    let (uid_a, _) = batch
+        .insert(
+            &prompt_a,
+            ironmlx_core::generate::SamplerConfig::greedy(),
+            eos,
+            5,
+        )
+        .unwrap();
+    let (uid_b, _) = batch
+        .insert(
+            &prompt_b,
+            ironmlx_core::generate::SamplerConfig::greedy(),
+            eos,
+            5,
+        )
+        .unwrap();
+
+    assert_ne!(uid_a, uid_b);
+    assert_eq!(batch.active_count(), 2);
+
+    // Step until both finish
+    for _ in 0..10 {
+        if batch.active_count() == 0 {
+            break;
+        }
+        let responses = batch.step().unwrap();
+        assert!(responses.len() <= 2);
+    }
+}
+
+#[test]
+#[ignore]
+fn test_batch_generator_abort() {
+    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+    let mut batch = ironmlx_core::generate::BatchGenerator::new(&model);
+
+    let prompt = tokenizer.encode("Tell me a story").unwrap();
+    let eos = config.eos_token_id as i32;
+
+    let (uid, _) = batch
+        .insert(
+            &prompt,
+            ironmlx_core::generate::SamplerConfig::greedy(),
+            eos,
+            100,
+        )
+        .unwrap();
+    assert_eq!(batch.active_count(), 1);
+
+    // Abort
+    batch.remove(uid);
+    assert_eq!(batch.active_count(), 0);
+    assert!(!batch.is_active(uid));
+}
+
+#[test]
+#[ignore]
+fn test_stream_generate_produces_tokens() {
+    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+
+    let prompt = tokenizer.encode("The answer is").unwrap();
+    let sampler = ironmlx_core::generate::SamplerConfig::greedy();
+    let eos = config.eos_token_id as i32;
+
+    let mut tokens = Vec::new();
+    let reason =
+        ironmlx_core::generate::stream_generate(&model, &prompt, 20, &sampler, eos, |token| {
+            tokens.push(token);
+            true
+        })
+        .unwrap();
+
+    assert!(!tokens.is_empty(), "should generate at least 1 token");
+    assert!(
+        reason == ironmlx_core::generate::StopReason::MaxTokens
+            || reason == ironmlx_core::generate::StopReason::Eos
+    );
+
+    // Verify tokens can be decoded
+    let text = tokenizer.decode(&tokens).unwrap();
+    assert!(!text.is_empty());
+}
+
+#[test]
+#[ignore]
+fn test_stream_generate_stops_on_abort() {
+    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+
+    let prompt = tokenizer.encode("Once upon a time").unwrap();
+    let sampler = ironmlx_core::generate::SamplerConfig::greedy();
+    let eos = config.eos_token_id as i32;
+
+    let mut count = 0;
+    let _reason =
+        ironmlx_core::generate::stream_generate(&model, &prompt, 100, &sampler, eos, |_token| {
+            count += 1;
+            count < 5 // abort after 5 tokens
+        })
+        .unwrap();
+
+    assert_eq!(count, 5);
 }

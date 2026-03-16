@@ -330,6 +330,139 @@ impl SSDStore {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> SSDStoreConfig {
+        let dir = std::env::temp_dir().join(format!("ironmlx_test_{}", std::process::id()));
+        SSDStoreConfig {
+            cache_dir: dir,
+            max_size_bytes: 1024 * 1024, // 1MB for testing
+            model_hash: "test_model".to_string(),
+        }
+    }
+
+    fn dummy_kv(num_layers: usize) -> Vec<(Array, Array)> {
+        (0..num_layers)
+            .map(|_| {
+                let k = Array::from_slice_f32(&[1.0, 2.0, 3.0, 4.0]);
+                let v = Array::from_slice_f32(&[5.0, 6.0, 7.0, 8.0]);
+                (k, v)
+            })
+            .collect()
+    }
+
+    fn cleanup(config: &SSDStoreConfig) {
+        let model_dir = config.cache_dir.join(&config.model_hash);
+        let _ = std::fs::remove_dir_all(&model_dir);
+        let _ = std::fs::remove_dir(&config.cache_dir);
+    }
+
+    #[test]
+    fn store_and_load_block() {
+        crate::init();
+        let config = test_config();
+        let mut store = SSDStore::new(config).unwrap();
+        let stream = Stream::new(&Device::cpu());
+
+        let kv = dummy_kv(2);
+        store.store_block(0, &kv, &stream).unwrap();
+
+        // Wait for async write
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        store.flush_pending().unwrap();
+
+        assert!(store.has_block(0));
+
+        let loaded = store.load_block(0, &stream).unwrap();
+        assert_eq!(loaded.len(), 2);
+
+        // Verify shape is preserved
+        assert_eq!(loaded[0].0.shape(), &[4]);
+        assert_eq!(loaded[0].1.shape(), &[4]);
+
+        cleanup(&store.config);
+    }
+
+    #[test]
+    fn remove_block_deletes_file() {
+        crate::init();
+        let config = test_config();
+        let mut store = SSDStore::new(config).unwrap();
+        let stream = Stream::new(&Device::cpu());
+
+        store.store_block(1, &dummy_kv(1), &stream).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        store.flush_pending().unwrap();
+
+        let file_path = store.model_dir().join("1.safetensors");
+        assert!(file_path.exists());
+
+        store.remove_block(1).unwrap();
+        assert!(!file_path.exists());
+        assert!(!store.has_block(1));
+
+        cleanup(&store.config);
+    }
+
+    #[test]
+    fn eviction_under_limit() {
+        crate::init();
+        let mut config = test_config();
+        config.max_size_bytes = 1; // 1 byte — force eviction
+        let mut store = SSDStore::new(config).unwrap();
+        let stream = Stream::new(&Device::cpu());
+
+        store.store_block(10, &dummy_kv(1), &stream).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        store.flush_pending().unwrap();
+
+        // Should have been evicted since limit is 1 byte
+        assert_eq!(store.entries.len(), 0);
+        assert_eq!(store.current_size_bytes, 0);
+
+        cleanup(&store.config);
+    }
+
+    #[test]
+    fn recover_index_on_startup() {
+        crate::init();
+        let config = test_config();
+        let stream = Stream::new(&Device::cpu());
+
+        // Write a block with the first store
+        {
+            let mut store1 = SSDStore::new(SSDStoreConfig {
+                cache_dir: config.cache_dir.clone(),
+                max_size_bytes: config.max_size_bytes,
+                model_hash: config.model_hash.clone(),
+            })
+            .unwrap();
+            store1.store_block(42, &dummy_kv(2), &stream).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            store1.flush_pending().unwrap();
+        }
+
+        // Create a new store and recover
+        let mut store2 = SSDStore::new(SSDStoreConfig {
+            cache_dir: config.cache_dir.clone(),
+            max_size_bytes: config.max_size_bytes,
+            model_hash: config.model_hash.clone(),
+        })
+        .unwrap();
+        let count = store2.recover_index().unwrap();
+        assert_eq!(count, 1);
+        assert!(store2.has_block(42));
+
+        // Load and verify
+        let loaded = store2.load_block(42, &stream).unwrap();
+        assert_eq!(loaded.len(), 2);
+
+        cleanup(&config);
+    }
+}
+
 /// Background writer thread: receives WriteJob messages and writes safetensors files.
 fn writer_thread(rx: mpsc::Receiver<WriteJob>) {
     while let Ok(job) = rx.recv() {
