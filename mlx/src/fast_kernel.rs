@@ -155,6 +155,11 @@ pub struct MetalKernel {
     raw: sys::mlx_fast_metal_kernel,
 }
 
+// SAFETY: MetalKernel wraps a compiled GPU kernel object that is immutable
+// after creation. The MLX runtime handles GPU synchronization internally.
+unsafe impl Send for MetalKernel {}
+unsafe impl Sync for MetalKernel {}
+
 impl MetalKernel {
     /// Create a new Metal kernel from shader source.
     ///

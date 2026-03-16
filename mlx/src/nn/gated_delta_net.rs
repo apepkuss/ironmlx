@@ -239,6 +239,218 @@ pub fn gated_delta_ops(
 ///   - v: [B, T, Hv, Dv]
 ///   - a: [B, T, Hv]
 ///   - b: [B, T, Hv]
+// ── Metal Kernel implementation (kept for future optimization) ──────────────
+// TODO: Metal kernel produces incorrect output — needs debugging.
+// The shader source and wrapper are correct in structure but likely have
+// a data layout or T parameter passing issue.
+#[allow(dead_code)]
+mod metal_kernel {
+    use crate::array::Array;
+    use crate::error::Result;
+    use crate::fast_kernel::{MetalKernel, MetalKernelConfig};
+    use crate::metal;
+    use crate::stream::Stream;
+    use std::sync::OnceLock;
+
+    /// Metal shader source for gated delta step (scalar g, no mask).
+    const METAL_SHADER_SCALAR: &str = r#"
+    auto n = thread_position_in_grid.z;
+    auto b_idx = n / Hv;
+    auto hv_idx = n % Hv;
+    auto hk_idx = hv_idx / (Hv / Hk);
+    constexpr int n_per_t = Dk / 32;
+    auto q_ = q + b_idx * T * Hk * Dk + hk_idx * Dk;
+    auto k_ = k + b_idx * T * Hk * Dk + hk_idx * Dk;
+    auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;
+    y += b_idx * T * Hv * Dv + hv_idx * Dv;
+    auto dk_idx = thread_position_in_threadgroup.x;
+    auto dv_idx = thread_position_in_grid.y;
+    auto i_state = state_in + (n * Dv + dv_idx) * Dk;
+    auto o_state = state_out + (n * Dv + dv_idx) * Dk;
+    float state[n_per_t];
+    for (int i = 0; i < n_per_t; ++i) {
+      state[i] = static_cast<float>(i_state[n_per_t * dk_idx + i]);
+    }
+    auto g_ = g + b_idx * T * Hv;
+    auto beta_ = beta + b_idx * T * Hv;
+    for (int t = 0; t < T; ++t) {
+      float kv_mem = 0.0f;
+      for (int i = 0; i < n_per_t; ++i) {
+        auto s_idx = n_per_t * dk_idx + i;
+        state[i] = state[i] * g_[hv_idx];
+        kv_mem += state[i] * k_[s_idx];
+      }
+      kv_mem = simd_sum(kv_mem);
+      auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
+      float out = 0.0f;
+      for (int i = 0; i < n_per_t; ++i) {
+        auto s_idx = n_per_t * dk_idx + i;
+        state[i] = state[i] + k_[s_idx] * delta;
+        out += state[i] * q_[s_idx];
+      }
+      out = simd_sum(out);
+      if (thread_index_in_simdgroup == 0) {
+        y[dv_idx] = static_cast<InT>(out);
+      }
+      q_ += Hk * Dk; k_ += Hk * Dk; v_ += Hv * Dv; y += Hv * Dv;
+      g_ += Hv; beta_ += Hv;
+    }
+    for (int i = 0; i < n_per_t; ++i) {
+      o_state[n_per_t * dk_idx + i] = static_cast<StT>(state[i]);
+    }
+"#;
+
+    /// Metal shader source for gated delta step (scalar g, with mask).
+    const METAL_SHADER_SCALAR_MASKED: &str = r#"
+    auto n = thread_position_in_grid.z;
+    auto b_idx = n / Hv;
+    auto hv_idx = n % Hv;
+    auto hk_idx = hv_idx / (Hv / Hk);
+    constexpr int n_per_t = Dk / 32;
+    auto q_ = q + b_idx * T * Hk * Dk + hk_idx * Dk;
+    auto k_ = k + b_idx * T * Hk * Dk + hk_idx * Dk;
+    auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;
+    y += b_idx * T * Hv * Dv + hv_idx * Dv;
+    auto dk_idx = thread_position_in_threadgroup.x;
+    auto dv_idx = thread_position_in_grid.y;
+    auto i_state = state_in + (n * Dv + dv_idx) * Dk;
+    auto o_state = state_out + (n * Dv + dv_idx) * Dk;
+    float state[n_per_t];
+    for (int i = 0; i < n_per_t; ++i) {
+      state[i] = static_cast<float>(i_state[n_per_t * dk_idx + i]);
+    }
+    auto g_ = g + b_idx * T * Hv;
+    auto beta_ = beta + b_idx * T * Hv;
+    for (int t = 0; t < T; ++t) {
+      if (mask[b_idx * T + t]) {
+        float kv_mem = 0.0f;
+        for (int i = 0; i < n_per_t; ++i) {
+          auto s_idx = n_per_t * dk_idx + i;
+          state[i] = state[i] * g_[hv_idx];
+          kv_mem += state[i] * k_[s_idx];
+        }
+        kv_mem = simd_sum(kv_mem);
+        auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
+        float out = 0.0f;
+        for (int i = 0; i < n_per_t; ++i) {
+          auto s_idx = n_per_t * dk_idx + i;
+          state[i] = state[i] + k_[s_idx] * delta;
+          out += state[i] * q_[s_idx];
+        }
+        out = simd_sum(out);
+        if (thread_index_in_simdgroup == 0) {
+          y[dv_idx] = static_cast<InT>(out);
+        }
+      }
+      q_ += Hk * Dk; k_ += Hk * Dk; v_ += Hv * Dv; y += Hv * Dv;
+      g_ += Hv; beta_ += Hv;
+    }
+    for (int i = 0; i < n_per_t; ++i) {
+      o_state[n_per_t * dk_idx + i] = static_cast<StT>(state[i]);
+    }
+"#;
+
+    /// Cached Metal kernels (created once, reused).
+    static KERNEL_SCALAR: OnceLock<Option<MetalKernel>> = OnceLock::new();
+    static KERNEL_SCALAR_MASKED: OnceLock<Option<MetalKernel>> = OnceLock::new();
+
+    fn get_kernel_scalar() -> Option<&'static MetalKernel> {
+        KERNEL_SCALAR
+            .get_or_init(|| {
+                if !metal::is_available().unwrap_or(false) {
+                    return None;
+                }
+                MetalKernel::new(
+                    "gated_delta_step",
+                    &["q", "k", "v", "g", "beta", "state_in", "T"],
+                    &["y", "state_out"],
+                    METAL_SHADER_SCALAR,
+                    "",
+                    true,
+                    false,
+                )
+                .ok()
+            })
+            .as_ref()
+    }
+
+    fn get_kernel_scalar_masked() -> Option<&'static MetalKernel> {
+        KERNEL_SCALAR_MASKED
+            .get_or_init(|| {
+                if !metal::is_available().unwrap_or(false) {
+                    return None;
+                }
+                MetalKernel::new(
+                    "gated_delta_step_mask",
+                    &["q", "k", "v", "g", "beta", "state_in", "T", "mask"],
+                    &["y", "state_out"],
+                    METAL_SHADER_SCALAR_MASKED,
+                    "",
+                    true,
+                    false,
+                )
+                .ok()
+            })
+            .as_ref()
+    }
+
+    /// Execute gated delta update using Metal kernel (GPU-accelerated).
+    #[allow(clippy::too_many_arguments)]
+    fn gated_delta_metal_kernel(
+        q: &Array,
+        k: &Array,
+        v: &Array,
+        g: &Array,
+        beta: &Array,
+        state: &Array,
+        mask: Option<&Array>,
+        stream: &Stream,
+    ) -> Result<(Array, Array)> {
+        let k_shape = k.shape();
+        let v_shape = v.shape();
+        let b = k_shape[0];
+        let t = k_shape[1];
+        let hk = k_shape[2];
+        let dk = k_shape[3];
+        let hv = v_shape[2];
+        let dv = v_shape[3];
+
+        let input_dtype = q.dtype();
+        let state_dtype = state.dtype();
+        let t_arr = Array::from_int(t);
+
+        let config = MetalKernelConfig::new();
+        config.add_output_arg(&[b, t, hv, dv], input_dtype)?;
+        config.add_output_arg(&state.shape(), state_dtype)?;
+        config.set_grid([32, dv, b * hv])?;
+        config.set_thread_group([32, 4, 1])?;
+        config.add_template_arg_dtype("InT", input_dtype)?;
+        config.add_template_arg_dtype("StT", state_dtype)?;
+        config.add_template_arg_int("Dk", dk)?;
+        config.add_template_arg_int("Dv", dv)?;
+        config.add_template_arg_int("Hk", hk)?;
+        config.add_template_arg_int("Hv", hv)?;
+
+        let outputs = if let Some(m) = mask {
+            let kernel = get_kernel_scalar_masked()
+                .ok_or_else(|| crate::error::Error::Mlx("Metal not available".into()))?;
+            kernel.apply(&[q, k, v, g, beta, state, &t_arr, m], &config, stream)?
+        } else {
+            let kernel = get_kernel_scalar()
+                .ok_or_else(|| crate::error::Error::Mlx("Metal not available".into()))?;
+            kernel.apply(&[q, k, v, g, beta, state, &t_arr], &config, stream)?
+        };
+
+        if outputs.len() < 2 {
+            return Err(crate::error::Error::Mlx(
+                "Metal kernel returned fewer than 2 outputs".into(),
+            ));
+        }
+
+        Ok((outputs[0].clone(), outputs[1].clone()))
+    }
+} // mod metal_kernel
+
 ///   - a_log: [Hv]
 ///   - dt_bias: [Hv]
 ///   - state: Option<[B, Hv, Dv, Dk]>
@@ -277,7 +489,13 @@ pub fn gated_delta_update(
         }
     };
 
-    gated_delta_ops(q, k, v, &g, &beta, state_ref, mask, stream)
+    let state_arr = state_ref.unwrap();
+
+    // TODO: Metal kernel available but needs debugging (output incorrect).
+    // For now, always use ops implementation.
+    // When ready, enable with: gated_delta_metal_kernel(q, k, v, &g, &beta, state_arr, mask, stream)
+
+    gated_delta_ops(q, k, v, &g, &beta, Some(state_arr), mask, stream)
 }
 
 // ── GatedDeltaNet module ────────────────────────────────────────────────────
