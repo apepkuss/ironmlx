@@ -1138,6 +1138,8 @@ dependencies = [
  "clap",
  "futures",
  "ironmlx-core",
+ "libc",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
