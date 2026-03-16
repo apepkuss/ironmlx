@@ -11,6 +11,7 @@ pub use sampler::{SamplerConfig, sample};
 pub use tokenizer::Tokenizer;
 
 use crate::array::Array;
+use crate::cache::CacheManager;
 use crate::device::Device;
 use crate::error::Result;
 use crate::model::LlamaModel;
@@ -34,21 +35,54 @@ pub fn stream_generate(
     max_tokens: usize,
     sampler_config: &SamplerConfig,
     eos_token_id: i32,
-    mut on_token: impl FnMut(i32) -> bool, // return false to abort
+    on_token: impl FnMut(i32) -> bool,
+) -> Result<StopReason> {
+    stream_generate_with_cache(
+        model,
+        prompt_tokens,
+        max_tokens,
+        sampler_config,
+        eos_token_id,
+        on_token,
+        None,
+    )
+}
+
+/// Generate tokens with optional prefix cache support.
+pub fn stream_generate_with_cache(
+    model: &LlamaModel,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    sampler_config: &SamplerConfig,
+    eos_token_id: i32,
+    mut on_token: impl FnMut(i32) -> bool,
+    mut cache_manager: Option<&mut CacheManager>,
 ) -> Result<StopReason> {
     let stream = Stream::new(&Device::gpu());
     let num_layers = model.layers.len();
 
-    let mut cache: Vec<(Option<Array>, Option<Array>)> =
-        (0..num_layers).map(|_| (None, None)).collect();
+    // Try prefix cache lookup
+    let (mut cache, matched_tokens) = match cache_manager {
+        Some(ref mut cm) => match cm.lookup_and_load(prompt_tokens) {
+            Ok((c, m)) if m > 0 => (c, m),
+            _ => ((0..num_layers).map(|_| (None, None)).collect(), 0),
+        },
+        None => ((0..num_layers).map(|_| (None, None)).collect(), 0),
+    };
 
-    // Prefill — astype ensures the CPU-created array migrates to GPU stream
-    let prompt_arr = Array::from_slice_i32(prompt_tokens);
+    // Prefill remaining tokens
+    let tokens_to_prefill = &prompt_tokens[matched_tokens..];
+    let prompt_arr = Array::from_slice_i32(tokens_to_prefill);
     let prompt_arr = ops::astype(&prompt_arr, crate::dtype::Dtype::Int32, &stream)?;
-    let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
+    let prompt_2d = ops::reshape(&prompt_arr, &[1, tokens_to_prefill.len() as i32], &stream)?;
     let logits = model.forward(&prompt_2d, &mut cache, "causal", None)?;
 
-    let last_idx = prompt_tokens.len() as i32 - 1;
+    // Store in prefix cache after prefill
+    if let Some(ref mut cm) = cache_manager {
+        let _ = cm.store_after_prefill(prompt_tokens, &cache);
+    }
+
+    let last_idx = tokens_to_prefill.len() as i32 - 1;
     let last_logits = ops::slice(
         &logits,
         &[0, last_idx, 0],

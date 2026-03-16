@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::array::Array;
+use crate::cache::CacheManager;
 use crate::device::Device;
 use crate::error::Result;
 use crate::model::LlamaModel;
@@ -35,6 +36,8 @@ struct SeqState {
     generated_count: usize,
     cache: Vec<(Option<Array>, Option<Array>)>,
     last_token: i32,
+    #[allow(dead_code)]
+    prompt_tokens: Vec<i32>,
 }
 
 /// BatchGenerator manages multiple sequences sharing a single model.
@@ -50,6 +53,7 @@ pub struct BatchGenerator<'a> {
     num_layers: usize,
     sequences: HashMap<SeqUid, SeqState>,
     next_uid: SeqUid,
+    cache_manager: Option<CacheManager>,
 }
 
 impl<'a> BatchGenerator<'a> {
@@ -61,6 +65,19 @@ impl<'a> BatchGenerator<'a> {
             num_layers,
             sequences: HashMap::new(),
             next_uid: 0,
+            cache_manager: None,
+        }
+    }
+
+    /// Create a new BatchGenerator with prefix caching enabled.
+    pub fn with_cache_manager(model: &'a LlamaModel, cache_manager: CacheManager) -> Self {
+        let num_layers = model.layers.len();
+        Self {
+            model,
+            num_layers,
+            sequences: HashMap::new(),
+            next_uid: 0,
+            cache_manager: Some(cache_manager),
         }
     }
 
@@ -78,17 +95,24 @@ impl<'a> BatchGenerator<'a> {
 
         let stream = Stream::new(&Device::gpu());
 
-        // Initialize empty KV cache for each layer
-        let mut cache: Vec<(Option<Array>, Option<Array>)> =
-            (0..self.num_layers).map(|_| (None, None)).collect();
+        // Try prefix cache lookup
+        let (mut cache, matched_tokens) = if let Some(ref mut cm) = self.cache_manager {
+            match cm.lookup_and_load(prompt_tokens) {
+                Ok((c, m)) if m > 0 => (c, m),
+                _ => ((0..self.num_layers).map(|_| (None, None)).collect(), 0),
+            }
+        } else {
+            ((0..self.num_layers).map(|_| (None, None)).collect(), 0)
+        };
 
-        // Prefill: run model.forward() with full prompt
-        let prompt_arr = Array::from_slice_i32(prompt_tokens);
-        let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
+        // Prefill: run model.forward() with remaining tokens (or all if no cache hit)
+        let tokens_to_prefill = &prompt_tokens[matched_tokens..];
+        let prompt_arr = Array::from_slice_i32(tokens_to_prefill);
+        let prompt_2d = ops::reshape(&prompt_arr, &[1, tokens_to_prefill.len() as i32], &stream)?;
         let logits = self.model.forward(&prompt_2d, &mut cache, "causal", None)?;
 
-        // Extract last token logits
-        let last_idx = prompt_tokens.len() as i32 - 1;
+        // Extract last token logits (from tokens_to_prefill output)
+        let last_idx = tokens_to_prefill.len() as i32 - 1;
         let vocab_size = logits.shape()[2];
         let last_logits = ops::slice(
             &logits,
@@ -119,6 +143,11 @@ impl<'a> BatchGenerator<'a> {
             finish_reason,
         };
 
+        // Store KV blocks in prefix cache for future reuse
+        if let Some(ref mut cm) = self.cache_manager {
+            let _ = cm.store_after_prefill(prompt_tokens, &cache);
+        }
+
         // Only store the sequence if it's not already finished
         if finish_reason.is_none() {
             self.sequences.insert(
@@ -130,6 +159,7 @@ impl<'a> BatchGenerator<'a> {
                     generated_count: 1,
                     cache,
                     last_token: first_token,
+                    prompt_tokens: prompt_tokens.to_vec(),
                 },
             );
         }
