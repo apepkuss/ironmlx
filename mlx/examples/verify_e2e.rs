@@ -3,34 +3,38 @@
 //! Usage:
 //!   cargo run --release --example verify_e2e
 //!
-//! This downloads `mlx-community/SmolLM2-135M-Instruct-4bit` (~50MB) on first run
-//! and generates text from a prompt using greedy decoding.
+//! This downloads `mlx-community/SmolLM-135M-Instruct-4bit` (~50MB) on first run
+//! and generates text from a prompt using chat template + greedy decoding.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use ironmlx_core::device::Device;
-use ironmlx_core::generate::{SamplerConfig, Tokenizer, stream_generate};
+use ironmlx_core::generate::{
+    ChatMessage, ChatTemplate, SamplerConfig, Tokenizer, stream_generate,
+};
 use ironmlx_core::model::{LlamaModel, ModelConfig, load_model_weights};
 use ironmlx_core::stream::Stream;
 
 fn download_model(repo_id: &str) -> PathBuf {
-    println!("[1/4] Downloading model: {}", repo_id);
+    println!("[1/5] Downloading model: {}", repo_id);
     let api = hf_hub::api::sync::Api::new().expect("failed to create HF API");
     let repo = api.model(repo_id.to_string());
 
-    // Download required files
-    for filename in &["config.json", "tokenizer.json", "model.safetensors"] {
+    for filename in &[
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "model.safetensors",
+    ] {
         match repo.get(filename) {
             Ok(path) => println!("  ✓ {} -> {}", filename, path.display()),
             Err(e) => {
-                // Try without — some models split into multiple shards
-                println!("  ⚠ {} not found ({}), trying alternatives...", filename, e);
+                println!("  ⚠ {} not found ({})", filename, e);
             }
         }
     }
 
-    // Return the repo cache directory
     let config_path = repo.get("config.json").expect("config.json is required");
     config_path.parent().unwrap().to_path_buf()
 }
@@ -46,8 +50,8 @@ fn main() {
     let model_dir = download_model(&repo_id);
     println!("  Model directory: {}\n", model_dir.display());
 
-    // Step 2: Load config
-    println!("[2/4] Loading config and tokenizer...");
+    // Step 2: Load config + tokenizer + chat template
+    println!("[2/5] Loading config, tokenizer, and chat template...");
     let config_path = model_dir.join("config.json").to_string_lossy().to_string();
     let config = ModelConfig::from_file(&config_path).expect("failed to load config");
     println!(
@@ -72,10 +76,29 @@ fn main() {
         .to_string_lossy()
         .to_string();
     let tokenizer = Tokenizer::from_file(&tokenizer_path).expect("failed to load tokenizer");
-    println!("  Tokenizer vocab size: {}\n", tokenizer.vocab_size());
+    println!("  Tokenizer vocab size: {}", tokenizer.vocab_size());
+
+    // Load chat template
+    let tc_path = model_dir.join("tokenizer_config.json");
+    let chat_template = if tc_path.exists() {
+        match ChatTemplate::from_file(&tc_path.to_string_lossy()) {
+            Ok(ct) => {
+                println!("  Chat template: loaded from tokenizer_config.json");
+                Some(ct)
+            }
+            Err(e) => {
+                println!("  Chat template: failed to load ({}), using raw prompt", e);
+                None
+            }
+        }
+    } else {
+        println!("  Chat template: not available, using raw prompt");
+        None
+    };
+    println!();
 
     // Step 3: Load weights + build model
-    println!("[3/4] Loading weights and building model...");
+    println!("[3/5] Loading weights and building model...");
     let t0 = Instant::now();
     let stream = Stream::new(&Device::gpu());
     let weights = load_model_weights(&model_dir, &stream).expect("failed to load weights");
@@ -85,19 +108,36 @@ fn main() {
     let load_time = t0.elapsed();
     println!("  Model built in {:.2}s\n", load_time.as_secs_f64());
 
-    // Step 4: Generate
-    let prompt = "The capital of France is";
-    println!("[4/4] Generating text...");
-    println!("  Prompt: \"{}\"\n", prompt);
+    // Step 4: Apply chat template
+    let user_prompt = "What is the capital of France?";
+    let prompt = if let Some(ref ct) = chat_template {
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user(user_prompt),
+        ];
+        let formatted = ct
+            .apply(&messages, true)
+            .expect("failed to apply chat template");
+        println!("[4/5] Chat template applied:");
+        println!("  --- formatted prompt ---");
+        for line in formatted.lines() {
+            println!("  | {}", line);
+        }
+        println!("  -------------------------\n");
+        formatted
+    } else {
+        println!("[4/5] Using raw prompt (no chat template)\n");
+        user_prompt.to_string()
+    };
 
-    let tokens = tokenizer.encode(prompt).expect("failed to encode");
-    println!("  Prompt tokens: {:?} ({} tokens)", tokens, tokens.len());
+    // Step 5: Generate
+    println!("[5/5] Generating text...");
+    let tokens = tokenizer.encode(&prompt).expect("failed to encode");
+    println!("  Prompt: {} tokens\n", tokens.len());
 
     let sampler = SamplerConfig::greedy();
-    let max_tokens = 50;
-
-    // Find EOS token — try common IDs
-    let eos_token_id = 2; // common default
+    let max_tokens = 100;
+    let eos_token_id = 2;
 
     let mut generated_tokens = Vec::new();
     let t1 = Instant::now();
@@ -110,7 +150,6 @@ fn main() {
         eos_token_id,
         |token| {
             generated_tokens.push(token);
-            // Print token as it's generated
             if let Ok(text) = tokenizer.decode_single(token) {
                 print!("{}", text);
             }
@@ -122,7 +161,6 @@ fn main() {
     let gen_time = t1.elapsed();
     println!("\n");
 
-    // Stats
     let full_text = tokenizer.decode(&generated_tokens).unwrap_or_default();
     let num_tokens = generated_tokens.len();
     let tokens_per_sec = num_tokens as f64 / gen_time.as_secs_f64();
