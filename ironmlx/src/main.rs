@@ -1,9 +1,15 @@
 mod api;
+mod engine;
+mod engine_handle;
 mod state;
 
-use clap::Parser;
-use state::AppState;
 use std::sync::Arc;
+
+use clap::Parser;
+use engine::EngineCore;
+use engine_handle::EngineHandle;
+use state::AppState;
+use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(name = "ironmlx", about = "Local LLM inference on Apple Silicon")]
@@ -31,16 +37,40 @@ async fn main() {
     // Initialize MLX runtime
     ironmlx_core::init();
 
-    // Load model
-    let state = match AppState::load(&args.model) {
-        Ok(s) => Arc::new(s),
+    // Load model artifacts
+    let (model, tokenizer, config, model_id) = match state::load_model(&args.model) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to load model: {}", e);
             std::process::exit(1);
         }
     };
 
-    println!("Model loaded: {}", state.model_id);
+    println!("Model loaded: {}", model_id);
+
+    // Create engine command channel
+    let (cmd_tx, cmd_rx) = mpsc::channel(256);
+    let engine_handle = EngineHandle::new(cmd_tx);
+
+    // Clone tokenizer for engine (engine needs its own copy for decode)
+    let engine_tokenizer = tokenizer.clone();
+
+    // Spawn engine on a dedicated OS thread.
+    // SAFETY: MLX C handles are reference-counted. EngineCore runs sequentially
+    // on a single thread — no concurrent access to model state.
+    let mut engine = EngineCore::new(cmd_rx, model, engine_tokenizer);
+    std::thread::spawn(move || {
+        engine.run();
+    });
+
+    // Build app state
+    let state = Arc::new(AppState {
+        engine: engine_handle,
+        tokenizer: Arc::new(tokenizer),
+        config,
+        model_id: model_id.clone(),
+    });
+
     println!("Listening on {}:{}", args.host, args.port);
 
     // Build router

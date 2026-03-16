@@ -1,7 +1,9 @@
+pub mod batch;
 mod kv_cache;
 mod sampler;
 mod tokenizer;
 
+pub use batch::{BatchGenerator, BatchResponse, FinishReason, SeqUid};
 pub use kv_cache::KVCache;
 pub use sampler::{SamplerConfig, sample};
 pub use tokenizer::Tokenizer;

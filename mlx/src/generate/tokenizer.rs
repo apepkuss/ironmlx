@@ -1,6 +1,7 @@
 use crate::error::Result;
 
 /// Wrapper around HuggingFace tokenizers.
+#[derive(Clone)]
 pub struct Tokenizer {
     inner: tokenizers::Tokenizer,
 }

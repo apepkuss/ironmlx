@@ -6,12 +6,11 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::types::*;
 use crate::state::AppState;
-use ironmlx_core::generate::{SamplerConfig, StopReason, generate, stream_generate};
+use ironmlx_core::generate::SamplerConfig;
 
 /// POST /v1/chat/completions — supports both regular and streaming responses
 pub async fn chat_completions(
@@ -36,27 +35,35 @@ async fn chat_completions_sync(
     let prompt_len = prompt_tokens.len();
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
+    let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
-    let generated_ids = {
-        let model_state = state.model.lock().unwrap();
-        generate(&model_state.llama, &prompt_tokens, max_tokens, &sampler, 2)
-            .map_err(|e| internal_error(&format!("generate error: {}", e)))?
-    };
+    // Submit to engine and collect all tokens
+    let mut token_rx = state
+        .engine
+        .add_request(
+            request_id.clone(),
+            prompt_tokens,
+            sampler,
+            max_tokens,
+            2, // eos_token_id
+        )
+        .await;
 
-    let completion_len = generated_ids.len();
-    let response_text = state
-        .tokenizer
-        .decode(&generated_ids)
-        .map_err(|e| internal_error(&format!("decode error: {}", e)))?;
+    let mut generated_text = String::new();
+    let mut completion_len = 0usize;
+    let mut finish_reason = "stop".to_string();
 
-    let finish_reason = if completion_len >= max_tokens {
-        "length"
-    } else {
-        "stop"
-    };
+    while let Some(output) = token_rx.recv().await {
+        if let Some(ref reason) = output.finish_reason {
+            finish_reason = reason.clone();
+            break;
+        }
+        generated_text.push_str(&output.token_text);
+        completion_len += 1;
+    }
 
     Ok(Json(ChatCompletionResponse {
-        id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+        id: request_id,
         object: "chat.completion".to_string(),
         created: chrono::Utc::now().timestamp(),
         model: state.model_id.clone(),
@@ -64,9 +71,9 @@ async fn chat_completions_sync(
             index: 0,
             message: ChatMessage {
                 role: "assistant".to_string(),
-                content: response_text,
+                content: generated_text,
             },
-            finish_reason: finish_reason.to_string(),
+            finish_reason,
         }],
         usage: Usage {
             prompt_tokens: prompt_len,
@@ -88,19 +95,22 @@ async fn chat_completions_stream(
     let created = chrono::Utc::now().timestamp();
     let model_id = state.model_id.clone();
 
-    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
+    let mut token_rx = state
+        .engine
+        .add_request(chunk_id.clone(), prompt_tokens, sampler, max_tokens, 2)
+        .await;
 
-    // Spawn blocking generation in a separate thread
-    let tx_gen = tx.clone();
-    let chunk_id_gen = chunk_id.clone();
-    let model_id_gen = model_id.clone();
-    tokio::task::spawn_blocking(move || {
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+
+    let chunk_id_clone = chunk_id.clone();
+    let model_id_clone = model_id.clone();
+    tokio::spawn(async move {
         // Send initial chunk with role
         let role_chunk = ChatCompletionChunk {
-            id: chunk_id_gen.clone(),
+            id: chunk_id_clone.clone(),
             object: "chat.completion.chunk".to_string(),
             created,
-            model: model_id_gen.clone(),
+            model: model_id_clone.clone(),
             choices: vec![ChatChunkChoice {
                 index: 0,
                 delta: ChatDelta {
@@ -110,69 +120,68 @@ async fn chat_completions_stream(
                 finish_reason: None,
             }],
         };
-        let _ = tx_gen.blocking_send(Ok(
-            Event::default().data(serde_json::to_string(&role_chunk).unwrap())
-        ));
+        let _ = sse_tx
+            .send(Ok(
+                Event::default().data(serde_json::to_string(&role_chunk).unwrap())
+            ))
+            .await;
 
-        let model_state = state.model.lock().unwrap();
-        let stop_reason = stream_generate(
-            &model_state.llama,
-            &prompt_tokens,
-            max_tokens,
-            &sampler,
-            2,
-            |token_id| {
-                let text = state.tokenizer.decode(&[token_id]).unwrap_or_default();
-                let chunk = ChatCompletionChunk {
-                    id: chunk_id_gen.clone(),
+        // Stream tokens
+        while let Some(output) = token_rx.recv().await {
+            if let Some(ref reason) = output.finish_reason {
+                // Send final chunk with finish_reason
+                let final_chunk = ChatCompletionChunk {
+                    id: chunk_id_clone.clone(),
                     object: "chat.completion.chunk".to_string(),
                     created,
-                    model: model_id_gen.clone(),
+                    model: model_id_clone.clone(),
                     choices: vec![ChatChunkChoice {
                         index: 0,
                         delta: ChatDelta {
                             role: None,
-                            content: Some(text),
+                            content: None,
                         },
-                        finish_reason: None,
+                        finish_reason: Some(reason.clone()),
                     }],
                 };
-                let data = serde_json::to_string(&chunk).unwrap();
-                tx_gen
-                    .blocking_send(Ok(Event::default().data(data)))
-                    .is_ok()
-            },
-        );
+                let _ = sse_tx
+                    .send(Ok(
+                        Event::default().data(serde_json::to_string(&final_chunk).unwrap())
+                    ))
+                    .await;
+                break;
+            }
 
-        // Send final chunk with finish_reason
-        let finish_reason = match stop_reason {
-            Ok(StopReason::Eos) => "stop",
-            Ok(StopReason::MaxTokens) => "length",
-            Err(_) => "stop",
-        };
-        let final_chunk = ChatCompletionChunk {
-            id: chunk_id_gen,
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: model_id_gen,
-            choices: vec![ChatChunkChoice {
-                index: 0,
-                delta: ChatDelta {
-                    role: None,
-                    content: None,
-                },
-                finish_reason: Some(finish_reason.to_string()),
-            }],
-        };
-        let _ = tx_gen.blocking_send(Ok(
-            Event::default().data(serde_json::to_string(&final_chunk).unwrap())
-        ));
+            let chunk = ChatCompletionChunk {
+                id: chunk_id_clone.clone(),
+                object: "chat.completion.chunk".to_string(),
+                created,
+                model: model_id_clone.clone(),
+                choices: vec![ChatChunkChoice {
+                    index: 0,
+                    delta: ChatDelta {
+                        role: None,
+                        content: Some(output.token_text),
+                    },
+                    finish_reason: None,
+                }],
+            };
+            if sse_tx
+                .send(Ok(
+                    Event::default().data(serde_json::to_string(&chunk).unwrap())
+                ))
+                .await
+                .is_err()
+            {
+                break; // Client disconnected
+            }
+        }
 
         // Send [DONE] marker
-        let _ = tx_gen.blocking_send(Ok(Event::default().data("[DONE]")));
+        let _ = sse_tx.send(Ok(Event::default().data("[DONE]"))).await;
     });
 
-    let stream = ReceiverStream::new(rx);
+    let stream = ReceiverStream::new(sse_rx);
     Ok(Sse::new(stream).into_response())
 }
 
@@ -189,34 +198,35 @@ pub async fn completions(
         ..SamplerConfig::default()
     };
     let max_tokens = req.max_tokens;
+    let request_id = format!("cmpl-{}", uuid::Uuid::new_v4());
 
-    let generated_ids = {
-        let model_state = state.model.lock().unwrap();
-        generate(&model_state.llama, &prompt_tokens, max_tokens, &sampler, 2)
-            .map_err(|e| internal_error(&format!("generate error: {}", e)))?
-    };
+    let mut token_rx = state
+        .engine
+        .add_request(request_id.clone(), prompt_tokens, sampler, max_tokens, 2)
+        .await;
 
-    let completion_len = generated_ids.len();
-    let text = state
-        .tokenizer
-        .decode(&generated_ids)
-        .map_err(|e| internal_error(&format!("decode error: {}", e)))?;
+    let mut text = String::new();
+    let mut completion_len = 0usize;
+    let mut finish_reason = "stop".to_string();
 
-    let finish_reason = if completion_len >= max_tokens {
-        "length"
-    } else {
-        "stop"
-    };
+    while let Some(output) = token_rx.recv().await {
+        if let Some(ref reason) = output.finish_reason {
+            finish_reason = reason.clone();
+            break;
+        }
+        text.push_str(&output.token_text);
+        completion_len += 1;
+    }
 
     Ok(Json(CompletionResponse {
-        id: format!("cmpl-{}", uuid::Uuid::new_v4()),
+        id: request_id,
         object: "text_completion".to_string(),
         created: chrono::Utc::now().timestamp(),
         model: state.model_id.clone(),
         choices: vec![CompletionChoice {
             index: 0,
             text,
-            finish_reason: finish_reason.to_string(),
+            finish_reason,
         }],
         usage: Usage {
             prompt_tokens: prompt_len,

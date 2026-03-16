@@ -1,4 +1,4 @@
-use ironmlx::{Array, Device, Stream, init};
+use ironmlx_core::{Array, Device, Stream, init};
 
 fn gpu_stream() -> Stream {
     init();
@@ -12,7 +12,7 @@ fn test_gpu_smoke() {
     let s = gpu_stream();
     let a = Array::from_float(3.0);
     let b = Array::from_float(4.0);
-    let c = ironmlx::ops::add(&a, &b, &s).unwrap();
+    let c = ironmlx_core::ops::add(&a, &b, &s).unwrap();
     assert!((c.item_f32().unwrap() - 7.0).abs() < 1e-6);
 }
 
@@ -22,7 +22,7 @@ fn test_cpu_smoke() {
     let s = Stream::default_stream(&Device::cpu());
     let a = Array::from_int(10);
     let b = Array::from_int(5);
-    let c = ironmlx::ops::subtract(&a, &b, &s).unwrap();
+    let c = ironmlx_core::ops::subtract(&a, &b, &s).unwrap();
     assert_eq!(c.item_i32().unwrap(), 5);
 }
 
@@ -30,10 +30,10 @@ fn test_cpu_smoke() {
 
 #[test]
 fn test_default_gpu_stream() {
-    ironmlx::init();
-    let s = ironmlx::default_stream(ironmlx::DeviceType::Gpu);
+    ironmlx_core::init();
+    let s = ironmlx_core::default_stream(ironmlx_core::DeviceType::Gpu);
     let a = Array::from_float(2.0);
-    let r = ironmlx::ops::square(&a, &s).unwrap();
+    let r = ironmlx_core::ops::square(&a, &s).unwrap();
     assert!((r.item_f32().unwrap() - 4.0).abs() < 1e-6);
 }
 
@@ -43,7 +43,7 @@ fn test_default_gpu_stream() {
 fn test_softmax() {
     let s = gpu_stream();
     let a = Array::from_slice_f32(&[1.0, 2.0, 3.0]);
-    let b = ironmlx::ops::softmax(&a, &[-1], &s).unwrap();
+    let b = ironmlx_core::ops::softmax(&a, &[-1], &s).unwrap();
     let v = b.to_vec_f32().unwrap();
     let total: f32 = v.iter().sum();
     assert!(
@@ -60,7 +60,7 @@ fn test_softmax() {
 fn test_relu() {
     let s = gpu_stream();
     let a = Array::from_slice_f32(&[-2.0, 0.0, 3.0]);
-    let b = ironmlx::ops::relu(&a, &s).unwrap();
+    let b = ironmlx_core::ops::relu(&a, &s).unwrap();
     let v = b.to_vec_f32().unwrap();
     assert!((v[0] - 0.0).abs() < 1e-6, "negative → 0");
     assert!((v[1] - 0.0).abs() < 1e-6, "zero → 0");
@@ -73,7 +73,7 @@ fn test_relu() {
 fn test_sum_all() {
     let s = gpu_stream();
     let a = Array::from_slice_f32(&[1.0, 2.0, 3.0]);
-    let r = ironmlx::ops::sum(&a, &[], false, &s).unwrap();
+    let r = ironmlx_core::ops::sum(&a, &[], false, &s).unwrap();
     assert!((r.item_f32().unwrap() - 6.0).abs() < 1e-5);
 }
 
@@ -82,7 +82,7 @@ fn test_sum_axis() {
     let s = gpu_stream();
     // shape [2, 3], sum along axis 0 → shape [3]
     let a = Array::from_slice_f32_shape(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
-    let r = ironmlx::ops::sum(&a, &[0], false, &s).unwrap();
+    let r = ironmlx_core::ops::sum(&a, &[0], false, &s).unwrap();
     assert_eq!(r.shape(), vec![3]);
     let v = r.to_vec_f32().unwrap();
     assert!((v[0] - 5.0).abs() < 1e-5);
@@ -94,7 +94,7 @@ fn test_sum_axis() {
 fn test_sum_keepdims() {
     let s = gpu_stream();
     let a = Array::from_slice_f32_shape(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
-    let r = ironmlx::ops::sum(&a, &[1], true, &s).unwrap();
+    let r = ironmlx_core::ops::sum(&a, &[1], true, &s).unwrap();
     assert_eq!(r.shape(), vec![2, 1]);
 }
 
@@ -102,7 +102,7 @@ fn test_sum_keepdims() {
 fn test_mean_axis() {
     let s = gpu_stream();
     let a = Array::from_slice_f32_shape(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
-    let r = ironmlx::ops::mean(&a, &[1], false, &s).unwrap();
+    let r = ironmlx_core::ops::mean(&a, &[1], false, &s).unwrap();
     assert_eq!(r.shape(), vec![2]);
     let v = r.to_vec_f32().unwrap();
     assert!((v[0] - 2.0).abs() < 1e-5); // mean of [1,2,3]
@@ -116,7 +116,7 @@ fn test_reshape() {
     let s = gpu_stream();
     let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
     let a = Array::from_slice_f32_shape(&data, &[2, 3]);
-    let b = ironmlx::ops::reshape(&a, &[3, 2], &s).unwrap();
+    let b = ironmlx_core::ops::reshape(&a, &[3, 2], &s).unwrap();
     assert_eq!(b.shape(), vec![3, 2]);
     assert_eq!(b.size(), 6);
     assert_eq!(b.to_vec_f32().unwrap(), data);
@@ -127,7 +127,7 @@ fn test_transpose() {
     let s = gpu_stream();
     let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
     let a = Array::from_slice_f32_shape(&data, &[2, 3]);
-    let b = ironmlx::ops::transpose(&a, &s).unwrap();
+    let b = ironmlx_core::ops::transpose(&a, &s).unwrap();
     assert_eq!(b.shape(), vec![3, 2]);
 }
 
@@ -137,7 +137,7 @@ fn test_transpose_axes() {
     // shape [2, 3, 4] → transpose axes [2, 0, 1] → shape [4, 2, 3]
     let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
     let a = Array::from_slice_f32_shape(&data, &[2, 3, 4]);
-    let b = ironmlx::ops::transpose_axes(&a, &[2, 0, 1], &s).unwrap();
+    let b = ironmlx_core::ops::transpose_axes(&a, &[2, 0, 1], &s).unwrap();
     assert_eq!(b.shape(), vec![4, 2, 3]);
 }
 
@@ -145,7 +145,7 @@ fn test_transpose_axes() {
 
 #[test]
 fn test_operator_add() {
-    ironmlx::init();
+    ironmlx_core::init();
     let a = Array::from_float(3.0);
     let b = Array::from_float(4.0);
     let c = (&a + &b).unwrap();
@@ -154,7 +154,7 @@ fn test_operator_add() {
 
 #[test]
 fn test_operator_sub() {
-    ironmlx::init();
+    ironmlx_core::init();
     let a = Array::from_float(9.0);
     let b = Array::from_float(4.0);
     let c = (&a - &b).unwrap();
@@ -163,7 +163,7 @@ fn test_operator_sub() {
 
 #[test]
 fn test_operator_mul() {
-    ironmlx::init();
+    ironmlx_core::init();
     let a = Array::from_float(3.0);
     let b = Array::from_float(4.0);
     let c = (&a * &b).unwrap();
@@ -172,7 +172,7 @@ fn test_operator_mul() {
 
 #[test]
 fn test_operator_div() {
-    ironmlx::init();
+    ironmlx_core::init();
     let a = Array::from_float(8.0);
     let b = Array::from_float(2.0);
     let c = (&a / &b).unwrap();
