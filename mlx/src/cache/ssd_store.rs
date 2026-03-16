@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use crate::array::Array;
 use crate::device::Device;
@@ -39,25 +40,51 @@ struct SSDEntry {
     num_layers: usize,
 }
 
-/// SSD-backed store for KV cache blocks, with LRU eviction.
+/// Message sent to the background writer thread.
+struct WriteJob {
+    kv_data: Vec<(Array, Array)>,
+    file_path: PathBuf,
+}
+
+/// SSD-backed store for KV cache blocks, with LRU eviction and async writes.
 pub struct SSDStore {
     config: SSDStoreConfig,
     entries: HashMap<BlockId, SSDEntry>,
     lru_order: VecDeque<BlockId>,
     current_size_bytes: u64,
+    /// Channel to the background writer thread.
+    write_tx: Option<mpsc::Sender<WriteJob>>,
+    /// Pending writes that haven't been confirmed yet.
+    pending_writes: HashMap<BlockId, PendingWrite>,
+}
+
+/// Tracks a block that's being written asynchronously.
+struct PendingWrite {
+    file_path: PathBuf,
+    num_layers: usize,
 }
 
 impl SSDStore {
     /// Create a new store, ensuring the model cache directory exists.
+    /// Spawns a background writer thread for async I/O.
     pub fn new(config: SSDStoreConfig) -> Result<Self> {
         let model_dir = config.cache_dir.join(&config.model_hash);
         std::fs::create_dir_all(&model_dir)
             .map_err(|e| Error::Mlx(format!("failed to create cache dir: {e}")))?;
+
+        // Spawn background writer thread
+        let (tx, rx) = mpsc::channel::<WriteJob>();
+        std::thread::spawn(move || {
+            writer_thread(rx);
+        });
+
         Ok(Self {
             config,
             entries: HashMap::new(),
             lru_order: VecDeque::new(),
             current_size_bytes: 0,
+            write_tx: Some(tx),
+            pending_writes: HashMap::new(),
         })
     }
 
@@ -71,15 +98,15 @@ impl SSDStore {
         self.current_size_bytes
     }
 
-    /// Check whether a block is present in the store.
+    /// Check whether a block is present in the store (on disk or pending write).
     pub fn has_block(&self, block_id: BlockId) -> bool {
-        self.entries.contains_key(&block_id)
+        self.entries.contains_key(&block_id) || self.pending_writes.contains_key(&block_id)
     }
 
-    /// Persist a KV cache block to disk as a safetensors file.
+    /// Persist a KV cache block to disk asynchronously.
     ///
-    /// Each layer's key and value tensors are stored under the names
-    /// `layer_N_keys` and `layer_N_values`.
+    /// The KV data is sent to a background thread for serialization.
+    /// The block is immediately available for `has_block()` checks.
     pub fn store_block(
         &mut self,
         block_id: BlockId,
@@ -87,41 +114,64 @@ impl SSDStore {
         _stream: &Stream,
     ) -> Result<()> {
         let file_path = self.model_dir().join(format!("{block_id}.safetensors"));
-        let path_str = file_path
-            .to_str()
-            .ok_or_else(|| Error::Mlx("non-UTF-8 cache path".into()))?;
 
-        let arrays = MapStringToArray::new();
-        for (i, (keys, values)) in kv_data.iter().enumerate() {
-            arrays.insert(&format!("layer_{i}_keys"), keys)?;
-            arrays.insert(&format!("layer_{i}_values"), values)?;
-        }
-
-        let metadata = MapStringToString::new();
-        save_safetensors(path_str, &arrays, &metadata)?;
-
-        let size_bytes = std::fs::metadata(&file_path)
-            .map_err(|e| Error::Mlx(format!("failed to stat cache file: {e}")))?
-            .len();
-
-        // Remove old entry if overwriting.
+        // Remove old entry if overwriting
         if self.entries.contains_key(&block_id) {
             self.remove_block(block_id)?;
         }
 
-        self.entries.insert(
+        let num_layers = kv_data.len();
+
+        // Clone arrays for the background thread
+        let cloned_kv: Vec<(Array, Array)> = kv_data
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // Track as pending
+        self.pending_writes.insert(
             block_id,
-            SSDEntry {
-                file_path,
-                size_bytes,
-                num_layers: kv_data.len(),
+            PendingWrite {
+                file_path: file_path.clone(),
+                num_layers,
             },
         );
-        self.lru_order.push_back(block_id);
-        self.current_size_bytes += size_bytes;
 
+        // Send to writer thread
+        if let Some(ref tx) = self.write_tx {
+            let _ = tx.send(WriteJob {
+                kv_data: cloned_kv,
+                file_path,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Flush any pending writes and update the index.
+    /// Call this before `load_block` if you need the data immediately.
+    pub fn flush_pending(&mut self) -> Result<()> {
+        let pending: Vec<BlockId> = self.pending_writes.keys().copied().collect();
+        for block_id in pending {
+            if let Some(pw) = self.pending_writes.remove(&block_id)
+                && pw.file_path.exists()
+            {
+                let size_bytes = std::fs::metadata(&pw.file_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                self.entries.insert(
+                    block_id,
+                    SSDEntry {
+                        file_path: pw.file_path,
+                        size_bytes,
+                        num_layers: pw.num_layers,
+                    },
+                );
+                self.lru_order.push_back(block_id);
+                self.current_size_bytes += size_bytes;
+            }
+        }
         self.evict_until_under_limit()?;
-
         Ok(())
     }
 
@@ -131,6 +181,20 @@ impl SSDStore {
         block_id: BlockId,
         stream: &Stream,
     ) -> Result<Vec<(Array, Array)>> {
+        // If pending, flush first
+        if self.pending_writes.contains_key(&block_id) {
+            // Wait briefly for the file to appear
+            let pw = self.pending_writes.get(&block_id).unwrap();
+            let path = pw.file_path.clone();
+            for _ in 0..50 {
+                if path.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            self.flush_pending()?;
+        }
+
         let entry = self
             .entries
             .get(&block_id)
@@ -151,7 +215,7 @@ impl SSDStore {
             result.push((keys, values));
         }
 
-        // Touch LRU: move to back.
+        // Touch LRU
         self.lru_order.retain(|id| *id != block_id);
         self.lru_order.push_back(block_id);
 
@@ -160,6 +224,7 @@ impl SSDStore {
 
     /// Remove a single block from disk and the index.
     pub fn remove_block(&mut self, block_id: BlockId) -> Result<()> {
+        self.pending_writes.remove(&block_id);
         if let Some(entry) = self.entries.remove(&block_id) {
             if entry.file_path.exists() {
                 std::fs::remove_file(&entry.file_path)
@@ -232,7 +297,7 @@ impl SSDStore {
                 .to_str()
                 .ok_or_else(|| Error::Mlx("non-UTF-8 cache path".into()))?;
 
-            // Determine layer count by loading the index of the safetensors file.
+            // Determine layer count by inspecting safetensors keys
             let (arrays, _metadata) = load_safetensors(path_str, &stream)?;
             let mut max_layer: Option<usize> = None;
             for (key, _) in arrays.iter() {
@@ -262,5 +327,25 @@ impl SSDStore {
         }
 
         Ok(count)
+    }
+}
+
+/// Background writer thread: receives WriteJob messages and writes safetensors files.
+fn writer_thread(rx: mpsc::Receiver<WriteJob>) {
+    while let Ok(job) = rx.recv() {
+        let arrays = MapStringToArray::new();
+        for (i, (keys, values)) in job.kv_data.iter().enumerate() {
+            if arrays.insert(&format!("layer_{i}_keys"), keys).is_err() {
+                continue;
+            }
+            if arrays.insert(&format!("layer_{i}_values"), values).is_err() {
+                continue;
+            }
+        }
+
+        let metadata = MapStringToString::new();
+        if let Some(path_str) = job.file_path.to_str() {
+            let _ = save_safetensors(path_str, &arrays, &metadata);
+        }
     }
 }

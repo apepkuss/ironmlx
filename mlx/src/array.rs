@@ -6,6 +6,12 @@ use crate::error::{Result, check};
 /// An N-dimensional array (lazy, reference-counted internally by MLX).
 pub struct Array(sys::mlx_array);
 
+// SAFETY: MLX arrays are internally reference-counted (shared_ptr in C++) and
+// the MLX runtime serializes GPU operations. Moving an Array handle across
+// threads is safe — the underlying data is immutable once evaluated.
+unsafe impl Send for Array {}
+unsafe impl Sync for Array {}
+
 // ── Constructors ──────────────────────────────────────────────────────────────
 
 impl Array {
