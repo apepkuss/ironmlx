@@ -10,7 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::types::*;
 use crate::state::AppState;
-use ironmlx_core::generate::SamplerConfig;
+use ironmlx_core::generate::{ChatMessage as CoreChatMessage, SamplerConfig};
 
 /// POST /v1/chat/completions — supports both regular and streaming responses
 pub async fn chat_completions(
@@ -30,23 +30,17 @@ async fn chat_completions_sync(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Json<ChatCompletionResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let prompt = build_chat_prompt(&req.messages);
+    let prompt = build_chat_prompt(&state, &req.messages)?;
     let prompt_tokens = encode_or_error(&state, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
+    let eos = state.config.eos_token_id as i32;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
-    // Submit to engine and collect all tokens
     let mut token_rx = state
         .engine
-        .add_request(
-            request_id.clone(),
-            prompt_tokens,
-            sampler,
-            max_tokens,
-            2, // eos_token_id
-        )
+        .add_request(request_id.clone(), prompt_tokens, sampler, max_tokens, eos)
         .await;
 
     let mut generated_text = String::new();
@@ -87,17 +81,18 @@ async fn chat_completions_stream(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    let prompt = build_chat_prompt(&req.messages);
+    let prompt = build_chat_prompt(&state, &req.messages)?;
     let prompt_tokens = encode_or_error(&state, &prompt)?;
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
+    let eos = state.config.eos_token_id as i32;
     let chunk_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = chrono::Utc::now().timestamp();
     let model_id = state.model_id.clone();
 
     let mut token_rx = state
         .engine
-        .add_request(chunk_id.clone(), prompt_tokens, sampler, max_tokens, 2)
+        .add_request(chunk_id.clone(), prompt_tokens, sampler, max_tokens, eos)
         .await;
 
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -129,7 +124,6 @@ async fn chat_completions_stream(
         // Stream tokens
         while let Some(output) = token_rx.recv().await {
             if let Some(ref reason) = output.finish_reason {
-                // Send final chunk with finish_reason
                 let final_chunk = ChatCompletionChunk {
                     id: chunk_id_clone.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -192,6 +186,7 @@ pub async fn completions(
 ) -> Result<Json<CompletionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let prompt_tokens = encode_or_error(&state, &req.prompt)?;
     let prompt_len = prompt_tokens.len();
+    let eos = state.config.eos_token_id as i32;
     let sampler = SamplerConfig {
         temperature: req.temperature,
         top_p: req.top_p,
@@ -202,7 +197,7 @@ pub async fn completions(
 
     let mut token_rx = state
         .engine
-        .add_request(request_id.clone(), prompt_tokens, sampler, max_tokens, 2)
+        .add_request(request_id.clone(), prompt_tokens, sampler, max_tokens, eos)
         .await;
 
     let mut text = String::new();
@@ -259,17 +254,30 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn build_chat_prompt(messages: &[ChatMessage]) -> String {
-    let mut prompt = String::new();
-    for msg in messages {
-        match msg.role.as_str() {
-            "system" => prompt.push_str(&format!("<<SYS>>\n{}\n<</SYS>>\n\n", msg.content)),
-            "user" => prompt.push_str(&format!("[INST] {} [/INST]\n", msg.content)),
-            "assistant" => prompt.push_str(&format!("{}\n", msg.content)),
-            _ => prompt.push_str(&format!("{}\n", msg.content)),
+fn build_chat_prompt(
+    state: &AppState,
+    messages: &[ChatMessage],
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(ref ct) = state.chat_template {
+        // Convert API ChatMessage to core ChatMessage for template rendering
+        let core_messages: Vec<CoreChatMessage> = messages
+            .iter()
+            .map(|m| CoreChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+        ct.apply(&core_messages, true)
+            .map_err(|e| internal_error(&format!("chat template error: {}", e)))
+    } else {
+        // Fallback: simple concatenation
+        let mut prompt = String::new();
+        for msg in messages {
+            prompt.push_str(&format!("{}: {}\n", msg.role, msg.content));
         }
+        prompt.push_str("assistant: ");
+        Ok(prompt)
     }
-    prompt
 }
 
 fn build_sampler(req: &ChatCompletionRequest) -> SamplerConfig {

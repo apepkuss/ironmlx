@@ -38,7 +38,7 @@ async fn main() {
     ironmlx_core::init();
 
     // Load model artifacts
-    let (model, tokenizer, config, model_id) = match state::load_model(&args.model) {
+    let (model, tokenizer, chat_template, config, model_id) = match state::load_model(&args.model) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to load model: {}", e);
@@ -67,6 +67,7 @@ async fn main() {
     let state = Arc::new(AppState {
         engine: engine_handle,
         tokenizer: Arc::new(tokenizer),
+        chat_template,
         config,
         model_id: model_id.clone(),
     });
