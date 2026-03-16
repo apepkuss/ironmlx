@@ -24,6 +24,7 @@ pub struct Attention {
     pub rope_traditional: bool,
     pub rope_base: Option<f32>,
     pub rope_scale: f32,
+    pub partial_rotary_factor: f32,
 }
 
 impl Attention {
@@ -40,6 +41,7 @@ impl Attention {
         rope_traditional: bool,
         rope_base: Option<f32>,
         rope_scale: f32,
+        partial_rotary_factor: f32,
     ) -> Self {
         Self {
             wq,
@@ -55,6 +57,7 @@ impl Attention {
             rope_traditional,
             rope_base,
             rope_scale,
+            partial_rotary_factor,
         }
     }
 
@@ -112,27 +115,96 @@ impl Attention {
         let k = ops::transpose_axes(&k, &[0, 2, 1, 3], stream)?;
         let v = ops::transpose_axes(&v, &[0, 2, 1, 3], stream)?;
 
-        // RoPE
-        let q = fast::rope(
-            &q,
-            self.rope_dims,
-            self.rope_traditional,
-            self.rope_base,
-            self.rope_scale,
-            offset,
-            None,
-            stream,
-        )?;
-        let k = fast::rope(
-            &k,
-            self.rope_dims,
-            self.rope_traditional,
-            self.rope_base,
-            self.rope_scale,
-            offset,
-            None,
-            stream,
-        )?;
+        // RoPE (with optional partial rotary encoding)
+        let (q, k) = if self.partial_rotary_factor < 1.0 {
+            let rope_dim = (self.head_dim as f32 * self.partial_rotary_factor) as i32;
+            let q_shape = q.shape();
+            let k_shape = k.shape();
+
+            // Split q along last axis: [B, n_heads, L, head_dim] -> rot + pass
+            let q_rot = ops::slice(
+                &q,
+                &[0, 0, 0, 0],
+                &[q_shape[0], q_shape[1], q_shape[2], rope_dim],
+                &[1, 1, 1, 1],
+                stream,
+            )?;
+            let q_pass = ops::slice(
+                &q,
+                &[0, 0, 0, rope_dim],
+                &[q_shape[0], q_shape[1], q_shape[2], q_shape[3]],
+                &[1, 1, 1, 1],
+                stream,
+            )?;
+
+            // Split k along last axis
+            let k_rot = ops::slice(
+                &k,
+                &[0, 0, 0, 0],
+                &[k_shape[0], k_shape[1], k_shape[2], rope_dim],
+                &[1, 1, 1, 1],
+                stream,
+            )?;
+            let k_pass = ops::slice(
+                &k,
+                &[0, 0, 0, rope_dim],
+                &[k_shape[0], k_shape[1], k_shape[2], k_shape[3]],
+                &[1, 1, 1, 1],
+                stream,
+            )?;
+
+            // Apply RoPE only to the rotary portion
+            let q_rot = fast::rope(
+                &q_rot,
+                rope_dim,
+                self.rope_traditional,
+                self.rope_base,
+                self.rope_scale,
+                offset,
+                None,
+                stream,
+            )?;
+            let k_rot = fast::rope(
+                &k_rot,
+                rope_dim,
+                self.rope_traditional,
+                self.rope_base,
+                self.rope_scale,
+                offset,
+                None,
+                stream,
+            )?;
+
+            // Concatenate rotary and pass-through portions back together
+            let q_arr = VectorArray::from_arrays(&[&q_rot, &q_pass]);
+            let k_arr = VectorArray::from_arrays(&[&k_rot, &k_pass]);
+            (
+                ops::concatenate(&q_arr, -1, stream)?,
+                ops::concatenate(&k_arr, -1, stream)?,
+            )
+        } else {
+            let q = fast::rope(
+                &q,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                self.rope_scale,
+                offset,
+                None,
+                stream,
+            )?;
+            let k = fast::rope(
+                &k,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                self.rope_scale,
+                offset,
+                None,
+                stream,
+            )?;
+            (q, k)
+        };
 
         // KV cache update
         let (k, v) = if let (Some(ck), Some(cv)) = (cache_keys, cache_values) {

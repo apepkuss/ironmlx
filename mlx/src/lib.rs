@@ -5,6 +5,7 @@ pub mod device;
 pub mod dtype;
 pub mod error;
 pub mod fast;
+pub mod fast_kernel;
 pub mod generate;
 pub mod io;
 pub mod memory;

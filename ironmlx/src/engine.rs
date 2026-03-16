@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::mpsc;
 
 use ironmlx_core::generate::{BatchGenerator, FinishReason, SamplerConfig, SeqUid, Tokenizer};
-use ironmlx_core::model::LlamaModel;
+use ironmlx_core::model::Model;
 
 /// Output for each generation step
 #[derive(Debug, Clone)]
@@ -56,16 +56,12 @@ unsafe impl Send for EngineCore {}
 /// The engine core that owns the model and processes requests using BatchGenerator.
 pub struct EngineCore {
     cmd_rx: mpsc::Receiver<EngineCommand>,
-    model: LlamaModel,
+    model: Model,
     tokenizer: Tokenizer,
 }
 
 impl EngineCore {
-    pub fn new(
-        cmd_rx: mpsc::Receiver<EngineCommand>,
-        model: LlamaModel,
-        tokenizer: Tokenizer,
-    ) -> Self {
+    pub fn new(cmd_rx: mpsc::Receiver<EngineCommand>, model: Model, tokenizer: Tokenizer) -> Self {
         Self {
             cmd_rx,
             model,

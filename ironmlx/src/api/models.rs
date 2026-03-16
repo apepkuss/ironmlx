@@ -153,7 +153,7 @@ async fn chat_completions_sync(
     let prompt_len = prompt_tokens.len();
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
-    let eos = state.config.eos_token_id as i32;
+    let eos = state.eos_token_id;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
     let mut token_rx = state
@@ -206,7 +206,7 @@ async fn chat_completions_stream(
     let prompt_tokens = encode_or_error(&state, &prompt)?;
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
-    let eos = state.config.eos_token_id as i32;
+    let eos = state.eos_token_id;
     let chunk_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = chrono::Utc::now().timestamp();
     let model_id = state.model_id.clone();
@@ -315,7 +315,7 @@ pub async fn completions(
 ) -> Result<Json<CompletionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let prompt_tokens = encode_or_error(&state, &req.prompt)?;
     let prompt_len = prompt_tokens.len();
-    let eos = state.config.eos_token_id as i32;
+    let eos = state.eos_token_id;
     let sampler = SamplerConfig {
         temperature: req.temperature,
         top_p: req.top_p,

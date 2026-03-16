@@ -212,9 +212,9 @@ fn test_array_2d() {
 const QWEN3_MODEL_DIR: &str = "/Users/sam/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-4bit/snapshots/73e3e38d981303bc594367cd910ea6eb48349da8";
 
 fn load_test_model() -> Option<(
-    ironmlx_core::model::LlamaModel,
+    ironmlx_core::model::Model,
     ironmlx_core::generate::Tokenizer,
-    ironmlx_core::model::ModelConfig,
+    i32, // eos_token_id
 )> {
     let dir = Path::new(QWEN3_MODEL_DIR);
     if !dir.exists() {
@@ -224,24 +224,27 @@ fn load_test_model() -> Option<(
     let config =
         ironmlx_core::model::ModelConfig::from_file(dir.join("config.json").to_str().unwrap())
             .ok()?;
+    let eos = eos_token_id;
     let stream = Stream::new(&Device::gpu());
     let weights = ironmlx_core::model::load_model_weights(dir, &stream).ok()?;
-    let model = ironmlx_core::model::build_model(&config, &weights).ok()?;
+    let config_path = dir.join("config.json").to_str().unwrap().to_string();
+    let model = ironmlx_core::model::build_model_from_file(&config_path, &weights).ok()?;
     let tokenizer =
         ironmlx_core::generate::Tokenizer::from_file(dir.join("tokenizer.json").to_str().unwrap())
             .ok()?;
-    Some((model, tokenizer, config))
+    Some((model, tokenizer, eos))
 }
 
 #[test]
 #[ignore]
 fn test_batch_generator_single_request() {
-    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+    let (model, tokenizer, eos_token_id) =
+        load_test_model().expect("Qwen3-0.6B-4bit not available");
     let mut batch = ironmlx_core::generate::BatchGenerator::new(&model);
 
     let prompt = tokenizer.encode("Hello").unwrap();
     let sampler = ironmlx_core::generate::SamplerConfig::greedy();
-    let eos = config.eos_token_id as i32;
+    let eos = eos_token_id;
 
     let (uid, first_response) = batch.insert(&prompt, sampler, eos, 10).unwrap();
     assert_eq!(uid, 0);
@@ -261,10 +264,11 @@ fn test_batch_generator_single_request() {
 #[test]
 #[ignore]
 fn test_batch_generator_multiple_requests() {
-    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+    let (model, tokenizer, eos_token_id) =
+        load_test_model().expect("Qwen3-0.6B-4bit not available");
     let mut batch = ironmlx_core::generate::BatchGenerator::new(&model);
 
-    let eos = config.eos_token_id as i32;
+    let eos = eos_token_id;
 
     // Insert two requests
     let prompt_a = tokenizer.encode("What is 1+1?").unwrap();
@@ -303,11 +307,12 @@ fn test_batch_generator_multiple_requests() {
 #[test]
 #[ignore]
 fn test_batch_generator_abort() {
-    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+    let (model, tokenizer, eos_token_id) =
+        load_test_model().expect("Qwen3-0.6B-4bit not available");
     let mut batch = ironmlx_core::generate::BatchGenerator::new(&model);
 
     let prompt = tokenizer.encode("Tell me a story").unwrap();
-    let eos = config.eos_token_id as i32;
+    let eos = eos_token_id;
 
     let (uid, _) = batch
         .insert(
@@ -328,11 +333,12 @@ fn test_batch_generator_abort() {
 #[test]
 #[ignore]
 fn test_stream_generate_produces_tokens() {
-    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+    let (model, tokenizer, eos_token_id) =
+        load_test_model().expect("Qwen3-0.6B-4bit not available");
 
     let prompt = tokenizer.encode("The answer is").unwrap();
     let sampler = ironmlx_core::generate::SamplerConfig::greedy();
-    let eos = config.eos_token_id as i32;
+    let eos = eos_token_id;
 
     let mut tokens = Vec::new();
     let reason =
@@ -356,11 +362,12 @@ fn test_stream_generate_produces_tokens() {
 #[test]
 #[ignore]
 fn test_stream_generate_stops_on_abort() {
-    let (model, tokenizer, config) = load_test_model().expect("Qwen3-0.6B-4bit not available");
+    let (model, tokenizer, eos_token_id) =
+        load_test_model().expect("Qwen3-0.6B-4bit not available");
 
     let prompt = tokenizer.encode("Once upon a time").unwrap();
     let sampler = ironmlx_core::generate::SamplerConfig::greedy();
-    let eos = config.eos_token_id as i32;
+    let eos = eos_token_id;
 
     let mut count = 0;
     let _reason =

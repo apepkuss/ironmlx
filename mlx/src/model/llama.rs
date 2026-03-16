@@ -131,6 +131,7 @@ impl LlamaModel {
                 false,    // traditional = false
                 Some(config.rope_theta as f32),
                 1.0, // rope_scale
+                1.0, // partial_rotary_factor
             );
 
             let gate_proj = linear(&format!("{}.mlp.gate_proj", lp))?;

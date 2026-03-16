@@ -14,7 +14,7 @@ use crate::array::Array;
 use crate::cache::CacheManager;
 use crate::device::Device;
 use crate::error::Result;
-use crate::model::LlamaModel;
+use crate::model::Model;
 use crate::ops;
 use crate::stream::Stream;
 
@@ -30,7 +30,7 @@ pub enum StopReason {
 /// Generate tokens from a prompt, calling `on_token` for each generated token.
 /// Returns the stop reason.
 pub fn stream_generate(
-    model: &LlamaModel,
+    model: &Model,
     prompt_tokens: &[i32],
     max_tokens: usize,
     sampler_config: &SamplerConfig,
@@ -50,7 +50,7 @@ pub fn stream_generate(
 
 /// Generate tokens with optional prefix cache support.
 pub fn stream_generate_with_cache(
-    model: &LlamaModel,
+    model: &Model,
     prompt_tokens: &[i32],
     max_tokens: usize,
     sampler_config: &SamplerConfig,
@@ -59,7 +59,7 @@ pub fn stream_generate_with_cache(
     mut cache_manager: Option<&mut CacheManager>,
 ) -> Result<StopReason> {
     let stream = Stream::new(&Device::gpu());
-    let num_layers = model.layers.len();
+    let num_layers = model.num_layers();
 
     // Try prefix cache lookup
     let (mut cache, matched_tokens) = match cache_manager {
@@ -131,14 +131,14 @@ pub fn stream_generate_with_cache(
 
 /// Generate tokens from a prompt.
 pub fn generate(
-    model: &LlamaModel,
+    model: &Model,
     prompt_tokens: &[i32],
     max_tokens: usize,
     sampler_config: &SamplerConfig,
     eos_token_id: i32,
 ) -> Result<Vec<i32>> {
     let stream = Stream::new(&Device::gpu());
-    let num_layers = model.layers.len();
+    let num_layers = model.num_layers();
 
     // Initialize KV cache (empty for each layer)
     let mut cache: Vec<(Option<Array>, Option<Array>)> =

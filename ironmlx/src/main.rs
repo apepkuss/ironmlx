@@ -38,13 +38,14 @@ async fn main() {
     ironmlx_core::init();
 
     // Load model artifacts
-    let (model, tokenizer, chat_template, config, model_id) = match state::load_model(&args.model) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to load model: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let (model, tokenizer, chat_template, eos_token_id, model_id) =
+        match state::load_model(&args.model) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Failed to load model: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     println!("Model loaded: {}", model_id);
 
@@ -68,7 +69,7 @@ async fn main() {
         engine: engine_handle,
         tokenizer: Arc::new(tokenizer),
         chat_template,
-        config,
+        eos_token_id,
         model_id: model_id.clone(),
     });
 

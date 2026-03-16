@@ -4,7 +4,7 @@ use crate::array::Array;
 use crate::cache::CacheManager;
 use crate::device::Device;
 use crate::error::Result;
-use crate::model::LlamaModel;
+use crate::model::Model;
 use crate::ops;
 use crate::stream::Stream;
 
@@ -49,7 +49,7 @@ struct SeqState {
 /// This provides lifecycle management and the API abstraction needed for
 /// the engine, while true batched forward passes are a future optimization.
 pub struct BatchGenerator<'a> {
-    model: &'a LlamaModel,
+    model: &'a Model,
     num_layers: usize,
     sequences: HashMap<SeqUid, SeqState>,
     next_uid: SeqUid,
@@ -58,8 +58,8 @@ pub struct BatchGenerator<'a> {
 
 impl<'a> BatchGenerator<'a> {
     /// Create a new BatchGenerator wrapping a model reference.
-    pub fn new(model: &'a LlamaModel) -> Self {
-        let num_layers = model.layers.len();
+    pub fn new(model: &'a Model) -> Self {
+        let num_layers = model.num_layers();
         Self {
             model,
             num_layers,
@@ -70,8 +70,8 @@ impl<'a> BatchGenerator<'a> {
     }
 
     /// Create a new BatchGenerator with prefix caching enabled.
-    pub fn with_cache_manager(model: &'a LlamaModel, cache_manager: CacheManager) -> Self {
-        let num_layers = model.layers.len();
+    pub fn with_cache_manager(model: &'a Model, cache_manager: CacheManager) -> Self {
+        let num_layers = model.num_layers();
         Self {
             model,
             num_layers,

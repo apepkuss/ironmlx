@@ -1,8 +1,10 @@
+use super::activations::silu;
 use super::module::{Module, get_weight};
 use crate::array::Array;
 use crate::device::Device;
 use crate::error::Result;
 use crate::fast;
+use crate::ops;
 use crate::stream::Stream;
 use std::collections::HashMap;
 
@@ -90,5 +92,25 @@ impl Module for LayerNorm {
         self.weight = weights.get(&w_key).cloned();
         self.bias = weights.get(&b_key).cloned();
         Ok(())
+    }
+}
+
+/// Gated RMS normalization: rms_norm(x) * silu(z)
+/// Used by Qwen3.5's GatedDeltaNet.
+pub struct RMSNormGated {
+    pub weight: Array,
+    pub eps: f32,
+}
+
+impl RMSNormGated {
+    pub fn new(weight: Array, eps: f32) -> Self {
+        Self { weight, eps }
+    }
+
+    /// Forward: rms_norm(x, weight, eps) * silu(z)
+    pub fn forward_with_stream(&self, x: &Array, z: &Array, stream: &Stream) -> Result<Array> {
+        let normed = fast::rms_norm(x, Some(&self.weight), self.eps, stream)?;
+        let gate = silu(z, stream)?;
+        ops::multiply(&normed, &gate, stream)
     }
 }

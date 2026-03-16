@@ -265,6 +265,36 @@ pub fn split(a: &Array, num_splits: i32, axis: i32, stream: &Stream) -> Result<V
     Ok(VectorArray::from_raw(raw))
 }
 
+/// Repeat array `repeats` times along `axis`.
+pub fn repeat_axis(a: &Array, repeats: i32, axis: i32, stream: &Stream) -> Result<Array> {
+    let mut res = Array::new_empty();
+    check(unsafe {
+        sys::mlx_repeat_axis(res.as_raw_mut(), a.as_raw(), repeats, axis, stream.as_raw())
+    })?;
+    Ok(res)
+}
+
+/// Split an array at the given `indices` along `axis`.
+pub fn split_at_indices(
+    a: &Array,
+    indices: &[i32],
+    axis: i32,
+    stream: &Stream,
+) -> Result<VectorArray> {
+    let mut raw = unsafe { sys::mlx_vector_array_new() };
+    check(unsafe {
+        sys::mlx_split_sections(
+            &mut raw,
+            a.as_raw(),
+            indices.as_ptr(),
+            indices.len(),
+            axis,
+            stream.as_raw(),
+        )
+    })?;
+    Ok(VectorArray::from_raw(raw))
+}
+
 /// Stack arrays along `axis`.
 pub fn stack(arrays: &VectorArray, axis: i32, stream: &Stream) -> Result<Array> {
     let mut res = Array::new_empty();

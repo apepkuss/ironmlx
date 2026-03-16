@@ -63,6 +63,7 @@ pub fn from_config(config: &ModelConfig, weights: &HashMap<String, Array>) -> Re
             false,
             Some(config.rope_theta as f32),
             1.0,
+            1.0,
         )
         .with_qk_norm(q_norm, k_norm);
 
