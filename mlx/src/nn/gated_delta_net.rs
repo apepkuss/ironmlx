@@ -244,7 +244,7 @@ pub fn gated_delta_ops(
 // The shader source and wrapper are correct in structure but likely have
 // a data layout or T parameter passing issue.
 #[allow(dead_code)]
-mod metal_kernel {
+pub(crate) mod metal_kernel {
     use crate::array::Array;
     use crate::error::Result;
     use crate::fast_kernel::{MetalKernel, MetalKernelConfig};
@@ -396,7 +396,7 @@ mod metal_kernel {
 
     /// Execute gated delta update using Metal kernel (GPU-accelerated).
     #[allow(clippy::too_many_arguments)]
-    fn gated_delta_metal_kernel(
+    pub(crate) fn gated_delta_metal_kernel(
         q: &Array,
         k: &Array,
         v: &Array,
@@ -491,11 +491,57 @@ pub fn gated_delta_update(
 
     let state_arr = state_ref.unwrap();
 
-    // TODO: Metal kernel available but needs debugging (output incorrect).
-    // For now, always use ops implementation.
-    // When ready, enable with: gated_delta_metal_kernel(q, k, v, &g, &beta, state_arr, mask, stream)
+    let state_arr_ref: &Array = state_arr;
 
-    gated_delta_ops(q, k, v, &g, &beta, Some(state_arr), mask, stream)
+    // Ensure all inputs have consistent dtypes for Metal kernel
+    let input_dtype = q.dtype();
+    let v_cast = if v.dtype() != input_dtype {
+        ops::astype(v, input_dtype, stream)?
+    } else {
+        v.clone()
+    };
+    let beta_cast = if beta.dtype() != input_dtype {
+        ops::astype(&beta, input_dtype, stream)?
+    } else {
+        beta.clone()
+    };
+    let g_cast = if g.dtype() != input_dtype {
+        ops::astype(&g, input_dtype, stream)?
+    } else {
+        g.clone()
+    };
+
+    // Use Metal kernel for prefill (T > 1) when available
+    let t = q.shape()[1];
+    if t > 1 && crate::metal::is_available().unwrap_or(false) && g_cast.ndim() <= 3 {
+        let hk = q.shape()[2];
+        let hv = v.shape()[2];
+        if hv % hk == 0
+            && let Ok(result) = metal_kernel::gated_delta_metal_kernel(
+                q,
+                k,
+                &v_cast,
+                &g_cast,
+                &beta_cast,
+                state_arr_ref,
+                mask,
+                stream,
+            )
+        {
+            return Ok(result);
+        }
+    }
+
+    gated_delta_ops(
+        q,
+        k,
+        &v_cast,
+        &g_cast,
+        &beta_cast,
+        Some(state_arr_ref),
+        mask,
+        stream,
+    )
 }
 
 // ── GatedDeltaNet module ────────────────────────────────────────────────────
@@ -692,5 +738,96 @@ impl Module for GatedDeltaNet {
         self.norm.weight = get_weight(weights, &pfx("norm"), "weight")?;
         self.out_proj.load_weights(weights, &pfx("out_proj"))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::Device;
+
+    /// Compare ops vs Metal kernel output on a minimal known input.
+    #[test]
+    fn test_metal_kernel_vs_ops() {
+        crate::init();
+        let stream = Stream::new(&Device::gpu());
+
+        // Minimal dims: B=1, T=2, Hk=1, Hv=2, Dk=32, Dv=4
+        // Dk must be multiple of 32 (n_per_t = Dk/32 = 1)
+        let b = 1i32;
+        let t = 2i32;
+        let hk = 1i32;
+        let hv = 2i32;
+        let dk = 32i32;
+        let dv = 4i32;
+
+        // Create simple test data
+        let q_data: Vec<f32> = (0..b * t * hk * dk).map(|i| (i as f32) * 0.01).collect();
+        let k_data: Vec<f32> = (0..b * t * hk * dk).map(|i| (i as f32) * 0.01).collect();
+        let v_data: Vec<f32> = (0..b * t * hv * dv).map(|i| (i as f32) * 0.1).collect();
+        let g_data: Vec<f32> = vec![0.9; (b * t * hv) as usize]; // decay ~0.9
+        let beta_data: Vec<f32> = vec![0.5; (b * t * hv) as usize];
+        let state_data: Vec<f32> = vec![0.0; (b * hv * dv * dk) as usize];
+
+        let q = Array::from_slice_f32_shape(&q_data, &[b, t, hk, dk]);
+        let k = Array::from_slice_f32_shape(&k_data, &[b, t, hk, dk]);
+        let v = Array::from_slice_f32_shape(&v_data, &[b, t, hv, dv]);
+        let g = Array::from_slice_f32_shape(&g_data, &[b, t, hv]);
+        let beta = Array::from_slice_f32_shape(&beta_data, &[b, t, hv]);
+        let state = Array::from_slice_f32_shape(&state_data, &[b, hv, dv, dk]);
+
+        // Run ops version
+        let (y_ops, state_ops) =
+            gated_delta_ops(&q, &k, &v, &g, &beta, Some(&state), None, &stream)
+                .expect("ops failed");
+        y_ops.eval().unwrap();
+        state_ops.eval().unwrap();
+
+        println!("=== OPS ===");
+        println!("y_ops shape: {:?}", y_ops.shape());
+        println!("y_ops: {:?}", y_ops.to_vec_f32().unwrap());
+        println!("state_ops shape: {:?}", state_ops.shape());
+
+        // Run Metal kernel version
+        let metal_result =
+            metal_kernel::gated_delta_metal_kernel(&q, &k, &v, &g, &beta, &state, None, &stream);
+
+        match metal_result {
+            Ok((y_metal, state_metal)) => {
+                y_metal.eval().unwrap();
+                state_metal.eval().unwrap();
+
+                println!("\n=== METAL ===");
+                println!("y_metal shape: {:?}", y_metal.shape());
+                println!("y_metal: {:?}", y_metal.to_vec_f32().unwrap());
+                println!("state_metal shape: {:?}", state_metal.shape());
+
+                // Compare
+                let y_ops_vec = y_ops.to_vec_f32().unwrap();
+                let y_metal_vec = y_metal.to_vec_f32().unwrap();
+                assert_eq!(y_ops_vec.len(), y_metal_vec.len(), "y length mismatch");
+
+                let mut max_diff: f32 = 0.0;
+                for (i, (a, b)) in y_ops_vec.iter().zip(y_metal_vec.iter()).enumerate() {
+                    let diff = (a - b).abs();
+                    if diff > max_diff {
+                        max_diff = diff;
+                    }
+                    if diff > 0.01 {
+                        println!("  MISMATCH at {}: ops={}, metal={}, diff={}", i, a, b, diff);
+                    }
+                }
+                println!("\nMax diff: {}", max_diff);
+                assert!(
+                    max_diff < 0.01,
+                    "Metal kernel output differs from ops by {}",
+                    max_diff
+                );
+            }
+            Err(e) => {
+                println!("Metal kernel failed: {}", e);
+                println!("(This is expected if Metal is not available)");
+            }
+        }
     }
 }

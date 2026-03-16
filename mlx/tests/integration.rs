@@ -224,7 +224,7 @@ fn load_test_model() -> Option<(
     let config =
         ironmlx_core::model::ModelConfig::from_file(dir.join("config.json").to_str().unwrap())
             .ok()?;
-    let eos = eos_token_id;
+    let eos = config.eos_token_id as i32;
     let stream = Stream::new(&Device::gpu());
     let weights = ironmlx_core::model::load_model_weights(dir, &stream).ok()?;
     let config_path = dir.join("config.json").to_str().unwrap().to_string();
