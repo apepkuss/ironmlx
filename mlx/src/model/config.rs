@@ -23,6 +23,10 @@ pub struct ModelConfig {
     pub tie_word_embeddings: bool,
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
+    #[serde(default = "default_eos")]
+    pub eos_token_id: i64,
+    #[serde(default)]
+    pub bos_token_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -51,6 +55,9 @@ fn default_rope_theta() -> f64 {
 }
 fn default_max_pos() -> usize {
     4096
+}
+fn default_eos() -> i64 {
+    2
 }
 
 impl ModelConfig {

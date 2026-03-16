@@ -13,7 +13,7 @@ use ironmlx_core::device::Device;
 use ironmlx_core::generate::{
     ChatMessage, ChatTemplate, SamplerConfig, Tokenizer, stream_generate,
 };
-use ironmlx_core::model::{LlamaModel, ModelConfig, load_model_weights};
+use ironmlx_core::model::{ModelConfig, build_model, load_model_weights};
 use ironmlx_core::stream::Stream;
 
 fn download_model(repo_id: &str) -> PathBuf {
@@ -44,7 +44,7 @@ fn main() {
 
     let repo_id = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "mlx-community/SmolLM-135M-Instruct-4bit".to_string());
+        .unwrap_or_else(|| "mlx-community/Qwen3-0.6B-4bit".to_string());
 
     // Step 1: Download
     let model_dir = download_model(&repo_id);
@@ -104,7 +104,7 @@ fn main() {
     let weights = load_model_weights(&model_dir, &stream).expect("failed to load weights");
     println!("  Loaded {} weight tensors", weights.len());
 
-    let model = LlamaModel::from_config(&config, &weights).expect("failed to build model");
+    let model = build_model(&config, &weights).expect("failed to build model");
     let load_time = t0.elapsed();
     println!("  Model built in {:.2}s\n", load_time.as_secs_f64());
 
@@ -137,7 +137,7 @@ fn main() {
 
     let sampler = SamplerConfig::greedy();
     let max_tokens = 100;
-    let eos_token_id = 2;
+    let eos_token_id = config.eos_token_id as i32;
 
     let mut generated_tokens = Vec::new();
     let t1 = Instant::now();

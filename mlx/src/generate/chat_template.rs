@@ -108,7 +108,14 @@ impl ChatTemplate {
     /// Apply the chat template to messages, returning the formatted prompt string.
     pub fn apply(&self, messages: &[ChatMessage], add_generation_prompt: bool) -> Result<String> {
         let mut env = minijinja::Environment::new();
-        env.add_template("chat", &self.template)
+
+        // Preprocess: replace Python string methods with minijinja equivalents
+        let processed = self
+            .template
+            .replace(".startswith(", " is startingwith(")
+            .replace(".endswith(", " is endingwith(")
+            .replace(".strip()", " | trim");
+        env.add_template("chat", &processed)
             .map_err(|e| crate::error::Error::Mlx(format!("invalid chat template: {}", e)))?;
 
         // Add raise_exception function (used by some templates)

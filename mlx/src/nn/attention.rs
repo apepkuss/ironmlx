@@ -1,5 +1,6 @@
 use super::linear::LinearLayer;
 use super::module::Module;
+use super::norm::RMSNorm;
 use crate::array::Array;
 use crate::device::Device;
 use crate::error::Result;
@@ -14,6 +15,8 @@ pub struct Attention {
     pub wk: LinearLayer,
     pub wv: LinearLayer,
     pub wo: LinearLayer,
+    pub q_norm: Option<RMSNorm>,
+    pub k_norm: Option<RMSNorm>,
     pub n_heads: i32,
     pub n_kv_heads: i32,
     pub head_dim: i32,
@@ -43,6 +46,8 @@ impl Attention {
             wk,
             wv,
             wo,
+            q_norm: None,
+            k_norm: None,
             n_heads,
             n_kv_heads,
             head_dim,
@@ -51,6 +56,13 @@ impl Attention {
             rope_base,
             rope_scale,
         }
+    }
+
+    /// Set QK normalization layers (used by Qwen3).
+    pub fn with_qk_norm(mut self, q_norm: RMSNorm, k_norm: RMSNorm) -> Self {
+        self.q_norm = Some(q_norm);
+        self.k_norm = Some(k_norm);
+        self
     }
 
     /// Forward with explicit cache. Returns (output, new_keys, new_values).
@@ -75,8 +87,8 @@ impl Attention {
         let v = self.wv.forward_with_stream(x, stream)?;
 
         // Reshape: [B, L, n_heads * head_dim] -> [B, L, n_heads, head_dim]
-        let q = ops::reshape(&q, &[batch, seq_len, self.n_heads, self.head_dim], stream)?;
-        let k = ops::reshape(
+        let mut q = ops::reshape(&q, &[batch, seq_len, self.n_heads, self.head_dim], stream)?;
+        let mut k = ops::reshape(
             &k,
             &[batch, seq_len, self.n_kv_heads, self.head_dim],
             stream,
@@ -86,6 +98,14 @@ impl Attention {
             &[batch, seq_len, self.n_kv_heads, self.head_dim],
             stream,
         )?;
+
+        // QK Norm (Qwen3): apply RMSNorm to Q and K before RoPE
+        if let Some(ref qn) = self.q_norm {
+            q = qn.forward_with_stream(&q, stream)?;
+        }
+        if let Some(ref kn) = self.k_norm {
+            k = kn.forward_with_stream(&k, stream)?;
+        }
 
         // Transpose to [B, n_heads, L, head_dim]
         let q = ops::transpose_axes(&q, &[0, 2, 1, 3], stream)?;
@@ -118,7 +138,7 @@ impl Attention {
         let (k, v) = if let (Some(ck), Some(cv)) = (cache_keys, cache_values) {
             let arrays_k = VectorArray::from_arrays(&[ck, &k]);
             let arrays_v = VectorArray::from_arrays(&[cv, &v]);
-            let new_k = ops::concatenate(&arrays_k, 2, stream)?; // concat along seq dim
+            let new_k = ops::concatenate(&arrays_k, 2, stream)?;
             let new_v = ops::concatenate(&arrays_v, 2, stream)?;
             (new_k, new_v)
         } else {
@@ -142,7 +162,6 @@ impl Attention {
         // Output projection
         let output = self.wo.forward_with_stream(&attn_out, stream)?;
 
-        // Return output and updated KV cache
         Ok((output, k, v))
     }
 }
@@ -172,7 +191,6 @@ impl Module for Attention {
     }
 
     fn load_weights(&mut self, _weights: &HashMap<String, Array>, _prefix: &str) -> Result<()> {
-        // LinearLayer is constructed with weights via from_weights; runtime reload not supported
         unimplemented!("use LinearLayer::from_weights during model construction")
     }
 }
