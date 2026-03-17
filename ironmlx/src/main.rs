@@ -61,7 +61,10 @@ async fn main() {
     println!("Model loaded: {}", model_id);
 
     // Build app state
-    let state = Arc::new(AppState { pool });
+    let state = Arc::new(AppState {
+        pool,
+        started_at: chrono::Utc::now().timestamp(),
+    });
 
     println!("Listening on {}:{}", args.host, args.port);
 

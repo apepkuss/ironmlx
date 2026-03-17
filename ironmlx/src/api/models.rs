@@ -834,6 +834,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             cache_mb: cache as f64 / 1_048_576.0,
             peak_mb: peak as f64 / 1_048_576.0,
         }),
+        started_at: state.started_at,
     })
 }
 

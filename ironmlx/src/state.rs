@@ -9,6 +9,7 @@ use crate::engine_pool::EnginePool;
 
 pub struct AppState {
     pub pool: EnginePool,
+    pub started_at: i64,
 }
 
 /// Load model artifacts from a directory.

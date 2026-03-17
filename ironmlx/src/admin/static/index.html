@@ -52,12 +52,85 @@
   <main class="flex-1 p-6 overflow-auto">
     <!-- Status Page -->
     <div x-show="currentPage === 'status'" x-cloak>
-      <div id="page-status"></div>
+      <h2 class="text-2xl font-bold mb-1">Server Status</h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm">Real-time monitoring</p>
+
+      <!-- Status cards -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <!-- Status -->
+        <div class="admin-card">
+          <div class="text-xs text-gray-500 mb-1">Status</div>
+          <div class="text-xl font-bold" :class="health.status === 'ok' ? 'text-green-500' : 'text-red-500'">
+            <span class="status-dot" :class="health.status === 'ok' ? 'running' : 'stopped'"></span>
+            <span x-text="health.status === 'ok' ? 'Running' : 'Stopped'"></span>
+          </div>
+        </div>
+        <!-- Active Memory -->
+        <div class="admin-card">
+          <div class="text-xs text-gray-500 mb-1">Active Memory</div>
+          <div class="text-xl font-bold" x-text="health.memory ? health.memory.active_mb.toFixed(0) + ' MB' : '—'"></div>
+        </div>
+        <!-- Peak Memory -->
+        <div class="admin-card">
+          <div class="text-xs text-gray-500 mb-1">Peak Memory</div>
+          <div class="text-xl font-bold" x-text="health.memory ? health.memory.peak_mb.toFixed(0) + ' MB' : '—'"></div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- Default Model -->
+        <div class="admin-card">
+          <div class="text-xs text-gray-500 mb-1">Default Model</div>
+          <div class="text-sm text-blue-400" x-text="health.model || '—'"></div>
+        </div>
+        <!-- Uptime -->
+        <div class="admin-card">
+          <div class="text-xs text-gray-500 mb-1">Uptime</div>
+          <div class="text-sm" x-text="uptime"></div>
+        </div>
+        <!-- Loaded Models -->
+        <div class="admin-card">
+          <div class="text-xs text-gray-500 mb-1">Loaded Models</div>
+          <div class="text-xl font-bold" x-text="models.length"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Models Page -->
     <div x-show="currentPage === 'models'" x-cloak>
-      <div id="page-models"></div>
+      <h2 class="text-2xl font-bold mb-1">Models</h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm">Manage loaded models</p>
+
+      <!-- Load model form -->
+      <div class="admin-card mb-4">
+        <div class="flex gap-2">
+          <input x-model="loadModelPath" placeholder="Model path or HuggingFace repo ID"
+                 class="flex-1 px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+          <button @click="loadModel()" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
+            Load
+          </button>
+        </div>
+        <div x-show="loadModelMsg" class="mt-2 text-sm" :class="loadModelError ? 'text-red-400' : 'text-green-400'" x-text="loadModelMsg"></div>
+      </div>
+
+      <!-- Model list -->
+      <div class="space-y-2">
+        <template x-for="m in models" :key="m.id">
+          <div class="admin-card flex items-center justify-between">
+            <div>
+              <span class="font-medium" x-text="m.id"></span>
+              <span x-show="m.id === health.model" class="ml-2 text-xs bg-blue-600 text-white px-2 py-0.5 rounded">default</span>
+            </div>
+            <div class="flex gap-2">
+              <button x-show="m.id !== health.model" @click="setDefaultModel(m.id)"
+                      class="text-xs px-2 py-1 border border-gray-600 rounded hover:bg-gray-700">Set Default</button>
+              <button @click="unloadModel(m.id)"
+                      class="text-xs px-2 py-1 border border-red-600 text-red-400 rounded hover:bg-red-900">Unload</button>
+            </div>
+          </div>
+        </template>
+        <div x-show="models.length === 0" class="text-gray-500 text-sm">No models loaded.</div>
+      </div>
     </div>
 
     <!-- Settings Page -->

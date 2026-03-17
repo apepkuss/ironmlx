@@ -180,6 +180,7 @@ pub struct HealthResponse {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryInfo>,
+    pub started_at: i64,
 }
 
 #[derive(Debug, Serialize)]
