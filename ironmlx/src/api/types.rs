@@ -404,6 +404,23 @@ pub struct AnthropicMessageStop {
     pub r#type: String,
 }
 
+// -- Engine Pool Management --------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct LoadModelRequest {
+    pub model_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnloadModelRequest {
+    pub model: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetDefaultRequest {
+    pub model: String,
+}
+
 // -- Defaults ----------------------------------------------------------------
 
 fn default_max_tokens() -> usize {

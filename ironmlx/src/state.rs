@@ -1,23 +1,14 @@
 use std::path::Path;
-use std::sync::Arc;
 
 use ironmlx_core::device::Device;
 use ironmlx_core::generate::{ChatTemplate, Tokenizer};
 use ironmlx_core::model::{Model, build_model_from_file, load_model_weights};
 use ironmlx_core::stream::Stream;
 
-use crate::engine_handle::EngineHandle;
+use crate::engine_pool::EnginePool;
 
 pub struct AppState {
-    pub engine: EngineHandle,
-    pub tokenizer: Arc<Tokenizer>,
-    pub chat_template: Option<ChatTemplate>,
-    pub eos_token_id: i32,
-    pub model_id: String,
-    /// Vision patch size (16 for Qwen3.5). Used for media processing.
-    pub patch_size: usize,
-    /// Spatial merge size (2 for Qwen3.5). Used for media processing.
-    pub spatial_merge_size: usize,
+    pub pool: EnginePool,
 }
 
 /// Load model artifacts from a directory.

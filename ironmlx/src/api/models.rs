@@ -9,8 +9,9 @@ use axum::response::{IntoResponse, Response};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::types::*;
+use crate::engine_pool::EngineEntry;
 use crate::state::AppState;
-use ironmlx_core::generate::{ChatMessage as CoreChatMessage, SamplerConfig};
+use ironmlx_core::generate::{ChatMessage as CoreChatMessage, ChatTemplate, SamplerConfig};
 use ironmlx_core::media::ProcessedMedia;
 
 // ── Thinking Mode ───────────────────────────────────────────────────────────
@@ -256,17 +257,23 @@ async fn chat_completions_sync(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Json<ChatCompletionResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let media = extract_and_process_media(&state, &req.messages)?;
+    let entry = state
+        .pool
+        .get(req.model.as_deref())
+        .map_err(|e| internal_error(&e))?;
+
+    let media = extract_and_process_media(&entry, &req.messages)?;
     let messages = inject_tools_into_messages(&req.messages, &req.tools);
-    let prompt = build_chat_prompt(&state, &messages)?;
-    let prompt_tokens = encode_or_error(&state, &prompt)?;
+    let prompt = build_chat_prompt(&entry.chat_template, &messages)?;
+    let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
-    let eos = state.eos_token_id;
+    let eos = entry.eos_token_id;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let model_id = entry.model_id.clone();
 
-    let mut token_rx = state
+    let mut token_rx = entry
         .engine
         .add_request(
             request_id.clone(),
@@ -310,7 +317,7 @@ async fn chat_completions_sync(
         id: request_id,
         object: "chat.completion".to_string(),
         created: chrono::Utc::now().timestamp(),
-        model: state.model_id.clone(),
+        model: model_id,
         choices: vec![ChatChoice {
             index: 0,
             message: AssistantMessage {
@@ -333,18 +340,23 @@ async fn chat_completions_stream(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    let media = extract_and_process_media(&state, &req.messages)?;
+    let entry = state
+        .pool
+        .get(req.model.as_deref())
+        .map_err(|e| internal_error(&e))?;
+
+    let media = extract_and_process_media(&entry, &req.messages)?;
     let messages = inject_tools_into_messages(&req.messages, &req.tools);
-    let prompt = build_chat_prompt(&state, &messages)?;
-    let prompt_tokens = encode_or_error(&state, &prompt)?;
+    let prompt = build_chat_prompt(&entry.chat_template, &messages)?;
+    let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
-    let eos = state.eos_token_id;
+    let eos = entry.eos_token_id;
     let chunk_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = chrono::Utc::now().timestamp();
-    let model_id = state.model_id.clone();
+    let model_id = entry.model_id.clone();
 
-    let mut token_rx = state
+    let mut token_rx = entry
         .engine
         .add_request(
             chunk_id.clone(),
@@ -506,9 +518,14 @@ async fn anthropic_messages_sync(
     state: Arc<AppState>,
     req: AnthropicMessagesRequest,
 ) -> Result<Json<AnthropicMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let entry = state
+        .pool
+        .get(req.model.as_deref())
+        .map_err(|e| internal_error(&e))?;
+
     let messages = anthropic_to_chat_messages(&req);
-    let prompt = build_chat_prompt(&state, &messages)?;
-    let prompt_tokens = encode_or_error(&state, &prompt)?;
+    let prompt = build_chat_prompt(&entry.chat_template, &messages)?;
+    let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = SamplerConfig {
         temperature: req.temperature,
@@ -516,10 +533,11 @@ async fn anthropic_messages_sync(
         ..SamplerConfig::default()
     };
     let max_tokens = req.max_tokens;
-    let eos = state.eos_token_id;
+    let eos = entry.eos_token_id;
     let request_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let model_id = entry.model_id.clone();
 
-    let mut token_rx = state
+    let mut token_rx = entry
         .engine
         .add_request(
             request_id.clone(),
@@ -552,7 +570,7 @@ async fn anthropic_messages_sync(
         r#type: "message".to_string(),
         role: "assistant".to_string(),
         content: vec![AnthropicContentBlock::Text { text: content }],
-        model: state.model_id.clone(),
+        model: model_id,
         stop_reason: to_anthropic_stop_reason(&finish_reason),
         usage: AnthropicUsage {
             input_tokens: prompt_len,
@@ -565,9 +583,14 @@ async fn anthropic_messages_stream(
     state: Arc<AppState>,
     req: AnthropicMessagesRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let entry = state
+        .pool
+        .get(req.model.as_deref())
+        .map_err(|e| internal_error(&e))?;
+
     let messages = anthropic_to_chat_messages(&req);
-    let prompt = build_chat_prompt(&state, &messages)?;
-    let prompt_tokens = encode_or_error(&state, &prompt)?;
+    let prompt = build_chat_prompt(&entry.chat_template, &messages)?;
+    let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = SamplerConfig {
         temperature: req.temperature,
@@ -575,11 +598,11 @@ async fn anthropic_messages_stream(
         ..SamplerConfig::default()
     };
     let max_tokens = req.max_tokens;
-    let eos = state.eos_token_id;
+    let eos = entry.eos_token_id;
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-    let model_id = state.model_id.clone();
+    let model_id = entry.model_id.clone();
 
-    let mut token_rx = state
+    let mut token_rx = entry
         .engine
         .add_request(
             msg_id.clone(),
@@ -714,9 +737,14 @@ pub async fn completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CompletionRequest>,
 ) -> Result<Json<CompletionResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let prompt_tokens = encode_or_error(&state, &req.prompt)?;
+    let entry = state
+        .pool
+        .get(req.model.as_deref())
+        .map_err(|e| internal_error(&e))?;
+
+    let prompt_tokens = encode_or_error(&entry, &req.prompt)?;
     let prompt_len = prompt_tokens.len();
-    let eos = state.eos_token_id;
+    let eos = entry.eos_token_id;
     let sampler = SamplerConfig {
         temperature: req.temperature,
         top_p: req.top_p,
@@ -724,8 +752,9 @@ pub async fn completions(
     };
     let max_tokens = req.max_tokens;
     let request_id = format!("cmpl-{}", uuid::Uuid::new_v4());
+    let model_id = entry.model_id.clone();
 
-    let mut token_rx = state
+    let mut token_rx = entry
         .engine
         .add_request(
             request_id.clone(),
@@ -754,7 +783,7 @@ pub async fn completions(
         id: request_id,
         object: "text_completion".to_string(),
         created: chrono::Utc::now().timestamp(),
-        model: state.model_id.clone(),
+        model: model_id,
         choices: vec![CompletionChoice {
             index: 0,
             text,
@@ -770,32 +799,93 @@ pub async fn completions(
 
 /// GET /v1/models
 pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelList> {
-    Json(ModelList {
-        object: "list".to_string(),
-        data: vec![ModelInfo {
-            id: state.model_id.clone(),
+    let model_ids = state.pool.list_models();
+    let data = model_ids
+        .into_iter()
+        .map(|id| ModelInfo {
+            id,
             object: "model".to_string(),
             created: 0,
             owned_by: "local".to_string(),
-        }],
+        })
+        .collect();
+    Json(ModelList {
+        object: "list".to_string(),
+        data,
     })
 }
 
 /// GET /health
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let model = state
+        .pool
+        .default_model_id()
+        .unwrap_or_else(|| "none".to_string());
     Json(HealthResponse {
         status: "ok".to_string(),
-        model: state.model_id.clone(),
+        model,
     })
+}
+
+// ── Engine Pool Management ──────────────────────────────────────────────────
+
+/// POST /v1/models/load — load a model by directory path
+pub async fn load_model_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoadModelRequest>,
+) -> Result<Json<ModelInfo>, (StatusCode, Json<ErrorResponse>)> {
+    let model_id = state
+        .pool
+        .load_model(&req.model_dir)
+        .map_err(|e| internal_error(&e))?;
+
+    Ok(Json(ModelInfo {
+        id: model_id,
+        object: "model".to_string(),
+        created: chrono::Utc::now().timestamp(),
+        owned_by: "local".to_string(),
+    }))
+}
+
+/// POST /v1/models/unload — unload a model
+pub async fn unload_model_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UnloadModelRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .pool
+        .unload_model(&req.model)
+        .map_err(|e| internal_error(&e))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "unloaded": req.model,
+    })))
+}
+
+/// POST /v1/models/default — set default model
+pub async fn set_default_model(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetDefaultRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .pool
+        .set_default(&req.model)
+        .map_err(|e| internal_error(&e))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "default_model": req.model,
+    })))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn build_chat_prompt(
-    state: &AppState,
+    chat_template: &Option<ChatTemplate>,
     messages: &[ChatMessage],
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
-    if let Some(ref ct) = state.chat_template {
+    if let Some(ct) = chat_template {
         // Convert API ChatMessage to core ChatMessage for template rendering
         let core_messages: Vec<CoreChatMessage> = messages
             .iter()
@@ -826,10 +916,10 @@ fn build_sampler(req: &ChatCompletionRequest) -> SamplerConfig {
 }
 
 fn encode_or_error(
-    state: &AppState,
+    entry: &EngineEntry,
     text: &str,
 ) -> Result<Vec<i32>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    entry
         .tokenizer
         .encode(text)
         .map_err(|e| internal_error(&format!("tokenize error: {}", e)))
@@ -838,7 +928,7 @@ fn encode_or_error(
 /// Extract media items from multimodal messages, process them, and return ProcessedMedia.
 /// Returns None if no media is found (pure text request).
 fn extract_and_process_media(
-    state: &AppState,
+    entry: &EngineEntry,
     messages: &[ChatMessage],
 ) -> Result<Option<Vec<ProcessedMedia>>, (StatusCode, Json<ErrorResponse>)> {
     let mut image_urls = Vec::new();
@@ -863,8 +953,8 @@ fn extract_and_process_media(
         return Ok(None);
     }
 
-    let patch_size = state.patch_size;
-    let spatial_merge_size = state.spatial_merge_size;
+    let patch_size = entry.patch_size;
+    let spatial_merge_size = entry.spatial_merge_size;
 
     let mut all_media = Vec::new();
     for url in &image_urls {
