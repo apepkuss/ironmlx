@@ -262,6 +262,20 @@ fn schedule_waiting(
     max_num_seqs: usize,
 ) {
     while batch.active_count() < max_num_seqs {
+        // Memory pressure check: stop scheduling if usage exceeds 90% of limit
+        if let Ok(active) = ironmlx_core::memory::get_active_memory()
+            && let Ok(limit) = ironmlx_core::memory::get_memory_limit()
+            && limit > 0
+            && active > limit * 9 / 10
+        {
+            let _ = ironmlx_core::memory::clear_cache();
+            if let Ok(after) = ironmlx_core::memory::get_active_memory()
+                && after > limit * 9 / 10
+            {
+                break; // Still over threshold — pause scheduling
+            }
+        }
+
         let Some(req) = waiting.pop_front() else {
             break;
         };
