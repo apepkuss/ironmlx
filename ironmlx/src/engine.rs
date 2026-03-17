@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::mpsc;
 
 use ironmlx_core::generate::{BatchGenerator, FinishReason, SamplerConfig, SeqUid, Tokenizer};
+use ironmlx_core::media::ProcessedMedia;
 use ironmlx_core::model::Model;
 
 /// Output for each generation step
@@ -26,6 +27,7 @@ pub enum EngineCommand {
         max_tokens: usize,
         eos_token_id: i32,
         token_tx: mpsc::Sender<RequestOutput>,
+        media: Option<Vec<ProcessedMedia>>,
     },
     AbortRequest {
         request_id: String,
@@ -41,6 +43,7 @@ struct PendingRequest {
     max_tokens: usize,
     eos_token_id: i32,
     token_tx: mpsc::Sender<RequestOutput>,
+    media: Option<Vec<ProcessedMedia>>,
 }
 
 /// Maps SeqUid to running request metadata
@@ -181,6 +184,7 @@ fn handle_command(
             max_tokens,
             eos_token_id,
             token_tx,
+            media,
         } => {
             waiting.push_back(PendingRequest {
                 request_id,
@@ -189,6 +193,7 @@ fn handle_command(
                 max_tokens,
                 eos_token_id,
                 token_tx,
+                media,
             });
         }
         EngineCommand::AbortRequest { request_id } => {
@@ -243,12 +248,24 @@ fn schedule_waiting(
             continue;
         }
 
-        match batch.insert(
-            &req.prompt_token_ids,
-            req.sampling_params,
-            req.eos_token_id,
-            req.max_tokens,
-        ) {
+        let insert_result = if let Some(ref media) = req.media {
+            batch.insert_vlm(
+                &req.prompt_token_ids,
+                media,
+                req.sampling_params,
+                req.eos_token_id,
+                req.max_tokens,
+            )
+        } else {
+            batch.insert(
+                &req.prompt_token_ids,
+                req.sampling_params,
+                req.eos_token_id,
+                req.max_tokens,
+            )
+        };
+
+        match insert_result {
             Ok((uid, first_response)) => {
                 let finish_reason = first_response.finish_reason.map(|r| match r {
                     FinishReason::Eos => "stop".to_string(),

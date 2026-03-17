@@ -14,12 +14,29 @@ pub struct AppState {
     pub chat_template: Option<ChatTemplate>,
     pub eos_token_id: i32,
     pub model_id: String,
+    /// Vision patch size (16 for Qwen3.5). Used for media processing.
+    pub patch_size: usize,
+    /// Spatial merge size (2 for Qwen3.5). Used for media processing.
+    pub spatial_merge_size: usize,
 }
 
 /// Load model artifacts from a directory.
+/// Returns (Model, Tokenizer, ChatTemplate, eos_token_id, model_id, patch_size, spatial_merge_size)
+#[allow(clippy::type_complexity)]
 pub fn load_model(
     model_dir: &str,
-) -> Result<(Model, Tokenizer, Option<ChatTemplate>, i32, String), String> {
+) -> Result<
+    (
+        Model,
+        Tokenizer,
+        Option<ChatTemplate>,
+        i32,
+        String,
+        usize,
+        usize,
+    ),
+    String,
+> {
     let dir = Path::new(model_dir);
 
     // Load config to extract metadata
@@ -82,10 +99,31 @@ pub fn load_model(
         None
     };
 
+    // Extract vision config for media processing
+    let (patch_size, spatial_merge_size) = if let Some(vc) = raw.get("vision_config") {
+        let ps = vc.get("patch_size").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
+        let sms = vc
+            .get("spatial_merge_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2) as usize;
+        println!("  Vision: patch_size={}, spatial_merge_size={}", ps, sms);
+        (ps, sms)
+    } else {
+        (16, 2) // defaults
+    };
+
     // Derive model_id
     let model_id = extract_model_id(dir);
 
-    Ok((model, tokenizer, chat_template, eos_token_id, model_id))
+    Ok((
+        model,
+        tokenizer,
+        chat_template,
+        eos_token_id,
+        model_id,
+        patch_size,
+        spatial_merge_size,
+    ))
 }
 
 /// Extract a human-readable model ID from a path.

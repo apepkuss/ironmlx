@@ -4,6 +4,7 @@ use crate::array::Array;
 use crate::cache::CacheManager;
 use crate::device::Device;
 use crate::error::Result;
+use crate::media::ProcessedMedia;
 use crate::model::Model;
 use crate::ops;
 use crate::stream::Stream;
@@ -149,6 +150,77 @@ impl<'a> BatchGenerator<'a> {
         }
 
         // Only store the sequence if it's not already finished
+        if finish_reason.is_none() {
+            self.sequences.insert(
+                uid,
+                SeqState {
+                    sampler,
+                    eos_token_id,
+                    max_tokens,
+                    generated_count: 1,
+                    cache,
+                    last_token: first_token,
+                    prompt_tokens: prompt_tokens.to_vec(),
+                },
+            );
+        }
+
+        Ok((uid, response))
+    }
+
+    /// Insert a new VLM sequence with media. Performs prefill with vision encoding.
+    pub fn insert_vlm(
+        &mut self,
+        prompt_tokens: &[i32],
+        media: &[ProcessedMedia],
+        sampler: SamplerConfig,
+        eos_token_id: i32,
+        max_tokens: usize,
+    ) -> Result<(SeqUid, BatchResponse)> {
+        let uid = self.next_uid;
+        self.next_uid += 1;
+
+        let stream = Stream::new(&Device::gpu());
+        let mut cache: Vec<(Option<Array>, Option<Array>)> =
+            (0..self.num_layers).map(|_| (None, None)).collect();
+
+        // VLM prefill: model.forward_vlm() handles vision encoding + embedding injection
+        let prompt_arr = Array::from_slice_i32(prompt_tokens);
+        let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
+        let logits = self
+            .model
+            .forward_vlm(&prompt_2d, Some(media), &mut cache)?;
+
+        // Extract last token logits
+        let last_idx = prompt_tokens.len() as i32 - 1;
+        let vocab_size = logits.shape()[2];
+        let last_logits = ops::slice(
+            &logits,
+            &[0, last_idx, 0],
+            &[1, last_idx + 1, vocab_size],
+            &[1, 1, 1],
+            &stream,
+        )?;
+        let last_logits = ops::reshape(&last_logits, &[1, vocab_size], &stream)?;
+
+        let token_arr = sample(&last_logits, &sampler, &stream)?;
+        token_arr.eval()?;
+        let first_token = token_arr.item_i32()?;
+
+        let finish_reason = if first_token == eos_token_id || max_tokens == 0 {
+            Some(FinishReason::Eos)
+        } else if max_tokens == 1 {
+            Some(FinishReason::MaxTokens)
+        } else {
+            None
+        };
+
+        let response = BatchResponse {
+            uid,
+            token_id: first_token,
+            finish_reason,
+        };
+
         if finish_reason.is_none() {
             self.sequences.insert(
                 uid,

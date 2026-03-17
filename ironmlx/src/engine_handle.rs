@@ -1,6 +1,7 @@
 use tokio::sync::mpsc;
 
 use ironmlx_core::generate::SamplerConfig;
+use ironmlx_core::media::ProcessedMedia;
 
 use crate::engine::{EngineCommand, RequestOutput};
 
@@ -23,6 +24,7 @@ impl EngineHandle {
         sampling_params: SamplerConfig,
         max_tokens: usize,
         eos_token_id: i32,
+        media: Option<Vec<ProcessedMedia>>,
     ) -> mpsc::Receiver<RequestOutput> {
         let (token_tx, token_rx) = mpsc::channel(64);
         let _ = self
@@ -34,6 +36,7 @@ impl EngineHandle {
                 max_tokens,
                 eos_token_id,
                 token_tx,
+                media,
             })
             .await;
         token_rx

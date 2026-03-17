@@ -11,6 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::types::*;
 use crate::state::AppState;
 use ironmlx_core::generate::{ChatMessage as CoreChatMessage, SamplerConfig};
+use ironmlx_core::media::ProcessedMedia;
 
 // ── Thinking Mode ───────────────────────────────────────────────────────────
 
@@ -148,6 +149,7 @@ async fn chat_completions_sync(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Json<ChatCompletionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let media = extract_and_process_media(&state, &req.messages)?;
     let prompt = build_chat_prompt(&state, &req.messages)?;
     let prompt_tokens = encode_or_error(&state, &prompt)?;
     let prompt_len = prompt_tokens.len();
@@ -158,7 +160,14 @@ async fn chat_completions_sync(
 
     let mut token_rx = state
         .engine
-        .add_request(request_id.clone(), prompt_tokens, sampler, max_tokens, eos)
+        .add_request(
+            request_id.clone(),
+            prompt_tokens,
+            sampler,
+            max_tokens,
+            eos,
+            media,
+        )
         .await;
 
     let mut generated_text = String::new();
@@ -202,6 +211,7 @@ async fn chat_completions_stream(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let media = extract_and_process_media(&state, &req.messages)?;
     let prompt = build_chat_prompt(&state, &req.messages)?;
     let prompt_tokens = encode_or_error(&state, &prompt)?;
     let sampler = build_sampler(&req);
@@ -213,7 +223,14 @@ async fn chat_completions_stream(
 
     let mut token_rx = state
         .engine
-        .add_request(chunk_id.clone(), prompt_tokens, sampler, max_tokens, eos)
+        .add_request(
+            chunk_id.clone(),
+            prompt_tokens,
+            sampler,
+            max_tokens,
+            eos,
+            media,
+        )
         .await;
 
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -326,7 +343,14 @@ pub async fn completions(
 
     let mut token_rx = state
         .engine
-        .add_request(request_id.clone(), prompt_tokens, sampler, max_tokens, eos)
+        .add_request(
+            request_id.clone(),
+            prompt_tokens,
+            sampler,
+            max_tokens,
+            eos,
+            None,
+        )
         .await;
 
     let mut text = String::new();
@@ -425,6 +449,62 @@ fn encode_or_error(
         .tokenizer
         .encode(text)
         .map_err(|e| internal_error(&format!("tokenize error: {}", e)))
+}
+
+/// Extract media items from multimodal messages, process them, and return ProcessedMedia.
+/// Returns None if no media is found (pure text request).
+fn extract_and_process_media(
+    state: &AppState,
+    messages: &[ChatMessage],
+) -> Result<Option<Vec<ProcessedMedia>>, (StatusCode, Json<ErrorResponse>)> {
+    let mut image_urls = Vec::new();
+
+    for msg in messages {
+        if let MessageContent::Parts(parts) = &msg.content {
+            for part in parts {
+                match part {
+                    ContentPart::ImageUrl { image_url } => {
+                        image_urls.push(image_url.url.clone());
+                    }
+                    ContentPart::VideoUrl { video_url: _ } => {
+                        // TODO: video support via ffmpeg
+                    }
+                    ContentPart::Text { .. } => {}
+                }
+            }
+        }
+    }
+
+    if image_urls.is_empty() {
+        return Ok(None);
+    }
+
+    let patch_size = state.patch_size;
+    let spatial_merge_size = state.spatial_merge_size;
+
+    let mut all_media = Vec::new();
+    for url in &image_urls {
+        let bytes = ironmlx_core::media::loader::load_media(url)
+            .map_err(|e| internal_error(&format!("failed to load image: {}", e)))?;
+
+        let (pixel_values, h, w) = ironmlx_core::media::image_proc::process_image_bytes(
+            &bytes,
+            patch_size,
+            spatial_merge_size,
+        )
+        .map_err(|e| internal_error(&format!("failed to process image: {}", e)))?;
+
+        let patches_h = h / patch_size;
+        let patches_w = w / patch_size;
+        let grid_thw = vec![(1usize, patches_h, patches_w)];
+
+        all_media.push(ProcessedMedia {
+            pixel_values,
+            grid_thw,
+        });
+    }
+
+    Ok(Some(all_media))
 }
 
 fn internal_error(message: &str) -> (StatusCode, Json<ErrorResponse>) {

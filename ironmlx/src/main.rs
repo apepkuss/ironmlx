@@ -38,7 +38,7 @@ async fn main() {
     ironmlx_core::init();
 
     // Load model artifacts
-    let (model, tokenizer, chat_template, eos_token_id, model_id) =
+    let (model, tokenizer, chat_template, eos_token_id, model_id, patch_size, spatial_merge_size) =
         match state::load_model(&args.model) {
             Ok(v) => v,
             Err(e) => {
@@ -71,6 +71,8 @@ async fn main() {
         chat_template,
         eos_token_id,
         model_id: model_id.clone(),
+        patch_size,
+        spatial_merge_size,
     });
 
     println!("Listening on {}:{}", args.host, args.port);
