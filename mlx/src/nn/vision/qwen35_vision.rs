@@ -81,6 +81,7 @@ impl Qwen35VisionEncoder {
 }
 
 /// Build a `Qwen35VisionEncoder` from a flat weights map and config values.
+#[allow(clippy::too_many_arguments)]
 pub fn build_vision_encoder(
     weights: &HashMap<String, Array>,
     depth: usize,               // 24

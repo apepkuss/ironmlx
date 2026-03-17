@@ -23,7 +23,7 @@ pub enum Model {
     /// Qwen3.5 with mixed GatedDeltaNet + FullAttention layers.
     Qwen35(Qwen35Model),
     /// Qwen3.5 VLM with vision encoder.
-    Qwen35VL(Qwen35VLModel),
+    Qwen35VL(Box<Qwen35VLModel>),
 }
 
 impl Model {
@@ -104,7 +104,7 @@ pub fn build_model_from_file(config_path: &str, weights: &HashMap<String, Array>
             let has_vision = raw.get("vision_config").is_some();
             if has_vision {
                 let model = qwen35_vl::from_config_file(config_path, weights)?;
-                Ok(Model::Qwen35VL(model))
+                Ok(Model::Qwen35VL(Box::new(model)))
             } else {
                 let model = qwen35::from_config_file(config_path, weights)?;
                 Ok(Model::Qwen35(model))
