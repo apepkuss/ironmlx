@@ -821,9 +821,19 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         .pool
         .default_model_id()
         .unwrap_or_else(|| "none".to_string());
+
+    let mem = ironmlx_core::memory::get_active_memory().unwrap_or(0);
+    let cache = ironmlx_core::memory::get_cache_memory().unwrap_or(0);
+    let peak = ironmlx_core::memory::get_peak_memory().unwrap_or(0);
+
     Json(HealthResponse {
         status: "ok".to_string(),
         model,
+        memory: Some(MemoryInfo {
+            active_mb: mem as f64 / 1_048_576.0,
+            cache_mb: cache as f64 / 1_048_576.0,
+            peak_mb: peak as f64 / 1_048_576.0,
+        }),
     })
 }
 

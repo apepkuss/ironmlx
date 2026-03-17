@@ -178,6 +178,15 @@ pub struct Usage {
 pub struct HealthResponse {
     pub status: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryInfo {
+    pub active_mb: f64,
+    pub cache_mb: f64,
+    pub peak_mb: f64,
 }
 
 #[derive(Debug, Serialize)]

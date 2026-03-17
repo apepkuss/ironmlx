@@ -1,7 +1,10 @@
 mod api;
+mod config;
 mod engine;
 mod engine_handle;
 mod engine_pool;
+mod hardware;
+mod memory_guard;
 mod state;
 
 use std::sync::Arc;
@@ -31,10 +34,24 @@ async fn main() {
     let args = Args::parse();
 
     println!("ironmlx starting...");
-    println!("Loading model from: {}", args.model);
 
     // Initialize MLX runtime
     ironmlx_core::init();
+
+    // Detect hardware
+    let chip = hardware::ChipInfo::detect();
+    println!("  Hardware: {}", chip);
+
+    // Set memory limit
+    let mem_limit = chip.recommended_memory_limit();
+    let guard = memory_guard::MemoryGuard::new(mem_limit, 0.9);
+    println!(
+        "  Memory limit: {:.1}GB",
+        mem_limit as f64 / 1_073_741_824.0
+    );
+    let _ = guard; // guard lives for duration of process via set_memory_limit
+
+    println!("Loading model from: {}", args.model);
 
     // Create pool and load initial model
     let pool = EnginePool::new();
