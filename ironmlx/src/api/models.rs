@@ -451,6 +451,264 @@ async fn chat_completions_stream(
     Ok(Sse::new(stream).into_response())
 }
 
+// ── Anthropic Messages API ──────────────────────────────────────────────────
+
+/// Convert Anthropic messages to internal ChatMessage format.
+fn anthropic_to_chat_messages(req: &AnthropicMessagesRequest) -> Vec<ChatMessage> {
+    let mut messages = Vec::new();
+
+    // System prompt is a top-level field in Anthropic API
+    if let Some(ref system) = req.system {
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: MessageContent::Text(system.clone()),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+    }
+
+    for msg in &req.messages {
+        messages.push(ChatMessage {
+            role: msg.role.clone(),
+            content: MessageContent::Text(msg.content.as_text()),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+    }
+
+    messages
+}
+
+/// Map internal finish_reason to Anthropic stop_reason.
+fn to_anthropic_stop_reason(reason: &str) -> String {
+    match reason {
+        "stop" => "end_turn".to_string(),
+        "length" => "max_tokens".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// POST /v1/messages — Anthropic-compatible Messages API
+pub async fn anthropic_messages(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AnthropicMessagesRequest>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    if req.stream {
+        anthropic_messages_stream(state, req).await
+    } else {
+        anthropic_messages_sync(state, req)
+            .await
+            .map(|j| j.into_response())
+    }
+}
+
+async fn anthropic_messages_sync(
+    state: Arc<AppState>,
+    req: AnthropicMessagesRequest,
+) -> Result<Json<AnthropicMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let messages = anthropic_to_chat_messages(&req);
+    let prompt = build_chat_prompt(&state, &messages)?;
+    let prompt_tokens = encode_or_error(&state, &prompt)?;
+    let prompt_len = prompt_tokens.len();
+    let sampler = SamplerConfig {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        ..SamplerConfig::default()
+    };
+    let max_tokens = req.max_tokens;
+    let eos = state.eos_token_id;
+    let request_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+
+    let mut token_rx = state
+        .engine
+        .add_request(
+            request_id.clone(),
+            prompt_tokens,
+            sampler,
+            max_tokens,
+            eos,
+            None,
+        )
+        .await;
+
+    let mut generated_text = String::new();
+    let mut completion_len = 0usize;
+    let mut finish_reason = "stop".to_string();
+
+    while let Some(output) = token_rx.recv().await {
+        if let Some(ref reason) = output.finish_reason {
+            finish_reason = reason.clone();
+            break;
+        }
+        generated_text.push_str(&output.token_text);
+        completion_len += 1;
+    }
+
+    // Strip thinking tags — Anthropic response uses content blocks only
+    let (content, _reasoning) = split_thinking(&generated_text);
+
+    Ok(Json(AnthropicMessagesResponse {
+        id: request_id,
+        r#type: "message".to_string(),
+        role: "assistant".to_string(),
+        content: vec![AnthropicContentBlock::Text { text: content }],
+        model: state.model_id.clone(),
+        stop_reason: to_anthropic_stop_reason(&finish_reason),
+        usage: AnthropicUsage {
+            input_tokens: prompt_len,
+            output_tokens: completion_len,
+        },
+    }))
+}
+
+async fn anthropic_messages_stream(
+    state: Arc<AppState>,
+    req: AnthropicMessagesRequest,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let messages = anthropic_to_chat_messages(&req);
+    let prompt = build_chat_prompt(&state, &messages)?;
+    let prompt_tokens = encode_or_error(&state, &prompt)?;
+    let prompt_len = prompt_tokens.len();
+    let sampler = SamplerConfig {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        ..SamplerConfig::default()
+    };
+    let max_tokens = req.max_tokens;
+    let eos = state.eos_token_id;
+    let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let model_id = state.model_id.clone();
+
+    let mut token_rx = state
+        .engine
+        .add_request(
+            msg_id.clone(),
+            prompt_tokens,
+            sampler,
+            max_tokens,
+            eos,
+            None,
+        )
+        .await;
+
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+
+    tokio::spawn(async move {
+        // 1) message_start
+        let msg_start = AnthropicMessageStart {
+            r#type: "message_start".to_string(),
+            message: AnthropicMessageStartPayload {
+                id: msg_id.clone(),
+                r#type: "message".to_string(),
+                role: "assistant".to_string(),
+                content: vec![],
+                model: model_id.clone(),
+                usage: AnthropicUsage {
+                    input_tokens: prompt_len,
+                    output_tokens: 0,
+                },
+            },
+        };
+        let _ = sse_tx
+            .send(Ok(Event::default()
+                .event("message_start")
+                .data(serde_json::to_string(&msg_start).unwrap())))
+            .await;
+
+        // 2) content_block_start
+        let block_start = AnthropicContentBlockStart {
+            r#type: "content_block_start".to_string(),
+            index: 0,
+            content_block: AnthropicContentBlock::Text {
+                text: String::new(),
+            },
+        };
+        let _ = sse_tx
+            .send(Ok(Event::default()
+                .event("content_block_start")
+                .data(serde_json::to_string(&block_start).unwrap())))
+            .await;
+
+        // 3) content_block_delta for each token
+        let mut thinking_state = ThinkingState::new();
+        let mut output_tokens = 0usize;
+        let mut finish_reason = "end_turn".to_string();
+
+        while let Some(output) = token_rx.recv().await {
+            if let Some(ref reason) = output.finish_reason {
+                finish_reason = to_anthropic_stop_reason(reason);
+                break;
+            }
+            output_tokens += 1;
+
+            let (content, _reasoning) = thinking_state.process_token(&output.token_text);
+            // Only emit content (skip reasoning for Anthropic format)
+            if let Some(text) = content
+                && !text.is_empty()
+            {
+                let delta = AnthropicContentBlockDelta {
+                    r#type: "content_block_delta".to_string(),
+                    index: 0,
+                    delta: AnthropicTextDelta {
+                        r#type: "text_delta".to_string(),
+                        text,
+                    },
+                };
+                if sse_tx
+                    .send(Ok(Event::default()
+                        .event("content_block_delta")
+                        .data(serde_json::to_string(&delta).unwrap())))
+                    .await
+                    .is_err()
+                {
+                    return; // Client disconnected
+                }
+            }
+        }
+
+        // 4) content_block_stop
+        let block_stop = AnthropicContentBlockStop {
+            r#type: "content_block_stop".to_string(),
+            index: 0,
+        };
+        let _ = sse_tx
+            .send(Ok(Event::default()
+                .event("content_block_stop")
+                .data(serde_json::to_string(&block_stop).unwrap())))
+            .await;
+
+        // 5) message_delta
+        let msg_delta = AnthropicMessageDelta {
+            r#type: "message_delta".to_string(),
+            delta: AnthropicMessageDeltaPayload {
+                stop_reason: finish_reason,
+            },
+            usage: AnthropicUsage {
+                input_tokens: 0,
+                output_tokens,
+            },
+        };
+        let _ = sse_tx
+            .send(Ok(Event::default()
+                .event("message_delta")
+                .data(serde_json::to_string(&msg_delta).unwrap())))
+            .await;
+
+        // 6) message_stop
+        let msg_stop = AnthropicMessageStop {
+            r#type: "message_stop".to_string(),
+        };
+        let _ = sse_tx
+            .send(Ok(Event::default()
+                .event("message_stop")
+                .data(serde_json::to_string(&msg_stop).unwrap())))
+            .await;
+    });
+
+    let stream = ReceiverStream::new(sse_rx);
+    Ok(Sse::new(stream).into_response())
+}
+
 /// POST /v1/completions
 pub async fn completions(
     State(state): State<Arc<AppState>>,

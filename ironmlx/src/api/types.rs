@@ -271,6 +271,139 @@ pub struct FunctionCallDelta {
     pub arguments: Option<String>,
 }
 
+// -- Anthropic Messages API --------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct AnthropicMessagesRequest {
+    #[allow(dead_code)]
+    pub model: Option<String>,
+    pub messages: Vec<AnthropicMessage>,
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    #[serde(default)]
+    pub stream: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AnthropicMessage {
+    pub role: String,
+    pub content: AnthropicContent,
+}
+
+/// Anthropic content: either a plain string or an array of content blocks.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum AnthropicContent {
+    Text(String),
+    Blocks(Vec<AnthropicContentBlock>),
+}
+
+impl AnthropicContent {
+    pub fn as_text(&self) -> String {
+        match self {
+            AnthropicContent::Text(s) => s.clone(),
+            AnthropicContent::Blocks(blocks) => blocks
+                .iter()
+                .map(|b| match b {
+                    AnthropicContentBlock::Text { text } => text.as_str(),
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum AnthropicContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicMessagesResponse {
+    pub id: String,
+    pub r#type: String,
+    pub role: String,
+    pub content: Vec<AnthropicContentBlock>,
+    pub model: String,
+    pub stop_reason: String,
+    pub usage: AnthropicUsage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicUsage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+}
+
+// Anthropic streaming event types
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicMessageStart {
+    pub r#type: String,
+    pub message: AnthropicMessageStartPayload,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicMessageStartPayload {
+    pub id: String,
+    pub r#type: String,
+    pub role: String,
+    pub content: Vec<AnthropicContentBlock>,
+    pub model: String,
+    pub usage: AnthropicUsage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicContentBlockStart {
+    pub r#type: String,
+    pub index: usize,
+    pub content_block: AnthropicContentBlock,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicContentBlockDelta {
+    pub r#type: String,
+    pub index: usize,
+    pub delta: AnthropicTextDelta,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicTextDelta {
+    pub r#type: String,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicContentBlockStop {
+    pub r#type: String,
+    pub index: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicMessageDelta {
+    pub r#type: String,
+    pub delta: AnthropicMessageDeltaPayload,
+    pub usage: AnthropicUsage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicMessageDeltaPayload {
+    pub stop_reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicMessageStop {
+    pub r#type: String,
+}
+
 // -- Defaults ----------------------------------------------------------------
 
 fn default_max_tokens() -> usize {
