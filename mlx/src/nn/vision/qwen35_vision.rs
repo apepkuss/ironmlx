@@ -29,8 +29,21 @@ impl VisionEncoder for Qwen35VisionEncoder {
         grid_thw: &[(usize, usize, usize)],
         stream: &Stream,
     ) -> Result<Array> {
+        // Ensure pixel_values has temporal_patch_size frames for PatchEmbed.
+        // For images (1 frame), repeat to match temporal_patch_size.
+        let t = self.patch_embed.temporal_patch_size;
+        let pv_shape = pixel_values.shape();
+        let pixel_values = if pv_shape[0] as usize == 1 && t > 1 {
+            // [1, C, H, W] → repeat along axis 0 to [T, C, H, W]
+            let refs: Vec<&Array> = (0..t).map(|_| pixel_values).collect();
+            let va = crate::vector::VectorArray::from_arrays(&refs);
+            ops::concatenate(&va, 0, stream)?
+        } else {
+            pixel_values.clone()
+        };
+
         // 1. Patch embedding: pixel_values → [B, num_patches, hidden_size]
-        let mut h = self.patch_embed.forward(pixel_values, stream)?;
+        let mut h = self.patch_embed.forward(&pixel_values, stream)?;
 
         // 2. Add position embeddings via gather
         let pos = self.compute_position_embeddings(grid_thw, stream)?;

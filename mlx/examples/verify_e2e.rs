@@ -11,8 +11,9 @@ use std::time::Instant;
 
 use ironmlx_core::device::Device;
 use ironmlx_core::generate::{
-    ChatMessage, ChatTemplate, SamplerConfig, Tokenizer, stream_generate,
+    ChatMessage, ChatTemplate, SamplerConfig, Tokenizer, stream_generate, stream_generate_vlm,
 };
+use ironmlx_core::media::ProcessedMedia;
 use ironmlx_core::model::{build_model_from_file, load_model_weights};
 use ironmlx_core::stream::Stream;
 
@@ -191,4 +192,131 @@ fn main() {
     );
     println!("  Model load: {:.2}s", load_time.as_secs_f64());
     println!("\n✅ End-to-end verification passed!");
+
+    // VLM test: if --vlm flag and an image path are provided
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(vlm_pos) = args.iter().position(|a| a == "--vlm") {
+        if let Some(image_path) = args.get(vlm_pos + 1) {
+            println!("\n========== VLM Test ==========\n");
+            run_vlm_test(&model, &tokenizer, &chat_template, image_path, eos_token_id);
+        } else {
+            println!("\n⚠ --vlm requires an image path argument");
+        }
+    }
+}
+
+fn run_vlm_test(
+    model: &ironmlx_core::model::Model,
+    tokenizer: &Tokenizer,
+    chat_template: &Option<ChatTemplate>,
+    image_path: &str,
+    eos_token_id: i32,
+) {
+    println!("[VLM 1/4] Loading image: {}", image_path);
+
+    // Load and process image
+    let image_bytes =
+        ironmlx_core::media::loader::load_media(image_path).expect("failed to load image");
+    println!("  Image loaded: {} bytes", image_bytes.len());
+
+    let patch_size = 16;
+    let spatial_merge_size = 2;
+    let (pixel_values, h, w) = ironmlx_core::media::image_proc::process_image_bytes(
+        &image_bytes,
+        patch_size,
+        spatial_merge_size,
+    )
+    .expect("failed to process image");
+    println!(
+        "  Processed: {}x{} → pixel_values {:?}",
+        w,
+        h,
+        pixel_values.shape()
+    );
+
+    // Compute grid_thw (pre-merge patch grid)
+    let patches_h = h / patch_size;
+    let patches_w = w / patch_size;
+    let grid_thw = vec![(1usize, patches_h, patches_w)];
+    println!("  Grid (T,H,W): {:?}", grid_thw[0]);
+
+    // Number of vision tokens after spatial merge
+    let num_vision_tokens = patches_h / spatial_merge_size * patches_w / spatial_merge_size;
+    println!("  Vision tokens after merge: {}", num_vision_tokens);
+
+    // Build prompt with image placeholders
+    // Qwen3.5 expects: <|vision_start|><|image_pad|>...<|image_pad|><|vision_end|>
+    // image_token_id = 248056
+    println!("[VLM 2/4] Building multimodal prompt...");
+    let image_placeholder = "<|image_pad|>".repeat(num_vision_tokens);
+    let user_content = format!(
+        "<|vision_start|>{}<|vision_end|>\nWhat do you see in this image?",
+        image_placeholder
+    );
+
+    let prompt = if let Some(ct) = chat_template {
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user(&user_content),
+        ];
+        ct.apply(&messages, true)
+            .expect("failed to apply chat template")
+    } else {
+        user_content.clone()
+    };
+
+    let tokens = tokenizer.encode(&prompt).expect("failed to encode");
+    println!("  Prompt tokens: {}", tokens.len());
+
+    // Check image token count matches
+    let image_token_count = tokens.iter().filter(|&&t| t == 248056).count();
+    println!("  Image tokens in prompt: {}", image_token_count);
+
+    // Prepare processed media
+    let media = vec![ProcessedMedia {
+        pixel_values,
+        grid_thw,
+    }];
+
+    // Generate with VLM
+    println!("[VLM 3/4] Generating with vision...\n");
+    let sampler = SamplerConfig::greedy();
+    let max_tokens = 100;
+    let mut generated_tokens = Vec::new();
+    let t1 = Instant::now();
+
+    let reason = stream_generate_vlm(
+        model,
+        &tokens,
+        Some(&media),
+        max_tokens,
+        &sampler,
+        eos_token_id,
+        |token| {
+            generated_tokens.push(token);
+            if let Ok(text) = tokenizer.decode_single(token) {
+                print!("{}", text);
+            }
+            true
+        },
+    )
+    .expect("VLM generation failed");
+
+    let gen_time = t1.elapsed();
+    println!("\n");
+
+    let full_text = tokenizer.decode(&generated_tokens).unwrap_or_default();
+    let num_tokens = generated_tokens.len();
+    let tokens_per_sec = num_tokens as f64 / gen_time.as_secs_f64();
+
+    println!("[VLM 4/4] Results:");
+    println!("  Stop reason: {:?}", reason);
+    println!("  Generated: {} tokens", num_tokens);
+    println!("  Full text: \"{}\"", full_text);
+    println!(
+        "  Time: {:.2}s ({:.1} tokens/sec)",
+        gen_time.as_secs_f64(),
+        tokens_per_sec
+    );
+    println!("\n✅ VLM verification passed!");
 }

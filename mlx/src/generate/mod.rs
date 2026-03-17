@@ -14,6 +14,7 @@ use crate::array::Array;
 use crate::cache::CacheManager;
 use crate::device::Device;
 use crate::error::Result;
+use crate::media::ProcessedMedia;
 use crate::model::Model;
 use crate::ops;
 use crate::stream::Stream;
@@ -104,6 +105,79 @@ pub fn stream_generate_with_cache(
     }
 
     // Decode loop
+    for i in 1..max_tokens {
+        let input = Array::from_int(next_token);
+        let input = ops::astype(&input, crate::dtype::Dtype::Int32, &stream)?;
+        let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
+        let logits = model.forward(&input_2d, &mut cache, "causal", None)?;
+        let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;
+
+        next_token_arr = sample(&logits_2d, sampler_config, &stream)?;
+        next_token_arr.eval()?;
+        next_token = next_token_arr.item_i32()?;
+
+        if next_token == eos_token_id {
+            return Ok(StopReason::Eos);
+        }
+        if !on_token(next_token) {
+            return Ok(StopReason::Eos);
+        }
+        if i + 1 >= max_tokens {
+            return Ok(StopReason::MaxTokens);
+        }
+    }
+
+    Ok(StopReason::MaxTokens)
+}
+
+/// Generate tokens with VLM support (optional media for first prefill).
+pub fn stream_generate_vlm(
+    model: &Model,
+    prompt_tokens: &[i32],
+    media: Option<&[ProcessedMedia]>,
+    max_tokens: usize,
+    sampler_config: &SamplerConfig,
+    eos_token_id: i32,
+    mut on_token: impl FnMut(i32) -> bool,
+) -> Result<StopReason> {
+    let stream = Stream::new(&Device::gpu());
+    let num_layers = model.num_layers();
+    let mut cache: Vec<(Option<Array>, Option<Array>)> =
+        (0..num_layers).map(|_| (None, None)).collect();
+
+    // Prefill with VLM support
+    let prompt_arr = Array::from_slice_i32(prompt_tokens);
+    let prompt_arr = ops::astype(&prompt_arr, crate::dtype::Dtype::Int32, &stream)?;
+    let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
+
+    let logits = if media.is_some() {
+        model.forward_vlm(&prompt_2d, media, &mut cache)?
+    } else {
+        model.forward(&prompt_2d, &mut cache, "causal", None)?
+    };
+
+    let last_idx = prompt_tokens.len() as i32 - 1;
+    let last_logits = ops::slice(
+        &logits,
+        &[0, last_idx, 0],
+        &[1, last_idx + 1, logits.shape()[2]],
+        &[1, 1, 1],
+        &stream,
+    )?;
+    let last_logits = ops::reshape(&last_logits, &[1, logits.shape()[2]], &stream)?;
+
+    let mut next_token_arr = sample(&last_logits, sampler_config, &stream)?;
+    next_token_arr.eval()?;
+    let mut next_token = next_token_arr.item_i32()?;
+
+    if next_token == eos_token_id {
+        return Ok(StopReason::Eos);
+    }
+    if !on_token(next_token) {
+        return Ok(StopReason::Eos);
+    }
+
+    // Decode loop (text-only, no media needed after prefill)
     for i in 1..max_tokens {
         let input = Array::from_int(next_token);
         let input = ops::astype(&input, crate::dtype::Dtype::Int32, &stream)?;

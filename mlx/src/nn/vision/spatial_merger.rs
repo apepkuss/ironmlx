@@ -29,6 +29,9 @@ impl SpatialMerger {
         let hidden = shape[2] as usize;
         let ms = self.spatial_merge_size;
 
+        // Norm BEFORE merge (norm weight dim = hidden_size = 1024)
+        let x = self.norm.forward_with_stream(x, stream)?;
+
         // grid_thw gives us the patch grid dimensions
         let (_, h, w) = grid_thw[0]; // patches_h, patches_w (before merge)
 
@@ -37,7 +40,7 @@ impl SpatialMerger {
         let w_merged = w / ms;
 
         let x = ops::reshape(
-            x,
+            &x,
             &[
                 b as i32,
                 h_merged as i32,
@@ -61,8 +64,7 @@ impl SpatialMerger {
             stream,
         )?;
 
-        // Norm → fc1 → GELU → fc2
-        let x = self.norm.forward_with_stream(&x, stream)?;
+        // fc1 → GELU → fc2
         let x = self.fc1.forward_with_stream(&x, stream)?;
         let x = gelu(&x, stream)?;
         self.fc2.forward_with_stream(&x, stream)

@@ -60,7 +60,7 @@ impl VisionAttention {
         // Scaled dot-product attention (non-causal, global)
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         let attn_out =
-            fast::scaled_dot_product_attention(&q, &k, &v, scale, "none", mask, None, stream)?;
+            fast::scaled_dot_product_attention(&q, &k, &v, scale, "", mask, None, stream)?;
 
         // [B, n, L, d] → [B, L, hidden]
         let attn_out = ops::transpose_axes(&attn_out, &[0, 2, 1, 3], stream)?;
