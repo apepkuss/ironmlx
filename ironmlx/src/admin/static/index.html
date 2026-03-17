@@ -26,7 +26,7 @@
             ? 'bg-blue-600 text-white'
             : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'"
           class="w-full text-left px-3 py-2 rounded-lg text-sm transition"
-          x-text="page.icon + ' ' + page.label">
+          x-text="page.icon + ' ' + $t('nav.' + page.id)">
         </button>
       </template>
     </div>
@@ -34,7 +34,7 @@
     <div class="p-3 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-500 space-y-2">
       <button @click="darkMode = !darkMode; localStorage.setItem('theme', darkMode ? 'dark' : 'light')"
               class="hover:text-gray-300 transition">
-        <span x-text="darkMode ? '☀️ Light' : '🌙 Dark'"></span>
+        <span x-text="darkMode ? '☀️ ' + $t('theme.light') : '🌙 ' + $t('theme.dark')"></span>
       </button>
       <div>
         <select x-model="lang" @change="localStorage.setItem('lang', lang)"
@@ -52,27 +52,27 @@
   <main class="flex-1 p-6 overflow-auto">
     <!-- Status Page -->
     <div x-show="currentPage === 'status'" x-cloak>
-      <h2 class="text-2xl font-bold mb-1">Server Status</h2>
-      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm">Real-time monitoring</p>
+      <h2 class="text-2xl font-bold mb-1" x-text="$t('status.title')"></h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm" x-text="$t('status.subtitle')"></p>
 
       <!-- Status cards -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <!-- Status -->
         <div class="admin-card">
-          <div class="text-xs text-gray-500 mb-1">Status</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('nav.status')"></div>
           <div class="text-xl font-bold" :class="health.status === 'ok' ? 'text-green-500' : 'text-red-500'">
             <span class="status-dot" :class="health.status === 'ok' ? 'running' : 'stopped'"></span>
-            <span x-text="health.status === 'ok' ? 'Running' : 'Stopped'"></span>
+            <span x-text="health.status === 'ok' ? $t('status.running') : $t('status.stopped')"></span>
           </div>
         </div>
         <!-- Active Memory -->
         <div class="admin-card">
-          <div class="text-xs text-gray-500 mb-1">Active Memory</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('status.active_memory')"></div>
           <div class="text-xl font-bold" x-text="health.memory ? health.memory.active_mb.toFixed(0) + ' MB' : '—'"></div>
         </div>
         <!-- Peak Memory -->
         <div class="admin-card">
-          <div class="text-xs text-gray-500 mb-1">Peak Memory</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('status.peak_memory')"></div>
           <div class="text-xl font-bold" x-text="health.memory ? health.memory.peak_mb.toFixed(0) + ' MB' : '—'"></div>
         </div>
       </div>
@@ -80,17 +80,17 @@
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <!-- Default Model -->
         <div class="admin-card">
-          <div class="text-xs text-gray-500 mb-1">Default Model</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('status.default_model')"></div>
           <div class="text-sm text-blue-400" x-text="health.model || '—'"></div>
         </div>
         <!-- Uptime -->
         <div class="admin-card">
-          <div class="text-xs text-gray-500 mb-1">Uptime</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('status.uptime')"></div>
           <div class="text-sm" x-text="uptime"></div>
         </div>
         <!-- Loaded Models -->
         <div class="admin-card">
-          <div class="text-xs text-gray-500 mb-1">Loaded Models</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('status.loaded_models')"></div>
           <div class="text-xl font-bold" x-text="models.length"></div>
         </div>
       </div>
@@ -98,17 +98,16 @@
 
     <!-- Models Page -->
     <div x-show="currentPage === 'models'" x-cloak>
-      <h2 class="text-2xl font-bold mb-1">Models</h2>
-      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm">Manage loaded models</p>
+      <h2 class="text-2xl font-bold mb-1" x-text="$t('models.title')"></h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm" x-text="$t('models.subtitle')"></p>
 
       <!-- Load model form -->
       <div class="admin-card mb-4">
         <div class="flex gap-2">
-          <input x-model="loadModelPath" placeholder="Model path or HuggingFace repo ID"
+          <input x-model="loadModelPath" :placeholder="$t('models.load_placeholder')"
                  class="flex-1 px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
-          <button @click="loadModel()" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
-            Load
-          </button>
+          <button @click="loadModel()" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+                  x-text="$t('models.load_button')"></button>
         </div>
         <div x-show="loadModelMsg" class="mt-2 text-sm" :class="loadModelError ? 'text-red-400' : 'text-green-400'" x-text="loadModelMsg"></div>
       </div>
@@ -123,20 +122,22 @@
             </div>
             <div class="flex gap-2">
               <button x-show="m.id !== health.model" @click="setDefaultModel(m.id)"
-                      class="text-xs px-2 py-1 border border-gray-600 rounded hover:bg-gray-700">Set Default</button>
+                      class="text-xs px-2 py-1 border border-gray-600 rounded hover:bg-gray-700"
+                      x-text="$t('models.set_default')"></button>
               <button @click="unloadModel(m.id)"
-                      class="text-xs px-2 py-1 border border-red-600 text-red-400 rounded hover:bg-red-900">Unload</button>
+                      class="text-xs px-2 py-1 border border-red-600 text-red-400 rounded hover:bg-red-900"
+                      x-text="$t('models.unload')"></button>
             </div>
           </div>
         </template>
-        <div x-show="models.length === 0" class="text-gray-500 text-sm">No models loaded.</div>
+        <div x-show="models.length === 0" class="text-gray-500 text-sm" x-text="$t('models.no_models')"></div>
       </div>
     </div>
 
     <!-- Settings Page -->
     <div x-show="currentPage === 'settings'" x-cloak>
-      <h2 class="text-2xl font-bold mb-1">Settings</h2>
-      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm">Server configuration</p>
+      <h2 class="text-2xl font-bold mb-1" x-text="$t('settings.title')"></h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm" x-text="$t('settings.subtitle')"></p>
 
       <div class="max-w-2xl space-y-4">
         <!-- Host (readonly) -->
@@ -212,9 +213,8 @@
         <!-- Save -->
         <div class="flex items-center gap-3">
           <button @click="saveSettings()"
-                  class="px-6 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 transition">
-            Save Settings
-          </button>
+                  class="px-6 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 transition"
+                  x-text="$t('settings.save')"></button>
           <span x-show="settingsMsg" class="text-sm" :class="settingsError ? 'text-red-400' : 'text-green-400'"
                 x-text="settingsMsg"></span>
         </div>
@@ -223,17 +223,18 @@
 
     <!-- Logs Page -->
     <div x-show="currentPage === 'logs'" x-cloak>
-      <h2 class="text-2xl font-bold mb-1">Logs</h2>
-      <p class="text-gray-500 dark:text-gray-400 mb-4 text-sm">Server activity log</p>
+      <h2 class="text-2xl font-bold mb-1" x-text="$t('logs.title')"></h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-4 text-sm" x-text="$t('logs.subtitle')"></p>
 
       <div class="flex gap-2 mb-4">
         <select x-model="logLevel" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm">
-          <option value="all">All levels</option>
+          <option value="all" x-text="$t('logs.all_levels')"></option>
           <option value="info">Info</option>
           <option value="warn">Warning</option>
           <option value="error">Error</option>
         </select>
-        <button @click="clearLogs()" class="px-3 py-1 text-sm border border-gray-600 rounded hover:bg-gray-700">Clear</button>
+        <button @click="clearLogs()" class="px-3 py-1 text-sm border border-gray-600 rounded hover:bg-gray-700"
+                x-text="$t('logs.clear')"></button>
       </div>
 
       <div class="admin-card font-mono text-xs space-y-1 max-h-[calc(100vh-14rem)] overflow-y-auto" x-ref="logContainer">
@@ -251,14 +252,14 @@
             <span x-text="log.message"></span>
           </div>
         </template>
-        <div x-show="filteredLogs.length === 0" class="text-gray-500">No log entries.</div>
+        <div x-show="filteredLogs.length === 0" class="text-gray-500" x-text="$t('logs.no_entries')"></div>
       </div>
     </div>
 
     <!-- Benchmark Page -->
     <div x-show="currentPage === 'benchmark'" x-cloak>
-      <h2 class="text-2xl font-bold mb-1">Benchmark</h2>
-      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm">Performance testing</p>
+      <h2 class="text-2xl font-bold mb-1" x-text="$t('benchmark.title')"></h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm" x-text="$t('benchmark.subtitle')"></p>
 
       <div class="admin-card mb-4">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
@@ -277,7 +278,7 @@
           <div class="flex items-end">
             <button @click="runBenchmark()" :disabled="benchRunning"
                     class="px-4 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700 disabled:opacity-50">
-              <span x-text="benchRunning ? 'Running...' : 'Run'"></span>
+              <span x-text="benchRunning ? $t('benchmark.running') : $t('benchmark.run')"></span>
             </button>
           </div>
         </div>
@@ -289,19 +290,19 @@
 
       <div x-show="benchResult" class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div class="admin-card text-center">
-          <div class="text-xs text-gray-500 mb-1">TTFT</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('benchmark.ttft')"></div>
           <div class="text-xl font-bold" x-text="benchResult ? benchResult.ttft_ms.toFixed(0) + ' ms' : '—'"></div>
         </div>
         <div class="admin-card text-center">
-          <div class="text-xs text-gray-500 mb-1">Throughput</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('benchmark.throughput')"></div>
           <div class="text-xl font-bold" x-text="benchResult ? benchResult.tokens_per_sec.toFixed(1) + ' tok/s' : '—'"></div>
         </div>
         <div class="admin-card text-center">
-          <div class="text-xs text-gray-500 mb-1">Total Time</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('benchmark.total_time')"></div>
           <div class="text-xl font-bold" x-text="benchResult ? (benchResult.total_ms / 1000).toFixed(1) + ' s' : '—'"></div>
         </div>
         <div class="admin-card text-center">
-          <div class="text-xs text-gray-500 mb-1">Generated</div>
+          <div class="text-xs text-gray-500 mb-1" x-text="$t('benchmark.generated')"></div>
           <div class="text-xl font-bold" x-text="benchResult ? benchResult.generated_tokens + ' tok' : '—'"></div>
         </div>
       </div>
@@ -313,8 +314,8 @@
         <!-- Header -->
         <div class="flex items-center justify-between mb-4">
           <div>
-            <h2 class="text-2xl font-bold">Chat</h2>
-            <p class="text-gray-500 dark:text-gray-400 text-sm">Interactive conversation</p>
+            <h2 class="text-2xl font-bold" x-text="$t('chat.title')"></h2>
+            <p class="text-gray-500 dark:text-gray-400 text-sm" x-text="$t('chat.subtitle')"></p>
           </div>
           <div class="flex gap-2 items-center">
             <select x-model="chatModel" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm">
@@ -322,7 +323,8 @@
                 <option :value="m.id" x-text="m.id"></option>
               </template>
             </select>
-            <button @click="clearChat()" class="px-3 py-1 text-sm border border-gray-600 rounded hover:bg-gray-700">Clear</button>
+            <button @click="clearChat()" class="px-3 py-1 text-sm border border-gray-600 rounded hover:bg-gray-700"
+                    x-text="$t('chat.clear')"></button>
           </div>
         </div>
 
@@ -347,13 +349,12 @@
         <!-- Input -->
         <div class="flex gap-2">
           <textarea x-model="chatInput" @keydown.enter.prevent="if (!$event.shiftKey) sendChat()"
-                    placeholder="Type a message..."
+                    :placeholder="$t('chat.placeholder')"
                     rows="2"
                     class="flex-1 px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm resize-none"></textarea>
           <button @click="sendChat()" :disabled="chatStreaming || !chatInput.trim()"
-                  class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50">
-            Send
-          </button>
+                  class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
+                  x-text="$t('chat.send')"></button>
         </div>
       </div>
     </div>
@@ -364,6 +365,7 @@
     </div>
   </main>
 
+  <script src="/admin/static/i18n.js"></script>
   <script src="/admin/static/app.js"></script>
 </body>
 </html>

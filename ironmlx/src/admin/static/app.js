@@ -7,12 +7,12 @@ function app() {
       (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches),
     lang: localStorage.getItem('lang') || 'en',
     pages: [
-      { id: 'status',    icon: '📊', label: 'Status' },
-      { id: 'models',    icon: '🤖', label: 'Models' },
-      { id: 'settings',  icon: '⚙️', label: 'Settings' },
-      { id: 'logs',      icon: '📝', label: 'Logs' },
-      { id: 'benchmark', icon: '⚡', label: 'Benchmark' },
-      { id: 'chat',      icon: '💬', label: 'Chat' },
+      { id: 'status',    icon: '📊' },
+      { id: 'models',    icon: '🤖' },
+      { id: 'settings',  icon: '⚙️' },
+      { id: 'logs',      icon: '📝' },
+      { id: 'benchmark', icon: '⚡' },
+      { id: 'chat',      icon: '💬' },
     ],
 
     // Status page data
@@ -51,6 +51,11 @@ function app() {
     chatModel: '',
     chatStreaming: false,
     chatStreamContent: '',
+
+    $t(key) {
+      const dict = translations[this.lang] || translations.en;
+      return dict[key] || translations.en[key] || key;
+    },
 
     init() {
       console.log('ironmlx Admin initialized');
@@ -135,7 +140,7 @@ function app() {
           method: 'POST', body: { model_dir: this.loadModelPath }
         });
         if (resp.ok) {
-          this.loadModelMsg = 'Model loaded successfully';
+          this.loadModelMsg = this.$t('models.load_success');
           this.loadModelPath = '';
           this.pollModels();
           this.pollHealth();
@@ -195,7 +200,7 @@ function app() {
           method: 'POST', body: body,
         });
         if (resp.ok) {
-          this.settingsMsg = 'Settings saved';
+          this.settingsMsg = this.$t('settings.saved');
           // If api_key was changed, store it in sessionStorage
           if (this.settings.api_key) {
             sessionStorage.setItem('ironmlx_api_key', this.settings.api_key);
