@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en" x-data="app()" x-init="init()" :class="{ 'dark': darkMode }">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ironmlx Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class' }</script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
+  <link rel="stylesheet" href="/admin/static/style.css">
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen flex">
+
+  <!-- Sidebar -->
+  <nav class="w-52 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col min-h-screen">
+    <div class="p-4 text-xl font-bold text-blue-500">🚀 ironmlx</div>
+
+    <div class="flex-1 px-2 space-y-1">
+      <template x-for="page in pages" :key="page.id">
+        <button
+          @click="currentPage = page.id"
+          :class="currentPage === page.id
+            ? 'bg-blue-600 text-white'
+            : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'"
+          class="w-full text-left px-3 py-2 rounded-lg text-sm transition"
+          x-text="page.icon + ' ' + page.label">
+        </button>
+      </template>
+    </div>
+
+    <div class="p-3 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-500 space-y-2">
+      <button @click="darkMode = !darkMode; localStorage.setItem('theme', darkMode ? 'dark' : 'light')"
+              class="hover:text-gray-300 transition">
+        <span x-text="darkMode ? '☀️ Light' : '🌙 Dark'"></span>
+      </button>
+      <div>
+        <select x-model="lang" @change="localStorage.setItem('lang', lang)"
+                class="bg-transparent border border-gray-600 rounded px-1 py-0.5 text-xs">
+          <option value="en">EN</option>
+          <option value="zh">中文</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+        </select>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Content -->
+  <main class="flex-1 p-6 overflow-auto">
+    <!-- Status Page -->
+    <div x-show="currentPage === 'status'" x-cloak>
+      <div id="page-status"></div>
+    </div>
+
+    <!-- Models Page -->
+    <div x-show="currentPage === 'models'" x-cloak>
+      <div id="page-models"></div>
+    </div>
+
+    <!-- Settings Page -->
+    <div x-show="currentPage === 'settings'" x-cloak>
+      <div id="page-settings"></div>
+    </div>
+
+    <!-- Logs Page -->
+    <div x-show="currentPage === 'logs'" x-cloak>
+      <div id="page-logs"></div>
+    </div>
+
+    <!-- Benchmark Page -->
+    <div x-show="currentPage === 'benchmark'" x-cloak>
+      <div id="page-benchmark"></div>
+    </div>
+
+    <!-- Chat Page -->
+    <div x-show="currentPage === 'chat'" x-cloak>
+      <div id="page-chat"></div>
+    </div>
+
+    <!-- Placeholder for pages not yet implemented -->
+    <div x-show="!['status','models','settings','logs','benchmark','chat'].includes(currentPage)">
+      <p class="text-gray-500">Page not found.</p>
+    </div>
+  </main>
+
+  <script src="/admin/static/app.js"></script>
+</body>
+</html>

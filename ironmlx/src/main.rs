@@ -1,3 +1,4 @@
+mod admin;
 mod api;
 mod config;
 mod engine;

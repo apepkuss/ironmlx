@@ -9,6 +9,8 @@ use axum::routing::{get, post};
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
+    let admin_routes = crate::admin::router(state.clone());
+
     Router::new()
         .route("/v1/chat/completions", post(models::chat_completions))
         .route("/v1/completions", post(models::completions))
@@ -18,5 +20,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models/unload", post(models::unload_model_endpoint))
         .route("/v1/models/default", post(models::set_default_model))
         .route("/health", get(models::health))
+        .merge(admin_routes)
         .with_state(state)
 }
