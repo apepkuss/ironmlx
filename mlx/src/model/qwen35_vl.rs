@@ -2,11 +2,13 @@ use std::collections::HashMap;
 
 use crate::array::Array;
 use crate::device::Device;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::media::ProcessedMedia;
 use crate::nn::vision::VisionEncoder;
 use crate::nn::vision::qwen35_vision::{Qwen35VisionEncoder, build_vision_encoder};
+use crate::ops;
 use crate::stream::Stream;
+use crate::vector::VectorArray;
 
 use super::config::{Qwen35Config, VisionConfig};
 use super::qwen35::Qwen35Model;
@@ -104,24 +106,107 @@ impl Qwen35VLModel {
 }
 
 /// Inject vision embeddings into text embeddings at image_token positions.
+///
+/// tokens: [1, L] — token IDs with image placeholders
+/// text_embs: [1, L, hidden] — text embeddings from embed_tokens
+/// vision_embs: [1, N, hidden] — vision embeddings from vision encoder
+///
+/// Strategy: read tokens to CPU, find image_token positions, then build
+/// merged embedding by slicing text segments and vision segments alternately.
 fn inject_vision_embeddings(
-    _tokens: &Array,
+    tokens: &Array,
     text_embs: &Array,
-    _vision_embs: &Array,
-    _image_token_id: i64,
-    _stream: &Stream,
+    vision_embs: &Array,
+    image_token_id: i64,
+    stream: &Stream,
 ) -> Result<Array> {
-    // For now, simple approach: replace image token positions with vision embeddings
-    // tokens: [B, L], text_embs: [B, L, hidden], vision_embs: [1, N, hidden]
-    // This replaces the positions where tokens == image_token_id
-    //
-    // The challenge: vision_embs has different length than number of image tokens
-    // We need to scatter vision_embs into the right positions
-    //
-    // For initial implementation, return text_embs as-is.
-    // The VLM will still work for text-only queries.
-    // Proper vision injection will be implemented in E2E integration.
-    Ok(text_embs.clone()) // TODO: implement proper injection
+    // Read tokens to CPU to find image positions
+    tokens.eval()?;
+    let token_vec = tokens.to_vec_i32()?;
+    let image_id = image_token_id as i32;
+
+    // Find contiguous runs of image tokens
+    // Example: [BOS, t1, t2, IMG, IMG, IMG, t3, t4] → text[0:3], vision[0:3], text[6:8]
+    let seq_len = token_vec.len();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut i = 0;
+    let mut vision_offset = 0usize;
+
+    while i < seq_len {
+        if token_vec[i] == image_id {
+            // Count consecutive image tokens
+            let start = i;
+            while i < seq_len && token_vec[i] == image_id {
+                i += 1;
+            }
+            let count = i - start;
+            segments.push(Segment::Vision {
+                offset: vision_offset,
+                count,
+            });
+            vision_offset += count;
+        } else {
+            let start = i;
+            while i < seq_len && token_vec[i] != image_id {
+                i += 1;
+            }
+            segments.push(Segment::Text { start, end: i });
+        }
+    }
+
+    // Check vision embedding count matches
+    let vision_embs_shape = vision_embs.shape();
+    let total_vision = vision_embs_shape[1] as usize; // [1, N, hidden]
+    if vision_offset != total_vision {
+        return Err(Error::Mlx(format!(
+            "vision embedding count mismatch: {} image tokens but {} vision patches",
+            vision_offset, total_vision
+        )));
+    }
+
+    // Build merged embedding by slicing and concatenating
+    let hidden = text_embs.shape()[2];
+    let mut parts: Vec<Array> = Vec::new();
+
+    for seg in &segments {
+        match seg {
+            Segment::Text { start, end } => {
+                // Slice text_embs[0, start:end, :]
+                let part = ops::slice(
+                    text_embs,
+                    &[0, *start as i32, 0],
+                    &[1, *end as i32, hidden],
+                    &[1, 1, 1],
+                    stream,
+                )?;
+                parts.push(part);
+            }
+            Segment::Vision { offset, count } => {
+                // Slice vision_embs[0, offset:offset+count, :]
+                let part = ops::slice(
+                    vision_embs,
+                    &[0, *offset as i32, 0],
+                    &[1, (*offset + *count) as i32, hidden],
+                    &[1, 1, 1],
+                    stream,
+                )?;
+                parts.push(part);
+            }
+        }
+    }
+
+    // Concatenate along seq dim (axis=1)
+    if parts.len() == 1 {
+        return Ok(parts.into_iter().next().unwrap());
+    }
+    let refs: Vec<&Array> = parts.iter().collect();
+    let va = VectorArray::from_arrays(&refs);
+    ops::concatenate(&va, 1, stream)
+}
+
+enum Segment {
+    Text { start: usize, end: usize },
+    Vision { offset: usize, count: usize },
 }
 
 /// Build Qwen3.5 VLM from config and weights
