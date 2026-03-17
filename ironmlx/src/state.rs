@@ -1,15 +1,69 @@
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 
 use ironmlx_core::device::Device;
 use ironmlx_core::generate::{ChatTemplate, Tokenizer};
 use ironmlx_core::model::{Model, build_model_from_file, load_model_weights};
 use ironmlx_core::stream::Stream;
+use serde::Serialize;
 
+use crate::config::ServerConfig;
 use crate::engine_pool::EnginePool;
+
+/// A single log entry stored in the in-memory buffer.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEntry {
+    pub timestamp: i64,
+    pub level: String,
+    pub message: String,
+}
+
+/// Fixed-capacity in-memory log buffer (FIFO).
+pub struct LogBuffer {
+    entries: std::sync::Mutex<VecDeque<LogEntry>>,
+    capacity: usize,
+}
+
+impl LogBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(VecDeque::with_capacity(capacity)),
+            capacity,
+        }
+    }
+
+    /// Push a log entry, evicting the oldest if at capacity.
+    pub fn push(&self, level: &str, message: &str) {
+        let entry = LogEntry {
+            timestamp: chrono::Utc::now().timestamp(),
+            level: level.to_string(),
+            message: message.to_string(),
+        };
+        let mut entries = self.entries.lock().unwrap();
+        if entries.len() >= self.capacity {
+            entries.pop_front();
+        }
+        entries.push_back(entry);
+    }
+
+    /// Return a snapshot of all entries.
+    pub fn snapshot(&self) -> Vec<LogEntry> {
+        self.entries.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Clear all entries.
+    #[allow(dead_code)]
+    pub fn clear(&self) {
+        self.entries.lock().unwrap().clear();
+    }
+}
 
 pub struct AppState {
     pub pool: EnginePool,
     pub started_at: i64,
+    pub config: Arc<std::sync::RwLock<ServerConfig>>,
+    pub log_buffer: LogBuffer,
 }
 
 /// Load model artifacts from a directory.

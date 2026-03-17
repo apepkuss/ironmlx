@@ -22,6 +22,12 @@ pub struct ServerConfig {
     pub max_num_seqs: usize,
     /// Log level
     pub log_level: String,
+    /// Sampling temperature
+    pub temperature: f32,
+    /// Top-p (nucleus) sampling
+    pub top_p: f32,
+    /// API key for authentication (None = no auth)
+    pub api_key: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -36,6 +42,9 @@ impl Default for ServerConfig {
             cache_max_size_gb: 10.0,
             max_num_seqs: 256,
             log_level: "info".to_string(),
+            temperature: 1.0,
+            top_p: 1.0,
+            api_key: None,
         }
     }
 }
@@ -82,6 +91,19 @@ impl ServerConfig {
         }
         if let Ok(v) = std::env::var("IRONMLX_LOG_LEVEL") {
             config.log_level = v;
+        }
+        if let Ok(v) = std::env::var("IRONMLX_TEMPERATURE")
+            && let Ok(f) = v.parse()
+        {
+            config.temperature = f;
+        }
+        if let Ok(v) = std::env::var("IRONMLX_TOP_P")
+            && let Ok(f) = v.parse()
+        {
+            config.top_p = f;
+        }
+        if let Ok(v) = std::env::var("IRONMLX_API_KEY") {
+            config.api_key = if v.is_empty() { None } else { Some(v) };
         }
 
         // CLI args (highest priority)

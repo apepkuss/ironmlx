@@ -135,17 +135,176 @@
 
     <!-- Settings Page -->
     <div x-show="currentPage === 'settings'" x-cloak>
-      <div id="page-settings"></div>
+      <h2 class="text-2xl font-bold mb-1">Settings</h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm">Server configuration</p>
+
+      <div class="max-w-2xl space-y-4">
+        <!-- Host (readonly) -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">Host</label>
+          <input type="text" :value="settings.host" readonly
+                 class="w-full px-3 py-2 bg-gray-200 dark:bg-gray-600 rounded text-sm cursor-not-allowed">
+        </div>
+
+        <!-- Port (readonly) -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">Port</label>
+          <input type="number" :value="settings.port" readonly
+                 class="w-full px-3 py-2 bg-gray-200 dark:bg-gray-600 rounded text-sm cursor-not-allowed">
+        </div>
+
+        <!-- Memory Limit -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">Memory Limit (GB)</label>
+          <input type="number" x-model.number="settings.memory_limit_gb" step="0.1" min="0"
+                 class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+        </div>
+
+        <!-- Cache Max Size -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">Cache Max Size (GB)</label>
+          <input type="number" x-model.number="settings.cache_max_size_gb" step="0.1" min="0"
+                 class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+        </div>
+
+        <!-- Max Concurrent Sequences -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">Max Concurrent Sequences</label>
+          <input type="number" x-model.number="settings.max_num_seqs" step="1" min="1"
+                 class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+        </div>
+
+        <!-- Temperature -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">Temperature</label>
+          <input type="number" x-model.number="settings.temperature" step="0.1" min="0" max="2"
+                 class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+        </div>
+
+        <!-- Top-P -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">Top-P</label>
+          <input type="number" x-model.number="settings.top_p" step="0.05" min="0" max="1"
+                 class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+        </div>
+
+        <!-- Log Level -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">Log Level</label>
+          <select x-model="settings.log_level"
+                  class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+            <option value="trace">trace</option>
+            <option value="debug">debug</option>
+            <option value="info">info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+        </div>
+
+        <!-- API Key -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1">API Key</label>
+          <input type="password" x-model="settings.api_key" placeholder="Leave empty to disable auth"
+                 class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+          <div x-show="settings.api_key_set" class="text-xs text-green-500 mt-1">API key is currently set</div>
+        </div>
+
+        <!-- Save -->
+        <div class="flex items-center gap-3">
+          <button @click="saveSettings()"
+                  class="px-6 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 transition">
+            Save Settings
+          </button>
+          <span x-show="settingsMsg" class="text-sm" :class="settingsError ? 'text-red-400' : 'text-green-400'"
+                x-text="settingsMsg"></span>
+        </div>
+      </div>
     </div>
 
     <!-- Logs Page -->
     <div x-show="currentPage === 'logs'" x-cloak>
-      <div id="page-logs"></div>
+      <h2 class="text-2xl font-bold mb-1">Logs</h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-4 text-sm">Server activity log</p>
+
+      <div class="flex gap-2 mb-4">
+        <select x-model="logLevel" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+          <option value="all">All levels</option>
+          <option value="info">Info</option>
+          <option value="warn">Warning</option>
+          <option value="error">Error</option>
+        </select>
+        <button @click="clearLogs()" class="px-3 py-1 text-sm border border-gray-600 rounded hover:bg-gray-700">Clear</button>
+      </div>
+
+      <div class="admin-card font-mono text-xs space-y-1 max-h-[calc(100vh-14rem)] overflow-y-auto" x-ref="logContainer">
+        <template x-for="(log, idx) in filteredLogs" :key="idx">
+          <div class="flex gap-2 py-0.5 border-b border-gray-100 dark:border-gray-700">
+            <span class="text-gray-500 shrink-0" x-text="new Date(log.timestamp * 1000).toLocaleTimeString()"></span>
+            <span class="shrink-0 w-12"
+                  :class="{
+                    'text-red-400': log.level === 'error',
+                    'text-yellow-400': log.level === 'warn',
+                    'text-blue-400': log.level === 'info',
+                    'text-gray-500': log.level === 'debug'
+                  }"
+                  x-text="log.level.toUpperCase()"></span>
+            <span x-text="log.message"></span>
+          </div>
+        </template>
+        <div x-show="filteredLogs.length === 0" class="text-gray-500">No log entries.</div>
+      </div>
     </div>
 
     <!-- Benchmark Page -->
     <div x-show="currentPage === 'benchmark'" x-cloak>
-      <div id="page-benchmark"></div>
+      <h2 class="text-2xl font-bold mb-1">Benchmark</h2>
+      <p class="text-gray-500 dark:text-gray-400 mb-6 text-sm">Performance testing</p>
+
+      <div class="admin-card mb-4">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">Model</label>
+            <select x-model="benchModel" class="w-full px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+              <template x-for="m in models" :key="m.id">
+                <option :value="m.id" x-text="m.id"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-gray-500 block mb-1">Max Tokens</label>
+            <input type="number" x-model.number="benchTokens" class="w-full px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+          </div>
+          <div class="flex items-end">
+            <button @click="runBenchmark()" :disabled="benchRunning"
+                    class="px-4 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700 disabled:opacity-50">
+              <span x-text="benchRunning ? 'Running...' : 'Run'"></span>
+            </button>
+          </div>
+        </div>
+        <div>
+          <label class="text-xs text-gray-500 block mb-1">Prompt</label>
+          <textarea x-model="benchPrompt" rows="2" class="w-full px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm resize-none"></textarea>
+        </div>
+      </div>
+
+      <div x-show="benchResult" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="admin-card text-center">
+          <div class="text-xs text-gray-500 mb-1">TTFT</div>
+          <div class="text-xl font-bold" x-text="benchResult ? benchResult.ttft_ms.toFixed(0) + ' ms' : '—'"></div>
+        </div>
+        <div class="admin-card text-center">
+          <div class="text-xs text-gray-500 mb-1">Throughput</div>
+          <div class="text-xl font-bold" x-text="benchResult ? benchResult.tokens_per_sec.toFixed(1) + ' tok/s' : '—'"></div>
+        </div>
+        <div class="admin-card text-center">
+          <div class="text-xs text-gray-500 mb-1">Total Time</div>
+          <div class="text-xl font-bold" x-text="benchResult ? (benchResult.total_ms / 1000).toFixed(1) + ' s' : '—'"></div>
+        </div>
+        <div class="admin-card text-center">
+          <div class="text-xs text-gray-500 mb-1">Generated</div>
+          <div class="text-xl font-bold" x-text="benchResult ? benchResult.generated_tokens + ' tok' : '—'"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Chat Page -->

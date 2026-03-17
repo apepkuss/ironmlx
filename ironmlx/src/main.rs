@@ -10,7 +10,10 @@ mod state;
 
 use std::sync::Arc;
 
+use std::sync::RwLock;
+
 use clap::Parser;
+use config::ServerConfig;
 use engine_pool::EnginePool;
 use state::AppState;
 
@@ -52,6 +55,10 @@ async fn main() {
     );
     let _ = guard; // guard lives for duration of process via set_memory_limit
 
+    // Load config with CLI overrides
+    let server_config = ServerConfig::load(&args.model, &args.host, args.port);
+    let config = Arc::new(RwLock::new(server_config));
+
     println!("Loading model from: {}", args.model);
 
     // Create pool and load initial model
@@ -64,7 +71,15 @@ async fn main() {
     let state = Arc::new(AppState {
         pool,
         started_at: chrono::Utc::now().timestamp(),
+        config,
+        log_buffer: state::LogBuffer::new(100),
     });
+
+    // Log startup event
+    state.log_buffer.push(
+        "info",
+        &format!("Server started, model loaded: {}", model_id),
+    );
 
     println!("Listening on {}:{}", args.host, args.port);
 

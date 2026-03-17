@@ -244,6 +244,15 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    state.log_buffer.push(
+        "info",
+        &format!(
+            "Chat request: model={}, stream={}, max_tokens={}",
+            req.model.as_deref().unwrap_or("default"),
+            req.stream,
+            req.max_tokens
+        ),
+    );
     if req.stream {
         chat_completions_stream(state, req).await
     } else {
@@ -845,10 +854,18 @@ pub async fn load_model_endpoint(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoadModelRequest>,
 ) -> Result<Json<ModelInfo>, (StatusCode, Json<ErrorResponse>)> {
-    let model_id = state
-        .pool
-        .load_model(&req.model_dir)
-        .map_err(|e| internal_error(&e))?;
+    state
+        .log_buffer
+        .push("info", &format!("Loading model: {}", req.model_dir));
+    let model_id = state.pool.load_model(&req.model_dir).map_err(|e| {
+        state
+            .log_buffer
+            .push("error", &format!("Model load failed: {}", e));
+        internal_error(&e)
+    })?;
+    state
+        .log_buffer
+        .push("info", &format!("Model loaded: {}", model_id));
 
     Ok(Json(ModelInfo {
         id: model_id,
@@ -863,10 +880,15 @@ pub async fn unload_model_endpoint(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UnloadModelRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    state.pool.unload_model(&req.model).map_err(|e| {
+        state
+            .log_buffer
+            .push("error", &format!("Model unload failed: {}", e));
+        internal_error(&e)
+    })?;
     state
-        .pool
-        .unload_model(&req.model)
-        .map_err(|e| internal_error(&e))?;
+        .log_buffer
+        .push("info", &format!("Model unloaded: {}", req.model));
 
     Ok(Json(serde_json::json!({
         "status": "ok",

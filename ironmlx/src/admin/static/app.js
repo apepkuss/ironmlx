@@ -25,6 +25,26 @@ function app() {
     loadModelMsg: '',
     loadModelError: false,
 
+    // Settings page data
+    settings: {
+      host: '', port: 0, memory_limit_gb: 0, cache_max_size_gb: 0,
+      max_num_seqs: 256, temperature: 1.0, top_p: 1.0,
+      api_key: '', api_key_set: false, log_level: 'info',
+    },
+    settingsMsg: '',
+    settingsError: false,
+
+    // Logs page data
+    logs: [],
+    logLevel: 'all',
+
+    // Benchmark page data
+    benchModel: '',
+    benchPrompt: 'Explain the theory of relativity in simple terms.',
+    benchTokens: 50,
+    benchRunning: false,
+    benchResult: null,
+
     // Chat page data
     chatMessages: [],
     chatInput: '',
@@ -39,8 +59,20 @@ function app() {
       setInterval(() => this.pollHealth(), 5000);
       setInterval(() => this.pollModels(), 10000);
       setInterval(() => this.updateUptime(), 1000);
-      // Set default chat model after first health poll
-      setTimeout(() => { if (this.health.model) this.chatModel = this.health.model; }, 2000);
+      // Set default chat/bench model after first health poll
+      setTimeout(() => {
+        if (this.health.model) {
+          this.chatModel = this.health.model;
+          this.benchModel = this.health.model;
+        }
+      }, 2000);
+      // Poll logs every 3 seconds
+      this.pollLogs();
+      setInterval(() => this.pollLogs(), 3000);
+      // Fetch settings when switching to settings page
+      this.$watch('currentPage', (page) => {
+        if (page === 'settings') this.fetchSettings();
+      });
     },
 
     // Utility: fetch with optional auth header
@@ -131,6 +163,89 @@ function app() {
         await this.apiFetch('/v1/models/default', { method: 'POST', body: { model: modelId } });
         this.pollHealth();
       } catch (e) { console.error('Set default failed:', e); }
+    },
+
+    // -- Settings --
+
+    async fetchSettings() {
+      try {
+        const resp = await this.apiFetch('/admin/api/settings');
+        const data = await resp.json();
+        this.settings = { ...data, api_key: '' };
+      } catch (e) { console.error('Settings fetch failed:', e); }
+    },
+
+    async saveSettings() {
+      this.settingsMsg = '';
+      this.settingsError = false;
+      try {
+        const body = {
+          memory_limit_gb: this.settings.memory_limit_gb,
+          cache_max_size_gb: this.settings.cache_max_size_gb,
+          max_num_seqs: this.settings.max_num_seqs,
+          temperature: this.settings.temperature,
+          top_p: this.settings.top_p,
+          log_level: this.settings.log_level,
+        };
+        // Only send api_key if the user typed something
+        if (this.settings.api_key !== '') {
+          body.api_key = this.settings.api_key;
+        }
+        const resp = await this.apiFetch('/admin/api/settings', {
+          method: 'POST', body: body,
+        });
+        if (resp.ok) {
+          this.settingsMsg = 'Settings saved';
+          // If api_key was changed, store it in sessionStorage
+          if (this.settings.api_key) {
+            sessionStorage.setItem('ironmlx_api_key', this.settings.api_key);
+          }
+          this.fetchSettings();
+        } else {
+          this.settingsMsg = 'Save failed';
+          this.settingsError = true;
+        }
+      } catch (e) {
+        this.settingsMsg = 'Save failed: ' + e.message;
+        this.settingsError = true;
+      }
+    },
+
+    // -- Logs --
+
+    get filteredLogs() {
+      if (this.logLevel === 'all') return this.logs;
+      return this.logs.filter(l => l.level === this.logLevel);
+    },
+
+    async pollLogs() {
+      try {
+        const resp = await this.apiFetch('/admin/api/logs');
+        this.logs = await resp.json();
+      } catch(e) {}
+    },
+
+    clearLogs() { this.logs = []; },
+
+    // -- Benchmark --
+
+    async runBenchmark() {
+      this.benchRunning = true;
+      this.benchResult = null;
+      try {
+        const resp = await this.apiFetch('/admin/api/benchmark', {
+          method: 'POST',
+          body: {
+            model: this.benchModel || undefined,
+            prompt: this.benchPrompt,
+            max_tokens: this.benchTokens,
+          },
+        });
+        if (resp.ok) {
+          this.benchResult = await resp.json();
+        }
+      } catch(e) { console.error('Benchmark failed:', e); }
+      this.benchRunning = false;
     },
 
     // -- Chat --

@@ -1,8 +1,10 @@
+mod api;
+
 use std::sync::Arc;
 
 use axum::Router;
 use axum::response::Html;
-use axum::routing::get;
+use axum::routing::{get, post};
 
 use crate::state::AppState;
 
@@ -17,6 +19,13 @@ pub fn router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin", get(admin_index))
         .route("/admin/static/app.js", get(serve_app_js))
         .route("/admin/static/style.css", get(serve_style_css))
+        .route(
+            "/admin/api/settings",
+            get(api::get_settings).post(api::update_settings),
+        )
+        .route("/admin/api/auth", post(api::auth))
+        .route("/admin/api/logs", get(api::get_logs))
+        .route("/admin/api/benchmark", post(api::run_benchmark))
 }
 
 async fn admin_index() -> Html<&'static str> {
