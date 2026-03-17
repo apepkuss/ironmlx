@@ -43,7 +43,14 @@ impl VisionEncoder for Qwen35VisionEncoder {
         };
 
         // 1. Patch embedding: pixel_values → [B, num_patches, hidden_size]
-        let mut h = self.patch_embed.forward(&pixel_values, stream)?;
+        //    where B = num_frames / temporal_patch_size
+        let h = self.patch_embed.forward(&pixel_values, stream)?;
+
+        // Flatten batch into sequence: [B, num_patches, hidden] → [1, B*num_patches, hidden]
+        let h_shape = h.shape();
+        let total_patches = h_shape[0] * h_shape[1];
+        let hidden = h_shape[2];
+        let mut h = ops::reshape(&h, &[1, total_patches, hidden], stream)?;
 
         // 2. Add position embeddings via gather
         let pos = self.compute_position_embeddings(grid_thw, stream)?;
@@ -55,7 +62,17 @@ impl VisionEncoder for Qwen35VisionEncoder {
         }
 
         // 4. Spatial merger: 2x2 patch merge + projection to LM hidden dim
-        self.merger.forward(&h, grid_thw, stream)
+        //    grid_thw must be adjusted for temporal folding:
+        //    merge treats the sequence as (T_folded * H) × W spatial grid
+        let tp = self.patch_embed.temporal_patch_size;
+        let folded_grid: Vec<(usize, usize, usize)> = grid_thw
+            .iter()
+            .map(|&(t, h, w)| {
+                let t_folded = t.div_ceil(tp);
+                (1, t_folded * h, w) // flatten temporal into height
+            })
+            .collect();
+        self.merger.forward(&h, &folded_grid, stream)
     }
 
     fn output_dim(&self) -> usize {
@@ -73,10 +90,14 @@ impl Qwen35VisionEncoder {
         grid_thw: &[(usize, usize, usize)],
         stream: &Stream,
     ) -> Result<Array> {
-        // Build sequential indices for all patches across the batch
+        // Build sequential indices for all patches across the batch.
+        // Note: temporal_patch_size folds T frames into T/tp groups,
+        // so actual patch count = (T/tp) * H * W per image/video.
+        let tp = self.patch_embed.temporal_patch_size;
         let mut total_patches: usize = 0;
         for &(t, h, w) in grid_thw {
-            total_patches += t * h * w;
+            let t_folded = t.div_ceil(tp); // ceil division
+            total_patches += t_folded * h * w;
         }
 
         // arange(0, total_patches) as i32 indices

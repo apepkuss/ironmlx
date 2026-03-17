@@ -203,6 +203,16 @@ fn main() {
             println!("\n⚠ --vlm requires an image path argument");
         }
     }
+
+    // Video test: if --video flag and a video path are provided
+    if let Some(video_pos) = args.iter().position(|a| a == "--video") {
+        if let Some(video_path) = args.get(video_pos + 1) {
+            println!("\n========== Video Test ==========\n");
+            run_video_test(&model, &tokenizer, &chat_template, video_path, eos_token_id);
+        } else {
+            println!("\n⚠ --video requires a video path argument");
+        }
+    }
 }
 
 fn run_vlm_test(
@@ -319,4 +329,118 @@ fn run_vlm_test(
         tokens_per_sec
     );
     println!("\n✅ VLM verification passed!");
+}
+
+fn run_video_test(
+    model: &ironmlx_core::model::Model,
+    tokenizer: &Tokenizer,
+    chat_template: &Option<ChatTemplate>,
+    video_path: &str,
+    eos_token_id: i32,
+) {
+    println!("[Video 1/4] Extracting frames: {}", video_path);
+
+    let patch_size = 16;
+    let spatial_merge_size = 2;
+    let max_frames = 4;
+
+    let (pixel_values, num_frames) = ironmlx_core::media::video::process_video(
+        video_path,
+        max_frames,
+        patch_size,
+        spatial_merge_size,
+    )
+    .expect("failed to process video");
+    println!(
+        "  Extracted {} frames → pixel_values {:?}",
+        num_frames,
+        pixel_values.shape()
+    );
+
+    // Compute grid_thw for video: (T, H_patches, W_patches)
+    let pv_shape = pixel_values.shape();
+    let h = pv_shape[2] as usize;
+    let w = pv_shape[3] as usize;
+    let patches_h = h / patch_size;
+    let patches_w = w / patch_size;
+    let grid_thw = vec![(num_frames, patches_h, patches_w)];
+    println!("  Grid (T,H,W): {:?}", grid_thw[0]);
+
+    // Vision tokens after temporal folding + spatial merge
+    let temporal_patch_size = 2; // Qwen3.5
+    let t_folded = (num_frames + temporal_patch_size - 1) / temporal_patch_size;
+    let num_vision_tokens =
+        (t_folded * patches_h / spatial_merge_size) * (patches_w / spatial_merge_size);
+    println!("  Vision tokens after merge: {}", num_vision_tokens);
+
+    // Build prompt with video placeholders
+    println!("[Video 2/4] Building multimodal prompt...");
+    let video_placeholder = "<|image_pad|>".repeat(num_vision_tokens);
+    let user_content = format!(
+        "<|vision_start|>{}<|vision_end|>\nWhat do you see in this video?",
+        video_placeholder
+    );
+
+    let prompt = if let Some(ct) = chat_template {
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user(&user_content),
+        ];
+        ct.apply(&messages, true)
+            .expect("failed to apply chat template")
+    } else {
+        user_content.clone()
+    };
+
+    let tokens = tokenizer.encode(&prompt).expect("failed to encode");
+    println!("  Prompt tokens: {}", tokens.len());
+
+    let image_token_count = tokens.iter().filter(|&&t| t == 248056).count();
+    println!("  Video tokens in prompt: {}", image_token_count);
+
+    let media = vec![ProcessedMedia {
+        pixel_values,
+        grid_thw,
+    }];
+
+    println!("[Video 3/4] Generating with video...\n");
+    let sampler = SamplerConfig::greedy();
+    let max_tokens = 100;
+    let mut generated_tokens = Vec::new();
+    let t1 = Instant::now();
+
+    let reason = stream_generate_vlm(
+        model,
+        &tokens,
+        Some(&media),
+        max_tokens,
+        &sampler,
+        eos_token_id,
+        |token| {
+            generated_tokens.push(token);
+            if let Ok(text) = tokenizer.decode_single(token) {
+                print!("{}", text);
+            }
+            true
+        },
+    )
+    .expect("Video generation failed");
+
+    let gen_time = t1.elapsed();
+    println!("\n");
+
+    let full_text = tokenizer.decode(&generated_tokens).unwrap_or_default();
+    let num_tokens = generated_tokens.len();
+    let tokens_per_sec = num_tokens as f64 / gen_time.as_secs_f64();
+
+    println!("[Video 4/4] Results:");
+    println!("  Stop reason: {:?}", reason);
+    println!("  Generated: {} tokens", num_tokens);
+    println!("  Full text: \"{}\"", full_text);
+    println!(
+        "  Time: {:.2}s ({:.1} tokens/sec)",
+        gen_time.as_secs_f64(),
+        tokens_per_sec
+    );
+    println!("\n✅ Video verification passed!");
 }
