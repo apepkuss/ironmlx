@@ -4,6 +4,7 @@ use crate::array::Array;
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::media::ProcessedMedia;
+use crate::nn::mrope;
 use crate::nn::vision::VisionEncoder;
 use crate::nn::vision::qwen35_vision::{Qwen35VisionEncoder, build_vision_encoder};
 use crate::ops;
@@ -82,9 +83,20 @@ impl Qwen35VLModel {
                     &stream,
                 )?;
 
-                // 4. Forward with merged embeddings
+                // 4. Compute M-RoPE position IDs
+                tokens.eval()?;
+                let token_vec = tokens.to_vec_i32()?;
+                let pos_ids = mrope::compute_mrope_position_ids(
+                    &token_vec,
+                    &pm.grid_thw,
+                    self.image_token_id,
+                    self.video_token_id,
+                );
+                let pos_arr = mrope::position_ids_to_array(&pos_ids, &stream)?;
+
+                // 5. Forward with merged embeddings + M-RoPE position IDs
                 self.text_model
-                    .forward_with_embeddings(&merged, cache, None)
+                    .forward_with_embeddings(&merged, cache, Some(&pos_arr))
             } else {
                 self.text_model.forward(tokens, cache, "causal", None)
             }
