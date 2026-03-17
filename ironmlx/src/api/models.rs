@@ -131,6 +131,113 @@ impl ThinkingState {
     }
 }
 
+// ── Tool Calling ────────────────────────────────────────────────────────────
+
+/// Parse tool calls from model-generated text.
+/// Supports Qwen-style `<tool_call>...</tool_call>` format.
+/// Returns (remaining_content, tool_calls) if tool calls found.
+fn parse_tool_calls_from_text(text: &str) -> (String, Option<Vec<ToolCall>>) {
+    let mut tool_calls = Vec::new();
+    let mut remaining = text.to_string();
+
+    // Try Qwen-style <tool_call> tags
+    let mut search_text = text;
+    while let Some(start) = search_text.find("<tool_call>") {
+        if let Some(end) = search_text[start..].find("</tool_call>") {
+            let end_abs = start + end;
+            let json_str = search_text[start + "<tool_call>".len()..end_abs].trim();
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str)
+                && let (Some(name), Some(args)) = (
+                    parsed.get("name").and_then(|n| n.as_str()),
+                    parsed.get("arguments"),
+                )
+            {
+                let uuid_str = uuid::Uuid::new_v4().to_string().replace('-', "");
+                tool_calls.push(ToolCall {
+                    id: format!("call_{}", &uuid_str[..24]),
+                    r#type: "function".to_string(),
+                    function: FunctionCall {
+                        name: name.to_string(),
+                        arguments: args.to_string(),
+                    },
+                });
+            }
+            search_text = &search_text[end_abs + "</tool_call>".len()..];
+        } else {
+            break;
+        }
+    }
+
+    if !tool_calls.is_empty() {
+        // Strip <tool_call>...</tool_call> blocks from remaining content
+        while let Some(start) = remaining.find("<tool_call>") {
+            if let Some(end) = remaining[start..].find("</tool_call>") {
+                let end_abs = start + end + "</tool_call>".len();
+                remaining = format!("{}{}", &remaining[..start], &remaining[end_abs..]);
+            } else {
+                break;
+            }
+        }
+        remaining = remaining.trim().to_string();
+        return (remaining, Some(tool_calls));
+    }
+
+    (remaining, None)
+}
+
+/// Inject tool definitions into the message list as system instructions.
+fn inject_tools_into_messages(
+    messages: &[ChatMessage],
+    tools: &Option<Vec<ToolDefinition>>,
+) -> Vec<ChatMessage> {
+    let Some(tools) = tools else {
+        return messages.to_vec();
+    };
+    if tools.is_empty() {
+        return messages.to_vec();
+    }
+
+    let tools_json = serde_json::to_string_pretty(tools).unwrap_or_default();
+    let tools_instruction = format!(
+        "You have access to the following tools:\n{}\n\n\
+         To call a tool, respond with a <tool_call> tag containing a JSON object with \"name\" and \"arguments\" keys.\n\
+         Example: <tool_call>\n{{\"name\": \"function_name\", \"arguments\": {{\"param\": \"value\"}}}}\n</tool_call>",
+        tools_json
+    );
+
+    let mut new_messages = Vec::with_capacity(messages.len() + 1);
+    let mut has_system = false;
+    for msg in messages {
+        if msg.role == "system" && !has_system {
+            has_system = true;
+            let original_text = msg.content.as_text();
+            new_messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: MessageContent::Text(format!(
+                    "{}\n\n{}",
+                    original_text, tools_instruction
+                )),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        } else {
+            new_messages.push(msg.clone());
+        }
+    }
+    if !has_system {
+        new_messages.insert(
+            0,
+            ChatMessage {
+                role: "system".to_string(),
+                content: MessageContent::Text(tools_instruction),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+    }
+    new_messages
+}
+
 /// POST /v1/chat/completions — supports both regular and streaming responses
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
@@ -150,7 +257,8 @@ async fn chat_completions_sync(
     req: ChatCompletionRequest,
 ) -> Result<Json<ChatCompletionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let media = extract_and_process_media(&state, &req.messages)?;
-    let prompt = build_chat_prompt(&state, &req.messages)?;
+    let messages = inject_tools_into_messages(&req.messages, &req.tools);
+    let prompt = build_chat_prompt(&state, &messages)?;
     let prompt_tokens = encode_or_error(&state, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = build_sampler(&req);
@@ -185,6 +293,19 @@ async fn chat_completions_sync(
 
     let (content, reasoning_content) = split_thinking(&generated_text);
 
+    // Check for tool calls if tools were provided
+    let (final_content, tool_calls) = if req.tools.is_some() {
+        parse_tool_calls_from_text(&content)
+    } else {
+        (content, None)
+    };
+
+    let finish_reason = if tool_calls.is_some() {
+        "tool_calls".to_string()
+    } else {
+        finish_reason
+    };
+
     Ok(Json(ChatCompletionResponse {
         id: request_id,
         object: "chat.completion".to_string(),
@@ -194,8 +315,9 @@ async fn chat_completions_sync(
             index: 0,
             message: AssistantMessage {
                 role: "assistant".to_string(),
-                content,
+                content: final_content,
                 reasoning_content,
+                tool_calls,
             },
             finish_reason,
         }],
@@ -212,7 +334,8 @@ async fn chat_completions_stream(
     req: ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let media = extract_and_process_media(&state, &req.messages)?;
-    let prompt = build_chat_prompt(&state, &req.messages)?;
+    let messages = inject_tools_into_messages(&req.messages, &req.tools);
+    let prompt = build_chat_prompt(&state, &messages)?;
     let prompt_tokens = encode_or_error(&state, &prompt)?;
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
@@ -250,6 +373,7 @@ async fn chat_completions_stream(
                     role: Some("assistant".to_string()),
                     content: None,
                     reasoning_content: None,
+                    tool_calls: None,
                 },
                 finish_reason: None,
             }],
@@ -276,6 +400,7 @@ async fn chat_completions_stream(
                             role: None,
                             content: None,
                             reasoning_content: None,
+                            tool_calls: None,
                         },
                         finish_reason: Some(reason.clone()),
                     }],
@@ -302,6 +427,7 @@ async fn chat_completions_stream(
                         role: None,
                         content,
                         reasoning_content,
+                        tool_calls: None,
                     },
                     finish_reason: None,
                 }],

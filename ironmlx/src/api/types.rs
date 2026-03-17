@@ -15,6 +15,11 @@ pub struct ChatCompletionRequest {
     pub top_p: f32,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub tools: Option<Vec<ToolDefinition>>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 /// Multimodal content: either a plain text string or a list of content parts.
@@ -77,6 +82,12 @@ pub struct VideoUrlContent {
 pub struct ChatMessage {
     pub role: String,
     pub content: MessageContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +113,8 @@ pub struct AssistantMessage {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 // -- Completions -------------------------------------------------------------
@@ -205,7 +218,60 @@ pub struct ChatDelta {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
+
+// -- Tool Calling ------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolDefinition {
+    pub r#type: String,
+    pub function: FunctionDefinition,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FunctionDefinition {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub r#type: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionCallDelta>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FunctionCallDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+// -- Defaults ----------------------------------------------------------------
 
 fn default_max_tokens() -> usize {
     256
