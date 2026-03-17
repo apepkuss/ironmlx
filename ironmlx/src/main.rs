@@ -56,10 +56,27 @@ async fn main() {
     // Clone tokenizer for engine (engine needs its own copy for decode)
     let engine_tokenizer = tokenizer.clone();
 
+    // Create CacheManager for prefix caching (SSD-backed)
+    let num_layers = model.num_layers();
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("ironmlx")
+        .join("kv_cache");
+    let model_hash = model_id.replace('/', "_");
+    let ssd_config = ironmlx_core::cache::SSDStoreConfig {
+        cache_dir: cache_dir.clone(),
+        max_size_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
+        model_hash,
+    };
+    let ssd_store =
+        ironmlx_core::cache::SSDStore::new(ssd_config).expect("failed to create SSD cache store");
+    let cache_manager = ironmlx_core::cache::CacheManager::new(ssd_store, num_layers);
+    println!("  KV cache dir: {}", cache_dir.display());
+
     // Spawn engine on a dedicated OS thread.
     // SAFETY: MLX C handles are reference-counted. EngineCore runs sequentially
     // on a single thread — no concurrent access to model state.
-    let mut engine = EngineCore::new(cmd_rx, model, engine_tokenizer);
+    let mut engine = EngineCore::with_cache_manager(cmd_rx, model, engine_tokenizer, cache_manager);
     std::thread::spawn(move || {
         engine.run();
     });

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use tokio::sync::mpsc;
 
+use ironmlx_core::cache::CacheManager;
 use ironmlx_core::generate::{BatchGenerator, FinishReason, SamplerConfig, SeqUid, Tokenizer};
 use ironmlx_core::media::ProcessedMedia;
 use ironmlx_core::model::Model;
@@ -61,20 +62,41 @@ pub struct EngineCore {
     cmd_rx: mpsc::Receiver<EngineCommand>,
     model: Model,
     tokenizer: Tokenizer,
+    cache_manager: Option<CacheManager>,
 }
 
 impl EngineCore {
+    #[allow(dead_code)]
     pub fn new(cmd_rx: mpsc::Receiver<EngineCommand>, model: Model, tokenizer: Tokenizer) -> Self {
         Self {
             cmd_rx,
             model,
             tokenizer,
+            cache_manager: None,
+        }
+    }
+
+    pub fn with_cache_manager(
+        cmd_rx: mpsc::Receiver<EngineCommand>,
+        model: Model,
+        tokenizer: Tokenizer,
+        cache_manager: CacheManager,
+    ) -> Self {
+        Self {
+            cmd_rx,
+            model,
+            tokenizer,
+            cache_manager: Some(cache_manager),
         }
     }
 
     /// Blocking run loop — call from a dedicated thread.
     pub fn run(&mut self) {
-        let mut batch = BatchGenerator::new(&self.model);
+        let mut batch = if let Some(cm) = self.cache_manager.take() {
+            BatchGenerator::with_cache_manager(&self.model, cm)
+        } else {
+            BatchGenerator::new(&self.model)
+        };
         let mut waiting: VecDeque<PendingRequest> = VecDeque::new();
         let mut running: HashMap<SeqUid, RunningRequest> = HashMap::new();
         let mut pending_aborts: HashSet<String> = HashSet::new();

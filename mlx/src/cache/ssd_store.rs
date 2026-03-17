@@ -54,6 +54,8 @@ pub struct SSDStore {
     current_size_bytes: u64,
     /// Channel to the background writer thread.
     write_tx: Option<mpsc::Sender<WriteJob>>,
+    /// Handle to the background writer thread for graceful shutdown.
+    writer_handle: Option<std::thread::JoinHandle<()>>,
     /// Pending writes that haven't been confirmed yet.
     pending_writes: HashMap<BlockId, PendingWrite>,
 }
@@ -74,9 +76,12 @@ impl SSDStore {
 
         // Spawn background writer thread
         let (tx, rx) = mpsc::channel::<WriteJob>();
-        std::thread::spawn(move || {
-            writer_thread(rx);
-        });
+        let handle = std::thread::Builder::new()
+            .name("ssd-cache-writer".into())
+            .spawn(move || {
+                writer_thread(rx);
+            })
+            .map_err(|e| Error::Mlx(format!("failed to spawn writer thread: {e}")))?;
 
         Ok(Self {
             config,
@@ -84,6 +89,7 @@ impl SSDStore {
             lru_order: VecDeque::new(),
             current_size_bytes: 0,
             write_tx: Some(tx),
+            writer_handle: Some(handle),
             pending_writes: HashMap::new(),
         })
     }
@@ -334,10 +340,9 @@ impl SSDStore {
 mod tests {
     use super::*;
 
-    fn test_config() -> SSDStoreConfig {
-        let dir = std::env::temp_dir().join(format!("ironmlx_test_{}", std::process::id()));
+    fn test_config(tmp_dir: &std::path::Path) -> SSDStoreConfig {
         SSDStoreConfig {
-            cache_dir: dir,
+            cache_dir: tmp_dir.to_path_buf(),
             max_size_bytes: 1024 * 1024, // 1MB for testing
             model_hash: "test_model".to_string(),
         }
@@ -345,33 +350,32 @@ mod tests {
 
     fn dummy_kv(num_layers: usize) -> Vec<(Array, Array)> {
         (0..num_layers)
-            .map(|_| {
-                let k = Array::from_slice_f32(&[1.0, 2.0, 3.0, 4.0]);
-                let v = Array::from_slice_f32(&[5.0, 6.0, 7.0, 8.0]);
+            .map(|i| {
+                let base = (i as f32) * 10.0;
+                let k = Array::from_slice_f32(&[base + 1.0, base + 2.0, base + 3.0, base + 4.0]);
+                let v = Array::from_slice_f32(&[base + 5.0, base + 6.0, base + 7.0, base + 8.0]);
                 (k, v)
             })
             .collect()
     }
 
-    fn cleanup(config: &SSDStoreConfig) {
-        let model_dir = config.cache_dir.join(&config.model_hash);
-        let _ = std::fs::remove_dir_all(&model_dir);
-        let _ = std::fs::remove_dir(&config.cache_dir);
+    /// Helper: wait for async write and flush pending entries.
+    fn wait_and_flush(store: &mut SSDStore) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        store.flush_pending().unwrap();
     }
 
     #[test]
     fn store_and_load_block() {
         crate::init();
-        let config = test_config();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_config(tmp.path());
         let mut store = SSDStore::new(config).unwrap();
         let stream = Stream::new(&Device::cpu());
 
         let kv = dummy_kv(2);
         store.store_block(0, &kv, &stream).unwrap();
-
-        // Wait for async write
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        store.flush_pending().unwrap();
+        wait_and_flush(&mut store);
 
         assert!(store.has_block(0));
 
@@ -381,20 +385,34 @@ mod tests {
         // Verify shape is preserved
         assert_eq!(loaded[0].0.shape(), &[4]);
         assert_eq!(loaded[0].1.shape(), &[4]);
+        assert_eq!(loaded[1].0.shape(), &[4]);
+        assert_eq!(loaded[1].1.shape(), &[4]);
+    }
 
-        cleanup(&store.config);
+    #[test]
+    fn store_block_has_block_immediately() {
+        crate::init();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let mut store = SSDStore::new(config).unwrap();
+        let stream = Stream::new(&Device::cpu());
+
+        store.store_block(99, &dummy_kv(1), &stream).unwrap();
+
+        // has_block should return true immediately (pending write)
+        assert!(store.has_block(99));
     }
 
     #[test]
     fn remove_block_deletes_file() {
         crate::init();
-        let config = test_config();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_config(tmp.path());
         let mut store = SSDStore::new(config).unwrap();
         let stream = Stream::new(&Device::cpu());
 
         store.store_block(1, &dummy_kv(1), &stream).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        store.flush_pending().unwrap();
+        wait_and_flush(&mut store);
 
         let file_path = store.model_dir().join("1.safetensors");
         assert!(file_path.exists());
@@ -402,64 +420,171 @@ mod tests {
         store.remove_block(1).unwrap();
         assert!(!file_path.exists());
         assert!(!store.has_block(1));
-
-        cleanup(&store.config);
     }
 
     #[test]
     fn eviction_under_limit() {
         crate::init();
-        let mut config = test_config();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = test_config(tmp.path());
         config.max_size_bytes = 1; // 1 byte — force eviction
         let mut store = SSDStore::new(config).unwrap();
         let stream = Stream::new(&Device::cpu());
 
         store.store_block(10, &dummy_kv(1), &stream).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        store.flush_pending().unwrap();
+        wait_and_flush(&mut store);
 
         // Should have been evicted since limit is 1 byte
         assert_eq!(store.entries.len(), 0);
         assert_eq!(store.current_size_bytes, 0);
+    }
 
-        cleanup(&store.config);
+    #[test]
+    fn eviction_lru_order() {
+        crate::init();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let mut store = SSDStore::new(config).unwrap();
+        let stream = Stream::new(&Device::cpu());
+
+        // Store 3 blocks
+        for id in 0..3 {
+            store.store_block(id, &dummy_kv(1), &stream).unwrap();
+            wait_and_flush(&mut store);
+        }
+
+        // All 3 should be present
+        assert!(store.has_block(0));
+        assert!(store.has_block(1));
+        assert!(store.has_block(2));
+
+        // Touch block 0 by loading it (moves to back of LRU)
+        let _ = store.load_block(0, &stream).unwrap();
+
+        // Now shrink the limit to force eviction of oldest untouched blocks
+        // Block 1 is the LRU victim (block 0 was touched, block 2 is newest)
+        store.config.max_size_bytes = 1;
+        store.evict_until_under_limit().unwrap();
+
+        // All should be evicted (limit is 1 byte), but LRU order was: 1, 2, 0
+        assert_eq!(store.entries.len(), 0);
     }
 
     #[test]
     fn recover_index_on_startup() {
         crate::init();
-        let config = test_config();
+        let tmp = tempfile::TempDir::new().unwrap();
         let stream = Stream::new(&Device::cpu());
 
-        // Write a block with the first store
+        // Write blocks with the first store
         {
-            let mut store1 = SSDStore::new(SSDStoreConfig {
-                cache_dir: config.cache_dir.clone(),
-                max_size_bytes: config.max_size_bytes,
-                model_hash: config.model_hash.clone(),
-            })
-            .unwrap();
+            let config = test_config(tmp.path());
+            let mut store1 = SSDStore::new(config).unwrap();
             store1.store_block(42, &dummy_kv(2), &stream).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            store1.flush_pending().unwrap();
+            store1.store_block(43, &dummy_kv(3), &stream).unwrap();
+            wait_and_flush(&mut store1);
         }
 
         // Create a new store and recover
-        let mut store2 = SSDStore::new(SSDStoreConfig {
-            cache_dir: config.cache_dir.clone(),
-            max_size_bytes: config.max_size_bytes,
-            model_hash: config.model_hash.clone(),
-        })
-        .unwrap();
+        let config2 = test_config(tmp.path());
+        let mut store2 = SSDStore::new(config2).unwrap();
         let count = store2.recover_index().unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
         assert!(store2.has_block(42));
+        assert!(store2.has_block(43));
 
-        // Load and verify
-        let loaded = store2.load_block(42, &stream).unwrap();
-        assert_eq!(loaded.len(), 2);
+        // Load and verify layer counts
+        let loaded42 = store2.load_block(42, &stream).unwrap();
+        assert_eq!(loaded42.len(), 2);
 
-        cleanup(&config);
+        let loaded43 = store2.load_block(43, &stream).unwrap();
+        assert_eq!(loaded43.len(), 3);
+    }
+
+    #[test]
+    fn recover_index_empty_dir() {
+        crate::init();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let mut store = SSDStore::new(config).unwrap();
+
+        let count = store.recover_index().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn overwrite_existing_block() {
+        crate::init();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let mut store = SSDStore::new(config).unwrap();
+        let stream = Stream::new(&Device::cpu());
+
+        // Store block with 2 layers
+        store.store_block(5, &dummy_kv(2), &stream).unwrap();
+        wait_and_flush(&mut store);
+
+        // Overwrite with 1 layer
+        store.store_block(5, &dummy_kv(1), &stream).unwrap();
+        wait_and_flush(&mut store);
+
+        let loaded = store.load_block(5, &stream).unwrap();
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn drop_flushes_writer_thread() {
+        crate::init();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let model_dir = tmp.path().join("test_model");
+
+        {
+            let config = test_config(tmp.path());
+            let mut store = SSDStore::new(config).unwrap();
+            let stream = Stream::new(&Device::cpu());
+            store.store_block(77, &dummy_kv(1), &stream).unwrap();
+            // Drop without explicit flush — Drop should join the writer thread
+        }
+
+        // The file should have been written because Drop joined the thread
+        let file_path = model_dir.join("77.safetensors");
+        assert!(file_path.exists(), "Drop should flush pending writes");
+    }
+
+    #[test]
+    fn multiple_blocks_current_size_tracking() {
+        crate::init();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let mut store = SSDStore::new(config).unwrap();
+        let stream = Stream::new(&Device::cpu());
+
+        assert_eq!(store.current_size(), 0);
+
+        store.store_block(1, &dummy_kv(1), &stream).unwrap();
+        wait_and_flush(&mut store);
+        let size_after_one = store.current_size();
+        assert!(size_after_one > 0);
+
+        store.store_block(2, &dummy_kv(1), &stream).unwrap();
+        wait_and_flush(&mut store);
+        let size_after_two = store.current_size();
+        assert!(size_after_two > size_after_one);
+
+        store.remove_block(1).unwrap();
+        let size_after_remove = store.current_size();
+        assert_eq!(size_after_remove, size_after_two - size_after_one);
+    }
+}
+
+impl Drop for SSDStore {
+    fn drop(&mut self) {
+        // Drop the sender to signal the writer thread to exit.
+        self.write_tx.take();
+        // Wait for the writer thread to finish processing all pending jobs.
+        if let Some(handle) = self.writer_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
