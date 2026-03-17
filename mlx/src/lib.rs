@@ -8,6 +8,7 @@ pub mod fast;
 pub mod fast_kernel;
 pub mod generate;
 pub mod io;
+pub mod media;
 pub mod memory;
 pub mod metal;
 pub mod model;

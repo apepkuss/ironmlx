@@ -17,10 +17,66 @@ pub struct ChatCompletionRequest {
     pub stream: bool,
 }
 
+/// Multimodal content: either a plain text string or a list of content parts.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Plain text content (backward compatible)
+    Text(String),
+    /// Multimodal content parts (text + images/videos)
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract text content for backward compatibility.
+    /// For plain text, returns the string directly.
+    /// For parts, concatenates all text parts.
+    pub fn as_text(&self) -> String {
+        match self {
+            MessageContent::Text(s) => s.clone(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+/// A single content part in a multimodal message.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// Text content
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image via URL or base64
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrlContent },
+    /// Video via URL or path
+    #[serde(rename = "video_url")]
+    VideoUrl { video_url: VideoUrlContent },
+}
+
+/// Image URL content (supports URL or base64 data URI).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ImageUrlContent {
+    pub url: String,
+}
+
+/// Video URL content.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct VideoUrlContent {
+    pub url: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: MessageContent,
 }
 
 #[derive(Debug, Serialize)]

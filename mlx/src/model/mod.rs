@@ -3,14 +3,17 @@ mod llama;
 mod loader;
 mod qwen3;
 mod qwen35;
+mod qwen35_vl;
 
-pub use config::{ModelConfig, Qwen35Config};
+pub use config::{ModelConfig, Qwen35Config, VisionConfig};
 pub use llama::{LlamaModel, TransformerBlock};
 pub use loader::load_model_weights;
 pub use qwen35::Qwen35Model;
+pub use qwen35_vl::Qwen35VLModel;
 
 use crate::array::Array;
 use crate::error::Result;
+use crate::media::ProcessedMedia;
 use std::collections::HashMap;
 
 /// Unified model type that can hold any supported architecture.
@@ -19,6 +22,8 @@ pub enum Model {
     Standard(LlamaModel),
     /// Qwen3.5 with mixed GatedDeltaNet + FullAttention layers.
     Qwen35(Qwen35Model),
+    /// Qwen3.5 VLM with vision encoder.
+    Qwen35VL(Qwen35VLModel),
 }
 
 impl Model {
@@ -27,6 +32,7 @@ impl Model {
         match self {
             Model::Standard(m) => m.layers.len(),
             Model::Qwen35(m) => m.num_layers(),
+            Model::Qwen35VL(m) => m.num_layers(),
         }
     }
 
@@ -42,6 +48,21 @@ impl Model {
         match self {
             Model::Standard(m) => m.forward(tokens, cache, mask_mode, mask),
             Model::Qwen35(m) => m.forward(tokens, cache, mask_mode, mask),
+            Model::Qwen35VL(m) => m.forward(tokens, cache, mask_mode, mask),
+        }
+    }
+
+    /// VLM forward pass with optional media. Returns logits.
+    /// Falls back to text-only forward for non-VLM models.
+    pub fn forward_vlm(
+        &self,
+        tokens: &Array,
+        media: Option<&[ProcessedMedia]>,
+        cache: &mut [(Option<Array>, Option<Array>)],
+    ) -> Result<Array> {
+        match self {
+            Model::Qwen35VL(m) => m.forward_vlm(tokens, media, cache),
+            _ => self.forward(tokens, cache, "causal", None),
         }
     }
 }
@@ -79,8 +100,15 @@ pub fn build_model_from_file(config_path: &str, weights: &HashMap<String, Array>
 
     match model_type {
         "qwen3_5" => {
-            let model = qwen35::from_config_file(config_path, weights)?;
-            Ok(Model::Qwen35(model))
+            // Check if vision_config is present to decide VLM vs text-only
+            let has_vision = raw.get("vision_config").is_some();
+            if has_vision {
+                let model = qwen35_vl::from_config_file(config_path, weights)?;
+                Ok(Model::Qwen35VL(model))
+            } else {
+                let model = qwen35::from_config_file(config_path, weights)?;
+                Ok(Model::Qwen35(model))
+            }
         }
         _ => {
             let config: ModelConfig = serde_json::from_str(&content)

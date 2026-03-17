@@ -184,6 +184,42 @@ impl Qwen35TextConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct VisionConfig {
+    pub hidden_size: usize,
+    pub num_heads: usize,
+    pub depth: usize,
+    pub patch_size: usize,
+    #[serde(default = "default_temporal_patch_size")]
+    pub temporal_patch_size: usize,
+    #[serde(default = "default_spatial_merge_size")]
+    pub spatial_merge_size: usize,
+    #[serde(default = "default_in_channels")]
+    pub in_channels: usize,
+    pub intermediate_size: usize,
+    pub out_hidden_size: usize,
+    #[serde(default = "default_num_position_embeddings")]
+    pub num_position_embeddings: usize,
+    #[serde(default = "default_hidden_act")]
+    pub hidden_act: String,
+}
+
+fn default_temporal_patch_size() -> usize {
+    2
+}
+fn default_spatial_merge_size() -> usize {
+    2
+}
+fn default_in_channels() -> usize {
+    3
+}
+fn default_num_position_embeddings() -> usize {
+    2304
+}
+fn default_hidden_act() -> String {
+    "gelu_pytorch_tanh".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Qwen35Config {
     pub model_type: String,
@@ -192,6 +228,16 @@ pub struct Qwen35Config {
     pub tie_word_embeddings: bool,
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
+    #[serde(default)]
+    pub vision_config: Option<VisionConfig>,
+    #[serde(default)]
+    pub image_token_id: Option<i64>,
+    #[serde(default)]
+    pub video_token_id: Option<i64>,
+    #[serde(default)]
+    pub vision_start_token_id: Option<i64>,
+    #[serde(default)]
+    pub vision_end_token_id: Option<i64>,
 }
 
 impl Qwen35Config {

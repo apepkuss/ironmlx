@@ -393,7 +393,7 @@ fn build_chat_prompt(
             .iter()
             .map(|m| CoreChatMessage {
                 role: m.role.clone(),
-                content: m.content.clone(),
+                content: m.content.as_text(),
             })
             .collect();
         ct.apply(&core_messages, true)
@@ -402,7 +402,7 @@ fn build_chat_prompt(
         // Fallback: simple concatenation
         let mut prompt = String::new();
         for msg in messages {
-            prompt.push_str(&format!("{}: {}\n", msg.role, msg.content));
+            prompt.push_str(&format!("{}: {}\n", msg.role, msg.content.as_text()));
         }
         prompt.push_str("assistant: ");
         Ok(prompt)

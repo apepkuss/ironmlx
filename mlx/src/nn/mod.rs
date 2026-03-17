@@ -6,9 +6,11 @@ mod gated_delta_net;
 mod linear;
 mod mlp;
 mod module;
+pub mod mrope;
 mod norm;
+pub mod vision;
 
-pub use activations::{gelu, silu};
+pub use activations::{gelu, gelu_tanh, silu};
 pub use attention::Attention;
 pub use conv1d::Conv1d;
 pub use embedding::{Embedding, EmbeddingLayer, QuantizedEmbedding};

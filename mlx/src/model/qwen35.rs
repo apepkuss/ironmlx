@@ -4,6 +4,7 @@ use crate::array::Array;
 use crate::device::Device;
 use crate::error::Result;
 use crate::fast;
+use crate::nn::mrope;
 use crate::nn::{Conv1d, EmbeddingLayer, GatedDeltaNet, LinearLayer, MLP, RMSNorm, RMSNormGated};
 use crate::ops;
 use crate::stream::Stream;
@@ -29,6 +30,7 @@ pub struct Qwen35Attention {
     pub head_dim: i32,
     pub partial_rotary_factor: f32,
     pub rope_base: f32,
+    pub mrope_section: Option<[usize; 3]>,
 }
 
 impl Qwen35Attention {
@@ -39,6 +41,7 @@ impl Qwen35Attention {
         cache_keys: Option<&Array>,
         cache_values: Option<&Array>,
         offset: i32,
+        position_ids: Option<&Array>,
         stream: &Stream,
     ) -> Result<(Array, Array, Array)> {
         let shape = x.shape();
@@ -73,91 +76,101 @@ impl Qwen35Attention {
         let k = ops::transpose_axes(&k, &[0, 2, 1, 3], stream)?;
         let v = ops::transpose_axes(&v, &[0, 2, 1, 3], stream)?;
 
-        // Partial RoPE
-        let rope_dim = (self.head_dim as f32 * self.partial_rotary_factor) as i32;
-        let (queries, k) = if rope_dim < self.head_dim {
-            // Split along last axis for partial rotation
-            let q_shape = queries.shape();
-            let k_shape = k.shape();
-
-            let q_rot = ops::slice(
-                &queries,
-                &[0, 0, 0, 0],
-                &[q_shape[0], q_shape[1], q_shape[2], rope_dim],
-                &[1, 1, 1, 1],
-                stream,
-            )?;
-            let q_pass = ops::slice(
-                &queries,
-                &[0, 0, 0, rope_dim],
-                &[q_shape[0], q_shape[1], q_shape[2], q_shape[3]],
-                &[1, 1, 1, 1],
-                stream,
-            )?;
-            let k_rot = ops::slice(
-                &k,
-                &[0, 0, 0, 0],
-                &[k_shape[0], k_shape[1], k_shape[2], rope_dim],
-                &[1, 1, 1, 1],
-                stream,
-            )?;
-            let k_pass = ops::slice(
-                &k,
-                &[0, 0, 0, rope_dim],
-                &[k_shape[0], k_shape[1], k_shape[2], k_shape[3]],
-                &[1, 1, 1, 1],
-                stream,
-            )?;
-
-            let q_rot = fast::rope(
-                &q_rot,
-                rope_dim,
-                false,
-                Some(self.rope_base),
-                1.0,
-                offset,
-                None,
-                stream,
-            )?;
-            let k_rot = fast::rope(
-                &k_rot,
-                rope_dim,
-                false,
-                Some(self.rope_base),
-                1.0,
-                offset,
-                None,
-                stream,
-            )?;
-
-            let q_arr = VectorArray::from_arrays(&[&q_rot, &q_pass]);
-            let k_arr = VectorArray::from_arrays(&[&k_rot, &k_pass]);
-            (
-                ops::concatenate(&q_arr, 3, stream)?,
-                ops::concatenate(&k_arr, 3, stream)?,
-            )
-        } else {
-            let queries = fast::rope(
-                &queries,
-                self.head_dim,
-                false,
-                Some(self.rope_base),
-                1.0,
-                offset,
-                None,
-                stream,
-            )?;
-            let k = fast::rope(
-                &k,
-                self.head_dim,
-                false,
-                Some(self.rope_base),
-                1.0,
-                offset,
-                None,
-                stream,
-            )?;
+        // Apply positional encoding: M-RoPE or standard partial RoPE
+        let (queries, k) = if let (Some(pos_ids), Some(section)) =
+            (position_ids, &self.mrope_section)
+        {
+            // M-RoPE path: apply multi-resolution rotary embeddings
+            let queries = mrope::apply_mrope(&queries, pos_ids, section, self.rope_base, stream)?;
+            let k = mrope::apply_mrope(&k, pos_ids, section, self.rope_base, stream)?;
             (queries, k)
+        } else {
+            // Standard partial RoPE path
+            let rope_dim = (self.head_dim as f32 * self.partial_rotary_factor) as i32;
+            if rope_dim < self.head_dim {
+                // Split along last axis for partial rotation
+                let q_shape = queries.shape();
+                let k_shape = k.shape();
+
+                let q_rot = ops::slice(
+                    &queries,
+                    &[0, 0, 0, 0],
+                    &[q_shape[0], q_shape[1], q_shape[2], rope_dim],
+                    &[1, 1, 1, 1],
+                    stream,
+                )?;
+                let q_pass = ops::slice(
+                    &queries,
+                    &[0, 0, 0, rope_dim],
+                    &[q_shape[0], q_shape[1], q_shape[2], q_shape[3]],
+                    &[1, 1, 1, 1],
+                    stream,
+                )?;
+                let k_rot = ops::slice(
+                    &k,
+                    &[0, 0, 0, 0],
+                    &[k_shape[0], k_shape[1], k_shape[2], rope_dim],
+                    &[1, 1, 1, 1],
+                    stream,
+                )?;
+                let k_pass = ops::slice(
+                    &k,
+                    &[0, 0, 0, rope_dim],
+                    &[k_shape[0], k_shape[1], k_shape[2], k_shape[3]],
+                    &[1, 1, 1, 1],
+                    stream,
+                )?;
+
+                let q_rot = fast::rope(
+                    &q_rot,
+                    rope_dim,
+                    false,
+                    Some(self.rope_base),
+                    1.0,
+                    offset,
+                    None,
+                    stream,
+                )?;
+                let k_rot = fast::rope(
+                    &k_rot,
+                    rope_dim,
+                    false,
+                    Some(self.rope_base),
+                    1.0,
+                    offset,
+                    None,
+                    stream,
+                )?;
+
+                let q_arr = VectorArray::from_arrays(&[&q_rot, &q_pass]);
+                let k_arr = VectorArray::from_arrays(&[&k_rot, &k_pass]);
+                (
+                    ops::concatenate(&q_arr, 3, stream)?,
+                    ops::concatenate(&k_arr, 3, stream)?,
+                )
+            } else {
+                let queries = fast::rope(
+                    &queries,
+                    self.head_dim,
+                    false,
+                    Some(self.rope_base),
+                    1.0,
+                    offset,
+                    None,
+                    stream,
+                )?;
+                let k = fast::rope(
+                    &k,
+                    self.head_dim,
+                    false,
+                    Some(self.rope_base),
+                    1.0,
+                    offset,
+                    None,
+                    stream,
+                )?;
+                (queries, k)
+            }
         };
 
         // KV cache update
@@ -212,6 +225,7 @@ impl Qwen35DecoderLayer {
         x: &Array,
         cache: &mut (Option<Array>, Option<Array>),
         mask: Option<&Array>,
+        position_ids: Option<&Array>,
         stream: &Stream,
     ) -> Result<Array> {
         let normed = self.input_layernorm.forward_with_stream(x, stream)?;
@@ -228,6 +242,7 @@ impl Qwen35DecoderLayer {
                     cache.0.as_ref(),
                     cache.1.as_ref(),
                     offset,
+                    position_ids,
                     stream,
                 )?;
                 *cache = (Some(new_k), Some(new_v));
@@ -270,12 +285,31 @@ impl Qwen35Model {
         let mut h = self.embed_tokens.forward_with_stream(tokens, &stream)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward_with_cache(&h, &mut cache[i], None, &stream)?;
+            h = layer.forward_with_cache(&h, &mut cache[i], None, None, &stream)?;
         }
 
         h = self.norm.forward_with_stream(&h, &stream)?;
         let logits = self.lm_head.forward_with_stream(&h, &stream)?;
         Ok(logits)
+    }
+
+    /// Forward pass with pre-computed embeddings (for VLM).
+    /// Skips embed_tokens, uses provided embeddings directly.
+    pub fn forward_with_embeddings(
+        &self,
+        embeddings: &Array,
+        cache: &mut [(Option<Array>, Option<Array>)],
+        position_ids: Option<&Array>,
+    ) -> Result<Array> {
+        let stream = Stream::new(&Device::gpu());
+        let mut h = embeddings.clone();
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward_with_cache(&h, &mut cache[i], None, position_ids, &stream)?;
+        }
+
+        h = self.norm.forward_with_stream(&h, &stream)?;
+        self.lm_head.forward_with_stream(&h, &stream)
     }
 }
 
@@ -402,6 +436,19 @@ pub fn from_config_file(
             LayerAttention::GatedDelta(gdn)
         } else {
             // Full attention layer with output gate (Qwen3.5 specific)
+            // Extract mrope_section from config if available
+            let mrope_section = tc
+                .rope_parameters
+                .as_ref()
+                .and_then(|rp| rp.mrope_section.as_ref())
+                .and_then(|s| {
+                    if s.len() == 3 {
+                        Some([s[0], s[1], s[2]])
+                    } else {
+                        None
+                    }
+                });
+
             let attn = Qwen35Attention {
                 q_proj: linear(&format!("{}.self_attn.q_proj", lp))?,
                 k_proj: linear(&format!("{}.self_attn.k_proj", lp))?,
@@ -414,6 +461,7 @@ pub fn from_config_file(
                 head_dim,
                 partial_rotary_factor: tc.partial_rotary_factor() as f32,
                 rope_base: tc.rope_theta() as f32,
+                mrope_section,
             };
 
             LayerAttention::Full(attn)
