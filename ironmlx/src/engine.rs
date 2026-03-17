@@ -146,7 +146,7 @@ impl EngineCore {
             }
 
             // 5. Execute one decode step for all active sequences
-            match batch.step() {
+            match batch.step_batched() {
                 Ok(responses) => {
                     process_batch_responses(responses, &mut running, &mut batch, &self.tokenizer);
                 }

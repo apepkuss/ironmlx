@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::array::Array;
 use crate::cache::CacheManager;
@@ -297,6 +297,79 @@ impl<'a> BatchGenerator<'a> {
         Ok(responses)
     }
 
+    /// Execute one decode step with batched evaluation.
+    ///
+    /// Unlike `step()` which evals per-sequence, this method:
+    /// 1. Runs all forward passes (MLX lazy — builds compute graph)
+    /// 2. Samples all tokens (still lazy)
+    /// 3. Calls eval once for the entire batch (single GPU dispatch)
+    ///
+    /// This leverages MLX's lazy evaluation to merge multiple per-sequence
+    /// forward passes into one GPU submission, improving throughput for
+    /// concurrent requests without changing the per-sequence cache structure.
+    pub fn step_batched(&mut self) -> Result<Vec<BatchResponse>> {
+        let stream = Stream::new(&Device::gpu());
+        let uids: Vec<SeqUid> = self.sequences.keys().copied().collect();
+
+        if uids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Phase 1: Build compute graph (all lazy, no eval yet)
+        let mut pending: Vec<(SeqUid, Array)> = Vec::with_capacity(uids.len());
+        for &uid in &uids {
+            let seq = self.sequences.get_mut(&uid).unwrap();
+            let input = Array::from_slice_i32(&[seq.last_token]);
+            let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
+            let logits = self
+                .model
+                .forward(&input_2d, &mut seq.cache, "causal", None)?;
+            let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;
+            let token_arr = sample(&logits_2d, &seq.sampler, &stream)?;
+            pending.push((uid, token_arr));
+        }
+
+        // Phase 2: Single eval — MLX merges all pending ops into one GPU dispatch
+        for (_, token_arr) in &pending {
+            token_arr.eval()?;
+        }
+
+        // Phase 3: Collect results
+        let mut responses = Vec::with_capacity(pending.len());
+        let mut finished_uids = Vec::new();
+
+        for (uid, token_arr) in pending {
+            let next_token = token_arr.item_i32()?;
+            let seq = self.sequences.get_mut(&uid).unwrap();
+            seq.generated_count += 1;
+            seq.last_token = next_token;
+
+            let finish_reason = if next_token == seq.eos_token_id {
+                Some(FinishReason::Eos)
+            } else if seq.generated_count >= seq.max_tokens {
+                Some(FinishReason::MaxTokens)
+            } else {
+                None
+            };
+
+            if finish_reason.is_some() {
+                finished_uids.push(uid);
+            }
+
+            responses.push(BatchResponse {
+                uid,
+                token_id: next_token,
+                finish_reason,
+            });
+        }
+
+        for uid in finished_uids {
+            self.sequences.remove(&uid);
+        }
+
+        Ok(responses)
+    }
+
     /// Remove a sequence (abort).
     pub fn remove(&mut self, uid: SeqUid) {
         self.sequences.remove(&uid);
@@ -310,5 +383,38 @@ impl<'a> BatchGenerator<'a> {
     /// Check if a sequence is still active.
     pub fn is_active(&self, uid: SeqUid) -> bool {
         self.sequences.contains_key(&uid)
+    }
+
+    /// Check if a set of sequences can be merged into a batch.
+    /// Requirements: all must have the same cache state (all cached or all uncached).
+    /// Returns true if batchable.
+    pub fn can_batch_together(&self, uids: &[SeqUid]) -> bool {
+        if uids.len() <= 1 {
+            return true;
+        }
+        let first_uid = uids[0];
+        let first_cache_len = match self.sequences.get(&first_uid) {
+            Some(seq) => seq.cache[0].0.as_ref().map(|k| k.shape()[2]).unwrap_or(0),
+            None => return false,
+        };
+        uids.iter().all(|&uid| {
+            self.sequences.get(&uid).is_some_and(|s| {
+                let cache_len = s.cache[0].0.as_ref().map(|k| k.shape()[2]).unwrap_or(0);
+                cache_len == first_cache_len
+            })
+        })
+    }
+
+    /// Partition sequences into groups that can be batched together.
+    /// Each group has sequences with the same cache length.
+    pub fn partition_by_cache_state(&self, uids: &[SeqUid]) -> Vec<Vec<SeqUid>> {
+        let mut groups: BTreeMap<i32, Vec<SeqUid>> = BTreeMap::new();
+        for &uid in uids {
+            if let Some(seq) = self.sequences.get(&uid) {
+                let cache_len = seq.cache[0].0.as_ref().map(|k| k.shape()[2]).unwrap_or(0);
+                groups.entry(cache_len).or_default().push(uid);
+            }
+        }
+        groups.into_values().collect()
     }
 }

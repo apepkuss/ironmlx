@@ -1,6 +1,7 @@
 pub mod batch;
 mod chat_template;
 mod kv_cache;
+pub mod padding;
 mod sampler;
 mod tokenizer;
 
