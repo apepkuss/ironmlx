@@ -1,19 +1,26 @@
 <p align="center">
-  <img src="assets/logo.png" width="180" alt="ironmlx logo"/>
+  <img src="assets/logo.png" width="260" alt="ironmlx logo"/>
 </p>
 
 <h1 align="center">ironmlx</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Built_with-Rust-B7410E?logo=rust" alt="Rust"/>
+  <img src="https://img.shields.io/badge/Platform-Apple_Silicon-000000?logo=apple" alt="Apple Silicon"/>
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License"/>
+</p>
 
 <p align="center">
   <strong>你的 Mac，你的 AI。</strong>
 </p>
 
 <p align="center">
-  Apple Silicon 本地 AI 推理服务。在你的 Mac 上本地运行大语言模型和视觉模型 — 无需云端、无需订阅、数据留在你的设备上，只需"安装、启动、开始对话"。
+  Apple Silicon 本地 AI 推理服务。<br/>
+  在你的 Mac 上本地运行大语言模型和视觉模型 — 无需云端、无需订阅、数据留在你的设备上，只需"安装、启动、开始对话"。
 </p>
 
 <p align="center">
-  <a href="README.md">English</a>
+  <a href="README.md">English</a> · <a href="README_zh.md">中文</a>
 </p>
 
 ## 特性

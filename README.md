@@ -1,15 +1,22 @@
 <p align="center">
-  <img src="assets/logo.png" width="180" alt="ironmlx logo"/>
+  <img src="assets/logo.png" width="260" alt="ironmlx logo"/>
 </p>
 
 <h1 align="center">ironmlx</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Built_with-Rust-B7410E?logo=rust" alt="Rust"/>
+  <img src="https://img.shields.io/badge/Platform-Apple_Silicon-000000?logo=apple" alt="Apple Silicon"/>
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License"/>
+</p>
 
 <p align="center">
   <strong>Your Mac has a GPU. Use it.</strong>
 </p>
 
 <p align="center">
-  A local AI inference service for Apple Silicon. Run LLMs and vision models locally on your Mac — no cloud, no subscription, your data stays on your device.
+  A local AI inference service for Apple Silicon.<br/>
+  Run LLMs and vision models locally on your Mac — no cloud, no subscription, your data stays on your device.
 </p>
 
 <p align="center">
@@ -17,7 +24,7 @@
 </p>
 
 <p align="center">
-  <a href="README_zh.md">中文版</a>
+  <a href="README.md">English</a> · <a href="README_zh.md">中文</a>
 </p>
 
 ## Features
