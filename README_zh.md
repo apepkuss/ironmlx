@@ -30,9 +30,10 @@
 - **Web 管理面板** — 状态监控、模型管理、对话测试、性能基准
 - **macOS 菜单栏应用** — 原生 AppKit，引导向导、偏好设置
 - **自动模型下载** — 从 HuggingFace 自动下载（支持 repo ID 作为模型路径）
-- **OpenAI 兼容 API** — `/v1/chat/completions`、`/v1/completions`、`/v1/models`
+- **OpenAI 兼容 API** — `/v1/chat/completions`、`/v1/completions`、`/v1/embeddings`
 - **Anthropic 兼容 API** — `/v1/messages`，支持流式响应
 - **Tool Calling** — 函数定义、JSON tool_calls 解析
+- **Rerank API** — `/v1/rerank`（Cohere 兼容）
 - **多模型服务** — 运行时动态加载/卸载模型（EnginePool）
 - **MLX 原生推理**
 - **4-bit / 8-bit 量化模型** 支持（affine 量化）
@@ -46,7 +47,7 @@ ironmlx 目标兼容 [mlx-lm](https://github.com/ml-explore/mlx-lm) 模型架构
 | 架构 | `model_type` | 发布时间 | 状态 | 备注 |
 | ---- | ------------ | -------- | ---- | ---- |
 | Qwen3.5 | `qwen3_5` | 2026.02 | :white_check_mark: | 文本 + VLM（图片/视频） |
-| Qwen3.5 MoE | `qwen3_5_moe` | 2026.02 | :x: | |
+| Qwen3.5 MoE | `qwen3_5_moe` | 2026.02 | :white_check_mark: | 256 experts, top-8 路由 |
 | Mistral Small 4 | `mistral3` | 2026.03 | :x: | |
 | Nemotron 3 Super | `nemotron_h` | 2026.03 | :x: | |
 | DeepSeek V32 | `deepseek_v32` | 2026.01 | :x: | |
@@ -80,6 +81,17 @@ ironmlx 目标兼容 [mlx-lm](https://github.com/ml-explore/mlx-lm) 模型架构
 | StarCoder 2 | `starcoder2` | 2024 | :x: |
 
 </details>
+
+**嵌入和重排模型**
+
+| 架构 | 类型 | 状态 | 代表模型 |
+| ---- | ---- | ---- | ---- |
+| BERT | 嵌入 / 重排 | :white_check_mark: | all-MiniLM-L6-v2, ms-marco-MiniLM |
+| XLM-RoBERTa | 嵌入 / 重排 | :white_check_mark: | bge-m3, bge-reranker-v2-m3 |
+| ModernBERT | 嵌入 | :white_check_mark: | ModernBERT-base |
+| GTE | 嵌入 | :white_check_mark: | gte-large-en-v1.5 |
+| Jina | 嵌入 / 重排 | :white_check_mark: | jina-embeddings-v5, jina-reranker-v2 |
+| E5-Mistral | 嵌入 | :white_check_mark: | e5-mistral-7b-instruct |
 
 > 推荐使用 `mlx-community` HuggingFace 组织中 SafeTensors 格式的模型。
 
@@ -180,6 +192,8 @@ console.log(data.choices[0].message.content);
 | `POST /v1/chat/completions` | 对话补全（文本、多模态、流式） |
 | `POST /v1/completions` | 文本补全 |
 | `POST /v1/messages` | Anthropic 兼容消息 API |
+| `POST /v1/embeddings` | 文本嵌入（BERT、XLM-RoBERTa 等） |
+| `POST /v1/rerank` | 文档重排（Cohere 兼容） |
 | `GET /v1/models` | 列出已加载模型 |
 | `POST /v1/models/load` | 加载模型 |
 | `POST /v1/models/unload` | 卸载模型 |

@@ -34,9 +34,10 @@
 - **Web Admin Panel** — Status, Models, Chat, Settings, Logs, Benchmark
 - **macOS Menubar App** — native AppKit, welcome wizard, preferences
 - **Automatic model download** from HuggingFace (repo ID as model path)
-- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/models`
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`
 - **Anthropic-compatible API** — `/v1/messages` with streaming
 - **Tool Calling** — function definitions, JSON tool_calls parsing
+- **Rerank API** — `/v1/rerank` (Cohere-compatible)
 - **Multi-model serving** — load/unload models at runtime via EnginePool
 - **MLX-native inference**
 - **4-bit / 8-bit quantized** model support (affine quantization)
@@ -50,7 +51,7 @@ ironmlx targets compatibility with [mlx-lm](https://github.com/ml-explore/mlx-lm
 | Architecture | `model_type` | Released | Status | Notes |
 | ------------ | ------------ | -------- | ------ | ----- |
 | Qwen3.5 | `qwen3_5` | 2026.02 | :white_check_mark: | Text + VLM (image/video) |
-| Qwen3.5 MoE | `qwen3_5_moe` | 2026.02 | :x: | |
+| Qwen3.5 MoE | `qwen3_5_moe` | 2026.02 | :white_check_mark: | 256 experts, top-8 routing |
 | Mistral Small 4 | `mistral3` | 2026.03 | :x: | |
 | Nemotron 3 Super | `nemotron_h` | 2026.03 | :x: | |
 | DeepSeek V32 | `deepseek_v32` | 2026.01 | :x: | |
@@ -84,6 +85,17 @@ ironmlx targets compatibility with [mlx-lm](https://github.com/ml-explore/mlx-lm
 | StarCoder 2 | `starcoder2` | 2024 | :x: |
 
 </details>
+
+**Embedding & Reranker Models**
+
+| Architecture | Type | Status | Representative Models |
+| ------------ | ---- | ------ | --------------------- |
+| BERT | Embedding / Reranker | :white_check_mark: | all-MiniLM-L6-v2, ms-marco-MiniLM |
+| XLM-RoBERTa | Embedding / Reranker | :white_check_mark: | bge-m3, bge-reranker-v2-m3 |
+| ModernBERT | Embedding | :white_check_mark: | ModernBERT-base |
+| GTE | Embedding | :white_check_mark: | gte-large-en-v1.5 |
+| Jina | Embedding / Reranker | :white_check_mark: | jina-embeddings-v5, jina-reranker-v2 |
+| E5-Mistral | Embedding | :white_check_mark: | e5-mistral-7b-instruct |
 
 > Recommended: models from `mlx-community` on HuggingFace in SafeTensors format.
 
@@ -184,6 +196,8 @@ console.log(data.choices[0].message.content);
 | `POST /v1/chat/completions` | Chat completion (text, multimodal, streaming) |
 | `POST /v1/completions` | Text completion |
 | `POST /v1/messages` | Anthropic-compatible messages API |
+| `POST /v1/embeddings` | Text embeddings (BERT, XLM-RoBERTa, etc.) |
+| `POST /v1/rerank` | Document reranking (Cohere-compatible) |
 | `GET /v1/models` | List loaded models |
 | `POST /v1/models/load` | Load a model |
 | `POST /v1/models/unload` | Unload a model |
