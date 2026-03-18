@@ -407,6 +407,7 @@ function app() {
 
     async sendChat() {
       const input = this.chatInput.trim();
+      console.log('sendChat called, input:', JSON.stringify(input), 'streaming:', this.chatStreaming, 'model:', this.chatModel);
       if (!input || this.chatStreaming) return;
 
       // Add user message
@@ -423,30 +424,43 @@ function app() {
       });
 
       try {
-        // Build messages array for API
-        const messages = this.chatMessages.map(m => ({
-          role: m.role,
-          content: m.content,
-        }));
+        // Build messages array — only include messages with content
+        const messages = this.chatMessages
+          .filter(m => m.content && m.content.trim())
+          .map(m => ({ role: m.role, content: m.content }));
 
-        const resp = await this.apiFetch('/v1/chat/completions', {
-          method: 'POST',
-          body: {
-            model: this.chatModel || undefined,
-            messages: messages,
-            stream: true,
-            max_tokens: 2048,
-            temperature: 0.7,
-          },
+        const body = JSON.stringify({
+          model: this.chatModel || undefined,
+          messages: messages,
+          stream: true,
+          max_tokens: 2048,
+          temperature: 0.7,
         });
+
+        console.log('Sending fetch...');
+        const resp = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: body,
+        });
+        console.log('Fetch response:', resp.status, resp.headers.get('content-type'));
+
+        if (!resp.ok) {
+          this.chatStreamContent = 'Error: ' + resp.status + ' ' + resp.statusText;
+          this.chatStreaming = false;
+          return;
+        }
 
         // Read SSE stream
         const reader = resp.body.getReader();
+        console.log('Reading stream...');
         const decoder = new TextDecoder();
         let buffer = '';
+        let streamDone = false;
 
-        while (true) {
+        while (!streamDone) {
           const { done, value } = await reader.read();
+          console.log('Stream read:', done, value ? value.length + ' bytes' : 'null');
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
@@ -454,9 +468,10 @@ function app() {
           buffer = lines.pop(); // Keep incomplete line
 
           for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6);
-            if (data === '[DONE]') break;
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+            const data = trimmed.slice(6);
+            if (data === '[DONE]') { streamDone = true; break; }
 
             try {
               const chunk = JSON.parse(data);

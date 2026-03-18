@@ -93,7 +93,7 @@ impl ThinkingState {
                 return (content, None);
             }
             // No <think> found yet — hold up to 7 chars for partial "<think>" match
-            if self.buffer.len() > 7 && !self.buffer.contains('<') {
+            if self.buffer.chars().count() > 7 && !self.buffer.contains('<') {
                 let flushed = self.buffer.clone();
                 self.buffer.clear();
                 return (Some(flushed), None);
@@ -119,10 +119,17 @@ impl ThinkingState {
 
         // Still inside thinking — emit reasoning incrementally
         // Keep last 8 chars in buffer in case </think> spans tokens
-        if self.buffer.len() > 8 {
-            let emit_len = self.buffer.len() - 8;
-            let emit = self.buffer[..emit_len].to_string();
-            self.buffer = self.buffer[emit_len..].to_string();
+        let char_count = self.buffer.chars().count();
+        if char_count > 8 {
+            let emit_count = char_count - 8;
+            let emit_byte_len: usize = self
+                .buffer
+                .chars()
+                .take(emit_count)
+                .map(|c| c.len_utf8())
+                .sum();
+            let emit = self.buffer[..emit_byte_len].to_string();
+            self.buffer = self.buffer[emit_byte_len..].to_string();
             return (None, Some(emit));
         }
 
