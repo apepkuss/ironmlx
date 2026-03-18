@@ -150,6 +150,17 @@ pub struct Qwen35TextConfig {
     pub rope_parameters: Option<RopeParameters>,
     #[serde(default)]
     pub eos_token_id: Option<i64>,
+    // MoE fields
+    #[serde(default)]
+    pub num_experts: Option<usize>,
+    #[serde(default)]
+    pub num_experts_per_tok: Option<usize>,
+    #[serde(default)]
+    pub moe_intermediate_size: Option<usize>,
+    #[serde(default)]
+    pub shared_expert_intermediate_size: Option<usize>,
+    #[serde(default)]
+    pub norm_topk_prob: Option<bool>,
 }
 
 impl Qwen35TextConfig {

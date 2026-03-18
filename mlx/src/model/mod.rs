@@ -145,13 +145,15 @@ pub fn build_model_from_file(config_path: &str, weights: &HashMap<String, Array>
             let model = rope_bert::from_config_file(config_path, weights)?;
             Ok(Model::RopeBert(model))
         }
-        "qwen3_5" => {
+        "qwen3_5" | "qwen3_5_moe" => {
             // Check if vision_config is present to decide VLM vs text-only
             let has_vision = raw.get("vision_config").is_some();
             if has_vision {
                 let model = qwen35_vl::from_config_file(config_path, weights)?;
                 Ok(Model::Qwen35VL(Box::new(model)))
             } else {
+                // Both qwen3_5 and qwen3_5_moe use the same builder;
+                // MoE is detected via num_experts in text_config.
                 let model = qwen35::from_config_file(config_path, weights)?;
                 Ok(Model::Qwen35(model))
             }

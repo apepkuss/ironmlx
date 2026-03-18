@@ -5,7 +5,10 @@ use crate::device::Device;
 use crate::error::Result;
 use crate::fast;
 use crate::nn::mrope;
-use crate::nn::{Conv1d, EmbeddingLayer, GatedDeltaNet, LinearLayer, MLP, RMSNorm, RMSNormGated};
+use crate::nn::{
+    Conv1d, EmbeddingLayer, Expert, GatedDeltaNet, Linear, LinearLayer, MLP, MoEMLP,
+    QuantizedLinear, RMSNorm, RMSNormGated,
+};
 use crate::ops;
 use crate::stream::Stream;
 use crate::vector::VectorArray;
@@ -210,9 +213,24 @@ pub enum LayerAttention {
     Full(Qwen35Attention),
 }
 
+/// MLP variant: standard SwiGLU or Mixture-of-Experts.
+pub enum Qwen35MLP {
+    Standard(MLP),
+    MoE(MoEMLP),
+}
+
+impl Qwen35MLP {
+    pub fn forward_with_stream(&self, x: &Array, stream: &Stream) -> Result<Array> {
+        match self {
+            Qwen35MLP::Standard(mlp) => mlp.forward_with_stream(x, stream),
+            Qwen35MLP::MoE(moe) => moe.forward_with_stream(x, stream),
+        }
+    }
+}
+
 pub struct Qwen35DecoderLayer {
     pub attention: LayerAttention,
-    pub mlp: MLP,
+    pub mlp: Qwen35MLP,
     pub input_layernorm: RMSNorm,
     pub post_attention_layernorm: RMSNorm,
     pub is_linear: bool,
@@ -467,10 +485,57 @@ pub fn from_config_file(
             LayerAttention::Full(attn)
         };
 
-        let gate_proj = linear(&format!("{}.mlp.gate_proj", lp))?;
-        let up_proj = linear(&format!("{}.mlp.up_proj", lp))?;
-        let down_proj = linear(&format!("{}.mlp.down_proj", lp))?;
-        let mlp = MLP::new(gate_proj, up_proj, down_proj);
+        // Build MLP: standard or MoE depending on config
+        let mlp = if let Some(num_experts) = tc.num_experts {
+            // MoE layer
+            let num_experts_per_tok = tc.num_experts_per_tok.unwrap_or(8);
+            let moe_intermediate = tc.moe_intermediate_size.unwrap_or(tc.intermediate_size);
+            let _shared_intermediate = tc
+                .shared_expert_intermediate_size
+                .unwrap_or(moe_intermediate);
+            let norm_topk_prob = tc.norm_topk_prob.unwrap_or(true);
+
+            // Router gate: hidden_size -> num_experts
+            let gate_weight = w(&format!("{}.mlp.gate.weight", lp))?;
+            let gate = Linear::new(gate_weight, None);
+
+            // Build experts from fused gate_up_proj weights
+            // Raw HF format: experts.gate_up_proj [num_experts, 2*intermediate, hidden]
+            //                 experts.down_proj   [num_experts, hidden, intermediate]
+            let experts = build_moe_experts(
+                weights,
+                &format!("language_model.model.{}", lp),
+                num_experts,
+                moe_intermediate,
+                group_size,
+                bits,
+            )?;
+
+            // Shared expert (standard SwiGLU MLP)
+            let shared_gate_proj = linear(&format!("{}.mlp.shared_expert.gate_proj", lp))?;
+            let shared_up_proj = linear(&format!("{}.mlp.shared_expert.up_proj", lp))?;
+            let shared_down_proj = linear(&format!("{}.mlp.shared_expert.down_proj", lp))?;
+            let shared_expert = MLP::new(shared_gate_proj, shared_up_proj, shared_down_proj);
+
+            // Shared expert gate: hidden_size -> 1
+            let shared_expert_gate_weight = w(&format!("{}.mlp.shared_expert_gate.weight", lp))?;
+            let shared_expert_gate = Linear::new(shared_expert_gate_weight, None);
+
+            Qwen35MLP::MoE(MoEMLP {
+                gate,
+                experts,
+                shared_expert,
+                shared_expert_gate,
+                num_experts_per_tok,
+                norm_topk_prob,
+            })
+        } else {
+            // Standard MLP
+            let gate_proj = linear(&format!("{}.mlp.gate_proj", lp))?;
+            let up_proj = linear(&format!("{}.mlp.up_proj", lp))?;
+            let down_proj = linear(&format!("{}.mlp.down_proj", lp))?;
+            Qwen35MLP::Standard(MLP::new(gate_proj, up_proj, down_proj))
+        };
 
         let input_layernorm = RMSNorm::new(w(&format!("{}.input_layernorm.weight", lp))?, eps);
         let post_attention_layernorm =
@@ -511,4 +576,269 @@ pub fn from_config_file(
         lm_head,
         full_attention_interval: tc.full_attention_interval,
     })
+}
+
+/// Build MoE experts from fused HuggingFace weight format.
+///
+/// Raw HF weights use fused `gate_up_proj` per expert:
+/// - `{prefix}.mlp.experts.gate_up_proj`       [num_experts, 2*intermediate, hidden]
+/// - `{prefix}.mlp.experts.down_proj`           [num_experts, hidden, intermediate]
+///
+/// For quantized models, scales/biases follow the same pattern.
+///
+/// We split `gate_up_proj` along dim 1 into `gate_proj` and `up_proj`,
+/// then slice each expert along dim 0.
+#[allow(clippy::too_many_arguments)]
+fn build_moe_experts(
+    weights: &HashMap<String, Array>,
+    prefix: &str,
+    num_experts: usize,
+    _moe_intermediate: usize,
+    group_size: i32,
+    bits: i32,
+) -> Result<Vec<Expert>> {
+    let stream = Stream::new(&Device::gpu());
+
+    // Check for quantized format (has scales)
+    let gate_up_scales_key = format!("{}.mlp.experts.gate_up_proj.scales", prefix);
+    let is_quantized = weights.contains_key(&gate_up_scales_key);
+
+    if is_quantized {
+        // Quantized expert weights
+        let gate_up_w = weights
+            .get(&format!("{}.mlp.experts.gate_up_proj.weight", prefix))
+            .ok_or_else(|| {
+                crate::error::Error::Mlx(format!(
+                    "missing weight: {}.mlp.experts.gate_up_proj.weight",
+                    prefix
+                ))
+            })?;
+        let gate_up_s = weights.get(&gate_up_scales_key).ok_or_else(|| {
+            crate::error::Error::Mlx(format!("missing weight: {}", gate_up_scales_key))
+        })?;
+        let gate_up_b = weights
+            .get(&format!("{}.mlp.experts.gate_up_proj.biases", prefix))
+            .ok_or_else(|| {
+                crate::error::Error::Mlx(format!(
+                    "missing weight: {}.mlp.experts.gate_up_proj.biases",
+                    prefix
+                ))
+            })?;
+
+        let down_w = weights
+            .get(&format!("{}.mlp.experts.down_proj.weight", prefix))
+            .ok_or_else(|| {
+                crate::error::Error::Mlx(format!(
+                    "missing weight: {}.mlp.experts.down_proj.weight",
+                    prefix
+                ))
+            })?;
+        let down_s = weights
+            .get(&format!("{}.mlp.experts.down_proj.scales", prefix))
+            .ok_or_else(|| {
+                crate::error::Error::Mlx(format!(
+                    "missing weight: {}.mlp.experts.down_proj.scales",
+                    prefix
+                ))
+            })?;
+        let down_b = weights
+            .get(&format!("{}.mlp.experts.down_proj.biases", prefix))
+            .ok_or_else(|| {
+                crate::error::Error::Mlx(format!(
+                    "missing weight: {}.mlp.experts.down_proj.biases",
+                    prefix
+                ))
+            })?;
+
+        // gate_up_proj shape: [num_experts, 2*intermediate/pack, hidden] (quantized)
+        // Split along dim 1 into gate and up halves
+        let gate_up_w_shape = gate_up_w.shape();
+        let half_dim1_w = gate_up_w_shape[1] / 2;
+        let gate_up_s_shape = gate_up_s.shape();
+        let half_dim1_s = gate_up_s_shape[1] / 2;
+
+        let mut experts = Vec::with_capacity(num_experts);
+        for ei in 0..num_experts {
+            let e = ei as i32;
+            // Slice expert ei from fused tensors: [1, dim1, dim2] -> squeeze to [dim1, dim2]
+            // gate_up weight
+            let gu_w = ops::slice(
+                gate_up_w,
+                &[e, 0, 0],
+                &[e + 1, gate_up_w_shape[1], gate_up_w_shape[2]],
+                &[1, 1, 1],
+                &stream,
+            )?;
+            let gu_w = ops::squeeze_axis(&gu_w, 0, &stream)?;
+            // Split into gate and up
+            let gate_w = ops::slice(
+                &gu_w,
+                &[0, 0],
+                &[half_dim1_w, gate_up_w_shape[2]],
+                &[1, 1],
+                &stream,
+            )?;
+            let up_w = ops::slice(
+                &gu_w,
+                &[half_dim1_w, 0],
+                &[gate_up_w_shape[1], gate_up_w_shape[2]],
+                &[1, 1],
+                &stream,
+            )?;
+
+            // gate_up scales
+            let gu_s = ops::slice(
+                gate_up_s,
+                &[e, 0, 0],
+                &[e + 1, gate_up_s_shape[1], gate_up_s_shape[2]],
+                &[1, 1, 1],
+                &stream,
+            )?;
+            let gu_s = ops::squeeze_axis(&gu_s, 0, &stream)?;
+            let gate_s = ops::slice(
+                &gu_s,
+                &[0, 0],
+                &[half_dim1_s, gate_up_s_shape[2]],
+                &[1, 1],
+                &stream,
+            )?;
+            let up_s = ops::slice(
+                &gu_s,
+                &[half_dim1_s, 0],
+                &[gate_up_s_shape[1], gate_up_s_shape[2]],
+                &[1, 1],
+                &stream,
+            )?;
+
+            // gate_up biases (same shape as scales)
+            let gu_b = ops::slice(
+                gate_up_b,
+                &[e, 0, 0],
+                &[e + 1, gate_up_s_shape[1], gate_up_s_shape[2]],
+                &[1, 1, 1],
+                &stream,
+            )?;
+            let gu_b = ops::squeeze_axis(&gu_b, 0, &stream)?;
+            let gate_b = ops::slice(
+                &gu_b,
+                &[0, 0],
+                &[half_dim1_s, gate_up_s_shape[2]],
+                &[1, 1],
+                &stream,
+            )?;
+            let up_b = ops::slice(
+                &gu_b,
+                &[half_dim1_s, 0],
+                &[gate_up_s_shape[1], gate_up_s_shape[2]],
+                &[1, 1],
+                &stream,
+            )?;
+
+            // down_proj: [num_experts, out_dim, in_dim_packed]
+            let down_w_shape = down_w.shape();
+            let dw = ops::slice(
+                down_w,
+                &[e, 0, 0],
+                &[e + 1, down_w_shape[1], down_w_shape[2]],
+                &[1, 1, 1],
+                &stream,
+            )?;
+            let dw = ops::squeeze_axis(&dw, 0, &stream)?;
+
+            let down_s_shape = down_s.shape();
+            let ds = ops::slice(
+                down_s,
+                &[e, 0, 0],
+                &[e + 1, down_s_shape[1], down_s_shape[2]],
+                &[1, 1, 1],
+                &stream,
+            )?;
+            let ds = ops::squeeze_axis(&ds, 0, &stream)?;
+
+            let db = ops::slice(
+                down_b,
+                &[e, 0, 0],
+                &[e + 1, down_s_shape[1], down_s_shape[2]],
+                &[1, 1, 1],
+                &stream,
+            )?;
+            let db = ops::squeeze_axis(&db, 0, &stream)?;
+
+            let gate_proj = LinearLayer::Quantized(QuantizedLinear::new(
+                gate_w, gate_s, gate_b, group_size, bits,
+            ));
+            let up_proj =
+                LinearLayer::Quantized(QuantizedLinear::new(up_w, up_s, up_b, group_size, bits));
+            let down_proj =
+                LinearLayer::Quantized(QuantizedLinear::new(dw, ds, db, group_size, bits));
+
+            experts.push(Expert::new(gate_proj, up_proj, down_proj));
+        }
+
+        Ok(experts)
+    } else {
+        // Non-quantized expert weights
+        let gate_up = weights
+            .get(&format!("{}.mlp.experts.gate_up_proj.weight", prefix))
+            .ok_or_else(|| {
+                crate::error::Error::Mlx(format!(
+                    "missing weight: {}.mlp.experts.gate_up_proj.weight",
+                    prefix
+                ))
+            })?;
+        let down = weights
+            .get(&format!("{}.mlp.experts.down_proj.weight", prefix))
+            .ok_or_else(|| {
+                crate::error::Error::Mlx(format!(
+                    "missing weight: {}.mlp.experts.down_proj.weight",
+                    prefix
+                ))
+            })?;
+
+        // gate_up shape: [num_experts, 2*intermediate, hidden]
+        let gu_shape = gate_up.shape();
+        let half_dim1 = gu_shape[1] / 2;
+
+        let mut experts = Vec::with_capacity(num_experts);
+        for ei in 0..num_experts {
+            let e = ei as i32;
+            // Slice and split gate_up
+            let gu = ops::slice(
+                gate_up,
+                &[e, 0, 0],
+                &[e + 1, gu_shape[1], gu_shape[2]],
+                &[1, 1, 1],
+                &stream,
+            )?;
+            let gu = ops::squeeze_axis(&gu, 0, &stream)?;
+
+            let gate_w = ops::slice(&gu, &[0, 0], &[half_dim1, gu_shape[2]], &[1, 1], &stream)?;
+            let up_w = ops::slice(
+                &gu,
+                &[half_dim1, 0],
+                &[gu_shape[1], gu_shape[2]],
+                &[1, 1],
+                &stream,
+            )?;
+
+            // down_proj: [num_experts, hidden, intermediate]
+            let d_shape = down.shape();
+            let dw = ops::slice(
+                down,
+                &[e, 0, 0],
+                &[e + 1, d_shape[1], d_shape[2]],
+                &[1, 1, 1],
+                &stream,
+            )?;
+            let dw = ops::squeeze_axis(&dw, 0, &stream)?;
+
+            let gate_proj = LinearLayer::Full(Linear::new(gate_w, None));
+            let up_proj = LinearLayer::Full(Linear::new(up_w, None));
+            let down_proj = LinearLayer::Full(Linear::new(dw, None));
+
+            experts.push(Expert::new(gate_proj, up_proj, down_proj));
+        }
+
+        Ok(experts)
+    }
 }
