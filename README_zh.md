@@ -7,6 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Built_with-Rust-B7410E?logo=rust" alt="Rust"/>
   <img src="https://img.shields.io/badge/Platform-Apple_Silicon-000000?logo=apple" alt="Apple Silicon"/>
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License"/>
 
 </p>
 
@@ -225,3 +226,6 @@ response = client.chat.completions.create(
 - 从源码构建：Rust 1.85+、CMake
 - 可选：ffmpeg（用于视频推理）
 
+## 许可证
+
+Apache-2.0

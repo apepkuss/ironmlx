@@ -7,6 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Built_with-Rust-B7410E?logo=rust" alt="Rust"/>
   <img src="https://img.shields.io/badge/Platform-Apple_Silicon-000000?logo=apple" alt="Apple Silicon"/>
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="License"/>
 
 </p>
 
@@ -229,3 +230,6 @@ response = client.chat.completions.create(
 - For building from source: Rust 1.85+, CMake
 - Optional: ffmpeg (for video inference)
 
+## License
+
+Apache-2.0
