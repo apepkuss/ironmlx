@@ -24,6 +24,13 @@
   <a href="README.md">🇺🇸 English</a> · <a href="README_zh.md">🇨🇳 中文</a>
 </p>
 
+## 为什么选择 ironmlx？
+
+- 单个 30MB 可执行文件 — 无需 Python、pip、虚拟环境
+- 11ms 冷启动，20MB 基础内存占用
+- 推理速度与云端 API 相同（MLX Metal kernel 直接驱动 GPU）
+- 数据永远不离开你的 Mac
+
 ## 特性
 
 - **多模态（VLM）** — 图片 + 视频理解（Qwen3.5-VL）

@@ -28,6 +28,13 @@
   <a href="README.md">🇺🇸 English</a> · <a href="README_zh.md">🇨🇳 中文</a>
 </p>
 
+## Why ironmlx?
+
+- Single 30MB binary — no Python, no pip, no virtual environments
+- 11ms cold start, 20MB baseline memory
+- Same inference speed as cloud APIs (MLX Metal kernel on your GPU)
+- Your data never leaves your Mac
+
 ## Features
 
 - **Multimodal (VLM)** — image + video understanding (Qwen3.5-VL)
