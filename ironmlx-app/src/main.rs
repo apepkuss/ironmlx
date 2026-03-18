@@ -4,7 +4,10 @@ use objc2_app_kit::{NSApplication, NSApplicationDelegate};
 
 mod app_delegate;
 mod config;
+mod preferences;
 mod server_manager;
+mod updater;
+mod welcome;
 
 fn main() {
     let mtm = MainThreadMarker::new().expect("ironmlx-app must be launched on the main thread");

@@ -10,7 +10,10 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSString, NSURL, ns_string};
 
 use crate::config::AppConfig;
+use crate::preferences;
 use crate::server_manager::{ServerManager, ServerStatus};
+use crate::updater;
+use crate::welcome;
 
 // Global state for server and config (Send + Sync safe)
 static SERVER: Mutex<Option<ServerManager>> = Mutex::new(None);
@@ -46,6 +49,19 @@ define_class!(
 
             let mtm = MainThreadMarker::from(self);
             setup_status_bar(mtm);
+
+            // First launch check
+            if welcome::is_first_launch() {
+                let mut cfg = CONFIG.lock().unwrap();
+                if let Some(ref mut c) = *cfg {
+                    if !welcome::show_welcome(mtm, c) {
+                        // User cancelled — quit
+                        let app = NSApplication::sharedApplication(mtm);
+                        app.terminate(None);
+                        return;
+                    }
+                }
+            }
 
             // Auto-start server if configured
             let should_start = CONFIG
@@ -161,6 +177,18 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
+    // Preferences
+    let prefs = make_item(mtm, "Preferences...", ",");
+    prefs.setTag(10);
+    menu.addItem(&prefs);
+
+    // Check for Updates
+    let update = make_item(mtm, "Check for Updates...", "");
+    update.setTag(11);
+    menu.addItem(&update);
+
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
     // Quit
     menu.addItem(&make_item(mtm, "Quit ironmlx", "q"));
 
@@ -184,6 +212,22 @@ pub fn open_url(url_str: &str) {
     let ns_url_str = NSString::from_str(url_str);
     if let Some(url) = NSURL::URLWithString(&ns_url_str) {
         NSWorkspace::sharedWorkspace().openURL(&url);
+    }
+}
+
+/// Open the preferences dialog
+pub fn open_preferences(mtm: MainThreadMarker) {
+    let mut cfg = CONFIG.lock().unwrap();
+    if let Some(ref mut c) = *cfg {
+        preferences::show_preferences(mtm, c);
+    }
+}
+
+/// Check for updates and show result
+pub fn check_for_updates(mtm: MainThreadMarker) {
+    match updater::check_for_update() {
+        Some(info) => updater::show_update_alert(mtm, &info),
+        None => updater::show_no_update_alert(mtm),
     }
 }
 
