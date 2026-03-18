@@ -7,6 +7,7 @@ use crate::stream::Stream;
 
 use super::Model;
 use super::bert;
+use super::rope_bert;
 
 // ---------------------------------------------------------------------------
 // PoolingStrategy
@@ -45,6 +46,7 @@ impl EmbeddingModel {
         // 1. Forward through model -> [batch, seq_len, hidden_size]
         let hidden = match &self.model {
             Model::Bert(bert) => bert.forward(token_ids, stream)?,
+            Model::RopeBert(rb) => rb.forward(token_ids, stream)?,
             _ => {
                 // Decoder models: forward returns logits [batch, seq_len, vocab_size]
                 // For decoder-based embeddings (E5-Mistral), we pool the logits.
@@ -104,6 +106,19 @@ impl EmbeddingModel {
         let hidden_size = bert.config.hidden_size;
         Ok(Self {
             model: Model::Bert(bert),
+            pooling: PoolingStrategy::Mean,
+            normalize: true,
+            hidden_size,
+        })
+    }
+
+    /// Build an EmbeddingModel from a RoPE-BERT config (ModernBERT, GTE, Jina).
+    /// Defaults to Mean pooling + L2 normalization.
+    pub fn from_rope_bert(config_path: &str, weights: &HashMap<String, Array>) -> Result<Self> {
+        let model = rope_bert::from_config_file(config_path, weights)?;
+        let hidden_size = model.config.hidden_size;
+        Ok(Self {
+            model: Model::RopeBert(model),
             pooling: PoolingStrategy::Mean,
             normalize: true,
             hidden_size,

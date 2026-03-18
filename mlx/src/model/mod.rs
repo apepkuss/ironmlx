@@ -6,6 +6,7 @@ mod loader;
 mod qwen3;
 mod qwen35;
 mod qwen35_vl;
+pub mod rope_bert;
 
 pub use bert::{BertConfig, BertModel};
 pub use config::{ModelConfig, Qwen35Config, VisionConfig};
@@ -14,6 +15,7 @@ pub use llama::{LlamaModel, TransformerBlock};
 pub use loader::load_model_weights;
 pub use qwen35::Qwen35Model;
 pub use qwen35_vl::Qwen35VLModel;
+pub use rope_bert::{RopeBertConfig, RopeBertModel};
 
 use crate::array::Array;
 use crate::error::Result;
@@ -31,6 +33,8 @@ pub enum Model {
     Qwen35VL(Box<Qwen35VLModel>),
     /// BERT encoder-only model for embeddings.
     Bert(BertModel),
+    /// RoPE-based encoder models (ModernBERT, GTE, Jina).
+    RopeBert(RopeBertModel),
 }
 
 impl Model {
@@ -41,6 +45,7 @@ impl Model {
             Model::Qwen35(m) => m.num_layers(),
             Model::Qwen35VL(m) => m.num_layers(),
             Model::Bert(m) => m.num_layers(),
+            Model::RopeBert(m) => m.num_layers(),
         }
     }
 
@@ -62,6 +67,10 @@ impl Model {
                 let stream = crate::stream::Stream::new(&crate::device::Device::gpu());
                 m.forward(tokens, &stream)
             }
+            Model::RopeBert(m) => {
+                let stream = crate::stream::Stream::new(&crate::device::Device::gpu());
+                m.forward(tokens, &stream)
+            }
         }
     }
 
@@ -79,9 +88,9 @@ impl Model {
         }
     }
 
-    /// Returns true if this is an encoder-only model (e.g., BERT).
+    /// Returns true if this is an encoder-only model (e.g., BERT, ModernBERT, GTE, Jina).
     pub fn is_encoder(&self) -> bool {
-        matches!(self, Model::Bert(_))
+        matches!(self, Model::Bert(_) | Model::RopeBert(_))
     }
 }
 
@@ -118,8 +127,21 @@ pub fn build_model_from_file(config_path: &str, weights: &HashMap<String, Array>
 
     match model_type {
         "bert" | "xlm-roberta" => {
+            // Check if this is a RoPE-based BERT (e.g., GTE with position_embedding_type: "rope")
+            let position_emb_type = raw
+                .get("position_embedding_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("absolute");
+            if position_emb_type == "rope" {
+                let model = rope_bert::from_config_file(config_path, weights)?;
+                return Ok(Model::RopeBert(model));
+            }
             let model = bert::from_config_file(config_path, weights)?;
             Ok(Model::Bert(model))
+        }
+        "modernbert" | "new" | "jina" | "jina-bert" => {
+            let model = rope_bert::from_config_file(config_path, weights)?;
+            Ok(Model::RopeBert(model))
         }
         "qwen3_5" => {
             // Check if vision_config is present to decide VLM vs text-only
