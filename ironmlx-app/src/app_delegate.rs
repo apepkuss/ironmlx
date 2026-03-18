@@ -119,8 +119,9 @@ define_class!(
     impl MenuHandler {
         #[unsafe(method(openDashboard:))]
         fn open_dashboard(&self, _sender: &NSMenuItem) {
-            let p = port();
-            open_url(&format!("http://localhost:{}/admin", p));
+            if let Some(mtm) = MainThreadMarker::new() {
+                crate::dashboard::show_dashboard(mtm);
+            }
         }
 
         #[unsafe(method(openChat:))]

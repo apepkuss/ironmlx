@@ -4,6 +4,7 @@ use objc2_app_kit::{NSApplication, NSApplicationDelegate};
 
 mod app_delegate;
 mod config;
+pub mod dashboard;
 mod preferences;
 mod server_manager;
 mod updater;
