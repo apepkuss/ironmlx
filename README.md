@@ -1,14 +1,24 @@
-# ironmlx
+<p align="center">
+  <img src="assets/logo.png" width="180" alt="ironmlx logo"/>
+</p>
 
-**Your Mac has a GPU. Use it.**
+<h1 align="center">ironmlx</h1>
 
-ironmlx is a local AI inference service for Apple Silicon. Run LLMs and vision models locally on your Mac — no cloud, no subscription, your data stays on your device.
+<p align="center">
+  <strong>Your Mac has a GPU. Use it.</strong>
+</p>
 
-```console
-brew install ironmlx → launch → chat
-```
+<p align="center">
+  A local AI inference service for Apple Silicon. Run LLMs and vision models locally on your Mac — no cloud, no subscription, your data stays on your device.
+</p>
 
-[中文版](README_zh.md)
+<p align="center">
+  <code>brew install ironmlx → launch → chat</code>
+</p>
+
+<p align="center">
+  <a href="README_zh.md">中文版</a>
+</p>
 
 ## Features
 

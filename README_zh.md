@@ -1,10 +1,20 @@
-# ironmlx
+<p align="center">
+  <img src="assets/logo.png" width="180" alt="ironmlx logo"/>
+</p>
 
-**你的 Mac，你的 AI。**
+<h1 align="center">ironmlx</h1>
 
-ironmlx 是一个 Apple Silicon 本地 AI 推理服务。在你的 Mac 上本地运行大语言模型和视觉模型 — 无需云端、无需订阅、数据留在你的设备上，只需"安装、启动、开始对话"。
+<p align="center">
+  <strong>你的 Mac，你的 AI。</strong>
+</p>
 
-[English](README.md)
+<p align="center">
+  Apple Silicon 本地 AI 推理服务。在你的 Mac 上本地运行大语言模型和视觉模型 — 无需云端、无需订阅、数据留在你的设备上，只需"安装、启动、开始对话"。
+</p>
+
+<p align="center">
+  <a href="README.md">English</a>
+</p>
 
 ## 特性
 
