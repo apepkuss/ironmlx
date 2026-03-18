@@ -71,8 +71,10 @@ async fn main() {
     let state = Arc::new(AppState {
         pool,
         started_at: chrono::Utc::now().timestamp(),
-        config,
-        log_buffer: state::LogBuffer::new(100),
+        config: config.clone(),
+        log_buffer: state::LogBuffer::new(config.read().unwrap().log_buffer_size),
+        downloads: std::sync::Mutex::new(std::collections::HashMap::new()),
+        benchmark_history: std::sync::Mutex::new(Vec::new()),
     });
 
     // Log startup event

@@ -135,6 +135,7 @@ impl EnginePool {
     }
 
     /// Get engine entry for a model. If model is None, use default.
+    /// If `model_id` is not found directly, tries to resolve it via the provided alias map.
     pub fn get(&self, model_id: Option<&str>) -> Result<Arc<EngineEntry>, String> {
         let engines = self.engines.read().unwrap();
 
@@ -163,6 +164,31 @@ impl EnginePool {
         let mut default = self.default_model.write().unwrap();
         *default = Some(model_id.to_string());
         Ok(())
+    }
+
+    /// Get engine entry, resolving model aliases from the provided map.
+    pub fn get_with_aliases(
+        &self,
+        model_id: Option<&str>,
+        aliases: &HashMap<String, String>,
+    ) -> Result<Arc<EngineEntry>, String> {
+        if let Some(id) = model_id {
+            // Try direct lookup first
+            let engines = self.engines.read().unwrap();
+            if let Some(entry) = engines.get(id) {
+                return Ok(entry.clone());
+            }
+            // Try alias resolution
+            if let Some(real_id) = aliases.get(id) {
+                return engines
+                    .get(real_id.as_str())
+                    .cloned()
+                    .ok_or_else(|| format!("model not loaded: {} (alias for {})", id, real_id));
+            }
+            Err(format!("model not loaded: {}", id))
+        } else {
+            self.get(None)
+        }
     }
 
     /// List all loaded models.

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -28,6 +29,14 @@ pub struct ServerConfig {
     pub top_p: f32,
     /// API key for authentication (None = no auth)
     pub api_key: Option<String>,
+    /// HuggingFace endpoint URL
+    pub hf_endpoint: String,
+    /// Custom chat template override (Jinja2)
+    pub chat_template_override: Option<String>,
+    /// Model aliases: alias name → real model_id
+    pub model_aliases: HashMap<String, String>,
+    /// Log buffer size (max number of in-memory log entries)
+    pub log_buffer_size: usize,
 }
 
 impl Default for ServerConfig {
@@ -45,6 +54,10 @@ impl Default for ServerConfig {
             temperature: 1.0,
             top_p: 1.0,
             api_key: None,
+            hf_endpoint: "https://huggingface.co".to_string(),
+            chat_template_override: None,
+            model_aliases: HashMap::new(),
+            log_buffer_size: 100,
         }
     }
 }
@@ -104,6 +117,17 @@ impl ServerConfig {
         }
         if let Ok(v) = std::env::var("IRONMLX_API_KEY") {
             config.api_key = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("HF_ENDPOINT") {
+            config.hf_endpoint = v;
+        }
+        if let Ok(v) = std::env::var("IRONMLX_CHAT_TEMPLATE") {
+            config.chat_template_override = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("IRONMLX_LOG_BUFFER_SIZE")
+            && let Ok(n) = v.parse()
+        {
+            config.log_buffer_size = n;
         }
 
         // CLI args (highest priority)

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::response::Html;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 
 use crate::state::AppState;
 
@@ -28,6 +28,13 @@ pub fn router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/api/auth", post(api::auth))
         .route("/admin/api/logs", get(api::get_logs))
         .route("/admin/api/benchmark", post(api::run_benchmark))
+        .route(
+            "/admin/api/benchmark/history",
+            get(api::get_benchmark_history).delete(api::clear_benchmark_history),
+        )
+        .route("/admin/api/models/search", post(api::hf_search))
+        .route("/admin/api/models/download", post(api::hf_download))
+        .route("/admin/api/models/downloads", get(api::hf_downloads))
 }
 
 async fn admin_index() -> Html<&'static str> {

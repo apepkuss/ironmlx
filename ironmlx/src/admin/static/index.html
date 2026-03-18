@@ -10,6 +10,9 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
   <link rel="stylesheet" href="/admin/static/style.css">
 </head>
 <body class="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen flex">
@@ -132,6 +135,55 @@
         </template>
         <div x-show="models.length === 0" class="text-gray-500 text-sm" x-text="$t('models.no_models')"></div>
       </div>
+
+      <!-- HuggingFace Search -->
+      <h3 class="text-lg font-semibold mt-8 mb-3" x-text="$t('models.hf_search_title')"></h3>
+      <div class="admin-card mb-4">
+        <div class="flex gap-2">
+          <input x-model="hfSearchQuery" :placeholder="$t('models.hf_search_placeholder')"
+                 @keydown.enter="hfSearch()"
+                 class="flex-1 px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+          <button @click="hfSearch()" :disabled="hfSearching"
+                  class="px-4 py-2 bg-purple-600 text-white rounded text-sm hover:bg-purple-700 disabled:opacity-50"
+                  x-text="hfSearching ? $t('models.hf_searching') : $t('models.hf_search_button')"></button>
+        </div>
+      </div>
+
+      <!-- Search Results -->
+      <div x-show="hfSearchResults.length > 0" class="space-y-2 mb-6">
+        <template x-for="result in hfSearchResults" :key="result.id">
+          <div class="admin-card flex items-center justify-between">
+            <div>
+              <span class="font-medium text-purple-400" x-text="result.id"></span>
+              <span class="ml-3 text-xs text-gray-500" x-text="result.downloads.toLocaleString() + ' downloads'"></span>
+            </div>
+            <button @click="hfDownload(result.id)" :disabled="isDownloading(result.id)"
+                    class="text-xs px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                    x-text="isDownloading(result.id) ? $t('models.hf_downloading') : $t('models.hf_download')"></button>
+          </div>
+        </template>
+      </div>
+
+      <!-- Active Downloads -->
+      <div x-show="hfDownloads.length > 0">
+        <h3 class="text-lg font-semibold mb-3" x-text="$t('models.hf_downloads_title')"></h3>
+        <div class="space-y-2">
+          <template x-for="dl in hfDownloads" :key="dl.repo_id">
+            <div class="admin-card">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-medium text-sm" x-text="dl.repo_id"></span>
+                <span class="text-xs" :class="hfDownloadStatusColor(dl.status)"
+                      x-text="dl.status === 'downloading' ? Math.round(dl.progress_pct) + '%' : dl.status"></span>
+              </div>
+              <div x-show="dl.status === 'downloading'" class="w-full bg-gray-200 dark:bg-gray-600 rounded-full h-2">
+                <div class="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                     :style="'width: ' + dl.progress_pct + '%'"></div>
+              </div>
+              <div x-show="dl.error" class="text-xs text-red-400 mt-1" x-text="dl.error"></div>
+            </div>
+          </template>
+        </div>
+      </div>
     </div>
 
     <!-- Settings Page -->
@@ -200,6 +252,55 @@
             <option value="warn">warn</option>
             <option value="error">error</option>
           </select>
+        </div>
+
+        <!-- HuggingFace Endpoint -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1" x-text="$t('settings.hf_endpoint')"></label>
+          <input type="text" x-model="settings.hf_endpoint"
+                 placeholder="https://huggingface.co"
+                 class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+          <div class="text-xs text-gray-500 mt-1" x-text="$t('settings.hf_endpoint_hint')"></div>
+        </div>
+
+        <!-- Log Buffer Size -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1" x-text="$t('settings.log_buffer_size')"></label>
+          <input type="number" x-model.number="settings.log_buffer_size" step="1" min="10" max="10000"
+                 class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+        </div>
+
+        <!-- Chat Template Override -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-1" x-text="$t('settings.chat_template')"></label>
+          <textarea x-model="settings.chat_template_override" rows="4"
+                    :placeholder="$t('settings.chat_template_placeholder')"
+                    class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono resize-y"></textarea>
+        </div>
+
+        <!-- Model Aliases -->
+        <div class="admin-card">
+          <label class="block text-xs text-gray-500 mb-2" x-text="$t('settings.model_aliases')"></label>
+          <div class="space-y-2 mb-3">
+            <template x-for="(realId, alias) in settings.model_aliases" :key="alias">
+              <div class="flex gap-2 items-center">
+                <span class="text-sm font-mono bg-gray-200 dark:bg-gray-600 px-2 py-1 rounded" x-text="alias"></span>
+                <span class="text-gray-500 text-xs">&rarr;</span>
+                <span class="text-sm font-mono text-blue-400" x-text="realId"></span>
+                <button @click="removeAlias(alias)" class="text-red-400 hover:text-red-300 text-xs ml-auto">x</button>
+              </div>
+            </template>
+            <div x-show="Object.keys(settings.model_aliases || {}).length === 0" class="text-gray-500 text-xs"
+                 x-text="$t('settings.no_aliases')"></div>
+          </div>
+          <div class="flex gap-2">
+            <input x-model="newAliasName" :placeholder="$t('settings.alias_name')"
+                   class="flex-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+            <input x-model="newAliasTarget" :placeholder="$t('settings.alias_target')"
+                   class="flex-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm">
+            <button @click="addAlias()" class="px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
+                    x-text="$t('settings.add_alias')"></button>
+          </div>
         </div>
 
         <!-- API Key -->
@@ -305,6 +406,45 @@
           <div class="text-xs text-gray-500 mb-1" x-text="$t('benchmark.generated')"></div>
           <div class="text-xl font-bold" x-text="benchResult ? benchResult.generated_tokens + ' tok' : '—'"></div>
         </div>
+      </div>
+
+      <!-- Benchmark History -->
+      <div class="mt-6">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-lg font-semibold" x-text="$t('benchmark.history')"></h3>
+          <button x-show="benchHistory.length > 0" @click="clearBenchHistory()"
+                  class="px-3 py-1 text-xs border border-gray-600 rounded hover:bg-gray-700"
+                  x-text="$t('benchmark.clear_history')"></button>
+        </div>
+        <div x-show="benchHistory.length > 0" class="admin-card overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs text-gray-500 border-b border-gray-200 dark:border-gray-700">
+                <th class="pb-2 pr-4" x-text="$t('benchmark.hist_time')"></th>
+                <th class="pb-2 pr-4">Model</th>
+                <th class="pb-2 pr-4" x-text="$t('benchmark.hist_prompt')"></th>
+                <th class="pb-2 pr-4" x-text="$t('benchmark.hist_gen')"></th>
+                <th class="pb-2 pr-4" x-text="$t('benchmark.ttft')"></th>
+                <th class="pb-2 pr-4" x-text="$t('benchmark.throughput')"></th>
+                <th class="pb-2" x-text="$t('benchmark.total_time')"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(h, idx) in benchHistory" :key="idx">
+                <tr class="border-b border-gray-100 dark:border-gray-700">
+                  <td class="py-1 pr-4 text-xs text-gray-500" x-text="new Date(h.timestamp * 1000).toLocaleString()"></td>
+                  <td class="py-1 pr-4 font-mono text-xs" x-text="h.model"></td>
+                  <td class="py-1 pr-4" x-text="h.prompt_tokens"></td>
+                  <td class="py-1 pr-4" x-text="h.gen_tokens"></td>
+                  <td class="py-1 pr-4" x-text="h.ttft_ms.toFixed(0) + ' ms'"></td>
+                  <td class="py-1 pr-4" x-text="h.tok_per_sec.toFixed(1) + ' tok/s'"></td>
+                  <td class="py-1" x-text="(h.total_ms / 1000).toFixed(1) + ' s'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+        <div x-show="benchHistory.length === 0" class="text-gray-500 text-sm" x-text="$t('benchmark.no_history')"></div>
       </div>
     </div>
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -5,7 +6,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{AppState, LogEntry};
+use crate::state::{AppState, BenchmarkResult, DownloadStatus, LogEntry};
 use ironmlx_core::generate::SamplerConfig;
 
 #[derive(Serialize)]
@@ -19,6 +20,10 @@ pub struct SettingsResponse {
     top_p: f32,
     api_key_set: bool,
     log_level: String,
+    hf_endpoint: String,
+    chat_template_override: Option<String>,
+    model_aliases: HashMap<String, String>,
+    log_buffer_size: usize,
 }
 
 #[derive(Deserialize)]
@@ -30,6 +35,10 @@ pub struct UpdateSettingsRequest {
     pub top_p: Option<f32>,
     pub api_key: Option<String>,
     pub log_level: Option<String>,
+    pub hf_endpoint: Option<String>,
+    pub chat_template_override: Option<String>,
+    pub model_aliases: Option<HashMap<String, String>>,
+    pub log_buffer_size: Option<usize>,
 }
 
 pub async fn get_settings(State(state): State<Arc<AppState>>) -> Json<SettingsResponse> {
@@ -44,6 +53,10 @@ pub async fn get_settings(State(state): State<Arc<AppState>>) -> Json<SettingsRe
         top_p: config.top_p,
         api_key_set: config.api_key.is_some(),
         log_level: config.log_level.clone(),
+        hf_endpoint: config.hf_endpoint.clone(),
+        chat_template_override: config.chat_template_override.clone(),
+        model_aliases: config.model_aliases.clone(),
+        log_buffer_size: config.log_buffer_size,
     })
 }
 
@@ -72,6 +85,25 @@ pub async fn update_settings(
     }
     if let Some(ref v) = req.log_level {
         config.log_level = v.clone();
+    }
+    if let Some(ref v) = req.hf_endpoint {
+        config.hf_endpoint = v.clone();
+    }
+    if let Some(ref v) = req.chat_template_override {
+        config.chat_template_override = if v.is_empty() { None } else { Some(v.clone()) };
+    }
+    if let Some(ref v) = req.model_aliases {
+        config.model_aliases = v.clone();
+    }
+    let new_log_cap = if let Some(v) = req.log_buffer_size {
+        config.log_buffer_size = v;
+        Some(v)
+    } else {
+        None
+    };
+    drop(config);
+    if let Some(cap) = new_log_cap {
+        state.log_buffer.set_capacity(cap);
     }
     StatusCode::OK
 }
@@ -129,9 +161,13 @@ pub async fn run_benchmark(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BenchmarkRequest>,
 ) -> Result<Json<BenchmarkResponse>, (StatusCode, String)> {
+    let aliases = {
+        let config = state.config.read().unwrap();
+        config.model_aliases.clone()
+    };
     let entry = state
         .pool
-        .get(req.model.as_deref())
+        .get_with_aliases(req.model.as_deref(), &aliases)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let prompt = req
@@ -199,6 +235,20 @@ pub async fn run_benchmark(
         ),
     );
 
+    // Store result in history
+    {
+        let result = BenchmarkResult {
+            timestamp: chrono::Utc::now().timestamp(),
+            model: entry.model_id.clone(),
+            prompt_tokens: prompt_len,
+            gen_tokens: count,
+            ttft_ms,
+            tok_per_sec: tps,
+            total_ms,
+        };
+        state.benchmark_history.lock().unwrap().push(result);
+    }
+
     Ok(Json(BenchmarkResponse {
         model: entry.model_id.clone(),
         prompt_tokens: prompt_len,
@@ -207,4 +257,190 @@ pub async fn run_benchmark(
         total_ms,
         tokens_per_sec: tps,
     }))
+}
+
+/// GET /admin/api/benchmark/history — return all benchmark results.
+pub async fn get_benchmark_history(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<BenchmarkResult>> {
+    Json(state.benchmark_history.lock().unwrap().clone())
+}
+
+/// DELETE /admin/api/benchmark/history — clear benchmark history.
+pub async fn clear_benchmark_history(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.benchmark_history.lock().unwrap().clear();
+    StatusCode::OK
+}
+
+// ── HuggingFace Model Search & Download ─────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct HfSearchRequest {
+    pub query: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct HfModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub downloads: u64,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// POST /admin/api/models/search — search HuggingFace for MLX models.
+pub async fn hf_search(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<HfSearchRequest>,
+) -> Result<Json<Vec<HfModelInfo>>, (StatusCode, String)> {
+    let endpoint = {
+        let config = state.config.read().unwrap();
+        config.hf_endpoint.clone()
+    };
+
+    let url = format!(
+        "{}/api/models?search={}&filter=mlx&limit=10&sort=downloads",
+        endpoint,
+        urlencoding::encode(&req.query)
+    );
+
+    let resp = reqwest::get(&url).await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("HF API request failed: {e}"),
+        )
+    })?;
+
+    let models: Vec<HfModelInfo> = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("HF API parse failed: {e}")))?;
+
+    Ok(Json(models))
+}
+
+#[derive(Deserialize)]
+pub struct HfDownloadRequest {
+    pub repo_id: String,
+}
+
+/// POST /admin/api/models/download — start downloading a HuggingFace model.
+pub async fn hf_download(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<HfDownloadRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repo_id = req.repo_id.clone();
+
+    // Check if already downloading
+    {
+        let downloads = state.downloads.lock().unwrap();
+        if let Some(status) = downloads.get(&repo_id) {
+            if status.status == "downloading" {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("{} is already downloading", repo_id),
+                ));
+            }
+        }
+    }
+
+    // Set initial status
+    {
+        let mut downloads = state.downloads.lock().unwrap();
+        downloads.insert(
+            repo_id.clone(),
+            DownloadStatus {
+                repo_id: repo_id.clone(),
+                status: "downloading".to_string(),
+                progress_pct: 0.0,
+                error: None,
+            },
+        );
+    }
+
+    let endpoint = {
+        let config = state.config.read().unwrap();
+        config.hf_endpoint.clone()
+    };
+
+    state
+        .log_buffer
+        .push("info", &format!("Starting download: {}", repo_id));
+
+    // Spawn background download thread
+    let state_clone = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let api = hf_hub::api::sync::ApiBuilder::new()
+                .with_endpoint(endpoint.clone())
+                .build()
+                .map_err(|e| format!("Failed to build HF API: {e}"))?;
+
+            let repo = api.model(repo_id.clone());
+
+            // Download the repo info to get file list
+            let info_url = format!("{}/api/models/{}", endpoint, repo_id);
+            let resp = reqwest::blocking::get(&info_url)
+                .map_err(|e| format!("Failed to fetch model info: {e}"))?;
+            let info: serde_json::Value = resp
+                .json()
+                .map_err(|e| format!("Failed to parse model info: {e}"))?;
+
+            let siblings = info
+                .get("siblings")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "No files found in model repo".to_string())?;
+
+            let total_files = siblings.len();
+            for (i, sibling) in siblings.iter().enumerate() {
+                let filename = sibling
+                    .get("rfilename")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if filename.is_empty() {
+                    continue;
+                }
+
+                repo.get(filename)
+                    .map_err(|e| format!("Failed to download {}: {e}", filename))?;
+
+                // Update progress
+                let pct = ((i + 1) as f32 / total_files as f32) * 100.0;
+                let mut downloads = state_clone.downloads.lock().unwrap();
+                if let Some(status) = downloads.get_mut(&repo_id) {
+                    status.progress_pct = pct;
+                }
+            }
+
+            Ok(())
+        })();
+
+        let mut downloads = state_clone.downloads.lock().unwrap();
+        if let Some(status) = downloads.get_mut(&repo_id) {
+            match result {
+                Ok(()) => {
+                    status.status = "completed".to_string();
+                    status.progress_pct = 100.0;
+                    state_clone
+                        .log_buffer
+                        .push("info", &format!("Download completed: {}", repo_id));
+                }
+                Err(e) => {
+                    status.status = "failed".to_string();
+                    status.error = Some(e.clone());
+                    state_clone
+                        .log_buffer
+                        .push("error", &format!("Download failed: {} — {}", repo_id, e));
+                }
+            }
+        }
+    });
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// GET /admin/api/models/downloads — get status of all downloads.
+pub async fn hf_downloads(State(state): State<Arc<AppState>>) -> Json<Vec<DownloadStatus>> {
+    let downloads = state.downloads.lock().unwrap();
+    Json(downloads.values().cloned().collect())
 }

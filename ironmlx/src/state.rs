@@ -1,6 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ironmlx_core::device::Device;
 use ironmlx_core::generate::{ChatTemplate, Tokenizer};
@@ -22,14 +22,14 @@ pub struct LogEntry {
 /// Fixed-capacity in-memory log buffer (FIFO).
 pub struct LogBuffer {
     entries: std::sync::Mutex<VecDeque<LogEntry>>,
-    capacity: usize,
+    capacity: std::sync::atomic::AtomicUsize,
 }
 
 impl LogBuffer {
     pub fn new(capacity: usize) -> Self {
         Self {
             entries: std::sync::Mutex::new(VecDeque::with_capacity(capacity)),
-            capacity,
+            capacity: std::sync::atomic::AtomicUsize::new(capacity),
         }
     }
 
@@ -40,8 +40,9 @@ impl LogBuffer {
             level: level.to_string(),
             message: message.to_string(),
         };
+        let cap = self.capacity.load(std::sync::atomic::Ordering::Relaxed);
         let mut entries = self.entries.lock().unwrap();
-        if entries.len() >= self.capacity {
+        while entries.len() >= cap {
             entries.pop_front();
         }
         entries.push_back(entry);
@@ -57,6 +58,43 @@ impl LogBuffer {
     pub fn clear(&self) {
         self.entries.lock().unwrap().clear();
     }
+
+    /// Update the buffer capacity. If shrinking, drop the oldest entries.
+    pub fn set_capacity(&self, new_cap: usize) {
+        self.capacity
+            .store(new_cap, std::sync::atomic::Ordering::Relaxed);
+        let mut entries = self.entries.lock().unwrap();
+        while entries.len() > new_cap {
+            entries.pop_front();
+        }
+    }
+
+    /// Return the current capacity.
+    #[allow(dead_code)]
+    pub fn get_capacity(&self) -> usize {
+        self.capacity.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// A stored benchmark result for historical tracking.
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchmarkResult {
+    pub timestamp: i64,
+    pub model: String,
+    pub prompt_tokens: usize,
+    pub gen_tokens: usize,
+    pub ttft_ms: f64,
+    pub tok_per_sec: f64,
+    pub total_ms: f64,
+}
+
+/// Status of a HuggingFace model download.
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadStatus {
+    pub repo_id: String,
+    pub status: String,
+    pub progress_pct: f32,
+    pub error: Option<String>,
 }
 
 pub struct AppState {
@@ -64,6 +102,8 @@ pub struct AppState {
     pub started_at: i64,
     pub config: Arc<std::sync::RwLock<ServerConfig>>,
     pub log_buffer: LogBuffer,
+    pub downloads: Mutex<HashMap<String, DownloadStatus>>,
+    pub benchmark_history: Mutex<Vec<BenchmarkResult>>,
 }
 
 /// Load model artifacts from a directory.

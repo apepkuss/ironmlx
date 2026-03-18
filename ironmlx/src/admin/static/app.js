@@ -24,15 +24,27 @@ function app() {
     loadModelPath: '',
     loadModelMsg: '',
     loadModelError: false,
+    // HuggingFace search/download
+    hfSearchQuery: '',
+    hfSearchResults: [],
+    hfSearching: false,
+    hfDownloads: [],
+    hfDownloadPolling: null,
 
     // Settings page data
     settings: {
       host: '', port: 0, memory_limit_gb: 0, cache_max_size_gb: 0,
       max_num_seqs: 256, temperature: 1.0, top_p: 1.0,
       api_key: '', api_key_set: false, log_level: 'info',
+      hf_endpoint: 'https://huggingface.co',
+      chat_template_override: '',
+      model_aliases: {},
+      log_buffer_size: 100,
     },
     settingsMsg: '',
     settingsError: false,
+    newAliasName: '',
+    newAliasTarget: '',
 
     // Logs page data
     logs: [],
@@ -44,6 +56,7 @@ function app() {
     benchTokens: 50,
     benchRunning: false,
     benchResult: null,
+    benchHistory: [],
 
     // Chat page data
     chatMessages: [],
@@ -74,9 +87,10 @@ function app() {
       // Poll logs every 3 seconds
       this.pollLogs();
       setInterval(() => this.pollLogs(), 3000);
-      // Fetch settings when switching to settings page
+      // Fetch settings/history when switching pages
       this.$watch('currentPage', (page) => {
         if (page === 'settings') this.fetchSettings();
+        if (page === 'benchmark') this.fetchBenchHistory();
       });
     },
 
@@ -176,7 +190,12 @@ function app() {
       try {
         const resp = await this.apiFetch('/admin/api/settings');
         const data = await resp.json();
-        this.settings = { ...data, api_key: '' };
+        this.settings = {
+          ...data,
+          api_key: '',
+          chat_template_override: data.chat_template_override || '',
+          model_aliases: data.model_aliases || {},
+        };
       } catch (e) { console.error('Settings fetch failed:', e); }
     },
 
@@ -191,6 +210,10 @@ function app() {
           temperature: this.settings.temperature,
           top_p: this.settings.top_p,
           log_level: this.settings.log_level,
+          hf_endpoint: this.settings.hf_endpoint,
+          chat_template_override: this.settings.chat_template_override || '',
+          model_aliases: this.settings.model_aliases,
+          log_buffer_size: this.settings.log_buffer_size,
         };
         // Only send api_key if the user typed something
         if (this.settings.api_key !== '') {
@@ -214,6 +237,21 @@ function app() {
         this.settingsMsg = 'Save failed: ' + e.message;
         this.settingsError = true;
       }
+    },
+
+    addAlias() {
+      const name = this.newAliasName.trim();
+      const target = this.newAliasTarget.trim();
+      if (!name || !target) return;
+      this.settings.model_aliases = { ...this.settings.model_aliases, [name]: target };
+      this.newAliasName = '';
+      this.newAliasTarget = '';
+    },
+
+    removeAlias(alias) {
+      const copy = { ...this.settings.model_aliases };
+      delete copy[alias];
+      this.settings.model_aliases = copy;
     },
 
     // -- Logs --
@@ -248,9 +286,87 @@ function app() {
         });
         if (resp.ok) {
           this.benchResult = await resp.json();
+          this.fetchBenchHistory();
         }
       } catch(e) { console.error('Benchmark failed:', e); }
       this.benchRunning = false;
+    },
+
+    async fetchBenchHistory() {
+      try {
+        const resp = await this.apiFetch('/admin/api/benchmark/history');
+        if (resp.ok) {
+          this.benchHistory = await resp.json();
+        }
+      } catch(e) { console.error('Bench history fetch failed:', e); }
+    },
+
+    async clearBenchHistory() {
+      try {
+        await this.apiFetch('/admin/api/benchmark/history', { method: 'DELETE' });
+        this.benchHistory = [];
+      } catch(e) { console.error('Clear bench history failed:', e); }
+    },
+
+    // -- HuggingFace Search & Download --
+
+    async hfSearch() {
+      if (!this.hfSearchQuery.trim()) return;
+      this.hfSearching = true;
+      this.hfSearchResults = [];
+      try {
+        const resp = await this.apiFetch('/admin/api/models/search', {
+          method: 'POST', body: { query: this.hfSearchQuery },
+        });
+        if (resp.ok) {
+          this.hfSearchResults = await resp.json();
+        }
+      } catch (e) { console.error('HF search failed:', e); }
+      this.hfSearching = false;
+    },
+
+    async hfDownload(repoId) {
+      try {
+        await this.apiFetch('/admin/api/models/download', {
+          method: 'POST', body: { repo_id: repoId },
+        });
+        this.startDownloadPolling();
+      } catch (e) { console.error('HF download failed:', e); }
+    },
+
+    startDownloadPolling() {
+      if (this.hfDownloadPolling) return;
+      this.pollDownloads();
+      this.hfDownloadPolling = setInterval(() => this.pollDownloads(), 2000);
+    },
+
+    stopDownloadPolling() {
+      if (this.hfDownloadPolling) {
+        clearInterval(this.hfDownloadPolling);
+        this.hfDownloadPolling = null;
+      }
+    },
+
+    async pollDownloads() {
+      try {
+        const resp = await this.apiFetch('/admin/api/models/downloads');
+        this.hfDownloads = await resp.json();
+        // Stop polling if no active downloads
+        const active = this.hfDownloads.some(d => d.status === 'downloading');
+        if (!active && this.hfDownloads.length > 0) {
+          this.stopDownloadPolling();
+        }
+      } catch (e) { console.error('Download poll failed:', e); }
+    },
+
+    hfDownloadStatusColor(status) {
+      if (status === 'completed') return 'text-green-400';
+      if (status === 'failed') return 'text-red-400';
+      return 'text-blue-400';
+    },
+
+    isDownloading(repoId) {
+      return this.hfDownloads.some(d => d.repo_id === repoId && d.status === 'downloading');
     },
 
     // -- Chat --
@@ -274,6 +390,19 @@ function app() {
       } catch (e) {
         return this.escapeHtml(text);
       }
+    },
+
+    renderMathInChat() {
+      if (typeof renderMathInElement !== 'function') return;
+      const container = this.$refs.chatMessages;
+      if (!container) return;
+      renderMathInElement(container, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false },
+        ],
+        throwOnError: false,
+      });
     },
 
     async sendChat() {
@@ -359,11 +488,12 @@ function app() {
       this.chatStreaming = false;
       this.chatStreamContent = '';
 
-      // Highlight code blocks
+      // Highlight code blocks and render math
       this.$nextTick(() => {
         document.querySelectorAll('pre code').forEach(block => {
           hljs.highlightElement(block);
         });
+        this.renderMathInChat();
       });
     },
   };
