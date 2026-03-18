@@ -1,211 +1,212 @@
 # ironmlx
 
-基于 [MLX](https://github.com/ml-explore/mlx) 的 Rust 本地 LLM 推理引擎，专为 Apple Silicon 设计。
+**你的 Mac，你的 AI。**
 
-ironmlx 是 [omlx](https://github.com/nicekid1/omlx) 的 Rust 版本，目标是提供快速、原生的本地推理服务，兼容 OpenAI API。
+ironmlx 是一个 Apple Silicon 本地 AI 推理服务。在你的 Mac 上本地运行大语言模型和视觉模型 — 无需云端、无需订阅、数据留在你的设备上，只需"安装、启动、开始对话"。
 
 [English](README.md)
 
 ## 特性
 
-- 通过 `mlx-c` C API 绑定实现 MLX 原生推理
-- 支持 4-bit / 8-bit 量化模型（affine 量化）
-- 基于 Jinja2 的聊天模板渲染（从 `tokenizer_config.json` 加载）
-- OpenAI 兼容 HTTP API（`/v1/chat/completions`、`/v1/completions`）
-- SSE 流式响应
-- 连续批处理引擎 + 异步请求队列
-- 自动从 HuggingFace 下载模型
+- **多模态（VLM）** — 图片 + 视频理解（Qwen3.5-VL）
+- **Web 管理面板** — 状态监控、模型管理、对话测试、性能基准
+- **macOS 菜单栏应用** — 原生 AppKit，引导向导、偏好设置
+- **自动模型下载** — 从 HuggingFace 自动下载（支持 repo ID 作为模型路径）
+- **OpenAI 兼容 API** — `/v1/chat/completions`、`/v1/completions`、`/v1/models`
+- **Anthropic 兼容 API** — `/v1/messages`，支持流式响应
+- **Tool Calling** — 函数定义、JSON tool_calls 解析
+- **多模型服务** — 运行时动态加载/卸载模型（EnginePool）
+- **MLX 原生推理**
+- **4-bit / 8-bit 量化模型** 支持（affine 量化）
 
 ## 支持的模型架构
 
-ironmlx 目标是全面兼容 [mlx-lm](https://github.com/ml-explore/mlx-lm)（共 117 种架构）。当前状态：
+ironmlx 目标兼容 [mlx-lm](https://github.com/ml-explore/mlx-lm) 模型架构。当前状态：
 
-| 分类 | 架构 | `model_type` | 状态 | 备注 |
-|------|------|-------------|------|------|
-| **Llama** | Llama 2/3 | `llama` | :white_check_mark: | 已验证（SmolLM-135M-4bit） |
-| | Llama 4 | `llama4` | :x: | |
-| **Qwen** | Qwen3 | `qwen3` | :white_check_mark: | 已验证（Qwen3-0.6B-4bit，19.3 tok/s） |
-| | Qwen3.5 | `qwen3_5` | :white_check_mark: | 已验证（Qwen3.5-4B-4bit，6.4 tok/s，纯文本） |
-| | Qwen2 | `qwen2` | :x: | |
-| | Qwen3 MoE | `qwen3_moe` | :x: | |
-| **Gemma** | Gemma 2 | `gemma2` | :x: | |
-| | Gemma 3 | `gemma3` | :x: | |
-| **DeepSeek** | DeepSeek V3 | `deepseek_v3` | :x: | |
-| | DeepSeek V2 | `deepseek_v2` | :x: | |
-| **Phi** | Phi 3 | `phi3` | :x: | |
-| | Phi MoE | `phimoe` | :x: | |
-| **Mistral** | Mixtral | `mixtral` | :x: | `mistral` 重映射至 `llama` |
+**近期（最近 6 个月）**
+
+| 架构 | `model_type` | 发布时间 | 状态 | 备注 |
+| ---- | ------------ | -------- | ---- | ---- |
+| Qwen3.5 | `qwen3_5` | 2026.02 | :white_check_mark: | 文本 + VLM（图片/视频） |
+| Qwen3.5 MoE | `qwen3_5_moe` | 2026.02 | :x: | |
+| Mistral Small 4 | `mistral3` | 2026.03 | :x: | |
+| Nemotron 3 Super | `nemotron_h` | 2026.03 | :x: | |
+| DeepSeek V32 | `deepseek_v32` | 2026.01 | :x: | |
+| Step 3.5 | `step3p5` | 2026.01 | :x: | |
+| SmolLM 3 | `smollm3` | 2026.01 | :x: | |
+| OLMo 3 | `olmo3` | 2025.12 | :x: | |
+| Qwen3 | `qwen3` | 2025.10 | :white_check_mark: | 文本 + thinking 模式 |
+| Qwen3 MoE | `qwen3_moe` | 2025.10 | :x: | |
+| RWKV 7 | `rwkv7` | 2025.10 | :x: | |
 
 <details>
-<summary><b>完整架构列表（共 117 种）</b></summary>
+<summary><b>更早的架构（6 个月以上）</b></summary>
 
-| 分类 | 架构 | `model_type` | 状态 |
-|------|------|-------------|------|
-| **Llama** | Llama 2/3 | `llama` | :white_check_mark: |
-| | Llama 4 | `llama4` | :x: |
-| | Mistral 3 | `mistral3` | :x: |
-| **Qwen** | Qwen | `qwen` | :x: |
-| | Qwen2 | `qwen2` | :x: |
-| | Qwen2 MoE | `qwen2_moe` | :x: |
-| | Qwen2 VL | `qwen2_vl` | :x: |
-| | Qwen3 | `qwen3` | :white_check_mark: |
-| | Qwen3.5 | `qwen3_5` | :white_check_mark: |
-| | Qwen3.5 MoE | `qwen3_5_moe` | :x: |
-| | Qwen3 MoE | `qwen3_moe` | :x: |
-| | Qwen3 Next | `qwen3_next` | :x: |
-| | Qwen3 VL | `qwen3_vl` | :x: |
-| | Qwen3 VL MoE | `qwen3_vl_moe` | :x: |
-| **Gemma** | Gemma | `gemma` | :x: |
-| | Gemma 2 | `gemma2` | :x: |
-| | Gemma 3 | `gemma3` | :x: |
-| | Gemma 3 Text | `gemma3_text` | :x: |
-| | Gemma 3n | `gemma3n` | :x: |
-| | Recurrent Gemma | `recurrent_gemma` | :x: |
-| **DeepSeek** | DeepSeek | `deepseek` | :x: |
-| | DeepSeek V2 | `deepseek_v2` | :x: |
-| | DeepSeek V3 | `deepseek_v3` | :x: |
-| | DeepSeek V32 | `deepseek_v32` | :x: |
-| **Phi** | Phi | `phi` | :x: |
-| | Phi 3 | `phi3` | :x: |
-| | Phi 3 Small | `phi3small` | :x: |
-| | PhiXtral | `phixtral` | :x: |
-| | Phi MoE | `phimoe` | :x: |
-| **GLM** | GLM | `glm` | :x: |
-| | GLM 4 | `glm4` | :x: |
-| | GLM 4 MoE | `glm4_moe` | :x: |
-| | GLM 4 MoE Lite | `glm4_moe_lite` | :x: |
-| | GLM MoE DSA | `glm_moe_dsa` | :x: |
-| **Mistral** | Mixtral | `mixtral` | :x: |
-| | Ministral 3 | `ministral3` | :x: |
-| | Pixtral | `pixtral` | :x: |
-| **SSM/循环** | Mamba | `mamba` | :x: |
-| | Mamba 2 | `mamba2` | :x: |
-| | RWKV 7 | `rwkv7` | :x: |
-| | SSM | `ssm` | :x: |
-| **Cohere** | Cohere | `cohere` | :x: |
-| | Cohere 2 | `cohere2` | :x: |
-| **IBM** | Granite | `granite` | :x: |
-| | Granite MoE | `granitemoe` | :x: |
-| | Granite MoE Hybrid | `granitemoehybrid` | :x: |
-| **OLMo** | OLMo | `olmo` | :x: |
-| | OLMo 2 | `olmo2` | :x: |
-| | OLMo 3 | `olmo3` | :x: |
-| | OLMoE | `olmoe` | :x: |
-| **InternLM** | InternLM 2 | `internlm2` | :x: |
-| | InternLM 3 | `internlm3` | :x: |
-| **MiniCPM** | MiniCPM | `minicpm` | :x: |
-| | MiniCPM 3 | `minicpm3` | :x: |
-| **NVIDIA** | Nemotron | `nemotron` | :x: |
-| | Nemotron NAS | `nemotron-nas` | :x: |
-| | Nemotron H | `nemotron_h` | :x: |
-| **GPT** | GPT-2 | `gpt2` | :x: |
-| | GPT-NeoX | `gpt_neox` | :x: |
-| | GPT BigCode | `gpt_bigcode` | :x: |
-| | GPT OSS | `gpt_oss` | :x: |
-| **StarCoder** | StarCoder 2 | `starcoder2` | :x: |
-| **EXaONE** | EXaONE | `exaone` | :x: |
-| | EXaONE 4 | `exaone4` | :x: |
-| | EXaONE MoE | `exaone_moe` | :x: |
-| **混元** | Hunyuan | `hunyuan` | :x: |
-| | Hunyuan V1 Dense | `hunyuan_v1_dense` | :x: |
-| **文心** | ERNIE 4.5 | `ernie4_5` | :x: |
-| | ERNIE 4.5 MoE | `ernie4_5_moe` | :x: |
-| **Plamo** | Plamo | `plamo` | :x: |
-| | Plamo 2 | `plamo2` | :x: |
-| **Kimi** | Kimi K2.5 | `kimi_k25` | :x: |
-| | Kimi Linear | `kimi_linear` | :x: |
-| | Kimi VL | `kimi_vl` | :x: |
-| **LFM** | LFM 2 | `lfm2` | :x: |
-| | LFM 2 MoE | `lfm2_moe` | :x: |
-| | LFM 2 VL | `lfm2-vl` | :x: |
-| **其他** | AFM 7 | `afm7` | :x: |
-| | AFMoE | `afmoe` | :x: |
-| | Apertus | `apertus` | :x: |
-| | Baichuan M1 | `baichuan_m1` | :x: |
-| | Bailing MoE | `bailing_moe` | :x: |
-| | Bailing MoE Linear | `bailing_moe_linear` | :x: |
-| | BitNet | `bitnet` | :x: |
-| | DBRX | `dbrx` | :x: |
-| | DOTS 1 | `dots1` | :x: |
-| | Falcon H1 | `falcon_h1` | :x: |
-| | Helium | `helium` | :x: |
-| | Jamba | `jamba` | :x: |
-| | Klear | `Klear` | :x: |
-| | Lille 130M | `lille-130m` | :x: |
-| | Longcat Flash | `longcat_flash` | :x: |
-| | Longcat Flash N-gram | `longcat_flash_ngram` | :x: |
-| | MIMO | `mimo` | :x: |
-| | MIMO V2 Flash | `mimo_v2_flash` | :x: |
-| | Minimax | `minimax` | :x: |
-| | MLA | `mla` | :x: |
-| | NanoChat | `nanochat` | :x: |
-| | OpenELM | `openelm` | :x: |
-| | SEED OSS | `seed_oss` | :x: |
-| | SmolLM 3 | `smollm3` | :x: |
-| | Solar Open | `solar_open` | :x: |
-| | StableLM | `stablelm` | :x: |
-| | Step 3.5 | `step3p5` | :x: |
-| | TeleChat 3 | `telechat3` | :x: |
-| | YoutuAI LLM | `youtu_llm` | :x: |
+| 架构 | `model_type` | 发布时间 | 状态 |
+| ---- | ------------ | -------- | ---- |
+| Falcon H1 | `falcon_h1` | 2025.07 | :x: |
+| Llama 4 | `llama4` | 2025.04 | :x: |
+| Gemma 3 | `gemma3` | 2025.03 | :x: |
+| Gemma 3n | `gemma3n` | 2025.03 | :x: |
+| Phi 4 mini | `phi3` | 2025.02 | :x: |
+| DeepSeek V3 | `deepseek_v3` | 2024.12 | :x: |
+| Llama 2/3 | `llama` | 2023-2024 | :white_check_mark: |
+| Gemma 2 | `gemma2` | 2024 | :x: |
+| Mixtral | `mixtral` | 2023.12 | :x: |
+| Mamba 2 | `mamba2` | 2024 | :x: |
+| Cohere 2 | `cohere2` | 2024 | :x: |
+| GLM 4 | `glm4` | 2024 | :x: |
+| InternLM 3 | `internlm3` | 2024 | :x: |
+| Granite | `granite` | 2024 | :x: |
+| GPT-NeoX | `gpt_neox` | 2023 | :x: |
+| StarCoder 2 | `starcoder2` | 2024 | :x: |
 
 </details>
 
 > 推荐使用 `mlx-community` HuggingFace 组织中 SafeTensors 格式的模型。
 
-## 工作区结构
+## 安装
 
+**Homebrew（推荐）：**
+
+```bash
+brew install ironmlx
 ```
-ironmlx/
-├── mlx-sys/      # FFI 绑定层（bindgen 从 mlx-c 头文件自动生成）
-├── mlx/          # ironmlx-core — 安全 Rust API（ops、nn、model、generate）
-├── ironmlx/      # 二进制 crate — CLI + OpenAI 兼容 HTTP 服务
-└── vendor/mlx-c/ # MLX C API（git 子模块）
+
+**从源码构建：**
+
+```bash
+git clone https://github.com/apepkuss/ironmlx.git
+cd ironmlx
+cargo build --release
 ```
 
 ## 快速开始
 
-### 编译
+### 桌面应用
+
+启动菜单栏应用 — 一切自动完成：
 
 ```bash
-cargo build --release
+ironmlx-app
 ```
 
-### 端到端验证
+1. 首次启动弹出引导向导 — 输入模型 ID（如 `mlx-community/Qwen3-0.6B-4bit`），自动下载
+2. 菜单栏出现 ⚡ 图标
+3. 点击 **Dashboard** 在浏览器中打开 Web 管理面板
 
-下载小型量化模型并运行推理：
+完成。本地推理服务已在运行。
+
+### Web 管理面板
+
+访问 `http://localhost:8080/admin` — 无需命令行：
+
+- **Chat** — 在浏览器中直接对话（流式响应、Markdown、代码高亮）
+- **Models** — 搜索 HuggingFace、一键下载、加载/卸载模型
+- **Status** — 实时内存使用和服务器状态
+- **Benchmark** — 测量推理速度（TTFT、tokens/sec）
+- **Settings** — 配置端口、采样参数、API 密钥
+- **Logs** — 查看服务器日志
+
+支持暗色/亮色/跟随系统主题，4 种语言（EN / 中文 / 日本語 / 한국어）。
+
+### 后台服务
+
+将 ironmlx 作为后台服务运行，开机自动启动：
 
 ```bash
-cargo run --release --example verify_e2e
-# 默认：Qwen3-0.6B-4bit（~320MB，自动从 HuggingFace 下载）
-
-# 或指定模型：
-cargo run --release --example verify_e2e -- mlx-community/SmolLM-135M-Instruct-4bit
+brew services start ironmlx
 ```
 
-### 启动推理服务
+## 使用推理 API
 
-```bash
-cargo run --release --bin ironmlx -- --model /path/to/model --port 8080
+ironmlx 提供 OpenAI 兼容和 Anthropic 兼容的 API。任何支持这些 API 的应用或工具都可以直接使用 — 将地址指向 `http://localhost:8080`。
+
+**兼容的工具：** ChatGPT 客户端、Cursor、Continue、Open Interpreter、LangChain、LlamaIndex，以及任何 OpenAI SDK。
+
+**示例 — Python (OpenAI SDK)：**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
+response = client.chat.completions.create(
+    model="default",
+    messages=[{"role": "user", "content": "你好！"}],
+    stream=True,
+)
+for chunk in response:
+    print(chunk.choices[0].delta.content or "", end="")
 ```
 
-### API 调用
+**示例 — JavaScript：**
 
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "default",
-    "messages": [{"role": "user", "content": "你好！"}],
-    "max_tokens": 100,
-    "stream": true
-  }'
+```javascript
+const response = await fetch("http://localhost:8080/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    messages: [{ role: "user", content: "你好！" }],
+    max_tokens: 100,
+    stream: false,
+  }),
+});
+const data = await response.json();
+console.log(data.choices[0].message.content);
+```
+
+### API 端点
+
+| 端点 | 说明 |
+| ---- | ---- |
+| `POST /v1/chat/completions` | 对话补全（文本、多模态、流式） |
+| `POST /v1/completions` | 文本补全 |
+| `POST /v1/messages` | Anthropic 兼容消息 API |
+| `GET /v1/models` | 列出已加载模型 |
+| `POST /v1/models/load` | 加载模型 |
+| `POST /v1/models/unload` | 卸载模型 |
+| `GET /health` | 服务器状态 + 内存统计 |
+
+### 多模态（图片）
+
+支持 base64、URL 或本地文件路径：
+
+```python
+response = client.chat.completions.create(
+    model="default",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
+            {"type": "text", "text": "这张图片里是什么？"}
+        ]
+    }],
+)
+```
+
+### Tool Calling
+
+```python
+response = client.chat.completions.create(
+    model="default",
+    messages=[{"role": "user", "content": "东京天气怎么样？"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "获取城市天气",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }
+    }],
+)
 ```
 
 ## 系统要求
 
 - macOS + Apple Silicon（M1/M2/M3/M4）
-- Rust 1.85+（edition 2024）
-- CMake（用于编译 MLX）
+- Homebrew 安装：只需 `brew install ironmlx`
+- 从源码构建：Rust 1.85+、CMake
+- 可选：ffmpeg（用于视频推理）
 
 ## 许可证
 

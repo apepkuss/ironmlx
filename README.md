@@ -1,211 +1,216 @@
 # ironmlx
 
-A Rust implementation of local LLM inference on Apple Silicon, powered by [MLX](https://github.com/ml-explore/mlx).
+**Your Mac has a GPU. Use it.**
 
-ironmlx is the Rust counterpart of [omlx](https://github.com/nicekid1/omlx), aiming to provide fast, native local inference with an OpenAI-compatible API.
+ironmlx is a local AI inference service for Apple Silicon. Run LLMs and vision models locally on your Mac — no cloud, no subscription, your data stays on your device.
+
+```console
+brew install ironmlx → launch → chat
+```
 
 [中文版](README_zh.md)
 
 ## Features
 
-- MLX-native inference via `mlx-c` C API bindings
-- 4-bit / 8-bit quantized model support (affine quantization)
-- Jinja2-based chat template rendering (from `tokenizer_config.json`)
-- OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/completions`)
-- SSE streaming responses
-- Continuous batching engine with async request queue
-- Automatic model download from HuggingFace
+- **Multimodal (VLM)** — image + video understanding (Qwen3.5-VL)
+- **Web Admin Panel** — Status, Models, Chat, Settings, Logs, Benchmark
+- **macOS Menubar App** — native AppKit, welcome wizard, preferences
+- **Automatic model download** from HuggingFace (repo ID as model path)
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/models`
+- **Anthropic-compatible API** — `/v1/messages` with streaming
+- **Tool Calling** — function definitions, JSON tool_calls parsing
+- **Multi-model serving** — load/unload models at runtime via EnginePool
+- **MLX-native inference**
+- **4-bit / 8-bit quantized** model support (affine quantization)
 
-## Supported Model Architectures
+## Supported Models
 
-ironmlx targets full compatibility with [mlx-lm](https://github.com/ml-explore/mlx-lm) (117 architectures). Current status:
+ironmlx targets compatibility with [mlx-lm](https://github.com/ml-explore/mlx-lm) model architectures. Current status:
 
-| Category | Architecture | `model_type` | Status | Notes |
-|----------|-------------|-------------|--------|-------|
-| **Llama** | Llama 2/3 | `llama` | :white_check_mark: | Verified (SmolLM-135M-4bit) |
-| | Llama 4 | `llama4` | :x: | |
-| **Qwen** | Qwen3 | `qwen3` | :white_check_mark: | Verified (Qwen3-0.6B-4bit, 19.3 tok/s) |
-| | Qwen3.5 | `qwen3_5` | :white_check_mark: | Verified (Qwen3.5-4B-4bit, 6.4 tok/s, text-only) |
-| | Qwen2 | `qwen2` | :x: | |
-| | Qwen3 MoE | `qwen3_moe` | :x: | |
-| **Gemma** | Gemma 2 | `gemma2` | :x: | |
-| | Gemma 3 | `gemma3` | :x: | |
-| **DeepSeek** | DeepSeek V3 | `deepseek_v3` | :x: | |
-| | DeepSeek V2 | `deepseek_v2` | :x: | |
-| **Phi** | Phi 3 | `phi3` | :x: | |
-| | Phi MoE | `phimoe` | :x: | |
-| **Mistral** | Mixtral | `mixtral` | :x: | Remapped from `mistral` -> `llama` |
+**Recent (last 6 months)**
+
+| Architecture | `model_type` | Released | Status | Notes |
+| ------------ | ------------ | -------- | ------ | ----- |
+| Qwen3.5 | `qwen3_5` | 2026.02 | :white_check_mark: | Text + VLM (image/video) |
+| Qwen3.5 MoE | `qwen3_5_moe` | 2026.02 | :x: | |
+| Mistral Small 4 | `mistral3` | 2026.03 | :x: | |
+| Nemotron 3 Super | `nemotron_h` | 2026.03 | :x: | |
+| DeepSeek V32 | `deepseek_v32` | 2026.01 | :x: | |
+| Step 3.5 | `step3p5` | 2026.01 | :x: | |
+| SmolLM 3 | `smollm3` | 2026.01 | :x: | |
+| OLMo 3 | `olmo3` | 2025.12 | :x: | |
+| Qwen3 | `qwen3` | 2025.10 | :white_check_mark: | Text + thinking mode |
+| Qwen3 MoE | `qwen3_moe` | 2025.10 | :x: | |
+| RWKV 7 | `rwkv7` | 2025.10 | :x: | |
 
 <details>
-<summary><b>Full architecture list (117 total)</b></summary>
+<summary><b>Older architectures (6+ months)</b></summary>
 
-| Category | Architecture | `model_type` | Status |
-|----------|-------------|-------------|--------|
-| **Llama** | Llama 2/3 | `llama` | :white_check_mark: |
-| | Llama 4 | `llama4` | :x: |
-| | Mistral 3 | `mistral3` | :x: |
-| **Qwen** | Qwen | `qwen` | :x: |
-| | Qwen2 | `qwen2` | :x: |
-| | Qwen2 MoE | `qwen2_moe` | :x: |
-| | Qwen2 VL | `qwen2_vl` | :x: |
-| | Qwen3 | `qwen3` | :white_check_mark: |
-| | Qwen3.5 | `qwen3_5` | :white_check_mark: |
-| | Qwen3.5 MoE | `qwen3_5_moe` | :x: |
-| | Qwen3 MoE | `qwen3_moe` | :x: |
-| | Qwen3 Next | `qwen3_next` | :x: |
-| | Qwen3 VL | `qwen3_vl` | :x: |
-| | Qwen3 VL MoE | `qwen3_vl_moe` | :x: |
-| **Gemma** | Gemma | `gemma` | :x: |
-| | Gemma 2 | `gemma2` | :x: |
-| | Gemma 3 | `gemma3` | :x: |
-| | Gemma 3 Text | `gemma3_text` | :x: |
-| | Gemma 3n | `gemma3n` | :x: |
-| | Recurrent Gemma | `recurrent_gemma` | :x: |
-| **DeepSeek** | DeepSeek | `deepseek` | :x: |
-| | DeepSeek V2 | `deepseek_v2` | :x: |
-| | DeepSeek V3 | `deepseek_v3` | :x: |
-| | DeepSeek V32 | `deepseek_v32` | :x: |
-| **Phi** | Phi | `phi` | :x: |
-| | Phi 3 | `phi3` | :x: |
-| | Phi 3 Small | `phi3small` | :x: |
-| | PhiXtral | `phixtral` | :x: |
-| | Phi MoE | `phimoe` | :x: |
-| **GLM** | GLM | `glm` | :x: |
-| | GLM 4 | `glm4` | :x: |
-| | GLM 4 MoE | `glm4_moe` | :x: |
-| | GLM 4 MoE Lite | `glm4_moe_lite` | :x: |
-| | GLM MoE DSA | `glm_moe_dsa` | :x: |
-| **Mistral** | Mixtral | `mixtral` | :x: |
-| | Ministral 3 | `ministral3` | :x: |
-| | Pixtral | `pixtral` | :x: |
-| **SSM/Recurrent** | Mamba | `mamba` | :x: |
-| | Mamba 2 | `mamba2` | :x: |
-| | RWKV 7 | `rwkv7` | :x: |
-| | SSM | `ssm` | :x: |
-| **Cohere** | Cohere | `cohere` | :x: |
-| | Cohere 2 | `cohere2` | :x: |
-| **IBM** | Granite | `granite` | :x: |
-| | Granite MoE | `granitemoe` | :x: |
-| | Granite MoE Hybrid | `granitemoehybrid` | :x: |
-| **OLMo** | OLMo | `olmo` | :x: |
-| | OLMo 2 | `olmo2` | :x: |
-| | OLMo 3 | `olmo3` | :x: |
-| | OLMoE | `olmoe` | :x: |
-| **InternLM** | InternLM 2 | `internlm2` | :x: |
-| | InternLM 3 | `internlm3` | :x: |
-| **MiniCPM** | MiniCPM | `minicpm` | :x: |
-| | MiniCPM 3 | `minicpm3` | :x: |
-| **NVIDIA** | Nemotron | `nemotron` | :x: |
-| | Nemotron NAS | `nemotron-nas` | :x: |
-| | Nemotron H | `nemotron_h` | :x: |
-| **GPT** | GPT-2 | `gpt2` | :x: |
-| | GPT-NeoX | `gpt_neox` | :x: |
-| | GPT BigCode | `gpt_bigcode` | :x: |
-| | GPT OSS | `gpt_oss` | :x: |
-| **StarCoder** | StarCoder 2 | `starcoder2` | :x: |
-| **EXaONE** | EXaONE | `exaone` | :x: |
-| | EXaONE 4 | `exaone4` | :x: |
-| | EXaONE MoE | `exaone_moe` | :x: |
-| **Hunyuan** | Hunyuan | `hunyuan` | :x: |
-| | Hunyuan V1 Dense | `hunyuan_v1_dense` | :x: |
-| **ERNIE** | ERNIE 4.5 | `ernie4_5` | :x: |
-| | ERNIE 4.5 MoE | `ernie4_5_moe` | :x: |
-| **Plamo** | Plamo | `plamo` | :x: |
-| | Plamo 2 | `plamo2` | :x: |
-| **Kimi** | Kimi K2.5 | `kimi_k25` | :x: |
-| | Kimi Linear | `kimi_linear` | :x: |
-| | Kimi VL | `kimi_vl` | :x: |
-| **LFM** | LFM 2 | `lfm2` | :x: |
-| | LFM 2 MoE | `lfm2_moe` | :x: |
-| | LFM 2 VL | `lfm2-vl` | :x: |
-| **Other** | AFM 7 | `afm7` | :x: |
-| | AFMoE | `afmoe` | :x: |
-| | Apertus | `apertus` | :x: |
-| | Baichuan M1 | `baichuan_m1` | :x: |
-| | Bailing MoE | `bailing_moe` | :x: |
-| | Bailing MoE Linear | `bailing_moe_linear` | :x: |
-| | BitNet | `bitnet` | :x: |
-| | DBRX | `dbrx` | :x: |
-| | DOTS 1 | `dots1` | :x: |
-| | Falcon H1 | `falcon_h1` | :x: |
-| | Helium | `helium` | :x: |
-| | Jamba | `jamba` | :x: |
-| | Klear | `Klear` | :x: |
-| | Lille 130M | `lille-130m` | :x: |
-| | Longcat Flash | `longcat_flash` | :x: |
-| | Longcat Flash N-gram | `longcat_flash_ngram` | :x: |
-| | MIMO | `mimo` | :x: |
-| | MIMO V2 Flash | `mimo_v2_flash` | :x: |
-| | Minimax | `minimax` | :x: |
-| | MLA | `mla` | :x: |
-| | NanoChat | `nanochat` | :x: |
-| | OpenELM | `openelm` | :x: |
-| | SEED OSS | `seed_oss` | :x: |
-| | SmolLM 3 | `smollm3` | :x: |
-| | Solar Open | `solar_open` | :x: |
-| | StableLM | `stablelm` | :x: |
-| | Step 3.5 | `step3p5` | :x: |
-| | TeleChat 3 | `telechat3` | :x: |
-| | YoutuAI LLM | `youtu_llm` | :x: |
+| Architecture | `model_type` | Released | Status |
+| ------------ | ------------ | -------- | ------ |
+| Falcon H1 | `falcon_h1` | 2025.07 | :x: |
+| Llama 4 | `llama4` | 2025.04 | :x: |
+| Gemma 3 | `gemma3` | 2025.03 | :x: |
+| Gemma 3n | `gemma3n` | 2025.03 | :x: |
+| Phi 4 mini | `phi3` | 2025.02 | :x: |
+| DeepSeek V3 | `deepseek_v3` | 2024.12 | :x: |
+| Llama 2/3 | `llama` | 2023-2024 | :white_check_mark: |
+| Gemma 2 | `gemma2` | 2024 | :x: |
+| Mixtral | `mixtral` | 2023.12 | :x: |
+| Mamba 2 | `mamba2` | 2024 | :x: |
+| Cohere 2 | `cohere2` | 2024 | :x: |
+| GLM 4 | `glm4` | 2024 | :x: |
+| InternLM 3 | `internlm3` | 2024 | :x: |
+| Granite | `granite` | 2024 | :x: |
+| GPT-NeoX | `gpt_neox` | 2023 | :x: |
+| StarCoder 2 | `starcoder2` | 2024 | :x: |
 
 </details>
 
-> Models from the `mlx-community` HuggingFace organization in SafeTensors format are recommended.
+> Recommended: models from `mlx-community` on HuggingFace in SafeTensors format.
 
-## Workspace Structure
+## Install
 
-```
-ironmlx/
-├── mlx-sys/      # FFI bindings (auto-generated by bindgen from mlx-c headers)
-├── mlx/          # ironmlx-core — safe Rust API (ops, nn, model, generate)
-├── ironmlx/      # Binary crate — CLI + OpenAI-compatible HTTP server
-└── vendor/mlx-c/ # MLX C API (git submodule)
-```
-
-## Quick Start
-
-### Build
+**Homebrew (recommended):**
 
 ```bash
+brew install ironmlx
+```
+
+**Build from source:**
+
+```bash
+git clone https://github.com/apepkuss/ironmlx.git
+cd ironmlx
 cargo build --release
 ```
 
-### End-to-End Verification
+## Getting Started
 
-Downloads a small quantized model and runs inference:
+### Desktop App
+
+Launch the menubar app — it handles everything automatically:
 
 ```bash
-cargo run --release --example verify_e2e
-# Default: Qwen3-0.6B-4bit (~320MB, auto-downloaded from HuggingFace)
-
-# Or specify a model:
-cargo run --release --example verify_e2e -- mlx-community/SmolLM-135M-Instruct-4bit
+ironmlx-app
 ```
 
-### Start Inference Server
+1. First launch opens a welcome wizard — enter a model ID (e.g. `mlx-community/Qwen3-0.6B-4bit`) and it downloads automatically
+2. The ⚡ icon appears in your menubar
+3. Click **Dashboard** to open the Web Admin Panel in your browser
+
+That's it. Your local inference server is running.
+
+### Web Admin Panel
+
+Access at `http://localhost:8080/admin` — no command line needed:
+
+- **Chat** — Talk to your model directly in the browser (streaming, Markdown, code highlighting)
+- **Models** — Search HuggingFace, download, load/unload models with one click
+- **Status** — Real-time memory usage and server health
+- **Benchmark** — Measure inference speed (TTFT, tokens/sec)
+- **Settings** — Configure port, sampling parameters, API keys
+- **Logs** — View server activity
+
+Supports dark/light/system theme and 4 languages (EN / 中文 / 日本語 / 한국어).
+
+### Background Service
+
+Run ironmlx as a background service that starts automatically:
 
 ```bash
-cargo run --release --bin ironmlx -- --model /path/to/model --port 8080
+brew services start ironmlx
 ```
 
-### API Usage
+## Using the Inference API
 
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "default",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 100,
-    "stream": true
-  }'
+ironmlx exposes OpenAI-compatible and Anthropic-compatible APIs. Any app or tool that supports these APIs works out of the box — point it to `http://localhost:8080`.
+
+**Works with:** ChatGPT clients, Cursor, Continue, Open Interpreter, LangChain, LlamaIndex, and any OpenAI SDK.
+
+**Example — Python (OpenAI SDK):**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
+response = client.chat.completions.create(
+    model="default",
+    messages=[{"role": "user", "content": "Hello!"}],
+    stream=True,
+)
+for chunk in response:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+**Example — JavaScript:**
+
+```javascript
+const response = await fetch("http://localhost:8080/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    messages: [{ role: "user", content: "Hello!" }],
+    max_tokens: 100,
+    stream: false,
+  }),
+});
+const data = await response.json();
+console.log(data.choices[0].message.content);
+```
+
+### API Endpoints
+
+| Endpoint | Description |
+| -------- | ----------- |
+| `POST /v1/chat/completions` | Chat completion (text, multimodal, streaming) |
+| `POST /v1/completions` | Text completion |
+| `POST /v1/messages` | Anthropic-compatible messages API |
+| `GET /v1/models` | List loaded models |
+| `POST /v1/models/load` | Load a model |
+| `POST /v1/models/unload` | Unload a model |
+| `GET /health` | Server health + memory stats |
+
+### Multimodal (Images)
+
+Send images as base64, URL, or local file path:
+
+```python
+response = client.chat.completions.create(
+    model="default",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
+            {"type": "text", "text": "What's in this image?"}
+        ]
+    }],
+)
+```
+
+### Tool Calling
+
+```python
+response = client.chat.completions.create(
+    model="default",
+    messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather for a city",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }
+    }],
+)
 ```
 
 ## Requirements
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
-- Rust 1.85+ (edition 2024)
-- CMake (for building MLX)
+- For Homebrew install: just `brew install ironmlx`
+- For building from source: Rust 1.85+, CMake
+- Optional: ffmpeg (for video inference)
 
 ## License
 
