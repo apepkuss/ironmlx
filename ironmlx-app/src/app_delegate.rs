@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::sync::Mutex;
 
 use objc2::rc::Retained;
+use objc2::sel;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
@@ -10,18 +11,15 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSString, NSURL, ns_string};
 
 use crate::config::AppConfig;
-use crate::preferences;
 use crate::server_manager::{ServerManager, ServerStatus};
-use crate::updater;
-use crate::welcome;
 
-// Global state for server and config (Send + Sync safe)
+// Global state
 static SERVER: Mutex<Option<ServerManager>> = Mutex::new(None);
 static CONFIG: Mutex<Option<AppConfig>> = Mutex::new(None);
 
-// Main-thread-only state stored in thread_local
 thread_local! {
     static STATUS_ITEM: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
+    static MENU_HANDLER: RefCell<Option<Retained<MenuHandler>>> = const { RefCell::new(None) };
 }
 
 fn port() -> u16 {
@@ -32,6 +30,10 @@ fn port() -> u16 {
         .map(|c| c.port)
         .unwrap_or(8080)
 }
+
+// ---------------------------------------------------------------------------
+// AppDelegate
+// ---------------------------------------------------------------------------
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -48,20 +50,20 @@ define_class!(
             setup_global_state();
 
             let mtm = MainThreadMarker::from(self);
-            setup_status_bar(mtm);
 
             // First launch check
-            if welcome::is_first_launch() {
+            if crate::welcome::is_first_launch() {
                 let mut cfg = CONFIG.lock().unwrap();
                 if let Some(ref mut c) = *cfg {
-                    if !welcome::show_welcome(mtm, c) {
-                        // User cancelled — quit
+                    if !crate::welcome::show_welcome(mtm, c) {
                         let app = NSApplication::sharedApplication(mtm);
                         app.terminate(None);
                         return;
                     }
                 }
             }
+
+            setup_status_bar(mtm);
 
             // Auto-start server if configured
             let should_start = CONFIG
@@ -81,6 +83,8 @@ define_class!(
                 if let Some(ref srv) = *SERVER.lock().unwrap() {
                     let _ = srv.start(&model);
                 }
+                // Refresh menu to show running state
+                refresh_menu(mtm);
             }
         }
 
@@ -94,6 +98,110 @@ define_class!(
 );
 
 impl AppDelegate {
+    pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![mtm.alloc::<Self>(), init] }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MenuHandler — receives menu item actions via selectors
+// ---------------------------------------------------------------------------
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "MenuHandler"]
+    #[ivars = ()]
+    pub struct MenuHandler;
+
+    unsafe impl NSObjectProtocol for MenuHandler {}
+
+    impl MenuHandler {
+        #[unsafe(method(openDashboard:))]
+        fn open_dashboard(&self, _sender: &NSMenuItem) {
+            let p = port();
+            open_url(&format!("http://localhost:{}/admin", p));
+        }
+
+        #[unsafe(method(openChat:))]
+        fn open_chat(&self, _sender: &NSMenuItem) {
+            let p = port();
+            open_url(&format!("http://localhost:{}/admin", p));
+        }
+
+        #[unsafe(method(startServer:))]
+        fn start_server(&self, _sender: &NSMenuItem) {
+            let model = CONFIG
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|c| c.last_model.clone())
+                .unwrap_or_default();
+            if model.is_empty() {
+                return;
+            }
+            if let Some(ref srv) = *SERVER.lock().unwrap() {
+                let _ = srv.start(&model);
+            }
+            let mtm = MainThreadMarker::from(self);
+            refresh_menu(mtm);
+        }
+
+        #[unsafe(method(stopServer:))]
+        fn stop_server(&self, _sender: &NSMenuItem) {
+            if let Some(ref srv) = *SERVER.lock().unwrap() {
+                srv.stop();
+            }
+            let mtm = MainThreadMarker::from(self);
+            refresh_menu(mtm);
+        }
+
+        #[unsafe(method(restartServer:))]
+        fn restart_server(&self, _sender: &NSMenuItem) {
+            let model = CONFIG
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|c| c.last_model.clone())
+                .unwrap_or_default();
+            if let Some(ref srv) = *SERVER.lock().unwrap() {
+                let _ = srv.restart(&model);
+            }
+            let mtm = MainThreadMarker::from(self);
+            refresh_menu(mtm);
+        }
+
+        #[unsafe(method(openPreferences:))]
+        fn open_preferences(&self, _sender: &NSMenuItem) {
+            let mtm = MainThreadMarker::from(self);
+            let mut cfg = CONFIG.lock().unwrap();
+            if let Some(ref mut c) = *cfg {
+                crate::preferences::show_preferences(mtm, c);
+            }
+        }
+
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: &NSMenuItem) {
+            let mtm = MainThreadMarker::from(self);
+            match crate::updater::check_for_update() {
+                Some(info) => crate::updater::show_update_alert(mtm, &info),
+                None => crate::updater::show_no_update_alert(mtm),
+            }
+        }
+
+        #[unsafe(method(quitApp:))]
+        fn quit_app(&self, _sender: &NSMenuItem) {
+            if let Some(ref srv) = *SERVER.lock().unwrap() {
+                srv.stop();
+            }
+            let mtm = MainThreadMarker::from(self);
+            let app = NSApplication::sharedApplication(mtm);
+            app.terminate(None);
+        }
+    }
+);
+
+impl MenuHandler {
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
         unsafe { msg_send![mtm.alloc::<Self>(), init] }
     }
@@ -117,6 +225,12 @@ fn setup_status_bar(mtm: MainThreadMarker) {
     if let Some(button) = status_item.button(mtm) {
         button.setTitle(ns_string!("\u{26A1}"));
     }
+
+    // Create menu handler
+    let handler = MenuHandler::new(mtm);
+    MENU_HANDLER.with(|mh| {
+        *mh.borrow_mut() = Some(handler);
+    });
 
     let menu = build_menu(mtm);
     status_item.setMenu(Some(&menu));
@@ -145,19 +259,19 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
         ServerStatus::Failed => "Status: Failed",
     };
 
-    // Status (disabled)
-    let status_item = make_item(mtm, status_text, "");
+    // Status (disabled, informational)
+    let status_item = make_item(mtm, status_text, None, "");
     status_item.setEnabled(false);
     menu.addItem(&status_item);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // Dashboard
-    let dashboard = make_item(mtm, "Dashboard", "d");
+    let dashboard = make_item(mtm, "Dashboard", Some(sel!(openDashboard:)), "d");
     dashboard.setEnabled(is_running);
     menu.addItem(&dashboard);
 
     // Chat
-    let chat = make_item(mtm, "Chat with ironmlx", "");
+    let chat = make_item(mtm, "Chat with ironmlx", Some(sel!(openChat:)), "");
     chat.setEnabled(is_running);
     menu.addItem(&chat);
 
@@ -165,69 +279,76 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 
     // Start / Stop
     if is_running {
-        menu.addItem(&make_item(mtm, "Stop Server", ""));
+        menu.addItem(&make_item(mtm, "Stop Server", Some(sel!(stopServer:)), ""));
     } else {
-        menu.addItem(&make_item(mtm, "Start Server", ""));
+        menu.addItem(&make_item(
+            mtm,
+            "Start Server",
+            Some(sel!(startServer:)),
+            "",
+        ));
     }
 
     // Restart
-    let restart = make_item(mtm, "Restart Server", "");
+    let restart = make_item(mtm, "Restart Server", Some(sel!(restartServer:)), "");
     restart.setEnabled(is_running);
     menu.addItem(&restart);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // Preferences
-    let prefs = make_item(mtm, "Preferences...", ",");
-    prefs.setTag(10);
-    menu.addItem(&prefs);
+    menu.addItem(&make_item(
+        mtm,
+        "Preferences...",
+        Some(sel!(openPreferences:)),
+        ",",
+    ));
 
     // Check for Updates
-    let update = make_item(mtm, "Check for Updates...", "");
-    update.setTag(11);
-    menu.addItem(&update);
+    menu.addItem(&make_item(
+        mtm,
+        "Check for Updates...",
+        Some(sel!(checkForUpdates:)),
+        "",
+    ));
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // Quit
-    menu.addItem(&make_item(mtm, "Quit ironmlx", "q"));
+    menu.addItem(&make_item(mtm, "Quit ironmlx", Some(sel!(quitApp:)), "q"));
 
     menu
 }
 
-fn make_item(mtm: MainThreadMarker, title: &str, key: &str) -> Retained<NSMenuItem> {
+fn make_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: Option<objc2::runtime::Sel>,
+    key: &str,
+) -> Retained<NSMenuItem> {
     let ns_title = NSString::from_str(title);
     let ns_key = NSString::from_str(key);
-    unsafe {
+    let item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             mtm.alloc::<NSMenuItem>(),
             &ns_title,
-            None,
+            action,
             &ns_key,
         )
-    }
+    };
+    // Set target to our MenuHandler
+    MENU_HANDLER.with(|mh| {
+        if let Some(ref handler) = *mh.borrow() {
+            unsafe { item.setTarget(Some(handler)) };
+        }
+    });
+    item
 }
 
 pub fn open_url(url_str: &str) {
     let ns_url_str = NSString::from_str(url_str);
     if let Some(url) = NSURL::URLWithString(&ns_url_str) {
         NSWorkspace::sharedWorkspace().openURL(&url);
-    }
-}
-
-/// Open the preferences dialog
-pub fn open_preferences(mtm: MainThreadMarker) {
-    let mut cfg = CONFIG.lock().unwrap();
-    if let Some(ref mut c) = *cfg {
-        preferences::show_preferences(mtm, c);
-    }
-}
-
-/// Check for updates and show result
-pub fn check_for_updates(mtm: MainThreadMarker) {
-    match updater::check_for_update() {
-        Some(info) => updater::show_update_alert(mtm, &info),
-        None => updater::show_no_update_alert(mtm),
     }
 }
 

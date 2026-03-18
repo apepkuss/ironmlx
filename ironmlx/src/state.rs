@@ -109,6 +109,48 @@ pub struct AppState {
 /// Load model artifacts from a directory.
 /// Returns (Model, Tokenizer, ChatTemplate, eos_token_id, model_id, patch_size, spatial_merge_size)
 #[allow(clippy::type_complexity)]
+/// Resolve a model path: if it looks like a HuggingFace repo ID (contains '/'
+/// but doesn't exist as a local path), download it first using hf-hub.
+fn resolve_model_path(model_dir: &str) -> Result<String, String> {
+    let path = Path::new(model_dir);
+    if path.exists() {
+        return Ok(model_dir.to_string());
+    }
+    // Looks like a HF repo ID (e.g., "mlx-community/Qwen3-0.6B-4bit")
+    if model_dir.contains('/') {
+        println!("  Downloading model: {}", model_dir);
+        let api =
+            hf_hub::api::sync::Api::new().map_err(|e| format!("HF API init failed: {}", e))?;
+        let repo = api.model(model_dir.to_string());
+        // Download essential files
+        for filename in &[
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors",
+            "model.safetensors.index.json",
+        ] {
+            match repo.get(filename) {
+                Ok(p) => println!("    {} -> {}", filename, p.display()),
+                Err(_) => {} // Optional files may not exist
+            }
+        }
+        // Return the snapshot directory
+        let config = repo
+            .get("config.json")
+            .map_err(|e| format!("failed to download config.json: {}", e))?;
+        let snapshot_dir = config
+            .parent()
+            .ok_or("cannot determine snapshot dir")?
+            .to_string_lossy()
+            .to_string();
+        println!("  Model directory: {}", snapshot_dir);
+        Ok(snapshot_dir)
+    } else {
+        Err(format!("model path not found: {}", model_dir))
+    }
+}
+
 pub fn load_model(
     model_dir: &str,
 ) -> Result<
@@ -123,7 +165,8 @@ pub fn load_model(
     ),
     String,
 > {
-    let dir = Path::new(model_dir);
+    let resolved = resolve_model_path(model_dir)?;
+    let dir = Path::new(&resolved);
 
     // Load config to extract metadata
     let config_path = dir.join("config.json");
