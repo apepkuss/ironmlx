@@ -122,7 +122,7 @@ ironmlx-app
 ```
 
 1. 首次启动弹出引导向导 — 输入模型 ID（如 `mlx-community/Qwen3-0.6B-4bit`），自动下载
-2. 菜单栏出现 ⚡ 图标
+2. 菜单栏出现 ironmlx 图标
 3. 点击 **Dashboard** 在浏览器中打开 Web 管理面板
 
 完成。本地推理服务已在运行。

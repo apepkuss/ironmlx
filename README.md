@@ -126,7 +126,7 @@ ironmlx-app
 ```
 
 1. First launch opens a welcome wizard — enter a model ID (e.g. `mlx-community/Qwen3-0.6B-4bit`) and it downloads automatically
-2. The ⚡ icon appears in your menubar
+2. The ironmlx icon appears in your menubar
 3. Click **Dashboard** to open the Web Admin Panel in your browser
 
 That's it. Your local inference server is running.
