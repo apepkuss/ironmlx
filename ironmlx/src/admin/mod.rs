@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::response::Html;
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 
 use crate::state::AppState;
 

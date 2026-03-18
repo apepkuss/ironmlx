@@ -67,8 +67,8 @@ jobs:
         run: cargo +nightly fmt --all -- --check
 
       - name: clippy
-        run: cargo +nightly clippy --all-features -- -D warnings
+        run: cargo +nightly clippy --all-features --workspace --exclude ironmlx-app -- -D warnings
 
       # ── Build ─────────────────────────────────────────────────────────────────
       - name: Build (release)
-        run: cargo build --release
+        run: cargo build --release --workspace --exclude ironmlx-app

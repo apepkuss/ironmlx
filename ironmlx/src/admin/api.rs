@@ -334,13 +334,13 @@ pub async fn hf_download(
     // Check if already downloading
     {
         let downloads = state.downloads.lock().unwrap();
-        if let Some(status) = downloads.get(&repo_id) {
-            if status.status == "downloading" {
-                return Err((
-                    StatusCode::CONFLICT,
-                    format!("{} is already downloading", repo_id),
-                ));
-            }
+        if let Some(status) = downloads.get(&repo_id)
+            && status.status == "downloading"
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("{} is already downloading", repo_id),
+            ));
         }
     }
 
