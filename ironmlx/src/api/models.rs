@@ -70,10 +70,9 @@ impl ThinkingState {
         if !self.in_thinking {
             if let Some(pos) = self.buffer.find("<think>") {
                 self.in_thinking = true;
-                // Discard the tag itself, keep any content before it as regular content
                 let before = self.buffer[..pos].to_string();
                 self.buffer = self.buffer[pos + "<think>".len()..].to_string();
-                let content = if before.is_empty() {
+                let content = if before.trim().is_empty() {
                     None
                 } else {
                     Some(before)
@@ -93,9 +92,8 @@ impl ThinkingState {
                 }
                 return (content, None);
             }
-            // No <think> found yet, buffer might be partial — hold tokens
-            // But if buffer is long enough that it can't be a partial tag, flush
-            if self.buffer.len() > 10 && !self.buffer.contains('<') {
+            // No <think> found yet — hold up to 7 chars for partial "<think>" match
+            if self.buffer.len() > 7 && !self.buffer.contains('<') {
                 let flushed = self.buffer.clone();
                 self.buffer.clear();
                 return (Some(flushed), None);
@@ -119,16 +117,30 @@ impl ThinkingState {
             return (c, r);
         }
 
-        // Still inside thinking — emit buffered reasoning incrementally
-        // Keep last 10 chars in buffer in case </think> spans tokens
-        if self.buffer.len() > 10 {
-            let emit_len = self.buffer.len() - 10;
+        // Still inside thinking — emit reasoning incrementally
+        // Keep last 8 chars in buffer in case </think> spans tokens
+        if self.buffer.len() > 8 {
+            let emit_len = self.buffer.len() - 8;
             let emit = self.buffer[..emit_len].to_string();
             self.buffer = self.buffer[emit_len..].to_string();
             return (None, Some(emit));
         }
 
         (None, None)
+    }
+
+    /// Flush any remaining buffered content (call when stream ends).
+    fn flush(&mut self) -> (Option<String>, Option<String>) {
+        if self.buffer.is_empty() {
+            return (None, None);
+        }
+        let remaining = std::mem::take(&mut self.buffer);
+        if self.in_thinking || !self.thinking_done {
+            // Still in thinking or never entered — emit as reasoning
+            (None, Some(remaining))
+        } else {
+            (Some(remaining), None)
+        }
     }
 }
 
@@ -410,6 +422,32 @@ async fn chat_completions_stream(
 
         while let Some(output) = token_rx.recv().await {
             if let Some(ref reason) = output.finish_reason {
+                // Flush remaining buffered thinking content before final chunk
+                let (flush_c, flush_r) = thinking_state.flush();
+                if flush_c.is_some() || flush_r.is_some() {
+                    let flush_chunk = ChatCompletionChunk {
+                        id: chunk_id_clone.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model_id_clone.clone(),
+                        choices: vec![ChatChunkChoice {
+                            index: 0,
+                            delta: ChatDelta {
+                                role: None,
+                                content: flush_c,
+                                reasoning_content: flush_r,
+                                tool_calls: None,
+                            },
+                            finish_reason: None,
+                        }],
+                    };
+                    let _ = sse_tx
+                        .send(Ok(
+                            Event::default().data(serde_json::to_string(&flush_chunk).unwrap())
+                        ))
+                        .await;
+                }
+
                 let final_chunk = ChatCompletionChunk {
                     id: chunk_id_clone.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -437,6 +475,11 @@ async fn chat_completions_stream(
             // Route token to content or reasoning_content based on <think> state
             let (content, reasoning_content) = thinking_state.process_token(&output.token_text);
 
+            // Skip empty deltas
+            if content.is_none() && reasoning_content.is_none() {
+                continue;
+            }
+
             let chunk = ChatCompletionChunk {
                 id: chunk_id_clone.clone(),
                 object: "chat.completion.chunk".to_string(),
@@ -462,6 +505,32 @@ async fn chat_completions_stream(
             {
                 break; // Client disconnected
             }
+        }
+
+        // Flush remaining buffered thinking content
+        let (flush_content, flush_reasoning) = thinking_state.flush();
+        if flush_content.is_some() || flush_reasoning.is_some() {
+            let chunk = ChatCompletionChunk {
+                id: chunk_id_clone.clone(),
+                object: "chat.completion.chunk".to_string(),
+                created,
+                model: model_id_clone.clone(),
+                choices: vec![ChatChunkChoice {
+                    index: 0,
+                    delta: ChatDelta {
+                        role: None,
+                        content: flush_content,
+                        reasoning_content: flush_reasoning,
+                        tool_calls: None,
+                    },
+                    finish_reason: None,
+                }],
+            };
+            let _ = sse_tx
+                .send(Ok(
+                    Event::default().data(serde_json::to_string(&chunk).unwrap())
+                ))
+                .await;
         }
 
         // Send [DONE] marker

@@ -4,6 +4,33 @@
   display: none !important;
 }
 
+/* Emoji font support */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
+}
+
+/* Markdown prose styling in chat */
+.chat-prose h1, .chat-prose h2, .chat-prose h3 { margin: 0.5em 0 0.25em; font-weight: 600; }
+.chat-prose h1 { font-size: 1.25em; }
+.chat-prose h2 { font-size: 1.15em; }
+.chat-prose h3 { font-size: 1.05em; }
+.chat-prose p { margin: 0.4em 0; }
+.chat-prose ul, .chat-prose ol { margin: 0.4em 0; padding-left: 1.5em; }
+.chat-prose li { margin: 0.2em 0; }
+.chat-prose code { background: rgba(0,0,0,0.06); padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.9em; }
+.dark .chat-prose code { background: rgba(255,255,255,0.1); }
+.chat-prose pre { margin: 0.5em 0; border-radius: 6px; overflow-x: auto; }
+.chat-prose pre code { background: none; padding: 0; }
+.chat-prose blockquote { border-left: 3px solid #d1d5db; padding-left: 0.75em; margin: 0.5em 0; color: #6b7280; }
+.dark .chat-prose blockquote { border-color: #4b5563; color: #9ca3af; }
+.chat-prose table { border-collapse: collapse; margin: 0.5em 0; }
+.chat-prose th, .chat-prose td { border: 1px solid #d1d5db; padding: 0.3em 0.6em; }
+.dark .chat-prose th, .dark .chat-prose td { border-color: #4b5563; }
+.chat-prose a { color: #3b82f6; text-decoration: underline; }
+
+/* KaTeX display math spacing */
+.chat-prose .katex-display { margin: 0.5em 0; overflow-x: auto; }
+
 /* Scrollbar styling for dark mode */
 .dark ::-webkit-scrollbar {
   width: 8px;

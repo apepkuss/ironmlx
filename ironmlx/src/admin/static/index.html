@@ -474,13 +474,13 @@
             <div class="flex gap-3" :class="msg.role === 'user' ? 'justify-end' : ''">
               <div :class="msg.role === 'user'
                 ? 'bg-blue-600 text-white rounded-lg px-4 py-2 max-w-[70%]'
-                : 'bg-gray-200 dark:bg-gray-700 rounded-lg px-4 py-2 max-w-[70%] prose dark:prose-invert prose-sm'"
+                : 'bg-gray-200 dark:bg-gray-700 rounded-lg px-4 py-2 max-w-[70%] chat-prose'"
                 x-html="msg.role === 'user' ? escapeHtml(msg.content) : renderMarkdown(msg.content)">
               </div>
             </div>
           </template>
           <div x-show="chatStreaming" class="flex gap-3">
-            <div class="bg-gray-200 dark:bg-gray-700 rounded-lg px-4 py-2 max-w-[70%] prose dark:prose-invert prose-sm"
+            <div class="bg-gray-200 dark:bg-gray-700 rounded-lg px-4 py-2 max-w-[70%] chat-prose"
                  x-html="renderMarkdown(chatStreamContent)">
             </div>
           </div>
