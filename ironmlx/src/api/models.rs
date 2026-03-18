@@ -988,6 +988,57 @@ pub async fn set_default_model(
     })))
 }
 
+// ── Embeddings ──────────────────────────────────────────────────────────────
+
+/// POST /v1/embeddings — OpenAI-compatible embeddings endpoint
+pub async fn embeddings(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EmbeddingRequest>,
+) -> Result<Json<EmbeddingResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let entry = state
+        .pool
+        .get(req.model.as_deref())
+        .map_err(|e| internal_error(&e))?;
+
+    let texts = match req.input {
+        EmbeddingInput::Single(s) => vec![s],
+        EmbeddingInput::Multiple(v) => v,
+    };
+
+    let mut all_embeddings = Vec::new();
+    let mut total_tokens = 0usize;
+
+    for (i, text) in texts.iter().enumerate() {
+        let token_ids = entry
+            .tokenizer
+            .encode(text.as_str())
+            .map_err(|e| internal_error(&format!("tokenize error: {}", e)))?;
+        total_tokens += token_ids.len();
+
+        // TODO: Call embedding model encode
+        // Placeholder — will be connected when BertModel is ready
+        let embedding = vec![0.0f32; 384];
+
+        all_embeddings.push(EmbeddingData {
+            object: "embedding".to_string(),
+            index: i,
+            embedding,
+        });
+    }
+
+    let model_id = entry.model_id.clone();
+
+    Ok(Json(EmbeddingResponse {
+        object: "list".to_string(),
+        data: all_embeddings,
+        model: model_id,
+        usage: EmbeddingUsage {
+            prompt_tokens: total_tokens,
+            total_tokens,
+        },
+    }))
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn build_chat_prompt(

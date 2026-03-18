@@ -431,6 +431,49 @@ pub struct SetDefaultRequest {
     pub model: String,
 }
 
+// -- Embeddings --------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct EmbeddingRequest {
+    pub input: EmbeddingInput,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_encoding_format")]
+    pub encoding_format: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+fn default_encoding_format() -> String {
+    "float".to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingResponse {
+    pub object: String,
+    pub data: Vec<EmbeddingData>,
+    pub model: String,
+    pub usage: EmbeddingUsage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingData {
+    pub object: String,
+    pub index: usize,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: usize,
+    pub total_tokens: usize,
+}
+
 // -- Defaults ----------------------------------------------------------------
 
 fn default_max_tokens() -> usize {

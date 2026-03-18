@@ -15,6 +15,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/chat/completions", post(models::chat_completions))
         .route("/v1/completions", post(models::completions))
         .route("/v1/messages", post(models::anthropic_messages))
+        .route("/v1/embeddings", post(models::embeddings))
         .route("/v1/models", get(models::list_models))
         .route("/v1/models/load", post(models::load_model_endpoint))
         .route("/v1/models/unload", post(models::unload_model_endpoint))
