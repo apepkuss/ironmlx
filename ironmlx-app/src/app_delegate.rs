@@ -229,7 +229,7 @@ fn setup_status_bar(mtm: MainThreadMarker) {
         if let Some(image) = unsafe { objc2_app_kit::NSImage::initWithData(mtm.alloc(), &ns_data) }
         {
             unsafe {
-                image.setSize(objc2_foundation::NSSize::new(22.0, 22.0));
+                image.setSize(objc2_foundation::NSSize::new(34.0, 22.0));
                 image.setTemplate(true); // adapts to light/dark menubar
             }
             button.setImage(Some(&image));
