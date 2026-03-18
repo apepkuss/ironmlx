@@ -35,10 +35,17 @@
     </div>
 
     <div class="p-3 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-500 space-y-2">
-      <button @click="darkMode = !darkMode; localStorage.setItem('theme', darkMode ? 'dark' : 'light')"
-              class="hover:text-gray-300 transition">
-        <span x-text="darkMode ? '☀️ ' + $t('theme.light') : '🌙 ' + $t('theme.dark')"></span>
-      </button>
+      <div class="flex gap-1">
+        <button @click="setThemeMode('system')"
+          :class="themeMode === 'system' ? 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300' : 'hover:bg-gray-100 dark:hover:bg-gray-700'"
+          class="flex-1 px-2 py-1 rounded text-center" title="System">🖥️</button>
+        <button @click="setThemeMode('light')"
+          :class="themeMode === 'light' ? 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300' : 'hover:bg-gray-100 dark:hover:bg-gray-700'"
+          class="flex-1 px-2 py-1 rounded text-center" title="Light">☀️</button>
+        <button @click="setThemeMode('dark')"
+          :class="themeMode === 'dark' ? 'bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300' : 'hover:bg-gray-100 dark:hover:bg-gray-700'"
+          class="flex-1 px-2 py-1 rounded text-center" title="Dark">🌙</button>
+      </div>
       <div>
         <select x-model="lang" @change="localStorage.setItem('lang', lang)"
                 class="bg-transparent border border-gray-600 rounded px-1 py-0.5 text-xs">

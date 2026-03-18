@@ -3,8 +3,8 @@
 function app() {
   return {
     currentPage: 'status',
-    darkMode: localStorage.getItem('theme') === 'dark' ||
-      (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches),
+    themeMode: localStorage.getItem('themeMode') || 'system',
+    darkMode: false,
     lang: localStorage.getItem('lang') || 'en',
     pages: [
       { id: 'status',    icon: '📊' },
@@ -70,8 +70,25 @@ function app() {
       return dict[key] || translations.en[key] || key;
     },
 
+    applyTheme() {
+      if (this.themeMode === 'system') {
+        this.darkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      } else {
+        this.darkMode = this.themeMode === 'dark';
+      }
+    },
+    setThemeMode(mode) {
+      this.themeMode = mode;
+      localStorage.setItem('themeMode', mode);
+      this.applyTheme();
+    },
     init() {
       console.log('ironmlx Admin initialized');
+      this.applyTheme();
+      // Listen for system theme changes
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+        if (this.themeMode === 'system') this.applyTheme();
+      });
       this.pollHealth();
       this.pollModels();
       setInterval(() => this.pollHealth(), 5000);
