@@ -130,9 +130,8 @@ fn resolve_model_path(model_dir: &str) -> Result<String, String> {
             "model.safetensors",
             "model.safetensors.index.json",
         ] {
-            match repo.get(filename) {
-                Ok(p) => println!("    {} -> {}", filename, p.display()),
-                Err(_) => {} // Optional files may not exist
+            if let Ok(p) = repo.get(filename) {
+                println!("    {} -> {}", filename, p.display());
             }
         }
         // Return the snapshot directory
@@ -151,20 +150,18 @@ fn resolve_model_path(model_dir: &str) -> Result<String, String> {
     }
 }
 
-pub fn load_model(
-    model_dir: &str,
-) -> Result<
-    (
-        Model,
-        Tokenizer,
-        Option<ChatTemplate>,
-        i32,
-        String,
-        usize,
-        usize,
-    ),
+/// (Model, Tokenizer, ChatTemplate, eos_token_id, model_id, vocab_size, num_layers)
+pub type LoadModelResult = (
+    Model,
+    Tokenizer,
+    Option<ChatTemplate>,
+    i32,
     String,
-> {
+    usize,
+    usize,
+);
+
+pub fn load_model(model_dir: &str) -> Result<LoadModelResult, String> {
     let resolved = resolve_model_path(model_dir)?;
     let dir = Path::new(&resolved);
 
