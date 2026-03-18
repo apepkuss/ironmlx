@@ -116,7 +116,7 @@ pub fn build_model_from_file(config_path: &str, weights: &HashMap<String, Array>
         .unwrap_or("llama");
 
     match model_type {
-        "bert" => {
+        "bert" | "xlm-roberta" => {
             let model = bert::from_config_file(config_path, weights)?;
             Ok(Model::Bert(model))
         }
