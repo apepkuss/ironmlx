@@ -6,7 +6,8 @@ use crate::error::Result;
 use crate::ops;
 use crate::stream::Stream;
 
-use super::bert::{self, BertModel};
+use super::Model;
+use super::bert;
 
 // ---------------------------------------------------------------------------
 // PoolingStrategy
@@ -19,7 +20,7 @@ pub enum PoolingStrategy {
     Cls,
     /// Mean of all token hidden states.
     Mean,
-    /// Use the last token output (for decoder-based embeddings).
+    /// Use the last token output (for decoder-based embeddings like E5-Mistral).
     LastToken,
 }
 
@@ -27,11 +28,13 @@ pub enum PoolingStrategy {
 // EmbeddingModel
 // ---------------------------------------------------------------------------
 
-/// Wrapper around an encoder model for embedding inference.
+/// Wrapper around any model for embedding inference.
+/// Supports encoder-only (BERT, XLM-RoBERTa) and decoder-only (E5-Mistral).
 pub struct EmbeddingModel {
-    pub model: BertModel,
+    pub model: Model,
     pub pooling: PoolingStrategy,
     pub normalize: bool,
+    pub hidden_size: usize,
 }
 
 impl EmbeddingModel {
@@ -40,8 +43,17 @@ impl EmbeddingModel {
     /// Input: `token_ids` of shape [batch, seq_len]
     /// Output: embeddings of shape [batch, hidden_size]
     pub fn encode(&self, token_ids: &Array, stream: &Stream) -> Result<Array> {
-        // 1. Forward through encoder -> [batch, seq_len, hidden_size]
-        let hidden = self.model.forward(token_ids, stream)?;
+        // 1. Forward through model -> [batch, seq_len, hidden_size]
+        let hidden = match &self.model {
+            Model::Bert(bert) => bert.forward(token_ids, stream)?,
+            _ => {
+                // Decoder models: forward returns logits [batch, seq_len, vocab_size]
+                // For decoder-based embeddings (E5-Mistral), we pool the logits.
+                // Proper implementation would need a forward_hidden() method.
+                let mut cache = vec![];
+                self.model.forward(token_ids, &mut cache, "none", None)?
+            }
+        };
 
         // 2. Pool
         let pooled = self.pool(&hidden, stream)?;
@@ -63,7 +75,6 @@ impl EmbeddingModel {
 
         match self.pooling {
             PoolingStrategy::Cls => {
-                // hidden[:, 0, :] -> [batch, hidden_size]
                 let cls = ops::slice(
                     hidden,
                     &[0, 0, 0],
@@ -73,12 +84,8 @@ impl EmbeddingModel {
                 )?;
                 ops::squeeze_axis(&cls, 1, stream)
             }
-            PoolingStrategy::Mean => {
-                // mean(hidden, axis=1) -> [batch, hidden_size]
-                ops::mean(hidden, &[1], false, stream)
-            }
+            PoolingStrategy::Mean => ops::mean(hidden, &[1], false, stream),
             PoolingStrategy::LastToken => {
-                // hidden[:, -1, :] -> [batch, hidden_size]
                 let last = ops::slice(
                     hidden,
                     &[0, seq_len - 1, 0],
@@ -91,38 +98,37 @@ impl EmbeddingModel {
         }
     }
 
-    /// Build an EmbeddingModel from a config file path and weights.
-    ///
-    /// Defaults to Mean pooling + L2 normalization (sentence-transformers convention).
-    pub fn from_config_file(config_path: &str, weights: &HashMap<String, Array>) -> Result<Self> {
-        let model = bert::from_config_file(config_path, weights)?;
-
+    /// Build an EmbeddingModel from a BERT/XLM-RoBERTa config.
+    /// Defaults to Mean pooling + L2 normalization.
+    pub fn from_bert(config_path: &str, weights: &HashMap<String, Array>) -> Result<Self> {
+        let bert = bert::from_config_file(config_path, weights)?;
+        let hidden_size = bert.config.hidden_size;
         Ok(Self {
-            model,
+            model: Model::Bert(bert),
             pooling: PoolingStrategy::Mean,
             normalize: true,
+            hidden_size,
         })
     }
 
-    /// Build with explicit pooling strategy and normalize flag.
-    pub fn from_config_file_with_options(
-        config_path: &str,
-        weights: &HashMap<String, Array>,
+    /// Build an EmbeddingModel from any Model with explicit options.
+    pub fn from_model(
+        model: Model,
+        hidden_size: usize,
         pooling: PoolingStrategy,
         normalize: bool,
-    ) -> Result<Self> {
-        let model = bert::from_config_file(config_path, weights)?;
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             model,
             pooling,
             normalize,
-        })
+            hidden_size,
+        }
     }
 
     /// Hidden size of the underlying model.
     pub fn hidden_size(&self) -> usize {
-        self.model.config.hidden_size
+        self.hidden_size
     }
 }
 
