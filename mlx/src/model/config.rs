@@ -35,6 +35,12 @@ pub struct QuantizationConfig {
     pub group_size: i32,
     #[serde(default = "default_bits")]
     pub bits: i32,
+    #[serde(default = "default_mode")]
+    pub mode: String,
+}
+
+fn default_mode() -> String {
+    "affine".to_string()
 }
 
 fn default_group_size() -> i32 {

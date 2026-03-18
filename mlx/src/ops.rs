@@ -656,6 +656,7 @@ pub fn dequantize(
     biases: Option<&Array>,
     group_size: Option<i32>,
     bits: Option<i32>,
+    mode: &str,
     stream: &Stream,
 ) -> Result<Array> {
     let mut res = Array::new_empty();
@@ -663,10 +664,9 @@ pub fn dequantize(
         Some(b) => b.as_raw(),
         None => unsafe { std::mem::zeroed() },
     };
-    let mode = std::ffi::CString::new("affine").unwrap();
-    // mlx_optional_dtype with has_value=false to use default
+    let mode_c = std::ffi::CString::new(mode).unwrap();
     let dtype = sys::mlx_optional_dtype_ {
-        value: 0, // placeholder
+        value: 0,
         has_value: false,
     };
     check(unsafe {
@@ -677,7 +677,7 @@ pub fn dequantize(
             biases_raw,
             optional_int(group_size),
             optional_int(bits),
-            mode.as_ptr(),
+            mode_c.as_ptr(),
             dtype,
             stream.as_raw(),
         )
@@ -689,6 +689,8 @@ pub fn dequantize(
 ///
 /// Performs `x @ dequantize(w, scales, biases)^T` using the quantized weight
 /// representation directly, avoiding full dequantization.
+///
+/// Supported modes: `"affine"` (2/3/4/6/8 bit), `"mxfp8"`, `"nvfp4"`.
 #[allow(clippy::too_many_arguments)]
 pub fn quantized_matmul(
     x: &Array,
@@ -698,6 +700,7 @@ pub fn quantized_matmul(
     transpose: bool,
     group_size: Option<i32>,
     bits: Option<i32>,
+    mode: &str,
     stream: &Stream,
 ) -> Result<Array> {
     let mut res = Array::new_empty();
@@ -705,7 +708,7 @@ pub fn quantized_matmul(
         Some(b) => b.as_raw(),
         None => unsafe { std::mem::zeroed() },
     };
-    let mode = std::ffi::CString::new("affine").unwrap();
+    let mode_c = std::ffi::CString::new(mode).unwrap();
     check(unsafe {
         sys::mlx_quantized_matmul(
             res.as_raw_mut(),
@@ -716,7 +719,7 @@ pub fn quantized_matmul(
             transpose,
             optional_int(group_size),
             optional_int(bits),
-            mode.as_ptr(),
+            mode_c.as_ptr(),
             stream.as_raw(),
         )
     })?;

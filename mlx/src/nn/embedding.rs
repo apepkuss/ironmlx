@@ -44,6 +44,7 @@ pub struct QuantizedEmbedding {
     pub biases: Array,
     pub group_size: i32,
     pub bits: i32,
+    pub mode: String,
 }
 
 impl QuantizedEmbedding {
@@ -54,17 +55,18 @@ impl QuantizedEmbedding {
             biases,
             group_size,
             bits,
+            mode: "affine".to_string(),
         }
     }
 
     pub fn forward_with_stream(&self, tokens: &Array, stream: &Stream) -> Result<Array> {
-        // Dequantize the full weight table, then do normal embedding lookup
         let full_weight = ops::dequantize(
             &self.weight,
             &self.scales,
             Some(&self.biases),
             Some(self.group_size),
             Some(self.bits),
+            &self.mode,
             stream,
         )?;
         ops::take_axis(&full_weight, tokens, 0, stream)

@@ -15,6 +15,7 @@ pub struct QuantizedLinear {
     pub biases: Array,
     pub group_size: i32,
     pub bits: i32,
+    pub mode: String,
 }
 
 impl QuantizedLinear {
@@ -25,6 +26,25 @@ impl QuantizedLinear {
             biases,
             group_size,
             bits,
+            mode: "affine".to_string(),
+        }
+    }
+
+    pub fn new_with_mode(
+        weight: Array,
+        scales: Array,
+        biases: Array,
+        group_size: i32,
+        bits: i32,
+        mode: &str,
+    ) -> Self {
+        Self {
+            weight,
+            scales,
+            biases,
+            group_size,
+            bits,
+            mode: mode.to_string(),
         }
     }
 
@@ -37,6 +57,7 @@ impl QuantizedLinear {
             true,
             Some(self.group_size),
             Some(self.bits),
+            &self.mode,
             stream,
         )
     }
