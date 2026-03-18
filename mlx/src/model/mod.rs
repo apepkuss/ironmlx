@@ -21,6 +21,7 @@ use crate::media::ProcessedMedia;
 use std::collections::HashMap;
 
 /// Unified model type that can hold any supported architecture.
+#[allow(clippy::large_enum_variant)]
 pub enum Model {
     /// Llama, Qwen3, and similar decoder-only models.
     Standard(LlamaModel),

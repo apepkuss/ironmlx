@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use crate::array::Array;
-use crate::device::Device;
 use crate::error::Result;
 use crate::nn::{EmbeddingLayer, LayerNorm, LinearLayer, gelu};
 use crate::ops;
