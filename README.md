@@ -40,7 +40,7 @@
 - **Rerank API** — `/v1/rerank` (Cohere-compatible)
 - **Multi-model serving** — load/unload models at runtime via EnginePool
 - **MLX-native inference**
-- **4-bit / 8-bit quantized** model support (affine quantization)
+- **Quantized models** — affine (2/3/4/6/8 bit), mxfp8, nvfp4
 
 ## Supported Models
 

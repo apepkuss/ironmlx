@@ -36,7 +36,7 @@
 - **Rerank API** — `/v1/rerank`（Cohere 兼容）
 - **多模型服务** — 运行时动态加载/卸载模型（EnginePool）
 - **MLX 原生推理**
-- **4-bit / 8-bit 量化模型** 支持（affine 量化）
+- **量化模型** — affine（2/3/4/6/8 bit）、mxfp8、nvfp4
 
 ## 支持的模型架构
 
