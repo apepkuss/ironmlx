@@ -223,7 +223,20 @@ fn setup_status_bar(mtm: MainThreadMarker) {
     let status_item = status_bar.statusItemWithLength(-1.0);
 
     if let Some(button) = status_item.button(mtm) {
-        button.setTitle(ns_string!("\u{26A1}"));
+        // Load embedded narwhal icon as template image
+        let icon_bytes = include_bytes!("../../assets/menubar-icon@2x.png");
+        let ns_data = unsafe { objc2_foundation::NSData::with_bytes(icon_bytes) };
+        if let Some(image) = unsafe { objc2_app_kit::NSImage::initWithData(mtm.alloc(), &ns_data) }
+        {
+            unsafe {
+                image.setSize(objc2_foundation::NSSize::new(22.0, 22.0));
+                image.setTemplate(true); // adapts to light/dark menubar
+            }
+            button.setImage(Some(&image));
+        } else {
+            // Fallback to emoji if image fails
+            button.setTitle(ns_string!("\u{26A1}"));
+        }
     }
 
     // Create menu handler
