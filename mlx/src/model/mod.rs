@@ -6,6 +6,7 @@ mod loader;
 mod qwen3;
 mod qwen35;
 mod qwen35_vl;
+pub mod reranker_model;
 pub mod rope_bert;
 
 pub use bert::{BertConfig, BertModel};
@@ -15,6 +16,7 @@ pub use llama::{LlamaModel, TransformerBlock};
 pub use loader::load_model_weights;
 pub use qwen35::Qwen35Model;
 pub use qwen35_vl::Qwen35VLModel;
+pub use reranker_model::RerankerModel;
 pub use rope_bert::{RopeBertConfig, RopeBertModel};
 
 use crate::array::Array;

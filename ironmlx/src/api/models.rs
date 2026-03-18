@@ -1039,6 +1039,62 @@ pub async fn embeddings(
     }))
 }
 
+pub async fn rerank(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<super::types::RerankRequest>,
+) -> Result<Json<super::types::RerankResponse>, (StatusCode, String)> {
+    let entry = state
+        .pool
+        .get(req.model.as_deref())
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+
+    let return_docs = req.return_documents.unwrap_or(false);
+
+    let mut results = Vec::new();
+    let mut total_tokens = 0usize;
+
+    for (i, doc) in req.documents.iter().enumerate() {
+        let text = doc.text();
+        let pair_text = format!("{} [SEP] {}", req.query, text);
+        let tokens = entry
+            .tokenizer
+            .encode(&pair_text)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tokenize: {e}")))?;
+        total_tokens += tokens.len();
+
+        // TODO: call reranker_model.score() when integrated
+        let score = 0.5f32;
+
+        results.push(super::types::RerankResult {
+            index: i,
+            relevance_score: score,
+            document: if return_docs {
+                Some(super::types::RerankResultDocument {
+                    text: text.to_string(),
+                })
+            } else {
+                None
+            },
+        });
+    }
+
+    results.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if let Some(n) = req.top_n {
+        results.truncate(n);
+    }
+
+    Ok(Json(super::types::RerankResponse {
+        results,
+        model: entry.model_id.clone(),
+        usage: super::types::RerankUsage { total_tokens },
+    }))
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn build_chat_prompt(

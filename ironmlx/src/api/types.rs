@@ -475,6 +475,61 @@ pub struct EmbeddingUsage {
     pub total_tokens: usize,
 }
 
+// -- Rerank ------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct RerankRequest {
+    pub query: String,
+    pub documents: Vec<RerankDocument>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub top_n: Option<usize>,
+    #[serde(default)]
+    pub return_documents: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum RerankDocument {
+    Text(String),
+    Object { text: String },
+}
+
+impl RerankDocument {
+    pub fn text(&self) -> &str {
+        match self {
+            RerankDocument::Text(s) => s,
+            RerankDocument::Object { text } => text,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RerankResponse {
+    pub results: Vec<RerankResult>,
+    pub model: String,
+    pub usage: RerankUsage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RerankResult {
+    pub index: usize,
+    pub relevance_score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<RerankResultDocument>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RerankResultDocument {
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RerankUsage {
+    pub total_tokens: usize,
+}
+
 // -- Defaults ----------------------------------------------------------------
 
 fn default_max_tokens() -> usize {
