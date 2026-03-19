@@ -44,9 +44,9 @@ const NAV_ITEMS: &[(&str, &str)] = &[
     ("\u{1F3E0}", "Status"),
     ("\u{1F916}", "Models"),
     ("\u{1F4AC}", "Chat"),
-    ("\u{2699}\u{FE0F}", "Settings"),
     ("\u{1F4DD}", "Logs"),
     ("\u{26A1}", "Benchmark"),
+    ("\u{2699}\u{FE0F}", "Settings"),
 ];
 
 // Status card value labels — stored for polling updates
@@ -251,14 +251,35 @@ fn create_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         )
     };
 
-    window.setTitle(ns_string!("ironmlx"));
+    window.setTitle(ns_string!("IRONMLX"));
     window.setMinSize(NSSize::new(700.0, 450.0));
     window.center();
-    window.setTitlebarAppearsTransparent(true);
+
+    // Hide native title text, use custom centered label instead
     window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
 
     let content = build_content(mtm);
     window.setContentView(Some(&content));
+
+    // Add centered title label directly to the window's themeFrame (above content)
+    // This ensures it's centered across the full window width including sidebar
+    unsafe {
+        if let Some(content_view) = window.contentView() {
+            if let Some(theme_frame) = content_view.superview() {
+                let frame = theme_frame.frame();
+                let title_label = NSTextField::labelWithString(ns_string!("IRONMLX"), mtm);
+                title_label.setFont(Some(&NSFont::titleBarFontOfSize(13.0)));
+                title_label.setTextColor(Some(&NSColor::windowFrameTextColor()));
+                title_label.setAlignment(NSTextAlignment::Center);
+                title_label.setFrame(NSRect::new(
+                    NSPoint::new(0.0, frame.size.height - 24.0),
+                    NSSize::new(frame.size.width, 16.0),
+                ));
+                title_label.setAutoresizingMask(NSAutoresizingMaskOptions(2 | 8));
+                theme_frame.addSubview(&title_label);
+            }
+        }
+    }
 
     window
 }
@@ -295,7 +316,7 @@ fn build_content(mtm: MainThreadMarker) -> Retained<NSView> {
         sidebar.setAutoresizingMask(NSAutoresizingMaskOptions(16));
     }
 
-    // Pages container
+    // Pages container — content area background
     let pages_container = unsafe {
         let v = NSView::initWithFrame(
             mtm.alloc(),
@@ -303,6 +324,29 @@ fn build_content(mtm: MainThreadMarker) -> Retained<NSView> {
         );
         v.setAutoresizesSubviews(true);
         v.setAutoresizingMask(NSAutoresizingMaskOptions(2 | 16));
+        // Content area: rgb(236,236,236)
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.925, 0.925, 0.925, 1.0);
+            let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg];
+        }
+        v
+    };
+
+    // Vertical separator line between sidebar and content
+    let separator = unsafe {
+        let v = NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(sw - 0.5, 0.0), NSSize::new(0.5, h)),
+        );
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let bg = NSColor::separatorColor();
+            let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg];
+        }
+        v.setAutoresizingMask(NSAutoresizingMaskOptions(16)); // height sizable
         v
     };
 
@@ -311,9 +355,9 @@ fn build_content(mtm: MainThreadMarker) -> Retained<NSView> {
         build_status_page,
         build_models_page,
         build_chat_page,
-        build_settings_page,
         build_logs_page,
         build_benchmark_page,
+        build_settings_page,
     ];
 
     let mut page_ptrs = Vec::new();
@@ -332,6 +376,7 @@ fn build_content(mtm: MainThreadMarker) -> Retained<NSView> {
     unsafe {
         container.addSubview(&sidebar);
         container.addSubview(&pages_container);
+        container.addSubview(&separator);
     }
 
     container
@@ -348,24 +393,24 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
             NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
         )
     };
-    // Use system color that auto-adapts to light/dark theme
+    // Sidebar: rgb(245,245,245)
     unsafe {
         sidebar.setWantsLayer(true);
         if let Some(layer) = sidebar.layer() {
-            let bg = NSColor::controlBackgroundColor();
+            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.961, 0.961, 0.961, 1.0);
             let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
             let _: () = msg_send![&*layer, setBackgroundColor: cg];
         }
     }
 
-    // Header
-    let header_y = height - 36.0 - 50.0;
+    // Header — logo + IronMLX
+    let header_y = height - 28.0 - 44.0;
     let header = build_sidebar_header(mtm, 16.0, header_y, width - 32.0);
     unsafe {
         sidebar.addSubview(&header);
     }
 
-    // Nav items
+    // Nav items — below header
     let handler_guard = nav_handler_lock().lock().unwrap();
     let handler_ptr = handler_guard.as_ref().unwrap().0;
     let action = sel!(navClicked:);
@@ -377,12 +422,13 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
         let highlight_bg = unsafe {
             let v = NSView::initWithFrame(
                 mtm.alloc(),
-                NSRect::new(NSPoint::new(12.0, y), NSSize::new(width - 24.0, 34.0)),
+                NSRect::new(NSPoint::new(12.0, y), NSSize::new(width - 24.0, 38.0)),
             );
             v.setWantsLayer(true);
             if let Some(layer) = v.layer() {
                 let _: () = msg_send![&*layer, setCornerRadius: 8.0f64];
-                let color = NSColor::controlAccentColor().colorWithAlphaComponent(0.25);
+                // Light blue highlight like Clash Verge
+                let color = NSColor::colorWithSRGBRed_green_blue_alpha(0.86, 0.91, 1.0, 1.0);
                 let cg: *const std::ffi::c_void = msg_send![&color, CGColor];
                 let _: () = msg_send![&*layer, setBackgroundColor: cg];
             }
@@ -404,7 +450,7 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
             handler_ptr,
             action,
         );
-        y -= 38.0;
+        y -= 42.0;
         unsafe {
             sidebar.addSubview(&highlight_bg);
             sidebar.addSubview(&btn);
@@ -433,12 +479,12 @@ fn build_sidebar_header(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
     let ns_data = unsafe { NSData::with_bytes(icon_bytes) };
     if let Some(image) = unsafe { NSImage::initWithData(mtm.alloc(), &ns_data) } {
         unsafe {
-            image.setSize(NSSize::new(32.0, 32.0));
+            image.setSize(NSSize::new(40.0, 40.0));
         }
         let iv = unsafe {
             let iv = NSImageView::initWithFrame(
                 mtm.alloc(),
-                NSRect::new(NSPoint::new(0.0, 6.0), NSSize::new(32.0, 32.0)),
+                NSRect::new(NSPoint::new(0.0, 4.0), NSSize::new(40.0, 40.0)),
             );
             iv.setImage(Some(&image));
             iv
@@ -450,11 +496,11 @@ fn build_sidebar_header(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
 
     let title = unsafe {
         let tf = NSTextField::labelWithString(ns_string!("IronMLX"), mtm);
-        tf.setFont(Some(&NSFont::boldSystemFontOfSize(22.0)));
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(24.0)));
         tf.setTextColor(Some(&NSColor::labelColor()));
         tf.setFrame(NSRect::new(
-            NSPoint::new(40.0, 8.0),
-            NSSize::new(130.0, 28.0),
+            NSPoint::new(48.0, 8.0),
+            NSSize::new(140.0, 32.0),
         ));
         tf
     };
@@ -476,18 +522,22 @@ fn build_nav_button(
     handler: *const std::ffi::c_void,
     action: Sel,
 ) -> Retained<NSButton> {
-    let title = format!("  {} {}", icon, label);
+    let title = format!("  {}  {}", icon, label); // extra space between icon and text
     let button = unsafe {
         let btn = NSButton::initWithFrame(
             mtm.alloc(),
-            NSRect::new(NSPoint::new(x, y), NSSize::new(width, 34.0)),
+            NSRect::new(NSPoint::new(x, y), NSSize::new(width, 38.0)),
         );
         btn.setTitle(&NSString::from_str(&title));
-        btn.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        btn.setFont(Some(&NSFont::systemFontOfSize(14.0)));
         btn.setAlignment(NSTextAlignment::Left);
         btn.setBordered(false);
         btn.setTag(tag as isize);
         btn.setBezelStyle(NSBezelStyle(0));
+        // Dark gray text via contentTintColor
+        btn.setContentTintColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            0.3, 0.3, 0.33, 1.0,
+        )));
 
         // Set action
         let handler_obj: &NSObject = &*(handler as *const NSObject);
@@ -508,49 +558,26 @@ fn build_sidebar_status(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
     let view = unsafe {
         NSView::initWithFrame(
             mtm.alloc(),
-            NSRect::new(NSPoint::new(x, y), NSSize::new(width, 50.0)),
+            NSRect::new(NSPoint::new(x, y), NSSize::new(width, 30.0)),
         )
     };
 
-    let model_tf = unsafe {
-        let tf = NSTextField::labelWithString(ns_string!("Model: \u{2014}"), mtm);
+    let version = env!("CARGO_PKG_VERSION");
+    let version_tf = unsafe {
+        let tf =
+            NSTextField::labelWithString(&NSString::from_str(&format!("Version {}", version)), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
-        tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        tf.setFrame(NSRect::new(
-            NSPoint::new(0.0, 26.0),
-            NSSize::new(width, 16.0),
-        ));
-        tf
-    };
-    // Store sidebar model label pointer
-    *SIDEBAR_MODEL_LABEL
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap() = Some(RawPtr(
-        &*model_tf as *const NSTextField as *const std::ffi::c_void,
-    ));
-
-    let mem_tf = unsafe {
-        let tf = NSTextField::labelWithString(ns_string!("Memory: \u{2014}"), mtm);
-        tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
-        tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        tf.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+        tf.setAlignment(NSTextAlignment::Center);
         tf.setFrame(NSRect::new(
             NSPoint::new(0.0, 6.0),
             NSSize::new(width, 16.0),
         ));
         tf
     };
-    // Store sidebar memory label pointer
-    *SIDEBAR_MEM_LABEL
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap() = Some(RawPtr(
-        &*mem_tf as *const NSTextField as *const std::ffi::c_void,
-    ));
 
     unsafe {
-        view.addSubview(&model_tf);
-        view.addSubview(&mem_tf);
+        view.addSubview(&version_tf);
     }
 
     view
@@ -564,7 +591,6 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
     let view = make_page_view(mtm, width, height);
 
     let title = make_title(mtm, "Status", height);
-    let subtitle = make_subtitle(mtm, "Server overview and real-time monitoring", height);
 
     let card_y = height - 200.0;
     let card_w = (width - 24.0 * 2.0 - 16.0 * 2.0) / 3.0;
@@ -634,7 +660,6 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
 
     unsafe {
         view.addSubview(&title);
-        view.addSubview(&subtitle);
         view.addSubview(&card1);
         view.addSubview(&card2);
         view.addSubview(&card3);
@@ -650,7 +675,6 @@ fn build_models_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
     let view = make_page_view(mtm, width, height);
 
     let title = make_title(mtm, "Models", height);
-    let subtitle = make_subtitle(mtm, "Manage loaded models", height);
 
     // Load model section
     let load_label = make_label(mtm, "Load Model", 24.0, height - 140.0, 100.0, true);
@@ -685,7 +709,6 @@ fn build_models_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
 
     unsafe {
         view.addSubview(&title);
-        view.addSubview(&subtitle);
         view.addSubview(&load_label);
         view.addSubview(&input);
         view.addSubview(&load_btn);
@@ -700,7 +723,6 @@ fn build_chat_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<N
     let view = make_page_view(mtm, width, height);
 
     let title = make_title(mtm, "Chat", height);
-    let subtitle = make_subtitle(mtm, "Interactive conversation with your model", height);
 
     let placeholder = unsafe {
         let tf = NSTextField::labelWithString(
@@ -719,7 +741,6 @@ fn build_chat_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<N
 
     unsafe {
         view.addSubview(&title);
-        view.addSubview(&subtitle);
         view.addSubview(&placeholder);
     }
 
@@ -730,7 +751,6 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     let view = make_page_view(mtm, width, height);
 
     let title = make_title(mtm, "Settings", height);
-    let subtitle = make_subtitle(mtm, "Server configuration", height);
 
     let mut y = height - 150.0;
     let label_w = 120.0;
@@ -776,7 +796,6 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     let save_btn = make_button(mtm, "Save Settings", 24.0 + label_w + 12.0, y - 10.0, 120.0);
     unsafe {
         view.addSubview(&title);
-        view.addSubview(&subtitle);
         view.addSubview(&save_btn);
     }
 
@@ -787,7 +806,6 @@ fn build_logs_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<N
     let view = make_page_view(mtm, width, height);
 
     let title = make_title(mtm, "Logs", height);
-    let subtitle = make_subtitle(mtm, "Server activity", height);
 
     // Filter buttons
     let filters = ["All", "Info", "Warn", "Error"];
@@ -838,7 +856,6 @@ fn build_logs_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<N
         scroll.setDocumentView(Some(&text_view));
         let scroll_view: Retained<NSView> = Retained::cast(scroll);
         view.addSubview(&title);
-        view.addSubview(&subtitle);
         view.addSubview(&scroll_view);
     }
 
@@ -849,7 +866,6 @@ fn build_benchmark_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retai
     let view = make_page_view(mtm, width, height);
 
     let title = make_title(mtm, "Benchmark", height);
-    let subtitle = make_subtitle(mtm, "Performance testing", height);
 
     // Form
     let mut y = height - 150.0;
@@ -910,7 +926,6 @@ fn build_benchmark_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retai
 
     unsafe {
         view.addSubview(&title);
-        view.addSubview(&subtitle);
         view.addSubview(&prompt_label);
         view.addSubview(&prompt_field);
         view.addSubview(&tokens_label);
@@ -954,12 +969,40 @@ fn build_status_card(
 // ---------------------------------------------------------------------------
 
 fn make_page_view(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSView> {
-    unsafe {
+    let view = unsafe {
         NSView::initWithFrame(
             mtm.alloc(),
             NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
         )
+    };
+
+    // Title bar background — same color as sidebar
+    let title_bar_h = 90.0;
+    let title_bar = unsafe {
+        let v = NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(
+                NSPoint::new(0.0, height - title_bar_h),
+                NSSize::new(width, title_bar_h),
+            ),
+        );
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            // Same color as sidebar: rgb(245,245,245)
+            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.961, 0.961, 0.961, 1.0);
+            let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg];
+        }
+        v.setAutoresizingMask(NSAutoresizingMaskOptions(2 | 8)); // width + top
+        v
+    };
+
+    unsafe {
+        view.setAutoresizesSubviews(true);
+        view.addSubview(&title_bar);
     }
+
+    view
 }
 
 fn make_title(mtm: MainThreadMarker, text: &str, height: f64) -> Retained<NSTextField> {
@@ -1053,11 +1096,23 @@ fn build_card_with_label(
             NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)),
         );
         v.setBoxType(NSBoxType::Custom);
-        v.setCornerRadius(12.0);
+        v.setCornerRadius(8.0);
         v.setBorderWidth(0.5);
         v.setBorderColor(&NSColor::separatorColor());
-        v.setFillColor(&NSColor::windowBackgroundColor());
+        // Cards use controlBackgroundColor — lightest layer
+        v.setFillColor(&NSColor::controlBackgroundColor());
         v.setTitlePosition(unsafe { std::mem::transmute(0u64) });
+        // Add subtle shadow for depth
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let _: () = msg_send![&*layer, setShadowOpacity: 0.04f32];
+            let _: () = msg_send![&*layer, setShadowRadius: 2.0f64];
+            let shadow_offset: objc2_core_foundation::CGSize = objc2_core_foundation::CGSize {
+                width: 0.0,
+                height: -1.0,
+            };
+            let _: () = msg_send![&*layer, setShadowOffset: shadow_offset];
+        }
         v
     };
 
