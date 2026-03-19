@@ -14,7 +14,7 @@ use crate::config::AppConfig;
 use crate::server_manager::{ServerManager, ServerStatus};
 
 // Global state
-static SERVER: Mutex<Option<ServerManager>> = Mutex::new(None);
+pub static SERVER: Mutex<Option<ServerManager>> = Mutex::new(None);
 static CONFIG: Mutex<Option<AppConfig>> = Mutex::new(None);
 
 thread_local! {

@@ -350,6 +350,320 @@ fn nav_handler_class() -> &'static AnyClass {
     })
 }
 
+// ---------------------------------------------------------------------------
+// SettingsHandler — handles settings page button actions
+// ---------------------------------------------------------------------------
+
+// Store Host/Port text field pointers for reading values
+static SETTINGS_HOST_FIELD: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+static SETTINGS_PORT_FIELD: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+
+static SETTINGS_HANDLER_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+
+// Tag constants for settings buttons
+const TAG_SAVE_RESTART: isize = 100;
+const TAG_LANG_EN: isize = 110;
+const TAG_LANG_ZH: isize = 111;
+const TAG_THEME_SYSTEM: isize = 120;
+const TAG_THEME_LIGHT: isize = 121;
+const TAG_THEME_DARK: isize = 122;
+
+extern "C" fn settings_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
+    let tag: isize = unsafe { msg_send![sender, tag] };
+    match tag {
+        TAG_SAVE_RESTART => save_and_restart(),
+        TAG_LANG_EN => set_language("en"),
+        TAG_LANG_ZH => set_language("zh"),
+        TAG_THEME_SYSTEM => set_theme(None),
+        TAG_THEME_LIGHT => set_theme(Some("NSAppearanceNameAqua")),
+        TAG_THEME_DARK => set_theme(Some("NSAppearanceNameDarkAqua")),
+        _ => {}
+    }
+}
+
+fn settings_handler_class() -> &'static AnyClass {
+    SETTINGS_HANDLER_CLASS.get_or_init(|| {
+        let superclass = AnyClass::get(c"NSObject").unwrap();
+        let mut builder = ClassBuilder::new(c"IronSettingsHandler", superclass).unwrap();
+        unsafe {
+            builder.add_method(
+                sel!(settingsAction:),
+                settings_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+        }
+        builder.register()
+    })
+}
+
+fn save_and_restart() {
+    // Read Host/Port values
+    let host = if let Ok(guard) = SETTINGS_HOST_FIELD.get_or_init(|| Mutex::new(None)).lock() {
+        guard.as_ref().map(|ptr| {
+            let tf: &NSTextField = unsafe { &*(ptr.0 as *const NSTextField) };
+            tf.stringValue().to_string()
+        })
+    } else {
+        None
+    };
+    let port = if let Ok(guard) = SETTINGS_PORT_FIELD.get_or_init(|| Mutex::new(None)).lock() {
+        guard.as_ref().map(|ptr| {
+            let tf: &NSTextField = unsafe { &*(ptr.0 as *const NSTextField) };
+            tf.stringValue().to_string()
+        })
+    } else {
+        None
+    };
+
+    // Save to config
+    let mut config = crate::config::AppConfig::load();
+    if let Some(h) = host {
+        // host is stored in server config, not app config — for now just log
+        eprintln!("[settings] Host: {}", h);
+    }
+    if let Some(p) = &port {
+        if let Ok(port_num) = p.parse::<u16>() {
+            config.port = port_num;
+        }
+    }
+    config.save();
+
+    // Restart server
+    eprintln!("[settings] Restarting server on port {}...", config.port);
+    let mut server = crate::app_delegate::SERVER.lock().unwrap();
+    if let Some(ref mut mgr) = *server {
+        mgr.stop();
+        if let Some(model) = &config.last_model {
+            let _ = mgr.start(model);
+        }
+    }
+}
+
+// Navigation label translations
+static NAV_LANGUAGE: OnceLock<Mutex<&'static str>> = OnceLock::new();
+fn nav_language() -> &'static Mutex<&'static str> {
+    NAV_LANGUAGE.get_or_init(|| Mutex::new("en"))
+}
+
+const NAV_LABELS_EN: &[&str] = &["Status", "Models", "Chat", "Logs", "Benchmark", "Settings"];
+const NAV_LABELS_ZH: &[&str] = &[
+    "\u{72B6}\u{6001}", // 状态
+    "\u{6A21}\u{578B}", // 模型
+    "\u{5BF9}\u{8BDD}", // 对话
+    "\u{65E5}\u{5FD7}", // 日志
+    "\u{57FA}\u{51C6}", // 基准
+    "\u{8BBE}\u{7F6E}", // 设置
+];
+
+/// Get translated string for current language
+fn t(key: &str) -> &str {
+    let lang = *nav_language().lock().unwrap();
+    match (lang, key) {
+        // Status page
+        ("zh", "status") => "\u{72B6}\u{6001}",
+        ("zh", "server") => "\u{670D}\u{52A1}\u{5668}",
+        ("zh", "uptime") => "\u{8FD0}\u{884C}\u{65F6}\u{95F4}",
+        ("zh", "current_model") => "\u{5F53}\u{524D}\u{6A21}\u{578B}",
+        ("zh", "gpu_memory") => "GPU \u{5185}\u{5B58}",
+        ("zh", "active") => "\u{6D3B}\u{8DC3}:",
+        ("zh", "peak") => "\u{5CF0}\u{503C}:",
+        ("zh", "gpu_hint") => {
+            "GPU \u{5185}\u{5B58}\u{5728}\u{9996}\u{6B21}\u{63A8}\u{7406}\u{65F6}\u{5206}\u{914D}"
+        }
+        // Settings page
+        ("zh", "settings") => "\u{8BBE}\u{7F6E}",
+        ("zh", "model") => "\u{6A21}\u{578B}",
+        ("zh", "appearance") => "\u{5916}\u{89C2}",
+        ("zh", "host") => "\u{4E3B}\u{673A}",
+        ("zh", "port") => "\u{7AEF}\u{53E3}",
+        ("zh", "temperature") => "Temperature",
+        ("zh", "top_p") => "Top P",
+        ("zh", "max_tokens") => "Max Tokens",
+        ("zh", "endpoint") => "\u{670D}\u{52A1}\u{7AEF}\u{70B9}",
+        ("zh", "language") => "\u{8BED}\u{8A00}",
+        ("zh", "theme") => "\u{4E3B}\u{9898}",
+        ("zh", "save_restart") => "\u{4FDD}\u{5B58}\u{5E76}\u{91CD}\u{542F}",
+        ("zh", "theme_system") => "\u{1F5A5} \u{8DDF}\u{968F}\u{7CFB}\u{7EDF}",
+        ("zh", "theme_light") => "\u{2600} \u{6D45}\u{8272}",
+        ("zh", "theme_dark") => "\u{1F319} \u{6DF1}\u{8272}",
+        // English defaults
+        (_, "status") => "Status",
+        (_, "server") => "Server",
+        (_, "uptime") => "Uptime",
+        (_, "current_model") => "Current Model",
+        (_, "gpu_memory") => "GPU Memory",
+        (_, "active") => "Active:",
+        (_, "peak") => "Peak:",
+        (_, "gpu_hint") => "GPU memory is allocated on first inference",
+        (_, "settings") => "Settings",
+        (_, "model") => "Model",
+        (_, "appearance") => "Appearance",
+        (_, "host") => "Host",
+        (_, "port") => "Port",
+        (_, "temperature") => "Temperature",
+        (_, "top_p") => "Top P",
+        (_, "max_tokens") => "Max Tokens",
+        (_, "endpoint") => "Endpoint",
+        (_, "language") => "Language",
+        (_, "theme") => "Theme",
+        (_, "save_restart") => "Save & Restart",
+        (_, "theme_system") => "\u{1F5A5} System",
+        (_, "theme_light") => "\u{2600} Light",
+        (_, "theme_dark") => "\u{1F319} Dark",
+        _ => key,
+    }
+}
+
+fn set_language(lang: &'static str) {
+    *nav_language().lock().unwrap() = lang;
+
+    // Update nav buttons
+    let labels = if lang == "zh" {
+        NAV_LABELS_ZH
+    } else {
+        NAV_LABELS_EN
+    };
+    if let Ok(buttons) = NAV_BUTTON_PTRS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        for (i, ptr) in buttons.iter().enumerate() {
+            if i < labels.len() {
+                let btn: &NSButton = unsafe { &*(ptr.0 as *const NSButton) };
+                let icon = NAV_ITEMS[i].0;
+                let title = format!("  {}  {}", icon, labels[i]);
+                unsafe {
+                    btn.setTitle(&NSString::from_str(&title));
+                }
+            }
+        }
+    }
+
+    // Rebuild Status page (index 0) and Settings page (index 5)
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    let pages = pages_lock().lock().unwrap();
+    for &idx in &[0usize, 5] {
+        if idx < pages.len() {
+            let page_view: &NSView = unsafe { &*(pages[idx].0 as *const NSView) };
+            let frame = page_view.frame();
+            let was_hidden = page_view.isHidden();
+
+            // Remove all subviews
+            unsafe {
+                let subs = page_view.subviews();
+                for i in (0..subs.len()).rev() {
+                    let sub = subs.objectAtIndex(i);
+                    sub.removeFromSuperview();
+                }
+            }
+
+            // Rebuild content into same view
+            let w = frame.size.width;
+            let h = frame.size.height;
+            let new_page = if idx == 0 {
+                build_status_page(mtm, w, h)
+            } else {
+                build_settings_page(mtm, w, h)
+            };
+
+            // Copy subviews from new page to existing page
+            unsafe {
+                let new_subs = new_page.subviews();
+                for i in 0..new_subs.len() {
+                    let sub = new_subs.objectAtIndex(i);
+                    page_view.addSubview(&sub);
+                }
+                page_view.setHidden(was_hidden);
+            }
+        }
+    }
+}
+
+// Store nav button pointers for language switching
+static NAV_BUTTON_PTRS: OnceLock<Mutex<Vec<RawPtr>>> = OnceLock::new();
+
+// ---------------------------------------------------------------------------
+// WindowDelegate — handles window close
+// ---------------------------------------------------------------------------
+
+static WIN_DELEGATE_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+static WIN_DELEGATE_INSTANCE: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+
+extern "C" fn window_should_close(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    _sender: *mut AnyObject,
+) -> objc2::runtime::Bool {
+    eprintln!("[dashboard] windowShouldClose called");
+    objc2::runtime::Bool::YES
+}
+
+extern "C" fn window_will_close(_this: *mut AnyObject, _sel: Sel, _notif: *mut AnyObject) {
+    eprintln!("[dashboard] windowWillClose called");
+    // Switch back to accessory mode (hide from Dock)
+    unsafe {
+        let app: *mut AnyObject =
+            msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication];
+        let _: () = msg_send![app, setActivationPolicy: 1i64];
+    }
+}
+
+fn window_delegate_class() -> &'static AnyClass {
+    WIN_DELEGATE_CLASS.get_or_init(|| {
+        let superclass = AnyClass::get(c"NSObject").unwrap();
+        let mut builder = ClassBuilder::new(c"IronWindowDelegate", superclass).unwrap();
+        unsafe {
+            builder.add_method(
+                sel!(windowShouldClose:),
+                window_should_close
+                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> objc2::runtime::Bool,
+            );
+            builder.add_method(
+                sel!(windowWillClose:),
+                window_will_close as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+        }
+        builder.register()
+    })
+}
+
+fn window_delegate_instance() -> &'static Mutex<Option<RawPtr>> {
+    let lock = WIN_DELEGATE_INSTANCE.get_or_init(|| Mutex::new(None));
+    let mut guard = lock.lock().unwrap();
+    if guard.is_none() {
+        let cls = window_delegate_class();
+        let obj: *mut AnyObject = unsafe {
+            let obj: *mut AnyObject = msg_send![cls, alloc];
+            msg_send![obj, init]
+        };
+        *guard = Some(RawPtr(obj as *const std::ffi::c_void));
+    }
+    drop(guard);
+    lock
+}
+
+fn set_theme(appearance_name: Option<&str>) {
+    let guard = window_lock().lock().unwrap();
+    if let Some(ref ptr) = *guard {
+        let window: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+        unsafe {
+            match appearance_name {
+                Some(name) => {
+                    let ns_name = NSString::from_str(name);
+                    let appearance: *mut AnyObject = msg_send![
+                        AnyClass::get(c"NSAppearance").unwrap(),
+                        appearanceNamed: &*ns_name
+                    ];
+                    let _: () = msg_send![window, setAppearance: appearance];
+                }
+                None => {
+                    // System default — set appearance to nil
+                    let _: () = msg_send![window, setAppearance: std::ptr::null::<AnyObject>()];
+                }
+            }
+        }
+    }
+}
+
 fn switch_page(idx: usize) {
     let pages = pages_lock().lock().unwrap();
     let highlights = nav_highlights_lock().lock().unwrap();
@@ -437,14 +751,23 @@ fn create_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         window.setReleasedWhenClosed(false);
     }
 
+    // Set window delegate for close handling
+    {
+        let guard = window_delegate_instance().lock().unwrap();
+        if let Some(ref ptr) = *guard {
+            unsafe {
+                let _: () = msg_send![&*window, setDelegate: ptr.0 as *const AnyObject];
+            }
+        }
+    }
+
     // Hide native title text, use custom centered label instead
     window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
 
     let content = build_content(mtm);
     window.setContentView(Some(&content));
 
-    // Add centered title label directly to the window's themeFrame (above content)
-    // This ensures it's centered across the full window width including sidebar
+    // Add centered title label on themeFrame — offset past traffic light buttons
     unsafe {
         if let Some(content_view) = window.contentView() {
             if let Some(theme_frame) = content_view.superview() {
@@ -453,9 +776,10 @@ fn create_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
                 title_label.setFont(Some(&NSFont::titleBarFontOfSize(13.0)));
                 title_label.setTextColor(Some(&NSColor::windowFrameTextColor()));
                 title_label.setAlignment(NSTextAlignment::Center);
+                // x=80 to avoid covering close/minimize/zoom buttons
                 title_label.setFrame(NSRect::new(
-                    NSPoint::new(0.0, frame.size.height - 24.0),
-                    NSSize::new(frame.size.width, 16.0),
+                    NSPoint::new(80.0, frame.size.height - 24.0),
+                    NSSize::new(frame.size.width - 160.0, 16.0),
                 ));
                 title_label.setAutoresizingMask(NSAutoresizingMaskOptions(2 | 8));
                 theme_frame.addSubview(&title_label);
@@ -598,6 +922,7 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
     let action = sel!(navClicked:);
 
     let mut highlight_ptrs = Vec::new();
+    let mut nav_btn_ptrs = Vec::new();
     let mut y = header_y - 50.0;
     for (i, (icon, label)) in NAV_ITEMS.iter().enumerate() {
         // Highlight background view (behind button)
@@ -633,12 +958,18 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
             action,
         );
         y -= 42.0;
+        let btn_ptr = &*btn as *const NSButton as *const std::ffi::c_void;
+        nav_btn_ptrs.push(RawPtr(btn_ptr));
         unsafe {
             sidebar.addSubview(&highlight_bg);
             sidebar.addSubview(&btn);
         }
     }
     *nav_highlights_lock().lock().unwrap() = highlight_ptrs;
+    *NAV_BUTTON_PTRS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap() = nav_btn_ptrs;
 
     // Bottom status
     let status = build_sidebar_status(mtm, 16.0, 12.0, width - 32.0);
@@ -771,7 +1102,7 @@ fn build_sidebar_status(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
 
 fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSView> {
     let view = make_page_view(mtm, width, height);
-    let title = make_title(mtm, "Status", height);
+    let title = make_title(mtm, t("status"), height);
 
     // === Layout constants ===
     // Title bar is 90pt, title text centered in it
@@ -787,11 +1118,18 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
     let wide_w = width - 24.0 * 2.0 - gap * 2.0 - narrow_w * 2.0;
 
     let card1 = build_status_card(
-        mtm, "Server", "Running", "status", 24.0, card_y, narrow_w, card_h,
+        mtm,
+        t("server"),
+        "Running",
+        "status",
+        24.0,
+        card_y,
+        narrow_w,
+        card_h,
     );
     let card2 = build_status_card(
         mtm,
-        "Uptime",
+        t("uptime"),
         "\u{2014}",
         "uptime",
         24.0 + narrow_w + gap,
@@ -801,7 +1139,7 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
     );
     let card3 = build_status_card(
         mtm,
-        "Current Model",
+        t("current_model"),
         "\u{2014}",
         "default_model",
         24.0 + (narrow_w + gap) * 2.0,
@@ -828,7 +1166,7 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
 
     // === GPU Memory header row ===
     let mem_row_y = sep_y - 24.0 - 18.0; // 24pt gap + 18pt label height
-    let mem_title = make_label(mtm, "GPU Memory", 24.0, mem_row_y, 120.0, true);
+    let mem_title = make_label(mtm, t("gpu_memory"), 24.0, mem_row_y, 120.0, true);
 
     let active_dot = unsafe {
         let tf = NSTextField::labelWithString(ns_string!("\u{2014}"), mtm);
@@ -842,7 +1180,7 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
         ));
         tf
     };
-    let active_lbl = make_label(mtm, "Active:", 164.0, mem_row_y, 55.0, false);
+    let active_lbl = make_label(mtm, t("active"), 164.0, mem_row_y, 55.0, false);
     let active_val = build_status_label(mtm, "0 MB", "active_mem", 220.0, mem_row_y, 100.0);
 
     let peak_dot = unsafe {
@@ -857,7 +1195,7 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
         ));
         tf
     };
-    let peak_lbl = make_label(mtm, "Peak:", 358.0, mem_row_y, 45.0, false);
+    let peak_lbl = make_label(mtm, t("peak"), 358.0, mem_row_y, 45.0, false);
     let peak_val = build_status_label(mtm, "0 MB", "peak_mem", 404.0, mem_row_y, 100.0);
 
     // === Memory chart ===
@@ -883,10 +1221,7 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
 
     // Hint text below chart
     let hint = unsafe {
-        let tf = NSTextField::labelWithString(
-            ns_string!("GPU memory is allocated on first inference"),
-            mtm,
-        );
+        let tf = NSTextField::labelWithString(&NSString::from_str(t("gpu_hint")), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(10.0)));
         tf.setTextColor(Some(&NSColor::tertiaryLabelColor()));
         tf.setFrame(NSRect::new(
@@ -1019,7 +1354,7 @@ fn build_settings_card(
         let tf = NSTextField::labelWithString(&NSString::from_str(section_title), mtm);
         tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
         tf.setFrame(NSRect::new(
-            NSPoint::new(16.0, h - 28.0),
+            NSPoint::new(16.0, h - 34.0),
             NSSize::new(w - 32.0, 18.0),
         ));
         tf
@@ -1033,7 +1368,7 @@ fn build_settings_card(
 
 fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSView> {
     let view = make_page_view(mtm, width, height);
-    let title = make_title(mtm, "Settings", height);
+    let title = make_title(mtm, t("settings"), height);
 
     let pad = 16.0;
     let row_h = 32.0;
@@ -1119,35 +1454,68 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     // Layout from top of doc_view (top = content_h)
     let mut y = content_h - card_gap;
 
+    // Create settings handler
+    let settings_cls = settings_handler_class();
+    let settings_handler: Retained<AnyObject> = unsafe {
+        let obj: *mut AnyObject = msg_send![settings_cls, alloc];
+        let obj: *mut AnyObject = msg_send![obj, init];
+        Retained::from_raw(obj).unwrap()
+    };
+    let sh_ptr = &*settings_handler as *const AnyObject;
+    let settings_action_sel = sel!(settingsAction:);
+
     // === Card 1: Server ===
     y -= c1_h;
-    let card1 = build_settings_card(mtm, "Server", 24.0, y, card_w, c1_h);
-    // "Save & Restart" button — inside card, same row as title
-    let btn_y = c1_h - 36.0; // below card top edge with enough margin
-    let save_restart_btn = make_button(mtm, "Save & Restart", card_w - pad - 120.0, btn_y, 120.0);
+    let card1 = build_settings_card(mtm, t("server"), 24.0, y, card_w, c1_h);
+    // Button right edge aligns with input field right edge
+    let field_right = pad + label_w + 8.0 + field_w;
+    let btn_w = 100.0;
+    let btn_y = c1_h - 38.0; // aligned with header centerline
+    let save_restart_btn = make_button(mtm, t("save_restart"), field_right - btn_w, btn_y, btn_w);
     unsafe {
-        // Make it the "default" button — macOS renders blue bg + white text
-        save_restart_btn.setKeyEquivalent(ns_string!("\r"));
+        // Blue button style without keyEquivalent (avoid intercepting window close)
+        save_restart_btn.setBezelColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            0.0, 0.478, 1.0, 1.0,
+        )));
+        save_restart_btn.setTag(TAG_SAVE_RESTART);
+        save_restart_btn.setTarget(Some(&*(sh_ptr as *const NSObject)));
+        save_restart_btn.setAction(Some(settings_action_sel));
         card1.addSubview(&save_restart_btn);
     }
-    add_card_field(&card1, mtm, "Host", "127.0.0.1", false, c1_h - 46.0 - row_h);
-    add_card_field(
-        &card1,
-        mtm,
-        "Port",
-        "8080",
-        false,
-        c1_h - 46.0 - row_h * 2.0,
-    );
+    // Host field — store pointer
+    let host_fy = c1_h - 46.0 - row_h;
+    add_card_field(&card1, mtm, t("host"), "127.0.0.1", false, host_fy);
+    // Find the field we just added (last subview)
+    unsafe {
+        let subs = card1.subviews();
+        let last = subs.objectAtIndex(subs.len() - 1);
+        let ptr = &*last as *const NSView as *const std::ffi::c_void;
+        *SETTINGS_HOST_FIELD
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(RawPtr(ptr));
+    }
+    // Port field — store pointer
+    let port_fy = c1_h - 46.0 - row_h * 2.0;
+    add_card_field(&card1, mtm, t("port"), "8080", false, port_fy);
+    unsafe {
+        let subs = card1.subviews();
+        let last = subs.objectAtIndex(subs.len() - 1);
+        let ptr = &*last as *const NSView as *const std::ffi::c_void;
+        *SETTINGS_PORT_FIELD
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(RawPtr(ptr));
+    }
 
     // === Card 2: Model ===
     y -= card_gap;
     y -= c2_h;
-    let card2 = build_settings_card(mtm, "Model", 24.0, y, card_w, c2_h);
+    let card2 = build_settings_card(mtm, t("model"), 24.0, y, card_w, c2_h);
     add_card_field(
         &card2,
         mtm,
-        "Temperature",
+        t("temperature"),
         "1.0",
         false,
         c2_h - 40.0 - row_h,
@@ -1155,7 +1523,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     add_card_field(
         &card2,
         mtm,
-        "Top P",
+        t("top_p"),
         "1.0",
         false,
         c2_h - 40.0 - row_h * 2.0,
@@ -1163,7 +1531,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     add_card_field(
         &card2,
         mtm,
-        "Max Tokens",
+        t("max_tokens"),
         "2048",
         false,
         c2_h - 40.0 - row_h * 3.0,
@@ -1176,7 +1544,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     add_card_field(
         &card3,
         mtm,
-        "Endpoint",
+        t("endpoint"),
         "https://huggingface.co",
         false,
         c3_h - 40.0 - row_h,
@@ -1185,12 +1553,12 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     // === Card 4: Appearance ===
     y -= card_gap;
     y -= c4_h;
-    let card4 = build_settings_card(mtm, "Appearance", 24.0, y, card_w, c4_h);
+    let card4 = build_settings_card(mtm, t("appearance"), 24.0, y, card_w, c4_h);
 
     // Language row
     let lang_y = c4_h - 40.0 - row_h;
     let lang_lbl = unsafe {
-        let tf = NSTextField::labelWithString(ns_string!("Language"), mtm);
+        let tf = NSTextField::labelWithString(&NSString::from_str(t("language")), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         tf.setFrame(NSRect::new(
             NSPoint::new(pad, lang_y),
@@ -1201,11 +1569,14 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     unsafe {
         card4.addSubview(&lang_lbl);
     }
-    let lang_btns = ["English", "\u{4E2D}\u{6587}"];
+    let lang_btns = [("English", TAG_LANG_EN), ("\u{4E2D}\u{6587}", TAG_LANG_ZH)];
     let mut lx = pad + label_w + 8.0;
-    for lang in &lang_btns {
-        let btn = make_button(mtm, lang, lx, lang_y - 2.0, 70.0);
+    for (label, tag) in &lang_btns {
+        let btn = make_button(mtm, label, lx, lang_y - 2.0, 70.0);
         unsafe {
+            btn.setTag(*tag);
+            btn.setTarget(Some(&*(sh_ptr as *const NSObject)));
+            btn.setAction(Some(settings_action_sel));
             card4.addSubview(&btn);
         }
         lx += 78.0;
@@ -1214,7 +1585,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     // Theme row
     let theme_y = c4_h - 40.0 - row_h * 2.0;
     let theme_lbl = unsafe {
-        let tf = NSTextField::labelWithString(ns_string!("Theme"), mtm);
+        let tf = NSTextField::labelWithString(&NSString::from_str(t("theme")), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         tf.setFrame(NSRect::new(
             NSPoint::new(pad, theme_y),
@@ -1225,15 +1596,25 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     unsafe {
         card4.addSubview(&theme_lbl);
     }
-    let theme_btns = ["\u{1F5A5} System", "\u{2600} Light", "\u{1F319} Dark"];
+    let theme_btns = [
+        (t("theme_system"), TAG_THEME_SYSTEM),
+        (t("theme_light"), TAG_THEME_LIGHT),
+        (t("theme_dark"), TAG_THEME_DARK),
+    ];
     let mut tx = pad + label_w + 8.0;
-    for theme in &theme_btns {
-        let btn = make_button(mtm, theme, tx, theme_y - 2.0, 80.0);
+    for (label, tag) in &theme_btns {
+        let btn = make_button(mtm, label, tx, theme_y - 2.0, 80.0);
         unsafe {
+            btn.setTag(*tag);
+            btn.setTarget(Some(&*(sh_ptr as *const NSObject)));
+            btn.setAction(Some(settings_action_sel));
             card4.addSubview(&btn);
         }
         tx += 88.0;
     }
+
+    // Keep settings handler alive
+    std::mem::forget(settings_handler);
 
     unsafe {
         doc_view.addSubview(&card1);
