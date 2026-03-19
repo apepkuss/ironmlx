@@ -1028,23 +1028,47 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     let view = make_page_view(mtm, width, height);
     let title = make_title(mtm, "Settings", height);
 
+    let pad = 16.0;
+    let row_h = 32.0;
+    let card_gap = 16.0;
+    let scroll_top = height - 90.0;
+
+    // Scrollable content area below title
+    let scroll = unsafe {
+        let sv = NSScrollView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::ZERO, NSSize::new(width, scroll_top)),
+        );
+        sv.setHasVerticalScroller(true);
+        sv.setBorderType(NSBorderType(0));
+        sv.setDrawsBackground(false);
+        sv.setAutoresizingMask(NSAutoresizingMaskOptions(2 | 16));
+        sv
+    };
+
     let card_w = width - 48.0;
     let label_w = 110.0;
     let field_w = card_w - label_w - 48.0;
-    let row_h = 30.0;
-    let pad = 16.0; // padding inside card
 
-    // Calculate card heights
-    let c1_h = 28.0 + row_h * 2.0 + pad; // Server: 2 fields
-    let c2_h = 28.0 + row_h * 3.0 + pad; // Model: 3 fields
-    let c3_h = 28.0 + row_h + pad; // HuggingFace: 1 field
-    let c4_h = 28.0 + row_h * 2.0 + pad; // Appearance: 2 rows
-    let total_cards_h = c1_h + c2_h + c3_h + c4_h;
+    // Card heights (generous)
+    let c1_h = 130.0;
+    let c2_h = 140.0;
+    let c3_h = 90.0;
+    let c4_h = 120.0;
 
-    // Available space: from title bottom (height - 90) to window bottom (24pt margin)
-    let available = (height - 90.0) - 24.0;
-    // 5 gaps: top + 3 between cards + bottom = 5 equal gaps
-    let card_gap = (available - total_cards_h) / 5.0;
+    let total_h: f64 =
+        card_gap + c1_h + card_gap + c2_h + card_gap + c3_h + card_gap + c4_h + card_gap;
+    let content_h = total_h.max(scroll_top);
+
+    let doc_view = unsafe {
+        NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::ZERO, NSSize::new(width, content_h)),
+        )
+    };
+    unsafe {
+        scroll.setDocumentView(Some(&doc_view));
+    }
 
     // Helper: add field inside a card (relative to card origin)
     let add_card_field = |card: &NSView,
@@ -1085,14 +1109,27 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
         }
     };
 
-    // Layout from top
-    let mut y = height - 90.0 - card_gap; // below title bar
+    // Layout from top of doc_view (top = content_h)
+    let mut y = content_h - card_gap;
 
     // === Card 1: Server ===
     y -= c1_h;
     let card1 = build_settings_card(mtm, "Server", 24.0, y, card_w, c1_h);
-    add_card_field(&card1, mtm, "Host", "127.0.0.1", true, c1_h - 28.0 - row_h);
-    add_card_field(&card1, mtm, "Port", "8080", true, c1_h - 28.0 - row_h * 2.0);
+    // "Save & Restart" button — inside card, same row as title
+    let btn_y = c1_h - 36.0; // below card top edge with enough margin
+    let save_restart_btn = make_button(mtm, "Save & Restart", card_w - pad - 120.0, btn_y, 120.0);
+    unsafe {
+        card1.addSubview(&save_restart_btn);
+    }
+    add_card_field(&card1, mtm, "Host", "127.0.0.1", false, c1_h - 46.0 - row_h);
+    add_card_field(
+        &card1,
+        mtm,
+        "Port",
+        "8080",
+        false,
+        c1_h - 46.0 - row_h * 2.0,
+    );
 
     // === Card 2: Model ===
     y -= card_gap;
@@ -1104,7 +1141,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
         "Temperature",
         "1.0",
         false,
-        c2_h - 28.0 - row_h,
+        c2_h - 40.0 - row_h,
     );
     add_card_field(
         &card2,
@@ -1112,7 +1149,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
         "Top P",
         "1.0",
         false,
-        c2_h - 28.0 - row_h * 2.0,
+        c2_h - 40.0 - row_h * 2.0,
     );
     add_card_field(
         &card2,
@@ -1120,7 +1157,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
         "Max Tokens",
         "2048",
         false,
-        c2_h - 28.0 - row_h * 3.0,
+        c2_h - 40.0 - row_h * 3.0,
     );
 
     // === Card 3: HuggingFace ===
@@ -1133,7 +1170,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
         "Endpoint",
         "https://huggingface.co",
         false,
-        c3_h - 28.0 - row_h,
+        c3_h - 40.0 - row_h,
     );
 
     // === Card 4: Appearance ===
@@ -1142,7 +1179,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     let card4 = build_settings_card(mtm, "Appearance", 24.0, y, card_w, c4_h);
 
     // Language row
-    let lang_y = c4_h - 28.0 - row_h;
+    let lang_y = c4_h - 40.0 - row_h;
     let lang_lbl = unsafe {
         let tf = NSTextField::labelWithString(ns_string!("Language"), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
@@ -1166,7 +1203,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     }
 
     // Theme row
-    let theme_y = c4_h - 28.0 - row_h * 2.0;
+    let theme_y = c4_h - 40.0 - row_h * 2.0;
     let theme_lbl = unsafe {
         let tf = NSTextField::labelWithString(ns_string!("Theme"), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
@@ -1190,11 +1227,13 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     }
 
     unsafe {
+        doc_view.addSubview(&card1);
+        doc_view.addSubview(&card2);
+        doc_view.addSubview(&card3);
+        doc_view.addSubview(&card4);
+        let scroll_view: Retained<NSView> = Retained::cast(scroll);
         view.addSubview(&title);
-        view.addSubview(&card1);
-        view.addSubview(&card2);
-        view.addSubview(&card3);
-        view.addSubview(&card4);
+        view.addSubview(&scroll_view);
     }
 
     view
