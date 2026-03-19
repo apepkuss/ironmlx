@@ -985,56 +985,216 @@ fn build_chat_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<N
     view
 }
 
+fn build_settings_card(
+    mtm: MainThreadMarker,
+    section_title: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Retained<NSView> {
+    let card = unsafe {
+        let v = NSBox::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)),
+        );
+        v.setBoxType(NSBoxType::Custom);
+        v.setCornerRadius(8.0);
+        v.setBorderWidth(0.5);
+        v.setBorderColor(&NSColor::separatorColor());
+        v.setFillColor(&NSColor::controlBackgroundColor());
+        v.setTitlePosition(unsafe { std::mem::transmute(0u64) });
+        v
+    };
+
+    // Section title inside card
+    let header = unsafe {
+        let tf = NSTextField::labelWithString(&NSString::from_str(section_title), mtm);
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(16.0, h - 28.0),
+            NSSize::new(w - 32.0, 18.0),
+        ));
+        tf
+    };
+    unsafe {
+        card.addSubview(&header);
+    }
+
+    unsafe { Retained::cast(card) }
+}
+
 fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSView> {
     let view = make_page_view(mtm, width, height);
-
     let title = make_title(mtm, "Settings", height);
 
-    let mut y = height - 150.0;
-    let label_w = 120.0;
-    let field_w = width - label_w - 80.0;
-    let row_h = 36.0;
+    let card_w = width - 48.0;
+    let label_w = 110.0;
+    let field_w = card_w - label_w - 48.0;
+    let row_h = 30.0;
+    let pad = 16.0; // padding inside card
 
-    let fields = [
-        ("Host", "127.0.0.1", true),
-        ("Port", "8080", true),
-        ("Temperature", "1.0", false),
-        ("Top P", "1.0", false),
-        ("Max Tokens", "2048", false),
-        ("HF Endpoint", "https://huggingface.co", false),
-    ];
+    // Calculate card heights
+    let c1_h = 28.0 + row_h * 2.0 + pad; // Server: 2 fields
+    let c2_h = 28.0 + row_h * 3.0 + pad; // Model: 3 fields
+    let c3_h = 28.0 + row_h + pad; // HuggingFace: 1 field
+    let c4_h = 28.0 + row_h * 2.0 + pad; // Appearance: 2 rows
+    let total_cards_h = c1_h + c2_h + c3_h + c4_h;
 
-    for (label_text, value, readonly) in &fields {
-        let label = make_label(mtm, label_text, 24.0, y, label_w, false);
+    // Available space: from title bottom (height - 90) to window bottom (24pt margin)
+    let available = (height - 90.0) - 24.0;
+    // 5 gaps: top + 3 between cards + bottom = 5 equal gaps
+    let card_gap = (available - total_cards_h) / 5.0;
+
+    // Helper: add field inside a card (relative to card origin)
+    let add_card_field = |card: &NSView,
+                          mtm: MainThreadMarker,
+                          label: &str,
+                          value: &str,
+                          readonly: bool,
+                          fy: f64| {
+        let lbl = unsafe {
+            let tf = NSTextField::labelWithString(&NSString::from_str(label), mtm);
+            tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+            tf.setFrame(NSRect::new(
+                NSPoint::new(pad, fy),
+                NSSize::new(label_w, 18.0),
+            ));
+            tf
+        };
         let field = unsafe {
             let tf = NSTextField::initWithFrame(
                 mtm.alloc(),
                 NSRect::new(
-                    NSPoint::new(24.0 + label_w + 12.0, y),
-                    NSSize::new(field_w, 24.0),
+                    NSPoint::new(pad + label_w + 8.0, fy - 2.0),
+                    NSSize::new(field_w, 22.0),
                 ),
             );
             tf.setStringValue(&NSString::from_str(value));
             tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
             tf.setBezeled(true);
             tf.setEditable(!readonly);
-            if *readonly {
+            if readonly {
                 tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
             }
             tf
         };
-        y -= row_h;
-
         unsafe {
-            view.addSubview(&label);
-            view.addSubview(&field);
+            card.addSubview(&lbl);
+            card.addSubview(&field);
         }
+    };
+
+    // Layout from top
+    let mut y = height - 90.0 - card_gap; // below title bar
+
+    // === Card 1: Server ===
+    y -= c1_h;
+    let card1 = build_settings_card(mtm, "Server", 24.0, y, card_w, c1_h);
+    add_card_field(&card1, mtm, "Host", "127.0.0.1", true, c1_h - 28.0 - row_h);
+    add_card_field(&card1, mtm, "Port", "8080", true, c1_h - 28.0 - row_h * 2.0);
+
+    // === Card 2: Model ===
+    y -= card_gap;
+    y -= c2_h;
+    let card2 = build_settings_card(mtm, "Model", 24.0, y, card_w, c2_h);
+    add_card_field(
+        &card2,
+        mtm,
+        "Temperature",
+        "1.0",
+        false,
+        c2_h - 28.0 - row_h,
+    );
+    add_card_field(
+        &card2,
+        mtm,
+        "Top P",
+        "1.0",
+        false,
+        c2_h - 28.0 - row_h * 2.0,
+    );
+    add_card_field(
+        &card2,
+        mtm,
+        "Max Tokens",
+        "2048",
+        false,
+        c2_h - 28.0 - row_h * 3.0,
+    );
+
+    // === Card 3: HuggingFace ===
+    y -= card_gap;
+    y -= c3_h;
+    let card3 = build_settings_card(mtm, "HuggingFace", 24.0, y, card_w, c3_h);
+    add_card_field(
+        &card3,
+        mtm,
+        "Endpoint",
+        "https://huggingface.co",
+        false,
+        c3_h - 28.0 - row_h,
+    );
+
+    // === Card 4: Appearance ===
+    y -= card_gap;
+    y -= c4_h;
+    let card4 = build_settings_card(mtm, "Appearance", 24.0, y, card_w, c4_h);
+
+    // Language row
+    let lang_y = c4_h - 28.0 - row_h;
+    let lang_lbl = unsafe {
+        let tf = NSTextField::labelWithString(ns_string!("Language"), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad, lang_y),
+            NSSize::new(label_w, 18.0),
+        ));
+        tf
+    };
+    unsafe {
+        card4.addSubview(&lang_lbl);
+    }
+    let lang_btns = ["English", "\u{4E2D}\u{6587}"];
+    let mut lx = pad + label_w + 8.0;
+    for lang in &lang_btns {
+        let btn = make_button(mtm, lang, lx, lang_y - 2.0, 70.0);
+        unsafe {
+            card4.addSubview(&btn);
+        }
+        lx += 78.0;
     }
 
-    let save_btn = make_button(mtm, "Save Settings", 24.0 + label_w + 12.0, y - 10.0, 120.0);
+    // Theme row
+    let theme_y = c4_h - 28.0 - row_h * 2.0;
+    let theme_lbl = unsafe {
+        let tf = NSTextField::labelWithString(ns_string!("Theme"), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad, theme_y),
+            NSSize::new(label_w, 18.0),
+        ));
+        tf
+    };
+    unsafe {
+        card4.addSubview(&theme_lbl);
+    }
+    let theme_btns = ["\u{1F5A5} System", "\u{2600} Light", "\u{1F319} Dark"];
+    let mut tx = pad + label_w + 8.0;
+    for theme in &theme_btns {
+        let btn = make_button(mtm, theme, tx, theme_y - 2.0, 80.0);
+        unsafe {
+            card4.addSubview(&btn);
+        }
+        tx += 88.0;
+    }
+
     unsafe {
         view.addSubview(&title);
-        view.addSubview(&save_btn);
+        view.addSubview(&card1);
+        view.addSubview(&card2);
+        view.addSubview(&card3);
+        view.addSubview(&card4);
     }
 
     view
