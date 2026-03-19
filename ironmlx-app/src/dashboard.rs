@@ -1119,6 +1119,8 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     let btn_y = c1_h - 36.0; // below card top edge with enough margin
     let save_restart_btn = make_button(mtm, "Save & Restart", card_w - pad - 120.0, btn_y, 120.0);
     unsafe {
+        // Make it the "default" button — macOS renders blue bg + white text
+        save_restart_btn.setKeyEquivalent(ns_string!("\r"));
         card1.addSubview(&save_restart_btn);
     }
     add_card_field(&card1, mtm, "Host", "127.0.0.1", false, c1_h - 46.0 - row_h);
@@ -1231,6 +1233,9 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
         doc_view.addSubview(&card2);
         doc_view.addSubview(&card3);
         doc_view.addSubview(&card4);
+        // Scroll to top
+        let top_point = NSPoint::new(0.0, content_h);
+        doc_view.scrollPoint(top_point);
         let scroll_view: Retained<NSView> = Retained::cast(scroll);
         view.addSubview(&title);
         view.addSubview(&scroll_view);
