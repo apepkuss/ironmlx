@@ -7,6 +7,14 @@ pub struct AppConfig {
     pub port: u16,
     pub auto_start: bool,
     pub last_model: Option<String>,
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default)]
+    pub theme: Option<String>, // None=System, Some("light"), Some("dark")
+}
+
+fn default_language() -> String {
+    "en".to_string()
 }
 
 impl Default for AppConfig {
@@ -16,6 +24,8 @@ impl Default for AppConfig {
             port: 8080,
             auto_start: true,
             last_model: None,
+            language: "en".to_string(),
+            theme: None,
         }
     }
 }

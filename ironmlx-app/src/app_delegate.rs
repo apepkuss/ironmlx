@@ -63,6 +63,16 @@ define_class!(
                 }
             }
 
+            // Restore saved language before building menu
+            {
+                let config = crate::config::AppConfig::load();
+                let lang: &'static str = match config.language.as_str() {
+                    "zh" => "zh",
+                    _ => "en",
+                };
+                *crate::dashboard::nav_language().lock().unwrap() = lang;
+            }
+
             setup_status_bar(mtm);
 
             // Auto-start server if configured
@@ -278,19 +288,26 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
         ServerStatus::Failed => "Status: Failed",
     };
 
+    use crate::dashboard::t;
+
     // Status (disabled, informational)
-    let status_item = make_item(mtm, status_text, None, "");
+    let status_text_i18n = if is_running {
+        t("menu_status_running")
+    } else {
+        t("menu_status_stopped")
+    };
+    let status_item = make_item(mtm, status_text_i18n, None, "");
     status_item.setEnabled(false);
     menu.addItem(&status_item);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // Dashboard
-    let dashboard = make_item(mtm, "Dashboard", Some(sel!(openDashboard:)), "d");
+    let dashboard = make_item(mtm, t("menu_dashboard"), Some(sel!(openDashboard:)), "d");
     dashboard.setEnabled(is_running);
     menu.addItem(&dashboard);
 
     // Chat
-    let chat = make_item(mtm, "Chat with ironmlx", Some(sel!(openChat:)), "");
+    let chat = make_item(mtm, t("menu_chat"), Some(sel!(openChat:)), "");
     chat.setEnabled(is_running);
     menu.addItem(&chat);
 
@@ -298,18 +315,18 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 
     // Start / Stop
     if is_running {
-        menu.addItem(&make_item(mtm, "Stop Server", Some(sel!(stopServer:)), ""));
+        menu.addItem(&make_item(mtm, t("menu_stop"), Some(sel!(stopServer:)), ""));
     } else {
         menu.addItem(&make_item(
             mtm,
-            "Start Server",
+            t("menu_start"),
             Some(sel!(startServer:)),
             "",
         ));
     }
 
     // Restart
-    let restart = make_item(mtm, "Restart Server", Some(sel!(restartServer:)), "");
+    let restart = make_item(mtm, t("menu_restart"), Some(sel!(restartServer:)), "");
     restart.setEnabled(is_running);
     menu.addItem(&restart);
 
@@ -318,7 +335,7 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     // Preferences
     menu.addItem(&make_item(
         mtm,
-        "Preferences...",
+        t("menu_preferences"),
         Some(sel!(openPreferences:)),
         ",",
     ));
@@ -326,7 +343,7 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     // Check for Updates
     menu.addItem(&make_item(
         mtm,
-        "Check for Updates...",
+        t("menu_updates"),
         Some(sel!(checkForUpdates:)),
         "",
     ));
@@ -334,7 +351,7 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // Quit
-    menu.addItem(&make_item(mtm, "Quit ironmlx", Some(sel!(quitApp:)), "q"));
+    menu.addItem(&make_item(mtm, t("menu_quit"), Some(sel!(quitApp:)), "q"));
 
     menu
 }

@@ -631,7 +631,7 @@ fn save_and_restart() {
 
 // Navigation label translations
 static NAV_LANGUAGE: OnceLock<Mutex<&'static str>> = OnceLock::new();
-fn nav_language() -> &'static Mutex<&'static str> {
+pub fn nav_language() -> &'static Mutex<&'static str> {
     NAV_LANGUAGE.get_or_init(|| Mutex::new("en"))
 }
 
@@ -646,7 +646,7 @@ const NAV_LABELS_ZH: &[&str] = &[
 ];
 
 /// Get translated string for current language
-fn t(key: &str) -> &str {
+pub fn t(key: &str) -> &str {
     let lang = *nav_language().lock().unwrap();
     match (lang, key) {
         // Status page
@@ -700,12 +700,38 @@ fn t(key: &str) -> &str {
         (_, "theme_system") => "\u{1F5A5} System",
         (_, "theme_light") => "\u{2600} Light",
         (_, "theme_dark") => "\u{1F319} Dark",
+        // Menu items
+        ("zh", "menu_dashboard") => "\u{4EEA}\u{8868}\u{76D8}",
+        ("zh", "menu_chat") => "\u{4E0E} ironmlx \u{5BF9}\u{8BDD}",
+        ("zh", "menu_stop") => "\u{505C}\u{6B62}\u{670D}\u{52A1}",
+        ("zh", "menu_start") => "\u{542F}\u{52A8}\u{670D}\u{52A1}",
+        ("zh", "menu_restart") => "\u{91CD}\u{542F}\u{670D}\u{52A1}",
+        ("zh", "menu_preferences") => "\u{504F}\u{597D}\u{8BBE}\u{7F6E}...",
+        ("zh", "menu_updates") => "\u{68C0}\u{67E5}\u{66F4}\u{65B0}...",
+        ("zh", "menu_quit") => "\u{9000}\u{51FA} ironmlx",
+        ("zh", "menu_status_running") => "\u{72B6}\u{6001}: \u{8FD0}\u{884C}\u{4E2D}",
+        ("zh", "menu_status_stopped") => "\u{72B6}\u{6001}: \u{5DF2}\u{505C}\u{6B62}",
+        (_, "menu_dashboard") => "Dashboard",
+        (_, "menu_chat") => "Chat with ironmlx",
+        (_, "menu_stop") => "Stop Server",
+        (_, "menu_start") => "Start Server",
+        (_, "menu_restart") => "Restart Server",
+        (_, "menu_preferences") => "Preferences...",
+        (_, "menu_updates") => "Check for Updates...",
+        (_, "menu_quit") => "Quit ironmlx",
+        (_, "menu_status_running") => "Status: Running",
+        (_, "menu_status_stopped") => "Status: Stopped",
         _ => key,
     }
 }
 
 fn set_language(lang: &'static str) {
     *nav_language().lock().unwrap() = lang;
+
+    // Persist to config
+    let mut config = crate::config::AppConfig::load();
+    config.language = lang.to_string();
+    config.save();
 
     // Update nav buttons
     let labels = if lang == "zh" {
@@ -729,8 +755,11 @@ fn set_language(lang: &'static str) {
         }
     }
 
-    // Rebuild Status page (index 0) and Settings page (index 5)
+    // Rebuild menubar menu to reflect language change
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    crate::app_delegate::refresh_menu(mtm);
+
+    // Rebuild Status page (index 0) and Settings page (index 5)
     let pages = pages_lock().lock().unwrap();
     for &idx in &[0usize, 5] {
         if idx < pages.len() {
@@ -840,13 +869,22 @@ fn set_theme(appearance_name: Option<&str>) {
     // Record dark mode state
     let is_dark = match appearance_name {
         Some(name) => name.contains("Dark"),
-        None => false, // System — will be re-evaluated
+        None => false,
     };
     *dark_mode_lock().lock().unwrap() = if appearance_name.is_some() {
         Some(is_dark)
     } else {
-        None // System default — use runtime detection
+        None
     };
+
+    // Persist to config
+    let mut config = crate::config::AppConfig::load();
+    config.theme = match appearance_name {
+        Some(name) if name.contains("Dark") => Some("dark".to_string()),
+        Some(_) => Some("light".to_string()),
+        None => None,
+    };
+    config.save();
 
     let guard = window_lock().lock().unwrap();
     if let Some(ref ptr) = *guard {
@@ -1032,11 +1070,49 @@ pub fn show_dashboard(mtm: MainThreadMarker) {
     let raw = Retained::into_raw(window) as *const std::ffi::c_void;
     *guard = Some(RawPtr(raw));
 
-    // Start polling on first dashboard open
-    static POLLING_STARTED: OnceLock<bool> = OnceLock::new();
-    POLLING_STARTED.get_or_init(|| {
-        let port = crate::config::AppConfig::load().port;
-        start_status_polling(port);
+    // On first dashboard open, restore saved settings and start polling
+    static INIT_DONE: OnceLock<bool> = OnceLock::new();
+    INIT_DONE.get_or_init(|| {
+        let config = crate::config::AppConfig::load();
+
+        // Restore language
+        let lang: &'static str = match config.language.as_str() {
+            "zh" => "zh",
+            _ => "en",
+        };
+        if lang != "en" {
+            // Set language without re-saving (already saved)
+            *nav_language().lock().unwrap() = lang;
+            // Rebuild nav buttons
+            let labels = NAV_LABELS_ZH;
+            if let Ok(buttons) = NAV_BUTTON_PTRS
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+            {
+                for (i, ptr) in buttons.iter().enumerate() {
+                    if i < labels.len() {
+                        let btn: &NSButton = unsafe { &*(ptr.0 as *const NSButton) };
+                        let icon = NAV_ITEMS[i].0;
+                        let title = format!("  {}  {}", icon, labels[i]);
+                        unsafe {
+                            btn.setTitle(&NSString::from_str(&title));
+                        }
+                    }
+                }
+            }
+            // Rebuild pages
+            crate::app_delegate::refresh_menu(mtm);
+        }
+
+        // Restore theme
+        match config.theme.as_deref() {
+            Some("dark") => set_theme(Some("NSAppearanceNameDarkAqua")),
+            Some("light") => set_theme(Some("NSAppearanceNameAqua")),
+            _ => {} // System default, no action needed
+        }
+
+        // Start polling
+        start_status_polling(config.port);
         true
     });
 }
