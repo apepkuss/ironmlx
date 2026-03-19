@@ -9,6 +9,190 @@ use objc2_app_kit::*;
 use objc2_foundation::*;
 
 // ---------------------------------------------------------------------------
+// Theme-aware colors
+// ---------------------------------------------------------------------------
+
+// Track dark mode state explicitly (set by set_theme)
+static DARK_MODE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
+fn dark_mode_lock() -> &'static Mutex<Option<bool>> {
+    DARK_MODE.get_or_init(|| Mutex::new(None))
+}
+
+fn is_dark_mode() -> bool {
+    // Use explicitly set value if available
+    if let Ok(guard) = dark_mode_lock().lock() {
+        if let Some(dark) = *guard {
+            return dark;
+        }
+    }
+    // Fallback: check system appearance
+    unsafe {
+        let app: *mut AnyObject =
+            msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication];
+        let appearance: *mut AnyObject = msg_send![app, effectiveAppearance];
+        if appearance.is_null() {
+            return false;
+        }
+        let name: *mut AnyObject = msg_send![appearance, name];
+        if name.is_null() {
+            return false;
+        }
+        let name_str: &NSString = &*(name as *const NSString);
+        name_str.to_string().contains("Dark")
+    }
+}
+
+/// Sidebar background color
+fn sidebar_bg_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        // RGB(46, 48, 61)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.180, 0.188, 0.239, 1.0)
+    } else {
+        // RGB(245, 245, 245)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.961, 0.961, 0.961, 1.0)
+    }
+}
+
+/// Window title bar background color
+fn titlebar_bg_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        // Same as sidebar: RGB(46, 48, 61)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.180, 0.188, 0.239, 1.0)
+    } else {
+        // Same as sidebar in light mode
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.961, 0.961, 0.961, 1.0)
+    }
+}
+
+/// Window title text color
+fn titlebar_text_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        // RGB(179, 179, 178)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.702, 0.702, 0.698, 1.0)
+    } else {
+        NSColor::windowFrameTextColor()
+    }
+}
+
+/// Content area background color
+fn content_bg_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        // RGB(30, 31, 39)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.118, 0.122, 0.153, 1.0)
+    } else {
+        // RGB(236, 236, 236)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.925, 0.925, 0.925, 1.0)
+    }
+}
+
+/// Chart background color (matches content area)
+fn chart_bg_color() -> Retained<NSColor> {
+    content_bg_color()
+}
+
+/// Card background color
+fn card_bg_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        // RGB(40, 42, 54)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.157, 0.165, 0.212, 1.0)
+    } else {
+        NSColor::controlBackgroundColor()
+    }
+}
+
+/// Card hover background color
+fn card_hover_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        // RGB(29, 34, 46)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.114, 0.133, 0.180, 1.0)
+    } else {
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.95, 0.95, 0.96, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HoverBox — NSBox subclass with mouse tracking for hover effect
+// ---------------------------------------------------------------------------
+
+static HOVER_BOX_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+
+extern "C" fn hover_mouse_entered(_this: *mut AnyObject, _sel: Sel, _event: *mut AnyObject) {
+    unsafe {
+        let _: () = msg_send![_this, setFillColor: &*card_hover_color()];
+    }
+}
+
+extern "C" fn hover_mouse_exited(_this: *mut AnyObject, _sel: Sel, _event: *mut AnyObject) {
+    unsafe {
+        let _: () = msg_send![_this, setFillColor: &*card_bg_color()];
+    }
+}
+
+extern "C" fn hover_update_tracking(_this: *mut AnyObject, _sel: Sel) {
+    unsafe {
+        let view: &NSView = &*(_this as *const NSView);
+        // Remove old tracking areas
+        let areas = view.trackingAreas();
+        for i in 0..areas.len() {
+            let area = areas.objectAtIndex(i);
+            view.removeTrackingArea(&area);
+        }
+        // Add new tracking area
+        let options: usize = 0x01 | 0x02 | 0x20; // MouseEnteredAndExited | MouseMoved | ActiveAlways
+        let area: Retained<NSTrackingArea> = msg_send![
+            msg_send![AnyClass::get(c"NSTrackingArea").unwrap(), alloc],
+            initWithRect: view.bounds()
+            options: options
+            owner: _this
+            userInfo: std::ptr::null::<AnyObject>()
+        ];
+        view.addTrackingArea(&area);
+    }
+}
+
+fn hover_box_class() -> &'static AnyClass {
+    HOVER_BOX_CLASS.get_or_init(|| {
+        let superclass = AnyClass::get(c"NSBox").unwrap();
+        let mut builder = ClassBuilder::new(c"IronHoverBox", superclass).unwrap();
+        unsafe {
+            builder.add_method(
+                sel!(mouseEntered:),
+                hover_mouse_entered as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(mouseExited:),
+                hover_mouse_exited as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(updateTrackingAreas),
+                hover_update_tracking as extern "C" fn(*mut AnyObject, Sel),
+            );
+        }
+        builder.register()
+    })
+}
+
+/// Nav text color
+fn nav_text_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        NSColor::whiteColor()
+    } else {
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.3, 0.3, 0.33, 1.0)
+    }
+}
+
+/// Nav highlight background color
+fn nav_highlight_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        // RGB(33, 77, 129)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.129, 0.302, 0.506, 1.0)
+    } else {
+        // Light blue
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.86, 0.91, 1.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
 
@@ -114,7 +298,7 @@ extern "C" fn chart_draw_rect(_this: *mut AnyObject, _sel: Sel, _dirty_rect: NSR
 
     unsafe {
         // Background — match content area
-        NSColor::colorWithSRGBRed_green_blue_alpha(0.925, 0.925, 0.925, 1.0).set();
+        chart_bg_color().set();
         NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(bounds, 6.0, 6.0).fill();
 
         // Horizontal grid lines (4 lines)
@@ -581,6 +765,10 @@ fn set_language(lang: &'static str) {
 // Store nav button pointers for language switching
 static NAV_BUTTON_PTRS: OnceLock<Mutex<Vec<RawPtr>>> = OnceLock::new();
 
+// Store sidebar and content area view pointers for theme color updates
+static SIDEBAR_VIEW_PTR: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+static CONTENT_AREA_PTR: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+
 // ---------------------------------------------------------------------------
 // WindowDelegate — handles window close
 // ---------------------------------------------------------------------------
@@ -642,6 +830,17 @@ fn window_delegate_instance() -> &'static Mutex<Option<RawPtr>> {
 }
 
 fn set_theme(appearance_name: Option<&str>) {
+    // Record dark mode state
+    let is_dark = match appearance_name {
+        Some(name) => name.contains("Dark"),
+        None => false, // System — will be re-evaluated
+    };
+    *dark_mode_lock().lock().unwrap() = if appearance_name.is_some() {
+        Some(is_dark)
+    } else {
+        None // System default — use runtime detection
+    };
+
     let guard = window_lock().lock().unwrap();
     if let Some(ref ptr) = *guard {
         let window: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
@@ -656,9 +855,123 @@ fn set_theme(appearance_name: Option<&str>) {
                     let _: () = msg_send![window, setAppearance: appearance];
                 }
                 None => {
-                    // System default — set appearance to nil
                     let _: () = msg_send![window, setAppearance: std::ptr::null::<AnyObject>()];
                 }
+            }
+        }
+    }
+    drop(guard);
+
+    // Refresh custom background colors after theme change
+    // Need a small delay for appearance to take effect before reading is_dark_mode()
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        dispatch2::Queue::main().exec_async(|| {
+            refresh_theme_colors();
+        });
+    });
+}
+
+fn refresh_theme_colors() {
+    // Update window title bar colors
+    {
+        let guard = window_lock().lock().unwrap();
+        if let Some(ref ptr) = *guard {
+            let window: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+            unsafe {
+                window.setBackgroundColor(Some(&titlebar_bg_color()));
+            }
+        }
+    }
+
+    // Update sidebar background layer
+    if let Ok(guard) = SIDEBAR_VIEW_PTR.get_or_init(|| Mutex::new(None)).lock() {
+        if let Some(ptr) = guard.as_ref() {
+            let view: &NSView = unsafe { &*(ptr.0 as *const NSView) };
+            unsafe {
+                if let Some(layer) = view.layer() {
+                    let bg = sidebar_bg_color();
+                    let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+                    let _: () = msg_send![&*layer, setBackgroundColor: cg];
+                }
+            }
+        }
+    }
+
+    // Update content area background layer
+    if let Ok(guard) = CONTENT_AREA_PTR.get_or_init(|| Mutex::new(None)).lock() {
+        if let Some(ptr) = guard.as_ref() {
+            let view: &NSView = unsafe { &*(ptr.0 as *const NSView) };
+            unsafe {
+                if let Some(layer) = view.layer() {
+                    let bg = content_bg_color();
+                    let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+                    let _: () = msg_send![&*layer, setBackgroundColor: cg];
+                }
+            }
+        }
+    }
+
+    // Update nav button text colors
+    if let Ok(buttons) = NAV_BUTTON_PTRS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        let color = nav_text_color();
+        for ptr in buttons.iter() {
+            let btn: &NSButton = unsafe { &*(ptr.0 as *const NSButton) };
+            unsafe {
+                btn.setContentTintColor(Some(&color));
+            }
+        }
+    }
+
+    // Update nav highlight colors
+    if let Ok(highlights) = nav_highlights_lock().lock() {
+        for ptr in highlights.iter() {
+            let bg: &NSView = unsafe { &*(ptr.0 as *const NSView) };
+            unsafe {
+                if let Some(layer) = bg.layer() {
+                    let color = nav_highlight_color();
+                    let cg: *const std::ffi::c_void = msg_send![&color, CGColor];
+                    let _: () = msg_send![&*layer, setBackgroundColor: cg];
+                }
+            }
+        }
+    }
+
+    // Rebuild Status (0) and Settings (5) pages to pick up new colors
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    let pages = pages_lock().lock().unwrap();
+    for &idx in &[0usize, 5] {
+        if idx < pages.len() {
+            let page_view: &NSView = unsafe { &*(pages[idx].0 as *const NSView) };
+            let frame = page_view.frame();
+            let was_hidden = page_view.isHidden();
+
+            unsafe {
+                let subs = page_view.subviews();
+                for i in (0..subs.len()).rev() {
+                    let sub = subs.objectAtIndex(i);
+                    sub.removeFromSuperview();
+                }
+            }
+
+            let w = frame.size.width;
+            let h = frame.size.height;
+            let new_page = if idx == 0 {
+                build_status_page(mtm, w, h)
+            } else {
+                build_settings_page(mtm, w, h)
+            };
+
+            unsafe {
+                let new_subs = new_page.subviews();
+                for i in 0..new_subs.len() {
+                    let sub = new_subs.objectAtIndex(i);
+                    page_view.addSubview(&sub);
+                }
+                page_view.setHidden(was_hidden);
             }
         }
     }
@@ -749,6 +1062,8 @@ fn create_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     window.center();
     unsafe {
         window.setReleasedWhenClosed(false);
+        // Set title bar background color
+        window.setBackgroundColor(Some(&titlebar_bg_color()));
     }
 
     // Set window delegate for close handling
@@ -774,7 +1089,7 @@ fn create_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
                 let frame = theme_frame.frame();
                 let title_label = NSTextField::labelWithString(ns_string!("IRONMLX"), mtm);
                 title_label.setFont(Some(&NSFont::titleBarFontOfSize(13.0)));
-                title_label.setTextColor(Some(&NSColor::windowFrameTextColor()));
+                title_label.setTextColor(Some(&titlebar_text_color()));
                 title_label.setAlignment(NSTextAlignment::Center);
                 // x=80 to avoid covering close/minimize/zoom buttons
                 title_label.setFrame(NSRect::new(
@@ -821,6 +1136,13 @@ fn build_content(mtm: MainThreadMarker) -> Retained<NSView> {
     unsafe {
         sidebar.setAutoresizingMask(NSAutoresizingMaskOptions(16));
     }
+    // Store sidebar pointer for theme updates
+    *SIDEBAR_VIEW_PTR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(RawPtr(
+        &*sidebar as *const NSView as *const std::ffi::c_void,
+    ));
 
     // Pages container — content area background
     let pages_container = unsafe {
@@ -833,12 +1155,19 @@ fn build_content(mtm: MainThreadMarker) -> Retained<NSView> {
         // Content area: rgb(236,236,236)
         v.setWantsLayer(true);
         if let Some(layer) = v.layer() {
-            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.925, 0.925, 0.925, 1.0);
+            let bg = content_bg_color();
             let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
             let _: () = msg_send![&*layer, setBackgroundColor: cg];
         }
         v
     };
+    // Store content area pointer for theme updates
+    *CONTENT_AREA_PTR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(RawPtr(
+        &*pages_container as *const NSView as *const std::ffi::c_void,
+    ));
 
     // Vertical separator line between sidebar and content
     let separator = unsafe {
@@ -903,7 +1232,7 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
     unsafe {
         sidebar.setWantsLayer(true);
         if let Some(layer) = sidebar.layer() {
-            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.961, 0.961, 0.961, 1.0);
+            let bg = sidebar_bg_color();
             let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
             let _: () = msg_send![&*layer, setBackgroundColor: cg];
         }
@@ -935,7 +1264,7 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
             if let Some(layer) = v.layer() {
                 let _: () = msg_send![&*layer, setCornerRadius: 8.0f64];
                 // Light blue highlight like Clash Verge
-                let color = NSColor::colorWithSRGBRed_green_blue_alpha(0.86, 0.91, 1.0, 1.0);
+                let color = nav_highlight_color();
                 let cg: *const std::ffi::c_void = msg_send![&color, CGColor];
                 let _: () = msg_send![&*layer, setBackgroundColor: cg];
             }
@@ -1047,10 +1376,8 @@ fn build_nav_button(
         btn.setBordered(false);
         btn.setTag(tag as isize);
         btn.setBezelStyle(NSBezelStyle(0));
-        // Dark gray text via contentTintColor
-        btn.setContentTintColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-            0.3, 0.3, 0.33, 1.0,
-        )));
+        // Theme-aware text color
+        btn.setContentTintColor(Some(&nav_text_color()));
 
         // Set action
         let handler_obj: &NSObject = &*(handler as *const NSObject);
@@ -1344,7 +1671,7 @@ fn build_settings_card(
         v.setCornerRadius(8.0);
         v.setBorderWidth(0.5);
         v.setBorderColor(&NSColor::separatorColor());
-        v.setFillColor(&NSColor::controlBackgroundColor());
+        v.setFillColor(&card_bg_color());
         v.setTitlePosition(unsafe { std::mem::transmute(0u64) });
         v
     };
@@ -1841,8 +2168,8 @@ fn make_page_view(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NS
         );
         v.setWantsLayer(true);
         if let Some(layer) = v.layer() {
-            // Same color as sidebar: rgb(245,245,245)
-            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.961, 0.961, 0.961, 1.0);
+            // Title bar area — may differ from sidebar in dark mode
+            let bg = sidebar_bg_color(); // In page content, use sidebar color
             let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
             let _: () = msg_send![&*layer, setBackgroundColor: cg];
         }
@@ -1943,19 +2270,20 @@ fn build_card_with_label(
     w: f64,
     h: f64,
 ) -> (Retained<NSView>, Option<*const std::ffi::c_void>) {
-    let card = unsafe {
-        let v = NSBox::initWithFrame(
-            mtm.alloc(),
-            NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)),
-        );
+    let card: Retained<NSBox> = unsafe {
+        let cls = hover_box_class();
+        let obj: *mut AnyObject = msg_send![cls, alloc];
+        let raw: *mut AnyObject = msg_send![obj, initWithFrame: NSRect::new(
+            NSPoint::new(x, y), NSSize::new(w, h)
+        )];
+        let v: Retained<NSBox> = Retained::cast(Retained::from_raw(raw).unwrap());
         v.setBoxType(NSBoxType::Custom);
         v.setCornerRadius(8.0);
         v.setBorderWidth(0.5);
         v.setBorderColor(&NSColor::separatorColor());
-        // Cards use controlBackgroundColor — lightest layer
-        v.setFillColor(&NSColor::controlBackgroundColor());
+        v.setFillColor(&card_bg_color());
         v.setTitlePosition(unsafe { std::mem::transmute(0u64) });
-        // Add subtle shadow for depth
+        // Subtle shadow
         v.setWantsLayer(true);
         if let Some(layer) = v.layer() {
             let _: () = msg_send![&*layer, setShadowOpacity: 0.04f32];
