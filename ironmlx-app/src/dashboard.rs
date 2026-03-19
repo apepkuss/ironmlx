@@ -49,6 +49,103 @@ const NAV_ITEMS: &[(&str, &str)] = &[
     ("\u{26A1}", "Benchmark"),
 ];
 
+// Status card value labels — stored for polling updates
+// Keys: "status", "active_mem", "peak_mem", "models", "uptime", "default_model"
+static STATUS_LABELS: OnceLock<Mutex<std::collections::HashMap<&'static str, RawPtr>>> =
+    OnceLock::new();
+fn status_labels_lock() -> &'static Mutex<std::collections::HashMap<&'static str, RawPtr>> {
+    STATUS_LABELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+// Sidebar status labels
+static SIDEBAR_MODEL_LABEL: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+static SIDEBAR_MEM_LABEL: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+
+/// Start polling /health API every 5 seconds to update Status page
+pub fn start_status_polling(port: u16) {
+    let url = format!("http://localhost:{}/health", port);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if let Ok(body) = std::process::Command::new("curl")
+                .args(["-s", &url])
+                .output()
+            {
+                if body.status.success() {
+                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body.stdout) {
+                        update_status_labels(&json);
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn update_status_labels(json: &serde_json::Value) {
+    let labels = status_labels_lock().lock().unwrap();
+
+    let set_label = |key: &str, text: &str| {
+        if let Some(ptr) = labels.get(key) {
+            let tf: &NSTextField = unsafe { &*(ptr.0 as *const NSTextField) };
+            unsafe {
+                tf.setStringValue(&NSString::from_str(text));
+            }
+        }
+    };
+
+    let status = json
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    set_label("status", if status == "ok" { "Running" } else { status });
+
+    if let Some(mem) = json.get("memory") {
+        let active = mem.get("active_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let peak = mem.get("peak_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        set_label("active_mem", &format!("{:.0} MB", active));
+        set_label("peak_mem", &format!("{:.0} MB", peak));
+    }
+
+    let model = json
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("\u{2014}");
+    set_label("default_model", model);
+
+    if let Some(started) = json.get("started_at").and_then(|v| v.as_i64()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let elapsed = now - started;
+        let h = elapsed / 3600;
+        let m = (elapsed % 3600) / 60;
+        set_label("uptime", &format!("{}h {}m", h, m));
+    }
+
+    // Update sidebar labels
+    if let Ok(guard) = SIDEBAR_MODEL_LABEL.get_or_init(|| Mutex::new(None)).lock() {
+        if let Some(ptr) = guard.as_ref() {
+            let tf: &NSTextField = unsafe { &*(ptr.0 as *const NSTextField) };
+            let short_model = model.split('/').last().unwrap_or(model);
+            unsafe {
+                tf.setStringValue(&NSString::from_str(&format!("Model: {}", short_model)));
+            }
+        }
+    }
+    if let Ok(guard) = SIDEBAR_MEM_LABEL.get_or_init(|| Mutex::new(None)).lock() {
+        if let Some(ptr) = guard.as_ref() {
+            let tf: &NSTextField = unsafe { &*(ptr.0 as *const NSTextField) };
+            if let Some(mem) = json.get("memory") {
+                let active = mem.get("active_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                unsafe {
+                    tf.setStringValue(&NSString::from_str(&format!("Memory: {:.0} MB", active)));
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // NavHandler — handles sidebar button clicks
 // ---------------------------------------------------------------------------
@@ -121,6 +218,14 @@ pub fn show_dashboard(mtm: MainThreadMarker) {
     app.activateIgnoringOtherApps(true);
     let raw = Retained::into_raw(window) as *const std::ffi::c_void;
     *guard = Some(RawPtr(raw));
+
+    // Start polling on first dashboard open
+    static POLLING_STARTED: OnceLock<bool> = OnceLock::new();
+    POLLING_STARTED.get_or_init(|| {
+        let port = crate::config::AppConfig::load().port;
+        start_status_polling(port);
+        true
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +512,7 @@ fn build_sidebar_status(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
         )
     };
 
-    let model = unsafe {
+    let model_tf = unsafe {
         let tf = NSTextField::labelWithString(ns_string!("Model: \u{2014}"), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
         tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -417,8 +522,15 @@ fn build_sidebar_status(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
         ));
         tf
     };
+    // Store sidebar model label pointer
+    *SIDEBAR_MODEL_LABEL
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(RawPtr(
+        &*model_tf as *const NSTextField as *const std::ffi::c_void,
+    ));
 
-    let mem = unsafe {
+    let mem_tf = unsafe {
         let tf = NSTextField::labelWithString(ns_string!("Memory: \u{2014}"), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
         tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -428,10 +540,17 @@ fn build_sidebar_status(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
         ));
         tf
     };
+    // Store sidebar memory label pointer
+    *SIDEBAR_MEM_LABEL
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(RawPtr(
+        &*mem_tf as *const NSTextField as *const std::ffi::c_void,
+    ));
 
     unsafe {
-        view.addSubview(&model);
-        view.addSubview(&mem);
+        view.addSubview(&model_tf);
+        view.addSubview(&mem_tf);
     }
 
     view
@@ -450,20 +569,31 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
     let card_y = height - 200.0;
     let card_w = (width - 24.0 * 2.0 - 16.0 * 2.0) / 3.0;
 
-    let card1 = build_card(mtm, "Server Status", "Running", 24.0, card_y, card_w, 90.0);
-    let card2 = build_card(
+    let card1 = build_status_card(
+        mtm,
+        "Server Status",
+        "Running",
+        "status",
+        24.0,
+        card_y,
+        card_w,
+        90.0,
+    );
+    let card2 = build_status_card(
         mtm,
         "Active Memory",
         "\u{2014}",
+        "active_mem",
         24.0 + card_w + 16.0,
         card_y,
         card_w,
         90.0,
     );
-    let card3 = build_card(
+    let card3 = build_status_card(
         mtm,
         "Peak Memory",
         "\u{2014}",
+        "peak_mem",
         24.0 + (card_w + 16.0) * 2.0,
         card_y,
         card_w,
@@ -471,20 +601,31 @@ fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
     );
 
     let card_y2 = card_y - 110.0;
-    let card4 = build_card(mtm, "Loaded Models", "1", 24.0, card_y2, card_w, 90.0);
-    let card5 = build_card(
+    let card4 = build_status_card(
+        mtm,
+        "Loaded Models",
+        "1",
+        "models",
+        24.0,
+        card_y2,
+        card_w,
+        90.0,
+    );
+    let card5 = build_status_card(
         mtm,
         "Uptime",
         "\u{2014}",
+        "uptime",
         24.0 + card_w + 16.0,
         card_y2,
         card_w,
         90.0,
     );
-    let card6 = build_card(
+    let card6 = build_status_card(
         mtm,
         "Default Model",
         "\u{2014}",
+        "default_model",
         24.0 + (card_w + 16.0) * 2.0,
         card_y2,
         card_w,
@@ -561,59 +702,25 @@ fn build_chat_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<N
     let title = make_title(mtm, "Chat", height);
     let subtitle = make_subtitle(mtm, "Interactive conversation with your model", height);
 
-    // Chat messages area (placeholder)
-    let chat_area = unsafe {
-        let box_view = NSBox::initWithFrame(
-            mtm.alloc(),
-            NSRect::new(
-                NSPoint::new(24.0, 80.0),
-                NSSize::new(width - 48.0, height - 200.0),
-            ),
-        );
-        box_view.setBoxType(NSBoxType::Custom);
-        box_view.setCornerRadius(12.0);
-        box_view.setBorderWidth(0.5);
-        box_view.setBorderColor(&NSColor::separatorColor());
-        box_view.setFillColor(&NSColor::windowBackgroundColor());
-        box_view.setTitlePosition(unsafe { std::mem::transmute(0u64) });
-        box_view
-    };
-
     let placeholder = unsafe {
-        let tf = NSTextField::labelWithString(ns_string!("Chat messages will appear here..."), mtm);
+        let tf = NSTextField::labelWithString(
+            ns_string!("Chat is available via Web Admin Panel\nhttp://localhost:8080/admin"),
+            mtm,
+        );
         tf.setFont(Some(&NSFont::systemFontOfSize(14.0)));
-        tf.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+        tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
         tf.setAlignment(NSTextAlignment::Center);
         tf.setFrame(NSRect::new(
-            NSPoint::new(0.0, (height - 200.0) / 2.0 - 10.0),
-            NSSize::new(width - 48.0, 24.0),
+            NSPoint::new(24.0, height / 2.0 - 20.0),
+            NSSize::new(width - 48.0, 40.0),
         ));
         tf
     };
-    unsafe {
-        chat_area.addSubview(&placeholder);
-    }
-
-    // Input area
-    let input = unsafe {
-        let tf = NSTextField::initWithFrame(
-            mtm.alloc(),
-            NSRect::new(NSPoint::new(24.0, 30.0), NSSize::new(width - 130.0, 30.0)),
-        );
-        tf.setPlaceholderString(Some(ns_string!("Type a message...")));
-        tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        tf.setBezeled(true);
-        tf
-    };
-    let send_btn = make_button(mtm, "Send", width - 94.0, 30.0, 70.0);
 
     unsafe {
-        let chat_view: Retained<NSView> = Retained::cast(chat_area);
         view.addSubview(&title);
         view.addSubview(&subtitle);
-        view.addSubview(&chat_view);
-        view.addSubview(&input);
-        view.addSubview(&send_btn);
+        view.addSubview(&placeholder);
     }
 
     view
@@ -819,6 +926,30 @@ fn build_benchmark_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retai
 }
 
 // ---------------------------------------------------------------------------
+// Status card (registers value label for polling)
+// ---------------------------------------------------------------------------
+
+fn build_status_card(
+    mtm: MainThreadMarker,
+    title: &str,
+    value: &str,
+    key: &'static str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Retained<NSView> {
+    let (card, value_label_ptr) = build_card_with_label(mtm, title, value, x, y, w, h);
+    if let Some(ptr) = value_label_ptr {
+        status_labels_lock()
+            .lock()
+            .unwrap()
+            .insert(key, RawPtr(ptr));
+    }
+    card
+}
+
+// ---------------------------------------------------------------------------
 // Shared UI helpers
 // ---------------------------------------------------------------------------
 
@@ -904,6 +1035,18 @@ fn build_card(
     w: f64,
     h: f64,
 ) -> Retained<NSView> {
+    build_card_with_label(mtm, title, value, x, y, w, h).0
+}
+
+fn build_card_with_label(
+    mtm: MainThreadMarker,
+    title: &str,
+    value: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> (Retained<NSView>, Option<*const std::ffi::c_void>) {
     let card = unsafe {
         let v = NSBox::initWithFrame(
             mtm.alloc(),
@@ -939,10 +1082,13 @@ fn build_card(
         tf
     };
 
+    // Get pointer before addSubview (addSubview retains it)
+    let value_ptr = &*value_tf as *const NSTextField as *const std::ffi::c_void;
+
     unsafe {
         card.addSubview(&title_tf);
         card.addSubview(&value_tf);
     }
 
-    unsafe { Retained::cast(card) }
+    (unsafe { Retained::cast(card) }, Some(value_ptr))
 }

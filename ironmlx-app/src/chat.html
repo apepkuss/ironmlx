@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chat</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: { extend: {} }
+}
+</script>
+<style>
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+.chat-prose h1,.chat-prose h2,.chat-prose h3 { margin: 0.5em 0 0.3em; font-weight: 600; }
+.chat-prose h1 { font-size: 1.3em; } .chat-prose h2 { font-size: 1.15em; } .chat-prose h3 { font-size: 1.05em; }
+.chat-prose p { margin: 0.4em 0; } .chat-prose ul,.chat-prose ol { margin: 0.4em 0; padding-left: 1.5em; }
+.chat-prose pre { margin: 0.5em 0; border-radius: 8px; overflow-x: auto; }
+.chat-prose code { font-size: 0.9em; }
+.chat-prose pre code { display: block; padding: 0.8em; }
+.chat-prose :not(pre) > code { background: rgba(127,127,127,0.15); padding: 0.15em 0.4em; border-radius: 4px; }
+.chat-prose table { border-collapse: collapse; margin: 0.5em 0; }
+.chat-prose th,.chat-prose td { border: 1px solid rgba(127,127,127,0.3); padding: 0.3em 0.6em; }
+.chat-prose blockquote { border-left: 3px solid rgba(127,127,127,0.4); margin: 0.5em 0; padding-left: 0.8em; }
+.chat-prose a { color: #3b82f6; text-decoration: underline; }
+.emoji { font-family: "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif; }
+</style>
+</head>
+<body class="bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 h-screen flex flex-col">
+
+<div id="app" class="flex flex-col h-full">
+  <!-- Messages area -->
+  <div id="messages" class="flex-1 overflow-y-auto p-4 space-y-3">
+    <div id="welcome" class="flex items-center justify-center h-full text-gray-400 dark:text-gray-500 text-sm">
+      Start a conversation...
+    </div>
+  </div>
+
+  <!-- Streaming indicator -->
+  <div id="streaming-indicator" class="hidden px-4 py-1 text-xs text-gray-400">
+    <span class="animate-pulse">Generating...</span>
+  </div>
+
+  <!-- Input area -->
+  <div class="border-t border-gray-200 dark:border-gray-700 p-3 flex gap-2">
+    <textarea id="input" rows="1" placeholder="Type a message..."
+      class="flex-1 resize-none rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"
+      oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px'"></textarea>
+    <button onclick="sendMessage()"
+      class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium whitespace-nowrap">
+      Send
+    </button>
+  </div>
+</div>
+
+<script>
+const PORT = 8080;
+const API_BASE = `http://localhost:${PORT}`;
+let messages = [];
+let streaming = false;
+
+// Detect system dark mode
+if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+  document.documentElement.classList.add('dark');
+}
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+  document.documentElement.classList.toggle('dark', e.matches);
+});
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderMarkdown(text) {
+  return marked.parse(text || '');
+}
+
+function addMessage(role, content) {
+  const container = document.getElementById('messages');
+  const welcome = document.getElementById('welcome');
+  if (welcome) welcome.remove();
+
+  const div = document.createElement('div');
+  div.className = role === 'user'
+    ? 'flex justify-end'
+    : 'flex justify-start';
+
+  const bubble = document.createElement('div');
+  bubble.className = role === 'user'
+    ? 'max-w-[80%] rounded-2xl px-4 py-2 bg-blue-600 text-white text-sm'
+    : 'max-w-[80%] rounded-2xl px-4 py-2 bg-gray-100 dark:bg-gray-800 text-sm chat-prose emoji';
+
+  if (role === 'user') {
+    bubble.textContent = content;
+  } else {
+    bubble.innerHTML = renderMarkdown(content);
+    bubble.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+    renderMathInElement(bubble, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$', right: '$', display: false},
+      ],
+      throwOnError: false
+    });
+  }
+
+  div.appendChild(bubble);
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return bubble;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text || streaming) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  messages.push({ role: 'user', content: text });
+  addMessage('user', text);
+
+  streaming = true;
+  document.getElementById('streaming-indicator').classList.remove('hidden');
+
+  const bubble = addMessage('assistant', '');
+  let fullContent = '';
+
+  try {
+    const res = await fetch(`${API_BASE}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: messages,
+        stream: true,
+        max_tokens: 2048,
+        temperature: 0.7,
+      })
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          const delta = data.choices?.[0]?.delta;
+          if (delta?.content) fullContent += delta.content;
+          if (delta?.reasoning_content) fullContent += delta.reasoning_content;
+        } catch {}
+      }
+
+      bubble.innerHTML = renderMarkdown(fullContent);
+      bubble.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+    }
+
+    // Final render with KaTeX
+    bubble.innerHTML = renderMarkdown(fullContent);
+    bubble.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+    renderMathInElement(bubble, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$', right: '$', display: false},
+      ],
+      throwOnError: false
+    });
+
+    messages.push({ role: 'assistant', content: fullContent });
+  } catch (e) {
+    bubble.textContent = 'Error: ' + e.message;
+  }
+
+  streaming = false;
+  document.getElementById('streaming-indicator').classList.add('hidden');
+  document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+}
+</script>
+</body>
+</html>
