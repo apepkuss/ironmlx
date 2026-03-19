@@ -12,7 +12,7 @@ path = "src/main.rs"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSThread", "NSRunLoop", "NSTimer", "NSNotification", "NSURL", "NSProcessInfo", "NSBundle", "NSObject", "NSGeometry"] }
 objc2-core-foundation = "0.3"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSStatusBar", "NSStatusItem", "NSMenu", "NSMenuItem", "NSImage", "NSWindow", "NSView", "NSTextField", "NSButton", "NSControl", "NSAlert", "NSWorkspace", "NSRunningApplication", "NSResponder", "NSText", "NSEvent", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSStackView", "NSSplitView", "NSScrollView", "NSClipView", "NSTableView", "NSTableColumn", "NSTableCellView", "NSColor", "NSFont", "NSBox", "NSVisualEffectView", "NSImageView", "NSSegmentedControl"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSStatusBar", "NSStatusItem", "NSMenu", "NSMenuItem", "NSImage", "NSWindow", "NSView", "NSTextField", "NSButton", "NSControl", "NSAlert", "NSWorkspace", "NSRunningApplication", "NSResponder", "NSText", "NSTextView", "NSEvent", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSStackView", "NSSplitView", "NSScrollView", "NSClipView", "NSTableView", "NSTableColumn", "NSTableCellView", "NSColor", "NSFont", "NSBox", "NSVisualEffectView", "NSImageView", "NSSegmentedControl", "NSLayoutManager", "NSTextContainer", "NSTextStorage"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
