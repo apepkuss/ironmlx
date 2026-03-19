@@ -332,14 +332,6 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    // Preferences
-    menu.addItem(&make_item(
-        mtm,
-        t("menu_preferences"),
-        Some(sel!(openPreferences:)),
-        ",",
-    ));
-
     // Check for Updates
     menu.addItem(&make_item(
         mtm,

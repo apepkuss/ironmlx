@@ -568,6 +568,13 @@ extern "C" fn settings_action(_this: *mut AnyObject, _sel: Sel, sender: *mut Any
         TAG_THEME_LIGHT => set_theme(Some("NSAppearanceNameAqua")),
         TAG_THEME_DARK => set_theme(Some("NSAppearanceNameDarkAqua")),
         TAG_THEME_SYSTEM => set_theme(None),
+        101 => {
+            // Auto-start toggle
+            let state: isize = unsafe { msg_send![sender, state] };
+            let mut config = crate::config::AppConfig::load();
+            config.auto_start = state == 1;
+            config.save();
+        }
         _ => {}
     }
 }
@@ -709,6 +716,7 @@ pub fn t(key: &str) -> &str {
         ("zh", "menu_preferences") => "\u{504F}\u{597D}\u{8BBE}\u{7F6E}...",
         ("zh", "menu_updates") => "\u{68C0}\u{67E5}\u{66F4}\u{65B0}...",
         ("zh", "menu_quit") => "\u{9000}\u{51FA} ironmlx",
+        ("zh", "auto_start") => "\u{81EA}\u{542F}\u{52A8}\u{670D}\u{52A1}",
         ("zh", "menu_status_running") => "\u{72B6}\u{6001}: \u{8FD0}\u{884C}\u{4E2D}",
         ("zh", "menu_status_stopped") => "\u{72B6}\u{6001}: \u{5DF2}\u{505C}\u{6B62}",
         (_, "menu_dashboard") => "Dashboard",
@@ -719,6 +727,7 @@ pub fn t(key: &str) -> &str {
         (_, "menu_preferences") => "Preferences...",
         (_, "menu_updates") => "Check for Updates...",
         (_, "menu_quit") => "Quit ironmlx",
+        (_, "auto_start") => "Auto-start Service",
         (_, "menu_status_running") => "Status: Running",
         (_, "menu_status_stopped") => "Status: Stopped",
         _ => key,
@@ -822,7 +831,10 @@ extern "C" fn window_should_close(
 }
 
 extern "C" fn window_will_close(_this: *mut AnyObject, _sel: Sel, _notif: *mut AnyObject) {
-    eprintln!("[dashboard] windowWillClose called");
+    // Clear window reference so next open creates a fresh window
+    if let Ok(mut guard) = window_lock().lock() {
+        *guard = None;
+    }
     // Switch back to accessory mode (hide from Dock)
     unsafe {
         let app: *mut AnyObject =
@@ -1048,6 +1060,7 @@ fn switch_page(idx: usize) {
 // ---------------------------------------------------------------------------
 
 pub fn show_dashboard(mtm: MainThreadMarker) {
+    eprintln!("[dashboard] show_dashboard called");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
@@ -1069,6 +1082,7 @@ pub fn show_dashboard(mtm: MainThreadMarker) {
     app.activateIgnoringOtherApps(true);
     let raw = Retained::into_raw(window) as *const std::ffi::c_void;
     *guard = Some(RawPtr(raw));
+    drop(guard); // Release lock before INIT_DONE (set_theme needs window_lock)
 
     // On first dashboard open, restore saved settings and start polling
     static INIT_DONE: OnceLock<bool> = OnceLock::new();
@@ -1803,7 +1817,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     let field_w = card_w - label_w - 48.0;
 
     // Card heights (generous)
-    let c1_h = 130.0;
+    let c1_h = 160.0; // Server: 2 fields + auto-start switch + button
     let c2_h = 140.0;
     let c3_h = 90.0;
     let c4_h = 120.0;
@@ -1916,6 +1930,38 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
             .get_or_init(|| Mutex::new(None))
             .lock()
             .unwrap() = Some(RawPtr(ptr));
+    }
+
+    // Auto-start switch below Port
+    let switch_fy = port_fy - row_h;
+    let auto_lbl = unsafe {
+        let tf = NSTextField::labelWithString(&NSString::from_str(t("auto_start")), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad, switch_fy),
+            NSSize::new(label_w, 18.0),
+        ));
+        tf
+    };
+    let auto_switch = unsafe {
+        let sw = NSSwitch::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(
+                NSPoint::new(pad + label_w + 16.0, switch_fy - 2.0),
+                NSSize::new(38.0, 22.0),
+            ),
+        );
+        // Set initial state from config
+        let config = crate::config::AppConfig::load();
+        sw.setState(if config.auto_start { 1 } else { 0 });
+        sw.setTag(TAG_SAVE_RESTART + 1); // unique tag for auto-start
+        sw.setTarget(Some(&*(sh_ptr as *const NSObject)));
+        sw.setAction(Some(settings_action_sel));
+        sw
+    };
+    unsafe {
+        card1.addSubview(&auto_lbl);
+        card1.addSubview(&auto_switch);
     }
 
     // === Card 2: Model ===
