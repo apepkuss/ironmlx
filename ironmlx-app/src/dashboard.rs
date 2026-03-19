@@ -383,7 +383,11 @@ pub fn show_dashboard(mtm: MainThreadMarker) {
 
     if let Some(ref ptr) = *guard {
         let window: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
-        window.makeKeyAndOrderFront(None);
+        if window.isVisible() {
+            window.makeKeyAndOrderFront(None);
+        } else {
+            window.makeKeyAndOrderFront(None);
+        }
         app.activateIgnoringOtherApps(true);
         return;
     }
@@ -429,6 +433,9 @@ fn create_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     window.setTitle(ns_string!("IRONMLX"));
     window.setMinSize(NSSize::new(700.0, 450.0));
     window.center();
+    unsafe {
+        window.setReleasedWhenClosed(false);
+    }
 
     // Hide native title text, use custom centered label instead
     window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
@@ -579,7 +586,7 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
     }
 
     // Header — logo + IronMLX
-    let header_y = height - 28.0 - 44.0;
+    let header_y = height - 28.0 - 60.0;
     let header = build_sidebar_header(mtm, 16.0, header_y, width - 32.0);
     unsafe {
         sidebar.addSubview(&header);
@@ -646,20 +653,20 @@ fn build_sidebar_header(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
     let view = unsafe {
         NSView::initWithFrame(
             mtm.alloc(),
-            NSRect::new(NSPoint::new(x, y), NSSize::new(width, 44.0)),
+            NSRect::new(NSPoint::new(x, y), NSSize::new(width, 79.0)),
         )
     };
 
-    let icon_bytes = include_bytes!("../../assets/menubar-icon@2x.png");
+    let icon_bytes = include_bytes!("../../assets/sidebar-logo@2x.png");
     let ns_data = unsafe { NSData::with_bytes(icon_bytes) };
     if let Some(image) = unsafe { NSImage::initWithData(mtm.alloc(), &ns_data) } {
         unsafe {
-            image.setSize(NSSize::new(40.0, 40.0));
+            image.setSize(NSSize::new(128.0, 60.0));
         }
         let iv = unsafe {
             let iv = NSImageView::initWithFrame(
                 mtm.alloc(),
-                NSRect::new(NSPoint::new(0.0, 4.0), NSSize::new(40.0, 40.0)),
+                NSRect::new(NSPoint::new(0.0, 17.0), NSSize::new(128.0, 60.0)),
             );
             iv.setImage(Some(&image));
             iv
@@ -671,11 +678,11 @@ fn build_sidebar_header(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
 
     let title = unsafe {
         let tf = NSTextField::labelWithString(ns_string!("IronMLX"), mtm);
-        tf.setFont(Some(&NSFont::boldSystemFontOfSize(24.0)));
-        tf.setTextColor(Some(&NSColor::labelColor()));
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
         tf.setFrame(NSRect::new(
-            NSPoint::new(48.0, 8.0),
-            NSSize::new(140.0, 32.0),
+            NSPoint::new(84.0, 17.0),
+            NSSize::new(90.0, 16.0),
         ));
         tf
     };
