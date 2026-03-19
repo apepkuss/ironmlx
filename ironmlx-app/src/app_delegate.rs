@@ -94,6 +94,11 @@ define_class!(
                 srv.stop();
             }
         }
+
+        #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
+        fn should_terminate_after_last_window_closed(&self, _sender: &NSApplication) -> bool {
+            false // menubar app should keep running
+        }
     }
 );
 

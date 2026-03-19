@@ -38,22 +38,23 @@ const NAV_ITEMS: &[(&str, &str)] = &[
 
 /// Show the dashboard window (create if needed, bring to front if exists).
 pub fn show_dashboard(mtm: MainThreadMarker) {
+    let app = NSApplication::sharedApplication(mtm);
+
+    // Show in Dock when dashboard is open
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+
     let mut guard = window_lock().lock().unwrap();
 
     if let Some(ref ptr) = *guard {
-        // Recover the retained window from raw pointer
         let window: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
         window.makeKeyAndOrderFront(None);
-        let app = NSApplication::sharedApplication(mtm);
         app.activateIgnoringOtherApps(true);
         return;
     }
 
     let window = create_dashboard_window(mtm);
     window.makeKeyAndOrderFront(None);
-    let app = NSApplication::sharedApplication(mtm);
     app.activateIgnoringOtherApps(true);
-    // Leak the window to keep it alive, store raw pointer
     let raw = Retained::into_raw(window) as *const std::ffi::c_void;
     *guard = Some(JsonSwap(raw));
 }
@@ -132,16 +133,20 @@ fn build_content(mtm: MainThreadMarker) -> Retained<NSView> {
 }
 
 fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSView> {
-    // Use NSVisualEffectView for translucent sidebar
-    let sidebar: Retained<NSVisualEffectView> = unsafe {
-        NSVisualEffectView::initWithFrame(
+    let sidebar = unsafe {
+        NSView::initWithFrame(
             mtm.alloc(),
             NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
         )
     };
+    // Solid dark background
     unsafe {
-        sidebar.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-        sidebar.setMaterial(NSVisualEffectMaterial::Sidebar);
+        sidebar.setWantsLayer(true);
+        if let Some(layer) = sidebar.layer() {
+            let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.12, 0.12, 0.14, 1.0);
+            let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg];
+        }
     }
 
     // Header: logo + title
@@ -152,7 +157,7 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
     }
 
     // Nav items
-    let mut y = header_y - 20.0;
+    let mut y = header_y - 50.0; // more space between header and nav
     for (i, (icon, label)) in NAV_ITEMS.iter().enumerate() {
         let item = build_nav_item(mtm, icon, label, i, 12.0, y, width - 24.0);
         y -= 38.0;
@@ -167,20 +172,7 @@ fn build_sidebar(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSV
         sidebar.addSubview(&status);
     }
 
-    // Return the visual effect view as NSView via msg_send
-    let view: Retained<NSView> = unsafe { msg_send![&sidebar, self] };
-    // Actually, just use addSubview directly — the sidebar IS-A NSView
-    // Use a simpler approach: wrap in a plain NSView
-    let wrapper = unsafe {
-        NSView::initWithFrame(
-            mtm.alloc(),
-            NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
-        )
-    };
-    unsafe {
-        wrapper.addSubview(&sidebar);
-    }
-    wrapper
+    sidebar
 }
 
 fn build_sidebar_header(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Retained<NSView> {
@@ -237,19 +229,29 @@ fn build_nav_item(
     y: f64,
     width: f64,
 ) -> Retained<NSView> {
-    let view = unsafe {
-        NSView::initWithFrame(
+    // Use NSButton for clickability
+    let title = format!("{} {}", icon, label);
+    let button = unsafe {
+        let btn = NSButton::initWithFrame(
             mtm.alloc(),
             NSRect::new(NSPoint::new(x, y), NSSize::new(width, 34.0)),
-        )
+        );
+        btn.setTitle(&NSString::from_str(&title));
+        btn.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        btn.setAlignment(NSTextAlignment::Left);
+        btn.setBordered(false);
+        btn.setTag(tag as isize);
+
+        // Style: transparent background, left-aligned text
+        btn.setBezelStyle(NSBezelStyle(0)); // no bezel
+        btn
     };
 
     // Highlight active item
     if tag == 0 {
         unsafe {
-            view.setWantsLayer(true);
-            if let Some(layer) = view.layer() {
-                // Use system accent color via CGColor
+            button.setWantsLayer(true);
+            if let Some(layer) = button.layer() {
                 let color = NSColor::controlAccentColor();
                 let cg: *const std::ffi::c_void = msg_send![&color, CGColor];
                 let _: () = msg_send![&*layer, setBackgroundColor: cg];
@@ -258,33 +260,7 @@ fn build_nav_item(
         }
     }
 
-    // Icon
-    let icon_tf = unsafe {
-        let tf = NSTextField::labelWithString(&NSString::from_str(icon), mtm);
-        tf.setFont(Some(&NSFont::systemFontOfSize(15.0)));
-        tf.setFrame(NSRect::new(
-            NSPoint::new(10.0, 7.0),
-            NSSize::new(22.0, 20.0),
-        ));
-        tf
-    };
-
-    // Label
-    let label_tf = unsafe {
-        let tf = NSTextField::labelWithString(&NSString::from_str(label), mtm);
-        tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        tf.setFrame(NSRect::new(
-            NSPoint::new(38.0, 7.0),
-            NSSize::new(width - 50.0, 20.0),
-        ));
-        tf
-    };
-
-    unsafe {
-        view.addSubview(&icon_tf);
-        view.addSubview(&label_tf);
-    }
-
+    let view: Retained<NSView> = unsafe { Retained::cast(button) };
     view
 }
 
