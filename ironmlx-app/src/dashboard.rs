@@ -556,11 +556,18 @@ extern "C" fn settings_action(_this: *mut AnyObject, _sel: Sel, sender: *mut Any
     let tag: isize = unsafe { msg_send![sender, tag] };
     match tag {
         TAG_SAVE_RESTART => save_and_restart(),
-        TAG_LANG_EN => set_language("en"),
-        TAG_LANG_ZH => set_language("zh"),
-        TAG_THEME_SYSTEM => set_theme(None),
+        TAG_LANG_EN => {
+            // Language popup — check selected index
+            let idx: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
+            match idx {
+                0 => set_language("en"),
+                1 => set_language("zh"),
+                _ => {}
+            }
+        }
         TAG_THEME_LIGHT => set_theme(Some("NSAppearanceNameAqua")),
         TAG_THEME_DARK => set_theme(Some("NSAppearanceNameDarkAqua")),
+        TAG_THEME_SYSTEM => set_theme(None),
         _ => {}
     }
 }
@@ -663,8 +670,8 @@ fn t(key: &str) -> &str {
         ("zh", "top_p") => "Top P",
         ("zh", "max_tokens") => "Max Tokens",
         ("zh", "endpoint") => "\u{670D}\u{52A1}\u{7AEF}\u{70B9}",
-        ("zh", "language") => "\u{8BED}\u{8A00}",
-        ("zh", "theme") => "\u{4E3B}\u{9898}",
+        ("zh", "language") => "\u{8BED}\u{8A00}\u{8BBE}\u{7F6E}",
+        ("zh", "theme") => "\u{4E3B}\u{9898}\u{6A21}\u{5F0F}",
         ("zh", "save_restart") => "\u{4FDD}\u{5B58}\u{5E76}\u{91CD}\u{542F}",
         ("zh", "theme_system") => "\u{1F5A5} \u{8DDF}\u{968F}\u{7CFB}\u{7EDF}",
         ("zh", "theme_light") => "\u{2600} \u{6D45}\u{8272}",
@@ -1882,7 +1889,7 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     y -= c4_h;
     let card4 = build_settings_card(mtm, t("appearance"), 24.0, y, card_w, c4_h);
 
-    // Language row
+    // Language row — NSPopUpButton dropdown
     let lang_y = c4_h - 40.0 - row_h;
     let lang_lbl = unsafe {
         let tf = NSTextField::labelWithString(&NSString::from_str(t("language")), mtm);
@@ -1893,23 +1900,33 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
         ));
         tf
     };
+    let lang_popup = unsafe {
+        let popup = NSPopUpButton::initWithFrame_pullsDown(
+            mtm.alloc(),
+            NSRect::new(
+                NSPoint::new(pad + label_w + 8.0, lang_y - 4.0),
+                NSSize::new(138.0, 26.0),
+            ),
+            false,
+        );
+        popup.addItemWithTitle(ns_string!("English"));
+        popup.addItemWithTitle(ns_string!("\u{4E2D}\u{6587}"));
+        // Select current language
+        let current = *nav_language().lock().unwrap();
+        if current == "zh" {
+            popup.selectItemAtIndex(1);
+        }
+        popup.setTag(TAG_LANG_EN); // tag identifies this as language selector
+        popup.setTarget(Some(&*(sh_ptr as *const NSObject)));
+        popup.setAction(Some(settings_action_sel));
+        popup
+    };
     unsafe {
         card4.addSubview(&lang_lbl);
-    }
-    let lang_btns = [("English", TAG_LANG_EN), ("\u{4E2D}\u{6587}", TAG_LANG_ZH)];
-    let mut lx = pad + label_w + 8.0;
-    for (label, tag) in &lang_btns {
-        let btn = make_button(mtm, label, lx, lang_y - 2.0, 70.0);
-        unsafe {
-            btn.setTag(*tag);
-            btn.setTarget(Some(&*(sh_ptr as *const NSObject)));
-            btn.setAction(Some(settings_action_sel));
-            card4.addSubview(&btn);
-        }
-        lx += 78.0;
+        card4.addSubview(&lang_popup);
     }
 
-    // Theme row
+    // Theme row — three rounded buttons (Light | Dark | System)
     let theme_y = c4_h - 40.0 - row_h * 2.0;
     let theme_lbl = unsafe {
         let tf = NSTextField::labelWithString(&NSString::from_str(t("theme")), mtm);
@@ -1923,21 +1940,89 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
     unsafe {
         card4.addSubview(&theme_lbl);
     }
-    let theme_btns = [
-        (t("theme_system"), TAG_THEME_SYSTEM),
-        (t("theme_light"), TAG_THEME_LIGHT),
-        (t("theme_dark"), TAG_THEME_DARK),
-    ];
-    let mut tx = pad + label_w + 8.0;
-    for (label, tag) in &theme_btns {
-        let btn = make_button(mtm, label, tx, theme_y - 2.0, 80.0);
-        unsafe {
-            btn.setTag(*tag);
-            btn.setTarget(Some(&*(sh_ptr as *const NSObject)));
-            btn.setAction(Some(settings_action_sel));
-            card4.addSubview(&btn);
+
+    // Current theme: 0=Light, 1=Dark, 2=System
+    let current_theme: isize = if let Ok(guard) = dark_mode_lock().lock() {
+        match *guard {
+            Some(false) => 0,
+            Some(true) => 1,
+            None => 2,
         }
-        tx += 88.0;
+    } else {
+        2
+    };
+
+    let lang = *nav_language().lock().unwrap();
+    let theme_labels = if lang == "zh" {
+        ["\u{6D45}\u{8272}", "\u{6DF1}\u{8272}", "\u{7CFB}\u{7EDF}"]
+    } else {
+        ["Light", "Dark", "System"]
+    };
+    let theme_tags = [TAG_THEME_LIGHT, TAG_THEME_DARK, TAG_THEME_SYSTEM];
+    let seg_w = 46.0;
+    let total_w = seg_w * 3.0;
+    let seg_h = 26.0;
+    let seg_x = pad + label_w + 8.0;
+    let seg_y = theme_y - 4.0;
+    let radius = 6.0;
+
+    // Container with outer border
+    let container = unsafe {
+        let v = NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(seg_x, seg_y), NSSize::new(total_w, seg_h)),
+        );
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let _: () = msg_send![&*layer, setCornerRadius: radius];
+            let border = if is_dark_mode() {
+                NSColor::colorWithSRGBRed_green_blue_alpha(0.4, 0.4, 0.45, 1.0)
+            } else {
+                NSColor::colorWithSRGBRed_green_blue_alpha(0.78, 0.78, 0.80, 1.0)
+            };
+            let cg: *const std::ffi::c_void = msg_send![&border, CGColor];
+            let _: () = msg_send![&*layer, setBorderColor: cg];
+            let _: () = msg_send![&*layer, setBorderWidth: 1.0f64];
+            let _: () = msg_send![&*layer, setMasksToBounds: true];
+        }
+        v
+    };
+
+    for (i, label) in theme_labels.iter().enumerate() {
+        let is_selected = i as isize == current_theme;
+        let bx = i as f64 * seg_w;
+
+        let btn = unsafe {
+            let b = NSButton::initWithFrame(
+                mtm.alloc(),
+                NSRect::new(NSPoint::new(bx, 0.0), NSSize::new(seg_w, seg_h)),
+            );
+            b.setTitle(&NSString::from_str(label));
+            b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+            b.setBordered(false);
+            b.setTag(theme_tags[i]);
+            b.setTarget(Some(&*(sh_ptr as *const NSObject)));
+            b.setAction(Some(settings_action_sel));
+            b.setWantsLayer(true);
+            if let Some(layer) = b.layer() {
+                if is_selected {
+                    let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.478, 1.0, 1.0);
+                    let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+                    let _: () = msg_send![&*layer, setBackgroundColor: cg];
+                    b.setContentTintColor(Some(&NSColor::whiteColor()));
+                }
+            }
+            // Disable focus ring
+            let cell: &NSCell = msg_send![&b, cell];
+            let _: () = msg_send![cell, setFocusRingType: 1i64];
+            b
+        };
+        unsafe {
+            container.addSubview(&btn);
+        }
+    }
+    unsafe {
+        card4.addSubview(&container);
     }
 
     // Keep settings handler alive
