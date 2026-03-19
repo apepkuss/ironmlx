@@ -57,6 +57,142 @@ fn status_labels_lock() -> &'static Mutex<std::collections::HashMap<&'static str
     STATUS_LABELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+// Memory history for chart (last 60 samples = 5 minutes at 5s interval)
+const MEM_HISTORY_LEN: usize = 300; // 1s interval × 300 = 5 minutes
+static MEM_HISTORY: OnceLock<Mutex<(Vec<f64>, Vec<f64>)>> = OnceLock::new();
+fn mem_history_lock() -> &'static Mutex<(Vec<f64>, Vec<f64>)> {
+    MEM_HISTORY.get_or_init(|| Mutex::new((Vec::new(), Vec::new())))
+}
+// Chart view pointer for triggering redraws
+static CHART_VIEW_PTR: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+
+// ---------------------------------------------------------------------------
+// MemoryChartView — custom NSView with drawRect for real-time line chart
+// ---------------------------------------------------------------------------
+
+static CHART_VIEW_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+
+extern "C" fn chart_draw_rect(_this: *mut AnyObject, _sel: Sel, _dirty_rect: NSRect) {
+    let history = mem_history_lock().lock().unwrap();
+    let (active, peak) = &*history;
+
+    let this_view: &NSView = unsafe { &*(_this as *const NSView) };
+    let bounds = this_view.bounds();
+    let w = bounds.size.width;
+    let h = bounds.size.height;
+    let pad_x = 8.0;
+    let pad_bottom = 12.0;
+    let pad_top = 8.0;
+    let chart_w = w - pad_x * 2.0;
+    let chart_h = h - pad_bottom - pad_top;
+
+    let max_val = active
+        .iter()
+        .chain(peak.iter())
+        .cloned()
+        .fold(100.0f64, f64::max)
+        * 1.3; // 30% headroom
+    let y_scale = chart_h / max_val;
+    let dx = chart_w / (MEM_HISTORY_LEN as f64 - 1.0);
+
+    let get_points = |data: &[f64]| -> Vec<(f64, f64)> {
+        (0..MEM_HISTORY_LEN)
+            .map(|i| {
+                let di = i as isize - (MEM_HISTORY_LEN as isize - data.len() as isize);
+                let v = if di >= 0 && (di as usize) < data.len() {
+                    data[di as usize]
+                } else {
+                    0.0
+                };
+                (pad_x + i as f64 * dx, pad_bottom + v * y_scale)
+            })
+            .collect()
+    };
+
+    let active_pts = get_points(active);
+    let _peak = peak; // used for horizontal reference line
+
+    unsafe {
+        // Background — match content area
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.925, 0.925, 0.925, 1.0).set();
+        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(bounds, 6.0, 6.0).fill();
+
+        // Horizontal grid lines (4 lines)
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.88, 0.88, 0.88, 1.0).set();
+        for i in 1..=4 {
+            let gy = pad_bottom + (chart_h * i as f64 / 5.0);
+            let grid = NSBezierPath::new();
+            grid.moveToPoint(NSPoint::new(pad_x, gy));
+            grid.lineToPoint(NSPoint::new(w - pad_x, gy));
+            grid.setLineWidth(0.5);
+            grid.stroke();
+        }
+
+        // Bottom baseline
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.85, 0.85, 0.85, 1.0).set();
+        let baseline = NSBezierPath::new();
+        baseline.moveToPoint(NSPoint::new(pad_x, pad_bottom));
+        baseline.lineToPoint(NSPoint::new(w - pad_x, pad_bottom));
+        baseline.setLineWidth(0.5);
+        baseline.stroke();
+
+        // Active memory filled area
+        let fill_path = NSBezierPath::new();
+        fill_path.moveToPoint(NSPoint::new(active_pts[0].0, pad_bottom));
+        for &(x, y) in &active_pts {
+            fill_path.lineToPoint(NSPoint::new(x, y));
+        }
+        fill_path.lineToPoint(NSPoint::new(active_pts.last().unwrap().0, pad_bottom));
+        fill_path.closePath();
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.22, 0.56, 0.96, 0.12).set();
+        fill_path.fill();
+
+        // Active memory line
+        let line = NSBezierPath::new();
+        for (i, &(x, y)) in active_pts.iter().enumerate() {
+            if i == 0 {
+                line.moveToPoint(NSPoint::new(x, y));
+            } else {
+                line.lineToPoint(NSPoint::new(x, y));
+            }
+        }
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.22, 0.56, 0.96, 1.0).set();
+        line.setLineWidth(2.0);
+        line.stroke();
+
+        // Peak memory — horizontal reference line at peak value
+        let peak_val = peak.iter().cloned().fold(0.0f64, f64::max);
+        if peak_val > 0.0 {
+            let peak_y = pad_bottom + peak_val * y_scale;
+            let peak_line = NSBezierPath::new();
+            peak_line.moveToPoint(NSPoint::new(pad_x, peak_y));
+            peak_line.lineToPoint(NSPoint::new(w - pad_x, peak_y));
+            NSColor::colorWithSRGBRed_green_blue_alpha(0.96, 0.56, 0.22, 0.6).set();
+            peak_line.setLineWidth(1.0);
+            let pattern: [f64; 2] = [4.0, 3.0];
+            let _: () =
+                msg_send![&*peak_line, setLineDash: pattern.as_ptr() count: 2i64 phase: 0.0f64];
+            peak_line.stroke();
+        }
+    }
+}
+
+fn chart_view_class() -> &'static AnyClass {
+    CHART_VIEW_CLASS.get_or_init(|| {
+        let superclass = AnyClass::get(c"NSView").unwrap();
+        let mut builder = ClassBuilder::new(c"IronMemoryChart", superclass).unwrap();
+
+        unsafe {
+            builder.add_method(
+                sel!(drawRect:),
+                chart_draw_rect as extern "C" fn(*mut AnyObject, Sel, NSRect),
+            );
+        }
+
+        builder.register()
+    })
+}
+
 // Sidebar status labels
 static SIDEBAR_MODEL_LABEL: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
 static SIDEBAR_MEM_LABEL: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
@@ -66,7 +202,7 @@ pub fn start_status_polling(port: u16) {
     let url = format!("http://localhost:{}/health", port);
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_secs(1));
             if let Ok(body) = std::process::Command::new("curl")
                 .args(["-s", &url])
                 .output()
@@ -104,6 +240,45 @@ fn update_status_labels(json: &serde_json::Value) {
         let peak = mem.get("peak_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
         set_label("active_mem", &format!("{:.0} MB", active));
         set_label("peak_mem", &format!("{:.0} MB", peak));
+
+        // Record memory history for chart
+        if let Ok(mut hist) = mem_history_lock().lock() {
+            // If peak increased since last sample, insert the peak value
+            // as a data point before the current active — this captures
+            // the transient spike that the 1s polling missed
+            let prev_peak = hist.1.last().cloned().unwrap_or(0.0);
+            if peak > prev_peak && peak > active {
+                hist.0.push(peak); // insert peak spike
+                hist.1.push(peak);
+                if hist.0.len() > MEM_HISTORY_LEN {
+                    hist.0.remove(0);
+                }
+                if hist.1.len() > MEM_HISTORY_LEN {
+                    hist.1.remove(0);
+                }
+            }
+            hist.0.push(active);
+            hist.1.push(peak);
+            if hist.0.len() > MEM_HISTORY_LEN {
+                hist.0.remove(0);
+            }
+            if hist.1.len() > MEM_HISTORY_LEN {
+                hist.1.remove(0);
+            }
+        }
+
+        // Trigger chart redraw via dispatch to main queue
+        if let Ok(guard) = CHART_VIEW_PTR.get_or_init(|| Mutex::new(None)).lock() {
+            if let Some(ptr) = guard.as_ref() {
+                let raw = ptr.0 as usize;
+                dispatch2::Queue::main().exec_async(move || {
+                    let chart: &NSView = unsafe { &*(raw as *const NSView) };
+                    unsafe {
+                        chart.setNeedsDisplay(true);
+                    }
+                });
+            }
+        }
     }
 
     let model = json
@@ -589,83 +764,146 @@ fn build_sidebar_status(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
 
 fn build_status_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSView> {
     let view = make_page_view(mtm, width, height);
-
     let title = make_title(mtm, "Status", height);
 
-    let card_y = height - 200.0;
-    let card_w = (width - 24.0 * 2.0 - 16.0 * 2.0) / 3.0;
+    // === Layout constants ===
+    // Title bar is 90pt, title text centered in it
+    // Title bottom edge ~ height - 90
+    let section_gap = 24.0;
+    let card_h = 80.0;
+    let gap = 12.0;
+
+    // === Row 1: 3 cards ===
+    let cards_top = height - 90.0 - section_gap;
+    let card_y = cards_top - card_h;
+    let narrow_w = 130.0;
+    let wide_w = width - 24.0 * 2.0 - gap * 2.0 - narrow_w * 2.0;
 
     let card1 = build_status_card(
-        mtm,
-        "Server Status",
-        "Running",
-        "status",
-        24.0,
-        card_y,
-        card_w,
-        90.0,
+        mtm, "Server", "Running", "status", 24.0, card_y, narrow_w, card_h,
     );
     let card2 = build_status_card(
-        mtm,
-        "Active Memory",
-        "\u{2014}",
-        "active_mem",
-        24.0 + card_w + 16.0,
-        card_y,
-        card_w,
-        90.0,
-    );
-    let card3 = build_status_card(
-        mtm,
-        "Peak Memory",
-        "\u{2014}",
-        "peak_mem",
-        24.0 + (card_w + 16.0) * 2.0,
-        card_y,
-        card_w,
-        90.0,
-    );
-
-    let card_y2 = card_y - 110.0;
-    let card4 = build_status_card(
-        mtm,
-        "Loaded Models",
-        "1",
-        "models",
-        24.0,
-        card_y2,
-        card_w,
-        90.0,
-    );
-    let card5 = build_status_card(
         mtm,
         "Uptime",
         "\u{2014}",
         "uptime",
-        24.0 + card_w + 16.0,
-        card_y2,
-        card_w,
-        90.0,
+        24.0 + narrow_w + gap,
+        card_y,
+        narrow_w,
+        card_h,
     );
-    let card6 = build_status_card(
+    let card3 = build_status_card(
         mtm,
-        "Default Model",
+        "Current Model",
         "\u{2014}",
         "default_model",
-        24.0 + (card_w + 16.0) * 2.0,
-        card_y2,
-        card_w,
-        90.0,
+        24.0 + (narrow_w + gap) * 2.0,
+        card_y,
+        wide_w,
+        card_h,
     );
+
+    // === Separator between cards and GPU Memory ===
+    let sep_y = card_y - 24.0;
+    let separator = unsafe {
+        let v = NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(24.0, sep_y), NSSize::new(width - 48.0, 0.5)),
+        );
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let bg = NSColor::separatorColor();
+            let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg];
+        }
+        v
+    };
+
+    // === GPU Memory header row ===
+    let mem_row_y = sep_y - 24.0 - 18.0; // 24pt gap + 18pt label height
+    let mem_title = make_label(mtm, "GPU Memory", 24.0, mem_row_y, 120.0, true);
+
+    let active_dot = unsafe {
+        let tf = NSTextField::labelWithString(ns_string!("\u{2014}"), mtm);
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        tf.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            0.22, 0.56, 0.96, 1.0,
+        )));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(144.0, mem_row_y),
+            NSSize::new(18.0, 18.0),
+        ));
+        tf
+    };
+    let active_lbl = make_label(mtm, "Active:", 164.0, mem_row_y, 55.0, false);
+    let active_val = build_status_label(mtm, "0 MB", "active_mem", 220.0, mem_row_y, 100.0);
+
+    let peak_dot = unsafe {
+        let tf = NSTextField::labelWithString(ns_string!("\u{2014}"), mtm);
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        tf.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            0.96, 0.56, 0.22, 1.0,
+        )));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(338.0, mem_row_y),
+            NSSize::new(18.0, 18.0),
+        ));
+        tf
+    };
+    let peak_lbl = make_label(mtm, "Peak:", 358.0, mem_row_y, 45.0, false);
+    let peak_val = build_status_label(mtm, "0 MB", "peak_mem", 404.0, mem_row_y, 100.0);
+
+    // === Memory chart ===
+    let chart_top = mem_row_y - 20.0;
+    let chart_bottom = 24.0;
+    let chart_h_val = (chart_top - chart_bottom).max(40.0);
+    let chart_w = width - 48.0;
+
+    let cls = chart_view_class();
+    let chart: Retained<NSView> = unsafe {
+        let obj: *mut AnyObject = msg_send![cls, alloc];
+        let obj: *mut AnyObject = msg_send![obj, initWithFrame: NSRect::new(
+            NSPoint::new(24.0, chart_bottom),
+            NSSize::new(chart_w, chart_h_val),
+        )];
+        Retained::from_raw(obj as *mut NSView).unwrap()
+    };
+
+    *CHART_VIEW_PTR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(RawPtr(&*chart as *const NSView as *const std::ffi::c_void));
+
+    // Hint text below chart
+    let hint = unsafe {
+        let tf = NSTextField::labelWithString(
+            ns_string!("GPU memory is allocated on first inference"),
+            mtm,
+        );
+        tf.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+        tf.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(24.0, 8.0),
+            NSSize::new(width - 48.0, 14.0),
+        ));
+        tf
+    };
 
     unsafe {
         view.addSubview(&title);
         view.addSubview(&card1);
         view.addSubview(&card2);
         view.addSubview(&card3);
-        view.addSubview(&card4);
-        view.addSubview(&card5);
-        view.addSubview(&card6);
+        view.addSubview(&separator);
+        view.addSubview(&mem_title);
+        view.addSubview(&active_dot);
+        view.addSubview(&active_lbl);
+        view.addSubview(&active_val);
+        view.addSubview(&peak_dot);
+        view.addSubview(&peak_lbl);
+        view.addSubview(&peak_val);
+        view.addSubview(&chart);
+        view.addSubview(&hint);
     }
 
     view
@@ -964,6 +1202,29 @@ fn build_status_card(
     card
 }
 
+/// Build a status label registered for polling updates.
+fn build_status_label(
+    mtm: MainThreadMarker,
+    value: &str,
+    key: &'static str,
+    x: f64,
+    y: f64,
+    width: f64,
+) -> Retained<NSTextField> {
+    let tf = unsafe {
+        let tf = NSTextField::labelWithString(&NSString::from_str(value), mtm);
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        tf.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(width, 18.0)));
+        tf
+    };
+    let ptr = &*tf as *const NSTextField as *const std::ffi::c_void;
+    status_labels_lock()
+        .lock()
+        .unwrap()
+        .insert(key, RawPtr(ptr));
+    tf
+}
+
 // ---------------------------------------------------------------------------
 // Shared UI helpers
 // ---------------------------------------------------------------------------
@@ -1129,7 +1390,9 @@ fn build_card_with_label(
 
     let value_tf = unsafe {
         let tf = NSTextField::labelWithString(&NSString::from_str(value), mtm);
-        tf.setFont(Some(&NSFont::boldSystemFontOfSize(20.0)));
+        tf.setFont(Some(&NSFont::systemFontOfSize_weight(18.0, unsafe {
+            std::mem::transmute(0.3f64)
+        })));
         tf.setFrame(NSRect::new(
             NSPoint::new(14.0, 12.0),
             NSSize::new(w - 28.0, 28.0),
