@@ -707,7 +707,8 @@ pub fn t(key: &str) -> &str {
         (_, "theme_light") => "\u{2600} Light",
         (_, "theme_dark") => "\u{1F319} Dark",
         // Menu items
-        ("zh", "menu_dashboard") => "\u{4EEA}\u{8868}\u{76D8}",
+        ("zh", "menu_dashboard") => "Dashboard (Native)",
+        ("zh", "menu_web_dashboard") => "\u{4EEA}\u{8868}\u{76D8}",
         ("zh", "menu_chat") => "\u{4E0E} ironmlx \u{5BF9}\u{8BDD}",
         ("zh", "menu_stop") => "\u{505C}\u{6B62}\u{670D}\u{52A1}",
         ("zh", "menu_start") => "\u{542F}\u{52A8}\u{670D}\u{52A1}",
@@ -718,7 +719,8 @@ pub fn t(key: &str) -> &str {
         ("zh", "auto_start") => "\u{81EA}\u{542F}\u{52A8}\u{670D}\u{52A1}",
         ("zh", "menu_status_running") => "\u{670D}\u{52A1}\u{5668}\u{8FD0}\u{884C}\u{4E2D}",
         ("zh", "menu_status_stopped") => "\u{670D}\u{52A1}\u{5668}\u{5DF2}\u{505C}\u{6B62}",
-        (_, "menu_dashboard") => "Dashboard",
+        (_, "menu_dashboard") => "Dashboard (Native)",
+        (_, "menu_web_dashboard") => "Dashboard",
         (_, "menu_chat") => "Chat with ironmlx",
         (_, "menu_stop") => "Stop Server",
         (_, "menu_start") => "Start Server",
@@ -873,6 +875,11 @@ fn window_delegate_instance() -> &'static Mutex<Option<RawPtr>> {
     }
     drop(guard);
     lock
+}
+
+/// Called from web_dashboard when theme is changed via web UI.
+pub fn set_theme_from_web(appearance_name: Option<&str>) {
+    set_theme(appearance_name);
 }
 
 fn set_theme(appearance_name: Option<&str>) {
@@ -3047,20 +3054,12 @@ fn build_settings_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retain
             mtm.alloc(),
             NSRect::new(
                 NSPoint::new(pad + label_w + 8.0, lang_y - 4.0),
-                NSSize::new(138.0, 26.0),
+                NSSize::new(200.0, 26.0),
             ),
             false,
         );
-        popup.addItemWithTitle(ns_string!("English"));
-        popup.addItemWithTitle(ns_string!("\u{4E2D}\u{6587}"));
-        // Select current language
-        let current = *nav_language().lock().unwrap();
-        if current == "zh" {
-            popup.selectItemAtIndex(1);
-        }
-        popup.setTag(TAG_LANG_EN); // tag identifies this as language selector
-        popup.setTarget(Some(&*(sh_ptr as *const NSObject)));
-        popup.setAction(Some(settings_action_sel));
+        popup.addItemWithTitle(ns_string!("Use Dashboard (Web)"));
+        popup.setEnabled(false); // Language setting moved to Web Dashboard
         popup
     };
     unsafe {
@@ -3248,80 +3247,262 @@ fn build_logs_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<N
 
 fn build_benchmark_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSView> {
     let view = make_page_view(mtm, width, height);
-
     let title = make_title(mtm, "Benchmark", height);
 
-    // Form
-    let mut y = height - 150.0;
+    // ── Config card ──
+    let pad = 24.0;
+    let card_w = width - pad * 2.0;
+    let inner = 20.0;
+    let field_w = card_w - inner * 2.0;
+    let card_h = 400.0;
+    let card_y = height - 110.0 - card_h;
 
-    let prompt_label = make_label(mtm, "Prompt", 24.0, y, 90.0, false);
-    let prompt_field = unsafe {
-        let tf = NSTextField::initWithFrame(
+    let config_card: Retained<NSBox> = unsafe {
+        let v = NSBox::initWithFrame(
             mtm.alloc(),
-            NSRect::new(NSPoint::new(120.0, y), NSSize::new(width - 240.0, 24.0)),
+            NSRect::new(NSPoint::new(pad, card_y), NSSize::new(card_w, card_h)),
         );
-        tf.setStringValue(ns_string!("Explain quantum computing in simple terms."));
+        v.setBoxType(NSBoxType::Custom);
+        v.setCornerRadius(10.0);
+        v.setBorderWidth(0.5);
+        v.setBorderColor(&NSColor::separatorColor());
+        v.setFillColor(&card_bg_color());
+        v.setTitlePosition(unsafe { std::mem::transmute(0u64) });
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let _: () = msg_send![&*layer, setShadowOpacity: 0.05f32];
+            let _: () = msg_send![&*layer, setShadowRadius: 3.0f64];
+            let shadow_offset: objc2_core_foundation::CGSize =
+                objc2_core_foundation::CGSize { width: 0.0, height: -1.0 };
+            let _: () = msg_send![&*layer, setShadowOffset: shadow_offset];
+        }
+        v
+    };
+
+    let mut iy = card_h - inner;
+
+    // ── Card header: icon + "配置" ──
+    iy -= 18.0;
+    let header_icon = make_sf_icon(mtm, "slider.horizontal.3", inner, iy, 16.0);
+    let header_label = unsafe {
+        let tf = NSTextField::labelWithString(ns_string!("\u{914D}\u{7F6E}"), mtm);
         tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        tf.setBezeled(true);
+        tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(inner + 22.0, iy),
+            NSSize::new(60.0, 18.0),
+        ));
         tf
     };
-    y -= 36.0;
 
-    let tokens_label = make_label(mtm, "Max Tokens", 24.0, y, 90.0, false);
-    let tokens_field = unsafe {
-        let tf = NSTextField::initWithFrame(
-            mtm.alloc(),
-            NSRect::new(NSPoint::new(120.0, y), NSSize::new(80.0, 24.0)),
-        );
-        tf.setStringValue(ns_string!("100"));
-        tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        tf.setBezeled(true);
+    // ── Separator under header ──
+    iy -= 12.0;
+    let sep_header = bench_separator(mtm, inner, iy, field_w);
+    iy -= 16.0;
+
+    // ── 模型 (Model) ──
+    iy -= 18.0;
+    let model_title = unsafe {
+        let tf = NSTextField::labelWithString(ns_string!("\u{6A21}\u{578B}"), mtm);
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(inner, iy),
+            NSSize::new(60.0, 18.0),
+        ));
         tf
     };
-    y -= 40.0;
+    iy -= 30.0;
+    let model_popup = unsafe {
+        let popup = NSPopUpButton::initWithFrame_pullsDown(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(inner, iy), NSSize::new(field_w * 0.6, 26.0)),
+            false,
+        );
+        popup.addItemWithTitle(ns_string!("\u{9009}\u{62E9}\u{6A21}\u{578B}..."));
+        popup.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        popup
+    };
 
-    let run_btn = make_button(mtm, "Run Benchmark", 120.0, y, 130.0);
+    // ── 单请求测试 (Single Request Test) ──
+    iy -= 30.0;
+    let single_title = unsafe {
+        let tf = NSTextField::labelWithString(
+            ns_string!("\u{5355}\u{8BF7}\u{6C42}\u{6D4B}\u{8BD5}"),
+            mtm,
+        );
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(inner, iy),
+            NSSize::new(120.0, 18.0),
+        ));
+        tf
+    };
+    iy -= 24.0;
+    let pp_names = [
+        "pp1024", "pp4096", "pp8192", "pp16384", "pp32768", "pp65536", "pp131072", "pp200000",
+    ];
+    let mut pp_cbs: Vec<Retained<NSButton>> = Vec::new();
+    let mut cx = inner;
+    for (i, name) in pp_names.iter().enumerate() {
+        let cb = unsafe {
+            let btn = NSButton::checkboxWithTitle_target_action(
+                &NSString::from_str(name),
+                None,
+                None,
+                mtm,
+            );
+            btn.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+            let cb_w = if name.len() > 6 { 95.0 } else { 75.0 };
+            btn.setFrame(NSRect::new(NSPoint::new(cx, iy), NSSize::new(cb_w, 18.0)));
+            if i < 2 {
+                btn.setState(1);
+            }
+            btn
+        };
+        let cb_w = if name.len() > 6 { 95.0 } else { 75.0 };
+        cx += cb_w + 6.0;
+        pp_cbs.push(cb);
+    }
+    // Note: 生成长度：128 tokens（固定）
+    iy -= 20.0;
+    let gen_note = unsafe {
+        let tf = NSTextField::labelWithString(
+            ns_string!("\u{751F}\u{6210}\u{957F}\u{5EA6}\u{FF1A}128 tokens\u{FF08}\u{56FA}\u{5B9A}\u{FF09}"),
+            mtm,
+        );
+        tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        tf.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(inner, iy),
+            NSSize::new(300.0, 16.0),
+        ));
+        tf
+    };
 
-    // Results cards
-    y -= 50.0;
-    let result_label = make_label(mtm, "Results", 24.0, y, 100.0, true);
-    y -= 10.0;
+    // ── 连续批处理测试 (Continuous Batch Test) ──
+    iy -= 28.0;
+    let batch_title = unsafe {
+        let tf = NSTextField::labelWithString(
+            ns_string!("\u{8FDE}\u{7EED}\u{6279}\u{5904}\u{7406}\u{6D4B}\u{8BD5}"),
+            mtm,
+        );
+        tf.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(inner, iy),
+            NSSize::new(160.0, 18.0),
+        ));
+        tf
+    };
+    iy -= 24.0;
+    let batch_names = ["2x batch", "4x batch", "8x batch"];
+    let mut batch_cbs: Vec<Retained<NSButton>> = Vec::new();
+    cx = inner;
+    for (i, name) in batch_names.iter().enumerate() {
+        let cb = unsafe {
+            let btn = NSButton::checkboxWithTitle_target_action(
+                &NSString::from_str(name),
+                None,
+                None,
+                mtm,
+            );
+            btn.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+            btn.setFrame(NSRect::new(NSPoint::new(cx, iy), NSSize::new(85.0, 18.0)));
+            if i < 2 {
+                btn.setState(1);
+            }
+            btn
+        };
+        cx += 91.0;
+        batch_cbs.push(cb);
+    }
+    // Note: 批处理测试使用 pp1024 / tg128
+    iy -= 20.0;
+    let batch_note = unsafe {
+        let tf = NSTextField::labelWithString(
+            ns_string!("\u{6279}\u{5904}\u{7406}\u{6D4B}\u{8BD5}\u{4F7F}\u{7528} pp1024 / tg128"),
+            mtm,
+        );
+        tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        tf.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(inner, iy),
+            NSSize::new(300.0, 16.0),
+        ));
+        tf
+    };
 
-    let card_w = (width - 48.0 - 32.0) / 3.0;
-    let card1 = build_card(mtm, "TTFT", "\u{2014}", 24.0, y - 90.0, card_w, 80.0);
-    let card2 = build_card(
-        mtm,
-        "Tokens/sec",
-        "\u{2014}",
-        24.0 + card_w + 16.0,
-        y - 90.0,
-        card_w,
-        80.0,
-    );
-    let card3 = build_card(
-        mtm,
-        "Total Time",
-        "\u{2014}",
-        24.0 + (card_w + 16.0) * 2.0,
-        y - 90.0,
-        card_w,
-        80.0,
-    );
+    // ── Green "▶ 运行基准测试" button ──
+    iy -= 36.0;
+    let run_btn = unsafe {
+        let btn = NSButton::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(inner, iy), NSSize::new(160.0, 32.0)),
+        );
+        btn.setTitle(&NSString::from_str("\u{25B6}  \u{8FD0}\u{884C}\u{57FA}\u{51C6}\u{6D4B}\u{8BD5}"));
+        btn.setFont(Some(&NSFont::boldSystemFontOfSize(12.0)));
+        btn.setBezelStyle(NSBezelStyle::Rounded);
+        btn.setWantsLayer(true);
+        if let Some(layer) = btn.layer() {
+            let green = NSColor::colorWithSRGBRed_green_blue_alpha(0.22, 0.78, 0.45, 1.0);
+            let cg: *const std::ffi::c_void = msg_send![&green, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg];
+            let _: () = msg_send![&*layer, setCornerRadius: 6.0f64];
+        }
+        btn.setContentTintColor(Some(&NSColor::whiteColor()));
+        btn
+    };
 
+    // ── Add subviews to card ──
+    unsafe {
+        config_card.addSubview(&header_icon);
+        config_card.addSubview(&header_label);
+        config_card.addSubview(&sep_header);
+        config_card.addSubview(&model_title);
+        let popup_view: &NSView = &*Retained::cast::<NSView>(model_popup);
+        config_card.addSubview(popup_view);
+        config_card.addSubview(&single_title);
+        for cb in &pp_cbs {
+            config_card.addSubview(cb);
+        }
+        config_card.addSubview(&gen_note);
+        config_card.addSubview(&batch_title);
+        for cb in &batch_cbs {
+            config_card.addSubview(cb);
+        }
+        config_card.addSubview(&batch_note);
+        config_card.addSubview(&run_btn);
+    }
+
+    // ── Add to page ──
     unsafe {
         view.addSubview(&title);
-        view.addSubview(&prompt_label);
-        view.addSubview(&prompt_field);
-        view.addSubview(&tokens_label);
-        view.addSubview(&tokens_field);
-        view.addSubview(&run_btn);
-        view.addSubview(&result_label);
-        view.addSubview(&card1);
-        view.addSubview(&card2);
-        view.addSubview(&card3);
+        let card_view: &NSView = &*Retained::cast::<NSView>(config_card);
+        view.addSubview(card_view);
     }
 
     view
+}
+
+/// Thin horizontal separator line for benchmark form
+fn bench_separator(
+    mtm: MainThreadMarker,
+    x: f64,
+    y: f64,
+    width: f64,
+) -> Retained<NSView> {
+    unsafe {
+        let v = NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(x, y), NSSize::new(width, 0.5)),
+        );
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let bg = NSColor::separatorColor();
+            let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg];
+        }
+        v
+    }
 }
 
 // ---------------------------------------------------------------------------

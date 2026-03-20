@@ -116,14 +116,14 @@ impl AppState {
             .join("ironmlx")
             .join("app_config.json");
 
-        if let Ok(data) = std::fs::read_to_string(&config_path) {
-            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&data) {
-                json["last_model"] = serde_json::Value::String(model_id.to_string());
-                let _ = std::fs::write(
-                    &config_path,
-                    serde_json::to_string_pretty(&json).unwrap_or_default(),
-                );
-            }
+        if let Ok(data) = std::fs::read_to_string(&config_path)
+            && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&data)
+        {
+            json["last_model"] = serde_json::Value::String(model_id.to_string());
+            let _ = std::fs::write(
+                &config_path,
+                serde_json::to_string_pretty(&json).unwrap_or_default(),
+            );
         }
     }
 }

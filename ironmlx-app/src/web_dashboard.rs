@@ -1,0 +1,362 @@
+//! Web-based dashboard window using WKWebView.
+//!
+//! Opens a native NSWindow with an embedded WKWebView that loads a local HTML file.
+//! Supports JS→Rust communication via WKScriptMessageHandler.
+
+use std::sync::{Mutex, OnceLock};
+
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2_app_kit::*;
+use objc2_foundation::*;
+use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKWebView, WKWebViewConfiguration};
+
+// ---------------------------------------------------------------------------
+// Singleton window
+// ---------------------------------------------------------------------------
+
+struct RawPtr(*const std::ffi::c_void);
+unsafe impl Send for RawPtr {}
+unsafe impl Sync for RawPtr {}
+
+static WEB_DASHBOARD_WINDOW: OnceLock<Mutex<Option<RawPtr>>> = OnceLock::new();
+
+// Simple app log buffer
+static APP_LOG_BUFFER: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+fn app_log_buf() -> &'static Mutex<Vec<String>> {
+    APP_LOG_BUFFER.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Push a log message to the app log buffer (call from anywhere in ironmlx-app).
+pub fn app_log(msg: &str) {
+    let mut buf = app_log_buf().lock().unwrap();
+    // Use Unix timestamp since we don't have chrono
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    buf.push(format!("{} - ironmlx-app - INFO - {}", ts, msg));
+    // Cap at 1000 entries
+    if buf.len() > 1000 {
+        let drain = buf.len() - 1000;
+        buf.drain(..drain);
+    }
+}
+
+fn window_lock() -> &'static Mutex<Option<RawPtr>> {
+    WEB_DASHBOARD_WINDOW.get_or_init(|| Mutex::new(None))
+}
+
+// ---------------------------------------------------------------------------
+// WKScriptMessageHandler — receives messages from JavaScript
+// ---------------------------------------------------------------------------
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "WebMessageHandler"]
+    #[ivars = ()]
+    pub struct WebMessageHandler;
+
+    unsafe impl NSObjectProtocol for WebMessageHandler {}
+
+    unsafe impl WKScriptMessageHandler for WebMessageHandler {
+        #[unsafe(method(userContentController:didReceiveScriptMessage:))]
+        fn did_receive_message(
+            &self,
+            _controller: &objc2_web_kit::WKUserContentController,
+            message: &WKScriptMessage,
+        ) {
+            let name = unsafe { message.name() }.to_string();
+            let body: *const AnyObject = unsafe { msg_send![message, body] };
+            if body.is_null() {
+                return;
+            }
+            let body_str: String = unsafe {
+                let ns: &NSString = &*(body as *const NSString);
+                ns.to_string()
+            };
+
+            match name.as_str() {
+                "setLanguage" => handle_set_language(&body_str),
+                "setTheme" => handle_set_theme(&body_str),
+                "fetchAPI" => {
+                    // Bridge: JS asks Rust to fetch a local API endpoint
+                    let port = crate::config::AppConfig::load().port;
+                    let url = format!("http://127.0.0.1:{}{}", port, body_str);
+                    let win_ptr_raw = window_lock().lock().ok().and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(|p| RawPtr(p));
+                    std::thread::spawn(move || {
+                        let win_ptr = win_send.map(|w| w.0);
+                        let result = std::process::Command::new("curl")
+                            .args(["-s", "--max-time", "2", &url])
+                            .output()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                            .unwrap_or_else(|_| "null".to_string());
+                        let escaped = result
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'")
+                            .replace('\n', "\\n");
+                        let path_escaped = body_str
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'");
+                        let js_code = format!(
+                            "onApiFetchResult('{}', '{}')",
+                            path_escaped, escaped
+                        );
+                        let inner_send = win_ptr.map(|p| RawPtr(p));
+                        dispatch2::Queue::main().exec_async(move || {
+                            if let Some(ref rp) = inner_send {
+                                let ptr = rp.0;
+                                let win: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
+                                if let Some(cv) = win.contentView() {
+                                    let js = NSString::from_str(&js_code);
+                                    unsafe {
+                                        let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+                "getAppLogs" => {
+                    // Return app logs by evaluating JS
+                    let logs = app_log_buf().lock().unwrap().join("\n");
+                    let escaped = logs
+                        .replace('\\', "\\\\")
+                        .replace('\'', "\\'")
+                        .replace('\n', "\\n");
+                    // Find the webview and evaluate JS
+                    if let Ok(guard) = window_lock().lock() {
+                        if let Some(ref ptr) = *guard {
+                            let win: &NSWindow =
+                                unsafe { &*(ptr.0 as *const NSWindow) };
+                            if let Some(cv) = win.contentView() {
+                                let js = NSString::from_str(&format!(
+                                    "receiveAppLogs('{}')",
+                                    escaped
+                                ));
+                                unsafe {
+                                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+);
+
+impl WebMessageHandler {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![mtm.alloc::<Self>(), init] }
+    }
+}
+
+fn handle_set_theme(theme: &str) {
+    use objc2::runtime::AnyClass;
+
+    let appearance_name: Option<&str> = match theme {
+        "light" => Some("NSAppearanceNameAqua"),
+        "dark" => Some("NSAppearanceNameDarkAqua"),
+        _ => None, // "system"
+    };
+
+    // Persist to config
+    let mut config = crate::config::AppConfig::load();
+    config.theme = match theme {
+        "light" => Some("light".to_string()),
+        "dark" => Some("dark".to_string()),
+        _ => None,
+    };
+    config.save();
+
+    // Apply to web dashboard window
+    if let Ok(guard) = window_lock().lock() {
+        if let Some(ref ptr) = *guard {
+            let window: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+            unsafe {
+                match appearance_name {
+                    Some(name) => {
+                        let ns_name = NSString::from_str(name);
+                        let appearance: *mut AnyObject = msg_send![
+                            AnyClass::get(c"NSAppearance").unwrap(),
+                            appearanceNamed: &*ns_name
+                        ];
+                        let _: () = msg_send![window, setAppearance: appearance];
+                    }
+                    None => {
+                        let _: () =
+                            msg_send![window, setAppearance: std::ptr::null::<AnyObject>()];
+                    }
+                }
+            }
+        }
+    }
+
+    // Also apply to native dashboard (calls set_theme which handles its own window + config)
+    // We already saved config, so just apply appearance to native dashboard window if open
+    let native_appearance = match theme {
+        "light" => Some("NSAppearanceNameAqua"),
+        "dark" => Some("NSAppearanceNameDarkAqua"),
+        _ => None,
+    };
+    // Delegate to native dashboard's set_theme to keep everything in sync
+    // (it will re-save config but that's fine)
+    crate::dashboard::set_theme_from_web(native_appearance);
+}
+
+fn handle_set_language(lang_code: &str) {
+    let lang: &'static str = match lang_code {
+        "zh-Hans" => "zh",
+        "zh-Hant" => "zh-Hant",
+        "ja" => "ja",
+        "ko" => "ko",
+        _ => "en",
+    };
+
+    // Persist to config
+    let mut config = crate::config::AppConfig::load();
+    config.language = lang.to_string();
+    config.save();
+
+    // Update native dashboard language state (if it's open)
+    *crate::dashboard::nav_language().lock().unwrap() = lang;
+
+    // Rebuild menubar menu
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    crate::app_delegate::refresh_menu(mtm);
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Show the web dashboard window. If already open, bring it to front.
+pub fn show_web_dashboard(mtm: MainThreadMarker) {
+    // Switch to Regular activation policy so window can receive keyboard input
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+
+    // Check if window already exists and is valid
+    if let Ok(guard) = window_lock().lock() {
+        if let Some(ref ptr) = *guard {
+            let win = ptr.0 as *const NSWindow;
+            if !win.is_null() {
+                unsafe {
+                    let w = &*win;
+                    w.makeKeyAndOrderFront(None);
+                    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+                }
+                return;
+            }
+        }
+    }
+
+    // Create new window
+    let window = create_web_dashboard_window(mtm);
+
+    // Store the window pointer
+    let ptr = &*window as *const NSWindow as *const std::ffi::c_void;
+    *window_lock().lock().unwrap() = Some(RawPtr(ptr));
+
+    // Show
+    unsafe {
+        window.makeKeyAndOrderFront(None);
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+
+    // Leak to keep alive (menubar app manages lifecycle)
+    let _ = Retained::into_raw(window);
+}
+
+// ---------------------------------------------------------------------------
+// Window creation
+// ---------------------------------------------------------------------------
+
+fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
+    let w = 1000.0;
+    let h = 700.0;
+
+    let style = NSWindowStyleMask(
+        NSWindowStyleMask::Titled.0
+            | NSWindowStyleMask::Closable.0
+            | NSWindowStyleMask::Miniaturizable.0
+            | NSWindowStyleMask::Resizable.0,
+    );
+
+    let window = unsafe {
+        let win = NSWindow::initWithContentRect_styleMask_backing_defer(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(200.0, 150.0), NSSize::new(w, h)),
+            style,
+            NSBackingStoreType(2), // NSBackingStoreBuffered
+            false,
+        );
+        win.setTitle(&NSString::from_str("IRONMLX Web Dashboard"));
+        win.setMinSize(NSSize::new(700.0, 450.0));
+        win.center();
+        win
+    };
+
+    // Create WKWebView with message handler
+    let config = unsafe { WKWebViewConfiguration::new(mtm) };
+
+    // Register JS→Rust message handler
+    let handler = WebMessageHandler::new(mtm);
+    let handler_obj = objc2::runtime::ProtocolObject::from_retained(handler);
+    unsafe {
+        let uc = config.userContentController();
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setLanguage"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setTheme"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("getAppLogs"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("fetchAPI"));
+    }
+
+    let webview = unsafe {
+        let wv = WKWebView::initWithFrame_configuration(
+            mtm.alloc(),
+            NSRect::new(NSPoint::ZERO, NSSize::new(w, h)),
+            &config,
+        );
+        wv.setAutoresizingMask(NSAutoresizingMaskOptions(2 | 16)); // width + height flexible
+        wv
+    };
+
+    // Load embedded HTML via loadHTMLString (no CORS issues with http:// API calls)
+    let config = crate::config::AppConfig::load();
+    let current_lang = config.language;
+    let current_theme = match config.theme.as_deref() {
+        Some("light") => "light",
+        Some("dark") => "dark",
+        _ => "system",
+    };
+    let html = include_str!("dashboard2.html");
+    let port = config.port;
+    let html_with_lang = html.replace(
+        "/*__INIT_LANG__*/",
+        &format!(
+            "window.__IRONMLX_PORT__ = {}; setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); initStatusPolling();",
+            port, current_lang, current_theme
+        ),
+    );
+
+    let html_ns = NSString::from_str(&html_with_lang);
+    let base_url: Option<&NSURL> = None;
+    unsafe {
+        let _: Retained<AnyObject> =
+            msg_send![&*webview, loadHTMLString: &*html_ns, baseURL: base_url];
+    }
+
+    // Set as content view
+    unsafe {
+        let view: &NSView = &*Retained::cast::<NSView>(webview);
+        window.setContentView(Some(view));
+    }
+
+    window
+}

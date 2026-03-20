@@ -8,6 +8,7 @@ pub mod dashboard;
 mod preferences;
 mod server_manager;
 mod updater;
+mod web_dashboard;
 mod welcome;
 
 fn main() {

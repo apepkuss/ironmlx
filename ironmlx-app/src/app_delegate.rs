@@ -140,6 +140,13 @@ define_class!(
             }
         }
 
+        #[unsafe(method(openWebDashboard:))]
+        fn open_web_dashboard(&self, _sender: &NSMenuItem) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                crate::web_dashboard::show_web_dashboard(mtm);
+            }
+        }
+
         #[unsafe(method(openChat:))]
         fn open_chat(&self, _sender: &NSMenuItem) {
             let p = port();
@@ -374,6 +381,14 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     }
     dashboard.setEnabled(is_running);
     menu.addItem(&dashboard);
+
+    // ── Dashboard (Web) ──
+    let web_dash = make_item(mtm, t("menu_web_dashboard"), Some(sel!(openWebDashboard:)), "");
+    if let Some(icon) = sf_icon("square.grid.2x2") {
+        web_dash.setImage(Some(&icon));
+    }
+    web_dash.setEnabled(is_running);
+    menu.addItem(&web_dash);
 
     // ── Chat ──
     let chat = make_item(mtm, t("menu_chat"), Some(sel!(openChat:)), "");
