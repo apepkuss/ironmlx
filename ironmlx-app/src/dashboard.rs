@@ -228,7 +228,6 @@ fn nav_handler_lock() -> &'static Mutex<Option<RawPtr>> {
 const NAV_ITEMS: &[(&str, &str)] = &[
     ("chart.bar", "Status"),
     ("cube", "Models"),
-    ("message", "Chat"),
     ("doc.text", "Logs"),
     ("gauge.with.dots.needle.67percent", "Benchmark"),
     ("gearshape", "Settings"),
@@ -643,11 +642,10 @@ pub fn nav_language() -> &'static Mutex<&'static str> {
     NAV_LANGUAGE.get_or_init(|| Mutex::new("en"))
 }
 
-const NAV_LABELS_EN: &[&str] = &["Status", "Models", "Chat", "Logs", "Benchmark", "Settings"];
+const NAV_LABELS_EN: &[&str] = &["Status", "Models", "Logs", "Benchmark", "Settings"];
 const NAV_LABELS_ZH: &[&str] = &[
     "\u{72B6}\u{6001}", // 状态
     "\u{6A21}\u{578B}", // 模型
-    "\u{5BF9}\u{8BDD}", // 对话
     "\u{65E5}\u{5FD7}", // 日志
     "\u{57FA}\u{51C6}", // 基准
     "\u{8BBE}\u{7F6E}", // 设置
@@ -1286,7 +1284,6 @@ fn build_content(mtm: MainThreadMarker) -> Retained<NSView> {
     let page_builders: Vec<fn(MainThreadMarker, f64, f64) -> Retained<NSView>> = vec![
         build_status_page,
         build_models_page,
-        build_chat_page,
         build_logs_page,
         build_benchmark_page,
         build_settings_page,
