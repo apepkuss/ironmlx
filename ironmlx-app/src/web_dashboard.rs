@@ -86,7 +86,10 @@ define_class!(
                     // Bridge: JS asks Rust to fetch a local API endpoint
                     let port = crate::config::AppConfig::load().port;
                     let url = format!("http://127.0.0.1:{}{}", port, body_str);
-                    let win_ptr_raw = window_lock().lock().ok().and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
                     let win_send = win_ptr_raw.map(|p| RawPtr(p));
                     std::thread::spawn(move || {
                         let win_ptr = win_send.map(|w| w.0);
@@ -99,13 +102,9 @@ define_class!(
                             .replace('\\', "\\\\")
                             .replace('\'', "\\'")
                             .replace('\n', "\\n");
-                        let path_escaped = body_str
-                            .replace('\\', "\\\\")
-                            .replace('\'', "\\'");
-                        let js_code = format!(
-                            "onApiFetchResult('{}', '{}')",
-                            path_escaped, escaped
-                        );
+                        let path_escaped = body_str.replace('\\', "\\\\").replace('\'', "\\'");
+                        let js_code =
+                            format!("onApiFetchResult('{}', '{}')", path_escaped, escaped);
                         let inner_send = win_ptr.map(|p| RawPtr(p));
                         dispatch2::Queue::main().exec_async(move || {
                             if let Some(ref rp) = inner_send {
@@ -131,13 +130,10 @@ define_class!(
                     // Find the webview and evaluate JS
                     if let Ok(guard) = window_lock().lock() {
                         if let Some(ref ptr) = *guard {
-                            let win: &NSWindow =
-                                unsafe { &*(ptr.0 as *const NSWindow) };
+                            let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
                             if let Some(cv) = win.contentView() {
-                                let js = NSString::from_str(&format!(
-                                    "receiveAppLogs('{}')",
-                                    escaped
-                                ));
+                                let js =
+                                    NSString::from_str(&format!("receiveAppLogs('{}')", escaped));
                                 unsafe {
                                     let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
                                 }
@@ -190,8 +186,7 @@ fn handle_set_theme(theme: &str) {
                         let _: () = msg_send![window, setAppearance: appearance];
                     }
                     None => {
-                        let _: () =
-                            msg_send![window, setAppearance: std::ptr::null::<AnyObject>()];
+                        let _: () = msg_send![window, setAppearance: std::ptr::null::<AnyObject>()];
                     }
                 }
             }

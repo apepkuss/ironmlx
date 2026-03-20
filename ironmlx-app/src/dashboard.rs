@@ -715,7 +715,7 @@ pub fn t(key: &str) -> &str {
         ("zh", "menu_restart") => "\u{91CD}\u{542F}\u{670D}\u{52A1}",
         ("zh", "menu_preferences") => "\u{504F}\u{597D}\u{8BBE}\u{7F6E}...",
         ("zh", "menu_updates") => "\u{68C0}\u{67E5}\u{66F4}\u{65B0}...",
-        ("zh", "menu_quit") => "\u{9000}\u{51FA} ironmlx",
+        ("zh", "menu_quit") => "\u{9000}\u{51FA}",
         ("zh", "auto_start") => "\u{81EA}\u{542F}\u{52A8}\u{670D}\u{52A1}",
         ("zh", "menu_status_running") => "\u{670D}\u{52A1}\u{5668}\u{8FD0}\u{884C}\u{4E2D}",
         ("zh", "menu_status_stopped") => "\u{670D}\u{52A1}\u{5668}\u{5DF2}\u{505C}\u{6B62}",
@@ -727,7 +727,7 @@ pub fn t(key: &str) -> &str {
         (_, "menu_restart") => "Restart Server",
         (_, "menu_preferences") => "Preferences...",
         (_, "menu_updates") => "Check for Updates...",
-        (_, "menu_quit") => "Quit ironmlx",
+        (_, "menu_quit") => "Quit",
         (_, "auto_start") => "Auto-start Service",
         (_, "menu_status_running") => "Server: Running",
         (_, "menu_status_stopped") => "Server: Stopped",
@@ -3272,8 +3272,10 @@ fn build_benchmark_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retai
         if let Some(layer) = v.layer() {
             let _: () = msg_send![&*layer, setShadowOpacity: 0.05f32];
             let _: () = msg_send![&*layer, setShadowRadius: 3.0f64];
-            let shadow_offset: objc2_core_foundation::CGSize =
-                objc2_core_foundation::CGSize { width: 0.0, height: -1.0 };
+            let shadow_offset: objc2_core_foundation::CGSize = objc2_core_foundation::CGSize {
+                width: 0.0,
+                height: -1.0,
+            };
             let _: () = msg_send![&*layer, setShadowOffset: shadow_offset];
         }
         v
@@ -3367,7 +3369,9 @@ fn build_benchmark_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retai
     iy -= 20.0;
     let gen_note = unsafe {
         let tf = NSTextField::labelWithString(
-            ns_string!("\u{751F}\u{6210}\u{957F}\u{5EA6}\u{FF1A}128 tokens\u{FF08}\u{56FA}\u{5B9A}\u{FF09}"),
+            ns_string!(
+                "\u{751F}\u{6210}\u{957F}\u{5EA6}\u{FF1A}128 tokens\u{FF08}\u{56FA}\u{5B9A}\u{FF09}"
+            ),
             mtm,
         );
         tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
@@ -3438,7 +3442,9 @@ fn build_benchmark_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retai
             mtm.alloc(),
             NSRect::new(NSPoint::new(inner, iy), NSSize::new(160.0, 32.0)),
         );
-        btn.setTitle(&NSString::from_str("\u{25B6}  \u{8FD0}\u{884C}\u{57FA}\u{51C6}\u{6D4B}\u{8BD5}"));
+        btn.setTitle(&NSString::from_str(
+            "\u{25B6}  \u{8FD0}\u{884C}\u{57FA}\u{51C6}\u{6D4B}\u{8BD5}",
+        ));
         btn.setFont(Some(&NSFont::boldSystemFontOfSize(12.0)));
         btn.setBezelStyle(NSBezelStyle::Rounded);
         btn.setWantsLayer(true);
@@ -3484,12 +3490,7 @@ fn build_benchmark_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retai
 }
 
 /// Thin horizontal separator line for benchmark form
-fn bench_separator(
-    mtm: MainThreadMarker,
-    x: f64,
-    y: f64,
-    width: f64,
-) -> Retained<NSView> {
+fn bench_separator(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Retained<NSView> {
     unsafe {
         let v = NSView::initWithFrame(
             mtm.alloc(),

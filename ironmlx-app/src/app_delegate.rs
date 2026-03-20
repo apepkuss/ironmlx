@@ -383,7 +383,12 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     menu.addItem(&dashboard);
 
     // ── Dashboard (Web) ──
-    let web_dash = make_item(mtm, t("menu_web_dashboard"), Some(sel!(openWebDashboard:)), "");
+    let web_dash = make_item(
+        mtm,
+        t("menu_web_dashboard"),
+        Some(sel!(openWebDashboard:)),
+        "",
+    );
     if let Some(icon) = sf_icon("square.grid.2x2") {
         web_dash.setImage(Some(&icon));
     }
