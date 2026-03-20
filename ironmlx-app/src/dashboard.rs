@@ -717,8 +717,8 @@ pub fn t(key: &str) -> &str {
         ("zh", "menu_updates") => "\u{68C0}\u{67E5}\u{66F4}\u{65B0}...",
         ("zh", "menu_quit") => "\u{9000}\u{51FA} ironmlx",
         ("zh", "auto_start") => "\u{81EA}\u{542F}\u{52A8}\u{670D}\u{52A1}",
-        ("zh", "menu_status_running") => "\u{72B6}\u{6001}: \u{8FD0}\u{884C}\u{4E2D}",
-        ("zh", "menu_status_stopped") => "\u{72B6}\u{6001}: \u{5DF2}\u{505C}\u{6B62}",
+        ("zh", "menu_status_running") => "\u{670D}\u{52A1}\u{5668}\u{8FD0}\u{884C}\u{4E2D}",
+        ("zh", "menu_status_stopped") => "\u{670D}\u{52A1}\u{5668}\u{5DF2}\u{505C}\u{6B62}",
         (_, "menu_dashboard") => "Dashboard",
         (_, "menu_chat") => "Chat with ironmlx",
         (_, "menu_stop") => "Stop Server",
@@ -728,8 +728,8 @@ pub fn t(key: &str) -> &str {
         (_, "menu_updates") => "Check for Updates...",
         (_, "menu_quit") => "Quit ironmlx",
         (_, "auto_start") => "Auto-start Service",
-        (_, "menu_status_running") => "Status: Running",
-        (_, "menu_status_stopped") => "Status: Stopped",
+        (_, "menu_status_running") => "Server: Running",
+        (_, "menu_status_stopped") => "Server: Stopped",
         _ => key,
     }
 }
@@ -923,7 +923,8 @@ fn set_theme(appearance_name: Option<&str>) {
     // Need a small delay for appearance to take effect before reading is_dark_mode()
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        dispatch2::Queue::main().exec_async(|| {
+        let q = dispatch2::Queue::main();
+        q.exec_async(|| {
             refresh_theme_colors();
         });
     });

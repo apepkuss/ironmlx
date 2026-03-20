@@ -2,11 +2,12 @@ use std::cell::RefCell;
 use std::sync::Mutex;
 
 use objc2::rc::Retained;
+use objc2::runtime::AnyClass;
 use objc2::sel;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSWorkspace,
+    NSApplication, NSApplicationDelegate, NSColor, NSImage, NSMenu, NSMenuItem, NSStatusBar,
+    NSStatusItem, NSWorkspace,
 };
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSString, NSURL, ns_string};
 
@@ -281,69 +282,149 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 
     let is_running = status == ServerStatus::Running;
 
-    let status_text = match status {
-        ServerStatus::Stopped => "Status: Stopped",
-        ServerStatus::Starting => "Status: Starting...",
-        ServerStatus::Running => "Status: Running",
-        ServerStatus::Failed => "Status: Failed",
-    };
-
     use crate::dashboard::t;
 
-    // Status (disabled, informational)
-    let status_text_i18n = if is_running {
+    // Helper: create SF Symbol image for menu items
+    let sf_icon = |name: &str| -> Option<Retained<NSImage>> {
+        let ns_name = NSString::from_str(name);
+        unsafe { NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns_name, None) }
+    };
+
+    // ── Status row ──
+    let status_label = if is_running {
         t("menu_status_running")
     } else {
         t("menu_status_stopped")
     };
-    let status_item = make_item(mtm, status_text_i18n, None, "");
-    status_item.setEnabled(false);
+    let status_item = unsafe {
+        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc::<NSMenuItem>(),
+            &NSString::from_str(status_label),
+            None,
+            &NSString::from_str(""),
+        );
+
+        // Green/red circle.fill icon with tint
+        let symbol_name = if is_running {
+            "circle.fill"
+        } else {
+            "circle.fill"
+        };
+        if let Some(icon) = sf_icon(symbol_name) {
+            let tint_color = if is_running {
+                NSColor::systemGreenColor()
+            } else {
+                NSColor::systemRedColor()
+            };
+            let config: Retained<objc2::runtime::AnyObject> = msg_send![
+                AnyClass::get(c"NSImageSymbolConfiguration").unwrap(),
+                configurationWithHierarchicalColor: &*tint_color
+            ];
+            let tinted: Retained<NSImage> = msg_send![&*icon,
+                imageWithSymbolConfiguration: &*config
+            ];
+            item.setImage(Some(&tinted));
+        }
+
+        // Green/red attributed title text
+        let color = if is_running {
+            NSColor::systemGreenColor()
+        } else {
+            NSColor::systemRedColor()
+        };
+        let fg_key: &NSString = ns_string!("NSColor");
+        let attrs: Retained<objc2::runtime::AnyObject> = msg_send![
+            AnyClass::get(c"NSDictionary").unwrap(),
+            dictionaryWithObject: &*color
+            forKey: fg_key
+        ];
+        let title_ns = NSString::from_str(status_label);
+        let attr_str: Retained<objc2::runtime::AnyObject> = msg_send![
+            msg_send![AnyClass::get(c"NSAttributedString").unwrap(), alloc],
+            initWithString: &*title_ns
+            attributes: &*attrs
+        ];
+        let _: () = msg_send![&*item, setAttributedTitle: &*attr_str];
+
+        item.setEnabled(false);
+        item
+    };
     menu.addItem(&status_item);
+
+    // ── Model name (gray, secondary) ──
+    let model_name = CONFIG
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|c| c.last_model.clone())
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    let model_item = make_item(mtm, &model_name, None, "");
+    if let Some(icon) = sf_icon("cube") {
+        model_item.setImage(Some(&icon));
+    }
+    model_item.setEnabled(false);
+    menu.addItem(&model_item);
+
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    // Dashboard
+    // ── Dashboard ──
     let dashboard = make_item(mtm, t("menu_dashboard"), Some(sel!(openDashboard:)), "d");
+    if let Some(icon) = sf_icon("square.grid.2x2") {
+        dashboard.setImage(Some(&icon));
+    }
     dashboard.setEnabled(is_running);
     menu.addItem(&dashboard);
 
-    // Chat
+    // ── Chat ──
     let chat = make_item(mtm, t("menu_chat"), Some(sel!(openChat:)), "");
+    if let Some(icon) = sf_icon("bubble.left.and.bubble.right") {
+        chat.setImage(Some(&icon));
+    }
     chat.setEnabled(is_running);
     menu.addItem(&chat);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    // Start / Stop
+    // ── Start / Stop ──
     if is_running {
-        menu.addItem(&make_item(mtm, t("menu_stop"), Some(sel!(stopServer:)), ""));
+        let stop = make_item(mtm, t("menu_stop"), Some(sel!(stopServer:)), "");
+        if let Some(icon) = sf_icon("stop.fill") {
+            stop.setImage(Some(&icon));
+        }
+        menu.addItem(&stop);
     } else {
-        menu.addItem(&make_item(
-            mtm,
-            t("menu_start"),
-            Some(sel!(startServer:)),
-            "",
-        ));
+        let start = make_item(mtm, t("menu_start"), Some(sel!(startServer:)), "");
+        if let Some(icon) = sf_icon("play.fill") {
+            start.setImage(Some(&icon));
+        }
+        menu.addItem(&start);
     }
 
-    // Restart
+    // ── Restart ──
     let restart = make_item(mtm, t("menu_restart"), Some(sel!(restartServer:)), "");
+    if let Some(icon) = sf_icon("arrow.clockwise") {
+        restart.setImage(Some(&icon));
+    }
     restart.setEnabled(is_running);
     menu.addItem(&restart);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    // Check for Updates
-    menu.addItem(&make_item(
-        mtm,
-        t("menu_updates"),
-        Some(sel!(checkForUpdates:)),
-        "",
-    ));
+    // ── Check for Updates ──
+    let updates = make_item(mtm, t("menu_updates"), Some(sel!(checkForUpdates:)), "");
+    if let Some(icon) = sf_icon("arrow.down.circle") {
+        updates.setImage(Some(&icon));
+    }
+    menu.addItem(&updates);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    // Quit
-    menu.addItem(&make_item(mtm, t("menu_quit"), Some(sel!(quitApp:)), "q"));
+    // ── Quit ──
+    let quit = make_item(mtm, t("menu_quit"), Some(sel!(quitApp:)), "q");
+    if let Some(icon) = sf_icon("power") {
+        quit.setImage(Some(&icon));
+    }
+    menu.addItem(&quit);
 
     menu
 }
