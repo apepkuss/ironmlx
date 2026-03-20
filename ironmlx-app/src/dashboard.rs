@@ -224,13 +224,14 @@ fn nav_handler_lock() -> &'static Mutex<Option<RawPtr>> {
 }
 
 // Navigation items: (icon, label)
+// SF Symbol names for sidebar nav icons
 const NAV_ITEMS: &[(&str, &str)] = &[
-    ("\u{1F3E0}", "Status"),
-    ("\u{1F916}", "Models"),
-    ("\u{1F4AC}", "Chat"),
-    ("\u{1F4DD}", "Logs"),
-    ("\u{26A1}", "Benchmark"),
-    ("\u{2699}\u{FE0F}", "Settings"),
+    ("chart.bar", "Status"),
+    ("cube", "Models"),
+    ("message", "Chat"),
+    ("doc.text", "Logs"),
+    ("gauge.with.dots.needle.67percent", "Benchmark"),
+    ("gearshape", "Settings"),
 ];
 
 // Status card value labels — stored for polling updates
@@ -755,8 +756,7 @@ fn set_language(lang: &'static str) {
         for (i, ptr) in buttons.iter().enumerate() {
             if i < labels.len() {
                 let btn: &NSButton = unsafe { &*(ptr.0 as *const NSButton) };
-                let icon = NAV_ITEMS[i].0;
-                let title = format!("  {}  {}", icon, labels[i]);
+                let title = format!("       {}", labels[i]);
                 unsafe {
                     btn.setTitle(&NSString::from_str(&title));
                 }
@@ -1107,8 +1107,7 @@ pub fn show_dashboard(mtm: MainThreadMarker) {
                 for (i, ptr) in buttons.iter().enumerate() {
                     if i < labels.len() {
                         let btn: &NSButton = unsafe { &*(ptr.0 as *const NSButton) };
-                        let icon = NAV_ITEMS[i].0;
-                        let title = format!("  {}  {}", icon, labels[i]);
+                        let title = format!("       {}", labels[i]);
                         unsafe {
                             btn.setTitle(&NSString::from_str(&title));
                         }
@@ -1453,7 +1452,7 @@ fn build_sidebar_header(mtm: MainThreadMarker, x: f64, y: f64, width: f64) -> Re
 
 fn build_nav_button(
     mtm: MainThreadMarker,
-    icon: &str,
+    sf_symbol: &str,
     label: &str,
     tag: usize,
     x: f64,
@@ -1462,18 +1461,42 @@ fn build_nav_button(
     handler: *const std::ffi::c_void,
     action: Sel,
 ) -> Retained<NSButton> {
-    let title = format!("  {}  {}", icon, label); // extra space between icon and text
     let button = unsafe {
         let btn = NSButton::initWithFrame(
             mtm.alloc(),
             NSRect::new(NSPoint::new(x, y), NSSize::new(width, 38.0)),
         );
-        btn.setTitle(&NSString::from_str(&title));
-        btn.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+        // Per-icon spacing to align text vertically
+        let spacing = match sf_symbol {
+            "chart.bar" => "     ",
+            "doc.text" | "gauge.with.dots.needle.67percent" => "         ",
+            "gearshape" => "        ",
+            _ => "       ",
+        };
+        btn.setTitle(&NSString::from_str(&format!("{}{}", spacing, label)));
+        btn.setFont(Some(&NSFont::systemFontOfSize(15.0)));
         btn.setAlignment(NSTextAlignment::Left);
         btn.setBordered(false);
         btn.setTag(tag as isize);
         btn.setBezelStyle(NSBezelStyle(0));
+
+        // SF Symbol icon
+        let ns_name = NSString::from_str(sf_symbol);
+        if let Some(img) =
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns_name, None)
+        {
+            match sf_symbol {
+                "chart.bar" => img.setSize(NSSize::new(15.0, 15.0)),
+                "doc.text" | "gauge.with.dots.needle.67percent" => {
+                    img.setSize(NSSize::new(22.0, 22.0))
+                }
+                "gearshape" => img.setSize(NSSize::new(20.0, 20.0)),
+                _ => {}
+            }
+            btn.setImage(Some(&img));
+            btn.setImagePosition(NSCellImagePosition::ImageLeft);
+        }
+
         // Theme-aware text color
         btn.setContentTintColor(Some(&nav_text_color()));
 
@@ -1482,9 +1505,9 @@ fn build_nav_button(
         btn.setTarget(Some(handler_obj));
         btn.setAction(Some(action));
 
-        // Disable focus ring — highlight handled by separate background view
+        // Disable focus ring
         let cell: &NSCell = msg_send![&btn, cell];
-        let _: () = msg_send![cell, setFocusRingType: 1i64]; // NSFocusRingTypeNone = 1
+        let _: () = msg_send![cell, setFocusRingType: 1i64];
 
         btn
     };
@@ -1880,23 +1903,44 @@ fn build_models_page(mtm: MainThreadMarker, width: f64, height: f64) -> Retained
     view
 }
 
-/// Model Manager panel — shows loaded models with status and actions
+/// Model Manager panel — omlx-style: toolbar + independent model cards
 fn build_model_manager_panel(mtm: MainThreadMarker, width: f64, height: f64) -> Retained<NSView> {
-    let view = unsafe {
-        NSView::initWithFrame(
+    let scroll = unsafe {
+        let sv = NSScrollView::initWithFrame(
             mtm.alloc(),
             NSRect::new(NSPoint::ZERO, NSSize::new(width, height)),
+        );
+        sv.setHasVerticalScroller(true);
+        sv.setDrawsBackground(false);
+        sv
+    };
+
+    let gap = 8.0;
+    let toolbar_h = 26.0;
+    let card_h = 80.0;
+    let card_gap = 12.0;
+    let num_models = 1;
+    let doc_h = (toolbar_h + 16.0 + (card_h + card_gap) * num_models as f64 + 16.0).max(height);
+
+    let doc_view = unsafe {
+        NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::ZERO, NSSize::new(width, doc_h)),
         )
     };
 
-    // Load model input row at top
-    let row_y = height - 40.0;
+    // Toolbar: [input] [Load] [Unload All]
+    let toolbar_y = doc_h - toolbar_h;
+    let unload_all_w = 90.0;
+    let load_w = 70.0;
+    let input_w = width - load_w - unload_all_w - gap * 2.0;
+
     let input = unsafe {
         let tf = NSTextField::initWithFrame(
             mtm.alloc(),
             NSRect::new(
-                NSPoint::new(0.0, row_y + 2.0),
-                NSSize::new(width - 90.0, 24.0),
+                NSPoint::new(0.0, toolbar_y),
+                NSSize::new(input_w, toolbar_h),
             ),
         );
         tf.setPlaceholderString(Some(ns_string!("HuggingFace repo ID or local path")));
@@ -1909,68 +1953,206 @@ fn build_model_manager_panel(mtm: MainThreadMarker, width: f64, height: f64) -> 
     let load_btn = unsafe {
         let b = NSButton::initWithFrame(
             mtm.alloc(),
-            NSRect::new(NSPoint::new(width - 80.0, row_y), NSSize::new(80.0, 28.0)),
+            NSRect::new(
+                NSPoint::new(input_w + gap, toolbar_y),
+                NSSize::new(load_w, toolbar_h),
+            ),
         );
         b.setTitle(ns_string!("Load"));
         b.setBezelStyle(NSBezelStyle::Rounded);
         b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-        let _: () = msg_send![&*b, setKeyEquivalent: ns_string!("\r")];
+        if let Some(icon) = sf_icon_small("plus.circle") {
+            b.setImage(Some(&icon));
+            b.setImagePosition(NSCellImagePosition::ImageLeft);
+        }
         b
     };
 
-    // Model list (scrollable)
-    let list_y = 0.0;
-    let list_h = row_y - 16.0;
-
-    let scroll = unsafe {
-        let sv = NSScrollView::initWithFrame(
+    let unload_all_btn = unsafe {
+        let b = NSButton::initWithFrame(
             mtm.alloc(),
-            NSRect::new(NSPoint::new(0.0, list_y), NSSize::new(width, list_h)),
+            NSRect::new(
+                NSPoint::new(input_w + gap + load_w + gap, toolbar_y),
+                NSSize::new(unload_all_w, toolbar_h),
+            ),
         );
-        sv.setHasVerticalScroller(true);
-        sv.setDrawsBackground(false);
-        sv
+        b.setTitle(ns_string!("Unload All"));
+        b.setBezelStyle(NSBezelStyle::Rounded);
+        b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        b
     };
 
-    // Document view for model cards
-    let doc_h = list_h.max(400.0); // will grow as models are added
-    let doc_view = unsafe {
-        let v = NSView::initWithFrame(
-            mtm.alloc(),
-            NSRect::new(NSPoint::ZERO, NSSize::new(width, doc_h)),
-        );
-        // flipped coordinate system handled manually;
-        v
-    };
-
-    // Placeholder: show current model
-    let card_h = 64.0;
-    let card = build_model_card(
+    // Model card
+    let card_y = toolbar_y - 16.0 - card_h;
+    let model_card = build_manager_model_card(
         mtm,
         "mlx-community/Qwen3-0.6B-4bit",
-        true, // loaded
-        true, // is_default
+        "0.6B params \u{00B7} 4-bit \u{00B7} 320 MB",
+        true,
+        true,
         0.0,
-        doc_h - card_h - 8.0,
+        card_y,
         width,
         card_h,
     );
 
     unsafe {
-        doc_view.addSubview(&card);
+        doc_view.addSubview(&input);
+        doc_view.addSubview(&load_btn);
+        doc_view.addSubview(&unload_all_btn);
+        doc_view.addSubview(&model_card);
         scroll.setDocumentView(Some(&doc_view));
+        let max_y = doc_view.frame().size.height;
+        let _: () = msg_send![&*doc_view, scrollPoint: NSPoint::new(0.0, max_y)];
     }
 
-    unsafe {
-        view.addSubview(&input);
-        view.addSubview(&load_btn);
-        view.addSubview(&scroll);
-    }
-
-    view
+    let scroll_view: Retained<NSView> = unsafe { Retained::cast(scroll) };
+    scroll_view
 }
 
-/// Model Downloader panel — search HuggingFace + download
+/// Single model card — white rounded card (omlx style)
+fn build_manager_model_card(
+    mtm: MainThreadMarker,
+    name: &str,
+    description: &str,
+    is_default: bool,
+    is_running: bool,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Retained<NSView> {
+    let cls = hover_box_class();
+    let card: Retained<NSBox> = unsafe {
+        let obj: *mut AnyObject = msg_send![cls, alloc];
+        let obj: *mut AnyObject = msg_send![obj, initWithFrame: NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))];
+        Retained::from_raw(obj as *mut NSBox).unwrap()
+    };
+    unsafe {
+        card.setBoxType(NSBoxType::Custom);
+        card.setBorderType(NSBorderType::LineBorder);
+        card.setFillColor(&card_bg_color());
+        card.setBorderColor(&NSColor::separatorColor());
+        card.setBorderWidth(0.5);
+        card.setCornerRadius(10.0);
+        card.setContentViewMargins(NSSize::new(0.0, 0.0));
+    }
+
+    let pad = 16.0;
+
+    // Green dot
+    let dot_color = if is_running {
+        NSColor::systemGreenColor()
+    } else {
+        NSColor::secondaryLabelColor()
+    };
+    let dot = unsafe {
+        let tf = NSTextField::labelWithString(ns_string!("\u{25CF}"), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        tf.setTextColor(Some(&dot_color));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad, height / 2.0 - 6.0),
+            NSSize::new(14.0, 14.0),
+        ));
+        tf
+    };
+
+    // Model name
+    let name_tf = unsafe {
+        let tf = NSTextField::labelWithString(&NSString::from_str(name), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        tf.setTextColor(Some(&NSColor::labelColor()));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad + 20.0, height / 2.0 + 8.0),
+            NSSize::new(width * 0.5, 18.0),
+        ));
+        tf
+    };
+
+    // Description
+    let desc_tf = unsafe {
+        let tf = NSTextField::labelWithString(&NSString::from_str(description), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad + 20.0, height / 2.0 - 12.0),
+            NSSize::new(width * 0.5, 16.0),
+        ));
+        tf
+    };
+
+    // Right side buttons
+    let btn_h = 22.0;
+    let btn_y = height / 2.0 - btn_h / 2.0;
+
+    let unload_btn = unsafe {
+        let b = NSButton::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(
+                NSPoint::new(width - pad - 60.0, btn_y),
+                NSSize::new(60.0, btn_h),
+            ),
+        );
+        b.setTitle(ns_string!("Unload"));
+        b.setBezelStyle(NSBezelStyle::Rounded);
+        b.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        b
+    };
+
+    let badge_x = width - pad - 60.0 - 8.0 - 72.0;
+    if is_default {
+        let badge = unsafe {
+            let tf = NSTextField::labelWithString(ns_string!("\u{2605} Default"), mtm);
+            tf.setFont(Some(&NSFont::boldSystemFontOfSize(10.0)));
+            tf.setTextColor(Some(&NSColor::whiteColor()));
+            tf.setAlignment(NSTextAlignment::Center);
+            tf.setWantsLayer(true);
+            if let Some(layer) = tf.layer() {
+                let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.478, 1.0, 1.0);
+                let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+                let _: () = msg_send![&*layer, setBackgroundColor: cg];
+                let _: () = msg_send![&*layer, setCornerRadius: 4.0f64];
+            }
+            tf.setFrame(NSRect::new(
+                NSPoint::new(badge_x, btn_y + 2.0),
+                NSSize::new(72.0, 18.0),
+            ));
+            tf
+        };
+        unsafe {
+            card.addSubview(&badge);
+        }
+    }
+
+    let status_x = badge_x - 8.0 - 55.0;
+    let status_color = if is_running {
+        NSColor::systemGreenColor()
+    } else {
+        NSColor::secondaryLabelColor()
+    };
+    let status_tf = unsafe {
+        let text = if is_running { "Running" } else { "Stopped" };
+        let tf = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        tf.setTextColor(Some(&status_color));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(status_x, btn_y + 3.0),
+            NSSize::new(55.0, 16.0),
+        ));
+        tf
+    };
+
+    unsafe {
+        card.addSubview(&dot);
+        card.addSubview(&name_tf);
+        card.addSubview(&desc_tf);
+        card.addSubview(&status_tf);
+        card.addSubview(&unload_btn);
+    }
+
+    unsafe { Retained::cast(card) }
+}
+
 fn build_model_downloader_panel(
     mtm: MainThreadMarker,
     width: f64,
@@ -2247,6 +2429,182 @@ fn build_downloader_card(
 }
 
 /// Build a single model card for the manager list
+/// Build a model row for the manager list (omlx style)
+fn build_manager_model_row(
+    mtm: MainThreadMarker,
+    name: &str,
+    description: &str,
+    is_default: bool,
+    is_running: bool,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Retained<NSView> {
+    let row = unsafe {
+        let v = NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)),
+        );
+        v
+    };
+
+    let pad = 16.0;
+
+    // Green dot — running status
+    let dot = unsafe {
+        let tf = NSTextField::labelWithString(ns_string!("\u{25CF}"), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+        let color = if is_running {
+            NSColor::systemGreenColor()
+        } else {
+            NSColor::secondaryLabelColor()
+        };
+        tf.setTextColor(Some(&color));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad, height / 2.0 - 5.0),
+            NSSize::new(12.0, 14.0),
+        ));
+        tf
+    };
+
+    // Model name (large)
+    let name_label = unsafe {
+        let tf = NSTextField::labelWithString(&NSString::from_str(name), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        tf.setTextColor(Some(&NSColor::labelColor()));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad + 18.0, height / 2.0 + 6.0),
+            NSSize::new(width - 300.0, 18.0),
+        ));
+        tf
+    };
+
+    // Description (small gray)
+    let desc_label = unsafe {
+        let tf = NSTextField::labelWithString(&NSString::from_str(description), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        tf.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        tf.setFrame(NSRect::new(
+            NSPoint::new(pad + 18.0, height / 2.0 - 14.0),
+            NSSize::new(width - 300.0, 16.0),
+        ));
+        tf
+    };
+
+    // Right side: status badge + action buttons
+    let right_x = width - 260.0;
+
+    // Status badge
+    let status_text = if is_running { "Running" } else { "Stopped" };
+    let status_badge = unsafe {
+        let tf = NSTextField::labelWithString(&NSString::from_str(status_text), mtm);
+        tf.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+        let color = if is_running {
+            NSColor::systemGreenColor()
+        } else {
+            NSColor::secondaryLabelColor()
+        };
+        tf.setTextColor(Some(&color));
+        tf.setAlignment(NSTextAlignment::Center);
+        tf.setFrame(NSRect::new(
+            NSPoint::new(right_x, height / 2.0 - 8.0),
+            NSSize::new(55.0, 16.0),
+        ));
+        tf
+    };
+
+    // Default badge
+    let default_badge = if is_default {
+        Some(unsafe {
+            let tf = NSTextField::labelWithString(ns_string!("\u{2605} Default"), mtm);
+            tf.setFont(Some(&NSFont::boldSystemFontOfSize(9.0)));
+            tf.setTextColor(Some(&NSColor::whiteColor()));
+            tf.setAlignment(NSTextAlignment::Center);
+            tf.setWantsLayer(true);
+            if let Some(layer) = tf.layer() {
+                let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.478, 1.0, 1.0);
+                let cg: *const std::ffi::c_void = msg_send![&bg, CGColor];
+                let _: () = msg_send![&*layer, setBackgroundColor: cg];
+                let _: () = msg_send![&*layer, setCornerRadius: 4.0f64];
+            }
+            tf.setFrame(NSRect::new(
+                NSPoint::new(right_x + 60.0, height / 2.0 - 8.0),
+                NSSize::new(62.0, 16.0),
+            ));
+            tf
+        })
+    } else {
+        None
+    };
+
+    // Set Default button (only if not default)
+    let set_default_btn = if !is_default {
+        Some(unsafe {
+            let b = NSButton::initWithFrame(
+                mtm.alloc(),
+                NSRect::new(
+                    NSPoint::new(right_x + 60.0, height / 2.0 - 10.0),
+                    NSSize::new(70.0, 20.0),
+                ),
+            );
+            b.setTitle(ns_string!("Set Default"));
+            b.setBezelStyle(NSBezelStyle::Rounded);
+            b.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+            b
+        })
+    } else {
+        None
+    };
+
+    // Unload button
+    let unload_btn = unsafe {
+        let b = NSButton::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(
+                NSPoint::new(width - pad - 60.0, height / 2.0 - 10.0),
+                NSSize::new(60.0, 20.0),
+            ),
+        );
+        b.setTitle(ns_string!("Unload"));
+        b.setBezelStyle(NSBezelStyle::Rounded);
+        b.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+        b
+    };
+
+    // Bottom separator line
+    let sep = unsafe {
+        let v = NSView::initWithFrame(
+            mtm.alloc(),
+            NSRect::new(NSPoint::new(pad, 0.0), NSSize::new(width - pad * 2.0, 1.0)),
+        );
+        v.setWantsLayer(true);
+        if let Some(layer) = v.layer() {
+            let c = NSColor::separatorColor();
+            let cg: *const std::ffi::c_void = msg_send![&c, CGColor];
+            let _: () = msg_send![&*layer, setBackgroundColor: cg];
+        }
+        v
+    };
+
+    unsafe {
+        row.addSubview(&dot);
+        row.addSubview(&name_label);
+        row.addSubview(&desc_label);
+        row.addSubview(&status_badge);
+        if let Some(ref badge) = default_badge {
+            row.addSubview(badge);
+        }
+        if let Some(ref btn) = set_default_btn {
+            row.addSubview(btn);
+        }
+        row.addSubview(&unload_btn);
+        row.addSubview(&sep);
+    }
+
+    row
+}
+
 fn build_model_card(
     mtm: MainThreadMarker,
     name: &str,
