@@ -943,6 +943,9 @@ pub async fn load_model_endpoint(
         .log_buffer
         .push("info", &format!("Model loaded: {}", model_id));
 
+    // Sync to app config so menubar shows correct model
+    state.sync_default_model(&model_id);
+
     Ok(Json(ModelInfo {
         id: model_id,
         object: "model".to_string(),
@@ -981,6 +984,9 @@ pub async fn set_default_model(
         .pool
         .set_default(&req.model)
         .map_err(|e| internal_error(&e))?;
+
+    // Sync to app config so menubar shows correct model
+    state.sync_default_model(&req.model);
 
     Ok(Json(serde_json::json!({
         "status": "ok",

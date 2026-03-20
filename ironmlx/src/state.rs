@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ironmlx_core::device::Device;
@@ -104,6 +104,28 @@ pub struct AppState {
     pub log_buffer: LogBuffer,
     pub downloads: Mutex<HashMap<String, DownloadStatus>>,
     pub benchmark_history: Mutex<Vec<BenchmarkResult>>,
+}
+
+impl AppState {
+    /// Sync the default model to the ironmlx-app config file
+    /// (~/Library/Application Support/ironmlx/app_config.json)
+    /// so the menubar app shows the correct model name.
+    pub fn sync_default_model(&self, model_id: &str) {
+        let config_path = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("ironmlx")
+            .join("app_config.json");
+
+        if let Ok(data) = std::fs::read_to_string(&config_path) {
+            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&data) {
+                json["last_model"] = serde_json::Value::String(model_id.to_string());
+                let _ = std::fs::write(
+                    &config_path,
+                    serde_json::to_string_pretty(&json).unwrap_or_default(),
+                );
+            }
+        }
+    }
 }
 
 /// Load model artifacts from a directory.
