@@ -80,8 +80,30 @@ define_class!(
             };
 
             match name.as_str() {
+                "scanLocalModels" => {
+                    // Scan HF cache directory for downloaded models
+                    let models_json = scan_local_models();
+                    if let Ok(guard) = window_lock().lock() {
+                        if let Some(ref ptr) = *guard {
+                            let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+                            if let Some(cv) = win.contentView() {
+                                let escaped = models_json
+                                    .replace('\\', "\\\\")
+                                    .replace('\'', "\\'")
+                                    .replace('\n', "\\n");
+                                let js = NSString::from_str(&format!(
+                                    "onLocalModelsScanned('{}')", escaped
+                                ));
+                                unsafe {
+                                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
+                                }
+                            }
+                        }
+                    }
+                }
                 "setLanguage" => handle_set_language(&body_str),
                 "setTheme" => handle_set_theme(&body_str),
+                "setDefaultModel" => handle_set_default_model(&body_str),
                 "fetchAPI" => {
                     // Bridge: JS asks Rust to fetch a local API endpoint
                     let port = crate::config::AppConfig::load().port;
@@ -205,6 +227,85 @@ fn handle_set_theme(theme: &str) {
     crate::dashboard::set_theme_from_web(native_appearance);
 }
 
+fn scan_local_models() -> String {
+    let cache_dir = crate::config::ironmlx_root().join("models");
+
+    let mut models = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("models--") {
+                continue;
+            }
+            // Convert "models--mlx-community--Qwen3-0.6B-4bit" -> "mlx-community/Qwen3-0.6B-4bit"
+            let model_id = name
+                .strip_prefix("models--")
+                .unwrap_or(&name)
+                .replacen("--", "/", 1);
+
+            // Calculate directory size
+            let dir_path = entry.path();
+            let size_bytes = dir_size(&dir_path);
+            let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+
+            // Try to detect model type from config.json
+            let model_type = detect_model_type(&dir_path);
+
+            models.push(format!(
+                "{{\"id\":\"{}\",\"size_mb\":{:.1},\"type\":\"{}\"}}",
+                model_id.replace('"', "\\\""),
+                size_mb,
+                model_type
+            ));
+        }
+    }
+    format!("[{}]", models.join(","))
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let ft = entry.file_type().unwrap_or_else(|_| entry.file_type().unwrap());
+            if ft.is_dir() {
+                total += dir_size(&entry.path());
+            } else {
+                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    total
+}
+
+fn detect_model_type(model_dir: &std::path::Path) -> &'static str {
+    // Look for config.json in snapshots
+    let snapshots = model_dir.join("snapshots");
+    if let Ok(entries) = std::fs::read_dir(&snapshots) {
+        for entry in entries.flatten() {
+            let config_path = entry.path().join("config.json");
+            if config_path.exists() {
+                if let Ok(data) = std::fs::read_to_string(&config_path) {
+                    if data.contains("\"vision") || data.contains("visual") || data.contains("image_size") {
+                        return "vlm";
+                    }
+                }
+                return "llm";
+            }
+        }
+    }
+    "llm"
+}
+
+fn handle_set_default_model(model_id: &str) {
+    let mut config = crate::config::AppConfig::load();
+    config.last_model = Some(model_id.to_string());
+    config.save();
+
+    // Update menubar to reflect new model name
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    crate::app_delegate::refresh_menu(mtm);
+}
+
 fn handle_set_language(lang_code: &str) {
     let lang: &'static str = match lang_code {
         "zh-Hans" => "zh",
@@ -292,9 +393,10 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
             NSBackingStoreType(2), // NSBackingStoreBuffered
             false,
         );
-        win.setTitle(&NSString::from_str("IRONMLX Web Dashboard"));
+        win.setTitle(&NSString::from_str(""));
         win.setMinSize(NSSize::new(700.0, 450.0));
         win.center();
+        unsafe { win.setReleasedWhenClosed(false) };
         win
     };
 
@@ -306,8 +408,10 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     let handler_obj = objc2::runtime::ProtocolObject::from_retained(handler);
     unsafe {
         let uc = config.userContentController();
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("scanLocalModels"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setLanguage"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setTheme"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setDefaultModel"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("getAppLogs"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("fetchAPI"));
     }
@@ -325,6 +429,7 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     // Load embedded HTML via loadHTMLString (no CORS issues with http:// API calls)
     let config = crate::config::AppConfig::load();
     let current_lang = config.language;
+    let default_model = config.last_model.clone().unwrap_or_default();
     let current_theme = match config.theme.as_deref() {
         Some("light") => "light",
         Some("dark") => "dark",
@@ -335,8 +440,12 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     let html_with_lang = html.replace(
         "/*__INIT_LANG__*/",
         &format!(
-            "window.__IRONMLX_PORT__ = {}; setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); initStatusPolling();",
-            port, current_lang, current_theme
+            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); initStatusPolling();{}",
+            port,
+            default_model,
+            current_lang,
+            current_theme,
+            if default_model.is_empty() { " showOnboarding();" } else { "" }
         ),
     );
 

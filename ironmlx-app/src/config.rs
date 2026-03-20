@@ -30,10 +30,16 @@ impl Default for AppConfig {
     }
 }
 
+/// Root directory for all ironmlx data: ~/.ironmlx/
+pub fn ironmlx_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironmlx")
+}
+
 impl AppConfig {
     pub fn config_path() -> PathBuf {
-        let home = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join("ironmlx").join("app_config.json")
+        ironmlx_root().join("config").join("app_config.json")
     }
 
     pub fn load() -> Self {

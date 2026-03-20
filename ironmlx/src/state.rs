@@ -108,12 +108,11 @@ pub struct AppState {
 
 impl AppState {
     /// Sync the default model to the ironmlx-app config file
-    /// (~/Library/Application Support/ironmlx/app_config.json)
+    /// (~/.ironmlx/config/app_config.json)
     /// so the menubar app shows the correct model name.
     pub fn sync_default_model(&self, model_id: &str) {
-        let config_path = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("ironmlx")
+        let config_path = crate::config::ironmlx_root()
+            .join("config")
             .join("app_config.json");
 
         if let Ok(data) = std::fs::read_to_string(&config_path)
@@ -141,8 +140,12 @@ fn resolve_model_path(model_dir: &str) -> Result<String, String> {
     // Looks like a HF repo ID (e.g., "mlx-community/Qwen3-0.6B-4bit")
     if model_dir.contains('/') {
         println!("  Downloading model: {}", model_dir);
-        let api =
-            hf_hub::api::sync::Api::new().map_err(|e| format!("HF API init failed: {}", e))?;
+        let models_dir = crate::config::ironmlx_root().join("models");
+        let _ = std::fs::create_dir_all(&models_dir);
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(models_dir)
+            .build()
+            .map_err(|e| format!("HF API init failed: {}", e))?;
         let repo = api.model(model_dir.to_string());
         // Download essential files
         for filename in &[

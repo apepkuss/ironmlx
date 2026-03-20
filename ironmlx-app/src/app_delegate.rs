@@ -96,6 +96,17 @@ define_class!(
                 }
                 // Refresh menu to show running state
                 refresh_menu(mtm);
+            } else {
+                // No model configured — show onboarding via Web Dashboard
+                let has_model = CONFIG
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| c.last_model.is_some())
+                    .unwrap_or(false);
+                if !has_model {
+                    crate::web_dashboard::show_web_dashboard(mtm);
+                }
             }
         }
 

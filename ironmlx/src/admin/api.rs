@@ -371,7 +371,10 @@ pub async fn hf_download(
     let state_clone = Arc::clone(&state);
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
+            let models_dir = crate::config::ironmlx_root().join("models");
+            let _ = std::fs::create_dir_all(&models_dir);
             let api = hf_hub::api::sync::ApiBuilder::new()
+                .with_cache_dir(models_dir)
                 .with_endpoint(endpoint.clone())
                 .build()
                 .map_err(|e| format!("Failed to build HF API: {e}"))?;

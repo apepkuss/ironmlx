@@ -794,6 +794,99 @@
 
   .btn-accent:hover { opacity: 0.85; }
 
+  /* ── Onboarding ── */
+  .onboarding {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 70vh;
+    text-align: center;
+    padding: 40px;
+  }
+
+  .onboarding-logo {
+    width: 64px;
+    height: 64px;
+    background: var(--accent);
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: 700;
+    font-size: 24px;
+    margin-bottom: 20px;
+  }
+
+  .onboarding h1 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+
+  .onboarding .subtitle {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-bottom: 36px;
+  }
+
+  .onboarding-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    width: 100%;
+    max-width: 440px;
+    text-align: left;
+  }
+
+  .onboarding-step {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    background: var(--card-bg);
+    border: 0.5px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    cursor: pointer;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  .onboarding-step:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  .step-num {
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .step-content {
+    flex: 1;
+  }
+
+  .step-content .step-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 3px;
+  }
+
+  .step-content .step-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
   /* ── GPU chart ── */
   .gpu-chart-container {
     background: var(--card-bg);
@@ -1051,6 +1144,38 @@
 <div class="content">
 
   <!-- Status Page -->
+  <!-- Onboarding Page (shown when no model is configured) -->
+  <div class="page" id="page-onboarding">
+    <div class="onboarding">
+      <div class="onboarding-logo">Fe</div>
+      <h1 data-i18n="welcome_title">Welcome to IronMLX</h1>
+      <div class="subtitle" data-i18n="welcome_subtitle">Get started in 3 simple steps</div>
+      <div class="onboarding-steps">
+        <div class="onboarding-step" onclick="navigateTo('models'); switchToTab('models-download');">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <div class="step-title" data-i18n="step1_title">Download a Model</div>
+            <div class="step-desc" data-i18n="step1_desc">Go to Models &rarr; Model Download, enter a HuggingFace model ID and click Download.</div>
+          </div>
+        </div>
+        <div class="onboarding-step" onclick="navigateTo('models');">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <div class="step-title" data-i18n="step2_title">Set Default Model</div>
+            <div class="step-desc" data-i18n="step2_desc">In Models &rarr; Model Manager, select the default model by clicking the radio button.</div>
+          </div>
+        </div>
+        <div class="onboarding-step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <div class="step-title" data-i18n="step3_title">Start the Server</div>
+            <div class="step-desc" data-i18n="step3_desc">Click "Start Server" from the menubar, or enable auto-start in Settings. The server will load your default model automatically.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="page active" id="page-status">
     <div class="page-title" data-i18n="nav_status">Status</div>
     <div class="page-subtitle" data-i18n="status_subtitle">Server status and resource usage overview.</div>
@@ -1109,7 +1234,7 @@
               <td>llm</td>
               <td>335.9 MB</td>
               <td><span class="status-dot ready"></span> <span data-i18n="status_ready">Ready</span></td>
-              <td><input type="radio" name="default-model" style="accent-color:var(--accent);"></td>
+              <td><input type="radio" name="default-model" value="Qwen3-0.6B-4bit" style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>
               <td><button class="icon-btn" onclick="openParamsModal('Qwen3-0.6B-4bit')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>
             </tr>
           </tbody>
@@ -1403,7 +1528,7 @@
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="ssd_cache_dir">SSD Cache Directory</div></div>
-        <div class="settings-row-right"><input type="text" value="~/Library/Caches/ironmlx/kv_cache" style="min-width:260px;"></div>
+        <div class="settings-row-right"><input type="text" value="~/.ironmlx/cache/kv_cache" style="min-width:260px;"></div>
       </div>
     </div>
 
@@ -1540,7 +1665,11 @@
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
       completion_batch: "Completion Batch Size", completion_batch_desc: "Batch size for the token generation phase.",
       init_cache_blocks: "Initial Cache Blocks", init_cache_blocks_desc: "Number of blocks pre-allocated at startup. Larger values reduce dynamic allocation overhead.",
-      save_settings: "Save Settings"
+      save_settings: "Save Settings",
+      welcome_title: "Welcome to IronMLX", welcome_subtitle: "Get started in 3 simple steps",
+      step1_title: "Download a Model", step1_desc: "Go to Models \u2192 Model Download, enter a HuggingFace model ID and click Download.",
+      step2_title: "Set Default Model", step2_desc: "In Models \u2192 Model Manager, select the default model by clicking the radio button.",
+      step3_title: "Start the Server", step3_desc: "Click \"Start Server\" from the menubar, or enable auto-start in Settings. The server will load your default model automatically."
     },
     "zh-Hans": {
       nav_status: "状态", nav_models: "模型", nav_benchmark: "基准测试", nav_logs: "日志", nav_settings: "设置",
@@ -1595,7 +1724,11 @@
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
       completion_batch: "补全批大小", completion_batch_desc: "Token 生成阶段的批处理大小。",
       init_cache_blocks: "初始缓存块数", init_cache_blocks_desc: "启动时预分配的块数。值越大，动态分配开销越小。",
-      save_settings: "保存设置"
+      save_settings: "保存设置",
+      welcome_title: "欢迎使用 IronMLX", welcome_subtitle: "只需 3 步即可开始",
+      step1_title: "下载模型", step1_desc: "前往 模型 \u2192 模型下载，输入 HuggingFace 模型 ID 并点击下载。",
+      step2_title: "设置默认模型", step2_desc: "在 模型 \u2192 模型管理 中，点击单选按钮选择默认模型。",
+      step3_title: "启动服务", step3_desc: "从菜单栏点击「启动服务」，或在设置中启用自动启动。服务将自动加载默认模型。"
     },
     "zh-Hant": {
       nav_status: "狀態", nav_models: "模型", nav_benchmark: "基準測試", nav_logs: "日誌", nav_settings: "設定",
@@ -1650,7 +1783,11 @@
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
       completion_batch: "補全批次大小", completion_batch_desc: "Token 生成階段的批次處理大小。",
       init_cache_blocks: "初始快取區塊數", init_cache_blocks_desc: "啟動時預先分配的區塊數。值越大，動態分配開銷越小。",
-      save_settings: "儲存設定"
+      save_settings: "儲存設定",
+      welcome_title: "歡迎使用 IronMLX", welcome_subtitle: "只需 3 步即可開始",
+      step1_title: "下載模型", step1_desc: "前往 模型 \u2192 模型下載，輸入 HuggingFace 模型 ID 並點擊下載。",
+      step2_title: "設定預設模型", step2_desc: "在 模型 \u2192 模型管理 中，點擊單選按鈕選擇預設模型。",
+      step3_title: "啟動服務", step3_desc: "從選單列點擊「啟動服務」，或在設定中啟用自動啟動。服務將自動載入預設模型。"
     },
     ja: {
       nav_status: "ステータス", nav_models: "モデル", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_settings: "設定",
@@ -1705,7 +1842,11 @@
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
       completion_batch: "補完バッチサイズ", completion_batch_desc: "トークン生成フェーズのバッチサイズ。",
       init_cache_blocks: "初期キャッシュブロック数", init_cache_blocks_desc: "起動時に事前割り当てするブロック数。値が大きいほど動的割り当てのオーバーヘッドが減少します。",
-      save_settings: "設定を保存"
+      save_settings: "設定を保存",
+      welcome_title: "IronMLX へようこそ", welcome_subtitle: "3つの簡単なステップで始めましょう",
+      step1_title: "モデルをダウンロード", step1_desc: "モデル \u2192 モデルダウンロードに移動し、HuggingFace モデル ID を入力してダウンロードをクリック。",
+      step2_title: "デフォルトモデルを設定", step2_desc: "モデル \u2192 モデル管理で、ラジオボタンをクリックしてデフォルトモデルを選択。",
+      step3_title: "サーバーを起動", step3_desc: "メニューバーから「サーバー起動」をクリック、または設定で自動起動を有効化。サーバーはデフォルトモデルを自動的に読み込みます。"
     },
     ko: {
       nav_status: "상태", nav_models: "모델", nav_benchmark: "벤치마크", nav_logs: "로그", nav_settings: "설정",
@@ -1760,7 +1901,11 @@
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
       completion_batch: "완성 배치 크기", completion_batch_desc: "토큰 생성 단계의 배치 크기.",
       init_cache_blocks: "초기 캐시 블록 수", init_cache_blocks_desc: "시작 시 사전 할당할 블록 수. 값이 클수록 동적 할당 오버헤드가 줄어듭니다.",
-      save_settings: "설정 저장"
+      save_settings: "설정 저장",
+      welcome_title: "IronMLX에 오신 것을 환영합니다", welcome_subtitle: "3단계로 간단하게 시작하세요",
+      step1_title: "모델 다운로드", step1_desc: "모델 \u2192 모델 다운로드로 이동하여 HuggingFace 모델 ID를 입력하고 다운로드를 클릭하세요.",
+      step2_title: "기본 모델 설정", step2_desc: "모델 \u2192 모델 관리에서 라디오 버튼을 클릭하여 기본 모델을 선택하세요.",
+      step3_title: "서버 시작", step3_desc: "메뉴 바에서 \"서버 시작\"을 클릭하거나 설정에서 자동 시작을 활성화하세요. 서버가 기본 모델을 자동으로 로드합니다."
     }
   };
 
@@ -1804,6 +1949,41 @@
   });
 
   // Model params modal
+  // Set default model via Rust bridge
+  // Navigation helpers
+  function navigateTo(page) {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    const navItem = document.querySelector('.nav-item[data-page="' + page + '"]');
+    if (navItem) navItem.classList.add('active');
+    const pageEl = document.getElementById('page-' + page);
+    if (pageEl) pageEl.classList.add('active');
+  }
+
+  function switchToTab(tabName) {
+    const parent = document.getElementById('page-models');
+    if (!parent) return;
+    parent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    parent.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    const btn = parent.querySelector('.tab-btn[data-tab="' + tabName + '"]');
+    if (btn) btn.classList.add('active');
+    const panel = document.getElementById('tab-' + tabName);
+    if (panel) panel.classList.add('active');
+  }
+
+  function showOnboarding() {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-onboarding').classList.add('active');
+  }
+
+  function setDefaultModel(modelId) {
+    window.__DEFAULT_MODEL__ = modelId;
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.setDefaultModel) {
+      window.webkit.messageHandlers.setDefaultModel.postMessage(modelId);
+    }
+  }
+
   function openParamsModal(name) {
     document.getElementById('modal-model-name').textContent = name;
     document.getElementById('modal-alias-input').value = name;
@@ -1931,8 +2111,38 @@
   // ── Model list sync ──
 
   function syncModelList() {
-    apiFetch('/v1/models');
-    // Also sync benchmark from existing table rows
+    // Scan local disk for downloaded models (not from API)
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scanLocalModels) {
+      window.webkit.messageHandlers.scanLocalModels.postMessage('scan');
+    }
+  }
+
+  function formatSize(mb) {
+    if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+    return mb.toFixed(0) + ' MB';
+  }
+
+  // Called from Rust with local model scan results
+  function onLocalModelsScanned(jsonStr) {
+    const dict = I18N[currentLang] || I18N.en;
+    let models = [];
+    try { models = JSON.parse(jsonStr); } catch(e) { return; }
+    const defaultModel = window.__DEFAULT_MODEL__ || '';
+    const tbody = document.querySelector('#tab-models-manage tbody');
+    if (tbody && models.length > 0) {
+      tbody.innerHTML = '';
+      models.forEach(m => {
+        const isDefault = (m.id === defaultModel);
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><div class="model-name"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.4;"><path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4.5L8 8M8 8L14 4.5M8 8V15" stroke="currentColor" stroke-width="1.2"/></svg> ' + m.id + '</div></td>'
+          + '<td>' + (m.type || 'llm') + '</td>'
+          + '<td>' + formatSize(m.size_mb) + '</td>'
+          + '<td><span class="status-dot ready"></span> <span>' + (dict.status_ready || 'Ready') + '</span></td>'
+          + '<td><input type="radio" name="default-model" value="' + m.id.replace(/"/g, '&quot;') + '" ' + (isDefault ? 'checked' : '') + ' style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
+          + '<td><button class="icon-btn" onclick="openParamsModal(\'' + m.id.replace(/'/g, "\\'") + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>';
+        tbody.appendChild(tr);
+      });
+    }
     syncBenchmarkModels();
   }
 
@@ -2137,27 +2347,6 @@
           document.getElementById('gpu-cache-val').textContent = formatMB(m.cache_mb);
           drawGpuChart();
         }
-      } else if (path === '/v1/models') {
-        const dict2 = I18N[currentLang] || I18N.en;
-        let models = [];
-        if (jsonStr && jsonStr !== 'null') {
-          try { const data = JSON.parse(jsonStr); models = (data.data || []).map(m => m.id); } catch(e) {}
-        }
-        // Update model manager table if API returned data
-        const tbody = document.querySelector('#tab-models-manage tbody');
-        if (tbody && models.length > 0) {
-          tbody.innerHTML = '';
-          models.forEach(id => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = '<td><div class="model-name"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.4;"><path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4.5L8 8M8 8L14 4.5M8 8V15" stroke="currentColor" stroke-width="1.2"/></svg> ' + id + '</div></td>'
-              + '<td>llm</td><td>--</td>'
-              + '<td><span class="status-dot ready"></span> <span>' + (dict2.status_ready || 'Ready') + '</span></td>'
-              + '<td><input type="radio" name="default-model" style="accent-color:var(--accent);"></td>'
-              + '<td><button class="icon-btn" onclick="openParamsModal(\'' + id.replace(/'/g, "\\'") + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>';
-            tbody.appendChild(tr);
-          });
-        }
-        syncBenchmarkModels();
       } else if (path === '/admin/api/logs') {
         const maxLines = parseInt(logLinesInput.value) || 500;
         if (!jsonStr || jsonStr === 'null' || jsonStr === '') {

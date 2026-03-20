@@ -3,6 +3,13 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+/// Root directory for all ironmlx data: ~/.ironmlx/
+pub fn ironmlx_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironmlx")
+}
+
 /// Server configuration with layered loading: CLI args > env vars > config file > defaults.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -142,10 +149,7 @@ impl ServerConfig {
     fn find_config_file() -> Option<PathBuf> {
         let candidates = [
             PathBuf::from("ironmlx.json"),
-            dirs::config_dir()
-                .unwrap_or_default()
-                .join("ironmlx")
-                .join("config.json"),
+            ironmlx_root().join("config").join("server_config.json"),
         ];
         candidates.into_iter().find(|p| p.exists())
     }
@@ -156,10 +160,7 @@ impl ServerConfig {
         if let Some(ref dir) = self.cache_dir {
             PathBuf::from(dir)
         } else {
-            dirs::cache_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join("ironmlx")
-                .join("kv_cache")
+            ironmlx_root().join("cache").join("kv_cache")
         }
     }
 
