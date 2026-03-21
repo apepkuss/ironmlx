@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::*;
 use objc2_foundation::*;
 use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKWebView, WKWebViewConfiguration};
@@ -144,6 +144,89 @@ define_class!(
                             }
                         }
                     }
+                }
+                "loadModel" | "forceLoadModel" => {
+                    let model_id = body_str.clone();
+                    let is_force = name == "forceLoadModel";
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let port = crate::config::AppConfig::load().port;
+                        let result = if !is_force {
+                            // Check memory first
+                            let model_size = estimate_model_size_mb(&model_id);
+                            let available = get_available_gpu_mb(port);
+                            if model_size > 0.0 && available > 0.0 && model_size > available {
+                                format!(
+                                    "{{\"warning\":true,\"model_id\":\"{}\",\"required_mb\":{:.0},\"available_mb\":{:.0}}}",
+                                    model_id.replace('"', "\\\""), model_size, available
+                                )
+                            } else {
+                                do_load_model(&model_id, port)
+                            }
+                        } else {
+                            do_load_model(&model_id, port)
+                        };
+                        eval_js_on_window(win_send, &format!(
+                            "onModelLoaded('{}')", result.replace('\'', "\\'")
+                        ));
+                    });
+                }
+                "unloadModel" => {
+                    let model_id = body_str.clone();
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let port = crate::config::AppConfig::load().port;
+                        let result = do_unload_model(&model_id, port);
+                        eval_js_on_window(win_send, &format!(
+                            "onModelUnloaded('{}')", result.replace('\'', "\\'")
+                        ));
+                    });
+                }
+                "syncLoadedModels" => {
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let port = crate::config::AppConfig::load().port;
+                        // Retry a few times — server may still be starting up
+                        let mut resp = String::new();
+                        for _ in 0..3 {
+                            if let Ok(r) = reqwest::blocking::get(
+                                format!("http://127.0.0.1:{}/v1/models", port)
+                            ) {
+                                if let Ok(text) = r.text() {
+                                    if text.contains("\"data\"") {
+                                        resp = text;
+                                        break;
+                                    }
+                                }
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+                        // Extract model IDs from response
+                        let ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&resp)
+                            .ok()
+                            .and_then(|v| v["data"].as_array().map(|arr| {
+                                arr.iter()
+                                    .filter_map(|m| m["id"].as_str().map(String::from))
+                                    .collect()
+                            }))
+                            .unwrap_or_default();
+                        let json = serde_json::to_string(&ids).unwrap_or_default();
+                        eval_js_on_window(win_send, &format!(
+                            "onLoadedModelsSynced('{}')", json.replace('\'', "\\'")
+                        ));
+                    });
                 }
                 "fetchAPI" => {
                     // Bridge: JS asks Rust to fetch a local API endpoint
@@ -342,6 +425,92 @@ fn detect_model_type(model_dir: &std::path::Path) -> &'static str {
     "llm"
 }
 
+/// Evaluate JS on the web dashboard window from any thread
+fn eval_js_on_window(win_send: Option<RawPtr>, js_code: &str) {
+    let js_owned = js_code.to_string();
+    let inner_send = win_send;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        if let Some(ref rp) = inner_send {
+            let win: &NSWindow = unsafe { &*(rp.0 as *const NSWindow) };
+            if let Some(cv) = win.contentView() {
+                let js = NSString::from_str(&js_owned);
+                unsafe {
+                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
+                }
+            }
+        }
+    });
+}
+
+/// Estimate model size in MB from local files
+fn estimate_model_size_mb(model_id: &str) -> f64 {
+    let models_dir = crate::config::ironmlx_root().join("models");
+    let dir_name = format!("models--{}", model_id.replace('/', "--"));
+    let path = models_dir.join(&dir_name);
+    if path.exists() {
+        dir_size(&path) as f64 / (1024.0 * 1024.0)
+    } else {
+        0.0
+    }
+}
+
+/// Get available GPU memory from health API
+fn get_available_gpu_mb(port: u16) -> f64 {
+    let resp = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", port))
+        .and_then(|r| r.text())
+        .unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
+    let active = v["memory"]["active_mb"].as_f64().unwrap_or(0.0);
+    // Try to get total GPU memory from device info
+    let total = v["memory"]["total_mb"].as_f64().unwrap_or(0.0);
+    if total > 0.0 {
+        total - active
+    } else {
+        // Fallback: assume 75% of system memory is available for GPU
+        0.0 // unknown, skip check
+    }
+}
+
+/// Load a model via backend API
+fn do_load_model(model_id: &str, port: u16) -> String {
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/models/load", port))
+        .json(&serde_json::json!({ "model_dir": model_id }))
+        .send()
+        .and_then(|r| r.text());
+    match resp {
+        Ok(_) => format!(
+            "{{\"success\":true,\"model_id\":\"{}\"}}",
+            model_id.replace('"', "\\\"")
+        ),
+        Err(e) => format!(
+            "{{\"error\":\"{}\"}}",
+            e.to_string().replace('"', "\\\"")
+        ),
+    }
+}
+
+/// Unload a model via backend API
+fn do_unload_model(model_id: &str, port: u16) -> String {
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/models/unload", port))
+        .json(&serde_json::json!({ "model": model_id }))
+        .send()
+        .and_then(|r| r.text());
+    match resp {
+        Ok(_) => format!(
+            "{{\"success\":true,\"model_id\":\"{}\"}}",
+            model_id.replace('"', "\\\"")
+        ),
+        Err(e) => format!(
+            "{{\"error\":\"{}\"}}",
+            e.to_string().replace('"', "\\\"")
+        ),
+    }
+}
+
 fn handle_set_default_model(model_id: &str) {
     let mut config = crate::config::AppConfig::load();
     config.last_model = Some(model_id.to_string());
@@ -383,6 +552,26 @@ pub fn show_web_dashboard(mtm: MainThreadMarker) {
     // Switch to Regular activation policy so window can receive keyboard input
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+
+    // Set up a main menu so fullscreen mode works correctly (menu bar + traffic lights)
+    if app.mainMenu().is_none() {
+        unsafe {
+            let menu_bar = NSMenu::new(mtm);
+            let app_menu_item = NSMenuItem::new(mtm);
+            let app_menu = NSMenu::new(mtm);
+            // Add "Quit" to the app menu
+            let quit_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Quit"),
+                Some(sel!(terminate:)),
+                &NSString::from_str("q"),
+            );
+            app_menu.addItem(&quit_item);
+            app_menu_item.setSubmenu(Some(&app_menu));
+            menu_bar.addItem(&app_menu_item);
+            app.setMainMenu(Some(&menu_bar));
+        }
+    }
 
     // Check if window already exists and is valid
     if let Ok(guard) = window_lock().lock() {
@@ -428,8 +617,7 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         NSWindowStyleMask::Titled.0
             | NSWindowStyleMask::Closable.0
             | NSWindowStyleMask::Miniaturizable.0
-            | NSWindowStyleMask::Resizable.0
-            | NSWindowStyleMask::FullSizeContentView.0,
+            | NSWindowStyleMask::Resizable.0,
     );
 
     let window = unsafe {
@@ -441,12 +629,13 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
             false,
         );
         win.setTitle(&NSString::from_str(""));
-        win.setTitlebarAppearsTransparent(true);
         win.setMinSize(NSSize::new(700.0, 450.0));
         win.center();
         unsafe { win.setReleasedWhenClosed(false) };
-        // Make titlebar auto-show on hover in fullscreen
-        let _: () = msg_send![&*win, setTitleVisibility: 1i64]; // NSWindowTitleHidden
+        // Ensure menu bar and traffic lights auto-show in fullscreen
+        let _: () = unsafe {
+            msg_send![&*win, setCollectionBehavior: 1u64 << 7] // NSWindowCollectionBehaviorFullScreenPrimary
+        };
         win
     };
 
@@ -463,6 +652,10 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setTheme"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setDefaultModel"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("deleteModels"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("loadModel"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("forceLoadModel"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("unloadModel"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("syncLoadedModels"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("getAppLogs"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("fetchAPI"));
     }
@@ -491,9 +684,14 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     let html_with_lang = html.replace(
         "/*__INIT_LANG__*/",
         &format!(
-            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); initStatusPolling();{}",
+            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling();{}",
             port,
             default_model,
+            if !default_model.is_empty() {
+                format!("window.__LOADED_MODELS__ = new Set(['{}']);", default_model)
+            } else {
+                String::new()
+            },
             current_lang,
             current_theme,
             if default_model.is_empty() { " showOnboarding();" } else { "" }

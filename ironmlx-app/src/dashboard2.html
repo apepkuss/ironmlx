@@ -54,7 +54,7 @@
     border-right: 0.5px solid var(--border);
     display: flex;
     flex-direction: column;
-    padding: 48px 12px 20px;
+    padding: 20px 12px;
     flex-shrink: 0;
   }
 
@@ -115,7 +115,7 @@
   .content {
     flex: 1;
     overflow-y: auto;
-    padding: 48px 32px 32px;
+    padding: 32px;
   }
 
   .page { display: none; }
@@ -731,6 +731,30 @@
   }
 
   .status-dot.ready { background: var(--green); }
+  .status-dot.loaded { background: var(--accent); }
+
+  .action-btn {
+    font-size: 11px;
+    padding: 3px 10px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .action-load {
+    background: var(--accent);
+    color: #fff;
+  }
+  .action-load:hover { opacity: 0.85; }
+  .action-unload {
+    background: #e53e3e;
+    color: #fff;
+  }
+  .action-unload:hover { opacity: 0.85; }
+  .action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
   .icon-btn {
     background: none;
@@ -1233,6 +1257,7 @@
               <th data-i18n="col_status">Status</th>
               <th data-i18n="col_default">Default</th>
               <th data-i18n="col_params">Params</th>
+              <th data-i18n="col_actions">Actions</th>
               <th style="width:48px;"></th>
             </tr>
           </thead>
@@ -1245,6 +1270,7 @@
               <td><span class="status-dot ready"></span> <span data-i18n="status_ready">Ready</span></td>
               <td><input type="radio" name="default-model" value="Qwen3-0.6B-4bit" style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>
               <td><button class="icon-btn" onclick="openParamsModal('Qwen3-0.6B-4bit')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>
+              <td><button class="action-btn action-load" onclick="toggleModelLoad('Qwen3-0.6B-4bit', this)" data-i18n="action_load">Load</button></td>
               <td><button class="icon-btn" onclick="deleteSingleModel('Qwen3-0.6B-4bit')" title="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round"/></svg></button></td>
             </tr>
           </tbody>
@@ -1632,6 +1658,9 @@
       batch_delete: "Batch Delete", cancel: "Cancel", selected_count: "{n} selected",
       confirm_delete_single: 'Delete model "{name}"? This cannot be undone.',
       confirm_delete_batch: "Delete {n} selected models? This cannot be undone.",
+      col_actions: "Actions", status_loaded: "Loaded", action_load: "Load", action_unload: "Unload",
+      action_loading: "Loading...", action_unloading: "Unloading...",
+      mem_warning: "Warning: Insufficient GPU memory.\n\nRequired: {required}\nAvailable: {available}\n\nLoading this model may cause performance issues or crashes.\n\nContinue anyway?",
       dl_from_hf: "Download from HuggingFace", repo_id: "Repo ID", optional: "(optional)", download: "Download",
       search_hf: "Search HuggingFace", trending: "Trending", most_downloads: "Most Downloads", recently_created: "Recently Created", recently_updated: "Recently Updated", most_params: "Most Params", least_params: "Least Params", search: "Search",
       model_param_settings: "Model Param Settings", context_size: "Context Size",
@@ -1694,6 +1723,9 @@
       batch_delete: "批量删除", cancel: "取消", selected_count: "已选 {n} 个",
       confirm_delete_single: '确定删除模型 "{name}"？此操作不可恢复。',
       confirm_delete_batch: "确定删除 {n} 个模型？此操作不可恢复。",
+      col_actions: "操作", status_loaded: "已加载", action_load: "加载", action_unload: "卸载",
+      action_loading: "加载中...", action_unloading: "卸载中...",
+      mem_warning: "警告：GPU 内存不足。\n\n所需：{required}\n可用：{available}\n\n加载此模型可能导致性能问题或崩溃。\n\n是否继续？",
       dl_from_hf: "从 HuggingFace 下载", repo_id: "仓库 ID", optional: "（可选）", download: "下载",
       search_hf: "搜索 HuggingFace", trending: "热门趋势", most_downloads: "下载最多", recently_created: "最近创建", recently_updated: "最近更新", most_params: "参数最多", least_params: "参数最少", search: "搜索",
       model_param_settings: "模型参数设置", context_size: "上下文大小",
@@ -1756,6 +1788,9 @@
       batch_delete: "批量刪除", cancel: "取消", selected_count: "已選 {n} 個",
       confirm_delete_single: '確定刪除模型 "{name}"？此操作不可復原。',
       confirm_delete_batch: "確定刪除 {n} 個模型？此操作不可復原。",
+      col_actions: "操作", status_loaded: "已載入", action_load: "載入", action_unload: "卸載",
+      action_loading: "載入中...", action_unloading: "卸載中...",
+      mem_warning: "警告：GPU 記憶體不足。\n\n所需：{required}\n可用：{available}\n\n載入此模型可能導致效能問題或當機。\n\n是否繼續？",
       dl_from_hf: "從 HuggingFace 下載", repo_id: "倉庫 ID", optional: "（可選）", download: "下載",
       search_hf: "搜尋 HuggingFace", trending: "熱門趨勢", most_downloads: "下載最多", recently_created: "最近建立", recently_updated: "最近更新", most_params: "參數最多", least_params: "參數最少", search: "搜尋",
       model_param_settings: "模型參數設定", context_size: "上下文大小",
@@ -1818,6 +1853,9 @@
       batch_delete: "一括削除", cancel: "キャンセル", selected_count: "{n} 件選択中",
       confirm_delete_single: 'モデル "{name}" を削除しますか？この操作は元に戻せません。',
       confirm_delete_batch: "{n} 件のモデルを削除しますか？この操作は元に戻せません。",
+      col_actions: "アクション", status_loaded: "ロード済み", action_load: "ロード", action_unload: "アンロード",
+      action_loading: "ロード中...", action_unloading: "アンロード中...",
+      mem_warning: "警告：GPU メモリが不足しています。\n\n必要：{required}\n利用可能：{available}\n\nこのモデルをロードするとパフォーマンスの問題やクラッシュが発生する可能性があります。\n\n続行しますか？",
       dl_from_hf: "HuggingFace からダウンロード", repo_id: "リポジトリ ID", optional: "（任意）", download: "ダウンロード",
       search_hf: "HuggingFace を検索", trending: "トレンド", most_downloads: "ダウンロード数順", recently_created: "最近作成順", recently_updated: "最近更新順", most_params: "パラメータ数順(多)", least_params: "パラメータ数順(少)", search: "検索",
       model_param_settings: "モデルパラメータ設定", context_size: "コンテキストサイズ",
@@ -1880,6 +1918,9 @@
       batch_delete: "일괄 삭제", cancel: "취소", selected_count: "{n}개 선택됨",
       confirm_delete_single: '모델 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
       confirm_delete_batch: "{n}개의 모델을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
+      col_actions: "작업", status_loaded: "로드됨", action_load: "로드", action_unload: "언로드",
+      action_loading: "로딩 중...", action_unloading: "언로드 중...",
+      mem_warning: "경고: GPU 메모리가 부족합니다.\n\n필요: {required}\n사용 가능: {available}\n\n이 모델을 로드하면 성능 문제나 충돌이 발생할 수 있습니다.\n\n계속하시겠습니까?",
       dl_from_hf: "HuggingFace에서 다운로드", repo_id: "저장소 ID", optional: "(선택 사항)", download: "다운로드",
       search_hf: "HuggingFace 검색", trending: "인기 트렌드", most_downloads: "다운로드순", recently_created: "최근 생성순", recently_updated: "최근 업데이트순", most_params: "매개변수 많은순", least_params: "매개변수 적은순", search: "검색",
       model_param_settings: "모델 매개변수 설정", context_size: "컨텍스트 크기",
@@ -2071,6 +2112,80 @@
     syncModelList();
   }
 
+  // ── Model Load / Unload ──
+  function toggleModelLoad(modelId, btn) {
+    const isLoaded = window.__LOADED_MODELS__.has(modelId);
+    if (isLoaded) {
+      unloadModel(modelId, btn);
+    } else {
+      loadModel(modelId, btn);
+    }
+  }
+
+  function loadModel(modelId, btn) {
+    const dict = I18N[currentLang] || I18N.en;
+    btn.disabled = true;
+    btn.textContent = dict.action_loading || 'Loading...';
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadModel) {
+      window.webkit.messageHandlers.loadModel.postMessage(modelId);
+    }
+  }
+
+  function unloadModel(modelId, btn) {
+    const dict = I18N[currentLang] || I18N.en;
+    btn.disabled = true;
+    btn.textContent = dict.action_unloading || 'Unloading...';
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.unloadModel) {
+      window.webkit.messageHandlers.unloadModel.postMessage(modelId);
+    }
+  }
+
+  // Called from Rust after load completes
+  function onModelLoaded(resultJson) {
+    let result = {};
+    try { result = JSON.parse(resultJson); } catch(e) { return; }
+    if (result.success) {
+      window.__LOADED_MODELS__.add(result.model_id);
+    } else if (result.warning) {
+      // Memory warning — ask user to confirm
+      const dict = I18N[currentLang] || I18N.en;
+      const msg = (dict.mem_warning || 'Warning: Insufficient GPU memory.\n\nRequired: {required}\nAvailable: {available}\n\nLoading this model may cause performance issues or crashes.\n\nContinue anyway?')
+        .replace('{required}', result.required_mb + ' MB')
+        .replace('{available}', result.available_mb + ' MB');
+      if (confirm(msg)) {
+        // Force load
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.forceLoadModel) {
+          window.webkit.messageHandlers.forceLoadModel.postMessage(result.model_id);
+        }
+        return; // don't refresh yet, wait for force load callback
+      }
+    } else if (result.error) {
+      alert(result.error);
+    }
+    syncModelList();
+  }
+
+  // Called from Rust after unload completes
+  function onModelUnloaded(resultJson) {
+    let result = {};
+    try { result = JSON.parse(resultJson); } catch(e) { return; }
+    if (result.success) {
+      window.__LOADED_MODELS__.delete(result.model_id);
+    } else if (result.error) {
+      alert(result.error);
+    }
+    syncModelList();
+  }
+
+  // Called from Rust to sync loaded models list on init
+  function onLoadedModelsSynced(jsonStr) {
+    let ids = [];
+    try { ids = JSON.parse(jsonStr); } catch(e) { return; }
+    // Merge with existing set (don't overwrite — default model is pre-set)
+    ids.forEach(id => window.__LOADED_MODELS__.add(id.trim()));
+    syncModelList();
+  }
+
   function openParamsModal(name) {
     document.getElementById('modal-model-name').textContent = name;
     document.getElementById('modal-alias-input').value = name;
@@ -2197,6 +2312,12 @@
 
   // ── Model list sync ──
 
+  function syncLoadedModels() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.syncLoadedModels) {
+      window.webkit.messageHandlers.syncLoadedModels.postMessage('sync');
+    }
+  }
+
   function syncModelList() {
     // Scan local disk for downloaded models (not from API)
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scanLocalModels) {
@@ -2209,6 +2330,9 @@
     return mb.toFixed(0) + ' MB';
   }
 
+  // Track loaded models
+  window.__LOADED_MODELS__ = new Set();
+
   // Called from Rust with local model scan results
   function onLocalModelsScanned(jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
@@ -2220,16 +2344,22 @@
       tbody.innerHTML = '';
       models.forEach(m => {
         const isDefault = (m.id === defaultModel);
+        const isLoaded = window.__LOADED_MODELS__.has(m.id);
         const escaped = m.id.replace(/"/g, '&quot;');
         const escapedSq = m.id.replace(/'/g, "\\'");
+        const statusDot = isLoaded ? 'loaded' : 'ready';
+        const statusText = isLoaded ? (dict.status_loaded || 'Loaded') : (dict.status_ready || 'Ready');
+        const actionClass = isLoaded ? 'action-unload' : 'action-load';
+        const actionText = isLoaded ? (dict.action_unload || 'Unload') : (dict.action_load || 'Load');
         const tr = document.createElement('tr');
         tr.innerHTML = '<td><input type="checkbox" class="model-checkbox" value="' + escaped + '" onchange="updateModelSelection()" style="accent-color:var(--accent);"></td>'
           + '<td><div class="model-name"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.4;"><path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4.5L8 8M8 8L14 4.5M8 8V15" stroke="currentColor" stroke-width="1.2"/></svg> ' + m.id + '</div></td>'
           + '<td>' + (m.type || 'llm') + '</td>'
           + '<td>' + formatSize(m.size_mb) + '</td>'
-          + '<td><span class="status-dot ready"></span> <span>' + (dict.status_ready || 'Ready') + '</span></td>'
+          + '<td><span class="status-dot ' + statusDot + '"></span> <span>' + statusText + '</span></td>'
           + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
           + '<td><button class="icon-btn" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
+          + '<td><button class="action-btn ' + actionClass + '" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '">' + actionText + '</button></td>'
           + '<td><button class="icon-btn" onclick="deleteSingleModel(\'' + escapedSq + '\')" title="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round"/></svg></button></td>';
         tbody.appendChild(tr);
       });
