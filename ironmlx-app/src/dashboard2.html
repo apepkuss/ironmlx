@@ -692,6 +692,7 @@
     width: 100%;
     border-collapse: collapse;
     font-size: 13px;
+    table-layout: fixed;
   }
 
   .data-table th {
@@ -703,12 +704,33 @@
     border-bottom: 1px solid var(--border);
     background: var(--bg);
     user-select: none;
+    position: relative;
+    white-space: nowrap;
   }
+  .data-table th.col-actions,
+  .data-table td:nth-child(8) {
+    border-left: 1px solid var(--border);
+  }
+
+  .data-table th[data-resizable]:hover {
+    border-left: none;
+    border-right: none;
+    background-image:
+      linear-gradient(to bottom, transparent, rgba(160,160,160,0.4) 50%, transparent) ,
+      linear-gradient(to bottom, transparent, rgba(160,160,160,0.4) 50%, transparent);
+    background-size: 3px 100%, 3px 100%;
+    background-position: left, right;
+    background-repeat: no-repeat;
+  }
+
 
   .data-table td {
     padding: 10px 12px;
     border-bottom: 0.5px solid var(--border);
     vertical-align: middle;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .data-table tr:last-child td {
@@ -1247,18 +1269,29 @@
           <button class="btn-primary" onclick="batchDeleteModels()" style="background:#e53e3e; font-size:12px; padding:4px 12px;" id="batch-delete-btn" data-i18n="batch_delete">Batch Delete</button>
           <button class="btn-primary" onclick="clearModelSelection()" style="background:var(--text-secondary); font-size:12px; padding:4px 12px;" data-i18n="cancel">Cancel</button>
         </div>
-        <table class="data-table">
+        <table class="data-table" id="model-table">
+          <colgroup>
+            <col style="width:32px;">
+            <col style="width:280px;">
+            <col style="width:70px;">
+            <col style="width:80px;">
+            <col style="width:80px;">
+            <col style="width:70px;">
+            <col style="width:60px;">
+            <col style="width:70px;">
+            <col style="width:48px;">
+          </colgroup>
           <thead>
             <tr>
-              <th style="width:32px;"><input type="checkbox" id="select-all-models" onchange="toggleSelectAllModels(this)" style="accent-color:var(--accent);"></th>
-              <th data-i18n="col_model">Model &#9650;</th>
-              <th data-i18n="col_type">Type</th>
-              <th data-i18n="col_size">Size</th>
-              <th data-i18n="col_status">Status</th>
-              <th data-i18n="col_default">Default</th>
-              <th data-i18n="col_params">Params</th>
-              <th data-i18n="col_actions">Actions</th>
-              <th style="width:48px;"></th>
+              <th><input type="checkbox" id="select-all-models" onchange="toggleSelectAllModels(this)" style="accent-color:var(--accent);"></th>
+              <th data-i18n="col_model" data-resizable="true">Model &#9650;</th>
+              <th data-i18n="col_type" data-resizable="true">Type</th>
+              <th data-i18n="col_size" data-resizable="true">Size</th>
+              <th data-i18n="col_status" data-resizable="true">Status</th>
+              <th data-i18n="col_default" data-resizable="true">Default</th>
+              <th data-i18n="col_params" data-resizable="true">Params</th>
+              <th data-i18n="col_actions" class="col-actions">Actions</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -2388,6 +2421,58 @@
     });
     if (current) benchSelect.value = current;
   }
+
+  // ── Column Resize ──
+  (function initColumnResize() {
+    const table = document.getElementById('model-table');
+    if (!table) return;
+    const cols = table.querySelectorAll('colgroup col');
+    const ths = table.querySelectorAll('thead th[data-resizable]');
+    const EDGE = 8; // pixels from right edge to trigger resize
+
+    let dragging = false, dragColIndex, dragStartX, dragStartWidth;
+
+    ths.forEach(th => {
+      th.addEventListener('mousemove', function(e) {
+        if (dragging) return;
+        const rect = th.getBoundingClientRect();
+        const nearEdge = (rect.right - e.clientX) < EDGE;
+        th.style.cursor = nearEdge ? 'col-resize' : '';
+      });
+
+      th.addEventListener('mouseleave', function() {
+        if (!dragging) th.style.cursor = '';
+      });
+
+      th.addEventListener('mousedown', function(e) {
+        const rect = th.getBoundingClientRect();
+        if ((rect.right - e.clientX) >= EDGE) return;
+
+        e.preventDefault();
+        dragging = true;
+        const headerCells = Array.from(th.parentElement.children);
+        dragColIndex = headerCells.indexOf(th);
+        dragStartX = e.clientX;
+        dragStartWidth = th.offsetWidth;
+      });
+    });
+
+    document.addEventListener('mousemove', function(e) {
+      if (!dragging) return;
+      const diff = e.clientX - dragStartX;
+      const newWidth = Math.max(40, dragStartWidth + diff);
+      if (cols[dragColIndex]) {
+        cols[dragColIndex].style.width = newWidth + 'px';
+      }
+    });
+
+    document.addEventListener('mouseup', function() {
+      if (dragging) {
+        dragging = false;
+        ths.forEach(t => t.style.cursor = '');
+      }
+    });
+  })();
 
   // ── GPU Memory Chart ──
   const gpuCanvas = document.getElementById('gpu-chart');
