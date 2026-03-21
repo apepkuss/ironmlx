@@ -428,7 +428,8 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         NSWindowStyleMask::Titled.0
             | NSWindowStyleMask::Closable.0
             | NSWindowStyleMask::Miniaturizable.0
-            | NSWindowStyleMask::Resizable.0,
+            | NSWindowStyleMask::Resizable.0
+            | NSWindowStyleMask::FullSizeContentView.0,
     );
 
     let window = unsafe {
@@ -440,9 +441,12 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
             false,
         );
         win.setTitle(&NSString::from_str(""));
+        win.setTitlebarAppearsTransparent(true);
         win.setMinSize(NSSize::new(700.0, 450.0));
         win.center();
         unsafe { win.setReleasedWhenClosed(false) };
+        // Make titlebar auto-show on hover in fullscreen
+        let _: () = msg_send![&*win, setTitleVisibility: 1i64]; // NSWindowTitleHidden
         win
     };
 
