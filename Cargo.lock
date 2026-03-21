@@ -1463,6 +1463,7 @@ dependencies = [
 name = "ironmlx-app"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "dirs",
  "dispatch2",
  "objc2",

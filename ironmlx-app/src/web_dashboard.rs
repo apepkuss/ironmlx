@@ -10,7 +10,7 @@ use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::*;
 use objc2_foundation::*;
-use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKWebView, WKWebViewConfiguration};
+use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKWebView, WKWebViewConfiguration};
 
 // ---------------------------------------------------------------------------
 // Singleton window
@@ -294,6 +294,71 @@ define_class!(
 );
 
 impl WebMessageHandler {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![mtm.alloc::<Self>(), init] }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WKUIDelegate — handle JS alert() / confirm() / prompt()
+// ---------------------------------------------------------------------------
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "WebUIDelegate"]
+    pub struct WebUIDelegate;
+
+    unsafe impl NSObjectProtocol for WebUIDelegate {}
+
+    unsafe impl WKUIDelegate for WebUIDelegate {
+        // alert()
+        #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
+        unsafe fn run_alert(
+            &self,
+            _webview: &WKWebView,
+            message: &NSString,
+            _frame: &AnyObject,
+            completion: &block2::Block<dyn Fn()>,
+        ) {
+            let msg = message.to_string();
+            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+            let alert = unsafe { NSAlert::new(mtm) };
+            alert.setMessageText(&NSString::from_str(&msg));
+            unsafe { alert.runModal() };
+            completion.call(());
+        }
+
+        // confirm()
+        #[unsafe(method(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:))]
+        unsafe fn run_confirm(
+            &self,
+            _webview: &WKWebView,
+            message: &NSString,
+            _frame: &AnyObject,
+            completion: &block2::Block<dyn Fn(objc2::runtime::Bool)>,
+        ) {
+            let msg = message.to_string();
+            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+            let alert = unsafe { NSAlert::new(mtm) };
+            alert.setMessageText(&NSString::from_str(&msg));
+            unsafe {
+                alert.addButtonWithTitle(&NSString::from_str("OK"));
+                alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            }
+            let response: isize = unsafe { msg_send![&*alert, runModal] };
+            // NSAlertFirstButtonReturn = 1000
+            let result = if response == 1000 {
+                objc2::runtime::Bool::YES
+            } else {
+                objc2::runtime::Bool::NO
+            };
+            completion.call((result,));
+        }
+    }
+);
+
+impl WebUIDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         unsafe { msg_send![mtm.alloc::<Self>(), init] }
     }
@@ -667,6 +732,12 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
             &config,
         );
         wv.setAutoresizingMask(NSAutoresizingMaskOptions(2 | 16)); // width + height flexible
+        // Set UI delegate for JS alert()/confirm()/prompt()
+        let ui_delegate = WebUIDelegate::new(mtm);
+        let ui_delegate_obj = objc2::runtime::ProtocolObject::from_retained(ui_delegate);
+        wv.setUIDelegate(Some(&ui_delegate_obj));
+        // Leak the delegate to keep it alive
+        std::mem::forget(ui_delegate_obj);
         wv
     };
 

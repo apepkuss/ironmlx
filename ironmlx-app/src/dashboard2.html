@@ -2034,6 +2034,8 @@
     // Sync dropdown
     const sel = document.getElementById('lang-select');
     if (sel) sel.value = i18nLang;
+    // Re-render model list to update action buttons text
+    syncModelList();
   }
 
   // Language select change handler
@@ -2041,6 +2043,7 @@
     const val = this.value;
     currentLang = val;
     applyI18n(val);
+    syncModelList();
     // Send to Rust via WKScriptMessageHandler
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.setLanguage) {
       window.webkit.messageHandlers.setLanguage.postMessage(val);
@@ -2428,16 +2431,15 @@
     if (!table) return;
     const cols = table.querySelectorAll('colgroup col');
     const ths = table.querySelectorAll('thead th[data-resizable]');
-    const EDGE = 8; // pixels from right edge to trigger resize
+    const EDGE = 8;
 
-    let dragging = false, dragColIndex, dragStartX, dragStartWidth;
+    let dragging = false, dragColIndex, dragStartX, dragStartWidth, dragNextIdx, dragNextStartWidth;
 
     ths.forEach(th => {
       th.addEventListener('mousemove', function(e) {
         if (dragging) return;
         const rect = th.getBoundingClientRect();
-        const nearEdge = (rect.right - e.clientX) < EDGE;
-        th.style.cursor = nearEdge ? 'col-resize' : '';
+        th.style.cursor = (rect.right - e.clientX) < EDGE ? 'col-resize' : '';
       });
 
       th.addEventListener('mouseleave', function() {
@@ -2447,23 +2449,39 @@
       th.addEventListener('mousedown', function(e) {
         const rect = th.getBoundingClientRect();
         if ((rect.right - e.clientX) >= EDGE) return;
-
         e.preventDefault();
         dragging = true;
         const headerCells = Array.from(th.parentElement.children);
         dragColIndex = headerCells.indexOf(th);
         dragStartX = e.clientX;
         dragStartWidth = th.offsetWidth;
+        // Find next resizable col
+        dragNextIdx = -1;
+        dragNextStartWidth = 0;
+        for (let i = dragColIndex + 1; i < headerCells.length; i++) {
+          if (headerCells[i].hasAttribute('data-resizable')) {
+            dragNextIdx = i;
+            dragNextStartWidth = headerCells[i].offsetWidth;
+            break;
+          }
+        }
       });
     });
 
     document.addEventListener('mousemove', function(e) {
       if (!dragging) return;
       const diff = e.clientX - dragStartX;
-      const newWidth = Math.max(40, dragStartWidth + diff);
-      if (cols[dragColIndex]) {
-        cols[dragColIndex].style.width = newWidth + 'px';
+      if (dragNextIdx >= 0) {
+        // Resize current and compensate with next resizable col
+        const newWidth = Math.max(40, dragStartWidth + diff);
+        const nextNewWidth = Math.max(40, dragNextStartWidth - diff);
+        // Only apply if both stay above minimum
+        if (newWidth > 40 && nextNewWidth > 40) {
+          cols[dragColIndex].style.width = newWidth + 'px';
+          cols[dragNextIdx].style.width = nextNewWidth + 'px';
+        }
       }
+      // If no next resizable col, don't allow resize (would push fixed cols)
     });
 
     document.addEventListener('mouseup', function() {
