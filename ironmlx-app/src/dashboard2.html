@@ -688,8 +688,12 @@
   .tab-panel.active { display: block; }
 
   /* ── Table ── */
+  .data-table-wrapper {
+    overflow-x: auto;
+  }
   .data-table {
     width: 100%;
+    min-width: 750px;
     border-collapse: collapse;
     font-size: 13px;
     table-layout: fixed;
@@ -710,6 +714,21 @@
   .data-table th.col-actions,
   .data-table td:nth-child(8) {
     border-left: 1px solid var(--border);
+    width: 110px !important;
+    min-width: 110px;
+    max-width: 110px;
+  }
+  .data-table th:first-child,
+  .data-table td:first-child {
+    width: 32px !important;
+    min-width: 32px;
+    max-width: 32px;
+  }
+  .data-table th:last-child,
+  .data-table td:last-child {
+    width: 48px !important;
+    min-width: 48px;
+    max-width: 48px;
   }
 
   .data-table th[data-resizable]:hover {
@@ -718,7 +737,7 @@
     background-image:
       linear-gradient(to bottom, transparent, rgba(160,160,160,0.4) 50%, transparent) ,
       linear-gradient(to bottom, transparent, rgba(160,160,160,0.4) 50%, transparent);
-    background-size: 3px 100%, 3px 100%;
+    background-size: 1.5px 100%, 1.5px 100%;
     background-position: left, right;
     background-repeat: no-repeat;
   }
@@ -762,6 +781,8 @@
     border-radius: 4px;
     cursor: pointer;
     font-weight: 500;
+    min-width: 80px;
+    text-align: center;
   }
   .action-load {
     background: var(--accent);
@@ -1269,17 +1290,18 @@
           <button class="btn-primary" onclick="batchDeleteModels()" style="background:#e53e3e; font-size:12px; padding:4px 12px;" id="batch-delete-btn" data-i18n="batch_delete">Batch Delete</button>
           <button class="btn-primary" onclick="clearModelSelection()" style="background:var(--text-secondary); font-size:12px; padding:4px 12px;" data-i18n="cancel">Cancel</button>
         </div>
+        <div class="data-table-wrapper">
         <table class="data-table" id="model-table">
           <colgroup>
-            <col style="width:32px;">
-            <col style="width:280px;">
-            <col style="width:70px;">
-            <col style="width:80px;">
-            <col style="width:80px;">
-            <col style="width:70px;">
-            <col style="width:60px;">
-            <col style="width:70px;">
-            <col style="width:48px;">
+            <col class="col-fixed" style="width:32px; min-width:32px; max-width:32px;">
+            <col style="width:30%;">
+            <col style="width:8%;">
+            <col style="width:10%;">
+            <col style="width:10%;">
+            <col style="width:8%;">
+            <col style="width:7%;">
+            <col class="col-fixed" style="width:110px; min-width:110px; max-width:110px;">
+            <col class="col-fixed" style="width:48px; min-width:48px; max-width:48px;">
           </colgroup>
           <thead>
             <tr>
@@ -1308,6 +1330,7 @@
             </tr>
           </tbody>
         </table>
+        </div>
       </div>
     </div>
 
