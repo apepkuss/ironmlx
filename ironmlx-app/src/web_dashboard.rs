@@ -10,7 +10,9 @@ use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::*;
 use objc2_foundation::*;
-use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKWebView, WKWebViewConfiguration};
+use objc2_web_kit::{
+    WKScriptMessage, WKScriptMessageHandler, WKUIDelegate, WKWebView, WKWebViewConfiguration,
+};
 
 // ---------------------------------------------------------------------------
 // Singleton window
@@ -162,7 +164,9 @@ define_class!(
                             if model_size > 0.0 && available > 0.0 && model_size > available {
                                 format!(
                                     "{{\"warning\":true,\"model_id\":\"{}\",\"required_mb\":{:.0},\"available_mb\":{:.0}}}",
-                                    model_id.replace('"', "\\\""), model_size, available
+                                    model_id.replace('"', "\\\""),
+                                    model_size,
+                                    available
                                 )
                             } else {
                                 do_load_model(&model_id, port)
@@ -170,9 +174,10 @@ define_class!(
                         } else {
                             do_load_model(&model_id, port)
                         };
-                        eval_js_on_window(win_send, &format!(
-                            "onModelLoaded('{}')", result.replace('\'', "\\'")
-                        ));
+                        eval_js_on_window(
+                            win_send,
+                            &format!("onModelLoaded('{}')", result.replace('\'', "\\'")),
+                        );
                     });
                 }
                 "unloadModel" => {
@@ -185,9 +190,10 @@ define_class!(
                     std::thread::spawn(move || {
                         let port = crate::config::AppConfig::load().port;
                         let result = do_unload_model(&model_id, port);
-                        eval_js_on_window(win_send, &format!(
-                            "onModelUnloaded('{}')", result.replace('\'', "\\'")
-                        ));
+                        eval_js_on_window(
+                            win_send,
+                            &format!("onModelUnloaded('{}')", result.replace('\'', "\\'")),
+                        );
                     });
                 }
                 "syncLoadedModels" => {
@@ -201,9 +207,10 @@ define_class!(
                         // Retry a few times — server may still be starting up
                         let mut resp = String::new();
                         for _ in 0..3 {
-                            if let Ok(r) = reqwest::blocking::get(
-                                format!("http://127.0.0.1:{}/v1/models", port)
-                            ) {
+                            if let Ok(r) = reqwest::blocking::get(format!(
+                                "http://127.0.0.1:{}/v1/models",
+                                port
+                            )) {
                                 if let Ok(text) = r.text() {
                                     if text.contains("\"data\"") {
                                         resp = text;
@@ -216,16 +223,19 @@ define_class!(
                         // Extract model IDs from response
                         let ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&resp)
                             .ok()
-                            .and_then(|v| v["data"].as_array().map(|arr| {
-                                arr.iter()
-                                    .filter_map(|m| m["id"].as_str().map(String::from))
-                                    .collect()
-                            }))
+                            .and_then(|v| {
+                                v["data"].as_array().map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|m| m["id"].as_str().map(String::from))
+                                        .collect()
+                                })
+                            })
                             .unwrap_or_default();
                         let json = serde_json::to_string(&ids).unwrap_or_default();
-                        eval_js_on_window(win_send, &format!(
-                            "onLoadedModelsSynced('{}')", json.replace('\'', "\\'")
-                        ));
+                        eval_js_on_window(
+                            win_send,
+                            &format!("onLoadedModelsSynced('{}')", json.replace('\'', "\\'")),
+                        );
                     });
                 }
                 "fetchAPI" => {
@@ -549,10 +559,7 @@ fn do_load_model(model_id: &str, port: u16) -> String {
             "{{\"success\":true,\"model_id\":\"{}\"}}",
             model_id.replace('"', "\\\"")
         ),
-        Err(e) => format!(
-            "{{\"error\":\"{}\"}}",
-            e.to_string().replace('"', "\\\"")
-        ),
+        Err(e) => format!("{{\"error\":\"{}\"}}", e.to_string().replace('"', "\\\"")),
     }
 }
 
@@ -569,10 +576,7 @@ fn do_unload_model(model_id: &str, port: u16) -> String {
             "{{\"success\":true,\"model_id\":\"{}\"}}",
             model_id.replace('"', "\\\"")
         ),
-        Err(e) => format!(
-            "{{\"error\":\"{}\"}}",
-            e.to_string().replace('"', "\\\"")
-        ),
+        Err(e) => format!("{{\"error\":\"{}\"}}", e.to_string().replace('"', "\\\"")),
     }
 }
 
