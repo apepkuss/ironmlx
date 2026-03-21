@@ -1217,25 +1217,35 @@
     <!-- Tab 1: Model Manager -->
     <div class="tab-panel active" id="tab-models-manage">
       <div class="card" style="padding:0;overflow:hidden;">
+        <!-- Batch action bar (hidden by default) -->
+        <div id="batch-action-bar" style="display:none; padding:8px 12px; margin-bottom:8px; background:var(--card-bg); border:1px solid var(--border); border-radius:8px; display:none; align-items:center; gap:12px;">
+          <span id="batch-selected-count" style="font-size:13px; color:var(--text-secondary);"></span>
+          <button class="btn-primary" onclick="batchDeleteModels()" style="background:#e53e3e; font-size:12px; padding:4px 12px;" id="batch-delete-btn" data-i18n="batch_delete">Batch Delete</button>
+          <button class="btn-primary" onclick="clearModelSelection()" style="background:var(--text-secondary); font-size:12px; padding:4px 12px;" data-i18n="cancel">Cancel</button>
+        </div>
         <table class="data-table">
           <thead>
             <tr>
+              <th style="width:32px;"><input type="checkbox" id="select-all-models" onchange="toggleSelectAllModels(this)" style="accent-color:var(--accent);"></th>
               <th data-i18n="col_model">Model &#9650;</th>
               <th data-i18n="col_type">Type</th>
               <th data-i18n="col_size">Size</th>
               <th data-i18n="col_status">Status</th>
               <th data-i18n="col_default">Default</th>
               <th data-i18n="col_params">Params</th>
+              <th style="width:48px;"></th>
             </tr>
           </thead>
           <tbody>
             <tr>
+              <td><input type="checkbox" class="model-checkbox" value="Qwen3-0.6B-4bit" onchange="updateModelSelection()" style="accent-color:var(--accent);"></td>
               <td><div class="model-name"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.4;"><path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4.5L8 8M8 8L14 4.5M8 8V15" stroke="currentColor" stroke-width="1.2"/></svg> Qwen3-0.6B-4bit</div></td>
               <td>llm</td>
               <td>335.9 MB</td>
               <td><span class="status-dot ready"></span> <span data-i18n="status_ready">Ready</span></td>
               <td><input type="radio" name="default-model" value="Qwen3-0.6B-4bit" style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>
               <td><button class="icon-btn" onclick="openParamsModal('Qwen3-0.6B-4bit')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>
+              <td><button class="icon-btn" onclick="deleteSingleModel('Qwen3-0.6B-4bit')" title="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round"/></svg></button></td>
             </tr>
           </tbody>
         </table>
@@ -1619,6 +1629,9 @@
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage and download models.", model_manager: "Model Manager", model_download: "Model Download",
       col_model: "Model \u25B2", col_type: "Type", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Ready",
+      batch_delete: "Batch Delete", cancel: "Cancel", selected_count: "{n} selected",
+      confirm_delete_single: 'Delete model "{name}"? This cannot be undone.',
+      confirm_delete_batch: "Delete {n} selected models? This cannot be undone.",
       dl_from_hf: "Download from HuggingFace", repo_id: "Repo ID", optional: "(optional)", download: "Download",
       search_hf: "Search HuggingFace", trending: "Trending", most_downloads: "Most Downloads", recently_created: "Recently Created", recently_updated: "Recently Updated", most_params: "Most Params", least_params: "Least Params", search: "Search",
       model_param_settings: "Model Param Settings", context_size: "Context Size",
@@ -1678,6 +1691,9 @@
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理和下载模型。", model_manager: "模型管理", model_download: "模型下载",
       col_model: "模型 \u25B2", col_type: "类型", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "就绪",
+      batch_delete: "批量删除", cancel: "取消", selected_count: "已选 {n} 个",
+      confirm_delete_single: '确定删除模型 "{name}"？此操作不可恢复。',
+      confirm_delete_batch: "确定删除 {n} 个模型？此操作不可恢复。",
       dl_from_hf: "从 HuggingFace 下载", repo_id: "仓库 ID", optional: "（可选）", download: "下载",
       search_hf: "搜索 HuggingFace", trending: "热门趋势", most_downloads: "下载最多", recently_created: "最近创建", recently_updated: "最近更新", most_params: "参数最多", least_params: "参数最少", search: "搜索",
       model_param_settings: "模型参数设置", context_size: "上下文大小",
@@ -1737,6 +1753,9 @@
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
       models_subtitle: "管理和下載模型。", model_manager: "模型管理", model_download: "模型下載",
       col_model: "模型 \u25B2", col_type: "類型", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "就緒",
+      batch_delete: "批量刪除", cancel: "取消", selected_count: "已選 {n} 個",
+      confirm_delete_single: '確定刪除模型 "{name}"？此操作不可復原。',
+      confirm_delete_batch: "確定刪除 {n} 個模型？此操作不可復原。",
       dl_from_hf: "從 HuggingFace 下載", repo_id: "倉庫 ID", optional: "（可選）", download: "下載",
       search_hf: "搜尋 HuggingFace", trending: "熱門趨勢", most_downloads: "下載最多", recently_created: "最近建立", recently_updated: "最近更新", most_params: "參數最多", least_params: "參數最少", search: "搜尋",
       model_param_settings: "模型參數設定", context_size: "上下文大小",
@@ -1796,6 +1815,9 @@
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
       models_subtitle: "モデルの管理とダウンロード。", model_manager: "モデル管理", model_download: "モデルダウンロード",
       col_model: "モデル \u25B2", col_type: "タイプ", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "準備完了",
+      batch_delete: "一括削除", cancel: "キャンセル", selected_count: "{n} 件選択中",
+      confirm_delete_single: 'モデル "{name}" を削除しますか？この操作は元に戻せません。',
+      confirm_delete_batch: "{n} 件のモデルを削除しますか？この操作は元に戻せません。",
       dl_from_hf: "HuggingFace からダウンロード", repo_id: "リポジトリ ID", optional: "（任意）", download: "ダウンロード",
       search_hf: "HuggingFace を検索", trending: "トレンド", most_downloads: "ダウンロード数順", recently_created: "最近作成順", recently_updated: "最近更新順", most_params: "パラメータ数順(多)", least_params: "パラメータ数順(少)", search: "検索",
       model_param_settings: "モデルパラメータ設定", context_size: "コンテキストサイズ",
@@ -1855,6 +1877,9 @@
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
       models_subtitle: "모델 관리 및 다운로드.", model_manager: "모델 관리", model_download: "모델 다운로드",
       col_model: "모델 \u25B2", col_type: "유형", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "준비됨",
+      batch_delete: "일괄 삭제", cancel: "취소", selected_count: "{n}개 선택됨",
+      confirm_delete_single: '모델 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
+      confirm_delete_batch: "{n}개의 모델을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
       dl_from_hf: "HuggingFace에서 다운로드", repo_id: "저장소 ID", optional: "(선택 사항)", download: "다운로드",
       search_hf: "HuggingFace 검색", trending: "인기 트렌드", most_downloads: "다운로드순", recently_created: "최근 생성순", recently_updated: "최근 업데이트순", most_params: "매개변수 많은순", least_params: "매개변수 적은순", search: "검색",
       model_param_settings: "모델 매개변수 설정", context_size: "컨텍스트 크기",
@@ -1982,6 +2007,68 @@
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.setDefaultModel) {
       window.webkit.messageHandlers.setDefaultModel.postMessage(modelId);
     }
+  }
+
+  // ── Model Selection & Deletion ──
+  function toggleSelectAllModels(el) {
+    document.querySelectorAll('.model-checkbox').forEach(cb => { cb.checked = el.checked; });
+    updateModelSelection();
+  }
+
+  function updateModelSelection() {
+    const dict = I18N[currentLang] || I18N.en;
+    const checked = document.querySelectorAll('.model-checkbox:checked');
+    const bar = document.getElementById('batch-action-bar');
+    const allCbs = document.querySelectorAll('.model-checkbox');
+    const selectAll = document.getElementById('select-all-models');
+    if (selectAll) selectAll.checked = allCbs.length > 0 && checked.length === allCbs.length;
+    if (checked.length > 0) {
+      bar.style.display = 'flex';
+      document.getElementById('batch-selected-count').textContent = (dict.selected_count || '{n} selected').replace('{n}', checked.length);
+    } else {
+      bar.style.display = 'none';
+    }
+  }
+
+  function clearModelSelection() {
+    document.querySelectorAll('.model-checkbox').forEach(cb => { cb.checked = false; });
+    const selectAll = document.getElementById('select-all-models');
+    if (selectAll) selectAll.checked = false;
+    document.getElementById('batch-action-bar').style.display = 'none';
+  }
+
+  function getSelectedModelIds() {
+    return Array.from(document.querySelectorAll('.model-checkbox:checked')).map(cb => cb.value);
+  }
+
+  function deleteSingleModel(modelId) {
+    const dict = I18N[currentLang] || I18N.en;
+    const msg = (dict.confirm_delete_single || 'Delete model "{name}"? This cannot be undone.').replace('{name}', modelId);
+    if (confirm(msg)) {
+      deleteModelsViaRust([modelId]);
+    }
+  }
+
+  function batchDeleteModels() {
+    const dict = I18N[currentLang] || I18N.en;
+    const ids = getSelectedModelIds();
+    if (ids.length === 0) return;
+    const msg = (dict.confirm_delete_batch || 'Delete {n} selected models? This cannot be undone.').replace('{n}', ids.length);
+    if (confirm(msg)) {
+      deleteModelsViaRust(ids);
+    }
+  }
+
+  function deleteModelsViaRust(modelIds) {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.deleteModels) {
+      window.webkit.messageHandlers.deleteModels.postMessage(JSON.stringify(modelIds));
+    }
+  }
+
+  // Called from Rust after deletion completes
+  function onModelsDeleted(resultJson) {
+    clearModelSelection();
+    syncModelList();
   }
 
   function openParamsModal(name) {
@@ -2133,13 +2220,17 @@
       tbody.innerHTML = '';
       models.forEach(m => {
         const isDefault = (m.id === defaultModel);
+        const escaped = m.id.replace(/"/g, '&quot;');
+        const escapedSq = m.id.replace(/'/g, "\\'");
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td><div class="model-name"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.4;"><path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4.5L8 8M8 8L14 4.5M8 8V15" stroke="currentColor" stroke-width="1.2"/></svg> ' + m.id + '</div></td>'
+        tr.innerHTML = '<td><input type="checkbox" class="model-checkbox" value="' + escaped + '" onchange="updateModelSelection()" style="accent-color:var(--accent);"></td>'
+          + '<td><div class="model-name"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.4;"><path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4.5L8 8M8 8L14 4.5M8 8V15" stroke="currentColor" stroke-width="1.2"/></svg> ' + m.id + '</div></td>'
           + '<td>' + (m.type || 'llm') + '</td>'
           + '<td>' + formatSize(m.size_mb) + '</td>'
           + '<td><span class="status-dot ready"></span> <span>' + (dict.status_ready || 'Ready') + '</span></td>'
-          + '<td><input type="radio" name="default-model" value="' + m.id.replace(/"/g, '&quot;') + '" ' + (isDefault ? 'checked' : '') + ' style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
-          + '<td><button class="icon-btn" onclick="openParamsModal(\'' + m.id.replace(/'/g, "\\'") + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>';
+          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
+          + '<td><button class="icon-btn" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
+          + '<td><button class="icon-btn" onclick="deleteSingleModel(\'' + escapedSq + '\')" title="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round"/></svg></button></td>';
         tbody.appendChild(tr);
       });
     }

@@ -61,9 +61,7 @@ impl EnginePool {
 
         // Create CacheManager
         let num_layers = model.num_layers();
-        let cache_dir = crate::config::ironmlx_root()
-            .join("cache")
-            .join("kv_cache");
+        let cache_dir = crate::config::ironmlx_root().join("cache").join("kv_cache");
         let model_hash = model_id.replace('/', "_");
         let ssd_config = ironmlx_core::cache::SSDStoreConfig {
             cache_dir,

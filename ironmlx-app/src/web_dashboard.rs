@@ -92,7 +92,8 @@ define_class!(
                                     .replace('\'', "\\'")
                                     .replace('\n', "\\n");
                                 let js = NSString::from_str(&format!(
-                                    "onLocalModelsScanned('{}')", escaped
+                                    "onLocalModelsScanned('{}')",
+                                    escaped
                                 ));
                                 unsafe {
                                     let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
@@ -104,6 +105,46 @@ define_class!(
                 "setLanguage" => handle_set_language(&body_str),
                 "setTheme" => handle_set_theme(&body_str),
                 "setDefaultModel" => handle_set_default_model(&body_str),
+                "deleteModels" => {
+                    // Delete model directories from ~/.ironmlx/models/
+                    let model_ids: Vec<String> =
+                        serde_json::from_str(&body_str).unwrap_or_default();
+                    let models_dir = crate::config::ironmlx_root().join("models");
+                    let mut deleted = Vec::new();
+                    let mut current_default = crate::config::AppConfig::load().last_model;
+                    for id in &model_ids {
+                        // model id "mlx-community/Qwen3-0.6B-4bit" -> dir "models--mlx-community--Qwen3-0.6B-4bit"
+                        let dir_name = format!("models--{}", id.replace('/', "--"));
+                        let path = models_dir.join(&dir_name);
+                        if path.exists() {
+                            let _ = std::fs::remove_dir_all(&path);
+                            deleted.push(id.clone());
+                        }
+                        // If deleted model was the default, clear it
+                        if current_default.as_deref() == Some(id.as_str()) {
+                            current_default = None;
+                            let mut config = crate::config::AppConfig::load();
+                            config.last_model = None;
+                            config.save();
+                        }
+                    }
+                    // Notify JS that deletion is complete, then rescan
+                    let result = serde_json::to_string(&deleted).unwrap_or_default();
+                    if let Ok(guard) = window_lock().lock() {
+                        if let Some(ref ptr) = *guard {
+                            let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+                            if let Some(cv) = win.contentView() {
+                                let js = NSString::from_str(&format!(
+                                    "onModelsDeleted('{}')",
+                                    result.replace('\'', "\\'")
+                                ));
+                                unsafe {
+                                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
+                                }
+                            }
+                        }
+                    }
+                }
                 "fetchAPI" => {
                     // Bridge: JS asks Rust to fetch a local API endpoint
                     let port = crate::config::AppConfig::load().port;
@@ -266,7 +307,9 @@ fn dir_size(path: &std::path::Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
-            let ft = entry.file_type().unwrap_or_else(|_| entry.file_type().unwrap());
+            let ft = entry
+                .file_type()
+                .unwrap_or_else(|_| entry.file_type().unwrap());
             if ft.is_dir() {
                 total += dir_size(&entry.path());
             } else {
@@ -285,7 +328,10 @@ fn detect_model_type(model_dir: &std::path::Path) -> &'static str {
             let config_path = entry.path().join("config.json");
             if config_path.exists() {
                 if let Ok(data) = std::fs::read_to_string(&config_path) {
-                    if data.contains("\"vision") || data.contains("visual") || data.contains("image_size") {
+                    if data.contains("\"vision")
+                        || data.contains("visual")
+                        || data.contains("image_size")
+                    {
                         return "vlm";
                     }
                 }
@@ -375,7 +421,7 @@ pub fn show_web_dashboard(mtm: MainThreadMarker) {
 // ---------------------------------------------------------------------------
 
 fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
-    let w = 1000.0;
+    let w = 1100.0;
     let h = 700.0;
 
     let style = NSWindowStyleMask(
@@ -412,6 +458,7 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setLanguage"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setTheme"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("setDefaultModel"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("deleteModels"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("getAppLogs"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("fetchAPI"));
     }
