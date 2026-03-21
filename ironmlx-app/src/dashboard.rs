@@ -682,6 +682,75 @@ pub fn t(key: &str) -> &str {
         ("zh", "theme_system") => "\u{1F5A5} \u{8DDF}\u{968F}\u{7CFB}\u{7EDF}",
         ("zh", "theme_light") => "\u{2600} \u{6D45}\u{8272}",
         ("zh", "theme_dark") => "\u{1F319} \u{6DF1}\u{8272}",
+        // Traditional Chinese
+        ("zh-Hant", "status") => "\u{72C0}\u{614B}",
+        ("zh-Hant", "server") => "\u{4F3A}\u{670D}\u{5668}",
+        ("zh-Hant", "uptime") => "\u{57F7}\u{884C}\u{6642}\u{9593}",
+        ("zh-Hant", "current_model") => "\u{7576}\u{524D}\u{6A21}\u{578B}",
+        ("zh-Hant", "gpu_memory") => "GPU \u{8A18}\u{61B6}\u{9AD4}",
+        ("zh-Hant", "active") => "\u{6D3B}\u{8E8D}:",
+        ("zh-Hant", "peak") => "\u{5CF0}\u{503C}:",
+        ("zh-Hant", "gpu_hint") => {
+            "GPU \u{8A18}\u{61B6}\u{9AD4}\u{5728}\u{9996}\u{6B21}\u{63A8}\u{7406}\u{6642}\u{5206}\u{914D}"
+        }
+        ("zh-Hant", "settings") => "\u{8A2D}\u{5B9A}",
+        ("zh-Hant", "model") => "\u{6A21}\u{578B}",
+        ("zh-Hant", "appearance") => "\u{5916}\u{89C0}",
+        ("zh-Hant", "host") => "\u{4E3B}\u{6A5F}",
+        ("zh-Hant", "port") => "\u{9023}\u{63A5}\u{57E0}",
+        ("zh-Hant", "endpoint") => "\u{670D}\u{52D9}\u{7AEF}\u{9EDE}",
+        ("zh-Hant", "language") => "\u{8A9E}\u{8A00}\u{8A2D}\u{5B9A}",
+        ("zh-Hant", "theme") => "\u{4E3B}\u{984C}\u{6A21}\u{5F0F}",
+        ("zh-Hant", "save_restart") => "\u{5132}\u{5B58}\u{4E26}\u{91CD}\u{555F}",
+        ("zh-Hant", "theme_system") => "\u{1F5A5} \u{8DDF}\u{96A8}\u{7CFB}\u{7D71}",
+        ("zh-Hant", "theme_light") => "\u{2600} \u{6DFA}\u{8272}",
+        ("zh-Hant", "theme_dark") => "\u{1F319} \u{6DF1}\u{8272}",
+        // Japanese
+        ("ja", "status") => "\u{30B9}\u{30C6}\u{30FC}\u{30BF}\u{30B9}",
+        ("ja", "server") => "\u{30B5}\u{30FC}\u{30D0}\u{30FC}",
+        ("ja", "uptime") => "\u{7A3C}\u{50CD}\u{6642}\u{9593}",
+        ("ja", "current_model") => "\u{73FE}\u{5728}\u{306E}\u{30E2}\u{30C7}\u{30EB}",
+        ("ja", "gpu_memory") => "GPU \u{30E1}\u{30E2}\u{30EA}",
+        ("ja", "active") => "\u{30A2}\u{30AF}\u{30C6}\u{30A3}\u{30D6}:",
+        ("ja", "peak") => "\u{30D4}\u{30FC}\u{30AF}:",
+        ("ja", "gpu_hint") => {
+            "GPU \u{30E1}\u{30E2}\u{30EA}\u{306F}\u{521D}\u{56DE}\u{63A8}\u{8AD6}\u{6642}\u{306B}\u{5272}\u{308A}\u{5F53}\u{3066}\u{3089}\u{308C}\u{307E}\u{3059}"
+        }
+        ("ja", "settings") => "\u{8A2D}\u{5B9A}",
+        ("ja", "model") => "\u{30E2}\u{30C7}\u{30EB}",
+        ("ja", "appearance") => "\u{5916}\u{89B3}",
+        ("ja", "host") => "\u{30DB}\u{30B9}\u{30C8}",
+        ("ja", "port") => "\u{30DD}\u{30FC}\u{30C8}",
+        ("ja", "endpoint") => "\u{30A8}\u{30F3}\u{30C9}\u{30DD}\u{30A4}\u{30F3}\u{30C8}",
+        ("ja", "language") => "\u{8A00}\u{8A9E}\u{8A2D}\u{5B9A}",
+        ("ja", "theme") => "\u{30C6}\u{30FC}\u{30DE}\u{30E2}\u{30FC}\u{30C9}",
+        ("ja", "save_restart") => "\u{4FDD}\u{5B58}\u{3057}\u{3066}\u{518D}\u{8D77}\u{52D5}",
+        ("ja", "theme_system") => "\u{1F5A5} \u{30B7}\u{30B9}\u{30C6}\u{30E0}",
+        ("ja", "theme_light") => "\u{2600} \u{30E9}\u{30A4}\u{30C8}",
+        ("ja", "theme_dark") => "\u{1F319} \u{30C0}\u{30FC}\u{30AF}",
+        // Korean
+        ("ko", "status") => "\u{C0C1}\u{D0DC}",
+        ("ko", "server") => "\u{C11C}\u{BC84}",
+        ("ko", "uptime") => "\u{AC00}\u{B3D9} \u{C2DC}\u{AC04}",
+        ("ko", "current_model") => "\u{D604}\u{C7AC} \u{BAA8}\u{B378}",
+        ("ko", "gpu_memory") => "GPU \u{BA54}\u{BAA8}\u{B9AC}",
+        ("ko", "active") => "\u{D65C}\u{C131}:",
+        ("ko", "peak") => "\u{D53C}\u{D06C}:",
+        ("ko", "gpu_hint") => {
+            "GPU \u{BA54}\u{BAA8}\u{B9AC}\u{B294} \u{CCB4}\u{C74C} \u{CD94}\u{B860} \u{C2DC} \u{D560}\u{B2F9}\u{B429}\u{B2C8}\u{B2E4}"
+        }
+        ("ko", "settings") => "\u{C124}\u{C815}",
+        ("ko", "model") => "\u{BAA8}\u{B378}",
+        ("ko", "appearance") => "\u{C678}\u{AD00}",
+        ("ko", "host") => "\u{D638}\u{C2A4}\u{D2B8}",
+        ("ko", "port") => "\u{D3EC}\u{D2B8}",
+        ("ko", "endpoint") => "\u{C5D4}\u{B4DC}\u{D3EC}\u{C778}\u{D2B8}",
+        ("ko", "language") => "\u{C5B8}\u{C5B4} \u{C124}\u{C815}",
+        ("ko", "theme") => "\u{D14C}\u{B9C8} \u{BAA8}\u{B4DC}",
+        ("ko", "save_restart") => "\u{C800}\u{C7A5} \u{D6C4} \u{C7AC}\u{C2DC}\u{C791}",
+        ("ko", "theme_system") => "\u{1F5A5} \u{C2DC}\u{C2A4}\u{D15C}",
+        ("ko", "theme_light") => "\u{2600} \u{B77C}\u{C774}\u{D2B8}",
+        ("ko", "theme_dark") => "\u{1F319} \u{B2E4}\u{D06C}",
         // English defaults
         (_, "status") => "Status",
         (_, "server") => "Server",
@@ -719,6 +788,51 @@ pub fn t(key: &str) -> &str {
         ("zh", "auto_start") => "\u{81EA}\u{542F}\u{52A8}\u{670D}\u{52A1}",
         ("zh", "menu_status_running") => "\u{670D}\u{52A1}\u{5668}\u{8FD0}\u{884C}\u{4E2D}",
         ("zh", "menu_status_stopped") => "\u{670D}\u{52A1}\u{5668}\u{5DF2}\u{505C}\u{6B62}",
+        // Traditional Chinese menu
+        ("zh-Hant", "menu_dashboard") => "Dashboard (Native)",
+        ("zh-Hant", "menu_web_dashboard") => "\u{5100}\u{8868}\u{677F}",
+        ("zh-Hant", "menu_chat") => "\u{8207} ironmlx \u{5C0D}\u{8A71}",
+        ("zh-Hant", "menu_stop") => "\u{505C}\u{6B62}\u{670D}\u{52D9}",
+        ("zh-Hant", "menu_start") => "\u{555F}\u{52D5}\u{670D}\u{52D9}",
+        ("zh-Hant", "menu_restart") => "\u{91CD}\u{555F}\u{670D}\u{52D9}",
+        ("zh-Hant", "menu_preferences") => "\u{504F}\u{597D}\u{8A2D}\u{5B9A}...",
+        ("zh-Hant", "menu_updates") => "\u{6AA2}\u{67E5}\u{66F4}\u{65B0}...",
+        ("zh-Hant", "menu_quit") => "\u{9000}\u{51FA}",
+        ("zh-Hant", "auto_start") => "\u{81EA}\u{52D5}\u{555F}\u{52D5}\u{670D}\u{52D9}",
+        ("zh-Hant", "menu_status_running") => "\u{4F3A}\u{670D}\u{5668}\u{57F7}\u{884C}\u{4E2D}",
+        ("zh-Hant", "menu_status_stopped") => "\u{4F3A}\u{670D}\u{5668}\u{5DF2}\u{505C}\u{6B62}",
+        // Japanese menu
+        ("ja", "menu_dashboard") => "Dashboard (Native)",
+        ("ja", "menu_web_dashboard") => "\u{30C0}\u{30C3}\u{30B7}\u{30E5}\u{30DC}\u{30FC}\u{30C9}",
+        ("ja", "menu_chat") => "ironmlx \u{3068}\u{30C1}\u{30E3}\u{30C3}\u{30C8}",
+        ("ja", "menu_stop") => "\u{30B5}\u{30FC}\u{30D0}\u{30FC}\u{505C}\u{6B62}",
+        ("ja", "menu_start") => "\u{30B5}\u{30FC}\u{30D0}\u{30FC}\u{958B}\u{59CB}",
+        ("ja", "menu_restart") => "\u{30B5}\u{30FC}\u{30D0}\u{30FC}\u{518D}\u{8D77}\u{52D5}",
+        ("ja", "menu_preferences") => "\u{74B0}\u{5883}\u{8A2D}\u{5B9A}...",
+        ("ja", "menu_updates") => {
+            "\u{30A2}\u{30C3}\u{30D7}\u{30C7}\u{30FC}\u{30C8}\u{78BA}\u{8A8D}..."
+        }
+        ("ja", "menu_quit") => "\u{7D42}\u{4E86}",
+        ("ja", "auto_start") => "\u{81EA}\u{52D5}\u{958B}\u{59CB}",
+        ("ja", "menu_status_running") => {
+            "\u{30B5}\u{30FC}\u{30D0}\u{30FC}: \u{5B9F}\u{884C}\u{4E2D}"
+        }
+        ("ja", "menu_status_stopped") => {
+            "\u{30B5}\u{30FC}\u{30D0}\u{30FC}: \u{505C}\u{6B62}\u{4E2D}"
+        }
+        // Korean menu
+        ("ko", "menu_dashboard") => "Dashboard (Native)",
+        ("ko", "menu_web_dashboard") => "\u{B300}\u{C2DC}\u{BCF4}\u{B4DC}",
+        ("ko", "menu_chat") => "ironmlx\u{C640} \u{CC44}\u{D305}",
+        ("ko", "menu_stop") => "\u{C11C}\u{BC84} \u{C815}\u{C9C0}",
+        ("ko", "menu_start") => "\u{C11C}\u{BC84} \u{C2DC}\u{C791}",
+        ("ko", "menu_restart") => "\u{C11C}\u{BC84} \u{C7AC}\u{C2DC}\u{C791}",
+        ("ko", "menu_preferences") => "\u{D658}\u{ACBD}\u{C124}\u{C815}...",
+        ("ko", "menu_updates") => "\u{C5C5}\u{B370}\u{C774}\u{D2B8} \u{D655}\u{C778}...",
+        ("ko", "menu_quit") => "\u{C885}\u{B8CC}",
+        ("ko", "auto_start") => "\u{C790}\u{B3D9} \u{C2DC}\u{C791}",
+        ("ko", "menu_status_running") => "\u{C11C}\u{BC84}: \u{C2E4}\u{D589} \u{C911}",
+        ("ko", "menu_status_stopped") => "\u{C11C}\u{BC84}: \u{C815}\u{C9C0}\u{B428}",
         (_, "menu_dashboard") => "Dashboard (Native)",
         (_, "menu_web_dashboard") => "Dashboard",
         (_, "menu_chat") => "Chat with ironmlx",
