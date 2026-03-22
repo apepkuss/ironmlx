@@ -194,6 +194,7 @@ impl EnginePool {
     }
 
     /// Get the default model ID.
+    #[allow(dead_code)]
     pub fn default_model_id(&self) -> Option<String> {
         self.default_model.read().unwrap().clone()
     }

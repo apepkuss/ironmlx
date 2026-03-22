@@ -234,7 +234,7 @@ pub fn load_model(model_dir: &str) -> Result<LoadModelResult, String> {
 
     // Load chat template (optional)
     let tc_path = dir.join("tokenizer_config.json");
-    let chat_template = if tc_path.exists() {
+    let mut chat_template = if tc_path.exists() {
         match ChatTemplate::from_file(&tc_path.to_string_lossy()) {
             Ok(ct) => {
                 println!("  Chat template: loaded");
@@ -249,6 +249,16 @@ pub fn load_model(model_dir: &str) -> Result<LoadModelResult, String> {
         println!("  Chat template: not found");
         None
     };
+
+    // Fallback: use built-in Qwen3 chat template for qwen3_5 models without one
+    if chat_template.is_none() && (model_type == "qwen3_5" || model_type == "qwen3") {
+        println!("  Chat template: using built-in Qwen3 template");
+        chat_template = Some(ChatTemplate::new(
+            include_str!("qwen3_chat_template.txt").to_string(),
+            "<|im_end|>".to_string(),
+            String::new(),
+        ));
+    }
 
     // Extract vision config for media processing
     let (patch_size, spatial_merge_size) = if let Some(vc) = raw.get("vision_config") {

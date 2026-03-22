@@ -1466,6 +1466,7 @@ dependencies = [
  "block2",
  "dirs",
  "dispatch2",
+ "hf-hub",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
@@ -1474,6 +1475,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "urlencoding",
 ]
 
 [[package]]

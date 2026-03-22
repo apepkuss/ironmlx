@@ -1179,6 +1179,15 @@
     border-bottom: 0.5px solid var(--border);
     border-radius: var(--radius) var(--radius) 0 0;
   }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .search-result-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 0; border-bottom: 0.5px solid var(--border);
+  }
+  .search-result-item:last-child { border-bottom: none; }
+  .search-result-name { font-weight: 600; font-size: 13px; color: var(--text); }
+  .search-result-meta { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+  .search-result-dl { font-size: 12px; padding: 4px 12px; }
 </style>
 </head>
 <body>
@@ -1349,13 +1358,22 @@
           <div class="dl-row">
             <div class="dl-field" style="flex:3;">
               <label data-i18n="repo_id">Repo ID</label>
-              <input type="text" placeholder="mlx-community/Llama-3-8B-4bit">
+              <input type="text" placeholder="mlx-community/Llama-3-8B-4bit" id="dl-repo-id" autocapitalize="off" autocorrect="off">
             </div>
             <div class="dl-field" style="flex:1.5;">
               <label>HF TOKEN <span style="color:var(--text-tertiary);font-weight:400;" data-i18n="optional">(optional)</span></label>
-              <input type="text" placeholder="hf_...">
+              <input type="text" placeholder="hf_..." id="dl-hf-token" autocapitalize="off" autocorrect="off">
             </div>
-            <button class="btn-accent"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="white" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="white" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg> <span data-i18n="download">Download</span></button>
+            <button class="btn-accent" id="dl-download-btn" onclick="startDownload()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v7M4.5 6.5L7 9l2.5-2.5" stroke="white" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 9.5v2h9v-2" stroke="white" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg> <span data-i18n="download">Download</span></button>
+          </div>
+          <div id="dl-progress" style="display:none; margin-top:12px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; font-size:12px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span id="dl-progress-icon" style="animation:spin 1s linear infinite;">&#x21BB;</span>
+              <span id="dl-progress-text">Downloading...</span>
+            </div>
+            <div style="margin-top:8px; height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
+              <div id="dl-progress-bar" style="height:100%; width:0%; background:var(--accent); border-radius:2px; transition:width 0.3s;"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -1369,20 +1387,19 @@
         <div style="padding:16px 20px;">
           <div class="dl-row">
             <div class="dl-field" style="flex:3;">
-              <input type="text" data-i18n-placeholder="search_hf_placeholder" placeholder="Search models on HuggingFace...">
+              <input type="text" data-i18n-placeholder="search_hf_placeholder" placeholder="Search models on HuggingFace..." id="search-hf-query" autocapitalize="off" autocorrect="off">
             </div>
             <div class="dl-field" style="flex:1;min-width:120px;">
-              <select>
-                <option data-i18n="trending">Trending</option>
-                <option data-i18n="most_downloads" selected>Most Downloads</option>
-                <option data-i18n="recently_created">Recently Created</option>
-                <option data-i18n="recently_updated">Recently Updated</option>
-                <option data-i18n="most_params">Most Params</option>
-                <option data-i18n="least_params">Least Params</option>
+              <select id="search-hf-sort">
+                <option value="trending" data-i18n="trending">Trending</option>
+                <option value="downloads" data-i18n="most_downloads" selected>Most Downloads</option>
+                <option value="created" data-i18n="recently_created">Recently Created</option>
+                <option value="modified" data-i18n="recently_updated">Recently Updated</option>
               </select>
             </div>
-            <button class="btn-accent"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="white" stroke-width="1.3"/><line x1="9" y1="9" x2="12.5" y2="12.5" stroke="white" stroke-width="1.3" stroke-linecap="round"/></svg> <span data-i18n="search">Search</span></button>
+            <button class="btn-accent" onclick="searchHuggingFace()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="white" stroke-width="1.3"/><line x1="9" y1="9" x2="12.5" y2="12.5" stroke="white" stroke-width="1.3" stroke-linecap="round"/></svg> <span data-i18n="search">Search</span></button>
           </div>
+          <div id="search-results" style="margin-top:12px;"></div>
         </div>
       </div>
     </div>
@@ -1624,15 +1641,15 @@
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="host">Host</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div></div>
-        <div class="settings-row-right"><select><option>localhost (127.0.0.1)</option><option data-i18n="all_interfaces">all interfaces (0.0.0.0)</option></select></div>
+        <div class="settings-row-right"><select id="cfg-host"><option value="127.0.0.1">localhost (127.0.0.1)</option><option value="0.0.0.0" data-i18n="all_interfaces">all interfaces (0.0.0.0)</option></select></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="port">Port</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div></div>
-        <div class="settings-row-right"><input type="number" value="8080"></div>
+        <div class="settings-row-right"><input type="number" value="8080" id="cfg-port"></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="log_level">Log Level</div></div>
-        <div class="settings-row-right"><select><option selected>info (default)</option><option>debug</option><option>warning</option><option>error</option></select></div>
+        <div class="settings-row-right"><select id="cfg-log-level"><option value="info" selected>info (default)</option><option value="debug">debug</option><option value="warning">warning</option><option value="error">error</option></select></div>
       </div>
     </div>
 
@@ -1677,19 +1694,19 @@
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_total">Memory Limit (Total)</div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Total memory limit for the server process (model + KV Cache + overhead). Exceeding this triggers LRU model eviction. Auto: system memory - 8GB, set 0 to disable.</div></div>
-        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24"><span class="slider-value">Auto (24GB)</span></div></div>
+        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-total-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24" id="cfg-mem-total"><span class="slider-value">Auto (24GB)</span></div></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_model">Memory Limit (Model Only)</div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Max memory for loaded models. Set 0 to disable.</div></div>
-        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);"> <span data-i18n="auto">Auto</span></label><span class="slider-value">Auto (22GB)</span></div>
+        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><span class="slider-value">Auto (22GB)</span></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="hot_cache">Hot Cache Limit (Memory Cache)</div><div class="settings-row-desc" data-i18n="hot_cache_desc">In-memory cache for frequently accessed KV Cache blocks. Reduces SSD I/O latency. 0 = disabled.</div></div>
-        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="64" value="0"><span class="slider-value">Off (0GB)</span></div></div>
+        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="64" value="0" id="cfg-hot-cache"><span class="slider-value">Off (0GB)</span></div></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="cold_cache">Cold Cache Limit (SSD Cache)</div><div class="settings-row-desc" data-i18n="cold_cache_desc">Persistent SSD storage for evicted KV Cache blocks.</div></div>
-        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="100" value="10"><span class="slider-value">10% (74GB)</span></div></div>
+        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="100" value="10" id="cfg-cold-cache"><span class="slider-value">10% (74GB)</span></div></div>
       </div>
     </div>
 
@@ -1701,11 +1718,11 @@
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="enable_cache">Enable Cache</div></div>
-        <div class="settings-row-right"><label class="toggle"><input type="checkbox" checked><span class="toggle-slider"></span></label></div>
+        <div class="settings-row-right"><label class="toggle"><input type="checkbox" checked id="cfg-cache-enable"><span class="toggle-slider"></span></label></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="ssd_cache_dir">SSD Cache Directory</div></div>
-        <div class="settings-row-right"><input type="text" value="~/.ironmlx/cache/kv_cache" style="min-width:260px;"></div>
+        <div class="settings-row-right"><input type="text" value="~/.ironmlx/cache/kv_cache" style="min-width:260px;" id="cfg-cache-dir"></div>
       </div>
     </div>
 
@@ -1724,11 +1741,11 @@
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="max_sequences">Max Sequences</div><div class="settings-row-desc" data-i18n="max_sequences_desc">Maximum number of concurrent parallel requests.</div></div>
-        <div class="settings-row-right"><input type="number" value="8" style="min-width:80px;"></div>
+        <div class="settings-row-right"><input type="number" value="8" style="min-width:80px;" id="cfg-max-sequences"></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="completion_batch">Completion Batch Size</div><div class="settings-row-desc" data-i18n="completion_batch_desc">Batch size for the token generation phase.</div></div>
-        <div class="settings-row-right"><input type="number" value="8" style="min-width:80px;"></div>
+        <div class="settings-row-right"><input type="number" value="8" style="min-width:80px;" id="cfg-completion-batch"></div>
       </div>
       <div style="padding:10px 20px 4px;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-tertiary);border-bottom:0.5px solid var(--border);">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style="opacity:0.5;"><path d="M2 4C2 2.8 4.2 1.5 7 1.5C9.8 1.5 12 2.8 12 4V10C12 11.2 9.8 12.5 7 12.5C4.2 12.5 2 11.2 2 10V4Z" stroke="currentColor" stroke-width="1.1"/><ellipse cx="7" cy="4" rx="5" ry="2" stroke="currentColor" stroke-width="1.1"/></svg>
@@ -1736,13 +1753,13 @@
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="init_cache_blocks">Initial Cache Blocks</div><div class="settings-row-desc" data-i18n="init_cache_blocks_desc">Number of blocks pre-allocated at startup. Larger values reduce dynamic allocation overhead.</div></div>
-        <div class="settings-row-right"><input type="number" value="256" style="min-width:80px;"></div>
+        <div class="settings-row-right"><input type="number" value="256" style="min-width:80px;" id="cfg-init-cache-blocks"></div>
       </div>
     </div>
 
     <!-- Save button -->
     <div style="display:flex;justify-content:flex-end;margin-top:8px;">
-      <button class="btn-accent" style="padding:10px 28px;" data-i18n="save_settings">Save Settings</button>
+      <button class="btn-accent" style="padding:10px 28px;" data-i18n="save_settings" onclick="saveSettings()">Save Settings</button>
     </div>
 
   </div>
@@ -1765,23 +1782,23 @@
         </div>
         <div class="modal-field" style="flex:1;">
           <label data-i18n="model_type">Model Type</label>
-          <select><option data-i18n="auto_detect">Auto Detect</option><option>LLM</option><option>VLM</option><option>Embedding</option><option>Reranker</option></select>
+          <select id="modal-model-type"><option value="auto" data-i18n="auto_detect">Auto Detect</option><option value="llm">LLM</option><option value="vlm">VLM</option><option value="embedding">Embedding</option><option value="reranker">Reranker</option></select>
         </div>
       </div>
       <div class="modal-row">
-        <div class="modal-field"><label>CONTEXT SIZE</label><input type="text" placeholder="4096"></div>
-        <div class="modal-field"><label>MAX TOKENS</label><input type="text" placeholder="256"></div>
-        <div class="modal-field"><label>TEMPERATURE</label><input type="text" placeholder="1.0"></div>
+        <div class="modal-field"><label>CONTEXT SIZE</label><input type="text" placeholder="4096" id="modal-context-size"></div>
+        <div class="modal-field"><label>MAX TOKENS</label><input type="text" placeholder="256" id="modal-max-tokens"></div>
+        <div class="modal-field"><label>TEMPERATURE</label><input type="text" placeholder="1.0" id="modal-temperature"></div>
       </div>
       <div class="modal-row">
-        <div class="modal-field"><label>TOP P</label><input type="text" placeholder="1.0"></div>
-        <div class="modal-field"><label>TOP K</label><input type="text" placeholder="-1"></div>
-        <div class="modal-field"><label>REPEAT PENALTY</label><input type="text" placeholder="1.0"></div>
+        <div class="modal-field"><label>TOP P</label><input type="text" placeholder="1.0" id="modal-top-p"></div>
+        <div class="modal-field"><label>TOP K</label><input type="text" placeholder="-1" id="modal-top-k"></div>
+        <div class="modal-field"><label>REPEAT PENALTY</label><input type="text" placeholder="1.0" id="modal-repeat-penalty"></div>
       </div>
     </div>
     <div class="modal-footer">
       <button class="btn-cancel" onclick="closeParamsModal()" data-i18n="cancel">Cancel</button>
-      <button class="btn-accent" onclick="closeParamsModal()" style="padding:8px 24px;" data-i18n="save">Save</button>
+      <button class="btn-accent" onclick="saveModelParams()" style="padding:8px 24px;" data-i18n="save">Save</button>
     </div>
   </div>
 </div>
@@ -1860,6 +1877,10 @@
       completion_batch: "Completion Batch Size", completion_batch_desc: "Batch size for the token generation phase.",
       init_cache_blocks: "Initial Cache Blocks", init_cache_blocks_desc: "Number of blocks pre-allocated at startup. Larger values reduce dynamic allocation overhead.",
       save_settings: "Save Settings",
+      settings_saved: "Settings saved successfully.",
+      params_saved: "Model parameters saved.",
+      restart_confirm: "Some settings require a server restart to take effect. Restart now?",
+      server_restarted: "Server has been restarted successfully.",
       welcome_title: "Welcome to IronMLX", welcome_subtitle: "Get started in 3 simple steps",
       step1_title: "Download a Model", step1_desc: "Go to Models \u2192 Model Download, enter a HuggingFace model ID and click Download.",
       step2_title: "Set Default Model", step2_desc: "In Models \u2192 Model Manager, select the default model by clicking the radio button.",
@@ -1936,6 +1957,10 @@
       completion_batch: "补全批大小", completion_batch_desc: "Token 生成阶段的批处理大小。",
       init_cache_blocks: "初始缓存块数", init_cache_blocks_desc: "启动时预分配的块数。值越大，动态分配开销越小。",
       save_settings: "保存设置",
+      settings_saved: "设置已保存。",
+      params_saved: "模型参数已保存。",
+      restart_confirm: "部分设置需要重启服务才能生效。是否立即重启？",
+      server_restarted: "服务已重启成功。",
       welcome_title: "欢迎使用 IronMLX", welcome_subtitle: "只需 3 步即可开始",
       step1_title: "下载模型", step1_desc: "前往 模型 \u2192 模型下载，输入 HuggingFace 模型 ID 并点击下载。",
       step2_title: "设置默认模型", step2_desc: "在 模型 \u2192 模型管理 中，点击单选按钮选择默认模型。",
@@ -2012,6 +2037,10 @@
       completion_batch: "補全批次大小", completion_batch_desc: "Token 生成階段的批次處理大小。",
       init_cache_blocks: "初始快取區塊數", init_cache_blocks_desc: "啟動時預先分配的區塊數。值越大，動態分配開銷越小。",
       save_settings: "儲存設定",
+      settings_saved: "設定已儲存。",
+      params_saved: "模型參數已儲存。",
+      restart_confirm: "部分設定需要重啟服務才能生效。是否立即重啟？",
+      server_restarted: "服務已重啟成功。",
       welcome_title: "歡迎使用 IronMLX", welcome_subtitle: "只需 3 步即可開始",
       step1_title: "下載模型", step1_desc: "前往 模型 \u2192 模型下載，輸入 HuggingFace 模型 ID 並點擊下載。",
       step2_title: "設定預設模型", step2_desc: "在 模型 \u2192 模型管理 中，點擊單選按鈕選擇預設模型。",
@@ -2088,6 +2117,10 @@
       completion_batch: "補完バッチサイズ", completion_batch_desc: "トークン生成フェーズのバッチサイズ。",
       init_cache_blocks: "初期キャッシュブロック数", init_cache_blocks_desc: "起動時に事前割り当てするブロック数。値が大きいほど動的割り当てのオーバーヘッドが減少します。",
       save_settings: "設定を保存",
+      settings_saved: "設定が保存されました。",
+      params_saved: "モデルパラメータが保存されました。",
+      restart_confirm: "一部の設定はサーバーの再起動が必要です。今すぐ再起動しますか？",
+      server_restarted: "サーバーが正常に再起動されました。",
       welcome_title: "IronMLX へようこそ", welcome_subtitle: "3つの簡単なステップで始めましょう",
       step1_title: "モデルをダウンロード", step1_desc: "モデル \u2192 モデルダウンロードに移動し、HuggingFace モデル ID を入力してダウンロードをクリック。",
       step2_title: "デフォルトモデルを設定", step2_desc: "モデル \u2192 モデル管理で、ラジオボタンをクリックしてデフォルトモデルを選択。",
@@ -2164,6 +2197,10 @@
       completion_batch: "완성 배치 크기", completion_batch_desc: "토큰 생성 단계의 배치 크기.",
       init_cache_blocks: "초기 캐시 블록 수", init_cache_blocks_desc: "시작 시 사전 할당할 블록 수. 값이 클수록 동적 할당 오버헤드가 줄어듭니다.",
       save_settings: "설정 저장",
+      settings_saved: "설정이 저장되었습니다.",
+      params_saved: "모델 매개변수가 저장되었습니다.",
+      restart_confirm: "일부 설정은 서버를 다시 시작해야 적용됩니다. 지금 다시 시작하시겠습니까?",
+      server_restarted: "서버가 성공적으로 다시 시작되었습니다.",
       welcome_title: "IronMLX에 오신 것을 환영합니다", welcome_subtitle: "3단계로 간단하게 시작하세요",
       step1_title: "모델 다운로드", step1_desc: "모델 \u2192 모델 다운로드로 이동하여 HuggingFace 모델 ID를 입력하고 다운로드를 클릭하세요.",
       step2_title: "기본 모델 설정", step2_desc: "모델 \u2192 모델 관리에서 라디오 버튼을 클릭하여 기본 모델을 선택하세요.",
@@ -2223,6 +2260,8 @@
     if (navItem) navItem.classList.add('active');
     const pageEl = document.getElementById('page-' + page);
     if (pageEl) pageEl.classList.add('active');
+    // Re-sync loaded models when navigating to models page
+    if (page === 'models') syncLoadedModels();
   }
 
   function switchToTab(tabName) {
@@ -2380,20 +2419,153 @@
   function onLoadedModelsSynced(jsonStr) {
     let ids = [];
     try { ids = JSON.parse(jsonStr); } catch(e) { return; }
-    // Merge with existing set (don't overwrite — default model is pre-set)
     ids.forEach(id => window.__LOADED_MODELS__.add(id.trim()));
+    window.__INIT_DONE__ = true;
+    // Re-render model list with correct loaded status
     syncModelList();
   }
 
+  window.__CURRENT_PARAM_MODEL__ = '';
+  window.__MODEL_PARAMS__ = {}; // { modelId: { context_size, max_tokens, ... } }
+
   function openParamsModal(name) {
+    window.__CURRENT_PARAM_MODEL__ = name;
     document.getElementById('modal-model-name').textContent = name;
     document.getElementById('modal-alias-input').value = name;
+    // Load saved params if any
+    const saved = window.__MODEL_PARAMS__[name] || {};
+    document.getElementById('modal-context-size').value = saved.context_size || '';
+    document.getElementById('modal-max-tokens').value = saved.max_tokens || '';
+    document.getElementById('modal-temperature').value = saved.temperature || '';
+    document.getElementById('modal-top-p').value = saved.top_p || '';
+    document.getElementById('modal-top-k').value = saved.top_k || '';
+    document.getElementById('modal-repeat-penalty').value = saved.repeat_penalty || '';
+    document.getElementById('modal-model-type').value = saved.model_type || 'auto';
     document.getElementById('model-params-modal').classList.add('open');
     applyI18n(currentLang);
   }
   function closeParamsModal() {
     document.getElementById('model-params-modal').classList.remove('open');
   }
+
+  function saveModelParams() {
+    const modelId = window.__CURRENT_PARAM_MODEL__;
+    if (!modelId) return;
+    const params = {
+      model_id: modelId,
+      alias: document.getElementById('modal-alias-input').value,
+      model_type: document.getElementById('modal-model-type').value,
+      context_size: document.getElementById('modal-context-size').value,
+      max_tokens: document.getElementById('modal-max-tokens').value,
+      temperature: document.getElementById('modal-temperature').value,
+      top_p: document.getElementById('modal-top-p').value,
+      top_k: document.getElementById('modal-top-k').value,
+      repeat_penalty: document.getElementById('modal-repeat-penalty').value
+    };
+    // Save locally
+    window.__MODEL_PARAMS__[modelId] = params;
+    // Send to Rust for persistence
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveModelParams) {
+      window.webkit.messageHandlers.saveModelParams.postMessage(JSON.stringify(params));
+    }
+    closeParamsModal();
+    const dict = I18N[currentLang] || I18N.en;
+    alert(dict.params_saved || 'Model parameters saved.');
+  }
+
+  // Called from Rust on init with saved model params
+  function onModelParamsLoaded(jsonStr) {
+    try {
+      window.__MODEL_PARAMS__ = JSON.parse(jsonStr);
+    } catch(e) {}
+  }
+
+  // ── Model Download ──
+  function startDownload() {
+    const repoId = document.getElementById('dl-repo-id').value.trim();
+    if (!repoId) { alert('Please enter a Repo ID.'); return; }
+    const token = document.getElementById('dl-hf-token').value.trim();
+    const btn = document.getElementById('dl-download-btn');
+    const progress = document.getElementById('dl-progress');
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    progress.style.display = 'block';
+    document.getElementById('dl-progress-text').textContent = 'Downloading ' + repoId + '...';
+    document.getElementById('dl-progress-bar').style.width = '0%';
+    const payload = JSON.stringify({ repo_id: repoId, token: token || null });
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.downloadModel) {
+      window.webkit.messageHandlers.downloadModel.postMessage(payload);
+    }
+  }
+
+  function onDownloadProgress(pct, msg) {
+    document.getElementById('dl-progress-bar').style.width = pct + '%';
+    document.getElementById('dl-progress-text').textContent = msg || ('Downloading... ' + pct + '%');
+  }
+
+  function onDownloadComplete(jsonStr) {
+    let result = {};
+    try { result = JSON.parse(jsonStr); } catch(e) {}
+    const btn = document.getElementById('dl-download-btn');
+    const progress = document.getElementById('dl-progress');
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    if (result.success) {
+      document.getElementById('dl-progress-bar').style.width = '100%';
+      document.getElementById('dl-progress-icon').style.animation = 'none';
+      document.getElementById('dl-progress-icon').textContent = '✓';
+      document.getElementById('dl-progress-text').textContent = result.message || 'Download complete!';
+      // Refresh model list
+      syncModelList();
+    } else {
+      document.getElementById('dl-progress-icon').style.animation = 'none';
+      document.getElementById('dl-progress-icon').textContent = '✗';
+      document.getElementById('dl-progress-text').textContent = result.error || 'Download failed.';
+      document.getElementById('dl-progress-bar').style.width = '0%';
+    }
+  }
+
+  // ── HuggingFace Search ──
+  function searchHuggingFace() {
+    const query = document.getElementById('search-hf-query').value.trim();
+    if (!query) return;
+    const sort = document.getElementById('search-hf-sort').value;
+    const resultsDiv = document.getElementById('search-results');
+    resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Searching...</div>';
+    const payload = JSON.stringify({ query: query, sort: sort });
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchHF) {
+      window.webkit.messageHandlers.searchHF.postMessage(payload);
+    }
+  }
+
+  function onSearchResults(jsonStr) {
+    let models = [];
+    try { models = JSON.parse(jsonStr); } catch(e) {}
+    const resultsDiv = document.getElementById('search-results');
+    const dict = I18N[currentLang] || I18N.en;
+    if (!models.length) {
+      resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">No results found.</div>';
+      return;
+    }
+    let html = '';
+    models.forEach(function(m) {
+      const downloads = m.downloads ? m.downloads.toLocaleString() : '0';
+      const likes = m.likes || 0;
+      html += '<div class="search-result-item">'
+        + '<div><div class="search-result-name">' + (m.id || m.modelId || '') + '</div>'
+        + '<div class="search-result-meta">↓ ' + downloads + ' · ♥ ' + likes + (m.pipeline_tag ? ' · ' + m.pipeline_tag : '') + '</div></div>'
+        + '<button class="btn-accent search-result-dl" onclick="fillRepoId(\'' + (m.id || m.modelId || '').replace(/'/g, "\\'") + '\')">' + (dict.download || 'Download') + '</button>'
+        + '</div>';
+    });
+    resultsDiv.innerHTML = html;
+  }
+
+  function fillRepoId(repoId) {
+    document.getElementById('dl-repo-id').value = repoId;
+    // Switch to download section focus
+    document.getElementById('dl-repo-id').scrollIntoView({ behavior: 'smooth' });
+  }
+
   document.getElementById('model-params-modal').addEventListener('click', function(e) {
     if (e.target === this) closeParamsModal();
   });
@@ -2531,7 +2703,6 @@
 
   // Track loaded models
   window.__LOADED_MODELS__ = new Set();
-
   // Called from Rust with local model scan results
   function onLocalModelsScanned(jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
@@ -2703,6 +2874,62 @@
     navigator.clipboard.writeText(url).catch(() => {});
   }
 
+  // ── Save Settings ──
+  function saveSettings() {
+    const themeActive = document.querySelector('#theme-select .seg-btn.active');
+    const settings = {
+      host: document.getElementById('cfg-host').value,
+      port: parseInt(document.getElementById('cfg-port').value) || 8080,
+      log_level: document.getElementById('cfg-log-level').value,
+      language: document.getElementById('lang-select').value,
+      theme: themeActive ? themeActive.dataset.value : 'system',
+      mem_total_auto: document.getElementById('cfg-mem-total-auto').checked,
+      mem_total: parseInt(document.getElementById('cfg-mem-total').value) || 0,
+      mem_model_auto: document.getElementById('cfg-mem-model-auto').checked,
+      hot_cache: parseInt(document.getElementById('cfg-hot-cache').value) || 0,
+      cold_cache: parseInt(document.getElementById('cfg-cold-cache').value) || 0,
+      cache_enable: document.getElementById('cfg-cache-enable').checked,
+      cache_dir: document.getElementById('cfg-cache-dir').value,
+      max_sequences: parseInt(document.getElementById('cfg-max-sequences').value) || 8,
+      completion_batch: parseInt(document.getElementById('cfg-completion-batch').value) || 8,
+      init_cache_blocks: parseInt(document.getElementById('cfg-init-cache-blocks').value) || 256
+    };
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveSettings) {
+      window.webkit.messageHandlers.saveSettings.postMessage(JSON.stringify(settings));
+    }
+  }
+
+  // Called from Rust after settings are saved
+  function onSettingsSaved(jsonStr) {
+    let result = {};
+    try { result = JSON.parse(jsonStr); } catch(e) { return; }
+    const dict = I18N[currentLang] || I18N.en;
+    if (result.needs_restart) {
+      const msg = dict.restart_confirm || 'Some settings require a server restart to take effect. Restart now?';
+      if (confirm(msg)) {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.restartServer) {
+          window.webkit.messageHandlers.restartServer.postMessage('restart');
+        }
+      }
+    } else {
+      alert(dict.settings_saved || 'Settings saved successfully.');
+    }
+  }
+
+  function onServerRestarted(newPort) {
+    if (newPort) {
+      window.__API_PORT__ = newPort;
+      // Update Moss config guide port display
+      const portEl = document.getElementById('moss-ironmlx-port');
+      if (portEl) portEl.textContent = newPort;
+      // Update settings port input
+      const cfgPort = document.getElementById('cfg-port');
+      if (cfgPort) cfgPort.value = newPort;
+    }
+    const dict = I18N[currentLang] || I18N.en;
+    alert(dict.server_restarted || 'Server has been restarted successfully.');
+  }
+
   // ── GPU Memory Chart ──
   const gpuCanvas = document.getElementById('gpu-chart');
   const gpuCtx = gpuCanvas.getContext('2d');
@@ -2846,6 +3073,10 @@
   function initStatusPolling() {
     pollStatus();
     statusPollTimer = setInterval(pollStatus, 2000);
+    // Sync config values to settings page inputs
+    const port = window.__IRONMLX_PORT__ || 8080;
+    const cfgPort = document.getElementById('cfg-port');
+    if (cfgPort) cfgPort.value = port;
   }
 
   // Resize chart on window resize

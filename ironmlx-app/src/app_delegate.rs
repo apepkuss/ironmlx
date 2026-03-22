@@ -68,7 +68,10 @@ define_class!(
             {
                 let config = crate::config::AppConfig::load();
                 let lang: &'static str = match config.language.as_str() {
-                    "zh" => "zh",
+                    "zh" | "zh-Hans" => "zh",
+                    "zh-Hant" => "zh-Hant",
+                    "ja" => "ja",
+                    "ko" => "ko",
                     _ => "en",
                 };
                 *crate::dashboard::nav_language().lock().unwrap() = lang;
@@ -504,4 +507,22 @@ pub fn refresh_menu(mtm: MainThreadMarker) {
             status_item.setMenu(Some(&menu));
         }
     });
+}
+
+/// Restart the backend server (callable from web_dashboard bridge)
+/// Reloads config from disk so port changes take effect.
+pub fn restart_server() {
+    // Reload config from disk
+    let fresh_config = crate::config::AppConfig::load();
+    let model = fresh_config.last_model.clone().unwrap_or_default();
+    let new_port = fresh_config.port;
+
+    // Update in-memory CONFIG
+    *CONFIG.lock().unwrap() = Some(fresh_config);
+
+    // Update port and restart
+    if let Some(ref mut srv) = *SERVER.lock().unwrap() {
+        srv.set_port(new_port);
+        let _ = srv.restart(&model);
+    }
 }

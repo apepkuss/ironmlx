@@ -107,6 +107,17 @@ impl ChatTemplate {
 
     /// Apply the chat template to messages, returning the formatted prompt string.
     pub fn apply(&self, messages: &[ChatMessage], add_generation_prompt: bool) -> Result<String> {
+        self.apply_with_thinking(messages, add_generation_prompt, None)
+    }
+
+    /// Apply the chat template with optional enable_thinking control.
+    /// When `enable_thinking` is Some(false), thinking/reasoning mode is disabled.
+    pub fn apply_with_thinking(
+        &self,
+        messages: &[ChatMessage],
+        add_generation_prompt: bool,
+        enable_thinking: Option<bool>,
+    ) -> Result<String> {
         let mut env = minijinja::Environment::new();
 
         // Preprocess: replace Python string methods with minijinja equivalents
@@ -128,6 +139,7 @@ impl ChatTemplate {
             add_generation_prompt => add_generation_prompt,
             eos_token => &self.eos_token,
             bos_token => &self.bos_token,
+            enable_thinking => enable_thinking.unwrap_or(false),
         };
 
         tmpl.render(ctx)

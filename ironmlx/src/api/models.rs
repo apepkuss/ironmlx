@@ -45,6 +45,7 @@ struct ThinkingState {
     buffer: String,
     in_thinking: bool,
     thinking_done: bool,
+    disabled: bool,
 }
 
 impl ThinkingState {
@@ -53,13 +54,23 @@ impl ThinkingState {
             buffer: String::new(),
             in_thinking: false,
             thinking_done: false,
+            disabled: false,
+        }
+    }
+
+    fn new_disabled() -> Self {
+        Self {
+            buffer: String::new(),
+            in_thinking: false,
+            thinking_done: true,
+            disabled: true,
         }
     }
 
     /// Process a new token. Returns (content, reasoning_content) to send in the SSE delta.
     /// At most one of the two will be Some.
     fn process_token(&mut self, token: &str) -> (Option<String>, Option<String>) {
-        if self.thinking_done {
+        if self.disabled || self.thinking_done {
             // After </think>, everything is content
             return (Some(token.to_string()), None);
         }
@@ -142,7 +153,10 @@ impl ThinkingState {
             return (None, None);
         }
         let remaining = std::mem::take(&mut self.buffer);
-        if self.in_thinking || !self.thinking_done {
+        if self.disabled {
+            // Thinking disabled — all content
+            (Some(remaining), None)
+        } else if self.in_thinking || !self.thinking_done {
             // Still in thinking or never entered — emit as reasoning
             (None, Some(remaining))
         } else {
@@ -259,17 +273,79 @@ fn inject_tools_into_messages(
 }
 
 /// POST /v1/chat/completions — supports both regular and streaming responses
+/// Load saved model params and apply as defaults to the request.
+fn apply_model_param_defaults(req: &mut ChatCompletionRequest) {
+    let model_id = req.model.as_deref().unwrap_or("default");
+    let params_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".ironmlx")
+        .join("config")
+        .join("model_params.json");
+    if !params_path.exists() {
+        return;
+    }
+    let data = match std::fs::read_to_string(&params_path) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let all_params: serde_json::Map<String, serde_json::Value> = match serde_json::from_str(&data) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let params = match all_params.get(model_id) {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Apply saved defaults only when request uses default values
+    if let Some(mt) = params.get("max_tokens").and_then(|v| v.as_str())
+        && let Ok(mt_val) = mt.parse::<usize>()
+        && mt_val > 0
+        && req.max_tokens == default_max_tokens()
+    {
+        req.max_tokens = mt_val;
+    }
+    if let Some(temp) = params.get("temperature").and_then(|v| v.as_str())
+        && let Ok(temp_val) = temp.parse::<f32>()
+        && req.temperature == default_temperature()
+    {
+        req.temperature = temp_val;
+    }
+    if let Some(tp) = params.get("top_p").and_then(|v| v.as_str())
+        && let Ok(tp_val) = tp.parse::<f32>()
+        && req.top_p == default_top_p()
+    {
+        req.top_p = tp_val;
+    }
+    if let Some(tk) = params.get("top_k").and_then(|v| v.as_str())
+        && let Ok(tk_val) = tk.parse::<i32>()
+        && req.top_k == default_top_k()
+    {
+        req.top_k = tk_val;
+    }
+    if let Some(rp) = params.get("repeat_penalty").and_then(|v| v.as_str())
+        && let Ok(rp_val) = rp.parse::<f32>()
+        && req.repetition_penalty == default_repetition_penalty()
+    {
+        req.repetition_penalty = rp_val;
+    }
+}
+
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ChatCompletionRequest>,
+    Json(mut req): Json<ChatCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // Apply saved model parameter defaults
+    apply_model_param_defaults(&mut req);
+
     state.log_buffer.push(
         "info",
         &format!(
-            "Chat request: model={}, stream={}, max_tokens={}",
+            "Chat request: model={}, stream={}, max_tokens={}, temp={}",
             req.model.as_deref().unwrap_or("default"),
             req.stream,
-            req.max_tokens
+            req.max_tokens,
+            req.temperature
         ),
     );
     if req.stream {
@@ -292,7 +368,7 @@ async fn chat_completions_sync(
 
     let media = extract_and_process_media(&entry, &req.messages)?;
     let messages = inject_tools_into_messages(&req.messages, &req.tools);
-    let prompt = build_chat_prompt(&entry.chat_template, &messages)?;
+    let prompt = build_chat_prompt(&entry.chat_template, &messages, req.enable_thinking)?;
     let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = build_sampler(&req);
@@ -326,7 +402,11 @@ async fn chat_completions_sync(
         completion_len += 1;
     }
 
-    let (content, reasoning_content) = split_thinking(&generated_text);
+    let (content, reasoning_content) = if req.enable_thinking.unwrap_or(false) {
+        split_thinking(&generated_text)
+    } else {
+        (generated_text.clone(), None)
+    };
 
     // Check for tool calls if tools were provided
     let (final_content, tool_calls) = if req.tools.is_some() {
@@ -375,7 +455,7 @@ async fn chat_completions_stream(
 
     let media = extract_and_process_media(&entry, &req.messages)?;
     let messages = inject_tools_into_messages(&req.messages, &req.tools);
-    let prompt = build_chat_prompt(&entry.chat_template, &messages)?;
+    let prompt = build_chat_prompt(&entry.chat_template, &messages, req.enable_thinking)?;
     let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
@@ -425,7 +505,12 @@ async fn chat_completions_stream(
             .await;
 
         // Stream tokens with thinking mode tracking
-        let mut thinking_state = ThinkingState::new();
+        let enable_thinking = req.enable_thinking.unwrap_or(false);
+        let mut thinking_state = if enable_thinking {
+            ThinkingState::new()
+        } else {
+            ThinkingState::new_disabled()
+        };
 
         while let Some(output) = token_rx.recv().await {
             if let Some(ref reason) = output.finish_reason {
@@ -609,7 +694,7 @@ async fn anthropic_messages_sync(
         .map_err(|e| internal_error(&e))?;
 
     let messages = anthropic_to_chat_messages(&req);
-    let prompt = build_chat_prompt(&entry.chat_template, &messages)?;
+    let prompt = build_chat_prompt(&entry.chat_template, &messages, None)?;
     let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = SamplerConfig {
@@ -674,7 +759,7 @@ async fn anthropic_messages_stream(
         .map_err(|e| internal_error(&e))?;
 
     let messages = anthropic_to_chat_messages(&req);
-    let prompt = build_chat_prompt(&entry.chat_template, &messages)?;
+    let prompt = build_chat_prompt(&entry.chat_template, &messages, None)?;
     let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = SamplerConfig {
@@ -737,8 +822,8 @@ async fn anthropic_messages_stream(
                 .data(serde_json::to_string(&block_start).unwrap())))
             .await;
 
-        // 3) content_block_delta for each token
-        let mut thinking_state = ThinkingState::new();
+        // 3) content_block_delta for each token (thinking disabled for Anthropic endpoint)
+        let mut thinking_state = ThinkingState::new_disabled();
         let mut output_tokens = 0usize;
         let mut finish_reason = "end_turn".to_string();
 
@@ -902,10 +987,12 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelList> 
 
 /// GET /health
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let model = state
-        .pool
-        .default_model_id()
-        .unwrap_or_else(|| "none".to_string());
+    let loaded = state.pool.list_models();
+    let model = if loaded.is_empty() {
+        "none".to_string()
+    } else {
+        loaded.join(", ")
+    };
 
     let mem = ironmlx_core::memory::get_active_memory().unwrap_or(0);
     let cache = ironmlx_core::memory::get_cache_memory().unwrap_or(0);
@@ -1106,6 +1193,7 @@ pub async fn rerank(
 fn build_chat_prompt(
     chat_template: &Option<ChatTemplate>,
     messages: &[ChatMessage],
+    enable_thinking: Option<bool>,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     if let Some(ct) = chat_template {
         // Convert API ChatMessage to core ChatMessage for template rendering
@@ -1116,7 +1204,7 @@ fn build_chat_prompt(
                 content: m.content.as_text(),
             })
             .collect();
-        ct.apply(&core_messages, true)
+        ct.apply_with_thinking(&core_messages, true, enable_thinking)
             .map_err(|e| internal_error(&format!("chat template error: {}", e)))
     } else {
         // Fallback: simple concatenation
@@ -1133,6 +1221,8 @@ fn build_sampler(req: &ChatCompletionRequest) -> SamplerConfig {
     SamplerConfig {
         temperature: req.temperature,
         top_p: req.top_p,
+        top_k: req.top_k,
+        repetition_penalty: req.repetition_penalty,
         ..SamplerConfig::default()
     }
 }

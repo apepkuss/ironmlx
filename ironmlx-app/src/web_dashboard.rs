@@ -204,9 +204,9 @@ define_class!(
                     let win_send = win_ptr_raw.map(RawPtr);
                     std::thread::spawn(move || {
                         let port = crate::config::AppConfig::load().port;
-                        // Retry a few times — server may still be starting up
+                        // Retry up to 10 times — server may still be loading model
                         let mut resp = String::new();
-                        for _ in 0..3 {
+                        for _ in 0..10 {
                             if let Ok(r) = reqwest::blocking::get(format!(
                                 "http://127.0.0.1:{}/v1/models",
                                 port
@@ -218,7 +218,7 @@ define_class!(
                                     }
                                 }
                             }
-                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            std::thread::sleep(std::time::Duration::from_secs(1));
                         }
                         // Extract model IDs from response
                         let ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&resp)
@@ -242,13 +242,15 @@ define_class!(
                     let installed = std::path::Path::new("/Applications/Moss.app").exists();
                     let status = format!("{{\"installed\":{}}}", installed);
                     eval_js_on_window_sync(&format!(
-                        "onMossStatus('{}')", status.replace('\'', "\\'")
+                        "onMossStatus('{}')",
+                        status.replace('\'', "\\'")
                     ));
                 }
                 "downloadMoss" => {
                     // Open GitHub Releases page in default browser
                     let url = "https://github.com/apepkuss/Aries/releases";
-                    let url_ns = unsafe { objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) };
+                    let url_ns =
+                        unsafe { objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) };
                     if let Some(url_obj) = url_ns {
                         unsafe {
                             let workspace = NSWorkspace::sharedWorkspace();
@@ -269,6 +271,277 @@ define_class!(
                         if let Err(e) = output {
                             eprintln!("Failed to open Moss: {e}");
                         }
+                    });
+                }
+                "saveSettings" => {
+                    // Save settings to app_config.json and check if restart needed
+                    let body = body_str.to_string();
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let mut needs_restart = false;
+                        if let Ok(new_settings) = serde_json::from_str::<serde_json::Value>(&body) {
+                            let mut config = crate::config::AppConfig::load();
+                            let old_port = config.port;
+
+                            // Update config fields that exist in AppConfig
+                            if let Some(port) = new_settings.get("port").and_then(|v| v.as_u64()) {
+                                config.port = port as u16;
+                            }
+                            let mut lang_changed: Option<String> = None;
+                            if let Some(lang) =
+                                new_settings.get("language").and_then(|v| v.as_str())
+                            {
+                                config.language = lang.to_string();
+                                lang_changed = Some(lang.to_string());
+                            }
+                            if let Some(theme) = new_settings.get("theme").and_then(|v| v.as_str())
+                            {
+                                config.theme = Some(theme.to_string());
+                            }
+
+                            // Check if restart-requiring settings changed
+                            if config.port != old_port {
+                                needs_restart = true;
+                            }
+
+                            // Save config
+                            config.save();
+
+                            // Sync language to menubar if changed
+                            if let Some(ref lc) = lang_changed {
+                                let lang_code = lc.clone();
+                                dispatch2::DispatchQueue::main().exec_async(move || {
+                                    handle_set_language(&lang_code);
+                                });
+                            }
+                        }
+
+                        // Notify JS
+                        let result =
+                            format!("{{\"success\":true,\"needs_restart\":{}}}", needs_restart);
+                        let escaped = result.replace('\\', "\\\\").replace('\'', "\\'");
+                        let js_code = format!("onSettingsSaved('{}')", escaped);
+                        let inner_send = win_send.map(|p| RawPtr(p.0));
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            if let Some(ref rp) = inner_send {
+                                let win: &objc2_app_kit::NSWindow =
+                                    unsafe { &*(rp.0 as *const objc2_app_kit::NSWindow) };
+                                if let Some(cv) = win.contentView() {
+                                    let js = NSString::from_str(&js_code);
+                                    unsafe {
+                                        let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<objc2::runtime::AnyObject>()];
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+                "restartServer" => {
+                    // Restart the backend server in background, notify JS when done
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        crate::app_delegate::restart_server();
+                        // Wait a moment for server to come up
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        let new_port = crate::config::AppConfig::load().port;
+                        let js_code = format!("onServerRestarted({})", new_port);
+                        let inner_send = win_send.map(|p| RawPtr(p.0));
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            if let Some(ref rp) = inner_send {
+                                let win: &objc2_app_kit::NSWindow =
+                                    unsafe { &*(rp.0 as *const objc2_app_kit::NSWindow) };
+                                if let Some(cv) = win.contentView() {
+                                    let js = NSString::from_str(&js_code);
+                                    unsafe {
+                                        let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<objc2::runtime::AnyObject>()];
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+                "saveModelParams" => {
+                    // Save model parameters to ~/.ironmlx/config/model_params.json
+                    let body = body_str.to_string();
+                    std::thread::spawn(move || {
+                        let params_path = crate::config::ironmlx_root()
+                            .join("config")
+                            .join("model_params.json");
+                        // Load existing params
+                        let mut all_params: serde_json::Map<String, serde_json::Value> =
+                            if params_path.exists() {
+                                let data =
+                                    std::fs::read_to_string(&params_path).unwrap_or_default();
+                                serde_json::from_str(&data).unwrap_or_default()
+                            } else {
+                                serde_json::Map::new()
+                            };
+                        // Parse new params and merge
+                        if let Ok(new_params) = serde_json::from_str::<serde_json::Value>(&body) {
+                            if let Some(model_id) =
+                                new_params.get("model_id").and_then(|v| v.as_str())
+                            {
+                                all_params.insert(model_id.to_string(), new_params.clone());
+                            }
+                        }
+                        // Write back
+                        if let Some(parent) = params_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Ok(data) = serde_json::to_string_pretty(&all_params) {
+                            let _ = std::fs::write(&params_path, data);
+                        }
+                    });
+                }
+                "downloadModel" => {
+                    // Download model from HuggingFace
+                    let body = body_str.to_string();
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let result = (|| -> Result<String, String> {
+                            let req: serde_json::Value =
+                                serde_json::from_str(&body).map_err(|e| e.to_string())?;
+                            let repo_id = req
+                                .get("repo_id")
+                                .and_then(|v| v.as_str())
+                                .ok_or("missing repo_id")?;
+                            let token = req.get("token").and_then(|v| v.as_str());
+
+                            // Use hf_hub to download
+                            let mut builder = hf_hub::api::sync::ApiBuilder::new()
+                                .with_cache_dir(crate::config::ironmlx_root().join("models"));
+                            if let Some(t) = token {
+                                if !t.is_empty() {
+                                    builder = builder.with_token(Some(t.to_string()));
+                                }
+                            }
+                            let api = builder.build().map_err(|e| e.to_string())?;
+                            let repo = api.model(repo_id.to_string());
+
+                            // Download key files
+                            for file in &[
+                                "config.json",
+                                "tokenizer.json",
+                                "tokenizer_config.json",
+                                "model.safetensors",
+                                "model.safetensors.index.json",
+                            ] {
+                                match repo.get(file) {
+                                    Ok(_) => {}
+                                    Err(_) => {
+                                        // Some files are optional
+                                        if *file != "model.safetensors.index.json" {
+                                            // Try to continue
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(format!("Model {} downloaded successfully.", repo_id))
+                        })();
+
+                        let js_code = match result {
+                            Ok(msg) => {
+                                let escaped = msg.replace('\\', "\\\\").replace('\'', "\\'");
+                                format!(
+                                    "onDownloadComplete('{{\"success\":true,\"message\":\"{}\"}}')",
+                                    escaped
+                                )
+                            }
+                            Err(e) => {
+                                let escaped = e
+                                    .replace('\\', "\\\\")
+                                    .replace('\'', "\\'")
+                                    .replace('"', "\\\"");
+                                format!(
+                                    "onDownloadComplete('{{\"success\":false,\"error\":\"{}\"}}')",
+                                    escaped
+                                )
+                            }
+                        };
+
+                        let inner_send = win_send.map(|p| RawPtr(p.0));
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            if let Some(ref rp) = inner_send {
+                                let win: &objc2_app_kit::NSWindow =
+                                    unsafe { &*(rp.0 as *const objc2_app_kit::NSWindow) };
+                                if let Some(cv) = win.contentView() {
+                                    let js = NSString::from_str(&js_code);
+                                    unsafe {
+                                        let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<objc2::runtime::AnyObject>()];
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+                "searchHF" => {
+                    // Search HuggingFace models API
+                    let body = body_str.to_string();
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let result = (|| -> Result<String, String> {
+                            let req: serde_json::Value =
+                                serde_json::from_str(&body).map_err(|e| e.to_string())?;
+                            let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                            let sort = req
+                                .get("sort")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("downloads");
+
+                            let url = format!(
+                                "https://huggingface.co/api/models?search={}&sort={}&direction=-1&limit=20&filter=mlx",
+                                urlencoding::encode(query),
+                                sort
+                            );
+                            let resp = reqwest::blocking::get(&url)
+                                .map_err(|e| e.to_string())?
+                                .text()
+                                .map_err(|e| e.to_string())?;
+                            Ok(resp)
+                        })();
+
+                        let js_code = match result {
+                            Ok(data) => {
+                                let escaped = data
+                                    .replace('\\', "\\\\")
+                                    .replace('\'', "\\'")
+                                    .replace('\n', "");
+                                format!("onSearchResults('{}')", escaped)
+                            }
+                            Err(e) => {
+                                format!("onSearchResults('[]')")
+                            }
+                        };
+
+                        let inner_send = win_send.map(|p| RawPtr(p.0));
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            if let Some(ref rp) = inner_send {
+                                let win: &objc2_app_kit::NSWindow =
+                                    unsafe { &*(rp.0 as *const objc2_app_kit::NSWindow) };
+                                if let Some(cv) = win.contentView() {
+                                    let js = NSString::from_str(&js_code);
+                                    unsafe {
+                                        let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<objc2::runtime::AnyObject>()];
+                                    }
+                                }
+                            }
+                        });
                     });
                 }
                 "fetchAPI" => {
@@ -565,7 +838,6 @@ fn eval_js_on_window_sync(js_code: &str) {
     }
 }
 
-
 /// Estimate model size in MB from local files
 fn estimate_model_size_mb(model_id: &str) -> f64 {
     let models_dir = crate::config::ironmlx_root().join("models");
@@ -595,36 +867,72 @@ fn get_available_gpu_mb(port: u16) -> f64 {
     }
 }
 
-/// Load a model via backend API
+/// Load a model via backend API (uses curl for reliability)
 fn do_load_model(model_id: &str, port: u16) -> String {
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/models/load", port))
-        .json(&serde_json::json!({ "model_dir": model_id }))
-        .send()
-        .and_then(|r| r.text());
-    match resp {
-        Ok(_) => format!(
-            "{{\"success\":true,\"model_id\":\"{}\"}}",
-            model_id.replace('"', "\\\"")
-        ),
+    let url = format!("http://127.0.0.1:{}/v1/models/load", port);
+    let payload = format!("{{\"model_dir\":\"{}\"}}", model_id.replace('"', "\\\""));
+    let output = std::process::Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            &url,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &payload,
+        ])
+        .output();
+    match output {
+        Ok(o) => {
+            let body = String::from_utf8_lossy(&o.stdout).to_string();
+            if body.contains("\"id\"") || body.contains("\"object\"") {
+                format!(
+                    "{{\"success\":true,\"model_id\":\"{}\"}}",
+                    model_id.replace('"', "\\\"")
+                )
+            } else {
+                format!(
+                    "{{\"error\":\"Load failed: {}\"}}",
+                    body.replace('"', "\\\"")
+                )
+            }
+        }
         Err(e) => format!("{{\"error\":\"{}\"}}", e.to_string().replace('"', "\\\"")),
     }
 }
 
-/// Unload a model via backend API
+/// Unload a model via backend API (uses curl for reliability)
 fn do_unload_model(model_id: &str, port: u16) -> String {
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/models/unload", port))
-        .json(&serde_json::json!({ "model": model_id }))
-        .send()
-        .and_then(|r| r.text());
-    match resp {
-        Ok(_) => format!(
-            "{{\"success\":true,\"model_id\":\"{}\"}}",
-            model_id.replace('"', "\\\"")
-        ),
+    let url = format!("http://127.0.0.1:{}/v1/models/unload", port);
+    let payload = format!("{{\"model\":\"{}\"}}", model_id.replace('"', "\\\""));
+    let output = std::process::Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            &url,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &payload,
+        ])
+        .output();
+    match output {
+        Ok(o) => {
+            let body = String::from_utf8_lossy(&o.stdout).to_string();
+            if body.contains("unloaded") || body.contains("ok") {
+                format!(
+                    "{{\"success\":true,\"model_id\":\"{}\"}}",
+                    model_id.replace('"', "\\\"")
+                )
+            } else {
+                format!(
+                    "{{\"error\":\"Unload failed: {}\"}}",
+                    body.replace('"', "\\\"")
+                )
+            }
+        }
         Err(e) => format!("{{\"error\":\"{}\"}}", e.to_string().replace('"', "\\\"")),
     }
 }
@@ -675,9 +983,10 @@ pub fn show_web_dashboard(mtm: MainThreadMarker) {
     if app.mainMenu().is_none() {
         unsafe {
             let menu_bar = NSMenu::new(mtm);
+
+            // App menu (Quit)
             let app_menu_item = NSMenuItem::new(mtm);
             let app_menu = NSMenu::new(mtm);
-            // Add "Quit" to the app menu
             let quit_item = NSMenuItem::initWithTitle_action_keyEquivalent(
                 mtm.alloc(),
                 &NSString::from_str("Quit"),
@@ -687,6 +996,57 @@ pub fn show_web_dashboard(mtm: MainThreadMarker) {
             app_menu.addItem(&quit_item);
             app_menu_item.setSubmenu(Some(&app_menu));
             menu_bar.addItem(&app_menu_item);
+
+            // Edit menu (Undo/Redo/Cut/Copy/Paste/Select All)
+            let edit_menu_item = NSMenuItem::new(mtm);
+            let edit_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("Edit"));
+            let undo = NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Undo"),
+                Some(sel!(undo:)),
+                &NSString::from_str("z"),
+            );
+            let redo = NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Redo"),
+                Some(sel!(redo:)),
+                &NSString::from_str("Z"),
+            );
+            let cut = NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Cut"),
+                Some(sel!(cut:)),
+                &NSString::from_str("x"),
+            );
+            let copy = NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Copy"),
+                Some(sel!(copy:)),
+                &NSString::from_str("c"),
+            );
+            let paste = NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Paste"),
+                Some(sel!(paste:)),
+                &NSString::from_str("v"),
+            );
+            let select_all = NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Select All"),
+                Some(sel!(selectAll:)),
+                &NSString::from_str("a"),
+            );
+            edit_menu.addItem(&undo);
+            edit_menu.addItem(&redo);
+            edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+            edit_menu.addItem(&cut);
+            edit_menu.addItem(&copy);
+            edit_menu.addItem(&paste);
+            edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+            edit_menu.addItem(&select_all);
+            edit_menu_item.setSubmenu(Some(&edit_menu));
+            menu_bar.addItem(&edit_menu_item);
+
             app.setMainMenu(Some(&menu_bar));
         }
     }
@@ -779,6 +1139,11 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("checkMoss"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("downloadMoss"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("openMossDesktop"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("saveSettings"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("restartServer"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("saveModelParams"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("downloadModel"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("searchHF"));
     }
 
     let webview = unsafe {
@@ -811,17 +1176,30 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     let html_with_lang = html.replace(
         "/*__INIT_LANG__*/",
         &format!(
-            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling(); checkMossInstalled();{}",
+            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling(); checkMossInstalled();{} {}",
             port,
             default_model,
             if !default_model.is_empty() {
-                format!("window.__LOADED_MODELS__ = new Set(['{}']);", default_model)
+                format!("window.__LOADED_MODELS__.add('{}');", default_model)
             } else {
                 String::new()
             },
             current_lang,
             current_theme,
-            if default_model.is_empty() { " showOnboarding();" } else { "" }
+            if default_model.is_empty() { " showOnboarding();" } else { "" },
+            {
+                // Load saved model params
+                let params_path = crate::config::ironmlx_root()
+                    .join("config")
+                    .join("model_params.json");
+                if params_path.exists() {
+                    let data = std::fs::read_to_string(&params_path).unwrap_or_default();
+                    let escaped = data.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "");
+                    format!("onModelParamsLoaded('{}');", escaped)
+                } else {
+                    String::new()
+                }
+            }
         ),
     );
 

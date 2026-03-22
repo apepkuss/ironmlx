@@ -62,6 +62,10 @@ impl ServerManager {
         *self.status.lock().unwrap() = ServerStatus::Stopped;
     }
 
+    pub fn set_port(&mut self, port: u16) {
+        self.port = port;
+    }
+
     pub fn restart(&self, model_path: &str) -> Result<(), String> {
         self.stop();
         self.start(model_path)

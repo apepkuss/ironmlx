@@ -20,6 +20,14 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     #[allow(dead_code)]
     pub tool_choice: Option<serde_json::Value>,
+    #[serde(default = "default_top_k")]
+    pub top_k: i32,
+    #[serde(default = "default_repetition_penalty")]
+    pub repetition_penalty: f32,
+    /// When set to false, disables thinking/reasoning mode for models that support it (e.g. Qwen3).
+    /// Default: None (use model's default behavior).
+    #[serde(default)]
+    pub enable_thinking: Option<bool>,
 }
 
 /// Multimodal content: either a plain text string or a list of content parts.
@@ -532,12 +540,18 @@ pub struct RerankUsage {
 
 // -- Defaults ----------------------------------------------------------------
 
-fn default_max_tokens() -> usize {
+pub fn default_max_tokens() -> usize {
     256
 }
-fn default_temperature() -> f32 {
+pub fn default_temperature() -> f32 {
     1.0
 }
-fn default_top_p() -> f32 {
+pub fn default_top_p() -> f32 {
+    1.0
+}
+pub fn default_top_k() -> i32 {
+    -1
+}
+pub fn default_repetition_penalty() -> f32 {
     1.0
 }
