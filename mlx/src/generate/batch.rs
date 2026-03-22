@@ -55,6 +55,7 @@ pub struct BatchGenerator<'a> {
     sequences: HashMap<SeqUid, SeqState>,
     next_uid: SeqUid,
     cache_manager: Option<CacheManager>,
+    stream: Stream,
 }
 
 impl<'a> BatchGenerator<'a> {
@@ -67,6 +68,7 @@ impl<'a> BatchGenerator<'a> {
             sequences: HashMap::new(),
             next_uid: 0,
             cache_manager: None,
+            stream: Stream::new(&Device::gpu()),
         }
     }
 
@@ -79,6 +81,7 @@ impl<'a> BatchGenerator<'a> {
             sequences: HashMap::new(),
             next_uid: 0,
             cache_manager: Some(cache_manager),
+            stream: Stream::new(&Device::gpu()),
         }
     }
 
@@ -94,7 +97,7 @@ impl<'a> BatchGenerator<'a> {
         let uid = self.next_uid;
         self.next_uid += 1;
 
-        let stream = Stream::new(&Device::gpu());
+        let stream = &self.stream;
 
         // Try prefix cache lookup
         let (mut cache, matched_tokens) = if let Some(ref mut cm) = self.cache_manager {
@@ -109,7 +112,7 @@ impl<'a> BatchGenerator<'a> {
         // Prefill: run model.forward() with remaining tokens (or all if no cache hit)
         let tokens_to_prefill = &prompt_tokens[matched_tokens..];
         let prompt_arr = Array::from_slice_i32(tokens_to_prefill);
-        let prompt_2d = ops::reshape(&prompt_arr, &[1, tokens_to_prefill.len() as i32], &stream)?;
+        let prompt_2d = ops::reshape(&prompt_arr, &[1, tokens_to_prefill.len() as i32], stream)?;
         let logits = self.model.forward(&prompt_2d, &mut cache, "causal", None)?;
 
         // Extract last token logits (from tokens_to_prefill output)
@@ -120,12 +123,12 @@ impl<'a> BatchGenerator<'a> {
             &[0, last_idx, 0],
             &[1, last_idx + 1, vocab_size],
             &[1, 1, 1],
-            &stream,
+            stream,
         )?;
-        let last_logits = ops::reshape(&last_logits, &[1, vocab_size], &stream)?;
+        let last_logits = ops::reshape(&last_logits, &[1, vocab_size], stream)?;
 
         // Sample first token
-        let token_arr = sample(&last_logits, &sampler, &stream)?;
+        let token_arr = sample(&last_logits, &sampler, stream)?;
         token_arr.eval()?;
         let first_token = token_arr.item_i32()?;
 
@@ -180,13 +183,13 @@ impl<'a> BatchGenerator<'a> {
         let uid = self.next_uid;
         self.next_uid += 1;
 
-        let stream = Stream::new(&Device::gpu());
+        let stream = &self.stream;
         let mut cache: Vec<(Option<Array>, Option<Array>)> =
             (0..self.num_layers).map(|_| (None, None)).collect();
 
         // VLM prefill: model.forward_vlm() handles vision encoding + embedding injection
         let prompt_arr = Array::from_slice_i32(prompt_tokens);
-        let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
+        let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], stream)?;
         let logits = self
             .model
             .forward_vlm(&prompt_2d, Some(media), &mut cache)?;
@@ -199,11 +202,11 @@ impl<'a> BatchGenerator<'a> {
             &[0, last_idx, 0],
             &[1, last_idx + 1, vocab_size],
             &[1, 1, 1],
-            &stream,
+            stream,
         )?;
-        let last_logits = ops::reshape(&last_logits, &[1, vocab_size], &stream)?;
+        let last_logits = ops::reshape(&last_logits, &[1, vocab_size], stream)?;
 
-        let token_arr = sample(&last_logits, &sampler, &stream)?;
+        let token_arr = sample(&last_logits, &sampler, stream)?;
         token_arr.eval()?;
         let first_token = token_arr.item_i32()?;
 
@@ -243,7 +246,7 @@ impl<'a> BatchGenerator<'a> {
     /// Returns one `BatchResponse` per active sequence.
     /// Finished sequences are automatically removed.
     pub fn step(&mut self) -> Result<Vec<BatchResponse>> {
-        let stream = Stream::new(&Device::gpu());
+        let stream = &self.stream;
         let mut responses = Vec::with_capacity(self.sequences.len());
         let mut finished_uids = Vec::new();
 
@@ -255,14 +258,14 @@ impl<'a> BatchGenerator<'a> {
 
             // Forward with last_token
             let input = Array::from_slice_i32(&[seq.last_token]);
-            let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
+            let input_2d = ops::reshape(&input, &[1, 1], stream)?;
             let logits = self
                 .model
                 .forward(&input_2d, &mut seq.cache, "causal", None)?;
-            let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;
+            let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], stream)?;
 
             // Sample next token
-            let token_arr = sample(&logits_2d, &seq.sampler, &stream)?;
+            let token_arr = sample(&logits_2d, &seq.sampler, stream)?;
             token_arr.eval()?;
             let next_token = token_arr.item_i32()?;
 
@@ -308,7 +311,7 @@ impl<'a> BatchGenerator<'a> {
     /// forward passes into one GPU submission, improving throughput for
     /// concurrent requests without changing the per-sequence cache structure.
     pub fn step_batched(&mut self) -> Result<Vec<BatchResponse>> {
-        let stream = Stream::new(&Device::gpu());
+        let stream = &self.stream;
         let uids: Vec<SeqUid> = self.sequences.keys().copied().collect();
 
         if uids.is_empty() {
@@ -320,12 +323,12 @@ impl<'a> BatchGenerator<'a> {
         for &uid in &uids {
             let seq = self.sequences.get_mut(&uid).unwrap();
             let input = Array::from_slice_i32(&[seq.last_token]);
-            let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
+            let input_2d = ops::reshape(&input, &[1, 1], stream)?;
             let logits = self
                 .model
                 .forward(&input_2d, &mut seq.cache, "causal", None)?;
-            let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;
-            let token_arr = sample(&logits_2d, &seq.sampler, &stream)?;
+            let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], stream)?;
+            let token_arr = sample(&logits_2d, &seq.sampler, stream)?;
             pending.push((uid, token_arr));
         }
 

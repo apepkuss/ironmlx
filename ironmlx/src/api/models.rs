@@ -1322,8 +1322,7 @@ fn get_max_context(model_id: &str) -> usize {
         .join("config")
         .join("model_params.json");
     if let Ok(data) = std::fs::read_to_string(&params_path)
-        && let Ok(all) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&data)
+        && let Ok(all) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&data)
         && let Some(params) = all.get(model_id)
         && let Some(ctx) = params.get("context_size").and_then(|v| v.as_str())
         && let Ok(val) = ctx.parse::<usize>()

@@ -35,6 +35,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
+    // Install panic hook to log crashes
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let msg = format!("PANIC: {}\n\nBacktrace:\n{}", info, backtrace);
+        eprintln!("{}", msg);
+        let _ = std::fs::write("/tmp/ironmlx-panic.log", &msg);
+    }));
+
     let args = Args::parse();
 
     println!("ironmlx starting...");

@@ -76,6 +76,7 @@ impl EngineCore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_cache_manager(
         cmd_rx: mpsc::Receiver<EngineCommand>,
         model: Model,
