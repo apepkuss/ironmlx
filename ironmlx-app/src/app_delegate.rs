@@ -160,8 +160,12 @@ define_class!(
 
         #[unsafe(method(openChat:))]
         fn open_chat(&self, _sender: &NSMenuItem) {
-            let p = port();
-            open_url(&format!("http://localhost:{}/admin", p));
+            if std::path::Path::new("/Applications/Moss.app").exists() {
+                let _ = std::process::Command::new("open")
+                    .arg("-a")
+                    .arg("Moss")
+                    .spawn();
+            }
         }
 
         #[unsafe(method(startServer:))]
@@ -406,12 +410,13 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     web_dash.setEnabled(is_running);
     menu.addItem(&web_dash);
 
-    // ── Chat ──
-    let chat = make_item(mtm, t("menu_chat"), Some(sel!(openChat:)), "");
+    // ── Chat with Moss ──
+    let moss_installed = std::path::Path::new("/Applications/Moss.app").exists();
+    let chat = make_item(mtm, "Chat with Moss", Some(sel!(openChat:)), "");
     if let Some(icon) = sf_icon("bubble.left.and.bubble.right") {
         chat.setImage(Some(&icon));
     }
-    chat.setEnabled(is_running);
+    chat.setEnabled(moss_installed);
     menu.addItem(&chat);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));

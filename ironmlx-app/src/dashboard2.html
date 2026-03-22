@@ -229,7 +229,7 @@
 
   /* ── Button ── */
   .btn-primary {
-    background: var(--green-bg);
+    background: var(--accent);
     color: white;
     border: none;
     border-radius: 8px;
@@ -1202,6 +1202,9 @@
   <div class="nav-item" data-page="logs">
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="3" y="2" width="12" height="14" rx="2" stroke="currentColor" stroke-width="1.4"/><line x1="6" y1="6" x2="12" y2="6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="9" x2="12" y2="9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="12" x2="10" y2="12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span> <span data-i18n="nav_logs">Logs</span>
   </div>
+  <div class="nav-item" data-page="chat">
+    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M3 3h12a1 1 0 011 1v8a1 1 0 01-1 1H6l-3 3V4a1 1 0 011-1z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="6.5" cy="8" r="0.8" fill="currentColor"/><circle cx="9" cy="8" r="0.8" fill="currentColor"/><circle cx="11.5" cy="8" r="0.8" fill="currentColor"/></svg></span> <span data-i18n="nav_chat">Chat</span>
+  </div>
   <div class="nav-item" data-page="settings">
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 1.5l1.1 2.3a5.2 5.2 0 0 1 1.8 1l2.4-.6.9 1.6-1.3 1.9a5 5 0 0 1 0 2.1l1.3 1.9-.9 1.6-2.4-.6a5.2 5.2 0 0 1-1.8 1L9 16.5l-1.1-2.3a5.2 5.2 0 0 1-1.8-1l-2.4.6-.9-1.6 1.3-1.9a5 5 0 0 1 0-2.1L2.8 6.3l.9-1.6 2.4.6a5.2 5.2 0 0 1 1.8-1L9 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="9" cy="9" r="2.5" stroke="currentColor" stroke-width="1.3"/></svg></span> <span data-i18n="nav_settings">Settings</span>
   </div>
@@ -1526,6 +1529,88 @@
     </div>
   </div>
 
+  <!-- Chat Page (Moss Integration) -->
+  <div class="page" id="page-chat">
+    <div class="page-title" data-i18n="nav_chat">Chat</div>
+    <div class="page-subtitle" data-i18n="chat_subtitle">Intelligent agent powered by Moss.</div>
+
+    <!-- Not Installed State -->
+    <div id="moss-not-installed">
+      <div class="card-settings" style="text-align:center; padding:48px 32px;">
+        <div style="margin-bottom:24px;">
+          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" style="opacity:0.3;">
+            <path d="M8 8h48a4 4 0 014 4v32a4 4 0 01-4 4H20l-12 12V12a4 4 0 014-4z" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+            <circle cx="22" cy="28" r="3" fill="currentColor"/>
+            <circle cx="32" cy="28" r="3" fill="currentColor"/>
+            <circle cx="42" cy="28" r="3" fill="currentColor"/>
+          </svg>
+        </div>
+        <h3 style="margin:0 0 8px; font-size:18px; font-weight:600;" data-i18n="moss_title">Moss Agent</h3>
+        <p style="margin:0 0 24px; color:var(--text-secondary); font-size:13px; max-width:480px; margin-left:auto; margin-right:auto; line-height:1.6;" data-i18n="moss_description">Moss is an intelligent AI agent that can plan complex tasks, use tools, execute scripts, and maintain conversation memory. Install Moss Desktop to unlock advanced chat capabilities.</p>
+
+        <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-bottom:32px;">
+          <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+            <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_planning">Task Planning</div>
+            <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_planning_desc">Break complex requests into subtasks</div>
+          </div>
+          <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+            <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_tools">Tool Integration</div>
+            <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_tools_desc">MCP servers, skills, script execution</div>
+          </div>
+          <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+            <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_memory">Conversation Memory</div>
+            <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_memory_desc">Persistent context across sessions</div>
+          </div>
+        </div>
+
+        <button class="btn-primary" onclick="downloadMossDesktop()" id="moss-download-btn" data-i18n="moss_download">Download Moss Desktop</button>
+        <p style="margin:12px 0 0; font-size:12px; color:var(--text-secondary);" data-i18n="moss_download_hint">Download from GitHub Releases and install the .dmg file.</p>
+      </div>
+    </div>
+
+    <!-- Installed State -->
+    <div id="moss-installed" style="display:none;">
+      <!-- Moss Status Card -->
+      <div class="card-settings" style="padding:24px;">
+        <div style="display:flex; align-items:center; gap:16px; margin-bottom:20px;">
+          <img src="data:image/png;base64,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" style="width:48px; height:48px; border-radius:12px;" alt="Moss"/>
+          <div>
+            <div style="font-size:16px; font-weight:600;" data-i18n="moss_management">Moss Desktop</div>
+            <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">
+              <span id="moss-status-dot" class="status-dot ready" style="margin-right:2px;"></span>
+              <span id="moss-status-text" data-i18n="moss_detected">Detected</span>
+            </div>
+          </div>
+          <div style="margin-left:auto;">
+            <button class="btn-primary" onclick="openMossDesktop()" data-i18n="moss_open" style="padding:8px 20px;">Open Moss Desktop</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Configuration Guide -->
+      <div class="card-settings" style="margin-top:16px;">
+        <div class="card-header">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M8 1v2M8 13v2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M1 8h2M13 8h2M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.3"/></svg>
+          <span data-i18n="moss_config_guide">Configuration Guide</span>
+        </div>
+        <div style="padding:16px; font-size:13px; line-height:1.8; color:var(--text-secondary);">
+          <p style="margin:0 0 12px;" data-i18n="moss_config_step1">To use ironmlx as the LLM backend in Moss, configure the following in Moss Settings:</p>
+          <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin:0 0 12px; font-family:'SF Mono', Menlo, monospace; font-size:13px; display:flex; align-items:center; justify-content:space-between;">
+            <div>
+              <span style="color:var(--text-secondary);">Chat URL</span>
+              <br>
+              <strong style="color:var(--text); font-size:14px;">http://127.0.0.1:<span id="moss-ironmlx-port">8080</span>/v1</strong>
+            </div>
+            <button class="icon-btn" onclick="copyMossUrl()" title="Copy" style="padding:6px;">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M3 11V3.5A.5.5 0 013.5 3H11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <p style="margin:0;" data-i18n="moss_config_step2">Once configured, Moss will use ironmlx's locally loaded models for inference.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings Page -->
   <div class="page" id="page-settings">
     <div class="page-title" data-i18n="settings_title">App Settings</div>
@@ -1705,7 +1790,18 @@
   // ── i18n translations ──
   const I18N = {
     en: {
-      nav_status: "Status", nav_models: "Models", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_settings: "Settings",
+      nav_status: "Status", nav_models: "Models", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_chat: "Chat", nav_settings: "Settings",
+      chat_subtitle: "Intelligent agent powered by Moss.",
+      moss_title: "Moss Agent", moss_description: "Moss is an intelligent AI agent that can plan complex tasks, use tools, execute scripts, and maintain conversation memory. Install Moss to unlock advanced chat capabilities.",
+      moss_feat_planning: "Task Planning", moss_feat_planning_desc: "Break complex requests into subtasks",
+      moss_feat_tools: "Tool Integration", moss_feat_tools_desc: "MCP servers, skills, script execution",
+      moss_feat_memory: "Conversation Memory", moss_feat_memory_desc: "Persistent context across sessions",
+      moss_download: "Download Moss Desktop", moss_download_hint: "Download from GitHub Releases and install the .dmg file.",
+      moss_management: "Moss Desktop", moss_status: "Status", moss_detected: "Detected",
+      moss_open: "Open Moss Desktop",
+      moss_config_guide: "Configuration Guide",
+      moss_config_step1: "To use ironmlx as the LLM backend in Moss, configure the following in Moss Settings:",
+      moss_config_step2: "Once configured, Moss will use ironmlx's locally loaded models for inference.",
       status_subtitle: "Server status and resource usage overview.",
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
@@ -1770,7 +1866,18 @@
       step3_title: "Start the Server", step3_desc: "Click \"Start Server\" from the menubar, or enable auto-start in Settings. The server will load your default model automatically."
     },
     "zh-Hans": {
-      nav_status: "状态", nav_models: "模型", nav_benchmark: "基准测试", nav_logs: "日志", nav_settings: "设置",
+      nav_status: "状态", nav_models: "模型", nav_benchmark: "基准测试", nav_logs: "日志", nav_chat: "对话", nav_settings: "设置",
+      chat_subtitle: "由 Moss 驱动的智能代理。",
+      moss_title: "Moss 智能代理", moss_description: "Moss 是一个智能 AI 代理，能够规划复杂任务、使用工具、执行脚本并维护对话记忆。安装 Moss 以解锁高级对话功能。",
+      moss_feat_planning: "任务规划", moss_feat_planning_desc: "将复杂请求分解为子任务",
+      moss_feat_tools: "工具集成", moss_feat_tools_desc: "MCP 服务器、技能、脚本执行",
+      moss_feat_memory: "对话记忆", moss_feat_memory_desc: "跨会话的持久化上下文",
+      moss_download: "下载 Moss Desktop", moss_download_hint: "从 GitHub Releases 下载并安装 .dmg 文件。",
+      moss_management: "Moss Desktop", moss_status: "状态", moss_detected: "已检测",
+      moss_open: "打开 Moss Desktop",
+      moss_config_guide: "配置指南",
+      moss_config_step1: "要在 Moss 中使用 ironmlx 作为 LLM 后端，请在 Moss 设置中配置以下内容：",
+      moss_config_step2: "配置完成后，Moss 将使用 ironmlx 本地加载的模型进行推理。",
       status_subtitle: "服务器状态与资源使用概览。",
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
@@ -1835,7 +1942,18 @@
       step3_title: "启动服务", step3_desc: "从菜单栏点击「启动服务」，或在设置中启用自动启动。服务将自动加载默认模型。"
     },
     "zh-Hant": {
-      nav_status: "狀態", nav_models: "模型", nav_benchmark: "基準測試", nav_logs: "日誌", nav_settings: "設定",
+      nav_status: "狀態", nav_models: "模型", nav_benchmark: "基準測試", nav_logs: "日誌", nav_chat: "對話", nav_settings: "設定",
+      chat_subtitle: "由 Moss 驅動的智慧代理。",
+      moss_title: "Moss 智慧代理", moss_description: "Moss 是一個智慧 AI 代理，能夠規劃複雜任務、使用工具、執行腳本並維護對話記憶。安裝 Moss 以解鎖進階對話功能。",
+      moss_feat_planning: "任務規劃", moss_feat_planning_desc: "將複雜請求分解為子任務",
+      moss_feat_tools: "工具整合", moss_feat_tools_desc: "MCP 伺服器、技能、腳本執行",
+      moss_feat_memory: "對話記憶", moss_feat_memory_desc: "跨會話的持久化上下文",
+      moss_download: "下載 Moss Desktop", moss_download_hint: "從 GitHub Releases 下載並安裝 .dmg 檔案。",
+      moss_management: "Moss Desktop", moss_status: "狀態", moss_detected: "已偵測",
+      moss_open: "開啟 Moss Desktop",
+      moss_config_guide: "設定指南",
+      moss_config_step1: "要在 Moss 中使用 ironmlx 作為 LLM 後端，請在 Moss 設定中設定以下內容：",
+      moss_config_step2: "設定完成後，Moss 將使用 ironmlx 本地載入的模型進行推理。",
       status_subtitle: "伺服器狀態與資源使用概覽。",
       server_status: "伺服器狀態", running: "執行中", uptime: "執行時間", model: "模型",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
@@ -1900,7 +2018,18 @@
       step3_title: "啟動服務", step3_desc: "從選單列點擊「啟動服務」，或在設定中啟用自動啟動。服務將自動載入預設模型。"
     },
     ja: {
-      nav_status: "ステータス", nav_models: "モデル", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_settings: "設定",
+      nav_status: "ステータス", nav_models: "モデル", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_chat: "チャット", nav_settings: "設定",
+      chat_subtitle: "Moss による知的エージェント。",
+      moss_title: "Moss エージェント", moss_description: "Moss は複雑なタスクの計画、ツールの使用、スクリプトの実行、会話メモリの維持ができる知的 AI エージェントです。Moss をインストールして高度なチャット機能を利用しましょう。",
+      moss_feat_planning: "タスク計画", moss_feat_planning_desc: "複雑なリクエストをサブタスクに分解",
+      moss_feat_tools: "ツール統合", moss_feat_tools_desc: "MCP サーバー、スキル、スクリプト実行",
+      moss_feat_memory: "会話メモリ", moss_feat_memory_desc: "セッション間の永続コンテキスト",
+      moss_download: "Moss Desktop をダウンロード", moss_download_hint: "GitHub Releases から .dmg ファイルをダウンロードしてインストール。",
+      moss_management: "Moss Desktop", moss_status: "ステータス", moss_detected: "検出済み",
+      moss_open: "Moss Desktop を開く",
+      moss_config_guide: "設定ガイド",
+      moss_config_step1: "Moss で ironmlx を LLM バックエンドとして使用するには、Moss の設定で以下を構成してください：",
+      moss_config_step2: "設定完了後、Moss は ironmlx のローカルモデルを推論に使用します。",
       status_subtitle: "サーバーステータスとリソース使用状況の概要。",
       server_status: "サーバーステータス", running: "実行中", uptime: "稼働時間", model: "モデル",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
@@ -1965,7 +2094,18 @@
       step3_title: "サーバーを起動", step3_desc: "メニューバーから「サーバー起動」をクリック、または設定で自動起動を有効化。サーバーはデフォルトモデルを自動的に読み込みます。"
     },
     ko: {
-      nav_status: "상태", nav_models: "모델", nav_benchmark: "벤치마크", nav_logs: "로그", nav_settings: "설정",
+      nav_status: "상태", nav_models: "모델", nav_benchmark: "벤치마크", nav_logs: "로그", nav_chat: "채팅", nav_settings: "설정",
+      chat_subtitle: "Moss 기반 지능형 에이전트.",
+      moss_title: "Moss 에이전트", moss_description: "Moss는 복잡한 작업을 계획하고, 도구를 사용하고, 스크립트를 실행하고, 대화 메모리를 유지할 수 있는 지능형 AI 에이전트입니다. Moss를 설치하여 고급 채팅 기능을 사용하세요.",
+      moss_feat_planning: "작업 계획", moss_feat_planning_desc: "복잡한 요청을 하위 작업으로 분해",
+      moss_feat_tools: "도구 통합", moss_feat_tools_desc: "MCP 서버, 스킬, 스크립트 실행",
+      moss_feat_memory: "대화 메모리", moss_feat_memory_desc: "세션 간 지속 컨텍스트",
+      moss_download: "Moss Desktop 다운로드", moss_download_hint: "GitHub Releases에서 .dmg 파일을 다운로드하여 설치하세요.",
+      moss_management: "Moss Desktop", moss_status: "상태", moss_detected: "감지됨",
+      moss_open: "Moss Desktop 열기",
+      moss_config_guide: "구성 가이드",
+      moss_config_step1: "Moss에서 ironmlx를 LLM 백엔드로 사용하려면 Moss 설정에서 다음을 구성하세요:",
+      moss_config_step2: "구성 완료 후 Moss는 ironmlx의 로컬 모델을 추론에 사용합니다.",
       status_subtitle: "서버 상태 및 리소스 사용 개요.",
       server_status: "서버 상태", running: "실행 중", uptime: "가동 시간", model: "모델",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
@@ -2514,6 +2654,54 @@
       }
     });
   })();
+
+  // ── Moss Desktop Integration ──
+  window.__MOSS_INSTALLED__ = false;
+
+  function checkMossInstalled() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.checkMoss) {
+      window.webkit.messageHandlers.checkMoss.postMessage('check');
+    }
+  }
+
+  // Called from Rust with moss detection result
+  function onMossStatus(jsonStr) {
+    let status = {};
+    try { status = JSON.parse(jsonStr); } catch(e) { return; }
+    window.__MOSS_INSTALLED__ = status.installed;
+
+    document.getElementById('moss-not-installed').style.display = status.installed ? 'none' : 'block';
+    document.getElementById('moss-installed').style.display = status.installed ? 'block' : 'none';
+
+    if (status.installed) {
+      const dot = document.getElementById('moss-status-dot');
+      const text = document.getElementById('moss-status-text');
+      const dict = I18N[currentLang] || I18N.en;
+      dot.className = 'status-dot ready';
+      text.textContent = dict.moss_detected || 'Detected';
+      // Show ironmlx port in config guide
+      const portEl = document.getElementById('moss-ironmlx-port');
+      if (portEl) portEl.textContent = window.__IRONMLX_PORT__ || '8080';
+    }
+  }
+
+  function downloadMossDesktop() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.downloadMoss) {
+      window.webkit.messageHandlers.downloadMoss.postMessage('download');
+    }
+  }
+
+  function openMossDesktop() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.openMossDesktop) {
+      window.webkit.messageHandlers.openMossDesktop.postMessage('open');
+    }
+  }
+
+  function copyMossUrl() {
+    const port = document.getElementById('moss-ironmlx-port').textContent || '8080';
+    const url = 'http://127.0.0.1:' + port + '/v1';
+    navigator.clipboard.writeText(url).catch(() => {});
+  }
 
   // ── GPU Memory Chart ──
   const gpuCanvas = document.getElementById('gpu-chart');

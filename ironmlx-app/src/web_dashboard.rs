@@ -238,6 +238,39 @@ define_class!(
                         );
                     });
                 }
+                "checkMoss" => {
+                    let installed = std::path::Path::new("/Applications/Moss.app").exists();
+                    let status = format!("{{\"installed\":{}}}", installed);
+                    eval_js_on_window_sync(&format!(
+                        "onMossStatus('{}')", status.replace('\'', "\\'")
+                    ));
+                }
+                "downloadMoss" => {
+                    // Open GitHub Releases page in default browser
+                    let url = "https://github.com/apepkuss/Aries/releases";
+                    let url_ns = unsafe { objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) };
+                    if let Some(url_obj) = url_ns {
+                        unsafe {
+                            let workspace = NSWorkspace::sharedWorkspace();
+                            let _: () = msg_send![&*workspace, openURL: &*url_obj];
+                        }
+                    }
+                }
+                "openMossDesktop" => {
+                    // Launch Moss.app in a background thread to avoid blocking
+                    std::thread::spawn(|| {
+                        let output = std::process::Command::new("/usr/bin/open")
+                            .arg("-a")
+                            .arg("/Applications/Moss.app")
+                            .env_clear()
+                            .env("HOME", std::env::var("HOME").unwrap_or_default())
+                            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                            .output();
+                        if let Err(e) = output {
+                            eprintln!("Failed to open Moss: {e}");
+                        }
+                    });
+                }
                 "fetchAPI" => {
                     // Bridge: JS asks Rust to fetch a local API endpoint
                     let port = crate::config::AppConfig::load().port;
@@ -517,6 +550,22 @@ fn eval_js_on_window(win_send: Option<RawPtr>, js_code: &str) {
     });
 }
 
+/// Evaluate JS on the web dashboard window from the main thread (used in message handler)
+fn eval_js_on_window_sync(js_code: &str) {
+    if let Ok(guard) = window_lock().lock() {
+        if let Some(ref ptr) = *guard {
+            let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+            if let Some(cv) = win.contentView() {
+                let js = NSString::from_str(js_code);
+                unsafe {
+                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
+                }
+            }
+        }
+    }
+}
+
+
 /// Estimate model size in MB from local files
 fn estimate_model_size_mb(model_id: &str) -> f64 {
     let models_dir = crate::config::ironmlx_root().join("models");
@@ -727,6 +776,9 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("syncLoadedModels"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("getAppLogs"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("fetchAPI"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("checkMoss"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("downloadMoss"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("openMossDesktop"));
     }
 
     let webview = unsafe {
@@ -759,7 +811,7 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     let html_with_lang = html.replace(
         "/*__INIT_LANG__*/",
         &format!(
-            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling();{}",
+            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling(); checkMossInstalled();{}",
             port,
             default_model,
             if !default_model.is_empty() {
