@@ -4,6 +4,7 @@ mod types;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 
 use crate::state::AppState;
@@ -23,5 +24,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models/default", post(models::set_default_model))
         .route("/health", get(models::health))
         .merge(admin_routes)
+        // Limit request body to 2MB to prevent OOM from oversized prompts
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state)
 }

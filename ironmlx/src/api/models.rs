@@ -369,13 +369,21 @@ async fn chat_completions_sync(
     let media = extract_and_process_media(&entry, &req.messages)?;
     let messages = inject_tools_into_messages(&req.messages, &req.tools);
     let prompt = build_chat_prompt(&entry.chat_template, &messages, req.enable_thinking)?;
+
+    // Pre-tokenization length check to prevent OOM during encode
+    check_raw_prompt_length(&prompt, &entry.model_id)?;
+
     let prompt_tokens = encode_or_error(&entry, &prompt)?;
     let prompt_len = prompt_tokens.len();
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
+    let model_id = entry.model_id.clone();
+
+    // Check context window limit
+    check_prompt_length(prompt_len, max_tokens, &model_id)?;
+
     let eos = entry.eos_token_id;
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-    let model_id = entry.model_id.clone();
 
     let mut token_rx = entry
         .engine
@@ -456,9 +464,19 @@ async fn chat_completions_stream(
     let media = extract_and_process_media(&entry, &req.messages)?;
     let messages = inject_tools_into_messages(&req.messages, &req.tools);
     let prompt = build_chat_prompt(&entry.chat_template, &messages, req.enable_thinking)?;
+
+    // Pre-tokenization length check to prevent OOM during encode
+    check_raw_prompt_length(&prompt, &entry.model_id)?;
+
     let prompt_tokens = encode_or_error(&entry, &prompt)?;
+    let prompt_len = prompt_tokens.len();
     let sampler = build_sampler(&req);
     let max_tokens = req.max_tokens;
+    let model_id_check = entry.model_id.clone();
+
+    // Check context window limit
+    check_prompt_length(prompt_len, max_tokens, &model_id_check)?;
+
     let eos = entry.eos_token_id;
     let chunk_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = chrono::Utc::now().timestamp();
@@ -1291,6 +1309,99 @@ fn extract_and_process_media(
     }
 
     Ok(Some(all_media))
+}
+
+/// Default max context size if not configured
+const DEFAULT_MAX_CONTEXT: usize = 32768;
+
+/// Get the max context size for a model from saved params, or use default.
+fn get_max_context(model_id: &str) -> usize {
+    let params_path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".ironmlx")
+        .join("config")
+        .join("model_params.json");
+    if let Ok(data) = std::fs::read_to_string(&params_path)
+        && let Ok(all) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&data)
+        && let Some(params) = all.get(model_id)
+        && let Some(ctx) = params.get("context_size").and_then(|v| v.as_str())
+        && let Ok(val) = ctx.parse::<usize>()
+        && val > 0
+    {
+        return val;
+    }
+    DEFAULT_MAX_CONTEXT
+}
+
+/// Quick pre-check on raw prompt string length before tokenization.
+/// Rough estimate: 1 token ≈ 4 chars. Reject obviously too-long prompts early.
+fn check_raw_prompt_length(
+    prompt: &str,
+    model_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let max_context = get_max_context(model_id);
+    let estimated_tokens = prompt.len() / 3; // conservative: ~3 chars per token
+    if estimated_tokens > max_context {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: ErrorDetail {
+                    message: format!(
+                        "Prompt too long: estimated ~{} tokens (from {} chars) exceeds context window of {} tokens.",
+                        estimated_tokens,
+                        prompt.len(),
+                        max_context
+                    ),
+                    r#type: "invalid_request_error".to_string(),
+                },
+            }),
+        ));
+    }
+    Ok(())
+}
+
+/// Check if prompt tokens exceed the model's context window and return error if so.
+fn check_prompt_length(
+    prompt_len: usize,
+    max_tokens: usize,
+    model_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let max_context = get_max_context(model_id);
+    if prompt_len + max_tokens > max_context {
+        let available = max_context.saturating_sub(prompt_len);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: ErrorDetail {
+                    message: format!(
+                        "Request exceeds context window: prompt_tokens={}, max_tokens={}, total={}, context_size={}. Reduce prompt length or max_tokens (max available for generation: {}).",
+                        prompt_len,
+                        max_tokens,
+                        prompt_len + max_tokens,
+                        max_context,
+                        available
+                    ),
+                    r#type: "invalid_request_error".to_string(),
+                },
+            }),
+        ));
+    }
+    if prompt_len > max_context {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: ErrorDetail {
+                    message: format!(
+                        "Prompt too long: {} tokens exceeds context window of {} tokens.",
+                        prompt_len, max_context
+                    ),
+                    r#type: "invalid_request_error".to_string(),
+                },
+            }),
+        ));
+    }
+    Ok(())
 }
 
 fn internal_error(message: &str) -> (StatusCode, Json<ErrorResponse>) {
