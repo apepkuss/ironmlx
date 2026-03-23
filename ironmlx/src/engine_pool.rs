@@ -59,10 +59,23 @@ impl EnginePool {
         let engine_handle = EngineHandle::new(cmd_tx);
         let engine_tokenizer = tokenizer.clone();
 
-        // SSD Cache disabled: Metal Fence::wait in writer_thread causes
-        // SIGABRT when GPU resources are shared between inference and cache writes.
-        // TODO: fix SSD cache to use CPU-side copies before saving to disk
-        let mut engine = EngineCore::new(cmd_rx, model, engine_tokenizer);
+        // Create CacheManager with SSD-backed store
+        // Note: store_block() now eval+copies arrays to CPU before sending to writer thread,
+        // avoiding Metal CommandBuffer conflicts (SIGABRT) between inference and cache I/O.
+        let num_layers = model.num_layers();
+        let cache_dir = crate::config::ironmlx_root().join("cache").join("kv_cache");
+        let model_hash = model_id.replace('/', "_");
+        let ssd_config = ironmlx_core::cache::SSDStoreConfig {
+            cache_dir,
+            max_size_bytes: 10 * 1024 * 1024 * 1024,
+            model_hash,
+        };
+        let ssd_store = ironmlx_core::cache::SSDStore::new(ssd_config)
+            .map_err(|e| format!("cache error: {}", e))?;
+        let cache_manager = ironmlx_core::cache::CacheManager::new(ssd_store, num_layers);
+
+        let mut engine =
+            EngineCore::with_cache_manager(cmd_rx, model, engine_tokenizer, cache_manager);
         std::thread::spawn(move || {
             engine.run();
         });

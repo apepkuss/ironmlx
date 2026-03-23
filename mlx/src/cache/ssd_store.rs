@@ -40,9 +40,18 @@ struct SSDEntry {
     num_layers: usize,
 }
 
+/// CPU-side KV data for a single layer, ready for disk write without GPU access.
+struct CpuKvLayer {
+    keys_data: Vec<f32>,
+    keys_shape: Vec<i32>,
+    values_data: Vec<f32>,
+    values_shape: Vec<i32>,
+}
+
 /// Message sent to the background writer thread.
+/// Contains CPU-side data only — no GPU arrays — to avoid Metal CommandBuffer conflicts.
 struct WriteJob {
-    kv_data: Vec<(Array, Array)>,
+    cpu_kv: Vec<CpuKvLayer>,
     file_path: PathBuf,
 }
 
@@ -128,11 +137,30 @@ impl SSDStore {
 
         let num_layers = kv_data.len();
 
-        // Clone arrays for the background thread
-        let cloned_kv: Vec<(Array, Array)> = kv_data
+        // Eval GPU arrays and copy to CPU before sending to writer thread.
+        // This avoids Metal CommandBuffer conflicts (SIGABRT) when the writer
+        // thread would otherwise trigger GPU eval on a separate OS thread.
+        let cpu_kv: Vec<CpuKvLayer> = kv_data
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter_map(|(k, v)| {
+                let keys_data = k.to_vec_f32().ok()?;
+                let keys_shape = k.shape();
+                let values_data = v.to_vec_f32().ok()?;
+                let values_shape = v.shape();
+                Some(CpuKvLayer {
+                    keys_data,
+                    keys_shape,
+                    values_data,
+                    values_shape,
+                })
+            })
             .collect();
+
+        if cpu_kv.len() != num_layers {
+            return Err(crate::error::Error::Mlx(
+                "failed to eval KV cache arrays for SSD store".into(),
+            ));
+        }
 
         // Track as pending
         self.pending_writes.insert(
@@ -143,12 +171,9 @@ impl SSDStore {
             },
         );
 
-        // Send to writer thread
+        // Send CPU data to writer thread (no GPU arrays cross thread boundary)
         if let Some(ref tx) = self.write_tx {
-            let _ = tx.send(WriteJob {
-                kv_data: cloned_kv,
-                file_path,
-            });
+            let _ = tx.send(WriteJob { cpu_kv, file_path });
         }
 
         Ok(())
@@ -589,14 +614,21 @@ impl Drop for SSDStore {
 }
 
 /// Background writer thread: receives WriteJob messages and writes safetensors files.
+/// All data arrives as CPU vectors — no GPU operations occur in this thread.
 fn writer_thread(rx: mpsc::Receiver<WriteJob>) {
     while let Ok(job) = rx.recv() {
         let arrays = MapStringToArray::new();
-        for (i, (keys, values)) in job.kv_data.iter().enumerate() {
-            if arrays.insert(&format!("layer_{i}_keys"), keys).is_err() {
+        for (i, layer) in job.cpu_kv.iter().enumerate() {
+            // Reconstruct Array from CPU data (no GPU involved)
+            let keys = Array::from_slice_f32_shape(&layer.keys_data, &layer.keys_shape);
+            let values = Array::from_slice_f32_shape(&layer.values_data, &layer.values_shape);
+            if arrays.insert(&format!("layer_{i}_keys"), &keys).is_err() {
                 continue;
             }
-            if arrays.insert(&format!("layer_{i}_values"), values).is_err() {
+            if arrays
+                .insert(&format!("layer_{i}_values"), &values)
+                .is_err()
+            {
                 continue;
             }
         }
