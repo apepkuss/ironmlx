@@ -60,3 +60,13 @@ pub fn set_wired_limit(limit: usize) -> Result<usize> {
 pub fn clear_cache() -> Result<()> {
     check(unsafe { sys::mlx_clear_cache() })
 }
+
+/// Get the total GPU memory in bytes via `mlx_device_info`.
+///
+/// Returns the `memory_size` key from the default GPU device info,
+/// which is the total unified memory on Apple Silicon.
+pub fn get_memory_size() -> Option<usize> {
+    let gpu = crate::device::Device::gpu();
+    let info = crate::device::DeviceInfo::get(&gpu)?;
+    info.get_size("memory_size")
+}

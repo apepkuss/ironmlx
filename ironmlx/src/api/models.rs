@@ -1015,6 +1015,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     let mem = ironmlx_core::memory::get_active_memory().unwrap_or(0);
     let cache = ironmlx_core::memory::get_cache_memory().unwrap_or(0);
     let peak = ironmlx_core::memory::get_peak_memory().unwrap_or(0);
+    let total = ironmlx_core::memory::get_memory_size().map(|bytes| bytes as f64 / 1_048_576.0);
 
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -1023,6 +1024,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             active_mb: mem as f64 / 1_048_576.0,
             cache_mb: cache as f64 / 1_048_576.0,
             peak_mb: peak as f64 / 1_048_576.0,
+            total_mb: total,
         }),
         started_at: state.started_at,
     })

@@ -2,3 +2,8 @@
 # from multiple threads concurrently. Run all tests single-threaded.
 [env]
 RUST_TEST_THREADS = "1"
+CMAKE_C_COMPILER_LAUNCHER = "sccache"
+CMAKE_CXX_COMPILER_LAUNCHER = "sccache"
+
+[build]
+rustc-wrapper = "sccache"

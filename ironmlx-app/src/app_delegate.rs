@@ -157,18 +157,19 @@ define_class!(
 
         #[unsafe(method(openChat:))]
         fn open_chat(&self, _sender: &NSMenuItem) {
-            eprintln!("[menu] openChat: triggered");
             if std::path::Path::new("/Applications/Moss.app").exists() {
-                match std::process::Command::new("open")
-                    .arg("-a")
-                    .arg("Moss")
-                    .spawn()
-                {
-                    Ok(_) => eprintln!("[menu] openChat: Moss launched"),
-                    Err(e) => eprintln!("[menu] openChat: failed to launch Moss: {e}"),
-                }
-            } else {
-                eprintln!("[menu] openChat: Moss.app not found");
+                std::thread::spawn(|| {
+                    let output = std::process::Command::new("/usr/bin/open")
+                        .arg("-a")
+                        .arg("/Applications/Moss.app")
+                        .env_clear()
+                        .env("HOME", std::env::var("HOME").unwrap_or_default())
+                        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                        .output();
+                    if let Err(e) = output {
+                        eprintln!("[menu] openChat: failed to open Moss: {e}");
+                    }
+                });
             }
         }
 
@@ -395,7 +396,7 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 
     // ── Chat with Moss ──
     let moss_installed = std::path::Path::new("/Applications/Moss.app").exists();
-    let chat = make_item(mtm, "Chat with Moss", Some(sel!(openChat:)), "");
+    let chat = make_item(mtm, t("menu_chat"), Some(sel!(openChat:)), "");
     if let Some(icon) = sf_icon("bubble.left.and.bubble.right") {
         chat.setImage(Some(&icon));
     }

@@ -1267,7 +1267,7 @@
     <!-- GPU Memory Chart -->
     <div class="gpu-chart-container">
       <div class="gpu-chart-header">
-        <span class="chart-title" data-i18n="gpu_memory">GPU Memory</span>
+        <span class="chart-title"><span data-i18n="gpu_memory">GPU Memory</span><span id="gpu-total-label" style="font-weight:400;color:var(--text-secondary);margin-left:6px;font-size:12px;"></span></span>
         <div class="gpu-chart-legend">
           <span><span class="legend-dot" style="background:#007aff;"></span> <span data-i18n="active_mem">Active</span></span>
           <span><span class="legend-dot" style="background:#ff3b30;"></span> <span data-i18n="peak_mem">Peak</span></span>
@@ -2936,6 +2936,7 @@
   const GPU_HISTORY_MAX = 120; // 2 minutes at 1s interval
   const gpuHistory = []; // [{time, active, peak, cache}]
   let gpuMaxMB = 8192; // auto-scale, start at 8GB
+  let gpuTotalMB = 0;  // actual GPU total from /health API
   let statusPollTimer = null;
 
   function formatMB(mb) {
@@ -2968,11 +2969,15 @@
     // Clear
     gpuCtx.clearRect(0, 0, W, H);
 
-    // Auto-scale Y axis
-    let maxVal = 1024;
-    gpuHistory.forEach(d => { maxVal = Math.max(maxVal, d.active, d.peak); });
-    gpuMaxMB = Math.ceil(maxVal / 1024) * 1024;
-    if (gpuMaxMB < 1024) gpuMaxMB = 1024;
+    // Auto-scale Y axis; use device total as ceiling when available
+    if (gpuTotalMB > 0) {
+      gpuMaxMB = gpuTotalMB;
+    } else {
+      let maxVal = 1024;
+      gpuHistory.forEach(d => { maxVal = Math.max(maxVal, d.active, d.peak); });
+      gpuMaxMB = Math.ceil(maxVal / 1024) * 1024;
+      if (gpuMaxMB < 1024) gpuMaxMB = 1024;
+    }
 
     // Grid lines
     const ySteps = 4;
@@ -3106,6 +3111,10 @@
         document.getElementById('stat-model').textContent = modelName;
         if (data.memory) {
           const m = data.memory;
+          if (m.total_mb && m.total_mb > 0) {
+            gpuTotalMB = m.total_mb;
+            document.getElementById('gpu-total-label').textContent = '(' + formatMB(gpuTotalMB) + ')';
+          }
           gpuHistory.push({ time: Date.now(), active: m.active_mb, peak: m.peak_mb, cache: m.cache_mb });
           if (gpuHistory.length > GPU_HISTORY_MAX) gpuHistory.shift();
           document.getElementById('gpu-active-val').textContent = formatMB(m.active_mb);

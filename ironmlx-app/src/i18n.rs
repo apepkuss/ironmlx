@@ -14,7 +14,7 @@ pub fn t(key: &str) -> &str {
     match (lang, key) {
         // Chinese Simplified
         ("zh", "menu_dashboard") => "\u{4eea}\u{8868}\u{76d8}",
-        ("zh", "menu_chat") => "\u{4e0e} ironmlx \u{5bf9}\u{8bdd}",
+        ("zh", "menu_chat") => "\u{4e0e} Moss \u{5bf9}\u{8bdd}",
         ("zh", "menu_stop") => "\u{505c}\u{6b62}\u{670d}\u{52a1}",
         ("zh", "menu_start") => "\u{542f}\u{52a8}\u{670d}\u{52a1}",
         ("zh", "menu_restart") => "\u{91cd}\u{542f}\u{670d}\u{52a1}",
@@ -25,7 +25,7 @@ pub fn t(key: &str) -> &str {
         ("zh", "menu_status_stopped") => "\u{670d}\u{52a1}\u{5668}\u{5df2}\u{505c}\u{6b62}",
         // Chinese Traditional
         ("zh-Hant", "menu_dashboard") => "\u{5100}\u{8868}\u{677f}",
-        ("zh-Hant", "menu_chat") => "\u{8207} ironmlx \u{5c0d}\u{8a71}",
+        ("zh-Hant", "menu_chat") => "\u{8207} Moss \u{5c0d}\u{8a71}",
         ("zh-Hant", "menu_stop") => "\u{505c}\u{6b62}\u{670d}\u{52d9}",
         ("zh-Hant", "menu_start") => "\u{555f}\u{52d5}\u{670d}\u{52d9}",
         ("zh-Hant", "menu_restart") => "\u{91cd}\u{555f}\u{670d}\u{52d9}",
@@ -36,7 +36,7 @@ pub fn t(key: &str) -> &str {
         ("zh-Hant", "menu_status_stopped") => "\u{4f3a}\u{670d}\u{5668}\u{5df2}\u{505c}\u{6b62}",
         // Japanese
         ("ja", "menu_dashboard") => "\u{30c0}\u{30c3}\u{30b7}\u{30e5}\u{30dc}\u{30fc}\u{30c9}",
-        ("ja", "menu_chat") => "ironmlx \u{3068}\u{30c1}\u{30e3}\u{30c3}\u{30c8}",
+        ("ja", "menu_chat") => "Moss \u{3068}\u{30c1}\u{30e3}\u{30c3}\u{30c8}",
         ("ja", "menu_stop") => "\u{30b5}\u{30fc}\u{30d0}\u{30fc}\u{505c}\u{6b62}",
         ("ja", "menu_start") => "\u{30b5}\u{30fc}\u{30d0}\u{30fc}\u{958b}\u{59cb}",
         ("ja", "menu_restart") => "\u{30b5}\u{30fc}\u{30d0}\u{30fc}\u{518d}\u{8d77}\u{52d5}",
@@ -53,7 +53,7 @@ pub fn t(key: &str) -> &str {
         }
         // Korean
         ("ko", "menu_dashboard") => "\u{b300}\u{c2dc}\u{bcf4}\u{b4dc}",
-        ("ko", "menu_chat") => "ironmlx\u{c640} \u{cc44}\u{d305}",
+        ("ko", "menu_chat") => "Moss\u{c640} \u{cc44}\u{d305}",
         ("ko", "menu_stop") => "\u{c11c}\u{bc84} \u{c815}\u{c9c0}",
         ("ko", "menu_start") => "\u{c11c}\u{bc84} \u{c2dc}\u{c791}",
         ("ko", "menu_restart") => "\u{c11c}\u{bc84} \u{c7ac}\u{c2dc}\u{c791}",
@@ -64,7 +64,7 @@ pub fn t(key: &str) -> &str {
         ("ko", "menu_status_stopped") => "\u{c11c}\u{bc84}: \u{c815}\u{c9c0}\u{b428}",
         // English defaults
         (_, "menu_dashboard") => "Dashboard",
-        (_, "menu_chat") => "Chat with ironmlx",
+        (_, "menu_chat") => "Chat with Moss",
         (_, "menu_stop") => "Stop Server",
         (_, "menu_start") => "Start Server",
         (_, "menu_restart") => "Restart Server",
