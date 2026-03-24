@@ -6,6 +6,7 @@ pub enum ServerStatus {
     Stopped,
     Starting,
     Running,
+    #[allow(dead_code)]
     Failed,
 }
 
@@ -71,6 +72,7 @@ impl ServerManager {
         self.start(model_path)
     }
 
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         // Check if process is still alive
         if let Some(ref mut child) = *self.process.lock().unwrap() {
@@ -87,6 +89,7 @@ impl ServerManager {
         false
     }
 
+    #[allow(dead_code)]
     pub fn check_health(&self) -> bool {
         let url = format!("http://127.0.0.1:{}/health", self.port);
         // Simple blocking check
@@ -99,12 +102,12 @@ impl ServerManager {
 
     fn find_binary() -> Option<String> {
         // 1. Same directory as this binary
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let sibling = dir.join("ironmlx");
-                if sibling.exists() {
-                    return Some(sibling.to_string_lossy().to_string());
-                }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            let sibling = dir.join("ironmlx");
+            if sibling.exists() {
+                return Some(sibling.to_string_lossy().to_string());
             }
         }
         // 2. In PATH

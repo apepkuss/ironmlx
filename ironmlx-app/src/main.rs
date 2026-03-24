@@ -1,10 +1,10 @@
 use objc2::MainThreadMarker;
 use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSApplication, NSApplicationDelegate};
+use objc2_app_kit::NSApplication;
 
 mod app_delegate;
 mod config;
-pub mod dashboard;
+mod i18n;
 mod preferences;
 mod server_manager;
 mod updater;
@@ -20,5 +20,5 @@ fn main() {
     let proto = ProtocolObject::from_retained(delegate);
     app.setDelegate(Some(&proto));
 
-    unsafe { app.run() };
+    app.run();
 }

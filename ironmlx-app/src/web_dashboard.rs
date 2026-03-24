@@ -32,6 +32,7 @@ fn app_log_buf() -> &'static Mutex<Vec<String>> {
 }
 
 /// Push a log message to the app log buffer (call from anywhere in ironmlx-app).
+#[allow(dead_code)]
 pub fn app_log(msg: &str) {
     let mut buf = app_log_buf().lock().unwrap();
     // Use Unix timestamp since we don't have chrono
@@ -85,21 +86,19 @@ define_class!(
                 "scanLocalModels" => {
                     // Scan HF cache directory for downloaded models
                     let models_json = scan_local_models();
-                    if let Ok(guard) = window_lock().lock() {
-                        if let Some(ref ptr) = *guard {
-                            let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
-                            if let Some(cv) = win.contentView() {
-                                let escaped = models_json
-                                    .replace('\\', "\\\\")
-                                    .replace('\'', "\\'")
-                                    .replace('\n', "\\n");
-                                let js = NSString::from_str(&format!(
-                                    "onLocalModelsScanned('{}')",
-                                    escaped
-                                ));
-                                unsafe {
-                                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
-                                }
+                    if let Ok(guard) = window_lock().lock()
+                        && let Some(ref ptr) = *guard
+                    {
+                        let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+                        if let Some(cv) = win.contentView() {
+                            let escaped = models_json
+                                .replace('\\', "\\\\")
+                                .replace('\'', "\\'")
+                                .replace('\n', "\\n");
+                            let js =
+                                NSString::from_str(&format!("onLocalModelsScanned('{}')", escaped));
+                            unsafe {
+                                let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
                             }
                         }
                     }
@@ -132,17 +131,17 @@ define_class!(
                     }
                     // Notify JS that deletion is complete, then rescan
                     let result = serde_json::to_string(&deleted).unwrap_or_default();
-                    if let Ok(guard) = window_lock().lock() {
-                        if let Some(ref ptr) = *guard {
-                            let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
-                            if let Some(cv) = win.contentView() {
-                                let js = NSString::from_str(&format!(
-                                    "onModelsDeleted('{}')",
-                                    result.replace('\'', "\\'")
-                                ));
-                                unsafe {
-                                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
-                                }
+                    if let Ok(guard) = window_lock().lock()
+                        && let Some(ref ptr) = *guard
+                    {
+                        let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+                        if let Some(cv) = win.contentView() {
+                            let js = NSString::from_str(&format!(
+                                "onModelsDeleted('{}')",
+                                result.replace('\'', "\\'")
+                            ));
+                            unsafe {
+                                let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
                             }
                         }
                     }
@@ -210,13 +209,11 @@ define_class!(
                             if let Ok(r) = reqwest::blocking::get(format!(
                                 "http://127.0.0.1:{}/v1/models",
                                 port
-                            )) {
-                                if let Ok(text) = r.text() {
-                                    if text.contains("\"data\"") {
-                                        resp = text;
-                                        break;
-                                    }
-                                }
+                            )) && let Ok(text) = r.text()
+                                && text.contains("\"data\"")
+                            {
+                                resp = text;
+                                break;
                             }
                             std::thread::sleep(std::time::Duration::from_secs(1));
                         }
@@ -249,8 +246,7 @@ define_class!(
                 "downloadMoss" => {
                     // Open GitHub Releases page in default browser
                     let url = "https://github.com/apepkuss/Aries/releases";
-                    let url_ns =
-                        unsafe { objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) };
+                    let url_ns = objc2_foundation::NSURL::URLWithString(&NSString::from_str(url));
                     if let Some(url_obj) = url_ns {
                         unsafe {
                             let workspace = NSWorkspace::sharedWorkspace();
@@ -385,12 +381,11 @@ define_class!(
                                 serde_json::Map::new()
                             };
                         // Parse new params and merge
-                        if let Ok(new_params) = serde_json::from_str::<serde_json::Value>(&body) {
-                            if let Some(model_id) =
+                        if let Ok(new_params) = serde_json::from_str::<serde_json::Value>(&body)
+                            && let Some(model_id) =
                                 new_params.get("model_id").and_then(|v| v.as_str())
-                            {
-                                all_params.insert(model_id.to_string(), new_params.clone());
-                            }
+                        {
+                            all_params.insert(model_id.to_string(), new_params.clone());
                         }
                         // Write back
                         if let Some(parent) = params_path.parent() {
@@ -422,10 +417,10 @@ define_class!(
                             // Use hf_hub to download
                             let mut builder = hf_hub::api::sync::ApiBuilder::new()
                                 .with_cache_dir(crate::config::ironmlx_root().join("models"));
-                            if let Some(t) = token {
-                                if !t.is_empty() {
-                                    builder = builder.with_token(Some(t.to_string()));
-                                }
+                            if let Some(t) = token
+                                && !t.is_empty()
+                            {
+                                builder = builder.with_token(Some(t.to_string()));
                             }
                             let api = builder.build().map_err(|e| e.to_string())?;
                             let repo = api.model(repo_id.to_string());
@@ -524,9 +519,7 @@ define_class!(
                                     .replace('\n', "");
                                 format!("onSearchResults('{}')", escaped)
                             }
-                            Err(e) => {
-                                format!("onSearchResults('[]')")
-                            }
+                            Err(_) => "onSearchResults('[]')".to_string(),
                         };
 
                         let inner_send = win_send.map(|p| RawPtr(p.0));
@@ -552,7 +545,7 @@ define_class!(
                         .lock()
                         .ok()
                         .and_then(|g| g.as_ref().map(|p| p.0));
-                    let win_send = win_ptr_raw.map(|p| RawPtr(p));
+                    let win_send = win_ptr_raw.map(RawPtr);
                     std::thread::spawn(move || {
                         let win_ptr = win_send.map(|w| w.0);
                         let result = std::process::Command::new("curl")
@@ -567,8 +560,8 @@ define_class!(
                         let path_escaped = body_str.replace('\\', "\\\\").replace('\'', "\\'");
                         let js_code =
                             format!("onApiFetchResult('{}', '{}')", path_escaped, escaped);
-                        let inner_send = win_ptr.map(|p| RawPtr(p));
-                        dispatch2::Queue::main().exec_async(move || {
+                        let inner_send = win_ptr.map(RawPtr);
+                        dispatch2::DispatchQueue::main().exec_async(move || {
                             if let Some(ref rp) = inner_send {
                                 let ptr = rp.0;
                                 let win: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
@@ -590,15 +583,14 @@ define_class!(
                         .replace('\'', "\\'")
                         .replace('\n', "\\n");
                     // Find the webview and evaluate JS
-                    if let Ok(guard) = window_lock().lock() {
-                        if let Some(ref ptr) = *guard {
-                            let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
-                            if let Some(cv) = win.contentView() {
-                                let js =
-                                    NSString::from_str(&format!("receiveAppLogs('{}')", escaped));
-                                unsafe {
-                                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
-                                }
+                    if let Ok(guard) = window_lock().lock()
+                        && let Some(ref ptr) = *guard
+                    {
+                        let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+                        if let Some(cv) = win.contentView() {
+                            let js = NSString::from_str(&format!("receiveAppLogs('{}')", escaped));
+                            unsafe {
+                                let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
                             }
                         }
                     }
@@ -639,9 +631,9 @@ define_class!(
         ) {
             let msg = message.to_string();
             let mtm = unsafe { MainThreadMarker::new_unchecked() };
-            let alert = unsafe { NSAlert::new(mtm) };
+            let alert = NSAlert::new(mtm);
             alert.setMessageText(&NSString::from_str(&msg));
-            unsafe { alert.runModal() };
+            alert.runModal();
             completion.call(());
         }
 
@@ -656,12 +648,10 @@ define_class!(
         ) {
             let msg = message.to_string();
             let mtm = unsafe { MainThreadMarker::new_unchecked() };
-            let alert = unsafe { NSAlert::new(mtm) };
+            let alert = NSAlert::new(mtm);
             alert.setMessageText(&NSString::from_str(&msg));
-            unsafe {
-                alert.addButtonWithTitle(&NSString::from_str("OK"));
-                alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-            }
+            alert.addButtonWithTitle(&NSString::from_str("OK"));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
             let response: isize = unsafe { msg_send![&*alert, runModal] };
             // NSAlertFirstButtonReturn = 1000
             let result = if response == 1000 {
@@ -699,37 +689,26 @@ fn handle_set_theme(theme: &str) {
     config.save();
 
     // Apply to web dashboard window
-    if let Ok(guard) = window_lock().lock() {
-        if let Some(ref ptr) = *guard {
-            let window: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
-            unsafe {
-                match appearance_name {
-                    Some(name) => {
-                        let ns_name = NSString::from_str(name);
-                        let appearance: *mut AnyObject = msg_send![
-                            AnyClass::get(c"NSAppearance").unwrap(),
-                            appearanceNamed: &*ns_name
-                        ];
-                        let _: () = msg_send![window, setAppearance: appearance];
-                    }
-                    None => {
-                        let _: () = msg_send![window, setAppearance: std::ptr::null::<AnyObject>()];
-                    }
+    if let Ok(guard) = window_lock().lock()
+        && let Some(ref ptr) = *guard
+    {
+        let window: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+        unsafe {
+            match appearance_name {
+                Some(name) => {
+                    let ns_name = NSString::from_str(name);
+                    let appearance: *mut AnyObject = msg_send![
+                        AnyClass::get(c"NSAppearance").unwrap(),
+                        appearanceNamed: &*ns_name
+                    ];
+                    let _: () = msg_send![window, setAppearance: appearance];
+                }
+                None => {
+                    let _: () = msg_send![window, setAppearance: std::ptr::null::<AnyObject>()];
                 }
             }
         }
     }
-
-    // Also apply to native dashboard (calls set_theme which handles its own window + config)
-    // We already saved config, so just apply appearance to native dashboard window if open
-    let native_appearance = match theme {
-        "light" => Some("NSAppearanceNameAqua"),
-        "dark" => Some("NSAppearanceNameDarkAqua"),
-        _ => None,
-    };
-    // Delegate to native dashboard's set_theme to keep everything in sync
-    // (it will re-save config but that's fine)
-    crate::dashboard::set_theme_from_web(native_appearance);
 }
 
 fn scan_local_models() -> String {
@@ -791,13 +770,12 @@ fn detect_model_type(model_dir: &std::path::Path) -> &'static str {
         for entry in entries.flatten() {
             let config_path = entry.path().join("config.json");
             if config_path.exists() {
-                if let Ok(data) = std::fs::read_to_string(&config_path) {
-                    if data.contains("\"vision")
+                if let Ok(data) = std::fs::read_to_string(&config_path)
+                    && (data.contains("\"vision")
                         || data.contains("visual")
-                        || data.contains("image_size")
-                    {
-                        return "vlm";
-                    }
+                        || data.contains("image_size"))
+                {
+                    return "vlm";
                 }
                 return "llm";
             }
@@ -825,14 +803,14 @@ fn eval_js_on_window(win_send: Option<RawPtr>, js_code: &str) {
 
 /// Evaluate JS on the web dashboard window from the main thread (used in message handler)
 fn eval_js_on_window_sync(js_code: &str) {
-    if let Ok(guard) = window_lock().lock() {
-        if let Some(ref ptr) = *guard {
-            let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
-            if let Some(cv) = win.contentView() {
-                let js = NSString::from_str(js_code);
-                unsafe {
-                    let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
-                }
+    if let Ok(guard) = window_lock().lock()
+        && let Some(ref ptr) = *guard
+    {
+        let win: &NSWindow = unsafe { &*(ptr.0 as *const NSWindow) };
+        if let Some(cv) = win.contentView() {
+            let js = NSString::from_str(js_code);
+            unsafe {
+                let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
             }
         }
     }
@@ -962,7 +940,7 @@ fn handle_set_language(lang_code: &str) {
     config.save();
 
     // Update native dashboard language state (if it's open)
-    *crate::dashboard::nav_language().lock().unwrap() = lang;
+    *crate::i18n::nav_language().lock().unwrap() = lang;
 
     // Rebuild menubar menu
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
@@ -1052,17 +1030,17 @@ pub fn show_web_dashboard(mtm: MainThreadMarker) {
     }
 
     // Check if window already exists and is valid
-    if let Ok(guard) = window_lock().lock() {
-        if let Some(ref ptr) = *guard {
-            let win = ptr.0 as *const NSWindow;
-            if !win.is_null() {
-                unsafe {
-                    let w = &*win;
-                    w.makeKeyAndOrderFront(None);
-                    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-                }
-                return;
+    if let Ok(guard) = window_lock().lock()
+        && let Some(ref ptr) = *guard
+    {
+        let win = ptr.0 as *const NSWindow;
+        if !win.is_null() {
+            unsafe {
+                let w = &*win;
+                w.makeKeyAndOrderFront(None);
+                NSApplication::sharedApplication(mtm).activate();
             }
+            return;
         }
     }
 
@@ -1074,10 +1052,8 @@ pub fn show_web_dashboard(mtm: MainThreadMarker) {
     *window_lock().lock().unwrap() = Some(RawPtr(ptr));
 
     // Show
-    unsafe {
-        window.makeKeyAndOrderFront(None);
-        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-    }
+    window.makeKeyAndOrderFront(None);
+    NSApplication::sharedApplication(mtm).activate();
 
     // Leak to keep alive (menubar app manages lifecycle)
     let _ = Retained::into_raw(window);
@@ -1109,11 +1085,9 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         win.setTitle(&NSString::from_str(""));
         win.setMinSize(NSSize::new(700.0, 450.0));
         win.center();
-        unsafe { win.setReleasedWhenClosed(false) };
+        win.setReleasedWhenClosed(false);
         // Ensure menu bar and traffic lights auto-show in fullscreen
-        let _: () = unsafe {
-            msg_send![&*win, setCollectionBehavior: 1u64 << 7] // NSWindowCollectionBehaviorFullScreenPrimary
-        };
+        let _: () = msg_send![&*win, setCollectionBehavior: 1u64 << 7]; // NSWindowCollectionBehaviorFullScreenPrimary
         win
     };
 
@@ -1211,10 +1185,8 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     }
 
     // Set as content view
-    unsafe {
-        let view: &NSView = &*Retained::cast::<NSView>(webview);
-        window.setContentView(Some(view));
-    }
+    let view: Retained<NSView> = unsafe { Retained::cast_unchecked::<NSView>(webview) };
+    window.setContentView(Some(&view));
 
     window
 }

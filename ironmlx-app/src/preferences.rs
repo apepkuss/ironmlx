@@ -5,7 +5,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use crate::config::AppConfig;
 
 pub fn show_preferences(mtm: MainThreadMarker, config: &mut AppConfig) {
-    use objc2_app_kit::{NSTextField, NSView};
+    use objc2_app_kit::NSView;
 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str("Preferences"));

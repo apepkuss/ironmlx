@@ -23,6 +23,7 @@ thread_local! {
     static MENU_HANDLER: RefCell<Option<Retained<MenuHandler>>> = const { RefCell::new(None) };
 }
 
+#[allow(dead_code)]
 fn port() -> u16 {
     CONFIG
         .lock()
@@ -55,12 +56,12 @@ define_class!(
             // First launch check
             if crate::welcome::is_first_launch() {
                 let mut cfg = CONFIG.lock().unwrap();
-                if let Some(ref mut c) = *cfg {
-                    if !crate::welcome::show_welcome(mtm, c) {
-                        let app = NSApplication::sharedApplication(mtm);
-                        app.terminate(None);
-                        return;
-                    }
+                if let Some(ref mut c) = *cfg
+                    && !crate::welcome::show_welcome(mtm, c)
+                {
+                    let app = NSApplication::sharedApplication(mtm);
+                    app.terminate(None);
+                    return;
                 }
             }
 
@@ -74,7 +75,7 @@ define_class!(
                     "ko" => "ko",
                     _ => "en",
                 };
-                *crate::dashboard::nav_language().lock().unwrap() = lang;
+                *crate::i18n::nav_language().lock().unwrap() = lang;
             }
 
             setup_status_bar(mtm);
@@ -147,13 +148,6 @@ define_class!(
     unsafe impl NSObjectProtocol for MenuHandler {}
 
     impl MenuHandler {
-        #[unsafe(method(openDashboard:))]
-        fn open_dashboard(&self, _sender: &NSMenuItem) {
-            if let Some(mtm) = MainThreadMarker::new() {
-                crate::dashboard::show_dashboard(mtm);
-            }
-        }
-
         #[unsafe(method(openWebDashboard:))]
         fn open_web_dashboard(&self, _sender: &NSMenuItem) {
             if let Some(mtm) = MainThreadMarker::new() {
@@ -261,19 +255,16 @@ fn setup_global_state() {
 }
 
 fn setup_status_bar(mtm: MainThreadMarker) {
-    let status_bar = unsafe { NSStatusBar::systemStatusBar() };
+    let status_bar = NSStatusBar::systemStatusBar();
     let status_item = status_bar.statusItemWithLength(-1.0);
 
     if let Some(button) = status_item.button(mtm) {
         // Load embedded narwhal icon as template image
         let icon_bytes = include_bytes!("../../assets/menubar-icon@2x.png");
-        let ns_data = unsafe { objc2_foundation::NSData::with_bytes(icon_bytes) };
-        if let Some(image) = unsafe { objc2_app_kit::NSImage::initWithData(mtm.alloc(), &ns_data) }
-        {
-            unsafe {
-                image.setSize(objc2_foundation::NSSize::new(34.0, 22.0));
-                image.setTemplate(true); // adapts to light/dark menubar
-            }
+        let ns_data = objc2_foundation::NSData::with_bytes(icon_bytes);
+        if let Some(image) = objc2_app_kit::NSImage::initWithData(mtm.alloc(), &ns_data) {
+            image.setSize(objc2_foundation::NSSize::new(34.0, 22.0));
+            image.setTemplate(true); // adapts to light/dark menubar
             button.setImage(Some(&image));
         } else {
             // Fallback to emoji if image fails
@@ -307,12 +298,12 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 
     let is_running = status == ServerStatus::Running;
 
-    use crate::dashboard::t;
+    use crate::i18n::t;
 
     // Helper: create SF Symbol image for menu items
     let sf_icon = |name: &str| -> Option<Retained<NSImage>> {
         let ns_name = NSString::from_str(name);
-        unsafe { NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns_name, None) }
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns_name, None)
     };
 
     // ── Status row ──
@@ -330,12 +321,7 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
         );
 
         // Green/red circle.fill icon with tint
-        let symbol_name = if is_running {
-            "circle.fill"
-        } else {
-            "circle.fill"
-        };
-        if let Some(icon) = sf_icon(symbol_name) {
+        if let Some(icon) = sf_icon("circle.fill") {
             let tint_color = if is_running {
                 NSColor::systemGreenColor()
             } else {
@@ -360,13 +346,13 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
         let fg_key: &NSString = ns_string!("NSColor");
         let attrs: Retained<objc2::runtime::AnyObject> = msg_send![
             AnyClass::get(c"NSDictionary").unwrap(),
-            dictionaryWithObject: &*color
+            dictionaryWithObject: &*color,
             forKey: fg_key
         ];
         let title_ns = NSString::from_str(status_label);
         let attr_str: Retained<objc2::runtime::AnyObject> = msg_send![
             msg_send![AnyClass::get(c"NSAttributedString").unwrap(), alloc],
-            initWithString: &*title_ns
+            initWithString: &*title_ns,
             attributes: &*attrs
         ];
         let _: () = msg_send![&*item, setAttributedTitle: &*attr_str];
@@ -393,25 +379,12 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // ── Dashboard ──
-    let dashboard = make_item(mtm, t("menu_dashboard"), Some(sel!(openDashboard:)), "d");
+    let dashboard = make_item(mtm, t("menu_dashboard"), Some(sel!(openWebDashboard:)), "d");
     if let Some(icon) = sf_icon("square.grid.2x2") {
         dashboard.setImage(Some(&icon));
     }
     dashboard.setEnabled(is_running);
     menu.addItem(&dashboard);
-
-    // ── Dashboard (Web) ──
-    let web_dash = make_item(
-        mtm,
-        t("menu_web_dashboard"),
-        Some(sel!(openWebDashboard:)),
-        "",
-    );
-    if let Some(icon) = sf_icon("square.grid.2x2") {
-        web_dash.setImage(Some(&icon));
-    }
-    web_dash.setEnabled(is_running);
-    menu.addItem(&web_dash);
 
     // ── Chat with Moss ──
     let moss_installed = std::path::Path::new("/Applications/Moss.app").exists();
