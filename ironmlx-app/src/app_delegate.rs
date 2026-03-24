@@ -157,11 +157,18 @@ define_class!(
 
         #[unsafe(method(openChat:))]
         fn open_chat(&self, _sender: &NSMenuItem) {
+            eprintln!("[menu] openChat: triggered");
             if std::path::Path::new("/Applications/Moss.app").exists() {
-                let _ = std::process::Command::new("open")
+                match std::process::Command::new("open")
                     .arg("-a")
                     .arg("Moss")
-                    .spawn();
+                    .spawn()
+                {
+                    Ok(_) => eprintln!("[menu] openChat: Moss launched"),
+                    Err(e) => eprintln!("[menu] openChat: failed to launch Moss: {e}"),
+                }
+            } else {
+                eprintln!("[menu] openChat: Moss.app not found");
             }
         }
 

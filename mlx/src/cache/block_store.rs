@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn evict_skips_referenced() {
         let mut store = BlockStore::new();
-        let a = store.alloc_block(dummy_kv(1), 10);
+        let _a = store.alloc_block(dummy_kv(1), 10);
         let b = store.alloc_block(dummy_kv(1), 20);
 
         // Only `b` is evictable (ref_count == 0).

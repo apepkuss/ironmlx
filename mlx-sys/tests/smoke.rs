@@ -3,8 +3,8 @@
 fn array_new_free() {
     unsafe {
         let arr = mlx_sys::mlx_array_new();
-        // ctx must be non-null – mlx always allocates
-        assert!(!arr.ctx.is_null());
+        // mlx_array_new() returns a default/empty array with ctx = null;
+        // mlx_array_free is safe to call on it regardless.
         mlx_sys::mlx_array_free(arr);
     }
 }

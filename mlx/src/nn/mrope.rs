@@ -9,12 +9,12 @@ use crate::vector::VectorArray;
 ///
 /// Returns position_ids: `Vec<[i32; 3]>` where:
 ///
-///     - Index 0: height positions
-///     - Index 1: width positions
-///     - Index 2: temporal positions
+/// - Index 0: height positions
+/// - Index 1: width positions
+/// - Index 2: temporal positions
 ///
-///     For text tokens, all 3 values have the same sequential position.
-///     For image tokens, each value has the corresponding spatial/temporal coordinate.
+/// For text tokens, all 3 values have the same sequential position.
+/// For image tokens, each value has the corresponding spatial/temporal coordinate.
 pub fn compute_mrope_position_ids(
     tokens: &[i32],
     grid_thw: &[(usize, usize, usize)],
