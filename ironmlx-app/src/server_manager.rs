@@ -15,15 +15,17 @@ pub struct ServerManager {
     status: Arc<Mutex<ServerStatus>>,
     host: String,
     port: u16,
+    memory_limit_total: f64,
 }
 
 impl ServerManager {
-    pub fn new(host: &str, port: u16) -> Self {
+    pub fn new(host: &str, port: u16, memory_limit_total: f64) -> Self {
         Self {
             process: Arc::new(Mutex::new(None)),
             status: Arc::new(Mutex::new(ServerStatus::Stopped)),
             host: host.to_string(),
             port,
+            memory_limit_total,
         }
     }
 
@@ -42,13 +44,18 @@ impl ServerManager {
         // Find ironmlx binary — same directory as this app, or in PATH
         let binary = Self::find_binary().ok_or("ironmlx binary not found")?;
 
-        let child = Command::new(&binary)
-            .arg("--model")
+        let mut cmd = Command::new(&binary);
+        cmd.arg("--model")
             .arg(model_path)
             .arg("--host")
             .arg(&self.host)
             .arg("--port")
-            .arg(self.port.to_string())
+            .arg(self.port.to_string());
+        if self.memory_limit_total > 0.0 {
+            cmd.arg("--memory-limit")
+                .arg(self.memory_limit_total.to_string());
+        }
+        let child = cmd
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -75,6 +82,9 @@ impl ServerManager {
         self.port = port;
     }
 
+    pub fn set_memory_limit_total(&mut self, limit: f64) {
+        self.memory_limit_total = limit;
+    }
 
     pub fn restart(&self, model_path: &str) -> Result<(), String> {
         self.stop();
@@ -100,7 +110,11 @@ impl ServerManager {
 
     #[allow(dead_code)]
     pub fn check_health(&self) -> bool {
-        let health_host = if self.host == "0.0.0.0" { "127.0.0.1" } else { &self.host };
+        let health_host = if self.host == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            &self.host
+        };
         let url = format!("http://{}:{}/health", health_host, self.port);
         // Simple blocking check
         std::process::Command::new("curl")

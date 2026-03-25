@@ -1702,15 +1702,15 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/><line x1="8" y1="4" x2="8" y2="8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="8" y1="10.5" x2="8" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
           <span data-i18n="resource_mgmt">Resource Management</span>
         </span>
-        <span class="badge badge-live" data-i18n="badge_live">live</span>
+        <span class="badge badge-restart" data-i18n="badge_restart">restart</span>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_total">Memory Limit (Total)</div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Total memory limit for the server process (model + KV Cache + overhead). Exceeding this triggers LRU model eviction. Auto: system memory - 8GB, set 0 to disable.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_total">Memory Limit (Total)</div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Total memory limit for the server process (model + KV Cache + overhead). Exceeding this triggers LRU model eviction. Set 0 for auto-detect.</div></div>
         <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-total-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24" id="cfg-mem-total"><span class="slider-value">Auto (24GB)</span></div></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_model">Memory Limit (Model Only)</div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Max memory for loaded models. Set 0 to disable.</div></div>
-        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><span class="slider-value">Auto (22GB)</span></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_model">Memory Limit (Model Only)</div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Max memory for loaded models. Set 0 for no limit.</div></div>
+        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="22" id="cfg-mem-model"><span class="slider-value">Auto (22GB)</span></div></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="hot_cache">Hot Cache Limit (Memory Cache)</div><div class="settings-row-desc" data-i18n="hot_cache_desc">In-memory cache for frequently accessed KV Cache blocks. Reduces SSD I/O latency. 0 = disabled.</div></div>
@@ -1878,8 +1878,8 @@
       all_interfaces: "all interfaces (0.0.0.0)",
       appearance: "Appearance", interface_language: "Language", theme_mode: "Theme Mode", theme_light: "Light", theme_dark: "Dark", theme_system: "System",
       resource_mgmt: "Resource Management",
-      mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Total memory limit for the server process (model + KV Cache + overhead). Exceeding this triggers LRU model eviction. Auto: system memory - 8GB, set 0 to disable.",
-      mem_limit_model: "Memory Limit (Model Only)", mem_limit_model_desc: "Max memory for loaded models. Set 0 to disable.",
+      mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Total memory limit for the server process (model + KV Cache + overhead). Exceeding this triggers LRU model eviction. Set 0 for auto-detect.",
+      mem_limit_model: "Memory Limit (Model Only)", mem_limit_model_desc: "Max memory for loaded models. Set 0 for no limit.",
       hot_cache: "Hot Cache Limit (Memory Cache)", hot_cache_desc: "In-memory cache for frequently accessed KV Cache blocks. Reduces SSD I/O latency. 0 = disabled.",
       cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Persistent SSD storage for evicted KV Cache blocks.",
       auto: "Auto",
@@ -1958,8 +1958,8 @@
       all_interfaces: "所有接口 (0.0.0.0)",
       appearance: "外观", interface_language: "界面语言", theme_mode: "主题模式", theme_light: "浅色", theme_dark: "暗色", theme_system: "系统",
       resource_mgmt: "资源管理",
-      mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "服务器进程的总内存限制（模型 + KV Cache + 开销）。超过此限制将触发 LRU 模型驱逐。自动：系统内存 - 8GB，设为 0 则禁用。",
-      mem_limit_model: "内存限制（仅模型）", mem_limit_model_desc: "已加载模型的最大内存限制。设为 0 则禁用。",
+      mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "服务器进程的总内存限制（模型 + KV Cache + 开销）。超过此限制将触发 LRU 模型驱逐。设为 0 则自动计算。",
+      mem_limit_model: "内存限制（仅模型）", mem_limit_model_desc: "已加载模型的最大内存限制。设为 0 则不限制。",
       hot_cache: "热缓存限制（内存缓存）", hot_cache_desc: "用于频繁访问的 KV Cache 块的内存缓存。减少重复读取的 SSD I/O 延迟。0 = 已禁用。",
       cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "被驱逐的 KV Cache 块的持久 SSD 存储。",
       auto: "自动",
@@ -2038,8 +2038,8 @@
       all_interfaces: "所有介面 (0.0.0.0)",
       appearance: "外觀", interface_language: "介面語言", theme_mode: "主題模式", theme_light: "淺色", theme_dark: "暗色", theme_system: "系統",
       resource_mgmt: "資源管理",
-      mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "伺服器程序的總記憶體限制（模型 + KV Cache + 額外開銷）。超過此限制將觸發 LRU 模型驅逐。自動：系統記憶體 - 8GB，設為 0 則停用。",
-      mem_limit_model: "記憶體限制（僅模型）", mem_limit_model_desc: "已載入模型的最大記憶體限制。設為 0 則停用。",
+      mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "伺服器程序的總記憶體限制（模型 + KV Cache + 額外開銷）。超過此限制將觸發 LRU 模型驅逐。設為 0 則自動計算。",
+      mem_limit_model: "記憶體限制（僅模型）", mem_limit_model_desc: "已載入模型的最大記憶體限制。設為 0 則不限制。",
       hot_cache: "熱快取限制（記憶體快取）", hot_cache_desc: "用於頻繁存取的 KV Cache 區塊的記憶體快取。減少重複讀取的 SSD I/O 延遲。0 = 已停用。",
       cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "被驅逐的 KV Cache 區塊的持久 SSD 儲存。",
       auto: "自動",
@@ -2118,8 +2118,8 @@
       all_interfaces: "全インターフェース (0.0.0.0)",
       appearance: "外観", interface_language: "インターフェース言語", theme_mode: "テーマモード", theme_light: "ライト", theme_dark: "ダーク", theme_system: "システム",
       resource_mgmt: "リソース管理",
-      mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "サーバープロセスの合計メモリ制限（モデル + KV Cache + オーバーヘッド）。超過するとLRUモデル退避がトリガーされます。自動：システムメモリ - 8GB、0で無効化。",
-      mem_limit_model: "メモリ制限（モデルのみ）", mem_limit_model_desc: "ロード済みモデルの最大メモリ制限。0で無効化。",
+      mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "サーバープロセスの合計メモリ制限（モデル + KV Cache + オーバーヘッド）。超過するとLRUモデル退避がトリガーされます。0で自動検出。",
+      mem_limit_model: "メモリ制限（モデルのみ）", mem_limit_model_desc: "ロード済みモデルの最大メモリ制限。0で制限なし。",
       hot_cache: "ホットキャッシュ制限（メモリキャッシュ）", hot_cache_desc: "頻繁にアクセスされるKV Cacheブロック用のメモリキャッシュ。SSD I/Oレイテンシを削減。0 = 無効。",
       cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "退避されたKV Cacheブロックの永続SSDストレージ。",
       auto: "自動",
@@ -2198,8 +2198,8 @@
       all_interfaces: "모든 인터페이스 (0.0.0.0)",
       appearance: "외관", interface_language: "인터페이스 언어", theme_mode: "테마 모드", theme_light: "라이트", theme_dark: "다크", theme_system: "시스템",
       resource_mgmt: "리소스 관리",
-      mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "서버 프로세스의 총 메모리 제한 (모델 + KV Cache + 오버헤드). 초과 시 LRU 모델 제거가 트리거됩니다. 자동: 시스템 메모리 - 8GB, 0으로 비활성화.",
-      mem_limit_model: "메모리 제한 (모델만)", mem_limit_model_desc: "로드된 모델의 최대 메모리 제한. 0으로 비활성화.",
+      mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "서버 프로세스의 총 메모리 제한 (모델 + KV Cache + 오버헤드). 초과 시 LRU 모델 제거가 트리거됩니다. 0으로 자동 감지.",
+      mem_limit_model: "메모리 제한 (모델만)", mem_limit_model_desc: "로드된 모델의 최대 메모리 제한. 0으로 제한 없음.",
       hot_cache: "핫 캐시 제한 (메모리 캐시)", hot_cache_desc: "자주 액세스하는 KV Cache 블록용 메모리 캐시. SSD I/O 지연을 줄입니다. 0 = 비활성화.",
       cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "제거된 KV Cache 블록의 영구 SSD 스토리지.",
       auto: "자동",
@@ -2908,15 +2908,19 @@
   // ── Save Settings ──
   function saveSettings() {
     const themeActive = document.querySelector('#theme-select .seg-btn.active');
+    const memTotalAuto = document.getElementById('cfg-mem-total-auto').checked;
+    const memModelAuto = document.getElementById('cfg-mem-model-auto').checked;
     const settings = {
       host: document.getElementById('cfg-host').value,
       port: parseInt(document.getElementById('cfg-port').value) || 8080,
       log_level: document.getElementById('cfg-log-level').value,
       language: document.getElementById('lang-select').value,
       theme: themeActive ? themeActive.dataset.value : 'system',
-      mem_total_auto: document.getElementById('cfg-mem-total-auto').checked,
+      mem_limit_total: memTotalAuto ? 0 : (parseInt(document.getElementById('cfg-mem-total').value) || 0),
+      mem_limit_model: memModelAuto ? 0 : (parseInt(document.getElementById('cfg-mem-model').value) || 0),
+      mem_total_auto: memTotalAuto,
       mem_total: parseInt(document.getElementById('cfg-mem-total').value) || 0,
-      mem_model_auto: document.getElementById('cfg-mem-model-auto').checked,
+      mem_model_auto: memModelAuto,
       hot_cache: parseInt(document.getElementById('cfg-hot-cache').value) || 0,
       cold_cache: parseInt(document.getElementById('cfg-cold-cache').value) || 0,
       cache_enable: document.getElementById('cfg-cache-enable').checked,
@@ -3189,6 +3193,28 @@
   logIntervalInput.addEventListener('change', startLogAutoRefresh);
   logAutoScrollToggle.addEventListener('change', function() { logAutoScroll = this.checked; });
   logLevelFilter.addEventListener('change', applyLogFilters);
+
+  // ── Memory slider interactions ──
+  function setupMemSlider(sliderId, autoId) {
+    const slider = document.getElementById(sliderId);
+    const auto = document.getElementById(autoId);
+    const label = slider.parentElement.querySelector('.slider-value');
+    function update() {
+      const v = parseInt(slider.value) || 0;
+      if (auto.checked) {
+        label.textContent = 'Auto (' + v + 'GB)';
+        slider.disabled = true;
+      } else {
+        label.textContent = v === 0 ? 'No limit' : v + 'GB';
+        slider.disabled = false;
+      }
+    }
+    slider.addEventListener('input', update);
+    auto.addEventListener('change', update);
+    update();
+  }
+  setupMemSlider('cfg-mem-total', 'cfg-mem-total-auto');
+  setupMemSlider('cfg-mem-model', 'cfg-mem-model-auto');
 
   /*__INIT_LANG__*/
 </script>

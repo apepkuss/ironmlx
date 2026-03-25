@@ -15,6 +15,12 @@ pub struct AppConfig {
     pub theme: Option<String>, // None=System, Some("light"), Some("dark")
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Total memory limit in GB (0.0 = auto-detect)
+    #[serde(default)]
+    pub memory_limit_total: f64,
+    /// Model-only memory limit in GB (0.0 = no limit)
+    #[serde(default)]
+    pub memory_limit_model: f64,
 }
 
 fn default_host() -> String {
@@ -40,6 +46,8 @@ impl Default for AppConfig {
             language: "en".to_string(),
             theme: None,
             log_level: "ALL".to_string(),
+            memory_limit_total: 0.0,
+            memory_limit_model: 0.0,
         }
     }
 }

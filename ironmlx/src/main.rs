@@ -31,6 +31,10 @@ struct Args {
     /// Port to bind to
     #[arg(long, default_value_t = 8080)]
     port: u16,
+
+    /// Total memory limit in GB (0 = auto-detect from hardware)
+    #[arg(long, default_value_t = 0.0)]
+    memory_limit: f64,
 }
 
 #[tokio::main]
@@ -55,7 +59,11 @@ async fn main() {
     println!("  Hardware: {}", chip);
 
     // Set memory limit
-    let mem_limit = chip.recommended_memory_limit();
+    let mem_limit = if args.memory_limit > 0.0 {
+        (args.memory_limit * 1024.0 * 1024.0 * 1024.0) as usize
+    } else {
+        chip.recommended_memory_limit()
+    };
     let guard = memory_guard::MemoryGuard::new(mem_limit, 0.9);
     println!(
         "  Memory limit: {:.1}GB",

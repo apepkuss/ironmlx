@@ -306,9 +306,25 @@ define_class!(
                             {
                                 config.log_level = ll.to_string();
                             }
+                            let old_mem_total = config.memory_limit_total;
+                            if let Some(v) =
+                                new_settings.get("mem_limit_total").and_then(|v| v.as_f64())
+                            {
+                                config.memory_limit_total = v;
+                            }
+                            let old_mem_model = config.memory_limit_model;
+                            if let Some(v) =
+                                new_settings.get("mem_limit_model").and_then(|v| v.as_f64())
+                            {
+                                config.memory_limit_model = v;
+                            }
 
                             // Check if restart-requiring settings changed
-                            if config.host != old_host || config.port != old_port {
+                            if config.host != old_host
+                                || config.port != old_port
+                                || config.memory_limit_total != old_mem_total
+                                || config.memory_limit_model != old_mem_model
+                            {
                                 needs_restart = true;
                             }
 

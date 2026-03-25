@@ -259,8 +259,9 @@ fn setup_global_state() {
     let config = AppConfig::load();
     let h = config.host.clone();
     let p = config.port;
+    let ml = config.memory_limit_total;
     *CONFIG.lock().unwrap() = Some(config);
-    *SERVER.lock().unwrap() = Some(ServerManager::new(&h, p));
+    *SERVER.lock().unwrap() = Some(ServerManager::new(&h, p, ml));
 }
 
 fn setup_status_bar(mtm: MainThreadMarker) {
@@ -499,14 +500,16 @@ pub fn restart_server() {
     let model = fresh_config.last_model.clone().unwrap_or_default();
     let new_host = fresh_config.host.clone();
     let new_port = fresh_config.port;
+    let new_mem_limit = fresh_config.memory_limit_total;
 
     // Update in-memory CONFIG
     *CONFIG.lock().unwrap() = Some(fresh_config);
 
-    // Update host/port and restart
+    // Update host/port/memory-limit and restart
     if let Some(ref mut srv) = *SERVER.lock().unwrap() {
         srv.set_host(&new_host);
         srv.set_port(new_port);
+        srv.set_memory_limit_total(new_mem_limit);
         let _ = srv.restart(&model);
     }
 }
