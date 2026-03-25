@@ -2,11 +2,21 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::array::Array;
 
+use super::block_pool::BlockPool;
+
 /// Number of tokens each block can hold.
 pub const BLOCK_SIZE: usize = 256;
 
 /// Unique identifier for a block in the store.
 pub type BlockId = u64;
+
+/// Storage strategy for a block's KV data.
+pub enum BlockStorage {
+    /// Block owns its KV data directly.
+    Owned(Vec<(Array, Array)>),
+    /// Block's KV data lives in a pre-allocated pool slot.
+    Pooled { slot_idx: usize },
+}
 
 /// A single block of paged KV cache data.
 ///
@@ -15,10 +25,21 @@ pub type BlockId = u64;
 pub struct Block {
     pub id: BlockId,
     pub ref_count: u32,
-    /// One `(keys, values)` pair per model layer.
-    pub kv_data: Vec<(Array, Array)>,
+    pub storage: BlockStorage,
     /// Number of tokens currently stored in this block (up to [`BLOCK_SIZE`]).
     pub token_count: usize,
+}
+
+impl Block {
+    /// Access KV data, resolving pooled storage if needed.
+    pub fn kv_data<'a>(&'a self, pool: Option<&'a BlockPool>) -> &'a Vec<(Array, Array)> {
+        match &self.storage {
+            BlockStorage::Owned(data) => data,
+            BlockStorage::Pooled { slot_idx } => pool
+                .expect("pooled block requires pool reference")
+                .get_slot(*slot_idx),
+        }
+    }
 }
 
 /// An LRU-managed store of paged KV cache blocks.
@@ -26,6 +47,8 @@ pub struct Block {
 /// Blocks are reference-counted.  When a block's reference count drops to zero
 /// it becomes eligible for eviction.  The LRU order tracks *usage* recency so
 /// that the least-recently-used unreferenced block is evicted first.
+///
+/// Optionally backed by a `BlockPool` for pre-allocated slot reuse.
 pub struct BlockStore {
     blocks: HashMap<BlockId, Block>,
     /// Front = most recently used, back = least recently used.
@@ -35,15 +58,17 @@ pub struct BlockStore {
     max_bytes: u64,
     /// Current estimated byte usage.
     current_bytes: u64,
+    /// Optional pre-allocated block pool.
+    pool: Option<BlockPool>,
 }
 
 impl BlockStore {
-    /// Create an empty block store with no size limit.
+    /// Create an empty block store with no size limit and no pool.
     pub fn new() -> Self {
         Self::with_limit(0)
     }
 
-    /// Create an empty block store with a byte limit (0 = unlimited).
+    /// Create an empty block store with a byte limit (0 = unlimited) and no pool.
     pub fn with_limit(max_bytes: u64) -> Self {
         Self {
             blocks: HashMap::new(),
@@ -51,10 +76,26 @@ impl BlockStore {
             next_id: 0,
             max_bytes,
             current_bytes: 0,
+            pool: None,
+        }
+    }
+
+    /// Create a block store with a byte limit and a pre-allocated pool.
+    pub fn with_pool(max_bytes: u64, pool: BlockPool) -> Self {
+        Self {
+            blocks: HashMap::new(),
+            lru_order: VecDeque::new(),
+            next_id: 0,
+            max_bytes,
+            current_bytes: 0,
+            pool: Some(pool),
         }
     }
 
     /// Allocate a new block with the given KV data and token count.
+    ///
+    /// If a pool is available and has free slots, the data is written into a
+    /// pooled slot. Otherwise, the block owns its data directly.
     ///
     /// The block is created with `ref_count = 1` and placed at the front
     /// (most-recently-used position) of the LRU list.
@@ -62,11 +103,24 @@ impl BlockStore {
         let id = self.next_id;
         self.next_id += 1;
 
-        let size = estimate_block_bytes(&kv_data);
+        let (storage, size) = if let Some(ref mut pool) = self.pool {
+            if let Some(slot_idx) = pool.acquire() {
+                let size = pool.slot_bytes;
+                pool.write_slot(slot_idx, kv_data);
+                (BlockStorage::Pooled { slot_idx }, size)
+            } else {
+                let size = estimate_block_bytes(&kv_data);
+                (BlockStorage::Owned(kv_data), size)
+            }
+        } else {
+            let size = estimate_block_bytes(&kv_data);
+            (BlockStorage::Owned(kv_data), size)
+        };
+
         let block = Block {
             id,
             ref_count: 1,
-            kv_data,
+            storage,
             token_count,
         };
 
@@ -87,6 +141,11 @@ impl BlockStore {
         self.blocks.get(&id)
     }
 
+    /// Get a reference to the pool (for resolving pooled block data).
+    pub fn pool(&self) -> Option<&BlockPool> {
+        self.pool.as_ref()
+    }
+
     /// Move the given block to the front (most-recently-used) of the LRU list.
     pub fn touch(&mut self, id: BlockId) {
         if let Some(pos) = self.lru_order.iter().position(|&bid| bid == id) {
@@ -105,7 +164,7 @@ impl BlockStore {
     /// Decrement the reference count of the given block.
     ///
     /// If the count reaches zero the block is removed from the store and the
-    /// LRU list.
+    /// LRU list. Pooled slots are released back to the pool.
     pub fn dec_ref(&mut self, id: BlockId) {
         let should_free = self
             .blocks
@@ -118,9 +177,9 @@ impl BlockStore {
 
         if should_free {
             if let Some(block) = self.blocks.remove(&id) {
-                self.current_bytes = self
-                    .current_bytes
-                    .saturating_sub(estimate_block_bytes(&block.kv_data));
+                let size = self.block_size_bytes(&block);
+                self.current_bytes = self.current_bytes.saturating_sub(size);
+                self.release_storage(block.storage);
             }
             if let Some(pos) = self.lru_order.iter().position(|&bid| bid == id) {
                 self.lru_order.remove(pos);
@@ -144,7 +203,7 @@ impl BlockStore {
         // Clone the KV data from the original block.
         let block = &self.blocks[&id];
         let cloned_kv: Vec<(Array, Array)> = block
-            .kv_data
+            .kv_data(self.pool.as_ref())
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -159,9 +218,10 @@ impl BlockStore {
 
     /// Evict the least-recently-used block whose `ref_count == 0`.
     ///
-    /// Returns the removed block's id and data, or `None` if no evictable
-    /// block exists.
-    pub fn evict_lru(&mut self) -> Option<(BlockId, Block)> {
+    /// Returns the removed block's id and owned KV data, or `None` if no
+    /// evictable block exists. Pooled blocks have their data extracted from
+    /// the pool before the slot is released.
+    pub fn evict_lru(&mut self) -> Option<(BlockId, Vec<(Array, Array)>)> {
         // Scan from the back (least recently used) to find an evictable block.
         let pos = self
             .lru_order
@@ -174,10 +234,29 @@ impl BlockStore {
         let front_idx = self.lru_order.len() - 1 - pos;
         let bid = self.lru_order.remove(front_idx).unwrap();
         let block = self.blocks.remove(&bid).unwrap();
-        self.current_bytes = self
-            .current_bytes
-            .saturating_sub(estimate_block_bytes(&block.kv_data));
-        Some((bid, block))
+        let size = self.block_size_bytes(&block);
+        self.current_bytes = self.current_bytes.saturating_sub(size);
+
+        // Extract KV data and release pool slot if needed
+        let kv_data = match block.storage {
+            BlockStorage::Owned(data) => data,
+            BlockStorage::Pooled { slot_idx } => {
+                let data = self
+                    .pool
+                    .as_ref()
+                    .expect("pooled block requires pool")
+                    .get_slot(slot_idx)
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if let Some(ref mut pool) = self.pool {
+                    pool.release(slot_idx);
+                }
+                data
+            }
+        };
+
+        Some((bid, kv_data))
     }
 
     /// Number of blocks currently in the store.
@@ -209,6 +288,23 @@ impl BlockStore {
             if self.evict_lru().is_none() {
                 break; // no more evictable blocks
             }
+        }
+    }
+
+    /// Get byte size of a block.
+    fn block_size_bytes(&self, block: &Block) -> u64 {
+        match &block.storage {
+            BlockStorage::Owned(data) => estimate_block_bytes(data),
+            BlockStorage::Pooled { .. } => self.pool.as_ref().map(|p| p.slot_bytes).unwrap_or(0),
+        }
+    }
+
+    /// Release storage back to pool if pooled.
+    fn release_storage(&mut self, storage: BlockStorage) {
+        if let BlockStorage::Pooled { slot_idx } = storage
+            && let Some(ref mut pool) = self.pool
+        {
+            pool.release(slot_idx);
         }
     }
 }
@@ -243,10 +339,11 @@ mod tests {
         let mut store = BlockStore::new();
         let id = store.alloc_block(dummy_kv(2), 64);
         assert_eq!(store.len(), 1);
+        let pool = store.pool();
         let block = store.get_block(id).unwrap();
         assert_eq!(block.token_count, 64);
         assert_eq!(block.ref_count, 1);
-        assert_eq!(block.kv_data.len(), 2);
+        assert_eq!(block.kv_data(pool).len(), 2);
     }
 
     #[test]

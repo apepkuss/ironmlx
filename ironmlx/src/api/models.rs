@@ -1051,7 +1051,13 @@ pub async fn load_model_endpoint(
     };
     let model_id = state
         .pool
-        .load_model(&req.model_dir, hot_bytes, cold_bytes, cache_dir.as_deref(), max_seqs)
+        .load_model(
+            &req.model_dir,
+            hot_bytes,
+            cold_bytes,
+            cache_dir.as_deref(),
+            max_seqs,
+        )
         .map_err(|e| {
             state
                 .log_buffer

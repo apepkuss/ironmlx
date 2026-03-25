@@ -88,11 +88,55 @@ impl EnginePool {
         };
         let ssd_store = ironmlx_core::cache::SSDStore::new(ssd_config)
             .map_err(|e| format!("cache error: {}", e))?;
-        let cache_manager =
-            ironmlx_core::cache::CacheManager::new(ssd_store, num_layers, hot_cache_bytes);
 
-        let mut engine =
-            EngineCore::with_cache_manager(cmd_rx, model, engine_tokenizer, cache_manager, max_num_seqs);
+        // Create block pool if hot cache is enabled and model has KV heads
+        let n_kv_heads = model.n_kv_heads();
+        let head_dim = model.head_dim();
+        let pool = if hot_cache_bytes > 0 && n_kv_heads > 0 && head_dim > 0 {
+            let pool_config = ironmlx_core::cache::BlockPoolConfig {
+                num_slots: 0, // calculated below
+                num_layers,
+                n_kv_heads,
+                head_dim,
+                dtype: ironmlx_core::dtype::Dtype::Float16,
+                block_size: ironmlx_core::cache::BLOCK_SIZE,
+            };
+            // Calculate num_slots from hot_cache_bytes
+            let slot_bytes = pool_config.num_layers as u64
+                * 2
+                * pool_config.n_kv_heads as u64
+                * pool_config.block_size as u64
+                * pool_config.head_dim as u64
+                * pool_config.dtype.size_of() as u64;
+            let num_slots = hot_cache_bytes.checked_div(slot_bytes).unwrap_or(0) as usize;
+            if num_slots > 0 {
+                let final_config = ironmlx_core::cache::BlockPoolConfig {
+                    num_slots,
+                    ..pool_config
+                };
+                println!(
+                    "  Block pool: {} slots ({:.1}MB each)",
+                    num_slots,
+                    slot_bytes as f64 / 1_048_576.0
+                );
+                Some(ironmlx_core::cache::BlockPool::new(&final_config))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let cache_manager =
+            ironmlx_core::cache::CacheManager::new(ssd_store, num_layers, hot_cache_bytes, pool);
+
+        let mut engine = EngineCore::with_cache_manager(
+            cmd_rx,
+            model,
+            engine_tokenizer,
+            cache_manager,
+            max_num_seqs,
+        );
         std::thread::spawn(move || {
             engine.run();
         });

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use super::block_pool::BlockPool;
 use super::block_store::{BLOCK_SIZE, BlockId, BlockStore};
 use super::ssd_store::SSDStore;
 use crate::array::Array;
@@ -138,9 +139,19 @@ impl CacheManager {
     /// Create a new cache manager.
     ///
     /// `hot_cache_max_bytes`: max memory for in-memory KV cache (0 = disabled).
-    pub fn new(ssd_store: SSDStore, num_layers: usize, hot_cache_max_bytes: u64) -> Self {
+    /// `pool`: optional pre-allocated block pool for slot reuse.
+    pub fn new(
+        ssd_store: SSDStore,
+        num_layers: usize,
+        hot_cache_max_bytes: u64,
+        pool: Option<BlockPool>,
+    ) -> Self {
         let block_store = if hot_cache_max_bytes > 0 {
-            BlockStore::with_limit(hot_cache_max_bytes)
+            if let Some(p) = pool {
+                BlockStore::with_pool(hot_cache_max_bytes, p)
+            } else {
+                BlockStore::with_limit(hot_cache_max_bytes)
+            }
         } else {
             BlockStore::new()
         };
@@ -177,9 +188,10 @@ impl CacheManager {
         let mut all_blocks_kv: Vec<Vec<(Array, Array)>> = Vec::new();
         for &block_id in &matched_block_ids {
             // Try memory first
+            let pool_ref = self.block_store.pool();
             let in_memory = self.block_store.get_block(block_id).map(|block| {
                 block
-                    .kv_data
+                    .kv_data(pool_ref)
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect::<Vec<_>>()

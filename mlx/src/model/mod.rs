@@ -51,6 +51,66 @@ impl Model {
         }
     }
 
+    /// Number of KV heads per layer (for block pool sizing).
+    /// Returns 0 for encoder-only models.
+    pub fn n_kv_heads(&self) -> usize {
+        match self {
+            Model::Standard(m) => m
+                .layers
+                .first()
+                .map(|l| l.attention.n_kv_heads as usize)
+                .unwrap_or(0),
+            Model::Qwen35(m) => m
+                .layers
+                .iter()
+                .find_map(|l| {
+                    let v = l.n_kv_heads();
+                    if v > 0 { Some(v) } else { None }
+                })
+                .unwrap_or(0),
+            Model::Qwen35VL(m) => m
+                .text_model
+                .layers
+                .iter()
+                .find_map(|l| {
+                    let v = l.n_kv_heads();
+                    if v > 0 { Some(v) } else { None }
+                })
+                .unwrap_or(0),
+            Model::Bert(_) | Model::RopeBert(_) => 0,
+        }
+    }
+
+    /// Head dimension (for block pool sizing).
+    /// Returns 0 for encoder-only models.
+    pub fn head_dim(&self) -> usize {
+        match self {
+            Model::Standard(m) => m
+                .layers
+                .first()
+                .map(|l| l.attention.head_dim as usize)
+                .unwrap_or(0),
+            Model::Qwen35(m) => m
+                .layers
+                .iter()
+                .find_map(|l| {
+                    let v = l.head_dim();
+                    if v > 0 { Some(v) } else { None }
+                })
+                .unwrap_or(0),
+            Model::Qwen35VL(m) => m
+                .text_model
+                .layers
+                .iter()
+                .find_map(|l| {
+                    let v = l.head_dim();
+                    if v > 0 { Some(v) } else { None }
+                })
+                .unwrap_or(0),
+            Model::Bert(_) | Model::RopeBert(_) => 0,
+        }
+    }
+
     /// Forward pass. Returns logits [batch, seq_len, vocab_size].
     /// For BERT models, returns hidden states [batch, seq_len, hidden_size] (no KV cache).
     #[allow(clippy::type_complexity)]

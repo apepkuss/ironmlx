@@ -237,6 +237,20 @@ pub struct Qwen35DecoderLayer {
 }
 
 impl Qwen35DecoderLayer {
+    pub fn n_kv_heads(&self) -> usize {
+        match &self.attention {
+            LayerAttention::Full(attn) => attn.n_kv_heads as usize,
+            LayerAttention::GatedDelta(_) => 0,
+        }
+    }
+
+    pub fn head_dim(&self) -> usize {
+        match &self.attention {
+            LayerAttention::Full(attn) => attn.head_dim as usize,
+            LayerAttention::GatedDelta(_) => 0,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn forward_with_cache(
         &self,
