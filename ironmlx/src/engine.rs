@@ -149,8 +149,14 @@ impl EngineCore {
                 }
             }
 
-            // 5. Execute one decode step for all active sequences
-            match batch.step_batched() {
+            // 5. Execute one decode step for all active sequences.
+            //    Use true batched forward when model supports it and >1 active sequence.
+            let step_result = if self.model.supports_batched_forward() && batch.active_count() > 1 {
+                batch.step_true_batched()
+            } else {
+                batch.step_batched()
+            };
+            match step_result {
                 Ok(responses) => {
                     process_batch_responses(responses, &mut running, &mut batch, &self.tokenizer);
                 }

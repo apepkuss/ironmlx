@@ -53,6 +53,36 @@ impl TransformerBlock {
         Ok((out, new_k, new_v))
     }
 
+    /// Batched forward for decode step.
+    /// `cache_keys`/`cache_values`: `[B, n_kv_heads, max_len, head_dim]`
+    /// `offsets`: `[B]` per-sequence position offsets
+    /// `mask`: `[B, 1, 1, max_len]` attention mask
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_batched(
+        &self,
+        x: &Array,
+        cache_keys: &Array,
+        cache_values: &Array,
+        offsets: &Array,
+        mask: &Array,
+        stream: &Stream,
+    ) -> Result<(Array, Array, Array)> {
+        let normed = self.input_layernorm.forward_with_stream(x, stream)?;
+        let (attn_out, new_k, new_v) = self.attention.forward_batched(
+            &normed,
+            cache_keys,
+            cache_values,
+            offsets,
+            mask,
+            stream,
+        )?;
+        let h = ops::add(x, &attn_out, stream)?;
+        let normed = self.post_attention_layernorm.forward_with_stream(&h, stream)?;
+        let mlp_out = self.mlp.forward_with_stream(&normed, stream)?;
+        let out = ops::add(&h, &mlp_out, stream)?;
+        Ok((out, new_k, new_v))
+    }
+
     pub fn load_weights(&mut self, weights: &HashMap<String, Array>, prefix: &str) -> Result<()> {
         let p = |name: &str| {
             if prefix.is_empty() {
@@ -201,6 +231,38 @@ impl LlamaModel {
         }
 
         // Final norm + lm_head
+        h = self.norm.forward_with_stream(&h, &stream)?;
+        let logits = self.lm_head.forward_with_stream(&h, &stream)?;
+        Ok(logits)
+    }
+
+    /// Batched decode forward pass.
+    ///
+    /// `tokens`: `[B, 1]` — one new token per sequence.
+    /// `cache`: per-layer `(keys, values)` each `[B, n_kv_heads, max_len, head_dim]` (padded).
+    /// `offsets`: `[B]` i32 — per-sequence position offsets.
+    /// `mask`: `[B, 1, 1, max_len]` — attention mask.
+    ///
+    /// Returns logits `[B, 1, vocab_size]` and updates cache in-place.
+    #[allow(clippy::type_complexity)]
+    pub fn forward_batched(
+        &self,
+        tokens: &Array,
+        cache: &mut [(Array, Array)],
+        offsets: &Array,
+        mask: &Array,
+    ) -> Result<Array> {
+        let stream = Stream::new(&Device::gpu());
+        let mut h = self.embed_tokens.forward_with_stream(tokens, &stream)?;
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            let (ref ck, ref cv) = cache[i];
+            let (out, new_k, new_v) =
+                layer.forward_batched(&h, ck, cv, offsets, mask, &stream)?;
+            h = out;
+            cache[i] = (new_k, new_v);
+        }
+
         h = self.norm.forward_with_stream(&h, &stream)?;
         let logits = self.lm_head.forward_with_stream(&h, &stream)?;
         Ok(logits)

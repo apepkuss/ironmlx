@@ -236,6 +236,92 @@ impl Attention {
 
         Ok((output, k, v))
     }
+
+    /// Batched forward for decode: multiple sequences with per-sequence offsets.
+    ///
+    /// `x`: `[B, 1, hidden]` — one new token per sequence.
+    /// `cache_keys`/`cache_values`: `[B, n_kv_heads, max_len, head_dim]` — padded cache.
+    /// `offsets`: `[B]` i32 array — per-sequence position offset.
+    /// `mask`: `[B, 1, 1, max_len]` — attention mask (0 for valid, -inf for pad).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_batched(
+        &self,
+        x: &Array,
+        cache_keys: &Array,
+        cache_values: &Array,
+        offsets: &Array,
+        mask: &Array,
+        stream: &Stream,
+    ) -> Result<(Array, Array, Array)> {
+        let shape = x.shape();
+        let batch = shape[0];
+        let seq_len = shape[1]; // should be 1 for decode
+
+        // QKV projections
+        let q = self.wq.forward_with_stream(x, stream)?;
+        let k = self.wk.forward_with_stream(x, stream)?;
+        let v = self.wv.forward_with_stream(x, stream)?;
+
+        // Reshape: [B, 1, n_heads * head_dim] -> [B, 1, n_heads, head_dim]
+        let mut q = ops::reshape(&q, &[batch, seq_len, self.n_heads, self.head_dim], stream)?;
+        let mut k = ops::reshape(&k, &[batch, seq_len, self.n_kv_heads, self.head_dim], stream)?;
+        let v = ops::reshape(&v, &[batch, seq_len, self.n_kv_heads, self.head_dim], stream)?;
+
+        // QK Norm
+        if let Some(ref qn) = self.q_norm {
+            q = qn.forward_with_stream(&q, stream)?;
+        }
+        if let Some(ref kn) = self.k_norm {
+            k = kn.forward_with_stream(&k, stream)?;
+        }
+
+        // Transpose to [B, n_heads, 1, head_dim]
+        let q = ops::transpose_axes(&q, &[0, 2, 1, 3], stream)?;
+        let k = ops::transpose_axes(&k, &[0, 2, 1, 3], stream)?;
+        let v = ops::transpose_axes(&v, &[0, 2, 1, 3], stream)?;
+
+        // RoPE with per-sequence offset (rope_dynamic)
+        let (q, k) = if self.partial_rotary_factor < 1.0 {
+            let rope_dim = (self.head_dim as f32 * self.partial_rotary_factor) as i32;
+            let q_shape = q.shape();
+            let k_shape = k.shape();
+
+            let q_rot = ops::slice(&q, &[0, 0, 0, 0], &[q_shape[0], q_shape[1], q_shape[2], rope_dim], &[1,1,1,1], stream)?;
+            let q_pass = ops::slice(&q, &[0, 0, 0, rope_dim], &[q_shape[0], q_shape[1], q_shape[2], q_shape[3]], &[1,1,1,1], stream)?;
+            let k_rot = ops::slice(&k, &[0, 0, 0, 0], &[k_shape[0], k_shape[1], k_shape[2], rope_dim], &[1,1,1,1], stream)?;
+            let k_pass = ops::slice(&k, &[0, 0, 0, rope_dim], &[k_shape[0], k_shape[1], k_shape[2], k_shape[3]], &[1,1,1,1], stream)?;
+
+            let q_rot = fast::rope_dynamic(&q_rot, rope_dim, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
+            let k_rot = fast::rope_dynamic(&k_rot, rope_dim, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
+
+            let q_arr = VectorArray::from_arrays(&[&q_rot, &q_pass]);
+            let k_arr = VectorArray::from_arrays(&[&k_rot, &k_pass]);
+            (ops::concatenate(&q_arr, -1, stream)?, ops::concatenate(&k_arr, -1, stream)?)
+        } else {
+            let q = fast::rope_dynamic(&q, self.rope_dims, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
+            let k = fast::rope_dynamic(&k, self.rope_dims, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
+            (q, k)
+        };
+
+        // KV cache update: concat new k,v with padded cache
+        let arrays_k = VectorArray::from_arrays(&[cache_keys, &k]);
+        let arrays_v = VectorArray::from_arrays(&[cache_values, &v]);
+        let new_k = ops::concatenate(&arrays_k, 2, stream)?;
+        let new_v = ops::concatenate(&arrays_v, 2, stream)?;
+
+        // Scaled dot-product attention with explicit mask
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        let attn_out = fast::scaled_dot_product_attention(
+            &q, &new_k, &new_v, scale, "none", Some(mask), None, stream,
+        )?;
+
+        // Transpose back and reshape
+        let attn_out = ops::transpose_axes(&attn_out, &[0, 2, 1, 3], stream)?;
+        let attn_out = ops::reshape(&attn_out, &[batch, seq_len, self.n_heads * self.head_dim], stream)?;
+        let output = self.wo.forward_with_stream(&attn_out, stream)?;
+
+        Ok((output, new_k, new_v))
+    }
 }
 
 impl Module for Attention {

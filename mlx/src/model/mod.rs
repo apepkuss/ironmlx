@@ -111,6 +111,32 @@ impl Model {
         }
     }
 
+    /// Batched decode forward pass. Only supported by decoder models.
+    ///
+    /// `tokens`: `[B, 1]`, `cache`: per-layer `(keys, values)` each `[B, n_kv, max_len, head_dim]`,
+    /// `offsets`: `[B]`, `mask`: `[B, 1, 1, max_len]`.
+    #[allow(clippy::type_complexity)]
+    pub fn forward_batched(
+        &self,
+        tokens: &Array,
+        cache: &mut [(Array, Array)],
+        offsets: &Array,
+        mask: &Array,
+    ) -> Result<Array> {
+        match self {
+            Model::Standard(m) => m.forward_batched(tokens, cache, offsets, mask),
+            // Qwen35/Qwen35VL/Bert: fallback not implemented yet
+            _ => Err(crate::error::Error::Mlx(
+                "forward_batched not supported for this model type".to_string(),
+            )),
+        }
+    }
+
+    /// Returns true if this model supports batched forward.
+    pub fn supports_batched_forward(&self) -> bool {
+        matches!(self, Model::Standard(_))
+    }
+
     /// Forward pass. Returns logits [batch, seq_len, vocab_size].
     /// For BERT models, returns hidden states [batch, seq_len, hidden_size] (no KV cache).
     #[allow(clippy::type_complexity)]
