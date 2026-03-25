@@ -3233,6 +3233,29 @@
   setupCacheSlider('cfg-hot-cache', 'Off (0GB)', 'GB');
   setupCacheSlider('cfg-cold-cache', 'Off (0GB)', 'GB');
 
+  // ── UI coupling: Enable Cache toggle ↔ cache sliders/dir ──
+  const cacheEnableToggle = document.getElementById('cfg-cache-enable');
+  const hotCacheSlider = document.getElementById('cfg-hot-cache');
+  const coldCacheSlider = document.getElementById('cfg-cold-cache');
+  const cacheDirInput = document.getElementById('cfg-cache-dir');
+
+  function syncCacheUI() {
+    const enabled = cacheEnableToggle.checked;
+    // Hot/cold sliders disabled when cache is off
+    hotCacheSlider.disabled = !enabled;
+    coldCacheSlider.disabled = !enabled;
+    hotCacheSlider.parentElement.style.opacity = enabled ? '1' : '0.4';
+    coldCacheSlider.parentElement.style.opacity = enabled ? '1' : '0.4';
+    // SSD cache dir disabled when cache is off or cold cache = 0
+    const coldVal = parseInt(coldCacheSlider.value) || 0;
+    const dirEnabled = enabled && coldVal > 0;
+    cacheDirInput.disabled = !dirEnabled;
+    cacheDirInput.style.opacity = dirEnabled ? '1' : '0.4';
+  }
+  cacheEnableToggle.addEventListener('change', syncCacheUI);
+  coldCacheSlider.addEventListener('input', syncCacheUI);
+  syncCacheUI();
+
   /*__INIT_LANG__*/
 </script>
 </body>
