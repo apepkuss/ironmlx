@@ -35,7 +35,13 @@ impl EnginePool {
 
     /// Load a model and register its engine.
     /// Spawns a dedicated OS thread for the engine.
-    pub fn load_model(&self, model_dir: &str) -> Result<String, String> {
+    pub fn load_model(
+        &self,
+        model_dir: &str,
+        hot_cache_bytes: u64,
+        cold_cache_bytes: u64,
+        cache_dir_override: Option<&str>,
+    ) -> Result<String, String> {
         let (
             model,
             tokenizer,
@@ -63,16 +69,26 @@ impl EnginePool {
         // Note: store_block() now eval+copies arrays to CPU before sending to writer thread,
         // avoiding Metal CommandBuffer conflicts (SIGABRT) between inference and cache I/O.
         let num_layers = model.num_layers();
-        let cache_dir = crate::config::ironmlx_root().join("cache").join("kv_cache");
+        let cache_dir = if let Some(dir) = cache_dir_override {
+            // Expand ~ to home directory
+            if let Some(stripped) = dir.strip_prefix("~/") {
+                dirs::home_dir().unwrap_or_default().join(stripped)
+            } else {
+                std::path::PathBuf::from(dir)
+            }
+        } else {
+            crate::config::ironmlx_root().join("cache").join("kv_cache")
+        };
         let model_hash = model_id.replace('/', "_");
         let ssd_config = ironmlx_core::cache::SSDStoreConfig {
             cache_dir,
-            max_size_bytes: 10 * 1024 * 1024 * 1024,
+            max_size_bytes: cold_cache_bytes,
             model_hash,
         };
         let ssd_store = ironmlx_core::cache::SSDStore::new(ssd_config)
             .map_err(|e| format!("cache error: {}", e))?;
-        let cache_manager = ironmlx_core::cache::CacheManager::new(ssd_store, num_layers);
+        let cache_manager =
+            ironmlx_core::cache::CacheManager::new(ssd_store, num_layers, hot_cache_bytes);
 
         let mut engine =
             EngineCore::with_cache_manager(cmd_rx, model, engine_tokenizer, cache_manager);

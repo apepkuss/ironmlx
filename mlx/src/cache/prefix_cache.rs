@@ -131,16 +131,25 @@ pub struct CacheManager {
     pub ssd_store: SSDStore,
     pub prefix_cache: PrefixCache,
     num_layers: usize,
+    hot_cache_enabled: bool,
 }
 
 impl CacheManager {
     /// Create a new cache manager.
-    pub fn new(ssd_store: SSDStore, num_layers: usize) -> Self {
+    ///
+    /// `hot_cache_max_bytes`: max memory for in-memory KV cache (0 = disabled).
+    pub fn new(ssd_store: SSDStore, num_layers: usize, hot_cache_max_bytes: u64) -> Self {
+        let block_store = if hot_cache_max_bytes > 0 {
+            BlockStore::with_limit(hot_cache_max_bytes)
+        } else {
+            BlockStore::new()
+        };
         Self {
-            block_store: BlockStore::new(),
+            block_store,
             ssd_store,
             prefix_cache: PrefixCache::new(),
             num_layers,
+            hot_cache_enabled: hot_cache_max_bytes > 0,
         }
     }
 
@@ -273,10 +282,14 @@ impl CacheManager {
                 continue; // skip incomplete layers
             }
 
-            // Allocate in BlockStore
-            let block_id = self.block_store.alloc_block(block_kv.clone(), BLOCK_SIZE);
+            // Allocate in BlockStore (or just get an ID if hot cache disabled)
+            let block_id = if self.hot_cache_enabled {
+                self.block_store.alloc_block(block_kv.clone(), BLOCK_SIZE)
+            } else {
+                self.block_store.next_block_id()
+            };
 
-            // Persist to SSD (sync for now, async in future)
+            // Persist to SSD
             let _ = self.ssd_store.store_block(block_id, &block_kv, &stream);
 
             block_ids.push(block_id);

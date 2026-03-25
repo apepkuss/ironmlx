@@ -318,12 +318,37 @@ define_class!(
                             {
                                 config.memory_limit_model = v;
                             }
+                            let old_hot_cache = config.hot_cache_gb;
+                            if let Some(v) = new_settings.get("hot_cache").and_then(|v| v.as_f64())
+                            {
+                                config.hot_cache_gb = v;
+                            }
+                            let old_cold_cache = config.cold_cache_gb;
+                            if let Some(v) = new_settings.get("cold_cache").and_then(|v| v.as_f64())
+                            {
+                                config.cold_cache_gb = v;
+                            }
+                            let old_cache_enabled = config.cache_enabled;
+                            if let Some(v) =
+                                new_settings.get("cache_enable").and_then(|v| v.as_bool())
+                            {
+                                config.cache_enabled = v;
+                            }
+                            let old_cache_dir = config.cache_dir.clone();
+                            if let Some(v) = new_settings.get("cache_dir").and_then(|v| v.as_str())
+                            {
+                                config.cache_dir = v.to_string();
+                            }
 
                             // Check if restart-requiring settings changed
                             if config.host != old_host
                                 || config.port != old_port
                                 || config.memory_limit_total != old_mem_total
                                 || config.memory_limit_model != old_mem_model
+                                || config.hot_cache_gb != old_hot_cache
+                                || config.cold_cache_gb != old_cold_cache
+                                || config.cache_enabled != old_cache_enabled
+                                || config.cache_dir != old_cache_dir
                             {
                                 needs_restart = true;
                             }

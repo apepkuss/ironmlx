@@ -128,6 +128,10 @@ impl SSDStore {
         kv_data: &[(Array, Array)],
         _stream: &Stream,
     ) -> Result<()> {
+        // Cold cache disabled when max_size_bytes == 0
+        if self.config.max_size_bytes == 0 {
+            return Ok(());
+        }
         let file_path = self.model_dir().join(format!("{block_id}.safetensors"));
 
         // Remove old entry if overwriting

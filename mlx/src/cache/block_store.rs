@@ -31,15 +31,26 @@ pub struct BlockStore {
     /// Front = most recently used, back = least recently used.
     lru_order: VecDeque<BlockId>,
     next_id: BlockId,
+    /// Maximum bytes allowed (0 = unlimited).
+    max_bytes: u64,
+    /// Current estimated byte usage.
+    current_bytes: u64,
 }
 
 impl BlockStore {
-    /// Create an empty block store.
+    /// Create an empty block store with no size limit.
     pub fn new() -> Self {
+        Self::with_limit(0)
+    }
+
+    /// Create an empty block store with a byte limit (0 = unlimited).
+    pub fn with_limit(max_bytes: u64) -> Self {
         Self {
             blocks: HashMap::new(),
             lru_order: VecDeque::new(),
             next_id: 0,
+            max_bytes,
+            current_bytes: 0,
         }
     }
 
@@ -51,6 +62,7 @@ impl BlockStore {
         let id = self.next_id;
         self.next_id += 1;
 
+        let size = estimate_block_bytes(&kv_data);
         let block = Block {
             id,
             ref_count: 1,
@@ -60,6 +72,13 @@ impl BlockStore {
 
         self.blocks.insert(id, block);
         self.lru_order.push_front(id);
+        self.current_bytes += size;
+
+        // Auto-evict if over limit
+        if self.max_bytes > 0 {
+            self.evict_until_under_limit();
+        }
+
         id
     }
 
@@ -98,7 +117,11 @@ impl BlockStore {
             .unwrap_or(false);
 
         if should_free {
-            self.blocks.remove(&id);
+            if let Some(block) = self.blocks.remove(&id) {
+                self.current_bytes = self
+                    .current_bytes
+                    .saturating_sub(estimate_block_bytes(&block.kv_data));
+            }
             if let Some(pos) = self.lru_order.iter().position(|&bid| bid == id) {
                 self.lru_order.remove(pos);
             }
@@ -151,6 +174,9 @@ impl BlockStore {
         let front_idx = self.lru_order.len() - 1 - pos;
         let bid = self.lru_order.remove(front_idx).unwrap();
         let block = self.blocks.remove(&bid).unwrap();
+        self.current_bytes = self
+            .current_bytes
+            .saturating_sub(estimate_block_bytes(&block.kv_data));
         Some((bid, block))
     }
 
@@ -168,6 +194,31 @@ impl BlockStore {
     pub fn total_blocks(&self) -> usize {
         self.next_id as usize
     }
+
+    /// Generate the next block ID without allocating a block.
+    /// Used when hot cache is disabled but an ID is needed for SSD/prefix index.
+    pub fn next_block_id(&mut self) -> BlockId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Evict LRU blocks until `current_bytes <= max_bytes`.
+    fn evict_until_under_limit(&mut self) {
+        while self.current_bytes > self.max_bytes {
+            if self.evict_lru().is_none() {
+                break; // no more evictable blocks
+            }
+        }
+    }
+}
+
+/// Estimate the byte size of a block's KV data.
+fn estimate_block_bytes(kv_data: &[(Array, Array)]) -> u64 {
+    kv_data
+        .iter()
+        .map(|(k, v)| (k.nbytes() + v.nbytes()) as u64)
+        .sum()
 }
 
 impl Default for BlockStore {

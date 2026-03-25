@@ -24,7 +24,9 @@ pub struct ServerConfig {
     pub memory_warn_threshold: f64,
     /// KV cache directory
     pub cache_dir: Option<String>,
-    /// KV cache max size in GB
+    /// Hot cache (in-memory KV) max size in GB (0 = disabled)
+    pub hot_cache_max_size_gb: f64,
+    /// Cold cache (SSD KV) max size in GB (0 = disabled)
     pub cache_max_size_gb: f64,
     /// Maximum concurrent sequences
     pub max_num_seqs: usize,
@@ -55,6 +57,7 @@ impl Default for ServerConfig {
             memory_limit_gb: 0.0,
             memory_warn_threshold: 0.9,
             cache_dir: None,
+            hot_cache_max_size_gb: 0.0,
             cache_max_size_gb: 10.0,
             max_num_seqs: 256,
             log_level: "info".to_string(),
@@ -164,9 +167,13 @@ impl ServerConfig {
         }
     }
 
-    /// Get cache max size in bytes.
-    #[allow(dead_code)]
-    pub fn cache_max_size_bytes(&self) -> u64 {
+    /// Get hot cache (in-memory) max size in bytes.
+    pub fn hot_cache_max_size_bytes(&self) -> u64 {
+        (self.hot_cache_max_size_gb * 1024.0 * 1024.0 * 1024.0) as u64
+    }
+
+    /// Get cold cache (SSD) max size in bytes.
+    pub fn cold_cache_max_size_bytes(&self) -> u64 {
         (self.cache_max_size_gb * 1024.0 * 1024.0 * 1024.0) as u64
     }
 }

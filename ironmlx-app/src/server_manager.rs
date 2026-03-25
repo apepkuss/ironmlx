@@ -16,16 +16,33 @@ pub struct ServerManager {
     host: String,
     port: u16,
     memory_limit_total: f64,
+    hot_cache_gb: f64,
+    cold_cache_gb: f64,
+    cache_enabled: bool,
+    cache_dir: String,
 }
 
 impl ServerManager {
-    pub fn new(host: &str, port: u16, memory_limit_total: f64) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        host: &str,
+        port: u16,
+        memory_limit_total: f64,
+        hot_cache_gb: f64,
+        cold_cache_gb: f64,
+        cache_enabled: bool,
+        cache_dir: &str,
+    ) -> Self {
         Self {
             process: Arc::new(Mutex::new(None)),
             status: Arc::new(Mutex::new(ServerStatus::Stopped)),
             host: host.to_string(),
             port,
             memory_limit_total,
+            hot_cache_gb,
+            cold_cache_gb,
+            cache_enabled,
+            cache_dir: cache_dir.to_string(),
         }
     }
 
@@ -54,6 +71,19 @@ impl ServerManager {
         if self.memory_limit_total > 0.0 {
             cmd.arg("--memory-limit")
                 .arg(self.memory_limit_total.to_string());
+        }
+        if !self.cache_enabled {
+            cmd.arg("--no-cache");
+        } else {
+            if self.hot_cache_gb > 0.0 {
+                cmd.arg("--hot-cache-limit")
+                    .arg(self.hot_cache_gb.to_string());
+            }
+            cmd.arg("--cold-cache-limit")
+                .arg(self.cold_cache_gb.to_string());
+        }
+        if !self.cache_dir.is_empty() && self.cache_dir != "~/.ironmlx/cache/kv_cache" {
+            cmd.arg("--cache-dir").arg(&self.cache_dir);
         }
         let child = cmd
             .stdout(std::process::Stdio::null())
@@ -84,6 +114,22 @@ impl ServerManager {
 
     pub fn set_memory_limit_total(&mut self, limit: f64) {
         self.memory_limit_total = limit;
+    }
+
+    pub fn set_hot_cache_gb(&mut self, v: f64) {
+        self.hot_cache_gb = v;
+    }
+
+    pub fn set_cold_cache_gb(&mut self, v: f64) {
+        self.cold_cache_gb = v;
+    }
+
+    pub fn set_cache_enabled(&mut self, v: bool) {
+        self.cache_enabled = v;
+    }
+
+    pub fn set_cache_dir(&mut self, v: &str) {
+        self.cache_dir = v.to_string();
     }
 
     pub fn restart(&self, model_path: &str) -> Result<(), String> {

@@ -260,8 +260,12 @@ fn setup_global_state() {
     let h = config.host.clone();
     let p = config.port;
     let ml = config.memory_limit_total;
+    let hc = config.hot_cache_gb;
+    let cc = config.cold_cache_gb;
+    let ce = config.cache_enabled;
+    let cd = config.cache_dir.clone();
     *CONFIG.lock().unwrap() = Some(config);
-    *SERVER.lock().unwrap() = Some(ServerManager::new(&h, p, ml));
+    *SERVER.lock().unwrap() = Some(ServerManager::new(&h, p, ml, hc, cc, ce, &cd));
 }
 
 fn setup_status_bar(mtm: MainThreadMarker) {
@@ -501,15 +505,23 @@ pub fn restart_server() {
     let new_host = fresh_config.host.clone();
     let new_port = fresh_config.port;
     let new_mem_limit = fresh_config.memory_limit_total;
+    let new_hc = fresh_config.hot_cache_gb;
+    let new_cc = fresh_config.cold_cache_gb;
+    let new_ce = fresh_config.cache_enabled;
+    let new_cd = fresh_config.cache_dir.clone();
 
     // Update in-memory CONFIG
     *CONFIG.lock().unwrap() = Some(fresh_config);
 
-    // Update host/port/memory-limit and restart
+    // Update all settings and restart
     if let Some(ref mut srv) = *SERVER.lock().unwrap() {
         srv.set_host(&new_host);
         srv.set_port(new_port);
         srv.set_memory_limit_total(new_mem_limit);
+        srv.set_hot_cache_gb(new_hc);
+        srv.set_cold_cache_gb(new_cc);
+        srv.set_cache_enabled(new_ce);
+        srv.set_cache_dir(&new_cd);
         let _ = srv.restart(&model);
     }
 }

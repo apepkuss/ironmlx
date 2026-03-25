@@ -21,10 +21,34 @@ pub struct AppConfig {
     /// Model-only memory limit in GB (0.0 = no limit)
     #[serde(default)]
     pub memory_limit_model: f64,
+    /// Hot cache (in-memory KV) limit in GB (0.0 = disabled)
+    #[serde(default)]
+    pub hot_cache_gb: f64,
+    /// Cold cache (SSD KV) limit in GB (default 10.0, 0.0 = disabled)
+    #[serde(default = "default_cold_cache_gb")]
+    pub cold_cache_gb: f64,
+    /// Master cache toggle (false = disable all caching)
+    #[serde(default = "default_true")]
+    pub cache_enabled: bool,
+    /// SSD cache directory
+    #[serde(default = "default_cache_dir")]
+    pub cache_dir: String,
 }
 
 fn default_host() -> String {
     "127.0.0.1".to_string()
+}
+
+fn default_cold_cache_gb() -> f64 {
+    10.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_cache_dir() -> String {
+    "~/.ironmlx/cache/kv_cache".to_string()
 }
 
 fn default_log_level() -> String {
@@ -48,6 +72,10 @@ impl Default for AppConfig {
             log_level: "ALL".to_string(),
             memory_limit_total: 0.0,
             memory_limit_model: 0.0,
+            hot_cache_gb: 0.0,
+            cold_cache_gb: 10.0,
+            cache_enabled: true,
+            cache_dir: "~/.ironmlx/cache/kv_cache".to_string(),
         }
     }
 }

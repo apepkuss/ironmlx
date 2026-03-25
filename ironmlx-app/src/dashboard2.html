@@ -1718,15 +1718,18 @@
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="cold_cache">Cold Cache Limit (SSD Cache)</div><div class="settings-row-desc" data-i18n="cold_cache_desc">Persistent SSD storage for evicted KV Cache blocks.</div></div>
-        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="100" value="10" id="cfg-cold-cache"><span class="slider-value">10% (74GB)</span></div></div>
+        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="100" value="10" id="cfg-cold-cache"><span class="slider-value">10GB</span></div></div>
       </div>
     </div>
 
     <!-- 4. Cache -->
     <div class="card-settings">
-      <div class="card-header">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M3 5C3 3.5 5.2 2 8 2C10.8 2 13 3.5 13 5V11C13 12.5 10.8 14 8 14C5.2 14 3 12.5 3 11V5Z" stroke="currentColor" stroke-width="1.2"/><ellipse cx="8" cy="5" rx="5" ry="2" stroke="currentColor" stroke-width="1.2"/><path d="M3 8C3 9.1 5.2 10 8 10C10.8 10 13 9.1 13 8" stroke="currentColor" stroke-width="1"/></svg>
-        <span data-i18n="cache">Cache</span>
+      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="display:flex;align-items:center;gap:8px;">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M3 5C3 3.5 5.2 2 8 2C10.8 2 13 3.5 13 5V11C13 12.5 10.8 14 8 14C5.2 14 3 12.5 3 11V5Z" stroke="currentColor" stroke-width="1.2"/><ellipse cx="8" cy="5" rx="5" ry="2" stroke="currentColor" stroke-width="1.2"/><path d="M3 8C3 9.1 5.2 10 8 10C10.8 10 13 9.1 13 8" stroke="currentColor" stroke-width="1"/></svg>
+          <span data-i18n="cache">Cache</span>
+        </span>
+        <span class="badge badge-restart" data-i18n="badge_restart">restart</span>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="enable_cache">Enable Cache</div></div>
@@ -3215,6 +3218,20 @@
   }
   setupMemSlider('cfg-mem-total', 'cfg-mem-total-auto');
   setupMemSlider('cfg-mem-model', 'cfg-mem-model-auto');
+
+  // ── Cache slider interactions ──
+  function setupCacheSlider(sliderId, zeroLabel, unit) {
+    const slider = document.getElementById(sliderId);
+    const label = slider.parentElement.querySelector('.slider-value');
+    function update() {
+      const v = parseInt(slider.value) || 0;
+      label.textContent = v === 0 ? zeroLabel : v + unit;
+    }
+    slider.addEventListener('input', update);
+    update();
+  }
+  setupCacheSlider('cfg-hot-cache', 'Off (0GB)', 'GB');
+  setupCacheSlider('cfg-cold-cache', 'Off (0GB)', 'GB');
 
   /*__INIT_LANG__*/
 </script>

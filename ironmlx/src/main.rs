@@ -35,6 +35,22 @@ struct Args {
     /// Total memory limit in GB (0 = auto-detect from hardware)
     #[arg(long, default_value_t = 0.0)]
     memory_limit: f64,
+
+    /// Hot cache (in-memory KV) limit in GB (0 = disabled)
+    #[arg(long, default_value_t = 0.0)]
+    hot_cache_limit: f64,
+
+    /// Cold cache (SSD KV) limit in GB (0 = disabled)
+    #[arg(long, default_value_t = 10.0)]
+    cold_cache_limit: f64,
+
+    /// Disable all caching
+    #[arg(long, default_value_t = false)]
+    no_cache: bool,
+
+    /// SSD cache directory
+    #[arg(long)]
+    cache_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -72,14 +88,34 @@ async fn main() {
     let _ = guard; // guard lives for duration of process via set_memory_limit
 
     // Load config with CLI overrides
-    let server_config = ServerConfig::load(&args.model, &args.host, args.port);
+    let mut server_config = ServerConfig::load(&args.model, &args.host, args.port);
+    if args.no_cache {
+        server_config.hot_cache_max_size_gb = 0.0;
+        server_config.cache_max_size_gb = 0.0;
+    } else {
+        server_config.hot_cache_max_size_gb = args.hot_cache_limit;
+        server_config.cache_max_size_gb = args.cold_cache_limit;
+    }
+    if let Some(ref dir) = args.cache_dir {
+        server_config.cache_dir = Some(dir.clone());
+    }
+    let hot_cache_bytes = server_config.hot_cache_max_size_bytes();
+    let cold_cache_bytes = server_config.cold_cache_max_size_bytes();
+    let cache_dir = server_config.cache_dir.clone();
     let config = Arc::new(RwLock::new(server_config));
 
     println!("Loading model from: {}", args.model);
 
     // Create pool and load initial model
     let pool = EnginePool::new();
-    let model_id = pool.load_model(&args.model).expect("failed to load model");
+    let model_id = pool
+        .load_model(
+            &args.model,
+            hot_cache_bytes,
+            cold_cache_bytes,
+            cache_dir.as_deref(),
+        )
+        .expect("failed to load model");
 
     println!("Model loaded: {}", model_id);
 
