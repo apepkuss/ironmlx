@@ -63,6 +63,7 @@ pub struct EngineCore {
     model: Model,
     tokenizer: Tokenizer,
     cache_manager: Option<CacheManager>,
+    max_num_seqs: usize,
 }
 
 impl EngineCore {
@@ -73,6 +74,7 @@ impl EngineCore {
             model,
             tokenizer,
             cache_manager: None,
+            max_num_seqs: 256,
         }
     }
 
@@ -81,12 +83,14 @@ impl EngineCore {
         model: Model,
         tokenizer: Tokenizer,
         cache_manager: CacheManager,
+        max_num_seqs: usize,
     ) -> Self {
         Self {
             cmd_rx,
             model,
             tokenizer,
             cache_manager: Some(cache_manager),
+            max_num_seqs,
         }
     }
 
@@ -100,7 +104,7 @@ impl EngineCore {
         let mut waiting: VecDeque<PendingRequest> = VecDeque::new();
         let mut running: HashMap<SeqUid, RunningRequest> = HashMap::new();
         let mut pending_aborts: HashSet<String> = HashSet::new();
-        let max_num_seqs: usize = 256;
+        let max_num_seqs = self.max_num_seqs;
 
         loop {
             // 1. Drain all pending commands

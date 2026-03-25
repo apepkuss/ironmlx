@@ -44,6 +44,10 @@ struct Args {
     #[arg(long, default_value_t = 10.0)]
     cold_cache_limit: f64,
 
+    /// Max concurrent sequences (default 16)
+    #[arg(long, default_value_t = 16)]
+    max_sequences: usize,
+
     /// Disable all caching
     #[arg(long, default_value_t = false)]
     no_cache: bool,
@@ -89,6 +93,7 @@ async fn main() {
 
     // Load config with CLI overrides
     let mut server_config = ServerConfig::load(&args.model, &args.host, args.port);
+    server_config.max_num_seqs = args.max_sequences;
     if args.no_cache {
         server_config.hot_cache_max_size_gb = 0.0;
         server_config.cache_max_size_gb = 0.0;
@@ -125,6 +130,7 @@ async fn main() {
             hot_cache_bytes,
             cold_cache_bytes,
             cache_dir.as_deref(),
+            args.max_sequences,
         )
         .expect("failed to load model");
 

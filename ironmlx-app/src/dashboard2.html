@@ -1748,27 +1748,11 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M2 4L8 2L14 4V12L8 14L2 12V4Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4L8 6L14 4" stroke="currentColor" stroke-width="1.2"/><line x1="8" y1="6" x2="8" y2="14" stroke="currentColor" stroke-width="1.2"/></svg>
           <span data-i18n="advanced">Advanced</span>
         </span>
-        <span class="badge badge-restart" data-i18n="requires_restart">requires restart</span>
-      </div>
-      <div style="padding:10px 20px 4px;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-tertiary);border-bottom:0.5px solid var(--border);">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style="opacity:0.5;"><rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.1"/><rect x="8" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.1"/><rect x="1" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.1"/><rect x="8" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.1"/></svg>
-        <span data-i18n="batch_processing">Batch Processing</span>
+        <span class="badge badge-restart" data-i18n="badge_restart">restart</span>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="max_sequences">Max Sequences</div><div class="settings-row-desc" data-i18n="max_sequences_desc">Maximum number of concurrent parallel requests.</div></div>
-        <div class="settings-row-right"><input type="number" value="8" style="min-width:80px;" id="cfg-max-sequences"></div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="completion_batch">Completion Batch Size</div><div class="settings-row-desc" data-i18n="completion_batch_desc">Batch size for the token generation phase.</div></div>
-        <div class="settings-row-right"><input type="number" value="8" style="min-width:80px;" id="cfg-completion-batch"></div>
-      </div>
-      <div style="padding:10px 20px 4px;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-tertiary);border-bottom:0.5px solid var(--border);">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style="opacity:0.5;"><path d="M2 4C2 2.8 4.2 1.5 7 1.5C9.8 1.5 12 2.8 12 4V10C12 11.2 9.8 12.5 7 12.5C4.2 12.5 2 11.2 2 10V4Z" stroke="currentColor" stroke-width="1.1"/><ellipse cx="7" cy="4" rx="5" ry="2" stroke="currentColor" stroke-width="1.1"/></svg>
-        <span data-i18n="cache">Cache</span>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="init_cache_blocks">Initial Cache Blocks</div><div class="settings-row-desc" data-i18n="init_cache_blocks_desc">Number of blocks pre-allocated at startup. Larger values reduce dynamic allocation overhead.</div></div>
-        <div class="settings-row-right"><input type="number" value="256" style="min-width:80px;" id="cfg-init-cache-blocks"></div>
+        <div class="settings-row-right"><input type="number" value="16" style="min-width:80px;" id="cfg-max-sequences"></div>
       </div>
     </div>
 
@@ -2928,9 +2912,7 @@
       cold_cache: parseInt(document.getElementById('cfg-cold-cache').value) || 0,
       cache_enable: document.getElementById('cfg-cache-enable').checked,
       cache_dir: document.getElementById('cfg-cache-dir').value,
-      max_sequences: parseInt(document.getElementById('cfg-max-sequences').value) || 8,
-      completion_batch: parseInt(document.getElementById('cfg-completion-batch').value) || 8,
-      init_cache_blocks: parseInt(document.getElementById('cfg-init-cache-blocks').value) || 256
+      max_sequences: parseInt(document.getElementById('cfg-max-sequences').value) || 16
     };
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveSettings) {
       window.webkit.messageHandlers.saveSettings.postMessage(JSON.stringify(settings));

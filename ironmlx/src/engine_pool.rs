@@ -41,6 +41,7 @@ impl EnginePool {
         hot_cache_bytes: u64,
         cold_cache_bytes: u64,
         cache_dir_override: Option<&str>,
+        max_num_seqs: usize,
     ) -> Result<String, String> {
         let (
             model,
@@ -91,7 +92,7 @@ impl EnginePool {
             ironmlx_core::cache::CacheManager::new(ssd_store, num_layers, hot_cache_bytes);
 
         let mut engine =
-            EngineCore::with_cache_manager(cmd_rx, model, engine_tokenizer, cache_manager);
+            EngineCore::with_cache_manager(cmd_rx, model, engine_tokenizer, cache_manager, max_num_seqs);
         std::thread::spawn(move || {
             engine.run();
         });

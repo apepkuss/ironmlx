@@ -18,6 +18,7 @@ pub struct ServerManager {
     memory_limit_total: f64,
     hot_cache_gb: f64,
     cold_cache_gb: f64,
+    max_sequences: usize,
     cache_enabled: bool,
     cache_dir: String,
 }
@@ -30,6 +31,7 @@ impl ServerManager {
         memory_limit_total: f64,
         hot_cache_gb: f64,
         cold_cache_gb: f64,
+        max_sequences: usize,
         cache_enabled: bool,
         cache_dir: &str,
     ) -> Self {
@@ -41,6 +43,7 @@ impl ServerManager {
             memory_limit_total,
             hot_cache_gb,
             cold_cache_gb,
+            max_sequences,
             cache_enabled,
             cache_dir: cache_dir.to_string(),
         }
@@ -72,6 +75,8 @@ impl ServerManager {
             cmd.arg("--memory-limit")
                 .arg(self.memory_limit_total.to_string());
         }
+        cmd.arg("--max-sequences")
+            .arg(self.max_sequences.to_string());
         if !self.cache_enabled {
             cmd.arg("--no-cache");
         } else {
@@ -122,6 +127,10 @@ impl ServerManager {
 
     pub fn set_cold_cache_gb(&mut self, v: f64) {
         self.cold_cache_gb = v;
+    }
+
+    pub fn set_max_sequences(&mut self, v: usize) {
+        self.max_sequences = v;
     }
 
     pub fn set_cache_enabled(&mut self, v: bool) {

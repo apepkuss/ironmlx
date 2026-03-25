@@ -334,6 +334,12 @@ define_class!(
                             {
                                 config.cache_enabled = v;
                             }
+                            let old_max_seqs = config.max_sequences;
+                            if let Some(v) =
+                                new_settings.get("max_sequences").and_then(|v| v.as_u64())
+                            {
+                                config.max_sequences = v as usize;
+                            }
                             let old_cache_dir = config.cache_dir.clone();
                             if let Some(v) = new_settings.get("cache_dir").and_then(|v| v.as_str())
                             {
@@ -347,6 +353,7 @@ define_class!(
                                 || config.memory_limit_model != old_mem_model
                                 || config.hot_cache_gb != old_hot_cache
                                 || config.cold_cache_gb != old_cold_cache
+                                || config.max_sequences != old_max_seqs
                                 || config.cache_enabled != old_cache_enabled
                                 || config.cache_dir != old_cache_dir
                             {

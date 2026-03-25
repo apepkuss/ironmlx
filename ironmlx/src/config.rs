@@ -59,7 +59,7 @@ impl Default for ServerConfig {
             cache_dir: None,
             hot_cache_max_size_gb: 0.0,
             cache_max_size_gb: 10.0,
-            max_num_seqs: 256,
+            max_num_seqs: 16,
             log_level: "info".to_string(),
             temperature: 1.0,
             top_p: 1.0,

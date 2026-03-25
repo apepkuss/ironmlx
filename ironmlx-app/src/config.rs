@@ -27,6 +27,9 @@ pub struct AppConfig {
     /// Cold cache (SSD KV) limit in GB (default 10.0, 0.0 = disabled)
     #[serde(default = "default_cold_cache_gb")]
     pub cold_cache_gb: f64,
+    /// Max concurrent sequences
+    #[serde(default = "default_max_sequences")]
+    pub max_sequences: usize,
     /// Master cache toggle (false = disable all caching)
     #[serde(default = "default_true")]
     pub cache_enabled: bool,
@@ -41,6 +44,10 @@ fn default_host() -> String {
 
 fn default_cold_cache_gb() -> f64 {
     10.0
+}
+
+fn default_max_sequences() -> usize {
+    16
 }
 
 fn default_true() -> bool {
@@ -74,6 +81,7 @@ impl Default for AppConfig {
             memory_limit_model: 0.0,
             hot_cache_gb: 0.0,
             cold_cache_gb: 10.0,
+            max_sequences: 16,
             cache_enabled: true,
             cache_dir: "~/.ironmlx/cache/kv_cache".to_string(),
         }

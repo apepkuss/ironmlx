@@ -1040,17 +1040,18 @@ pub async fn load_model_endpoint(
     state
         .log_buffer
         .push("info", &format!("Loading model: {}", req.model_dir));
-    let (hot_bytes, cold_bytes, cache_dir) = {
+    let (hot_bytes, cold_bytes, cache_dir, max_seqs) = {
         let cfg = state.config.read().unwrap();
         (
             cfg.hot_cache_max_size_bytes(),
             cfg.cold_cache_max_size_bytes(),
             cfg.cache_dir.clone(),
+            cfg.max_num_seqs,
         )
     };
     let model_id = state
         .pool
-        .load_model(&req.model_dir, hot_bytes, cold_bytes, cache_dir.as_deref())
+        .load_model(&req.model_dir, hot_bytes, cold_bytes, cache_dir.as_deref(), max_seqs)
         .map_err(|e| {
             state
                 .log_buffer
