@@ -99,7 +99,18 @@ async fn main() {
     if let Some(ref dir) = args.cache_dir {
         server_config.cache_dir = Some(dir.clone());
     }
-    let hot_cache_bytes = server_config.hot_cache_max_size_bytes();
+    // Auto-calculate hot cache: 0 means auto = GPU total memory / 4
+    let hot_cache_bytes = if server_config.hot_cache_max_size_gb == 0.0 && !args.no_cache {
+        let total = ironmlx_core::memory::get_memory_size().unwrap_or(0) as u64;
+        let auto_bytes = total / 4;
+        println!(
+            "  Hot cache: auto ({:.1}GB)",
+            auto_bytes as f64 / 1_073_741_824.0
+        );
+        auto_bytes
+    } else {
+        server_config.hot_cache_max_size_bytes()
+    };
     let cold_cache_bytes = server_config.cold_cache_max_size_bytes();
     let cache_dir = server_config.cache_dir.clone();
     let config = Arc::new(RwLock::new(server_config));

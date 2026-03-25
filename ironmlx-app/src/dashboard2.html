@@ -1712,14 +1712,6 @@
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_model">Memory Limit (Model Only)</div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Max memory for loaded models. Set 0 for no limit.</div></div>
         <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="22" id="cfg-mem-model"><span class="slider-value">Auto (22GB)</span></div></div>
       </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="hot_cache">Hot Cache Limit (Memory Cache)</div><div class="settings-row-desc" data-i18n="hot_cache_desc">In-memory cache for frequently accessed KV Cache blocks. Reduces SSD I/O latency. 0 = disabled.</div></div>
-        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="64" value="0" id="cfg-hot-cache"><span class="slider-value">Off (0GB)</span></div></div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="cold_cache">Cold Cache Limit (SSD Cache)</div><div class="settings-row-desc" data-i18n="cold_cache_desc">Persistent SSD storage for evicted KV Cache blocks.</div></div>
-        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="100" value="10" id="cfg-cold-cache"><span class="slider-value">10GB</span></div></div>
-      </div>
     </div>
 
     <!-- 4. Cache -->
@@ -1734,6 +1726,14 @@
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="enable_cache">Enable Cache</div></div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" checked id="cfg-cache-enable"><span class="toggle-slider"></span></label></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="hot_cache">Hot Cache Limit (Memory Cache)</div><div class="settings-row-desc" data-i18n="hot_cache_desc">In-memory cache for frequently accessed KV Cache blocks. Reduces SSD I/O latency. Auto: GPU memory / 4.</div></div>
+        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-hot-cache-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="64" value="8" id="cfg-hot-cache"><span class="slider-value">Auto (8GB)</span></div></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="cold_cache">Cold Cache Limit (SSD Cache)</div><div class="settings-row-desc" data-i18n="cold_cache_desc">Persistent SSD storage for evicted KV Cache blocks. Set 0 to disable.</div></div>
+        <div class="settings-row-right"><div class="slider-row"><input type="range" min="0" max="100" value="10" id="cfg-cold-cache"><span class="slider-value">10GB</span></div></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="ssd_cache_dir">SSD Cache Directory</div></div>
@@ -1883,8 +1883,8 @@
       resource_mgmt: "Resource Management",
       mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Total memory limit for the server process (model + KV Cache + overhead). Exceeding this triggers LRU model eviction. Set 0 for auto-detect.",
       mem_limit_model: "Memory Limit (Model Only)", mem_limit_model_desc: "Max memory for loaded models. Set 0 for no limit.",
-      hot_cache: "Hot Cache Limit (Memory Cache)", hot_cache_desc: "In-memory cache for frequently accessed KV Cache blocks. Reduces SSD I/O latency. 0 = disabled.",
-      cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Persistent SSD storage for evicted KV Cache blocks.",
+      hot_cache: "Hot Cache Limit (Memory Cache)", hot_cache_desc: "In-memory cache for frequently accessed KV Cache blocks. Reduces SSD I/O latency. Auto: GPU memory / 4.",
+      cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Persistent SSD storage for evicted KV Cache blocks. Set 0 to disable.",
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
       advanced: "Advanced", batch_processing: "Batch Processing",
@@ -1963,8 +1963,8 @@
       resource_mgmt: "资源管理",
       mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "服务器进程的总内存限制（模型 + KV Cache + 开销）。超过此限制将触发 LRU 模型驱逐。设为 0 则自动计算。",
       mem_limit_model: "内存限制（仅模型）", mem_limit_model_desc: "已加载模型的最大内存限制。设为 0 则不限制。",
-      hot_cache: "热缓存限制（内存缓存）", hot_cache_desc: "用于频繁访问的 KV Cache 块的内存缓存。减少重复读取的 SSD I/O 延迟。0 = 已禁用。",
-      cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "被驱逐的 KV Cache 块的持久 SSD 存储。",
+      hot_cache: "热缓存限制（内存缓存）", hot_cache_desc: "用于频繁访问的 KV Cache 块的内存缓存。减少重复读取的 SSD I/O 延迟。自动：GPU 内存 / 4。",
+      cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "被驱逐的 KV Cache 块的持久 SSD 存储。设为 0 则禁用。",
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
       advanced: "高级", batch_processing: "批处理",
@@ -2043,8 +2043,8 @@
       resource_mgmt: "資源管理",
       mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "伺服器程序的總記憶體限制（模型 + KV Cache + 額外開銷）。超過此限制將觸發 LRU 模型驅逐。設為 0 則自動計算。",
       mem_limit_model: "記憶體限制（僅模型）", mem_limit_model_desc: "已載入模型的最大記憶體限制。設為 0 則不限制。",
-      hot_cache: "熱快取限制（記憶體快取）", hot_cache_desc: "用於頻繁存取的 KV Cache 區塊的記憶體快取。減少重複讀取的 SSD I/O 延遲。0 = 已停用。",
-      cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "被驅逐的 KV Cache 區塊的持久 SSD 儲存。",
+      hot_cache: "熱快取限制（記憶體快取）", hot_cache_desc: "用於頻繁存取的 KV Cache 區塊的記憶體快取。減少重複讀取的 SSD I/O 延遲。自動：GPU 記憶體 / 4。",
+      cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "被驅逐的 KV Cache 區塊的持久 SSD 儲存。設為 0 則停用。",
       auto: "自動",
       cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
       advanced: "進階", batch_processing: "批次處理",
@@ -2123,8 +2123,8 @@
       resource_mgmt: "リソース管理",
       mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "サーバープロセスの合計メモリ制限（モデル + KV Cache + オーバーヘッド）。超過するとLRUモデル退避がトリガーされます。0で自動検出。",
       mem_limit_model: "メモリ制限（モデルのみ）", mem_limit_model_desc: "ロード済みモデルの最大メモリ制限。0で制限なし。",
-      hot_cache: "ホットキャッシュ制限（メモリキャッシュ）", hot_cache_desc: "頻繁にアクセスされるKV Cacheブロック用のメモリキャッシュ。SSD I/Oレイテンシを削減。0 = 無効。",
-      cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "退避されたKV Cacheブロックの永続SSDストレージ。",
+      hot_cache: "ホットキャッシュ制限（メモリキャッシュ）", hot_cache_desc: "頻繁にアクセスされるKV Cacheブロック用のメモリキャッシュ。SSD I/Oレイテンシを削減。自動：GPUメモリ / 4。",
+      cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "退避されたKV Cacheブロックの永続SSDストレージ。0で無効化。",
       auto: "自動",
       cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
       advanced: "詳細設定", batch_processing: "バッチ処理",
@@ -2203,8 +2203,8 @@
       resource_mgmt: "리소스 관리",
       mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "서버 프로세스의 총 메모리 제한 (모델 + KV Cache + 오버헤드). 초과 시 LRU 모델 제거가 트리거됩니다. 0으로 자동 감지.",
       mem_limit_model: "메모리 제한 (모델만)", mem_limit_model_desc: "로드된 모델의 최대 메모리 제한. 0으로 제한 없음.",
-      hot_cache: "핫 캐시 제한 (메모리 캐시)", hot_cache_desc: "자주 액세스하는 KV Cache 블록용 메모리 캐시. SSD I/O 지연을 줄입니다. 0 = 비활성화.",
-      cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "제거된 KV Cache 블록의 영구 SSD 스토리지.",
+      hot_cache: "핫 캐시 제한 (메모리 캐시)", hot_cache_desc: "자주 액세스하는 KV Cache 블록용 메모리 캐시. SSD I/O 지연을 줄입니다. 자동: GPU 메모리 / 4.",
+      cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "제거된 KV Cache 블록의 영구 SSD 스토리지. 0으로 비활성화.",
       auto: "자동",
       cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
       advanced: "고급", batch_processing: "배치 처리",
@@ -2924,7 +2924,7 @@
       mem_total_auto: memTotalAuto,
       mem_total: parseInt(document.getElementById('cfg-mem-total').value) || 0,
       mem_model_auto: memModelAuto,
-      hot_cache: parseInt(document.getElementById('cfg-hot-cache').value) || 0,
+      hot_cache: document.getElementById('cfg-hot-cache-auto').checked ? 0 : (parseInt(document.getElementById('cfg-hot-cache').value) || 0),
       cold_cache: parseInt(document.getElementById('cfg-cold-cache').value) || 0,
       cache_enable: document.getElementById('cfg-cache-enable').checked,
       cache_dir: document.getElementById('cfg-cache-dir').value,
@@ -3218,6 +3218,7 @@
   }
   setupMemSlider('cfg-mem-total', 'cfg-mem-total-auto');
   setupMemSlider('cfg-mem-model', 'cfg-mem-model-auto');
+  setupMemSlider('cfg-hot-cache', 'cfg-hot-cache-auto');
 
   // ── Cache slider interactions ──
   function setupCacheSlider(sliderId, zeroLabel, unit) {
@@ -3230,21 +3231,26 @@
     slider.addEventListener('input', update);
     update();
   }
-  setupCacheSlider('cfg-hot-cache', 'Off (0GB)', 'GB');
   setupCacheSlider('cfg-cold-cache', 'Off (0GB)', 'GB');
 
   // ── UI coupling: Enable Cache toggle ↔ cache sliders/dir ──
   const cacheEnableToggle = document.getElementById('cfg-cache-enable');
   const hotCacheSlider = document.getElementById('cfg-hot-cache');
+  const hotCacheAuto = document.getElementById('cfg-hot-cache-auto');
   const coldCacheSlider = document.getElementById('cfg-cold-cache');
   const cacheDirInput = document.getElementById('cfg-cache-dir');
 
   function syncCacheUI() {
     const enabled = cacheEnableToggle.checked;
-    // Hot/cold sliders disabled when cache is off
-    hotCacheSlider.disabled = !enabled;
+    // Hot cache: row disabled when cache is off; slider also respects Auto checkbox
+    const hotRow = hotCacheSlider.closest('.settings-row .settings-row-right') || hotCacheSlider.parentElement.parentElement;
+    hotRow.style.opacity = enabled ? '1' : '0.4';
+    hotCacheAuto.disabled = !enabled;
+    if (!enabled) {
+      hotCacheSlider.disabled = true;
+    }
+    // Cold cache slider disabled when cache is off
     coldCacheSlider.disabled = !enabled;
-    hotCacheSlider.parentElement.style.opacity = enabled ? '1' : '0.4';
     coldCacheSlider.parentElement.style.opacity = enabled ? '1' : '0.4';
     // SSD cache dir disabled when cache is off or cold cache = 0
     const coldVal = parseInt(coldCacheSlider.value) || 0;
@@ -3252,7 +3258,14 @@
     cacheDirInput.disabled = !dirEnabled;
     cacheDirInput.style.opacity = dirEnabled ? '1' : '0.4';
   }
-  cacheEnableToggle.addEventListener('change', syncCacheUI);
+  cacheEnableToggle.addEventListener('change', function() {
+    syncCacheUI();
+    // Re-run setupMemSlider update to restore Auto state when re-enabled
+    if (cacheEnableToggle.checked) {
+      hotCacheSlider.dispatchEvent(new Event('input'));
+      hotCacheAuto.dispatchEvent(new Event('change'));
+    }
+  });
   coldCacheSlider.addEventListener('input', syncCacheUI);
   syncCacheUI();
 
