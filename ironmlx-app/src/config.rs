@@ -30,6 +30,9 @@ pub struct AppConfig {
     /// Max concurrent sequences
     #[serde(default = "default_max_sequences")]
     pub max_sequences: usize,
+    /// Initial cache blocks (0 = auto-calculate from hot cache limit)
+    #[serde(default)]
+    pub init_cache_blocks: usize,
     /// Master cache toggle (false = disable all caching)
     #[serde(default = "default_true")]
     pub cache_enabled: bool,
@@ -82,6 +85,7 @@ impl Default for AppConfig {
             hot_cache_gb: 0.0,
             cold_cache_gb: 10.0,
             max_sequences: 16,
+            init_cache_blocks: 0,
             cache_enabled: true,
             cache_dir: "~/.ironmlx/cache/kv_cache".to_string(),
         }

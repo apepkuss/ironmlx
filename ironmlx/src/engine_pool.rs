@@ -42,6 +42,7 @@ impl EnginePool {
         cold_cache_bytes: u64,
         cache_dir_override: Option<&str>,
         max_num_seqs: usize,
+        init_cache_blocks: usize,
     ) -> Result<String, String> {
         let (
             model,
@@ -108,7 +109,11 @@ impl EnginePool {
                 * pool_config.block_size as u64
                 * pool_config.head_dim as u64
                 * pool_config.dtype.size_of() as u64;
-            let num_slots = hot_cache_bytes.checked_div(slot_bytes).unwrap_or(0) as usize;
+            let num_slots = if init_cache_blocks > 0 {
+                init_cache_blocks
+            } else {
+                hot_cache_bytes.checked_div(slot_bytes).unwrap_or(0) as usize
+            };
             if num_slots > 0 {
                 let final_config = ironmlx_core::cache::BlockPoolConfig {
                     num_slots,

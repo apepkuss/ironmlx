@@ -263,10 +263,11 @@ fn setup_global_state() {
     let hc = config.hot_cache_gb;
     let cc = config.cold_cache_gb;
     let ms = config.max_sequences;
+    let icb = config.init_cache_blocks;
     let ce = config.cache_enabled;
     let cd = config.cache_dir.clone();
     *CONFIG.lock().unwrap() = Some(config);
-    *SERVER.lock().unwrap() = Some(ServerManager::new(&h, p, ml, hc, cc, ms, ce, &cd));
+    *SERVER.lock().unwrap() = Some(ServerManager::new(&h, p, ml, hc, cc, ms, icb, ce, &cd));
 }
 
 fn setup_status_bar(mtm: MainThreadMarker) {
@@ -509,6 +510,7 @@ pub fn restart_server() {
     let new_hc = fresh_config.hot_cache_gb;
     let new_cc = fresh_config.cold_cache_gb;
     let new_ms = fresh_config.max_sequences;
+    let new_icb = fresh_config.init_cache_blocks;
     let new_ce = fresh_config.cache_enabled;
     let new_cd = fresh_config.cache_dir.clone();
 
@@ -523,6 +525,7 @@ pub fn restart_server() {
         srv.set_hot_cache_gb(new_hc);
         srv.set_cold_cache_gb(new_cc);
         srv.set_max_sequences(new_ms);
+        srv.set_init_cache_blocks(new_icb);
         srv.set_cache_enabled(new_ce);
         srv.set_cache_dir(&new_cd);
         let _ = srv.restart(&model);

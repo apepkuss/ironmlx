@@ -1057,6 +1057,7 @@ pub async fn load_model_endpoint(
             cold_bytes,
             cache_dir.as_deref(),
             max_seqs,
+            0, // auto-calculate init_cache_blocks
         )
         .map_err(|e| {
             state

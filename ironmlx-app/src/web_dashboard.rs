@@ -340,6 +340,13 @@ define_class!(
                             {
                                 config.max_sequences = v as usize;
                             }
+                            let old_icb = config.init_cache_blocks;
+                            if let Some(v) = new_settings
+                                .get("init_cache_blocks")
+                                .and_then(|v| v.as_u64())
+                            {
+                                config.init_cache_blocks = v as usize;
+                            }
                             let old_cache_dir = config.cache_dir.clone();
                             if let Some(v) = new_settings.get("cache_dir").and_then(|v| v.as_str())
                             {
@@ -354,6 +361,7 @@ define_class!(
                                 || config.hot_cache_gb != old_hot_cache
                                 || config.cold_cache_gb != old_cold_cache
                                 || config.max_sequences != old_max_seqs
+                                || config.init_cache_blocks != old_icb
                                 || config.cache_enabled != old_cache_enabled
                                 || config.cache_dir != old_cache_dir
                             {

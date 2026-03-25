@@ -48,6 +48,10 @@ struct Args {
     #[arg(long, default_value_t = 16)]
     max_sequences: usize,
 
+    /// Initial cache blocks (0 = auto-calculate from hot cache limit)
+    #[arg(long, default_value_t = 0)]
+    init_cache_blocks: usize,
+
     /// Disable all caching
     #[arg(long, default_value_t = false)]
     no_cache: bool,
@@ -131,6 +135,7 @@ async fn main() {
             cold_cache_bytes,
             cache_dir.as_deref(),
             args.max_sequences,
+            args.init_cache_blocks,
         )
         .expect("failed to load model");
 

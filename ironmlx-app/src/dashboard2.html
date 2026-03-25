@@ -1754,6 +1754,10 @@
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="max_sequences">Max Sequences</div><div class="settings-row-desc" data-i18n="max_sequences_desc">Maximum number of concurrent parallel requests.</div></div>
         <div class="settings-row-right"><input type="number" value="16" style="min-width:80px;" id="cfg-max-sequences"></div>
       </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="init_cache_blocks">Initial Cache Blocks</div><div class="settings-row-desc" data-i18n="init_cache_blocks_desc">Number of pre-allocated KV cache block slots. 0 = auto-calculate from hot cache limit.</div></div>
+        <div class="settings-row-right"><input type="number" value="0" style="min-width:80px;" id="cfg-init-cache-blocks"></div>
+      </div>
     </div>
 
     <!-- Save button -->
@@ -1874,7 +1878,7 @@
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
       completion_batch: "Completion Batch Size", completion_batch_desc: "Batch size for the token generation phase.",
-      init_cache_blocks: "Initial Cache Blocks", init_cache_blocks_desc: "Number of blocks pre-allocated at startup. Larger values reduce dynamic allocation overhead.",
+      init_cache_blocks: "Initial Cache Blocks", init_cache_blocks_desc: "Number of pre-allocated KV cache block slots. 0 = auto-calculate from hot cache limit.",
       save_settings: "Save Settings",
       settings_saved: "Settings saved successfully.",
       params_saved: "Model parameters saved.",
@@ -1954,7 +1958,7 @@
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
       completion_batch: "补全批大小", completion_batch_desc: "Token 生成阶段的批处理大小。",
-      init_cache_blocks: "初始缓存块数", init_cache_blocks_desc: "启动时预分配的块数。值越大，动态分配开销越小。",
+      init_cache_blocks: "初始缓存块数", init_cache_blocks_desc: "预分配的 KV 缓存块槽位数。0 = 根据热缓存限制自动计算。",
       save_settings: "保存设置",
       settings_saved: "设置已保存。",
       params_saved: "模型参数已保存。",
@@ -2034,7 +2038,7 @@
       advanced: "進階", batch_processing: "批次處理",
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
       completion_batch: "補全批次大小", completion_batch_desc: "Token 生成階段的批次處理大小。",
-      init_cache_blocks: "初始快取區塊數", init_cache_blocks_desc: "啟動時預先分配的區塊數。值越大，動態分配開銷越小。",
+      init_cache_blocks: "初始快取區塊數", init_cache_blocks_desc: "預先分配的 KV 快取區塊槽位數。0 = 根據熱快取限制自動計算。",
       save_settings: "儲存設定",
       settings_saved: "設定已儲存。",
       params_saved: "模型參數已儲存。",
@@ -2114,7 +2118,7 @@
       advanced: "詳細設定", batch_processing: "バッチ処理",
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
       completion_batch: "補完バッチサイズ", completion_batch_desc: "トークン生成フェーズのバッチサイズ。",
-      init_cache_blocks: "初期キャッシュブロック数", init_cache_blocks_desc: "起動時に事前割り当てするブロック数。値が大きいほど動的割り当てのオーバーヘッドが減少します。",
+      init_cache_blocks: "初期キャッシュブロック数", init_cache_blocks_desc: "事前割り当てするKVキャッシュブロックスロット数。0 = ホットキャッシュ制限から自動計算。",
       save_settings: "設定を保存",
       settings_saved: "設定が保存されました。",
       params_saved: "モデルパラメータが保存されました。",
@@ -2194,7 +2198,7 @@
       advanced: "고급", batch_processing: "배치 처리",
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
       completion_batch: "완성 배치 크기", completion_batch_desc: "토큰 생성 단계의 배치 크기.",
-      init_cache_blocks: "초기 캐시 블록 수", init_cache_blocks_desc: "시작 시 사전 할당할 블록 수. 값이 클수록 동적 할당 오버헤드가 줄어듭니다.",
+      init_cache_blocks: "초기 캐시 블록 수", init_cache_blocks_desc: "사전 할당할 KV 캐시 블록 슬롯 수. 0 = 핫 캐시 제한에서 자동 계산.",
       save_settings: "설정 저장",
       settings_saved: "설정이 저장되었습니다.",
       params_saved: "모델 매개변수가 저장되었습니다.",
@@ -2912,7 +2916,8 @@
       cold_cache: parseInt(document.getElementById('cfg-cold-cache').value) || 0,
       cache_enable: document.getElementById('cfg-cache-enable').checked,
       cache_dir: document.getElementById('cfg-cache-dir').value,
-      max_sequences: parseInt(document.getElementById('cfg-max-sequences').value) || 16
+      max_sequences: parseInt(document.getElementById('cfg-max-sequences').value) || 16,
+      init_cache_blocks: parseInt(document.getElementById('cfg-init-cache-blocks').value) || 0
     };
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveSettings) {
       window.webkit.messageHandlers.saveSettings.postMessage(JSON.stringify(settings));
