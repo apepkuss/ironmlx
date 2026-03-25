@@ -264,8 +264,16 @@ impl Attention {
 
         // Reshape: [B, 1, n_heads * head_dim] -> [B, 1, n_heads, head_dim]
         let mut q = ops::reshape(&q, &[batch, seq_len, self.n_heads, self.head_dim], stream)?;
-        let mut k = ops::reshape(&k, &[batch, seq_len, self.n_kv_heads, self.head_dim], stream)?;
-        let v = ops::reshape(&v, &[batch, seq_len, self.n_kv_heads, self.head_dim], stream)?;
+        let mut k = ops::reshape(
+            &k,
+            &[batch, seq_len, self.n_kv_heads, self.head_dim],
+            stream,
+        )?;
+        let v = ops::reshape(
+            &v,
+            &[batch, seq_len, self.n_kv_heads, self.head_dim],
+            stream,
+        )?;
 
         // QK Norm
         if let Some(ref qn) = self.q_norm {
@@ -286,20 +294,83 @@ impl Attention {
             let q_shape = q.shape();
             let k_shape = k.shape();
 
-            let q_rot = ops::slice(&q, &[0, 0, 0, 0], &[q_shape[0], q_shape[1], q_shape[2], rope_dim], &[1,1,1,1], stream)?;
-            let q_pass = ops::slice(&q, &[0, 0, 0, rope_dim], &[q_shape[0], q_shape[1], q_shape[2], q_shape[3]], &[1,1,1,1], stream)?;
-            let k_rot = ops::slice(&k, &[0, 0, 0, 0], &[k_shape[0], k_shape[1], k_shape[2], rope_dim], &[1,1,1,1], stream)?;
-            let k_pass = ops::slice(&k, &[0, 0, 0, rope_dim], &[k_shape[0], k_shape[1], k_shape[2], k_shape[3]], &[1,1,1,1], stream)?;
+            let q_rot = ops::slice(
+                &q,
+                &[0, 0, 0, 0],
+                &[q_shape[0], q_shape[1], q_shape[2], rope_dim],
+                &[1, 1, 1, 1],
+                stream,
+            )?;
+            let q_pass = ops::slice(
+                &q,
+                &[0, 0, 0, rope_dim],
+                &[q_shape[0], q_shape[1], q_shape[2], q_shape[3]],
+                &[1, 1, 1, 1],
+                stream,
+            )?;
+            let k_rot = ops::slice(
+                &k,
+                &[0, 0, 0, 0],
+                &[k_shape[0], k_shape[1], k_shape[2], rope_dim],
+                &[1, 1, 1, 1],
+                stream,
+            )?;
+            let k_pass = ops::slice(
+                &k,
+                &[0, 0, 0, rope_dim],
+                &[k_shape[0], k_shape[1], k_shape[2], k_shape[3]],
+                &[1, 1, 1, 1],
+                stream,
+            )?;
 
-            let q_rot = fast::rope_dynamic(&q_rot, rope_dim, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
-            let k_rot = fast::rope_dynamic(&k_rot, rope_dim, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
+            let q_rot = fast::rope_dynamic(
+                &q_rot,
+                rope_dim,
+                self.rope_traditional,
+                self.rope_base,
+                self.rope_scale,
+                offsets,
+                None,
+                stream,
+            )?;
+            let k_rot = fast::rope_dynamic(
+                &k_rot,
+                rope_dim,
+                self.rope_traditional,
+                self.rope_base,
+                self.rope_scale,
+                offsets,
+                None,
+                stream,
+            )?;
 
             let q_arr = VectorArray::from_arrays(&[&q_rot, &q_pass]);
             let k_arr = VectorArray::from_arrays(&[&k_rot, &k_pass]);
-            (ops::concatenate(&q_arr, -1, stream)?, ops::concatenate(&k_arr, -1, stream)?)
+            (
+                ops::concatenate(&q_arr, -1, stream)?,
+                ops::concatenate(&k_arr, -1, stream)?,
+            )
         } else {
-            let q = fast::rope_dynamic(&q, self.rope_dims, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
-            let k = fast::rope_dynamic(&k, self.rope_dims, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
+            let q = fast::rope_dynamic(
+                &q,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                self.rope_scale,
+                offsets,
+                None,
+                stream,
+            )?;
+            let k = fast::rope_dynamic(
+                &k,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                self.rope_scale,
+                offsets,
+                None,
+                stream,
+            )?;
             (q, k)
         };
 
@@ -312,12 +383,23 @@ impl Attention {
         // Scaled dot-product attention with explicit mask
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         let attn_out = fast::scaled_dot_product_attention(
-            &q, &new_k, &new_v, scale, "none", Some(mask), None, stream,
+            &q,
+            &new_k,
+            &new_v,
+            scale,
+            "none",
+            Some(mask),
+            None,
+            stream,
         )?;
 
         // Transpose back and reshape
         let attn_out = ops::transpose_axes(&attn_out, &[0, 2, 1, 3], stream)?;
-        let attn_out = ops::reshape(&attn_out, &[batch, seq_len, self.n_heads * self.head_dim], stream)?;
+        let attn_out = ops::reshape(
+            &attn_out,
+            &[batch, seq_len, self.n_heads * self.head_dim],
+            stream,
+        )?;
         let output = self.wo.forward_with_stream(&attn_out, stream)?;
 
         Ok((output, new_k, new_v))

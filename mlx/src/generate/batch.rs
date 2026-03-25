@@ -407,10 +407,7 @@ impl<'a> BatchGenerator<'a> {
         for &uid in &uids {
             let seq = &self.sequences[&uid];
             tokens_vec.push(seq.last_token);
-            let cache_len = seq.cache[0]
-                .0
-                .as_ref()
-                .map_or(0, |k| k.shape()[2]);
+            let cache_len = seq.cache[0].0.as_ref().map_or(0, |k| k.shape()[2]);
             offsets_vec.push(cache_len);
             cache_lens.push(cache_len);
         }
@@ -435,11 +432,7 @@ impl<'a> BatchGenerator<'a> {
             mask_data.extend(std::iter::repeat_n(0.0_f32, (cl + 1) as usize));
         }
         let mask_flat = Array::from_slice_f32(&mask_data);
-        let mask = ops::reshape(
-            &mask_flat,
-            &[batch_size, 1, 1, total_len],
-            stream,
-        )?;
+        let mask = ops::reshape(&mask_flat, &[batch_size, 1, 1, total_len], stream)?;
 
         // Pad per-sequence caches to [B, n_kv_heads, max_cache_len, head_dim]
         let mut batched_cache: Vec<(Array, Array)> = Vec::with_capacity(num_layers);
@@ -487,9 +480,9 @@ impl<'a> BatchGenerator<'a> {
         }
 
         // Single forward pass [B, 1] -> [B, 1, vocab]
-        let logits = self
-            .model
-            .forward_batched(&tokens_2d, &mut batched_cache, &offsets_arr, &mask)?;
+        let logits =
+            self.model
+                .forward_batched(&tokens_2d, &mut batched_cache, &offsets_arr, &mask)?;
 
         // Sample per-sequence
         let mut pending: Vec<(SeqUid, Array)> = Vec::with_capacity(uids.len());

@@ -77,7 +77,9 @@ impl TransformerBlock {
             stream,
         )?;
         let h = ops::add(x, &attn_out, stream)?;
-        let normed = self.post_attention_layernorm.forward_with_stream(&h, stream)?;
+        let normed = self
+            .post_attention_layernorm
+            .forward_with_stream(&h, stream)?;
         let mlp_out = self.mlp.forward_with_stream(&normed, stream)?;
         let out = ops::add(&h, &mlp_out, stream)?;
         Ok((out, new_k, new_v))
@@ -257,8 +259,7 @@ impl LlamaModel {
 
         for (i, layer) in self.layers.iter().enumerate() {
             let (ref ck, ref cv) = cache[i];
-            let (out, new_k, new_v) =
-                layer.forward_batched(&h, ck, cv, offsets, mask, &stream)?;
+            let (out, new_k, new_v) = layer.forward_batched(&h, ck, cv, offsets, mask, &stream)?;
             h = out;
             cache[i] = (new_k, new_v);
         }
