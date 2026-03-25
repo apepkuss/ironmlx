@@ -302,6 +302,10 @@ define_class!(
                             {
                                 config.theme = Some(theme.to_string());
                             }
+                            if let Some(ll) = new_settings.get("log_level").and_then(|v| v.as_str())
+                            {
+                                config.log_level = ll.to_string();
+                            }
 
                             // Check if restart-requiring settings changed
                             if config.host != old_host || config.port != old_port {
@@ -1151,10 +1155,11 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     };
     let html = include_str!("dashboard2.html");
     let port = config.port;
+    let saved_log_level = &config.log_level;
     let html_with_lang = html.replace(
         "/*__INIT_LANG__*/",
         &format!(
-            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling(); checkMossInstalled();{} {}",
+            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); if(document.getElementById('log-level-filter'))document.getElementById('log-level-filter').value='{}'; if(document.getElementById('cfg-log-level'))document.getElementById('cfg-log-level').value='{}'; initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling(); checkMossInstalled();{} {}",
             port,
             default_model,
             if !default_model.is_empty() {
@@ -1164,6 +1169,8 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
             },
             current_lang,
             current_theme,
+            saved_log_level,
+            saved_log_level,
             if default_model.is_empty() { " showOnboarding();" } else { "" },
             {
                 // Load saved model params

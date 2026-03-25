@@ -13,10 +13,16 @@ pub struct AppConfig {
     pub language: String,
     #[serde(default)]
     pub theme: Option<String>, // None=System, Some("light"), Some("dark")
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 fn default_host() -> String {
     "127.0.0.1".to_string()
+}
+
+fn default_log_level() -> String {
+    "ALL".to_string()
 }
 
 fn default_language() -> String {
@@ -33,6 +39,7 @@ impl Default for AppConfig {
             last_model: None,
             language: "en".to_string(),
             theme: None,
+            log_level: "ALL".to_string(),
         }
     }
 }
