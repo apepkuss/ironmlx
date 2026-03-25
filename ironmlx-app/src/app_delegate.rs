@@ -257,9 +257,10 @@ impl MenuHandler {
 
 fn setup_global_state() {
     let config = AppConfig::load();
+    let h = config.host.clone();
     let p = config.port;
     *CONFIG.lock().unwrap() = Some(config);
-    *SERVER.lock().unwrap() = Some(ServerManager::new(p));
+    *SERVER.lock().unwrap() = Some(ServerManager::new(&h, p));
 }
 
 fn setup_status_bar(mtm: MainThreadMarker) {
@@ -491,18 +492,20 @@ pub fn refresh_menu(mtm: MainThreadMarker) {
 }
 
 /// Restart the backend server (callable from web_dashboard bridge)
-/// Reloads config from disk so port changes take effect.
+/// Reloads config from disk so host/port changes take effect.
 pub fn restart_server() {
     // Reload config from disk
     let fresh_config = crate::config::AppConfig::load();
     let model = fresh_config.last_model.clone().unwrap_or_default();
+    let new_host = fresh_config.host.clone();
     let new_port = fresh_config.port;
 
     // Update in-memory CONFIG
     *CONFIG.lock().unwrap() = Some(fresh_config);
 
-    // Update port and restart
+    // Update host/port and restart
     if let Some(ref mut srv) = *SERVER.lock().unwrap() {
+        srv.set_host(&new_host);
         srv.set_port(new_port);
         let _ = srv.restart(&model);
     }

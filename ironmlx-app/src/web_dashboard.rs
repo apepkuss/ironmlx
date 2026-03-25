@@ -281,9 +281,13 @@ define_class!(
                         let mut needs_restart = false;
                         if let Ok(new_settings) = serde_json::from_str::<serde_json::Value>(&body) {
                             let mut config = crate::config::AppConfig::load();
+                            let old_host = config.host.clone();
                             let old_port = config.port;
 
                             // Update config fields that exist in AppConfig
+                            if let Some(host) = new_settings.get("host").and_then(|v| v.as_str()) {
+                                config.host = host.to_string();
+                            }
                             if let Some(port) = new_settings.get("port").and_then(|v| v.as_u64()) {
                                 config.port = port as u16;
                             }
@@ -300,7 +304,7 @@ define_class!(
                             }
 
                             // Check if restart-requiring settings changed
-                            if config.port != old_port {
+                            if config.host != old_host || config.port != old_port {
                                 needs_restart = true;
                             }
 

@@ -4,6 +4,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub model_dir: Option<String>,
+    #[serde(default = "default_host")]
+    pub host: String,
     pub port: u16,
     pub auto_start: bool,
     pub last_model: Option<String>,
@@ -11,6 +13,10 @@ pub struct AppConfig {
     pub language: String,
     #[serde(default)]
     pub theme: Option<String>, // None=System, Some("light"), Some("dark")
+}
+
+fn default_host() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_language() -> String {
@@ -21,6 +27,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             model_dir: None,
+            host: "127.0.0.1".to_string(),
             port: 8080,
             auto_start: true,
             last_model: None,

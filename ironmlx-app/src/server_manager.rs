@@ -13,14 +13,16 @@ pub enum ServerStatus {
 pub struct ServerManager {
     process: Arc<Mutex<Option<Child>>>,
     status: Arc<Mutex<ServerStatus>>,
+    host: String,
     port: u16,
 }
 
 impl ServerManager {
-    pub fn new(port: u16) -> Self {
+    pub fn new(host: &str, port: u16) -> Self {
         Self {
             process: Arc::new(Mutex::new(None)),
             status: Arc::new(Mutex::new(ServerStatus::Stopped)),
+            host: host.to_string(),
             port,
         }
     }
@@ -43,6 +45,8 @@ impl ServerManager {
         let child = Command::new(&binary)
             .arg("--model")
             .arg(model_path)
+            .arg("--host")
+            .arg(&self.host)
             .arg("--port")
             .arg(self.port.to_string())
             .stdout(std::process::Stdio::null())
@@ -63,9 +67,14 @@ impl ServerManager {
         *self.status.lock().unwrap() = ServerStatus::Stopped;
     }
 
+    pub fn set_host(&mut self, host: &str) {
+        self.host = host.to_string();
+    }
+
     pub fn set_port(&mut self, port: u16) {
         self.port = port;
     }
+
 
     pub fn restart(&self, model_path: &str) -> Result<(), String> {
         self.stop();
@@ -91,7 +100,8 @@ impl ServerManager {
 
     #[allow(dead_code)]
     pub fn check_health(&self) -> bool {
-        let url = format!("http://127.0.0.1:{}/health", self.port);
+        let health_host = if self.host == "0.0.0.0" { "127.0.0.1" } else { &self.host };
+        let url = format!("http://{}:{}/health", health_host, self.port);
         // Simple blocking check
         std::process::Command::new("curl")
             .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", &url])
