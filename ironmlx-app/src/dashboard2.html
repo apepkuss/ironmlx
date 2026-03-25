@@ -1521,11 +1521,23 @@
           <option value="server">ironmlx-server</option>
           <option value="app">ironmlx-app</option>
         </select>
+        <label data-i18n="log_level_filter">Level:</label>
+        <select id="log-level-filter" style="min-width:0;">
+          <option value="ALL" data-i18n="log_level_all">ALL</option>
+          <option value="DEBUG">DEBUG</option>
+          <option value="INFO">INFO</option>
+          <option value="WARNING">WARNING</option>
+          <option value="ERROR">ERROR</option>
+        </select>
         <button class="btn-accent" data-i18n="refresh">Refresh</button>
         <label style="font-size:12px;color:var(--text-secondary);white-space:nowrap;display:flex;align-items:center;gap:5px;margin-left:4px;cursor:pointer;">
           <input type="checkbox" checked style="accent-color:var(--accent);width:15px;height:15px;" id="log-auto-scroll-cb">
           <span data-i18n="auto_scroll">Auto Scroll</span>
         </label>
+      </div>
+      <div class="log-filter-row" style="padding-top:0;">
+        <label data-i18n="log_search">Search:</label>
+        <input type="text" id="log-search-input" placeholder="" style="flex:1;min-width:120px;" oninput="applyLogFilters()">
       </div>
     </div>
 
@@ -1858,7 +1870,7 @@
       speedup_label: "Speedup", speedup_desc: "Token generation throughput multiplier relative to single-request baseline (1x). Higher is better.",
       pp_tps_req_label: "(Per-request Prompt TPS)", pp_tps_req_desc: "Prompt processing throughput divided by batch size. Shows per-request prefill speed under batch load.",
       logs_subtitle: "Server inference logs.",
-      log_viewer: "Log Viewer", auto_refresh: "Auto Refresh", log_lines: "Lines:", log_interval: "Interval:", log_interval_hint: "sec (0=off)", log_file: "File:", refresh: "Refresh", auto_scroll: "Auto Scroll", log_showing: "Showing", log_lines_unit: "lines", export_log: "Export Log",
+      log_viewer: "Log Viewer", auto_refresh: "Auto Refresh", log_lines: "Lines:", log_interval: "Interval:", log_interval_hint: "sec (0=off)", log_file: "File:", log_level_filter: "Level:", log_level_all: "ALL", log_search: "Search:", refresh: "Refresh", auto_scroll: "Auto Scroll", log_showing: "Showing", log_lines_unit: "lines", export_log: "Export Log",
       log_server_offline: "Server is not running", log_start_hint: "Start the server from the menubar to view logs.", log_no_entries: "No log entries", log_no_app_logs: "No app log entries",
       settings_title: "App Settings", settings_subtitle_html: 'Settings marked with <span class="badge badge-restart">restart</span> require a server restart.',
       server: "Server", host: "Host", port: "Port", log_level: "Log Level",
@@ -1938,7 +1950,7 @@
       speedup_label: "加速比", speedup_desc: "相对于单请求基准（1x）的 Token 生成吞吐量倍数。越高越好。",
       pp_tps_req_label: "（每请求提示词处理 TPS）", pp_tps_req_desc: "提示词处理吞吐量除以批量大小。显示批量负载下每个请求的预填充速度。",
       logs_subtitle: "服务器推理日志。",
-      log_viewer: "日志查看器", auto_refresh: "自动刷新", log_lines: "行数：", log_interval: "刷新间隔：", log_interval_hint: "秒（0=关闭）", log_file: "文件：", refresh: "刷新", auto_scroll: "自动滚动", log_showing: "显示", log_lines_unit: "行", export_log: "导出日志",
+      log_viewer: "日志查看器", auto_refresh: "自动刷新", log_lines: "行数：", log_interval: "刷新间隔：", log_interval_hint: "秒（0=关闭）", log_file: "文件：", log_level_filter: "级别：", log_level_all: "全部", log_search: "搜索：", refresh: "刷新", auto_scroll: "自动滚动", log_showing: "显示", log_lines_unit: "行", export_log: "导出日志",
       log_server_offline: "服务器未运行", log_start_hint: "请从菜单栏启动服务以查看日志。", log_no_entries: "暂无日志", log_no_app_logs: "暂无应用日志",
       settings_title: "应用设置", settings_subtitle_html: '标有 <span class="badge badge-restart">重启</span> 的设置需要重启服务。',
       server: "服务器", host: "主机", port: "端口", log_level: "日志级别",
@@ -2018,7 +2030,7 @@
       speedup_label: "加速比", speedup_desc: "相對於單請求基準（1x）的 Token 生成吞吐量倍數。越高越好。",
       pp_tps_req_label: "（每請求提示詞處理 TPS）", pp_tps_req_desc: "提示詞處理吞吐量除以批次大小。顯示批次負載下每個請求的預填充速度。",
       logs_subtitle: "伺服器推理日誌。",
-      log_viewer: "日誌檢視器", auto_refresh: "自動重新整理", log_lines: "行數：", log_interval: "重新整理間隔：", log_interval_hint: "秒（0=關閉）", log_file: "檔案：", refresh: "重新整理", auto_scroll: "自動捲動", log_showing: "顯示", log_lines_unit: "行", export_log: "匯出日誌",
+      log_viewer: "日誌檢視器", auto_refresh: "自動重新整理", log_lines: "行數：", log_interval: "重新整理間隔：", log_interval_hint: "秒（0=關閉）", log_file: "檔案：", log_level_filter: "級別：", log_level_all: "全部", log_search: "搜尋：", refresh: "重新整理", auto_scroll: "自動捲動", log_showing: "顯示", log_lines_unit: "行", export_log: "匯出日誌",
       log_server_offline: "伺服器未執行", log_start_hint: "請從選單列啟動服務以檢視日誌。", log_no_entries: "暫無日誌", log_no_app_logs: "暫無應用日誌",
       settings_title: "應用設定", settings_subtitle_html: '標有 <span class="badge badge-restart">重啟</span> 的設定需要重啟服務。',
       server: "伺服器", host: "主機", port: "連接埠", log_level: "日誌等級",
@@ -2098,7 +2110,7 @@
       speedup_label: "高速化率", speedup_desc: "単一リクエストベースライン(1x)に対するトークン生成スループットの倍率。高いほど良い。",
       pp_tps_req_label: "（リクエストあたりプロンプトTPS）", pp_tps_req_desc: "プロンプト処理スループットをバッチサイズで割った値。バッチ負荷下のリクエストあたりのプリフィル速度を表示。",
       logs_subtitle: "サーバー推論ログ。",
-      log_viewer: "ログビューア", auto_refresh: "自動更新", log_lines: "行数：", log_interval: "更新間隔：", log_interval_hint: "秒（0=オフ）", log_file: "ファイル：", refresh: "更新", auto_scroll: "自動スクロール", log_showing: "表示", log_lines_unit: "行", export_log: "ログエクスポート",
+      log_viewer: "ログビューア", auto_refresh: "自動更新", log_lines: "行数：", log_interval: "更新間隔：", log_interval_hint: "秒（0=オフ）", log_file: "ファイル：", log_level_filter: "レベル：", log_level_all: "すべて", log_search: "検索：", refresh: "更新", auto_scroll: "自動スクロール", log_showing: "表示", log_lines_unit: "行", export_log: "ログエクスポート",
       log_server_offline: "サーバーが実行されていません", log_start_hint: "ログを表示するにはメニューバーからサーバーを起動してください。", log_no_entries: "ログエントリなし", log_no_app_logs: "アプリログエントリなし",
       settings_title: "アプリ設定", settings_subtitle_html: '<span class="badge badge-restart">再起動</span> マーク付きの設定はサーバーの再起動が必要です。',
       server: "サーバー", host: "ホスト", port: "ポート", log_level: "ログレベル",
@@ -2178,7 +2190,7 @@
       speedup_label: "속도 향상", speedup_desc: "단일 요청 기준(1x) 대비 토큰 생성 처리량 배율. 높을수록 좋음.",
       pp_tps_req_label: "(요청당 프롬프트 TPS)", pp_tps_req_desc: "프롬프트 처리 처리량을 배치 크기로 나눈 값. 배치 부하에서 요청당 프리필 속도 표시.",
       logs_subtitle: "서버 추론 로그.",
-      log_viewer: "로그 뷰어", auto_refresh: "자동 새로고침", log_lines: "줄 수:", log_interval: "새로고침 간격:", log_interval_hint: "초 (0=끄기)", log_file: "파일:", refresh: "새로고침", auto_scroll: "자동 스크롤", log_showing: "표시", log_lines_unit: "줄", export_log: "로그 내보내기",
+      log_viewer: "로그 뷰어", auto_refresh: "자동 새로고침", log_lines: "줄 수:", log_interval: "새로고침 간격:", log_interval_hint: "초 (0=끄기)", log_file: "파일:", log_level_filter: "레벨:", log_level_all: "전체", log_search: "검색:", refresh: "새로고침", auto_scroll: "자동 스크롤", log_showing: "표시", log_lines_unit: "줄", export_log: "로그 내보내기",
       log_server_offline: "서버가 실행되고 있지 않습니다", log_start_hint: "로그를 보려면 메뉴 바에서 서버를 시작하세요.", log_no_entries: "로그 항목 없음", log_no_app_logs: "앱 로그 항목 없음",
       settings_title: "앱 설정", settings_subtitle_html: '<span class="badge badge-restart">재시작</span> 표시된 설정은 서버 재시작이 필요합니다.',
       server: "서버", host: "호스트", port: "포트", log_level: "로그 수준",
@@ -2615,6 +2627,7 @@
   // ── Log system ──
   let logRefreshTimer = null;
   let logAutoScroll = true;
+  let logRawLines = []; // store all fetched lines before filtering
   const logOutput = document.getElementById('log-output');
   const logTimestamp = document.getElementById('log-timestamp');
   const logFileSelect = document.querySelector('#page-logs .log-filter-row select');
@@ -2622,6 +2635,8 @@
   const logIntervalInput = document.querySelectorAll('#page-logs .log-filter-row input[type="number"]')[1];
   const logRefreshBtn = document.querySelector('#page-logs .btn-accent');
   const logAutoScrollToggle = document.getElementById('log-auto-scroll-cb');
+  const logLevelFilter = document.getElementById('log-level-filter');
+  const logSearchInput = document.getElementById('log-search-input');
 
   function formatLogTimestamp() {
     return new Date().toLocaleTimeString();
@@ -2640,13 +2655,8 @@
 
   // Called from Rust via evaluateJavaScript
   function receiveAppLogs(text) {
-    const maxLines = parseInt(logLinesInput.value) || 500;
-    const lines = text ? text.split('\\n') : [];
-    const limited = lines.slice(-maxLines);
-    updateLogCount(limited.length, lines.length);
-    logOutput.textContent = limited.join('\n') || '[ No app log entries ]';
-    logTimestamp.textContent = formatLogTimestamp();
-    if (logAutoScroll) logOutput.scrollTop = logOutput.scrollHeight;
+    logRawLines = text ? text.split('\\n') : [];
+    applyLogFilters();
   }
 
   function updateLogCount(showing, total) {
@@ -2655,6 +2665,27 @@
       const dict = I18N[currentLang] || I18N.en;
       header.textContent = (dict.log_showing || 'Showing') + ' ' + showing + ' / ' + total + ' ' + (dict.log_lines_unit || 'lines');
     }
+  }
+
+  function applyLogFilters() {
+    const maxLines = parseInt(logLinesInput.value) || 500;
+    const level = logLevelFilter.value;
+    const search = logSearchInput.value.trim().toLowerCase();
+    let filtered = logRawLines;
+    if (level !== 'ALL') {
+      filtered = filtered.filter(line => {
+        const upper = line.toUpperCase();
+        return upper.includes(' - ' + level + ' - ') || upper.includes(' ' + level + ' ');
+      });
+    }
+    if (search) {
+      filtered = filtered.filter(line => line.toLowerCase().includes(search));
+    }
+    const limited = filtered.slice(-maxLines);
+    updateLogCount(limited.length, filtered.length);
+    const dict = I18N[currentLang] || I18N.en;
+    logOutput.textContent = limited.join('\n') || (dict.log_no_entries || 'No log entries');
+    if (logAutoScroll) logOutput.scrollTop = logOutput.scrollHeight;
   }
 
   function refreshLogs() {
@@ -3123,28 +3154,24 @@
           drawGpuChart();
         }
       } else if (path === '/admin/api/logs') {
-        const maxLines = parseInt(logLinesInput.value) || 500;
         if (!jsonStr || jsonStr === 'null' || jsonStr === '') {
+          logRawLines = [];
           updateLogCount(0, 0);
           logOutput.textContent = (dict.log_server_offline || 'Server is not running') + '\n' + (dict.log_start_hint || 'Start the server from the menubar to view logs.');
         } else {
           try {
             const entries = JSON.parse(jsonStr);
-            const lines = entries.map(e => {
+            logRawLines = entries.map(e => {
               const d = new Date(e.timestamp * 1000);
               const ts = d.toISOString().replace('T', ' ').replace('Z', '');
               return ts + ' - ' + e.level + ' - ' + e.message;
             });
-            const limited = lines.slice(-maxLines);
-            updateLogCount(limited.length, entries.length);
-            logOutput.textContent = limited.join('\n') || (dict.log_no_entries || 'No log entries');
           } catch(e) {
-            logOutput.textContent = jsonStr;
-            updateLogCount(0, 0);
+            logRawLines = jsonStr.split('\n');
           }
+          applyLogFilters();
         }
         logTimestamp.textContent = formatLogTimestamp();
-        if (logAutoScroll) logOutput.scrollTop = logOutput.scrollHeight;
       }
     } catch (e) {
       if (path === '/health') showStatusOffline();
@@ -3161,6 +3188,7 @@
   logRefreshBtn.addEventListener('click', refreshLogs);
   logIntervalInput.addEventListener('change', startLogAutoRefresh);
   logAutoScrollToggle.addEventListener('change', function() { logAutoScroll = this.checked; });
+  logLevelFilter.addEventListener('change', applyLogFilters);
 
   /*__INIT_LANG__*/
 </script>
