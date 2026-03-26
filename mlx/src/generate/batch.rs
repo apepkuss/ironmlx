@@ -80,6 +80,23 @@ pub struct BatchGenerator<'a> {
     stream: Stream,
     /// Sequences undergoing chunked prefill.
     prefilling: Vec<PrefillState>,
+    /// Persistent batched cache: [B, n_kv, seq_len, head_dim] per layer.
+    /// None when not in batched decode mode (0 or 1 active sequences).
+    batched_cache: Option<BatchedCacheState>,
+}
+
+/// Persistent state for batched decode — avoids pad/unpad every step.
+struct BatchedCacheState {
+    /// Ordered UIDs matching batch dimension positions.
+    uids: Vec<SeqUid>,
+    /// Per-layer batched KV cache: [B, n_kv, current_len, head_dim].
+    cache: Vec<(Array, Array)>,
+    /// Per-sequence cache length (before padding). Updated each step.
+    cache_lens: Vec<i32>,
+    /// Max cache length across all sequences (= padded dimension).
+    max_cache_len: i32,
+    /// Model dtype for mask casting.
+    model_dtype: crate::Dtype,
 }
 
 impl<'a> BatchGenerator<'a> {
@@ -94,6 +111,7 @@ impl<'a> BatchGenerator<'a> {
             cache_manager: None,
             stream: Stream::new(&Device::gpu()),
             prefilling: Vec::new(),
+            batched_cache: None,
         }
     }
 
@@ -108,6 +126,7 @@ impl<'a> BatchGenerator<'a> {
             cache_manager: Some(cache_manager),
             stream: Stream::new(&Device::gpu()),
             prefilling: Vec::new(),
+            batched_cache: None,
         }
     }
 
@@ -546,90 +565,38 @@ impl<'a> BatchGenerator<'a> {
         Ok(responses)
     }
 
-    /// True batched decode: merge all sequences into a single forward pass.
-    ///
-    /// Steps:
-    /// 1. Collect per-sequence tokens and cache lengths
-    /// 2. Pad caches to uniform length, build attention mask
-    /// 3. Single batched forward pass
-    /// 4. Unpad caches back to per-sequence
-    /// 5. Sample and collect results
-    pub fn step_true_batched(&mut self) -> Result<Vec<BatchResponse>> {
+    /// Build or rebuild the persistent batched cache from per-sequence caches.
+    fn build_batched_cache(&mut self) -> Result<()> {
         let stream = &self.stream;
         let uids: Vec<SeqUid> = self.sequences.keys().copied().collect();
-
-        if uids.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Single sequence: skip padding overhead, use per-sequence path
-        if uids.len() == 1 {
-            return self.step_batched();
-        }
-
         let num_layers = self.num_layers;
-        let batch_size = uids.len() as i32;
-        let step_t0 = std::time::Instant::now();
 
-        // Collect per-sequence info
-        let mut tokens_vec: Vec<i32> = Vec::with_capacity(uids.len());
-        let mut offsets_vec: Vec<i32> = Vec::with_capacity(uids.len());
         let mut cache_lens: Vec<i32> = Vec::with_capacity(uids.len());
-
         for &uid in &uids {
             let seq = &self.sequences[&uid];
-            tokens_vec.push(seq.last_token);
-            let cache_len = seq.cache[0].0.as_ref().map_or(0, |k| k.shape()[2]);
-            offsets_vec.push(cache_len);
-            cache_lens.push(cache_len);
+            let cl = seq.cache[0].0.as_ref().map_or(0, |k| k.shape()[2]);
+            cache_lens.push(cl);
         }
-
         let max_cache_len = *cache_lens.iter().max().unwrap_or(&0);
 
-        // Build batched input tokens [B, 1]
-        let tokens_arr = Array::from_slice_i32(&tokens_vec);
-        let tokens_2d = ops::reshape(&tokens_arr, &[batch_size, 1], stream)?;
-
-        // Build offsets array [B]
-        let offsets_arr = Array::from_slice_i32(&offsets_vec);
-
-        // Determine model dtype from cache (typically bfloat16)
         let model_dtype = self.sequences[&uids[0]].cache[0]
             .0
             .as_ref()
             .map(|k| k.dtype())
             .unwrap_or(crate::Dtype::Float32);
 
-        // Build attention mask [B, 1, 1, max_cache_len + 1]
-        // For each sequence: 0.0 for valid positions, -inf for pad positions
-        let total_len = max_cache_len + 1; // +1 for the new token
-        let mut mask_data: Vec<f32> = Vec::with_capacity(uids.len() * total_len as usize);
-        for &cl in &cache_lens {
-            let pad_len = (max_cache_len - cl) as usize;
-            // Left-padded: first `pad_len` positions are masked, rest are valid
-            mask_data.extend(std::iter::repeat_n(f32::NEG_INFINITY, pad_len));
-            mask_data.extend(std::iter::repeat_n(0.0_f32, (cl + 1) as usize));
-        }
-        let mask_flat = Array::from_slice_f32(&mask_data);
-        let mask = ops::reshape(&mask_flat, &[batch_size, 1, 1, total_len], stream)?;
-        // Cast mask to model dtype (e.g. bfloat16) for scaled_dot_product_attention
-        let mask = ops::astype(&mask, model_dtype, stream)?;
-
-        // Pad per-sequence caches to [B, n_kv_heads, max_cache_len, head_dim]
-        let mut batched_cache: Vec<(Array, Array)> = Vec::with_capacity(num_layers);
+        let mut batched_layers: Vec<(Array, Array)> = Vec::with_capacity(num_layers);
         for layer_idx in 0..num_layers {
             let mut k_arrays: Vec<Array> = Vec::with_capacity(uids.len());
             let mut v_arrays: Vec<Array> = Vec::with_capacity(uids.len());
 
-            for &uid in &uids {
+            for (i, &uid) in uids.iter().enumerate() {
                 let seq = &self.sequences[&uid];
                 let (ref ck, ref cv) = seq.cache[layer_idx];
-                let cl = ck.as_ref().map_or(0, |k| k.shape()[2]);
-                let pad_len = max_cache_len - cl;
+                let pad_len = max_cache_len - cache_lens[i];
 
                 if let (Some(k), Some(v)) = (ck, cv) {
                     if pad_len > 0 {
-                        // Left-pad with zeros: [1, n_kv, pad_len, head_dim]
                         let k_shape = k.shape();
                         let pad_shape = &[1, k_shape[1], pad_len, k_shape[3]];
                         let pad_k = ops::zeros(pad_shape, k.dtype(), stream)?;
@@ -643,38 +610,119 @@ impl<'a> BatchGenerator<'a> {
                         v_arrays.push(v.clone());
                     }
                 } else {
-                    // No cache yet — shouldn't happen in decode, but handle gracefully
-                    // Create zero cache of max_cache_len
-                    // We need shape info from another sequence
-                    return self.step_batched(); // fallback
+                    return Err(crate::error::Error::Mlx(
+                        "missing cache in build_batched_cache".to_string(),
+                    ));
                 }
             }
 
-            // Stack along batch dim: [B, n_kv, max_cache_len, head_dim]
             let k_refs: Vec<&Array> = k_arrays.iter().collect();
             let v_refs: Vec<&Array> = v_arrays.iter().collect();
             let k_vec = VectorArray::from_arrays(&k_refs);
             let v_vec = VectorArray::from_arrays(&v_refs);
-            let batched_k = ops::concatenate(&k_vec, 0, stream)?;
-            let batched_v = ops::concatenate(&v_vec, 0, stream)?;
-            batched_cache.push((batched_k, batched_v));
+            batched_layers.push((
+                ops::concatenate(&k_vec, 0, stream)?,
+                ops::concatenate(&v_vec, 0, stream)?,
+            ));
         }
 
-        let pad_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
+        self.batched_cache = Some(BatchedCacheState {
+            uids,
+            cache: batched_layers,
+            cache_lens,
+            max_cache_len,
+            model_dtype,
+        });
+        Ok(())
+    }
 
-        // Single forward pass [B, 1] -> [B, 1, vocab]
+    /// Invalidate the persistent batched cache (e.g. when sequences change).
+    fn invalidate_batched_cache(&mut self) {
+        self.batched_cache = None;
+    }
+
+    /// True batched decode with persistent cache.
+    ///
+    /// First call builds the batched cache from per-sequence caches (pad once).
+    /// Subsequent calls reuse the batched cache — forward_batched appends new KV
+    /// entries in-place, no pad/unpad per step.
+    /// When a sequence finishes, the cache is invalidated and rebuilt next step.
+    pub fn step_true_batched(&mut self) -> Result<Vec<BatchResponse>> {
+        let uids: Vec<SeqUid> = self.sequences.keys().copied().collect();
+
+        if uids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        if uids.len() == 1 {
+            self.invalidate_batched_cache();
+            return self.step_batched();
+        }
+
+        let step_t0 = std::time::Instant::now();
+
+        // Build batched cache if not present or if sequences changed
+        let needs_rebuild = match &self.batched_cache {
+            None => true,
+            Some(bc) => bc.uids != uids,
+        };
+        if needs_rebuild {
+            self.build_batched_cache()?;
+            eprintln!(
+                "[batched] built persistent cache: B={}, max_len={}",
+                uids.len(),
+                self.batched_cache.as_ref().unwrap().max_cache_len
+            );
+        }
+
+        let stream = &self.stream;
+        let batch_size = uids.len() as i32;
+
+        // Collect tokens and build offsets from persistent state
+        let bc = self.batched_cache.as_ref().unwrap();
+        let mut tokens_vec: Vec<i32> = Vec::with_capacity(uids.len());
+        for &uid in &bc.uids {
+            tokens_vec.push(self.sequences[&uid].last_token);
+        }
+
+        let tokens_arr = Array::from_slice_i32(&tokens_vec);
+        let tokens_2d = ops::reshape(&tokens_arr, &[batch_size, 1], stream)?;
+        let offsets_arr = Array::from_slice_i32(&bc.cache_lens);
+
+        // Build attention mask from current cache_lens
+        let total_len = bc.max_cache_len + 1;
+        let mut mask_data: Vec<f32> = Vec::with_capacity(uids.len() * total_len as usize);
+        for &cl in &bc.cache_lens {
+            let pad_len = (bc.max_cache_len - cl) as usize;
+            mask_data.extend(std::iter::repeat_n(f32::NEG_INFINITY, pad_len));
+            mask_data.extend(std::iter::repeat_n(0.0_f32, (cl + 1) as usize));
+        }
+        let mask_flat = Array::from_slice_f32(&mask_data);
+        let mask = ops::reshape(&mask_flat, &[batch_size, 1, 1, total_len], stream)?;
+        let mask = ops::astype(&mask, bc.model_dtype, stream)?;
+
+        let build_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
+
+        // Forward pass using persistent batched cache (mutated in-place by forward_batched)
         let fwd_t0 = std::time::Instant::now();
-        let logits =
-            self.model
-                .forward_batched(&tokens_2d, &mut batched_cache, &offsets_arr, &mask)?;
-
+        let bc_mut = self.batched_cache.as_mut().unwrap();
+        let logits = self
+            .model
+            .forward_batched(&tokens_2d, &mut bc_mut.cache, &offsets_arr, &mask)?;
         let fwd_ms = fwd_t0.elapsed().as_secs_f64() * 1000.0;
 
+        // Update cache_lens and max_cache_len (each sequence grew by 1 token)
+        let bc_mut = self.batched_cache.as_mut().unwrap();
+        for cl in &mut bc_mut.cache_lens {
+            *cl += 1;
+        }
+        bc_mut.max_cache_len += 1;
+
         // Sample per-sequence
+        let bc = self.batched_cache.as_ref().unwrap();
         let mut pending: Vec<(SeqUid, Array)> = Vec::with_capacity(uids.len());
-        for (i, &uid) in uids.iter().enumerate() {
+        for (i, &uid) in bc.uids.iter().enumerate() {
             let seq = &self.sequences[&uid];
-            // Slice logits for this sequence: [1, vocab]
             let seq_logits = ops::slice(
                 &logits,
                 &[i as i32, 0, 0],
@@ -687,46 +735,19 @@ impl<'a> BatchGenerator<'a> {
             pending.push((uid, token_arr));
         }
 
-        // Eval all sampled tokens
+        // Eval
         for (_, token_arr) in &pending {
             token_arr.eval()?;
         }
 
         let eval_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
-        let unpad_t0 = std::time::Instant::now();
-
-        // Unpad caches back to per-sequence
-        for (i, &uid) in uids.iter().enumerate() {
-            let seq = self.sequences.get_mut(&uid).unwrap();
-            for (layer_idx, (bk, bv)) in batched_cache.iter().enumerate() {
-                let bk_shape = bk.shape();
-                // New cache len = old offset + 1 (new token)
-                let new_len = offsets_vec[i] + 1;
-                // Extract this sequence's cache: slice batch dim and remove left padding
-                let pad_len = max_cache_len + 1 - new_len;
-                let seq_k = ops::slice(
-                    bk,
-                    &[i as i32, 0, pad_len, 0],
-                    &[i as i32 + 1, bk_shape[1], max_cache_len + 1, bk_shape[3]],
-                    &[1, 1, 1, 1],
-                    stream,
-                )?;
-                let seq_v = ops::slice(
-                    bv,
-                    &[i as i32, 0, pad_len, 0],
-                    &[i as i32 + 1, bk_shape[1], max_cache_len + 1, bk_shape[3]],
-                    &[1, 1, 1, 1],
-                    stream,
-                )?;
-                seq.cache[layer_idx] = (Some(seq_k), Some(seq_v));
-            }
-        }
-
-        let unpad_ms = unpad_t0.elapsed().as_secs_f64() * 1000.0;
-        let total_step_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "[batched] B={} pad={:.1}ms fwd={:.1}ms eval_total={:.1}ms unpad={:.1}ms total={:.1}ms",
-            batch_size, pad_ms, fwd_ms, eval_ms, unpad_ms, total_step_ms
+            "[batched] B={} build={:.1}ms fwd={:.1}ms eval_total={:.1}ms{}",
+            batch_size,
+            build_ms,
+            fwd_ms,
+            eval_ms,
+            if needs_rebuild { " (rebuilt)" } else { "" }
         );
 
         // Collect results
@@ -758,8 +779,43 @@ impl<'a> BatchGenerator<'a> {
             });
         }
 
-        for uid in finished_uids {
-            self.sequences.remove(&uid);
+        // If any sequence finished, invalidate batched cache
+        // (will be rebuilt next step with remaining sequences)
+        if !finished_uids.is_empty() {
+            // Extract per-sequence caches from batched cache before invalidating
+            let bc = self.batched_cache.as_ref().unwrap();
+            for &uid in &uids {
+                if finished_uids.contains(&uid) {
+                    continue; // will be removed below
+                }
+                let i = bc.uids.iter().position(|&u| u == uid).unwrap();
+                let seq = self.sequences.get_mut(&uid).unwrap();
+                let new_len = bc.cache_lens[i];
+                let pad_len = bc.max_cache_len - new_len;
+                for (layer_idx, (bk, bv)) in bc.cache.iter().enumerate() {
+                    let bk_shape = bk.shape();
+                    let seq_k = ops::slice(
+                        bk,
+                        &[i as i32, 0, pad_len, 0],
+                        &[i as i32 + 1, bk_shape[1], bc.max_cache_len, bk_shape[3]],
+                        &[1, 1, 1, 1],
+                        stream,
+                    )?;
+                    let seq_v = ops::slice(
+                        bv,
+                        &[i as i32, 0, pad_len, 0],
+                        &[i as i32 + 1, bk_shape[1], bc.max_cache_len, bk_shape[3]],
+                        &[1, 1, 1, 1],
+                        stream,
+                    )?;
+                    seq.cache[layer_idx] = (Some(seq_k), Some(seq_v));
+                }
+            }
+
+            self.invalidate_batched_cache();
+            for uid in finished_uids {
+                self.sequences.remove(&uid);
+            }
         }
 
         Ok(responses)
@@ -768,6 +824,7 @@ impl<'a> BatchGenerator<'a> {
     /// Remove a sequence (abort).
     pub fn remove(&mut self, uid: SeqUid) {
         self.sequences.remove(&uid);
+        self.invalidate_batched_cache();
     }
 
     /// Number of active sequences.
