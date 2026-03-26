@@ -29,7 +29,7 @@ struct Args {
     host: String,
 
     /// Port to bind to
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, default_value_t = 9068)]
     port: u16,
 
     /// Total memory limit in GB (0 = auto-detect from hardware)

@@ -1657,7 +1657,7 @@
         <div style="padding:16px; font-size:13px; line-height:1.8; color:var(--text-secondary);">
           <div style="margin-bottom:6px;color:var(--text-secondary);font-size:12px;">Chat URL (OpenAI Compatible)</div>
           <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin:0 0 14px; font-family:'SF Mono', Menlo, monospace; font-size:13px; display:flex; align-items:center; justify-content:space-between;">
-            <strong id="moss-chat-url" style="color:var(--text); font-size:14px;">http://127.0.0.1:<span id="moss-ironmlx-port">8080</span>/v1</strong>
+            <strong id="moss-chat-url" style="color:var(--text); font-size:14px;">http://127.0.0.1:<span id="moss-ironmlx-port">9068</span>/v1</strong>
             <button class="icon-btn" id="copy-url-btn" onclick="copyMossUrl()" title="Copy" style="padding:6px;">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M3 11V3.5A.5.5 0 013.5 3H11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
             </button>
@@ -1688,7 +1688,7 @@
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="port">Port</span> <span class="badge badge-restart" data-i18n="badge_restart">restart</span></div></div>
-        <div class="settings-row-right"><input type="number" value="8080" id="cfg-port"></div>
+        <div class="settings-row-right"><input type="number" value="9068" id="cfg-port"></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="log_level">Log Level</div></div>
@@ -3050,7 +3050,7 @@
       text.textContent = dict.moss_detected || 'Detected';
       // Show ironmlx port in config guide
       const portEl = document.getElementById('moss-ironmlx-port');
-      if (portEl) portEl.textContent = window.__IRONMLX_PORT__ || '8080';
+      if (portEl) portEl.textContent = window.__IRONMLX_PORT__ || '9068';
     }
   }
 
@@ -3067,7 +3067,7 @@
   }
 
   function copyMossUrl() {
-    const port = document.getElementById('moss-ironmlx-port').textContent || '8080';
+    const port = document.getElementById('moss-ironmlx-port').textContent || '9068';
     const url = 'http://127.0.0.1:' + port + '/v1';
     // WKWebView doesn't support navigator.clipboard — use execCommand fallback
     const ta = document.createElement('textarea');
@@ -3094,7 +3094,7 @@
     const memModelAuto = document.getElementById('cfg-mem-model-auto').checked;
     const settings = {
       host: document.getElementById('cfg-host').value,
-      port: parseInt(document.getElementById('cfg-port').value) || 8080,
+      port: parseInt(document.getElementById('cfg-port').value) || 9068,
       log_level: document.getElementById('cfg-log-level').value,
       language: document.getElementById('lang-select').value,
       theme: themeActive ? themeActive.dataset.value : 'system',
@@ -3295,7 +3295,7 @@
     pollStatus();
     statusPollTimer = setInterval(pollStatus, 2000);
     // Sync config values to settings page inputs
-    const port = window.__IRONMLX_PORT__ || 8080;
+    const port = window.__IRONMLX_PORT__ || 9068;
     const cfgPort = document.getElementById('cfg-port');
     if (cfgPort) cfgPort.value = port;
   }

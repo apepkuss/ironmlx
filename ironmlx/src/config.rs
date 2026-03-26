@@ -52,7 +52,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".to_string(),
-            port: 8080,
+            port: 9068,
             model: None,
             memory_limit_gb: 0.0,
             memory_warn_threshold: 0.9,

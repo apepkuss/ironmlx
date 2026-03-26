@@ -140,7 +140,7 @@ That's it. Your local inference server is running.
 
 ### Web Admin Panel
 
-Access at `http://localhost:8080/admin` — no command line needed:
+Access at `http://localhost:9068/admin` — no command line needed:
 
 - **Chat** — Talk to your model directly in the browser (streaming, Markdown, code highlighting)
 - **Models** — Search HuggingFace, download, load/unload models with one click
@@ -161,7 +161,7 @@ brew services start ironmlx
 
 ## Using the Inference API
 
-ironmlx exposes OpenAI-compatible and Anthropic-compatible APIs. Any app or tool that supports these APIs works out of the box — point it to `http://localhost:8080`.
+ironmlx exposes OpenAI-compatible and Anthropic-compatible APIs. Any app or tool that supports these APIs works out of the box — point it to `http://localhost:9068`.
 
 **Works with:** ChatGPT clients, Cursor, Continue, Open Interpreter, LangChain, LlamaIndex, and any OpenAI SDK.
 
@@ -170,7 +170,7 @@ ironmlx exposes OpenAI-compatible and Anthropic-compatible APIs. Any app or tool
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:9068/v1", api_key="unused")
 response = client.chat.completions.create(
     model="default",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -183,7 +183,7 @@ for chunk in response:
 **Example — JavaScript:**
 
 ```javascript
-const response = await fetch("http://localhost:8080/v1/chat/completions", {
+const response = await fetch("http://localhost:9068/v1/chat/completions", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({

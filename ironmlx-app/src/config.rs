@@ -74,7 +74,7 @@ impl Default for AppConfig {
         Self {
             model_dir: None,
             host: "127.0.0.1".to_string(),
-            port: 8080,
+            port: 9068,
             auto_start: true,
             last_model: None,
             language: "en".to_string(),
