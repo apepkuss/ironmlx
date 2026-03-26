@@ -124,9 +124,9 @@ impl PageTable {
     pub fn ensure_capacity(&mut self, new_len: usize, pool: &mut PagePool) -> Result<()> {
         let pages_needed = new_len.div_ceil(PAGE_SIZE);
         while self.pages.len() < pages_needed {
-            let page_idx = pool.alloc().ok_or_else(|| {
-                crate::error::Error::Mlx("page pool exhausted".to_string())
-            })?;
+            let page_idx = pool
+                .alloc()
+                .ok_or_else(|| crate::error::Error::Mlx("page pool exhausted".to_string()))?;
             self.pages.push(page_idx);
         }
         Ok(())

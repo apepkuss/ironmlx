@@ -41,6 +41,8 @@ struct SeqState {
     last_token: i32,
     #[allow(dead_code)]
     prompt_tokens: Vec<i32>,
+    /// Page table for paged attention (None if not using paged mode).
+    page_table: Option<crate::cache::paged_cache::PageTable>,
 }
 
 /// State for a sequence undergoing chunked prefill.
@@ -83,6 +85,8 @@ pub struct BatchGenerator<'a> {
     /// Persistent batched cache: [B, n_kv, seq_len, head_dim] per layer.
     /// None when not in batched decode mode (0 or 1 active sequences).
     batched_cache: Option<BatchedCacheState>,
+    /// Page pool for paged attention (optional).
+    page_pool: Option<crate::cache::paged_cache::PagePool>,
 }
 
 /// Pre-allocated capacity for batched cache (tokens beyond current length).
@@ -118,6 +122,7 @@ impl<'a> BatchGenerator<'a> {
             stream: Stream::new(&Device::gpu()),
             prefilling: Vec::new(),
             batched_cache: None,
+            page_pool: None,
         }
     }
 
@@ -133,6 +138,7 @@ impl<'a> BatchGenerator<'a> {
             stream: Stream::new(&Device::gpu()),
             prefilling: Vec::new(),
             batched_cache: None,
+            page_pool: None,
         }
     }
 
@@ -215,6 +221,7 @@ impl<'a> BatchGenerator<'a> {
                     cache,
                     last_token: first_token,
                     prompt_tokens: prompt_tokens.to_vec(),
+                    page_table: None,
                 },
             );
         }
@@ -355,6 +362,7 @@ impl<'a> BatchGenerator<'a> {
                             cache: ps.cache,
                             last_token: first_token,
                             prompt_tokens: ps.prompt_tokens,
+                            page_table: None,
                         },
                     );
                 }
@@ -433,6 +441,7 @@ impl<'a> BatchGenerator<'a> {
                     cache,
                     last_token: first_token,
                     prompt_tokens: prompt_tokens.to_vec(),
+                    page_table: None,
                 },
             );
         }
@@ -888,6 +897,82 @@ impl<'a> BatchGenerator<'a> {
     /// Check if a sequence is still active.
     pub fn is_active(&self, uid: SeqUid) -> bool {
         self.sequences.contains_key(&uid)
+    }
+
+    /// Set the page pool for paged attention.
+    pub fn set_page_pool(&mut self, pool: crate::cache::paged_cache::PagePool) {
+        self.page_pool = Some(pool);
+    }
+
+    /// Returns true if paged attention is available.
+    pub fn has_page_pool(&self) -> bool {
+        self.page_pool.is_some()
+    }
+
+    /// Paged batched decode: use custom Metal kernel for attention.
+    ///
+    /// Prerequisites:
+    /// - Page pool must be set (`set_page_pool`)
+    /// - Each active sequence must have a page_table with KV data in pages
+    ///
+    /// This method:
+    /// 1. Computes QKV projections for new tokens
+    /// 2. Writes new KV to pages via put_along_axis
+    /// 3. Runs paged attention Metal kernel (reads KV via page table)
+    /// 4. Samples next tokens
+    pub fn step_paged_batched(&mut self) -> Result<Vec<BatchResponse>> {
+        let uids: Vec<SeqUid> = self.sequences.keys().copied().collect();
+
+        if uids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Fallback to non-paged if pool not available or single sequence
+        if self.page_pool.is_none() || uids.len() <= 1 {
+            return self.step_batched();
+        }
+
+        let _stream = &self.stream;
+        let _step_t0 = std::time::Instant::now();
+
+        // For each sequence, ensure page table has capacity and get seq_len
+        let pool = self.page_pool.as_mut().unwrap();
+        let mut seq_lens: Vec<i32> = Vec::with_capacity(uids.len());
+        for &uid in &uids {
+            let seq = self.sequences.get_mut(&uid).unwrap();
+            let cache_len = seq.cache[0].0.as_ref().map_or(0, |k| k.shape()[2]) as usize;
+            seq_lens.push(cache_len as i32);
+
+            // Initialize page table if needed
+            if seq.page_table.is_none() {
+                seq.page_table = Some(crate::cache::paged_cache::PageTable::new());
+            }
+            let pt = seq.page_table.as_mut().unwrap();
+            pt.ensure_capacity(cache_len + 1, pool)?;
+            pt.len = cache_len;
+        }
+
+        // Collect page tables as refs
+        let page_tables: Vec<&crate::cache::paged_cache::PageTable> = uids
+            .iter()
+            .map(|uid| self.sequences[uid].page_table.as_ref().unwrap())
+            .collect();
+
+        // Build tokens and run per-sequence forward to get new KV
+        // (paged attention only handles the attention computation,
+        // we still need the model to produce Q/K/V projections)
+        // For now, fall back to Phase B path and log
+        eprintln!(
+            "[paged] B={} seq_lens={:?} pages_free={} (paged attention kernel not yet wired)",
+            uids.len(),
+            seq_lens,
+            pool.free_count()
+        );
+
+        // TODO: Wire paged attention kernel into forward pass
+        // For now, use Phase B path
+        drop(page_tables);
+        self.step_true_batched()
     }
 
     /// Check if a set of sequences can be merged into a batch.

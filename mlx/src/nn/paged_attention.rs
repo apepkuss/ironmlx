@@ -39,7 +39,11 @@ pub fn paged_attention(
 ) -> Result<Array> {
     let batch_size = page_tables.len();
     let n_kv_heads = pool.n_kv_heads;
-    let max_pages = page_tables.iter().map(|pt| pt.num_pages()).max().unwrap_or(0);
+    let max_pages = page_tables
+        .iter()
+        .map(|pt| pt.num_pages())
+        .max()
+        .unwrap_or(0);
     let scale = 1.0 / (head_dim as f32).sqrt();
 
     // Build padded page table: [B, max_pages]
