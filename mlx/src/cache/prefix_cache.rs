@@ -154,7 +154,11 @@ impl CacheStats {
 
     /// Cache hit rate (0.0 to 1.0).
     pub fn hit_rate(&self) -> f64 {
-        if self.lookups == 0 { 0.0 } else { self.hits as f64 / self.lookups as f64 }
+        if self.lookups == 0 {
+            0.0
+        } else {
+            self.hits as f64 / self.lookups as f64
+        }
     }
 }
 
@@ -293,7 +297,10 @@ impl CacheManager {
         if num_complete_blocks == 0 {
             return Ok(());
         }
-        CACHE_TOKENS_STORED.fetch_add((num_complete_blocks * BLOCK_SIZE) as u64, std::sync::atomic::Ordering::Relaxed);
+        CACHE_TOKENS_STORED.fetch_add(
+            (num_complete_blocks * BLOCK_SIZE) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         let stream = Stream::new(&Device::gpu());
         let mut block_ids = Vec::with_capacity(num_complete_blocks);

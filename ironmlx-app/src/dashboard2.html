@@ -1270,7 +1270,7 @@
     <!-- GPU Memory Chart -->
     <div class="gpu-chart-container">
       <div class="gpu-chart-header">
-        <span class="chart-title"><span data-i18n="gpu_memory">GPU Memory</span><span id="gpu-total-label" style="font-weight:400;color:var(--text-secondary);margin-left:6px;font-size:12px;"></span></span>
+        <span class="chart-title"><span data-i18n="gpu_memory">GPU Memory</span><span id="gpu-total-label" style="font-weight:400;color:var(--text-secondary);margin-left:6px;font-size:12px;"></span><span id="gpu-device-info" style="font-weight:400;color:var(--text-tertiary);margin-left:8px;font-size:11px;"></span></span>
         <div class="gpu-chart-legend">
           <span><span class="legend-dot" style="background:#007aff;"></span> <span data-i18n="active_mem">Active</span></span>
           <span><span class="legend-dot" style="background:#ff3b30;"></span> <span data-i18n="peak_mem">Peak</span></span>
@@ -3348,9 +3348,19 @@
         }
         if (data.memory) {
           const m = data.memory;
-          if (m.total_mb && m.total_mb > 0) {
+          if (m.max_mb && m.max_mb > 0) {
+            gpuTotalMB = m.max_mb;
+            document.getElementById('gpu-total-label').textContent = '(Max: ' + formatMB(gpuTotalMB) + ')';
+          } else if (m.total_mb && m.total_mb > 0) {
             gpuTotalMB = m.total_mb;
-            document.getElementById('gpu-total-label').textContent = '(' + formatMB(gpuTotalMB) + ')';
+            document.getElementById('gpu-total-label').textContent = '(Max: ' + formatMB(gpuTotalMB) + ')';
+          }
+          // Show device info (static, only set once)
+          if (data.device_name) {
+            const el = document.getElementById('gpu-device-info');
+            if (el && !el.textContent) {
+              el.textContent = data.device_name;
+            }
           }
           gpuHistory.push({ time: Date.now(), active: m.active_mb, peak: m.peak_mb, cache: m.cache_mb });
           if (gpuHistory.length > GPU_HISTORY_MAX) gpuHistory.shift();

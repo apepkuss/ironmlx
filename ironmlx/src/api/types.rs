@@ -192,6 +192,8 @@ pub struct HealthResponse {
     pub total_tokens: u64,
     pub cached_tokens: u64,
     pub cache_hit_rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,6 +203,8 @@ pub struct MemoryInfo {
     pub peak_mb: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_mb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_mb: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]

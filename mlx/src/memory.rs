@@ -70,3 +70,20 @@ pub fn get_memory_size() -> Option<usize> {
     let info = crate::device::DeviceInfo::get(&gpu)?;
     info.get_size("memory_size")
 }
+
+/// Get the device name (e.g. "Apple M1 Pro").
+pub fn get_device_name() -> Option<String> {
+    let gpu = crate::device::Device::gpu();
+    let info = crate::device::DeviceInfo::get(&gpu)?;
+    info.get_string("device_name")
+}
+
+/// Get the max recommended working set size in bytes.
+///
+/// This is the maximum GPU memory the system recommends for active use
+/// before performance degradation (swap to SSD) may occur.
+pub fn get_max_recommended_memory() -> Option<usize> {
+    let gpu = crate::device::Device::gpu();
+    let info = crate::device::DeviceInfo::get(&gpu)?;
+    info.get_size("max_recommended_working_set_size")
+}

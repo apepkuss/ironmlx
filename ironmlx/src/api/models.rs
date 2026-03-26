@@ -1023,9 +1023,14 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     let cache = ironmlx_core::memory::get_cache_memory().unwrap_or(0);
     let peak = ironmlx_core::memory::get_peak_memory().unwrap_or(0);
     let total = ironmlx_core::memory::get_memory_size().map(|bytes| bytes as f64 / 1_048_576.0);
+    let max_rec =
+        ironmlx_core::memory::get_max_recommended_memory().map(|bytes| bytes as f64 / 1_048_576.0);
 
+    let device_name = ironmlx_core::memory::get_device_name();
     let cache_stats = ironmlx_core::cache::CacheStats::current();
-    let total_tokens = state.total_tokens.load(std::sync::atomic::Ordering::Relaxed);
+    let total_tokens = state
+        .total_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -1035,11 +1040,13 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             cache_mb: cache as f64 / 1_048_576.0,
             peak_mb: peak as f64 / 1_048_576.0,
             total_mb: total,
+            max_mb: max_rec,
         }),
         started_at: state.started_at,
         total_tokens,
         cached_tokens: cache_stats.cached_tokens,
         cache_hit_rate: cache_stats.hit_rate(),
+        device_name,
     })
 }
 

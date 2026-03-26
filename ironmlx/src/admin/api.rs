@@ -264,7 +264,11 @@ pub async fn run_benchmark(
         let active_mem = ironmlx_core::memory::get_active_memory().unwrap_or(0) as f64;
         let mem_limit = ironmlx_core::memory::get_memory_limit().unwrap_or(0) as f64;
         let total_mem = ironmlx_core::memory::get_memory_size().unwrap_or(0) as f64;
-        let effective_limit = if mem_limit > 0.0 { mem_limit } else { total_mem * 0.9 };
+        let effective_limit = if mem_limit > 0.0 {
+            mem_limit
+        } else {
+            total_mem * 0.9
+        };
         let available = effective_limit - active_mem;
 
         // Estimate KV cache memory per sequence:
@@ -460,10 +464,9 @@ pub async fn run_benchmark(
             });
 
         let total_tokens = (prompt_len * batch_size) + total_gen;
-        state.total_tokens.fetch_add(
-            total_tokens as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        state
+            .total_tokens
+            .fetch_add(total_tokens as u64, std::sync::atomic::Ordering::Relaxed);
 
         Ok(Json(resp))
     }

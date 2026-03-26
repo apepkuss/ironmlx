@@ -150,15 +150,12 @@ impl ServerManager {
                                     eprintln!("[server_manager] backend restarted successfully");
                                 }
                                 Err(e) => {
-                                    eprintln!(
-                                        "[server_manager] failed to restart backend: {}",
-                                        e
-                                    );
+                                    eprintln!("[server_manager] failed to restart backend: {}", e);
                                     return; // Stop monitoring
                                 }
                             }
                         }
-                        Ok(None) => {} // Still running
+                        Ok(None) => {}    // Still running
                         Err(_) => return, // Can't check — stop monitoring
                     }
                 } else {

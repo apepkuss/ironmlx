@@ -84,6 +84,42 @@ impl DeviceInfo {
         if rc == 0 { Some(value) } else { None }
     }
 
+    /// List all available keys.
+    pub fn keys(&self) -> Vec<String> {
+        unsafe {
+            let mut keys = sys::mlx_vector_string_new();
+            if sys::mlx_device_info_get_keys(&mut keys, self.0) != 0 {
+                sys::mlx_vector_string_free(keys);
+                return vec![];
+            }
+            let len = sys::mlx_vector_string_size(keys);
+            let mut result = Vec::with_capacity(len);
+            for i in 0..len {
+                let mut ptr: *mut std::os::raw::c_char = std::ptr::null_mut();
+                if sys::mlx_vector_string_get(&mut ptr, keys, i) == 0 && !ptr.is_null() {
+                    result.push(
+                        std::ffi::CStr::from_ptr(ptr as *const _)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+            sys::mlx_vector_string_free(keys);
+            result
+        }
+    }
+
+    /// Check if a key holds a string value (vs size_t).
+    pub fn is_string(&self, key: &str) -> bool {
+        let c_key = match std::ffi::CString::new(key) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let mut result = false;
+        unsafe { sys::mlx_device_info_is_string(&mut result, self.0, c_key.as_ptr()) };
+        result
+    }
+
     /// Get a string value by key (e.g. "device_name", "architecture").
     pub fn get_string(&self, key: &str) -> Option<String> {
         let c_key = std::ffi::CString::new(key).ok()?;

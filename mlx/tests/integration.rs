@@ -379,3 +379,27 @@ fn test_stream_generate_stops_on_abort() {
 
     assert_eq!(count, 5);
 }
+
+#[test]
+fn test_device_info_keys() {
+    ironmlx_core::init();
+    let gpu = ironmlx_core::device::Device::gpu();
+    let info = ironmlx_core::device::DeviceInfo::get(&gpu).expect("get device info");
+    let keys = info.keys();
+    eprintln!("Device info keys ({}):", keys.len());
+    for key in &keys {
+        if info.is_string(key) {
+            let val = info.get_string(key).unwrap_or_default();
+            eprintln!("  {} (string) = {}", key, val);
+        } else {
+            let val = info.get_size(key).unwrap_or(0);
+            eprintln!(
+                "  {} (size) = {} ({:.2} GB)",
+                key,
+                val,
+                val as f64 / 1_073_741_824.0
+            );
+        }
+    }
+    assert!(!keys.is_empty());
+}
