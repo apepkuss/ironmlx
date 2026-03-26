@@ -251,6 +251,7 @@ impl Attention {
         cache_values: &Array,
         offsets: &Array,
         mask: &Array,
+        write_positions: Option<&Array>,
         stream: &Stream,
     ) -> Result<(Array, Array, Array)> {
         let shape = x.shape();
@@ -374,11 +375,26 @@ impl Attention {
             (q, k)
         };
 
-        // KV cache update: concat new k,v with padded cache
-        let arrays_k = VectorArray::from_arrays(&[cache_keys, &k]);
-        let arrays_v = VectorArray::from_arrays(&[cache_values, &v]);
-        let new_k = ops::concatenate(&arrays_k, 2, stream)?;
-        let new_v = ops::concatenate(&arrays_v, 2, stream)?;
+        // KV cache update: use put_along_axis if pre-allocated, otherwise concat
+        let (new_k, new_v) = if let Some(write_positions) = write_positions {
+            // Pre-allocated path: write new KV at per-batch positions
+            // write_positions: [B] → reshape to [B, 1, 1, 1] for broadcast
+            // put_along_axis requires indices same ndim as a, broadcasts along other dims
+            // cache: [B, n_kv, capacity, head_dim], k/v: [B, n_kv, 1, head_dim]
+            // indices: [B, 1, 1, 1] → broadcast to [B, n_kv, 1, head_dim]
+            let wp = ops::reshape(write_positions, &[batch, 1, 1, 1], stream)?;
+            let new_k = ops::put_along_axis(cache_keys, &wp, &k, 2, stream)?;
+            let new_v = ops::put_along_axis(cache_values, &wp, &v, 2, stream)?;
+            (new_k, new_v)
+        } else {
+            // Concat path (fallback)
+            let arrays_k = VectorArray::from_arrays(&[cache_keys, &k]);
+            let arrays_v = VectorArray::from_arrays(&[cache_values, &v]);
+            (
+                ops::concatenate(&arrays_k, 2, stream)?,
+                ops::concatenate(&arrays_v, 2, stream)?,
+            )
+        };
 
         // Scaled dot-product attention with explicit mask
         let scale = 1.0 / (self.head_dim as f32).sqrt();

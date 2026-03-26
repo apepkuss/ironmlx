@@ -57,6 +57,7 @@ impl TransformerBlock {
     /// `cache_keys`/`cache_values`: `[B, n_kv_heads, max_len, head_dim]`
     /// `offsets`: `[B]` per-sequence position offsets
     /// `mask`: `[B, 1, 1, max_len]` attention mask
+    /// `write_positions`: optional `[B]` positions for scatter-based KV update
     #[allow(clippy::too_many_arguments)]
     pub fn forward_batched(
         &self,
@@ -65,6 +66,7 @@ impl TransformerBlock {
         cache_values: &Array,
         offsets: &Array,
         mask: &Array,
+        write_positions: Option<&Array>,
         stream: &Stream,
     ) -> Result<(Array, Array, Array)> {
         let normed = self.input_layernorm.forward_with_stream(x, stream)?;
@@ -74,6 +76,7 @@ impl TransformerBlock {
             cache_values,
             offsets,
             mask,
+            write_positions,
             stream,
         )?;
         let h = ops::add(x, &attn_out, stream)?;
@@ -244,6 +247,7 @@ impl LlamaModel {
     /// `cache`: per-layer `(keys, values)` each `[B, n_kv_heads, max_len, head_dim]` (padded).
     /// `offsets`: `[B]` i32 — per-sequence position offsets.
     /// `mask`: `[B, 1, 1, max_len]` — attention mask.
+    /// `write_positions`: optional `[B]` positions for scatter-based KV update.
     ///
     /// Returns logits `[B, 1, vocab_size]` and updates cache in-place.
     #[allow(clippy::type_complexity)]
@@ -253,13 +257,15 @@ impl LlamaModel {
         cache: &mut [(Array, Array)],
         offsets: &Array,
         mask: &Array,
+        write_positions: Option<&Array>,
     ) -> Result<Array> {
         let stream = Stream::new(&Device::gpu());
         let mut h = self.embed_tokens.forward_with_stream(tokens, &stream)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             let (ref ck, ref cv) = cache[i];
-            let (out, new_k, new_v) = layer.forward_batched(&h, ck, cv, offsets, mask, &stream)?;
+            let (out, new_k, new_v) =
+                layer.forward_batched(&h, ck, cv, offsets, mask, write_positions, &stream)?;
             h = out;
             cache[i] = (new_k, new_v);
         }

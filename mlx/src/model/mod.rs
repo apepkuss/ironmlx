@@ -115,6 +115,7 @@ impl Model {
     ///
     /// `tokens`: `[B, 1]`, `cache`: per-layer `(keys, values)` each `[B, n_kv, max_len, head_dim]`,
     /// `offsets`: `[B]`, `mask`: `[B, 1, 1, max_len]`.
+    /// `write_positions`: optional `[B]` positions for scatter-based KV update.
     #[allow(clippy::type_complexity)]
     pub fn forward_batched(
         &self,
@@ -122,10 +123,10 @@ impl Model {
         cache: &mut [(Array, Array)],
         offsets: &Array,
         mask: &Array,
+        write_positions: Option<&Array>,
     ) -> Result<Array> {
         match self {
-            Model::Standard(m) => m.forward_batched(tokens, cache, offsets, mask),
-            // Qwen35/Qwen35VL/Bert: fallback not implemented yet
+            Model::Standard(m) => m.forward_batched(tokens, cache, offsets, mask, write_positions),
             _ => Err(crate::error::Error::Mlx(
                 "forward_batched not supported for this model type".to_string(),
             )),

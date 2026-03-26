@@ -85,16 +85,22 @@ pub struct BatchGenerator<'a> {
     batched_cache: Option<BatchedCacheState>,
 }
 
+/// Pre-allocated capacity for batched cache (tokens beyond current length).
+const BATCHED_CACHE_PREALLOC: i32 = 256;
+
 /// Persistent state for batched decode — avoids pad/unpad every step.
 struct BatchedCacheState {
     /// Ordered UIDs matching batch dimension positions.
     uids: Vec<SeqUid>,
-    /// Per-layer batched KV cache: [B, n_kv, current_len, head_dim].
+    /// Per-layer batched KV cache: [B, n_kv, capacity, head_dim].
+    /// Pre-allocated to max_cache_len + BATCHED_CACHE_PREALLOC.
     cache: Vec<(Array, Array)>,
-    /// Per-sequence cache length (before padding). Updated each step.
+    /// Per-sequence cache length (actual data). Updated each step.
     cache_lens: Vec<i32>,
-    /// Max cache length across all sequences (= padded dimension).
+    /// Max cache length across all sequences (actual data, not capacity).
     max_cache_len: i32,
+    /// Total allocated capacity (seq_len dimension of cache arrays).
+    capacity: i32,
     /// Model dtype for mask casting.
     model_dtype: crate::Dtype,
 }
@@ -626,11 +632,28 @@ impl<'a> BatchGenerator<'a> {
             ));
         }
 
+        // Pre-allocate extra capacity to avoid rebuilds
+        let capacity = max_cache_len + BATCHED_CACHE_PREALLOC;
+        let extra = capacity - max_cache_len;
+        if extra > 0 {
+            for (bk, bv) in &mut batched_layers {
+                let shape = bk.shape();
+                let pad_shape = &[shape[0], shape[1], extra, shape[3]];
+                let pad_k = ops::zeros(pad_shape, bk.dtype(), stream)?;
+                let pad_v = ops::zeros(pad_shape, bv.dtype(), stream)?;
+                let k_arr = VectorArray::from_arrays(&[&*bk, &pad_k]);
+                let v_arr = VectorArray::from_arrays(&[&*bv, &pad_v]);
+                *bk = ops::concatenate(&k_arr, 2, stream)?;
+                *bv = ops::concatenate(&v_arr, 2, stream)?;
+            }
+        }
+
         self.batched_cache = Some(BatchedCacheState {
             uids,
             cache: batched_layers,
             cache_lens,
             max_cache_len,
+            capacity,
             model_dtype,
         });
         Ok(())
@@ -668,17 +691,34 @@ impl<'a> BatchGenerator<'a> {
         };
         if needs_rebuild {
             self.build_batched_cache()?;
+            let bc = self.batched_cache.as_ref().unwrap();
             eprintln!(
-                "[batched] built persistent cache: B={}, max_len={}",
+                "[batched] built persistent cache: B={}, max_len={}, capacity={}",
                 uids.len(),
-                self.batched_cache.as_ref().unwrap().max_cache_len
+                bc.max_cache_len,
+                bc.capacity
+            );
+        }
+
+        // Check if we need to re-allocate (exceeded pre-allocated capacity)
+        let bc = self.batched_cache.as_ref().unwrap();
+        if bc.max_cache_len + 1 > bc.capacity {
+            // Rebuild with fresh pre-allocation
+            self.invalidate_batched_cache();
+            self.build_batched_cache()?;
+            let bc = self.batched_cache.as_ref().unwrap();
+            eprintln!(
+                "[batched] capacity exceeded, rebuilt: B={}, max_len={}, capacity={}",
+                uids.len(),
+                bc.max_cache_len,
+                bc.capacity
             );
         }
 
         let stream = &self.stream;
         let batch_size = uids.len() as i32;
 
-        // Collect tokens and build offsets from persistent state
+        // Collect tokens and build offsets/write_positions from persistent state
         let bc = self.batched_cache.as_ref().unwrap();
         let mut tokens_vec: Vec<i32> = Vec::with_capacity(uids.len());
         for &uid in &bc.uids {
@@ -689,26 +729,38 @@ impl<'a> BatchGenerator<'a> {
         let tokens_2d = ops::reshape(&tokens_arr, &[batch_size, 1], stream)?;
         let offsets_arr = Array::from_slice_i32(&bc.cache_lens);
 
-        // Build attention mask from current cache_lens
-        let total_len = bc.max_cache_len + 1;
-        let mut mask_data: Vec<f32> = Vec::with_capacity(uids.len() * total_len as usize);
+        // Write positions for scatter: each sequence writes at its current cache_len
+        // (within the pre-allocated buffer)
+        let write_pos_arr = Array::from_slice_i32(&bc.cache_lens);
+
+        // Build attention mask [B, 1, 1, capacity]
+        // Mask: -inf for positions before data start AND after data end
+        let cap = bc.capacity;
+        let mut mask_data: Vec<f32> = Vec::with_capacity(uids.len() * cap as usize);
         for &cl in &bc.cache_lens {
-            let pad_len = (bc.max_cache_len - cl) as usize;
-            mask_data.extend(std::iter::repeat_n(f32::NEG_INFINITY, pad_len));
-            mask_data.extend(std::iter::repeat_n(0.0_f32, (cl + 1) as usize));
+            let left_pad = (bc.max_cache_len - cl) as usize;
+            let valid = (cl + 1) as usize; // current data + 1 new token
+            let right_pad = (cap - bc.max_cache_len - 1).max(0) as usize;
+            mask_data.extend(std::iter::repeat_n(f32::NEG_INFINITY, left_pad));
+            mask_data.extend(std::iter::repeat_n(0.0_f32, valid));
+            mask_data.extend(std::iter::repeat_n(f32::NEG_INFINITY, right_pad));
         }
         let mask_flat = Array::from_slice_f32(&mask_data);
-        let mask = ops::reshape(&mask_flat, &[batch_size, 1, 1, total_len], stream)?;
+        let mask = ops::reshape(&mask_flat, &[batch_size, 1, 1, cap], stream)?;
         let mask = ops::astype(&mask, bc.model_dtype, stream)?;
 
         let build_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
 
-        // Forward pass using persistent batched cache (mutated in-place by forward_batched)
+        // Forward pass with scatter-based KV update (no concat, no allocation)
         let fwd_t0 = std::time::Instant::now();
         let bc_mut = self.batched_cache.as_mut().unwrap();
-        let logits = self
-            .model
-            .forward_batched(&tokens_2d, &mut bc_mut.cache, &offsets_arr, &mask)?;
+        let logits = self.model.forward_batched(
+            &tokens_2d,
+            &mut bc_mut.cache,
+            &offsets_arr,
+            &mask,
+            Some(&write_pos_arr),
+        )?;
         let fwd_ms = fwd_t0.elapsed().as_secs_f64() * 1000.0;
 
         // Update cache_lens and max_cache_len (each sequence grew by 1 token)
@@ -782,7 +834,7 @@ impl<'a> BatchGenerator<'a> {
         // If any sequence finished, invalidate batched cache
         // (will be rebuilt next step with remaining sequences)
         if !finished_uids.is_empty() {
-            // Extract per-sequence caches from batched cache before invalidating
+            // Extract per-sequence caches from pre-allocated batched cache
             let bc = self.batched_cache.as_ref().unwrap();
             for &uid in &uids {
                 if finished_uids.contains(&uid) {
@@ -790,21 +842,22 @@ impl<'a> BatchGenerator<'a> {
                 }
                 let i = bc.uids.iter().position(|&u| u == uid).unwrap();
                 let seq = self.sequences.get_mut(&uid).unwrap();
-                let new_len = bc.cache_lens[i];
-                let pad_len = bc.max_cache_len - new_len;
+                let seq_len = bc.cache_lens[i];
+                // Data starts at left_pad position within the capacity
+                let left_pad = bc.max_cache_len - seq_len;
                 for (layer_idx, (bk, bv)) in bc.cache.iter().enumerate() {
                     let bk_shape = bk.shape();
                     let seq_k = ops::slice(
                         bk,
-                        &[i as i32, 0, pad_len, 0],
-                        &[i as i32 + 1, bk_shape[1], bc.max_cache_len, bk_shape[3]],
+                        &[i as i32, 0, left_pad, 0],
+                        &[i as i32 + 1, bk_shape[1], left_pad + seq_len, bk_shape[3]],
                         &[1, 1, 1, 1],
                         stream,
                     )?;
                     let seq_v = ops::slice(
                         bv,
-                        &[i as i32, 0, pad_len, 0],
-                        &[i as i32 + 1, bk_shape[1], bc.max_cache_len, bk_shape[3]],
+                        &[i as i32, 0, left_pad, 0],
+                        &[i as i32 + 1, bk_shape[1], left_pad + seq_len, bk_shape[3]],
                         &[1, 1, 1, 1],
                         stream,
                     )?;

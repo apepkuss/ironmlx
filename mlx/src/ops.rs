@@ -741,3 +741,28 @@ pub fn linspace(start: f64, stop: f64, num: i32, dtype: Dtype, stream: &Stream) 
     })?;
     Ok(res)
 }
+
+/// Write `values` into `a` at positions given by `indices` along `axis`.
+///
+/// Like NumPy/PyTorch `put_along_axis` / `scatter_`: `a`, `indices`, and
+/// `values` must have the same number of dimensions. Broadcasting is supported.
+pub fn put_along_axis(
+    a: &Array,
+    indices: &Array,
+    values: &Array,
+    axis: i32,
+    stream: &Stream,
+) -> Result<Array> {
+    let mut res = Array::new_empty();
+    check(unsafe {
+        sys::mlx_put_along_axis(
+            res.as_raw_mut(),
+            a.as_raw(),
+            indices.as_raw(),
+            values.as_raw(),
+            axis as std::os::raw::c_int,
+            stream.as_raw(),
+        )
+    })?;
+    Ok(res)
+}
