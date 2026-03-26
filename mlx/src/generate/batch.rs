@@ -940,16 +940,20 @@ impl<'a> BatchGenerator<'a> {
         let mut seq_lens: Vec<i32> = Vec::with_capacity(uids.len());
         for &uid in &uids {
             let seq = self.sequences.get_mut(&uid).unwrap();
-            let cache_len = seq.cache[0].0.as_ref().map_or(0, |k| k.shape()[2]) as usize;
-            seq_lens.push(cache_len as i32);
 
             // Initialize page table if needed
             if seq.page_table.is_none() {
-                seq.page_table = Some(crate::cache::paged_cache::PageTable::new());
+                let cache_len = seq.cache[0].0.as_ref().map_or(0, |k| k.shape()[2]) as usize;
+                let mut pt = crate::cache::paged_cache::PageTable::new();
+                pt.len = cache_len;
+                seq.page_table = Some(pt);
             }
+
+            // Use page_table.len as authoritative seq_len
+            let cache_len = seq.page_table.as_ref().unwrap().len;
+            seq_lens.push(cache_len as i32);
             let pt = seq.page_table.as_mut().unwrap();
             pt.ensure_capacity(cache_len + 1, pool)?;
-            pt.len = cache_len;
         }
 
         // (page tables collected below after taking page_pool)
@@ -977,8 +981,10 @@ impl<'a> BatchGenerator<'a> {
 
         // Take page_pool out of self to avoid borrow conflicts with model.forward_paged
         let mut page_pool = self.page_pool.take().unwrap();
+        let num_pages = page_pool.num_pages;
+        let n_kv_heads = page_pool.n_kv_heads;
 
-        // Collect page table refs from sequences (sequences not borrowed mutably during forward)
+        // Collect page table refs
         let pt_refs: Vec<&crate::cache::paged_cache::PageTable> = uids
             .iter()
             .map(|uid| self.sequences[uid].page_table.as_ref().unwrap())
@@ -988,21 +994,30 @@ impl<'a> BatchGenerator<'a> {
             &tokens_2d,
             &offsets_arr,
             |layer_idx, q, k, v| {
-                // 1. Write new K/V to page pool
-                page_pool.write_kv(k, v, &pt_refs, &seq_lens, layer_idx)?;
+                // Fused kernel: KV write + paged attention in one GPU dispatch
+                let (attn_out, k_updated, v_updated) =
+                    crate::nn::fused_paged_attention::fused_paged_attention(
+                        q,
+                        k,
+                        v,
+                        &page_pool.k_pages[layer_idx],
+                        &page_pool.v_pages[layer_idx],
+                        &pt_refs,
+                        &seq_lens,
+                        layer_idx,
+                        n_heads,
+                        n_kv_heads,
+                        head_dim,
+                        num_pages,
+                        dtype,
+                        _stream,
+                    )?;
 
-                // 2. Run paged attention kernel
-                crate::nn::paged_attention::paged_attention(
-                    q,
-                    &page_pool,
-                    &pt_refs,
-                    &seq_lens,
-                    layer_idx,
-                    n_heads,
-                    head_dim,
-                    dtype,
-                    _stream,
-                )
+                // Update pool arrays for next step
+                page_pool.k_pages[layer_idx] = k_updated;
+                page_pool.v_pages[layer_idx] = v_updated;
+
+                Ok(attn_out)
             },
         )?;
 
@@ -1039,7 +1054,7 @@ impl<'a> BatchGenerator<'a> {
 
         let paged_ms = _step_t0.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "[paged] B={} took={:.1}ms (placeholder attention — outputs are zeros)",
+            "[paged] B={} took={:.1}ms (fused kernel)",
             batch_size, paged_ms
         );
 

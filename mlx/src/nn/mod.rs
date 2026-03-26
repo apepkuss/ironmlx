@@ -9,6 +9,7 @@ mod module;
 mod moe;
 pub mod mrope;
 mod norm;
+pub mod fused_paged_attention;
 pub mod paged_attention;
 pub mod vision;
 

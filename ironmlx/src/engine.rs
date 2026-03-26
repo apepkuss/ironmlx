@@ -107,8 +107,8 @@ impl EngineCore {
             let head_dim = self.model.head_dim();
             let num_layers = self.model.num_layers();
             if n_kv_heads > 0 && head_dim > 0 {
-                // Allocate 64 pages (64 * 256 = 16384 tokens of KV cache capacity)
-                let num_pages = 64;
+                // Allocate pages: enough for typical batch decode + headroom
+                let num_pages = 16; // 16 * 256 = 4096 tokens capacity
                 match ironmlx_core::cache::paged_cache::PagePool::new(
                     num_pages,
                     num_layers,
