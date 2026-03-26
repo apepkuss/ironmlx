@@ -103,6 +103,7 @@ impl EngineCore {
         };
         let mut waiting: VecDeque<PendingRequest> = VecDeque::new();
         let mut running: HashMap<SeqUid, RunningRequest> = HashMap::new();
+        let mut prefill_pending: PrefillRunning = HashMap::new();
         let mut pending_aborts: HashSet<String> = HashSet::new();
         let max_num_seqs = self.max_num_seqs;
 
@@ -116,27 +117,11 @@ impl EngineCore {
             // 2. Process pending aborts
             process_aborts(&mut pending_aborts, &mut running, &mut batch);
 
-            // 3. Schedule waiting requests into the batch
-            let waiting_before = waiting.len();
-            schedule_waiting(
-                &mut waiting,
-                &mut running,
-                &mut batch,
-                &self.tokenizer,
-                max_num_seqs,
-            );
-            let scheduled = waiting_before - waiting.len();
-            if scheduled > 0 {
-                eprintln!(
-                    "[engine] scheduled {} requests (prefill), active={}, waiting={}",
-                    scheduled,
-                    batch.active_count(),
-                    waiting.len()
-                );
-            }
+            // 3. Enqueue waiting requests into chunked prefill
+            enqueue_to_prefill(&mut waiting, &mut batch, &mut prefill_pending, max_num_seqs);
 
-            // 4. If nothing is running, block-wait for next command
-            if batch.active_count() == 0 {
+            // 4. If nothing is active and nothing is prefilling, block-wait
+            if batch.active_count() == 0 && batch.prefilling_count() == 0 {
                 if waiting.is_empty() {
                     match self.cmd_rx.blocking_recv() {
                         Some(EngineCommand::Shutdown) | None => return,
@@ -145,23 +130,32 @@ impl EngineCore {
                         }
                     }
                     process_aborts(&mut pending_aborts, &mut running, &mut batch);
-                    schedule_waiting(
+                    enqueue_to_prefill(
                         &mut waiting,
-                        &mut running,
                         &mut batch,
-                        &self.tokenizer,
+                        &mut prefill_pending,
                         max_num_seqs,
                     );
                 }
 
-                if batch.active_count() == 0 {
+                if batch.active_count() == 0 && batch.prefilling_count() == 0 {
                     continue;
                 }
             }
 
-            // 5. Execute one decode step for all active sequences.
-            //    Use true batched forward when model supports it and >1 active sequence.
+            // 5. Process one chunk of prefill for all prefilling sequences
+            step_prefill(
+                &mut batch,
+                &mut prefill_pending,
+                &mut running,
+                &self.tokenizer,
+            );
+
+            // 6. Execute one decode step for all active sequences
             let active = batch.active_count();
+            if active == 0 {
+                continue;
+            }
             let use_batched = self.model.supports_batched_forward() && active > 1;
             let step_t0 = std::time::Instant::now();
             let step_result = if use_batched {
@@ -170,14 +164,12 @@ impl EngineCore {
                 batch.step_batched()
             };
             let step_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
-            if active > 0 {
-                eprintln!(
-                    "[engine] decode step: active={}, path={}, took={:.1}ms",
-                    active,
-                    if use_batched { "batched" } else { "sequential" },
-                    step_ms
-                );
-            }
+            eprintln!(
+                "[engine] decode step: active={}, path={}, took={:.1}ms",
+                active,
+                if use_batched { "batched" } else { "sequential" },
+                step_ms
+            );
             match step_result {
                 Ok(responses) => {
                     process_batch_responses(responses, &mut running, &mut batch, &self.tokenizer);
@@ -286,15 +278,19 @@ fn process_aborts(
     }
 }
 
-fn schedule_waiting(
+/// Map from SeqUid to PendingRequest for sequences in chunked prefill.
+type PrefillRunning = HashMap<SeqUid, PendingRequest>;
+
+/// Enqueue waiting requests into chunked prefill (not full prefill).
+/// VLM requests fall back to full prefill since they need vision encoding.
+fn enqueue_to_prefill(
     waiting: &mut VecDeque<PendingRequest>,
-    running: &mut HashMap<SeqUid, RunningRequest>,
     batch: &mut BatchGenerator<'_>,
-    tokenizer: &Tokenizer,
+    prefill_pending: &mut PrefillRunning,
     max_num_seqs: usize,
 ) {
-    while batch.active_count() < max_num_seqs {
-        // Memory pressure check: stop scheduling if usage exceeds 90% of limit
+    while (batch.active_count() + batch.prefilling_count()) < max_num_seqs {
+        // Memory pressure check
         if let Ok(active) = ironmlx_core::memory::get_active_memory()
             && let Ok(limit) = ironmlx_core::memory::get_memory_limit()
             && limit > 0
@@ -304,7 +300,7 @@ fn schedule_waiting(
             if let Ok(after) = ironmlx_core::memory::get_active_memory()
                 && after > limit * 9 / 10
             {
-                break; // Still over threshold — pause scheduling
+                break;
             }
         }
 
@@ -316,66 +312,92 @@ fn schedule_waiting(
             continue;
         }
 
-        let prefill_t0 = std::time::Instant::now();
+        // VLM requests use full prefill (need vision encoding)
+        if req.media.is_some() {
+            let uid = batch.begin_prefill(
+                &req.prompt_token_ids,
+                req.sampling_params.clone(),
+                req.eos_token_id,
+                req.max_tokens,
+            );
+            eprintln!(
+                "[engine] enqueue VLM prefill: req={}, prompt_tokens={}",
+                req.request_id,
+                req.prompt_token_ids.len()
+            );
+            prefill_pending.insert(uid, req);
+            continue;
+        }
+
         let prompt_len = req.prompt_token_ids.len();
-        let insert_result = if let Some(ref media) = req.media {
-            batch.insert_vlm(
-                &req.prompt_token_ids,
-                media,
-                req.sampling_params,
-                req.eos_token_id,
-                req.max_tokens,
-            )
-        } else {
-            batch.insert(
-                &req.prompt_token_ids,
-                req.sampling_params,
-                req.eos_token_id,
-                req.max_tokens,
-            )
-        };
-        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1000.0;
-        eprintln!(
-            "[engine] prefill: req={}, prompt_tokens={}, took={:.1}ms",
-            req.request_id, prompt_len, prefill_ms
+        let uid = batch.begin_prefill(
+            &req.prompt_token_ids,
+            req.sampling_params.clone(),
+            req.eos_token_id,
+            req.max_tokens,
         );
+        eprintln!(
+            "[engine] enqueue chunked prefill: req={}, prompt_tokens={}, uid={}",
+            req.request_id, prompt_len, uid
+        );
+        prefill_pending.insert(uid, req);
+    }
+}
 
-        match insert_result {
-            Ok((uid, first_response)) => {
-                let finish_reason = first_response.finish_reason.map(|r| match r {
-                    FinishReason::Eos => "stop".to_string(),
-                    FinishReason::MaxTokens => "length".to_string(),
-                });
-                let text = tokenizer
-                    .decode(&[first_response.token_id])
-                    .unwrap_or_default();
+/// Process one round of chunked prefill + handle completed sequences.
+fn step_prefill(
+    batch: &mut BatchGenerator<'_>,
+    prefill_pending: &mut PrefillRunning,
+    running: &mut HashMap<SeqUid, RunningRequest>,
+    tokenizer: &Tokenizer,
+) {
+    if batch.prefilling_count() == 0 {
+        return;
+    }
 
-                let _ = req.token_tx.blocking_send(RequestOutput {
-                    request_id: req.request_id.clone(),
-                    token_id: first_response.token_id,
-                    token_text: text,
-                    finish_reason: finish_reason.clone(),
-                });
+    let prefill_t0 = std::time::Instant::now();
+    let count = batch.prefilling_count();
+    let results = match batch.step_prefill_chunk() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[engine] prefill chunk error: {}", e);
+            return;
+        }
+    };
+    let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "[engine] prefill chunk: prefilling={}, completed={}, took={:.1}ms",
+        count,
+        results.len(),
+        prefill_ms
+    );
 
-                if finish_reason.is_none() {
-                    running.insert(
-                        uid,
-                        RunningRequest {
-                            request_id: req.request_id,
-                            token_tx: req.token_tx,
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to insert request {}: {}", req.request_id, e);
-                let _ = req.token_tx.blocking_send(RequestOutput {
+    for (uid, response) in results {
+        let Some(req) = prefill_pending.remove(&uid) else {
+            continue;
+        };
+
+        let finish_reason = response.finish_reason.map(|r| match r {
+            FinishReason::Eos => "stop".to_string(),
+            FinishReason::MaxTokens => "length".to_string(),
+        });
+        let text = tokenizer.decode(&[response.token_id]).unwrap_or_default();
+
+        let _ = req.token_tx.blocking_send(RequestOutput {
+            request_id: req.request_id.clone(),
+            token_id: response.token_id,
+            token_text: text,
+            finish_reason: finish_reason.clone(),
+        });
+
+        if finish_reason.is_none() {
+            running.insert(
+                uid,
+                RunningRequest {
                     request_id: req.request_id,
-                    token_id: 0,
-                    token_text: String::new(),
-                    finish_reason: Some("stop".to_string()),
-                });
-            }
+                    token_tx: req.token_tx,
+                },
+            );
         }
     }
 }

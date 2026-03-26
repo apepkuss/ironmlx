@@ -5,7 +5,9 @@ pub mod padding;
 mod sampler;
 mod tokenizer;
 
-pub use batch::{BatchGenerator, BatchResponse, FinishReason, SeqUid};
+pub use batch::{
+    BatchGenerator, BatchResponse, ChunkedPrefillResult, FinishReason, PrefillState, SeqUid,
+};
 pub use chat_template::{ChatMessage, ChatTemplate};
 pub use kv_cache::KVCache;
 pub use sampler::{SamplerConfig, sample};

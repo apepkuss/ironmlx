@@ -32,6 +32,9 @@ pub fn router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/admin/api/benchmark/history",
             get(api::get_benchmark_history).delete(api::clear_benchmark_history),
         )
+        .route("/admin/api/models/local", get(api::list_local_models))
+        .route("/admin/api/models/load", post(api::load_model))
+        .route("/admin/api/models/unload", post(api::unload_model))
         .route("/admin/api/models/search", post(api::hf_search))
         .route("/admin/api/models/download", post(api::hf_download))
         .route("/admin/api/models/downloads", get(api::hf_downloads))

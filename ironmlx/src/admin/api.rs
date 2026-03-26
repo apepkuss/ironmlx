@@ -462,6 +462,117 @@ pub struct HfModelInfo {
     pub tags: Vec<String>,
 }
 
+// ── Local Model Management ──────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct LocalModelInfo {
+    pub repo_id: String,
+    pub loaded: bool,
+}
+
+/// GET /admin/api/models/local — list all locally downloaded models.
+pub async fn list_local_models(State(state): State<Arc<AppState>>) -> Json<Vec<LocalModelInfo>> {
+    let models_dir = crate::config::ironmlx_root().join("models");
+    let mut models = Vec::new();
+
+    // Scan ~/.ironmlx/models/ for directories matching "models--org--name"
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("models--") && entry.file_type().is_ok_and(|t| t.is_dir()) {
+                // Convert "models--org--name" to "org/name"
+                let repo_id = name
+                    .strip_prefix("models--")
+                    .unwrap_or(&name)
+                    .replacen("--", "/", 1);
+
+                // Check if this model is currently loaded
+                let loaded = state.pool.get(Some(&repo_id)).is_ok();
+
+                models.push(LocalModelInfo { repo_id, loaded });
+            }
+        }
+    }
+
+    models.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
+    Json(models)
+}
+
+#[derive(Deserialize)]
+pub struct LoadModelRequest {
+    pub model: String,
+}
+
+/// POST /admin/api/models/load — load a local model into the engine.
+/// Unloads the current model first (single-model mode).
+pub async fn load_model(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoadModelRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Check if already loaded
+    if state.pool.get(Some(&req.model)).is_ok() {
+        return Ok(Json(
+            serde_json::json!({ "status": "already_loaded", "model": req.model }),
+        ));
+    }
+
+    // Unload current model(s)
+    let loaded: Vec<String> = state.pool.loaded_model_ids().into_iter().collect();
+    for id in &loaded {
+        let _ = state.pool.unload_model(id);
+    }
+
+    state.log_buffer.push(
+        "info",
+        &format!("Loading model for benchmark: {}", req.model),
+    );
+
+    // Read config for cache parameters
+    let config = state.config.read().unwrap().clone();
+    let hot_cache_bytes = if config.hot_cache_max_size_gb > 0.0 {
+        (config.hot_cache_max_size_gb * 1_073_741_824.0) as u64
+    } else {
+        // Auto: GPU memory / 4
+        ironmlx_core::memory::get_memory_size().unwrap_or(0) as u64 / 4
+    };
+    let cold_cache_bytes = (config.cache_max_size_gb * 1_073_741_824.0) as u64;
+
+    // Load the model
+    state
+        .pool
+        .load_model(
+            &req.model,
+            hot_cache_bytes,
+            cold_cache_bytes,
+            config.cache_dir.as_deref(),
+            config.max_num_seqs,
+            0, // auto init_cache_blocks
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    state
+        .log_buffer
+        .push("info", &format!("Model loaded: {}", req.model));
+
+    Ok(Json(
+        serde_json::json!({ "status": "loaded", "model": req.model }),
+    ))
+}
+
+/// POST /admin/api/models/unload — unload a model.
+pub async fn unload_model(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoadModelRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .pool
+        .unload_model(&req.model)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(
+        serde_json::json!({ "status": "unloaded", "model": req.model }),
+    ))
+}
+
 /// POST /admin/api/models/search — search HuggingFace for MLX models.
 pub async fn hf_search(
     State(state): State<Arc<AppState>>,

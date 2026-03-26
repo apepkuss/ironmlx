@@ -43,14 +43,34 @@ struct SeqState {
     prompt_tokens: Vec<i32>,
 }
 
+/// State for a sequence undergoing chunked prefill.
+pub struct PrefillState {
+    pub uid: SeqUid,
+    pub prompt_tokens: Vec<i32>,
+    pub processed: usize,
+    pub sampler: SamplerConfig,
+    pub eos_token_id: i32,
+    pub max_tokens: usize,
+    cache: Vec<(Option<Array>, Option<Array>)>,
+}
+
+/// Result of one chunked prefill step.
+pub enum ChunkedPrefillResult {
+    /// More chunks remain to be processed.
+    InProgress,
+    /// Prefill complete. Contains the first generated token response.
+    Done(BatchResponse),
+}
+
+/// Default chunk size for chunked prefill (in tokens).
+const PREFILL_CHUNK_SIZE: usize = 512;
+
 /// BatchGenerator manages multiple sequences sharing a single model.
 ///
-/// Current approach (7B):
-/// - Prefill: each new sequence is prefilled individually in `insert()`
-/// - Decode: each active sequence is decoded one at a time in `step()`
-///
-/// This provides lifecycle management and the API abstraction needed for
-/// the engine, while true batched forward passes are a future optimization.
+/// Supports three modes:
+/// - Full prefill: `insert()` processes entire prompt in one forward pass
+/// - Chunked prefill: `begin_prefill()` + `step_prefill_chunk()` for incremental prefill
+/// - Decode: `step_batched()` or `step_true_batched()` for token generation
 pub struct BatchGenerator<'a> {
     model: &'a Model,
     num_layers: usize,
@@ -58,6 +78,8 @@ pub struct BatchGenerator<'a> {
     next_uid: SeqUid,
     cache_manager: Option<CacheManager>,
     stream: Stream,
+    /// Sequences undergoing chunked prefill.
+    prefilling: Vec<PrefillState>,
 }
 
 impl<'a> BatchGenerator<'a> {
@@ -71,6 +93,7 @@ impl<'a> BatchGenerator<'a> {
             next_uid: 0,
             cache_manager: None,
             stream: Stream::new(&Device::gpu()),
+            prefilling: Vec::new(),
         }
     }
 
@@ -84,6 +107,7 @@ impl<'a> BatchGenerator<'a> {
             next_uid: 0,
             cache_manager: Some(cache_manager),
             stream: Stream::new(&Device::gpu()),
+            prefilling: Vec::new(),
         }
     }
 
@@ -171,6 +195,153 @@ impl<'a> BatchGenerator<'a> {
         }
 
         Ok((uid, response))
+    }
+
+    /// Begin chunked prefill for a new sequence. Does NOT run any forward pass yet.
+    /// Call `step_prefill_chunk()` repeatedly to process chunks.
+    pub fn begin_prefill(
+        &mut self,
+        prompt_tokens: &[i32],
+        sampler: SamplerConfig,
+        eos_token_id: i32,
+        max_tokens: usize,
+    ) -> SeqUid {
+        let uid = self.next_uid;
+        self.next_uid += 1;
+
+        // Try prefix cache lookup
+        let (cache, matched_tokens) = if let Some(ref mut cm) = self.cache_manager {
+            match cm.lookup_and_load(prompt_tokens) {
+                Ok((c, m)) if m > 0 => (c, m),
+                _ => ((0..self.num_layers).map(|_| (None, None)).collect(), 0),
+            }
+        } else {
+            ((0..self.num_layers).map(|_| (None, None)).collect(), 0)
+        };
+
+        self.prefilling.push(PrefillState {
+            uid,
+            prompt_tokens: prompt_tokens.to_vec(),
+            processed: matched_tokens,
+            sampler,
+            eos_token_id,
+            max_tokens,
+            cache,
+        });
+
+        uid
+    }
+
+    /// Returns the number of sequences currently undergoing chunked prefill.
+    pub fn prefilling_count(&self) -> usize {
+        self.prefilling.len()
+    }
+
+    /// Process one chunk of prefill for all prefilling sequences.
+    ///
+    /// Each sequence advances by up to `PREFILL_CHUNK_SIZE` tokens.
+    /// Sequences that finish prefill are sampled and moved to active decode.
+    /// Returns responses for sequences that completed prefill this step.
+    pub fn step_prefill_chunk(&mut self) -> Result<Vec<(SeqUid, BatchResponse)>> {
+        if self.prefilling.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let stream = &self.stream;
+        let chunk_size = PREFILL_CHUNK_SIZE;
+        let mut completed = Vec::new();
+
+        // Process each prefilling sequence's next chunk
+        for ps in &mut self.prefilling {
+            let remaining = ps.prompt_tokens.len() - ps.processed;
+            if remaining == 0 {
+                continue;
+            }
+
+            let this_chunk = remaining.min(chunk_size);
+            let chunk_tokens = &ps.prompt_tokens[ps.processed..ps.processed + this_chunk];
+
+            let chunk_arr = Array::from_slice_i32(chunk_tokens);
+            let chunk_2d = ops::reshape(&chunk_arr, &[1, this_chunk as i32], stream)?;
+
+            let _logits = self
+                .model
+                .forward(&chunk_2d, &mut ps.cache, "causal", None)?;
+
+            ps.processed += this_chunk;
+
+            // If this was the last chunk, sample the first token
+            if ps.processed >= ps.prompt_tokens.len() {
+                let last_idx = this_chunk as i32 - 1;
+                let vocab_size = _logits.shape()[2];
+                let last_logits = ops::slice(
+                    &_logits,
+                    &[0, last_idx, 0],
+                    &[1, last_idx + 1, vocab_size],
+                    &[1, 1, 1],
+                    stream,
+                )?;
+                let last_logits = ops::reshape(&last_logits, &[1, vocab_size], stream)?;
+                let token_arr = sample(&last_logits, &ps.sampler, stream)?;
+                token_arr.eval()?;
+                let first_token = token_arr.item_i32()?;
+
+                let finish_reason = if first_token == ps.eos_token_id || ps.max_tokens == 0 {
+                    Some(FinishReason::Eos)
+                } else if ps.max_tokens == 1 {
+                    Some(FinishReason::MaxTokens)
+                } else {
+                    None
+                };
+
+                completed.push((ps.uid, first_token, finish_reason));
+            }
+        }
+
+        // Move completed sequences from prefilling to active (or drop if finished)
+        let mut results = Vec::new();
+        let completed_uids: Vec<SeqUid> = completed.iter().map(|(uid, _, _)| *uid).collect();
+
+        for (uid, first_token, finish_reason) in completed {
+            // Find and remove from prefilling
+            let idx = self.prefilling.iter().position(|ps| ps.uid == uid);
+            if let Some(idx) = idx {
+                let ps = self.prefilling.swap_remove(idx);
+
+                // Store KV blocks in prefix cache
+                if let Some(ref mut cm) = self.cache_manager {
+                    let _ = cm.store_after_prefill(&ps.prompt_tokens, &ps.cache);
+                }
+
+                let response = BatchResponse {
+                    uid,
+                    token_id: first_token,
+                    finish_reason,
+                };
+
+                if finish_reason.is_none() {
+                    self.sequences.insert(
+                        uid,
+                        SeqState {
+                            sampler: ps.sampler,
+                            eos_token_id: ps.eos_token_id,
+                            max_tokens: ps.max_tokens,
+                            generated_count: 1,
+                            cache: ps.cache,
+                            last_token: first_token,
+                            prompt_tokens: ps.prompt_tokens,
+                        },
+                    );
+                }
+
+                results.push((uid, response));
+            }
+        }
+
+        // Discard logits for non-completed sequences (only last chunk logits matter)
+        let _ = completed_uids;
+
+        Ok(results)
     }
 
     /// Insert a new VLM sequence with media. Performs prefill with vision encoding.

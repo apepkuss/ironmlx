@@ -203,17 +203,36 @@ define_class!(
                     let win_send = win_ptr_raw.map(RawPtr);
                     std::thread::spawn(move || {
                         let port = crate::config::AppConfig::load().port;
+                        eprintln!(
+                            "[syncLoadedModels] requesting http://127.0.0.1:{}/v1/models",
+                            port
+                        );
                         // Retry up to 10 times — server may still be loading model
                         let mut resp = String::new();
-                        for _ in 0..10 {
-                            if let Ok(r) = reqwest::blocking::get(format!(
+                        for attempt in 0..10 {
+                            match reqwest::blocking::get(format!(
                                 "http://127.0.0.1:{}/v1/models",
                                 port
-                            )) && let Ok(text) = r.text()
-                                && text.contains("\"data\"")
-                            {
-                                resp = text;
-                                break;
+                            )) {
+                                Ok(r) => {
+                                    if let Ok(text) = r.text() {
+                                        eprintln!(
+                                            "[syncLoadedModels] attempt {}: got {}",
+                                            attempt,
+                                            &text[..text.len().min(100)]
+                                        );
+                                        if text.contains("\"data\"") {
+                                            resp = text;
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[syncLoadedModels] attempt {}: error {}",
+                                        attempt, e
+                                    );
+                                }
                             }
                             std::thread::sleep(std::time::Duration::from_secs(1));
                         }
@@ -228,6 +247,7 @@ define_class!(
                                 })
                             })
                             .unwrap_or_default();
+                        eprintln!("[syncLoadedModels] loaded model ids: {:?}", ids);
                         let json = serde_json::to_string(&ids).unwrap_or_default();
                         eval_js_on_window(
                             win_send,
@@ -642,15 +662,23 @@ define_class!(
                 "fetchAPIPost" => {
                     // Bridge: JS asks Rust to POST a local API endpoint
                     // body_str is JSON: {"path":"/admin/api/benchmark","body":{...}}
+                    eprintln!(
+                        "[fetchAPIPost] raw body_str: {}",
+                        &body_str[..body_str.len().min(200)]
+                    );
                     let port = crate::config::AppConfig::load().port;
                     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&body_str);
                     let (path, post_body) = match parsed {
                         Ok(v) => {
                             let p = v["path"].as_str().unwrap_or("").to_string();
                             let b = v["body"].to_string();
+                            eprintln!("[fetchAPIPost] path={}, body={}", p, &b[..b.len().min(100)]);
                             (p, b)
                         }
-                        Err(_) => return,
+                        Err(e) => {
+                            eprintln!("[fetchAPIPost] JSON parse error: {}", e);
+                            return;
+                        }
                     };
                     let url = format!("http://127.0.0.1:{}{}", port, path);
                     let win_ptr_raw = window_lock()
@@ -675,8 +703,21 @@ define_class!(
                                 &url,
                             ])
                             .output()
-                            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                            .unwrap_or_else(|_| "null".to_string());
+                            .map(|o| {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                if !stderr.is_empty() {
+                                    eprintln!("[fetchAPIPost] curl stderr: {}", stderr);
+                                }
+                                String::from_utf8_lossy(&o.stdout).to_string()
+                            })
+                            .unwrap_or_else(|e| {
+                                eprintln!("[fetchAPIPost] curl failed: {}", e);
+                                "null".to_string()
+                            });
+                        eprintln!(
+                            "[fetchAPIPost] curl result (first 200): {}",
+                            &result[..result.len().min(200)]
+                        );
                         let escaped = result
                             .replace('\\', "\\\\")
                             .replace('\'', "\\'")
@@ -684,6 +725,10 @@ define_class!(
                         let path_escaped = path_for_js.replace('\\', "\\\\").replace('\'', "\\'");
                         let js_code =
                             format!("onApiFetchResult('{}', '{}')", path_escaped, escaped);
+                        eprintln!(
+                            "[fetchAPIPost] js_code (first 200): {}",
+                            &js_code[..js_code.len().min(200)]
+                        );
                         let inner_send = win_ptr.map(RawPtr);
                         dispatch2::DispatchQueue::main().exec_async(move || {
                             if let Some(ref rp) = inner_send {

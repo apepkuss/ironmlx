@@ -219,6 +219,11 @@ impl EnginePool {
         }
     }
 
+    /// Return IDs of all loaded models.
+    pub fn loaded_model_ids(&self) -> Vec<String> {
+        self.engines.read().unwrap().keys().cloned().collect()
+    }
+
     /// Set default model.
     pub fn set_default(&self, model_id: &str) -> Result<(), String> {
         let engines = self.engines.read().unwrap();

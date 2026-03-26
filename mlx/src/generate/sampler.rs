@@ -4,6 +4,7 @@ use crate::ops;
 use crate::random;
 use crate::stream::Stream;
 
+#[derive(Clone)]
 pub struct SamplerConfig {
     pub temperature: f32,
     pub top_p: f32,

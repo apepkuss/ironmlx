@@ -2447,10 +2447,11 @@
     syncModelList();
   }
 
-  // Called from Rust to sync loaded models list on init
+  // Called from Rust to sync loaded models list on init or after model switch
   function onLoadedModelsSynced(jsonStr) {
     let ids = [];
     try { ids = JSON.parse(jsonStr); } catch(e) { return; }
+    window.__LOADED_MODELS__.clear();
     ids.forEach(id => window.__LOADED_MODELS__.add(id.trim()));
     window.__INIT_DONE__ = true;
     // Re-render model list with correct loaded status
@@ -2788,23 +2789,28 @@
     syncBenchmarkModels();
   }
 
+  let benchLocalModels = []; // [{repo_id, loaded}]
+
   function syncBenchmarkModels() {
+    // Request local model list from backend
+    apiFetch('/admin/api/models/local');
+  }
+
+  function onLocalModelsResult(jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
     const benchSelect = document.getElementById('bench-model-select');
     if (!benchSelect) return;
-
+    try {
+      benchLocalModels = JSON.parse(jsonStr);
+    } catch (e) {
+      benchLocalModels = [];
+    }
     const current = benchSelect.value;
-    const models = [];
-    document.querySelectorAll('#tab-models-manage tbody .model-name').forEach(el => {
-      const name = el.textContent.trim();
-      if (name) models.push(name);
-    });
-
     benchSelect.innerHTML = '<option value="">' + (dict.select_model || 'Select a model...') + '</option>';
-    models.forEach(id => {
+    benchLocalModels.forEach(m => {
       const opt = document.createElement('option');
-      opt.value = id;
-      opt.textContent = id;
+      opt.value = m.repo_id;
+      opt.textContent = m.repo_id;
       benchSelect.appendChild(opt);
     });
     if (current) benchSelect.value = current;
@@ -2840,7 +2846,50 @@
     document.getElementById('bench-results-card').style.display = '';
     document.getElementById('bench-progress').style.display = '';
     benchQueueIdx = 0;
-    runNextBench();
+
+    // Check if model is already loaded
+    const modelInfo = benchLocalModels.find(m => m.repo_id === benchModel);
+    if (modelInfo && !modelInfo.loaded) {
+      document.getElementById('bench-progress').textContent = 'Loading model: ' + benchModel + '...';
+      apiPost('/admin/api/models/load', { model: benchModel });
+    } else {
+      runNextBench();
+    }
+  }
+
+  function onModelLoadResult(jsonStr) {
+    try {
+      const r = JSON.parse(jsonStr);
+      if (r.status === 'loaded' || r.status === 'already_loaded') {
+        // Sync model page: update __LOADED_MODELS__ and re-render
+        window.__LOADED_MODELS__.clear();
+        window.__LOADED_MODELS__.add(r.model);
+        syncModelList();
+        // Also re-sync from backend to ensure accuracy
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.syncLoadedModels) {
+          window.webkit.messageHandlers.syncLoadedModels.postMessage('sync');
+        }
+
+        // Refresh benchmark model list
+        apiFetch('/admin/api/models/local');
+
+        // Continue with benchmark
+        if (benchRunning) {
+          runNextBench();
+        }
+      } else {
+        throw new Error(r.error || 'Failed to load model');
+      }
+    } catch (e) {
+      const errMsg = e instanceof SyntaxError ? jsonStr : e.message;
+      if (benchRunning) {
+        const tbody = document.getElementById('bench-results-body');
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td style="padding:6px;color:#ff3b30;" colspan="8">Load model failed: ' + errMsg + '</td>';
+        tbody.appendChild(tr);
+        benchFinish();
+      }
+    }
   }
 
   function runNextBench() {
@@ -2873,7 +2922,9 @@
         '<td style="text-align:right;padding:6px;">' + r.total_ms.toFixed(0) + '</td>' +
         '<td style="text-align:right;padding:6px;">' + r.total_throughput.toFixed(1) + '</td>';
     } catch (e) {
-      tr.innerHTML = '<td style="padding:6px;color:#ff3b30;" colspan="8">' + t.label + ': ' + e.message + '</td>';
+      // Show raw server response if JSON parse failed, otherwise show error message
+      const errMsg = e instanceof SyntaxError ? jsonStr : e.message;
+      tr.innerHTML = '<td style="padding:6px;color:#ff3b30;" colspan="8">' + t.label + ': ' + errMsg + '</td>';
     }
     tbody.appendChild(tr);
     benchQueueIdx++;
@@ -3260,6 +3311,15 @@
         document.getElementById('stat-uptime').textContent = formatUptime(data.started_at);
         const modelName = (data.model || '--').split('/').pop();
         document.getElementById('stat-model').textContent = modelName;
+        // Sync loaded model state from health response
+        if (data.model) {
+          const prev = Array.from(window.__LOADED_MODELS__);
+          if (prev.length !== 1 || prev[0] !== data.model) {
+            window.__LOADED_MODELS__.clear();
+            window.__LOADED_MODELS__.add(data.model);
+            syncModelList();
+          }
+        }
         if (data.memory) {
           const m = data.memory;
           if (m.total_mb && m.total_mb > 0) {
@@ -3273,6 +3333,10 @@
           document.getElementById('gpu-cache-val').textContent = formatMB(m.cache_mb);
           drawGpuChart();
         }
+      } else if (path === '/admin/api/models/local') {
+        onLocalModelsResult(jsonStr);
+      } else if (path === '/admin/api/models/load') {
+        onModelLoadResult(jsonStr);
       } else if (path === '/admin/api/benchmark') {
         if (benchRunning) onBenchResult(jsonStr);
       } else if (path === '/admin/api/logs') {
