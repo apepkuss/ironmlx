@@ -88,6 +88,36 @@ impl TransformerBlock {
         Ok((out, new_k, new_v))
     }
 
+    /// Paged forward: QKV projection only, returns (hidden_out, q, k, v).
+    /// Attention is handled externally by paged attention kernel.
+    pub fn forward_paged_qkv(
+        &self,
+        x: &Array,
+        offsets: &Array,
+        stream: &Stream,
+    ) -> Result<(Array, Array, Array, Array)> {
+        let normed = self.input_layernorm.forward_with_stream(x, stream)?;
+        let (q, k, v) = self.attention.qkv_project_batched(&normed, offsets, stream)?;
+        // Return x (for residual) and q, k, v for external attention
+        Ok((x.clone(), q, k, v))
+    }
+
+    /// Paged forward: apply attention output and MLP after external attention.
+    pub fn forward_paged_post(
+        &self,
+        x: &Array,
+        attn_out: &Array,
+        stream: &Stream,
+    ) -> Result<Array> {
+        let output = self.attention.output_project_batched(attn_out, stream)?;
+        let h = ops::add(x, &output, stream)?;
+        let normed = self
+            .post_attention_layernorm
+            .forward_with_stream(&h, stream)?;
+        let mlp_out = self.mlp.forward_with_stream(&normed, stream)?;
+        ops::add(&h, &mlp_out, stream)
+    }
+
     pub fn load_weights(&mut self, weights: &HashMap<String, Array>, prefix: &str) -> Result<()> {
         let p = |name: &str| {
             if prefix.is_empty() {
@@ -268,6 +298,34 @@ impl LlamaModel {
                 layer.forward_batched(&h, ck, cv, offsets, mask, write_positions, &stream)?;
             h = out;
             cache[i] = (new_k, new_v);
+        }
+
+        h = self.norm.forward_with_stream(&h, &stream)?;
+        let logits = self.lm_head.forward_with_stream(&h, &stream)?;
+        Ok(logits)
+    }
+
+    /// Paged decode forward pass.
+    ///
+    /// For each layer: QKV projection → (externally: write KV to pages + paged attention) → MLP.
+    /// The caller provides a callback that handles per-layer paged attention.
+    ///
+    /// `tokens`: `[B, 1]`
+    /// `offsets`: `[B]`
+    /// `paged_attn_fn`: called per layer with `(layer_idx, q, k, v)`, returns `attn_out`
+    pub fn forward_paged(
+        &self,
+        tokens: &Array,
+        offsets: &Array,
+        mut paged_attn_fn: impl FnMut(usize, &Array, &Array, &Array) -> Result<Array>,
+    ) -> Result<Array> {
+        let stream = Stream::new(&Device::gpu());
+        let mut h = self.embed_tokens.forward_with_stream(tokens, &stream)?;
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            let (residual, q, k, v) = layer.forward_paged_qkv(&h, offsets, &stream)?;
+            let attn_out = paged_attn_fn(i, &q, &k, &v)?;
+            h = layer.forward_paged_post(&residual, &attn_out, &stream)?;
         }
 
         h = self.norm.forward_with_stream(&h, &stream)?;

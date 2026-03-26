@@ -138,6 +138,21 @@ impl Model {
         matches!(self, Model::Standard(_))
     }
 
+    /// Paged decode forward pass with per-layer callback for attention.
+    pub fn forward_paged(
+        &self,
+        tokens: &Array,
+        offsets: &Array,
+        paged_attn_fn: impl FnMut(usize, &Array, &Array, &Array) -> Result<Array>,
+    ) -> Result<Array> {
+        match self {
+            Model::Standard(m) => m.forward_paged(tokens, offsets, paged_attn_fn),
+            _ => Err(crate::error::Error::Mlx(
+                "forward_paged not supported for this model type".to_string(),
+            )),
+        }
+    }
+
     /// Forward pass. Returns logits [batch, seq_len, vocab_size].
     /// For BERT models, returns hidden states [batch, seq_len, hidden_size] (no KV cache).
     #[allow(clippy::type_complexity)]

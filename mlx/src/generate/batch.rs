@@ -969,10 +969,107 @@ impl<'a> BatchGenerator<'a> {
             pool.free_count()
         );
 
-        // TODO: Wire paged attention kernel into forward pass
-        // For now, use Phase B path
-        drop(page_tables);
-        self.step_true_batched()
+        // Build tokens [B, 1]
+        let mut tokens_vec: Vec<i32> = Vec::with_capacity(uids.len());
+        for &uid in &uids {
+            tokens_vec.push(self.sequences[&uid].last_token);
+        }
+        let batch_size = uids.len() as i32;
+        let tokens_arr = Array::from_slice_i32(&tokens_vec);
+        let tokens_2d = ops::reshape(&tokens_arr, &[batch_size, 1], _stream)?;
+        let offsets_arr = Array::from_slice_i32(&seq_lens);
+
+        let n_heads = self.model.n_kv_heads() * (self.model.head_dim() / self.model.head_dim()); // TODO: get n_heads properly
+        let head_dim = self.model.head_dim();
+        let n_kv_heads = self.model.n_kv_heads();
+        let dtype = pool.dtype;
+
+        // Paged forward: per-layer QKV → write to pages → paged attention kernel
+        let page_tables_clone: Vec<&crate::cache::paged_cache::PageTable> = page_tables;
+        let pool_ref = self.page_pool.as_ref().unwrap();
+        let seq_lens_clone = seq_lens.clone();
+        let stream_clone = _stream.clone();
+
+        let logits = self.model.forward_paged(
+            &tokens_2d,
+            &offsets_arr,
+            |layer_idx, q, _k, _v| {
+                // TODO: Write k, v to page pool at correct positions
+                // TODO: Call paged_attention kernel
+                // For now, use placeholder — return zeros with correct shape
+                let out_shape = q.shape();
+                ops::zeros(
+                    &[out_shape[0], out_shape[1], out_shape[2], out_shape[3]],
+                    dtype,
+                    &stream_clone,
+                )
+            },
+        )?;
+
+        // Sample per-sequence
+        let mut pending: Vec<(SeqUid, Array)> = Vec::with_capacity(uids.len());
+        for (i, &uid) in uids.iter().enumerate() {
+            let seq = &self.sequences[&uid];
+            let seq_logits = ops::slice(
+                &logits,
+                &[i as i32, 0, 0],
+                &[i as i32 + 1, 1, logits.shape()[2]],
+                &[1, 1, 1],
+                _stream,
+            )?;
+            let seq_logits_2d = ops::reshape(&seq_logits, &[1, logits.shape()[2]], _stream)?;
+            let token_arr = sample(&seq_logits_2d, &seq.sampler, _stream)?;
+            pending.push((uid, token_arr));
+        }
+
+        for (_, token_arr) in &pending {
+            token_arr.eval()?;
+        }
+
+        let paged_ms = _step_t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[paged] B={} took={:.1}ms (placeholder attention — outputs are zeros)",
+            batch_size, paged_ms
+        );
+
+        // Collect results
+        let mut responses = Vec::with_capacity(pending.len());
+        let mut finished_uids = Vec::new();
+
+        for (uid, token_arr) in pending {
+            let next_token = token_arr.item_i32()?;
+            let seq = self.sequences.get_mut(&uid).unwrap();
+            seq.generated_count += 1;
+            seq.last_token = next_token;
+
+            let finish_reason = if next_token == seq.eos_token_id {
+                Some(FinishReason::Eos)
+            } else if seq.generated_count >= seq.max_tokens {
+                Some(FinishReason::MaxTokens)
+            } else {
+                None
+            };
+
+            if finish_reason.is_some() {
+                finished_uids.push(uid);
+            }
+
+            responses.push(BatchResponse {
+                uid,
+                token_id: next_token,
+                finish_reason,
+            });
+        }
+
+        for uid in finished_uids {
+            if let Some(seq) = self.sequences.remove(&uid) {
+                if let (Some(mut pt), Some(pool)) = (seq.page_table, self.page_pool.as_mut()) {
+                    pt.release_all(pool);
+                }
+            }
+        }
+
+        Ok(responses)
     }
 
     /// Check if a set of sequences can be merged into a batch.

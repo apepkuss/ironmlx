@@ -244,26 +244,26 @@ impl Attention {
     /// `offsets`: `[B]` i32 array — per-sequence position offset.
     /// `mask`: `[B, 1, 1, max_len]` — attention mask (0 for valid, -inf for pad).
     #[allow(clippy::too_many_arguments)]
-    pub fn forward_batched(
+    /// Compute QKV projections with RoPE for batched decode.
+    ///
+    /// Returns `(q, k, v)` where:
+    /// - `q`: `[B, n_heads, 1, head_dim]`
+    /// - `k`: `[B, n_kv_heads, 1, head_dim]`
+    /// - `v`: `[B, n_kv_heads, 1, head_dim]`
+    pub fn qkv_project_batched(
         &self,
         x: &Array,
-        cache_keys: &Array,
-        cache_values: &Array,
         offsets: &Array,
-        mask: &Array,
-        write_positions: Option<&Array>,
         stream: &Stream,
     ) -> Result<(Array, Array, Array)> {
         let shape = x.shape();
         let batch = shape[0];
-        let seq_len = shape[1]; // should be 1 for decode
+        let seq_len = shape[1];
 
-        // QKV projections
         let q = self.wq.forward_with_stream(x, stream)?;
         let k = self.wk.forward_with_stream(x, stream)?;
         let v = self.wv.forward_with_stream(x, stream)?;
 
-        // Reshape: [B, 1, n_heads * head_dim] -> [B, 1, n_heads, head_dim]
         let mut q = ops::reshape(&q, &[batch, seq_len, self.n_heads, self.head_dim], stream)?;
         let mut k = ops::reshape(
             &k,
@@ -276,7 +276,6 @@ impl Attention {
             stream,
         )?;
 
-        // QK Norm
         if let Some(ref qn) = self.q_norm {
             q = qn.forward_with_stream(&q, stream)?;
         }
@@ -284,110 +283,73 @@ impl Attention {
             k = kn.forward_with_stream(&k, stream)?;
         }
 
-        // Transpose to [B, n_heads, 1, head_dim]
         let q = ops::transpose_axes(&q, &[0, 2, 1, 3], stream)?;
         let k = ops::transpose_axes(&k, &[0, 2, 1, 3], stream)?;
         let v = ops::transpose_axes(&v, &[0, 2, 1, 3], stream)?;
 
-        // RoPE with per-sequence offset (rope_dynamic)
         let (q, k) = if self.partial_rotary_factor < 1.0 {
             let rope_dim = (self.head_dim as f32 * self.partial_rotary_factor) as i32;
             let q_shape = q.shape();
             let k_shape = k.shape();
 
-            let q_rot = ops::slice(
-                &q,
-                &[0, 0, 0, 0],
-                &[q_shape[0], q_shape[1], q_shape[2], rope_dim],
-                &[1, 1, 1, 1],
-                stream,
-            )?;
-            let q_pass = ops::slice(
-                &q,
-                &[0, 0, 0, rope_dim],
-                &[q_shape[0], q_shape[1], q_shape[2], q_shape[3]],
-                &[1, 1, 1, 1],
-                stream,
-            )?;
-            let k_rot = ops::slice(
-                &k,
-                &[0, 0, 0, 0],
-                &[k_shape[0], k_shape[1], k_shape[2], rope_dim],
-                &[1, 1, 1, 1],
-                stream,
-            )?;
-            let k_pass = ops::slice(
-                &k,
-                &[0, 0, 0, rope_dim],
-                &[k_shape[0], k_shape[1], k_shape[2], k_shape[3]],
-                &[1, 1, 1, 1],
-                stream,
-            )?;
+            let q_rot = ops::slice(&q, &[0, 0, 0, 0], &[q_shape[0], q_shape[1], q_shape[2], rope_dim], &[1, 1, 1, 1], stream)?;
+            let q_pass = ops::slice(&q, &[0, 0, 0, rope_dim], &[q_shape[0], q_shape[1], q_shape[2], q_shape[3]], &[1, 1, 1, 1], stream)?;
+            let k_rot = ops::slice(&k, &[0, 0, 0, 0], &[k_shape[0], k_shape[1], k_shape[2], rope_dim], &[1, 1, 1, 1], stream)?;
+            let k_pass = ops::slice(&k, &[0, 0, 0, rope_dim], &[k_shape[0], k_shape[1], k_shape[2], k_shape[3]], &[1, 1, 1, 1], stream)?;
 
-            let q_rot = fast::rope_dynamic(
-                &q_rot,
-                rope_dim,
-                self.rope_traditional,
-                self.rope_base,
-                self.rope_scale,
-                offsets,
-                None,
-                stream,
-            )?;
-            let k_rot = fast::rope_dynamic(
-                &k_rot,
-                rope_dim,
-                self.rope_traditional,
-                self.rope_base,
-                self.rope_scale,
-                offsets,
-                None,
-                stream,
-            )?;
+            let q_rot = fast::rope_dynamic(&q_rot, rope_dim, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
+            let k_rot = fast::rope_dynamic(&k_rot, rope_dim, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
 
             let q_arr = VectorArray::from_arrays(&[&q_rot, &q_pass]);
             let k_arr = VectorArray::from_arrays(&[&k_rot, &k_pass]);
-            (
-                ops::concatenate(&q_arr, -1, stream)?,
-                ops::concatenate(&k_arr, -1, stream)?,
-            )
+            (ops::concatenate(&q_arr, -1, stream)?, ops::concatenate(&k_arr, -1, stream)?)
         } else {
-            let q = fast::rope_dynamic(
-                &q,
-                self.rope_dims,
-                self.rope_traditional,
-                self.rope_base,
-                self.rope_scale,
-                offsets,
-                None,
-                stream,
-            )?;
-            let k = fast::rope_dynamic(
-                &k,
-                self.rope_dims,
-                self.rope_traditional,
-                self.rope_base,
-                self.rope_scale,
-                offsets,
-                None,
-                stream,
-            )?;
+            let q = fast::rope_dynamic(&q, self.rope_dims, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
+            let k = fast::rope_dynamic(&k, self.rope_dims, self.rope_traditional, self.rope_base, self.rope_scale, offsets, None, stream)?;
             (q, k)
         };
 
-        // KV cache update: use put_along_axis if pre-allocated, otherwise concat
+        Ok((q, k, v))
+    }
+
+    /// Output projection: transpose attention output and project through Wo.
+    ///
+    /// `attn_out`: `[B, n_heads, 1, head_dim]` → output: `[B, 1, hidden_dim]`
+    pub fn output_project_batched(
+        &self,
+        attn_out: &Array,
+        stream: &Stream,
+    ) -> Result<Array> {
+        let shape = attn_out.shape();
+        let batch = shape[0];
+        let seq_len = shape[2]; // 1 for decode
+        let out = ops::transpose_axes(attn_out, &[0, 2, 1, 3], stream)?;
+        let out = ops::reshape(&out, &[batch, seq_len, self.n_heads * self.head_dim], stream)?;
+        self.wo.forward_with_stream(&out, stream)
+    }
+
+    /// Batched forward with dense cache (Phase A/B path).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_batched(
+        &self,
+        x: &Array,
+        cache_keys: &Array,
+        cache_values: &Array,
+        offsets: &Array,
+        mask: &Array,
+        write_positions: Option<&Array>,
+        stream: &Stream,
+    ) -> Result<(Array, Array, Array)> {
+        let batch = x.shape()[0];
+        let (q, k, v) = self.qkv_project_batched(x, offsets, stream)?;
+
+        // KV cache update
         let (new_k, new_v) = if let Some(write_positions) = write_positions {
-            // Pre-allocated path: write new KV at per-batch positions
-            // write_positions: [B] → reshape to [B, 1, 1, 1] for broadcast
-            // put_along_axis requires indices same ndim as a, broadcasts along other dims
-            // cache: [B, n_kv, capacity, head_dim], k/v: [B, n_kv, 1, head_dim]
-            // indices: [B, 1, 1, 1] → broadcast to [B, n_kv, 1, head_dim]
             let wp = ops::reshape(write_positions, &[batch, 1, 1, 1], stream)?;
             let new_k = ops::put_along_axis(cache_keys, &wp, &k, 2, stream)?;
             let new_v = ops::put_along_axis(cache_values, &wp, &v, 2, stream)?;
             (new_k, new_v)
         } else {
-            // Concat path (fallback)
             let arrays_k = VectorArray::from_arrays(&[cache_keys, &k]);
             let arrays_v = VectorArray::from_arrays(&[cache_values, &v]);
             (
@@ -396,28 +358,13 @@ impl Attention {
             )
         };
 
-        // Scaled dot-product attention with explicit mask
+        // Scaled dot-product attention
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         let attn_out = fast::scaled_dot_product_attention(
-            &q,
-            &new_k,
-            &new_v,
-            scale,
-            "array",
-            Some(mask),
-            None,
-            stream,
+            &q, &new_k, &new_v, scale, "array", Some(mask), None, stream,
         )?;
 
-        // Transpose back and reshape
-        let attn_out = ops::transpose_axes(&attn_out, &[0, 2, 1, 3], stream)?;
-        let attn_out = ops::reshape(
-            &attn_out,
-            &[batch, seq_len, self.n_heads * self.head_dim],
-            stream,
-        )?;
-        let output = self.wo.forward_with_stream(&attn_out, stream)?;
-
+        let output = self.output_project_batched(&attn_out, stream)?;
         Ok((output, new_k, new_v))
     }
 }
