@@ -9,6 +9,7 @@ mod module;
 mod moe;
 pub mod mrope;
 mod norm;
+pub mod paged_attention;
 pub mod vision;
 
 pub use activations::{gelu, gelu_tanh, silu};

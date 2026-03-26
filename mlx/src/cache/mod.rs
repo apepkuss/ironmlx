@@ -2,6 +2,7 @@ pub mod block_pool;
 pub mod block_store;
 pub mod boundary_snapshot;
 pub mod cache_type;
+pub mod paged_cache;
 pub mod prefix_cache;
 pub mod ssd_store;
 

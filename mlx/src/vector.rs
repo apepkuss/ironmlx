@@ -44,6 +44,15 @@ impl VectorArray {
         self.0
     }
 
+    pub(crate) fn as_raw_mut(&mut self) -> *mut sys::mlx_vector_array {
+        &mut self.0
+    }
+
+    /// Collect all elements into a Vec<Array>.
+    pub fn to_vec(&self) -> Vec<Array> {
+        (0..self.len()).filter_map(|i| self.get(i).ok()).collect()
+    }
+
     /// Wrap an already-owned raw `mlx_vector_array` handle.
     pub(crate) fn from_raw(raw: sys::mlx_vector_array) -> Self {
         VectorArray(raw)

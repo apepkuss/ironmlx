@@ -11,6 +11,7 @@ pub mod io;
 pub mod media;
 pub mod memory;
 pub mod metal;
+pub mod metal_kernel;
 pub mod model;
 pub mod nn;
 pub mod ops;
