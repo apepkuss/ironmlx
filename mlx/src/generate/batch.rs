@@ -954,12 +954,8 @@ impl<'a> BatchGenerator<'a> {
 
         // (page tables collected below after taking page_pool)
 
-        // Build tokens and run per-sequence forward to get new KV
-        // (paged attention only handles the attention computation,
-        // we still need the model to produce Q/K/V projections)
-        // For now, fall back to Phase B path and log
         eprintln!(
-            "[paged] B={} seq_lens={:?} pages_free={} (paged attention kernel not yet wired)",
+            "[paged] B={} seq_lens={:?} pages_free={}",
             uids.len(),
             seq_lens,
             pool.free_count()

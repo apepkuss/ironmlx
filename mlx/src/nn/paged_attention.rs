@@ -1,7 +1,7 @@
 //! Paged Attention — custom Metal kernel for page-table-based KV cache access.
 
 use crate::array::Array;
-use crate::cache::paged_cache::{PAGE_SIZE, PagePool, PageTable};
+use crate::cache::paged_cache::{PagePool, PageTable};
 use crate::dtype::Dtype;
 use crate::error::Result;
 use crate::metal_kernel::{MetalKernel, MetalKernelConfig};
@@ -63,58 +63,44 @@ pub fn paged_attention(
 
     let seq_lens_arr = Array::from_slice_i32(seq_lens);
 
-    // Scalar constants as arrays
-    let n_heads_arr = Array::from_int(n_heads as i32);
-    let n_kv_heads_arr = Array::from_int(n_kv_heads as i32);
-    let max_pages_arr = Array::from_int(max_pages as i32);
-    let num_pages_total_arr = Array::from_int(pool.num_pages as i32);
-    let scale_arr = Array::from_float(scale);
+    // Embed scalar constants directly into shader source via string replacement.
+    // This avoids Metal address space issues with scalar array inputs.
+    let source = PAGED_ATTN_SOURCE
+        .replace("N_HEADS_VAL", &n_heads.to_string())
+        .replace("N_KV_HEADS_VAL", &n_kv_heads.to_string())
+        .replace("MAX_PAGES_VAL", &max_pages.to_string())
+        .replace("NUM_PAGES_VAL", &pool.num_pages.to_string())
+        .replace("SCALE_VAL", &format!("{:.8}", scale))
+        .replace("HEAD_DIM_VAL", &head_dim.to_string())
+        .replace("PAGE_SIZE_VAL", &crate::cache::paged_cache::PAGE_SIZE.to_string());
 
-    // Create kernel (cached after first call by MLX)
-    // Note: "out" is in output_names, not input_names.
-    // MLX assigns buffer indices: inputs first (0..N-1), then outputs (N..)
+    // Unique kernel name per configuration (MLX caches compiled kernels by name)
+    let kernel_name = format!(
+        "paged_attn_h{}_kv{}_hd{}_p{}",
+        n_heads, n_kv_heads, head_dim, pool.num_pages
+    );
+
     let kernel = MetalKernel::new(
-        "paged_attention",
-        &[
-            "q",
-            "k_pages",
-            "v_pages",
-            "page_table",
-            "seq_lens",
-            "n_heads",
-            "n_kv_heads",
-            "max_pages",
-            "num_pages_total",
-            "scale",
-        ],
+        &kernel_name,
+        &["q", "k_pages", "v_pages", "page_table", "seq_lens"],
         &["out"],
-        PAGED_ATTN_SOURCE,
-        "", // no header
+        &source,
+        "",
         true,
         false,
     );
 
-    // Configure kernel execution
     let config = MetalKernelConfig::new();
 
-    // Output shape: [B, n_heads, 1, head_dim]
-    let out_shape = [batch_size as i32, n_heads as i32, 1, head_dim as i32];
-    config.add_output(&out_shape, dtype);
+    let out_elements = batch_size * n_heads * head_dim;
+    config.add_output(&[out_elements as i32], dtype);
 
-    // Grid: one thread group per (batch, head)
-    config.set_grid(batch_size as i32, n_heads as i32, 1);
-    // Thread group: single thread for now (TODO: multi-thread reduction)
+    config.set_grid((batch_size * n_heads) as i32, 1, 1);
     config.set_thread_group(1, 1, 1);
 
-    // Template args for compile-time constants
     config.add_template_dtype("T", dtype);
-    config.add_template_int("HEAD_DIM", head_dim as i32);
-    config.add_template_int("PAGE_SIZE", PAGE_SIZE as i32);
-    config.add_template_int("BLOCK_THREADS", 1);
-
     config.set_init_value(0.0);
 
-    // Execute kernel
     let outputs = kernel.apply(
         &[
             q,
@@ -122,21 +108,22 @@ pub fn paged_attention(
             &pool.v_pages[layer_idx],
             &page_table_2d,
             &seq_lens_arr,
-            // out is implicit (allocated by config)
-            &n_heads_arr,
-            &n_kv_heads_arr,
-            &max_pages_arr,
-            &num_pages_total_arr,
-            &scale_arr,
         ],
         &config,
         stream,
     )?;
 
-    outputs
+    // Reshape output from [B * n_heads * head_dim] to [B, n_heads, 1, head_dim]
+    let flat_out = outputs
         .into_iter()
         .next()
-        .ok_or_else(|| crate::error::Error::Mlx("paged_attention returned no output".to_string()))
+        .ok_or_else(|| crate::error::Error::Mlx("paged_attention returned no output".to_string()))?;
+
+    ops::reshape(
+        &flat_out,
+        &[batch_size as i32, n_heads as i32, 1, head_dim as i32],
+        stream,
+    )
 }
 
 // KV write is now handled by PagePool::write_kv() in paged_cache.rs

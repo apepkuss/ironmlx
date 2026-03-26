@@ -101,6 +101,35 @@ impl EngineCore {
         } else {
             BatchGenerator::new(&self.model)
         };
+        // Create page pool for paged attention if model supports it
+        if self.model.supports_batched_forward() {
+            let n_kv_heads = self.model.n_kv_heads();
+            let head_dim = self.model.head_dim();
+            let num_layers = self.model.num_layers();
+            if n_kv_heads > 0 && head_dim > 0 {
+                // Allocate 64 pages (64 * 256 = 16384 tokens of KV cache capacity)
+                let num_pages = 64;
+                match ironmlx_core::cache::paged_cache::PagePool::new(
+                    num_pages,
+                    num_layers,
+                    n_kv_heads,
+                    head_dim,
+                    ironmlx_core::dtype::Dtype::Bfloat16,
+                ) {
+                    Ok(pool) => {
+                        eprintln!(
+                            "[engine] page pool: {} pages x {} tokens = {} total capacity",
+                            num_pages,
+                            ironmlx_core::cache::paged_cache::PAGE_SIZE,
+                            num_pages * ironmlx_core::cache::paged_cache::PAGE_SIZE
+                        );
+                        batch.set_page_pool(pool);
+                    }
+                    Err(e) => eprintln!("[engine] failed to create page pool: {}", e),
+                }
+            }
+        }
+
         let mut waiting: VecDeque<PendingRequest> = VecDeque::new();
         let mut running: HashMap<SeqUid, RunningRequest> = HashMap::new();
         let mut prefill_pending: PrefillRunning = HashMap::new();
@@ -156,19 +185,21 @@ impl EngineCore {
             if active == 0 {
                 continue;
             }
-            let use_batched = self.model.supports_batched_forward() && active > 1;
+            let use_paged = batch.has_page_pool() && self.model.supports_batched_forward() && active > 1;
+            let use_batched = !use_paged && self.model.supports_batched_forward() && active > 1;
             let step_t0 = std::time::Instant::now();
-            let step_result = if use_batched {
+            let step_result = if use_paged {
+                batch.step_paged_batched()
+            } else if use_batched {
                 batch.step_true_batched()
             } else {
                 batch.step_batched()
             };
             let step_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
+            let path_name = if use_paged { "paged" } else if use_batched { "batched" } else { "sequential" };
             eprintln!(
                 "[engine] decode step: active={}, path={}, took={:.1}ms",
-                active,
-                if use_batched { "batched" } else { "sequential" },
-                step_ms
+                active, path_name, step_ms
             );
             match step_result {
                 Ok(responses) => {
