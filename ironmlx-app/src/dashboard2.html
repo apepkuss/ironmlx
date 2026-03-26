@@ -1648,25 +1648,24 @@
         </div>
       </div>
 
-      <!-- Configuration Guide -->
+      <!-- API Endpoint -->
       <div class="card-settings" style="margin-top:16px;">
         <div class="card-header">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M8 1v2M8 13v2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M1 8h2M13 8h2M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.3"/></svg>
-          <span data-i18n="moss_config_guide">Configuration Guide</span>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M2 4h12M2 8h12M2 12h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          <span data-i18n="api_endpoint">API Endpoint</span>
         </div>
         <div style="padding:16px; font-size:13px; line-height:1.8; color:var(--text-secondary);">
-          <p style="margin:0 0 12px;" data-i18n="moss_config_step1">To use ironmlx as the LLM backend in Moss, configure the following in Moss Settings:</p>
-          <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin:0 0 12px; font-family:'SF Mono', Menlo, monospace; font-size:13px; display:flex; align-items:center; justify-content:space-between;">
-            <div>
-              <span style="color:var(--text-secondary);">Chat URL</span>
-              <br>
-              <strong style="color:var(--text); font-size:14px;">http://127.0.0.1:<span id="moss-ironmlx-port">8080</span>/v1</strong>
-            </div>
-            <button class="icon-btn" onclick="copyMossUrl()" title="Copy" style="padding:6px;">
+          <div style="margin-bottom:6px;color:var(--text-secondary);font-size:12px;">Chat URL (OpenAI Compatible)</div>
+          <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 18px; margin:0 0 14px; font-family:'SF Mono', Menlo, monospace; font-size:13px; display:flex; align-items:center; justify-content:space-between;">
+            <strong id="moss-chat-url" style="color:var(--text); font-size:14px;">http://127.0.0.1:<span id="moss-ironmlx-port">8080</span>/v1</strong>
+            <button class="icon-btn" id="copy-url-btn" onclick="copyMossUrl()" title="Copy" style="padding:6px;">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M3 11V3.5A.5.5 0 013.5 3H11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
             </button>
           </div>
-          <p style="margin:0;" data-i18n="moss_config_step2">Once configured, Moss will use ironmlx's locally loaded models for inference.</p>
+          <div style="display:flex;align-items:flex-start;gap:8px;padding:10px 14px;background:var(--bg);border-radius:8px;border:1px solid var(--border);">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;margin-top:1px;color:#007aff;"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.3"/><path d="M8 7v4M8 5.5v0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <span style="font-size:12px;color:var(--text-secondary);line-height:1.6;" data-i18n="moss_config_step2">To use in Moss Desktop, go to Settings and paste the Chat URL above as the API endpoint. No API key required.</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1851,9 +1850,9 @@
       moss_download: "Download Moss Desktop", moss_download_hint: "Download from GitHub Releases and install the .dmg file.",
       moss_management: "Moss Desktop", moss_status: "Status", moss_detected: "Detected",
       moss_open: "Open Moss Desktop",
-      moss_config_guide: "Configuration Guide",
+      api_endpoint: "API Endpoint", moss_config_guide: "Configuration Guide",
       moss_config_step1: "To use ironmlx as the LLM backend in Moss, configure the following in Moss Settings:",
-      moss_config_step2: "Once configured, Moss will use ironmlx's locally loaded models for inference.",
+      moss_config_step2: "To use in Moss Desktop, go to Settings and paste the Chat URL above as the API endpoint. No API key required.",
       status_subtitle: "Server status and resource usage overview.",
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
       total_tokens: "Total Tokens", cached_tokens: "Cached Tokens", cache_efficiency: "Cache Efficiency",
@@ -1932,9 +1931,9 @@
       moss_download: "下载 Moss Desktop", moss_download_hint: "从 GitHub Releases 下载并安装 .dmg 文件。",
       moss_management: "Moss Desktop", moss_status: "状态", moss_detected: "已检测",
       moss_open: "打开 Moss Desktop",
-      moss_config_guide: "配置指南",
+      api_endpoint: "API 端点", moss_config_guide: "配置指南",
       moss_config_step1: "要在 Moss 中使用 ironmlx 作为 LLM 后端，请在 Moss 设置中配置以下内容：",
-      moss_config_step2: "配置完成后，Moss 将使用 ironmlx 本地加载的模型进行推理。",
+      moss_config_step2: "在 Moss Desktop 的设置中，将上方 Chat URL 粘贴为 API 端点。无需 API Key。",
       status_subtitle: "服务器状态与资源使用概览。",
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
       total_tokens: "处理 Tokens", cached_tokens: "缓存 Tokens", cache_efficiency: "缓存命中率",
@@ -3070,7 +3069,22 @@
   function copyMossUrl() {
     const port = document.getElementById('moss-ironmlx-port').textContent || '8080';
     const url = 'http://127.0.0.1:' + port + '/v1';
-    navigator.clipboard.writeText(url).catch(() => {});
+    // WKWebView doesn't support navigator.clipboard — use execCommand fallback
+    const ta = document.createElement('textarea');
+    ta.value = url;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    // Visual feedback
+    const btn = document.getElementById('copy-url-btn');
+    if (btn) {
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 8l3 3 5-5" stroke="#34c759" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      setTimeout(() => { btn.innerHTML = orig; }, 1500);
+    }
   }
 
   // ── Save Settings ──
