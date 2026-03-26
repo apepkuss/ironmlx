@@ -117,6 +117,7 @@ impl EngineCore {
             process_aborts(&mut pending_aborts, &mut running, &mut batch);
 
             // 3. Schedule waiting requests into the batch
+            let waiting_before = waiting.len();
             schedule_waiting(
                 &mut waiting,
                 &mut running,
@@ -124,6 +125,15 @@ impl EngineCore {
                 &self.tokenizer,
                 max_num_seqs,
             );
+            let scheduled = waiting_before - waiting.len();
+            if scheduled > 0 {
+                eprintln!(
+                    "[engine] scheduled {} requests (prefill), active={}, waiting={}",
+                    scheduled,
+                    batch.active_count(),
+                    waiting.len()
+                );
+            }
 
             // 4. If nothing is running, block-wait for next command
             if batch.active_count() == 0 {
@@ -151,11 +161,23 @@ impl EngineCore {
 
             // 5. Execute one decode step for all active sequences.
             //    Use true batched forward when model supports it and >1 active sequence.
-            let step_result = if self.model.supports_batched_forward() && batch.active_count() > 1 {
+            let active = batch.active_count();
+            let use_batched = self.model.supports_batched_forward() && active > 1;
+            let step_t0 = std::time::Instant::now();
+            let step_result = if use_batched {
                 batch.step_true_batched()
             } else {
                 batch.step_batched()
             };
+            let step_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
+            if active > 0 {
+                eprintln!(
+                    "[engine] decode step: active={}, path={}, took={:.1}ms",
+                    active,
+                    if use_batched { "batched" } else { "sequential" },
+                    step_ms
+                );
+            }
             match step_result {
                 Ok(responses) => {
                     process_batch_responses(responses, &mut running, &mut batch, &self.tokenizer);
@@ -294,6 +316,8 @@ fn schedule_waiting(
             continue;
         }
 
+        let prefill_t0 = std::time::Instant::now();
+        let prompt_len = req.prompt_token_ids.len();
         let insert_result = if let Some(ref media) = req.media {
             batch.insert_vlm(
                 &req.prompt_token_ids,
@@ -310,6 +334,11 @@ fn schedule_waiting(
                 req.max_tokens,
             )
         };
+        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[engine] prefill: req={}, prompt_tokens={}, took={:.1}ms",
+            req.request_id, prompt_len, prefill_ms
+        );
 
         match insert_result {
             Ok((uid, first_response)) => {

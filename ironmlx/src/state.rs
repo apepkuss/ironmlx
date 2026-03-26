@@ -83,9 +83,13 @@ pub struct BenchmarkResult {
     pub model: String,
     pub prompt_tokens: usize,
     pub gen_tokens: usize,
+    pub batch_size: usize,
     pub ttft_ms: f64,
-    pub tok_per_sec: f64,
+    pub tpot_ms: f64,
+    pub tg_tps: f64,
+    pub pp_tps: f64,
     pub total_ms: f64,
+    pub total_throughput: f64,
 }
 
 /// Status of a HuggingFace model download.

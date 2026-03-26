@@ -639,6 +639,76 @@ define_class!(
                         });
                     });
                 }
+                "fetchAPIPost" => {
+                    // Bridge: JS asks Rust to POST a local API endpoint
+                    // body_str is JSON: {"path":"/admin/api/benchmark","body":{...}}
+                    let port = crate::config::AppConfig::load().port;
+                    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&body_str);
+                    let (path, post_body) = match parsed {
+                        Ok(v) => {
+                            let p = v["path"].as_str().unwrap_or("").to_string();
+                            let b = v["body"].to_string();
+                            (p, b)
+                        }
+                        Err(_) => return,
+                    };
+                    let url = format!("http://127.0.0.1:{}{}", port, path);
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    let path_for_js = path.clone();
+                    std::thread::spawn(move || {
+                        let win_ptr = win_send.map(|w| w.0);
+                        let result = std::process::Command::new("curl")
+                            .args([
+                                "-s",
+                                "--max-time",
+                                "120",
+                                "-X",
+                                "POST",
+                                "-H",
+                                "Content-Type: application/json",
+                                "-d",
+                                &post_body,
+                                &url,
+                            ])
+                            .output()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                            .unwrap_or_else(|_| "null".to_string());
+                        let escaped = result
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'")
+                            .replace('\n', "\\n");
+                        let path_escaped = path_for_js.replace('\\', "\\\\").replace('\'', "\\'");
+                        let js_code =
+                            format!("onApiFetchResult('{}', '{}')", path_escaped, escaped);
+                        let inner_send = win_ptr.map(RawPtr);
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            if let Some(ref rp) = inner_send {
+                                let ptr = rp.0;
+                                let win: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
+                                if let Some(cv) = win.contentView() {
+                                    let js = NSString::from_str(&js_code);
+                                    unsafe {
+                                        let _: () = msg_send![&*cv, evaluateJavaScript: &*js, completionHandler: std::ptr::null::<AnyObject>()];
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+                "fetchAPIDelete" => {
+                    // Bridge: JS asks Rust to DELETE a local API endpoint
+                    let port = crate::config::AppConfig::load().port;
+                    let url = format!("http://127.0.0.1:{}{}", port, body_str);
+                    std::thread::spawn(move || {
+                        let _ = std::process::Command::new("curl")
+                            .args(["-s", "--max-time", "5", "-X", "DELETE", &url])
+                            .output();
+                    });
+                }
                 "getAppLogs" => {
                     // Return app logs by evaluating JS
                     let logs = app_log_buf().lock().unwrap().join("\n");
@@ -1174,6 +1244,8 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("syncLoadedModels"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("getAppLogs"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("fetchAPI"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("fetchAPIPost"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("fetchAPIDelete"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("checkMoss"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("downloadMoss"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("openMossDesktop"));

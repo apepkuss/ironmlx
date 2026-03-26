@@ -129,7 +129,7 @@ mod tests {
         assert_eq!(pool.free_count(), 4);
 
         let s0 = pool.acquire().unwrap();
-        let s1 = pool.acquire().unwrap();
+        let _s1 = pool.acquire().unwrap();
         assert_eq!(pool.free_count(), 2);
 
         pool.release(s0);

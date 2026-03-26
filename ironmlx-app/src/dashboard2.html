@@ -1421,28 +1421,57 @@
       </div>
       <div class="form-group">
         <div class="form-label" data-i18n="single_request_test">Single Request Test</div>
-        <div class="checkbox-group">
-          <label><input type="checkbox" checked> pp1024</label>
-          <label><input type="checkbox" checked> pp4096</label>
-          <label><input type="checkbox"> pp8192</label>
-          <label><input type="checkbox"> pp16384</label>
-          <label><input type="checkbox"> pp32768</label>
-          <label><input type="checkbox"> pp65536</label>
-          <label><input type="checkbox"> pp131072</label>
-          <label><input type="checkbox"> pp200000</label>
+        <div class="checkbox-group" id="bench-single-checks">
+          <label><input type="checkbox" value="1024" checked> pp1024</label>
+          <label><input type="checkbox" value="4096" checked> pp4096</label>
+          <label><input type="checkbox" value="8192"> pp8192</label>
+          <label><input type="checkbox" value="16384"> pp16384</label>
+          <label><input type="checkbox" value="32768"> pp32768</label>
+          <label><input type="checkbox" value="65536"> pp65536</label>
+          <label><input type="checkbox" value="131072"> pp131072</label>
+          <label><input type="checkbox" value="200000"> pp200000</label>
         </div>
         <div class="form-note" data-i18n="gen_length_note">Generation length: 128 tokens (fixed)</div>
       </div>
       <div class="form-group">
         <div class="form-label" data-i18n="batch_test">Continuous Batch Test</div>
-        <div class="checkbox-group">
-          <label><input type="checkbox" checked> 2x batch</label>
-          <label><input type="checkbox" checked> 4x batch</label>
-          <label><input type="checkbox"> 8x batch</label>
+        <div class="checkbox-group" id="bench-batch-checks">
+          <label><input type="checkbox" value="2" checked> 2x batch</label>
+          <label><input type="checkbox" value="4" checked> 4x batch</label>
+          <label><input type="checkbox" value="8"> 8x batch</label>
         </div>
         <div class="form-note" data-i18n="batch_note">Batch test uses pp1024 / tg128</div>
       </div>
-      <button class="btn-accent"><span>&#9654;</span> <span data-i18n="run_benchmark">Run Benchmark</span></button>
+      <button class="btn-accent" id="bench-run-btn" onclick="runBenchmark()"><span>&#9654;</span> <span data-i18n="run_benchmark">Run Benchmark</span></button>
+      <div id="bench-progress" style="display:none;margin-top:12px;font-size:12px;color:var(--text-secondary);"></div>
+    </div>
+
+    <!-- Results Table -->
+    <div class="card-settings" id="bench-results-card" style="margin-top:20px;display:none;">
+      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="display:flex;align-items:center;gap:8px;">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M3 2h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2"/><line x1="2" y1="5.5" x2="14" y2="5.5" stroke="currentColor" stroke-width="0.8"/><line x1="6" y1="2" x2="6" y2="14" stroke="currentColor" stroke-width="0.8"/></svg>
+          <span data-i18n="bench_results">Results</span>
+        </span>
+        <button style="font-size:11px;padding:3px 10px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-secondary);cursor:pointer;" onclick="clearBenchResults()" data-i18n="clear">Clear</button>
+      </div>
+      <div style="overflow-x:auto;padding:0 4px 12px;">
+        <table style="width:100%;font-size:11px;border-collapse:collapse;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border);color:var(--text-secondary);">
+              <th style="text-align:left;padding:8px 6px;">Test</th>
+              <th style="text-align:right;padding:8px 6px;">Batch</th>
+              <th style="text-align:right;padding:8px 6px;">TTFT (ms)</th>
+              <th style="text-align:right;padding:8px 6px;">TPOT (ms)</th>
+              <th style="text-align:right;padding:8px 6px;">tg TPS</th>
+              <th style="text-align:right;padding:8px 6px;">pp TPS</th>
+              <th style="text-align:right;padding:8px 6px;">Total (ms)</th>
+              <th style="text-align:right;padding:8px 6px;">Throughput</th>
+            </tr>
+          </thead>
+          <tbody id="bench-results-body"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Metrics Reference -->
@@ -2781,6 +2810,91 @@
     if (current) benchSelect.value = current;
   }
 
+  // ── Benchmark Runner ──
+  let benchRunning = false;
+  let benchQueue = [];
+  let benchQueueIdx = 0;
+  let benchModel = '';
+
+  function runBenchmark() {
+    if (benchRunning) return;
+    benchModel = document.getElementById('bench-model-select').value;
+    if (!benchModel) { alert('Please select a model first.'); return; }
+
+    benchRunning = true;
+    const btn = document.getElementById('bench-run-btn');
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+
+    // Collect single-request tests
+    benchQueue = [];
+    document.querySelectorAll('#bench-single-checks input:checked').forEach(cb => {
+      benchQueue.push({ prompt_tokens: parseInt(cb.value), max_tokens: 128, batch_size: 1, label: 'pp' + cb.value });
+    });
+    document.querySelectorAll('#bench-batch-checks input:checked').forEach(cb => {
+      benchQueue.push({ prompt_tokens: 1024, max_tokens: 128, batch_size: parseInt(cb.value), label: cb.value + 'x batch (pp1024)' });
+    });
+
+    if (benchQueue.length === 0) { benchFinish(); return; }
+
+    document.getElementById('bench-results-card').style.display = '';
+    document.getElementById('bench-progress').style.display = '';
+    benchQueueIdx = 0;
+    runNextBench();
+  }
+
+  function runNextBench() {
+    if (benchQueueIdx >= benchQueue.length) { benchFinish(); return; }
+    const t = benchQueue[benchQueueIdx];
+    document.getElementById('bench-progress').textContent = 'Running ' + (benchQueueIdx + 1) + '/' + benchQueue.length + ': ' + t.label + '...';
+    apiPost('/admin/api/benchmark', {
+      model: benchModel,
+      prompt_tokens: t.prompt_tokens,
+      max_tokens: t.max_tokens,
+      batch_size: t.batch_size
+    });
+  }
+
+  function onBenchResult(jsonStr) {
+    const tbody = document.getElementById('bench-results-body');
+    const t = benchQueue[benchQueueIdx];
+    const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid var(--border)';
+    try {
+      const r = JSON.parse(jsonStr);
+      if (r.error || r.status) throw new Error(r.error || r.status || 'Unknown error');
+      tr.innerHTML =
+        '<td style="padding:6px;font-weight:500;">' + t.label + '</td>' +
+        '<td style="text-align:right;padding:6px;">' + r.batch_size + '</td>' +
+        '<td style="text-align:right;padding:6px;">' + r.ttft_ms.toFixed(1) + '</td>' +
+        '<td style="text-align:right;padding:6px;">' + r.tpot_ms.toFixed(2) + '</td>' +
+        '<td style="text-align:right;padding:6px;">' + r.tg_tps.toFixed(1) + '</td>' +
+        '<td style="text-align:right;padding:6px;">' + r.pp_tps.toFixed(0) + '</td>' +
+        '<td style="text-align:right;padding:6px;">' + r.total_ms.toFixed(0) + '</td>' +
+        '<td style="text-align:right;padding:6px;">' + r.total_throughput.toFixed(1) + '</td>';
+    } catch (e) {
+      tr.innerHTML = '<td style="padding:6px;color:#ff3b30;" colspan="8">' + t.label + ': ' + e.message + '</td>';
+    }
+    tbody.appendChild(tr);
+    benchQueueIdx++;
+    runNextBench();
+  }
+
+  function benchFinish() {
+    const progress = document.getElementById('bench-progress');
+    progress.textContent = 'Done.';
+    setTimeout(() => { progress.style.display = 'none'; }, 3000);
+    benchRunning = false;
+    const btn = document.getElementById('bench-run-btn');
+    btn.disabled = false;
+    btn.style.opacity = '1';
+  }
+
+  function clearBenchResults() {
+    document.getElementById('bench-results-body').innerHTML = '';
+    apiDelete('/admin/api/benchmark/history');
+  }
+
   // ── Column Resize ──
   (function initColumnResize() {
     const table = document.getElementById('model-table');
@@ -3119,6 +3233,18 @@
     }
   }
 
+  function apiPost(path, body) {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.fetchAPIPost) {
+      window.webkit.messageHandlers.fetchAPIPost.postMessage(JSON.stringify({ path, body }));
+    }
+  }
+
+  function apiDelete(path) {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.fetchAPIDelete) {
+      window.webkit.messageHandlers.fetchAPIDelete.postMessage(path);
+    }
+  }
+
   // Called from Rust with API response
   function onApiFetchResult(path, jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
@@ -3147,6 +3273,8 @@
           document.getElementById('gpu-cache-val').textContent = formatMB(m.cache_mb);
           drawGpuChart();
         }
+      } else if (path === '/admin/api/benchmark') {
+        if (benchRunning) onBenchResult(jsonStr);
       } else if (path === '/admin/api/logs') {
         if (!jsonStr || jsonStr === 'null' || jsonStr === '') {
           logRawLines = [];

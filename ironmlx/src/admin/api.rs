@@ -143,7 +143,11 @@ pub async fn get_logs(State(state): State<Arc<AppState>>) -> Json<Vec<LogEntry>>
 pub struct BenchmarkRequest {
     pub model: Option<String>,
     pub prompt: Option<String>,
+    /// Desired prompt token count (e.g. 1024, 4096). Overrides `prompt` text.
+    pub prompt_tokens: Option<usize>,
     pub max_tokens: Option<usize>,
+    /// Number of concurrent requests (1 = single, 2/4/8 = batch test).
+    pub batch_size: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -151,46 +155,43 @@ pub struct BenchmarkResponse {
     pub model: String,
     pub prompt_tokens: usize,
     pub generated_tokens: usize,
+    pub batch_size: usize,
     pub ttft_ms: f64,
+    pub tpot_ms: f64,
+    pub tg_tps: f64,
+    pub pp_tps: f64,
     pub total_ms: f64,
-    pub tokens_per_sec: f64,
+    pub total_throughput: f64,
 }
 
-/// POST /admin/api/benchmark — run a benchmark and return timing results.
-pub async fn run_benchmark(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<BenchmarkRequest>,
-) -> Result<Json<BenchmarkResponse>, (StatusCode, String)> {
-    let aliases = {
-        let config = state.config.read().unwrap();
-        config.model_aliases.clone()
-    };
-    let entry = state
-        .pool
-        .get_with_aliases(req.model.as_deref(), &aliases)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+/// Build a prompt with approximately `target_tokens` tokens by repeating a
+/// short sentence. The tokenizer is used to verify the actual token count.
+fn build_prompt_with_token_count(
+    tokenizer: &ironmlx_core::generate::Tokenizer,
+    target_tokens: usize,
+) -> Result<(String, Vec<i32>), String> {
+    let sentence = "The quick brown fox jumps over the lazy dog. ";
+    let sentence_tokens = tokenizer.encode(sentence).map_err(|e| e.to_string())?.len();
+    // Estimate repeats needed, add 20% buffer
+    let repeats = (target_tokens / sentence_tokens.max(1)) + 2;
+    let long_prompt = sentence.repeat(repeats);
+    let mut tokens: Vec<i32> = tokenizer.encode(&long_prompt).map_err(|e| e.to_string())?;
+    tokens.truncate(target_tokens);
+    // Decode back to text for the actual prompt
+    let prompt = tokenizer.decode(&tokens).map_err(|e| e.to_string())?;
+    let final_tokens: Vec<i32> = tokenizer.encode(&prompt).map_err(|e| e.to_string())?;
+    Ok((prompt, final_tokens))
+}
 
-    let prompt = req
-        .prompt
-        .unwrap_or_else(|| "Explain the theory of relativity.".to_string());
-    let max_tokens = req.max_tokens.unwrap_or(50);
-
-    let tokens = entry
-        .tokenizer
-        .encode(&prompt)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+/// Run a single benchmark request and return (prompt_len, gen_count, ttft_ms, total_ms).
+async fn run_single_bench(
+    entry: &crate::engine_pool::EngineEntry,
+    tokens: Vec<i32>,
+    max_tokens: usize,
+) -> Result<(usize, usize, f64, f64), String> {
     let prompt_len = tokens.len();
-
     let request_id = format!("bench_{}", uuid::Uuid::new_v4().simple());
     let sampler = SamplerConfig::greedy();
-
-    state.log_buffer.push(
-        "info",
-        &format!(
-            "Benchmark started: model={}, prompt_tokens={}, max_tokens={}",
-            entry.model_id, prompt_len, max_tokens
-        ),
-    );
 
     let t0 = std::time::Instant::now();
     let mut token_rx = entry
@@ -220,43 +221,216 @@ pub async fn run_benchmark(
 
     let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let ttft_ms = ttft.unwrap_or(0.0);
-    let decode_ms = total_ms - ttft_ms;
-    let tps = if decode_ms > 0.0 && count > 1 {
-        (count - 1) as f64 / (decode_ms / 1000.0)
+    Ok((prompt_len, count, ttft_ms, total_ms))
+}
+
+/// POST /admin/api/benchmark — run a benchmark and return timing results.
+///
+/// Supports single-request and batch (concurrent) modes.
+pub async fn run_benchmark(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BenchmarkRequest>,
+) -> Result<Json<BenchmarkResponse>, (StatusCode, String)> {
+    let aliases = {
+        let config = state.config.read().unwrap();
+        config.model_aliases.clone()
+    };
+    let entry = state
+        .pool
+        .get_with_aliases(req.model.as_deref(), &aliases)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let max_tokens = req.max_tokens.unwrap_or(128);
+    let batch_size = req.batch_size.unwrap_or(1).max(1);
+
+    // Build prompt tokens
+    let (prompt_len, tokens) = if let Some(target) = req.prompt_tokens {
+        let (_prompt_text, toks) = build_prompt_with_token_count(&entry.tokenizer, target)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        (toks.len(), toks)
     } else {
-        0.0
+        let prompt = req
+            .prompt
+            .unwrap_or_else(|| "Explain the theory of relativity.".to_string());
+        let toks = entry
+            .tokenizer
+            .encode(&prompt)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        (toks.len(), toks)
     };
 
     state.log_buffer.push(
         "info",
         &format!(
-            "Benchmark done: {} tokens, {:.0}ms, {:.1} tok/s",
-            count, total_ms, tps
+            "Benchmark started: model={}, prompt_tokens={}, max_tokens={}, batch={}",
+            entry.model_id, prompt_len, max_tokens, batch_size
         ),
     );
 
-    // Store result in history
-    {
-        let result = BenchmarkResult {
-            timestamp: chrono::Utc::now().timestamp(),
+    let t0 = std::time::Instant::now();
+
+    if batch_size <= 1 {
+        // Single request benchmark
+        let (pl, gen_count, ttft_ms, total_ms) = run_single_bench(&entry, tokens, max_tokens)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        let decode_ms = total_ms - ttft_ms;
+        let tg_tps = if decode_ms > 0.0 && gen_count > 1 {
+            (gen_count - 1) as f64 / (decode_ms / 1000.0)
+        } else {
+            0.0
+        };
+        let tpot_ms = if tg_tps > 0.0 { 1000.0 / tg_tps } else { 0.0 };
+        let pp_tps = if ttft_ms > 0.0 {
+            pl as f64 / (ttft_ms / 1000.0)
+        } else {
+            0.0
+        };
+        let total_throughput = if total_ms > 0.0 {
+            (pl + gen_count) as f64 / (total_ms / 1000.0)
+        } else {
+            0.0
+        };
+
+        let resp = BenchmarkResponse {
+            model: entry.model_id.clone(),
+            prompt_tokens: pl,
+            generated_tokens: gen_count,
+            batch_size: 1,
+            ttft_ms,
+            tpot_ms,
+            tg_tps,
+            pp_tps,
+            total_ms,
+            total_throughput,
+        };
+
+        state.log_buffer.push(
+            "info",
+            &format!(
+                "Benchmark done: pp{}→tg{}, TTFT={:.0}ms, tg={:.1}tok/s, pp={:.0}tok/s",
+                pl, gen_count, ttft_ms, tg_tps, pp_tps
+            ),
+        );
+
+        state
+            .benchmark_history
+            .lock()
+            .unwrap()
+            .push(BenchmarkResult {
+                timestamp: chrono::Utc::now().timestamp(),
+                model: entry.model_id.clone(),
+                prompt_tokens: pl,
+                gen_tokens: gen_count,
+                batch_size: 1,
+                ttft_ms,
+                tpot_ms,
+                tg_tps,
+                pp_tps,
+                total_ms,
+                total_throughput,
+            });
+
+        Ok(Json(resp))
+    } else {
+        // Batch benchmark: launch batch_size concurrent requests
+        let mut handles = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            let e = Arc::clone(&entry);
+            let t = tokens.clone();
+            let mt = max_tokens;
+            handles.push(tokio::spawn(
+                async move { run_single_bench(&e, t, mt).await },
+            ));
+        }
+
+        let mut total_gen = 0usize;
+        let mut sum_ttft = 0.0f64;
+        let mut max_total = 0.0f64;
+        for h in handles {
+            let (_, gen_count, ttft_ms, total_ms) = h
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            total_gen += gen_count;
+            sum_ttft += ttft_ms;
+            if total_ms > max_total {
+                max_total = total_ms;
+            }
+        }
+
+        let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let avg_ttft = sum_ttft / batch_size as f64;
+        let decode_ms = wall_ms - avg_ttft;
+        let tg_tps = if decode_ms > 0.0 && total_gen > batch_size {
+            (total_gen - batch_size) as f64 / (decode_ms / 1000.0)
+        } else {
+            0.0
+        };
+        let tpot_ms = if tg_tps > 0.0 {
+            batch_size as f64 * 1000.0 / tg_tps
+        } else {
+            0.0
+        };
+        let pp_tps = if avg_ttft > 0.0 {
+            (prompt_len * batch_size) as f64 / (avg_ttft / 1000.0)
+        } else {
+            0.0
+        };
+        let total_tokens = (prompt_len * batch_size) + total_gen;
+        let total_throughput = if wall_ms > 0.0 {
+            total_tokens as f64 / (wall_ms / 1000.0)
+        } else {
+            0.0
+        };
+
+        let resp = BenchmarkResponse {
             model: entry.model_id.clone(),
             prompt_tokens: prompt_len,
-            gen_tokens: count,
-            ttft_ms,
-            tok_per_sec: tps,
-            total_ms,
+            generated_tokens: total_gen / batch_size,
+            batch_size,
+            ttft_ms: avg_ttft,
+            tpot_ms,
+            tg_tps,
+            pp_tps,
+            total_ms: wall_ms,
+            total_throughput,
         };
-        state.benchmark_history.lock().unwrap().push(result);
-    }
 
-    Ok(Json(BenchmarkResponse {
-        model: entry.model_id.clone(),
-        prompt_tokens: prompt_len,
-        generated_tokens: count,
-        ttft_ms,
-        total_ms,
-        tokens_per_sec: tps,
-    }))
+        state.log_buffer.push(
+            "info",
+            &format!(
+                "Batch benchmark done: {}x pp{}→tg{}, wall={:.0}ms, tg={:.1}tok/s, pp={:.0}tok/s",
+                batch_size,
+                prompt_len,
+                total_gen / batch_size,
+                wall_ms,
+                tg_tps,
+                pp_tps
+            ),
+        );
+
+        state
+            .benchmark_history
+            .lock()
+            .unwrap()
+            .push(BenchmarkResult {
+                timestamp: chrono::Utc::now().timestamp(),
+                model: entry.model_id.clone(),
+                prompt_tokens: prompt_len,
+                gen_tokens: total_gen / batch_size,
+                batch_size,
+                ttft_ms: avg_ttft,
+                tpot_ms,
+                tg_tps,
+                pp_tps,
+                total_ms: wall_ms,
+                total_throughput,
+            });
+
+        Ok(Json(resp))
+    }
 }
 
 /// GET /admin/api/benchmark/history — return all benchmark results.

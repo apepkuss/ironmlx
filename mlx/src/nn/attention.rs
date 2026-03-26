@@ -387,7 +387,7 @@ impl Attention {
             &new_k,
             &new_v,
             scale,
-            "none",
+            "array",
             Some(mask),
             None,
             stream,

@@ -398,6 +398,7 @@ impl<'a> BatchGenerator<'a> {
 
         let num_layers = self.num_layers;
         let batch_size = uids.len() as i32;
+        let step_t0 = std::time::Instant::now();
 
         // Collect per-sequence info
         let mut tokens_vec: Vec<i32> = Vec::with_capacity(uids.len());
@@ -421,6 +422,13 @@ impl<'a> BatchGenerator<'a> {
         // Build offsets array [B]
         let offsets_arr = Array::from_slice_i32(&offsets_vec);
 
+        // Determine model dtype from cache (typically bfloat16)
+        let model_dtype = self.sequences[&uids[0]].cache[0]
+            .0
+            .as_ref()
+            .map(|k| k.dtype())
+            .unwrap_or(crate::Dtype::Float32);
+
         // Build attention mask [B, 1, 1, max_cache_len + 1]
         // For each sequence: 0.0 for valid positions, -inf for pad positions
         let total_len = max_cache_len + 1; // +1 for the new token
@@ -433,6 +441,8 @@ impl<'a> BatchGenerator<'a> {
         }
         let mask_flat = Array::from_slice_f32(&mask_data);
         let mask = ops::reshape(&mask_flat, &[batch_size, 1, 1, total_len], stream)?;
+        // Cast mask to model dtype (e.g. bfloat16) for scaled_dot_product_attention
+        let mask = ops::astype(&mask, model_dtype, stream)?;
 
         // Pad per-sequence caches to [B, n_kv_heads, max_cache_len, head_dim]
         let mut batched_cache: Vec<(Array, Array)> = Vec::with_capacity(num_layers);
@@ -479,10 +489,15 @@ impl<'a> BatchGenerator<'a> {
             batched_cache.push((batched_k, batched_v));
         }
 
+        let pad_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
+
         // Single forward pass [B, 1] -> [B, 1, vocab]
+        let fwd_t0 = std::time::Instant::now();
         let logits =
             self.model
                 .forward_batched(&tokens_2d, &mut batched_cache, &offsets_arr, &mask)?;
+
+        let fwd_ms = fwd_t0.elapsed().as_secs_f64() * 1000.0;
 
         // Sample per-sequence
         let mut pending: Vec<(SeqUid, Array)> = Vec::with_capacity(uids.len());
@@ -505,6 +520,9 @@ impl<'a> BatchGenerator<'a> {
         for (_, token_arr) in &pending {
             token_arr.eval()?;
         }
+
+        let eval_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
+        let unpad_t0 = std::time::Instant::now();
 
         // Unpad caches back to per-sequence
         for (i, &uid) in uids.iter().enumerate() {
@@ -532,6 +550,13 @@ impl<'a> BatchGenerator<'a> {
                 seq.cache[layer_idx] = (Some(seq_k), Some(seq_v));
             }
         }
+
+        let unpad_ms = unpad_t0.elapsed().as_secs_f64() * 1000.0;
+        let total_step_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[batched] B={} pad={:.1}ms fwd={:.1}ms eval_total={:.1}ms unpad={:.1}ms total={:.1}ms",
+            batch_size, pad_ms, fwd_ms, eval_ms, unpad_ms, total_step_ms
+        );
 
         // Collect results
         let mut responses = Vec::with_capacity(pending.len());
