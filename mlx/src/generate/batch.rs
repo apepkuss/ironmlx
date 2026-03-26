@@ -952,11 +952,7 @@ impl<'a> BatchGenerator<'a> {
             pt.len = cache_len;
         }
 
-        // Collect page tables as refs
-        let page_tables: Vec<&crate::cache::paged_cache::PageTable> = uids
-            .iter()
-            .map(|uid| self.sequences[uid].page_table.as_ref().unwrap())
-            .collect();
+        // (page tables collected below after taking page_pool)
 
         // Build tokens and run per-sequence forward to get new KV
         // (paged attention only handles the attention computation,
@@ -979,32 +975,51 @@ impl<'a> BatchGenerator<'a> {
         let tokens_2d = ops::reshape(&tokens_arr, &[batch_size, 1], _stream)?;
         let offsets_arr = Array::from_slice_i32(&seq_lens);
 
-        let n_heads = self.model.n_kv_heads() * (self.model.head_dim() / self.model.head_dim()); // TODO: get n_heads properly
+        let n_heads = self.model.n_heads();
         let head_dim = self.model.head_dim();
-        let n_kv_heads = self.model.n_kv_heads();
         let dtype = pool.dtype;
 
-        // Paged forward: per-layer QKV → write to pages → paged attention kernel
-        let page_tables_clone: Vec<&crate::cache::paged_cache::PageTable> = page_tables;
-        let pool_ref = self.page_pool.as_ref().unwrap();
-        let seq_lens_clone = seq_lens.clone();
-        let stream_clone = _stream.clone();
+        // Take page_pool out of self to avoid borrow conflicts with model.forward_paged
+        let mut page_pool = self.page_pool.take().unwrap();
+
+        // Collect page table refs from sequences (sequences not borrowed mutably during forward)
+        let pt_refs: Vec<&crate::cache::paged_cache::PageTable> = uids
+            .iter()
+            .map(|uid| self.sequences[uid].page_table.as_ref().unwrap())
+            .collect();
 
         let logits = self.model.forward_paged(
             &tokens_2d,
             &offsets_arr,
-            |layer_idx, q, _k, _v| {
-                // TODO: Write k, v to page pool at correct positions
-                // TODO: Call paged_attention kernel
-                // For now, use placeholder — return zeros with correct shape
-                let out_shape = q.shape();
-                ops::zeros(
-                    &[out_shape[0], out_shape[1], out_shape[2], out_shape[3]],
+            |layer_idx, q, k, v| {
+                // 1. Write new K/V to page pool
+                page_pool.write_kv(k, v, &pt_refs, &seq_lens, layer_idx)?;
+
+                // 2. Run paged attention kernel
+                crate::nn::paged_attention::paged_attention(
+                    q,
+                    &page_pool,
+                    &pt_refs,
+                    &seq_lens,
+                    layer_idx,
+                    n_heads,
+                    head_dim,
                     dtype,
-                    &stream_clone,
+                    _stream,
                 )
             },
         )?;
+
+        // Put page_pool back
+        self.page_pool = Some(page_pool);
+
+        // Update seq_lens in page tables
+        for &uid in &uids {
+            let seq = self.sequences.get_mut(&uid).unwrap();
+            if let Some(ref mut pt) = seq.page_table {
+                pt.len += 1;
+            }
+        }
 
         // Sample per-sequence
         let mut pending: Vec<(SeqUid, Array)> = Vec::with_capacity(uids.len());
@@ -1062,10 +1077,10 @@ impl<'a> BatchGenerator<'a> {
         }
 
         for uid in finished_uids {
-            if let Some(seq) = self.sequences.remove(&uid) {
-                if let (Some(mut pt), Some(pool)) = (seq.page_table, self.page_pool.as_mut()) {
-                    pt.release_all(pool);
-                }
+            if let Some(seq) = self.sequences.remove(&uid)
+                && let (Some(mut pt), Some(pool)) = (seq.page_table, self.page_pool.as_mut())
+            {
+                pt.release_all(pool);
             }
         }
 

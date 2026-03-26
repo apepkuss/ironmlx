@@ -24,12 +24,12 @@ template <typename T, int HEAD_DIM, int PAGE_SIZE, int BLOCK_THREADS>
     const device T* v_pages    [[buffer(2)]],
     const device int* page_table [[buffer(3)]],
     const device int* seq_lens [[buffer(4)]],
-    device T* out              [[buffer(5)]],
-    constant int& n_heads      [[buffer(6)]],
-    constant int& n_kv_heads   [[buffer(7)]],
-    constant int& max_pages    [[buffer(8)]],
-    constant int& num_pages_total [[buffer(9)]],
-    constant float& scale      [[buffer(10)]],
+    constant int& n_heads      [[buffer(5)]],
+    constant int& n_kv_heads   [[buffer(6)]],
+    constant int& max_pages    [[buffer(7)]],
+    constant int& num_pages_total [[buffer(8)]],
+    constant float& scale      [[buffer(9)]],
+    device T* out              [[buffer(10)]],
     uint3 tid                  [[thread_position_in_threadgroup]],
     uint3 gid                  [[threadgroup_position_in_grid]]
 ) {

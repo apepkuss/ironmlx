@@ -98,6 +98,75 @@ impl PagePool {
     pub fn page_bytes(&self) -> usize {
         self.num_layers * 2 * self.n_kv_heads * PAGE_SIZE * self.head_dim * self.dtype.size_of()
     }
+
+    /// Write new KV data for one token per batch element into the page pool.
+    ///
+    /// `new_k` / `new_v`: `[B, n_kv_heads, 1, head_dim]`
+    /// `page_tables`: per-sequence page tables
+    /// `seq_lens`: current sequence lengths (write position per element)
+    /// `layer_idx`: which layer to write to
+    pub fn write_kv(
+        &mut self,
+        new_k: &Array,
+        new_v: &Array,
+        page_tables: &[&PageTable],
+        seq_lens: &[i32],
+        layer_idx: usize,
+    ) -> Result<()> {
+        let stream = Stream::new(&crate::device::Device::gpu());
+        let batch_size = page_tables.len();
+        let total_positions = (self.num_pages * PAGE_SIZE) as i32;
+        let n_kv = self.n_kv_heads as i32;
+        let hd = self.head_dim as i32;
+
+        // Compute global write positions for each batch element
+        let mut write_positions: Vec<i32> = Vec::with_capacity(batch_size);
+        for b in 0..batch_size {
+            let pos = seq_lens[b] as usize;
+            let page_logical = pos / PAGE_SIZE;
+            let page_offset = pos % PAGE_SIZE;
+            let physical_page = page_tables[b].pages[page_logical];
+            write_positions.push((physical_page * PAGE_SIZE + page_offset) as i32);
+        }
+
+        // Reshape page arrays: [num_pages, n_kv, PAGE_SIZE, head_dim] → [total_pos, n_kv, head_dim]
+        let k_flat = ops::reshape(
+            &self.k_pages[layer_idx],
+            &[total_positions, n_kv, hd],
+            &stream,
+        )?;
+        let v_flat = ops::reshape(
+            &self.v_pages[layer_idx],
+            &[total_positions, n_kv, hd],
+            &stream,
+        )?;
+
+        // Reshape new KV: [B, n_kv, 1, head_dim] → [B, n_kv, head_dim]
+        let k_vals = ops::reshape(new_k, &[batch_size as i32, n_kv, hd], &stream)?;
+        let v_vals = ops::reshape(new_v, &[batch_size as i32, n_kv, hd], &stream)?;
+
+        // Build indices: [B, 1, 1] for broadcast with put_along_axis axis=0
+        let idx_arr = Array::from_slice_i32(&write_positions);
+        let idx = ops::reshape(&idx_arr, &[batch_size as i32, 1, 1], &stream)?;
+
+        // Write using put_along_axis on axis 0
+        let k_updated = ops::put_along_axis(&k_flat, &idx, &k_vals, 0, &stream)?;
+        let v_updated = ops::put_along_axis(&v_flat, &idx, &v_vals, 0, &stream)?;
+
+        // Reshape back to page format
+        self.k_pages[layer_idx] = ops::reshape(
+            &k_updated,
+            &[self.num_pages as i32, n_kv, PAGE_SIZE as i32, hd],
+            &stream,
+        )?;
+        self.v_pages[layer_idx] = ops::reshape(
+            &v_updated,
+            &[self.num_pages as i32, n_kv, PAGE_SIZE as i32, hd],
+            &stream,
+        )?;
+
+        Ok(())
+    }
 }
 
 /// Per-sequence page table — maps logical token positions to physical pages.

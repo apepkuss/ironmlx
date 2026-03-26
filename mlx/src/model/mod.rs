@@ -53,6 +53,27 @@ impl Model {
 
     /// Number of KV heads per layer (for block pool sizing).
     /// Returns 0 for encoder-only models.
+    /// Number of query attention heads.
+    pub fn n_heads(&self) -> usize {
+        match self {
+            Model::Standard(m) => m
+                .layers
+                .first()
+                .map(|l| l.attention.n_heads as usize)
+                .unwrap_or(0),
+            Model::Qwen35(m) => m
+                .layers
+                .iter()
+                .find_map(|l| {
+                    let v = l.n_kv_heads(); // approximate
+                    if v > 0 { Some(v) } else { None }
+                })
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// Number of KV attention heads.
     pub fn n_kv_heads(&self) -> usize {
         match self {
             Model::Standard(m) => m

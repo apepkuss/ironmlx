@@ -71,6 +71,8 @@ pub fn paged_attention(
     let scale_arr = Array::from_float(scale);
 
     // Create kernel (cached after first call by MLX)
+    // Note: "out" is in output_names, not input_names.
+    // MLX assigns buffer indices: inputs first (0..N-1), then outputs (N..)
     let kernel = MetalKernel::new(
         "paged_attention",
         &[
@@ -79,7 +81,6 @@ pub fn paged_attention(
             "v_pages",
             "page_table",
             "seq_lens",
-            "out",
             "n_heads",
             "n_kv_heads",
             "max_pages",
@@ -138,84 +139,4 @@ pub fn paged_attention(
         .ok_or_else(|| crate::error::Error::Mlx("paged_attention returned no output".to_string()))
 }
 
-/// Write new KV data into page pool at the correct positions.
-///
-/// * `new_k` / `new_v`: `[B, n_kv_heads, 1, head_dim]` — new KV for one token
-/// * `page_tables`: per-sequence page tables
-/// * `seq_lens`: current seq lengths (write position = seq_len for each)
-pub fn write_kv_to_pages(
-    new_k: &Array,
-    new_v: &Array,
-    pool: &PagePool,
-    page_tables: &[&PageTable],
-    seq_lens: &[i32],
-    layer_idx: usize,
-    stream: &Stream,
-) -> Result<()> {
-    let batch_size = page_tables.len();
-
-    for b in 0..batch_size {
-        let write_pos = seq_lens[b] as usize;
-        let page_logical = write_pos / PAGE_SIZE;
-        let page_offset = write_pos % PAGE_SIZE;
-
-        if page_logical >= page_tables[b].pages.len() {
-            continue; // shouldn't happen if ensure_capacity was called
-        }
-        let physical_page = page_tables[b].pages[page_logical] as i32;
-
-        // Extract this batch element's KV: [1, n_kv_heads, 1, head_dim]
-        let b_i = b as i32;
-        let k_shape = new_k.shape();
-        let seq_k = ops::slice(
-            new_k,
-            &[b_i, 0, 0, 0],
-            &[b_i + 1, k_shape[1], 1, k_shape[3]],
-            &[1, 1, 1, 1],
-            stream,
-        )?;
-        let seq_v = ops::slice(
-            new_v,
-            &[b_i, 0, 0, 0],
-            &[b_i + 1, k_shape[1], 1, k_shape[3]],
-            &[1, 1, 1, 1],
-            stream,
-        )?;
-
-        // Reshape to [n_kv_heads, 1, head_dim] for put_along_axis
-        let seq_k = ops::reshape(&seq_k, &[k_shape[1], 1, k_shape[3]], stream)?;
-        let seq_v = ops::reshape(&seq_v, &[k_shape[1], 1, k_shape[3]], stream)?;
-
-        // Write into pool's k_pages[layer_idx] at [physical_page, :, page_offset, :]
-        // Use slice + put_along_axis
-        let page_k = ops::slice(
-            &pool.k_pages[layer_idx],
-            &[physical_page, 0, 0, 0],
-            &[physical_page + 1, k_shape[1], PAGE_SIZE as i32, k_shape[3]],
-            &[1, 1, 1, 1],
-            stream,
-        )?;
-        let page_k = ops::reshape(&page_k, &[k_shape[1], PAGE_SIZE as i32, k_shape[3]], stream)?;
-
-        let write_idx = Array::from_int(page_offset as i32);
-        let write_idx = ops::reshape(&write_idx, &[1, 1, 1], stream)?;
-        let updated_k = ops::put_along_axis(&page_k, &write_idx, &seq_k, 1, stream)?;
-
-        let page_v = ops::slice(
-            &pool.v_pages[layer_idx],
-            &[physical_page, 0, 0, 0],
-            &[physical_page + 1, k_shape[1], PAGE_SIZE as i32, k_shape[3]],
-            &[1, 1, 1, 1],
-            stream,
-        )?;
-        let page_v = ops::reshape(&page_v, &[k_shape[1], PAGE_SIZE as i32, k_shape[3]], stream)?;
-        let updated_v = ops::put_along_axis(&page_v, &write_idx, &seq_v, 1, stream)?;
-
-        // TODO: Write updated_k/v back into pool.k_pages[layer_idx][physical_page]
-        // This requires mutable access to pool arrays — currently MLX arrays are immutable.
-        // For now, store updated pages as new arrays (will be optimized in future).
-        let _ = (updated_k, updated_v);
-    }
-
-    Ok(())
-}
+// KV write is now handled by PagePool::write_kv() in paged_cache.rs
