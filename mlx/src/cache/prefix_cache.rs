@@ -126,6 +126,38 @@ fn chain_hash(prev_hash: BlockHash, block_tokens: &[i32]) -> BlockHash {
     hasher.finish()
 }
 
+/// Global cache statistics accessible from any thread.
+static CACHE_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CACHE_TOKENS_MATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CACHE_TOKENS_STORED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Cache statistics snapshot for monitoring.
+#[derive(Debug, Clone, Default)]
+pub struct CacheStats {
+    pub lookups: u64,
+    pub hits: u64,
+    pub tokens_matched: u64,
+    pub cached_tokens: u64,
+}
+
+impl CacheStats {
+    /// Read current global cache statistics.
+    pub fn current() -> Self {
+        Self {
+            lookups: CACHE_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed),
+            hits: CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed),
+            tokens_matched: CACHE_TOKENS_MATCHED.load(std::sync::atomic::Ordering::Relaxed),
+            cached_tokens: CACHE_TOKENS_STORED.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Cache hit rate (0.0 to 1.0).
+    pub fn hit_rate(&self) -> f64 {
+        if self.lookups == 0 { 0.0 } else { self.hits as f64 / self.lookups as f64 }
+    }
+}
+
 /// High-level cache manager that coordinates BlockStore, SSDStore, and PrefixCache.
 pub struct CacheManager {
     pub block_store: BlockStore,
@@ -174,6 +206,7 @@ impl CacheManager {
         &mut self,
         tokens: &[i32],
     ) -> Result<(Vec<(Option<Array>, Option<Array>)>, usize)> {
+        CACHE_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (matched_block_ids, _) = self.prefix_cache.lookup_prefix(tokens);
 
         if matched_block_ids.is_empty() {
@@ -218,6 +251,9 @@ impl CacheManager {
         let actual_matched = all_blocks_kv.len();
         let actual_tokens = actual_matched * BLOCK_SIZE;
 
+        CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        CACHE_TOKENS_MATCHED.fetch_add(actual_tokens as u64, std::sync::atomic::Ordering::Relaxed);
+
         // Concatenate blocks per layer
         let mut cache: Vec<(Option<Array>, Option<Array>)> = Vec::with_capacity(self.num_layers);
         let gpu_stream = Stream::new(&Device::gpu());
@@ -257,6 +293,7 @@ impl CacheManager {
         if num_complete_blocks == 0 {
             return Ok(());
         }
+        CACHE_TOKENS_STORED.fetch_add((num_complete_blocks * BLOCK_SIZE) as u64, std::sync::atomic::Ordering::Relaxed);
 
         let stream = Stream::new(&Device::gpu());
         let mut block_ids = Vec::with_capacity(num_complete_blocks);

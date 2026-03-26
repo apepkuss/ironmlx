@@ -259,6 +259,31 @@ pub async fn run_benchmark(
         (toks.len(), toks)
     };
 
+    // Memory safety check before starting benchmark
+    if batch_size > 1 {
+        let active_mem = ironmlx_core::memory::get_active_memory().unwrap_or(0) as f64;
+        let mem_limit = ironmlx_core::memory::get_memory_limit().unwrap_or(0) as f64;
+        let total_mem = ironmlx_core::memory::get_memory_size().unwrap_or(0) as f64;
+        let effective_limit = if mem_limit > 0.0 { mem_limit } else { total_mem * 0.9 };
+        let available = effective_limit - active_mem;
+
+        // Estimate KV cache memory per sequence:
+        // 2 (K+V) * num_layers * n_kv_heads * (prompt_tokens + max_tokens) * head_dim * dtype_size
+        // Use model info to estimate; fallback to ~2MB per 1K tokens for 4B model
+        let estimated_per_seq_mb = (prompt_len as f64 + max_tokens as f64) * 2.0; // rough: ~2MB/1K tokens
+        let total_estimated_mb = estimated_per_seq_mb * batch_size as f64;
+        let available_mb = available / 1_048_576.0;
+
+        if total_estimated_mb > available_mb * 0.8 {
+            let msg = format!(
+                "Insufficient GPU memory for {}x batch (pp{}). Estimated need: {:.0}MB, available: {:.0}MB. Try reducing batch size or prompt length.",
+                batch_size, prompt_len, total_estimated_mb, available_mb
+            );
+            state.log_buffer.push("warning", &msg);
+            return Err((StatusCode::SERVICE_UNAVAILABLE, msg));
+        }
+    }
+
     state.log_buffer.push(
         "info",
         &format!(
@@ -331,6 +356,11 @@ pub async fn run_benchmark(
                 total_ms,
                 total_throughput,
             });
+
+        state.total_tokens.fetch_add(
+            (pl + gen_count) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         Ok(Json(resp))
     } else {
@@ -428,6 +458,12 @@ pub async fn run_benchmark(
                 total_ms: wall_ms,
                 total_throughput,
             });
+
+        let total_tokens = (prompt_len * batch_size) + total_gen;
+        state.total_tokens.fetch_add(
+            total_tokens as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         Ok(Json(resp))
     }

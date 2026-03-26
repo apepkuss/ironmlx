@@ -1262,6 +1262,9 @@
       <div class="stat-card"><div class="stat-label" data-i18n="server_status">Server Status</div><div class="stat-value" id="stat-server-status" style="font-size:14px;color:var(--green);">&mdash;</div></div>
       <div class="stat-card"><div class="stat-label" data-i18n="uptime">Uptime</div><div class="stat-value" id="stat-uptime" style="font-size:14px;">&mdash;</div></div>
       <div class="stat-card"><div class="stat-label" data-i18n="model">Model</div><div class="stat-value" id="stat-model" style="font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">&mdash;</div></div>
+      <div class="stat-card"><div class="stat-label" data-i18n="total_tokens">Total Tokens</div><div class="stat-value" id="stat-total-tokens" style="font-size:14px;">0</div></div>
+      <div class="stat-card"><div class="stat-label" data-i18n="cached_tokens">Cached Tokens</div><div class="stat-value" id="stat-cached-tokens" style="font-size:14px;">0</div></div>
+      <div class="stat-card"><div class="stat-label" data-i18n="cache_efficiency">Cache Efficiency</div><div class="stat-value" id="stat-cache-efficiency" style="font-size:14px;">--</div></div>
     </div>
 
     <!-- GPU Memory Chart -->
@@ -1853,6 +1856,7 @@
       moss_config_step2: "Once configured, Moss will use ironmlx's locally loaded models for inference.",
       status_subtitle: "Server status and resource usage overview.",
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
+      total_tokens: "Total Tokens", cached_tokens: "Cached Tokens", cache_efficiency: "Cache Efficiency",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage and download models.", model_manager: "Model Manager", model_download: "Model Download",
       col_model: "Model \u25B2", col_type: "Type", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Ready",
@@ -1933,6 +1937,7 @@
       moss_config_step2: "配置完成后，Moss 将使用 ironmlx 本地加载的模型进行推理。",
       status_subtitle: "服务器状态与资源使用概览。",
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
+      total_tokens: "处理 Tokens", cached_tokens: "缓存 Tokens", cache_efficiency: "缓存命中率",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理和下载模型。", model_manager: "模型管理", model_download: "模型下载",
       col_model: "模型 \u25B2", col_type: "类型", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "就绪",
@@ -2909,6 +2914,14 @@
     const t = benchQueue[benchQueueIdx];
     const tr = document.createElement('tr');
     tr.style.borderBottom = '1px solid var(--border)';
+    // Handle empty response (server crash or connection refused)
+    if (!jsonStr || jsonStr.trim() === '' || jsonStr === 'null') {
+      tr.innerHTML = '<td style="padding:6px;color:var(--text-secondary);" colspan="8"><span style="color:#ff3b30;">&#9888;</span> ' + t.label + ': Server unavailable. It may be restarting — please try again shortly.</td>';
+      tbody.appendChild(tr);
+      benchQueueIdx++;
+      benchFinish();
+      return;
+    }
     try {
       const r = JSON.parse(jsonStr);
       if (r.error || r.status) throw new Error(r.error || r.status || 'Unknown error');
@@ -2922,9 +2935,8 @@
         '<td style="text-align:right;padding:6px;">' + r.total_ms.toFixed(0) + '</td>' +
         '<td style="text-align:right;padding:6px;">' + r.total_throughput.toFixed(1) + '</td>';
     } catch (e) {
-      // Show raw server response if JSON parse failed, otherwise show error message
       const errMsg = e instanceof SyntaxError ? jsonStr : e.message;
-      tr.innerHTML = '<td style="padding:6px;color:#ff3b30;" colspan="8">' + t.label + ': ' + errMsg + '</td>';
+      tr.innerHTML = '<td style="padding:6px;color:var(--text-secondary);" colspan="8"><span style="color:#ff9500;">&#9888;</span> ' + t.label + ': ' + errMsg + '</td>';
     }
     tbody.appendChild(tr);
     benchQueueIdx++;
@@ -3332,6 +3344,16 @@
           document.getElementById('gpu-peak-val').textContent = formatMB(m.peak_mb);
           document.getElementById('gpu-cache-val').textContent = formatMB(m.cache_mb);
           drawGpuChart();
+        }
+        // Update token/cache stats
+        if (data.total_tokens !== undefined) {
+          document.getElementById('stat-total-tokens').textContent = data.total_tokens.toLocaleString();
+        }
+        if (data.cached_tokens !== undefined) {
+          document.getElementById('stat-cached-tokens').textContent = data.cached_tokens.toLocaleString();
+        }
+        if (data.cache_hit_rate !== undefined) {
+          document.getElementById('stat-cache-efficiency').textContent = (data.cache_hit_rate * 100).toFixed(1) + '%';
         }
       } else if (path === '/admin/api/models/local') {
         onLocalModelsResult(jsonStr);

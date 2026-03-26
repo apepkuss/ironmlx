@@ -105,6 +105,68 @@ impl ServerManager {
 
         *self.process.lock().unwrap() = Some(child);
         *self.status.lock().unwrap() = ServerStatus::Running;
+
+        // Start crash monitor thread — detects backend exit and auto-restarts
+        let process_arc = self.process.clone();
+        let status_arc = self.status.clone();
+        let model = model_path.to_string();
+        let binary_clone = binary.clone();
+        let host = self.host.clone();
+        let port = self.port;
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let mut guard = process_arc.lock().unwrap();
+                if let Some(ref mut child) = *guard {
+                    match child.try_wait() {
+                        Ok(Some(exit_status)) => {
+                            // Process exited — log and attempt restart
+                            eprintln!(
+                                "[server_manager] backend exited with status: {}. Restarting...",
+                                exit_status
+                            );
+                            *status_arc.lock().unwrap() = ServerStatus::Stopped;
+                            drop(guard);
+
+                            // Wait briefly before restart
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+
+                            // Restart
+                            let restart_result = Command::new(&binary_clone)
+                                .arg("--model")
+                                .arg(&model)
+                                .arg("--host")
+                                .arg(&host)
+                                .arg("--port")
+                                .arg(port.to_string())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn();
+
+                            match restart_result {
+                                Ok(new_child) => {
+                                    *process_arc.lock().unwrap() = Some(new_child);
+                                    *status_arc.lock().unwrap() = ServerStatus::Running;
+                                    eprintln!("[server_manager] backend restarted successfully");
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[server_manager] failed to restart backend: {}",
+                                        e
+                                    );
+                                    return; // Stop monitoring
+                                }
+                            }
+                        }
+                        Ok(None) => {} // Still running
+                        Err(_) => return, // Can't check — stop monitoring
+                    }
+                } else {
+                    return; // No process — intentionally stopped, exit monitor
+                }
+            }
+        });
+
         Ok(())
     }
 

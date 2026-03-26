@@ -189,6 +189,9 @@ pub struct HealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryInfo>,
     pub started_at: i64,
+    pub total_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_hit_rate: f64,
 }
 
 #[derive(Debug, Serialize)]

@@ -149,6 +149,7 @@ async fn main() {
         log_buffer: state::LogBuffer::new(config.read().unwrap().log_buffer_size),
         downloads: std::sync::Mutex::new(std::collections::HashMap::new()),
         benchmark_history: std::sync::Mutex::new(Vec::new()),
+        total_tokens: std::sync::atomic::AtomicU64::new(0),
     });
 
     // Log startup event

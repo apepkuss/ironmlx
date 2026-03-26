@@ -429,7 +429,7 @@ async fn chat_completions_sync(
         finish_reason
     };
 
-    Ok(Json(ChatCompletionResponse {
+    let resp = Ok(Json(ChatCompletionResponse {
         id: request_id,
         object: "chat.completion".to_string(),
         created: chrono::Utc::now().timestamp(),
@@ -449,7 +449,14 @@ async fn chat_completions_sync(
             completion_tokens: completion_len,
             total_tokens: prompt_len + completion_len,
         },
-    }))
+    }));
+
+    state.total_tokens.fetch_add(
+        (prompt_len + completion_len) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    resp
 }
 
 async fn chat_completions_stream(
@@ -1017,6 +1024,9 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     let peak = ironmlx_core::memory::get_peak_memory().unwrap_or(0);
     let total = ironmlx_core::memory::get_memory_size().map(|bytes| bytes as f64 / 1_048_576.0);
 
+    let cache_stats = ironmlx_core::cache::CacheStats::current();
+    let total_tokens = state.total_tokens.load(std::sync::atomic::Ordering::Relaxed);
+
     Json(HealthResponse {
         status: "ok".to_string(),
         model,
@@ -1027,6 +1037,9 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             total_mb: total,
         }),
         started_at: state.started_at,
+        total_tokens,
+        cached_tokens: cache_stats.cached_tokens,
+        cache_hit_rate: cache_stats.hit_rate(),
     })
 }
 

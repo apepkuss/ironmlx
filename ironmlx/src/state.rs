@@ -108,6 +108,8 @@ pub struct AppState {
     pub log_buffer: LogBuffer,
     pub downloads: Mutex<HashMap<String, DownloadStatus>>,
     pub benchmark_history: Mutex<Vec<BenchmarkResult>>,
+    /// Total tokens processed (prompt + generated) across all requests.
+    pub total_tokens: std::sync::atomic::AtomicU64,
 }
 
 impl AppState {

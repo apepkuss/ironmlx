@@ -9,5 +9,5 @@ pub use block_pool::{BlockPool, BlockPoolConfig};
 pub use block_store::{BLOCK_SIZE, BlockId, BlockStore};
 pub use boundary_snapshot::{BoundarySnapshotStore, SnapshotKey};
 pub use cache_type::{CacheType, LayerCacheConfig, ModelCacheConfig};
-pub use prefix_cache::{CacheManager, PrefixCache};
+pub use prefix_cache::{CacheManager, CacheStats, PrefixCache};
 pub use ssd_store::{SSDStore, SSDStoreConfig};
