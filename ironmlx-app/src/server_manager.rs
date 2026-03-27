@@ -182,6 +182,13 @@ impl ServerManager {
                                 return;
                             }
 
+                            // Notify frontend: backend crashed
+                            let exit_msg = format!("{}", exit_status);
+                            crate::web_dashboard::eval_js_on_window_sync(&format!(
+                                "if(typeof onServerCrash==='function')onServerCrash('exited','{}')",
+                                exit_msg.replace('\'', "\\'")
+                            ));
+
                             eprintln!("[server_manager] restarting...");
 
                             // Wait briefly before restart
@@ -204,9 +211,17 @@ impl ServerManager {
                                     *process_arc.lock().unwrap() = Some(new_child);
                                     *status_arc.lock().unwrap() = ServerStatus::Running;
                                     eprintln!("[server_manager] backend restarted successfully");
+                                    // Notify frontend: backend recovered
+                                    crate::web_dashboard::eval_js_on_window_sync(
+                                        "if(typeof onServerCrash==='function')onServerCrash('recovered','')",
+                                    );
                                 }
                                 Err(e) => {
                                     eprintln!("[server_manager] failed to restart backend: {}", e);
+                                    crate::web_dashboard::eval_js_on_window_sync(&format!(
+                                        "if(typeof onServerCrash==='function')onServerCrash('failed','{}')",
+                                        e.to_string().replace('\'', "\\'")
+                                    ));
                                     return; // Stop monitoring
                                 }
                             }
