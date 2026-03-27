@@ -248,6 +248,81 @@
     opacity: 0.85;
   }
 
+  .btn-secondary {
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .btn-secondary:hover {
+    background: var(--bg);
+  }
+
+  /* ── Chat Tab Bar ── */
+  .chat-tab {
+    padding: 8px 20px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .chat-tab:hover {
+    color: var(--text);
+  }
+  .chat-tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent, #007aff);
+  }
+
+  /* ── Toggle Switch ── */
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+    flex-shrink: 0;
+  }
+  .switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+  }
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--border);
+    border-radius: 22px;
+    transition: .2s;
+  }
+  .switch input:checked + .slider {
+    background: var(--accent, #007aff);
+  }
+  .slider:before {
+    content: "";
+    position: absolute;
+    height: 16px;
+    width: 16px;
+    left: 3px;
+    bottom: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: .2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  }
+  .switch input:checked + .slider:before {
+    transform: translateX(18px);
+  }
+
   /* ── Stats grid ── */
   .stats-grid {
     display: grid;
@@ -1590,66 +1665,189 @@
     </div>
   </div>
 
-  <!-- Chat Page (Moss Integration) -->
+  <!-- Chat Page (Moss + OpenClaw Integration) -->
   <div class="page" id="page-chat">
     <div class="page-title" data-i18n="nav_chat">Chat</div>
-    <div class="page-subtitle" data-i18n="chat_subtitle">Intelligent agent powered by Moss.</div>
+    <div class="page-subtitle" data-i18n="chat_subtitle">Connect your AI agent to ironmlx.</div>
 
-    <!-- Not Installed State -->
-    <div id="moss-not-installed">
-      <div class="card-settings" style="text-align:center; padding:48px 32px;">
-        <div style="margin-bottom:24px;">
-          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" style="opacity:0.3;">
-            <path d="M8 8h48a4 4 0 014 4v32a4 4 0 01-4 4H20l-12 12V12a4 4 0 014-4z" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
-            <circle cx="22" cy="28" r="3" fill="currentColor"/>
-            <circle cx="32" cy="28" r="3" fill="currentColor"/>
-            <circle cx="42" cy="28" r="3" fill="currentColor"/>
-          </svg>
+    <!-- Tab Bar -->
+    <div class="chat-tab-bar" style="display:flex; gap:0; margin-bottom:20px; border-bottom:1px solid var(--border);">
+      <button class="chat-tab active" id="tab-btn-moss" onclick="switchChatTab('moss')" data-i18n="tab_moss">Moss</button>
+      <button class="chat-tab" id="tab-btn-openclaw" onclick="switchChatTab('openclaw')" data-i18n="tab_openclaw">OpenClaw</button>
+    </div>
+
+    <!-- ═══ Moss Tab Content ═══ -->
+    <div id="tab-content-moss">
+      <!-- Moss Not Installed -->
+      <div id="moss-not-installed">
+        <div class="card-settings" style="text-align:center; padding:48px 32px;">
+          <div style="margin-bottom:24px;">
+            <svg width="64" height="64" viewBox="0 0 64 64" fill="none" style="opacity:0.3;">
+              <path d="M8 8h48a4 4 0 014 4v32a4 4 0 01-4 4H20l-12 12V12a4 4 0 014-4z" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+              <circle cx="22" cy="28" r="3" fill="currentColor"/>
+              <circle cx="32" cy="28" r="3" fill="currentColor"/>
+              <circle cx="42" cy="28" r="3" fill="currentColor"/>
+            </svg>
+          </div>
+          <h3 style="margin:0 0 8px; font-size:18px; font-weight:600;" data-i18n="moss_title">Moss Agent</h3>
+          <p style="margin:0 0 24px; color:var(--text-secondary); font-size:13px; max-width:480px; margin-left:auto; margin-right:auto; line-height:1.6;" data-i18n="moss_description">Moss is an intelligent AI agent that can plan complex tasks, use tools, execute scripts, and maintain conversation memory. Install Moss Desktop to unlock advanced chat capabilities.</p>
+          <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-bottom:32px;">
+            <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+              <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_planning">Task Planning</div>
+              <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_planning_desc">Break complex requests into subtasks</div>
+            </div>
+            <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+              <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_tools">Tool Integration</div>
+              <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_tools_desc">MCP servers, skills, script execution</div>
+            </div>
+            <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+              <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_memory">Conversation Memory</div>
+              <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_memory_desc">Persistent context across sessions</div>
+            </div>
+          </div>
+          <button class="btn-primary" onclick="downloadMossDesktop()" id="moss-download-btn" data-i18n="moss_download">Download Moss Desktop</button>
+          <p style="margin:12px 0 0; font-size:12px; color:var(--text-secondary);" data-i18n="moss_download_hint">Download from GitHub Releases and install the .dmg file.</p>
         </div>
-        <h3 style="margin:0 0 8px; font-size:18px; font-weight:600;" data-i18n="moss_title">Moss Agent</h3>
-        <p style="margin:0 0 24px; color:var(--text-secondary); font-size:13px; max-width:480px; margin-left:auto; margin-right:auto; line-height:1.6;" data-i18n="moss_description">Moss is an intelligent AI agent that can plan complex tasks, use tools, execute scripts, and maintain conversation memory. Install Moss Desktop to unlock advanced chat capabilities.</p>
-
-        <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-bottom:32px;">
-          <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
-            <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_planning">Task Planning</div>
-            <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_planning_desc">Break complex requests into subtasks</div>
-          </div>
-          <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
-            <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_tools">Tool Integration</div>
-            <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_tools_desc">MCP servers, skills, script execution</div>
-          </div>
-          <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
-            <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="moss_feat_memory">Conversation Memory</div>
-            <div style="font-size:12px; color:var(--text-secondary);" data-i18n="moss_feat_memory_desc">Persistent context across sessions</div>
+      </div>
+      <!-- Moss Installed -->
+      <div id="moss-installed" style="display:none;">
+        <div class="card-settings" style="padding:24px;">
+          <div style="display:flex; align-items:center; gap:16px;">
+            <img src="data:image/png;base64,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" style="width:48px; height:48px; border-radius:12px;" alt="Moss"/>
+            <div>
+              <div style="font-size:16px; font-weight:600;" data-i18n="moss_management">Moss Desktop</div>
+              <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">
+                <span id="moss-status-dot" class="status-dot ready" style="margin-right:2px;"></span>
+                <span id="moss-status-text" data-i18n="moss_detected">Detected</span>
+              </div>
+            </div>
+            <div style="margin-left:auto;">
+              <button class="btn-primary" onclick="openMossDesktop()" data-i18n="moss_open" style="padding:8px 20px;">Open Moss Desktop</button>
+            </div>
           </div>
         </div>
-
-        <button class="btn-primary" onclick="downloadMossDesktop()" id="moss-download-btn" data-i18n="moss_download">Download Moss Desktop</button>
-        <p style="margin:12px 0 0; font-size:12px; color:var(--text-secondary);" data-i18n="moss_download_hint">Download from GitHub Releases and install the .dmg file.</p>
       </div>
     </div>
 
-    <!-- Installed State -->
-    <div id="moss-installed" style="display:none;">
-      <!-- Moss Status Card -->
-      <div class="card-settings" style="padding:24px;">
-        <div style="display:flex; align-items:center; gap:16px; margin-bottom:20px;">
-          <img src="data:image/png;base64,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" style="width:48px; height:48px; border-radius:12px;" alt="Moss"/>
-          <div>
-            <div style="font-size:16px; font-weight:600;" data-i18n="moss_management">Moss Desktop</div>
-            <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">
-              <span id="moss-status-dot" class="status-dot ready" style="margin-right:2px;"></span>
-              <span id="moss-status-text" data-i18n="moss_detected">Detected</span>
+    <!-- ═══ OpenClaw Tab Content ═══ -->
+    <div id="tab-content-openclaw" style="display:none;">
+      <!-- OpenClaw Not Installed -->
+      <div id="openclaw-not-installed">
+        <div class="card-settings" style="text-align:center; padding:48px 32px;">
+          <div style="margin-bottom:24px;">
+            <div style="width:48px; height:48px; border-radius:12px; background:var(--bg); display:flex; align-items:center; justify-content:center; margin:0 auto;">
+              <svg width="32" height="32" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <defs><linearGradient id="oc-grad-ni" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ff4d4d"/><stop offset="100%" stop-color="#991b1b"/></linearGradient></defs>
+                <path d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z" fill="url(#oc-grad-ni)"/>
+                <path d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z" fill="url(#oc-grad-ni)"/>
+                <path d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z" fill="url(#oc-grad-ni)"/>
+                <path d="M45 15 Q35 5 30 8" stroke="#ff4d4d" stroke-width="3" stroke-linecap="round"/>
+                <path d="M75 15 Q85 5 90 8" stroke="#ff4d4d" stroke-width="3" stroke-linecap="round"/>
+                <circle cx="45" cy="35" r="6" fill="#050810"/><circle cx="75" cy="35" r="6" fill="#050810"/>
+                <circle cx="46" cy="34" r="2.5" fill="#00e5cc"/><circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
+              </svg>
             </div>
           </div>
-          <div style="margin-left:auto;">
-            <button class="btn-primary" onclick="openMossDesktop()" data-i18n="moss_open" style="padding:8px 20px;">Open Moss Desktop</button>
+          <h3 style="margin:0 0 8px; font-size:18px; font-weight:600;" data-i18n="openclaw_title">OpenClaw</h3>
+          <p style="margin:0 0 24px; color:var(--text-secondary); font-size:13px; max-width:480px; margin-left:auto; margin-right:auto; line-height:1.6;" data-i18n="openclaw_description">OpenClaw is a personal AI assistant framework that runs on your device. It supports 25+ messaging channels including WhatsApp, Telegram, Slack, and more.</p>
+          <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-bottom:32px;">
+            <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+              <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="openclaw_feat_multichannel">Multi-Channel</div>
+              <div style="font-size:12px; color:var(--text-secondary);" data-i18n="openclaw_feat_multichannel_desc">WhatsApp, Telegram, Slack & 25+ more</div>
+            </div>
+            <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+              <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="openclaw_feat_routing">Agent Routing</div>
+              <div style="font-size:12px; color:var(--text-secondary);" data-i18n="openclaw_feat_routing_desc">Route channels to specialized agents</div>
+            </div>
+            <div class="card" style="padding:16px 20px; text-align:left; min-width:160px;">
+              <div style="font-weight:600; font-size:13px; margin-bottom:4px;" data-i18n="openclaw_feat_privacy">Privacy First</div>
+              <div style="font-size:12px; color:var(--text-secondary);" data-i18n="openclaw_feat_privacy_desc">Runs entirely on your device</div>
+            </div>
+          </div>
+          <button class="btn-primary" onclick="installOpenClaw()" id="openclaw-install-btn" data-i18n="openclaw_install">Install OpenClaw</button>
+          <p style="margin:12px 0 0; font-size:12px; color:var(--text-secondary);" data-i18n="openclaw_install_hint">Uses the official install script. Requires internet connection.</p>
+        </div>
+      </div>
+      <!-- OpenClaw Installing -->
+      <div id="openclaw-installing" style="display:none;">
+        <div class="card-settings" style="padding:32px;">
+          <h3 style="margin:0 0 16px; font-size:16px; font-weight:600;" data-i18n="openclaw_installing">Installing OpenClaw...</h3>
+          <div style="background:var(--bg); border-radius:8px; height:6px; overflow:hidden; margin-bottom:20px;">
+            <div id="openclaw-progress-bar" style="height:100%; width:0%; background:var(--accent, #007aff); border-radius:8px; transition:width 0.3s ease;"></div>
+          </div>
+          <div id="openclaw-install-steps" style="font-size:13px; line-height:2;">
+            <div id="step-downloading"><span>○</span> <span data-i18n="openclaw_step_downloading">Downloading install script...</span></div>
+            <div id="step-cli_installed"><span>○</span> <span data-i18n="openclaw_step_cli">Installing OpenClaw CLI...</span></div>
+            <div id="step-configuring"><span>○</span> <span data-i18n="openclaw_step_config">Configuring ironmlx provider...</span></div>
+            <div id="step-gateway_install"><span>○</span> <span data-i18n="openclaw_step_gateway">Starting Gateway...</span></div>
           </div>
         </div>
       </div>
+      <!-- OpenClaw Installed -->
+      <div id="openclaw-installed" style="display:none;">
+        <div class="card-settings" style="padding:24px;">
+          <div style="display:flex; align-items:center; gap:16px; margin-bottom:16px;">
+            <div style="width:48px; height:48px; border-radius:12px; background:var(--bg); display:flex; align-items:center; justify-content:center;">
+              <svg width="32" height="32" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <defs><linearGradient id="oc-grad-sm" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ff4d4d"/><stop offset="100%" stop-color="#991b1b"/></linearGradient></defs>
+                <path d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z" fill="url(#oc-grad-sm)"/>
+                <path d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z" fill="url(#oc-grad-sm)"/>
+                <path d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z" fill="url(#oc-grad-sm)"/>
+                <path d="M45 15 Q35 5 30 8" stroke="#ff4d4d" stroke-width="3" stroke-linecap="round"/>
+                <path d="M75 15 Q85 5 90 8" stroke="#ff4d4d" stroke-width="3" stroke-linecap="round"/>
+                <circle cx="45" cy="35" r="6" fill="#050810"/><circle cx="75" cy="35" r="6" fill="#050810"/>
+                <circle cx="46" cy="34" r="2.5" fill="#00e5cc"/><circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
+              </svg>
+            </div>
+            <div>
+              <div style="font-size:16px; font-weight:600;">OpenClaw</div>
+              <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">
+                <span id="openclaw-status-dot" class="status-dot ready" style="margin-right:2px;"></span>
+                <span id="openclaw-status-text" data-i18n="openclaw_running">Running</span>
+              </div>
+            </div>
+            <div style="margin-left:auto;" id="openclaw-action-buttons">
+              <button class="btn-primary" onclick="openOpenClawChat()" data-i18n="openclaw_open_webchat" style="padding:8px 20px;">Open OpenClaw</button>
+            </div>
+            <div style="margin-left:auto; display:none;" id="openclaw-start-button">
+              <button class="btn-primary" onclick="startOpenClawGateway()" data-i18n="openclaw_start_gateway" style="padding:8px 20px;">Start Gateway</button>
+            </div>
+          </div>
+          <!-- Gateway Token -->
+          <div id="openclaw-token-row" style="border-top:1px solid var(--border); padding-top:16px; margin-top:8px; display:none;">
+            <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;" data-i18n="openclaw_gateway_token">Gateway Token</div>
+            <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:10px 14px; font-family:'SF Mono', Menlo, monospace; font-size:12px; display:flex; align-items:center; justify-content:space-between;">
+              <span id="openclaw-token-display" style="color:var(--text); word-break:break-all;"></span>
+              <div style="display:flex; gap:4px; flex-shrink:0; margin-left:8px;">
+                <button class="icon-btn" id="openclaw-token-eye" onclick="toggleOpenClawTokenVisibility()" title="Show/Hide" style="padding:6px;">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/></svg>
+                </button>
+                <button class="icon-btn" onclick="copyOpenClawToken()" title="Copy" style="padding:6px;">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M3 11V3.5A.5.5 0 013.5 3H11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <!-- Settings -->
+          <div style="border-top:1px solid var(--border); padding-top:16px; margin-top:8px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+              <span style="font-size:13px;" data-i18n="openclaw_autostart">Start at Login</span>
+              <label class="switch">
+                <input type="checkbox" id="openclaw-autostart-toggle" onchange="toggleOpenClawAutoStart(this.checked)">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div style="text-align:right;">
+              <button style="background:none; border:none; color:var(--text-secondary); font-size:12px; cursor:pointer; text-decoration:underline;" onclick="uninstallOpenClaw()" data-i18n="openclaw_uninstall">Uninstall OpenClaw</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-      <!-- API Endpoint -->
-      <div class="card-settings" style="margin-top:16px;">
+    <!-- ═══ Shared API Endpoint (outside tabs) ═══ -->
+    <div id="chat-api-endpoint" style="display:none; margin-top:16px;">
+      <div class="card-settings">
         <div class="card-header">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M2 4h12M2 8h12M2 12h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
           <span data-i18n="api_endpoint">API Endpoint</span>
@@ -1664,7 +1862,7 @@
           </div>
           <div style="display:flex;align-items:flex-start;gap:8px;padding:10px 14px;background:var(--bg);border-radius:8px;border:1px solid var(--border);">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;margin-top:1px;color:#007aff;"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.3"/><path d="M8 7v4M8 5.5v0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-            <span style="font-size:12px;color:var(--text-secondary);line-height:1.6;" data-i18n="moss_config_step2">To use in Moss Desktop, go to Settings and paste the Chat URL above as the API endpoint. No API key required.</span>
+            <span id="chat-config-hint" style="font-size:12px;color:var(--text-secondary);line-height:1.6;" data-i18n="moss_config_hint">To use in Moss Desktop, go to Settings and paste the Chat URL above as the API endpoint. No API key required.</span>
           </div>
         </div>
       </div>
@@ -1842,7 +2040,8 @@
   const I18N = {
     en: {
       nav_status: "Status", nav_models: "Models", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_chat: "Chat", nav_settings: "Settings",
-      chat_subtitle: "Intelligent agent powered by Moss.",
+      chat_subtitle: "Connect your AI agent to ironmlx.",
+      tab_moss: "Moss", tab_openclaw: "OpenClaw",
       moss_title: "Moss Agent", moss_description: "Moss is an intelligent AI agent that can plan complex tasks, use tools, execute scripts, and maintain conversation memory. Install Moss to unlock advanced chat capabilities.",
       moss_feat_planning: "Task Planning", moss_feat_planning_desc: "Break complex requests into subtasks",
       moss_feat_tools: "Tool Integration", moss_feat_tools_desc: "MCP servers, skills, script execution",
@@ -1853,6 +2052,19 @@
       api_endpoint: "API Endpoint", moss_config_guide: "Configuration Guide",
       moss_config_step1: "To use ironmlx as the LLM backend in Moss, configure the following in Moss Settings:",
       moss_config_step2: "To use in Moss Desktop, go to Settings and paste the Chat URL above as the API endpoint. No API key required.",
+      moss_config_hint: "To use in Moss Desktop, go to Settings and paste the Chat URL above as the API endpoint. No API key required.",
+      openclaw_title: "OpenClaw", openclaw_description: "OpenClaw is a personal AI assistant framework that runs on your device. It supports 25+ messaging channels including WhatsApp, Telegram, Slack, and more.",
+      openclaw_feat_multichannel: "Multi-Channel", openclaw_feat_multichannel_desc: "WhatsApp, Telegram, Slack & 25+ more",
+      openclaw_feat_routing: "Agent Routing", openclaw_feat_routing_desc: "Route channels to specialized agents",
+      openclaw_feat_privacy: "Privacy First", openclaw_feat_privacy_desc: "Runs entirely on your device",
+      openclaw_install: "Install OpenClaw", openclaw_install_hint: "Uses the official install script. Requires internet connection.",
+      openclaw_installing: "Installing OpenClaw...", openclaw_running: "Running", openclaw_stopped: "Stopped",
+      openclaw_step_downloading: "Downloading install script...", openclaw_step_cli: "Installing OpenClaw CLI...", openclaw_step_config: "Configuring ironmlx provider...", openclaw_step_gateway: "Starting Gateway...",
+      openclaw_gateway_token: "Gateway Token",
+      openclaw_open_chat: "Open Web Chat", openclaw_open_dashboard: "Open Dashboard", openclaw_open_webchat: "Open OpenClaw",
+      openclaw_start_gateway: "Start Gateway", openclaw_autostart: "Start at Login",
+      openclaw_uninstall: "Uninstall OpenClaw", openclaw_uninstall_confirm: "Are you sure you want to uninstall OpenClaw?",
+      openclaw_config_hint: "ironmlx is auto-configured as a provider during installation. To manage models and channels, open the OpenClaw dashboard.",
       status_subtitle: "Server status and resource usage overview.",
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
       total_tokens: "Total Tokens", cached_tokens: "Cached Tokens", cache_efficiency: "Cache Efficiency",
@@ -1923,7 +2135,8 @@
     },
     "zh-Hans": {
       nav_status: "状态", nav_models: "模型", nav_benchmark: "基准测试", nav_logs: "日志", nav_chat: "对话", nav_settings: "设置",
-      chat_subtitle: "由 Moss 驱动的智能代理。",
+      chat_subtitle: "将您的 AI 代理连接到 ironmlx。",
+      tab_moss: "Moss", tab_openclaw: "OpenClaw",
       moss_title: "Moss 智能代理", moss_description: "Moss 是一个智能 AI 代理，能够规划复杂任务、使用工具、执行脚本并维护对话记忆。安装 Moss 以解锁高级对话功能。",
       moss_feat_planning: "任务规划", moss_feat_planning_desc: "将复杂请求分解为子任务",
       moss_feat_tools: "工具集成", moss_feat_tools_desc: "MCP 服务器、技能、脚本执行",
@@ -1934,6 +2147,19 @@
       api_endpoint: "API 端点", moss_config_guide: "配置指南",
       moss_config_step1: "要在 Moss 中使用 ironmlx 作为 LLM 后端，请在 Moss 设置中配置以下内容：",
       moss_config_step2: "在 Moss Desktop 的设置中，将上方 Chat URL 粘贴为 API 端点。无需 API Key。",
+      moss_config_hint: "在 Moss Desktop 中，前往设置并将上方 Chat URL 粘贴为 API 端点。无需 API 密钥。",
+      openclaw_title: "OpenClaw", openclaw_description: "OpenClaw 是一个在您设备上运行的个人 AI 助手框架，支持 WhatsApp、Telegram、Slack 等 25+ 消息频道。",
+      openclaw_feat_multichannel: "多频道", openclaw_feat_multichannel_desc: "WhatsApp、Telegram、Slack 等 25+ 频道",
+      openclaw_feat_routing: "代理路由", openclaw_feat_routing_desc: "将频道路由到专用代理",
+      openclaw_feat_privacy: "隐私优先", openclaw_feat_privacy_desc: "完全在您的设备上运行",
+      openclaw_install: "一键安装 OpenClaw", openclaw_install_hint: "使用官方安装脚本，需要网络连接。",
+      openclaw_installing: "正在安装 OpenClaw...", openclaw_running: "运行中", openclaw_stopped: "已停止",
+      openclaw_step_downloading: "下载安装脚本...", openclaw_step_cli: "安装 OpenClaw CLI...", openclaw_step_config: "配置 ironmlx Provider...", openclaw_step_gateway: "启动 Gateway...",
+      openclaw_gateway_token: "Gateway Token",
+      openclaw_open_chat: "打开 Web Chat", openclaw_open_dashboard: "打开管理面板", openclaw_open_webchat: "打开 OpenClaw",
+      openclaw_start_gateway: "启动 Gateway", openclaw_autostart: "开机自启",
+      openclaw_uninstall: "卸载 OpenClaw", openclaw_uninstall_confirm: "确定要卸载 OpenClaw 吗？",
+      openclaw_config_hint: "ironmlx 在安装时已自动配置为 Provider。如需管理模型和频道，请打开 OpenClaw 管理面板。",
       status_subtitle: "服务器状态与资源使用概览。",
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
       total_tokens: "处理 Tokens", cached_tokens: "缓存 Tokens", cache_efficiency: "缓存命中率",
@@ -2004,7 +2230,8 @@
     },
     "zh-Hant": {
       nav_status: "狀態", nav_models: "模型", nav_benchmark: "基準測試", nav_logs: "日誌", nav_chat: "對話", nav_settings: "設定",
-      chat_subtitle: "由 Moss 驅動的智慧代理。",
+      chat_subtitle: "將您的 AI 代理連接到 ironmlx。",
+      tab_moss: "Moss", tab_openclaw: "OpenClaw",
       moss_title: "Moss 智慧代理", moss_description: "Moss 是一個智慧 AI 代理，能夠規劃複雜任務、使用工具、執行腳本並維護對話記憶。安裝 Moss 以解鎖進階對話功能。",
       moss_feat_planning: "任務規劃", moss_feat_planning_desc: "將複雜請求分解為子任務",
       moss_feat_tools: "工具整合", moss_feat_tools_desc: "MCP 伺服器、技能、腳本執行",
@@ -2015,6 +2242,19 @@
       moss_config_guide: "設定指南",
       moss_config_step1: "要在 Moss 中使用 ironmlx 作為 LLM 後端，請在 Moss 設定中設定以下內容：",
       moss_config_step2: "設定完成後，Moss 將使用 ironmlx 本地載入的模型進行推理。",
+      moss_config_hint: "在 Moss Desktop 中，前往設定並將上方 Chat URL 貼上為 API 端點。無需 API 金鑰。",
+      openclaw_title: "OpenClaw", openclaw_description: "OpenClaw 是一個在您裝置上執行的個人 AI 助手框架，支援 WhatsApp、Telegram、Slack 等 25+ 訊息頻道。",
+      openclaw_feat_multichannel: "多頻道", openclaw_feat_multichannel_desc: "WhatsApp、Telegram、Slack 等 25+ 頻道",
+      openclaw_feat_routing: "代理路由", openclaw_feat_routing_desc: "將頻道路由到專用代理",
+      openclaw_feat_privacy: "隱私優先", openclaw_feat_privacy_desc: "完全在您的裝置上執行",
+      openclaw_install: "一鍵安裝 OpenClaw", openclaw_install_hint: "使用官方安裝腳本，需要網路連線。",
+      openclaw_installing: "正在安裝 OpenClaw...", openclaw_running: "執行中", openclaw_stopped: "已停止",
+      openclaw_step_downloading: "下載安裝腳本...", openclaw_step_cli: "安裝 OpenClaw CLI...", openclaw_step_config: "設定 ironmlx Provider...", openclaw_step_gateway: "啟動 Gateway...",
+      openclaw_gateway_token: "Gateway Token",
+      openclaw_open_chat: "開啟 Web Chat", openclaw_open_dashboard: "開啟管理面板", openclaw_open_webchat: "開啟 OpenClaw",
+      openclaw_start_gateway: "啟動 Gateway", openclaw_autostart: "開機自啟",
+      openclaw_uninstall: "解除安裝 OpenClaw", openclaw_uninstall_confirm: "確定要解除安裝 OpenClaw 嗎？",
+      openclaw_config_hint: "ironmlx 在安裝時已自動設定為 Provider。如需管理模型和頻道，請開啟 OpenClaw 管理面板。",
       status_subtitle: "伺服器狀態與資源使用概覽。",
       server_status: "伺服器狀態", running: "執行中", uptime: "執行時間", model: "模型",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
@@ -2084,7 +2324,8 @@
     },
     ja: {
       nav_status: "ステータス", nav_models: "モデル", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_chat: "チャット", nav_settings: "設定",
-      chat_subtitle: "Moss による知的エージェント。",
+      chat_subtitle: "AI エージェントを ironmlx に接続。",
+      tab_moss: "Moss", tab_openclaw: "OpenClaw",
       moss_title: "Moss エージェント", moss_description: "Moss は複雑なタスクの計画、ツールの使用、スクリプトの実行、会話メモリの維持ができる知的 AI エージェントです。Moss をインストールして高度なチャット機能を利用しましょう。",
       moss_feat_planning: "タスク計画", moss_feat_planning_desc: "複雑なリクエストをサブタスクに分解",
       moss_feat_tools: "ツール統合", moss_feat_tools_desc: "MCP サーバー、スキル、スクリプト実行",
@@ -2095,6 +2336,19 @@
       moss_config_guide: "設定ガイド",
       moss_config_step1: "Moss で ironmlx を LLM バックエンドとして使用するには、Moss の設定で以下を構成してください：",
       moss_config_step2: "設定完了後、Moss は ironmlx のローカルモデルを推論に使用します。",
+      moss_config_hint: "Moss Desktop の設定で、上記の Chat URL を API エンドポイントとして貼り付けてください。API キー不要。",
+      openclaw_title: "OpenClaw", openclaw_description: "OpenClaw はデバイス上で動作する個人 AI アシスタントフレームワークです。WhatsApp、Telegram、Slack など 25 以上のチャネルに対応。",
+      openclaw_feat_multichannel: "マルチチャネル", openclaw_feat_multichannel_desc: "WhatsApp、Telegram、Slack など 25 以上",
+      openclaw_feat_routing: "エージェントルーティング", openclaw_feat_routing_desc: "チャネルを専門エージェントにルーティング",
+      openclaw_feat_privacy: "プライバシー最優先", openclaw_feat_privacy_desc: "完全にデバイス上で動作",
+      openclaw_install: "OpenClaw をインストール", openclaw_install_hint: "公式インストールスクリプトを使用。インターネット接続が必要。",
+      openclaw_installing: "OpenClaw をインストール中...", openclaw_running: "実行中", openclaw_stopped: "停止中",
+      openclaw_step_downloading: "インストールスクリプトをダウンロード中...", openclaw_step_cli: "OpenClaw CLI をインストール中...", openclaw_step_config: "ironmlx プロバイダーを設定中...", openclaw_step_gateway: "Gateway を起動中...",
+      openclaw_gateway_token: "Gateway トークン",
+      openclaw_open_chat: "Web Chat を開く", openclaw_open_dashboard: "ダッシュボードを開く", openclaw_open_webchat: "OpenClaw を開く",
+      openclaw_start_gateway: "Gateway を起動", openclaw_autostart: "ログイン時に起動",
+      openclaw_uninstall: "OpenClaw をアンインストール", openclaw_uninstall_confirm: "OpenClaw をアンインストールしてもよろしいですか？",
+      openclaw_config_hint: "ironmlx はインストール時にプロバイダーとして自動設定済み。モデルやチャネルの管理は OpenClaw ダッシュボードで。",
       status_subtitle: "サーバーステータスとリソース使用状況の概要。",
       server_status: "サーバーステータス", running: "実行中", uptime: "稼働時間", model: "モデル",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
@@ -2164,7 +2418,8 @@
     },
     ko: {
       nav_status: "상태", nav_models: "모델", nav_benchmark: "벤치마크", nav_logs: "로그", nav_chat: "채팅", nav_settings: "설정",
-      chat_subtitle: "Moss 기반 지능형 에이전트.",
+      chat_subtitle: "AI 에이전트를 ironmlx에 연결하세요.",
+      tab_moss: "Moss", tab_openclaw: "OpenClaw",
       moss_title: "Moss 에이전트", moss_description: "Moss는 복잡한 작업을 계획하고, 도구를 사용하고, 스크립트를 실행하고, 대화 메모리를 유지할 수 있는 지능형 AI 에이전트입니다. Moss를 설치하여 고급 채팅 기능을 사용하세요.",
       moss_feat_planning: "작업 계획", moss_feat_planning_desc: "복잡한 요청을 하위 작업으로 분해",
       moss_feat_tools: "도구 통합", moss_feat_tools_desc: "MCP 서버, 스킬, 스크립트 실행",
@@ -2175,6 +2430,19 @@
       moss_config_guide: "구성 가이드",
       moss_config_step1: "Moss에서 ironmlx를 LLM 백엔드로 사용하려면 Moss 설정에서 다음을 구성하세요:",
       moss_config_step2: "구성 완료 후 Moss는 ironmlx의 로컬 모델을 추론에 사용합니다.",
+      moss_config_hint: "Moss Desktop 설정에서 위의 Chat URL을 API 엔드포인트로 붙여넣으세요. API 키 불필요.",
+      openclaw_title: "OpenClaw", openclaw_description: "OpenClaw는 디바이스에서 실행되는 개인 AI 어시스턴트 프레임워크입니다. WhatsApp, Telegram, Slack 등 25개 이상의 채널을 지원합니다.",
+      openclaw_feat_multichannel: "멀티채널", openclaw_feat_multichannel_desc: "WhatsApp, Telegram, Slack 등 25개 이상",
+      openclaw_feat_routing: "에이전트 라우팅", openclaw_feat_routing_desc: "채널을 전문 에이전트로 라우팅",
+      openclaw_feat_privacy: "프라이버시 우선", openclaw_feat_privacy_desc: "완전히 디바이스에서 실행",
+      openclaw_install: "OpenClaw 설치", openclaw_install_hint: "공식 설치 스크립트를 사용합니다. 인터넷 연결이 필요합니다.",
+      openclaw_installing: "OpenClaw 설치 중...", openclaw_running: "실행 중", openclaw_stopped: "중지됨",
+      openclaw_step_downloading: "설치 스크립트 다운로드 중...", openclaw_step_cli: "OpenClaw CLI 설치 중...", openclaw_step_config: "ironmlx 프로바이더 구성 중...", openclaw_step_gateway: "Gateway 시작 중...",
+      openclaw_gateway_token: "Gateway 토큰",
+      openclaw_open_chat: "Web Chat 열기", openclaw_open_dashboard: "대시보드 열기", openclaw_open_webchat: "OpenClaw 열기",
+      openclaw_start_gateway: "Gateway 시작", openclaw_autostart: "로그인 시 자동 시작",
+      openclaw_uninstall: "OpenClaw 제거", openclaw_uninstall_confirm: "OpenClaw를 제거하시겠습니까?",
+      openclaw_config_hint: "ironmlx는 설치 시 프로바이더로 자동 구성됩니다. 모델과 채널 관리는 OpenClaw 대시보드에서 하세요.",
       status_subtitle: "서버 상태 및 리소스 사용 개요.",
       server_status: "서버 상태", running: "실행 중", uptime: "가동 시간", model: "모델",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
@@ -3024,6 +3292,39 @@
     });
   })();
 
+  // ── Chat Tab Switching ──
+  let currentChatTab = 'moss';
+
+  function switchChatTab(tab) {
+    currentChatTab = tab;
+    document.getElementById('tab-content-moss').style.display = tab === 'moss' ? 'block' : 'none';
+    document.getElementById('tab-content-openclaw').style.display = tab === 'openclaw' ? 'block' : 'none';
+    document.getElementById('tab-btn-moss').className = 'chat-tab' + (tab === 'moss' ? ' active' : '');
+    document.getElementById('tab-btn-openclaw').className = 'chat-tab' + (tab === 'openclaw' ? ' active' : '');
+    // Update config hint text
+    const hint = document.getElementById('chat-config-hint');
+    if (hint) {
+      const dict = I18N[currentLang] || I18N.en;
+      if (tab === 'moss') {
+        hint.textContent = dict.moss_config_hint || 'To use in Moss Desktop, go to Settings and paste the Chat URL above as the API endpoint. No API key required.';
+        hint.setAttribute('data-i18n', 'moss_config_hint');
+      } else {
+        hint.textContent = dict.openclaw_config_hint || 'ironmlx is auto-configured as a provider during installation. To manage models and channels, open the OpenClaw dashboard.';
+        hint.setAttribute('data-i18n', 'openclaw_config_hint');
+      }
+    }
+    updateApiEndpointVisibility();
+  }
+
+  function updateApiEndpointVisibility() {
+    const show = window.__MOSS_INSTALLED__ || window.__OPENCLAW_INSTALLED__;
+    const el = document.getElementById('chat-api-endpoint');
+    if (el) el.style.display = show ? 'block' : 'none';
+    // Update port
+    const portEl = document.getElementById('moss-ironmlx-port');
+    if (portEl) portEl.textContent = window.__IRONMLX_PORT__ || '9068';
+  }
+
   // ── Moss Desktop Integration ──
   window.__MOSS_INSTALLED__ = false;
 
@@ -3033,25 +3334,20 @@
     }
   }
 
-  // Called from Rust with moss detection result
   function onMossStatus(jsonStr) {
     let status = {};
     try { status = JSON.parse(jsonStr); } catch(e) { return; }
     window.__MOSS_INSTALLED__ = status.installed;
-
     document.getElementById('moss-not-installed').style.display = status.installed ? 'none' : 'block';
     document.getElementById('moss-installed').style.display = status.installed ? 'block' : 'none';
-
     if (status.installed) {
       const dot = document.getElementById('moss-status-dot');
       const text = document.getElementById('moss-status-text');
       const dict = I18N[currentLang] || I18N.en;
       dot.className = 'status-dot ready';
       text.textContent = dict.moss_detected || 'Detected';
-      // Show ironmlx port in config guide
-      const portEl = document.getElementById('moss-ironmlx-port');
-      if (portEl) portEl.textContent = window.__IRONMLX_PORT__ || '9068';
     }
+    updateApiEndpointVisibility();
   }
 
   function downloadMossDesktop() {
@@ -3063,6 +3359,171 @@
   function openMossDesktop() {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.openMossDesktop) {
       window.webkit.messageHandlers.openMossDesktop.postMessage('open');
+    }
+  }
+
+  // ── OpenClaw Integration ──
+  window.__OPENCLAW_INSTALLED__ = false;
+  window.__OPENCLAW_GATEWAY_RUNNING__ = false;
+
+  function checkOpenClawInstalled() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.checkOpenClaw) {
+      window.webkit.messageHandlers.checkOpenClaw.postMessage('check');
+    }
+  }
+
+  function onOpenClawStatus(jsonStr) {
+    let status = {};
+    try { status = JSON.parse(jsonStr); } catch(e) { return; }
+    window.__OPENCLAW_INSTALLED__ = status.installed;
+    window.__OPENCLAW_GATEWAY_RUNNING__ = status.gatewayRunning;
+
+    document.getElementById('openclaw-not-installed').style.display = status.installed ? 'none' : 'block';
+    document.getElementById('openclaw-installing').style.display = 'none';
+    document.getElementById('openclaw-installed').style.display = status.installed ? 'block' : 'none';
+
+    if (status.installed) {
+      const dot = document.getElementById('openclaw-status-dot');
+      const text = document.getElementById('openclaw-status-text');
+      const dict = I18N[currentLang] || I18N.en;
+      if (status.gatewayRunning) {
+        dot.className = 'status-dot ready';
+        text.textContent = dict.openclaw_running || 'Running';
+        document.getElementById('openclaw-action-buttons').style.display = 'flex';
+        document.getElementById('openclaw-start-button').style.display = 'none';
+      } else {
+        dot.className = 'status-dot stopped';
+        text.textContent = dict.openclaw_stopped || 'Stopped';
+        document.getElementById('openclaw-action-buttons').style.display = 'none';
+        document.getElementById('openclaw-start-button').style.display = 'block';
+      }
+      // Update autostart toggle
+      const toggle = document.getElementById('openclaw-autostart-toggle');
+      if (toggle && status.autostart !== undefined) {
+        toggle.checked = status.autostart;
+      }
+      // Update gateway token display (masked by default)
+      const tokenRow = document.getElementById('openclaw-token-row');
+      const tokenDisplay = document.getElementById('openclaw-token-display');
+      if (tokenRow && tokenDisplay && status.token) {
+        window.__OPENCLAW_TOKEN__ = status.token;
+        window.__OPENCLAW_TOKEN_VISIBLE__ = false;
+        tokenDisplay.textContent = '\u2022'.repeat(status.token.length);
+        tokenRow.style.display = 'block';
+      }
+    }
+    updateApiEndpointVisibility();
+  }
+
+  function toggleOpenClawTokenVisibility() {
+    const token = window.__OPENCLAW_TOKEN__ || '';
+    const display = document.getElementById('openclaw-token-display');
+    const eyeBtn = document.getElementById('openclaw-token-eye');
+    if (!display || !token) return;
+    window.__OPENCLAW_TOKEN_VISIBLE__ = !window.__OPENCLAW_TOKEN_VISIBLE__;
+    if (window.__OPENCLAW_TOKEN_VISIBLE__) {
+      display.textContent = token;
+      eyeBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/><line x1="2" y1="14" x2="14" y2="2" stroke="currentColor" stroke-width="1.2"/></svg>';
+    } else {
+      display.textContent = '\u2022'.repeat(token.length);
+      eyeBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/></svg>';
+    }
+  }
+
+  function copyOpenClawToken() {
+    const token = window.__OPENCLAW_TOKEN__ || '';
+    if (!token) return;
+    const ta = document.createElement('textarea');
+    ta.value = token;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+
+  function installOpenClaw() {
+    const btn = document.getElementById('openclaw-install-btn');
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+    document.getElementById('openclaw-not-installed').style.display = 'none';
+    document.getElementById('openclaw-installing').style.display = 'block';
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.installOpenClaw) {
+      window.webkit.messageHandlers.installOpenClaw.postMessage('install');
+    }
+  }
+
+  function onOpenClawInstallProgress(jsonStr) {
+    let progress = {};
+    try { progress = JSON.parse(jsonStr); } catch(e) { return; }
+
+    const bar = document.getElementById('openclaw-progress-bar');
+    if (bar && progress.progress) bar.style.width = progress.progress + '%';
+
+    const stepMap = {
+      'downloading': 'step-downloading',
+      'cli_installed': 'step-cli_installed',
+      'configuring': 'step-configuring',
+      'gateway_install': 'step-gateway_install'
+    };
+    const steps = ['downloading', 'cli_installed', 'configuring', 'gateway_install'];
+    const currentIdx = steps.indexOf(progress.step);
+    steps.forEach((s, i) => {
+      const el = document.getElementById('step-' + s);
+      if (!el) return;
+      const iconSpan = el.querySelector('span:first-child');
+      if (!iconSpan) return;
+      if (i < currentIdx) iconSpan.textContent = '\u2705';
+      else if (i === currentIdx) iconSpan.textContent = '\u23f3';
+    });
+
+    if (progress.step === 'done') {
+      checkOpenClawInstalled();
+    }
+    if (progress.step === 'error') {
+      document.getElementById('openclaw-installing').style.display = 'none';
+      document.getElementById('openclaw-not-installed').style.display = 'block';
+      const btn = document.getElementById('openclaw-install-btn');
+      if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+      alert('Installation failed: ' + (progress.message || 'Unknown error'));
+    }
+  }
+
+  function uninstallOpenClaw() {
+    const dict = I18N[currentLang] || I18N.en;
+    if (!confirm(dict.openclaw_uninstall_confirm || 'Are you sure you want to uninstall OpenClaw?')) return;
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.uninstallOpenClaw) {
+      window.webkit.messageHandlers.uninstallOpenClaw.postMessage('uninstall');
+    }
+  }
+
+  function startOpenClawGateway() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.startOpenClawGateway) {
+      window.webkit.messageHandlers.startOpenClawGateway.postMessage('start');
+    }
+  }
+
+  function stopOpenClawGateway() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.stopOpenClawGateway) {
+      window.webkit.messageHandlers.stopOpenClawGateway.postMessage('stop');
+    }
+  }
+
+  function toggleOpenClawAutoStart(enabled) {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.toggleOpenClawAutoStart) {
+      window.webkit.messageHandlers.toggleOpenClawAutoStart.postMessage(JSON.stringify({enabled: enabled}));
+    }
+  }
+
+  function openOpenClawChat() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.openOpenClawChat) {
+      window.webkit.messageHandlers.openOpenClawChat.postMessage('open');
+    }
+  }
+
+  function openOpenClawDashboard() {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.openOpenClawDashboard) {
+      window.webkit.messageHandlers.openOpenClawDashboard.postMessage('open');
     }
   }
 
@@ -3085,6 +3546,22 @@
       btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 8l3 3 5-5" stroke="#34c759" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       setTimeout(() => { btn.innerHTML = orig; }, 1500);
     }
+  }
+
+  // ── Server Error Notification ──
+  function onServerError(message) {
+    // Show a non-intrusive banner at the top of the status page
+    let banner = document.getElementById('server-error-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'server-error-banner';
+      banner.style.cssText = 'background:#ff3b3014;border:1px solid #ff3b3040;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px;font-size:13px;color:var(--text);';
+      const statusPage = document.getElementById('page-status');
+      if (statusPage) statusPage.insertBefore(banner, statusPage.children[2]);
+    }
+    banner.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;"><circle cx="8" cy="8" r="7" stroke="#ff3b30" stroke-width="1.3"/><path d="M8 4.5v4M8 10.5v.5" stroke="#ff3b30" stroke-width="1.5" stroke-linecap="round"/></svg>'
+      + '<span>' + message + '</span>'
+      + '<button onclick="this.parentElement.remove()" style="margin-left:auto;background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:16px;">\u00d7</button>';
   }
 
   // ── Save Settings ──
@@ -3344,6 +3821,11 @@
             window.__LOADED_MODELS__.clear();
             window.__LOADED_MODELS__.add(data.model);
             syncModelList();
+          }
+          // Trigger OpenClaw model sync once when server first becomes ready
+          if (!window.__OPENCLAW_MODELS_SYNCED__) {
+            window.__OPENCLAW_MODELS_SYNCED__ = true;
+            syncLoadedModels();
           }
         }
         if (data.memory) {

@@ -173,6 +173,10 @@ define_class!(
                         } else {
                             do_load_model(&model_id, port)
                         };
+                        // Sync to OpenClaw config after load
+                        if !result.contains("\"warning\"") {
+                            sync_openclaw_models(port);
+                        }
                         eval_js_on_window(
                             win_send,
                             &format!("onModelLoaded('{}')", result.replace('\'', "\\'")),
@@ -189,6 +193,8 @@ define_class!(
                     std::thread::spawn(move || {
                         let port = crate::config::AppConfig::load().port;
                         let result = do_unload_model(&model_id, port);
+                        // Sync to OpenClaw config after unload
+                        sync_openclaw_models(port);
                         eval_js_on_window(
                             win_send,
                             &format!("onModelUnloaded('{}')", result.replace('\'', "\\'")),
@@ -248,6 +254,8 @@ define_class!(
                             })
                             .unwrap_or_default();
                         eprintln!("[syncLoadedModels] loaded model ids: {:?}", ids);
+                        // Sync to OpenClaw config
+                        sync_openclaw_models(port);
                         let json = serde_json::to_string(&ids).unwrap_or_default();
                         eval_js_on_window(
                             win_send,
@@ -288,6 +296,336 @@ define_class!(
                             eprintln!("Failed to open Moss: {e}");
                         }
                     });
+                }
+                // ── OpenClaw Integration ──
+                "checkOpenClaw" => {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let cli_path = format!("{home}/.openclaw/bin/openclaw");
+                    let installed = std::path::Path::new(&cli_path).exists();
+                    let gateway_running = std::net::TcpStream::connect_timeout(
+                        &std::net::SocketAddr::from(([127, 0, 0, 1], 18789)),
+                        std::time::Duration::from_millis(500),
+                    )
+                    .is_ok();
+                    // Check if LaunchAgent plist exists (autostart enabled)
+                    let plist = format!("{home}/Library/LaunchAgents/ai.openclaw.gateway.plist");
+                    let autostart = std::path::Path::new(&plist).exists();
+                    let token = read_openclaw_gateway_token();
+                    let token_json =
+                        serde_json::to_string(&token).unwrap_or_else(|_| "\"\"".to_string());
+                    let status = format!(
+                        "{{\"installed\":{installed},\"gatewayRunning\":{gateway_running},\"autostart\":{autostart},\"token\":{token_json}}}"
+                    );
+                    eval_js_on_window_sync(&format!(
+                        "onOpenClawStatus('{}')",
+                        status.replace('\'', "\\'")
+                    ));
+                }
+                "installOpenClaw" => {
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let home = std::env::var("HOME").unwrap_or_default();
+
+                        // Step 1: Download and run install script
+                        eval_js_on_window(
+                            win_send.as_ref().map(|r| RawPtr(r.0)),
+                            "onOpenClawInstallProgress('{\"step\":\"downloading\",\"progress\":10}')",
+                        );
+                        let install_result = std::process::Command::new("/bin/bash")
+                            .arg("-c")
+                            .arg("curl -fsSL https://openclaw.bot/install-cli.sh | bash -s -- --json --no-onboard --prefix ~/.openclaw")
+                            .env("HOME", &home)
+                            .env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin")
+                            .output();
+
+                        match install_result {
+                            Ok(output) if output.status.success() => {
+                                eval_js_on_window(
+                                    win_send.as_ref().map(|r| RawPtr(r.0)),
+                                    "onOpenClawInstallProgress('{\"step\":\"cli_installed\",\"progress\":50}')",
+                                );
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                eprintln!("[installOpenClaw] install script failed: {stderr}");
+                                let msg = format!(
+                                    "onOpenClawInstallProgress('{}')",
+                                    format!(
+                                        "{{\"step\":\"error\",\"message\":\"{}\"}}",
+                                        stderr
+                                            .replace('"', "\\\"")
+                                            .replace('\'', "\\'")
+                                            .replace('\n', " ")
+                                    )
+                                );
+                                eval_js_on_window(win_send.as_ref().map(|r| RawPtr(r.0)), &msg);
+                                return;
+                            }
+                            Err(e) => {
+                                eprintln!("[installOpenClaw] failed to run install script: {e}");
+                                let msg = format!(
+                                    "onOpenClawInstallProgress('{}')",
+                                    format!(
+                                        "{{\"step\":\"error\",\"message\":\"Failed to run install script: {e}\"}}"
+                                    )
+                                );
+                                eval_js_on_window(win_send.as_ref().map(|r| RawPtr(r.0)), &msg);
+                                return;
+                            }
+                        }
+
+                        // Step 2: Write ironmlx provider config
+                        eval_js_on_window(
+                            win_send.as_ref().map(|r| RawPtr(r.0)),
+                            "onOpenClawInstallProgress('{\"step\":\"configuring\",\"progress\":65}')",
+                        );
+                        let config_path = format!("{home}/.openclaw/openclaw.json");
+                        let port = crate::config::AppConfig::load().port;
+                        let provider_config = serde_json::json!({
+                            "ironmlx": {
+                                "baseUrl": format!("http://127.0.0.1:{port}/v1"),
+                                "apiKey": "sk-any",
+                                "api": "openai-completions",
+                                "models": []
+                            }
+                        });
+                        // Read existing config and merge
+                        let mut config: serde_json::Value = std::fs::read_to_string(&config_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        if config.get("models").is_none() {
+                            config["models"] = serde_json::json!({});
+                        }
+                        if config["models"].get("mode").is_none() {
+                            config["models"]["mode"] = serde_json::json!("merge");
+                        }
+                        if config["models"].get("providers").is_none() {
+                            config["models"]["providers"] = serde_json::json!({});
+                        }
+                        config["models"]["providers"]["ironmlx"] =
+                            provider_config["ironmlx"].clone();
+                        if let Ok(json_str) = serde_json::to_string_pretty(&config) {
+                            let _ = std::fs::write(&config_path, json_str);
+                        }
+
+                        // Step 3: Install gateway (LaunchAgent)
+                        eval_js_on_window(
+                            win_send.as_ref().map(|r| RawPtr(r.0)),
+                            "onOpenClawInstallProgress('{\"step\":\"gateway_install\",\"progress\":80}')",
+                        );
+                        let cli = format!("{home}/.openclaw/bin/openclaw");
+                        let gw_result = std::process::Command::new(&cli)
+                            .args(["gateway", "install", "--port", "18789"])
+                            .env("HOME", &home)
+                            .env("PATH", format!("{home}/.openclaw/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"))
+                            .output();
+
+                        match gw_result {
+                            Ok(output) if output.status.success() => {
+                                // Wait for gateway to be reachable
+                                for _ in 0..10 {
+                                    if std::net::TcpStream::connect_timeout(
+                                        &std::net::SocketAddr::from(([127, 0, 0, 1], 18789)),
+                                        std::time::Duration::from_millis(500),
+                                    )
+                                    .is_ok()
+                                    {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_secs(1));
+                                }
+                                eval_js_on_window(
+                                    win_send.as_ref().map(|r| RawPtr(r.0)),
+                                    "onOpenClawInstallProgress('{\"step\":\"done\",\"progress\":100}')",
+                                );
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                eprintln!("[installOpenClaw] gateway install failed: {stderr}");
+                                eval_js_on_window(
+                                    win_send.as_ref().map(|r| RawPtr(r.0)),
+                                    "onOpenClawInstallProgress('{\"step\":\"done\",\"progress\":100}')",
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("[installOpenClaw] failed to run gateway install: {e}");
+                                eval_js_on_window(
+                                    win_send.as_ref().map(|r| RawPtr(r.0)),
+                                    "onOpenClawInstallProgress('{\"step\":\"done\",\"progress\":100}')",
+                                );
+                            }
+                        }
+                    });
+                }
+                "uninstallOpenClaw" => {
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        let cli = format!("{home}/.openclaw/bin/openclaw");
+                        // Uninstall gateway LaunchAgent
+                        let _ = std::process::Command::new(&cli)
+                            .args(["gateway", "uninstall"])
+                            .env("HOME", &home)
+                            .env("PATH", format!("{home}/.openclaw/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"))
+                            .output();
+                        // Uninstall CLI via npm
+                        let _ = std::process::Command::new("npm")
+                            .args(["uninstall", "-g", "openclaw"])
+                            .env("HOME", &home)
+                            .env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin")
+                            .output();
+                        // Report status
+                        eval_js_on_window(
+                            win_send.as_ref().map(|r| RawPtr(r.0)),
+                            "onOpenClawStatus('{\"installed\":false,\"gatewayRunning\":false,\"autostart\":false}')",
+                        );
+                    });
+                }
+                "startOpenClawGateway" => {
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let _ = std::process::Command::new("/bin/launchctl")
+                            .args(["start", "ai.openclaw.gateway"])
+                            .output();
+                        // Wait for gateway to become reachable
+                        for _ in 0..10 {
+                            if std::net::TcpStream::connect_timeout(
+                                &std::net::SocketAddr::from(([127, 0, 0, 1], 18789)),
+                                std::time::Duration::from_millis(500),
+                            )
+                            .is_ok()
+                            {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                        }
+                        let running = std::net::TcpStream::connect_timeout(
+                            &std::net::SocketAddr::from(([127, 0, 0, 1], 18789)),
+                            std::time::Duration::from_millis(500),
+                        )
+                        .is_ok();
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        let plist =
+                            format!("{home}/Library/LaunchAgents/ai.openclaw.gateway.plist");
+                        let autostart = std::path::Path::new(&plist).exists();
+                        let status = format!(
+                            "{{\"installed\":true,\"gatewayRunning\":{running},\"autostart\":{autostart}}}"
+                        );
+                        eval_js_on_window(
+                            win_send.as_ref().map(|r| RawPtr(r.0)),
+                            &format!("onOpenClawStatus('{}')", status.replace('\'', "\\'")),
+                        );
+                    });
+                }
+                "stopOpenClawGateway" => {
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let _ = std::process::Command::new("/bin/launchctl")
+                            .args(["stop", "ai.openclaw.gateway"])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        let plist =
+                            format!("{home}/Library/LaunchAgents/ai.openclaw.gateway.plist");
+                        let autostart = std::path::Path::new(&plist).exists();
+                        eval_js_on_window(
+                            win_send.as_ref().map(|r| RawPtr(r.0)),
+                            &format!(
+                                "onOpenClawStatus('{{\"installed\":true,\"gatewayRunning\":false,\"autostart\":{autostart}}}')"
+                            ),
+                        );
+                    });
+                }
+                "toggleOpenClawAutoStart" => {
+                    let body = body_str.to_string();
+                    let win_ptr_raw = window_lock()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.0));
+                    let win_send = win_ptr_raw.map(RawPtr);
+                    std::thread::spawn(move || {
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        let cli = format!("{home}/.openclaw/bin/openclaw");
+                        let enabled = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|v| v["enabled"].as_bool())
+                            .unwrap_or(false);
+                        if enabled {
+                            let _ = std::process::Command::new(&cli)
+                                .args(["gateway", "install", "--port", "18789"])
+                                .env("HOME", &home)
+                                .env("PATH", format!("{home}/.openclaw/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"))
+                                .output();
+                        } else {
+                            let _ = std::process::Command::new(&cli)
+                                .args(["gateway", "uninstall"])
+                                .env("HOME", &home)
+                                .env("PATH", format!("{home}/.openclaw/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"))
+                                .output();
+                        }
+                        let gateway_running = std::net::TcpStream::connect_timeout(
+                            &std::net::SocketAddr::from(([127, 0, 0, 1], 18789)),
+                            std::time::Duration::from_millis(500),
+                        )
+                        .is_ok();
+                        let plist =
+                            format!("{home}/Library/LaunchAgents/ai.openclaw.gateway.plist");
+                        let autostart = std::path::Path::new(&plist).exists();
+                        let status = format!(
+                            "{{\"installed\":true,\"gatewayRunning\":{gateway_running},\"autostart\":{autostart}}}"
+                        );
+                        eval_js_on_window(
+                            win_send.as_ref().map(|r| RawPtr(r.0)),
+                            &format!("onOpenClawStatus('{}')", status.replace('\'', "\\'")),
+                        );
+                    });
+                }
+                "openOpenClawChat" => {
+                    let token = read_openclaw_gateway_token();
+                    let url = if token.is_empty() {
+                        "http://127.0.0.1:18789".to_string()
+                    } else {
+                        format!("http://127.0.0.1:18789#token={token}")
+                    };
+                    let url_ns = objc2_foundation::NSURL::URLWithString(&NSString::from_str(&url));
+                    if let Some(url_obj) = url_ns {
+                        unsafe {
+                            let workspace = NSWorkspace::sharedWorkspace();
+                            let _: () = msg_send![&*workspace, openURL: &*url_obj];
+                        }
+                    }
+                }
+                "openOpenClawDashboard" => {
+                    let token = read_openclaw_gateway_token();
+                    let url = if token.is_empty() {
+                        "http://127.0.0.1:18789/openclaw".to_string()
+                    } else {
+                        format!("http://127.0.0.1:18789/openclaw#token={token}")
+                    };
+                    let url_ns = objc2_foundation::NSURL::URLWithString(&NSString::from_str(&url));
+                    if let Some(url_obj) = url_ns {
+                        unsafe {
+                            let workspace = NSWorkspace::sharedWorkspace();
+                            let _: () = msg_send![&*workspace, openURL: &*url_obj];
+                        }
+                    }
                 }
                 "saveSettings" => {
                     // Save settings to app_config.json and check if restart needed
@@ -981,7 +1319,7 @@ fn eval_js_on_window(win_send: Option<RawPtr>, js_code: &str) {
 }
 
 /// Evaluate JS on the web dashboard window from the main thread (used in message handler)
-fn eval_js_on_window_sync(js_code: &str) {
+pub fn eval_js_on_window_sync(js_code: &str) {
     if let Ok(guard) = window_lock().lock()
         && let Some(ref ptr) = *guard
     {
@@ -1128,6 +1466,128 @@ fn handle_set_language(lang_code: &str) {
 
 // ---------------------------------------------------------------------------
 // Public API
+/// Sync ironmlx loaded models to OpenClaw provider config.
+/// Reads /v1/models from ironmlx and writes model entries to
+/// ~/.openclaw/openclaw.json -> models.providers.ironmlx.models
+pub fn sync_openclaw_models(port: u16) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let config_path = format!("{home}/.openclaw/openclaw.json");
+    if !std::path::Path::new(&config_path).exists() {
+        return;
+    }
+
+    // Fetch current models from ironmlx (use simple HTTP to avoid reqwest/tokio issues)
+    let resp = match crate::server_manager::simple_http_get(port, "/v1/models") {
+        Ok(body) => body,
+        Err(_) => return,
+    };
+    let model_ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&resp)
+        .ok()
+        .and_then(|v| {
+            v["data"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["id"].as_str().map(String::from))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+
+    // Build model entries for OpenClaw config
+    let models: Vec<serde_json::Value> = model_ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "name": id,
+                "reasoning": false,
+                "input": ["text"],
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+                "contextWindow": 128000,
+                "maxTokens": 8192
+            })
+        })
+        .collect();
+
+    // Read, merge, write
+    let mut config: serde_json::Value = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    if let Some(ironmlx_provider) = config
+        .get_mut("models")
+        .and_then(|m| m.get_mut("providers"))
+        .and_then(|p| p.get_mut("ironmlx"))
+    {
+        ironmlx_provider["models"] = serde_json::json!(models);
+        // Also update baseUrl in case port changed
+        ironmlx_provider["baseUrl"] = serde_json::json!(format!("http://127.0.0.1:{port}/v1"));
+    }
+
+    // Set agents.defaults.model.primary to first loaded model (ironmlx/<model_id>)
+    if let Some(first_model) = model_ids.first() {
+        let primary = format!("ironmlx/{first_model}");
+        if config.get("agents").is_none() {
+            config["agents"] = serde_json::json!({});
+        }
+        if config["agents"].get("defaults").is_none() {
+            config["agents"]["defaults"] = serde_json::json!({});
+        }
+        if config["agents"]["defaults"].get("model").is_none() {
+            config["agents"]["defaults"]["model"] = serde_json::json!({});
+        }
+        config["agents"]["defaults"]["model"]["primary"] = serde_json::json!(primary);
+    } else {
+        // No models loaded — clear primary if it was an ironmlx model
+        if let Some(current) = config
+            .get("agents")
+            .and_then(|a| a.get("defaults"))
+            .and_then(|d| d.get("model"))
+            .and_then(|m| m.get("primary"))
+            .and_then(|p| p.as_str())
+        {
+            if current.starts_with("ironmlx/") {
+                config["agents"]["defaults"]["model"]["primary"] = serde_json::json!(null);
+            }
+        }
+    }
+    // Clean up old incorrect agent.model.primary if present
+    if let Some(agent) = config.get_mut("agent") {
+        if let Some(model) = agent.get("model") {
+            if model.get("primary").is_some() {
+                config["agent"]["model"]
+                    .as_object_mut()
+                    .map(|m| m.remove("primary"));
+            }
+        }
+    }
+
+    if let Ok(json_str) = serde_json::to_string_pretty(&config) {
+        let _ = std::fs::write(&config_path, json_str);
+    }
+    eprintln!(
+        "[sync_openclaw_models] synced {} models to openclaw config",
+        models.len()
+    );
+}
+
+/// Read OpenClaw gateway token from ~/.openclaw/openclaw.json
+fn read_openclaw_gateway_token() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let config_path = format!("{home}/.openclaw/openclaw.json");
+    std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("gateway")
+                .and_then(|g| g.get("auth"))
+                .and_then(|a| a.get("token"))
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 
 /// Show the web dashboard window. If already open, bring it to front.
@@ -1294,6 +1754,17 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("checkMoss"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("downloadMoss"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("openMossDesktop"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("checkOpenClaw"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("installOpenClaw"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("uninstallOpenClaw"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("startOpenClawGateway"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("stopOpenClawGateway"));
+        uc.addScriptMessageHandler_name(
+            &handler_obj,
+            &NSString::from_str("toggleOpenClawAutoStart"),
+        );
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("openOpenClawChat"));
+        uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("openOpenClawDashboard"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("saveSettings"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("restartServer"));
         uc.addScriptMessageHandler_name(&handler_obj, &NSString::from_str("saveModelParams"));
@@ -1332,7 +1803,7 @@ fn create_web_dashboard_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     let html_with_lang = html.replace(
         "/*__INIT_LANG__*/",
         &format!(
-            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); if(document.getElementById('log-level-filter'))document.getElementById('log-level-filter').value='{}'; if(document.getElementById('cfg-log-level'))document.getElementById('cfg-log-level').value='{}'; initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling(); checkMossInstalled();{} {}",
+            "window.__IRONMLX_PORT__ = {}; window.__DEFAULT_MODEL__ = '{}'; {} setLanguage('{}'); setTheme('{}'); if(document.getElementById('log-level-filter'))document.getElementById('log-level-filter').value='{}'; if(document.getElementById('cfg-log-level'))document.getElementById('cfg-log-level').value='{}'; initLogs(); syncModelList(); syncLoadedModels(); initStatusPolling(); checkMossInstalled(); checkOpenClawInstalled();{} {}",
             port,
             default_model,
             if !default_model.is_empty() {

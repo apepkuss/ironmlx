@@ -57,6 +57,9 @@ impl ServerManager {
     }
 
     pub fn start(&self, model_path: &str) -> Result<(), String> {
+        if model_path.is_empty() {
+            return Err("No model specified".to_string());
+        }
         let mut status = self.status.lock().unwrap();
         if *status == ServerStatus::Running {
             return Ok(());
@@ -106,6 +109,32 @@ impl ServerManager {
         *self.process.lock().unwrap() = Some(child);
         *self.status.lock().unwrap() = ServerStatus::Running;
 
+        // Sync models to OpenClaw config once backend has loaded models
+        let sync_port = self.port;
+        std::thread::spawn(move || {
+            eprintln!("[server_manager] waiting for models to load before syncing OpenClaw...");
+            for attempt in 0..90 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                // Use raw TCP + HTTP/1.1 to avoid reqwest/tokio issues
+                if let Ok(body) = simple_http_get(sync_port, "/v1/models") {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(arr) = json["data"].as_array() {
+                            if !arr.is_empty() {
+                                eprintln!(
+                                    "[server_manager] {} model(s) loaded at attempt {}, syncing OpenClaw",
+                                    arr.len(),
+                                    attempt
+                                );
+                                crate::web_dashboard::sync_openclaw_models(sync_port);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("[server_manager] gave up waiting for models to sync OpenClaw");
+        });
+
         // Start crash monitor thread — detects backend exit and auto-restarts
         let process_arc = self.process.clone();
         let status_arc = self.status.clone();
@@ -122,11 +151,38 @@ impl ServerManager {
                         Ok(Some(exit_status)) => {
                             // Process exited — log and attempt restart
                             eprintln!(
-                                "[server_manager] backend exited with status: {}. Restarting...",
+                                "[server_manager] backend exited with status: {}",
                                 exit_status
                             );
                             *status_arc.lock().unwrap() = ServerStatus::Stopped;
                             drop(guard);
+
+                            // Don't restart if model path is empty
+                            if model.is_empty() {
+                                eprintln!("[server_manager] no model configured, stopping monitor");
+                                return;
+                            }
+
+                            // Check if port is in use before restarting
+                            if std::net::TcpStream::connect_timeout(
+                                &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                                std::time::Duration::from_millis(500),
+                            )
+                            .is_ok()
+                            {
+                                eprintln!(
+                                    "[server_manager] port {} is already in use, not restarting",
+                                    port
+                                );
+                                // Notify frontend
+                                crate::web_dashboard::eval_js_on_window_sync(&format!(
+                                    "if(typeof onServerError==='function')onServerError('Port {} is already in use. Another instance may be running.')",
+                                    port
+                                ));
+                                return;
+                            }
+
+                            eprintln!("[server_manager] restarting...");
 
                             // Wait briefly before restart
                             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -280,5 +336,35 @@ impl ServerManager {
 impl Drop for ServerManager {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Simple HTTP GET using std::net::TcpStream (no tokio/reqwest dependency).
+/// Returns the response body on success.
+pub fn simple_http_get(port: u16, path: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let addr = format!("127.0.0.1:{port}");
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &addr.parse().map_err(|e| format!("{e}"))?,
+        std::time::Duration::from_secs(2),
+    )
+    .map_err(|e| format!("connect: {e}"))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("read: {e}"))?;
+    // Extract body after \r\n\r\n
+    if let Some(pos) = response.find("\r\n\r\n") {
+        Ok(response[pos + 4..].to_string())
+    } else {
+        Err("no HTTP body".to_string())
     }
 }

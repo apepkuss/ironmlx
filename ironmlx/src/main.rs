@@ -164,9 +164,24 @@ async fn main() {
     let app = api::router(state);
 
     // Start server
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port))
-        .await
-        .expect("Failed to bind address");
+    let addr = format!("{}:{}", args.host, args.port);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("ERROR: Cannot bind to {addr}: {e}");
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                eprintln!(
+                    "HINT: Port {} is already in use. Another ironmlx instance may be running.",
+                    args.port
+                );
+                eprintln!(
+                    "HINT: Run `lsof -iTCP:{} -sTCP:LISTEN` to find the process.",
+                    args.port
+                );
+            }
+            std::process::exit(1);
+        }
+    };
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

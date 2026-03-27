@@ -78,6 +78,39 @@ define_class!(
                 *crate::i18n::nav_language().lock().unwrap() = lang;
             }
 
+            // Check if port is available before starting
+            {
+                let port = CONFIG
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| c.port)
+                    .unwrap_or(9068);
+                if std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                    std::time::Duration::from_millis(500),
+                )
+                .is_ok()
+                {
+                    use objc2_app_kit::NSAlert;
+                    let alert = NSAlert::new(mtm);
+                    alert.setMessageText(&NSString::from_str(&format!(
+                        "Port {} is already in use",
+                        port
+                    )));
+                    alert.setInformativeText(&NSString::from_str(&format!(
+                        "Another ironmlx instance or service is using port {}. Please close it first, or change the port in Settings.",
+                        port
+                    )));
+                    alert.setAlertStyle(objc2_app_kit::NSAlertStyle::Critical);
+                    alert.addButtonWithTitle(&NSString::from_str("Quit"));
+                    alert.runModal();
+                    let app = NSApplication::sharedApplication(mtm);
+                    app.terminate(None);
+                    return;
+                }
+            }
+
             setup_status_bar(mtm);
 
             // Auto-start server if configured
@@ -170,6 +203,15 @@ define_class!(
                         eprintln!("[menu] openChat: failed to open Moss: {e}");
                     }
                 });
+            }
+        }
+
+        #[unsafe(method(openOpenClawChat:))]
+        fn open_openclaw_chat(&self, _sender: &NSMenuItem) {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let cli_path = format!("{home}/.openclaw/bin/openclaw");
+            if std::path::Path::new(&cli_path).exists() {
+                crate::app_delegate::open_url("http://127.0.0.1:18789");
             }
         }
 
@@ -410,6 +452,22 @@ fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     }
     chat.setEnabled(moss_installed);
     menu.addItem(&chat);
+
+    // ── Chat with OpenClaw ──
+    let home = std::env::var("HOME").unwrap_or_default();
+    let openclaw_cli = format!("{home}/.openclaw/bin/openclaw");
+    let openclaw_installed = std::path::Path::new(&openclaw_cli).exists();
+    let openclaw_chat = make_item(
+        mtm,
+        t("menu_chat_openclaw"),
+        Some(sel!(openOpenClawChat:)),
+        "",
+    );
+    if let Some(icon) = sf_icon("bubble.left.and.text.bubble.right") {
+        openclaw_chat.setImage(Some(&icon));
+    }
+    openclaw_chat.setEnabled(openclaw_installed);
+    menu.addItem(&openclaw_chat);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 

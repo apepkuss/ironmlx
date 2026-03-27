@@ -15,6 +15,7 @@ pub fn t(key: &str) -> &str {
         // Chinese Simplified
         ("zh", "menu_dashboard") => "\u{4eea}\u{8868}\u{76d8}",
         ("zh", "menu_chat") => "\u{4e0e} Moss \u{5bf9}\u{8bdd}",
+        ("zh", "menu_chat_openclaw") => "\u{4f7f}\u{7528} OpenClaw \u{804a}\u{5929}",
         ("zh", "menu_stop") => "\u{505c}\u{6b62}\u{670d}\u{52a1}",
         ("zh", "menu_start") => "\u{542f}\u{52a8}\u{670d}\u{52a1}",
         ("zh", "menu_restart") => "\u{91cd}\u{542f}\u{670d}\u{52a1}",
@@ -26,6 +27,7 @@ pub fn t(key: &str) -> &str {
         // Chinese Traditional
         ("zh-Hant", "menu_dashboard") => "\u{5100}\u{8868}\u{677f}",
         ("zh-Hant", "menu_chat") => "\u{8207} Moss \u{5c0d}\u{8a71}",
+        ("zh-Hant", "menu_chat_openclaw") => "\u{4f7f}\u{7528} OpenClaw \u{804a}\u{5929}",
         ("zh-Hant", "menu_stop") => "\u{505c}\u{6b62}\u{670d}\u{52d9}",
         ("zh-Hant", "menu_start") => "\u{555f}\u{52d5}\u{670d}\u{52d9}",
         ("zh-Hant", "menu_restart") => "\u{91cd}\u{555f}\u{670d}\u{52d9}",
@@ -37,6 +39,7 @@ pub fn t(key: &str) -> &str {
         // Japanese
         ("ja", "menu_dashboard") => "\u{30c0}\u{30c3}\u{30b7}\u{30e5}\u{30dc}\u{30fc}\u{30c9}",
         ("ja", "menu_chat") => "Moss \u{3068}\u{30c1}\u{30e3}\u{30c3}\u{30c8}",
+        ("ja", "menu_chat_openclaw") => "OpenClaw \u{3067}\u{30c1}\u{30e3}\u{30c3}\u{30c8}",
         ("ja", "menu_stop") => "\u{30b5}\u{30fc}\u{30d0}\u{30fc}\u{505c}\u{6b62}",
         ("ja", "menu_start") => "\u{30b5}\u{30fc}\u{30d0}\u{30fc}\u{958b}\u{59cb}",
         ("ja", "menu_restart") => "\u{30b5}\u{30fc}\u{30d0}\u{30fc}\u{518d}\u{8d77}\u{52d5}",
@@ -62,9 +65,12 @@ pub fn t(key: &str) -> &str {
         ("ko", "menu_quit") => "\u{c885}\u{b8cc}",
         ("ko", "menu_status_running") => "\u{c11c}\u{bc84}: \u{c2e4}\u{d589} \u{c911}",
         ("ko", "menu_status_stopped") => "\u{c11c}\u{bc84}: \u{c815}\u{c9c0}\u{b428}",
+        // Korean – OpenClaw
+        ("ko", "menu_chat_openclaw") => "OpenClaw\u{b85c} \u{cc44}\u{d305}",
         // English defaults
         (_, "menu_dashboard") => "Dashboard",
         (_, "menu_chat") => "Chat with Moss",
+        (_, "menu_chat_openclaw") => "Chat with OpenClaw",
         (_, "menu_stop") => "Stop Server",
         (_, "menu_start") => "Start Server",
         (_, "menu_restart") => "Restart Server",
