@@ -293,6 +293,12 @@ impl<'a> BatchGenerator<'a> {
                 .model
                 .forward(&chunk_2d, &mut ps.cache, "causal", None)?;
 
+            // Force GPU execution after each chunk to avoid accumulating too many
+            // lazy operations. Without this, macOS GPU watchdog may kill the
+            // command buffer for "Impacting Interactivity" when all chunks
+            // execute at once.
+            _logits.eval()?;
+
             ps.processed += this_chunk;
 
             // If this was the last chunk, sample the first token
@@ -365,6 +371,14 @@ impl<'a> BatchGenerator<'a> {
 
         // Discard logits for non-completed sequences (only last chunk logits matter)
         let _ = completed_uids;
+
+        // Synchronize the Metal stream to ensure all GPU work (forward pass,
+        // sampling, and KV cache storage) completes before the next decode step.
+        // Without this, Metal may abort due to uncommitted encoders or race
+        // conditions on the command buffer.
+        if !results.is_empty() || !self.prefilling.is_empty() {
+            stream.synchronize();
+        }
 
         Ok(results)
     }
@@ -883,6 +897,11 @@ impl<'a> BatchGenerator<'a> {
     /// Number of active sequences.
     pub fn active_count(&self) -> usize {
         self.sequences.len()
+    }
+
+    /// Block until all pending GPU operations on this batch's stream complete.
+    pub fn synchronize_stream(&self) {
+        self.stream.synchronize();
     }
 
     /// Check if a sequence is still active.
