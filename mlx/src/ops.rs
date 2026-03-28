@@ -678,6 +678,7 @@ pub fn dequantize(
             optional_int(group_size),
             optional_int(bits),
             mode_c.as_ptr(),
+            unsafe { std::mem::zeroed() }, // global_scale (null)
             dtype,
             stream.as_raw(),
         )

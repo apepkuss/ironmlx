@@ -20,3 +20,14 @@ pub fn start_capture(path: &str) -> Result<()> {
 pub fn stop_capture() -> Result<()> {
     check(unsafe { sys::mlx_metal_stop_capture() })
 }
+
+/// Set the maximum number of operations per Metal command buffer.
+/// Lower values improve stability for large prompts at a small throughput cost.
+pub fn set_max_ops_per_buffer(val: i32) -> Result<()> {
+    check(unsafe { sys::mlx_metal_set_max_ops_per_buffer(val) })
+}
+
+/// Set the maximum MB of data per Metal command buffer.
+pub fn set_max_mb_per_buffer(val: i32) -> Result<()> {
+    check(unsafe { sys::mlx_metal_set_max_mb_per_buffer(val) })
+}

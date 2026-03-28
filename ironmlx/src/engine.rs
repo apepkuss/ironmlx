@@ -330,6 +330,16 @@ fn enqueue_to_prefill(
         }
 
         let prompt_len = req.prompt_token_ids.len();
+
+        // Dynamically adjust Metal command buffer limits based on prompt size.
+        // Larger prompts need lower limits to prevent Metal command buffer
+        // assertion failures ("Completed handler provided after commit call").
+        if prompt_len > 8192 {
+            let ops = if prompt_len > 16384 { 5 } else { 10 };
+            ironmlx_core::metal::set_max_ops_per_buffer(ops).ok();
+            ironmlx_core::metal::set_max_mb_per_buffer(10).ok();
+        }
+
         let uid = batch.begin_prefill(
             &req.prompt_token_ids,
             req.sampling_params.clone(),
@@ -371,6 +381,12 @@ fn step_prefill(
         results.len(),
         prefill_ms
     );
+
+    // Restore default Metal buffer limits after prefill completes
+    if !results.is_empty() && batch.prefilling_count() == 0 {
+        ironmlx_core::metal::set_max_ops_per_buffer(40).ok();
+        ironmlx_core::metal::set_max_mb_per_buffer(40).ok();
+    }
 
     for (uid, response) in results {
         let Some(req) = prefill_pending.remove(&uid) else {
