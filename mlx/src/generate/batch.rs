@@ -63,7 +63,7 @@ pub enum ChunkedPrefillResult {
 }
 
 /// Default chunk size for chunked prefill (in tokens).
-const PREFILL_CHUNK_SIZE: usize = 512;
+const PREFILL_CHUNK_SIZE: usize = 256;
 
 /// BatchGenerator manages multiple sequences sharing a single model.
 ///
@@ -274,6 +274,7 @@ impl<'a> BatchGenerator<'a> {
 
         let stream = &self.stream;
         let chunk_size = PREFILL_CHUNK_SIZE;
+
         let mut completed = Vec::new();
 
         // Process each prefilling sequence's next chunk
@@ -293,11 +294,20 @@ impl<'a> BatchGenerator<'a> {
                 .model
                 .forward(&chunk_2d, &mut ps.cache, "causal", None)?;
 
-            // Force GPU execution after each chunk to avoid accumulating too many
-            // lazy operations. Without this, macOS GPU watchdog may kill the
-            // command buffer for "Impacting Interactivity" when all chunks
-            // execute at once.
-            _logits.eval()?;
+            // Evaluate cache state after each chunk (following mlx-lm pattern).
+            // This forces GPU execution of the KV cache updates without
+            // disrupting the Metal command buffer pipeline for logits.
+            // Prevents GPU watchdog timeout on large prompts.
+            for (k, v) in ps.cache.iter() {
+                if let Some(k) = k {
+                    k.eval()?;
+                }
+                if let Some(v) = v {
+                    v.eval()?;
+                }
+            }
+            // Clear MLX memory cache to release intermediate buffers
+            crate::memory::clear_cache().ok();
 
             ps.processed += this_chunk;
 
