@@ -73,6 +73,7 @@ pub struct SSDStore {
 struct PendingWrite {
     file_path: PathBuf,
     num_layers: usize,
+    estimated_bytes: u64,
 }
 
 impl SSDStore {
@@ -166,19 +167,31 @@ impl SSDStore {
             ));
         }
 
+        // Estimate size for early eviction check
+        let estimated_bytes: u64 = cpu_kv
+            .iter()
+            .map(|l| (l.keys_data.len() + l.values_data.len()) as u64 * 4)
+            .sum();
+
         // Track as pending
         self.pending_writes.insert(
             block_id,
             PendingWrite {
                 file_path: file_path.clone(),
                 num_layers,
+                estimated_bytes,
             },
         );
+
+        self.current_size_bytes += estimated_bytes;
 
         // Send CPU data to writer thread (no GPU arrays cross thread boundary)
         if let Some(ref tx) = self.write_tx {
             let _ = tx.send(WriteJob { cpu_kv, file_path });
         }
+
+        // Evict old blocks if over limit
+        self.evict_until_under_limit()?;
 
         Ok(())
     }
@@ -203,7 +216,9 @@ impl SSDStore {
                     },
                 );
                 self.lru_order.push_back(block_id);
-                self.current_size_bytes += size_bytes;
+                // Replace estimated size with actual file size
+                self.current_size_bytes =
+                    self.current_size_bytes.saturating_sub(pw.estimated_bytes) + size_bytes;
             }
         }
         self.evict_until_under_limit()?;
@@ -360,6 +375,9 @@ impl SSDStore {
             self.current_size_bytes += size_bytes;
             count += 1;
         }
+
+        // Evict blocks that exceed the configured limit
+        self.evict_until_under_limit()?;
 
         Ok(count)
     }

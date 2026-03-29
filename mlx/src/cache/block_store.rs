@@ -284,10 +284,16 @@ impl BlockStore {
 
     /// Evict LRU blocks until `current_bytes <= max_bytes`.
     fn evict_until_under_limit(&mut self) {
+        let mut evicted = false;
         while self.current_bytes > self.max_bytes {
             if self.evict_lru().is_none() {
                 break; // no more evictable blocks
             }
+            evicted = true;
+        }
+        // Force MLX to reclaim GPU memory from evicted arrays
+        if evicted {
+            crate::memory::clear_cache().ok();
         }
     }
 
