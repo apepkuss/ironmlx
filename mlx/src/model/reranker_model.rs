@@ -25,7 +25,8 @@ impl RerankerModel {
             Model::RopeBert(m) => m.forward(token_ids, stream)?,
             _ => {
                 let mut cache = vec![];
-                self.model.forward(token_ids, &mut cache, "none", None)?
+                self.model
+                    .forward(token_ids, &mut cache, "none", None, stream)?
             }
         };
 

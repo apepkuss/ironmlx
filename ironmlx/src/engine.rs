@@ -106,7 +106,6 @@ impl EngineCore {
         let mut prefill_pending: PrefillRunning = HashMap::new();
         let mut pending_aborts: HashSet<String> = HashSet::new();
         let max_num_seqs = self.max_num_seqs;
-
         loop {
             // 1. Drain all pending commands
             match drain_commands(&mut self.cmd_rx, &mut waiting, &mut pending_aborts) {

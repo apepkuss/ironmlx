@@ -79,7 +79,7 @@ pub fn stream_generate_with_cache(
     let prompt_arr = Array::from_slice_i32(tokens_to_prefill);
     let prompt_arr = ops::astype(&prompt_arr, crate::dtype::Dtype::Int32, &stream)?;
     let prompt_2d = ops::reshape(&prompt_arr, &[1, tokens_to_prefill.len() as i32], &stream)?;
-    let logits = model.forward(&prompt_2d, &mut cache, "causal", None)?;
+    let logits = model.forward(&prompt_2d, &mut cache, "causal", None, &stream)?;
 
     // Store in prefix cache after prefill
     if let Some(ref mut cm) = cache_manager {
@@ -112,7 +112,7 @@ pub fn stream_generate_with_cache(
         let input = Array::from_int(next_token);
         let input = ops::astype(&input, crate::dtype::Dtype::Int32, &stream)?;
         let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
-        let logits = model.forward(&input_2d, &mut cache, "causal", None)?;
+        let logits = model.forward(&input_2d, &mut cache, "causal", None, &stream)?;
         let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;
 
         next_token_arr = sample(&logits_2d, sampler_config, &stream)?;
@@ -154,9 +154,9 @@ pub fn stream_generate_vlm(
     let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
 
     let logits = if media.is_some() {
-        model.forward_vlm(&prompt_2d, media, &mut cache)?
+        model.forward_vlm(&prompt_2d, media, &mut cache, &stream)?
     } else {
-        model.forward(&prompt_2d, &mut cache, "causal", None)?
+        model.forward(&prompt_2d, &mut cache, "causal", None, &stream)?
     };
 
     let last_idx = prompt_tokens.len() as i32 - 1;
@@ -185,7 +185,7 @@ pub fn stream_generate_vlm(
         let input = Array::from_int(next_token);
         let input = ops::astype(&input, crate::dtype::Dtype::Int32, &stream)?;
         let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
-        let logits = model.forward(&input_2d, &mut cache, "causal", None)?;
+        let logits = model.forward(&input_2d, &mut cache, "causal", None, &stream)?;
         let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;
 
         next_token_arr = sample(&logits_2d, sampler_config, &stream)?;
@@ -227,7 +227,7 @@ pub fn generate(
     let prompt_arr = Array::from_slice_i32(prompt_tokens);
     let prompt_arr = ops::astype(&prompt_arr, crate::dtype::Dtype::Int32, &stream)?;
     let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], &stream)?;
-    let logits = model.forward(&prompt_2d, &mut cache, "causal", None)?;
+    let logits = model.forward(&prompt_2d, &mut cache, "causal", None, &stream)?;
 
     // Take logits of last token
     let last_idx = prompt_tokens.len() as i32 - 1;
@@ -255,7 +255,7 @@ pub fn generate(
         let input = Array::from_int(next_token);
         let input = ops::astype(&input, crate::dtype::Dtype::Int32, &stream)?;
         let input_2d = ops::reshape(&input, &[1, 1], &stream)?;
-        let logits = model.forward(&input_2d, &mut cache, "causal", None)?;
+        let logits = model.forward(&input_2d, &mut cache, "causal", None, &stream)?;
 
         // logits shape: [1, 1, vocab_size] -> [1, vocab_size]
         let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], &stream)?;

@@ -164,7 +164,9 @@ impl<'a> BatchGenerator<'a> {
         let tokens_to_prefill = &prompt_tokens[matched_tokens..];
         let prompt_arr = Array::from_slice_i32(tokens_to_prefill);
         let prompt_2d = ops::reshape(&prompt_arr, &[1, tokens_to_prefill.len() as i32], stream)?;
-        let logits = self.model.forward(&prompt_2d, &mut cache, "causal", None)?;
+        let logits = self
+            .model
+            .forward(&prompt_2d, &mut cache, "causal", None, &self.stream)?;
 
         // Extract last token logits (from tokens_to_prefill output)
         let last_idx = tokens_to_prefill.len() as i32 - 1;
@@ -290,9 +292,9 @@ impl<'a> BatchGenerator<'a> {
             let chunk_arr = Array::from_slice_i32(chunk_tokens);
             let chunk_2d = ops::reshape(&chunk_arr, &[1, this_chunk as i32], stream)?;
 
-            let _logits = self
-                .model
-                .forward(&chunk_2d, &mut ps.cache, "causal", None)?;
+            let _logits =
+                self.model
+                    .forward(&chunk_2d, &mut ps.cache, "causal", None, &self.stream)?;
 
             // Evaluate cache state after each chunk (following mlx-lm pattern).
             // This forces GPU execution of the KV cache updates without
@@ -414,7 +416,7 @@ impl<'a> BatchGenerator<'a> {
         let prompt_2d = ops::reshape(&prompt_arr, &[1, prompt_tokens.len() as i32], stream)?;
         let logits = self
             .model
-            .forward_vlm(&prompt_2d, Some(media), &mut cache)?;
+            .forward_vlm(&prompt_2d, Some(media), &mut cache, &self.stream)?;
 
         // Extract last token logits
         let last_idx = prompt_tokens.len() as i32 - 1;
@@ -481,9 +483,9 @@ impl<'a> BatchGenerator<'a> {
             // Forward with last_token
             let input = Array::from_slice_i32(&[seq.last_token]);
             let input_2d = ops::reshape(&input, &[1, 1], stream)?;
-            let logits = self
-                .model
-                .forward(&input_2d, &mut seq.cache, "causal", None)?;
+            let logits =
+                self.model
+                    .forward(&input_2d, &mut seq.cache, "causal", None, &self.stream)?;
             let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], stream)?;
 
             // Sample next token
@@ -546,9 +548,9 @@ impl<'a> BatchGenerator<'a> {
             let seq = self.sequences.get_mut(&uid).unwrap();
             let input = Array::from_slice_i32(&[seq.last_token]);
             let input_2d = ops::reshape(&input, &[1, 1], stream)?;
-            let logits = self
-                .model
-                .forward(&input_2d, &mut seq.cache, "causal", None)?;
+            let logits =
+                self.model
+                    .forward(&input_2d, &mut seq.cache, "causal", None, &self.stream)?;
             let logits_2d = ops::reshape(&logits, &[1, logits.shape()[2]], stream)?;
             let token_arr = sample(&logits_2d, &seq.sampler, stream)?;
             pending.push((uid, token_arr));
@@ -784,6 +786,7 @@ impl<'a> BatchGenerator<'a> {
             &offsets_arr,
             &mask,
             Some(&write_pos_arr),
+            &self.stream,
         )?;
         let fwd_ms = fwd_t0.elapsed().as_secs_f64() * 1000.0;
 

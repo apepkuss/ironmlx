@@ -124,9 +124,12 @@ impl Model {
         offsets: &Array,
         mask: &Array,
         write_positions: Option<&Array>,
+        stream: &crate::stream::Stream,
     ) -> Result<Array> {
         match self {
-            Model::Standard(m) => m.forward_batched(tokens, cache, offsets, mask, write_positions),
+            Model::Standard(m) => {
+                m.forward_batched(tokens, cache, offsets, mask, write_positions, stream)
+            }
             _ => Err(crate::error::Error::Mlx(
                 "forward_batched not supported for this model type".to_string(),
             )),
@@ -147,19 +150,14 @@ impl Model {
         cache: &mut [(Option<Array>, Option<Array>)],
         mask_mode: &str,
         mask: Option<&Array>,
+        stream: &crate::stream::Stream,
     ) -> Result<Array> {
         match self {
-            Model::Standard(m) => m.forward(tokens, cache, mask_mode, mask),
-            Model::Qwen35(m) => m.forward(tokens, cache, mask_mode, mask),
-            Model::Qwen35VL(m) => m.forward(tokens, cache, mask_mode, mask),
-            Model::Bert(m) => {
-                let stream = crate::stream::Stream::new(&crate::device::Device::gpu());
-                m.forward(tokens, &stream)
-            }
-            Model::RopeBert(m) => {
-                let stream = crate::stream::Stream::new(&crate::device::Device::gpu());
-                m.forward(tokens, &stream)
-            }
+            Model::Standard(m) => m.forward(tokens, cache, mask_mode, mask, stream),
+            Model::Qwen35(m) => m.forward(tokens, cache, mask_mode, mask, stream),
+            Model::Qwen35VL(m) => m.forward(tokens, cache, mask_mode, mask, stream),
+            Model::Bert(m) => m.forward(tokens, stream),
+            Model::RopeBert(m) => m.forward(tokens, stream),
         }
     }
 
@@ -170,10 +168,11 @@ impl Model {
         tokens: &Array,
         media: Option<&[ProcessedMedia]>,
         cache: &mut [(Option<Array>, Option<Array>)],
+        stream: &crate::stream::Stream,
     ) -> Result<Array> {
         match self {
-            Model::Qwen35VL(m) => m.forward_vlm(tokens, media, cache),
-            _ => self.forward(tokens, cache, "causal", None),
+            Model::Qwen35VL(m) => m.forward_vlm(tokens, media, cache, stream),
+            _ => self.forward(tokens, cache, "causal", None, stream),
         }
     }
 

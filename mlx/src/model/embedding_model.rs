@@ -52,7 +52,8 @@ impl EmbeddingModel {
                 // For decoder-based embeddings (E5-Mistral), we pool the logits.
                 // Proper implementation would need a forward_hidden() method.
                 let mut cache = vec![];
-                self.model.forward(token_ids, &mut cache, "none", None)?
+                self.model
+                    .forward(token_ids, &mut cache, "none", None, stream)?
             }
         };
 

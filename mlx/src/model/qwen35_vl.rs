@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use crate::array::Array;
-use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::media::ProcessedMedia;
 use crate::nn::mrope;
@@ -57,22 +56,21 @@ impl Qwen35VLModel {
         tokens: &Array,
         media: Option<&[ProcessedMedia]>,
         cache: &mut [(Option<Array>, Option<Array>)],
+        stream: &Stream,
     ) -> Result<Array> {
-        let stream = Stream::new(&Device::gpu());
-
         if let Some(media_items) = media {
             if !media_items.is_empty() {
                 // 1. Encode vision
                 let pm = &media_items[0];
                 let vision_embs =
                     self.vision_encoder
-                        .encode(&pm.pixel_values, &pm.grid_thw, &stream)?;
+                        .encode(&pm.pixel_values, &pm.grid_thw, stream)?;
 
                 // 2. Get text embeddings
                 let text_embs = self
                     .text_model
                     .embed_tokens
-                    .forward_with_stream(tokens, &stream)?;
+                    .forward_with_stream(tokens, stream)?;
 
                 // 3. Inject vision embeddings at image_token positions
                 let merged = inject_vision_embeddings(
@@ -80,7 +78,7 @@ impl Qwen35VLModel {
                     &text_embs,
                     &vision_embs,
                     self.image_token_id,
-                    &stream,
+                    stream,
                 )?;
 
                 // 4. Compute M-RoPE position IDs
@@ -92,16 +90,18 @@ impl Qwen35VLModel {
                     self.image_token_id,
                     self.video_token_id,
                 );
-                let pos_arr = mrope::position_ids_to_array(&pos_ids, &stream)?;
+                let pos_arr = mrope::position_ids_to_array(&pos_ids, stream)?;
 
                 // 5. Forward with merged embeddings + M-RoPE position IDs
                 self.text_model
-                    .forward_with_embeddings(&merged, cache, Some(&pos_arr))
+                    .forward_with_embeddings(&merged, cache, Some(&pos_arr), stream)
             } else {
-                self.text_model.forward(tokens, cache, "causal", None)
+                self.text_model
+                    .forward(tokens, cache, "causal", None, stream)
             }
         } else {
-            self.text_model.forward(tokens, cache, "causal", None)
+            self.text_model
+                .forward(tokens, cache, "causal", None, stream)
         }
     }
 
@@ -112,8 +112,10 @@ impl Qwen35VLModel {
         cache: &mut [(Option<Array>, Option<Array>)],
         mask_mode: &str,
         mask: Option<&Array>,
+        stream: &Stream,
     ) -> Result<Array> {
-        self.text_model.forward(tokens, cache, mask_mode, mask)
+        self.text_model
+            .forward(tokens, cache, mask_mode, mask, stream)
     }
 }
 

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use crate::array::Array;
-use crate::device::Device;
 use crate::error::Result;
 use crate::nn::{Attention, EmbeddingLayer, LinearLayer, MLP, Module, RMSNorm};
 use crate::ops;
@@ -214,10 +213,9 @@ impl LlamaModel {
         cache: &mut [(Option<Array>, Option<Array>)],
         mask_mode: &str,
         mask: Option<&Array>,
+        stream: &Stream,
     ) -> Result<Array> {
-        let stream = Stream::new(&Device::gpu());
-
-        let mut h = self.embed_tokens.forward_with_stream(tokens, &stream)?;
+        let mut h = self.embed_tokens.forward_with_stream(tokens, stream)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             let (ck, cv) = &cache[i];
@@ -229,15 +227,15 @@ impl LlamaModel {
                 offset,
                 mask_mode,
                 mask,
-                &stream,
+                stream,
             )?;
             h = out;
             cache[i] = (Some(new_k), Some(new_v));
         }
 
         // Final norm + lm_head
-        h = self.norm.forward_with_stream(&h, &stream)?;
-        let logits = self.lm_head.forward_with_stream(&h, &stream)?;
+        h = self.norm.forward_with_stream(&h, stream)?;
+        let logits = self.lm_head.forward_with_stream(&h, stream)?;
         Ok(logits)
     }
 
@@ -258,20 +256,20 @@ impl LlamaModel {
         offsets: &Array,
         mask: &Array,
         write_positions: Option<&Array>,
+        stream: &Stream,
     ) -> Result<Array> {
-        let stream = Stream::new(&Device::gpu());
-        let mut h = self.embed_tokens.forward_with_stream(tokens, &stream)?;
+        let mut h = self.embed_tokens.forward_with_stream(tokens, stream)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             let (ref ck, ref cv) = cache[i];
             let (out, new_k, new_v) =
-                layer.forward_batched(&h, ck, cv, offsets, mask, write_positions, &stream)?;
+                layer.forward_batched(&h, ck, cv, offsets, mask, write_positions, stream)?;
             h = out;
             cache[i] = (new_k, new_v);
         }
 
-        h = self.norm.forward_with_stream(&h, &stream)?;
-        let logits = self.lm_head.forward_with_stream(&h, &stream)?;
+        h = self.norm.forward_with_stream(&h, stream)?;
+        let logits = self.lm_head.forward_with_stream(&h, stream)?;
         Ok(logits)
     }
 }

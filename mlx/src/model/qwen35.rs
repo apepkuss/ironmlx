@@ -312,16 +312,16 @@ impl Qwen35Model {
         cache: &mut [(Option<Array>, Option<Array>)],
         _mask_mode: &str,
         _mask: Option<&Array>,
+        stream: &Stream,
     ) -> Result<Array> {
-        let stream = Stream::new(&Device::gpu());
-        let mut h = self.embed_tokens.forward_with_stream(tokens, &stream)?;
+        let mut h = self.embed_tokens.forward_with_stream(tokens, stream)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward_with_cache(&h, &mut cache[i], None, None, &stream)?;
+            h = layer.forward_with_cache(&h, &mut cache[i], None, None, stream)?;
         }
 
-        h = self.norm.forward_with_stream(&h, &stream)?;
-        let logits = self.lm_head.forward_with_stream(&h, &stream)?;
+        h = self.norm.forward_with_stream(&h, stream)?;
+        let logits = self.lm_head.forward_with_stream(&h, stream)?;
         Ok(logits)
     }
 
@@ -332,16 +332,16 @@ impl Qwen35Model {
         embeddings: &Array,
         cache: &mut [(Option<Array>, Option<Array>)],
         position_ids: Option<&Array>,
+        stream: &Stream,
     ) -> Result<Array> {
-        let stream = Stream::new(&Device::gpu());
         let mut h = embeddings.clone();
 
         for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward_with_cache(&h, &mut cache[i], None, position_ids, &stream)?;
+            h = layer.forward_with_cache(&h, &mut cache[i], None, position_ids, stream)?;
         }
 
-        h = self.norm.forward_with_stream(&h, &stream)?;
-        self.lm_head.forward_with_stream(&h, &stream)
+        h = self.norm.forward_with_stream(&h, stream)?;
+        self.lm_head.forward_with_stream(&h, stream)
     }
 }
 
