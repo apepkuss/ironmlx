@@ -21,6 +21,22 @@ pub fn stop_capture() -> Result<()> {
     check(unsafe { sys::mlx_metal_stop_capture() })
 }
 
+/// Get the maximum number of operations per Metal command buffer.
+/// This returns the chip-specific default set by MLX at startup.
+pub fn get_max_ops_per_buffer() -> Result<i32> {
+    let mut res: i32 = 0;
+    check(unsafe { sys::mlx_metal_get_max_ops_per_buffer(&mut res) })?;
+    Ok(res)
+}
+
+/// Get the maximum MB of data per Metal command buffer.
+/// This returns the chip-specific default set by MLX at startup.
+pub fn get_max_mb_per_buffer() -> Result<i32> {
+    let mut res: i32 = 0;
+    check(unsafe { sys::mlx_metal_get_max_mb_per_buffer(&mut res) })?;
+    Ok(res)
+}
+
 /// Set the maximum number of operations per Metal command buffer.
 /// Lower values improve stability for large prompts at a small throughput cost.
 pub fn set_max_ops_per_buffer(val: i32) -> Result<()> {

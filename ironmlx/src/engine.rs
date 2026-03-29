@@ -7,6 +7,25 @@ use ironmlx_core::generate::{BatchGenerator, FinishReason, SamplerConfig, SeqUid
 use ironmlx_core::media::ProcessedMedia;
 use ironmlx_core::model::Model;
 
+/// Chip-specific Metal command buffer defaults, read from MLX at startup.
+#[derive(Clone, Copy)]
+struct MetalBufferDefaults {
+    ops: i32,
+    mb: i32,
+}
+
+impl MetalBufferDefaults {
+    fn from_device() -> Self {
+        let ops = ironmlx_core::metal::get_max_ops_per_buffer().unwrap_or(40);
+        let mb = ironmlx_core::metal::get_max_mb_per_buffer().unwrap_or(40);
+        eprintln!(
+            "[engine] Metal buffer defaults: max_ops={}, max_mb={}",
+            ops, mb
+        );
+        Self { ops, mb }
+    }
+}
+
 /// Output for each generation step
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -96,6 +115,7 @@ impl EngineCore {
 
     /// Blocking run loop — call from a dedicated thread.
     pub fn run(&mut self) {
+        let metal_defaults = MetalBufferDefaults::from_device();
         let mut batch = if let Some(cm) = self.cache_manager.take() {
             BatchGenerator::with_cache_manager(&self.model, cm)
         } else {
@@ -123,7 +143,13 @@ impl EngineCore {
             process_aborts(&mut pending_aborts, &mut running, &mut batch);
 
             // 3. Enqueue waiting requests into chunked prefill
-            enqueue_to_prefill(&mut waiting, &mut batch, &mut prefill_pending, max_num_seqs);
+            enqueue_to_prefill(
+                &mut waiting,
+                &mut batch,
+                &mut prefill_pending,
+                max_num_seqs,
+                metal_defaults,
+            );
 
             // 4. If nothing is active and nothing is prefilling, block-wait
             if batch.active_count() == 0 && batch.prefilling_count() == 0 {
@@ -140,6 +166,7 @@ impl EngineCore {
                         &mut batch,
                         &mut prefill_pending,
                         max_num_seqs,
+                        metal_defaults,
                     );
                 }
 
@@ -154,6 +181,7 @@ impl EngineCore {
                 &mut prefill_pending,
                 &mut running,
                 &self.tokenizer,
+                metal_defaults,
             );
 
             // 6. Execute one decode step for all active sequences
@@ -293,6 +321,7 @@ fn enqueue_to_prefill(
     batch: &mut BatchGenerator<'_>,
     prefill_pending: &mut PrefillRunning,
     max_num_seqs: usize,
+    metal_defaults: MetalBufferDefaults,
 ) {
     while (batch.active_count() + batch.prefilling_count()) < max_num_seqs {
         // Memory pressure check
@@ -337,12 +366,14 @@ fn enqueue_to_prefill(
         let prompt_len = req.prompt_token_ids.len();
 
         // Dynamically adjust Metal command buffer limits based on prompt size.
-        // Larger prompts need lower limits to prevent Metal command buffer
-        // assertion failures ("Completed handler provided after commit call").
+        // Scale down from chip-specific defaults to prevent Metal command buffer
+        // timeout on large prompts.
         if prompt_len > 8192 {
-            let ops = if prompt_len > 16384 { 5 } else { 10 };
+            let divisor = if prompt_len > 16384 { 8 } else { 4 };
+            let ops = (metal_defaults.ops / divisor).max(2);
+            let mb = (metal_defaults.mb / divisor).max(5);
             ironmlx_core::metal::set_max_ops_per_buffer(ops).ok();
-            ironmlx_core::metal::set_max_mb_per_buffer(10).ok();
+            ironmlx_core::metal::set_max_mb_per_buffer(mb).ok();
         }
 
         let uid = batch.begin_prefill(
@@ -365,6 +396,7 @@ fn step_prefill(
     prefill_pending: &mut PrefillRunning,
     running: &mut HashMap<SeqUid, RunningRequest>,
     tokenizer: &Tokenizer,
+    metal_defaults: MetalBufferDefaults,
 ) {
     if batch.prefilling_count() == 0 {
         return;
@@ -387,10 +419,10 @@ fn step_prefill(
         prefill_ms
     );
 
-    // Restore default Metal buffer limits after prefill completes
+    // Restore chip-specific Metal buffer defaults after prefill completes
     if !results.is_empty() && batch.prefilling_count() == 0 {
-        ironmlx_core::metal::set_max_ops_per_buffer(40).ok();
-        ironmlx_core::metal::set_max_mb_per_buffer(40).ok();
+        ironmlx_core::metal::set_max_ops_per_buffer(metal_defaults.ops).ok();
+        ironmlx_core::metal::set_max_mb_per_buffer(metal_defaults.mb).ok();
     }
 
     for (uid, response) in results {
