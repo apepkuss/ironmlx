@@ -1374,22 +1374,23 @@ fn get_max_context(model_id: &str) -> usize {
     DEFAULT_MAX_CONTEXT
 }
 
-/// Quick pre-check on raw prompt string length before tokenization.
-/// Rough estimate: 1 token ≈ 4 chars. Reject obviously too-long prompts early.
+/// Pre-tokenization length sanity check.
+/// Only rejects prompts that are impossibly long (> context_window * 6 chars),
+/// since even CJK text averages ~1.5 chars/token. The real limit is enforced
+/// post-tokenization by `check_prompt_length`.
 fn check_raw_prompt_length(
     prompt: &str,
     model_id: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let max_context = get_max_context(model_id);
-    let estimated_tokens = prompt.len() / 3; // conservative: ~3 chars per token
-    if estimated_tokens > max_context {
+    // 6 chars/token is a very generous lower bound; tokenizers rarely exceed this
+    if prompt.len() > max_context * 6 {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: ErrorDetail {
                     message: format!(
-                        "Prompt too long: estimated ~{} tokens (from {} chars) exceeds context window of {} tokens.",
-                        estimated_tokens,
+                        "Prompt too long: {} chars likely exceeds context window of {} tokens.",
                         prompt.len(),
                         max_context
                     ),
