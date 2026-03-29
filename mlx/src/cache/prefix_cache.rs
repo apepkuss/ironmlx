@@ -298,14 +298,24 @@ impl CacheManager {
         if num_complete_blocks == 0 {
             return Ok(());
         }
+
+        // Skip blocks already present in the prefix cache
+        let (existing_block_ids, _) = self.prefix_cache.lookup_prefix(tokens);
+        let skip_count = existing_block_ids.len();
+        if skip_count >= num_complete_blocks {
+            return Ok(()); // All blocks already cached
+        }
+
+        let new_blocks = num_complete_blocks - skip_count;
         CACHE_TOKENS_STORED.fetch_add(
-            (num_complete_blocks * BLOCK_SIZE) as u64,
+            (new_blocks * BLOCK_SIZE) as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
 
-        let mut block_ids = Vec::with_capacity(num_complete_blocks);
+        // Start with existing block IDs, then store only new ones
+        let mut block_ids: Vec<BlockId> = existing_block_ids;
 
-        for block_idx in 0..num_complete_blocks {
+        for block_idx in skip_count..num_complete_blocks {
             let start_token = (block_idx * BLOCK_SIZE) as i32;
             let end_token = start_token + BLOCK_SIZE as i32;
 
