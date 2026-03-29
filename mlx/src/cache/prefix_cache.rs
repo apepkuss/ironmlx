@@ -209,6 +209,7 @@ impl CacheManager {
     pub fn lookup_and_load(
         &mut self,
         tokens: &[i32],
+        gpu_stream: &Stream,
     ) -> Result<(Vec<(Option<Array>, Option<Array>)>, usize)> {
         CACHE_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (matched_block_ids, _) = self.prefix_cache.lookup_prefix(tokens);
@@ -260,7 +261,6 @@ impl CacheManager {
 
         // Concatenate blocks per layer
         let mut cache: Vec<(Option<Array>, Option<Array>)> = Vec::with_capacity(self.num_layers);
-        let gpu_stream = Stream::new(&Device::gpu());
 
         for layer_idx in 0..self.num_layers {
             let k_arrays: Vec<&Array> = all_blocks_kv
@@ -292,6 +292,7 @@ impl CacheManager {
         &mut self,
         tokens: &[i32],
         kv_cache: &[(Option<Array>, Option<Array>)],
+        stream: &Stream,
     ) -> Result<()> {
         let num_complete_blocks = tokens.len() / BLOCK_SIZE;
         if num_complete_blocks == 0 {
@@ -302,7 +303,6 @@ impl CacheManager {
             std::sync::atomic::Ordering::Relaxed,
         );
 
-        let stream = Stream::new(&Device::gpu());
         let mut block_ids = Vec::with_capacity(num_complete_blocks);
 
         for block_idx in 0..num_complete_blocks {

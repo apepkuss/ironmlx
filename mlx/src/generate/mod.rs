@@ -67,7 +67,7 @@ pub fn stream_generate_with_cache(
 
     // Try prefix cache lookup
     let (mut cache, matched_tokens) = match cache_manager {
-        Some(ref mut cm) => match cm.lookup_and_load(prompt_tokens) {
+        Some(ref mut cm) => match cm.lookup_and_load(prompt_tokens, &stream) {
             Ok((c, m)) if m > 0 => (c, m),
             _ => ((0..num_layers).map(|_| (None, None)).collect(), 0),
         },
@@ -83,7 +83,7 @@ pub fn stream_generate_with_cache(
 
     // Store in prefix cache after prefill
     if let Some(ref mut cm) = cache_manager {
-        let _ = cm.store_after_prefill(prompt_tokens, &cache);
+        let _ = cm.store_after_prefill(prompt_tokens, &cache, &stream);
     }
 
     let last_idx = tokens_to_prefill.len() as i32 - 1;

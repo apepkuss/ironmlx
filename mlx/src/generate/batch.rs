@@ -152,7 +152,7 @@ impl<'a> BatchGenerator<'a> {
 
         // Try prefix cache lookup
         let (mut cache, matched_tokens) = if let Some(ref mut cm) = self.cache_manager {
-            match cm.lookup_and_load(prompt_tokens) {
+            match cm.lookup_and_load(prompt_tokens, &self.stream) {
                 Ok((c, m)) if m > 0 => (c, m),
                 _ => ((0..self.num_layers).map(|_| (None, None)).collect(), 0),
             }
@@ -202,7 +202,7 @@ impl<'a> BatchGenerator<'a> {
 
         // Store KV blocks in prefix cache for future reuse
         if let Some(ref mut cm) = self.cache_manager {
-            let _ = cm.store_after_prefill(prompt_tokens, &cache);
+            let _ = cm.store_after_prefill(prompt_tokens, &cache, &self.stream);
         }
 
         // Only store the sequence if it's not already finished
@@ -238,7 +238,7 @@ impl<'a> BatchGenerator<'a> {
 
         // Try prefix cache lookup
         let (cache, matched_tokens) = if let Some(ref mut cm) = self.cache_manager {
-            match cm.lookup_and_load(prompt_tokens) {
+            match cm.lookup_and_load(prompt_tokens, &self.stream) {
                 Ok((c, m)) if m > 0 => (c, m),
                 _ => ((0..self.num_layers).map(|_| (None, None)).collect(), 0),
             }
@@ -353,7 +353,7 @@ impl<'a> BatchGenerator<'a> {
 
                 // Store KV blocks in prefix cache
                 if let Some(ref mut cm) = self.cache_manager {
-                    let _ = cm.store_after_prefill(&ps.prompt_tokens, &ps.cache);
+                    let _ = cm.store_after_prefill(&ps.prompt_tokens, &ps.cache, stream);
                 }
 
                 let response = BatchResponse {
