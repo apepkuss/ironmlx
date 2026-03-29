@@ -106,7 +106,13 @@ impl EngineCore {
         let mut prefill_pending: PrefillRunning = HashMap::new();
         let mut pending_aborts: HashSet<String> = HashSet::new();
         let max_num_seqs = self.max_num_seqs;
+        let mut step_counter: u64 = 0;
         loop {
+            // Periodic GPU memory cleanup (every 32 steps, following omlx pattern)
+            step_counter += 1;
+            if step_counter % 32 == 0 {
+                ironmlx_core::memory::clear_cache().ok();
+            }
             // 1. Drain all pending commands
             match drain_commands(&mut self.cmd_rx, &mut waiting, &mut pending_aborts) {
                 DrainResult::Continue => {}

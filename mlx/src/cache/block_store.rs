@@ -227,7 +227,7 @@ impl BlockStore {
             .lru_order
             .iter()
             .rev()
-            .position(|&bid| self.blocks.get(&bid).is_some_and(|b| b.ref_count == 0));
+            .position(|&bid| self.blocks.get(&bid).is_some_and(|b| b.ref_count <= 1));
 
         let pos = pos?;
         // `pos` is the offset from the back, convert to front-based index.
