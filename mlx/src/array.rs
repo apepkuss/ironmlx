@@ -15,8 +15,24 @@ impl Array {
     }
 
     /// The shape of the array. `[]` denotes a scalar.
-    pub fn shape(&self) -> Vec<i32> {
-        mlx_sys::array::ffi::array_shape(&self.0)
+    ///
+    /// Returns a `SmallVec` with 8 inline slots — zero allocation for
+    /// the common case of ≤ 8-dimensional tensors.
+    pub fn shape(&self) -> smallvec::SmallVec<[i32; 8]> {
+        let raw = mlx_sys::array::ffi::array_shape(&self.0);
+        smallvec::SmallVec::from_vec(raw)
+    }
+
+    /// The size along the given dimension. Supports negative indexing
+    /// (`-1` is the last dim).
+    ///
+    /// Panics if `dim` is out of range.
+    pub fn shape_at(&self, dim: i32) -> i32 {
+        let s = self.shape();
+        let n = s.len() as i32;
+        let idx = if dim < 0 { dim + n } else { dim };
+        assert!(idx >= 0 && idx < n, "shape_at({dim}): out of range for ndim={n}");
+        s[idx as usize]
     }
 
     /// The dtype of the array.

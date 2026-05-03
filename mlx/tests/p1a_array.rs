@@ -47,3 +47,24 @@ fn debug_format_includes_shape_and_dtype() {
     assert!(s.contains("2"), "Debug output missing dim '2': {}", s);
     assert!(s.contains("3"), "Debug output missing dim '3': {}", s);
 }
+
+#[test]
+fn shape_returns_smallvec_compatible_slice() {
+    use smallvec::SmallVec;
+    let arr = Array::zeros(&[2, 3, 4], Dtype::Float32).expect("zeros");
+    let s = arr.shape();
+    // Verify the public type really is a SmallVec; this would not compile if
+    // shape() returned Vec<i32>.
+    let _: &SmallVec<[i32; 8]> = &s;
+    assert_eq!(s.as_slice(), &[2, 3, 4]);
+    assert_eq!(s.len(), 3);
+}
+
+#[test]
+fn shape_at_supports_negative_indexing() {
+    let arr = Array::zeros(&[2, 3, 4], Dtype::Float32).expect("zeros");
+    assert_eq!(arr.shape_at(0), 2);
+    assert_eq!(arr.shape_at(2), 4);
+    assert_eq!(arr.shape_at(-1), 4);
+    assert_eq!(arr.shape_at(-3), 2);
+}
