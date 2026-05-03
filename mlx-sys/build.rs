@@ -47,13 +47,17 @@ fn main() {
     // C++ standard library
     println!("cargo:rustc-link-lib=c++");
 
-    cxx_build::bridge("src/bridge/array.rs")
-        .file("shim/src/array.cc")
-        .include("shim/include")
-        .include(&include_dir)
-        .std("c++20")
-        .flag_if_supported("-fvisibility=hidden")
-        .compile("cxx_mlx_shim");
+    cxx_build::bridges([
+        "src/bridge/array.rs",
+        "src/bridge/transforms.rs",
+    ])
+    .file("shim/src/array.cc")
+    .file("shim/src/transforms.cc")
+    .include("shim/include")
+    .include(&include_dir)
+    .std("c++20")
+    .flag_if_supported("-fvisibility=hidden")
+    .compile("cxx_mlx_shim");
 }
 
 fn locate_mlx() -> (PathBuf, PathBuf) {

@@ -25,3 +25,9 @@ fn zeros_metadata() {
     assert_eq!(ffi::array_size(&arr), 24);
     assert_eq!(ffi::array_dtype(&arr), FLOAT32);
 }
+
+#[test]
+fn zeros_then_eval() {
+    let arr = mlx_sys::array::ffi::array_zeros(&[8], FLOAT32);
+    mlx_sys::transforms::ffi::eval_one(&arr).expect("eval should succeed");
+}
