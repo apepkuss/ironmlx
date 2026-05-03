@@ -139,3 +139,16 @@ impl std::fmt::Debug for Array {
             .finish()
     }
 }
+
+// SAFETY: MLX's `mlx::core::array` is internally backed by
+// `std::shared_ptr<ArrayDesc>`. The shared_ptr refcount is atomic, so
+// transferring ownership across threads is safe (the destructor in the
+// receiving thread can decrement the refcount).
+//
+// We do NOT impl Sync because MLX's "const" methods (set_status,
+// attach_event, is_available's lazy→available transition) mutate the
+// underlying ArrayDesc without synchronization. Two threads holding
+// `&Array` to the same array would race. To share an Array between
+// threads, clone it (cheap MLX refcount) or wrap it in
+// `Arc<Mutex<Array>>`. See README "Threading" section.
+unsafe impl Send for Array {}
