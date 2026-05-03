@@ -102,3 +102,40 @@ fn broadcast_to_incompatible_shape_errors() {
     let result = a.broadcast_to(&[2, 4]);
     assert!(matches!(result, Err(Error::Mlx(_))));
 }
+
+#[test]
+fn concatenate_along_axis_0() {
+    // [2,3] + [3,3] along axis 0 → [5, 3]
+    let a = Array::from_slice(&[1.0_f32; 6], &[2, 3]).expect("from_slice");
+    let b = Array::from_slice(&[2.0_f32; 9], &[3, 3]).expect("from_slice");
+    let c = mlx::ops::concatenate(&[&a, &b], 0).expect("concatenate");
+    assert_eq!(c.shape().as_slice(), &[5, 3]);
+}
+
+#[test]
+fn concatenate_along_axis_1() {
+    // [2,3] + [2,4] along axis 1 → [2, 7]
+    let a = Array::from_slice(&[1.0_f32; 6], &[2, 3]).expect("from_slice");
+    let b = Array::from_slice(&[2.0_f32; 8], &[2, 4]).expect("from_slice");
+    let c = mlx::ops::concatenate(&[&a, &b], 1).expect("concatenate");
+    assert_eq!(c.shape().as_slice(), &[2, 7]);
+}
+
+#[test]
+fn stack_creates_new_axis() {
+    // Stack two [2,3] along axis 0 → [2, 2, 3]
+    let a = Array::from_slice(&[1.0_f32; 6], &[2, 3]).expect("from_slice");
+    let b = Array::from_slice(&[2.0_f32; 6], &[2, 3]).expect("from_slice");
+    let s = mlx::ops::stack(&[&a, &b], 0).expect("stack");
+    assert_eq!(s.shape().as_slice(), &[2, 2, 3]);
+}
+
+#[test]
+fn stack_along_last_axis() {
+    let a = Array::from_slice(&[1.0_f32, 2.0], &[2]).expect("from_slice");
+    let b = Array::from_slice(&[3.0_f32, 4.0], &[2]).expect("from_slice");
+    let s = mlx::ops::stack(&[&a, &b], -1).expect("stack");
+    assert_eq!(s.shape().as_slice(), &[2, 2]);
+    // Result column-major in the new axis: [[1, 3], [2, 4]]
+    assert_eq!(s.to_vec::<f32>().expect("to_vec"), vec![1.0, 3.0, 2.0, 4.0]);
+}

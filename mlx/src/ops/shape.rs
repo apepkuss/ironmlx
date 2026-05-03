@@ -61,3 +61,29 @@ pub fn broadcast_to(a: &Array, shape: &[i32]) -> Result<Array> {
         mlx_sys::array::ffi::array_broadcast_to(a.as_inner(), shape).map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Concatenate arrays along the given axis. All arrays must have identical
+/// shape except along the concatenation axis.
+pub fn concatenate(arrays: &[&Array], axis: i32) -> Result<Array> {
+    // Build a slice of raw pointers to bridge to the unsafe shim. Each pointer
+    // is valid for the duration of this call because `arrays` (a slice of
+    // `&Array`) outlives the FFI invocation.
+    let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
+        arrays.iter().map(|a| a.as_inner() as *const _).collect();
+    // SAFETY: `raw` contains valid pointers into the borrowed `&Array`s in
+    // `arrays`, all live for the duration of this call. The shim copies via
+    // copy ctor (refcount-shared, cheap) — no aliasing or lifetime escape.
+    let inner = unsafe { mlx_sys::array::ffi::array_concatenate(&raw, axis) }
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Stack arrays along a new axis. All arrays must have identical shape; the
+/// result has rank `arrays[0].ndim() + 1`.
+pub fn stack(arrays: &[&Array], axis: i32) -> Result<Array> {
+    let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
+        arrays.iter().map(|a| a.as_inner() as *const _).collect();
+    // SAFETY: same as `concatenate` — pointers are bounded by call lifetime.
+    let inner = unsafe { mlx_sys::array::ffi::array_stack(&raw, axis) }.map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
