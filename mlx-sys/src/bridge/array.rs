@@ -71,5 +71,46 @@ pub mod ffi {
         fn array_rsqrt(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
         fn array_erf(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
         fn array_reciprocal(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
+        // === P1b2a opaque type for std::vector<array> returns ===
+        type MlxArrayVec;
+
+        // === P1b2a reductions (5 ops × {all, axis, axes}) ===
+        fn array_sum_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_sum_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_sum_axes(a: &MlxArray, axes: &[i32], keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_mean_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_mean_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_mean_axes(a: &MlxArray, axes: &[i32], keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_max_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_max_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_max_axes(a: &MlxArray, axes: &[i32], keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_min_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_min_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_min_axes(a: &MlxArray, axes: &[i32], keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_argmax_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_argmax_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+
+        // === P1b2a shape ops ===
+        fn array_reshape(a: &MlxArray, shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
+        fn array_transpose(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn array_transpose_axes(a: &MlxArray, axes: &[i32]) -> Result<UniquePtr<MlxArray>>;
+        fn array_broadcast_to(a: &MlxArray, shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn array_concatenate(arrays: &[*const MlxArray], axis: i32) -> Result<UniquePtr<MlxArray>>;
+        unsafe fn array_stack(arrays: &[*const MlxArray], axis: i32) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_split_n(a: &MlxArray, num_splits: i32, axis: i32) -> Result<UniquePtr<MlxArrayVec>>;
+        fn array_split_at(a: &MlxArray, indices: &[i32], axis: i32) -> Result<UniquePtr<MlxArrayVec>>;
+
+        fn split_result_len(v: &MlxArrayVec) -> usize;
+        fn split_result_at(v: &MlxArrayVec, i: usize) -> Result<UniquePtr<MlxArray>>;
+
+        // === P1b2a matmul ===
+        fn array_matmul(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
     }
 }

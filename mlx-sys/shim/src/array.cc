@@ -249,4 +249,119 @@ std::unique_ptr<MlxArray> array_reciprocal(const MlxArray& a) {
   return std::make_unique<MlxArray>(mlx::core::reciprocal(a));
 }
 
+// === P1b2a reductions ===
+
+std::unique_ptr<MlxArray> array_sum_all(const MlxArray& a, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::sum(a, keepdims));
+}
+std::unique_ptr<MlxArray> array_sum_axis(const MlxArray& a, int32_t axis, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::sum(a, axis, keepdims));
+}
+std::unique_ptr<MlxArray> array_sum_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims) {
+  std::vector<int> axes_vec(axes.begin(), axes.end());
+  return std::make_unique<MlxArray>(mlx::core::sum(a, axes_vec, keepdims));
+}
+
+std::unique_ptr<MlxArray> array_mean_all(const MlxArray& a, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::mean(a, keepdims));
+}
+std::unique_ptr<MlxArray> array_mean_axis(const MlxArray& a, int32_t axis, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::mean(a, axis, keepdims));
+}
+std::unique_ptr<MlxArray> array_mean_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims) {
+  std::vector<int> axes_vec(axes.begin(), axes.end());
+  return std::make_unique<MlxArray>(mlx::core::mean(a, axes_vec, keepdims));
+}
+
+std::unique_ptr<MlxArray> array_max_all(const MlxArray& a, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::max(a, keepdims));
+}
+std::unique_ptr<MlxArray> array_max_axis(const MlxArray& a, int32_t axis, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::max(a, axis, keepdims));
+}
+std::unique_ptr<MlxArray> array_max_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims) {
+  std::vector<int> axes_vec(axes.begin(), axes.end());
+  return std::make_unique<MlxArray>(mlx::core::max(a, axes_vec, keepdims));
+}
+
+std::unique_ptr<MlxArray> array_min_all(const MlxArray& a, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::min(a, keepdims));
+}
+std::unique_ptr<MlxArray> array_min_axis(const MlxArray& a, int32_t axis, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::min(a, axis, keepdims));
+}
+std::unique_ptr<MlxArray> array_min_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims) {
+  std::vector<int> axes_vec(axes.begin(), axes.end());
+  return std::make_unique<MlxArray>(mlx::core::min(a, axes_vec, keepdims));
+}
+
+std::unique_ptr<MlxArray> array_argmax_all(const MlxArray& a, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::argmax(a, keepdims));
+}
+std::unique_ptr<MlxArray> array_argmax_axis(const MlxArray& a, int32_t axis, bool keepdims) {
+  return std::make_unique<MlxArray>(mlx::core::argmax(a, axis, keepdims));
+}
+
+// === P1b2a shape ops ===
+
+std::unique_ptr<MlxArray> array_reshape(const MlxArray& a, rust::Slice<const int32_t> shape) {
+  mlx::core::Shape s(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::reshape(a, std::move(s)));
+}
+
+std::unique_ptr<MlxArray> array_transpose(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::transpose(a));
+}
+
+std::unique_ptr<MlxArray> array_transpose_axes(const MlxArray& a, rust::Slice<const int32_t> axes) {
+  std::vector<int> axes_vec(axes.begin(), axes.end());
+  return std::make_unique<MlxArray>(mlx::core::transpose(a, std::move(axes_vec)));
+}
+
+std::unique_ptr<MlxArray> array_broadcast_to(const MlxArray& a, rust::Slice<const int32_t> shape) {
+  mlx::core::Shape s(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::broadcast_to(a, s));
+}
+
+std::unique_ptr<MlxArray> array_concatenate(rust::Slice<const MlxArray* const> arrays, int32_t axis) {
+  std::vector<MlxArray> vec;
+  vec.reserve(arrays.size());
+  for (size_t i = 0; i < arrays.size(); ++i) {
+    vec.push_back(*arrays[i]);  // copy ctor — refcount-shared, cheap
+  }
+  return std::make_unique<MlxArray>(mlx::core::concatenate(std::move(vec), axis));
+}
+
+std::unique_ptr<MlxArray> array_stack(rust::Slice<const MlxArray* const> arrays, int32_t axis) {
+  std::vector<MlxArray> vec;
+  vec.reserve(arrays.size());
+  for (size_t i = 0; i < arrays.size(); ++i) {
+    vec.push_back(*arrays[i]);
+  }
+  return std::make_unique<MlxArray>(mlx::core::stack(vec, axis));
+}
+
+std::unique_ptr<MlxArrayVec> array_split_n(const MlxArray& a, int32_t num_splits, int32_t axis) {
+  return std::make_unique<MlxArrayVec>(mlx::core::split(a, num_splits, axis));
+}
+
+std::unique_ptr<MlxArrayVec> array_split_at(const MlxArray& a, rust::Slice<const int32_t> indices, int32_t axis) {
+  mlx::core::Shape idx(indices.begin(), indices.end());
+  return std::make_unique<MlxArrayVec>(mlx::core::split(a, idx, axis));
+}
+
+size_t split_result_len(const MlxArrayVec& v) {
+  return v.size();
+}
+
+std::unique_ptr<MlxArray> split_result_at(const MlxArrayVec& v, size_t i) {
+  return std::make_unique<MlxArray>(v.at(i));  // copy ctor — refcount-shared
+}
+
+// === P1b2a matmul ===
+
+std::unique_ptr<MlxArray> array_matmul(const MlxArray& a, const MlxArray& b) {
+  return std::make_unique<MlxArray>(mlx::core::matmul(a, b));
+}
+
 }  // namespace cxx_mlx

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "mlx/array.h"
 #include "rust/cxx.h"
@@ -9,6 +10,7 @@
 namespace cxx_mlx {
 
 using MlxArray = mlx::core::array;
+using MlxArrayVec = std::vector<mlx::core::array>;
 
 std::unique_ptr<MlxArray> array_zeros(rust::Slice<const int32_t> shape, uint8_t dtype);
 rust::Vec<int32_t> array_shape(const MlxArray& a);
@@ -78,5 +80,52 @@ std::unique_ptr<MlxArray> array_square(const MlxArray& a);
 std::unique_ptr<MlxArray> array_rsqrt(const MlxArray& a);
 std::unique_ptr<MlxArray> array_erf(const MlxArray& a);
 std::unique_ptr<MlxArray> array_reciprocal(const MlxArray& a);
+
+// === P1b2a reductions (5 ops × 3 forms = 15) ===
+
+std::unique_ptr<MlxArray> array_sum_all(const MlxArray& a, bool keepdims);
+std::unique_ptr<MlxArray> array_sum_axis(const MlxArray& a, int32_t axis, bool keepdims);
+std::unique_ptr<MlxArray> array_sum_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+
+std::unique_ptr<MlxArray> array_mean_all(const MlxArray& a, bool keepdims);
+std::unique_ptr<MlxArray> array_mean_axis(const MlxArray& a, int32_t axis, bool keepdims);
+std::unique_ptr<MlxArray> array_mean_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+
+std::unique_ptr<MlxArray> array_max_all(const MlxArray& a, bool keepdims);
+std::unique_ptr<MlxArray> array_max_axis(const MlxArray& a, int32_t axis, bool keepdims);
+std::unique_ptr<MlxArray> array_max_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+
+std::unique_ptr<MlxArray> array_min_all(const MlxArray& a, bool keepdims);
+std::unique_ptr<MlxArray> array_min_axis(const MlxArray& a, int32_t axis, bool keepdims);
+std::unique_ptr<MlxArray> array_min_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+
+// argmax: only single-axis variant in MLX. We expose array_argmax_all via
+// flatten-then-argmax for symmetry.
+std::unique_ptr<MlxArray> array_argmax_all(const MlxArray& a, bool keepdims);
+std::unique_ptr<MlxArray> array_argmax_axis(const MlxArray& a, int32_t axis, bool keepdims);
+
+// === P1b2a shape ops ===
+
+std::unique_ptr<MlxArray> array_reshape(const MlxArray& a, rust::Slice<const int32_t> shape);
+std::unique_ptr<MlxArray> array_transpose(const MlxArray& a);
+std::unique_ptr<MlxArray> array_transpose_axes(const MlxArray& a, rust::Slice<const int32_t> axes);
+std::unique_ptr<MlxArray> array_broadcast_to(const MlxArray& a, rust::Slice<const int32_t> shape);
+
+// Concatenate/stack accept raw pointer slices because cxx 1.0 doesn't bridge
+// &[&MlxArray] directly. Caller (Rust safe layer) builds the pointer slice.
+std::unique_ptr<MlxArray> array_concatenate(rust::Slice<const MlxArray* const> arrays, int32_t axis);
+std::unique_ptr<MlxArray> array_stack(rust::Slice<const MlxArray* const> arrays, int32_t axis);
+
+// Split returns std::vector<array> wrapped in MlxArrayVec opaque holder.
+std::unique_ptr<MlxArrayVec> array_split_n(const MlxArray& a, int32_t num_splits, int32_t axis);
+std::unique_ptr<MlxArrayVec> array_split_at(const MlxArray& a, rust::Slice<const int32_t> indices, int32_t axis);
+
+// MlxArrayVec accessors.
+size_t split_result_len(const MlxArrayVec& v);
+std::unique_ptr<MlxArray> split_result_at(const MlxArrayVec& v, size_t i);
+
+// === P1b2a matmul ===
+
+std::unique_ptr<MlxArray> array_matmul(const MlxArray& a, const MlxArray& b);
 
 }  // namespace cxx_mlx
