@@ -39,5 +39,18 @@ pub mod ffi {
         fn array_item_bf16(a: &MlxArray) -> Result<u16>;
         fn array_item_f32(a: &MlxArray) -> Result<f32>;
         fn array_item_f64(a: &MlxArray) -> Result<f64>;
+
+        // to_vec family — Result-wrapped (data() can throw if storage isn't
+        // available, e.g. eval hasn't been called).
+        fn array_to_vec_bool(a: &MlxArray) -> Result<Vec<u8>>;
+        fn array_to_vec_u8(a: &MlxArray) -> Result<Vec<u8>>;
+        fn array_to_vec_i8(a: &MlxArray) -> Result<Vec<i8>>;
+        fn array_to_vec_i16(a: &MlxArray) -> Result<Vec<i16>>;
+        fn array_to_vec_i32(a: &MlxArray) -> Result<Vec<i32>>;
+        fn array_to_vec_i64(a: &MlxArray) -> Result<Vec<i64>>;
+        fn array_to_vec_f16(a: &MlxArray) -> Result<Vec<u16>>;
+        fn array_to_vec_bf16(a: &MlxArray) -> Result<Vec<u16>>;
+        fn array_to_vec_f32(a: &MlxArray) -> Result<Vec<f32>>;
+        fn array_to_vec_f64(a: &MlxArray) -> Result<Vec<f64>>;
     }
 }

@@ -80,3 +80,56 @@ fn item_non_scalar_returns_err() {
     let result = arr.item::<f32>();
     assert!(matches!(result, Err(Error::Mlx(_))));
 }
+
+#[test]
+fn to_vec_f32_round_trip() {
+    let original = vec![1.0_f32, 2.0, 3.0, 4.0];
+    let arr = Array::from_slice(&original, &[2, 2]).expect("from_slice");
+    let read_back = arr.to_vec::<f32>().expect("to_vec");
+    assert_eq!(read_back, original);
+}
+
+#[test]
+fn to_vec_implicit_eval() {
+    // Lazy zeros — should NOT need explicit eval before to_vec.
+    let arr = Array::zeros(&[3], Dtype::Float32).expect("zeros");
+    let v = arr.to_vec::<f32>().expect("to_vec triggers eval");
+    assert_eq!(v, vec![0.0_f32, 0.0, 0.0]);
+}
+
+#[test]
+fn to_vec_f16_bit_pattern_preserved() {
+    // Specific bit patterns (NaN-ish, denormal) round-trip exactly.
+    let original: Vec<half::f16> = vec![
+        half::f16::from_f32(1.5),
+        half::f16::from_f32(-2.25),
+        half::f16::from_bits(0x7C01), // signaling NaN-ish bit pattern
+        half::f16::from_bits(0x0001), // denormal
+    ];
+    let arr = Array::from_slice(&original, &[4]).expect("from_slice");
+    let read_back = arr.to_vec::<half::f16>().expect("to_vec");
+    for (i, (a, b)) in original.iter().zip(read_back.iter()).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "bit pattern mismatch at index {i}");
+    }
+}
+
+#[test]
+fn to_vec_dtype_mismatch_returns_err() {
+    let arr = Array::from_slice(&[1.0_f32, 2.0], &[2]).expect("from_slice");
+    let result = arr.to_vec::<i32>();
+    match result {
+        Err(Error::DtypeMismatch { expected, actual }) => {
+            assert_eq!(expected, Dtype::Int32);
+            assert_eq!(actual, Dtype::Float32);
+        }
+        other => panic!("expected DtypeMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn to_vec_bool_round_trip() {
+    let original = vec![true, false, true];
+    let arr = Array::from_slice(&original, &[3]).expect("from_slice");
+    let read_back = arr.to_vec::<bool>().expect("to_vec");
+    assert_eq!(read_back, original);
+}

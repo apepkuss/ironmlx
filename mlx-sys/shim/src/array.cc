@@ -3,6 +3,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #include "mlx/dtype.h"
 #include "mlx/ops.h"
@@ -51,6 +52,25 @@ mlx::core::Dtype dtype_from_u8(uint8_t v) {
       throw std::invalid_argument(
           "cxx_mlx: unknown Dtype::Val value: " + std::to_string(static_cast<int>(v)));
   }
+}
+
+template <typename CppT, typename WireT = CppT>
+rust::Vec<WireT> array_to_vec_typed(const MlxArray& a) {
+  // Caller (the safe Rust layer) is responsible for calling Array::eval()
+  // before to_vec; data<T>() asserts the array is evaluated.
+  rust::Vec<WireT> out;
+  out.reserve(a.size());
+  const CppT* ptr = a.data<CppT>();
+  for (size_t i = 0; i < a.size(); ++i) {
+    if constexpr (std::is_same_v<CppT, WireT>) {
+      out.push_back(ptr[i]);
+    } else {
+      WireT bits;
+      std::memcpy(&bits, &ptr[i], sizeof(bits));
+      out.push_back(bits);
+    }
+  }
+  return out;
 }
 
 }  // namespace
@@ -153,5 +173,23 @@ uint16_t array_item_bf16(const MlxArray& a) {
 }
 float array_item_f32(const MlxArray& a) { return a.item<float>(); }
 double array_item_f64(const MlxArray& a) { return a.item<double>(); }
+
+rust::Vec<uint8_t> array_to_vec_bool(const MlxArray& a) {
+  // mlx stores bool as 1-byte; reinterpret to uint8_t for the wire.
+  return array_to_vec_typed<bool, uint8_t>(a);
+}
+rust::Vec<uint8_t> array_to_vec_u8(const MlxArray& a)   { return array_to_vec_typed<uint8_t>(a); }
+rust::Vec<int8_t> array_to_vec_i8(const MlxArray& a)    { return array_to_vec_typed<int8_t>(a); }
+rust::Vec<int16_t> array_to_vec_i16(const MlxArray& a)  { return array_to_vec_typed<int16_t>(a); }
+rust::Vec<int32_t> array_to_vec_i32(const MlxArray& a)  { return array_to_vec_typed<int32_t>(a); }
+rust::Vec<int64_t> array_to_vec_i64(const MlxArray& a)  { return array_to_vec_typed<int64_t>(a); }
+rust::Vec<uint16_t> array_to_vec_f16(const MlxArray& a) {
+  return array_to_vec_typed<mlx::core::float16_t, uint16_t>(a);
+}
+rust::Vec<uint16_t> array_to_vec_bf16(const MlxArray& a) {
+  return array_to_vec_typed<mlx::core::bfloat16_t, uint16_t>(a);
+}
+rust::Vec<float> array_to_vec_f32(const MlxArray& a)    { return array_to_vec_typed<float>(a); }
+rust::Vec<double> array_to_vec_f64(const MlxArray& a)   { return array_to_vec_typed<double>(a); }
 
 }  // namespace cxx_mlx

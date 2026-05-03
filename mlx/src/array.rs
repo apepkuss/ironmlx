@@ -28,6 +28,20 @@ impl Array {
         T::array_from(slice, shape)
     }
 
+    /// Copy all elements out as a `Vec<T>`. Implicitly evaluates if needed.
+    ///
+    /// Returns `Err(Error::DtypeMismatch)` if the array's dtype does not
+    /// match `T::DTYPE`.
+    pub fn to_vec<T: Element>(&self) -> Result<Vec<T>> {
+        if self.dtype() != T::DTYPE {
+            return Err(Error::DtypeMismatch {
+                expected: T::DTYPE,
+                actual: self.dtype(),
+            });
+        }
+        T::array_to_vec(self)
+    }
+
     /// Read this array as a single scalar of type `T`.
     ///
     /// Returns `Err` if the array is not a scalar (size != 1) or if its

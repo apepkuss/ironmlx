@@ -47,4 +47,17 @@ uint16_t array_item_bf16(const MlxArray& a);  // raw bits of half::bf16
 float array_item_f32(const MlxArray& a);
 double array_item_f64(const MlxArray& a);
 
+// to_vec family — copy all elements out as a rust::Vec. Triggers eval.
+
+rust::Vec<uint8_t> array_to_vec_bool(const MlxArray& a);   // 1 byte per bool
+rust::Vec<uint8_t> array_to_vec_u8(const MlxArray& a);
+rust::Vec<int8_t> array_to_vec_i8(const MlxArray& a);
+rust::Vec<int16_t> array_to_vec_i16(const MlxArray& a);
+rust::Vec<int32_t> array_to_vec_i32(const MlxArray& a);
+rust::Vec<int64_t> array_to_vec_i64(const MlxArray& a);
+rust::Vec<uint16_t> array_to_vec_f16(const MlxArray& a);   // raw bits of half::f16
+rust::Vec<uint16_t> array_to_vec_bf16(const MlxArray& a);  // raw bits of half::bf16
+rust::Vec<float> array_to_vec_f32(const MlxArray& a);
+rust::Vec<double> array_to_vec_f64(const MlxArray& a);
+
 }  // namespace cxx_mlx
