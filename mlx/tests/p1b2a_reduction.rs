@@ -65,3 +65,72 @@ fn sum_dtype_preserved_for_integers() {
     assert_eq!(s.dtype(), Dtype::Int32);
     assert_eq!(s.item::<i32>().expect("item"), 6);
 }
+
+#[test]
+fn mean_basic() {
+    let a = Array::from_slice(&[2.0_f32, 4.0, 6.0, 8.0], &[2, 2]).expect("from_slice");
+    let m = ops::mean(&a, All, false).expect("mean");
+    assert!((m.item::<f32>().expect("item") - 5.0).abs() < 1e-6);
+
+    let m2 = ops::mean(&a, -1, false).expect("mean axis");
+    assert_eq!(m2.to_vec::<f32>().expect("to_vec"), vec![3.0_f32, 7.0]);
+}
+
+#[test]
+fn max_basic() {
+    let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0], &[2, 2]).expect("from_slice");
+    assert_eq!(ops::max(&a, All, false).expect("max").item::<f32>().expect("item"), 5.0);
+
+    let m = ops::max(&a, -1, false).expect("max axis");
+    assert_eq!(m.to_vec::<f32>().expect("to_vec"), vec![5.0_f32, 3.0]);
+}
+
+#[test]
+fn min_basic() {
+    let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0], &[2, 2]).expect("from_slice");
+    assert_eq!(ops::min(&a, All, false).expect("min").item::<f32>().expect("item"), 1.0);
+
+    let m = ops::min(&a, -1, false).expect("min axis");
+    assert_eq!(m.to_vec::<f32>().expect("to_vec"), vec![1.0_f32, 2.0]);
+}
+
+#[test]
+fn argmax_basic() {
+    // [[1, 5, 3], [2, 4, 6]] → argmax(-1) = [1, 2]
+    let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0, 4.0, 6.0], &[2, 3]).expect("from_slice");
+    let am = ops::argmax(&a, -1, false).expect("argmax");
+    // MLX returns Uint32 for argmax results
+    assert_eq!(am.dtype(), Dtype::Uint32);
+    // Result shape: one index per row of a [2, 3] array
+    assert_eq!(am.shape().as_slice(), &[2_i32]);
+    // NOTE: u32 is not yet an Element in this crate; value assertions will be
+    // added in a follow-up task when Uint32/Element support is wired up.
+}
+
+#[test]
+fn argmax_all_returns_flat_index() {
+    // The single max in [1, 5, 3, 2, 4, 6] is at flat index 5
+    let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0, 4.0, 6.0], &[2, 3]).expect("from_slice");
+    let am = ops::argmax(&a, All, false).expect("argmax all");
+    assert_eq!(am.dtype(), Dtype::Uint32);
+    // All-axes argmax returns a scalar
+    assert_eq!(am.size(), 1);
+    assert_eq!(am.shape().as_slice(), &[] as &[i32]);
+}
+
+#[test]
+fn reduction_methods_match_free_fns() {
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("from_slice");
+    assert_eq!(
+        a.mean(All, false).expect("mean").item::<f32>().expect("item"),
+        ops::mean(&a, All, false).expect("mean").item::<f32>().expect("item"),
+    );
+    assert_eq!(
+        a.max(All, false).expect("max").item::<f32>().expect("item"),
+        ops::max(&a, All, false).expect("max").item::<f32>().expect("item"),
+    );
+    assert_eq!(
+        a.min(All, false).expect("min").item::<f32>().expect("item"),
+        ops::min(&a, All, false).expect("min").item::<f32>().expect("item"),
+    );
+}

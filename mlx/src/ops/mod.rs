@@ -9,5 +9,5 @@ pub mod reduction;
 pub mod unary;
 
 pub use binary::{add, divide, multiply, negative, subtract};
-pub use reduction::{All, IntoAxes, sum};
+pub use reduction::{All, IntoAxes, argmax, max, mean, min, sum};
 pub use unary::{erf, exp, log, reciprocal, rsqrt, sigmoid, sqrt, square, tanh};

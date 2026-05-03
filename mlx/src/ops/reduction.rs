@@ -105,3 +105,54 @@ pub fn sum<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Mean over the specified axes. See [`sum`] for axes semantics.
+pub fn mean<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    let inner = match axes.as_axes() {
+        None => mlx_sys::array::ffi::array_mean_all(a.as_inner(), keepdim),
+        Some([axis]) => mlx_sys::array::ffi::array_mean_axis(a.as_inner(), *axis, keepdim),
+        Some(axes) => mlx_sys::array::ffi::array_mean_axes(a.as_inner(), axes, keepdim),
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Maximum over the specified axes. See [`sum`] for axes semantics.
+pub fn max<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    let inner = match axes.as_axes() {
+        None => mlx_sys::array::ffi::array_max_all(a.as_inner(), keepdim),
+        Some([axis]) => mlx_sys::array::ffi::array_max_axis(a.as_inner(), *axis, keepdim),
+        Some(axes) => mlx_sys::array::ffi::array_max_axes(a.as_inner(), axes, keepdim),
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Minimum over the specified axes. See [`sum`] for axes semantics.
+pub fn min<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    let inner = match axes.as_axes() {
+        None => mlx_sys::array::ffi::array_min_all(a.as_inner(), keepdim),
+        Some([axis]) => mlx_sys::array::ffi::array_min_axis(a.as_inner(), *axis, keepdim),
+        Some(axes) => mlx_sys::array::ffi::array_min_axes(a.as_inner(), axes, keepdim),
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Indices of the maximum values along the specified axis. Returns `Uint32`
+/// (MLX convention). For [`All`], reduces over the flattened array.
+///
+/// Multi-axis argmax is not supported by MLX; pass a single `i32` axis or [`All`].
+pub fn argmax<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    let inner = match axes.as_axes() {
+        None => mlx_sys::array::ffi::array_argmax_all(a.as_inner(), keepdim),
+        Some([axis]) => mlx_sys::array::ffi::array_argmax_axis(a.as_inner(), *axis, keepdim),
+        Some(axes) => {
+            return Err(Error::Mlx(format!(
+                "argmax does not support multi-axis reduction (got axes={axes:?})"
+            )));
+        }
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

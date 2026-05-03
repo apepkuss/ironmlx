@@ -162,6 +162,26 @@ impl Array {
     pub fn sum<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
         crate::ops::sum(self, axes, keepdim)
     }
+
+    /// Mean over the specified axes. See [`crate::ops::mean`].
+    pub fn mean<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::mean(self, axes, keepdim)
+    }
+
+    /// Maximum over the specified axes. See [`crate::ops::max`].
+    pub fn max<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::max(self, axes, keepdim)
+    }
+
+    /// Minimum over the specified axes. See [`crate::ops::min`].
+    pub fn min<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::min(self, axes, keepdim)
+    }
+
+    /// Indices of the maximum values along the specified axis. See [`crate::ops::argmax`].
+    pub fn argmax<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::argmax(self, axes, keepdim)
+    }
 }
 
 impl Clone for Array {
