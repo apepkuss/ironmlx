@@ -27,6 +27,7 @@ mod dtype;
 mod element;
 mod error;
 pub mod ops;
+mod ops_impl;
 
 pub use array::Array;
 pub use broadcast::broadcast_shape;

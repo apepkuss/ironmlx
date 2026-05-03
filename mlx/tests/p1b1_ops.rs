@@ -33,3 +33,21 @@ fn add_broadcast_mismatch_err() {
         other => panic!("expected BroadcastMismatch, got {other:?}"),
     }
 }
+
+#[test]
+fn add_operator_all_ref_combos() {
+    let a = Array::from_slice(&[1.0_f32, 2.0], &[2]).expect("from_slice");
+    let b = Array::from_slice(&[10.0_f32, 20.0], &[2]).expect("from_slice");
+
+    // All four reference combinations should compile and produce same result.
+    let r1 = (&a + &b).expect("&a + &b");
+    let r2 = (a.clone() + &b).expect("a + &b");
+    let r3 = (&a + b.clone()).expect("&a + b");
+    let r4 = (a.clone() + b.clone()).expect("a + b");
+
+    let expected = vec![11.0_f32, 22.0];
+    assert_eq!(r1.to_vec::<f32>().expect("to_vec"), expected);
+    assert_eq!(r2.to_vec::<f32>().expect("to_vec"), expected);
+    assert_eq!(r3.to_vec::<f32>().expect("to_vec"), expected);
+    assert_eq!(r4.to_vec::<f32>().expect("to_vec"), expected);
+}
