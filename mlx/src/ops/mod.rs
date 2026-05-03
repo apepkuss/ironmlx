@@ -5,7 +5,9 @@
 //! mismatch, or MLX-side errors all surface as recoverable Rust errors.
 
 pub mod binary;
+pub mod reduction;
 pub mod unary;
 
 pub use binary::{add, divide, multiply, negative, subtract};
+pub use reduction::{All, IntoAxes};
 pub use unary::{erf, exp, log, reciprocal, rsqrt, sigmoid, sqrt, square, tanh};
