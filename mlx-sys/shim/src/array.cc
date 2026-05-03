@@ -55,4 +55,16 @@ rust::Vec<int32_t> array_shape(const MlxArray& a) {
   return out;
 }
 
+size_t array_ndim(const MlxArray& a) {
+  return a.ndim();
+}
+
+size_t array_size(const MlxArray& a) {
+  return a.size();
+}
+
+uint8_t array_dtype(const MlxArray& a) {
+  return static_cast<uint8_t>(a.dtype().val());
+}
+
 }  // namespace cxx_mlx

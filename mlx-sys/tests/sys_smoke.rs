@@ -17,3 +17,11 @@ fn zeros_scalar_has_empty_shape() {
     let arr = ffi::array_zeros(&[], FLOAT32);
     assert_eq!(ffi::array_shape(&arr), Vec::<i32>::new());
 }
+
+#[test]
+fn zeros_metadata() {
+    let arr = ffi::array_zeros(&[2, 3, 4], FLOAT32);
+    assert_eq!(ffi::array_ndim(&arr), 3);
+    assert_eq!(ffi::array_size(&arr), 24);
+    assert_eq!(ffi::array_dtype(&arr), FLOAT32);
+}
