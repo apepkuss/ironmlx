@@ -18,7 +18,7 @@ pub fn reshape(a: &Array, shape: &[i32]) -> Result<Array> {
                 .filter(|&&d| d != -1)
                 .map(|&d| d as usize)
                 .product();
-            if known == 0 || total % known != 0 {
+            if known == 0 || !total.is_multiple_of(known) {
                 return Err(Error::Mlx(format!(
                     "reshape: cannot infer -1 dim — total {total} not divisible by product {known} of remaining dims {shape:?}"
                 )));

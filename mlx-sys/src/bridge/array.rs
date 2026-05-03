@@ -1,3 +1,8 @@
+// cxx::bridge generates `unsafe fn` declarations for our pointer-slice variants
+// (array_concatenate, array_stack). The Safety contracts are documented in the
+// safe Rust wrappers (`mlx::ops::concatenate`, `mlx::ops::stack`); cxx doesn't
+// propagate doc comments from inside the bridge macro.
+#[allow(clippy::missing_safety_doc)]
 #[cxx::bridge(namespace = "cxx_mlx")]
 pub mod ffi {
     unsafe extern "C++" {
@@ -101,6 +106,9 @@ pub mod ffi {
         fn array_transpose_axes(a: &MlxArray, axes: &[i32]) -> Result<UniquePtr<MlxArray>>;
         fn array_broadcast_to(a: &MlxArray, shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
 
+        // Safety contract: each pointer in `arrays` must point to a valid
+        // MlxArray that lives for the duration of the call. The safe wrappers
+        // `mlx::ops::concatenate` and `mlx::ops::stack` satisfy this.
         unsafe fn array_concatenate(arrays: &[*const MlxArray], axis: i32) -> Result<UniquePtr<MlxArray>>;
         unsafe fn array_stack(arrays: &[*const MlxArray], axis: i32) -> Result<UniquePtr<MlxArray>>;
 

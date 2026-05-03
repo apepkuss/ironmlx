@@ -56,40 +56,6 @@ impl<const N: usize> IntoAxes for [i32; N] {
     fn as_axes(&self) -> Option<&[i32]> { Some(self.as_slice()) }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn all_returns_none() {
-        assert_eq!(All.as_axes(), None);
-    }
-
-    #[test]
-    fn i32_returns_single_element_slice() {
-        let axis: i32 = -1;
-        assert_eq!(axis.as_axes(), Some(&[-1][..]));
-    }
-
-    #[test]
-    fn slice_returns_self() {
-        let axes: &[i32] = &[0, 2];
-        assert_eq!(axes.as_axes(), Some(&[0, 2][..]));
-    }
-
-    #[test]
-    fn vec_returns_slice() {
-        let axes = vec![0_i32, 2];
-        assert_eq!(axes.as_axes(), Some(&[0, 2][..]));
-    }
-
-    #[test]
-    fn array_literal_returns_slice() {
-        let axes: [i32; 2] = [0, 2];
-        assert_eq!(axes.as_axes(), Some(&[0, 2][..]));
-    }
-}
-
 /// Sum over the specified axes.
 ///
 /// Pass [`All`] to reduce over every axis (yielding a scalar by default),
@@ -155,4 +121,38 @@ pub fn argmax<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
     }
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_returns_none() {
+        assert_eq!(All.as_axes(), None);
+    }
+
+    #[test]
+    fn i32_returns_single_element_slice() {
+        let axis: i32 = -1;
+        assert_eq!(axis.as_axes(), Some(&[-1][..]));
+    }
+
+    #[test]
+    fn slice_returns_self() {
+        let axes: &[i32] = &[0, 2];
+        assert_eq!(axes.as_axes(), Some(&[0, 2][..]));
+    }
+
+    #[test]
+    fn vec_returns_slice() {
+        let axes = vec![0_i32, 2];
+        assert_eq!(axes.as_axes(), Some(&[0, 2][..]));
+    }
+
+    #[test]
+    fn array_literal_returns_slice() {
+        let axes: [i32; 2] = [0, 2];
+        assert_eq!(axes.as_axes(), Some(&[0, 2][..]));
+    }
 }

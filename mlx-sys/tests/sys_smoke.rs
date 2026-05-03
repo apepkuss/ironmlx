@@ -88,7 +88,7 @@ fn concatenate_links_with_raw_ptr_slice() {
         vec![&*a as *const _, &*b as *const _];
     let _c = unsafe {
         mlx_sys::array::ffi::array_concatenate(
-            std::slice::from_raw_parts(raw_ptrs.as_ptr() as *const *const mlx_sys::array::ffi::MlxArray, raw_ptrs.len()),
+            std::slice::from_raw_parts(raw_ptrs.as_ptr(), raw_ptrs.len()),
             0
         )
     }.expect("concatenate");
