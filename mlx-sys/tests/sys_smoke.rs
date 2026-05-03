@@ -31,3 +31,16 @@ fn zeros_then_eval() {
     let arr = mlx_sys::array::ffi::array_zeros(&[8], FLOAT32).expect("zeros should succeed");
     mlx_sys::transforms::ffi::eval_one(&arr).expect("eval should succeed");
 }
+
+#[test]
+fn binary_add_links() {
+    let a = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
+    let b = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
+    let _c = mlx_sys::array::ffi::array_add(&a, &b).expect("add should succeed");
+}
+
+#[test]
+fn unary_exp_links() {
+    let a = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
+    let _e = mlx_sys::array::ffi::array_exp(&a).expect("exp should succeed");
+}

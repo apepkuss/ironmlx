@@ -201,4 +201,52 @@ rust::Vec<uint16_t> array_to_vec_bf16(const MlxArray& a) {
 rust::Vec<float> array_to_vec_f32(const MlxArray& a)    { return array_to_vec_typed<float>(a); }
 rust::Vec<double> array_to_vec_f64(const MlxArray& a)   { return array_to_vec_typed<double>(a); }
 
+// === P1b1 binary element-wise ops ===
+
+std::unique_ptr<MlxArray> array_add(const MlxArray& a, const MlxArray& b) {
+  return std::make_unique<MlxArray>(mlx::core::add(a, b));
+}
+std::unique_ptr<MlxArray> array_subtract(const MlxArray& a, const MlxArray& b) {
+  return std::make_unique<MlxArray>(mlx::core::subtract(a, b));
+}
+std::unique_ptr<MlxArray> array_multiply(const MlxArray& a, const MlxArray& b) {
+  return std::make_unique<MlxArray>(mlx::core::multiply(a, b));
+}
+std::unique_ptr<MlxArray> array_divide(const MlxArray& a, const MlxArray& b) {
+  return std::make_unique<MlxArray>(mlx::core::divide(a, b));
+}
+
+// === P1b1 unary element-wise ops ===
+
+std::unique_ptr<MlxArray> array_negative(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::negative(a));
+}
+std::unique_ptr<MlxArray> array_exp(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::exp(a));
+}
+std::unique_ptr<MlxArray> array_log(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::log(a));
+}
+std::unique_ptr<MlxArray> array_sqrt(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::sqrt(a));
+}
+std::unique_ptr<MlxArray> array_tanh(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::tanh(a));
+}
+std::unique_ptr<MlxArray> array_sigmoid(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::sigmoid(a));
+}
+std::unique_ptr<MlxArray> array_square(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::square(a));
+}
+std::unique_ptr<MlxArray> array_rsqrt(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::rsqrt(a));
+}
+std::unique_ptr<MlxArray> array_erf(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::erf(a));
+}
+std::unique_ptr<MlxArray> array_reciprocal(const MlxArray& a) {
+  return std::make_unique<MlxArray>(mlx::core::reciprocal(a));
+}
+
 }  // namespace cxx_mlx
