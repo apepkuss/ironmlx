@@ -26,5 +26,18 @@ pub mod ffi {
         fn array_from_bf16(data: &[u16], shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
         fn array_from_f32(data: &[f32], shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
         fn array_from_f64(data: &[f64], shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
+
+        // item family — Result-wrapped (MLX item<T>() may throw if dtype mismatches
+        // or eval fails for any reason).
+        fn array_item_bool(a: &MlxArray) -> Result<bool>;
+        fn array_item_u8(a: &MlxArray) -> Result<u8>;
+        fn array_item_i8(a: &MlxArray) -> Result<i8>;
+        fn array_item_i16(a: &MlxArray) -> Result<i16>;
+        fn array_item_i32(a: &MlxArray) -> Result<i32>;
+        fn array_item_i64(a: &MlxArray) -> Result<i64>;
+        fn array_item_f16(a: &MlxArray) -> Result<u16>;
+        fn array_item_bf16(a: &MlxArray) -> Result<u16>;
+        fn array_item_f32(a: &MlxArray) -> Result<f32>;
+        fn array_item_f64(a: &MlxArray) -> Result<f64>;
     }
 }

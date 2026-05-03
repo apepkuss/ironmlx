@@ -33,4 +33,18 @@ std::unique_ptr<MlxArray> array_from_bf16(rust::Slice<const uint16_t> data, rust
 std::unique_ptr<MlxArray> array_from_f32(rust::Slice<const float> data, rust::Slice<const int32_t> shape);
 std::unique_ptr<MlxArray> array_from_f64(rust::Slice<const double> data, rust::Slice<const int32_t> shape);
 
+// item family — extract the single scalar value. Caller must ensure size()==1
+// and dtype matches; the shim does eval implicitly (mlx::array::item triggers it).
+
+bool array_item_bool(const MlxArray& a);
+uint8_t array_item_u8(const MlxArray& a);
+int8_t array_item_i8(const MlxArray& a);
+int16_t array_item_i16(const MlxArray& a);
+int32_t array_item_i32(const MlxArray& a);
+int64_t array_item_i64(const MlxArray& a);
+uint16_t array_item_f16(const MlxArray& a);   // raw bits of half::f16
+uint16_t array_item_bf16(const MlxArray& a);  // raw bits of half::bf16
+float array_item_f32(const MlxArray& a);
+double array_item_f64(const MlxArray& a);
+
 }  // namespace cxx_mlx

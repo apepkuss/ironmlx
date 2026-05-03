@@ -1,5 +1,6 @@
 #include "cxx_mlx_shim/array.h"
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -130,5 +131,27 @@ std::unique_ptr<MlxArray> array_from_f32(rust::Slice<const float> data, rust::Sl
 std::unique_ptr<MlxArray> array_from_f64(rust::Slice<const double> data, rust::Slice<const int32_t> shape) {
   return array_from_typed<double>(data.data(), shape, mlx::core::float64);
 }
+
+bool array_item_bool(const MlxArray& a) { return a.item<bool>(); }
+uint8_t array_item_u8(const MlxArray& a) { return a.item<uint8_t>(); }
+int8_t array_item_i8(const MlxArray& a) { return a.item<int8_t>(); }
+int16_t array_item_i16(const MlxArray& a) { return a.item<int16_t>(); }
+int32_t array_item_i32(const MlxArray& a) { return a.item<int32_t>(); }
+int64_t array_item_i64(const MlxArray& a) { return a.item<int64_t>(); }
+uint16_t array_item_f16(const MlxArray& a) {
+  // Read out as mlx::core::float16_t and reinterpret to raw uint16_t.
+  auto v = a.item<mlx::core::float16_t>();
+  uint16_t out;
+  std::memcpy(&out, &v, sizeof(out));
+  return out;
+}
+uint16_t array_item_bf16(const MlxArray& a) {
+  auto v = a.item<mlx::core::bfloat16_t>();
+  uint16_t out;
+  std::memcpy(&out, &v, sizeof(out));
+  return out;
+}
+float array_item_f32(const MlxArray& a) { return a.item<float>(); }
+double array_item_f64(const MlxArray& a) { return a.item<double>(); }
 
 }  // namespace cxx_mlx

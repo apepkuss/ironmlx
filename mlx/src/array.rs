@@ -28,6 +28,27 @@ impl Array {
         T::array_from(slice, shape)
     }
 
+    /// Read this array as a single scalar of type `T`.
+    ///
+    /// Returns `Err` if the array is not a scalar (size != 1) or if its
+    /// dtype does not match `T::DTYPE`. Implicitly evaluates the array.
+    pub fn item<T: Element>(&self) -> Result<T> {
+        if self.size() != 1 {
+            return Err(Error::Mlx(format!(
+                "item() called on non-scalar array (size={}, shape={:?})",
+                self.size(),
+                self.shape().as_slice()
+            )));
+        }
+        if self.dtype() != T::DTYPE {
+            return Err(Error::DtypeMismatch {
+                expected: T::DTYPE,
+                actual: self.dtype(),
+            });
+        }
+        T::array_item(self)
+    }
+
     /// Create an array filled with zeros of the given shape and dtype.
     /// The result is lazy — call [`Array::eval`] before reading the data.
     pub fn zeros(shape: &[i32], dtype: Dtype) -> Result<Self> {

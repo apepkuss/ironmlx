@@ -53,3 +53,30 @@ fn from_slice_empty_shape_is_scalar() {
     assert_eq!(arr.size(), 1);
     assert_eq!(arr.ndim(), 0);
 }
+
+#[test]
+fn item_f32_round_trip() {
+    let arr = Array::from_slice(&[42.0_f32], &[]).expect("from_slice");
+    let v = arr.item::<f32>().expect("item");
+    assert_eq!(v, 42.0);
+}
+
+#[test]
+fn item_dtype_mismatch_returns_err() {
+    let arr = Array::from_slice(&[1.0_f32], &[]).expect("from_slice");
+    let result = arr.item::<i32>();
+    match result {
+        Err(Error::DtypeMismatch { expected, actual }) => {
+            assert_eq!(expected, Dtype::Int32);
+            assert_eq!(actual, Dtype::Float32);
+        }
+        other => panic!("expected DtypeMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn item_non_scalar_returns_err() {
+    let arr = Array::from_slice(&[1.0_f32, 2.0], &[2]).expect("from_slice");
+    let result = arr.item::<f32>();
+    assert!(matches!(result, Err(Error::Mlx(_))));
+}
