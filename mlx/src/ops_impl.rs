@@ -10,7 +10,7 @@
 //! Array`, `Array op &Array`, `&Array op Array`) by delegating to the
 //! `&Array op &Array` impl (which holds the actual logic).
 
-use std::ops::Add;
+use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use crate::{ops, Array, Result};
 
@@ -50,3 +50,35 @@ impl Add<&Array> for &Array {
     }
 }
 forward_ref_binop!(Add, add);
+
+// === Sub / Mul / Div ===
+
+impl Sub<&Array> for &Array {
+    type Output = Result<Array>;
+    fn sub(self, other: &Array) -> Self::Output { ops::subtract(self, other) }
+}
+forward_ref_binop!(Sub, sub);
+
+impl Mul<&Array> for &Array {
+    type Output = Result<Array>;
+    fn mul(self, other: &Array) -> Self::Output { ops::multiply(self, other) }
+}
+forward_ref_binop!(Mul, mul);
+
+impl Div<&Array> for &Array {
+    type Output = Result<Array>;
+    fn div(self, other: &Array) -> Self::Output { ops::divide(self, other) }
+}
+forward_ref_binop!(Div, div);
+
+// === Neg ===
+
+impl Neg for &Array {
+    type Output = Result<Array>;
+    fn neg(self) -> Self::Output { ops::negative(self) }
+}
+
+impl Neg for Array {
+    type Output = Result<Array>;
+    fn neg(self) -> Self::Output { ops::negative(&self) }
+}

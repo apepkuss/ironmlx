@@ -51,3 +51,39 @@ fn add_operator_all_ref_combos() {
     assert_eq!(r3.to_vec::<f32>().expect("to_vec"), expected);
     assert_eq!(r4.to_vec::<f32>().expect("to_vec"), expected);
 }
+
+#[test]
+fn sub_mul_div_basic() {
+    let a = Array::from_slice(&[10.0_f32, 20.0, 30.0], &[3]).expect("from_slice");
+    let b = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3]).expect("from_slice");
+
+    let s = (&a - &b).expect("sub");
+    assert_eq!(s.to_vec::<f32>().expect("to_vec"), vec![9.0, 18.0, 27.0]);
+
+    let m = (&a * &b).expect("mul");
+    assert_eq!(m.to_vec::<f32>().expect("to_vec"), vec![10.0, 40.0, 90.0]);
+
+    let d = (&a / &b).expect("div");
+    assert_eq!(d.to_vec::<f32>().expect("to_vec"), vec![10.0, 10.0, 10.0]);
+}
+
+#[test]
+fn neg_basic() {
+    let a = Array::from_slice(&[1.0_f32, -2.0, 3.0], &[3]).expect("from_slice");
+    let n = (-&a).expect("neg &");
+    assert_eq!(n.to_vec::<f32>().expect("to_vec"), vec![-1.0, 2.0, -3.0]);
+    let n2 = (-a).expect("neg owned");
+    assert_eq!(n2.to_vec::<f32>().expect("to_vec"), vec![-1.0, 2.0, -3.0]);
+}
+
+#[test]
+fn neg_on_unsigned_wraps() {
+    // MLX permits negation on u8 (wraps two's-complement style).
+    // This test documents the actual runtime behaviour: 1u8 → 255u8, 2u8 → 254u8.
+    // (The op returns Ok, NOT an Err — MLX does not pre-validate dtype for neg.)
+    let a = Array::from_slice(&[1_u8, 2, 3], &[3]).expect("from_slice");
+    let result = -&a;
+    assert!(matches!(result, Ok(_)), "expected Ok for u8 neg, got {result:?}");
+    let v = result.unwrap().to_vec::<u8>().expect("to_vec");
+    assert_eq!(v, vec![255_u8, 254, 253]);
+}
