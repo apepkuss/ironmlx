@@ -99,6 +99,47 @@ fn scalar_rhs_f32() {
 }
 
 #[test]
+fn unary_numerical_correctness() {
+    let zero = Array::from_slice(&[0.0_f32], &[]).expect("from_slice");
+    assert!((zero.exp().expect("exp").item::<f32>().expect("item") - 1.0).abs() < 1e-6);
+    assert!((zero.erf().expect("erf").item::<f32>().expect("item") - 0.0).abs() < 1e-6);
+
+    let one = Array::from_slice(&[1.0_f32], &[]).expect("from_slice");
+    assert!((one.log().expect("log").item::<f32>().expect("item") - 0.0).abs() < 1e-6);
+    assert!((one.sqrt().expect("sqrt").item::<f32>().expect("item") - 1.0).abs() < 1e-6);
+    assert!((one.tanh().expect("tanh").item::<f32>().expect("item") - 0.7615942).abs() < 1e-6);
+    assert!((one.sigmoid().expect("sigmoid").item::<f32>().expect("item") - 0.7310586).abs() < 1e-6);
+    assert!((one.reciprocal().expect("reciprocal").item::<f32>().expect("item") - 1.0).abs() < 1e-6);
+
+    let three = Array::from_slice(&[3.0_f32], &[]).expect("from_slice");
+    assert!((three.square().expect("square").item::<f32>().expect("item") - 9.0).abs() < 1e-6);
+
+    let four = Array::from_slice(&[4.0_f32], &[]).expect("from_slice");
+    assert!((four.rsqrt().expect("rsqrt").item::<f32>().expect("item") - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn unary_method_matches_free_fn() {
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3]).expect("from_slice");
+    let by_method = a.exp().expect("method");
+    let by_freefn = mlx::ops::exp(&a).expect("free fn");
+    assert_eq!(
+        by_method.to_vec::<f32>().expect("method to_vec"),
+        by_freefn.to_vec::<f32>().expect("freefn to_vec")
+    );
+}
+
+#[test]
+fn unary_chain_composes() {
+    // Compute (exp(x) - 1) / 2  for x = [0.0, 1.0]; expected ≈ [0.0, 0.859]
+    let x = Array::from_slice(&[0.0_f32, 1.0], &[2]).expect("from_slice");
+    let r = ((&x.exp().expect("exp") - 1.0_f32).expect("sub") / 2.0_f32).expect("div");
+    let v = r.to_vec::<f32>().expect("to_vec");
+    assert!((v[0] - 0.0).abs() < 1e-6);
+    assert!((v[1] - 0.85914).abs() < 1e-3);
+}
+
+#[test]
 fn scalar_rhs_i32_on_owned() {
     let a = Array::from_slice(&[1_i32, 2, 3], &[3]).expect("from_slice");
     let r = (a - 1_i32).expect("scalar sub on owned");
