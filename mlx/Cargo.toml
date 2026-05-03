@@ -11,3 +11,8 @@ description = "Safe, idiomatic Rust bindings to Apple MLX"
 mlx-sys = { path = "../mlx-sys", version = "0.0.1" }
 cxx.workspace = true
 thiserror.workspace = true
+half = "2"
+smallvec = "1"
+
+[dev-dependencies]
+static_assertions = "1"
