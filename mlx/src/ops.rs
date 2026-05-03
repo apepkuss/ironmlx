@@ -40,15 +40,14 @@ pub fn divide(a: &Array, b: &Array) -> Result<Array> {
     Ok(Array::from_inner(inner))
 }
 
-/// Element-wise negation. May error on unsigned/bool dtypes.
+/// Element-wise negation.
 ///
-/// Eagerly evaluates so that dtype errors (e.g. negating u8/bool) surface
-/// immediately as `Err(Error::Mlx(...))` rather than at a later eval point.
+/// On unsigned dtypes (`u8`/`u16`/etc.) MLX wraps two's-complement style
+/// (e.g. `1u8 → 255u8`); it does not throw. On `bool` MLX errors at eval
+/// time per its own dtype rules.
 pub fn negative(a: &Array) -> Result<Array> {
     let inner = mlx_sys::array::ffi::array_negative(a.as_inner()).map_err(Error::from)?;
-    let result = Array::from_inner(inner);
-    result.eval()?;
-    Ok(result)
+    Ok(Array::from_inner(inner))
 }
 
 /// Macro to define a unary op delegating to a single shim function.
