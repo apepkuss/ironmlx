@@ -14,11 +14,23 @@ use crate::{Error, Result};
 /// Compute the broadcast result shape of two operand shapes per NumPy rules.
 ///
 /// Returns `Err(Error::BroadcastMismatch)` if the shapes are incompatible.
+///
+/// All dims must be non-negative (the function `debug_assert!`s this in debug
+/// builds). MLX always produces non-negative shape values, so callers passing
+/// `Array::shape()` outputs never need to worry. P1b2 helpers that synthesize
+/// shapes (e.g. for keepdim or `-1` placeholders in reshape) must canonicalize
+/// to non-negative dims before calling this.
 pub fn broadcast_shape(lhs: &[i32], rhs: &[i32]) -> Result<SmallVec<[i32; 8]>> {
+    debug_assert!(
+        lhs.iter().chain(rhs).all(|&d| d >= 0),
+        "broadcast_shape requires non-negative dims; got lhs={lhs:?}, rhs={rhs:?}"
+    );
     let n = lhs.len().max(rhs.len());
     let mut out = SmallVec::<[i32; 8]>::with_capacity(n);
     for i in 0..n {
-        // Right-align: treat missing leading dims as 1.
+        // Right-align: treat missing leading dims as 1. The wrapping_sub trick:
+        // when `n - i > lhs.len()`, the subtraction wraps to a giant usize that
+        // .get() returns None for, so .unwrap_or(1) supplies the implicit 1.
         let a = lhs.get(lhs.len().wrapping_sub(n - i)).copied().unwrap_or(1);
         let b = rhs.get(rhs.len().wrapping_sub(n - i)).copied().unwrap_or(1);
         let dim = match (a, b) {

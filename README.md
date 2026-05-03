@@ -65,7 +65,9 @@ fn main() -> mlx::Result<()> {
 
 NumPy-style broadcasting is validated in Rust before the FFI call; incompatible shapes return `Err(Error::BroadcastMismatch { lhs, rhs })` with structured fields rather than an opaque MLX exception string.
 
-**No scalar LHS** (`1.0 - &a`): blocked by Rust's orphan rule. Equivalent expressions: `(-&a)? + 1.0`, or `Array::from_slice(&[1.0], &[])? - a`.
+**No scalar LHS** (`1.0 - &a`): blocked by Rust's orphan rule. Equivalent expressions: `(-&a)? + 1.0_f32`, or `Array::from_slice(&[1.0_f32], &[])? - a`.
+
+> **Tip:** Always type-suffix scalar literals (`1.0_f32`, not bare `1.0`). Without a suffix, Rust infers `f64`, and most arrays in inference workloads are `f32`/`f16`/`bf16`. Mixing `f64` scalars into a non-`f64` op surfaces as `Err(Error::Mlx("..."))` at runtime, not at compile time. The same applies to integer literals: prefer `1_i32` over `1`.
 
 Available unary ops: `exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `square`, `rsqrt`, `erf`, `reciprocal` — sufficient to compose `softmax`, `gelu` (via `0.5 * x * (1 + erf(x / sqrt(2)))`), and `silu` once P1b2 adds the needed reductions.
 
