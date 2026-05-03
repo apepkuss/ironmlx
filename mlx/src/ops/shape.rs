@@ -87,3 +87,33 @@ pub fn stack(arrays: &[&Array], axis: i32) -> Result<Array> {
     let inner = unsafe { mlx_sys::array::ffi::array_stack(&raw, axis) }.map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Split `a` into `num_splits` equal-sized pieces along `axis`. Returns a
+/// `Vec<Array>` of length `num_splits`. The split axis size must be evenly
+/// divisible by `num_splits`; MLX validates and errors otherwise.
+pub fn split_n(a: &Array, num_splits: i32, axis: i32) -> Result<Vec<Array>> {
+    let v = mlx_sys::array::ffi::array_split_n(a.as_inner(), num_splits, axis)
+        .map_err(Error::from)?;
+    let len = mlx_sys::array::ffi::split_result_len(&v);
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let inner = mlx_sys::array::ffi::split_result_at(&v, i).map_err(Error::from)?;
+        out.push(Array::from_inner(inner));
+    }
+    Ok(out)
+}
+
+/// Split `a` at the given indices along `axis`. With `indices = [i, j, ...]`
+/// and the split axis size `S`, the result has pieces with sizes
+/// `[i, j-i, ..., S - last_idx]`.
+pub fn split_at(a: &Array, indices: &[i32], axis: i32) -> Result<Vec<Array>> {
+    let v = mlx_sys::array::ffi::array_split_at(a.as_inner(), indices, axis)
+        .map_err(Error::from)?;
+    let len = mlx_sys::array::ffi::split_result_len(&v);
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let inner = mlx_sys::array::ffi::split_result_at(&v, i).map_err(Error::from)?;
+        out.push(Array::from_inner(inner));
+    }
+    Ok(out)
+}

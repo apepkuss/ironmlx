@@ -139,3 +139,50 @@ fn stack_along_last_axis() {
     // Result column-major in the new axis: [[1, 3], [2, 4]]
     assert_eq!(s.to_vec::<f32>().expect("to_vec"), vec![1.0, 3.0, 2.0, 4.0]);
 }
+
+#[test]
+fn split_n_equal_pieces() {
+    // [6] split into 3 → 3 arrays of shape [2]
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[6]).expect("from_slice");
+    let parts = mlx::ops::split_n(&a, 3, 0).expect("split_n");
+    assert_eq!(parts.len(), 3);
+    for part in &parts {
+        assert_eq!(part.shape().as_slice(), &[2]);
+    }
+    assert_eq!(parts[0].to_vec::<f32>().expect("to_vec"), vec![1.0, 2.0]);
+    assert_eq!(parts[1].to_vec::<f32>().expect("to_vec"), vec![3.0, 4.0]);
+    assert_eq!(parts[2].to_vec::<f32>().expect("to_vec"), vec![5.0, 6.0]);
+}
+
+#[test]
+fn split_n_along_axis_1() {
+    // [2, 6] split into 3 along axis 1 → 3 arrays of shape [2, 2]
+    let a = Array::from_slice(&[0.0_f32; 12], &[2, 6]).expect("from_slice");
+    let parts = mlx::ops::split_n(&a, 3, 1).expect("split_n axis 1");
+    assert_eq!(parts.len(), 3);
+    for part in &parts {
+        assert_eq!(part.shape().as_slice(), &[2, 2]);
+    }
+}
+
+#[test]
+fn split_at_indices() {
+    // [6] split at indices [2, 4] → arrays of shape [2], [2], [2]
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[6]).expect("from_slice");
+    let parts = mlx::ops::split_at(&a, &[2, 4], 0).expect("split_at");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].to_vec::<f32>().expect("to_vec"), vec![1.0, 2.0]);
+    assert_eq!(parts[1].to_vec::<f32>().expect("to_vec"), vec![3.0, 4.0]);
+    assert_eq!(parts[2].to_vec::<f32>().expect("to_vec"), vec![5.0, 6.0]);
+}
+
+#[test]
+fn split_at_uneven_pieces() {
+    // [6] split at indices [1, 4] → arrays of shape [1], [3], [2]
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[6]).expect("from_slice");
+    let parts = mlx::ops::split_at(&a, &[1, 4], 0).expect("split_at uneven");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].shape().as_slice(), &[1]);
+    assert_eq!(parts[1].shape().as_slice(), &[3]);
+    assert_eq!(parts[2].shape().as_slice(), &[2]);
+}
