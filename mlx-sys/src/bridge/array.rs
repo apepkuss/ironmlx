@@ -12,5 +12,6 @@ pub mod ffi {
         fn array_size(a: &MlxArray) -> usize;
         fn array_dtype(a: &MlxArray) -> u8;
         fn array_clone(a: &MlxArray) -> UniquePtr<MlxArray>;
+        fn array_is_available(a: &MlxArray) -> bool;
     }
 }

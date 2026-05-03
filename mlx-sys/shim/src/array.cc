@@ -77,4 +77,12 @@ std::unique_ptr<MlxArray> array_clone(const MlxArray& a) {
   return std::make_unique<MlxArray>(a);
 }
 
+bool array_is_available(const MlxArray& a) {
+  // NB: mlx::core::array::is_available() is a const method that internally
+  // mutates state via shared_ptr<ArrayDesc> (calls detach_event() and
+  // set_status() on the available transition). This is safe under our
+  // !Sync contract — only single-thread access to a given Array is allowed.
+  return a.is_available();
+}
+
 }  // namespace cxx_mlx

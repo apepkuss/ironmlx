@@ -16,5 +16,6 @@ size_t array_ndim(const MlxArray& a);
 size_t array_size(const MlxArray& a);
 uint8_t array_dtype(const MlxArray& a);
 std::unique_ptr<MlxArray> array_clone(const MlxArray& a);
+bool array_is_available(const MlxArray& a);
 
 }  // namespace cxx_mlx

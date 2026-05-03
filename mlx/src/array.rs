@@ -40,10 +40,29 @@ impl Array {
     pub fn eval(&self) -> Result<()> {
         mlx_sys::transforms::ffi::eval_one(&self.0).map_err(Error::from)
     }
+
+    /// Hidden raw FFI access for advanced users and internal tests.
+    #[doc(hidden)]
+    pub fn as_inner(&self) -> &mlx_sys::array::ffi::MlxArray {
+        &self.0
+    }
 }
 
 impl Clone for Array {
     fn clone(&self) -> Self {
         Array(mlx_sys::array::ffi::array_clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for Array {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // CRITICAL: Debug must NOT trigger eval. Read shape/dtype/availability
+        // through the cheap getters that the spec guarantees do not eval.
+        let evaluated = mlx_sys::array::ffi::array_is_available(&self.0);
+        f.debug_struct("Array")
+            .field("shape", &self.shape())
+            .field("dtype", &self.dtype())
+            .field("evaluated", &evaluated)
+            .finish()
     }
 }
