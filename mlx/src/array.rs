@@ -14,11 +14,22 @@ impl Array {
 
     /// Construct an array from a slice of `T` and a shape.
     ///
-    /// Returns `Err(Error::ShapeMismatch)` if `slice.len()` does not equal
-    /// `shape.iter().product()` (or 1 for empty/scalar shapes).
+    /// Returns `Err(Error::Mlx(...))` if `shape` contains a negative dimension,
+    /// or `Err(Error::ShapeMismatch)` if `slice.len()` does not equal
+    /// `shape.iter().product()` (the empty-shape product is 1, denoting a scalar).
     pub fn from_slice<T: Element>(slice: &[T], shape: &[i32]) -> Result<Array> {
+        // Reject negative dims early — `d as usize` would wrap to usize::MAX
+        // and the subsequent .product() would either overflow-panic in debug
+        // or wrap silently in release.
+        if let Some(&d) = shape.iter().find(|&&d| d < 0) {
+            return Err(Error::Mlx(format!(
+                "from_slice: negative dimension {d} in shape {shape:?}"
+            )));
+        }
+        // Empty shape → empty product = 1 → scalar (1 element). The branch
+        // for shape.is_empty() is unnecessary because i32::product on an
+        // empty iterator already returns 1.
         let expected: usize = shape.iter().map(|&d| d as usize).product();
-        let expected = if shape.is_empty() { 1 } else { expected };
         if slice.len() != expected {
             return Err(Error::ShapeMismatch {
                 expected: shape.to_vec(),

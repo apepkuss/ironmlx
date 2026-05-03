@@ -18,6 +18,15 @@ static_assert(static_cast<uint8_t>(mlx::core::Dtype::Val::float32) == 10,
 static_assert(static_cast<uint8_t>(mlx::core::Dtype::Val::complex64) == 13,
               "Dtype::Val::complex64 ordinal changed; update Dtype enum in mlx/src/dtype.rs");
 
+// Half-type width guards. Rust's element.rs has matching static asserts for
+// half::f16 / half::bf16 size_of == 2. The reinterpret_cast bridges (e.g.
+// `reinterpret_cast<mlx::core::float16_t*>(uint16_t*)` in array_from_f16)
+// silently misbehave if MLX adds padding or grows these types. Catch it here.
+static_assert(sizeof(mlx::core::float16_t) == 2,
+              "MLX float16_t no longer 2 bytes; reinterpret_cast bridges in this shim are unsound");
+static_assert(sizeof(mlx::core::bfloat16_t) == 2,
+              "MLX bfloat16_t no longer 2 bytes; reinterpret_cast bridges in this shim are unsound");
+
 namespace cxx_mlx {
 
 namespace {

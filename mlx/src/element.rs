@@ -39,6 +39,7 @@ impl Element for bool {
         Ok(bytes.into_iter().map(|b| b != 0).collect())
     }
     fn array_item(arr: &Array) -> Result<Self> {
+        arr.eval()?;  // implicit eval per spec A8 — MLX's const item<T>() throws on lazy
         mlx_sys::array::ffi::array_item_bool(arr.as_inner()).map_err(Error::from)
     }
 }
@@ -58,6 +59,7 @@ macro_rules! element_impl_simple {
                 Ok(raw.into_iter().collect::<Vec<_>>())
             }
             fn array_item(arr: &Array) -> Result<Self> {
+                arr.eval()?;  // implicit eval per spec A8
                 mlx_sys::array::ffi::$shim_item(arr.as_inner()).map_err(Error::from)
             }
         }
@@ -89,6 +91,7 @@ impl Element for half::f16 {
         Ok(raw.into_iter().map(half::f16::from_bits).collect())
     }
     fn array_item(arr: &Array) -> Result<Self> {
+        arr.eval()?;  // implicit eval per spec A8
         let bits = mlx_sys::array::ffi::array_item_f16(arr.as_inner()).map_err(Error::from)?;
         Ok(half::f16::from_bits(bits))
     }
@@ -110,6 +113,7 @@ impl Element for half::bf16 {
         Ok(raw.into_iter().map(half::bf16::from_bits).collect())
     }
     fn array_item(arr: &Array) -> Result<Self> {
+        arr.eval()?;  // implicit eval per spec A8
         let bits = mlx_sys::array::ffi::array_item_bf16(arr.as_inner()).map_err(Error::from)?;
         Ok(half::bf16::from_bits(bits))
     }

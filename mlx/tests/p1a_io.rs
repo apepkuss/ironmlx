@@ -133,3 +133,25 @@ fn to_vec_bool_round_trip() {
     let read_back = arr.to_vec::<bool>().expect("to_vec");
     assert_eq!(read_back, original);
 }
+
+#[test]
+fn item_implicit_eval_on_lazy_scalar() {
+    // Regression: `mlx::core::array::item<T>() const` throws on lazy arrays.
+    // Per spec A8, item<T> must implicitly eval (same contract as to_vec).
+    let arr = Array::zeros(&[], Dtype::Float32).expect("zeros");
+    let v = arr.item::<f32>().expect("item must trigger implicit eval on lazy");
+    assert_eq!(v, 0.0);
+}
+
+#[test]
+fn from_slice_negative_dim_returns_err() {
+    // Regression: shape elements like -1 (sometimes used as a placeholder
+    // semantically) would wrap to usize::MAX in the size product and either
+    // panic in debug or compute a wrong expected size in release.
+    let data = vec![1.0_f32, 2.0, 3.0];
+    let result = Array::from_slice(&data, &[-1, 3]);
+    match result {
+        Err(Error::Mlx(msg)) => assert!(msg.contains("negative dimension"), "msg: {msg}"),
+        other => panic!("expected Error::Mlx with 'negative dimension', got {other:?}"),
+    }
+}
