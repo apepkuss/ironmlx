@@ -20,6 +20,15 @@ namespace cxx_mlx {
 
 namespace {
 
+template <typename CppT>
+std::unique_ptr<MlxArray> array_from_typed(
+    const CppT* data,
+    rust::Slice<const int32_t> shape,
+    mlx::core::Dtype dtype) {
+  mlx::core::Shape s(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::array(data, std::move(s), dtype));
+}
+
 mlx::core::Dtype dtype_from_u8(uint8_t v) {
   using V = mlx::core::Dtype::Val;
   switch (static_cast<V>(v)) {
@@ -83,6 +92,43 @@ bool array_is_available(const MlxArray& a) {
   // set_status() on the available transition). This is safe under our
   // !Sync contract — only single-thread access to a given Array is allowed.
   return a.is_available();
+}
+
+std::unique_ptr<MlxArray> array_from_bool(rust::Slice<const uint8_t> data, rust::Slice<const int32_t> shape) {
+  // mlx stores bool as 1 byte; reinterpret uint8_t bridge to bool elements.
+  return array_from_typed<bool>(reinterpret_cast<const bool*>(data.data()), shape, mlx::core::bool_);
+}
+std::unique_ptr<MlxArray> array_from_u8(rust::Slice<const uint8_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<uint8_t>(data.data(), shape, mlx::core::uint8);
+}
+std::unique_ptr<MlxArray> array_from_i8(rust::Slice<const int8_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<int8_t>(data.data(), shape, mlx::core::int8);
+}
+std::unique_ptr<MlxArray> array_from_i16(rust::Slice<const int16_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<int16_t>(data.data(), shape, mlx::core::int16);
+}
+std::unique_ptr<MlxArray> array_from_i32(rust::Slice<const int32_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<int32_t>(data.data(), shape, mlx::core::int32);
+}
+std::unique_ptr<MlxArray> array_from_i64(rust::Slice<const int64_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<int64_t>(data.data(), shape, mlx::core::int64);
+}
+std::unique_ptr<MlxArray> array_from_f16(rust::Slice<const uint16_t> data, rust::Slice<const int32_t> shape) {
+  // half::f16 has the same memory layout as mlx::core::float16_t (both 2-byte POD, IEEE 754 binary16).
+  return array_from_typed<mlx::core::float16_t>(
+      reinterpret_cast<const mlx::core::float16_t*>(data.data()),
+      shape, mlx::core::float16);
+}
+std::unique_ptr<MlxArray> array_from_bf16(rust::Slice<const uint16_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<mlx::core::bfloat16_t>(
+      reinterpret_cast<const mlx::core::bfloat16_t*>(data.data()),
+      shape, mlx::core::bfloat16);
+}
+std::unique_ptr<MlxArray> array_from_f32(rust::Slice<const float> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<float>(data.data(), shape, mlx::core::float32);
+}
+std::unique_ptr<MlxArray> array_from_f64(rust::Slice<const double> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<double>(data.data(), shape, mlx::core::float64);
 }
 
 }  // namespace cxx_mlx

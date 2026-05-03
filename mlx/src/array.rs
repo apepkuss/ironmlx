@@ -1,11 +1,33 @@
 use cxx::UniquePtr;
 
-use crate::{Dtype, Error, Result};
+use crate::{Dtype, Element, Error, Result};
 
 /// An MLX array. Cheap to clone (MLX internally refcounts the storage).
 pub struct Array(UniquePtr<mlx_sys::array::ffi::MlxArray>);
 
 impl Array {
+    /// Construct from a raw cxx UniquePtr. Internal use only — the safe API
+    /// is `Array::from_slice<T>` / `Array::zeros` / etc.
+    pub(crate) fn from_inner(inner: cxx::UniquePtr<mlx_sys::array::ffi::MlxArray>) -> Self {
+        Array(inner)
+    }
+
+    /// Construct an array from a slice of `T` and a shape.
+    ///
+    /// Returns `Err(Error::ShapeMismatch)` if `slice.len()` does not equal
+    /// `shape.iter().product()` (or 1 for empty/scalar shapes).
+    pub fn from_slice<T: Element>(slice: &[T], shape: &[i32]) -> Result<Array> {
+        let expected: usize = shape.iter().map(|&d| d as usize).product();
+        let expected = if shape.is_empty() { 1 } else { expected };
+        if slice.len() != expected {
+            return Err(Error::ShapeMismatch {
+                expected: shape.to_vec(),
+                actual: vec![slice.len() as i32],
+            });
+        }
+        T::array_from(slice, shape)
+    }
+
     /// Create an array filled with zeros of the given shape and dtype.
     /// The result is lazy — call [`Array::eval`] before reading the data.
     pub fn zeros(shape: &[i32], dtype: Dtype) -> Result<Self> {
