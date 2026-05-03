@@ -41,3 +41,9 @@ impl Array {
         mlx_sys::transforms::ffi::eval_one(&self.0).map_err(Error::from)
     }
 }
+
+impl Clone for Array {
+    fn clone(&self) -> Self {
+        Array(mlx_sys::array::ffi::array_clone(&self.0))
+    }
+}

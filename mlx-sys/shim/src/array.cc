@@ -71,4 +71,10 @@ uint8_t array_dtype(const MlxArray& a) {
   return static_cast<uint8_t>(a.dtype().val());
 }
 
+std::unique_ptr<MlxArray> array_clone(const MlxArray& a) {
+  // mlx::core::array's copy constructor shares the internal shared_ptr<ArrayDesc>;
+  // this is cheap (atomic refcount++) and does not copy tensor data.
+  return std::make_unique<MlxArray>(a);
+}
+
 }  // namespace cxx_mlx

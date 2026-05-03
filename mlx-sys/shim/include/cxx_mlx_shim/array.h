@@ -15,5 +15,6 @@ rust::Vec<int32_t> array_shape(const MlxArray& a);
 size_t array_ndim(const MlxArray& a);
 size_t array_size(const MlxArray& a);
 uint8_t array_dtype(const MlxArray& a);
+std::unique_ptr<MlxArray> array_clone(const MlxArray& a);
 
 }  // namespace cxx_mlx
