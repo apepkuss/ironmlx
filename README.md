@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** P1a — Array foundation (`zeros`/`from_slice<T>`/`item<T>`/`to_vec<T>`/`Clone`/`Debug`/`Send`/`SmallVec` shape) covering 10 dtypes incl. `f16`/`bf16`. Full design in [`docs/superpowers/specs/`](docs/superpowers/specs/).
+**Status:** P1b1 — operators (`+ - * / unary -`) + scalar RHS (any `Element` type) + 9 element-wise unary ops (`exp`/`log`/`sqrt`/`tanh`/`sigmoid`/`square`/`rsqrt`/`erf`/`reciprocal`) + NumPy broadcasting validated in Rust. Built on P1a Array foundation. Full design in [`docs/superpowers/specs/`](docs/superpowers/specs/).
 
 ## Requirements
 
@@ -38,6 +38,39 @@ fn main() -> mlx::Result<()> {
 }
 ```
 
+## Operators
+
+`mlx::Array` supports the standard arithmetic operators with all 4 reference combinations (`a + b`, `&a + b`, `a + &b`, `&a + &b`) and scalar RHS for any `Element` type. Operators return `Result<Array>` because broadcasting validation, dtype mismatch, or MLX-side errors all surface as recoverable Rust errors:
+
+```rust
+use mlx::{Array, Dtype};
+
+fn main() -> mlx::Result<()> {
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3])?;
+    let b = Array::from_slice(&[10.0_f32, 20.0, 30.0], &[3])?;
+
+    // Binary ops with all reference combos
+    let _r1 = (&a + &b)?;          // most common
+    let _r2 = (&a * 2.0_f32)?;     // scalar RHS
+
+    // Chained unary (free fn or method form)
+    let _y = (&a.exp()? - 1.0_f32)?;
+    let _z = mlx::ops::sigmoid(&a)?;
+
+    // Negation
+    let _n = (-&a)?;
+    Ok(())
+}
+```
+
+NumPy-style broadcasting is validated in Rust before the FFI call; incompatible shapes return `Err(Error::BroadcastMismatch { lhs, rhs })` with structured fields rather than an opaque MLX exception string.
+
+**No scalar LHS** (`1.0 - &a`): blocked by Rust's orphan rule. Equivalent expressions: `(-&a)? + 1.0_f32`, or `Array::from_slice(&[1.0_f32], &[])? - a`.
+
+> **Tip:** Always type-suffix scalar literals (`1.0_f32`, not bare `1.0`). Without a suffix, Rust infers `f64`, and most arrays in inference workloads are `f32`/`f16`/`bf16`. Mixing `f64` scalars into a non-`f64` op surfaces as `Err(Error::Mlx("..."))` at runtime, not at compile time. The same applies to integer literals: prefer `1_i32` over `1`.
+
+Available unary ops: `exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `square`, `rsqrt`, `erf`, `reciprocal` — sufficient to compose `softmax`, `gelu` (via `0.5 * x * (1 + erf(x / sqrt(2)))`), and `silu` once P1b2 adds the needed reductions.
+
 ## Threading
 
 `mlx::Array` implements `Send` but **not** `Sync`. Internally, MLX's
@@ -66,7 +99,8 @@ mutable access — `clone` is almost always the right answer.
 
 - ✅ **P0** — scaffold (zeros + eval + shape)
 - ✅ **P1a** — Array foundation (Element trait, 10 dtypes, from_slice/item/to_vec, Clone/Debug, Send, SmallVec shape)
-- ⏳ **P1b** — core ops (arithmetic, reduction, indexing, shape ops)
+- ✅ **P1b1** — operators + element-wise unary + broadcasting
+- ⏳ **P1b2** — shape ops + reduction + indexing + matmul
 - ⏳ **P1c** — random (key + uniform/normal/categorical)
 - ⏳ **P2** — `fast` (rms_norm, layer_norm, rope, sdpa) + io (safetensors/gguf load) + transforms
 - ⏳ **P3** — quantization + compile + LLM inference example

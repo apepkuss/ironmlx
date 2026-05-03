@@ -60,4 +60,23 @@ rust::Vec<uint16_t> array_to_vec_bf16(const MlxArray& a);  // raw bits of half::
 rust::Vec<float> array_to_vec_f32(const MlxArray& a);
 rust::Vec<double> array_to_vec_f64(const MlxArray& a);
 
+// Binary element-wise ops (broadcasting handled by MLX after Rust-side
+// shape validation in mlx::broadcast::broadcast_shape).
+std::unique_ptr<MlxArray> array_add(const MlxArray& a, const MlxArray& b);
+std::unique_ptr<MlxArray> array_subtract(const MlxArray& a, const MlxArray& b);
+std::unique_ptr<MlxArray> array_multiply(const MlxArray& a, const MlxArray& b);
+std::unique_ptr<MlxArray> array_divide(const MlxArray& a, const MlxArray& b);
+
+// Unary element-wise ops.
+std::unique_ptr<MlxArray> array_negative(const MlxArray& a);
+std::unique_ptr<MlxArray> array_exp(const MlxArray& a);
+std::unique_ptr<MlxArray> array_log(const MlxArray& a);
+std::unique_ptr<MlxArray> array_sqrt(const MlxArray& a);
+std::unique_ptr<MlxArray> array_tanh(const MlxArray& a);
+std::unique_ptr<MlxArray> array_sigmoid(const MlxArray& a);
+std::unique_ptr<MlxArray> array_square(const MlxArray& a);
+std::unique_ptr<MlxArray> array_rsqrt(const MlxArray& a);
+std::unique_ptr<MlxArray> array_erf(const MlxArray& a);
+std::unique_ptr<MlxArray> array_reciprocal(const MlxArray& a);
+
 }  // namespace cxx_mlx

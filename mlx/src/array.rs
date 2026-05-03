@@ -130,6 +130,33 @@ impl Array {
     pub fn as_inner(&self) -> &mlx_sys::array::ffi::MlxArray {
         &self.0
     }
+
+    /// Element-wise natural exponential. See [`crate::ops::exp`].
+    pub fn exp(&self) -> Result<Array> { crate::ops::exp(self) }
+
+    /// Element-wise natural logarithm. See [`crate::ops::log`].
+    pub fn log(&self) -> Result<Array> { crate::ops::log(self) }
+
+    /// Element-wise square root. See [`crate::ops::sqrt`].
+    pub fn sqrt(&self) -> Result<Array> { crate::ops::sqrt(self) }
+
+    /// Element-wise hyperbolic tangent. See [`crate::ops::tanh`].
+    pub fn tanh(&self) -> Result<Array> { crate::ops::tanh(self) }
+
+    /// Element-wise sigmoid. See [`crate::ops::sigmoid`].
+    pub fn sigmoid(&self) -> Result<Array> { crate::ops::sigmoid(self) }
+
+    /// Element-wise x^2. See [`crate::ops::square`].
+    pub fn square(&self) -> Result<Array> { crate::ops::square(self) }
+
+    /// Element-wise 1/sqrt(x). See [`crate::ops::rsqrt`].
+    pub fn rsqrt(&self) -> Result<Array> { crate::ops::rsqrt(self) }
+
+    /// Element-wise error function. See [`crate::ops::erf`].
+    pub fn erf(&self) -> Result<Array> { crate::ops::erf(self) }
+
+    /// Element-wise 1/x. See [`crate::ops::reciprocal`].
+    pub fn reciprocal(&self) -> Result<Array> { crate::ops::reciprocal(self) }
 }
 
 impl Clone for Array {
