@@ -1,4 +1,4 @@
-use mlx::{Array, Dtype, Error};
+use mlx::{Array, Error};
 
 #[test]
 fn add_same_shape() {
@@ -83,7 +83,7 @@ fn neg_on_unsigned_wraps() {
     // (The op returns Ok, NOT an Err — MLX does not pre-validate dtype for neg.)
     let a = Array::from_slice(&[1_u8, 2, 3], &[3]).expect("from_slice");
     let result = -&a;
-    assert!(matches!(result, Ok(_)), "expected Ok for u8 neg, got {result:?}");
+    assert!(result.is_ok(), "expected Ok for u8 neg, got {result:?}");
     let v = result.unwrap().to_vec::<u8>().expect("to_vec");
     assert_eq!(v, vec![255_u8, 254, 253]);
 }

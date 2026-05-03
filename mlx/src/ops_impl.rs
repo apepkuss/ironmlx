@@ -4,7 +4,9 @@
 //! because broadcasting validation, dtype mismatch, or MLX-side errors all
 //! surface immediately. User code threads `?` through expressions:
 //!
-//!     let y = (&a + &b)?.matmul(&w)?;
+//! ```ignore
+//! let y = (&a + &b)?.matmul(&w)?;
+//! ```
 //!
 //! The `forward_ref_binop!` macro generates the 3 variant impls (`Array op
 //! Array`, `Array op &Array`, `&Array op Array`) by delegating to the
