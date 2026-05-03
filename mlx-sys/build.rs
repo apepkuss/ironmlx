@@ -47,8 +47,13 @@ fn main() {
     // C++ standard library
     println!("cargo:rustc-link-lib=c++");
 
-    // include_dir will be used by cxx_build wiring in Task 3.
-    let _ = include_dir;
+    cxx_build::bridge("src/bridge/array.rs")
+        .file("shim/src/array.cc")
+        .include("shim/include")
+        .include(&include_dir)
+        .std("c++20")
+        .flag_if_supported("-fvisibility=hidden")
+        .compile("cxx_mlx_shim");
 }
 
 fn locate_mlx() -> (PathBuf, PathBuf) {

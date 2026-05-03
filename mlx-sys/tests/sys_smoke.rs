@@ -1,0 +1,13 @@
+use mlx_sys::array::ffi;
+
+// Mirror of mlx::core::Dtype::Val. Verified against mlx/dtype.h:
+// bool_=0, uint8=1, uint16=2, uint32=3, uint64=4, int8=5, int16=6, int32=7,
+// int64=8, float16=9, float32=10, float64=11, bfloat16=12, complex64=13.
+const FLOAT32: u8 = 10;
+
+#[test]
+fn zeros_then_read_shape() {
+    let arr = ffi::array_zeros(&[2, 3], FLOAT32);
+    let shape = ffi::array_shape(&arr);
+    assert_eq!(shape, vec![2, 3]);
+}
