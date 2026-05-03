@@ -7,6 +7,7 @@
 
 #include "mlx/dtype.h"
 #include "mlx/ops.h"
+#include "mlx/transforms.h"
 
 // Endpoint static_asserts on mlx::core::Dtype::Val. If MLX inserts a new
 // dtype at any position, at least one endpoint shifts and we fail fast at
@@ -65,12 +66,17 @@ mlx::core::Dtype dtype_from_u8(uint8_t v) {
 
 template <typename CppT, typename WireT = CppT>
 rust::Vec<WireT> array_to_vec_typed(const MlxArray& a) {
-  // Caller (the safe Rust layer) is responsible for calling Array::eval()
-  // before to_vec; data<T>() asserts the array is evaluated.
+  // Flatten to a 1-D contiguous array so that data<T>() iterates elements in
+  // logical (row-major) order regardless of strides. This handles transpose,
+  // broadcast_to, and any other view ops that leave the backing buffer
+  // non-contiguous. The flatten+eval is cheap when already contiguous (MLX
+  // detects that and avoids a copy).
+  mlx::core::array flat = mlx::core::flatten(a);
+  mlx::core::eval(flat);
   rust::Vec<WireT> out;
-  out.reserve(a.size());
-  const CppT* ptr = a.data<CppT>();
-  for (size_t i = 0; i < a.size(); ++i) {
+  out.reserve(flat.size());
+  const CppT* ptr = flat.data<CppT>();
+  for (size_t i = 0; i < flat.size(); ++i) {
     if constexpr (std::is_same_v<CppT, WireT>) {
       out.push_back(ptr[i]);
     } else {

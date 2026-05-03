@@ -39,3 +39,25 @@ pub fn reshape(a: &Array, shape: &[i32]) -> Result<Array> {
         mlx_sys::array::ffi::array_reshape(a.as_inner(), &resolved).map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Reverse all axes (NumPy `arr.T` equivalent).
+pub fn transpose(a: &Array) -> Result<Array> {
+    let inner = mlx_sys::array::ffi::array_transpose(a.as_inner()).map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Permute axes per the given permutation. `axes` must be a permutation of
+/// `[0, a.ndim())`; MLX validates and errors otherwise.
+pub fn transpose_axes(a: &Array, axes: &[i32]) -> Result<Array> {
+    let inner =
+        mlx_sys::array::ffi::array_transpose_axes(a.as_inner(), axes).map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Broadcast `a` to the given shape, replicating dims of size 1. The target
+/// shape must be broadcast-compatible per NumPy rules.
+pub fn broadcast_to(a: &Array, shape: &[i32]) -> Result<Array> {
+    let inner =
+        mlx_sys::array::ffi::array_broadcast_to(a.as_inner(), shape).map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

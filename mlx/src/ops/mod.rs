@@ -11,5 +11,5 @@ pub mod unary;
 
 pub use binary::{add, divide, multiply, negative, subtract};
 pub use reduction::{All, IntoAxes, argmax, max, mean, min, sum};
-pub use shape::reshape;
+pub use shape::{broadcast_to, reshape, transpose, transpose_axes};
 pub use unary::{erf, exp, log, reciprocal, rsqrt, sigmoid, sqrt, square, tanh};

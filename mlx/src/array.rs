@@ -187,6 +187,26 @@ impl Array {
     pub fn reshape(&self, shape: &[i32]) -> Result<Array> {
         crate::ops::reshape(self, shape)
     }
+
+    /// Reverse all axes. See [`crate::ops::transpose`].
+    pub fn transpose(&self) -> Result<Array> {
+        crate::ops::transpose(self)
+    }
+
+    /// Shorthand for [`Array::transpose`]. Standard convention in matrix code.
+    pub fn t(&self) -> Result<Array> {
+        crate::ops::transpose(self)
+    }
+
+    /// Permute axes per the given permutation. See [`crate::ops::transpose_axes`].
+    pub fn transpose_axes(&self, axes: &[i32]) -> Result<Array> {
+        crate::ops::transpose_axes(self, axes)
+    }
+
+    /// Broadcast to the given shape. See [`crate::ops::broadcast_to`].
+    pub fn broadcast_to(&self, shape: &[i32]) -> Result<Array> {
+        crate::ops::broadcast_to(self, shape)
+    }
 }
 
 impl Clone for Array {
