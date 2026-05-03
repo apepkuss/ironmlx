@@ -90,10 +90,18 @@ mod tests {
     }
 }
 
-// Reduction functions land in Tasks 4 and 5.
-#[allow(unused_imports)]
-use Array as _;
-#[allow(unused_imports)]
-use Error as _;
-#[allow(unused_imports)]
-use Result as _;
+/// Sum over the specified axes.
+///
+/// Pass [`All`] to reduce over every axis (yielding a scalar by default),
+/// `i32` for a single axis (negative indexing supported), or `&[i32]` /
+/// `Vec<i32>` / `[i32; N]` for multiple axes. `keepdim = true` retains
+/// reduced axes as size-1.
+pub fn sum<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    let inner = match axes.as_axes() {
+        None => mlx_sys::array::ffi::array_sum_all(a.as_inner(), keepdim),
+        Some([axis]) => mlx_sys::array::ffi::array_sum_axis(a.as_inner(), *axis, keepdim),
+        Some(axes) => mlx_sys::array::ffi::array_sum_axes(a.as_inner(), axes, keepdim),
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

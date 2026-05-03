@@ -157,6 +157,11 @@ impl Array {
 
     /// Element-wise 1/x. See [`crate::ops::reciprocal`].
     pub fn reciprocal(&self) -> Result<Array> { crate::ops::reciprocal(self) }
+
+    /// Sum over the specified axes. See [`crate::ops::sum`].
+    pub fn sum<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::sum(self, axes, keepdim)
+    }
 }
 
 impl Clone for Array {
