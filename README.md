@@ -30,7 +30,7 @@ Then in your project:
 use mlx::{Array, Dtype};
 
 fn main() -> mlx::Result<()> {
-    let a = Array::zeros(&[2, 3], Dtype::Float32);
+    let a = Array::zeros(&[2, 3], Dtype::Float32)?;
     println!("shape={:?} dtype={:?} size={}", a.shape(), a.dtype(), a.size());
     a.eval()?;
     Ok(())

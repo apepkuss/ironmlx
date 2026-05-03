@@ -8,8 +8,10 @@ pub struct Array(UniquePtr<mlx_sys::array::ffi::MlxArray>);
 impl Array {
     /// Create an array filled with zeros of the given shape and dtype.
     /// The result is lazy — call [`Array::eval`] before reading the data.
-    pub fn zeros(shape: &[i32], dtype: Dtype) -> Self {
-        Array(mlx_sys::array::ffi::array_zeros(shape, dtype.as_u8()))
+    pub fn zeros(shape: &[i32], dtype: Dtype) -> Result<Self> {
+        let inner = mlx_sys::array::ffi::array_zeros(shape, dtype.as_u8())
+            .map_err(Error::from)?;
+        Ok(Array(inner))
     }
 
     /// The shape of the array. `[]` denotes a scalar.
