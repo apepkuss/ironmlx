@@ -207,6 +207,11 @@ impl Array {
     pub fn broadcast_to(&self, shape: &[i32]) -> Result<Array> {
         crate::ops::broadcast_to(self, shape)
     }
+
+    /// Matrix multiplication. See [`crate::ops::matmul`] for shape rules.
+    pub fn matmul(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::matmul(self, rhs)
+    }
 }
 
 impl Clone for Array {

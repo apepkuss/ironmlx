@@ -5,11 +5,13 @@
 //! mismatch, or MLX-side errors all surface as recoverable Rust errors.
 
 pub mod binary;
+pub mod matmul;
 pub mod reduction;
 pub mod shape;
 pub mod unary;
 
 pub use binary::{add, divide, multiply, negative, subtract};
+pub use matmul::matmul;
 pub use reduction::{All, IntoAxes, argmax, max, mean, min, sum};
 pub use shape::{
     broadcast_to, concatenate, reshape, split_at, split_n, stack, transpose, transpose_axes,
