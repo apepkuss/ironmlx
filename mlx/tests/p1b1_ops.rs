@@ -87,3 +87,31 @@ fn neg_on_unsigned_wraps() {
     let v = result.unwrap().to_vec::<u8>().expect("to_vec");
     assert_eq!(v, vec![255_u8, 254, 253]);
 }
+
+#[test]
+fn scalar_rhs_f32() {
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3]).expect("from_slice");
+    let r = (&a + 10.0_f32).expect("scalar add");
+    assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![11.0, 12.0, 13.0]);
+
+    let r2 = (&a * 2.0_f32).expect("scalar mul");
+    assert_eq!(r2.to_vec::<f32>().expect("to_vec"), vec![2.0, 4.0, 6.0]);
+}
+
+#[test]
+fn scalar_rhs_i32_on_owned() {
+    let a = Array::from_slice(&[1_i32, 2, 3], &[3]).expect("from_slice");
+    let r = (a - 1_i32).expect("scalar sub on owned");
+    assert_eq!(r.to_vec::<i32>().expect("to_vec"), vec![0, 1, 2]);
+}
+
+#[test]
+fn scalar_rhs_half_f16() {
+    let a = Array::from_slice(
+        &[half::f16::from_f32(1.0), half::f16::from_f32(2.0)], &[2]
+    ).expect("from_slice");
+    let r = (&a + half::f16::from_f32(0.5)).expect("scalar add f16");
+    let v = r.to_vec::<half::f16>().expect("to_vec");
+    assert!((v[0].to_f32() - 1.5).abs() < 1e-3);
+    assert!((v[1].to_f32() - 2.5).abs() < 1e-3);
+}

@@ -82,3 +82,37 @@ impl Neg for Array {
     type Output = Result<Array>;
     fn neg(self) -> Self::Output { ops::negative(&self) }
 }
+
+// === Scalar RHS ===
+
+use crate::Element;
+
+/// Generate `impl Trait<T: Element> for &Array` and `for Array` by constructing
+/// a 1-element scalar `Array` from the RHS scalar and delegating to the
+/// `&Array op &Array` impl above.
+///
+/// Spec A4: this avoids 50 per-dtype scalar shim functions. Cost is a small
+/// per-call allocation; broadcasting in MLX makes the actual op cheap.
+macro_rules! impl_scalar_rhs {
+    ($trait:ident, $method:ident) => {
+        impl<T: Element> std::ops::$trait<T> for &Array {
+            type Output = Result<Array>;
+            fn $method(self, rhs: T) -> Self::Output {
+                let scalar = Array::from_slice(&[rhs], &[])?;
+                std::ops::$trait::$method(self, &scalar)
+            }
+        }
+        impl<T: Element> std::ops::$trait<T> for Array {
+            type Output = Result<Array>;
+            fn $method(self, rhs: T) -> Self::Output {
+                let scalar = Array::from_slice(&[rhs], &[])?;
+                std::ops::$trait::$method(&self, &scalar)
+            }
+        }
+    };
+}
+
+impl_scalar_rhs!(Add, add);
+impl_scalar_rhs!(Sub, sub);
+impl_scalar_rhs!(Mul, mul);
+impl_scalar_rhs!(Div, div);
