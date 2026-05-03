@@ -22,11 +22,13 @@
 compile_error!("mlx only supports macOS on Apple Silicon (aarch64-apple-darwin)");
 
 mod array;
+mod broadcast;
 mod dtype;
 mod element;
 mod error;
 
 pub use array::Array;
+pub use broadcast::broadcast_shape;
 pub use dtype::Dtype;
 pub use element::Element;
 pub use error::{Error, Result};
