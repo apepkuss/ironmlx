@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["mlx-sys", "mlx"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wei/cxx-mlx"
+
+[workspace.dependencies]
+cxx = "1.0"
+cxx-build = "1.0"
+thiserror = "2.0"

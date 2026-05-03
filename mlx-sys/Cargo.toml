@@ -1,0 +1,18 @@
+[package]
+name = "mlx-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "mlx"
+description = "Raw FFI bindings to MLX C++ via cxx"
+
+[dependencies]
+cxx.workspace = true
+
+[build-dependencies]
+cxx-build.workspace = true
+
+[features]
+default = []
