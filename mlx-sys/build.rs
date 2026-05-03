@@ -75,7 +75,7 @@ fn locate_mlx() -> (PathBuf, PathBuf) {
 fn link_extra_static_archives(lib_dir: &std::path::Path) {
     let entries = match fs::read_dir(lib_dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => panic!("failed to read MLX lib dir {}: {e}", lib_dir.display()),
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -88,7 +88,8 @@ fn link_extra_static_archives(lib_dir: &std::path::Path) {
             Some(s) => s,
             None => continue,
         };
-        if stem == "mlx" {
+        // Skip libmlx.a (already linked above) and a degenerate `lib.a` with empty stem.
+        if stem.is_empty() || stem == "mlx" {
             continue;
         }
         println!("cargo:rustc-link-lib=static={stem}");
