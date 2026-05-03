@@ -6,11 +6,15 @@
 #include "mlx/dtype.h"
 #include "mlx/ops.h"
 
-// Compile-time guard: if MLX reorders Dtype::Val, the float32 ordinal changes
-// and FLOAT32 in mlx-sys/tests/sys_smoke.rs (and the Dtype enum landing in
-// Task 6) will silently drift. Catch it here at build time.
+// Endpoint static_asserts on mlx::core::Dtype::Val. If MLX inserts a new
+// dtype at any position, at least one endpoint shifts and we fail fast at
+// the C++ build step before the Rust Dtype mirror has a chance to drift.
+static_assert(static_cast<uint8_t>(mlx::core::Dtype::Val::bool_) == 0,
+              "Dtype::Val::bool_ ordinal changed; update Dtype enum in mlx/src/dtype.rs");
 static_assert(static_cast<uint8_t>(mlx::core::Dtype::Val::float32) == 10,
               "Dtype::Val::float32 ordinal changed; update FLOAT32 in sys_smoke.rs and Dtype enum");
+static_assert(static_cast<uint8_t>(mlx::core::Dtype::Val::complex64) == 13,
+              "Dtype::Val::complex64 ordinal changed; update Dtype enum in mlx/src/dtype.rs");
 
 namespace cxx_mlx {
 
