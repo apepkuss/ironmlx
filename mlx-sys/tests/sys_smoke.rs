@@ -7,20 +7,20 @@ const FLOAT32: u8 = 10;
 
 #[test]
 fn zeros_then_read_shape() {
-    let arr = ffi::array_zeros(&[2, 3], FLOAT32);
+    let arr = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros should succeed");
     let shape = ffi::array_shape(&arr);
     assert_eq!(shape, vec![2, 3]);
 }
 
 #[test]
 fn zeros_scalar_has_empty_shape() {
-    let arr = ffi::array_zeros(&[], FLOAT32);
+    let arr = ffi::array_zeros(&[], FLOAT32).expect("zeros should succeed");
     assert_eq!(ffi::array_shape(&arr), Vec::<i32>::new());
 }
 
 #[test]
 fn zeros_metadata() {
-    let arr = ffi::array_zeros(&[2, 3, 4], FLOAT32);
+    let arr = ffi::array_zeros(&[2, 3, 4], FLOAT32).expect("zeros should succeed");
     assert_eq!(ffi::array_ndim(&arr), 3);
     assert_eq!(ffi::array_size(&arr), 24);
     assert_eq!(ffi::array_dtype(&arr), FLOAT32);
@@ -28,6 +28,6 @@ fn zeros_metadata() {
 
 #[test]
 fn zeros_then_eval() {
-    let arr = mlx_sys::array::ffi::array_zeros(&[8], FLOAT32);
+    let arr = mlx_sys::array::ffi::array_zeros(&[8], FLOAT32).expect("zeros should succeed");
     mlx_sys::transforms::ffi::eval_one(&arr).expect("eval should succeed");
 }
