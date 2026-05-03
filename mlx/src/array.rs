@@ -182,6 +182,11 @@ impl Array {
     pub fn argmax<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
         crate::ops::argmax(self, axes, keepdim)
     }
+
+    /// Reshape this array. See [`crate::ops::reshape`].
+    pub fn reshape(&self, shape: &[i32]) -> Result<Array> {
+        crate::ops::reshape(self, shape)
+    }
 }
 
 impl Clone for Array {

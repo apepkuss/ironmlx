@@ -6,8 +6,10 @@
 
 pub mod binary;
 pub mod reduction;
+pub mod shape;
 pub mod unary;
 
 pub use binary::{add, divide, multiply, negative, subtract};
 pub use reduction::{All, IntoAxes, argmax, max, mean, min, sum};
+pub use shape::reshape;
 pub use unary::{erf, exp, log, reciprocal, rsqrt, sigmoid, sqrt, square, tanh};
