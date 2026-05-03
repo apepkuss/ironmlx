@@ -1,4 +1,22 @@
 //! Safe Rust bindings to Apple MLX.
+//!
+//! # Quickstart
+//!
+//! ```no_run
+//! use mlx::{Array, Dtype};
+//!
+//! # fn main() -> mlx::Result<()> {
+//! let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2])?;
+//! let v: Vec<f32> = a.to_vec()?;
+//! assert_eq!(v, vec![1.0, 2.0, 3.0, 4.0]);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Threading
+//!
+//! [`Array`] is `Send` but not `Sync`. To share an array between threads,
+//! clone it (cheap MLX refcount). See the README for details.
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 compile_error!("mlx only supports macOS on Apple Silicon (aarch64-apple-darwin)");
