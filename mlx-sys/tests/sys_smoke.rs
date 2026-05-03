@@ -11,3 +11,9 @@ fn zeros_then_read_shape() {
     let shape = ffi::array_shape(&arr);
     assert_eq!(shape, vec![2, 3]);
 }
+
+#[test]
+fn zeros_scalar_has_empty_shape() {
+    let arr = ffi::array_zeros(&[], FLOAT32);
+    assert_eq!(ffi::array_shape(&arr), Vec::<i32>::new());
+}
