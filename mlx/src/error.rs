@@ -1,5 +1,5 @@
-use thiserror::Error;
 use crate::Dtype;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -10,7 +10,10 @@ pub enum Error {
     DtypeMismatch { expected: Dtype, actual: Dtype },
 
     #[error("shape mismatch: expected {expected:?}, got {actual:?}")]
-    ShapeMismatch { expected: Vec<i32>, actual: Vec<i32> },
+    ShapeMismatch {
+        expected: Vec<i32>,
+        actual: Vec<i32>,
+    },
 
     #[error("broadcast mismatch: lhs {lhs:?} vs rhs {rhs:?}")]
     BroadcastMismatch { lhs: Vec<i32>, rhs: Vec<i32> },
@@ -31,19 +34,31 @@ mod tests {
 
     #[test]
     fn dtype_mismatch_displays() {
-        let e = Error::DtypeMismatch { expected: Dtype::Float32, actual: Dtype::Int32 };
+        let e = Error::DtypeMismatch {
+            expected: Dtype::Float32,
+            actual: Dtype::Int32,
+        };
         assert_eq!(e.to_string(), "dtype mismatch: expected Float32, got Int32");
     }
 
     #[test]
     fn shape_mismatch_displays() {
-        let e = Error::ShapeMismatch { expected: vec![2, 3], actual: vec![6] };
+        let e = Error::ShapeMismatch {
+            expected: vec![2, 3],
+            actual: vec![6],
+        };
         assert_eq!(e.to_string(), "shape mismatch: expected [2, 3], got [6]");
     }
 
     #[test]
     fn broadcast_mismatch_displays() {
-        let e = Error::BroadcastMismatch { lhs: vec![3, 1], rhs: vec![2, 4] };
-        assert_eq!(e.to_string(), "broadcast mismatch: lhs [3, 1] vs rhs [2, 4]");
+        let e = Error::BroadcastMismatch {
+            lhs: vec![3, 1],
+            rhs: vec![2, 4],
+        };
+        assert_eq!(
+            e.to_string(),
+            "broadcast mismatch: lhs [3, 1] vs rhs [2, 4]"
+        );
     }
 }

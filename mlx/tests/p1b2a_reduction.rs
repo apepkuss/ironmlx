@@ -79,7 +79,13 @@ fn mean_basic() {
 #[test]
 fn max_basic() {
     let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0], &[2, 2]).expect("from_slice");
-    assert_eq!(ops::max(&a, All, false).expect("max").item::<f32>().expect("item"), 5.0);
+    assert_eq!(
+        ops::max(&a, All, false)
+            .expect("max")
+            .item::<f32>()
+            .expect("item"),
+        5.0
+    );
 
     let m = ops::max(&a, -1, false).expect("max axis");
     assert_eq!(m.to_vec::<f32>().expect("to_vec"), vec![5.0_f32, 3.0]);
@@ -88,7 +94,13 @@ fn max_basic() {
 #[test]
 fn min_basic() {
     let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0], &[2, 2]).expect("from_slice");
-    assert_eq!(ops::min(&a, All, false).expect("min").item::<f32>().expect("item"), 1.0);
+    assert_eq!(
+        ops::min(&a, All, false)
+            .expect("min")
+            .item::<f32>()
+            .expect("item"),
+        1.0
+    );
 
     let m = ops::min(&a, -1, false).expect("min axis");
     assert_eq!(m.to_vec::<f32>().expect("to_vec"), vec![1.0_f32, 2.0]);
@@ -141,7 +153,10 @@ fn sum_empty_axes_slice_is_no_op() {
         Ok(s) => {
             // MLX returns the original array unchanged for empty-axes reduction
             assert_eq!(s.shape().as_slice(), &[2, 3]);
-            assert_eq!(s.to_vec::<f32>().expect("to_vec"), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+            assert_eq!(
+                s.to_vec::<f32>().expect("to_vec"),
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+            );
         }
         Err(Error::Mlx(msg)) => {
             // Acceptable too — pin whatever MLX does.
@@ -155,15 +170,27 @@ fn sum_empty_axes_slice_is_no_op() {
 fn reduction_methods_match_free_fns() {
     let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("from_slice");
     assert_eq!(
-        a.mean(All, false).expect("mean").item::<f32>().expect("item"),
-        ops::mean(&a, All, false).expect("mean").item::<f32>().expect("item"),
+        a.mean(All, false)
+            .expect("mean")
+            .item::<f32>()
+            .expect("item"),
+        ops::mean(&a, All, false)
+            .expect("mean")
+            .item::<f32>()
+            .expect("item"),
     );
     assert_eq!(
         a.max(All, false).expect("max").item::<f32>().expect("item"),
-        ops::max(&a, All, false).expect("max").item::<f32>().expect("item"),
+        ops::max(&a, All, false)
+            .expect("max")
+            .item::<f32>()
+            .expect("item"),
     );
     assert_eq!(
         a.min(All, false).expect("min").item::<f32>().expect("item"),
-        ops::min(&a, All, false).expect("min").item::<f32>().expect("item"),
+        ops::min(&a, All, false)
+            .expect("min")
+            .item::<f32>()
+            .expect("item"),
     );
 }

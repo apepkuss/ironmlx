@@ -60,7 +60,9 @@ pub fn synchronize_stream(s: Stream) -> Result<()> {
 /// pool, negligible vs typical MLX kernel times (µs–ms).
 ///
 /// [`Event`]: https://github.com/ml-explore/mlx/blob/main/mlx/event.h
-pub fn async_eval(arrays: &[&Array]) -> impl std::future::Future<Output = Result<()>> + Send + use<> {
+pub fn async_eval(
+    arrays: &[&Array],
+) -> impl std::future::Future<Output = Result<()>> + Send + use<> {
     // Clone each &Array into an owned Array (cheap: shared refcount on
     // mlx::core::array::array_desc_). Owned values move into the future's
     // closure so the wait calls have valid array references regardless of

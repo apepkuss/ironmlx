@@ -79,11 +79,10 @@ mod ffi_bridge {
 /// (defined outside the bridge as a native Rust enum to support `as i32` casting).
 #[allow(clippy::missing_safety_doc)]
 pub mod ffi {
-    pub use super::DeviceType;
     pub use super::ffi_bridge::{
-        async_eval_many, clear_streams, default_device, default_stream,
-        device_count, get_streams, is_available, new_stream, set_default_device,
-        set_default_stream, synchronize, synchronize_stream, Device, MlxArray,
-        Stream,
+        async_eval_many, clear_streams, default_device, default_stream, device_count, get_streams,
+        is_available, new_stream, set_default_device, set_default_stream, synchronize,
+        synchronize_stream, Device, MlxArray, Stream,
     };
+    pub use super::DeviceType;
 }

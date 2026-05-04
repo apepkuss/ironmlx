@@ -33,27 +33,37 @@ pub trait IntoAxes: sealed::Sealed {
 
 impl sealed::Sealed for All {}
 impl IntoAxes for All {
-    fn as_axes(&self) -> Option<&[i32]> { None }
+    fn as_axes(&self) -> Option<&[i32]> {
+        None
+    }
 }
 
 impl sealed::Sealed for i32 {}
 impl IntoAxes for i32 {
-    fn as_axes(&self) -> Option<&[i32]> { Some(std::slice::from_ref(self)) }
+    fn as_axes(&self) -> Option<&[i32]> {
+        Some(std::slice::from_ref(self))
+    }
 }
 
 impl sealed::Sealed for &[i32] {}
 impl IntoAxes for &[i32] {
-    fn as_axes(&self) -> Option<&[i32]> { Some(self) }
+    fn as_axes(&self) -> Option<&[i32]> {
+        Some(self)
+    }
 }
 
 impl sealed::Sealed for Vec<i32> {}
 impl IntoAxes for Vec<i32> {
-    fn as_axes(&self) -> Option<&[i32]> { Some(self.as_slice()) }
+    fn as_axes(&self) -> Option<&[i32]> {
+        Some(self.as_slice())
+    }
 }
 
 impl<const N: usize> sealed::Sealed for [i32; N] {}
 impl<const N: usize> IntoAxes for [i32; N] {
-    fn as_axes(&self) -> Option<&[i32]> { Some(self.as_slice()) }
+    fn as_axes(&self) -> Option<&[i32]> {
+        Some(self.as_slice())
+    }
 }
 
 /// Sum over the specified axes.

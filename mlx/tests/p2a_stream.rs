@@ -12,7 +12,10 @@ fn new_stream_has_unique_index() {
     let d = mlx::default_device();
     let default_s = mlx::default_stream(d);
     let new_s = mlx::new_stream(d).expect("new_stream");
-    assert_ne!(default_s.index, new_s.index, "new stream should have a fresh index");
+    assert_ne!(
+        default_s.index, new_s.index,
+        "new stream should have a fresh index"
+    );
     assert_eq!(new_s.device, d);
 }
 
@@ -22,7 +25,8 @@ fn get_streams_includes_default() {
     let default_s = mlx::default_stream(d);
     let all = mlx::get_streams();
     assert!(
-        all.iter().any(|s| s.index == default_s.index && s.device == d),
+        all.iter()
+            .any(|s| s.index == default_s.index && s.device == d),
         "default stream should appear in get_streams()"
     );
 }
@@ -43,7 +47,7 @@ fn set_default_stream_round_trip() {
 fn stream_equality_and_copy() {
     let d = mlx::default_device();
     let a = mlx::default_stream(d);
-    let b = a;  // Copy
+    let b = a; // Copy
     assert_eq!(a, b);
     let other = mlx::new_stream(d).expect("new_stream");
     assert_ne!(a, other);
@@ -55,5 +59,5 @@ fn clear_streams_then_default_still_works() {
     // The default stream is recreated lazily by MLX.
     mlx::clear_streams();
     let d = mlx::default_device();
-    let _s: Stream = mlx::default_stream(d);  // Must not panic.
+    let _s: Stream = mlx::default_stream(d); // Must not panic.
 }

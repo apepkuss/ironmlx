@@ -91,9 +91,10 @@ fn concatenate_links_with_raw_ptr_slice() {
     let _c = unsafe {
         mlx_sys::array::ffi::array_concatenate(
             std::slice::from_raw_parts(raw_ptrs.as_ptr(), raw_ptrs.len()),
-            0
+            0,
         )
-    }.expect("concatenate");
+    }
+    .expect("concatenate");
 }
 
 #[test]
@@ -118,7 +119,10 @@ fn indexing_ops_link() {
 fn device_default_links() {
     let d = mlx_sys::stream::ffi::default_device();
     // On macOS Apple Silicon the default is GPU (DeviceType::Gpu = 1)
-    assert_eq!(d.device_type as i32, mlx_sys::stream::ffi::DeviceType::Gpu as i32);
+    assert_eq!(
+        d.device_type as i32,
+        mlx_sys::stream::ffi::DeviceType::Gpu as i32
+    );
     assert_eq!(d.index, 0);
     assert!(mlx_sys::stream::ffi::is_available(d));
 }
@@ -128,6 +132,9 @@ fn stream_default_and_new_links() {
     let d = mlx_sys::stream::ffi::default_device();
     let default_stream = mlx_sys::stream::ffi::default_stream(d);
     let new_stream = mlx_sys::stream::ffi::new_stream(d).expect("new_stream should succeed");
-    assert_ne!(default_stream.index, new_stream.index, "new stream should have different index");
+    assert_ne!(
+        default_stream.index, new_stream.index,
+        "new stream should have different index"
+    );
     assert_eq!(new_stream.device.index, d.index);
 }
