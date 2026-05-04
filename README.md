@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** 🎉 **P1 complete** — full inference primitives. P1b2b adds 3 new dtypes (`u16`/`u32`/`u64`), 6 indexing ops (`where_`/`take`/`take_along_axis`/`slice`/`slice_strided`/`gather`), and SDPA integration tests (causal mask + softmax row-sum + numerical correctness). Built on P1b2a shape/reduction/matmul. Full design in [`docs/superpowers/specs/`](docs/superpowers/specs/). Next: P2 (`fast` ops + io + transforms).
+**Status:** 🚧 **P2a complete** — Stream / Device foundation. Adds `Device::cpu()`/`gpu()`, stream lifecycle, runtime-agnostic `async_eval` returning `impl Future` (works under tokio / async-std / smol / `futures_lite::future::block_on` / any executor; per-array event wait under the hood for cross-thread correctness), and explicit `synchronize` / `synchronize_stream`. Built on P1 inference primitives. Next: P2b (`fast` ops: rms_norm/layer_norm/rope/sdpa) and P2c (`io`: safetensors/gguf load).
 
 ## Requirements
 
@@ -124,6 +124,61 @@ fn main() -> mlx::Result<()> {
 
 A complete SDPA (scaled dot-product attention) implementation composing matmul, transpose, mask-add, softmax, and matmul lives in [`mlx/tests/p1b2b_sdpa.rs`](mlx/tests/p1b2b_sdpa.rs). It's the canonical test that all of P1 (P0 + P1a + P1b1 + P1b2a + P1b2b) integrates correctly. P2's `fast::scaled_dot_product_attention` will match these numerics.
 
+## Streams & Devices
+
+`Device::cpu()` / `Device::gpu(index)` are the supported devices on Apple
+Silicon. Streams are MLX's execution queues — work on different streams may
+run concurrently. The default stream of the default device is used unless
+explicitly overridden:
+
+```rust
+use mlx::{Array, Device, Dtype};
+
+fn main() -> mlx::Result<()> {
+    println!("default device: {:?}", mlx::default_device());
+    println!("gpu count: {}", mlx::device_count(mlx::DeviceType::Gpu));
+
+    let _arr = Array::zeros(&[2, 3], Dtype::Float32)?;
+
+    // Optional: switch streams (thread-local).
+    let s = mlx::new_stream(Device::gpu(0))?;
+    mlx::set_default_stream(s);
+
+    Ok(())
+}
+```
+
+### Async evaluation
+
+`async_eval` returns a runtime-agnostic `Future`. It works under any
+executor — tokio, async-std, smol, or `futures_lite::future::block_on`:
+
+```rust
+use mlx::{Array, Dtype};
+
+# #[tokio::main]
+# async fn main() -> mlx::Result<()> {
+let a = Array::zeros(&[1024], Dtype::Float32)?;
+let b = Array::zeros(&[1024], Dtype::Float32)?;
+
+// Submit one or many arrays; await when ready.
+mlx::async_eval(&[&a, &b]).await?;
+
+// Or single-array convenience method:
+let c = Array::zeros(&[256], Dtype::Float32)?;
+c.async_eval().await?;
+# Ok(())
+# }
+```
+
+**Cancellation note**: dropping a future without awaiting does NOT cancel
+the submitted MLX work — MLX has no cancellation primitive. The work runs
+to completion in the background. Subsequent ops on the same arrays will
+implicitly synchronize.
+
+For sync contexts (no executor), use `mlx::synchronize()` (default stream)
+or `mlx::synchronize_stream(s)` (explicit stream) to block.
+
 ## Threading
 
 `mlx::Array` implements `Send` but **not** `Sync`. Internally, MLX's
@@ -156,8 +211,10 @@ mutable access — `clone` is almost always the right answer.
 - ✅ **P1b2a** — shape ops + reduction + matmul (compose softmax/gelu/silu)
 - ✅ **P1b2b** — indexing (take/take_along_axis/where/slice/gather) + u16/u32/u64 dtypes + SDPA integration
 - 🎉 **P1 complete** — full inference primitives ready
+- ✅ **P2a** — Stream / Device foundation + runtime-agnostic async_eval
+- ⏳ **P2b** — `fast` ops (rms_norm / layer_norm / rope / sdpa)
+- ⏳ **P2c** — `io` (safetensors / gguf load)
 - ⏳ **P1c** — random (key + uniform/normal/categorical)
-- ⏳ **P2** — `fast` (rms_norm, layer_norm, rope, sdpa) + io (safetensors/gguf load) + transforms
 - ⏳ **P3** — quantization + compile + LLM inference example
 
 ## Architecture
