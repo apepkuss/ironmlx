@@ -50,9 +50,11 @@ fn main() {
     cxx_build::bridges([
         "src/bridge/array.rs",
         "src/bridge/transforms.rs",
+        "src/bridge/stream.rs",
     ])
     .file("shim/src/array.cc")
     .file("shim/src/transforms.cc")
+    .file("shim/src/stream.cc")
     .include("shim/include")
     .include(&include_dir)
     .std("c++20")

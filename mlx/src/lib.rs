@@ -23,15 +23,21 @@ compile_error!("mlx only supports macOS on Apple Silicon (aarch64-apple-darwin)"
 
 mod array;
 mod broadcast;
+mod device;
 mod dtype;
 mod element;
 mod error;
 pub mod ops;
 mod ops_impl;
+mod stream;
+pub mod transforms;
 
 pub use array::Array;
 pub use broadcast::broadcast_shape;
+pub use device::{default_device, device_count, is_available, set_default_device, Device, DeviceType};
 pub use dtype::Dtype;
 pub use element::Element;
 pub use error::{Error, Result};
 pub use ops::All;
+pub use stream::{clear_streams, default_stream, get_streams, new_stream, set_default_stream, Stream};
+pub use transforms::{async_eval, synchronize, synchronize_stream};

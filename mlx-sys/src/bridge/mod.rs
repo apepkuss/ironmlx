@@ -11,3 +11,4 @@
 
 pub mod array;
 pub mod transforms;
+pub mod stream;
