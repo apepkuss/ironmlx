@@ -1,4 +1,4 @@
-use mlx::{ops, All, Array, Dtype};
+use mlx::{ops, All, Array, Dtype, Error};
 
 #[test]
 fn sum_all_axes_returns_scalar() {
@@ -116,6 +116,40 @@ fn argmax_all_returns_flat_index() {
     // All-axes argmax returns a scalar
     assert_eq!(am.size(), 1);
     assert_eq!(am.shape().as_slice(), &[] as &[i32]);
+}
+
+#[test]
+fn argmax_multi_axis_rejected() {
+    // MLX doesn't support multi-axis argmax; Rust returns a structured error.
+    let a = Array::from_slice(&[1.0_f32; 24], &[2, 3, 4]).expect("from_slice");
+    let result = ops::argmax(&a, &[0, 1][..], false);
+    match result {
+        Err(Error::Mlx(msg)) => {
+            assert!(msg.contains("does not support multi-axis"), "msg: {msg}");
+        }
+        other => panic!("expected Error::Mlx, got {other:?}"),
+    }
+}
+
+#[test]
+fn sum_empty_axes_slice_is_no_op() {
+    // Empty `&[]` passes through to MLX's multi-axes sum with empty list.
+    // MLX's behaviour: empty axes is a no-op, returning the original shape.
+    // This test pins the actual MLX semantics so future MLX changes are caught.
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("from_slice");
+    let result = ops::sum(&a, &[][..], false);
+    match result {
+        Ok(s) => {
+            // MLX returns the original array unchanged for empty-axes reduction
+            assert_eq!(s.shape().as_slice(), &[2, 3]);
+            assert_eq!(s.to_vec::<f32>().expect("to_vec"), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        }
+        Err(Error::Mlx(msg)) => {
+            // Acceptable too — pin whatever MLX does.
+            panic!("MLX rejected empty-axes sum: {msg}. Update test if behaviour changed.");
+        }
+        other => panic!("unexpected result type: {other:?}"),
+    }
 }
 
 #[test]

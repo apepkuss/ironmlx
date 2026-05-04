@@ -100,6 +100,8 @@ fn main() -> mlx::Result<()> {
 
 `softmax`, `gelu`, and `silu` compose directly atop these ops — see [`mlx/tests/p1b2a_compose.rs`](mlx/tests/p1b2a_compose.rs) for the canonical implementations.
 
+> **Gotcha:** `.t()` reverses **all** dims. For 4D attention (`Q @ K^T` where `Q`/`K` are `[B, H, S, D]`), use `k.transpose_axes(&[0, 1, 3, 2])` to swap just the last two dims, not `k.t()` (which would yield `[D, S, H, B]`). See [`matmul_using_t_for_attention`](mlx/tests/p1b2a_matmul.rs).
+
 ## Threading
 
 `mlx::Array` implements `Send` but **not** `Sync`. Internally, MLX's
