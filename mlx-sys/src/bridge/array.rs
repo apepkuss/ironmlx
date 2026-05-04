@@ -120,5 +120,35 @@ pub mod ffi {
 
         // === P1b2a matmul ===
         fn array_matmul(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
+        // === P1b2b dtype extension ===
+        fn array_from_u16(data: &[u16], shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
+        fn array_from_u32(data: &[u32], shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
+        fn array_from_u64(data: &[u64], shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_item_u16(a: &MlxArray) -> Result<u16>;
+        fn array_item_u32(a: &MlxArray) -> Result<u32>;
+        fn array_item_u64(a: &MlxArray) -> Result<u64>;
+
+        fn array_to_vec_u16(a: &MlxArray) -> Result<Vec<u16>>;
+        fn array_to_vec_u32(a: &MlxArray) -> Result<Vec<u32>>;
+        fn array_to_vec_u64(a: &MlxArray) -> Result<Vec<u64>>;
+
+        // === P1b2b indexing ops ===
+        fn array_where(cond: &MlxArray, x: &MlxArray, y: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn array_take(a: &MlxArray, indices: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
+        fn array_take_along_axis(a: &MlxArray, indices: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
+        fn array_slice_strided(
+            a: &MlxArray,
+            start: &[i32],
+            stop: &[i32],
+            strides: &[i32],
+        ) -> Result<UniquePtr<MlxArray>>;
+        unsafe fn array_gather(
+            a: &MlxArray,
+            indices: &[*const MlxArray],
+            axes: &[i32],
+            slice_sizes: &[i32],
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }
