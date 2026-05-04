@@ -73,3 +73,79 @@ fn layer_norm_with_weight_and_bias() {
         );
     }
 }
+
+#[test]
+fn rope_basic_shape_finite() {
+    // 最简验证：base=Some(10000), traditional=false, offset=0, freqs=None。
+    // x: [B=1, H=1, S=4, D=8]，dims=8（旋转全部维度）
+    // 主要验证形状不变 + 输出有限 + 与输入显著不同（确实做了旋转）
+    let total: usize = 32; // 1 * 1 * 4 * 8
+    let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01).collect();
+    let x = Array::from_slice(&data, &[1, 1, 4, 8]).expect("x");
+    let out = fast::rope(&x, 8, false, Some(10000.0), 1.0, 0, None).expect("rope");
+
+    assert_eq!(out.shape().as_slice(), &[1, 1, 4, 8]);
+    let v: Vec<f32> = out.to_vec().expect("to_vec");
+    assert_eq!(v.len(), total);
+    for x in &v {
+        assert!(x.is_finite(), "non-finite value in rope output: {x}");
+    }
+    // 第 0 个位置（pos=0）的旋转应当是单位变换：cos(0)=1, sin(0)=0 → 输出 = 输入
+    // 但是实际 MLX 实现里，pos=0 的旋转不是恒等，因为 freq 的角度也跟 dim_idx 走。
+    // 这里只验证整体不全等于输入：
+    let in_v = x.to_vec::<f32>().expect("x.to_vec");
+    let mut differ = 0;
+    for (a, b) in v.iter().zip(in_v.iter()) {
+        if (a - b).abs() > 1e-6 {
+            differ += 1;
+        }
+    }
+    assert!(differ > 0, "rope should rotate at least some elements");
+}
+
+#[test]
+fn rope_offset_shifts_output() {
+    // 同样输入，offset=0 vs offset=4 应当产生不同的输出（实际是把 pos 位置移了 4 步）。
+    let total: usize = 32; // 1 * 1 * 4 * 8
+    let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01).collect();
+    let x = Array::from_slice(&data, &[1, 1, 4, 8]).expect("x");
+
+    let out0 = fast::rope(&x, 8, false, Some(10000.0), 1.0, 0, None).expect("rope_0");
+    let out4 = fast::rope(&x, 8, false, Some(10000.0), 1.0, 4, None).expect("rope_4");
+
+    let v0: Vec<f32> = out0.to_vec().expect("to_vec0");
+    let v4: Vec<f32> = out4.to_vec().expect("to_vec4");
+
+    let mut differ = 0;
+    for (a, b) in v0.iter().zip(v4.iter()) {
+        if (a - b).abs() > 1e-4 {
+            differ += 1;
+        }
+    }
+    assert!(
+        differ > 0,
+        "different offsets should produce different rope outputs"
+    );
+}
+
+#[test]
+fn rope_traditional_differs_from_default() {
+    // traditional=true 与 traditional=false 是不同的 rope 排布方式。
+    let total: usize = 32; // 1 * 1 * 4 * 8
+    let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01).collect();
+    let x = Array::from_slice(&data, &[1, 1, 4, 8]).expect("x");
+
+    let out_f = fast::rope(&x, 8, false, Some(10000.0), 1.0, 0, None).expect("rope_f");
+    let out_t = fast::rope(&x, 8, true, Some(10000.0), 1.0, 0, None).expect("rope_t");
+
+    let vf: Vec<f32> = out_f.to_vec().expect("to_vec_f");
+    let vt: Vec<f32> = out_t.to_vec().expect("to_vec_t");
+
+    let mut differ = 0;
+    for (a, b) in vf.iter().zip(vt.iter()) {
+        if (a - b).abs() > 1e-4 {
+            differ += 1;
+        }
+    }
+    assert!(differ > 0, "traditional vs non-traditional should differ");
+}

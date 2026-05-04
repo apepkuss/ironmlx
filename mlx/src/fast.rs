@@ -35,3 +35,37 @@ pub fn layer_norm(
         .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Rotary position embedding with a scalar offset (single-stream decode
+/// or fixed-context prefill).
+///
+/// `base=None` requires `freqs=Some(_)` (precomputed frequencies);
+/// `base=Some(_)` typically pairs with `freqs=None`. MLX validates the
+/// combination and raises if both are missing.
+pub fn rope(
+    x: &Array,
+    dims: i32,
+    traditional: bool,
+    base: Option<f32>,
+    scale: f32,
+    offset: i32,
+    freqs: Option<&Array>,
+) -> Result<Array> {
+    let (has_base, base_val) = base.map_or((false, 0.0), |b| (true, b));
+    let f = freqs.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: f is null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::fast::ffi::fast_rope(
+            x.as_inner(),
+            dims,
+            traditional,
+            has_base,
+            base_val,
+            scale,
+            offset,
+            f,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

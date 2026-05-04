@@ -9,7 +9,7 @@
 //! `bool has_base` + `f32 base` pair to avoid raw float pointers across
 //! cxx (which doesn't model `Option<f32>` directly).
 
-#[allow(clippy::missing_safety_doc)]
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "cxx_mlx")]
 pub mod ffi {
     unsafe extern "C++" {
@@ -28,6 +28,17 @@ pub mod ffi {
             weight: *const MlxArray,
             bias: *const MlxArray,
             eps: f32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn fast_rope(
+            x: &MlxArray,
+            dims: i32,
+            traditional: bool,
+            has_base: bool,
+            base: f32,
+            scale: f32,
+            offset: i32,
+            freqs: *const MlxArray,
         ) -> Result<UniquePtr<MlxArray>>;
     }
 }

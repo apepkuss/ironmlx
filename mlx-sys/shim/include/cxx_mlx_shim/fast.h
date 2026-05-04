@@ -23,4 +23,17 @@ std::unique_ptr<MlxArray> fast_layer_norm(
     const MlxArray* bias,
     float eps);
 
+// rope (int offset)
+//   has_base=false → std::nullopt (MLX 内部回落到默认 base 处理逻辑)
+//   freqs=nullptr → std::nullopt
+std::unique_ptr<MlxArray> fast_rope(
+    const MlxArray& x,
+    int32_t dims,
+    bool traditional,
+    bool has_base,
+    float base,
+    float scale,
+    int32_t offset,
+    const MlxArray* freqs);
+
 }  // namespace cxx_mlx

@@ -14,7 +14,7 @@ inline std::optional<mlx::core::array> opt_arr(const MlxArray* p) {
   return p ? std::optional<mlx::core::array>(*p) : std::nullopt;
 }
 
-[[maybe_unused]] inline std::optional<float> opt_f(bool has, float v) {
+inline std::optional<float> opt_f(bool has, float v) {
   return has ? std::optional<float>(v) : std::nullopt;
 }
 
@@ -30,6 +30,16 @@ std::unique_ptr<MlxArray> fast_layer_norm(
     const MlxArray& x, const MlxArray* weight, const MlxArray* bias, float eps) {
   return std::make_unique<MlxArray>(
       mlx::core::fast::layer_norm(x, opt_arr(weight), opt_arr(bias), eps));
+}
+
+std::unique_ptr<MlxArray> fast_rope(
+    const MlxArray& x, int32_t dims, bool traditional,
+    bool has_base, float base, float scale, int32_t offset,
+    const MlxArray* freqs) {
+  return std::make_unique<MlxArray>(
+      mlx::core::fast::rope(
+          x, dims, traditional, opt_f(has_base, base), scale, offset,
+          opt_arr(freqs)));
 }
 
 }  // namespace cxx_mlx
