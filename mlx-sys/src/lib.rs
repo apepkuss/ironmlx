@@ -10,3 +10,4 @@ mod bridge;
 
 pub use bridge::array;
 pub use bridge::transforms;
+pub use bridge::stream;
