@@ -13,6 +13,7 @@ cxx.workspace = true
 thiserror.workspace = true
 half = "2"
 smallvec = "1"
+blocking = "1"
 
 [dev-dependencies]
 static_assertions = "1"
