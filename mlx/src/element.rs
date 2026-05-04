@@ -66,8 +66,11 @@ macro_rules! element_impl_simple {
     };
 }
 
-element_impl_simple!(u8, Dtype::Uint8, array_from_u8, array_item_u8, array_to_vec_u8);
-element_impl_simple!(i8, Dtype::Int8, array_from_i8, array_item_i8, array_to_vec_i8);
+element_impl_simple!(u8,  Dtype::Uint8,  array_from_u8,  array_item_u8,  array_to_vec_u8);
+element_impl_simple!(u16, Dtype::Uint16, array_from_u16, array_item_u16, array_to_vec_u16);
+element_impl_simple!(u32, Dtype::Uint32, array_from_u32, array_item_u32, array_to_vec_u32);
+element_impl_simple!(u64, Dtype::Uint64, array_from_u64, array_item_u64, array_to_vec_u64);
+element_impl_simple!(i8,  Dtype::Int8,   array_from_i8,  array_item_i8,  array_to_vec_i8);
 element_impl_simple!(i16, Dtype::Int16, array_from_i16, array_item_i16, array_to_vec_i16);
 element_impl_simple!(i32, Dtype::Int32, array_from_i32, array_item_i32, array_to_vec_i32);
 element_impl_simple!(i64, Dtype::Int64, array_from_i64, array_item_i64, array_to_vec_i64);
@@ -132,6 +135,9 @@ mod tests {
     fn dtype_const_matches_for_each_element() {
         assert_eq!(<bool as Element>::DTYPE, Dtype::Bool);
         assert_eq!(<u8 as Element>::DTYPE, Dtype::Uint8);
+        assert_eq!(<u16 as Element>::DTYPE, Dtype::Uint16);
+        assert_eq!(<u32 as Element>::DTYPE, Dtype::Uint32);
+        assert_eq!(<u64 as Element>::DTYPE, Dtype::Uint64);
         assert_eq!(<i8 as Element>::DTYPE, Dtype::Int8);
         assert_eq!(<i16 as Element>::DTYPE, Dtype::Int16);
         assert_eq!(<i32 as Element>::DTYPE, Dtype::Int32);
