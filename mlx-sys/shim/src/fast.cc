@@ -26,4 +26,10 @@ std::unique_ptr<MlxArray> fast_rms_norm(
       mlx::core::fast::rms_norm(x, opt_arr(weight), eps));
 }
 
+std::unique_ptr<MlxArray> fast_layer_norm(
+    const MlxArray& x, const MlxArray* weight, const MlxArray* bias, float eps) {
+  return std::make_unique<MlxArray>(
+      mlx::core::fast::layer_norm(x, opt_arr(weight), opt_arr(bias), eps));
+}
+
 }  // namespace cxx_mlx

@@ -16,4 +16,11 @@ std::unique_ptr<MlxArray> fast_rms_norm(
     const MlxArray* weight,
     float eps);
 
+// layer_norm: weight=nullptr → no weight, bias=nullptr → no bias
+std::unique_ptr<MlxArray> fast_layer_norm(
+    const MlxArray& x,
+    const MlxArray* weight,
+    const MlxArray* bias,
+    float eps);
+
 }  // namespace cxx_mlx

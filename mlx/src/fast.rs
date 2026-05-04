@@ -20,3 +20,18 @@ pub fn rms_norm(x: &Array, weight: Option<&Array>, eps: f32) -> Result<Array> {
         unsafe { mlx_sys::fast::ffi::fast_rms_norm(x.as_inner(), w, eps) }.map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Layer normalization with optional learned scale and bias.
+pub fn layer_norm(
+    x: &Array,
+    weight: Option<&Array>,
+    bias: Option<&Array>,
+    eps: f32,
+) -> Result<Array> {
+    let w = weight.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let b = bias.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: w/b each null or borrow of an &Array valid for this call.
+    let inner = unsafe { mlx_sys::fast::ffi::fast_layer_norm(x.as_inner(), w, b, eps) }
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

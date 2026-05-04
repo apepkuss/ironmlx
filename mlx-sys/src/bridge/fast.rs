@@ -22,5 +22,12 @@ pub mod ffi {
             weight: *const MlxArray,
             eps: f32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn fast_layer_norm(
+            x: &MlxArray,
+            weight: *const MlxArray,
+            bias: *const MlxArray,
+            eps: f32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }
