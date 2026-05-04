@@ -148,18 +148,20 @@ pub fn clear_streams() {
 
 **线程语义**:`set_default_stream` / `set_default_device` 在 MLX C++ 是 thread-local("Make the stream the default for its device on current thread")。Rust 端不重复包装 thread-local,直接镜像 MLX 行为,文档说明。
 
-### A4. `async_eval` 返回 `impl Future`,实现走 `blocking` crate
+### A4. `async_eval` 返回 `impl Future`,实现走 `blocking` crate + per-array event wait
+
+> **修订记录(2026-05-04)**:本节最初的 captured-stream 设计在 Task 6 集成测试中被发现是错的(`async_eval_under_tokio_multi_thread` 失败,所有 6 个测试都报 `"There is no Stream(gpu, N) in current thread."`)。根本原因:MLX 的 `get_command_encoder(Stream s)`([mlx/backend/metal/device.cpp:809](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/device.cpp))在 `thread_local std::unordered_map<int, CommandEncoder>` 里查 stream — 仅靠 Stream POD 标识跨线程不够,目标线程必须 *注册* 过该 stream 的 CommandEncoder,而 `blocking::unblock` 的 worker 线程从未注册。修复:走 per-array `array::wait()`(Event-based,MTLSharedEvent 跨线程安全)。下面是实际落地的设计。
 
 ```rust
 // mlx/src/transforms.rs
-use crate::{Array, Result, Stream};
+use crate::{Array, Error, Result, Stream};
 
 /// Asynchronously evaluate one or more arrays.
 ///
 /// Submits the computation graph to MLX's stream worker (non-blocking) on
 /// the **caller's thread's** default stream, then returns a `Future` that
 /// resolves when the work completes. The future is runtime-agnostic —
-/// `.await` it under tokio, async-std, smol, `futures::executor::block_on`,
+/// `.await` it under tokio, async-std, smol, `futures_lite::future::block_on`,
 /// or any executor.
 ///
 /// **Cancellation**: dropping the returned future without awaiting does
@@ -168,37 +170,40 @@ use crate::{Array, Result, Stream};
 /// GPU time and memory. Any subsequent operation on the same arrays will
 /// implicitly synchronize.
 ///
-/// Implementation note: the returned future uses the [`blocking`] crate's
-/// global thread pool to wrap MLX's `synchronize_stream()`. The future
-/// captures the submission stream at construction time and synchronizes
-/// on it explicitly, so the future can be polled on any thread (not just
-/// the submitter's thread). Scheduling overhead is ~5µs per call,
-/// negligible vs typical MLX kernel times (µs–ms).
+/// Implementation note: the future waits on each submitted array's MLX
+/// `Event` inside [`blocking::unblock`]. Events are MTLSharedEvent-backed
+/// and waitable from any thread, so the future polls correctly under
+/// multi-threaded executors. Stream-level synchronization is **not** used
+/// because MLX's per-stream `CommandEncoder` lookup is thread-local —
+/// `synchronize_stream(s)` on a thread that did not register `s` throws.
+/// Per-array events have no such constraint. Scheduling overhead is ~5µs
+/// per call, negligible vs typical MLX kernel times (µs–ms).
 pub fn async_eval(arrays: &[&Array]) -> impl Future<Output = Result<()>> + Send + use<> {
-    // Capture the submission stream on THIS thread, BEFORE submission.
-    // MLX `async_eval` queues work on the caller-thread's default stream;
-    // we must wait on that exact stream regardless of which thread polls
-    // the returned future. Otherwise `blocking::unblock`'s pool thread
-    // would call `synchronize()` against ITS default stream (which has
-    // no queued work) and the future would resolve before MLX finishes.
-    let device = mlx_sys::stream::ffi::default_device();
-    let stream = mlx_sys::stream::ffi::default_stream(device);
+    // Clone each &Array into an owned Array (cheap: shared refcount on
+    // mlx::core::array::array_desc_). Owned values move into the future's
+    // closure so the wait calls have valid array references regardless of
+    // when the caller drops the originals.
+    let owned: Vec<Array> = arrays.iter().map(|a| (*a).clone()).collect();
 
     // Step 1 (sync, fast): build raw pointer slice + submit to MLX.
     let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
-        arrays.iter().map(|a| a.as_inner() as *const _).collect();
-    // SAFETY: pointers valid for the duration of this fn (we hold &Array refs).
-    // MLX `async_eval` copies arrays internally (refcount-share), so pointers
-    // need not outlive THIS function — only the submission.
+        owned.iter().map(|a| a.as_inner() as *const _).collect();
+    // SAFETY: each pointer references an owned Array kept alive on this
+    // stack frame; MLX async_eval copies the array refs internally so the
+    // pointers need not outlive this call.
     let submit_result = unsafe { mlx_sys::stream::ffi::async_eval_many(&raw) };
 
-    // Step 2 (returned future): explicitly synchronize on the captured stream
-    // via `blocking`. `Stream` is `Copy` (POD), so it moves cleanly into the
-    // closure with no lifetime concerns.
+    // Step 2 (returned future): wait on each owned array's event via
+    // `blocking::unblock`. Events fire as the underlying stream worker
+    // completes their kernels; total wall time is bounded by the slowest
+    // array, not the sum.
     async move {
-        submit_result.map_err(crate::Error::from)?;
-        blocking::unblock(move || {
-            mlx_sys::stream::ffi::synchronize_stream(stream).map_err(crate::Error::from)
+        submit_result.map_err(Error::from)?;
+        blocking::unblock(move || -> Result<()> {
+            for a in &owned {
+                mlx_sys::transforms::ffi::array_wait(a.as_inner()).map_err(Error::from)?;
+            }
+            Ok(())
         })
         .await
     }
@@ -206,8 +211,9 @@ pub fn async_eval(arrays: &[&Array]) -> impl Future<Output = Result<()>> + Send 
 
 impl Array {
     /// See [`mlx::transforms::async_eval`]. Convenience method for a single array.
-    /// The returned future does not borrow `self` (submission consumes the
-    /// `&Array` reference; future captures only the owned Stream + submit result).
+    /// The returned future does not borrow `self` — submission runs synchronously
+    /// before the future is constructed, and the future then owns a refcount-share
+    /// clone of the array on which it waits.
     pub fn async_eval(&self) -> impl Future<Output = Result<()>> + Send + use<> {
         async_eval(&[self])
     }
@@ -220,19 +226,27 @@ pub fn synchronize() -> Result<()> {
 }
 
 /// Block the current thread until all queued work on the **given stream**
-/// completes (regardless of which thread queued it).
+/// completes (regardless of which thread queued it). NOTE: this requires
+/// the calling thread to have registered `s` (via `default_stream(d)` or
+/// `new_stream(d)` on this thread). Using it on the current thread for
+/// streams obtained on the current thread is safe; cross-thread use is
+/// not — that's why `async_eval` uses per-array event wait, not this.
 pub fn synchronize_stream(s: Stream) -> Result<()> {
-    mlx_sys::stream::ffi::synchronize_stream(s).map_err(crate::Error::from)
+    mlx_sys::stream::ffi::synchronize_stream(s.into()).map_err(crate::Error::from)
 }
 ```
 
 **设计点**:
-- **Stream capture at submit time**:这是关键修复。MLX 的 `synchronize()`(无参)阻塞**调用线程的 default stream**(thread-local)。`blocking::unblock` 在 pool 的另一个线程 B 上跑 closure,B 的 default stream ≠ 提交线程 A 的 default stream。如果在 B 上调 `synchronize()`,等的是 B 的空 stream → future 误报完成。**修复:在 submit 时 capture A 的 default stream,future 内部用 `synchronize_stream(captured)`**(Stream-specific 版本不依赖 thread-local default)
-- **Submit 在调用线程同步执行**(< 1µs):用户 `let fut = async_eval(...)` 立即返回 Future,但 MLX submission 已经发生
-- **Cancellation 语义**:doc 明确说 drop future 不取消 MLX 工作 — MLX 无 cancellation 机制,工作仍跑完。后续 `eval` / `to_vec` 隐式 sync
-- **`use<>` / `use<'_>` 捕获语法**(Rust 1.82+ precise capturing):明确 Future 的 lifetime / Send bound
-- **Future is `Send`**:`Stream` is `Copy + Send`,closure 只 capture 它(无 `&Array` 引用),所以 future 可跨线程
-- **Multi-array form 是 base case**;single-array `Array::async_eval` 是 1-行包装
+
+- **Per-array event wait(替代原 captured-stream 方案)**:MLX `array::wait()`([mlx/array.cpp:144](https://github.com/ml-explore/mlx/blob/main/mlx/array.cpp))调 `Event::wait()`,Event 是 MTLSharedEvent,任何线程都能 wait,不依赖 thread-local 状态。Sys 层新增 `array_wait` FFI(`mlx-sys/shim/{include,src}/cxx_mlx_shim/transforms.{h,cc}` + `mlx-sys/src/bridge/transforms.rs`)。
+- **Submit 在调用线程同步执行**(< 1µs):用户 `let fut = async_eval(...)` 立即返回 Future,但 MLX submission 已经发生 — 工作落在调用线程的 default stream 上(MLX 期望的语义)。
+- **Array 克隆是 refcount-share**:`Array::clone` 走 `array_desc_` 的 `shared_ptr` 引用计数,不复制底层数据,O(1)。clone 移入 closure 保证等待期间引用有效。
+- **总等待时间 = max,不是 sum**:MLX stream worker 并发跑 kernels;closure 里 `for` 循环顺序 wait 每个 event,但因为 event 在底层都已并行触发,顺序 wait 的 wall-clock 等于最慢那个 array。
+- **Cancellation 语义**:doc 明确说 drop future 不取消 MLX 工作 — MLX 无 cancellation 机制,工作仍跑完。后续 `eval` / `to_vec` 隐式 sync。
+- **`use<>` 捕获语法**(Rust 1.82+ precise capturing):明确 Future 的 lifetime / Send bound,无隐式借用。
+- **Future is `Send`**:`Array` is `Send`(`Sync` 不需要),`Vec<Array>` 也是 `Send`,closure capture 满足 `Send`,future 可跨线程 poll。
+- **`synchronize_stream` 同样有 thread-local 限制**:safe-layer 文档已注明 — 同线程获取 + 同线程等待 OK,跨线程不支持。`async_eval` 不依赖它。
+- **Multi-array form 是 base case**;single-array `Array::async_eval` 是 1-行包装。
 
 **Lifetime 分析**:
 - `arrays: &[&Array]` 生命周期止于 `async_eval` 函数返回

@@ -855,8 +855,15 @@ git commit -m "feat(p2a): mlx::transforms module + blocking dep (synchronize + s
 **Files:**
 - Modify: `mlx/src/transforms.rs`
 - Modify: `mlx/src/lib.rs`
+- (Post-mortem fix below also touches `mlx-sys/shim/{include,src}/cxx_mlx_shim/transforms.{h,cc}` and `mlx-sys/src/bridge/transforms.rs` — see "Correction" note.)
 
-This is the most subtle part of P2a. The implementation captures the submission stream **at submit time** and uses `synchronize_stream(captured)` inside the future, so the future can be polled on any thread regardless of which thread's default stream is set there.
+> **CORRECTION (2026-05-04, after Task 6 integration testing)**: the captured-stream design described below was **wrong**. MLX's `get_command_encoder(Stream s)` looks up streams in a `thread_local` map ([mlx/backend/metal/device.cpp:809](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/device.cpp)) — calling `synchronize_stream(captured)` on a `blocking::unblock` worker thread throws `"There is no Stream(gpu, N) in current thread."` because that worker never registered the stream. **All 6 Task 6 tests failed**, not just the multi-thread one.
+>
+> **Fix shipped** (commit `69762fd`): use per-array `array::wait()` ([mlx/array.cpp:144](https://github.com/ml-explore/mlx/blob/main/mlx/array.cpp)). MLX Events are MTLSharedEvent-backed and waitable from any thread. Sys layer adds `array_wait` FFI; safe layer clones each `&Array` (cheap refcount-share), moves the `Vec<Array>` into the closure, and waits on each array's event in sequence inside `blocking::unblock`. Total wait time is bounded by the slowest array, not the sum.
+>
+> The implementation block below is preserved as the original spec for historical reference. **The shipped code in `mlx/src/transforms.rs` after `69762fd` is the correct implementation** — see design doc spec A4 (also revised) for the canonical version.
+
+This was originally framed as the most subtle part of P2a. The captured-stream theory was: capture the submission stream at submit time and use `synchronize_stream(captured)` inside the future, so the future can be polled on any thread regardless of which thread's default stream is set there. **In practice this fails** because MLX's per-stream CommandEncoder is thread-local, not just the default-stream pointer. See the correction note above.
 
 - [ ] **Step 1: Append `async_eval` to `mlx/src/transforms.rs`**
 
