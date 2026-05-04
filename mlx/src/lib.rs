@@ -34,3 +34,4 @@ pub use broadcast::broadcast_shape;
 pub use dtype::Dtype;
 pub use element::Element;
 pub use error::{Error, Result};
+pub use ops::All;

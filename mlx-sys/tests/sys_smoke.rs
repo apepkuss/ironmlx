@@ -44,3 +44,52 @@ fn unary_exp_links() {
     let a = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
     let _e = mlx_sys::array::ffi::array_exp(&a).expect("exp should succeed");
 }
+
+#[test]
+fn reduction_sum_links() {
+    let a = ffi::array_zeros(&[3, 4], FLOAT32).expect("zeros");
+    let _s = mlx_sys::array::ffi::array_sum_all(&a, false).expect("sum_all");
+    let _s2 = mlx_sys::array::ffi::array_sum_axis(&a, 0, false).expect("sum_axis");
+    let axes: Vec<i32> = vec![0, 1];
+    let _s3 = mlx_sys::array::ffi::array_sum_axes(&a, &axes, false).expect("sum_axes");
+}
+
+#[test]
+fn shape_ops_link() {
+    let a = ffi::array_zeros(&[6, 4], FLOAT32).expect("zeros");
+    let _r = mlx_sys::array::ffi::array_reshape(&a, &[2, 3, 4]).expect("reshape");
+    let _t = mlx_sys::array::ffi::array_transpose(&a).expect("transpose");
+    let _ta = mlx_sys::array::ffi::array_transpose_axes(&a, &[1, 0]).expect("transpose_axes");
+    let _b = mlx_sys::array::ffi::array_broadcast_to(&a, &[2, 6, 4]).expect("broadcast_to");
+}
+
+#[test]
+fn matmul_links() {
+    let a = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
+    let b = ffi::array_zeros(&[3, 4], FLOAT32).expect("zeros");
+    let _c = mlx_sys::array::ffi::array_matmul(&a, &b).expect("matmul");
+}
+
+#[test]
+fn split_n_links_returns_vec() {
+    let a = ffi::array_zeros(&[6, 4], FLOAT32).expect("zeros");
+    let v = mlx_sys::array::ffi::array_split_n(&a, 3, 0).expect("split_n");
+    assert_eq!(mlx_sys::array::ffi::split_result_len(&v), 3);
+    let _first = mlx_sys::array::ffi::split_result_at(&v, 0).expect("split_result_at");
+}
+
+#[test]
+fn concatenate_links_with_raw_ptr_slice() {
+    let a = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
+    let b = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
+    // Raw pointers cross the bridge as &[*const MlxArray] (cxx 1.0 limitation:
+    // can't directly bridge &[&MlxArray]).
+    let raw_ptrs: Vec<*const mlx_sys::array::ffi::MlxArray> =
+        vec![&*a as *const _, &*b as *const _];
+    let _c = unsafe {
+        mlx_sys::array::ffi::array_concatenate(
+            std::slice::from_raw_parts(raw_ptrs.as_ptr(), raw_ptrs.len()),
+            0
+        )
+    }.expect("concatenate");
+}

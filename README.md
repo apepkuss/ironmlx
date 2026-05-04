@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** P1b1 — operators (`+ - * / unary -`) + scalar RHS (any `Element` type) + 9 element-wise unary ops (`exp`/`log`/`sqrt`/`tanh`/`sigmoid`/`square`/`rsqrt`/`erf`/`reciprocal`) + NumPy broadcasting validated in Rust. Built on P1a Array foundation. Full design in [`docs/superpowers/specs/`](docs/superpowers/specs/).
+**Status:** P1b2a — full op surface for inference primitives: 6 shape ops (`reshape` with `-1` inference, `transpose`/`transpose_axes`, `broadcast_to`, `concatenate`, `stack`, `split_n`/`split_at`) + 5 reductions (`sum`/`mean`/`max`/`min`/`argmax` via `IntoAxes` sealed trait + `All` marker) + `matmul`. Compose `softmax`/`gelu`/`silu`. Built on P1b1 operators. Full design in [`docs/superpowers/specs/`](docs/superpowers/specs/).
 
 ## Requirements
 
@@ -71,6 +71,37 @@ NumPy-style broadcasting is validated in Rust before the FFI call; incompatible 
 
 Available unary ops: `exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `square`, `rsqrt`, `erf`, `reciprocal` — sufficient to compose `softmax`, `gelu` (via `0.5 * x * (1 + erf(x / sqrt(2)))`), and `silu` once P1b2 adds the needed reductions.
 
+## Reductions, Shape, Matmul
+
+Reductions accept axes via the `IntoAxes` trait — pass `mlx::All` to reduce all axes, an `i32` for a single axis, or any of `&[i32]` / `Vec<i32>` / `[i32; N]` for multiple axes:
+
+```rust
+use mlx::{Array, All, ops};
+
+fn main() -> mlx::Result<()> {
+    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
+
+    let _total = ops::sum(&x, All, false)?;          // scalar 21.0
+    let _row_sums = x.sum(-1, false)?;               // [6.0, 15.0]
+    let _row_sums_kd = x.sum(-1, true)?;             // [[6.0], [15.0]]
+
+    let _reshaped = x.reshape(&[3, 2])?;             // [3, 2]
+    let _auto = x.reshape(&[2, -1])?;                // -1 inferred → [2, 3]
+    let _t = x.t()?;                                 // [3, 2] (transpose)
+
+    // Matmul covers 2D, batched, and broadcasting on batch dims.
+    let q = Array::from_slice(&[0.0_f32; 24], &[2, 3, 4])?;
+    let k = Array::from_slice(&[0.0_f32; 24], &[2, 4, 3])?;
+    let _scores = q.matmul(&k)?;                     // [2, 3, 3]
+
+    Ok(())
+}
+```
+
+`softmax`, `gelu`, and `silu` compose directly atop these ops — see [`mlx/tests/p1b2a_compose.rs`](mlx/tests/p1b2a_compose.rs) for the canonical implementations.
+
+> **Gotcha:** `.t()` reverses **all** dims. For 4D attention (`Q @ K^T` where `Q`/`K` are `[B, H, S, D]`), use `k.transpose_axes(&[0, 1, 3, 2])` to swap just the last two dims, not `k.t()` (which would yield `[D, S, H, B]`). See [`matmul_using_t_for_attention`](mlx/tests/p1b2a_matmul.rs).
+
 ## Threading
 
 `mlx::Array` implements `Send` but **not** `Sync`. Internally, MLX's
@@ -100,7 +131,8 @@ mutable access — `clone` is almost always the right answer.
 - ✅ **P0** — scaffold (zeros + eval + shape)
 - ✅ **P1a** — Array foundation (Element trait, 10 dtypes, from_slice/item/to_vec, Clone/Debug, Send, SmallVec shape)
 - ✅ **P1b1** — operators + element-wise unary + broadcasting
-- ⏳ **P1b2** — shape ops + reduction + indexing + matmul
+- ✅ **P1b2a** — shape ops + reduction + matmul (compose softmax/gelu/silu)
+- ⏳ **P1b2b** — indexing (take/gather/where/slice) + SDPA integration test
 - ⏳ **P1c** — random (key + uniform/normal/categorical)
 - ⏳ **P2** — `fast` (rms_norm, layer_norm, rope, sdpa) + io (safetensors/gguf load) + transforms
 - ⏳ **P3** — quantization + compile + LLM inference example
