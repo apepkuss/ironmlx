@@ -218,6 +218,16 @@ impl Array {
     pub fn where_(&self, x: &Array, y: &Array) -> Result<Array> {
         crate::ops::where_(self, x, y)
     }
+
+    /// Take values along `axis`. See [`crate::ops::take`].
+    pub fn take(&self, indices: &Array, axis: i32) -> Result<Array> {
+        crate::ops::take(self, indices, axis)
+    }
+
+    /// Per-axis gather (PyTorch `torch.gather`). See [`crate::ops::take_along_axis`].
+    pub fn take_along_axis(&self, indices: &Array, axis: i32) -> Result<Array> {
+        crate::ops::take_along_axis(self, indices, axis)
+    }
 }
 
 impl Clone for Array {
