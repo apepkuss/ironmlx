@@ -212,6 +212,12 @@ impl Array {
     pub fn matmul(&self, rhs: &Array) -> Result<Array> {
         crate::ops::matmul(self, rhs)
     }
+
+    /// Use `self` as the condition mask, selecting from `x` where true and `y` where false.
+    /// See [`crate::ops::where_`].
+    pub fn where_(&self, x: &Array, y: &Array) -> Result<Array> {
+        crate::ops::where_(self, x, y)
+    }
 }
 
 impl Clone for Array {
