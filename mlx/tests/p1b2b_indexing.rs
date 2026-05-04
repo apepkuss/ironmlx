@@ -156,6 +156,22 @@ fn slice_method_form() {
 }
 
 #[test]
+fn slice_negative_stop_takes_from_end() {
+    // a = [0..12] reshaped to [3, 4]; slice [0, 0]..[3, -1] picks all rows, drops last col
+    // → [3, 3]: [[0, 1, 2], [4, 5, 6], [8, 9, 10]]
+    // Spec A4 promises MLX-native negative-index support (stop=-1 means last-1).
+    // This pins the contract so MLX semantic changes are caught in CI.
+    let data: Vec<f32> = (0..12).map(|i| i as f32).collect();
+    let a = Array::from_slice(&data, &[3, 4]).expect("from_slice");
+    let r = a.slice(&[0, 0], &[3, -1]).expect("slice with negative stop");
+    assert_eq!(r.shape().as_slice(), &[3, 3]);
+    assert_eq!(
+        r.to_vec::<f32>().expect("to_vec"),
+        vec![0.0, 1.0, 2.0, 4.0, 5.0, 6.0, 8.0, 9.0, 10.0]
+    );
+}
+
+#[test]
 fn gather_basic_1d_index() {
     // Simple case: gather from a [4, 3] along axis 0 with indices [1, 3]
     // and slice_sizes [1, 3]. Result shape: indices_shape (2,) ++ slice_sizes (1, 3)

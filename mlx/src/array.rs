@@ -208,7 +208,7 @@ impl Array {
         crate::ops::broadcast_to(self, shape)
     }
 
-    /// Matrix multiplication. See [`crate::ops::matmul`] for shape rules.
+    /// Matrix multiplication. See [`crate::ops::matmul()`] for shape rules.
     pub fn matmul(&self, rhs: &Array) -> Result<Array> {
         crate::ops::matmul(self, rhs)
     }
