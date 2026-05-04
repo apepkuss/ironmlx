@@ -40,4 +40,4 @@ pub use element::Element;
 pub use error::{Error, Result};
 pub use ops::All;
 pub use stream::{clear_streams, default_stream, get_streams, new_stream, set_default_stream, Stream};
-pub use transforms::{synchronize, synchronize_stream};
+pub use transforms::{async_eval, synchronize, synchronize_stream};
