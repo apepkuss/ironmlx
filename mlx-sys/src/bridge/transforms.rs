@@ -10,5 +10,11 @@ pub mod ffi {
         type MlxArray = crate::bridge::array::ffi::MlxArray;
 
         fn eval_one(a: &MlxArray) -> Result<()>;
+
+        /// Wait for an already-scheduled array's event to fire. Cross-thread
+        /// safe (Event-based, not bound to MLX's per-thread stream TLS) —
+        /// the canonical primitive for awaiting async_eval completion from
+        /// a different thread than the submitter.
+        fn array_wait(a: &MlxArray) -> Result<()>;
     }
 }
