@@ -40,5 +40,16 @@ pub mod ffi {
             offset: i32,
             freqs: *const MlxArray,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn fast_rope_with_array_offset(
+            x: &MlxArray,
+            dims: i32,
+            traditional: bool,
+            has_base: bool,
+            base: f32,
+            scale: f32,
+            offset: &MlxArray,
+            freqs: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

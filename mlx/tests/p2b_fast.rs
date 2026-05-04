@@ -149,3 +149,55 @@ fn rope_traditional_differs_from_default() {
     }
     assert!(differ > 0, "traditional vs non-traditional should differ");
 }
+
+#[test]
+fn rope_with_array_offset_per_batch_offsets() {
+    // batch=2，offsets=[0, 4]：行 0 用 offset=0，行 1 用 offset=4。
+    // 期望：第 0 行结果 == fast::rope(...offset=0)，第 1 行结果 == fast::rope(...offset=4)
+    // 简化验证：用 batch=2 的输入，比较与单一 offset 路径的一致性。
+
+    let per_row: usize = 32; // 1 * 4 * 8 (H=1, S=4, D=8)
+                             // batch 0: 全 0.01 增长
+    let row0: Vec<f32> = (0..per_row).map(|i| (i as f32) * 0.01).collect();
+    // batch 1: 同样的 pattern（让两个 batch 共享数据，方便比对）
+    let row1 = row0.clone();
+
+    let mut combined: Vec<f32> = Vec::with_capacity(per_row * 2);
+    combined.extend_from_slice(&row0);
+    combined.extend_from_slice(&row1);
+    let x_batched = Array::from_slice(&combined, &[2, 1, 4, 8]).expect("x_batched");
+
+    let offsets = Array::from_slice(&[0_i32, 4], &[2]).expect("offsets");
+    let out =
+        fast::rope_with_array_offset(&x_batched, 8, false, Some(10000.0), 1.0, &offsets, None)
+            .expect("rope_array");
+    assert_eq!(out.shape().as_slice(), &[2, 1, 4, 8]);
+
+    // 单独用 int offset 路径计算两个参考：
+    let x_single = Array::from_slice(&row0, &[1, 1, 4, 8]).expect("x_single");
+    let ref_0 = fast::rope(&x_single, 8, false, Some(10000.0), 1.0, 0, None).expect("ref0");
+    let ref_4 = fast::rope(&x_single, 8, false, Some(10000.0), 1.0, 4, None).expect("ref4");
+
+    let v_out: Vec<f32> = out.to_vec().expect("to_vec");
+    let v_ref0: Vec<f32> = ref_0.to_vec().expect("ref0_vec");
+    let v_ref4: Vec<f32> = ref_4.to_vec().expect("ref4_vec");
+
+    // 第 0 个 batch 应当与 offset=0 参考一致
+    for i in 0..per_row {
+        let a = v_out[i];
+        let b = v_ref0[i];
+        assert!(
+            (a - b).abs() < 1e-4,
+            "batch0[{i}] = {a}, ref offset=0 = {b}"
+        );
+    }
+    // 第 1 个 batch 应当与 offset=4 参考一致
+    for i in 0..per_row {
+        let a = v_out[per_row + i];
+        let b = v_ref4[i];
+        assert!(
+            (a - b).abs() < 1e-4,
+            "batch1[{i}] = {a}, ref offset=4 = {b}"
+        );
+    }
+}

@@ -69,3 +69,33 @@ pub fn rope(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// RoPE with per-batch-row offsets — for variable-length batched inference.
+/// `offset` shape: `[batch]`, dtype `i32`.
+pub fn rope_with_array_offset(
+    x: &Array,
+    dims: i32,
+    traditional: bool,
+    base: Option<f32>,
+    scale: f32,
+    offset: &Array,
+    freqs: Option<&Array>,
+) -> Result<Array> {
+    let (has_base, base_val) = base.map_or((false, 0.0), |b| (true, b));
+    let f = freqs.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: f is null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::fast::ffi::fast_rope_with_array_offset(
+            x.as_inner(),
+            dims,
+            traditional,
+            has_base,
+            base_val,
+            scale,
+            offset.as_inner(),
+            f,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

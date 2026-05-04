@@ -36,4 +36,15 @@ std::unique_ptr<MlxArray> fast_rope(
     int32_t offset,
     const MlxArray* freqs);
 
+// rope (array offset) — 同上 base/freqs 处理；offset 改为引用 array
+std::unique_ptr<MlxArray> fast_rope_with_array_offset(
+    const MlxArray& x,
+    int32_t dims,
+    bool traditional,
+    bool has_base,
+    float base,
+    float scale,
+    const MlxArray& offset,
+    const MlxArray* freqs);
+
 }  // namespace cxx_mlx

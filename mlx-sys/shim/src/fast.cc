@@ -42,4 +42,14 @@ std::unique_ptr<MlxArray> fast_rope(
           opt_arr(freqs)));
 }
 
+std::unique_ptr<MlxArray> fast_rope_with_array_offset(
+    const MlxArray& x, int32_t dims, bool traditional,
+    bool has_base, float base, float scale, const MlxArray& offset,
+    const MlxArray* freqs) {
+  return std::make_unique<MlxArray>(
+      mlx::core::fast::rope(
+          x, dims, traditional, opt_f(has_base, base), scale, offset,
+          opt_arr(freqs)));
+}
+
 }  // namespace cxx_mlx
