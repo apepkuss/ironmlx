@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** P1b2a — full op surface for inference primitives: 6 shape ops (`reshape` with `-1` inference, `transpose`/`transpose_axes`, `broadcast_to`, `concatenate`, `stack`, `split_n`/`split_at`) + 5 reductions (`sum`/`mean`/`max`/`min`/`argmax` via `IntoAxes` sealed trait + `All` marker) + `matmul`. Compose `softmax`/`gelu`/`silu`. Built on P1b1 operators. Full design in [`docs/superpowers/specs/`](docs/superpowers/specs/).
+**Status:** 🎉 **P1 complete** — full inference primitives. P1b2b adds 3 new dtypes (`u16`/`u32`/`u64`), 6 indexing ops (`where_`/`take`/`take_along_axis`/`slice`/`slice_strided`/`gather`), and SDPA integration tests (causal mask + softmax row-sum + numerical correctness). Built on P1b2a shape/reduction/matmul. Full design in [`docs/superpowers/specs/`](docs/superpowers/specs/). Next: P2 (`fast` ops + io + transforms).
 
 ## Requirements
 
@@ -102,6 +102,28 @@ fn main() -> mlx::Result<()> {
 
 > **Gotcha:** `.t()` reverses **all** dims. For 4D attention (`Q @ K^T` where `Q`/`K` are `[B, H, S, D]`), use `k.transpose_axes(&[0, 1, 3, 2])` to swap just the last two dims, not `k.t()` (which would yield `[D, S, H, B]`). See [`matmul_using_t_for_attention`](mlx/tests/p1b2a_matmul.rs).
 
+## Indexing & SDPA
+
+`mlx::ops::where_` (trailing underscore, since `where` is a Rust keyword) selects element-wise from two arrays based on a condition mask. `take` / `take_along_axis` index along an axis (NumPy / PyTorch semantics). `slice` and `slice_strided` extract sub-arrays Python-style:
+
+```rust
+use mlx::{ops, Array};
+
+fn main() -> mlx::Result<()> {
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
+    let cond = Array::from_slice(&[1_u8, 0, 1, 0, 1, 0], &[2, 3])?;
+    let zeros = Array::from_slice(&[0.0_f32; 6], &[2, 3])?;
+
+    let _picked = ops::where_(&cond, &a, &zeros)?;             // element-wise select
+    let idx = Array::from_slice(&[0_u32, 2], &[2])?;
+    let _cols = a.take(&idx, 1)?;                              // [2, 2] — pick cols 0 and 2
+    let _sub = a.slice(&[0, 1], &[2, 3])?;                     // [2, 2] — rows 0..2, cols 1..3
+    Ok(())
+}
+```
+
+A complete SDPA (scaled dot-product attention) implementation composing matmul, transpose, mask-add, softmax, and matmul lives in [`mlx/tests/p1b2b_sdpa.rs`](mlx/tests/p1b2b_sdpa.rs). It's the canonical test that all of P1 (P0 + P1a + P1b1 + P1b2a + P1b2b) integrates correctly. P2's `fast::scaled_dot_product_attention` will match these numerics.
+
 ## Threading
 
 `mlx::Array` implements `Send` but **not** `Sync`. Internally, MLX's
@@ -132,7 +154,8 @@ mutable access — `clone` is almost always the right answer.
 - ✅ **P1a** — Array foundation (Element trait, 10 dtypes, from_slice/item/to_vec, Clone/Debug, Send, SmallVec shape)
 - ✅ **P1b1** — operators + element-wise unary + broadcasting
 - ✅ **P1b2a** — shape ops + reduction + matmul (compose softmax/gelu/silu)
-- ⏳ **P1b2b** — indexing (take/gather/where/slice) + SDPA integration test
+- ✅ **P1b2b** — indexing (take/take_along_axis/where/slice/gather) + u16/u32/u64 dtypes + SDPA integration
+- 🎉 **P1 complete** — full inference primitives ready
 - ⏳ **P1c** — random (key + uniform/normal/categorical)
 - ⏳ **P2** — `fast` (rms_norm, layer_norm, rope, sdpa) + io (safetensors/gguf load) + transforms
 - ⏳ **P3** — quantization + compile + LLM inference example

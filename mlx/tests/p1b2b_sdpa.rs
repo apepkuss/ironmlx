@@ -49,7 +49,7 @@ fn causal_mask(s: usize) -> Result<Array> {
 #[test]
 fn sdpa_no_mask_shape_finite() {
     // [B=1, H=2, S=4, D=8]
-    let total: usize = 1 * 2 * 4 * 8;
+    let total: usize = 64; // 1 * 2 * 4 * 8
     let q_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01).collect();
     let k_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.02).collect();
     let v_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.03).collect();
@@ -70,7 +70,7 @@ fn sdpa_no_mask_shape_finite() {
 fn sdpa_softmax_rows_sum_to_one() {
     // Verify the softmax-of-scores property: the attention weight rows sum to 1.
     // We compute weights directly (without the final V matmul) to inspect.
-    let total: usize = 1 * 1 * 3 * 4;
+    let total: usize = 12; // 1 * 1 * 3 * 4
     let q_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.1).collect();
     let k_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.1).collect();
     let q = Array::from_slice(&q_data, &[1, 1, 3, 4]).expect("q");
@@ -98,7 +98,7 @@ fn sdpa_causal_mask_zeros_future() {
     // With a causal mask, attention weights for j > i (future positions) should be 0.
     // We compute weights manually (without V matmul) to inspect.
     let s = 4;
-    let total: usize = 1 * 1 * s * 4;
+    let total: usize = s * 4; // 1 * 1 * s * 4
     let q_data: Vec<f32> = (0..total).map(|i| 0.1 * (i as f32)).collect();
     let k_data: Vec<f32> = (0..total).map(|i| 0.1 * (i as f32)).collect();
     let q = Array::from_slice(&q_data, &[1, 1, s as i32, 4]).expect("q");
