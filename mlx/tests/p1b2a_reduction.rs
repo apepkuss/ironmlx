@@ -99,12 +99,10 @@ fn argmax_basic() {
     // [[1, 5, 3], [2, 4, 6]] → argmax(-1) = [1, 2]
     let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0, 4.0, 6.0], &[2, 3]).expect("from_slice");
     let am = ops::argmax(&a, -1, false).expect("argmax");
-    // MLX returns Uint32 for argmax results
     assert_eq!(am.dtype(), Dtype::Uint32);
-    // Result shape: one index per row of a [2, 3] array
     assert_eq!(am.shape().as_slice(), &[2_i32]);
-    // NOTE: u32 is not yet an Element in this crate; value assertions will be
-    // added in a follow-up task when Uint32/Element support is wired up.
+    // P1b2b: u32 is now an Element, value assertion enabled
+    assert_eq!(am.to_vec::<u32>().expect("to_vec"), vec![1_u32, 2]);
 }
 
 #[test]
@@ -113,9 +111,10 @@ fn argmax_all_returns_flat_index() {
     let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0, 4.0, 6.0], &[2, 3]).expect("from_slice");
     let am = ops::argmax(&a, All, false).expect("argmax all");
     assert_eq!(am.dtype(), Dtype::Uint32);
-    // All-axes argmax returns a scalar
     assert_eq!(am.size(), 1);
     assert_eq!(am.shape().as_slice(), &[] as &[i32]);
+    // P1b2b: u32 is now an Element, value assertion enabled
+    assert_eq!(am.item::<u32>().expect("item"), 5);
 }
 
 #[test]

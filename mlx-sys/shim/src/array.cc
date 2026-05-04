@@ -66,12 +66,13 @@ mlx::core::Dtype dtype_from_u8(uint8_t v) {
 
 template <typename CppT, typename WireT = CppT>
 rust::Vec<WireT> array_to_vec_typed(const MlxArray& a) {
-  // Flatten to a 1-D contiguous array so that data<T>() iterates elements in
-  // logical (row-major) order regardless of strides. This handles transpose,
-  // broadcast_to, and any other view ops that leave the backing buffer
-  // non-contiguous. The flatten+eval is cheap when already contiguous (MLX
-  // detects that and avoids a copy).
-  mlx::core::array flat = mlx::core::flatten(a);
+  // Use contiguous() to ensure a flat, stride-1 copy before reading raw data.
+  // flatten() alone is insufficient for arrays with non-unit memory strides
+  // (e.g. slice with stride > 1): it reshapes to 1-D but preserves the
+  // underlying strides, causing ptr[i] to read the wrong elements.
+  // contiguous() forces a materialized copy with unit element stride.
+  // It is a no-op (zero extra copy) when the array is already contiguous.
+  mlx::core::array flat = mlx::core::contiguous(mlx::core::flatten(a));
   mlx::core::eval(flat);
   rust::Vec<WireT> out;
   out.reserve(flat.size());
@@ -368,6 +369,67 @@ std::unique_ptr<MlxArray> split_result_at(const MlxArrayVec& v, size_t i) {
 
 std::unique_ptr<MlxArray> array_matmul(const MlxArray& a, const MlxArray& b) {
   return std::make_unique<MlxArray>(mlx::core::matmul(a, b));
+}
+
+// === P1b2b dtype extension implementations ===
+
+std::unique_ptr<MlxArray> array_from_u16(rust::Slice<const uint16_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<uint16_t>(data.data(), shape, mlx::core::uint16);
+}
+std::unique_ptr<MlxArray> array_from_u32(rust::Slice<const uint32_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<uint32_t>(data.data(), shape, mlx::core::uint32);
+}
+std::unique_ptr<MlxArray> array_from_u64(rust::Slice<const uint64_t> data, rust::Slice<const int32_t> shape) {
+  return array_from_typed<uint64_t>(data.data(), shape, mlx::core::uint64);
+}
+
+uint16_t array_item_u16(const MlxArray& a) { return a.item<uint16_t>(); }
+uint32_t array_item_u32(const MlxArray& a) { return a.item<uint32_t>(); }
+uint64_t array_item_u64(const MlxArray& a) { return a.item<uint64_t>(); }
+
+rust::Vec<uint16_t> array_to_vec_u16(const MlxArray& a) { return array_to_vec_typed<uint16_t>(a); }
+rust::Vec<uint32_t> array_to_vec_u32(const MlxArray& a) { return array_to_vec_typed<uint32_t>(a); }
+rust::Vec<uint64_t> array_to_vec_u64(const MlxArray& a) { return array_to_vec_typed<uint64_t>(a); }
+
+// === P1b2b indexing implementations ===
+
+std::unique_ptr<MlxArray> array_where(const MlxArray& cond, const MlxArray& x, const MlxArray& y) {
+  return std::make_unique<MlxArray>(mlx::core::where(cond, x, y));
+}
+
+std::unique_ptr<MlxArray> array_take(const MlxArray& a, const MlxArray& indices, int32_t axis) {
+  return std::make_unique<MlxArray>(mlx::core::take(a, indices, axis));
+}
+
+std::unique_ptr<MlxArray> array_take_along_axis(const MlxArray& a, const MlxArray& indices, int32_t axis) {
+  return std::make_unique<MlxArray>(mlx::core::take_along_axis(a, indices, axis));
+}
+
+std::unique_ptr<MlxArray> array_slice_strided(
+    const MlxArray& a,
+    rust::Slice<const int32_t> start,
+    rust::Slice<const int32_t> stop,
+    rust::Slice<const int32_t> strides) {
+  mlx::core::Shape s_start(start.begin(), start.end());
+  mlx::core::Shape s_stop(stop.begin(), stop.end());
+  mlx::core::Shape s_strides(strides.begin(), strides.end());
+  return std::make_unique<MlxArray>(
+      mlx::core::slice(a, std::move(s_start), std::move(s_stop), std::move(s_strides)));
+}
+
+std::unique_ptr<MlxArray> array_gather(
+    const MlxArray& a,
+    rust::Slice<const MlxArray* const> indices,
+    rust::Slice<const int32_t> axes,
+    rust::Slice<const int32_t> slice_sizes) {
+  std::vector<MlxArray> idx_vec;
+  idx_vec.reserve(indices.size());
+  for (size_t i = 0; i < indices.size(); ++i) {
+    idx_vec.push_back(*indices[i]);  // copy ctor — refcount-shared, cheap
+  }
+  std::vector<int> axes_vec(axes.begin(), axes.end());
+  mlx::core::Shape ss(slice_sizes.begin(), slice_sizes.end());
+  return std::make_unique<MlxArray>(mlx::core::gather(a, idx_vec, axes_vec, ss));
 }
 
 }  // namespace cxx_mlx

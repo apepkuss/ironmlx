@@ -128,4 +128,37 @@ std::unique_ptr<MlxArray> split_result_at(const MlxArrayVec& v, size_t i);
 
 std::unique_ptr<MlxArray> array_matmul(const MlxArray& a, const MlxArray& b);
 
+// === P1b2b dtype extension: u16/u32/u64 ===
+
+std::unique_ptr<MlxArray> array_from_u16(rust::Slice<const uint16_t> data, rust::Slice<const int32_t> shape);
+std::unique_ptr<MlxArray> array_from_u32(rust::Slice<const uint32_t> data, rust::Slice<const int32_t> shape);
+std::unique_ptr<MlxArray> array_from_u64(rust::Slice<const uint64_t> data, rust::Slice<const int32_t> shape);
+
+uint16_t array_item_u16(const MlxArray& a);
+uint32_t array_item_u32(const MlxArray& a);
+uint64_t array_item_u64(const MlxArray& a);
+
+rust::Vec<uint16_t> array_to_vec_u16(const MlxArray& a);
+rust::Vec<uint32_t> array_to_vec_u32(const MlxArray& a);
+rust::Vec<uint64_t> array_to_vec_u64(const MlxArray& a);
+
+// === P1b2b indexing ops ===
+
+std::unique_ptr<MlxArray> array_where(const MlxArray& cond, const MlxArray& x, const MlxArray& y);
+
+std::unique_ptr<MlxArray> array_take(const MlxArray& a, const MlxArray& indices, int32_t axis);
+std::unique_ptr<MlxArray> array_take_along_axis(const MlxArray& a, const MlxArray& indices, int32_t axis);
+
+std::unique_ptr<MlxArray> array_slice_strided(
+    const MlxArray& a,
+    rust::Slice<const int32_t> start,
+    rust::Slice<const int32_t> stop,
+    rust::Slice<const int32_t> strides);
+
+std::unique_ptr<MlxArray> array_gather(
+    const MlxArray& a,
+    rust::Slice<const MlxArray* const> indices,
+    rust::Slice<const int32_t> axes,
+    rust::Slice<const int32_t> slice_sizes);
+
 }  // namespace cxx_mlx

@@ -208,9 +208,45 @@ impl Array {
         crate::ops::broadcast_to(self, shape)
     }
 
-    /// Matrix multiplication. See [`crate::ops::matmul`] for shape rules.
+    /// Matrix multiplication. See [`crate::ops::matmul()`] for shape rules.
     pub fn matmul(&self, rhs: &Array) -> Result<Array> {
         crate::ops::matmul(self, rhs)
+    }
+
+    /// Use `self` as the condition mask, selecting from `x` where true and `y` where false.
+    /// See [`crate::ops::where_`].
+    pub fn where_(&self, x: &Array, y: &Array) -> Result<Array> {
+        crate::ops::where_(self, x, y)
+    }
+
+    /// Take values along `axis`. See [`crate::ops::take`].
+    pub fn take(&self, indices: &Array, axis: i32) -> Result<Array> {
+        crate::ops::take(self, indices, axis)
+    }
+
+    /// Per-axis gather (PyTorch `torch.gather`). See [`crate::ops::take_along_axis`].
+    pub fn take_along_axis(&self, indices: &Array, axis: i32) -> Result<Array> {
+        crate::ops::take_along_axis(self, indices, axis)
+    }
+
+    /// Slice with stride 1. See [`crate::ops::slice`].
+    pub fn slice(&self, start: &[i32], stop: &[i32]) -> Result<Array> {
+        crate::ops::slice(self, start, stop)
+    }
+
+    /// Slice with explicit strides. See [`crate::ops::slice_strided`].
+    pub fn slice_strided(&self, start: &[i32], stop: &[i32], strides: &[i32]) -> Result<Array> {
+        crate::ops::slice_strided(self, start, stop, strides)
+    }
+
+    /// N-dimensional gather. See [`crate::ops::gather`].
+    pub fn gather(
+        &self,
+        indices: &[&Array],
+        axes: &[i32],
+        slice_sizes: &[i32],
+    ) -> Result<Array> {
+        crate::ops::gather(self, indices, axes, slice_sizes)
     }
 }
 
