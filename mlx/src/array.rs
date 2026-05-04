@@ -228,6 +228,16 @@ impl Array {
     pub fn take_along_axis(&self, indices: &Array, axis: i32) -> Result<Array> {
         crate::ops::take_along_axis(self, indices, axis)
     }
+
+    /// Slice with stride 1. See [`crate::ops::slice`].
+    pub fn slice(&self, start: &[i32], stop: &[i32]) -> Result<Array> {
+        crate::ops::slice(self, start, stop)
+    }
+
+    /// Slice with explicit strides. See [`crate::ops::slice_strided`].
+    pub fn slice_strided(&self, start: &[i32], stop: &[i32], strides: &[i32]) -> Result<Array> {
+        crate::ops::slice_strided(self, start, stop, strides)
+    }
 }
 
 impl Clone for Array {

@@ -108,3 +108,49 @@ fn take_method_form() {
     let r = a.take(&indices, 0).expect("method take");
     assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![30.0, 10.0]);
 }
+
+#[test]
+fn slice_basic_2d() {
+    // a = 3x4 = [[1..4], [5..8], [9..12]]; slice([1, 1], [3, 3]) → [[6, 7], [10, 11]]
+    let data: Vec<f32> = (1..=12).map(|i| i as f32).collect();
+    let a = Array::from_slice(&data, &[3, 4]).expect("from_slice");
+    let r = ops::slice(&a, &[1, 1], &[3, 3]).expect("slice");
+    assert_eq!(r.shape().as_slice(), &[2, 2]);
+    assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![6.0, 7.0, 10.0, 11.0]);
+}
+
+#[test]
+fn slice_full_first_dim() {
+    let data: Vec<f32> = (0..6).map(|i| i as f32).collect();
+    let a = Array::from_slice(&data, &[2, 3]).expect("from_slice");
+    let r = ops::slice(&a, &[0, 1], &[2, 3]).expect("slice");
+    assert_eq!(r.shape().as_slice(), &[2, 2]);
+    assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![1.0, 2.0, 4.0, 5.0]);
+}
+
+#[test]
+fn slice_strided_step_2() {
+    // a = [0..6], slice with stride 2 → [0, 2, 4]
+    let data: Vec<f32> = (0..6).map(|i| i as f32).collect();
+    let a = Array::from_slice(&data, &[6]).expect("from_slice");
+    let r = ops::slice_strided(&a, &[0], &[6], &[2]).expect("slice_strided");
+    assert_eq!(r.shape().as_slice(), &[3]);
+    assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![0.0, 2.0, 4.0]);
+}
+
+#[test]
+fn slice_length_mismatch_errors() {
+    let a = Array::from_slice(&[0.0_f32; 6], &[2, 3]).expect("from_slice");
+    // Pass start with wrong length (1 instead of 2)
+    let result = ops::slice(&a, &[0], &[2, 3]);
+    assert!(matches!(result, Err(Error::ShapeMismatch { .. })), "got {result:?}");
+}
+
+#[test]
+fn slice_method_form() {
+    let data: Vec<f32> = (0..12).map(|i| i as f32).collect();
+    let a = Array::from_slice(&data, &[3, 4]).expect("from_slice");
+    let r = a.slice(&[0, 0], &[2, 2]).expect("method slice");
+    assert_eq!(r.shape().as_slice(), &[2, 2]);
+    assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![0.0, 1.0, 4.0, 5.0]);
+}

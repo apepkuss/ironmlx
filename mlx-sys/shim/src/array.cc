@@ -66,12 +66,13 @@ mlx::core::Dtype dtype_from_u8(uint8_t v) {
 
 template <typename CppT, typename WireT = CppT>
 rust::Vec<WireT> array_to_vec_typed(const MlxArray& a) {
-  // Flatten to a 1-D contiguous array so that data<T>() iterates elements in
-  // logical (row-major) order regardless of strides. This handles transpose,
-  // broadcast_to, and any other view ops that leave the backing buffer
-  // non-contiguous. The flatten+eval is cheap when already contiguous (MLX
-  // detects that and avoids a copy).
-  mlx::core::array flat = mlx::core::flatten(a);
+  // Use contiguous() to ensure a flat, stride-1 copy before reading raw data.
+  // flatten() alone is insufficient for arrays with non-unit memory strides
+  // (e.g. slice with stride > 1): it reshapes to 1-D but preserves the
+  // underlying strides, causing ptr[i] to read the wrong elements.
+  // contiguous() forces a materialized copy with unit element stride.
+  // It is a no-op (zero extra copy) when the array is already contiguous.
+  mlx::core::array flat = mlx::core::contiguous(mlx::core::flatten(a));
   mlx::core::eval(flat);
   rust::Vec<WireT> out;
   out.reserve(flat.size());

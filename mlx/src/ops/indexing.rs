@@ -37,3 +37,25 @@ pub fn take_along_axis(a: &Array, indices: &Array, axis: i32) -> Result<Array> {
         .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Slice with stride 1 along every dimension. `start` and `stop` must each have
+/// length equal to `a.ndim()`. Negative indices are supported (per MLX rules).
+pub fn slice(a: &Array, start: &[i32], stop: &[i32]) -> Result<Array> {
+    let strides: Vec<i32> = vec![1; a.ndim()];
+    slice_strided(a, start, stop, &strides)
+}
+
+/// Slice with explicit per-dim strides. `start`, `stop`, `strides` must all
+/// have length equal to `a.ndim()`. Negative indices and negative strides are
+/// supported per MLX rules.
+pub fn slice_strided(a: &Array, start: &[i32], stop: &[i32], strides: &[i32]) -> Result<Array> {
+    let ndim = a.ndim();
+    if start.len() != ndim || stop.len() != ndim || strides.len() != ndim {
+        let actual = vec![start.len() as i32, stop.len() as i32, strides.len() as i32];
+        let expected = vec![ndim as i32; 3];
+        return Err(Error::ShapeMismatch { expected, actual });
+    }
+    let inner = mlx_sys::array::ffi::array_slice_strided(a.as_inner(), start, stop, strides)
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
