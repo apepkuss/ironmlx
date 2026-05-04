@@ -51,10 +51,12 @@ fn main() {
         "src/bridge/array.rs",
         "src/bridge/transforms.rs",
         "src/bridge/stream.rs",
+        "src/bridge/fast.rs",
     ])
     .file("shim/src/array.cc")
     .file("shim/src/transforms.cc")
     .file("shim/src/stream.cc")
+    .file("shim/src/fast.cc")
     .include("shim/include")
     .include(&include_dir)
     .std("c++20")
