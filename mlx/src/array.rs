@@ -238,6 +238,16 @@ impl Array {
     pub fn slice_strided(&self, start: &[i32], stop: &[i32], strides: &[i32]) -> Result<Array> {
         crate::ops::slice_strided(self, start, stop, strides)
     }
+
+    /// N-dimensional gather. See [`crate::ops::gather`].
+    pub fn gather(
+        &self,
+        indices: &[&Array],
+        axes: &[i32],
+        slice_sizes: &[i32],
+    ) -> Result<Array> {
+        crate::ops::gather(self, indices, axes, slice_sizes)
+    }
 }
 
 impl Clone for Array {

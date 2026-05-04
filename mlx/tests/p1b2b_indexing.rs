@@ -154,3 +154,29 @@ fn slice_method_form() {
     assert_eq!(r.shape().as_slice(), &[2, 2]);
     assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![0.0, 1.0, 4.0, 5.0]);
 }
+
+#[test]
+fn gather_basic_1d_index() {
+    // Simple case: gather from a [4, 3] along axis 0 with indices [1, 3]
+    // and slice_sizes [1, 3]. Result shape: indices_shape (2,) ++ slice_sizes (1, 3)
+    // = [2, 1, 3]
+    let data: Vec<f32> = (0..12).map(|i| i as f32).collect();
+    let a = Array::from_slice(&data, &[4, 3]).expect("from_slice");
+    let idx = Array::from_slice(&[1_u32, 3], &[2]).expect("from_slice idx");
+    let r = ops::gather(&a, &[&idx], &[0], &[1, 3]).expect("gather");
+    assert_eq!(r.shape().as_slice(), &[2, 1, 3]);
+    // Row 1 of original: [3, 4, 5]; Row 3: [9, 10, 11]
+    assert_eq!(
+        r.to_vec::<f32>().expect("to_vec"),
+        vec![3.0, 4.0, 5.0, 9.0, 10.0, 11.0]
+    );
+}
+
+#[test]
+fn gather_method_form() {
+    let data: Vec<f32> = (0..6).map(|i| i as f32).collect();
+    let a = Array::from_slice(&data, &[3, 2]).expect("from_slice");
+    let idx = Array::from_slice(&[0_u32, 2], &[2]).expect("from_slice");
+    let r = a.gather(&[&idx], &[0], &[1, 2]).expect("method gather");
+    assert_eq!(r.shape().as_slice(), &[2, 1, 2]);
+}
