@@ -29,6 +29,10 @@ pub fn synchronize_stream(s: Stream) -> Result<()> {
 /// thread's default stream** (non-blocking, < 1µs), then returns a
 /// `Future<Output = Result<()>>` that resolves when the work completes.
 ///
+/// The output is `()` — MLX evaluates arrays in-place via its refcount
+/// model, so the caller's original `&Array` references read the
+/// materialized data after `.await` (call `.to_vec()`, index, etc.).
+///
 /// The future is **runtime-agnostic** — `.await` it under tokio,
 /// async-std, smol, `futures_lite::future::block_on`, or any executor.
 ///

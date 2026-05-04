@@ -4,18 +4,21 @@
 //! Ops queued on the same stream execute in order; ops on different streams
 //! may run concurrently. Streams are bound to a specific [`Device`].
 //!
-//! **Construction**: `Stream` literals are technically possible because
-//! fields are `pub`, but constructing arbitrary indices is **not safe** —
-//! only indices returned by [`default_stream`] / [`new_stream`] correspond
-//! to real MLX stream workers. Always obtain streams via these functions.
+//! **Construction**: only obtain `Stream` values via [`default_stream`] or
+//! [`new_stream`] — arbitrary indices do not correspond to real MLX stream
+//! workers, and `synchronize_stream` / op dispatch on a fabricated index
+//! throws inside MLX. The struct is `#[non_exhaustive]` so external callers
+//! cannot construct one with a struct literal.
 //!
 //! Like [`crate::Device`], `Stream` is a safe-layer wrapper over
 //! `mlx_sys::stream::ffi::Stream` with the strongly-typed [`Device`] field.
 
 use crate::{Device, Error, Result};
 
-/// MLX execution stream. POD value type, cheap to copy.
+/// MLX execution stream. POD value type, cheap to copy. Cannot be
+/// constructed externally — use [`default_stream`] or [`new_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stream {
     pub index: i32,
     pub device: Device,
