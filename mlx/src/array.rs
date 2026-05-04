@@ -125,6 +125,15 @@ impl Array {
         mlx_sys::transforms::ffi::eval_one(&self.0).map_err(Error::from)
     }
 
+    /// Asynchronously evaluate this array. See [`crate::transforms::async_eval`].
+    ///
+    /// The returned future does not borrow `self` — submission runs
+    /// synchronously before the future is constructed, and the future
+    /// then owns a refcount-share clone of the array on which it waits.
+    pub fn async_eval(&self) -> impl std::future::Future<Output = Result<()>> + Send + use<> {
+        crate::transforms::async_eval(&[self])
+    }
+
     /// Hidden raw FFI access for advanced users and internal tests.
     #[doc(hidden)]
     pub fn as_inner(&self) -> &mlx_sys::array::ffi::MlxArray {
