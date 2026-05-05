@@ -309,3 +309,12 @@ fn permutation_array_preserves_elements() {
         "permutation must preserve the multiset"
     );
 }
+
+#[test]
+fn top_level_re_exports_work() {
+    // 验证可以通过 mlx::* 顶层访问 P4 公开 API
+    let k = mlx::key(42).expect("key via mlx::*");
+    let u = mlx::uniform_default(&[10], mlx::Dtype::Float32, Some(&k))
+        .expect("uniform_default via mlx::*");
+    assert_eq!(u.shape().as_slice(), &[10]);
+}

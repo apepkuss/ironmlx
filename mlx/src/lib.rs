@@ -62,3 +62,8 @@ pub use quantization::{
 };
 
 pub mod random;
+pub use random::{
+    bernoulli, bernoulli_default, bits, categorical, categorical_n, categorical_shaped, gumbel,
+    key, laplace, multivariate_normal, normal, permutation, permutation_arange, randint, seed,
+    split, split_n, truncated_normal, truncated_normal_default, uniform, uniform_default,
+};
