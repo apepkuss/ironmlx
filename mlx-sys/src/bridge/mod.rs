@@ -13,5 +13,6 @@ pub mod array;
 pub mod fast;
 pub mod io;
 pub mod quantization;
+pub mod random;
 pub mod stream;
 pub mod transforms;
