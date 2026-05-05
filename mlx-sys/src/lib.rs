@@ -11,5 +11,6 @@ mod bridge;
 pub use bridge::array;
 pub use bridge::fast;
 pub use bridge::io;
+pub use bridge::quantization;
 pub use bridge::stream;
 pub use bridge::transforms;

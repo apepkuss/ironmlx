@@ -1,0 +1,277 @@
+//! Integration tests for mlx::quantization — low-precision subsystem.
+
+use mlx::quantization::{dequantize, quantize, quantized_matmul};
+use mlx::Array;
+
+/// 构造 [N=4, K=64] f32 测试权重矩阵（K=64 = 默认 group_size）。
+fn make_test_weight() -> Array {
+    let total: usize = 256; // 4 * 64
+    let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01 - 1.0).collect();
+    Array::from_slice(&data, &[4, 64]).expect("weight")
+}
+
+#[test]
+fn quantize_affine_4bit_returns_three_arrays() {
+    let w = make_test_weight();
+    let result = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
+    // affine 模式下应返回 [packed_weights, scales, biases]
+    assert_eq!(result.len(), 3, "affine quantize should return 3 arrays");
+}
+
+#[test]
+fn quantize_dequantize_round_trip_4bit() {
+    let w = make_test_weight();
+    let v_in: Vec<f32> = w.to_vec().expect("w to_vec");
+
+    let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
+    assert_eq!(parts.len(), 3);
+
+    let dequantized = dequantize(
+        &parts[0],       // packed
+        &parts[1],       // scales
+        Some(&parts[2]), // biases
+        Some(64),
+        Some(4),
+        "affine",
+        None,
+        None,
+    )
+    .expect("dequantize");
+
+    let v_out: Vec<f32> = dequantized.to_vec().expect("dequantized to_vec");
+    assert_eq!(v_in.len(), v_out.len());
+
+    // 4-bit 量化误差容差较宽（典型 SQNR ~25 dB，相对误差几个百分点）
+    let mut max_err = 0.0_f32;
+    for (a, b) in v_in.iter().zip(&v_out) {
+        let err = (a - b).abs();
+        if err > max_err {
+            max_err = err;
+        }
+    }
+    assert!(max_err < 5e-2, "4-bit round-trip max err {max_err}");
+}
+
+#[test]
+fn quantize_dequantize_round_trip_8bit() {
+    let w = make_test_weight();
+    let v_in: Vec<f32> = w.to_vec().expect("w to_vec");
+
+    let parts = quantize(&w, Some(64), Some(8), "affine", None).expect("quantize");
+    let dequantized = dequantize(
+        &parts[0],
+        &parts[1],
+        Some(&parts[2]),
+        Some(64),
+        Some(8),
+        "affine",
+        None,
+        None,
+    )
+    .expect("dequantize");
+
+    let v_out: Vec<f32> = dequantized.to_vec().expect("to_vec");
+    let mut max_err = 0.0_f32;
+    for (a, b) in v_in.iter().zip(&v_out) {
+        let err = (a - b).abs();
+        if err > max_err {
+            max_err = err;
+        }
+    }
+    assert!(max_err < 5e-3, "8-bit round-trip max err {max_err}");
+}
+
+#[test]
+fn quantized_matmul_matches_dequantize_matmul() {
+    // W: [N=4, K=64], x: [B=2, K=64]
+    // y_qmm = quantized_matmul(x, packed_W, scales, biases, transpose=true)
+    // y_ref = x @ dequantize(packed_W).T
+    // 两者应在 4-bit 量化容差内一致
+    let w = make_test_weight(); // [4, 64]
+    let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
+    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+
+    let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
+
+    // y_qmm = x @ W.T (transpose=true)，输出 [2, 4]
+    let y_qmm = quantized_matmul(
+        &x,
+        &parts[0],
+        &parts[1],
+        Some(&parts[2]),
+        true,
+        Some(64),
+        Some(4),
+        "affine",
+    )
+    .expect("qmm");
+    assert_eq!(y_qmm.shape().as_slice(), &[2, 4]);
+
+    // 参考路径: y_ref = x @ dequantize(W).T
+    let dq = dequantize(
+        &parts[0],
+        &parts[1],
+        Some(&parts[2]),
+        Some(64),
+        Some(4),
+        "affine",
+        None,
+        None,
+    )
+    .expect("dq");
+    let dq_t = dq.transpose_axes(&[1, 0]).expect("transpose");
+    let y_ref = x.matmul(&dq_t).expect("ref matmul");
+
+    let v_qmm: Vec<f32> = y_qmm.to_vec().expect("qmm to_vec");
+    let v_ref: Vec<f32> = y_ref.to_vec().expect("ref to_vec");
+    assert_eq!(v_qmm.len(), v_ref.len());
+
+    // qmm 与 dequantize+matmul 的差异应当极小（计算路径不同但代数等价）
+    let mut max_err = 0.0_f32;
+    for (a, b) in v_qmm.iter().zip(&v_ref) {
+        let err = (a - b).abs();
+        if err > max_err {
+            max_err = err;
+        }
+    }
+    assert!(max_err < 1e-2, "qmm vs ref max err {max_err}");
+}
+
+use mlx::quantization::qqmm;
+
+#[test]
+fn qqmm_binding_smoke() {
+    // Smoke test: validates binding wiring only (shim → bridge → safe API).
+    // Does NOT validate NVFP4 kernel correctness — at the time of writing,
+    // MLX's QQMatmul kernel returns "[QQMatmul] NYI for the general case"
+    // on the macOS Metal backend.
+    //
+    // The test tolerates Err only if the message contains "NYI"; any other
+    // failure mode (real regression, invalid bindings) panics.
+    //
+    // TODO: when MLX lands NVFP4 Metal kernel, replace this with a real
+    // round-trip test (similar to `quantized_matmul_matches_dequantize_matmul`).
+    let w = make_test_weight();
+    let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
+    let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
+    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+
+    let result = qqmm(
+        &x,
+        &parts[0],
+        Some(&parts[1]),
+        Some(64),
+        Some(4),
+        "nvfp4",
+        None,
+        None,
+    );
+
+    match result {
+        Ok(y) => match y.to_vec::<f32>() {
+            Ok(v) => {
+                for x in &v {
+                    assert!(x.is_finite(), "non-finite value: {x}");
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:?}");
+                assert!(
+                    msg.contains("NYI"),
+                    "qqmm eval failed with non-NYI error (real regression?): {msg}"
+                );
+            }
+        },
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("NYI"),
+                "qqmm construction failed with non-NYI error (real regression?): {msg}"
+            );
+        }
+    }
+}
+
+use mlx::quantization::gather_qmm;
+
+#[test]
+fn gather_qmm_no_indices_binding_smoke() {
+    // gather_qmm 不传 lhs/rhs indices 时退化为常规 quantized_matmul。
+    // 本测试验证 binding wiring：仅容忍 NYI 错误（与 qqmm_binding_smoke 对齐）。
+    //
+    // TODO: 当 MLX 在 Metal 后端完整支持 gather_qmm（含 indices 路径）时，
+    // 加一个 indices=Some 的 round-trip 测试。
+    let w = make_test_weight();
+    let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
+    let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
+    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+
+    let result = gather_qmm(
+        &x,
+        &parts[0],
+        &parts[1],
+        Some(&parts[2]),
+        None, // lhs_indices
+        None, // rhs_indices
+        true, // transpose
+        Some(64),
+        Some(4),
+        "affine",
+        false, // sorted_indices
+    );
+
+    match result {
+        Ok(y) => match y.to_vec::<f32>() {
+            Ok(v) => {
+                for x in &v {
+                    assert!(x.is_finite(), "non-finite value: {x}");
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:?}");
+                assert!(
+                    msg.contains("NYI"),
+                    "gather_qmm eval failed with non-NYI error (real regression?): {msg}"
+                );
+            }
+        },
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("NYI"),
+                "gather_qmm construction failed with non-NYI error (real regression?): {msg}"
+            );
+        }
+    }
+}
+
+use mlx::quantization::{from_fp8, to_fp8};
+use mlx::Dtype;
+
+#[test]
+fn fp8_round_trip_f32_small_integers() {
+    // 小整数 1.0/2.0/3.0/4.0 在 E4M3 (4-exp 3-mantissa) 范围内可精确或近似表达。
+    // E4M3 mantissa 仅 3-bit，相对误差典型 ~6-12%；容差 0.5 安全（绝对误差对小值）。
+    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[4]).expect("x");
+    let fp8 = to_fp8(&x).expect("to_fp8");
+
+    let back = from_fp8(&fp8, Dtype::Float32).expect("from_fp8");
+    assert_eq!(back.shape().as_slice(), &[4]);
+
+    let v_back: Vec<f32> = back.to_vec().expect("to_vec");
+    let expected = [1.0_f32, 2.0, 3.0, 4.0];
+    for (i, (got, want)) in v_back.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 0.5,
+            "fp8 round-trip[{i}] = {got}, want {want}"
+        );
+    }
+}
+
+#[test]
+fn top_level_re_exports_work() {
+    // 验证可以通过 mlx::* 顶层访问 P3 公开 API
+    let w = make_test_weight();
+    let parts = mlx::quantize(&w, Some(64), Some(4), "affine", None).expect("re-export");
+    assert_eq!(parts.len(), 3);
+}

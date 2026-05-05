@@ -55,3 +55,8 @@ pub use io::{
     save_gguf, save_npy, save_npy_to_writer, save_safetensors, save_safetensors_to_writer,
     GGUFMetaData, Reader, Writer,
 };
+
+pub mod quantization;
+pub use quantization::{
+    dequantize, from_fp8, gather_qmm, qqmm, quantize, quantized_matmul, to_fp8,
+};
