@@ -201,3 +201,107 @@ fn rope_with_array_offset_per_batch_offsets() {
         );
     }
 }
+
+#[test]
+fn sdpa_no_mask_matches_manual_reference() {
+    // Q=K=V=I (4×4 identity)，scale=1，无 mask。
+    // softmax(I @ I.T) = softmax(I) → 每行 [exp(1), 1, 1, 1] / (exp(1) + 3)
+    // weights @ V (=I) = weights 本身
+    let n: usize = 4;
+    let mut data = vec![0.0_f32; n * n];
+    for i in 0..n {
+        data[i * n + i] = 1.0;
+    }
+    let id_2d = Array::from_slice(&data, &[n as i32, n as i32]).expect("id");
+    let q = id_2d.reshape(&[1, 1, n as i32, n as i32]).expect("q");
+    let k = q.clone();
+    let v = q.clone();
+
+    let out = fast::scaled_dot_product_attention(&q, &k, &v, 1.0, "", None, None).expect("sdpa");
+    assert_eq!(out.shape().as_slice(), &[1, 1, n as i32, n as i32]);
+
+    let result: Vec<f32> = out.to_vec().expect("to_vec");
+    let e = std::f32::consts::E;
+    let norm = e + 3.0;
+    let expected_diag = e / norm;
+    let expected_off = 1.0 / norm;
+
+    for i in 0..n {
+        for j in 0..n {
+            let actual = result[i * n + j];
+            let want = if i == j { expected_diag } else { expected_off };
+            assert!(
+                (actual - want).abs() < 1e-3,
+                "sdpa[{i},{j}] = {actual}, want {want}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sdpa_causal_mode_zeros_future_positions() {
+    // mask_mode="causal"：因果掩码。weights @ V=I 时，第 i 行对位置 j>i 的注意力应为 0。
+    // 用 Q=K=I, V=I, scale=1.0, causal 模式 → 输出第 i 行的 j>i 位置应为 0。
+    let n: usize = 4;
+    let mut data = vec![0.0_f32; n * n];
+    for i in 0..n {
+        data[i * n + i] = 1.0;
+    }
+    let id_2d = Array::from_slice(&data, &[n as i32, n as i32]).expect("id");
+    let q = id_2d.reshape(&[1, 1, n as i32, n as i32]).expect("q");
+    let k = q.clone();
+    let v = q.clone();
+
+    let out =
+        fast::scaled_dot_product_attention(&q, &k, &v, 1.0, "causal", None, None).expect("sdpa");
+    let result: Vec<f32> = out.to_vec().expect("to_vec");
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let val = result[i * n + j];
+            assert!(
+                val.abs() < 1e-5,
+                "causal sdpa[{i},{j}] should be 0, got {val}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sdpa_custom_mask_zeros_masked_positions() {
+    // 提供自定义 mask（全 -inf 的右上三角等价 causal）。验证传 mask_arr 路径通。
+    let n: usize = 4;
+    let mut data = vec![0.0_f32; n * n];
+    for i in 0..n {
+        data[i * n + i] = 1.0;
+    }
+    let id_2d = Array::from_slice(&data, &[n as i32, n as i32]).expect("id");
+    let q = id_2d.reshape(&[1, 1, n as i32, n as i32]).expect("q");
+    let k = q.clone();
+    let v = q.clone();
+
+    // additive mask shape [n, n]
+    let mut mask_data = vec![0.0_f32; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            if j > i {
+                mask_data[i * n + j] = f32::NEG_INFINITY;
+            }
+        }
+    }
+    let mask = Array::from_slice(&mask_data, &[n as i32, n as i32]).expect("mask");
+
+    let out =
+        fast::scaled_dot_product_attention(&q, &k, &v, 1.0, "", Some(&mask), None).expect("sdpa");
+    let result: Vec<f32> = out.to_vec().expect("to_vec");
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let val = result[i * n + j];
+            assert!(
+                val.abs() < 1e-5,
+                "custom-mask sdpa[{i},{j}] should be 0, got {val}"
+            );
+        }
+    }
+}

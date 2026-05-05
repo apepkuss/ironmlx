@@ -99,3 +99,39 @@ pub fn rope_with_array_offset(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Fused scaled dot-product attention: `softmax(Q @ K.T * scale + mask) @ V`.
+///
+/// `mask_mode`:
+/// - `""` — no implicit mask (default if `mask_arr=None`)
+/// - `"causal"` — standard causal mask
+/// - `"chunked_causal"` — block-causal for chunked prefill
+///
+/// `mask_arr=Some(_)` supplies a custom additive mask (broadcastable).
+/// `sinks=Some(_)` enables attention sinks (StreamingLLM-style).
+pub fn scaled_dot_product_attention(
+    queries: &Array,
+    keys: &Array,
+    values: &Array,
+    scale: f32,
+    mask_mode: &str,
+    mask_arr: Option<&Array>,
+    sinks: Option<&Array>,
+) -> Result<Array> {
+    let m = mask_arr.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let s = sinks.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: m/s each null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::fast::ffi::fast_scaled_dot_product_attention(
+            queries.as_inner(),
+            keys.as_inner(),
+            values.as_inner(),
+            scale,
+            mask_mode,
+            m,
+            s,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

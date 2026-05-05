@@ -52,4 +52,16 @@ std::unique_ptr<MlxArray> fast_rope_with_array_offset(
           opt_arr(freqs)));
 }
 
+std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
+    const MlxArray& queries, const MlxArray& keys, const MlxArray& values,
+    float scale, rust::Str mask_mode,
+    const MlxArray* mask_arr, const MlxArray* sinks) {
+  return std::make_unique<MlxArray>(
+      mlx::core::fast::scaled_dot_product_attention(
+          queries, keys, values, scale,
+          std::string(mask_mode),
+          opt_arr(mask_arr),
+          opt_arr(sinks)));
+}
+
 }  // namespace cxx_mlx

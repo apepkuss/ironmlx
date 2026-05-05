@@ -47,4 +47,17 @@ std::unique_ptr<MlxArray> fast_rope_with_array_offset(
     const MlxArray& offset,
     const MlxArray* freqs);
 
+// scaled_dot_product_attention
+//   mask_mode: rust::Str → std::string  ("" 等价 MLX 默认值)
+//   mask_arr=nullptr → std::nullopt
+//   sinks=nullptr → std::nullopt
+std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
+    const MlxArray& queries,
+    const MlxArray& keys,
+    const MlxArray& values,
+    float scale,
+    rust::Str mask_mode,
+    const MlxArray* mask_arr,
+    const MlxArray* sinks);
+
 }  // namespace cxx_mlx

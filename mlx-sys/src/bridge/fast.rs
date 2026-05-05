@@ -51,5 +51,15 @@ pub mod ffi {
             offset: &MlxArray,
             freqs: *const MlxArray,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn fast_scaled_dot_product_attention(
+            queries: &MlxArray,
+            keys: &MlxArray,
+            values: &MlxArray,
+            scale: f32,
+            mask_mode: &str,
+            mask_arr: *const MlxArray,
+            sinks: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }
