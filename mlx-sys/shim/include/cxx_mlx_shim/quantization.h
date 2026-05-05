@@ -77,4 +77,17 @@ std::unique_ptr<MlxArray> qqmm(
     const MlxArray* global_scale_x,
     const MlxArray* global_scale_w);
 
+std::unique_ptr<MlxArray> gather_qmm(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray& scales,
+    const MlxArray* biases,
+    const MlxArray* lhs_indices,
+    const MlxArray* rhs_indices,
+    bool transpose,
+    bool has_group_size, int32_t group_size,
+    bool has_bits, int32_t bits,
+    rust::Str mode,
+    bool sorted_indices);
+
 }  // namespace cxx_mlx

@@ -80,5 +80,22 @@ pub mod ffi {
             global_scale_x: *const MlxArray,
             global_scale_w: *const MlxArray,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== gather_qmm =====
+        unsafe fn gather_qmm(
+            x: &MlxArray,
+            w: &MlxArray,
+            scales: &MlxArray,
+            biases: *const MlxArray,
+            lhs_indices: *const MlxArray,
+            rhs_indices: *const MlxArray,
+            transpose: bool,
+            has_group_size: bool,
+            group_size: i32,
+            has_bits: bool,
+            bits: i32,
+            mode: &str,
+            sorted_indices: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

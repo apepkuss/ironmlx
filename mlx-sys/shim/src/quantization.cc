@@ -137,4 +137,26 @@ std::unique_ptr<MlxArray> qqmm(
       opt_arr(global_scale_w)));
 }
 
+// ===== gather_qmm =====
+
+std::unique_ptr<MlxArray> gather_qmm(
+    const MlxArray& x, const MlxArray& w, const MlxArray& scales,
+    const MlxArray* biases,
+    const MlxArray* lhs_indices,
+    const MlxArray* rhs_indices,
+    bool transpose,
+    bool has_group_size, int32_t group_size,
+    bool has_bits, int32_t bits,
+    rust::Str mode,
+    bool sorted_indices) {
+  return std::make_unique<MlxArray>(mlx::core::gather_qmm(
+      x, w, scales, opt_arr(biases),
+      opt_arr(lhs_indices), opt_arr(rhs_indices),
+      transpose,
+      opt_i(has_group_size, group_size),
+      opt_i(has_bits, bits),
+      std::string(mode),
+      sorted_indices));
+}
+
 }  // namespace cxx_mlx

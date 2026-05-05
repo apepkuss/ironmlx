@@ -151,3 +151,45 @@ pub fn qqmm(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Quantized matmul with matrix-level gather (MoE / expert routing).
+#[allow(clippy::too_many_arguments)]
+pub fn gather_qmm(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    lhs_indices: Option<&Array>,
+    rhs_indices: Option<&Array>,
+    transpose: bool,
+    group_size: Option<i32>,
+    bits: Option<i32>,
+    mode: &str,
+    sorted_indices: bool,
+) -> Result<Array> {
+    let b_ptr = biases.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let li = lhs_indices.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let ri = rhs_indices.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let (has_gs, gs) = group_size.map_or((false, 0), |v| (true, v));
+    let (has_b, b) = bits.map_or((false, 0), |v| (true, v));
+    // SAFETY: b_ptr/li/ri each null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::quantization::ffi::gather_qmm(
+            x.as_inner(),
+            w.as_inner(),
+            scales.as_inner(),
+            b_ptr,
+            li,
+            ri,
+            transpose,
+            has_gs,
+            gs,
+            has_b,
+            b,
+            mode,
+            sorted_indices,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
