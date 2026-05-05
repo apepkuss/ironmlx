@@ -12,5 +12,6 @@
 pub mod array;
 pub mod fast;
 pub mod io;
+pub mod quantization;
 pub mod stream;
 pub mod transforms;

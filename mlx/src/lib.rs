@@ -55,3 +55,5 @@ pub use io::{
     save_gguf, save_npy, save_npy_to_writer, save_safetensors, save_safetensors_to_writer,
     GGUFMetaData, Reader, Writer,
 };
+
+pub mod quantization;

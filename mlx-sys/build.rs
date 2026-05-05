@@ -53,12 +53,14 @@ fn main() {
         "src/bridge/stream.rs",
         "src/bridge/fast.rs",
         "src/bridge/io.rs",
+        "src/bridge/quantization.rs",
     ])
     .file("shim/src/array.cc")
     .file("shim/src/transforms.cc")
     .file("shim/src/stream.cc")
     .file("shim/src/fast.cc")
     .file("shim/src/io.cc")
+    .file("shim/src/quantization.cc")
     .include("shim/include")
     .include(&include_dir)
     .std("c++20")
