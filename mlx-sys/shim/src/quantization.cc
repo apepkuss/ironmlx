@@ -118,4 +118,23 @@ std::unique_ptr<MlxArray> quantized_matmul(
       std::string(mode)));
 }
 
+// ===== qqmm =====
+
+std::unique_ptr<MlxArray> qqmm(
+    const MlxArray& x, const MlxArray& w,
+    const MlxArray* w_scales,
+    bool has_group_size, int32_t group_size,
+    bool has_bits, int32_t bits,
+    rust::Str mode,
+    const MlxArray* global_scale_x,
+    const MlxArray* global_scale_w) {
+  return std::make_unique<MlxArray>(mlx::core::qqmm(
+      x, w, opt_arr(w_scales),
+      opt_i(has_group_size, group_size),
+      opt_i(has_bits, bits),
+      std::string(mode),
+      opt_arr(global_scale_x),
+      opt_arr(global_scale_w)));
+}
+
 }  // namespace cxx_mlx

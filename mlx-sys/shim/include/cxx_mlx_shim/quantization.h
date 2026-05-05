@@ -67,4 +67,14 @@ std::unique_ptr<MlxArray> quantized_matmul(
     bool has_bits, int32_t bits,
     rust::Str mode);
 
+std::unique_ptr<MlxArray> qqmm(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray* w_scales,
+    bool has_group_size, int32_t group_size,
+    bool has_bits, int32_t bits,
+    rust::Str mode,
+    const MlxArray* global_scale_x,
+    const MlxArray* global_scale_w);
+
 }  // namespace cxx_mlx

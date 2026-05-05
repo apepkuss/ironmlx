@@ -136,3 +136,58 @@ fn quantized_matmul_matches_dequantize_matmul() {
     }
     assert!(max_err < 1e-2, "qmm vs ref max err {max_err}");
 }
+
+use mlx::quantization::qqmm;
+
+#[test]
+fn qqmm_binding_smoke() {
+    // Smoke test: validates binding wiring only (shim → bridge → safe API).
+    // Does NOT validate NVFP4 kernel correctness — at the time of writing,
+    // MLX's QQMatmul kernel returns "[QQMatmul] NYI for the general case"
+    // on the macOS Metal backend.
+    //
+    // The test tolerates Err only if the message contains "NYI"; any other
+    // failure mode (real regression, invalid bindings) panics.
+    //
+    // TODO: when MLX lands NVFP4 Metal kernel, replace this with a real
+    // round-trip test (similar to `quantized_matmul_matches_dequantize_matmul`).
+    let w = make_test_weight();
+    let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
+    let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
+    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+
+    let result = qqmm(
+        &x,
+        &parts[0],
+        Some(&parts[1]),
+        Some(64),
+        Some(4),
+        "nvfp4",
+        None,
+        None,
+    );
+
+    match result {
+        Ok(y) => match y.to_vec::<f32>() {
+            Ok(v) => {
+                for x in &v {
+                    assert!(x.is_finite(), "non-finite value: {x}");
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:?}");
+                assert!(
+                    msg.contains("NYI"),
+                    "qqmm eval failed with non-NYI error (real regression?): {msg}"
+                );
+            }
+        },
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("NYI"),
+                "qqmm construction failed with non-NYI error (real regression?): {msg}"
+            );
+        }
+    }
+}

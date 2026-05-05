@@ -66,5 +66,19 @@ pub mod ffi {
             bits: i32,
             mode: &str,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== qqmm =====
+        unsafe fn qqmm(
+            x: &MlxArray,
+            w: &MlxArray,
+            w_scales: *const MlxArray,
+            has_group_size: bool,
+            group_size: i32,
+            has_bits: bool,
+            bits: i32,
+            mode: &str,
+            global_scale_x: *const MlxArray,
+            global_scale_w: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

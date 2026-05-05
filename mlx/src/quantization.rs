@@ -114,3 +114,40 @@ pub fn quantized_matmul(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Quantized-quantized matmul. Both x and w may be quantized; default
+/// mode is `"nvfp4"`.
+#[allow(clippy::too_many_arguments)]
+pub fn qqmm(
+    x: &Array,
+    w: &Array,
+    w_scales: Option<&Array>,
+    group_size: Option<i32>,
+    bits: Option<i32>,
+    mode: &str,
+    global_scale_x: Option<&Array>,
+    global_scale_w: Option<&Array>,
+) -> Result<Array> {
+    let ws = w_scales.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let (has_gs, gs) = group_size.map_or((false, 0), |v| (true, v));
+    let (has_b, b) = bits.map_or((false, 0), |v| (true, v));
+    let gx = global_scale_x.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let gw = global_scale_w.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: ws/gx/gw each null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::quantization::ffi::qqmm(
+            x.as_inner(),
+            w.as_inner(),
+            ws,
+            has_gs,
+            gs,
+            has_b,
+            b,
+            mode,
+            gx,
+            gw,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
