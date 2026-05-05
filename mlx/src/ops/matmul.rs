@@ -59,3 +59,51 @@ pub fn addmm(c: &Array, a: &Array, b: &Array, alpha: f32, beta: f32) -> Result<A
         .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Block-masked matrix product. Each of the 3 masks is optional and applies
+/// at block granularity (`block_size`).
+pub fn block_masked_mm(
+    a: &Array,
+    b: &Array,
+    block_size: i32,
+    mask_out: Option<&Array>,
+    mask_lhs: Option<&Array>,
+    mask_rhs: Option<&Array>,
+) -> Result<Array> {
+    let mo = mask_out.map_or(std::ptr::null(), |x| x.as_inner() as *const _);
+    let ml = mask_lhs.map_or(std::ptr::null(), |x| x.as_inner() as *const _);
+    let mr = mask_rhs.map_or(std::ptr::null(), |x| x.as_inner() as *const _);
+    // SAFETY: mo/ml/mr each null or borrow of an &Array valid for this call.
+    let inner = unsafe {
+        mlx_sys::array::ffi::block_masked_mm(a.as_inner(), b.as_inner(), block_size, mo, ml, mr)
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Matrix product with row-level gather. **Non-quantized** version.
+/// For the quantized counterpart, see `mlx::quantization::gather_qmm` (P3).
+pub fn gather_mm(
+    a: &Array,
+    b: &Array,
+    lhs_indices: Option<&Array>,
+    rhs_indices: Option<&Array>,
+    sorted_indices: bool,
+) -> Result<Array> {
+    let li = lhs_indices.map_or(std::ptr::null(), |x| x.as_inner() as *const _);
+    let ri = rhs_indices.map_or(std::ptr::null(), |x| x.as_inner() as *const _);
+    // SAFETY: li/ri each null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::array::ffi::gather_mm(a.as_inner(), b.as_inner(), li, ri, sorted_indices)
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Matrix product with segmented inner dimension. `segments` is an i32
+/// array describing how the inner dimension is partitioned across batches.
+pub fn segmented_mm(a: &Array, b: &Array, segments: &Array) -> Result<Array> {
+    let inner = mlx_sys::array::ffi::segmented_mm(a.as_inner(), b.as_inner(), segments.as_inner())
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

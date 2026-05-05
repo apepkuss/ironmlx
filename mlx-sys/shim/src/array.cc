@@ -464,4 +464,33 @@ std::unique_ptr<MlxArray> addmm(
   return std::make_unique<MlxArray>(mlx::core::addmm(c, a, b, alpha, beta));
 }
 
+std::unique_ptr<MlxArray> block_masked_mm(
+    const MlxArray& a, const MlxArray& b, int32_t block_size,
+    const MlxArray* mask_out,
+    const MlxArray* mask_lhs,
+    const MlxArray* mask_rhs) {
+  return std::make_unique<MlxArray>(mlx::core::block_masked_mm(
+      a, b, block_size,
+      helpers::opt_arr(mask_out),
+      helpers::opt_arr(mask_lhs),
+      helpers::opt_arr(mask_rhs)));
+}
+
+std::unique_ptr<MlxArray> gather_mm(
+    const MlxArray& a, const MlxArray& b,
+    const MlxArray* lhs_indices,
+    const MlxArray* rhs_indices,
+    bool sorted_indices) {
+  return std::make_unique<MlxArray>(mlx::core::gather_mm(
+      a, b,
+      helpers::opt_arr(lhs_indices),
+      helpers::opt_arr(rhs_indices),
+      sorted_indices));
+}
+
+std::unique_ptr<MlxArray> segmented_mm(
+    const MlxArray& a, const MlxArray& b, const MlxArray& segments) {
+  return std::make_unique<MlxArray>(mlx::core::segmented_mm(a, b, segments));
+}
+
 }  // namespace cxx_mlx

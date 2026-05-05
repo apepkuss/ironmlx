@@ -179,4 +179,19 @@ std::unique_ptr<MlxArray> addmm(
     const MlxArray& c, const MlxArray& a, const MlxArray& b,
     float alpha, float beta);
 
+std::unique_ptr<MlxArray> block_masked_mm(
+    const MlxArray& a, const MlxArray& b, int32_t block_size,
+    const MlxArray* mask_out,
+    const MlxArray* mask_lhs,
+    const MlxArray* mask_rhs);
+
+std::unique_ptr<MlxArray> gather_mm(
+    const MlxArray& a, const MlxArray& b,
+    const MlxArray* lhs_indices,
+    const MlxArray* rhs_indices,
+    bool sorted_indices);
+
+std::unique_ptr<MlxArray> segmented_mm(
+    const MlxArray& a, const MlxArray& b, const MlxArray& segments);
+
 }  // namespace cxx_mlx

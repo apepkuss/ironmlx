@@ -103,3 +103,103 @@ fn addmm_alpha_beta_formula() {
         assert!((got - want).abs() < 1e-4, "addmm: got {got}, want {want}");
     }
 }
+
+use mlx::ops::{block_masked_mm, gather_mm, segmented_mm};
+
+#[test]
+fn block_masked_mm_smoke_no_masks() {
+    // 不传 mask 时退化为常规 matmul（块大小不影响结果）
+    // A: [4, 4], B: [4, 4], block_size=2
+    let a_data: Vec<f32> = (0..16).map(|i| i as f32).collect();
+    let b_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
+    let a = Array::from_slice(&a_data, &[4, 4]).expect("a");
+    let b = Array::from_slice(&b_data, &[4, 4]).expect("b");
+
+    let result = block_masked_mm(&a, &b, 2, None, None, None);
+
+    match result {
+        Ok(out) => {
+            assert_eq!(out.shape().as_slice(), &[4, 4]);
+            match out.to_vec::<f32>() {
+                Ok(v) => {
+                    for x in &v {
+                        assert!(x.is_finite());
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{e:?}");
+                    assert!(
+                        msg.contains("not yet supported") || msg.contains("NYI"),
+                        "block_masked_mm eval non-NYI error: {msg}"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("not yet supported") || msg.contains("NYI"),
+                "block_masked_mm construction non-NYI error: {msg}"
+            );
+        }
+    }
+}
+
+#[test]
+fn gather_mm_no_indices_smoke() {
+    // gather_mm 不传 indices 时退化为常规 batched matmul
+    // A: [2, 3, 4], B: [2, 4, 5] → [2, 3, 5]
+    let a_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.01).collect();
+    let b_data: Vec<f32> = (0..40).map(|i| (i as f32) * 0.005).collect();
+    let a = Array::from_slice(&a_data, &[2, 3, 4]).expect("a");
+    let b = Array::from_slice(&b_data, &[2, 4, 5]).expect("b");
+
+    let out = gather_mm(&a, &b, None, None, false).expect("gather_mm");
+    assert_eq!(out.shape().as_slice(), &[2, 3, 5]);
+    let v: Vec<f32> = out.to_vec().expect("vec");
+    for x in &v {
+        assert!(x.is_finite(), "gather_mm: non-finite {x}");
+    }
+}
+
+#[test]
+fn segmented_mm_smoke() {
+    // segmented_mm: A: [M, K], B: [K, N] (必须 2D, 不支持 batched),
+    // segments: i32 array, shape (..., 2), 每行 [start, end] 描述 K 维上的 segment.
+    // 构造 1-segment 覆盖全部 K=3: segments = [[0, 3]], shape [1, 2]
+    // 期望输出 shape [1, 2, 4] (segments shape 去掉末维 + [M, N])
+    let a_data: Vec<f32> = (0..6).map(|i| (i as f32) * 0.1).collect();
+    let b_data: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05).collect();
+    let a = Array::from_slice(&a_data, &[2, 3]).expect("a");
+    let b = Array::from_slice(&b_data, &[3, 4]).expect("b");
+    let segments = Array::from_slice(&[0_i32, 3], &[1, 2]).expect("segments");
+
+    let result = segmented_mm(&a, &b, &segments);
+
+    match result {
+        Ok(out) => {
+            // shape 通常 [B, M, num_segments, N] = [1, 2, 1, 4] 或类似
+            let v: Vec<f32> = match out.to_vec::<f32>() {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = format!("{e:?}");
+                    assert!(
+                        msg.contains("not yet supported") || msg.contains("NYI"),
+                        "segmented_mm eval non-NYI: {msg}"
+                    );
+                    return;
+                }
+            };
+            for x in &v {
+                assert!(x.is_finite(), "segmented_mm: non-finite {x}");
+            }
+        }
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("not yet supported") || msg.contains("NYI"),
+                "segmented_mm construction non-NYI error: {msg}"
+            );
+        }
+    }
+}

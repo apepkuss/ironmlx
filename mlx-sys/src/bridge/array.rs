@@ -208,5 +208,28 @@ pub mod ffi {
             alpha: f32,
             beta: f32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn block_masked_mm(
+            a: &MlxArray,
+            b: &MlxArray,
+            block_size: i32,
+            mask_out: *const MlxArray,
+            mask_lhs: *const MlxArray,
+            mask_rhs: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn gather_mm(
+            a: &MlxArray,
+            b: &MlxArray,
+            lhs_indices: *const MlxArray,
+            rhs_indices: *const MlxArray,
+            sorted_indices: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn segmented_mm(
+            a: &MlxArray,
+            b: &MlxArray,
+            segments: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }
