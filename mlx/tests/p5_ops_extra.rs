@@ -75,3 +75,31 @@ fn inner_product_dot_scalar() {
         v[0]
     );
 }
+
+use mlx::ops::addmm;
+
+#[test]
+fn addmm_alpha_beta_formula() {
+    // D = β*C + α*(A @ B)
+    // A: [2, 3], B: [3, 2], C: [2, 2]
+    // 设 α=2.0, β=3.0
+    // A @ B 的第 [i,j] 元素 = sum_k A[i,k] * B[k,j]
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("a");
+    let b = Array::from_slice(&[1.0_f32, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2]).expect("b");
+    let c = Array::from_slice(&[10.0_f32, 20.0, 30.0, 40.0], &[2, 2]).expect("c");
+
+    let d = addmm(&c, &a, &b, 2.0, 3.0).expect("addmm");
+    assert_eq!(d.shape().as_slice(), &[2, 2]);
+
+    // 手算参考:
+    // A @ B = [[1*1+2*0+3*1, 1*0+2*1+3*1], [4*1+5*0+6*1, 4*0+5*1+6*1]]
+    //       = [[4, 5], [10, 11]]
+    // D = 3*C + 2*(A@B)
+    //   = [[3*10+2*4, 3*20+2*5], [3*30+2*10, 3*40+2*11]]
+    //   = [[38, 70], [110, 142]]
+    let v: Vec<f32> = d.to_vec().expect("vec");
+    let expected = [38.0_f32, 70.0, 110.0, 142.0];
+    for (got, want) in v.iter().zip(expected.iter()) {
+        assert!((got - want).abs() < 1e-4, "addmm: got {got}, want {want}");
+    }
+}

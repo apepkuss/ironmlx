@@ -458,4 +458,10 @@ std::unique_ptr<MlxArray> inner(const MlxArray& a, const MlxArray& b) {
   return std::make_unique<MlxArray>(mlx::core::inner(a, b));
 }
 
+std::unique_ptr<MlxArray> addmm(
+    const MlxArray& c, const MlxArray& a, const MlxArray& b,
+    float alpha, float beta) {
+  return std::make_unique<MlxArray>(mlx::core::addmm(c, a, b, alpha, beta));
+}
+
 }  // namespace cxx_mlx

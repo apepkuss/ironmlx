@@ -175,4 +175,8 @@ std::unique_ptr<MlxArray> outer(const MlxArray& a, const MlxArray& b);
 
 std::unique_ptr<MlxArray> inner(const MlxArray& a, const MlxArray& b);
 
+std::unique_ptr<MlxArray> addmm(
+    const MlxArray& c, const MlxArray& a, const MlxArray& b,
+    float alpha, float beta);
+
 }  // namespace cxx_mlx

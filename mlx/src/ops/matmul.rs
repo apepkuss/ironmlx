@@ -52,3 +52,10 @@ pub fn inner_product(a: &Array, b: &Array) -> Result<Array> {
     let inner = mlx_sys::array::ffi::inner(a.as_inner(), b.as_inner()).map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Compute `D = beta * C + alpha * (A @ B)` in a single fused kernel.
+pub fn addmm(c: &Array, a: &Array, b: &Array, alpha: f32, beta: f32) -> Result<Array> {
+    let inner = mlx_sys::array::ffi::addmm(c.as_inner(), a.as_inner(), b.as_inner(), alpha, beta)
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

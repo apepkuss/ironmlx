@@ -200,5 +200,13 @@ pub mod ffi {
         fn outer(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 
         fn inner(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
+        fn addmm(
+            c: &MlxArray,
+            a: &MlxArray,
+            b: &MlxArray,
+            alpha: f32,
+            beta: f32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }
