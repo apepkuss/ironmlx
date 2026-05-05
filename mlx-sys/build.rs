@@ -52,11 +52,13 @@ fn main() {
         "src/bridge/transforms.rs",
         "src/bridge/stream.rs",
         "src/bridge/fast.rs",
+        "src/bridge/io.rs",
     ])
     .file("shim/src/array.cc")
     .file("shim/src/transforms.cc")
     .file("shim/src/stream.cc")
     .file("shim/src/fast.cc")
+    .file("shim/src/io.cc")
     .include("shim/include")
     .include(&include_dir)
     .std("c++20")

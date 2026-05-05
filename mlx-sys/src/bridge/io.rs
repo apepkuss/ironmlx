@@ -1,0 +1,29 @@
+//! Bridge for MLX IO (load/save: safetensors, gguf, npy + Reader/Writer streams).
+//!
+//! Map decomposition: shim returns opaque LoadResult types, Rust calls
+//! parallel name/value getters and rebuilds HashMap on the safe layer.
+//!
+//! Save direction: opaque SaveBuilder accumulates entries via add_* calls;
+//! single save_*_file/writer call commits.
+//!
+//! Reader/Writer: opaque MlxReader/MlxWriter wrap shared_ptr<io::Reader/Writer>.
+//! B-lite = file + memory backends only; no Rust trait callbacks.
+
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+#[cxx::bridge(namespace = "cxx_mlx")]
+pub mod ffi {
+    unsafe extern "C++" {
+        include!("cxx_mlx_shim/io.h");
+
+        type MlxArray = crate::bridge::array::ffi::MlxArray;
+        type MlxReader;
+        type MlxWriter;
+
+        // ===== Reader / Writer 工厂 =====
+        fn open_file_reader(path: &str) -> Result<UniquePtr<MlxReader>>;
+        fn open_memory_reader(data: &[u8]) -> UniquePtr<MlxReader>;
+        fn create_file_writer(path: &str) -> Result<UniquePtr<MlxWriter>>;
+        fn create_memory_writer() -> UniquePtr<MlxWriter>;
+        fn writer_into_bytes(writer: UniquePtr<MlxWriter>) -> Result<Vec<u8>>;
+    }
+}

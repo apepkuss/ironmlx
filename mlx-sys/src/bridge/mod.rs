@@ -11,5 +11,6 @@
 
 pub mod array;
 pub mod fast;
+pub mod io;
 pub mod stream;
 pub mod transforms;
