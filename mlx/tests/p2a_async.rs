@@ -36,7 +36,9 @@ fn async_eval_under_tokio_multi_thread() {
         .expect("tokio multi-thread rt");
     rt.block_on(async {
         let arr = Array::zeros(&[256], Dtype::Float32).expect("zeros");
-        arr.async_eval().await.expect("async_eval under multi-thread tokio");
+        arr.async_eval()
+            .await
+            .expect("async_eval under multi-thread tokio");
         let v: Vec<f32> = arr.to_vec().expect("to_vec");
         assert_eq!(v.len(), 256);
     });
@@ -47,8 +49,7 @@ fn async_eval_multiple_arrays() {
     // Submit multiple arrays in one async_eval call.
     let a = Array::zeros(&[64], Dtype::Float32).expect("zeros a");
     let b = Array::zeros(&[64], Dtype::Float32).expect("zeros b");
-    futures_lite::future::block_on(transforms::async_eval(&[&a, &b]))
-        .expect("async_eval multiple");
+    futures_lite::future::block_on(transforms::async_eval(&[&a, &b])).expect("async_eval multiple");
     assert_eq!(a.to_vec::<f32>().expect("to_vec a").len(), 64);
     assert_eq!(b.to_vec::<f32>().expect("to_vec b").len(), 64);
 }

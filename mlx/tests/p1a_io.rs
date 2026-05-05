@@ -109,7 +109,11 @@ fn to_vec_f16_bit_pattern_preserved() {
     let arr = Array::from_slice(&original, &[4]).expect("from_slice");
     let read_back = arr.to_vec::<half::f16>().expect("to_vec");
     for (i, (a, b)) in original.iter().zip(read_back.iter()).enumerate() {
-        assert_eq!(a.to_bits(), b.to_bits(), "bit pattern mismatch at index {i}");
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "bit pattern mismatch at index {i}"
+        );
     }
 }
 
@@ -139,7 +143,9 @@ fn item_implicit_eval_on_lazy_scalar() {
     // Regression: `mlx::core::array::item<T>() const` throws on lazy arrays.
     // Per spec A8, item<T> must implicitly eval (same contract as to_vec).
     let arr = Array::zeros(&[], Dtype::Float32).expect("zeros");
-    let v = arr.item::<f32>().expect("item must trigger implicit eval on lazy");
+    let v = arr
+        .item::<f32>()
+        .expect("item must trigger implicit eval on lazy");
     assert_eq!(v, 0.0);
 }
 

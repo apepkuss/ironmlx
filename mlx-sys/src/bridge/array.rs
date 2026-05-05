@@ -83,22 +83,42 @@ pub mod ffi {
         // === P1b2a reductions (5 ops × {all, axis, axes}) ===
         fn array_sum_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
         fn array_sum_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_sum_axes(a: &MlxArray, axes: &[i32], keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_sum_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn array_mean_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
         fn array_mean_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_mean_axes(a: &MlxArray, axes: &[i32], keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_mean_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn array_max_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
         fn array_max_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_max_axes(a: &MlxArray, axes: &[i32], keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_max_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn array_min_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
         fn array_min_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_min_axes(a: &MlxArray, axes: &[i32], keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_min_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn array_argmax_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_argmax_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_argmax_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // === P1b2a shape ops ===
         fn array_reshape(a: &MlxArray, shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
@@ -109,11 +129,23 @@ pub mod ffi {
         // Safety contract: each pointer in `arrays` must point to a valid
         // MlxArray that lives for the duration of the call. The safe wrappers
         // `mlx::ops::concatenate` and `mlx::ops::stack` satisfy this.
-        unsafe fn array_concatenate(arrays: &[*const MlxArray], axis: i32) -> Result<UniquePtr<MlxArray>>;
-        unsafe fn array_stack(arrays: &[*const MlxArray], axis: i32) -> Result<UniquePtr<MlxArray>>;
+        unsafe fn array_concatenate(
+            arrays: &[*const MlxArray],
+            axis: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        unsafe fn array_stack(arrays: &[*const MlxArray], axis: i32)
+            -> Result<UniquePtr<MlxArray>>;
 
-        fn array_split_n(a: &MlxArray, num_splits: i32, axis: i32) -> Result<UniquePtr<MlxArrayVec>>;
-        fn array_split_at(a: &MlxArray, indices: &[i32], axis: i32) -> Result<UniquePtr<MlxArrayVec>>;
+        fn array_split_n(
+            a: &MlxArray,
+            num_splits: i32,
+            axis: i32,
+        ) -> Result<UniquePtr<MlxArrayVec>>;
+        fn array_split_at(
+            a: &MlxArray,
+            indices: &[i32],
+            axis: i32,
+        ) -> Result<UniquePtr<MlxArrayVec>>;
 
         fn split_result_len(v: &MlxArrayVec) -> usize;
         fn split_result_at(v: &MlxArrayVec, i: usize) -> Result<UniquePtr<MlxArray>>;
@@ -137,7 +169,11 @@ pub mod ffi {
         // === P1b2b indexing ops ===
         fn array_where(cond: &MlxArray, x: &MlxArray, y: &MlxArray) -> Result<UniquePtr<MlxArray>>;
         fn array_take(a: &MlxArray, indices: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
-        fn array_take_along_axis(a: &MlxArray, indices: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
+        fn array_take_along_axis(
+            a: &MlxArray,
+            indices: &MlxArray,
+            axis: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_slice_strided(
             a: &MlxArray,
             start: &[i32],

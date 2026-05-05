@@ -10,5 +10,6 @@
 //! Pure getters (no throw paths) may stay as plain return types.
 
 pub mod array;
-pub mod transforms;
+pub mod fast;
 pub mod stream;
+pub mod transforms;

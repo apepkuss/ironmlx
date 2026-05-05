@@ -55,7 +55,10 @@ mod tests {
 
     #[test]
     fn equal_shapes() {
-        assert_eq!(broadcast_shape(&[2, 3], &[2, 3]).unwrap().as_slice(), &[2, 3]);
+        assert_eq!(
+            broadcast_shape(&[2, 3], &[2, 3]).unwrap().as_slice(),
+            &[2, 3]
+        );
     }
 
     #[test]
@@ -67,7 +70,10 @@ mod tests {
     #[test]
     fn one_dim_expands_in_middle() {
         // [2, 1, 4] vs [3, 4] → right-align: [2, 1, 4] vs [_, 3, 4] → [2, 3, 4]
-        assert_eq!(broadcast_shape(&[2, 1, 4], &[3, 4]).unwrap().as_slice(), &[2, 3, 4]);
+        assert_eq!(
+            broadcast_shape(&[2, 1, 4], &[3, 4]).unwrap().as_slice(),
+            &[2, 3, 4]
+        );
     }
 
     #[test]

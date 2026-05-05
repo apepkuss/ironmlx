@@ -14,7 +14,7 @@ pub mod unary;
 pub use binary::{add, divide, multiply, negative, subtract};
 pub use indexing::{gather, slice, slice_strided, take, take_along_axis, where_};
 pub use matmul::matmul;
-pub use reduction::{All, IntoAxes, argmax, max, mean, min, sum};
+pub use reduction::{argmax, max, mean, min, sum, All, IntoAxes};
 pub use shape::{
     broadcast_to, concatenate, reshape, split_at, split_n, stack, transpose, transpose_axes,
 };

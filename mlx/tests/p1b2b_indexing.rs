@@ -11,7 +11,10 @@ fn where_basic() {
     let y = Array::from_slice(&[10.0_f32, 20.0, 30.0, 40.0], &[2, 2]).expect("from_slice y");
     let r = ops::where_(&cond, &x, &y).expect("where_");
     assert_eq!(r.shape().as_slice(), &[2, 2]);
-    assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![1.0, 20.0, 30.0, 4.0]);
+    assert_eq!(
+        r.to_vec::<f32>().expect("to_vec"),
+        vec![1.0, 20.0, 30.0, 4.0]
+    );
 }
 
 #[test]
@@ -37,7 +40,10 @@ fn where_broadcast_mismatch_errors() {
     let x = Array::from_slice(&[1.0_f32; 6], &[2, 3]).expect("from_slice");
     let y = Array::from_slice(&[1.0_f32; 8], &[2, 4]).expect("from_slice");
     let result = ops::where_(&cond, &x, &y);
-    assert!(matches!(result, Err(Error::BroadcastMismatch { .. })), "got {result:?}");
+    assert!(
+        matches!(result, Err(Error::BroadcastMismatch { .. })),
+        "got {result:?}"
+    );
 }
 
 #[test]
@@ -55,11 +61,8 @@ fn where_method_form() {
 fn take_along_axis_0() {
     // a = [[1, 2, 3], [4, 5, 6], [7, 8, 9]], indices = [0, 2], axis = 0
     // result = [[1, 2, 3], [7, 8, 9]]
-    let a = Array::from_slice(
-        &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-        &[3, 3],
-    )
-    .expect("from_slice");
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3])
+        .expect("from_slice");
     let indices = Array::from_slice(&[0_u32, 2], &[2]).expect("from_slice");
     let r = ops::take(&a, &indices, 0).expect("take");
     assert_eq!(r.shape().as_slice(), &[2, 3]);
@@ -72,11 +75,8 @@ fn take_along_axis_0() {
 #[test]
 fn take_along_axis_1() {
     // Same a, indices = [0, 2], axis = 1 → pick cols 0 and 2 → [[1, 3], [4, 6], [7, 9]]
-    let a = Array::from_slice(
-        &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-        &[3, 3],
-    )
-    .expect("from_slice");
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3])
+        .expect("from_slice");
     let indices = Array::from_slice(&[0_u32, 2], &[2]).expect("from_slice");
     let r = ops::take(&a, &indices, 1).expect("take");
     assert_eq!(r.shape().as_slice(), &[3, 2]);
@@ -90,7 +90,8 @@ fn take_along_axis_1() {
 fn take_along_axis_pytorch_gather_semantics() {
     // a = [[10, 20, 30], [40, 50, 60]], indices same shape, axis = 1
     // indices = [[0, 2, 1], [1, 0, 2]] → result = [[10, 30, 20], [50, 40, 60]]
-    let a = Array::from_slice(&[10.0_f32, 20.0, 30.0, 40.0, 50.0, 60.0], &[2, 3]).expect("from_slice");
+    let a =
+        Array::from_slice(&[10.0_f32, 20.0, 30.0, 40.0, 50.0, 60.0], &[2, 3]).expect("from_slice");
     let indices_data: Vec<u32> = vec![0, 2, 1, 1, 0, 2];
     let indices = Array::from_slice(&indices_data, &[2, 3]).expect("from_slice");
     let r = ops::take_along_axis(&a, &indices, 1).expect("take_along_axis");
@@ -116,7 +117,10 @@ fn slice_basic_2d() {
     let a = Array::from_slice(&data, &[3, 4]).expect("from_slice");
     let r = ops::slice(&a, &[1, 1], &[3, 3]).expect("slice");
     assert_eq!(r.shape().as_slice(), &[2, 2]);
-    assert_eq!(r.to_vec::<f32>().expect("to_vec"), vec![6.0, 7.0, 10.0, 11.0]);
+    assert_eq!(
+        r.to_vec::<f32>().expect("to_vec"),
+        vec![6.0, 7.0, 10.0, 11.0]
+    );
 }
 
 #[test]
@@ -143,7 +147,10 @@ fn slice_length_mismatch_errors() {
     let a = Array::from_slice(&[0.0_f32; 6], &[2, 3]).expect("from_slice");
     // Pass start with wrong length (1 instead of 2)
     let result = ops::slice(&a, &[0], &[2, 3]);
-    assert!(matches!(result, Err(Error::ShapeMismatch { .. })), "got {result:?}");
+    assert!(
+        matches!(result, Err(Error::ShapeMismatch { .. })),
+        "got {result:?}"
+    );
 }
 
 #[test]
@@ -163,7 +170,9 @@ fn slice_negative_stop_takes_from_end() {
     // This pins the contract so MLX semantic changes are caught in CI.
     let data: Vec<f32> = (0..12).map(|i| i as f32).collect();
     let a = Array::from_slice(&data, &[3, 4]).expect("from_slice");
-    let r = a.slice(&[0, 0], &[3, -1]).expect("slice with negative stop");
+    let r = a
+        .slice(&[0, 0], &[3, -1])
+        .expect("slice with negative stop");
     assert_eq!(r.shape().as_slice(), &[3, 3]);
     assert_eq!(
         r.to_vec::<f32>().expect("to_vec"),

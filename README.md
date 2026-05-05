@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** 🚧 **P2a complete** — Stream / Device foundation. Adds `Device::cpu()`/`gpu()`, stream lifecycle, runtime-agnostic `async_eval` returning `impl Future` (works under tokio / async-std / smol / `futures_lite::future::block_on` / any executor; per-array event wait under the hood for cross-thread correctness), and explicit `synchronize` / `synchronize_stream`. Built on P1 inference primitives. Next: P2b (`fast` ops: rms_norm/layer_norm/rope/sdpa) and P2c (`io`: safetensors/gguf load).
+**Status:** 🚧 **P2b complete** — Fused inference kernels via `mlx::fast::*` (`rms_norm`, `layer_norm`, `rope` with int and per-batch array offset, `scaled_dot_product_attention`). Re-exported at the crate root for convenience. Builds on P2a's Stream / Device foundation (`Device::cpu()`/`gpu()`, stream lifecycle, runtime-agnostic `async_eval`, `synchronize` / `synchronize_stream`). Next: P2c (`io`: safetensors/gguf load).
 
 ## Requirements
 
@@ -122,7 +122,7 @@ fn main() -> mlx::Result<()> {
 }
 ```
 
-A complete SDPA (scaled dot-product attention) implementation composing matmul, transpose, mask-add, softmax, and matmul lives in [`mlx/tests/p1b2b_sdpa.rs`](mlx/tests/p1b2b_sdpa.rs). It's the canonical test that all of P1 (P0 + P1a + P1b1 + P1b2a + P1b2b) integrates correctly. P2's `fast::scaled_dot_product_attention` will match these numerics.
+A complete SDPA (scaled dot-product attention) implementation composing matmul, transpose, mask-add, softmax, and matmul lives in [`mlx/tests/p1b2b_sdpa.rs`](mlx/tests/p1b2b_sdpa.rs). It's the canonical test that all of P1 (P0 + P1a + P1b1 + P1b2a + P1b2b) integrates correctly. P2b's [`fast::scaled_dot_product_attention`](mlx/tests/p2b_fast.rs) matches these numerics via a fused Metal kernel.
 
 ## Streams & Devices
 
@@ -212,7 +212,7 @@ mutable access — `clone` is almost always the right answer.
 - ✅ **P1b2b** — indexing (take/take_along_axis/where/slice/gather) + u16/u32/u64 dtypes + SDPA integration
 - 🎉 **P1 complete** — full inference primitives ready
 - ✅ **P2a** — Stream / Device foundation + runtime-agnostic async_eval
-- ⏳ **P2b** — `fast` ops (rms_norm / layer_norm / rope / sdpa)
+- ✅ **P2b** — `fast` ops (rms_norm / layer_norm / rope int+array offset / sdpa) — 12 integration tests
 - ⏳ **P2c** — `io` (safetensors / gguf load)
 - ⏳ **P1c** — random (key + uniform/normal/categorical)
 - ⏳ **P3** — quantization + compile + LLM inference example

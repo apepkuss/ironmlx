@@ -29,12 +29,17 @@ fn debug_does_not_trigger_eval() {
     let was_available_before = mlx_sys::array::ffi::array_is_available(lazy.as_inner());
     let _ = format!("{:?}", lazy);
     let was_available_after = mlx_sys::array::ffi::array_is_available(lazy.as_inner());
-    assert_eq!(was_available_before, was_available_after,
-               "Debug must not trigger eval");
+    assert_eq!(
+        was_available_before, was_available_after,
+        "Debug must not trigger eval"
+    );
     // Sanity: after explicit eval, is_available should flip to true.
     lazy.eval().expect("eval");
     let was_available_after_eval = mlx_sys::array::ffi::array_is_available(lazy.as_inner());
-    assert!(was_available_after_eval, "after eval, is_available should be true");
+    assert!(
+        was_available_after_eval,
+        "after eval, is_available should be true"
+    );
     let _ = arr;
 }
 
@@ -43,7 +48,11 @@ fn debug_format_includes_shape_and_dtype() {
     let arr = Array::zeros(&[2, 3], Dtype::Float32).expect("zeros");
     let s = format!("{:?}", arr);
     assert!(s.contains("shape"), "Debug output missing 'shape': {}", s);
-    assert!(s.contains("Float32"), "Debug output missing 'Float32': {}", s);
+    assert!(
+        s.contains("Float32"),
+        "Debug output missing 'Float32': {}",
+        s
+    );
     assert!(s.contains("2"), "Debug output missing dim '2': {}", s);
     assert!(s.contains("3"), "Debug output missing dim '3': {}", s);
 }

@@ -110,8 +110,18 @@ fn unary_numerical_correctness() {
     // Transcendentals at 1e-5 to tolerate kernel/approx changes across MLX versions
     // (tanh/sigmoid implementations can drift in the last few f32 bits).
     assert!((one.tanh().expect("tanh").item::<f32>().expect("item") - 0.7615942).abs() < 1e-5);
-    assert!((one.sigmoid().expect("sigmoid").item::<f32>().expect("item") - 0.7310586).abs() < 1e-5);
-    assert!((one.reciprocal().expect("reciprocal").item::<f32>().expect("item") - 1.0).abs() < 1e-6);
+    assert!(
+        (one.sigmoid().expect("sigmoid").item::<f32>().expect("item") - 0.7310586).abs() < 1e-5
+    );
+    assert!(
+        (one.reciprocal()
+            .expect("reciprocal")
+            .item::<f32>()
+            .expect("item")
+            - 1.0)
+            .abs()
+            < 1e-6
+    );
 
     let three = Array::from_slice(&[3.0_f32], &[]).expect("from_slice");
     assert!((three.square().expect("square").item::<f32>().expect("item") - 9.0).abs() < 1e-6);
@@ -150,9 +160,8 @@ fn scalar_rhs_i32_on_owned() {
 
 #[test]
 fn scalar_rhs_half_f16() {
-    let a = Array::from_slice(
-        &[half::f16::from_f32(1.0), half::f16::from_f32(2.0)], &[2]
-    ).expect("from_slice");
+    let a = Array::from_slice(&[half::f16::from_f32(1.0), half::f16::from_f32(2.0)], &[2])
+        .expect("from_slice");
     let r = (&a + half::f16::from_f32(0.5)).expect("scalar add f16");
     let v = r.to_vec::<half::f16>().expect("to_vec");
     assert!((v[0].to_f32() - 1.5).abs() < 1e-3);

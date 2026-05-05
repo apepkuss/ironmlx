@@ -77,8 +77,7 @@ impl Array {
     /// Create an array filled with zeros of the given shape and dtype.
     /// The result is lazy — call [`Array::eval`] before reading the data.
     pub fn zeros(shape: &[i32], dtype: Dtype) -> Result<Self> {
-        let inner = mlx_sys::array::ffi::array_zeros(shape, dtype.as_u8())
-            .map_err(Error::from)?;
+        let inner = mlx_sys::array::ffi::array_zeros(shape, dtype.as_u8()).map_err(Error::from)?;
         Ok(Array(inner))
     }
 
@@ -99,7 +98,10 @@ impl Array {
         let s = self.shape();
         let n = s.len() as i32;
         let idx = if dim < 0 { dim + n } else { dim };
-        assert!(idx >= 0 && idx < n, "shape_at({dim}): out of range for ndim={n}");
+        assert!(
+            idx >= 0 && idx < n,
+            "shape_at({dim}): out of range for ndim={n}"
+        );
         s[idx as usize]
     }
 
@@ -141,31 +143,49 @@ impl Array {
     }
 
     /// Element-wise natural exponential. See [`crate::ops::exp`].
-    pub fn exp(&self) -> Result<Array> { crate::ops::exp(self) }
+    pub fn exp(&self) -> Result<Array> {
+        crate::ops::exp(self)
+    }
 
     /// Element-wise natural logarithm. See [`crate::ops::log`].
-    pub fn log(&self) -> Result<Array> { crate::ops::log(self) }
+    pub fn log(&self) -> Result<Array> {
+        crate::ops::log(self)
+    }
 
     /// Element-wise square root. See [`crate::ops::sqrt`].
-    pub fn sqrt(&self) -> Result<Array> { crate::ops::sqrt(self) }
+    pub fn sqrt(&self) -> Result<Array> {
+        crate::ops::sqrt(self)
+    }
 
     /// Element-wise hyperbolic tangent. See [`crate::ops::tanh`].
-    pub fn tanh(&self) -> Result<Array> { crate::ops::tanh(self) }
+    pub fn tanh(&self) -> Result<Array> {
+        crate::ops::tanh(self)
+    }
 
     /// Element-wise sigmoid. See [`crate::ops::sigmoid`].
-    pub fn sigmoid(&self) -> Result<Array> { crate::ops::sigmoid(self) }
+    pub fn sigmoid(&self) -> Result<Array> {
+        crate::ops::sigmoid(self)
+    }
 
     /// Element-wise x^2. See [`crate::ops::square`].
-    pub fn square(&self) -> Result<Array> { crate::ops::square(self) }
+    pub fn square(&self) -> Result<Array> {
+        crate::ops::square(self)
+    }
 
     /// Element-wise 1/sqrt(x). See [`crate::ops::rsqrt`].
-    pub fn rsqrt(&self) -> Result<Array> { crate::ops::rsqrt(self) }
+    pub fn rsqrt(&self) -> Result<Array> {
+        crate::ops::rsqrt(self)
+    }
 
     /// Element-wise error function. See [`crate::ops::erf`].
-    pub fn erf(&self) -> Result<Array> { crate::ops::erf(self) }
+    pub fn erf(&self) -> Result<Array> {
+        crate::ops::erf(self)
+    }
 
     /// Element-wise 1/x. See [`crate::ops::reciprocal`].
-    pub fn reciprocal(&self) -> Result<Array> { crate::ops::reciprocal(self) }
+    pub fn reciprocal(&self) -> Result<Array> {
+        crate::ops::reciprocal(self)
+    }
 
     /// Sum over the specified axes. See [`crate::ops::sum`].
     pub fn sum<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
@@ -249,12 +269,7 @@ impl Array {
     }
 
     /// N-dimensional gather. See [`crate::ops::gather`].
-    pub fn gather(
-        &self,
-        indices: &[&Array],
-        axes: &[i32],
-        slice_sizes: &[i32],
-    ) -> Result<Array> {
+    pub fn gather(&self, indices: &[&Array], axes: &[i32], slice_sizes: &[i32]) -> Result<Array> {
         crate::ops::gather(self, indices, axes, slice_sizes)
     }
 }

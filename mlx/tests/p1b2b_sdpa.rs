@@ -11,13 +11,7 @@ use mlx::{ops, Array, Result};
 /// Q/K/V: [B, H, S, D]
 /// mask: [S, S] additive (-inf in masked positions, 0 elsewhere) — broadcasts on B, H
 /// Returns: [B, H, S, D]
-fn sdpa(
-    q: &Array,
-    k: &Array,
-    v: &Array,
-    mask: Option<&Array>,
-    scale: f32,
-) -> Result<Array> {
+fn sdpa(q: &Array, k: &Array, v: &Array, mask: Option<&Array>, scale: f32) -> Result<Array> {
     // K.transpose(-1, -2): [B, H, S, D] → [B, H, D, S]
     let kt = k.transpose_axes(&[0, 1, 3, 2])?;
     let scores = q.matmul(&kt)?;
@@ -89,7 +83,10 @@ fn sdpa_softmax_rows_sum_to_one() {
     let row_sums = ops::sum(&weights, -1, false).expect("row_sums");
     let v = row_sums.to_vec::<f32>().expect("to_vec");
     for sum in &v {
-        assert!((sum - 1.0).abs() < 1e-5, "row sum should be ~1.0, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "row sum should be ~1.0, got {sum}"
+        );
     }
 }
 
@@ -123,7 +120,10 @@ fn sdpa_causal_mask_zeros_future() {
         for j in 0..s {
             let val = v[i * s + j];
             if j > i {
-                assert!(val.abs() < 1e-6, "w[{i},{j}] should be 0 (causal), got {val}");
+                assert!(
+                    val.abs() < 1e-6,
+                    "w[{i},{j}] should be 0 (causal), got {val}"
+                );
             }
         }
     }
@@ -142,7 +142,9 @@ fn sdpa_numerical_match_reference() {
         data[i * n + i] = 1.0;
     }
     let identity_2d = Array::from_slice(&data, &[n as i32, n as i32]).expect("identity");
-    let q = identity_2d.reshape(&[1, 1, n as i32, n as i32]).expect("reshape");
+    let q = identity_2d
+        .reshape(&[1, 1, n as i32, n as i32])
+        .expect("reshape");
     let k = q.clone();
     let v = q.clone();
 

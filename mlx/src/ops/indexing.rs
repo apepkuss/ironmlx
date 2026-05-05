@@ -65,12 +65,7 @@ pub fn slice_strided(a: &Array, start: &[i32], stop: &[i32], strides: &[i32]) ->
 ///
 /// Returns shape `indices_shape ++ slice_sizes` (concatenation). See MLX docs
 /// for full semantics — this is the most flexible / least intuitive indexing op.
-pub fn gather(
-    a: &Array,
-    indices: &[&Array],
-    axes: &[i32],
-    slice_sizes: &[i32],
-) -> Result<Array> {
+pub fn gather(a: &Array, indices: &[&Array], axes: &[i32], slice_sizes: &[i32]) -> Result<Array> {
     // Build a slice of raw pointers to bridge to the unsafe shim. Each pointer
     // is valid for the duration of this call because `indices` (a slice of
     // &Array) outlives the FFI invocation.
@@ -79,9 +74,7 @@ pub fn gather(
     // SAFETY: `raw` contains valid pointers into the borrowed `&Array`s in
     // `indices`, all live for the duration of this call. The shim copies via
     // copy ctor (refcount-shared, cheap) — no aliasing or lifetime escape.
-    let inner = unsafe {
-        mlx_sys::array::ffi::array_gather(a.as_inner(), &raw, axes, slice_sizes)
-    }
-    .map_err(Error::from)?;
+    let inner = unsafe { mlx_sys::array::ffi::array_gather(a.as_inner(), &raw, axes, slice_sizes) }
+        .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }

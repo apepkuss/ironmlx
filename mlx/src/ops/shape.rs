@@ -35,8 +35,7 @@ pub fn reshape(a: &Array, shape: &[i32]) -> Result<Array> {
             )))
         }
     };
-    let inner =
-        mlx_sys::array::ffi::array_reshape(a.as_inner(), &resolved).map_err(Error::from)?;
+    let inner = mlx_sys::array::ffi::array_reshape(a.as_inner(), &resolved).map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
@@ -73,8 +72,8 @@ pub fn concatenate(arrays: &[&Array], axis: i32) -> Result<Array> {
     // SAFETY: `raw` contains valid pointers into the borrowed `&Array`s in
     // `arrays`, all live for the duration of this call. The shim copies via
     // copy ctor (refcount-shared, cheap) — no aliasing or lifetime escape.
-    let inner = unsafe { mlx_sys::array::ffi::array_concatenate(&raw, axis) }
-        .map_err(Error::from)?;
+    let inner =
+        unsafe { mlx_sys::array::ffi::array_concatenate(&raw, axis) }.map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
@@ -92,8 +91,8 @@ pub fn stack(arrays: &[&Array], axis: i32) -> Result<Array> {
 /// `Vec<Array>` of length `num_splits`. The split axis size must be evenly
 /// divisible by `num_splits`; MLX validates and errors otherwise.
 pub fn split_n(a: &Array, num_splits: i32, axis: i32) -> Result<Vec<Array>> {
-    let v = mlx_sys::array::ffi::array_split_n(a.as_inner(), num_splits, axis)
-        .map_err(Error::from)?;
+    let v =
+        mlx_sys::array::ffi::array_split_n(a.as_inner(), num_splits, axis).map_err(Error::from)?;
     let len = mlx_sys::array::ffi::split_result_len(&v);
     let mut out = Vec::with_capacity(len);
     for i in 0..len {
@@ -107,8 +106,8 @@ pub fn split_n(a: &Array, num_splits: i32, axis: i32) -> Result<Vec<Array>> {
 /// and the split axis size `S`, the result has pieces with sizes
 /// `[i, j-i, ..., S - last_idx]`.
 pub fn split_at(a: &Array, indices: &[i32], axis: i32) -> Result<Vec<Array>> {
-    let v = mlx_sys::array::ffi::array_split_at(a.as_inner(), indices, axis)
-        .map_err(Error::from)?;
+    let v =
+        mlx_sys::array::ffi::array_split_at(a.as_inner(), indices, axis).map_err(Error::from)?;
     let len = mlx_sys::array::ffi::split_result_len(&v);
     let mut out = Vec::with_capacity(len);
     for i in 0..len {

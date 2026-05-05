@@ -7,7 +7,9 @@ fn matmul_2d() {
     // a @ b = [[1, 2, 3, 0], [4, 5, 6, 0]]
     let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("from_slice");
     let b = Array::from_slice(
-        &[1.0_f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        &[
+            1.0_f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        ],
         &[3, 4],
     )
     .expect("from_slice");
@@ -45,8 +47,8 @@ fn matmul_using_t_for_attention() {
     let q = Array::from_slice(&[0.0_f32; 1024], &[2, 4, 8, 16]).expect("from_slice");
     let k = Array::from_slice(&[0.0_f32; 1024], &[2, 4, 8, 16]).expect("from_slice");
     let kt = k.t().expect("k.t()");
-    assert_eq!(kt.shape().as_slice(), &[16, 8, 4, 2]);  // .t() reverses ALL dims
-    // For a proper attention pattern we'd need transpose_axes(&[0, 1, 3, 2])
+    assert_eq!(kt.shape().as_slice(), &[16, 8, 4, 2]); // .t() reverses ALL dims
+                                                       // For a proper attention pattern we'd need transpose_axes(&[0, 1, 3, 2])
     let kt_proper = k.transpose_axes(&[0, 1, 3, 2]).expect("transpose_axes");
     assert_eq!(kt_proper.shape().as_slice(), &[2, 4, 16, 8]);
     let scores = q.matmul(&kt_proper).expect("matmul");
@@ -56,7 +58,7 @@ fn matmul_using_t_for_attention() {
 #[test]
 fn matmul_inner_dim_mismatch_errors() {
     let a = Array::from_slice(&[0.0_f32; 6], &[2, 3]).expect("from_slice");
-    let b = Array::from_slice(&[0.0_f32; 8], &[4, 2]).expect("from_slice");  // inner dim 3 != 4
+    let b = Array::from_slice(&[0.0_f32; 8], &[4, 2]).expect("from_slice"); // inner dim 3 != 4
     let result = a.matmul(&b);
     assert!(matches!(result, Err(Error::Mlx(_))));
 }

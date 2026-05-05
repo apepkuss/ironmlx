@@ -12,7 +12,7 @@ use crate::{Array, Error, Result};
 
 /// Matrix multiplication. See module docs for shape rules.
 pub fn matmul(a: &Array, b: &Array) -> Result<Array> {
-    let inner = mlx_sys::array::ffi::array_matmul(a.as_inner(), b.as_inner())
-        .map_err(Error::from)?;
+    let inner =
+        mlx_sys::array::ffi::array_matmul(a.as_inner(), b.as_inner()).map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }

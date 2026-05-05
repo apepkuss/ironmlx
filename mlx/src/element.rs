@@ -34,12 +34,12 @@ impl Element for bool {
         Ok(Array::from_inner(inner))
     }
     fn array_to_vec(arr: &Array) -> Result<Vec<Self>> {
-        arr.eval()?;  // implicit eval per spec A8
+        arr.eval()?; // implicit eval per spec A8
         let bytes = mlx_sys::array::ffi::array_to_vec_bool(arr.as_inner()).map_err(Error::from)?;
         Ok(bytes.into_iter().map(|b| b != 0).collect())
     }
     fn array_item(arr: &Array) -> Result<Self> {
-        arr.eval()?;  // implicit eval per spec A8 — MLX's const item<T>() throws on lazy
+        arr.eval()?; // implicit eval per spec A8 — MLX's const item<T>() throws on lazy
         mlx_sys::array::ffi::array_item_bool(arr.as_inner()).map_err(Error::from)
     }
 }
@@ -59,32 +59,91 @@ macro_rules! element_impl_simple {
                 Ok(raw.into_iter().collect::<Vec<_>>())
             }
             fn array_item(arr: &Array) -> Result<Self> {
-                arr.eval()?;  // implicit eval per spec A8
+                arr.eval()?; // implicit eval per spec A8
                 mlx_sys::array::ffi::$shim_item(arr.as_inner()).map_err(Error::from)
             }
         }
     };
 }
 
-element_impl_simple!(u8,  Dtype::Uint8,  array_from_u8,  array_item_u8,  array_to_vec_u8);
-element_impl_simple!(u16, Dtype::Uint16, array_from_u16, array_item_u16, array_to_vec_u16);
-element_impl_simple!(u32, Dtype::Uint32, array_from_u32, array_item_u32, array_to_vec_u32);
-element_impl_simple!(u64, Dtype::Uint64, array_from_u64, array_item_u64, array_to_vec_u64);
-element_impl_simple!(i8,  Dtype::Int8,   array_from_i8,  array_item_i8,  array_to_vec_i8);
-element_impl_simple!(i16, Dtype::Int16, array_from_i16, array_item_i16, array_to_vec_i16);
-element_impl_simple!(i32, Dtype::Int32, array_from_i32, array_item_i32, array_to_vec_i32);
-element_impl_simple!(i64, Dtype::Int64, array_from_i64, array_item_i64, array_to_vec_i64);
-element_impl_simple!(f32, Dtype::Float32, array_from_f32, array_item_f32, array_to_vec_f32);
-element_impl_simple!(f64, Dtype::Float64, array_from_f64, array_item_f64, array_to_vec_f64);
+element_impl_simple!(
+    u8,
+    Dtype::Uint8,
+    array_from_u8,
+    array_item_u8,
+    array_to_vec_u8
+);
+element_impl_simple!(
+    u16,
+    Dtype::Uint16,
+    array_from_u16,
+    array_item_u16,
+    array_to_vec_u16
+);
+element_impl_simple!(
+    u32,
+    Dtype::Uint32,
+    array_from_u32,
+    array_item_u32,
+    array_to_vec_u32
+);
+element_impl_simple!(
+    u64,
+    Dtype::Uint64,
+    array_from_u64,
+    array_item_u64,
+    array_to_vec_u64
+);
+element_impl_simple!(
+    i8,
+    Dtype::Int8,
+    array_from_i8,
+    array_item_i8,
+    array_to_vec_i8
+);
+element_impl_simple!(
+    i16,
+    Dtype::Int16,
+    array_from_i16,
+    array_item_i16,
+    array_to_vec_i16
+);
+element_impl_simple!(
+    i32,
+    Dtype::Int32,
+    array_from_i32,
+    array_item_i32,
+    array_to_vec_i32
+);
+element_impl_simple!(
+    i64,
+    Dtype::Int64,
+    array_from_i64,
+    array_item_i64,
+    array_to_vec_i64
+);
+element_impl_simple!(
+    f32,
+    Dtype::Float32,
+    array_from_f32,
+    array_item_f32,
+    array_to_vec_f32
+);
+element_impl_simple!(
+    f64,
+    Dtype::Float64,
+    array_from_f64,
+    array_item_f64,
+    array_to_vec_f64
+);
 
 // f16/bf16 reinterpret through u16.
 impl sealed::Sealed for half::f16 {}
 impl Element for half::f16 {
     const DTYPE: Dtype = Dtype::Float16;
     fn array_from(slice: &[Self], shape: &[i32]) -> Result<Array> {
-        let raw: &[u16] = unsafe {
-            std::slice::from_raw_parts(slice.as_ptr().cast::<u16>(), slice.len())
-        };
+        let raw: &[u16] =
+            unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u16>(), slice.len()) };
         let inner = mlx_sys::array::ffi::array_from_f16(raw, shape).map_err(Error::from)?;
         Ok(Array::from_inner(inner))
     }
@@ -94,7 +153,7 @@ impl Element for half::f16 {
         Ok(raw.into_iter().map(half::f16::from_bits).collect())
     }
     fn array_item(arr: &Array) -> Result<Self> {
-        arr.eval()?;  // implicit eval per spec A8
+        arr.eval()?; // implicit eval per spec A8
         let bits = mlx_sys::array::ffi::array_item_f16(arr.as_inner()).map_err(Error::from)?;
         Ok(half::f16::from_bits(bits))
     }
@@ -104,9 +163,8 @@ impl sealed::Sealed for half::bf16 {}
 impl Element for half::bf16 {
     const DTYPE: Dtype = Dtype::Bfloat16;
     fn array_from(slice: &[Self], shape: &[i32]) -> Result<Array> {
-        let raw: &[u16] = unsafe {
-            std::slice::from_raw_parts(slice.as_ptr().cast::<u16>(), slice.len())
-        };
+        let raw: &[u16] =
+            unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u16>(), slice.len()) };
         let inner = mlx_sys::array::ffi::array_from_bf16(raw, shape).map_err(Error::from)?;
         Ok(Array::from_inner(inner))
     }
@@ -116,7 +174,7 @@ impl Element for half::bf16 {
         Ok(raw.into_iter().map(half::bf16::from_bits).collect())
     }
     fn array_item(arr: &Array) -> Result<Self> {
-        arr.eval()?;  // implicit eval per spec A8
+        arr.eval()?; // implicit eval per spec A8
         let bits = mlx_sys::array::ffi::array_item_bf16(arr.as_inner()).map_err(Error::from)?;
         Ok(half::bf16::from_bits(bits))
     }
