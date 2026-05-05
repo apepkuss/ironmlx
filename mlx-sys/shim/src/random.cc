@@ -192,4 +192,20 @@ std::unique_ptr<MlxArray> multivariate_normal(
       helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
 }
 
+// ===== Permutation =====
+
+std::unique_ptr<MlxArray> permutation(
+    const MlxArray& x, int32_t axis,
+    const MlxArray* key) {
+  return std::make_unique<MlxArray>(mlx::core::random::permutation(
+      x, axis, helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> permutation_arange(
+    int32_t n,
+    const MlxArray* key) {
+  return std::make_unique<MlxArray>(mlx::core::random::permutation(
+      n, helpers::opt_arr(key)));
+}
+
 }  // namespace cxx_mlx

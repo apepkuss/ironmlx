@@ -132,5 +132,14 @@ pub mod ffi {
             dtype_repr: u8,
             key: *const MlxArray,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== Permutation =====
+        unsafe fn permutation(
+            x: &MlxArray,
+            axis: i32,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn permutation_arange(n: i32, key: *const MlxArray) -> Result<UniquePtr<MlxArray>>;
     }
 }

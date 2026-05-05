@@ -276,3 +276,36 @@ fn multivariate_normal_binding_smoke() {
         }
     }
 }
+
+use mlx::random::{permutation, permutation_arange};
+
+#[test]
+fn permutation_arange_is_valid_perm() {
+    let k = key(42).expect("key");
+    let p = permutation_arange(10, Some(&k)).expect("permutation_arange");
+    assert_eq!(p.shape().as_slice(), &[10]);
+
+    let mut v: Vec<u32> = p.to_vec().expect("to_vec");
+    v.sort();
+    assert_eq!(
+        v,
+        (0..10).collect::<Vec<u32>>(),
+        "permutation must be a re-ordering of 0..n"
+    );
+}
+
+#[test]
+fn permutation_array_preserves_elements() {
+    let k = key(42).expect("key");
+    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0], &[5]).expect("x");
+    let p = permutation(&x, 0, Some(&k)).expect("permutation");
+    assert_eq!(p.shape().as_slice(), &[5]);
+
+    let mut v: Vec<f32> = p.to_vec().expect("to_vec");
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(
+        v,
+        vec![1.0_f32, 2.0, 3.0, 4.0, 5.0],
+        "permutation must preserve the multiset"
+    );
+}

@@ -112,4 +112,14 @@ std::unique_ptr<MlxArray> multivariate_normal(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
     const MlxArray* key);
 
+// ===== Permutation =====
+
+std::unique_ptr<MlxArray> permutation(
+    const MlxArray& x, int32_t axis,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> permutation_arange(
+    int32_t n,
+    const MlxArray* key);
+
 }  // namespace cxx_mlx

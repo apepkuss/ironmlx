@@ -267,3 +267,22 @@ pub fn multivariate_normal(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+// ===== Permutation =====
+
+/// Randomly permute the elements of `x` along `axis`.
+pub fn permutation(x: &Array, axis: i32, key: Option<&Array>) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner =
+        unsafe { mlx_sys::random::ffi::permutation(x.as_inner(), axis, k) }.map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Return a random permutation of `arange(n)`.
+pub fn permutation_arange(n: i32, key: Option<&Array>) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe { mlx_sys::random::ffi::permutation_arange(n, k) }.map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
