@@ -101,4 +101,21 @@ std::unique_ptr<MlxArray> dequantize(
       opt_dtype(has_dtype, dtype_repr)));
 }
 
+// ===== quantized_matmul =====
+
+std::unique_ptr<MlxArray> quantized_matmul(
+    const MlxArray& x, const MlxArray& w, const MlxArray& scales,
+    const MlxArray* biases,
+    bool transpose,
+    bool has_group_size, int32_t group_size,
+    bool has_bits, int32_t bits,
+    rust::Str mode) {
+  return std::make_unique<MlxArray>(mlx::core::quantized_matmul(
+      x, w, scales, opt_arr(biases),
+      transpose,
+      opt_i(has_group_size, group_size),
+      opt_i(has_bits, bits),
+      std::string(mode)));
+}
+
 }  // namespace cxx_mlx

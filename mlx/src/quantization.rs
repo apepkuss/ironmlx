@@ -79,3 +79,38 @@ pub fn dequantize(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Compute `x @ w` where `w` is a quantized matrix. The workhorse for
+/// inference of quantized models.
+#[allow(clippy::too_many_arguments)]
+pub fn quantized_matmul(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    transpose: bool,
+    group_size: Option<i32>,
+    bits: Option<i32>,
+    mode: &str,
+) -> Result<Array> {
+    let b_ptr = biases.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let (has_gs, gs) = group_size.map_or((false, 0), |v| (true, v));
+    let (has_b, b) = bits.map_or((false, 0), |v| (true, v));
+    // SAFETY: b_ptr is null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::quantization::ffi::quantized_matmul(
+            x.as_inner(),
+            w.as_inner(),
+            scales.as_inner(),
+            b_ptr,
+            transpose,
+            has_gs,
+            gs,
+            has_b,
+            b,
+            mode,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

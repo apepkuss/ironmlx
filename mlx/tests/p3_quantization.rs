@@ -1,6 +1,6 @@
 //! Integration tests for mlx::quantization — low-precision subsystem.
 
-use mlx::quantization::{dequantize, quantize};
+use mlx::quantization::{dequantize, quantize, quantized_matmul};
 use mlx::Array;
 
 /// 构造 [N=4, K=64] f32 测试权重矩阵（K=64 = 默认 group_size）。
@@ -79,4 +79,60 @@ fn quantize_dequantize_round_trip_8bit() {
         }
     }
     assert!(max_err < 5e-3, "8-bit round-trip max err {max_err}");
+}
+
+#[test]
+fn quantized_matmul_matches_dequantize_matmul() {
+    // W: [N=4, K=64], x: [B=2, K=64]
+    // y_qmm = quantized_matmul(x, packed_W, scales, biases, transpose=true)
+    // y_ref = x @ dequantize(packed_W).T
+    // 两者应在 4-bit 量化容差内一致
+    let w = make_test_weight(); // [4, 64]
+    let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
+    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+
+    let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
+
+    // y_qmm = x @ W.T (transpose=true)，输出 [2, 4]
+    let y_qmm = quantized_matmul(
+        &x,
+        &parts[0],
+        &parts[1],
+        Some(&parts[2]),
+        true,
+        Some(64),
+        Some(4),
+        "affine",
+    )
+    .expect("qmm");
+    assert_eq!(y_qmm.shape().as_slice(), &[2, 4]);
+
+    // 参考路径: y_ref = x @ dequantize(W).T
+    let dq = dequantize(
+        &parts[0],
+        &parts[1],
+        Some(&parts[2]),
+        Some(64),
+        Some(4),
+        "affine",
+        None,
+        None,
+    )
+    .expect("dq");
+    let dq_t = dq.transpose_axes(&[1, 0]).expect("transpose");
+    let y_ref = x.matmul(&dq_t).expect("ref matmul");
+
+    let v_qmm: Vec<f32> = y_qmm.to_vec().expect("qmm to_vec");
+    let v_ref: Vec<f32> = y_ref.to_vec().expect("ref to_vec");
+    assert_eq!(v_qmm.len(), v_ref.len());
+
+    // qmm 与 dequantize+matmul 的差异应当极小（计算路径不同但代数等价）
+    let mut max_err = 0.0_f32;
+    for (a, b) in v_qmm.iter().zip(&v_ref) {
+        let err = (a - b).abs();
+        if err > max_err {
+            max_err = err;
+        }
+    }
+    assert!(max_err < 1e-2, "qmm vs ref max err {max_err}");
 }

@@ -52,5 +52,19 @@ pub mod ffi {
             has_dtype: bool,
             dtype_repr: u8,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== quantized_matmul =====
+        unsafe fn quantized_matmul(
+            x: &MlxArray,
+            w: &MlxArray,
+            scales: &MlxArray,
+            biases: *const MlxArray,
+            transpose: bool,
+            has_group_size: bool,
+            group_size: i32,
+            has_bits: bool,
+            bits: i32,
+            mode: &str,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

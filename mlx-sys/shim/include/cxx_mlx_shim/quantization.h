@@ -57,4 +57,14 @@ std::unique_ptr<MlxArray> dequantize(
     const MlxArray* global_scale,
     bool has_dtype, uint8_t dtype_repr);
 
+std::unique_ptr<MlxArray> quantized_matmul(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray& scales,
+    const MlxArray* biases,
+    bool transpose,
+    bool has_group_size, int32_t group_size,
+    bool has_bits, int32_t bits,
+    rust::Str mode);
+
 }  // namespace cxx_mlx
