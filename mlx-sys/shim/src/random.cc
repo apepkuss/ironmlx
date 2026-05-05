@@ -103,4 +103,44 @@ std::unique_ptr<MlxArray> randint(
       helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
 }
 
+// ===== Discrete distributions =====
+
+std::unique_ptr<MlxArray> bernoulli(
+    const MlxArray& p, rust::Slice<const int32_t> shape,
+    const MlxArray* key) {
+  mlx::core::Shape shape_vec(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::random::bernoulli(
+      p, shape_vec, helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> bernoulli_default(
+    const MlxArray& p,
+    const MlxArray* key) {
+  return std::make_unique<MlxArray>(mlx::core::random::bernoulli(
+      p, helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> categorical(
+    const MlxArray& logits, int32_t axis,
+    const MlxArray* key) {
+  return std::make_unique<MlxArray>(mlx::core::random::categorical(
+      logits, axis, helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> categorical_n(
+    const MlxArray& logits, int32_t axis, int32_t num_samples,
+    const MlxArray* key) {
+  return std::make_unique<MlxArray>(mlx::core::random::categorical(
+      logits, axis, num_samples, helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> categorical_shaped(
+    const MlxArray& logits, int32_t axis,
+    rust::Slice<const int32_t> shape,
+    const MlxArray* key) {
+  mlx::core::Shape shape_vec(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::random::categorical(
+      logits, axis, shape_vec, helpers::opt_arr(key)));
+}
+
 }  // namespace cxx_mlx

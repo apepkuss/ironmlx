@@ -62,5 +62,37 @@ pub mod ffi {
             dtype_repr: u8,
             key: *const MlxArray,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== Discrete distributions =====
+        unsafe fn bernoulli(
+            p: &MlxArray,
+            shape: &[i32],
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn bernoulli_default(
+            p: &MlxArray,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn categorical(
+            logits: &MlxArray,
+            axis: i32,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn categorical_n(
+            logits: &MlxArray,
+            axis: i32,
+            num_samples: i32,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn categorical_shaped(
+            logits: &MlxArray,
+            axis: i32,
+            shape: &[i32],
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

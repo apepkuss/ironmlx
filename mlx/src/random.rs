@@ -109,3 +109,64 @@ pub fn randint(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+// ===== Discrete distributions =====
+
+/// Sample binary (0/1) values with probability `p`. Output shape must match
+/// `p`'s broadcastable shape via the `shape` argument.
+pub fn bernoulli(p: &Array, shape: &[i32], key: Option<&Array>) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner =
+        unsafe { mlx_sys::random::ffi::bernoulli(p.as_inner(), shape, k) }.map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Sample binary values with probability `p`. Output shape inferred from `p`.
+pub fn bernoulli_default(p: &Array, key: Option<&Array>) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner =
+        unsafe { mlx_sys::random::ffi::bernoulli_default(p.as_inner(), k) }.map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Sample 1 index per row from `logits` along `axis`. The canonical token
+/// sampling op for LLM decoding.
+pub fn categorical(logits: &Array, axis: i32, key: Option<&Array>) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe { mlx_sys::random::ffi::categorical(logits.as_inner(), axis, k) }
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Sample `num_samples` indices per row from `logits` along `axis`.
+pub fn categorical_n(
+    logits: &Array,
+    axis: i32,
+    num_samples: i32,
+    key: Option<&Array>,
+) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner =
+        unsafe { mlx_sys::random::ffi::categorical_n(logits.as_inner(), axis, num_samples, k) }
+            .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Sample with explicit output `shape` from `logits` along `axis`.
+pub fn categorical_shaped(
+    logits: &Array,
+    axis: i32,
+    shape: &[i32],
+    key: Option<&Array>,
+) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner =
+        unsafe { mlx_sys::random::ffi::categorical_shaped(logits.as_inner(), axis, shape, k) }
+            .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

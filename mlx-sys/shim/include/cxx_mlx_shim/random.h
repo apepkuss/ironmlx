@@ -63,4 +63,27 @@ std::unique_ptr<MlxArray> randint(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
     const MlxArray* key);
 
+// ===== Discrete distributions =====
+
+std::unique_ptr<MlxArray> bernoulli(
+    const MlxArray& p, rust::Slice<const int32_t> shape,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> bernoulli_default(
+    const MlxArray& p,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> categorical(
+    const MlxArray& logits, int32_t axis,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> categorical_n(
+    const MlxArray& logits, int32_t axis, int32_t num_samples,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> categorical_shaped(
+    const MlxArray& logits, int32_t axis,
+    rust::Slice<const int32_t> shape,
+    const MlxArray* key);
+
 }  // namespace cxx_mlx
