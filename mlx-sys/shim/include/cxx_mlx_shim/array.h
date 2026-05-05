@@ -161,4 +161,18 @@ std::unique_ptr<MlxArray> array_gather(
     rust::Slice<const int32_t> axes,
     rust::Slice<const int32_t> slice_sizes);
 
+// === P5 ops extensions: matmul family ===
+
+std::unique_ptr<MlxArray> tensordot_axis(
+    const MlxArray& a, const MlxArray& b, int32_t axis);
+
+std::unique_ptr<MlxArray> tensordot_axes(
+    const MlxArray& a, const MlxArray& b,
+    rust::Slice<const int32_t> axes_a,
+    rust::Slice<const int32_t> axes_b);
+
+std::unique_ptr<MlxArray> outer(const MlxArray& a, const MlxArray& b);
+
+std::unique_ptr<MlxArray> inner(const MlxArray& a, const MlxArray& b);
+
 }  // namespace cxx_mlx

@@ -186,5 +186,19 @@ pub mod ffi {
             axes: &[i32],
             slice_sizes: &[i32],
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5 ops extensions ===
+        fn tensordot_axis(a: &MlxArray, b: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
+
+        fn tensordot_axes(
+            a: &MlxArray,
+            b: &MlxArray,
+            axes_a: &[i32],
+            axes_b: &[i32],
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn outer(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
+        fn inner(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
     }
 }
