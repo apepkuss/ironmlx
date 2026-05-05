@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** 🚧 **P2c complete** — Full IO subsystem: `mlx::io::{load,save}_{safetensors,gguf,npy}` + B-lite `Reader`/`Writer` (file + in-memory) for stream-based load/save. Builds on P2b's fused kernels. Next: P3 (quantization ops for 4-bit GGUF/MLX inference).
+**Status:** 🎉 **P3 complete (0.1 release candidate)** — Full quantization subsystem (`mlx::quantization::*`): affine `quantize`/`dequantize`/`quantized_matmul`, NVFP4 `qqmm`, MoE `gather_qmm`, FP8 `from_fp8`/`to_fp8`. Combined with P2a (Stream/async) + P2b (fast ops) + P2c (IO) + P1 (ops/array foundations), cxx-mlx now covers the macOS local LLM inference path end-to-end.
 
 ## Requirements
 
@@ -214,8 +214,9 @@ mutable access — `clone` is almost always the right answer.
 - ✅ **P2a** — Stream / Device foundation + runtime-agnostic async_eval
 - ✅ **P2b** — `fast` ops (rms_norm / layer_norm / rope int+array offset / sdpa) — 12 integration tests
 - ✅ **P2c** — `io` (safetensors / gguf / npy + Reader/Writer streams) — 18 integration tests
+- ✅ **P3** — `quantization` (quantize/dequantize/quantized_matmul/qqmm/gather_qmm/fp8) — 8 integration tests
 - ⏳ **P1c** — random (key + uniform/normal/categorical)
-- ⏳ **P3** — quantization + compile + LLM inference example
+- ⏳ compile + LLM inference example
 
 ## Architecture
 
