@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** 🚧 **P2b complete** — Fused inference kernels via `mlx::fast::*` (`rms_norm`, `layer_norm`, `rope` with int and per-batch array offset, `scaled_dot_product_attention`). Re-exported at the crate root for convenience. Builds on P2a's Stream / Device foundation (`Device::cpu()`/`gpu()`, stream lifecycle, runtime-agnostic `async_eval`, `synchronize` / `synchronize_stream`). Next: P2c (`io`: safetensors/gguf load).
+**Status:** 🚧 **P2c complete** — Full IO subsystem: `mlx::io::{load,save}_{safetensors,gguf,npy}` + B-lite `Reader`/`Writer` (file + in-memory) for stream-based load/save. Builds on P2b's fused kernels. Next: P3 (quantization ops for 4-bit GGUF/MLX inference).
 
 ## Requirements
 
@@ -213,7 +213,7 @@ mutable access — `clone` is almost always the right answer.
 - 🎉 **P1 complete** — full inference primitives ready
 - ✅ **P2a** — Stream / Device foundation + runtime-agnostic async_eval
 - ✅ **P2b** — `fast` ops (rms_norm / layer_norm / rope int+array offset / sdpa) — 12 integration tests
-- ⏳ **P2c** — `io` (safetensors / gguf load)
+- ✅ **P2c** — `io` (safetensors / gguf / npy + Reader/Writer streams) — 18 integration tests
 - ⏳ **P1c** — random (key + uniform/normal/categorical)
 - ⏳ **P3** — quantization + compile + LLM inference example
 

@@ -267,3 +267,16 @@ fn npy_load_nonexistent_file_returns_err() {
     let result = io::load_npy("/nonexistent/path/foo.npy");
     assert!(result.is_err());
 }
+
+#[test]
+fn top_level_re_exports_work() {
+    // 验证可以通过 mlx::* 顶层访问 P2c 公开 API
+    let _r = mlx::Reader::from_bytes(&[]);
+    let _w = mlx::Writer::memory();
+    // GGUFMetaData 类型可访问
+    let _meta = mlx::GGUFMetaData::String("test".to_string());
+
+    // load_safetensors 函数可达（不需要真正成功调用）
+    let result = mlx::load_safetensors("/nonexistent/foo.safetensors");
+    assert!(result.is_err());
+}
