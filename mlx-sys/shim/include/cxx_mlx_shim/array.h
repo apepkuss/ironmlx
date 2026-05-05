@@ -161,4 +161,37 @@ std::unique_ptr<MlxArray> array_gather(
     rust::Slice<const int32_t> axes,
     rust::Slice<const int32_t> slice_sizes);
 
+// === P5 ops extensions: matmul family ===
+
+std::unique_ptr<MlxArray> tensordot_axis(
+    const MlxArray& a, const MlxArray& b, int32_t axis);
+
+std::unique_ptr<MlxArray> tensordot_axes(
+    const MlxArray& a, const MlxArray& b,
+    rust::Slice<const int32_t> axes_a,
+    rust::Slice<const int32_t> axes_b);
+
+std::unique_ptr<MlxArray> outer(const MlxArray& a, const MlxArray& b);
+
+std::unique_ptr<MlxArray> inner(const MlxArray& a, const MlxArray& b);
+
+std::unique_ptr<MlxArray> addmm(
+    const MlxArray& c, const MlxArray& a, const MlxArray& b,
+    float alpha, float beta);
+
+std::unique_ptr<MlxArray> block_masked_mm(
+    const MlxArray& a, const MlxArray& b, int32_t block_size,
+    const MlxArray* mask_out,
+    const MlxArray* mask_lhs,
+    const MlxArray* mask_rhs);
+
+std::unique_ptr<MlxArray> gather_mm(
+    const MlxArray& a, const MlxArray& b,
+    const MlxArray* lhs_indices,
+    const MlxArray* rhs_indices,
+    bool sorted_indices);
+
+std::unique_ptr<MlxArray> segmented_mm(
+    const MlxArray& a, const MlxArray& b, const MlxArray& segments);
+
 }  // namespace cxx_mlx

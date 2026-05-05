@@ -9,6 +9,8 @@
 #include "mlx/ops.h"
 #include "mlx/transforms.h"
 
+#include "cxx_mlx_shim/shim_helpers.h"
+
 // Endpoint static_asserts on mlx::core::Dtype::Val. If MLX inserts a new
 // dtype at any position, at least one endpoint shifts and we fail fast at
 // the C++ build step before the Rust Dtype mirror has a chance to drift.
@@ -430,6 +432,65 @@ std::unique_ptr<MlxArray> array_gather(
   std::vector<int> axes_vec(axes.begin(), axes.end());
   mlx::core::Shape ss(slice_sizes.begin(), slice_sizes.end());
   return std::make_unique<MlxArray>(mlx::core::gather(a, idx_vec, axes_vec, ss));
+}
+
+// === P5 ops extensions ===
+
+std::unique_ptr<MlxArray> tensordot_axis(
+    const MlxArray& a, const MlxArray& b, int32_t axis) {
+  return std::make_unique<MlxArray>(mlx::core::tensordot(a, b, axis));
+}
+
+std::unique_ptr<MlxArray> tensordot_axes(
+    const MlxArray& a, const MlxArray& b,
+    rust::Slice<const int32_t> axes_a,
+    rust::Slice<const int32_t> axes_b) {
+  std::vector<int> va(axes_a.begin(), axes_a.end());
+  std::vector<int> vb(axes_b.begin(), axes_b.end());
+  return std::make_unique<MlxArray>(mlx::core::tensordot(a, b, va, vb));
+}
+
+std::unique_ptr<MlxArray> outer(const MlxArray& a, const MlxArray& b) {
+  return std::make_unique<MlxArray>(mlx::core::outer(a, b));
+}
+
+std::unique_ptr<MlxArray> inner(const MlxArray& a, const MlxArray& b) {
+  return std::make_unique<MlxArray>(mlx::core::inner(a, b));
+}
+
+std::unique_ptr<MlxArray> addmm(
+    const MlxArray& c, const MlxArray& a, const MlxArray& b,
+    float alpha, float beta) {
+  return std::make_unique<MlxArray>(mlx::core::addmm(c, a, b, alpha, beta));
+}
+
+std::unique_ptr<MlxArray> block_masked_mm(
+    const MlxArray& a, const MlxArray& b, int32_t block_size,
+    const MlxArray* mask_out,
+    const MlxArray* mask_lhs,
+    const MlxArray* mask_rhs) {
+  return std::make_unique<MlxArray>(mlx::core::block_masked_mm(
+      a, b, block_size,
+      helpers::opt_arr(mask_out),
+      helpers::opt_arr(mask_lhs),
+      helpers::opt_arr(mask_rhs)));
+}
+
+std::unique_ptr<MlxArray> gather_mm(
+    const MlxArray& a, const MlxArray& b,
+    const MlxArray* lhs_indices,
+    const MlxArray* rhs_indices,
+    bool sorted_indices) {
+  return std::make_unique<MlxArray>(mlx::core::gather_mm(
+      a, b,
+      helpers::opt_arr(lhs_indices),
+      helpers::opt_arr(rhs_indices),
+      sorted_indices));
+}
+
+std::unique_ptr<MlxArray> segmented_mm(
+    const MlxArray& a, const MlxArray& b, const MlxArray& segments) {
+  return std::make_unique<MlxArray>(mlx::core::segmented_mm(a, b, segments));
 }
 
 }  // namespace cxx_mlx

@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** 🎉 **P4 complete** — `mlx::random` PRNG + 21 distribution functions including `categorical` (token sampling). Combined with P3 (quantization) + P2c (IO) + P2b (fast ops) + P1 (ops/array foundations), the LLM decode loop is now end-to-end inside MLX's compute graph.
+**Status:** 🎉 **P5 complete** — `mlx::ops` 补漏完成 (tensordot×2, outer, inner_product, addmm, block_masked_mm, gather_mm, segmented_mm). MLX `ops.h` 公开 matmul 家族全覆盖.
 
 ## Requirements
 
@@ -216,6 +216,7 @@ mutable access — `clone` is almost always the right answer.
 - ✅ **P2c** — `io` (safetensors / gguf / npy + Reader/Writer streams) — 18 integration tests
 - ✅ **P3** — `quantization` (quantize/dequantize/quantized_matmul/qqmm/gather_qmm/fp8) — 8 integration tests
 - ✅ **P4** — `random` (key/seed/split + 17 distributions including categorical) — 23 integration tests
+- ✅ **P5** — `ops` 补漏 (8 matmul family ops) — 9 integration tests
 - ⏳ compile + LLM inference example
 
 ## Architecture
