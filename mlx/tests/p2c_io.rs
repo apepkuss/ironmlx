@@ -125,3 +125,107 @@ fn safetensors_empty_metadata_round_trip() {
     assert_eq!(loaded_tensors.len(), tensors.len());
     assert!(loaded_meta.is_empty());
 }
+
+use mlx::io::GGUFMetaData;
+
+#[test]
+fn gguf_round_trip_tensor_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("tensor_only.gguf");
+    let path_str = path.to_str().unwrap();
+    let tensors = make_test_tensors();
+    let metadata: HashMap<String, GGUFMetaData> = HashMap::new();
+
+    io::save_gguf(path_str, &tensors, &metadata).expect("save");
+    let (loaded_tensors, loaded_meta) = io::load_gguf(path_str).expect("load");
+
+    assert_eq!(loaded_tensors.len(), tensors.len());
+    assert!(loaded_meta.is_empty());
+    let alpha_in: Vec<f32> = tensors["alpha"].to_vec().expect("alpha");
+    let alpha_out: Vec<f32> = loaded_tensors["alpha"].to_vec().expect("alpha out");
+    assert_eq!(alpha_in, alpha_out);
+}
+
+#[test]
+fn gguf_round_trip_with_string_meta() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("string_meta.gguf");
+    let path_str = path.to_str().unwrap();
+    let tensors = make_test_tensors();
+    let mut metadata: HashMap<String, GGUFMetaData> = HashMap::new();
+    metadata.insert(
+        "model".to_string(),
+        GGUFMetaData::String("test-model".to_string()),
+    );
+    metadata.insert(
+        "version".to_string(),
+        GGUFMetaData::String("1.0".to_string()),
+    );
+
+    io::save_gguf(path_str, &tensors, &metadata).expect("save");
+    let (_loaded_tensors, loaded_meta) = io::load_gguf(path_str).expect("load");
+
+    assert_eq!(loaded_meta.len(), 2);
+    match &loaded_meta["model"] {
+        GGUFMetaData::String(s) => assert_eq!(s, "test-model"),
+        _ => panic!("expected String variant for 'model'"),
+    }
+    match &loaded_meta["version"] {
+        GGUFMetaData::String(s) => assert_eq!(s, "1.0"),
+        _ => panic!("expected String variant for 'version'"),
+    }
+}
+
+#[test]
+fn gguf_round_trip_with_string_list_meta() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("string_list_meta.gguf");
+    let path_str = path.to_str().unwrap();
+    let tensors = make_test_tensors();
+    let mut metadata: HashMap<String, GGUFMetaData> = HashMap::new();
+    metadata.insert(
+        "tags".to_string(),
+        GGUFMetaData::StringList(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+    );
+
+    io::save_gguf(path_str, &tensors, &metadata).expect("save");
+    let (_loaded_tensors, loaded_meta) = io::load_gguf(path_str).expect("load");
+
+    match &loaded_meta["tags"] {
+        GGUFMetaData::StringList(list) => {
+            assert_eq!(
+                list,
+                &vec!["a".to_string(), "b".to_string(), "c".to_string()]
+            );
+        }
+        _ => panic!("expected StringList variant for 'tags'"),
+    }
+}
+
+#[test]
+fn gguf_round_trip_with_array_meta() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("array_meta.gguf");
+    let path_str = path.to_str().unwrap();
+    let tensors = make_test_tensors();
+    let mut metadata: HashMap<String, GGUFMetaData> = HashMap::new();
+    let scale_array = Array::from_slice(&[2.5_f32, 3.5], &[2]).expect("scale");
+    metadata.insert("scale".to_string(), GGUFMetaData::Array(scale_array));
+
+    io::save_gguf(path_str, &tensors, &metadata).expect("save");
+    let (_loaded_tensors, loaded_meta) = io::load_gguf(path_str).expect("load");
+
+    match &loaded_meta["scale"] {
+        GGUFMetaData::Array(arr) => {
+            let v: Vec<f32> = arr.to_vec().expect("array meta to_vec");
+            assert_eq!(v, vec![2.5_f32, 3.5]);
+        }
+        _ => panic!("expected Array variant for 'scale'"),
+    }
+}
+
+#[test]
+fn gguf_load_nonexistent_file_returns_err() {
+    let result = io::load_gguf("/nonexistent/path/foo.gguf");
+    assert!(result.is_err());
+}

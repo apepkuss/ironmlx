@@ -128,3 +128,98 @@ fn build_safetensors_builder(
     }
     builder
 }
+
+// ===== GGUF =====
+
+/// GGUF metadata value. Mirrors `mlx::core::GGUFMetaData` minus monostate
+/// (the empty variant is silently dropped during load).
+#[derive(Debug)]
+pub enum GGUFMetaData {
+    Array(Array),
+    String(String),
+    StringList(Vec<String>),
+}
+
+/// Load tensors + GGUF metadata from a `.gguf` file.
+pub fn load_gguf(path: &str) -> Result<(HashMap<String, Array>, HashMap<String, GGUFMetaData>)> {
+    let mut result = mlx_sys::io::ffi::load_gguf_file(path).map_err(Error::from)?;
+    gguf_decompose(&mut result)
+}
+
+fn gguf_decompose(
+    result: &mut cxx::UniquePtr<mlx_sys::io::ffi::GGUFLoadResult>,
+) -> Result<(HashMap<String, Array>, HashMap<String, GGUFMetaData>)> {
+    // tensors
+    let tensor_names = mlx_sys::io::ffi::gguf_tensor_names(result);
+    let mut tensors: HashMap<String, Array> = HashMap::with_capacity(tensor_names.len());
+    for name in tensor_names {
+        let array_ptr = mlx_sys::io::ffi::gguf_take_tensor_by_name(result.pin_mut(), &name)
+            .map_err(Error::from)?;
+        tensors.insert(name, Array::from_inner(array_ptr));
+    }
+
+    // metadata: 三类合并
+    let mut metadata: HashMap<String, GGUFMetaData> = HashMap::new();
+
+    // array metadata
+    let arr_names = mlx_sys::io::ffi::gguf_array_meta_names(result);
+    for name in arr_names {
+        let array_ptr = mlx_sys::io::ffi::gguf_take_array_meta_by_name(result.pin_mut(), &name)
+            .map_err(Error::from)?;
+        metadata.insert(name, GGUFMetaData::Array(Array::from_inner(array_ptr)));
+    }
+
+    // string metadata
+    let str_names = mlx_sys::io::ffi::gguf_string_meta_names(result);
+    let str_values = mlx_sys::io::ffi::gguf_string_meta_values(result);
+    for (name, value) in str_names.into_iter().zip(str_values) {
+        metadata.insert(name, GGUFMetaData::String(value));
+    }
+
+    // string list metadata: 解 packed
+    let list_names = mlx_sys::io::ffi::gguf_string_list_meta_names(result);
+    let packed = mlx_sys::io::ffi::gguf_string_list_meta_values_packed(result);
+    let lengths = mlx_sys::io::ffi::gguf_string_list_meta_lengths(result);
+    let mut idx: usize = 0;
+    for (name, len) in list_names.into_iter().zip(lengths) {
+        let len = len as usize;
+        let strings: Vec<String> = packed[idx..idx + len].to_vec();
+        idx += len;
+        metadata.insert(name, GGUFMetaData::StringList(strings));
+    }
+
+    Ok((tensors, metadata))
+}
+
+/// Save tensors + GGUF metadata to a `.gguf` file.
+pub fn save_gguf(
+    path: &str,
+    tensors: &HashMap<String, Array>,
+    metadata: &HashMap<String, GGUFMetaData>,
+) -> Result<()> {
+    let mut builder = mlx_sys::io::ffi::new_gguf_save_builder();
+    for (name, array) in tensors {
+        mlx_sys::io::ffi::gguf_builder_add_tensor(builder.pin_mut(), name, array.as_inner());
+    }
+    for (key, value) in metadata {
+        match value {
+            GGUFMetaData::Array(a) => {
+                mlx_sys::io::ffi::gguf_builder_add_array_meta(builder.pin_mut(), key, a.as_inner())
+            }
+            GGUFMetaData::String(s) => {
+                mlx_sys::io::ffi::gguf_builder_add_string_meta(builder.pin_mut(), key, s)
+            }
+            GGUFMetaData::StringList(items) => {
+                mlx_sys::io::ffi::gguf_builder_begin_string_list_meta(builder.pin_mut(), key)
+                    .map_err(Error::from)?;
+                for item in items {
+                    mlx_sys::io::ffi::gguf_builder_push_string_list_meta(builder.pin_mut(), item)
+                        .map_err(Error::from)?;
+                }
+                mlx_sys::io::ffi::gguf_builder_end_string_list_meta(builder.pin_mut())
+                    .map_err(Error::from)?;
+            }
+        }
+    }
+    mlx_sys::io::ffi::save_gguf_file(path, &builder).map_err(Error::from)
+}

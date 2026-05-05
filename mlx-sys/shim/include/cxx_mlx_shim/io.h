@@ -122,4 +122,57 @@ std::unique_ptr<SafetensorsLoadResult> load_safetensors_reader(MlxReader& reader
 void save_safetensors_file(rust::Str path, const SafetensorsSaveBuilder& builder);
 void save_safetensors_writer(MlxWriter& writer, const SafetensorsSaveBuilder& builder);
 
+// ===== GGUFLoadResult (opaque) =====
+
+class GGUFLoadResult {
+ public:
+  explicit GGUFLoadResult(mlx::core::GGUFLoad data) : inner_(std::move(data)) {}
+  mlx::core::GGUFLoad inner_;
+};
+
+// 注：take_*_by_name 单次性消费——成功取出后会从 map erase；同名重复调用抛异常。
+rust::Vec<rust::String> gguf_tensor_names(const GGUFLoadResult& r);
+std::unique_ptr<MlxArray> gguf_take_tensor_by_name(GGUFLoadResult& r, rust::Str name);
+
+// metadata 按 variant 类型拆（monostate 静默丢弃）
+rust::Vec<rust::String> gguf_array_meta_names(const GGUFLoadResult& r);
+std::unique_ptr<MlxArray> gguf_take_array_meta_by_name(GGUFLoadResult& r, rust::Str name);
+
+rust::Vec<rust::String> gguf_string_meta_names(const GGUFLoadResult& r);
+rust::Vec<rust::String> gguf_string_meta_values(const GGUFLoadResult& r);
+
+rust::Vec<rust::String> gguf_string_list_meta_names(const GGUFLoadResult& r);
+// string list 用 packed (concat) + lengths 表达，避免 nested Vec 桥接限制
+rust::Vec<rust::String> gguf_string_list_meta_values_packed(const GGUFLoadResult& r);
+rust::Vec<uint64_t> gguf_string_list_meta_lengths(const GGUFLoadResult& r);
+
+// ===== GGUFSaveBuilder (opaque) =====
+// Public fields: opaque to Rust; shim free funcs are the canonical accessors.
+
+class GGUFSaveBuilder {
+ public:
+  std::unordered_map<std::string, mlx::core::array> tensors;
+  std::unordered_map<std::string, mlx::core::GGUFMetaData> metadata;
+  // string list 用 begin/push/end 三步法
+  std::optional<std::pair<std::string, std::vector<std::string>>> pending_list;
+};
+
+std::unique_ptr<GGUFSaveBuilder> new_gguf_save_builder();
+// Adds a tensor to the builder. The array is shallow-copied (shared buffer
+// via mlx::core::array's refcounted internals), so this is cheap regardless
+// of array size.
+void gguf_builder_add_tensor(
+    GGUFSaveBuilder& b, rust::Str name, const MlxArray& array);
+// Adds an array-typed metadata entry. Same shallow-copy semantics as above.
+void gguf_builder_add_array_meta(
+    GGUFSaveBuilder& b, rust::Str key, const MlxArray& array);
+void gguf_builder_add_string_meta(
+    GGUFSaveBuilder& b, rust::Str key, rust::Str value);
+void gguf_builder_begin_string_list_meta(GGUFSaveBuilder& b, rust::Str key);
+void gguf_builder_push_string_list_meta(GGUFSaveBuilder& b, rust::Str value);
+void gguf_builder_end_string_list_meta(GGUFSaveBuilder& b);
+
+std::unique_ptr<GGUFLoadResult> load_gguf_file(rust::Str path);
+void save_gguf_file(rust::Str path, const GGUFSaveBuilder& builder);
+
 }  // namespace cxx_mlx

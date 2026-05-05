@@ -58,5 +58,41 @@ pub mod ffi {
             writer: Pin<&mut MlxWriter>,
             builder: &SafetensorsSaveBuilder,
         ) -> Result<()>;
+
+        type GGUFLoadResult;
+        type GGUFSaveBuilder;
+
+        // ===== GGUF =====
+        fn load_gguf_file(path: &str) -> Result<UniquePtr<GGUFLoadResult>>;
+        fn gguf_tensor_names(r: &GGUFLoadResult) -> Vec<String>;
+        fn gguf_take_tensor_by_name(
+            r: Pin<&mut GGUFLoadResult>,
+            name: &str,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn gguf_array_meta_names(r: &GGUFLoadResult) -> Vec<String>;
+        fn gguf_take_array_meta_by_name(
+            r: Pin<&mut GGUFLoadResult>,
+            name: &str,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn gguf_string_meta_names(r: &GGUFLoadResult) -> Vec<String>;
+        fn gguf_string_meta_values(r: &GGUFLoadResult) -> Vec<String>;
+        fn gguf_string_list_meta_names(r: &GGUFLoadResult) -> Vec<String>;
+        fn gguf_string_list_meta_values_packed(r: &GGUFLoadResult) -> Vec<String>;
+        fn gguf_string_list_meta_lengths(r: &GGUFLoadResult) -> Vec<u64>;
+
+        fn new_gguf_save_builder() -> UniquePtr<GGUFSaveBuilder>;
+        fn gguf_builder_add_tensor(b: Pin<&mut GGUFSaveBuilder>, name: &str, array: &MlxArray);
+        fn gguf_builder_add_array_meta(b: Pin<&mut GGUFSaveBuilder>, key: &str, array: &MlxArray);
+        fn gguf_builder_add_string_meta(b: Pin<&mut GGUFSaveBuilder>, key: &str, value: &str);
+        fn gguf_builder_begin_string_list_meta(
+            b: Pin<&mut GGUFSaveBuilder>,
+            key: &str,
+        ) -> Result<()>;
+        fn gguf_builder_push_string_list_meta(
+            b: Pin<&mut GGUFSaveBuilder>,
+            value: &str,
+        ) -> Result<()>;
+        fn gguf_builder_end_string_list_meta(b: Pin<&mut GGUFSaveBuilder>) -> Result<()>;
+        fn save_gguf_file(path: &str, builder: &GGUFSaveBuilder) -> Result<()>;
     }
 }

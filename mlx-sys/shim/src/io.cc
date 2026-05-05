@@ -194,4 +194,164 @@ void save_safetensors_writer(MlxWriter& writer, const SafetensorsSaveBuilder& b)
   mlx::core::save_safetensors(writer.ptr, b.tensors, b.metadata);
 }
 
+// ===== GGUFLoadResult getters =====
+
+rust::Vec<rust::String> gguf_tensor_names(const GGUFLoadResult& r) {
+  rust::Vec<rust::String> out;
+  out.reserve(r.inner_.first.size());
+  for (const auto& kv : r.inner_.first) {
+    out.push_back(rust::String(kv.first));
+  }
+  return out;
+}
+
+std::unique_ptr<MlxArray> gguf_take_tensor_by_name(GGUFLoadResult& r, rust::Str name) {
+  auto it = r.inner_.first.find(std::string(name));
+  if (it == r.inner_.first.end()) {
+    throw std::runtime_error("gguf tensor not found: " + std::string(name));
+  }
+  // Move array out, then erase entry so subsequent take with same name throws.
+  auto array_out = std::make_unique<MlxArray>(std::move(it->second));
+  r.inner_.first.erase(it);
+  return array_out;
+}
+
+rust::Vec<rust::String> gguf_array_meta_names(const GGUFLoadResult& r) {
+  rust::Vec<rust::String> out;
+  for (const auto& kv : r.inner_.second) {
+    if (std::holds_alternative<mlx::core::array>(kv.second)) {
+      out.push_back(rust::String(kv.first));
+    }
+  }
+  return out;
+}
+
+std::unique_ptr<MlxArray> gguf_take_array_meta_by_name(GGUFLoadResult& r, rust::Str name) {
+  auto it = r.inner_.second.find(std::string(name));
+  if (it == r.inner_.second.end()) {
+    throw std::runtime_error("gguf array meta not found: " + std::string(name));
+  }
+  if (!std::holds_alternative<mlx::core::array>(it->second)) {
+    throw std::runtime_error("gguf metadata is not an array variant: " + std::string(name));
+  }
+  // Move array out, then erase entry so subsequent take with same name throws.
+  auto array_out = std::make_unique<MlxArray>(
+      std::move(std::get<mlx::core::array>(it->second)));
+  r.inner_.second.erase(it);
+  return array_out;
+}
+
+rust::Vec<rust::String> gguf_string_meta_names(const GGUFLoadResult& r) {
+  rust::Vec<rust::String> out;
+  for (const auto& kv : r.inner_.second) {
+    if (std::holds_alternative<std::string>(kv.second)) {
+      out.push_back(rust::String(kv.first));
+    }
+  }
+  return out;
+}
+
+rust::Vec<rust::String> gguf_string_meta_values(const GGUFLoadResult& r) {
+  rust::Vec<rust::String> out;
+  for (const auto& kv : r.inner_.second) {
+    if (std::holds_alternative<std::string>(kv.second)) {
+      out.push_back(rust::String(std::get<std::string>(kv.second)));
+    }
+  }
+  return out;
+}
+
+rust::Vec<rust::String> gguf_string_list_meta_names(const GGUFLoadResult& r) {
+  rust::Vec<rust::String> out;
+  for (const auto& kv : r.inner_.second) {
+    if (std::holds_alternative<std::vector<std::string>>(kv.second)) {
+      out.push_back(rust::String(kv.first));
+    }
+  }
+  return out;
+}
+
+rust::Vec<rust::String> gguf_string_list_meta_values_packed(const GGUFLoadResult& r) {
+  rust::Vec<rust::String> out;
+  for (const auto& kv : r.inner_.second) {
+    if (std::holds_alternative<std::vector<std::string>>(kv.second)) {
+      const auto& list = std::get<std::vector<std::string>>(kv.second);
+      for (const auto& s : list) {
+        out.push_back(rust::String(s));
+      }
+    }
+  }
+  return out;
+}
+
+rust::Vec<uint64_t> gguf_string_list_meta_lengths(const GGUFLoadResult& r) {
+  rust::Vec<uint64_t> out;
+  for (const auto& kv : r.inner_.second) {
+    if (std::holds_alternative<std::vector<std::string>>(kv.second)) {
+      out.push_back(static_cast<uint64_t>(
+          std::get<std::vector<std::string>>(kv.second).size()));
+    }
+  }
+  return out;
+}
+
+// ===== GGUFSaveBuilder =====
+
+std::unique_ptr<GGUFSaveBuilder> new_gguf_save_builder() {
+  return std::make_unique<GGUFSaveBuilder>();
+}
+
+void gguf_builder_add_tensor(
+    GGUFSaveBuilder& b, rust::Str name, const MlxArray& array) {
+  b.tensors.emplace(std::string(name), array);
+}
+
+void gguf_builder_add_array_meta(
+    GGUFSaveBuilder& b, rust::Str key, const MlxArray& array) {
+  b.metadata.emplace(std::string(key), mlx::core::GGUFMetaData(array));
+}
+
+void gguf_builder_add_string_meta(
+    GGUFSaveBuilder& b, rust::Str key, rust::Str value) {
+  b.metadata.emplace(std::string(key), mlx::core::GGUFMetaData(std::string(value)));
+}
+
+void gguf_builder_begin_string_list_meta(GGUFSaveBuilder& b, rust::Str key) {
+  if (b.pending_list.has_value()) {
+    throw std::runtime_error(
+        "begin_string_list_meta called without end_string_list_meta");
+  }
+  b.pending_list = std::make_pair(std::string(key), std::vector<std::string>{});
+}
+
+void gguf_builder_push_string_list_meta(GGUFSaveBuilder& b, rust::Str value) {
+  if (!b.pending_list.has_value()) {
+    throw std::runtime_error(
+        "push_string_list_meta called without begin_string_list_meta");
+  }
+  b.pending_list->second.push_back(std::string(value));
+}
+
+void gguf_builder_end_string_list_meta(GGUFSaveBuilder& b) {
+  if (!b.pending_list.has_value()) {
+    throw std::runtime_error(
+        "end_string_list_meta called without begin_string_list_meta");
+  }
+  b.metadata.emplace(
+      std::move(b.pending_list->first),
+      mlx::core::GGUFMetaData(std::move(b.pending_list->second)));
+  b.pending_list.reset();
+}
+
+// ===== 顶层 load/save =====
+
+std::unique_ptr<GGUFLoadResult> load_gguf_file(rust::Str path) {
+  auto data = mlx::core::load_gguf(std::string(path));
+  return std::make_unique<GGUFLoadResult>(std::move(data));
+}
+
+void save_gguf_file(rust::Str path, const GGUFSaveBuilder& b) {
+  mlx::core::save_gguf(std::string(path), b.tensors, b.metadata);
+}
+
 }  // namespace cxx_mlx
