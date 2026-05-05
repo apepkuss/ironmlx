@@ -38,4 +38,29 @@ void seed(uint64_t seed);
 std::unique_ptr<KeyPair> split(const MlxArray& key);
 std::unique_ptr<MlxArray> split_n(const MlxArray& key, int32_t num);
 
+// ===== Basic distributions =====
+
+std::unique_ptr<MlxArray> bits(
+    rust::Slice<const int32_t> shape, int32_t width,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> uniform(
+    const MlxArray& low, const MlxArray& high,
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> uniform_default(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> normal(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* loc, const MlxArray* scale,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> randint(
+    const MlxArray& low, const MlxArray& high,
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key);
+
 }  // namespace cxx_mlx

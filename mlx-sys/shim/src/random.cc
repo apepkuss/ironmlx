@@ -2,6 +2,7 @@
 #include "cxx_mlx_shim/shim_helpers.h"
 
 #include <stdexcept>
+#include <vector>
 
 namespace cxx_mlx {
 
@@ -51,6 +52,55 @@ std::unique_ptr<KeyPair> split(const MlxArray& key) {
 
 std::unique_ptr<MlxArray> split_n(const MlxArray& key, int32_t num) {
   return std::make_unique<MlxArray>(mlx::core::random::split(key, num));
+}
+
+// ===== Basic distributions =====
+
+std::unique_ptr<MlxArray> bits(
+    rust::Slice<const int32_t> shape, int32_t width,
+    const MlxArray* key) {
+  mlx::core::Shape shape_vec(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::random::bits(
+      shape_vec, width, helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> uniform(
+    const MlxArray& low, const MlxArray& high,
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key) {
+  mlx::core::Shape shape_vec(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::random::uniform(
+      low, high, shape_vec,
+      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> uniform_default(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key) {
+  mlx::core::Shape shape_vec(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::random::uniform(
+      shape_vec, helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> normal(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* loc, const MlxArray* scale,
+    const MlxArray* key) {
+  mlx::core::Shape shape_vec(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::random::normal(
+      shape_vec, helpers::dtype_from_repr(dtype_repr),
+      helpers::opt_arr(loc), helpers::opt_arr(scale),
+      helpers::opt_arr(key)));
+}
+
+std::unique_ptr<MlxArray> randint(
+    const MlxArray& low, const MlxArray& high,
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key) {
+  mlx::core::Shape shape_vec(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::random::randint(
+      low, high, shape_vec,
+      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
 }
 
 }  // namespace cxx_mlx

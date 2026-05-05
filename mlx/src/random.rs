@@ -8,7 +8,7 @@
 //!
 //! For LLM token sampling, see `categorical` (P4 Task 3).
 
-use crate::{Array, Error, Result};
+use crate::{Array, Dtype, Error, Result};
 
 /// Get a PRNG key from a u64 seed. The returned array is a uint32 key
 /// suitable for passing to distribution functions or to `split` / `split_n`.
@@ -36,5 +36,76 @@ pub fn split(key: &Array) -> Result<(Array, Array)> {
 /// with shape `[num, ...]`.
 pub fn split_n(key: &Array, num: i32) -> Result<Array> {
     let inner = mlx_sys::random::ffi::split_n(key.as_inner(), num).map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+// ===== Basic distributions =====
+
+/// Generate an array of random uniform 32-bit integers.
+pub fn bits(shape: &[i32], width: i32, key: Option<&Array>) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe { mlx_sys::random::ffi::bits(shape, width, k) }.map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Generate uniform random numbers in the range `[low, high)`.
+pub fn uniform(
+    low: &Array,
+    high: &Array,
+    shape: &[i32],
+    dtype: Dtype,
+    key: Option<&Array>,
+) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::random::ffi::uniform(low.as_inner(), high.as_inner(), shape, dtype.as_u8(), k)
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Generate uniform random numbers in `[0, 1)` with the given shape and dtype.
+pub fn uniform_default(shape: &[i32], dtype: Dtype, key: Option<&Array>) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe { mlx_sys::random::ffi::uniform_default(shape, dtype.as_u8(), k) }
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Generate samples from the normal distribution. `loc` and `scale` default
+/// to 0.0 and 1.0 respectively when `None`.
+pub fn normal(
+    shape: &[i32],
+    dtype: Dtype,
+    loc: Option<&Array>,
+    scale: Option<&Array>,
+    key: Option<&Array>,
+) -> Result<Array> {
+    let l = loc.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let s = scale.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: l/s/k each null or borrow valid for this call.
+    let inner = unsafe { mlx_sys::random::ffi::normal(shape, dtype.as_u8(), l, s, k) }
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Generate uniform random integers in `[low, high)`.
+pub fn randint(
+    low: &Array,
+    high: &Array,
+    shape: &[i32],
+    dtype: Dtype,
+    key: Option<&Array>,
+) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::random::ffi::randint(low.as_inner(), high.as_inner(), shape, dtype.as_u8(), k)
+    }
+    .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }

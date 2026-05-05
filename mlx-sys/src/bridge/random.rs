@@ -25,5 +25,42 @@ pub mod ffi {
         fn seed(seed: u64);
         fn split(key: &MlxArray) -> Result<UniquePtr<KeyPair>>;
         fn split_n(key: &MlxArray, num: i32) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== Basic distributions =====
+        unsafe fn bits(
+            shape: &[i32],
+            width: i32,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn uniform(
+            low: &MlxArray,
+            high: &MlxArray,
+            shape: &[i32],
+            dtype_repr: u8,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn uniform_default(
+            shape: &[i32],
+            dtype_repr: u8,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn normal(
+            shape: &[i32],
+            dtype_repr: u8,
+            loc: *const MlxArray,
+            scale: *const MlxArray,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn randint(
+            low: &MlxArray,
+            high: &MlxArray,
+            shape: &[i32],
+            dtype_repr: u8,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }
