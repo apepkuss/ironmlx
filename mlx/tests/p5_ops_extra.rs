@@ -203,3 +203,14 @@ fn segmented_mm_smoke() {
         }
     }
 }
+
+#[test]
+fn top_level_re_exports_work() {
+    // 验证 P5 公开 API 通过 mlx::ops::* 模块路径访问
+    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3]).expect("a");
+    let b = Array::from_slice(&[4.0_f32, 5.0, 6.0], &[3]).expect("b");
+    // 确认 ops/mod.rs re-export 链路通过到 P5 新增项
+    let dot = mlx::ops::inner_product(&a, &b).expect("inner_product via mlx::ops");
+    let v: Vec<f32> = dot.to_vec().expect("vec");
+    assert!((v[0] - 32.0).abs() < 1e-4);
+}
