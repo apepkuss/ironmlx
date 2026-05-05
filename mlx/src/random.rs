@@ -170,3 +170,100 @@ pub fn categorical_shaped(
             .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+// ===== Special distributions =====
+
+/// Generate samples from a truncated normal distribution restricted to
+/// `[lower, upper]`.
+pub fn truncated_normal(
+    lower: &Array,
+    upper: &Array,
+    shape: &[i32],
+    dtype: Dtype,
+    key: Option<&Array>,
+) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::random::ffi::truncated_normal(
+            lower.as_inner(),
+            upper.as_inner(),
+            shape,
+            dtype.as_u8(),
+            k,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Truncated normal with output shape inferred from `broadcast(lower, upper)`.
+pub fn truncated_normal_default(
+    lower: &Array,
+    upper: &Array,
+    dtype: Dtype,
+    key: Option<&Array>,
+) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::random::ffi::truncated_normal_default(
+            lower.as_inner(),
+            upper.as_inner(),
+            dtype.as_u8(),
+            k,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Generate samples from the standard Gumbel distribution.
+pub fn gumbel(shape: &[i32], dtype: Dtype, key: Option<&Array>) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner =
+        unsafe { mlx_sys::random::ffi::gumbel(shape, dtype.as_u8(), k) }.map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Generate samples from the Laplace distribution with location `loc` and
+/// scale `scale`.
+pub fn laplace(
+    shape: &[i32],
+    dtype: Dtype,
+    loc: f32,
+    scale: f32,
+    key: Option<&Array>,
+) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe { mlx_sys::random::ffi::laplace(shape, dtype.as_u8(), loc, scale, k) }
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Generate samples from a multivariate normal distribution with mean `mean`
+/// and covariance `cov`. Output shape is `[..., dim]` where `dim` is the
+/// last dimension of `mean`.
+pub fn multivariate_normal(
+    mean: &Array,
+    cov: &Array,
+    shape: &[i32],
+    dtype: Dtype,
+    key: Option<&Array>,
+) -> Result<Array> {
+    let k = key.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    // SAFETY: k is null or borrow valid for this call.
+    let inner = unsafe {
+        mlx_sys::random::ffi::multivariate_normal(
+            mean.as_inner(),
+            cov.as_inner(),
+            shape,
+            dtype.as_u8(),
+            k,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

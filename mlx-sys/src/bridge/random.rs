@@ -94,5 +94,43 @@ pub mod ffi {
             shape: &[i32],
             key: *const MlxArray,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== Special distributions =====
+        unsafe fn truncated_normal(
+            lower: &MlxArray,
+            upper: &MlxArray,
+            shape: &[i32],
+            dtype_repr: u8,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn truncated_normal_default(
+            lower: &MlxArray,
+            upper: &MlxArray,
+            dtype_repr: u8,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn gumbel(
+            shape: &[i32],
+            dtype_repr: u8,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn laplace(
+            shape: &[i32],
+            dtype_repr: u8,
+            loc: f32,
+            scale: f32,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn multivariate_normal(
+            mean: &MlxArray,
+            cov: &MlxArray,
+            shape: &[i32],
+            dtype_repr: u8,
+            key: *const MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

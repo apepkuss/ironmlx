@@ -86,4 +86,30 @@ std::unique_ptr<MlxArray> categorical_shaped(
     rust::Slice<const int32_t> shape,
     const MlxArray* key);
 
+// ===== Special distributions =====
+
+std::unique_ptr<MlxArray> truncated_normal(
+    const MlxArray& lower, const MlxArray& upper,
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> truncated_normal_default(
+    const MlxArray& lower, const MlxArray& upper,
+    uint8_t dtype_repr,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> gumbel(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> laplace(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    float loc, float scale,
+    const MlxArray* key);
+
+std::unique_ptr<MlxArray> multivariate_normal(
+    const MlxArray& mean, const MlxArray& cov,
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    const MlxArray* key);
+
 }  // namespace cxx_mlx

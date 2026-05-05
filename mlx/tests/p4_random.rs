@@ -175,3 +175,104 @@ fn categorical_shaped_returns_explicit_shape() {
     let out = categorical_shaped(&logits, -1, &[5, 2], Some(&k)).expect("categorical_shaped");
     assert_eq!(out.shape().as_slice(), &[5, 2]);
 }
+
+use mlx::random::{
+    gumbel, laplace, multivariate_normal, truncated_normal, truncated_normal_default,
+};
+
+#[test]
+fn truncated_normal_in_bounds() {
+    let k = key(42).expect("key");
+    let lower = Array::from_slice(&[-1.0_f32], &[]).expect("lower");
+    let upper = Array::from_slice(&[1.0_f32], &[]).expect("upper");
+    let t = truncated_normal(&lower, &upper, &[100], Dtype::Float32, Some(&k))
+        .expect("truncated_normal");
+    let v: Vec<f32> = t.to_vec().expect("to_vec");
+    for x in &v {
+        assert!(
+            *x >= -1.0 && *x <= 1.0,
+            "truncated value {x} out of [-1, 1]"
+        );
+    }
+}
+
+#[test]
+fn truncated_normal_default_broadcast_shape() {
+    let k = key(42).expect("key");
+    let lower = Array::from_slice(&[-1.0_f32, -2.0], &[2]).expect("lower");
+    let upper = Array::from_slice(&[1.0_f32, 2.0], &[2]).expect("upper");
+    let t = truncated_normal_default(&lower, &upper, Dtype::Float32, Some(&k))
+        .expect("truncated_normal_default");
+    // shape 从 broadcast(lower, upper) = [2]
+    assert_eq!(t.shape().as_slice(), &[2]);
+}
+
+#[test]
+fn gumbel_finite() {
+    let k = key(42).expect("key");
+    let g = gumbel(&[100], Dtype::Float32, Some(&k)).expect("gumbel");
+    assert_eq!(g.shape().as_slice(), &[100]);
+    let v: Vec<f32> = g.to_vec().expect("to_vec");
+    for x in &v {
+        assert!(x.is_finite(), "non-finite gumbel value: {x}");
+    }
+}
+
+#[test]
+fn laplace_finite() {
+    let k = key(42).expect("key");
+    let l = laplace(&[100], Dtype::Float32, 0.0, 1.0, Some(&k)).expect("laplace");
+    assert_eq!(l.shape().as_slice(), &[100]);
+    let v: Vec<f32> = l.to_vec().expect("to_vec");
+    for x in &v {
+        assert!(x.is_finite(), "non-finite laplace value: {x}");
+    }
+}
+
+#[test]
+fn multivariate_normal_binding_smoke() {
+    // Binding wiring smoke test. multivariate_normal internally calls linalg::svd
+    // which is NYI on the Metal GPU backend (as of MLX HEAD). The test tolerates
+    // Err only if the message indicates GPU SVD is not yet supported; any other
+    // failure mode (real regression, invalid bindings) panics.
+    //
+    // TODO: when MLX implements SVD on Metal (or adds a non-SVD code path for
+    // multivariate_normal), replace this with a real shape/sample test:
+    //   - assert shape == [10, 2]
+    //   - assert all values are finite
+    //   - assert sample covariance roughly matches input cov
+    let k = key(42).expect("key");
+    let mean = Array::from_slice(&[0.0_f32, 0.0], &[2]).expect("mean");
+    let cov = Array::from_slice(&[1.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("cov");
+
+    let result = multivariate_normal(&mean, &cov, &[10], Dtype::Float32, Some(&k));
+
+    match result {
+        Ok(mvn) => {
+            // If MLX implements SVD on GPU, verify shape correctness.
+            assert_eq!(mvn.shape().as_slice(), &[10, 2]);
+            // Try to materialize values; tolerate eval-time NYI.
+            match mvn.to_vec::<f32>() {
+                Ok(v) => {
+                    for x in &v {
+                        assert!(x.is_finite(), "non-finite mvn value: {x}");
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("{e:?}");
+                    assert!(
+                        msg.contains("not yet supported") || msg.contains("svd"),
+                        "multivariate_normal eval failed with non-NYI error: {msg}"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("not yet supported") || msg.contains("svd"),
+                "multivariate_normal construction failed with non-NYI error: {msg}"
+            );
+        }
+    }
+}
