@@ -90,4 +90,7 @@ std::unique_ptr<MlxArray> gather_qmm(
     rust::Str mode,
     bool sorted_indices);
 
+std::unique_ptr<MlxArray> from_fp8(const MlxArray& x, uint8_t dtype_repr);
+std::unique_ptr<MlxArray> to_fp8(const MlxArray& x);
+
 }  // namespace cxx_mlx

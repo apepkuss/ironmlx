@@ -193,3 +193,16 @@ pub fn gather_qmm(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+/// Convert an E4M3 float8 array to the given floating-point dtype.
+pub fn from_fp8(x: &Array, dtype: Dtype) -> Result<Array> {
+    let inner =
+        mlx_sys::quantization::ffi::from_fp8(x.as_inner(), dtype.as_u8()).map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Convert a floating-point matrix to E4M3 float8.
+pub fn to_fp8(x: &Array) -> Result<Array> {
+    let inner = mlx_sys::quantization::ffi::to_fp8(x.as_inner()).map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}

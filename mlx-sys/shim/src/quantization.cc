@@ -15,13 +15,7 @@ inline std::optional<int> opt_i(bool has, int32_t v) {
   return has ? std::optional<int>(v) : std::nullopt;
 }
 
-inline std::optional<mlx::core::Dtype> opt_dtype(bool has, uint8_t v) {
-  // Dtype 在 MLX 中是含 size 的 struct，但 Val 枚举值定义了所有 dtype。
-  // 用 size_of(Dtype) 反推不直接，只能依赖默认 Dtype 构造器。所幸 dequantize
-  // 的 dtype 参数 MLX 内部按枚举 dispatch，传 Dtype{Val, size} 即可。
-  if (!has) return std::nullopt;
-  // 重建对应 Val 的 Dtype，size 从 default 实例查（MLX dtype.h 定义了 inline constexpr
-  // 实例如 mlx::core::float32 等）。这里走简化路径：手动 case 所有 Val 值。
+inline mlx::core::Dtype dtype_from_repr(uint8_t v) {
   switch (static_cast<mlx::core::Dtype::Val>(v)) {
     case mlx::core::Dtype::Val::bool_:    return mlx::core::bool_;
     case mlx::core::Dtype::Val::uint8:    return mlx::core::uint8;
@@ -39,6 +33,11 @@ inline std::optional<mlx::core::Dtype> opt_dtype(bool has, uint8_t v) {
     case mlx::core::Dtype::Val::complex64:return mlx::core::complex64;
   }
   throw std::runtime_error("unknown Dtype::Val");
+}
+
+inline std::optional<mlx::core::Dtype> opt_dtype(bool has, uint8_t v) {
+  if (!has) return std::nullopt;
+  return dtype_from_repr(v);
 }
 
 }  // namespace
@@ -157,6 +156,14 @@ std::unique_ptr<MlxArray> gather_qmm(
       opt_i(has_bits, bits),
       std::string(mode),
       sorted_indices));
+}
+
+std::unique_ptr<MlxArray> from_fp8(const MlxArray& x, uint8_t dtype_repr) {
+  return std::make_unique<MlxArray>(mlx::core::from_fp8(x, dtype_from_repr(dtype_repr)));
+}
+
+std::unique_ptr<MlxArray> to_fp8(const MlxArray& x) {
+  return std::make_unique<MlxArray>(mlx::core::to_fp8(x));
 }
 
 }  // namespace cxx_mlx

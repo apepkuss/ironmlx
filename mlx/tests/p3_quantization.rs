@@ -244,3 +244,26 @@ fn gather_qmm_no_indices_binding_smoke() {
         }
     }
 }
+
+use mlx::quantization::{from_fp8, to_fp8};
+use mlx::Dtype;
+
+#[test]
+fn fp8_round_trip_f32_small_integers() {
+    // 小整数 1.0/2.0/3.0/4.0 在 E4M3 (4-exp 3-mantissa) 范围内可精确或近似表达。
+    // E4M3 mantissa 仅 3-bit，相对误差典型 ~6-12%；容差 0.5 安全（绝对误差对小值）。
+    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[4]).expect("x");
+    let fp8 = to_fp8(&x).expect("to_fp8");
+
+    let back = from_fp8(&fp8, Dtype::Float32).expect("from_fp8");
+    assert_eq!(back.shape().as_slice(), &[4]);
+
+    let v_back: Vec<f32> = back.to_vec().expect("to_vec");
+    let expected = [1.0_f32, 2.0, 3.0, 4.0];
+    for (i, (got, want)) in v_back.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 0.5,
+            "fp8 round-trip[{i}] = {got}, want {want}"
+        );
+    }
+}

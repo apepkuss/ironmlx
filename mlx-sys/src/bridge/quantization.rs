@@ -97,5 +97,9 @@ pub mod ffi {
             mode: &str,
             sorted_indices: bool,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== FP8 =====
+        fn from_fp8(x: &MlxArray, dtype_repr: u8) -> Result<UniquePtr<MlxArray>>;
+        fn to_fp8(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
     }
 }
