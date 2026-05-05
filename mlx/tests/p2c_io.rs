@@ -229,3 +229,41 @@ fn gguf_load_nonexistent_file_returns_err() {
     let result = io::load_gguf("/nonexistent/path/foo.gguf");
     assert!(result.is_err());
 }
+
+#[test]
+fn npy_round_trip_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("array.npy");
+    let path_str = path.to_str().unwrap();
+    let array = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("a");
+
+    io::save_npy(path_str, &array).expect("save_npy");
+    let loaded = io::load_npy(path_str).expect("load_npy");
+
+    assert_eq!(loaded.shape().as_slice(), &[2, 3]);
+    let v: Vec<f32> = loaded.to_vec().expect("to_vec");
+    assert_eq!(v, vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn npy_round_trip_memory() {
+    let array = Array::from_slice(&[10.0_f32, 20.0, 30.0], &[3]).expect("a");
+
+    let mut writer = io::Writer::memory();
+    io::save_npy_to_writer(&mut writer, &array).expect("save");
+    let bytes = writer.into_bytes().expect("into_bytes");
+    assert!(!bytes.is_empty());
+
+    let mut reader = io::Reader::from_bytes(&bytes);
+    let loaded = io::load_npy_from_reader(&mut reader).expect("load");
+
+    assert_eq!(loaded.shape().as_slice(), &[3]);
+    let v: Vec<f32> = loaded.to_vec().expect("to_vec");
+    assert_eq!(v, vec![10.0_f32, 20.0, 30.0]);
+}
+
+#[test]
+fn npy_load_nonexistent_file_returns_err() {
+    let result = io::load_npy("/nonexistent/path/foo.npy");
+    assert!(result.is_err());
+}

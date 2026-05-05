@@ -223,3 +223,27 @@ pub fn save_gguf(
     }
     mlx_sys::io::ffi::save_gguf_file(path, &builder).map_err(Error::from)
 }
+
+// ===== npy =====
+
+/// Load a single array from a `.npy` file.
+pub fn load_npy(path: &str) -> Result<Array> {
+    let inner = mlx_sys::io::ffi::load_npy_file(path).map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Load a single array from a Reader (`.npy` format).
+pub fn load_npy_from_reader(reader: &mut Reader) -> Result<Array> {
+    let inner = mlx_sys::io::ffi::load_npy_reader(reader.pin_mut()).map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Save a single array to a `.npy` file.
+pub fn save_npy(path: &str, array: &Array) -> Result<()> {
+    mlx_sys::io::ffi::save_npy_file(path, array.as_inner()).map_err(Error::from)
+}
+
+/// Save a single array to a Writer (`.npy` format).
+pub fn save_npy_to_writer(writer: &mut Writer, array: &Array) -> Result<()> {
+    mlx_sys::io::ffi::save_npy_writer(writer.pin_mut(), array.as_inner()).map_err(Error::from)
+}

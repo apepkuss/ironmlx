@@ -354,4 +354,22 @@ void save_gguf_file(rust::Str path, const GGUFSaveBuilder& b) {
   mlx::core::save_gguf(std::string(path), b.tensors, b.metadata);
 }
 
+// ===== npy =====
+
+std::unique_ptr<MlxArray> load_npy_file(rust::Str path) {
+  return std::make_unique<MlxArray>(mlx::core::load(std::string(path)));
+}
+
+std::unique_ptr<MlxArray> load_npy_reader(MlxReader& reader) {
+  return std::make_unique<MlxArray>(mlx::core::load(reader.ptr));
+}
+
+void save_npy_file(rust::Str path, const MlxArray& array) {
+  mlx::core::save(std::string(path), array);
+}
+
+void save_npy_writer(MlxWriter& writer, const MlxArray& array) {
+  mlx::core::save(writer.ptr, array);
+}
+
 }  // namespace cxx_mlx

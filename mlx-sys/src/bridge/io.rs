@@ -94,5 +94,11 @@ pub mod ffi {
         ) -> Result<()>;
         fn gguf_builder_end_string_list_meta(b: Pin<&mut GGUFSaveBuilder>) -> Result<()>;
         fn save_gguf_file(path: &str, builder: &GGUFSaveBuilder) -> Result<()>;
+
+        // ===== npy =====
+        fn load_npy_file(path: &str) -> Result<UniquePtr<MlxArray>>;
+        fn load_npy_reader(reader: Pin<&mut MlxReader>) -> Result<UniquePtr<MlxArray>>;
+        fn save_npy_file(path: &str, array: &MlxArray) -> Result<()>;
+        fn save_npy_writer(writer: Pin<&mut MlxWriter>, array: &MlxArray) -> Result<()>;
     }
 }

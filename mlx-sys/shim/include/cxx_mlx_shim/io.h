@@ -175,4 +175,11 @@ void gguf_builder_end_string_list_meta(GGUFSaveBuilder& b);
 std::unique_ptr<GGUFLoadResult> load_gguf_file(rust::Str path);
 void save_gguf_file(rust::Str path, const GGUFSaveBuilder& builder);
 
+// ===== npy (single-array) =====
+
+std::unique_ptr<MlxArray> load_npy_file(rust::Str path);
+std::unique_ptr<MlxArray> load_npy_reader(MlxReader& reader);
+void save_npy_file(rust::Str path, const MlxArray& array);
+void save_npy_writer(MlxWriter& writer, const MlxArray& array);
+
 }  // namespace cxx_mlx
