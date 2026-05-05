@@ -54,6 +54,7 @@ fn main() {
         "src/bridge/fast.rs",
         "src/bridge/io.rs",
         "src/bridge/quantization.rs",
+        "src/bridge/random.rs",
     ])
     .file("shim/src/array.cc")
     .file("shim/src/transforms.cc")
@@ -61,6 +62,7 @@ fn main() {
     .file("shim/src/fast.cc")
     .file("shim/src/io.cc")
     .file("shim/src/quantization.cc")
+    .file("shim/src/random.cc")
     .include("shim/include")
     .include(&include_dir)
     .std("c++20")
