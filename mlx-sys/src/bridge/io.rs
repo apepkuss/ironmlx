@@ -25,5 +25,38 @@ pub mod ffi {
         fn create_file_writer(path: &str) -> Result<UniquePtr<MlxWriter>>;
         fn create_memory_writer() -> UniquePtr<MlxWriter>;
         fn writer_into_bytes(writer: UniquePtr<MlxWriter>) -> Result<Vec<u8>>;
+
+        type SafetensorsLoadResult;
+        type SafetensorsSaveBuilder;
+
+        // ===== safetensors =====
+        fn load_safetensors_file(path: &str) -> Result<UniquePtr<SafetensorsLoadResult>>;
+        fn load_safetensors_reader(
+            reader: Pin<&mut MlxReader>,
+        ) -> Result<UniquePtr<SafetensorsLoadResult>>;
+        fn safetensors_tensor_names(r: &SafetensorsLoadResult) -> Vec<String>;
+        fn safetensors_take_tensor_by_name(
+            r: Pin<&mut SafetensorsLoadResult>,
+            name: &str,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn safetensors_metadata_names(r: &SafetensorsLoadResult) -> Vec<String>;
+        fn safetensors_metadata_values(r: &SafetensorsLoadResult) -> Vec<String>;
+
+        fn new_safetensors_save_builder() -> UniquePtr<SafetensorsSaveBuilder>;
+        fn safetensors_builder_add_tensor(
+            b: Pin<&mut SafetensorsSaveBuilder>,
+            name: &str,
+            array: &MlxArray,
+        );
+        fn safetensors_builder_add_metadata(
+            b: Pin<&mut SafetensorsSaveBuilder>,
+            key: &str,
+            value: &str,
+        );
+        fn save_safetensors_file(path: &str, builder: &SafetensorsSaveBuilder) -> Result<()>;
+        fn save_safetensors_writer(
+            writer: Pin<&mut MlxWriter>,
+            builder: &SafetensorsSaveBuilder,
+        ) -> Result<()>;
     }
 }

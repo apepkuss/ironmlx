@@ -79,4 +79,47 @@ std::unique_ptr<MlxWriter> create_memory_writer();
 // 仅 MemoryWriter 合法；FileWriter 抛 runtime_error。消费 writer 语义。
 rust::Vec<uint8_t> writer_into_bytes(std::unique_ptr<MlxWriter> writer);
 
+// ===== SafetensorsLoadResult (opaque) =====
+
+class SafetensorsLoadResult {
+ public:
+  explicit SafetensorsLoadResult(mlx::core::SafetensorsLoad data)
+      : inner_(std::move(data)) {}
+  mlx::core::SafetensorsLoad inner_;
+};
+
+// 注：take_tensor_by_name 单次性消费（同名重复调用会抛异常）。
+// Names 应来自 safetensors_tensor_names()；不存在时 shim 抛 runtime_error。
+rust::Vec<rust::String> safetensors_tensor_names(const SafetensorsLoadResult& r);
+// Take a single tensor by name (single-use; subsequent take with same name throws).
+// Names should be obtained from safetensors_tensor_names(); shim throws if not found.
+std::unique_ptr<MlxArray> safetensors_take_tensor_by_name(
+    SafetensorsLoadResult& r, rust::Str name);
+rust::Vec<rust::String> safetensors_metadata_names(const SafetensorsLoadResult& r);
+rust::Vec<rust::String> safetensors_metadata_values(const SafetensorsLoadResult& r);
+
+// ===== SafetensorsSaveBuilder (opaque) =====
+
+class SafetensorsSaveBuilder {
+ public:
+  std::unordered_map<std::string, mlx::core::array> tensors;
+  std::unordered_map<std::string, std::string> metadata;
+};
+
+std::unique_ptr<SafetensorsSaveBuilder> new_safetensors_save_builder();
+// Adds a tensor to the builder. The array is shallow-copied (shared buffer
+// via mlx::core::array's refcounted internals), so this is cheap regardless
+// of array size.
+void safetensors_builder_add_tensor(
+    SafetensorsSaveBuilder& b, rust::Str name, const MlxArray& array);
+void safetensors_builder_add_metadata(
+    SafetensorsSaveBuilder& b, rust::Str key, rust::Str value);
+
+// ===== 顶层 load/save APIs =====
+
+std::unique_ptr<SafetensorsLoadResult> load_safetensors_file(rust::Str path);
+std::unique_ptr<SafetensorsLoadResult> load_safetensors_reader(MlxReader& reader);
+void save_safetensors_file(rust::Str path, const SafetensorsSaveBuilder& builder);
+void save_safetensors_writer(MlxWriter& writer, const SafetensorsSaveBuilder& builder);
+
 }  // namespace cxx_mlx

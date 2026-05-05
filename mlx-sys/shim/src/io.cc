@@ -116,4 +116,82 @@ rust::Vec<uint8_t> writer_into_bytes(std::unique_ptr<MlxWriter> w) {
   return out;
 }
 
+// ===== SafetensorsLoadResult getters =====
+
+rust::Vec<rust::String> safetensors_tensor_names(const SafetensorsLoadResult& r) {
+  rust::Vec<rust::String> out;
+  out.reserve(r.inner_.first.size());
+  for (const auto& kv : r.inner_.first) {
+    out.push_back(rust::String(kv.first));
+  }
+  return out;
+}
+
+std::unique_ptr<MlxArray> safetensors_take_tensor_by_name(
+    SafetensorsLoadResult& r, rust::Str name) {
+  auto it = r.inner_.first.find(std::string(name));
+  if (it == r.inner_.first.end()) {
+    throw std::runtime_error("safetensors tensor not found: " + std::string(name));
+  }
+  // Move array out, then erase entry so subsequent take with same name throws
+  // (matches the "single-use" contract documented in the header).
+  auto array_out = std::make_unique<MlxArray>(std::move(it->second));
+  r.inner_.first.erase(it);
+  return array_out;
+}
+
+rust::Vec<rust::String> safetensors_metadata_names(const SafetensorsLoadResult& r) {
+  rust::Vec<rust::String> out;
+  out.reserve(r.inner_.second.size());
+  for (const auto& kv : r.inner_.second) {
+    out.push_back(rust::String(kv.first));
+  }
+  return out;
+}
+
+rust::Vec<rust::String> safetensors_metadata_values(const SafetensorsLoadResult& r) {
+  rust::Vec<rust::String> out;
+  out.reserve(r.inner_.second.size());
+  for (const auto& kv : r.inner_.second) {
+    out.push_back(rust::String(kv.second));
+  }
+  return out;
+}
+
+// ===== SafetensorsSaveBuilder =====
+
+std::unique_ptr<SafetensorsSaveBuilder> new_safetensors_save_builder() {
+  return std::make_unique<SafetensorsSaveBuilder>();
+}
+
+void safetensors_builder_add_tensor(
+    SafetensorsSaveBuilder& b, rust::Str name, const MlxArray& array) {
+  b.tensors.emplace(std::string(name), array);
+}
+
+void safetensors_builder_add_metadata(
+    SafetensorsSaveBuilder& b, rust::Str key, rust::Str value) {
+  b.metadata.emplace(std::string(key), std::string(value));
+}
+
+// ===== 顶层 load/save =====
+
+std::unique_ptr<SafetensorsLoadResult> load_safetensors_file(rust::Str path) {
+  auto data = mlx::core::load_safetensors(std::string(path));
+  return std::make_unique<SafetensorsLoadResult>(std::move(data));
+}
+
+std::unique_ptr<SafetensorsLoadResult> load_safetensors_reader(MlxReader& reader) {
+  auto data = mlx::core::load_safetensors(reader.ptr);
+  return std::make_unique<SafetensorsLoadResult>(std::move(data));
+}
+
+void save_safetensors_file(rust::Str path, const SafetensorsSaveBuilder& b) {
+  mlx::core::save_safetensors(std::string(path), b.tensors, b.metadata);
+}
+
+void save_safetensors_writer(MlxWriter& writer, const SafetensorsSaveBuilder& b) {
+  mlx::core::save_safetensors(writer.ptr, b.tensors, b.metadata);
+}
+
 }  // namespace cxx_mlx

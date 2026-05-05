@@ -30,7 +30,6 @@ impl Reader {
         Reader(mlx_sys::io::ffi::open_memory_reader(bytes))
     }
 
-    #[allow(dead_code)] // Will be used by load_*_from_reader in Tasks 2/4
     pub(crate) fn pin_mut(&mut self) -> Pin<&mut mlx_sys::io::ffi::MlxReader> {
         self.0.pin_mut()
     }
@@ -54,8 +53,78 @@ impl Writer {
         mlx_sys::io::ffi::writer_into_bytes(self.0).map_err(Error::from)
     }
 
-    #[allow(dead_code)] // Will be used by save_*_to_writer in Tasks 2/4
     pub(crate) fn pin_mut(&mut self) -> Pin<&mut mlx_sys::io::ffi::MlxWriter> {
         self.0.pin_mut()
     }
+}
+
+use std::collections::HashMap;
+
+use crate::Array;
+
+// ===== safetensors =====
+
+/// Load tensors + string metadata from a `.safetensors` file.
+pub fn load_safetensors(path: &str) -> Result<(HashMap<String, Array>, HashMap<String, String>)> {
+    let mut result = mlx_sys::io::ffi::load_safetensors_file(path).map_err(Error::from)?;
+    safetensors_decompose(&mut result)
+}
+
+/// Load tensors + string metadata from a Reader.
+pub fn load_safetensors_from_reader(
+    reader: &mut Reader,
+) -> Result<(HashMap<String, Array>, HashMap<String, String>)> {
+    let mut result =
+        mlx_sys::io::ffi::load_safetensors_reader(reader.pin_mut()).map_err(Error::from)?;
+    safetensors_decompose(&mut result)
+}
+
+fn safetensors_decompose(
+    result: &mut cxx::UniquePtr<mlx_sys::io::ffi::SafetensorsLoadResult>,
+) -> Result<(HashMap<String, Array>, HashMap<String, String>)> {
+    let names = mlx_sys::io::ffi::safetensors_tensor_names(result);
+    let mut tensors: HashMap<String, Array> = HashMap::with_capacity(names.len());
+    for name in names {
+        let array_ptr = mlx_sys::io::ffi::safetensors_take_tensor_by_name(result.pin_mut(), &name)
+            .map_err(Error::from)?;
+        tensors.insert(name, Array::from_inner(array_ptr));
+    }
+    let meta_names = mlx_sys::io::ffi::safetensors_metadata_names(result);
+    let meta_values = mlx_sys::io::ffi::safetensors_metadata_values(result);
+    let metadata: HashMap<String, String> = meta_names.into_iter().zip(meta_values).collect();
+    Ok((tensors, metadata))
+}
+
+/// Save tensors + metadata to a `.safetensors` file.
+pub fn save_safetensors(
+    path: &str,
+    tensors: &HashMap<String, Array>,
+    metadata: &HashMap<String, String>,
+) -> Result<()> {
+    let builder = build_safetensors_builder(tensors, metadata);
+    mlx_sys::io::ffi::save_safetensors_file(path, &builder).map_err(Error::from)
+}
+
+/// Save tensors + metadata to a Writer.
+pub fn save_safetensors_to_writer(
+    writer: &mut Writer,
+    tensors: &HashMap<String, Array>,
+    metadata: &HashMap<String, String>,
+) -> Result<()> {
+    let builder = build_safetensors_builder(tensors, metadata);
+    mlx_sys::io::ffi::save_safetensors_writer(writer.pin_mut(), &builder).map_err(Error::from)
+}
+
+fn build_safetensors_builder(
+    tensors: &HashMap<String, Array>,
+    metadata: &HashMap<String, String>,
+) -> cxx::UniquePtr<mlx_sys::io::ffi::SafetensorsSaveBuilder> {
+    let mut builder = mlx_sys::io::ffi::new_safetensors_save_builder();
+    for (name, array) in tensors {
+        mlx_sys::io::ffi::safetensors_builder_add_tensor(builder.pin_mut(), name, array.as_inner());
+    }
+    for (key, value) in metadata {
+        mlx_sys::io::ffi::safetensors_builder_add_metadata(builder.pin_mut(), key, value);
+    }
+    builder
 }
