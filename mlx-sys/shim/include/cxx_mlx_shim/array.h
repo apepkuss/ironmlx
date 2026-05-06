@@ -520,4 +520,24 @@ std::unique_ptr<MlxArray> squeeze(
     const MlxArray& a, rust::Slice<const int32_t> axes,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.6 累积归约 (cumsum/cumprod) ===
+// Scan along `axis`. `reverse=true` flips scan direction; `inclusive=true`
+// includes the element at the index in the running aggregate.
+std::unique_ptr<MlxArray> cumsum(
+    const MlxArray& a, int32_t axis, bool reverse, bool inclusive,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> cumprod(
+    const MlxArray& a, int32_t axis, bool reverse, bool inclusive,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.6 shape 补完 (flatten/repeat) ===
+// `flatten` collapses dims `[start_axis, end_axis]` (inclusive, neg indices
+// allowed) into one. `repeat` tiles `a` `repeats` times along `axis`.
+std::unique_ptr<MlxArray> flatten(
+    const MlxArray& a, int32_t start_axis, int32_t end_axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> repeat(
+    const MlxArray& a, int32_t repeats, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 }  // namespace cxx_mlx

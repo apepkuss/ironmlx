@@ -1213,4 +1213,42 @@ std::unique_ptr<MlxArray> remainder(
   return std::make_unique<MlxArray>(mlx::core::remainder(a, b, target));
 }
 
+// === P5.6 累积归约 (cumsum/cumprod) ===
+
+std::unique_ptr<MlxArray> cumsum(
+    const MlxArray& a, int32_t axis, bool reverse, bool inclusive,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(
+      mlx::core::cumsum(a, axis, reverse, inclusive, target));
+}
+std::unique_ptr<MlxArray> cumprod(
+    const MlxArray& a, int32_t axis, bool reverse, bool inclusive,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(
+      mlx::core::cumprod(a, axis, reverse, inclusive, target));
+}
+
+// === P5.6 shape 补完 (flatten/repeat) ===
+
+std::unique_ptr<MlxArray> flatten(
+    const MlxArray& a, int32_t start_axis, int32_t end_axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(
+      mlx::core::flatten(a, start_axis, end_axis, target));
+}
+std::unique_ptr<MlxArray> repeat(
+    const MlxArray& a, int32_t repeats, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(
+      mlx::core::repeat(a, repeats, axis, target));
+}
+
 }  // namespace cxx_mlx

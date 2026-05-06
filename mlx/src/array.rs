@@ -909,6 +909,74 @@ impl Array {
         crate::ops::binary::remainder_on(self, rhs, target)
     }
 
+    // === P5.6 累积归约 (cumsum / cumprod) ===
+
+    /// Cumulative sum along `axis`. See [`crate::ops::cumulative::cumsum`].
+    pub fn cumsum(&self, axis: i32, reverse: bool, inclusive: bool) -> Result<Array> {
+        crate::ops::cumulative::cumsum(self, axis, reverse, inclusive)
+    }
+
+    /// Stream-targeted variant of [`Array::cumsum`].
+    pub fn cumsum_on(
+        &self,
+        axis: i32,
+        reverse: bool,
+        inclusive: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::cumulative::cumsum_on(self, axis, reverse, inclusive, target)
+    }
+
+    /// Cumulative product along `axis`. See [`crate::ops::cumulative::cumprod`].
+    pub fn cumprod(&self, axis: i32, reverse: bool, inclusive: bool) -> Result<Array> {
+        crate::ops::cumulative::cumprod(self, axis, reverse, inclusive)
+    }
+
+    /// Stream-targeted variant of [`Array::cumprod`].
+    pub fn cumprod_on(
+        &self,
+        axis: i32,
+        reverse: bool,
+        inclusive: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::cumulative::cumprod_on(self, axis, reverse, inclusive, target)
+    }
+
+    // === P5.6 shape 补完 (flatten / repeat) ===
+
+    /// Flatten dims `[start_axis, end_axis]` (inclusive) into one. See
+    /// [`crate::ops::shape::flatten`].
+    pub fn flatten(&self, start_axis: i32, end_axis: i32) -> Result<Array> {
+        crate::ops::shape::flatten(self, start_axis, end_axis)
+    }
+
+    /// Stream-targeted variant of [`Array::flatten`].
+    pub fn flatten_on(
+        &self,
+        start_axis: i32,
+        end_axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::flatten_on(self, start_axis, end_axis, target)
+    }
+
+    /// Repeat `self` `repeats` times along `axis`. See
+    /// [`crate::ops::shape::repeat`].
+    pub fn repeat(&self, repeats: i32, axis: i32) -> Result<Array> {
+        crate::ops::shape::repeat(self, repeats, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::repeat`].
+    pub fn repeat_on(
+        &self,
+        repeats: i32,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::repeat_on(self, repeats, axis, target)
+    }
+
     // === P5.5 clip ===
 
     /// Clamp to `[a_min, a_max]`. Pass `None` for either bound to leave it

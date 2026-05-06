@@ -211,3 +211,38 @@ fn logsumexp_numerically_stable() {
     // log(2) ≈ 0.6931
     assert!((r.item::<f32>().unwrap() - 0.6931).abs() < 1e-3);
 }
+
+// === Task 5: 累积归约 (cumsum/cumprod) + shape 补完 (flatten/repeat) ===
+
+#[test]
+fn cumsum_along_axis() {
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (4,)).try_into().unwrap();
+    let r = mlx::ops::cumulative::cumsum(&a, 0, false, true).expect("cumsum");
+    assert_eq!(r.to_vec::<f32>().unwrap(), vec![1.0, 3.0, 6.0, 10.0]);
+}
+
+#[test]
+fn cumprod_inclusive() {
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (4,)).try_into().unwrap();
+    let r = mlx::ops::cumulative::cumprod(&a, 0, false, true).expect("cumprod");
+    assert_eq!(r.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 6.0, 24.0]);
+}
+
+#[test]
+fn flatten_collapses_dims() {
+    let a: Array = (&[1.0_f32; 24][..], (2, 3, 4)).try_into().unwrap();
+    let r = mlx::ops::shape::flatten(&a, 0, -1).expect("flatten");
+    assert_eq!(r.shape().as_slice(), &[24]);
+}
+
+#[test]
+fn repeat_along_axis() {
+    let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+    let r = mlx::ops::shape::repeat(&a, 3, 0).expect("repeat");
+    assert_eq!(r.shape().as_slice(), &[6]);
+    // Each element repeats `repeats` times consecutively along the axis.
+    assert_eq!(
+        r.to_vec::<f32>().unwrap(),
+        vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
+    );
+}

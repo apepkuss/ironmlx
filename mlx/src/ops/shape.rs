@@ -287,3 +287,20 @@ pub fn squeeze_on<A: IntoAxes>(
         .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+// === P5.6 shape 补完 (flatten/repeat) ===
+
+op_with_stream! {
+    /// Flatten dims `[start_axis, end_axis]` (inclusive, negative indices
+    /// allowed) into one. Use `start_axis=0, end_axis=-1` to fully flatten
+    /// to 1D.
+    pub fn flatten(a: &Array, start_axis: i32, end_axis: i32) -> Result<Array>
+        => mlx_sys::array::ffi::flatten(a.as_inner(), start_axis, end_axis);
+}
+
+op_with_stream! {
+    /// Repeat `a` `repeats` times along `axis`. The output's `axis` size
+    /// becomes `a.shape()[axis] * repeats`.
+    pub fn repeat(a: &Array, repeats: i32, axis: i32) -> Result<Array>
+        => mlx_sys::array::ffi::repeat(a.as_inner(), repeats, axis);
+}

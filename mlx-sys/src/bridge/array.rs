@@ -1070,5 +1070,47 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.6 累积归约 (cumsum/cumprod) ===
+        fn cumsum(
+            a: &MlxArray,
+            axis: i32,
+            reverse: bool,
+            inclusive: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn cumprod(
+            a: &MlxArray,
+            axis: i32,
+            reverse: bool,
+            inclusive: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.6 shape 补完 (flatten/repeat) ===
+        fn flatten(
+            a: &MlxArray,
+            start_axis: i32,
+            end_axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn repeat(
+            a: &MlxArray,
+            repeats: i32,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }
