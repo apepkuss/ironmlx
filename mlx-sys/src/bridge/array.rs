@@ -874,5 +874,47 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.6 数值卫生 + logical_not ===
+        fn isnan(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn isinf(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn isfinite(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn logical_not(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn nan_to_num(
+            a: &MlxArray,
+            nan: f32,
+            has_posinf: bool,
+            posinf: f32,
+            has_neginf: bool,
+            neginf: f32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

@@ -87,7 +87,8 @@ pub use sort::{
 };
 pub use unary::{
     abs, abs_on, ceil, ceil_on, cos, cos_on, erf, erf_on, exp, exp_on, expm1, expm1_on, floor,
-    floor_on, log, log_on, reciprocal, reciprocal_on, round, round_on, rsqrt, rsqrt_on, sigmoid,
-    sigmoid_on, sign, sign_on, sin, sin_on, softmax, softmax_on, sqrt, sqrt_on, square, square_on,
-    tan, tan_on, tanh, tanh_on,
+    floor_on, isfinite, isfinite_on, isinf, isinf_on, isnan, isnan_on, log, log_on, logical_not,
+    logical_not_on, nan_to_num, nan_to_num_on, reciprocal, reciprocal_on, round, round_on, rsqrt,
+    rsqrt_on, sigmoid, sigmoid_on, sign, sign_on, sin, sin_on, softmax, softmax_on, sqrt, sqrt_on,
+    square, square_on, tan, tan_on, tanh, tanh_on,
 };

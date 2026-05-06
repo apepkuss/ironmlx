@@ -424,6 +424,28 @@ std::unique_ptr<MlxArray> expm1(
     const MlxArray& a,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.6 数值卫生 + logical_not (isnan/isinf/isfinite/nan_to_num/logical_not) ===
+// `nan_to_num` carries 3 scalar params; `posinf`/`neginf` are optional and
+// encoded as `(has_*, value)` pairs (parallels P4 random's loc/scale
+// pattern). The shim rebuilds the Option<float> on the C++ side.
+std::unique_ptr<MlxArray> isnan(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> isinf(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> isfinite(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> logical_not(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> nan_to_num(
+    const MlxArray& a, float nan,
+    bool has_posinf, float posinf,
+    bool has_neginf, float neginf,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 // === P5.5 expand_dims / squeeze (axis-driven shape ops) ===
 // `axes` slice is forwarded as `std::vector<int>`. For `squeeze`, an empty
 // slice falls through to the no-axis MLX overload (squeeze every size-1 dim).

@@ -306,6 +306,64 @@ impl Array {
         crate::ops::unary::expm1_on(self, target)
     }
 
+    // === P5.6 数值卫生 + logical_not ===
+
+    /// Element-wise NaN test. See [`crate::ops::unary::isnan`].
+    pub fn isnan(&self) -> Result<Array> {
+        crate::ops::unary::isnan(self)
+    }
+
+    /// Stream-targeted variant of [`Array::isnan`].
+    pub fn isnan_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::isnan_on(self, target)
+    }
+
+    /// Element-wise infinity test. See [`crate::ops::unary::isinf`].
+    pub fn isinf(&self) -> Result<Array> {
+        crate::ops::unary::isinf(self)
+    }
+
+    /// Stream-targeted variant of [`Array::isinf`].
+    pub fn isinf_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::isinf_on(self, target)
+    }
+
+    /// Element-wise finiteness test. See [`crate::ops::unary::isfinite`].
+    pub fn isfinite(&self) -> Result<Array> {
+        crate::ops::unary::isfinite(self)
+    }
+
+    /// Stream-targeted variant of [`Array::isfinite`].
+    pub fn isfinite_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::isfinite_on(self, target)
+    }
+
+    /// Element-wise logical negation. See [`crate::ops::unary::logical_not`].
+    pub fn logical_not(&self) -> Result<Array> {
+        crate::ops::unary::logical_not(self)
+    }
+
+    /// Stream-targeted variant of [`Array::logical_not`].
+    pub fn logical_not_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::logical_not_on(self, target)
+    }
+
+    /// Replace non-finite values. See [`crate::ops::unary::nan_to_num`].
+    pub fn nan_to_num(&self, nan: f32, posinf: Option<f32>, neginf: Option<f32>) -> Result<Array> {
+        crate::ops::unary::nan_to_num(self, nan, posinf, neginf)
+    }
+
+    /// Stream-targeted variant of [`Array::nan_to_num`].
+    pub fn nan_to_num_on(
+        &self,
+        nan: f32,
+        posinf: Option<f32>,
+        neginf: Option<f32>,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::unary::nan_to_num_on(self, nan, posinf, neginf, target)
+    }
+
     /// Sum over the specified axes. See [`crate::ops::sum`].
     pub fn sum<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
         crate::ops::sum(self, axes, keepdim)

@@ -83,3 +83,53 @@ fn stream_routing_for_abs() {
     let r = mlx::ops::unary::abs_on(&a, Device::cpu()).expect("abs_on");
     assert_eq!(r.to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
 }
+
+// === Task 2: 数值卫生 + logical_not ===
+
+#[test]
+fn isnan_isinf_isfinite_classify() {
+    let a: Array = (
+        &[1.0_f32, f32::NAN, f32::INFINITY, -f32::INFINITY, 0.0][..],
+        (5,),
+    )
+        .try_into()
+        .unwrap();
+    let nan = mlx::ops::unary::isnan(&a).expect("isnan");
+    let inf = mlx::ops::unary::isinf(&a).expect("isinf");
+    let fin = mlx::ops::unary::isfinite(&a).expect("isfinite");
+    assert_eq!(
+        nan.to_vec::<bool>().unwrap(),
+        vec![false, true, false, false, false]
+    );
+    assert_eq!(
+        inf.to_vec::<bool>().unwrap(),
+        vec![false, false, true, true, false]
+    );
+    assert_eq!(
+        fin.to_vec::<bool>().unwrap(),
+        vec![true, false, false, false, true]
+    );
+}
+
+#[test]
+fn nan_to_num_replaces_nonfinite() {
+    let a: Array = (
+        &[1.0_f32, f32::NAN, f32::INFINITY, -f32::INFINITY][..],
+        (4,),
+    )
+        .try_into()
+        .unwrap();
+    let r = mlx::ops::unary::nan_to_num(&a, 0.0, Some(1e30), Some(-1e30)).expect("nan_to_num");
+    let v: Vec<f32> = r.to_vec().unwrap();
+    assert_eq!(v[0], 1.0);
+    assert_eq!(v[1], 0.0);
+    assert!(v[2] >= 1e29);
+    assert!(v[3] <= -1e29);
+}
+
+#[test]
+fn logical_not_inverts_bool() {
+    let a: Array = (&[1.0_f32, 0.0, 2.0][..], (3,)).try_into().unwrap();
+    let r = mlx::ops::unary::logical_not(&a).expect("logical_not");
+    assert_eq!(r.to_vec::<bool>().unwrap(), vec![false, true, false]);
+}

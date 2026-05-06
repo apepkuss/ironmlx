@@ -131,6 +131,76 @@ pub fn round_on(a: &Array, decimals: i32, target: impl Into<StreamOrDevice>) -> 
     Ok(Array::from_inner(inner))
 }
 
+// === P5.6 数值卫生 + logical_not ===
+//
+// 4 simple unary ops follow the standard `op_with_stream!` pattern; they
+// return `Bool` dtype arrays (use `.to_vec::<bool>()` on the Rust side).
+// `nan_to_num` is hand-written to encode `Option<f32>` × 2 via `(bool, f32)`
+// pairs, mirroring the P4 random `loc`/`scale` optional-encoding pattern.
+
+op_with_stream! {
+    /// Element-wise NaN test. Returns a `Bool` array (`true` where the input
+    /// is NaN). Non-floating-point inputs raise [`Error::Mlx`].
+    pub fn isnan(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::isnan(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise infinity test. Returns a `Bool` array (`true` where the
+    /// input is +inf or -inf).
+    pub fn isinf(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::isinf(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise finiteness test. Returns a `Bool` array (`true` where
+    /// the input is neither NaN nor infinite).
+    pub fn isfinite(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::isfinite(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise logical negation. Inputs are interpreted as booleans
+    /// (zero → false, non-zero → true) and the output is a `Bool` array.
+    pub fn logical_not(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::logical_not(a.as_inner());
+}
+
+/// Replace non-finite values: NaN → `nan`, +∞ → `posinf` (or the dtype's
+/// largest finite value when `None`), −∞ → `neginf` (or the smallest finite
+/// value when `None`). Mirrors `numpy.nan_to_num`.
+pub fn nan_to_num(a: &Array, nan: f32, posinf: Option<f32>, neginf: Option<f32>) -> Result<Array> {
+    nan_to_num_on(a, nan, posinf, neginf, ())
+}
+
+/// Stream-targeted variant of [`nan_to_num`]. Pass `()` for the current
+/// default stream, a `Stream`, or a `Device`.
+pub fn nan_to_num_on(
+    a: &Array,
+    nan: f32,
+    posinf: Option<f32>,
+    neginf: Option<f32>,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has_posinf, posinf_v) = posinf.map_or((false, 0.0), |v| (true, v));
+    let (has_neginf, neginf_v) = neginf.map_or((false, 0.0), |v| (true, v));
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::array::ffi::nan_to_num(
+        a.as_inner(),
+        nan,
+        has_posinf,
+        posinf_v,
+        has_neginf,
+        neginf_v,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 // === P5.5 softmax (axis-driven reduction-style op) ===
 //
 // MLX exposes three softmax overloads (multi-axis vector, single-axis int,

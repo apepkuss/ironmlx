@@ -1,6 +1,7 @@
 #include "cxx_mlx_shim/array.h"
 
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -1035,6 +1036,48 @@ std::unique_ptr<MlxArray> expm1(
   auto target = cxx_mlx::helpers::decode_stream_or_device(
       has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::expm1(a, target));
+}
+
+// === P5.6 数值卫生 + logical_not ===
+
+std::unique_ptr<MlxArray> isnan(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::isnan(a, target));
+}
+std::unique_ptr<MlxArray> isinf(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::isinf(a, target));
+}
+std::unique_ptr<MlxArray> isfinite(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::isfinite(a, target));
+}
+std::unique_ptr<MlxArray> logical_not(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::logical_not(a, target));
+}
+std::unique_ptr<MlxArray> nan_to_num(
+    const MlxArray& a, float nan,
+    bool has_posinf, float posinf,
+    bool has_neginf, float neginf,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto pos = has_posinf ? std::optional<float>(posinf) : std::nullopt;
+  auto neg = has_neginf ? std::optional<float>(neginf) : std::nullopt;
+  return std::make_unique<MlxArray>(mlx::core::nan_to_num(a, nan, pos, neg, target));
 }
 
 }  // namespace cxx_mlx
