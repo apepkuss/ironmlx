@@ -303,3 +303,27 @@ fn tril_triu_masks() {
     assert_eq!(uv[6], 0.0);
     assert_eq!(uv[7], 0.0);
 }
+
+// === Task 5: expand_dims + squeeze ===
+
+#[test]
+fn expand_dims_adds_rank_one() {
+    let a: Array = (&[1.0_f32, 2.0, 3.0][..], (3,)).try_into().unwrap();
+    let r = mlx::ops::shape::expand_dims(&a, 0).expect("expand_dims");
+    assert_eq!(r.shape().as_slice(), &[1, 3]);
+}
+
+#[test]
+fn squeeze_removes_rank_one() {
+    let a: Array = (&[1.0_f32, 2.0, 3.0][..], (1, 3, 1)).try_into().unwrap();
+    use mlx::ops::All;
+    let r = mlx::ops::shape::squeeze(&a, All).expect("squeeze");
+    assert_eq!(r.shape().as_slice(), &[3]);
+}
+
+#[test]
+fn squeeze_specific_axis() {
+    let a: Array = (&[1.0_f32, 2.0, 3.0][..], (1, 3, 1)).try_into().unwrap();
+    let r = mlx::ops::shape::squeeze(&a, 0).expect("squeeze axis 0");
+    assert_eq!(r.shape().as_slice(), &[3, 1]);
+}

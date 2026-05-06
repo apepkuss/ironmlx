@@ -392,4 +392,15 @@ std::unique_ptr<MlxArray> triu(
     const MlxArray& x, int32_t k,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.5 expand_dims / squeeze (axis-driven shape ops) ===
+// `axes` slice is forwarded as `std::vector<int>`. For `squeeze`, an empty
+// slice falls through to the no-axis MLX overload (squeeze every size-1 dim).
+// For `expand_dims`, an empty slice is illegal and MLX will throw.
+std::unique_ptr<MlxArray> expand_dims(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> squeeze(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 }  // namespace cxx_mlx

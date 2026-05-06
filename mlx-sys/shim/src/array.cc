@@ -944,4 +944,31 @@ std::unique_ptr<MlxArray> triu(
   return std::make_unique<MlxArray>(mlx::core::triu(x, k, target));
 }
 
+// === P5.5 expand_dims / squeeze ===
+
+std::unique_ptr<MlxArray> expand_dims(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  // expand_dims requires at least one axis. Empty input is illegal at this
+  // boundary; we still forward it so MLX raises a uniform error message.
+  std::vector<int> ax(axes.begin(), axes.end());
+  return std::make_unique<MlxArray>(mlx::core::expand_dims(a, ax, target));
+}
+
+std::unique_ptr<MlxArray> squeeze(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  if (axes.empty()) {
+    // Empty axes -> "squeeze every size-1 dim" (no-axis overload). Matches
+    // `IntoAxes::All` semantics in the safe layer.
+    return std::make_unique<MlxArray>(mlx::core::squeeze(a, target));
+  }
+  std::vector<int> ax(axes.begin(), axes.end());
+  return std::make_unique<MlxArray>(mlx::core::squeeze(a, ax, target));
+}
+
 }  // namespace cxx_mlx

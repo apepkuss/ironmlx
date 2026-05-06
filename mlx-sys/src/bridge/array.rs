@@ -788,5 +788,25 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 expand_dims / squeeze ===
+        // Empty `axes` slice for `squeeze` means "all size-1 dims"; for
+        // `expand_dims` an empty slice is illegal and surfaces as an MLX error.
+        fn expand_dims(
+            a: &MlxArray,
+            axes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn squeeze(
+            a: &MlxArray,
+            axes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

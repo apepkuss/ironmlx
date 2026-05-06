@@ -72,9 +72,9 @@ pub use reduction::{
     argmax, argmax_on, max, max_on, mean, mean_on, min, min_on, sum, sum_on, All, IntoAxes,
 };
 pub use shape::{
-    broadcast_to, broadcast_to_on, concatenate, concatenate_on, reshape, reshape_on, split_at,
-    split_at_on, split_n, split_n_on, stack, stack_on, transpose, transpose_axes,
-    transpose_axes_on, transpose_on,
+    broadcast_to, broadcast_to_on, concatenate, concatenate_on, expand_dims, expand_dims_on,
+    reshape, reshape_on, split_at, split_at_on, split_n, split_n_on, squeeze, squeeze_on, stack,
+    stack_on, transpose, transpose_axes, transpose_axes_on, transpose_on,
 };
 // `sort::sort` is intentionally NOT re-exported at this flat level: it
 // would shadow the `sort` module name (`mlx::ops::sort` resolves to the

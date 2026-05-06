@@ -817,6 +817,37 @@ impl Array {
     pub fn triu_on(&self, k: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
         crate::ops::constructors::triu_on(self, k, target)
     }
+
+    // === P5.5 expand_dims / squeeze ===
+
+    /// Insert size-1 dims at the given axes. See [`crate::ops::shape::expand_dims`].
+    pub fn expand_dims<A: crate::ops::IntoAxes>(&self, axes: A) -> Result<Array> {
+        crate::ops::shape::expand_dims(self, axes)
+    }
+
+    /// Stream-targeted variant of [`Array::expand_dims`].
+    pub fn expand_dims_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::expand_dims_on(self, axes, target)
+    }
+
+    /// Remove size-1 dims. With [`crate::ops::All`] drops every size-1 dim;
+    /// with explicit axes only those. See [`crate::ops::shape::squeeze`].
+    pub fn squeeze<A: crate::ops::IntoAxes>(&self, axes: A) -> Result<Array> {
+        crate::ops::shape::squeeze(self, axes)
+    }
+
+    /// Stream-targeted variant of [`Array::squeeze`].
+    pub fn squeeze_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::squeeze_on(self, axes, target)
+    }
 }
 
 /// Construct an Array from a slice of `T` and any [`IntoShape`].
