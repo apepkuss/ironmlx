@@ -164,6 +164,56 @@ std::unique_ptr<MlxArray> array_argmax_axis(
     const MlxArray& a, int32_t axis, bool keepdims,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.6 reduction completions (argmin / all / any / prod / logsumexp) ===
+// argmin: 2 forms (no multi-axis); others: 3 forms each.
+
+std::unique_ptr<MlxArray> array_argmin_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_argmin_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+std::unique_ptr<MlxArray> array_all_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_all_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_all_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+std::unique_ptr<MlxArray> array_any_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_any_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_any_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+std::unique_ptr<MlxArray> array_prod_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_prod_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_prod_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+std::unique_ptr<MlxArray> array_logsumexp_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_logsumexp_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_logsumexp_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 // === P1b2a shape ops (P5.7: + 4 trailing stream params) ===
 
 std::unique_ptr<MlxArray> array_reshape(
@@ -392,6 +442,73 @@ std::unique_ptr<MlxArray> triu(
     const MlxArray& x, int32_t k,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.6 一元补完 (abs/sign/floor/ceil/round/sin/cos/tan/expm1) ===
+// `round` carries an extra `decimals` parameter (forwarded to MLX's overload
+// `mlx::core::round(a, decimals, s)`). The other 8 follow the standard
+// unary signature.
+std::unique_ptr<MlxArray> abs(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> sign(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> floor(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> ceil(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> round(
+    const MlxArray& a, int32_t decimals,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> sin(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> cos(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> tan(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> expm1(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.6 数值卫生 + logical_not (isnan/isinf/isfinite/nan_to_num/logical_not) ===
+// `nan_to_num` carries 3 scalar params; `posinf`/`neginf` are optional and
+// encoded as `(has_*, value)` pairs (parallels P4 random's loc/scale
+// pattern). The shim rebuilds the Option<float> on the C++ side.
+std::unique_ptr<MlxArray> isnan(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> isinf(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> isfinite(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> logical_not(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> nan_to_num(
+    const MlxArray& a, float nan,
+    bool has_posinf, float posinf,
+    bool has_neginf, float neginf,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.6 二元补完 (power/logaddexp/remainder) ===
+// All three are element-wise broadcast binary ops; broadcasting is handled
+// MLX-side. Return dtype follows MLX promotion rules.
+std::unique_ptr<MlxArray> power(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> logaddexp(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> remainder(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 // === P5.5 expand_dims / squeeze (axis-driven shape ops) ===
 // `axes` slice is forwarded as `std::vector<int>`. For `squeeze`, an empty
 // slice falls through to the no-axis MLX overload (squeeze every size-1 dim).
@@ -401,6 +518,26 @@ std::unique_ptr<MlxArray> expand_dims(
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 std::unique_ptr<MlxArray> squeeze(
     const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.6 累积归约 (cumsum/cumprod) ===
+// Scan along `axis`. `reverse=true` flips scan direction; `inclusive=true`
+// includes the element at the index in the running aggregate.
+std::unique_ptr<MlxArray> cumsum(
+    const MlxArray& a, int32_t axis, bool reverse, bool inclusive,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> cumprod(
+    const MlxArray& a, int32_t axis, bool reverse, bool inclusive,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.6 shape 补完 (flatten/repeat) ===
+// `flatten` collapses dims `[start_axis, end_axis]` (inclusive, neg indices
+// allowed) into one. `repeat` tiles `a` `repeats` times along `axis`.
+std::unique_ptr<MlxArray> flatten(
+    const MlxArray& a, int32_t start_axis, int32_t end_axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> repeat(
+    const MlxArray& a, int32_t repeats, int32_t axis,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 }  // namespace cxx_mlx

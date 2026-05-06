@@ -303,6 +303,134 @@ pub mod ffi {
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
+        // === P5.6 reduction completions (argmin / all / any / prod / logsumexp) ===
+        // argmin has only 2 forms (no multi-axis); others have 3 forms.
+        fn array_argmin_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_argmin_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_all_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_all_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_all_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_any_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_any_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_any_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_prod_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_prod_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_prod_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_logsumexp_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_logsumexp_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_logsumexp_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         // === P1b2a shape ops (P5.7: + 4 trailing stream params) ===
         fn array_reshape(
             a: &MlxArray,
@@ -803,6 +931,182 @@ pub mod ffi {
         fn squeeze(
             a: &MlxArray,
             axes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.6 一元补完 ===
+        fn abs(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn sign(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn floor(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn ceil(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn round(
+            a: &MlxArray,
+            decimals: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn sin(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn cos(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn tan(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn expm1(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.6 数值卫生 + logical_not ===
+        fn isnan(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn isinf(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn isfinite(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn logical_not(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn nan_to_num(
+            a: &MlxArray,
+            nan: f32,
+            has_posinf: bool,
+            posinf: f32,
+            has_neginf: bool,
+            neginf: f32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.6 二元补完 (power/logaddexp/remainder) ===
+        fn power(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn logaddexp(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn remainder(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.6 累积归约 (cumsum/cumprod) ===
+        fn cumsum(
+            a: &MlxArray,
+            axis: i32,
+            reverse: bool,
+            inclusive: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn cumprod(
+            a: &MlxArray,
+            axis: i32,
+            reverse: bool,
+            inclusive: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.6 shape 补完 (flatten/repeat) ===
+        fn flatten(
+            a: &MlxArray,
+            start_axis: i32,
+            end_axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn repeat(
+            a: &MlxArray,
+            repeats: i32,
+            axis: i32,
             has_target: bool,
             is_device_only: bool,
             device_type: u8,

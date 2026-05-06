@@ -210,6 +210,160 @@ impl Array {
         crate::ops::unary::reciprocal_on(self, target)
     }
 
+    // === P5.6 一元补完 ===
+
+    /// Element-wise absolute value `|x|`. See [`crate::ops::unary::abs`].
+    pub fn abs(&self) -> Result<Array> {
+        crate::ops::unary::abs(self)
+    }
+
+    /// Stream-targeted variant of [`Array::abs`].
+    pub fn abs_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::abs_on(self, target)
+    }
+
+    /// Element-wise sign. See [`crate::ops::unary::sign`].
+    pub fn sign(&self) -> Result<Array> {
+        crate::ops::unary::sign(self)
+    }
+
+    /// Stream-targeted variant of [`Array::sign`].
+    pub fn sign_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::sign_on(self, target)
+    }
+
+    /// Element-wise floor. See [`crate::ops::unary::floor`].
+    pub fn floor(&self) -> Result<Array> {
+        crate::ops::unary::floor(self)
+    }
+
+    /// Stream-targeted variant of [`Array::floor`].
+    pub fn floor_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::floor_on(self, target)
+    }
+
+    /// Element-wise ceiling. See [`crate::ops::unary::ceil`].
+    pub fn ceil(&self) -> Result<Array> {
+        crate::ops::unary::ceil(self)
+    }
+
+    /// Stream-targeted variant of [`Array::ceil`].
+    pub fn ceil_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::ceil_on(self, target)
+    }
+
+    /// Round to `decimals` decimal places. See [`crate::ops::unary::round`].
+    pub fn round(&self, decimals: i32) -> Result<Array> {
+        crate::ops::unary::round(self, decimals)
+    }
+
+    /// Stream-targeted variant of [`Array::round`].
+    pub fn round_on(
+        &self,
+        decimals: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::unary::round_on(self, decimals, target)
+    }
+
+    /// Element-wise sine. See [`crate::ops::unary::sin`].
+    pub fn sin(&self) -> Result<Array> {
+        crate::ops::unary::sin(self)
+    }
+
+    /// Stream-targeted variant of [`Array::sin`].
+    pub fn sin_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::sin_on(self, target)
+    }
+
+    /// Element-wise cosine. See [`crate::ops::unary::cos`].
+    pub fn cos(&self) -> Result<Array> {
+        crate::ops::unary::cos(self)
+    }
+
+    /// Stream-targeted variant of [`Array::cos`].
+    pub fn cos_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::cos_on(self, target)
+    }
+
+    /// Element-wise tangent. See [`crate::ops::unary::tan`].
+    pub fn tan(&self) -> Result<Array> {
+        crate::ops::unary::tan(self)
+    }
+
+    /// Stream-targeted variant of [`Array::tan`].
+    pub fn tan_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::tan_on(self, target)
+    }
+
+    /// Element-wise `exp(x) - 1`. See [`crate::ops::unary::expm1`].
+    pub fn expm1(&self) -> Result<Array> {
+        crate::ops::unary::expm1(self)
+    }
+
+    /// Stream-targeted variant of [`Array::expm1`].
+    pub fn expm1_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::expm1_on(self, target)
+    }
+
+    // === P5.6 数值卫生 + logical_not ===
+
+    /// Element-wise NaN test. See [`crate::ops::unary::isnan`].
+    pub fn isnan(&self) -> Result<Array> {
+        crate::ops::unary::isnan(self)
+    }
+
+    /// Stream-targeted variant of [`Array::isnan`].
+    pub fn isnan_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::isnan_on(self, target)
+    }
+
+    /// Element-wise infinity test. See [`crate::ops::unary::isinf`].
+    pub fn isinf(&self) -> Result<Array> {
+        crate::ops::unary::isinf(self)
+    }
+
+    /// Stream-targeted variant of [`Array::isinf`].
+    pub fn isinf_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::isinf_on(self, target)
+    }
+
+    /// Element-wise finiteness test. See [`crate::ops::unary::isfinite`].
+    pub fn isfinite(&self) -> Result<Array> {
+        crate::ops::unary::isfinite(self)
+    }
+
+    /// Stream-targeted variant of [`Array::isfinite`].
+    pub fn isfinite_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::isfinite_on(self, target)
+    }
+
+    /// Element-wise logical negation. See [`crate::ops::unary::logical_not`].
+    pub fn logical_not(&self) -> Result<Array> {
+        crate::ops::unary::logical_not(self)
+    }
+
+    /// Stream-targeted variant of [`Array::logical_not`].
+    pub fn logical_not_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::logical_not_on(self, target)
+    }
+
+    /// Replace non-finite values. See [`crate::ops::unary::nan_to_num`].
+    pub fn nan_to_num(&self, nan: f32, posinf: Option<f32>, neginf: Option<f32>) -> Result<Array> {
+        crate::ops::unary::nan_to_num(self, nan, posinf, neginf)
+    }
+
+    /// Stream-targeted variant of [`Array::nan_to_num`].
+    pub fn nan_to_num_on(
+        &self,
+        nan: f32,
+        posinf: Option<f32>,
+        neginf: Option<f32>,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::unary::nan_to_num_on(self, nan, posinf, neginf, target)
+    }
+
     /// Sum over the specified axes. See [`crate::ops::sum`].
     pub fn sum<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
         crate::ops::sum(self, axes, keepdim)
@@ -283,6 +437,81 @@ impl Array {
         target: impl Into<crate::StreamOrDevice>,
     ) -> Result<Array> {
         crate::ops::reduction::argmax_on(self, axes, keepdim, target)
+    }
+
+    /// Indices of the minimum values along the specified axis. See [`crate::ops::argmin`].
+    pub fn argmin<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::argmin(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::argmin`].
+    pub fn argmin_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::argmin_on(self, axes, keepdim, target)
+    }
+
+    /// Logical AND reduction over the specified axes. See [`crate::ops::all`].
+    pub fn all<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::all(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::all`].
+    pub fn all_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::all_on(self, axes, keepdim, target)
+    }
+
+    /// Logical OR reduction over the specified axes. See [`crate::ops::any`].
+    pub fn any<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::any(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::any`].
+    pub fn any_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::any_on(self, axes, keepdim, target)
+    }
+
+    /// Product over the specified axes. See [`crate::ops::prod`].
+    pub fn prod<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::prod(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::prod`].
+    pub fn prod_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::prod_on(self, axes, keepdim, target)
+    }
+
+    /// Numerically stable `log(sum(exp(x)))` over the specified axes. See [`crate::ops::logsumexp`].
+    pub fn logsumexp<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::logsumexp(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::logsumexp`].
+    pub fn logsumexp_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::logsumexp_on(self, axes, keepdim, target)
     }
 
     /// Reshape this array. See [`crate::ops::reshape`].
@@ -636,6 +865,116 @@ impl Array {
         target: impl Into<crate::StreamOrDevice>,
     ) -> Result<Array> {
         crate::ops::binary::minimum_on(self, rhs, target)
+    }
+
+    // === P5.6 二元补完 (power / logaddexp / remainder) ===
+
+    /// Element-wise `self ** rhs`. See [`crate::ops::binary::power`].
+    pub fn power(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::power(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::power`].
+    pub fn power_on(&self, rhs: &Array, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::binary::power_on(self, rhs, target)
+    }
+
+    /// Element-wise numerically stable `log(exp(self) + exp(rhs))`.
+    /// See [`crate::ops::binary::logaddexp`].
+    pub fn logaddexp(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::logaddexp(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::logaddexp`].
+    pub fn logaddexp_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::logaddexp_on(self, rhs, target)
+    }
+
+    /// Element-wise remainder (Python-style `%`, sign of divisor).
+    /// See [`crate::ops::binary::remainder`].
+    pub fn remainder(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::remainder(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::remainder`].
+    pub fn remainder_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::remainder_on(self, rhs, target)
+    }
+
+    // === P5.6 累积归约 (cumsum / cumprod) ===
+
+    /// Cumulative sum along `axis`. See [`crate::ops::cumulative::cumsum`].
+    pub fn cumsum(&self, axis: i32, reverse: bool, inclusive: bool) -> Result<Array> {
+        crate::ops::cumulative::cumsum(self, axis, reverse, inclusive)
+    }
+
+    /// Stream-targeted variant of [`Array::cumsum`].
+    pub fn cumsum_on(
+        &self,
+        axis: i32,
+        reverse: bool,
+        inclusive: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::cumulative::cumsum_on(self, axis, reverse, inclusive, target)
+    }
+
+    /// Cumulative product along `axis`. See [`crate::ops::cumulative::cumprod`].
+    pub fn cumprod(&self, axis: i32, reverse: bool, inclusive: bool) -> Result<Array> {
+        crate::ops::cumulative::cumprod(self, axis, reverse, inclusive)
+    }
+
+    /// Stream-targeted variant of [`Array::cumprod`].
+    pub fn cumprod_on(
+        &self,
+        axis: i32,
+        reverse: bool,
+        inclusive: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::cumulative::cumprod_on(self, axis, reverse, inclusive, target)
+    }
+
+    // === P5.6 shape 补完 (flatten / repeat) ===
+
+    /// Flatten dims `[start_axis, end_axis]` (inclusive) into one. See
+    /// [`crate::ops::shape::flatten`].
+    pub fn flatten(&self, start_axis: i32, end_axis: i32) -> Result<Array> {
+        crate::ops::shape::flatten(self, start_axis, end_axis)
+    }
+
+    /// Stream-targeted variant of [`Array::flatten`].
+    pub fn flatten_on(
+        &self,
+        start_axis: i32,
+        end_axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::flatten_on(self, start_axis, end_axis, target)
+    }
+
+    /// Repeat `self` `repeats` times along `axis`. See
+    /// [`crate::ops::shape::repeat`].
+    pub fn repeat(&self, repeats: i32, axis: i32) -> Result<Array> {
+        crate::ops::shape::repeat(self, repeats, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::repeat`].
+    pub fn repeat_on(
+        &self,
+        repeats: i32,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::repeat_on(self, repeats, axis, target)
     }
 
     // === P5.5 clip ===
