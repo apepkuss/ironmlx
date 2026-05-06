@@ -50,4 +50,5 @@ pub use error::{Error, Result};
 pub use shape::{IntoShape, Shape};
 pub use stream::{
     clear_streams, default_stream, get_streams, new_stream, set_default_stream, Stream,
+    StreamOrDevice,
 };

@@ -75,3 +75,114 @@ pub fn get_streams() -> Vec<Stream> {
 pub fn clear_streams() {
     mlx_sys::stream::ffi::clear_streams();
 }
+
+/// Target stream or device for an op. Mirrors MLX C++
+/// `mlx::core::StreamOrDevice` (`std::variant<monostate, Stream, Device>`).
+///
+/// Used by `*_on` op variants. Construct via:
+/// - [`StreamOrDevice::default()`] or `().into()` — use MLX's current default
+/// - `stream.into()` — explicit stream
+/// - `device.into()` — that device's default stream
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamOrDevice {
+    /// Use MLX's current default stream for the calling thread.
+    #[default]
+    Default,
+    /// Use the specified stream.
+    Stream(Stream),
+    /// Use the default stream of the specified device.
+    Device(crate::Device),
+}
+
+impl From<Stream> for StreamOrDevice {
+    fn from(s: Stream) -> Self {
+        StreamOrDevice::Stream(s)
+    }
+}
+
+impl From<crate::Device> for StreamOrDevice {
+    fn from(d: crate::Device) -> Self {
+        StreamOrDevice::Device(d)
+    }
+}
+
+impl From<()> for StreamOrDevice {
+    fn from(_: ()) -> Self {
+        StreamOrDevice::Default
+    }
+}
+
+impl StreamOrDevice {
+    /// Encode for FFI: `(has_target, is_device_only, device_type_repr, stream_index)`.
+    /// `Default` → `(false, false, 0, 0)`. `Device` → `(true, true, dt, 0)`.
+    /// `Stream` → `(true, false, dt, idx)`.
+    ///
+    /// Consumed by op `_on` variants in subsequent P5.7 tasks.
+    #[allow(dead_code)]
+    pub(crate) fn encode(self) -> (bool, bool, u8, i32) {
+        match self {
+            StreamOrDevice::Default => (false, false, 0, 0),
+            StreamOrDevice::Device(d) => (true, true, d.device_type as u8, 0),
+            StreamOrDevice::Stream(s) => (true, false, s.device.device_type as u8, s.index),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_or_device_default_is_default_variant() {
+        assert_eq!(StreamOrDevice::default(), StreamOrDevice::Default);
+    }
+
+    #[test]
+    fn stream_or_device_from_unit() {
+        let s: StreamOrDevice = ().into();
+        assert_eq!(s, StreamOrDevice::Default);
+    }
+
+    #[test]
+    fn stream_or_device_from_stream() {
+        let s = default_stream(crate::Device::cpu());
+        let target: StreamOrDevice = s.into();
+        assert_eq!(target, StreamOrDevice::Stream(s));
+    }
+
+    #[test]
+    fn stream_or_device_from_device() {
+        let target: StreamOrDevice = crate::Device::cpu().into();
+        assert_eq!(target, StreamOrDevice::Device(crate::Device::cpu()));
+    }
+
+    #[test]
+    fn encode_default() {
+        let (has, dev_only, dt, idx) = StreamOrDevice::Default.encode();
+        assert!(!has);
+        assert!(!dev_only);
+        assert_eq!(dt, 0);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn encode_device_only() {
+        let target = StreamOrDevice::Device(crate::Device::cpu());
+        let (has, dev_only, dt, idx) = target.encode();
+        assert!(has);
+        assert!(dev_only);
+        assert_eq!(dt, crate::DeviceType::Cpu as u8);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn encode_full_stream() {
+        let s = default_stream(crate::Device::cpu());
+        let target = StreamOrDevice::Stream(s);
+        let (has, dev_only, dt, idx) = target.encode();
+        assert!(has);
+        assert!(!dev_only);
+        assert_eq!(dt, s.device.device_type as u8);
+        assert_eq!(idx, s.index);
+    }
+}
