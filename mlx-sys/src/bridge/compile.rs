@@ -30,6 +30,9 @@ pub type CallbackFn = dyn Fn(&[&MlxArray]) -> Result<Vec<UniquePtr<MlxArray>>, S
 /// Returning `Err` (or panicking) from the closure surfaces as a Rust
 /// `Err` from `compile()` or `CompiledFn::invoke()`. cxx auto-translates
 /// panics via `catch_unwind` because [`Self::invoke`] returns a `Result`.
+// NOTE: The Rust safe API enforces single-threaded replay via `&CompiledFn`
+// being `!Sync`. Direct sys-crate users must not concurrently invoke a
+// CompiledFn — the user closure is only required to be `Send`, not `Sync`.
 pub struct CompileCallback {
     f: Box<CallbackFn>,
 }

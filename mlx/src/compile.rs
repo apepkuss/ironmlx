@@ -84,6 +84,12 @@ impl CompiledFn {
 /// Returning `Err` from the closure (or panicking) yields a Rust `Err`
 /// from `compile()` or `invoke()`; the panic is caught by cxx, never
 /// aborts the process.
+///
+/// Errors returned by the closure are converted to a string at the FFI
+/// boundary, so structured `Error` variants (`ShapeMismatch`,
+/// `DtypeMismatch`, `BroadcastMismatch`) emerge as `Error::Mlx(String)`
+/// from `compile()` / `invoke()`. Closure callers that need structured
+/// errors should panic with a typed payload instead.
 pub fn compile<F>(f: F, shapeless: bool) -> Result<CompiledFn>
 where
     // `Send + 'static` only: `Sync` is intentionally NOT required, so users
