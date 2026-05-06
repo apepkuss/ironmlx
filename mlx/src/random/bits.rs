@@ -1,6 +1,6 @@
 //! Random bits builder.
 
-use crate::{Array, Error, IntoShape, Result, Shape};
+use crate::{Array, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling arrays of random uniform integers of a given byte width.
 /// Defaults to `width = 4` (32-bit `u32`) scalar.
@@ -8,6 +8,7 @@ pub struct Bits<'k> {
     shape: Shape,
     width: i32,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'k> Bits<'k> {
@@ -17,6 +18,7 @@ impl<'k> Bits<'k> {
             shape: Shape::new(),
             width: 4,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -35,15 +37,31 @@ impl<'k> Bits<'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
         // SAFETY: k is null or borrow valid for this call.
-        let inner = unsafe { mlx_sys::random::ffi::bits(self.shape.as_slice(), self.width, k) }
-            .map_err(Error::from)?;
+        let inner = unsafe {
+            mlx_sys::random::ffi::bits(
+                self.shape.as_slice(),
+                self.width,
+                k,
+                has,
+                dev_only,
+                dev_t,
+                idx,
+            )
+        }
+        .map_err(Error::from)?;
         Ok(Array::from_inner(inner))
     }
 }

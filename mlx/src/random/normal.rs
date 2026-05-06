@@ -1,6 +1,6 @@
 //! Normal distribution builder.
 
-use crate::{Array, Dtype, Error, IntoShape, Result, Shape};
+use crate::{Array, Dtype, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling from the normal distribution. Defaults to standard
 /// normal `N(0, 1)` `f32` scalar; `loc` defaults to 0 and `scale` to 1 when
@@ -11,6 +11,7 @@ pub struct Normal<'k> {
     loc: Option<f64>,
     scale: Option<f64>,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'k> Normal<'k> {
@@ -22,6 +23,7 @@ impl<'k> Normal<'k> {
             loc: None,
             scale: None,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -50,9 +52,15 @@ impl<'k> Normal<'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         // Materialize loc/scale arrays only when set.
         let loc_arr: Option<Array> = self.loc.map(super::scalar_f32).transpose()?;
         let scale_arr: Option<Array> = self.scale.map(super::scalar_f32).transpose()?;
@@ -67,7 +75,17 @@ impl<'k> Normal<'k> {
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
         // SAFETY: l/s/k are null or borrows valid for this call.
         let inner = unsafe {
-            mlx_sys::random::ffi::normal(self.shape.as_slice(), self.dtype.as_u8(), l, s, k)
+            mlx_sys::random::ffi::normal(
+                self.shape.as_slice(),
+                self.dtype.as_u8(),
+                l,
+                s,
+                k,
+                has,
+                dev_only,
+                dev_t,
+                idx,
+            )
         }
         .map_err(Error::from)?;
         Ok(Array::from_inner(inner))

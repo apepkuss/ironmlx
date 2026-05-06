@@ -1,6 +1,6 @@
 //! Bernoulli distribution builder.
 
-use crate::{Array, Error, IntoShape, Result, Shape};
+use crate::{Array, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling from the Bernoulli distribution with probability `p`.
 /// If `.shape(...)` is not called, output shape is inferred from `p`.
@@ -8,6 +8,7 @@ pub struct Bernoulli<'a, 'k> {
     p: &'a Array,
     shape: Option<Shape>,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'a, 'k> Bernoulli<'a, 'k> {
@@ -17,6 +18,7 @@ impl<'a, 'k> Bernoulli<'a, 'k> {
             p,
             shape: None,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -30,20 +32,45 @@ impl<'a, 'k> Bernoulli<'a, 'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
         let inner = match self.shape {
             Some(s) => {
                 // SAFETY: k is null or borrow valid for this call.
-                unsafe { mlx_sys::random::ffi::bernoulli(self.p.as_inner(), s.as_slice(), k) }
+                unsafe {
+                    mlx_sys::random::ffi::bernoulli(
+                        self.p.as_inner(),
+                        s.as_slice(),
+                        k,
+                        has,
+                        dev_only,
+                        dev_t,
+                        idx,
+                    )
+                }
             }
             None => {
                 // SAFETY: k is null or borrow valid for this call.
-                unsafe { mlx_sys::random::ffi::bernoulli_default(self.p.as_inner(), k) }
+                unsafe {
+                    mlx_sys::random::ffi::bernoulli_default(
+                        self.p.as_inner(),
+                        k,
+                        has,
+                        dev_only,
+                        dev_t,
+                        idx,
+                    )
+                }
             }
         }
         .map_err(Error::from)?;

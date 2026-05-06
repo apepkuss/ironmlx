@@ -6,6 +6,8 @@
 //! Optional encodings:
 //! - Option<&Array> → *const MlxArray (nullptr = None)
 //! - Dtype → u8 dtype_repr (shim uses dtype_from_repr from shim_helpers.h)
+//! - StreamOrDevice → 4 trailing args (has_target, is_device_only,
+//!   device_type, stream_index) decoded by shim helpers.
 
 #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "cxx_mlx")]
@@ -31,6 +33,10 @@ pub mod ffi {
             shape: &[i32],
             width: i32,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn uniform(
@@ -39,12 +45,20 @@ pub mod ffi {
             shape: &[i32],
             dtype_repr: u8,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn uniform_default(
             shape: &[i32],
             dtype_repr: u8,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn normal(
@@ -53,6 +67,10 @@ pub mod ffi {
             loc: *const MlxArray,
             scale: *const MlxArray,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn randint(
@@ -61,6 +79,10 @@ pub mod ffi {
             shape: &[i32],
             dtype_repr: u8,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // ===== Discrete distributions =====
@@ -68,17 +90,29 @@ pub mod ffi {
             p: &MlxArray,
             shape: &[i32],
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn bernoulli_default(
             p: &MlxArray,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn categorical(
             logits: &MlxArray,
             axis: i32,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn categorical_n(
@@ -86,6 +120,10 @@ pub mod ffi {
             axis: i32,
             num_samples: i32,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn categorical_shaped(
@@ -93,6 +131,10 @@ pub mod ffi {
             axis: i32,
             shape: &[i32],
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // ===== Special distributions =====
@@ -102,6 +144,10 @@ pub mod ffi {
             shape: &[i32],
             dtype_repr: u8,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn truncated_normal_default(
@@ -109,12 +155,20 @@ pub mod ffi {
             upper: &MlxArray,
             dtype_repr: u8,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn gumbel(
             shape: &[i32],
             dtype_repr: u8,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn laplace(
@@ -123,6 +177,10 @@ pub mod ffi {
             loc: f32,
             scale: f32,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn multivariate_normal(
@@ -131,6 +189,10 @@ pub mod ffi {
             shape: &[i32],
             dtype_repr: u8,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // ===== Permutation =====
@@ -138,8 +200,19 @@ pub mod ffi {
             x: &MlxArray,
             axis: i32,
             key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        unsafe fn permutation_arange(n: i32, key: *const MlxArray) -> Result<UniquePtr<MlxArray>>;
+        unsafe fn permutation_arange(
+            n: i32,
+            key: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

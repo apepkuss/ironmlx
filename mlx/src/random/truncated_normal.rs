@@ -1,6 +1,6 @@
 //! Truncated normal distribution builder.
 
-use crate::{Array, Dtype, Error, IntoShape, Result, Shape};
+use crate::{Array, Dtype, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling from the truncated normal distribution restricted to
 /// `[lower, upper]`. If `.shape(...)` is not called, output shape is inferred
@@ -11,6 +11,7 @@ pub struct TruncatedNormal<'a, 'k> {
     shape: Option<Shape>,
     dtype: Dtype,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'a, 'k> TruncatedNormal<'a, 'k> {
@@ -22,6 +23,7 @@ impl<'a, 'k> TruncatedNormal<'a, 'k> {
             shape: None,
             dtype: Dtype::Float32,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -40,9 +42,15 @@ impl<'a, 'k> TruncatedNormal<'a, 'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
@@ -56,6 +64,10 @@ impl<'a, 'k> TruncatedNormal<'a, 'k> {
                         s.as_slice(),
                         self.dtype.as_u8(),
                         k,
+                        has,
+                        dev_only,
+                        dev_t,
+                        idx,
                     )
                 }
             }
@@ -67,6 +79,10 @@ impl<'a, 'k> TruncatedNormal<'a, 'k> {
                         self.upper.as_inner(),
                         self.dtype.as_u8(),
                         k,
+                        has,
+                        dev_only,
+                        dev_t,
+                        idx,
                     )
                 }
             }

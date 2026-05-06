@@ -58,89 +58,119 @@ std::unique_ptr<MlxArray> split_n(const MlxArray& key, int32_t num) {
 
 std::unique_ptr<MlxArray> bits(
     rust::Slice<const int32_t> shape, int32_t width,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::bits(
-      shape_vec, width, helpers::opt_arr(key)));
+      shape_vec, width, helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> uniform(
     const MlxArray& low, const MlxArray& high,
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::uniform(
       low, high, shape_vec,
-      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> uniform_default(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::uniform(
-      shape_vec, helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+      shape_vec, helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> normal(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
     const MlxArray* loc, const MlxArray* scale,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::normal(
       shape_vec, helpers::dtype_from_repr(dtype_repr),
       helpers::opt_arr(loc), helpers::opt_arr(scale),
-      helpers::opt_arr(key)));
+      helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> randint(
     const MlxArray& low, const MlxArray& high,
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::randint(
       low, high, shape_vec,
-      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key), target));
 }
 
 // ===== Discrete distributions =====
 
 std::unique_ptr<MlxArray> bernoulli(
     const MlxArray& p, rust::Slice<const int32_t> shape,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::bernoulli(
-      p, shape_vec, helpers::opt_arr(key)));
+      p, shape_vec, helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> bernoulli_default(
     const MlxArray& p,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::random::bernoulli(
-      p, helpers::opt_arr(key)));
+      p, helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> categorical(
     const MlxArray& logits, int32_t axis,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::random::categorical(
-      logits, axis, helpers::opt_arr(key)));
+      logits, axis, helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> categorical_n(
     const MlxArray& logits, int32_t axis, int32_t num_samples,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::random::categorical(
-      logits, axis, num_samples, helpers::opt_arr(key)));
+      logits, axis, num_samples, helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> categorical_shaped(
     const MlxArray& logits, int32_t axis,
     rust::Slice<const int32_t> shape,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::categorical(
-      logits, axis, shape_vec, helpers::opt_arr(key)));
+      logits, axis, shape_vec, helpers::opt_arr(key), target));
 }
 
 // ===== Special distributions =====
@@ -148,64 +178,85 @@ std::unique_ptr<MlxArray> categorical_shaped(
 std::unique_ptr<MlxArray> truncated_normal(
     const MlxArray& lower, const MlxArray& upper,
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::truncated_normal(
       lower, upper, shape_vec,
-      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> truncated_normal_default(
     const MlxArray& lower, const MlxArray& upper,
     uint8_t dtype_repr,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::random::truncated_normal(
       lower, upper,
-      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> gumbel(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::gumbel(
-      shape_vec, helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+      shape_vec, helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> laplace(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
     float loc, float scale,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::laplace(
       shape_vec, helpers::dtype_from_repr(dtype_repr), loc, scale,
-      helpers::opt_arr(key)));
+      helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> multivariate_normal(
     const MlxArray& mean, const MlxArray& cov,
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape shape_vec(shape.begin(), shape.end());
   return std::make_unique<MlxArray>(mlx::core::random::multivariate_normal(
       mean, cov, shape_vec,
-      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key)));
+      helpers::dtype_from_repr(dtype_repr), helpers::opt_arr(key), target));
 }
 
 // ===== Permutation =====
 
 std::unique_ptr<MlxArray> permutation(
     const MlxArray& x, int32_t axis,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::random::permutation(
-      x, axis, helpers::opt_arr(key)));
+      x, axis, helpers::opt_arr(key), target));
 }
 
 std::unique_ptr<MlxArray> permutation_arange(
     int32_t n,
-    const MlxArray* key) {
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::random::permutation(
-      n, helpers::opt_arr(key)));
+      n, helpers::opt_arr(key), target));
 }
 
 }  // namespace cxx_mlx

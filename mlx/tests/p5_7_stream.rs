@@ -290,6 +290,27 @@ fn quantization_ops_on_variants() {
     assert_eq!(r.shape().as_slice(), &[2, 64]);
 }
 
+// === Task 8: random builder .stream() setter ===
+
+#[test]
+fn random_builder_stream_setter() {
+    use mlx::random;
+    use mlx::Device;
+    let r = random::uniform()
+        .shape((3, 3))
+        .stream(Device::cpu())
+        .sample()
+        .expect("uniform on cpu");
+    assert_eq!(r.shape().as_slice(), &[3, 3]);
+
+    let r2 = random::normal()
+        .shape((4,))
+        .stream(Device::cpu())
+        .sample()
+        .expect("normal on cpu");
+    assert_eq!(r2.shape().as_slice(), &[4]);
+}
+
 // === Task 6: Array methods *_on variants ===
 
 #[test]
