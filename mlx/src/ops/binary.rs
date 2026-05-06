@@ -137,3 +137,27 @@ pub fn clip_on(
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
+
+// === P5.6 二元补完 ===
+//
+// Element-wise broadcast binary ops. MLX handles broadcasting; we keep the
+// Rust-side prologue minimal (consistent with `equal`/`maximum`).
+
+op_with_stream! {
+    /// Element-wise `a ** b` (power). Broadcasts per NumPy rules.
+    pub fn power(a: &Array, b: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::power(a.as_inner(), b.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise `log(exp(a) + exp(b))` computed in a numerically stable way.
+    pub fn logaddexp(a: &Array, b: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::logaddexp(a.as_inner(), b.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise remainder (`a` modulo `b`). MLX returns a result with the
+    /// sign of the divisor (Python-style `%`), e.g. `(-7) % 3 == 2`.
+    pub fn remainder(a: &Array, b: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::remainder(a.as_inner(), b.as_inner());
+}

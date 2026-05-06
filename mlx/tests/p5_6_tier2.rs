@@ -133,3 +133,35 @@ fn logical_not_inverts_bool() {
     let r = mlx::ops::unary::logical_not(&a).expect("logical_not");
     assert_eq!(r.to_vec::<bool>().unwrap(), vec![false, true, false]);
 }
+
+// === Task 3: 二元补完 (power / logaddexp / remainder) ===
+
+#[test]
+fn power_element_wise() {
+    let a: Array = (&[2.0_f32, 3.0][..], (2,)).try_into().unwrap();
+    let b: Array = (&[3.0_f32, 2.0][..], (2,)).try_into().unwrap();
+    let r = mlx::ops::binary::power(&a, &b).expect("power");
+    assert_eq!(r.to_vec::<f32>().unwrap(), vec![8.0, 9.0]);
+}
+
+#[test]
+fn logaddexp_numerically_stable() {
+    let a: Array = (&[0.0_f32, 1.0][..], (2,)).try_into().unwrap();
+    let b: Array = (&[0.0_f32, 1.0][..], (2,)).try_into().unwrap();
+    let r = mlx::ops::binary::logaddexp(&a, &b).expect("logaddexp");
+    let v: Vec<f32> = r.to_vec().unwrap();
+    // log(2*e^0) = log(2) ≈ 0.693
+    // log(2*e^1) = 1 + log(2) ≈ 1.693
+    assert!((v[0] - 0.6931).abs() < 1e-3);
+    assert!((v[1] - 1.6931).abs() < 1e-3);
+}
+
+#[test]
+fn remainder_modulo_like() {
+    let a: Array = (&[7.0_f32, -7.0][..], (2,)).try_into().unwrap();
+    let b: Array = (&[3.0_f32, 3.0][..], (2,)).try_into().unwrap();
+    let r = mlx::ops::binary::remainder(&a, &b).expect("remainder");
+    let v: Vec<f32> = r.to_vec().unwrap();
+    assert_eq!(v[0], 1.0); // 7 % 3 = 1
+    assert!((v[1] - 2.0).abs() < 1e-5); // MLX: positive remainder
+}

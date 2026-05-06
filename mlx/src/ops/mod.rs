@@ -40,6 +40,9 @@ pub use binary::{
     less_equal,
     less_equal_on,
     less_on,
+    // P5.6 二元补完
+    logaddexp,
+    logaddexp_on,
     maximum,
     maximum_on,
     minimum,
@@ -50,6 +53,10 @@ pub use binary::{
     negative_on,
     not_equal,
     not_equal_on,
+    power,
+    power_on,
+    remainder,
+    remainder_on,
     subtract,
     subtract_on,
 };

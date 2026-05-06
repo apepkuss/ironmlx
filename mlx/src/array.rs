@@ -792,6 +792,48 @@ impl Array {
         crate::ops::binary::minimum_on(self, rhs, target)
     }
 
+    // === P5.6 二元补完 (power / logaddexp / remainder) ===
+
+    /// Element-wise `self ** rhs`. See [`crate::ops::binary::power`].
+    pub fn power(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::power(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::power`].
+    pub fn power_on(&self, rhs: &Array, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::binary::power_on(self, rhs, target)
+    }
+
+    /// Element-wise numerically stable `log(exp(self) + exp(rhs))`.
+    /// See [`crate::ops::binary::logaddexp`].
+    pub fn logaddexp(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::logaddexp(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::logaddexp`].
+    pub fn logaddexp_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::logaddexp_on(self, rhs, target)
+    }
+
+    /// Element-wise remainder (Python-style `%`, sign of divisor).
+    /// See [`crate::ops::binary::remainder`].
+    pub fn remainder(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::remainder(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::remainder`].
+    pub fn remainder_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::remainder_on(self, rhs, target)
+    }
+
     // === P5.5 clip ===
 
     /// Clamp to `[a_min, a_max]`. Pass `None` for either bound to leave it

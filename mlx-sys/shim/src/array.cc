@@ -1080,4 +1080,28 @@ std::unique_ptr<MlxArray> nan_to_num(
   return std::make_unique<MlxArray>(mlx::core::nan_to_num(a, nan, pos, neg, target));
 }
 
+// === P5.6 二元补完 (power/logaddexp/remainder) ===
+
+std::unique_ptr<MlxArray> power(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::power(a, b, target));
+}
+std::unique_ptr<MlxArray> logaddexp(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::logaddexp(a, b, target));
+}
+std::unique_ptr<MlxArray> remainder(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::remainder(a, b, target));
+}
+
 }  // namespace cxx_mlx

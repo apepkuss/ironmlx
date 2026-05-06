@@ -446,6 +446,19 @@ std::unique_ptr<MlxArray> nan_to_num(
     bool has_neginf, float neginf,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.6 二元补完 (power/logaddexp/remainder) ===
+// All three are element-wise broadcast binary ops; broadcasting is handled
+// MLX-side. Return dtype follows MLX promotion rules.
+std::unique_ptr<MlxArray> power(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> logaddexp(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> remainder(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 // === P5.5 expand_dims / squeeze (axis-driven shape ops) ===
 // `axes` slice is forwarded as `std::vector<int>`. For `squeeze`, an empty
 // slice falls through to the no-axis MLX overload (squeeze every size-1 dim).
