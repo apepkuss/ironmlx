@@ -125,9 +125,19 @@ impl Array {
         crate::ops::exp(self)
     }
 
+    /// Stream-targeted variant of [`Array::exp`].
+    pub fn exp_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::exp_on(self, target)
+    }
+
     /// Element-wise natural logarithm. See [`crate::ops::log`].
     pub fn log(&self) -> Result<Array> {
         crate::ops::log(self)
+    }
+
+    /// Stream-targeted variant of [`Array::log`].
+    pub fn log_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::log_on(self, target)
     }
 
     /// Element-wise square root. See [`crate::ops::sqrt`].
@@ -135,9 +145,19 @@ impl Array {
         crate::ops::sqrt(self)
     }
 
+    /// Stream-targeted variant of [`Array::sqrt`].
+    pub fn sqrt_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::sqrt_on(self, target)
+    }
+
     /// Element-wise hyperbolic tangent. See [`crate::ops::tanh`].
     pub fn tanh(&self) -> Result<Array> {
         crate::ops::tanh(self)
+    }
+
+    /// Stream-targeted variant of [`Array::tanh`].
+    pub fn tanh_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::tanh_on(self, target)
     }
 
     /// Element-wise sigmoid. See [`crate::ops::sigmoid`].
@@ -145,9 +165,19 @@ impl Array {
         crate::ops::sigmoid(self)
     }
 
+    /// Stream-targeted variant of [`Array::sigmoid`].
+    pub fn sigmoid_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::sigmoid_on(self, target)
+    }
+
     /// Element-wise x^2. See [`crate::ops::square`].
     pub fn square(&self) -> Result<Array> {
         crate::ops::square(self)
+    }
+
+    /// Stream-targeted variant of [`Array::square`].
+    pub fn square_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::square_on(self, target)
     }
 
     /// Element-wise 1/sqrt(x). See [`crate::ops::rsqrt`].
@@ -155,9 +185,19 @@ impl Array {
         crate::ops::rsqrt(self)
     }
 
+    /// Stream-targeted variant of [`Array::rsqrt`].
+    pub fn rsqrt_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::rsqrt_on(self, target)
+    }
+
     /// Element-wise error function. See [`crate::ops::erf`].
     pub fn erf(&self) -> Result<Array> {
         crate::ops::erf(self)
+    }
+
+    /// Stream-targeted variant of [`Array::erf`].
+    pub fn erf_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::erf_on(self, target)
     }
 
     /// Element-wise 1/x. See [`crate::ops::reciprocal`].
@@ -165,9 +205,24 @@ impl Array {
         crate::ops::reciprocal(self)
     }
 
+    /// Stream-targeted variant of [`Array::reciprocal`].
+    pub fn reciprocal_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::reciprocal_on(self, target)
+    }
+
     /// Sum over the specified axes. See [`crate::ops::sum`].
     pub fn sum<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
         crate::ops::sum(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::sum`].
+    pub fn sum_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::sum_on(self, axes, keepdim, target)
     }
 
     /// Mean over the specified axes. See [`crate::ops::mean`].
@@ -175,9 +230,29 @@ impl Array {
         crate::ops::mean(self, axes, keepdim)
     }
 
+    /// Stream-targeted variant of [`Array::mean`].
+    pub fn mean_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::mean_on(self, axes, keepdim, target)
+    }
+
     /// Maximum over the specified axes. See [`crate::ops::max`].
     pub fn max<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
         crate::ops::max(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::max`].
+    pub fn max_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::max_on(self, axes, keepdim, target)
     }
 
     /// Minimum over the specified axes. See [`crate::ops::min`].
@@ -185,9 +260,29 @@ impl Array {
         crate::ops::min(self, axes, keepdim)
     }
 
+    /// Stream-targeted variant of [`Array::min`].
+    pub fn min_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::min_on(self, axes, keepdim, target)
+    }
+
     /// Indices of the maximum values along the specified axis. See [`crate::ops::argmax`].
     pub fn argmax<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
         crate::ops::argmax(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::argmax`].
+    pub fn argmax_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::argmax_on(self, axes, keepdim, target)
     }
 
     /// Reshape this array. See [`crate::ops::reshape`].
@@ -195,9 +290,23 @@ impl Array {
         crate::ops::reshape(self, shape)
     }
 
+    /// Stream-targeted variant of [`Array::reshape`].
+    pub fn reshape_on<S: IntoShape>(
+        &self,
+        shape: S,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::reshape_on(self, shape, target)
+    }
+
     /// Reverse all axes. See [`crate::ops::transpose`].
     pub fn transpose(&self) -> Result<Array> {
         crate::ops::transpose(self)
+    }
+
+    /// Stream-targeted variant of [`Array::transpose`].
+    pub fn transpose_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::shape::transpose_on(self, target)
     }
 
     /// Shorthand for [`Array::transpose`]. Standard convention in matrix code.
@@ -205,9 +314,23 @@ impl Array {
         crate::ops::transpose(self)
     }
 
+    /// Stream-targeted variant of [`Array::t`].
+    pub fn t_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::shape::transpose_on(self, target)
+    }
+
     /// Permute axes per the given permutation. See [`crate::ops::transpose_axes`].
     pub fn transpose_axes<S: IntoShape>(&self, axes: S) -> Result<Array> {
         crate::ops::transpose_axes(self, axes)
+    }
+
+    /// Stream-targeted variant of [`Array::transpose_axes`].
+    pub fn transpose_axes_on<S: IntoShape>(
+        &self,
+        axes: S,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::transpose_axes_on(self, axes, target)
     }
 
     /// Broadcast to the given shape. See [`crate::ops::broadcast_to`].
@@ -215,9 +338,27 @@ impl Array {
         crate::ops::broadcast_to(self, shape)
     }
 
+    /// Stream-targeted variant of [`Array::broadcast_to`].
+    pub fn broadcast_to_on<S: IntoShape>(
+        &self,
+        shape: S,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::broadcast_to_on(self, shape, target)
+    }
+
     /// Matrix multiplication. See [`crate::ops::matmul()`] for shape rules.
     pub fn matmul(&self, rhs: &Array) -> Result<Array> {
         crate::ops::matmul(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::matmul`].
+    pub fn matmul_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::matmul::matmul_on(self, rhs, target)
     }
 
     /// Use `self` as the condition mask, selecting from `x` where true and `y` where false.
@@ -226,10 +367,29 @@ impl Array {
         crate::ops::where_(self, x, y)
     }
 
+    /// Stream-targeted variant of [`Array::where_`].
+    pub fn where_on(
+        &self,
+        x: &Array,
+        y: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::indexing::where_on(self, x, y, target)
+    }
+
     /// Element-wise addition. Returns an error on shape/dtype mismatch.
     /// For an infallible panic-on-err variant, use the `+` operator.
     pub fn try_add(&self, rhs: &Array) -> Result<Array> {
         crate::ops::binary::add(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::try_add`].
+    pub fn try_add_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::add_on(self, rhs, target)
     }
 
     /// Element-wise subtraction. Returns an error on shape/dtype mismatch.
@@ -238,10 +398,28 @@ impl Array {
         crate::ops::binary::subtract(self, rhs)
     }
 
+    /// Stream-targeted variant of [`Array::try_sub`].
+    pub fn try_sub_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::subtract_on(self, rhs, target)
+    }
+
     /// Element-wise multiplication. Returns an error on shape/dtype mismatch.
     /// For an infallible panic-on-err variant, use the `*` operator.
     pub fn try_mul(&self, rhs: &Array) -> Result<Array> {
         crate::ops::binary::multiply(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::try_mul`].
+    pub fn try_mul_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::multiply_on(self, rhs, target)
     }
 
     /// Element-wise division. Returns an error on shape/dtype mismatch.
@@ -250,10 +428,24 @@ impl Array {
         crate::ops::binary::divide(self, rhs)
     }
 
+    /// Stream-targeted variant of [`Array::try_div`].
+    pub fn try_div_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::divide_on(self, rhs, target)
+    }
+
     /// Element-wise negation. Returns an error if the operation fails.
     /// For an infallible panic-on-err variant, use the unary `-` operator.
     pub fn try_neg(&self) -> Result<Array> {
         crate::ops::binary::negative(self)
+    }
+
+    /// Stream-targeted variant of [`Array::try_neg`].
+    pub fn try_neg_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::binary::negative_on(self, target)
     }
 
     /// Take values along `axis`. See [`crate::ops::take`].
@@ -261,14 +453,44 @@ impl Array {
         crate::ops::take(self, indices, axis)
     }
 
+    /// Stream-targeted variant of [`Array::take`].
+    pub fn take_on(
+        &self,
+        indices: &Array,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::indexing::take_on(self, indices, axis, target)
+    }
+
     /// Per-axis gather (PyTorch `torch.gather`). See [`crate::ops::take_along_axis`].
     pub fn take_along_axis(&self, indices: &Array, axis: i32) -> Result<Array> {
         crate::ops::take_along_axis(self, indices, axis)
     }
 
+    /// Stream-targeted variant of [`Array::take_along_axis`].
+    pub fn take_along_axis_on(
+        &self,
+        indices: &Array,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::indexing::take_along_axis_on(self, indices, axis, target)
+    }
+
     /// Slice with stride 1. See [`crate::ops::slice`].
     pub fn slice<S1: IntoShape, S2: IntoShape>(&self, start: S1, stop: S2) -> Result<Array> {
         crate::ops::slice(self, start, stop)
+    }
+
+    /// Stream-targeted variant of [`Array::slice`].
+    pub fn slice_on<S1: IntoShape, S2: IntoShape>(
+        &self,
+        start: S1,
+        stop: S2,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::indexing::slice_on(self, start, stop, target)
     }
 
     /// Slice with explicit strides. See [`crate::ops::slice_strided`].
@@ -279,6 +501,17 @@ impl Array {
         strides: S3,
     ) -> Result<Array> {
         crate::ops::slice_strided(self, start, stop, strides)
+    }
+
+    /// Stream-targeted variant of [`Array::slice_strided`].
+    pub fn slice_strided_on<S1: IntoShape, S2: IntoShape, S3: IntoShape>(
+        &self,
+        start: S1,
+        stop: S2,
+        strides: S3,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::indexing::slice_strided_on(self, start, stop, strides, target)
     }
 
     /// N-dimensional gather. See [`crate::ops::gather`].

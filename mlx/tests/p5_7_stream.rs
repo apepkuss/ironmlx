@@ -252,3 +252,31 @@ fn ops_smoke_stream_routing() {
     let p = mlx::ops::matmul::matmul_on(&m1, &m2, Device::cpu()).expect("matmul_on");
     assert_eq!(p.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 }
+
+// === Task 6: Array methods *_on variants ===
+
+#[test]
+fn array_methods_on_variants() {
+    let a: Array = (&[1.0_f32, 4.0][..], (2,)).try_into().unwrap();
+    let b: Array = (&[2.0_f32, 8.0][..], (2,)).try_into().unwrap();
+
+    // Each *_on variant produces same result as default when target is Device::cpu()
+    assert_eq!(
+        a.try_add_on(&b, Device::cpu())
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap(),
+        a.try_add(&b).unwrap().to_vec::<f32>().unwrap()
+    );
+    assert_eq!(
+        a.sqrt_on(Device::cpu()).unwrap().to_vec::<f32>().unwrap(),
+        a.sqrt().unwrap().to_vec::<f32>().unwrap()
+    );
+    assert_eq!(
+        a.reshape_on((2,), Device::cpu())
+            .unwrap()
+            .shape()
+            .as_slice(),
+        &[2]
+    );
+}
