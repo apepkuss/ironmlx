@@ -10,6 +10,9 @@
 //! - Option<Dtype> → (bool has_dtype, u8 dtype_repr)
 //! - Option<&Array>→ *const MlxArray (nullptr = None)  (P2b/P2c pattern)
 //! - &str mode     → rust::Str  (P2b sdpa pattern)
+//!
+//! Each fn carries 4 trailing `StreamOrDevice` args (P5.7) — same encoding
+//! as the array bridge: `(has_target, is_device_only, device_type, stream_index)`.
 
 #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "cxx_mlx")]
@@ -36,6 +39,10 @@ pub mod ffi {
             bits: i32,
             mode: &str,
             global_scale: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<QuantizeResult>>;
 
         // ===== dequantize =====
@@ -51,6 +58,10 @@ pub mod ffi {
             global_scale: *const MlxArray,
             has_dtype: bool,
             dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // ===== quantized_matmul =====
@@ -65,6 +76,10 @@ pub mod ffi {
             has_bits: bool,
             bits: i32,
             mode: &str,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // ===== qqmm =====
@@ -79,6 +94,10 @@ pub mod ffi {
             mode: &str,
             global_scale_x: *const MlxArray,
             global_scale_w: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // ===== gather_qmm =====
@@ -96,10 +115,27 @@ pub mod ffi {
             bits: i32,
             mode: &str,
             sorted_indices: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // ===== FP8 =====
-        fn from_fp8(x: &MlxArray, dtype_repr: u8) -> Result<UniquePtr<MlxArray>>;
-        fn to_fp8(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn from_fp8(
+            x: &MlxArray,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn to_fp8(
+            x: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

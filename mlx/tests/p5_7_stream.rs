@@ -253,6 +253,43 @@ fn ops_smoke_stream_routing() {
     assert_eq!(p.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 }
 
+// === Task 7: fast / quantization _on variants ===
+
+#[test]
+fn fast_ops_on_variants() {
+    let x: Array = (&[1.0_f32; 16][..], (4, 4)).try_into().unwrap();
+    let w: Array = (&[1.0_f32; 4][..], (4,)).try_into().unwrap();
+    let r = mlx::fast::rms_norm_on(&x, Some(&w), 1e-5, Device::cpu()).expect("rms_norm_on");
+    assert_eq!(r.shape().as_slice(), &[4, 4]);
+}
+
+#[test]
+fn quantization_ops_on_variants() {
+    // group_size=64 requires last dim divisible by 64; use [2, 64].
+    let x: Array = (&[1.0_f32; 128][..], (2, 64)).try_into().unwrap();
+    // quantize returns Vec<Array> — affine mode produces [packed, scales, biases].
+    let parts =
+        mlx::quantization::quantize_on(&x, Some(64), Some(4), "affine", None, Device::cpu())
+            .expect("quantize_on");
+    assert_eq!(parts.len(), 3);
+    let q = &parts[0];
+    let scales = &parts[1];
+    let biases = &parts[2];
+    let r = mlx::quantization::dequantize_on(
+        q,
+        scales,
+        Some(biases),
+        Some(64),
+        Some(4),
+        "affine",
+        None,
+        None,
+        Device::cpu(),
+    )
+    .expect("dequantize_on");
+    assert_eq!(r.shape().as_slice(), &[2, 64]);
+}
+
 // === Task 6: Array methods *_on variants ===
 
 #[test]
