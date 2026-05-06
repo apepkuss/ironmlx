@@ -39,8 +39,8 @@ pub fn broadcast_shape(lhs: &[i32], rhs: &[i32]) -> Result<SmallVec<[i32; 8]>> {
             (a, 1) => a,
             _ => {
                 return Err(Error::BroadcastMismatch {
-                    lhs: lhs.to_vec(),
-                    rhs: rhs.to_vec(),
+                    lhs: crate::Shape::from(lhs),
+                    rhs: crate::Shape::from(rhs),
                 });
             }
         };
@@ -95,8 +95,8 @@ mod tests {
         let err = broadcast_shape(&[2, 3], &[2, 4]).unwrap_err();
         match err {
             Error::BroadcastMismatch { lhs, rhs } => {
-                assert_eq!(lhs, vec![2, 3]);
-                assert_eq!(rhs, vec![2, 4]);
+                assert_eq!(lhs.as_slice(), &[2, 3]);
+                assert_eq!(rhs.as_slice(), &[2, 4]);
             }
             other => panic!("expected BroadcastMismatch, got {other:?}"),
         }

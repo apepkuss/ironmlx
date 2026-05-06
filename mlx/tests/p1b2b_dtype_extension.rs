@@ -3,7 +3,7 @@ use mlx::{Array, Dtype, Element};
 #[test]
 fn u16_round_trip() {
     let data: Vec<u16> = vec![1, 100, 65535, 0];
-    let arr = Array::from_slice(&data, &[4]).expect("from_slice");
+    let arr = Array::try_from((&data[..], &[4][..])).expect("try_from");
     assert_eq!(arr.dtype(), Dtype::Uint16);
     let back: Vec<u16> = arr.to_vec().expect("to_vec");
     assert_eq!(back, data);
@@ -12,7 +12,7 @@ fn u16_round_trip() {
 #[test]
 fn u32_round_trip() {
     let data: Vec<u32> = vec![1, 1_000_000, u32::MAX, 0];
-    let arr = Array::from_slice(&data, &[4]).expect("from_slice");
+    let arr = Array::try_from((&data[..], &[4][..])).expect("try_from");
     assert_eq!(arr.dtype(), Dtype::Uint32);
     let back: Vec<u32> = arr.to_vec().expect("to_vec");
     assert_eq!(back, data);
@@ -21,7 +21,7 @@ fn u32_round_trip() {
 #[test]
 fn u64_round_trip() {
     let data: Vec<u64> = vec![1, 1_000_000_000_000, u64::MAX, 0];
-    let arr = Array::from_slice(&data, &[4]).expect("from_slice");
+    let arr = Array::try_from((&data[..], &[4][..])).expect("try_from");
     assert_eq!(arr.dtype(), Dtype::Uint64);
     let back: Vec<u64> = arr.to_vec().expect("to_vec");
     assert_eq!(back, data);
@@ -29,7 +29,7 @@ fn u64_round_trip() {
 
 #[test]
 fn u32_item_scalar() {
-    let arr = Array::from_slice(&[42_u32], &[]).expect("from_slice");
+    let arr = Array::try_from((&[42_u32][..], &[][..])).expect("try_from");
     assert_eq!(arr.item::<u32>().expect("item"), 42);
 }
 
@@ -43,6 +43,6 @@ fn dtype_const_for_new_types() {
 #[test]
 fn shape_validation_for_new_types() {
     // Length mismatch should produce ShapeMismatch (Rust-side check)
-    let result = Array::from_slice(&[1_u32, 2, 3], &[5]);
+    let result = Array::try_from((&[1_u32, 2, 3][..], &[5][..]));
     assert!(matches!(result, Err(mlx::Error::ShapeMismatch { .. })));
 }

@@ -2,7 +2,7 @@ use mlx::{ops, All, Array, Dtype, Error};
 
 #[test]
 fn sum_all_axes_returns_scalar() {
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[2, 2][..])).expect("try_from");
     let s = ops::sum(&a, All, false).expect("sum_all");
     assert_eq!(s.size(), 1);
     assert_eq!(s.shape().as_slice(), &[] as &[i32]);
@@ -11,7 +11,8 @@ fn sum_all_axes_returns_scalar() {
 
 #[test]
 fn sum_single_axis_negative_index() {
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("from_slice");
+    let a =
+        Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[2, 3][..])).expect("try_from");
     let s = ops::sum(&a, -1, false).expect("sum");
     assert_eq!(s.shape().as_slice(), &[2]);
     assert_eq!(s.to_vec::<f32>().expect("to_vec"), vec![6.0, 15.0]);
@@ -19,14 +20,15 @@ fn sum_single_axis_negative_index() {
 
 #[test]
 fn sum_single_axis_keepdim() {
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("from_slice");
+    let a =
+        Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[2, 3][..])).expect("try_from");
     let s = ops::sum(&a, -1, true).expect("sum");
     assert_eq!(s.shape().as_slice(), &[2, 1]);
 }
 
 #[test]
 fn sum_multi_axis_slice_form() {
-    let a = Array::from_slice(&[1.0_f32; 24], &[2, 3, 4]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32; 24][..], &[2, 3, 4][..])).expect("try_from");
     let s = ops::sum(&a, &[0, 2][..], false).expect("sum");
     assert_eq!(s.shape().as_slice(), &[3]);
     let v = s.to_vec::<f32>().expect("to_vec");
@@ -35,21 +37,21 @@ fn sum_multi_axis_slice_form() {
 
 #[test]
 fn sum_multi_axis_vec_form() {
-    let a = Array::from_slice(&[1.0_f32; 24], &[2, 3, 4]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32; 24][..], &[2, 3, 4][..])).expect("try_from");
     let s = ops::sum(&a, vec![0, 2], false).expect("sum");
     assert_eq!(s.shape().as_slice(), &[3]);
 }
 
 #[test]
 fn sum_multi_axis_array_literal_form() {
-    let a = Array::from_slice(&[1.0_f32; 24], &[2, 3, 4]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32; 24][..], &[2, 3, 4][..])).expect("try_from");
     let s = ops::sum(&a, [0, 2], false).expect("sum");
     assert_eq!(s.shape().as_slice(), &[3]);
 }
 
 #[test]
 fn sum_method_matches_free_fn() {
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[2, 2][..])).expect("try_from");
     let by_method = a.sum(-1, false).expect("method");
     let by_freefn = ops::sum(&a, -1, false).expect("free fn");
     assert_eq!(
@@ -60,7 +62,7 @@ fn sum_method_matches_free_fn() {
 
 #[test]
 fn sum_dtype_preserved_for_integers() {
-    let a = Array::from_slice(&[1_i32, 2, 3], &[3]).expect("from_slice");
+    let a = Array::try_from((&[1_i32, 2, 3][..], &[3][..])).expect("try_from");
     let s = ops::sum(&a, All, false).expect("sum");
     assert_eq!(s.dtype(), Dtype::Int32);
     assert_eq!(s.item::<i32>().expect("item"), 6);
@@ -68,7 +70,7 @@ fn sum_dtype_preserved_for_integers() {
 
 #[test]
 fn mean_basic() {
-    let a = Array::from_slice(&[2.0_f32, 4.0, 6.0, 8.0], &[2, 2]).expect("from_slice");
+    let a = Array::try_from((&[2.0_f32, 4.0, 6.0, 8.0][..], &[2, 2][..])).expect("try_from");
     let m = ops::mean(&a, All, false).expect("mean");
     assert!((m.item::<f32>().expect("item") - 5.0).abs() < 1e-6);
 
@@ -78,7 +80,7 @@ fn mean_basic() {
 
 #[test]
 fn max_basic() {
-    let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0], &[2, 2]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32, 5.0, 3.0, 2.0][..], &[2, 2][..])).expect("try_from");
     assert_eq!(
         ops::max(&a, All, false)
             .expect("max")
@@ -93,7 +95,7 @@ fn max_basic() {
 
 #[test]
 fn min_basic() {
-    let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0], &[2, 2]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32, 5.0, 3.0, 2.0][..], &[2, 2][..])).expect("try_from");
     assert_eq!(
         ops::min(&a, All, false)
             .expect("min")
@@ -109,7 +111,8 @@ fn min_basic() {
 #[test]
 fn argmax_basic() {
     // [[1, 5, 3], [2, 4, 6]] → argmax(-1) = [1, 2]
-    let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0, 4.0, 6.0], &[2, 3]).expect("from_slice");
+    let a =
+        Array::try_from((&[1.0_f32, 5.0, 3.0, 2.0, 4.0, 6.0][..], &[2, 3][..])).expect("try_from");
     let am = ops::argmax(&a, -1, false).expect("argmax");
     assert_eq!(am.dtype(), Dtype::Uint32);
     assert_eq!(am.shape().as_slice(), &[2_i32]);
@@ -120,7 +123,8 @@ fn argmax_basic() {
 #[test]
 fn argmax_all_returns_flat_index() {
     // The single max in [1, 5, 3, 2, 4, 6] is at flat index 5
-    let a = Array::from_slice(&[1.0_f32, 5.0, 3.0, 2.0, 4.0, 6.0], &[2, 3]).expect("from_slice");
+    let a =
+        Array::try_from((&[1.0_f32, 5.0, 3.0, 2.0, 4.0, 6.0][..], &[2, 3][..])).expect("try_from");
     let am = ops::argmax(&a, All, false).expect("argmax all");
     assert_eq!(am.dtype(), Dtype::Uint32);
     assert_eq!(am.size(), 1);
@@ -132,7 +136,7 @@ fn argmax_all_returns_flat_index() {
 #[test]
 fn argmax_multi_axis_rejected() {
     // MLX doesn't support multi-axis argmax; Rust returns a structured error.
-    let a = Array::from_slice(&[1.0_f32; 24], &[2, 3, 4]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32; 24][..], &[2, 3, 4][..])).expect("try_from");
     let result = ops::argmax(&a, &[0, 1][..], false);
     match result {
         Err(Error::Mlx(msg)) => {
@@ -147,7 +151,8 @@ fn sum_empty_axes_slice_is_no_op() {
     // Empty `&[]` passes through to MLX's multi-axes sum with empty list.
     // MLX's behaviour: empty axes is a no-op, returning the original shape.
     // This test pins the actual MLX semantics so future MLX changes are caught.
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("from_slice");
+    let a =
+        Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[2, 3][..])).expect("try_from");
     let result = ops::sum(&a, &[][..], false);
     match result {
         Ok(s) => {
@@ -168,7 +173,7 @@ fn sum_empty_axes_slice_is_no_op() {
 
 #[test]
 fn reduction_methods_match_free_fns() {
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("from_slice");
+    let a = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[2, 2][..])).expect("try_from");
     assert_eq!(
         a.mean(All, false)
             .expect("mean")

@@ -58,13 +58,12 @@ fn debug_format_includes_shape_and_dtype() {
 }
 
 #[test]
-fn shape_returns_smallvec_compatible_slice() {
-    use smallvec::SmallVec;
+fn shape_returns_shape_type() {
+    use mlx::Shape;
     let arr = Array::zeros(&[2, 3, 4], Dtype::Float32).expect("zeros");
     let s = arr.shape();
-    // Verify the public type really is a SmallVec; this would not compile if
-    // shape() returned Vec<i32>.
-    let _: &SmallVec<[i32; 8]> = &s;
+    // Verify shape() returns the public Shape newtype.
+    let _: &Shape = &s;
     assert_eq!(s.as_slice(), &[2, 3, 4]);
     assert_eq!(s.len(), 3);
 }

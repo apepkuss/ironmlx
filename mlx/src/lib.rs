@@ -6,7 +6,7 @@
 //! use mlx::{Array, Dtype};
 //!
 //! # fn main() -> mlx::Result<()> {
-//! let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2])?;
+//! let a = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], (2, 2)))?;
 //! let v: Vec<f32> = a.to_vec()?;
 //! assert_eq!(v, vec![1.0, 2.0, 3.0, 4.0]);
 //! # Ok(())

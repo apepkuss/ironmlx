@@ -7,7 +7,7 @@ use mlx::Array;
 fn make_test_weight() -> Array {
     let total: usize = 256; // 4 * 64
     let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01 - 1.0).collect();
-    Array::from_slice(&data, &[4, 64]).expect("weight")
+    Array::try_from((&data[..], &[4, 64][..])).expect("weight")
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn quantized_matmul_matches_dequantize_matmul() {
     // 两者应在 4-bit 量化容差内一致
     let w = make_test_weight(); // [4, 64]
     let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
-    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+    let x = Array::try_from((&x_data[..], &[2, 64][..])).expect("x");
 
     let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
 
@@ -154,7 +154,7 @@ fn qqmm_binding_smoke() {
     let w = make_test_weight();
     let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
     let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
-    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+    let x = Array::try_from((&x_data[..], &[2, 64][..])).expect("x");
 
     let result = qqmm(
         &x,
@@ -204,7 +204,7 @@ fn gather_qmm_no_indices_binding_smoke() {
     let w = make_test_weight();
     let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
     let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
-    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+    let x = Array::try_from((&x_data[..], &[2, 64][..])).expect("x");
 
     let result = gather_qmm(
         &x,
@@ -252,7 +252,7 @@ use mlx::Dtype;
 fn fp8_round_trip_f32_small_integers() {
     // 小整数 1.0/2.0/3.0/4.0 在 E4M3 (4-exp 3-mantissa) 范围内可精确或近似表达。
     // E4M3 mantissa 仅 3-bit，相对误差典型 ~6-12%；容差 0.5 安全（绝对误差对小值）。
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[4]).expect("x");
+    let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[4][..])).expect("x");
     let fp8 = to_fp8(&x).expect("to_fp8");
 
     let back = from_fp8(&fp8, Dtype::Float32).expect("from_fp8");

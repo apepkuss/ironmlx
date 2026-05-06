@@ -1,42 +1,15 @@
 use cxx::UniquePtr;
 
-use crate::{Dtype, Element, Error, Result};
+use crate::{Dtype, Element, Error, IntoShape, Result, Shape};
 
 /// An MLX array. Cheap to clone (MLX internally refcounts the storage).
 pub struct Array(UniquePtr<mlx_sys::array::ffi::MlxArray>);
 
 impl Array {
-    /// Low-level FFI escape hatch — wrap an existing cxx UniquePtr<MlxArray> as a safe Array. Use the high-level constructors (Array::from_slice / zeros / etc.) for normal code.
+    /// Low-level FFI escape hatch — wrap an existing cxx UniquePtr<MlxArray> as a safe Array. Use the high-level constructors (Array::try_from / zeros / etc.) for normal code.
     #[doc(hidden)]
     pub fn from_inner(inner: cxx::UniquePtr<mlx_sys::array::ffi::MlxArray>) -> Self {
         Array(inner)
-    }
-
-    /// Construct an array from a slice of `T` and a shape.
-    ///
-    /// Returns `Err(Error::Mlx(...))` if `shape` contains a negative dimension,
-    /// or `Err(Error::ShapeMismatch)` if `slice.len()` does not equal
-    /// `shape.iter().product()` (the empty-shape product is 1, denoting a scalar).
-    pub fn from_slice<T: Element>(slice: &[T], shape: &[i32]) -> Result<Array> {
-        // Reject negative dims early — `d as usize` would wrap to usize::MAX
-        // and the subsequent .product() would either overflow-panic in debug
-        // or wrap silently in release.
-        if let Some(&d) = shape.iter().find(|&&d| d < 0) {
-            return Err(Error::Mlx(format!(
-                "from_slice: negative dimension {d} in shape {shape:?}"
-            )));
-        }
-        // Empty shape → empty product = 1 → scalar (1 element). The branch
-        // for shape.is_empty() is unnecessary because i32::product on an
-        // empty iterator already returns 1.
-        let expected: usize = shape.iter().map(|&d| d as usize).product();
-        if slice.len() != expected {
-            return Err(Error::ShapeMismatch {
-                expected: shape.to_vec(),
-                actual: vec![slice.len() as i32],
-            });
-        }
-        T::array_from(slice, shape)
     }
 
     /// Copy all elements out as a `Vec<T>`. Implicitly evaluates if needed.
@@ -60,9 +33,9 @@ impl Array {
     pub fn item<T: Element>(&self) -> Result<T> {
         if self.size() != 1 {
             return Err(Error::Mlx(format!(
-                "item() called on non-scalar array (size={}, shape={:?})",
+                "item() called on non-scalar array (size={}, shape={})",
                 self.size(),
-                self.shape().as_slice()
+                self.shape()
             )));
         }
         if self.dtype() != T::DTYPE {
@@ -76,18 +49,17 @@ impl Array {
 
     /// Create an array filled with zeros of the given shape and dtype.
     /// The result is lazy — call [`Array::eval`] before reading the data.
-    pub fn zeros(shape: &[i32], dtype: Dtype) -> Result<Self> {
-        let inner = mlx_sys::array::ffi::array_zeros(shape, dtype.as_u8()).map_err(Error::from)?;
+    pub fn zeros<S: IntoShape>(shape: S, dtype: Dtype) -> Result<Self> {
+        let shape = shape.into_shape();
+        let inner = mlx_sys::array::ffi::array_zeros(shape.as_slice(), dtype.as_u8())
+            .map_err(Error::from)?;
         Ok(Array(inner))
     }
 
     /// The shape of the array. `[]` denotes a scalar.
-    ///
-    /// Returns a `SmallVec` with 8 inline slots — zero allocation for
-    /// the common case of ≤ 8-dimensional tensors.
-    pub fn shape(&self) -> smallvec::SmallVec<[i32; 8]> {
+    pub fn shape(&self) -> Shape {
         let raw = mlx_sys::array::ffi::array_shape(&self.0);
-        smallvec::SmallVec::from_vec(raw)
+        Shape::from(raw)
     }
 
     /// The size along the given dimension. Supports negative indexing
@@ -96,7 +68,7 @@ impl Array {
     /// Panics if `dim` is out of range.
     pub fn shape_at(&self, dim: i32) -> i32 {
         let s = self.shape();
-        let n = s.len() as i32;
+        let n = s.rank() as i32;
         let idx = if dim < 0 { dim + n } else { dim };
         assert!(
             idx >= 0 && idx < n,
@@ -219,7 +191,7 @@ impl Array {
     }
 
     /// Reshape this array. See [`crate::ops::reshape`].
-    pub fn reshape(&self, shape: &[i32]) -> Result<Array> {
+    pub fn reshape<S: IntoShape>(&self, shape: S) -> Result<Array> {
         crate::ops::reshape(self, shape)
     }
 
@@ -234,12 +206,12 @@ impl Array {
     }
 
     /// Permute axes per the given permutation. See [`crate::ops::transpose_axes`].
-    pub fn transpose_axes(&self, axes: &[i32]) -> Result<Array> {
+    pub fn transpose_axes<S: IntoShape>(&self, axes: S) -> Result<Array> {
         crate::ops::transpose_axes(self, axes)
     }
 
     /// Broadcast to the given shape. See [`crate::ops::broadcast_to`].
-    pub fn broadcast_to(&self, shape: &[i32]) -> Result<Array> {
+    pub fn broadcast_to<S: IntoShape>(&self, shape: S) -> Result<Array> {
         crate::ops::broadcast_to(self, shape)
     }
 
@@ -254,6 +226,36 @@ impl Array {
         crate::ops::where_(self, x, y)
     }
 
+    /// Element-wise addition. Returns an error on shape/dtype mismatch.
+    /// For an infallible panic-on-err variant, use the `+` operator.
+    pub fn try_add(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::add(self, rhs)
+    }
+
+    /// Element-wise subtraction. Returns an error on shape/dtype mismatch.
+    /// For an infallible panic-on-err variant, use the `-` operator.
+    pub fn try_sub(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::subtract(self, rhs)
+    }
+
+    /// Element-wise multiplication. Returns an error on shape/dtype mismatch.
+    /// For an infallible panic-on-err variant, use the `*` operator.
+    pub fn try_mul(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::multiply(self, rhs)
+    }
+
+    /// Element-wise division. Returns an error on shape/dtype mismatch.
+    /// For an infallible panic-on-err variant, use the `/` operator.
+    pub fn try_div(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::divide(self, rhs)
+    }
+
+    /// Element-wise negation. Returns an error if the operation fails.
+    /// For an infallible panic-on-err variant, use the unary `-` operator.
+    pub fn try_neg(&self) -> Result<Array> {
+        crate::ops::binary::negative(self)
+    }
+
     /// Take values along `axis`. See [`crate::ops::take`].
     pub fn take(&self, indices: &Array, axis: i32) -> Result<Array> {
         crate::ops::take(self, indices, axis)
@@ -265,18 +267,48 @@ impl Array {
     }
 
     /// Slice with stride 1. See [`crate::ops::slice`].
-    pub fn slice(&self, start: &[i32], stop: &[i32]) -> Result<Array> {
+    pub fn slice<S1: IntoShape, S2: IntoShape>(&self, start: S1, stop: S2) -> Result<Array> {
         crate::ops::slice(self, start, stop)
     }
 
     /// Slice with explicit strides. See [`crate::ops::slice_strided`].
-    pub fn slice_strided(&self, start: &[i32], stop: &[i32], strides: &[i32]) -> Result<Array> {
+    pub fn slice_strided<S1: IntoShape, S2: IntoShape, S3: IntoShape>(
+        &self,
+        start: S1,
+        stop: S2,
+        strides: S3,
+    ) -> Result<Array> {
         crate::ops::slice_strided(self, start, stop, strides)
     }
 
     /// N-dimensional gather. See [`crate::ops::gather`].
     pub fn gather(&self, indices: &[&Array], axes: &[i32], slice_sizes: &[i32]) -> Result<Array> {
         crate::ops::gather(self, indices, axes, slice_sizes)
+    }
+}
+
+/// Construct an Array from a slice of `T` and any [`IntoShape`].
+///
+/// Returns `Err(Error::Mlx)` if the shape contains a negative dim, or
+/// `Err(Error::ShapeMismatch)` if `slice.len()` does not equal the shape's
+/// element count.
+impl<T: Element, S: IntoShape> TryFrom<(&[T], S)> for Array {
+    type Error = Error;
+    fn try_from((slice, shape): (&[T], S)) -> Result<Array> {
+        let shape = shape.into_shape();
+        if let Some(&d) = shape.iter().find(|&&d| d < 0) {
+            return Err(Error::Mlx(format!(
+                "Array::try_from: negative dimension {d} in shape {shape}"
+            )));
+        }
+        let expected: usize = shape.numel();
+        if slice.len() != expected {
+            return Err(Error::ShapeMismatch {
+                expected: shape,
+                actual: Shape::from(slice.len() as i32),
+            });
+        }
+        T::array_from(slice, shape.as_slice())
     }
 }
 
@@ -299,6 +331,14 @@ impl std::fmt::Debug for Array {
     }
 }
 
+impl std::fmt::Display for Array {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // TODO(p6.5 task 3): switch to `{}` for dtype once `Display for Dtype`
+        // lands. Final form: `Array<f32>[2, 3]`.
+        write!(f, "Array<{:?}>{}", self.dtype(), self.shape())
+    }
+}
+
 // SAFETY: MLX's `mlx::core::array` is internally backed by
 // `std::shared_ptr<ArrayDesc>`. The shared_ptr refcount is atomic, so
 // transferring ownership across threads is safe (the destructor in the
@@ -311,3 +351,126 @@ impl std::fmt::Debug for Array {
 // threads, clone it (cheap MLX refcount) or wrap it in
 // `Arc<Mutex<Array>>`. See README "Threading" section.
 unsafe impl Send for Array {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_from_slice_and_tuple_shape() {
+        let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (2, 2)).try_into().unwrap();
+        assert_eq!(a.shape().as_slice(), &[2, 2]);
+        assert_eq!(a.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn try_from_array_shape() {
+        let a: Array = (&[1.0_f32, 2.0][..], [2]).try_into().unwrap();
+        assert_eq!(a.shape().as_slice(), &[2]);
+    }
+
+    #[test]
+    fn try_from_size_mismatch_errors() {
+        let r: Result<Array> = (&[1.0_f32, 2.0][..], (3,)).try_into();
+        assert!(matches!(r, Err(Error::ShapeMismatch { .. })));
+    }
+
+    #[test]
+    fn shape_returns_shape_type() {
+        let a = Array::zeros((2, 3), Dtype::Float32).unwrap();
+        let s: Shape = a.shape();
+        assert_eq!(s.rank(), 2);
+        assert_eq!(s.numel(), 6);
+        assert_eq!(format!("{s}"), "[2, 3]");
+    }
+
+    #[test]
+    fn clone_is_refcount_share() {
+        let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+        let b = a.clone();
+        assert_eq!(b.to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
+        assert_eq!(a.to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn add_operator_works() {
+        let a: Array = (&[1.0_f32, 2.0, 3.0][..], (3,)).try_into().unwrap();
+        let b: Array = (&[10.0_f32, 20.0, 30.0][..], (3,)).try_into().unwrap();
+        let c = &a + &b;
+        assert_eq!(c.to_vec::<f32>().unwrap(), vec![11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn sub_mul_div_operators_work() {
+        let a: Array = (&[10.0_f32, 20.0][..], (2,)).try_into().unwrap();
+        let b: Array = (&[2.0_f32, 4.0][..], (2,)).try_into().unwrap();
+        assert_eq!((&a - &b).to_vec::<f32>().unwrap(), vec![8.0, 16.0]);
+        assert_eq!((&a * &b).to_vec::<f32>().unwrap(), vec![20.0, 80.0]);
+        assert_eq!((&a / &b).to_vec::<f32>().unwrap(), vec![5.0, 5.0]);
+    }
+
+    #[test]
+    fn neg_operator_works() {
+        let a: Array = (&[1.0_f32, -2.0][..], (2,)).try_into().unwrap();
+        assert_eq!((-&a).to_vec::<f32>().unwrap(), vec![-1.0, 2.0]);
+    }
+
+    #[test]
+    fn into_shape_threads_through_zeros_and_reshape() {
+        let a = Array::zeros([2, 3], Dtype::Float32).unwrap();
+        let b = a.reshape((3, 2)).unwrap();
+        assert_eq!(b.shape().as_slice(), &[3, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Array + Array failed:")]
+    fn add_operator_panics_on_shape_mismatch() {
+        let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+        let b: Array = (&[1.0_f32, 2.0, 3.0][..], (3,)).try_into().unwrap();
+        let _ = &a + &b;
+    }
+
+    #[test]
+    fn display_uses_dtype_debug_for_now() {
+        // TODO(p6.5 task 3): switch expected to "Array<f32>[2, 3]".
+        let a = Array::zeros((2, 3), Dtype::Float32).unwrap();
+        assert_eq!(format!("{a}"), "Array<Float32>[2, 3]");
+    }
+
+    #[test]
+    fn try_add_returns_result() {
+        let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+        let b: Array = (&[10.0_f32, 20.0][..], (2,)).try_into().unwrap();
+        let c = a.try_add(&b).unwrap();
+        assert_eq!(c.to_vec::<f32>().unwrap(), vec![11.0, 22.0]);
+    }
+
+    #[test]
+    fn try_add_returns_err_on_shape_mismatch() {
+        let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+        let b: Array = (&[1.0_f32, 2.0, 3.0][..], (3,)).try_into().unwrap();
+        assert!(a.try_add(&b).is_err());
+    }
+
+    #[test]
+    fn try_sub_mul_div_neg_work() {
+        let a: Array = (&[10.0_f32, 20.0][..], (2,)).try_into().unwrap();
+        let b: Array = (&[2.0_f32, 4.0][..], (2,)).try_into().unwrap();
+        assert_eq!(
+            a.try_sub(&b).unwrap().to_vec::<f32>().unwrap(),
+            vec![8.0, 16.0]
+        );
+        assert_eq!(
+            a.try_mul(&b).unwrap().to_vec::<f32>().unwrap(),
+            vec![20.0, 80.0]
+        );
+        assert_eq!(
+            a.try_div(&b).unwrap().to_vec::<f32>().unwrap(),
+            vec![5.0, 5.0]
+        );
+        assert_eq!(
+            a.try_neg().unwrap().to_vec::<f32>().unwrap(),
+            vec![-10.0, -20.0]
+        );
+    }
+}

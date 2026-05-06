@@ -8,7 +8,7 @@ fn rms_norm_no_weight_known_values() {
     // mean(x^2) = (1+4+9+16)/4 = 7.5
     // sqrt(7.5 + 1e-5) ≈ 2.7386140
     // Expected output ≈ x / 2.7386 = [0.36514, 0.73029, 1.09543, 1.46059]
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[1, 4]).expect("x");
+    let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[1, 4][..])).expect("x");
     let out = fast::rms_norm(&x, None, 1e-5).expect("rms_norm");
     assert_eq!(out.shape().as_slice(), &[1, 4]);
 
@@ -25,8 +25,8 @@ fn rms_norm_no_weight_known_values() {
 #[test]
 fn rms_norm_with_weight_scales_output() {
     // Same x as above; weight = [2.0, 2.0, 2.0, 2.0] → output = 2 × no-weight result.
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[1, 4]).expect("x");
-    let w = Array::from_slice(&[2.0_f32, 2.0, 2.0, 2.0], &[4]).expect("w");
+    let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[1, 4][..])).expect("x");
+    let w = Array::try_from((&[2.0_f32, 2.0, 2.0, 2.0][..], &[4][..])).expect("w");
     let out = fast::rms_norm(&x, Some(&w), 1e-5).expect("rms_norm");
     let v: Vec<f32> = out.to_vec().expect("to_vec");
     let expected = [0.73029_f32, 1.46058, 2.19087, 2.92117];
@@ -43,7 +43,7 @@ fn layer_norm_no_weight_no_bias_known_values() {
     // x = [[1.0, 2.0, 3.0, 4.0]], shape [1, 4]
     // mean = 2.5; var = 1.25; sqrt(1.25 + 1e-5) ≈ 1.11803
     // normalized = (x - 2.5) / 1.11803 ≈ [-1.34164, -0.44721, 0.44721, 1.34164]
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[1, 4]).expect("x");
+    let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[1, 4][..])).expect("x");
     let out = fast::layer_norm(&x, None, None, 1e-5).expect("layer_norm");
     assert_eq!(out.shape().as_slice(), &[1, 4]);
 
@@ -60,9 +60,9 @@ fn layer_norm_no_weight_no_bias_known_values() {
 #[test]
 fn layer_norm_with_weight_and_bias() {
     // weight=[1,1,1,1], bias=[10,10,10,10] → output = normalized + 10
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[1, 4]).expect("x");
-    let w = Array::from_slice(&[1.0_f32, 1.0, 1.0, 1.0], &[4]).expect("w");
-    let b = Array::from_slice(&[10.0_f32, 10.0, 10.0, 10.0], &[4]).expect("b");
+    let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[1, 4][..])).expect("x");
+    let w = Array::try_from((&[1.0_f32, 1.0, 1.0, 1.0][..], &[4][..])).expect("w");
+    let b = Array::try_from((&[10.0_f32, 10.0, 10.0, 10.0][..], &[4][..])).expect("b");
     let out = fast::layer_norm(&x, Some(&w), Some(&b), 1e-5).expect("layer_norm");
     let v: Vec<f32> = out.to_vec().expect("to_vec");
     let expected = [8.65836_f32, 9.55279, 10.44721, 11.34164];
@@ -81,7 +81,7 @@ fn rope_basic_shape_finite() {
     // 主要验证形状不变 + 输出有限 + 与输入显著不同（确实做了旋转）
     let total: usize = 32; // 1 * 1 * 4 * 8
     let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01).collect();
-    let x = Array::from_slice(&data, &[1, 1, 4, 8]).expect("x");
+    let x = Array::try_from((&data[..], &[1, 1, 4, 8][..])).expect("x");
     let out = fast::rope(&x, 8, false, Some(10000.0), 1.0, 0, None).expect("rope");
 
     assert_eq!(out.shape().as_slice(), &[1, 1, 4, 8]);
@@ -108,7 +108,7 @@ fn rope_offset_shifts_output() {
     // 同样输入，offset=0 vs offset=4 应当产生不同的输出（实际是把 pos 位置移了 4 步）。
     let total: usize = 32; // 1 * 1 * 4 * 8
     let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01).collect();
-    let x = Array::from_slice(&data, &[1, 1, 4, 8]).expect("x");
+    let x = Array::try_from((&data[..], &[1, 1, 4, 8][..])).expect("x");
 
     let out0 = fast::rope(&x, 8, false, Some(10000.0), 1.0, 0, None).expect("rope_0");
     let out4 = fast::rope(&x, 8, false, Some(10000.0), 1.0, 4, None).expect("rope_4");
@@ -133,7 +133,7 @@ fn rope_traditional_differs_from_default() {
     // traditional=true 与 traditional=false 是不同的 rope 排布方式。
     let total: usize = 32; // 1 * 1 * 4 * 8
     let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01).collect();
-    let x = Array::from_slice(&data, &[1, 1, 4, 8]).expect("x");
+    let x = Array::try_from((&data[..], &[1, 1, 4, 8][..])).expect("x");
 
     let out_f = fast::rope(&x, 8, false, Some(10000.0), 1.0, 0, None).expect("rope_f");
     let out_t = fast::rope(&x, 8, true, Some(10000.0), 1.0, 0, None).expect("rope_t");
@@ -165,16 +165,16 @@ fn rope_with_array_offset_per_batch_offsets() {
     let mut combined: Vec<f32> = Vec::with_capacity(per_row * 2);
     combined.extend_from_slice(&row0);
     combined.extend_from_slice(&row1);
-    let x_batched = Array::from_slice(&combined, &[2, 1, 4, 8]).expect("x_batched");
+    let x_batched = Array::try_from((&combined[..], &[2, 1, 4, 8][..])).expect("x_batched");
 
-    let offsets = Array::from_slice(&[0_i32, 4], &[2]).expect("offsets");
+    let offsets = Array::try_from((&[0_i32, 4][..], &[2][..])).expect("offsets");
     let out =
         fast::rope_with_array_offset(&x_batched, 8, false, Some(10000.0), 1.0, &offsets, None)
             .expect("rope_array");
     assert_eq!(out.shape().as_slice(), &[2, 1, 4, 8]);
 
     // 单独用 int offset 路径计算两个参考：
-    let x_single = Array::from_slice(&row0, &[1, 1, 4, 8]).expect("x_single");
+    let x_single = Array::try_from((&row0[..], &[1, 1, 4, 8][..])).expect("x_single");
     let ref_0 = fast::rope(&x_single, 8, false, Some(10000.0), 1.0, 0, None).expect("ref0");
     let ref_4 = fast::rope(&x_single, 8, false, Some(10000.0), 1.0, 4, None).expect("ref4");
 
@@ -212,7 +212,7 @@ fn sdpa_no_mask_matches_manual_reference() {
     for i in 0..n {
         data[i * n + i] = 1.0;
     }
-    let id_2d = Array::from_slice(&data, &[n as i32, n as i32]).expect("id");
+    let id_2d = Array::try_from((&data[..], &[n as i32, n as i32][..])).expect("id");
     let q = id_2d.reshape(&[1, 1, n as i32, n as i32]).expect("q");
     let k = q.clone();
     let v = q.clone();
@@ -247,7 +247,7 @@ fn sdpa_causal_mode_zeros_future_positions() {
     for i in 0..n {
         data[i * n + i] = 1.0;
     }
-    let id_2d = Array::from_slice(&data, &[n as i32, n as i32]).expect("id");
+    let id_2d = Array::try_from((&data[..], &[n as i32, n as i32][..])).expect("id");
     let q = id_2d.reshape(&[1, 1, n as i32, n as i32]).expect("q");
     let k = q.clone();
     let v = q.clone();
@@ -275,7 +275,7 @@ fn sdpa_custom_mask_zeros_masked_positions() {
     for i in 0..n {
         data[i * n + i] = 1.0;
     }
-    let id_2d = Array::from_slice(&data, &[n as i32, n as i32]).expect("id");
+    let id_2d = Array::try_from((&data[..], &[n as i32, n as i32][..])).expect("id");
     let q = id_2d.reshape(&[1, 1, n as i32, n as i32]).expect("q");
     let k = q.clone();
     let v = q.clone();
@@ -289,7 +289,7 @@ fn sdpa_custom_mask_zeros_masked_positions() {
             }
         }
     }
-    let mask = Array::from_slice(&mask_data, &[n as i32, n as i32]).expect("mask");
+    let mask = Array::try_from((&mask_data[..], &[n as i32, n as i32][..])).expect("mask");
 
     let out =
         fast::scaled_dot_product_attention(&q, &k, &v, 1.0, "", Some(&mask), None).expect("sdpa");
@@ -309,7 +309,7 @@ fn sdpa_custom_mask_zeros_masked_positions() {
 #[test]
 fn top_level_re_exports_work() {
     // 通过 mlx::rms_norm 直接调用（验证 re-export 可达）
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[1, 4]).expect("x");
+    let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[1, 4][..])).expect("x");
     let out = mlx::rms_norm(&x, None, 1e-5).expect("rms_norm");
     assert_eq!(out.shape().as_slice(), &[1, 4]);
 }

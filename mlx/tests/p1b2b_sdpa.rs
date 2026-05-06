@@ -15,17 +15,17 @@ fn sdpa(q: &Array, k: &Array, v: &Array, mask: Option<&Array>, scale: f32) -> Re
     // K.transpose(-1, -2): [B, H, S, D] → [B, H, D, S]
     let kt = k.transpose_axes(&[0, 1, 3, 2])?;
     let scores = q.matmul(&kt)?;
-    let scaled = (&scores * scale)?;
+    let scaled = &scores * scale;
     let masked = match mask {
-        Some(m) => (&scaled + m)?,
+        Some(m) => &scaled + m,
         None => scaled,
     };
     // Softmax along last axis
     let m = ops::max(&masked, -1, true)?;
-    let shifted = (&masked - &m)?;
+    let shifted = &masked - &m;
     let e = shifted.exp()?;
     let s = ops::sum(&e, -1, true)?;
-    let weights = (&e / &s)?;
+    let weights = &e / &s;
     weights.matmul(v)
 }
 
@@ -37,7 +37,7 @@ fn causal_mask(s: usize) -> Result<Array> {
             data.push(if j <= i { 0.0_f32 } else { f32::NEG_INFINITY });
         }
     }
-    Array::from_slice(&data, &[s as i32, s as i32])
+    Array::try_from((&data[..], &[s as i32, s as i32][..]))
 }
 
 #[test]
@@ -47,9 +47,9 @@ fn sdpa_no_mask_shape_finite() {
     let q_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01).collect();
     let k_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.02).collect();
     let v_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.03).collect();
-    let q = Array::from_slice(&q_data, &[1, 2, 4, 8]).expect("q");
-    let k = Array::from_slice(&k_data, &[1, 2, 4, 8]).expect("k");
-    let v = Array::from_slice(&v_data, &[1, 2, 4, 8]).expect("v");
+    let q = Array::try_from((&q_data[..], &[1, 2, 4, 8][..])).expect("q");
+    let k = Array::try_from((&k_data[..], &[1, 2, 4, 8][..])).expect("k");
+    let v = Array::try_from((&v_data[..], &[1, 2, 4, 8][..])).expect("v");
 
     let scale = 1.0 / (8.0_f32).sqrt();
     let out = sdpa(&q, &k, &v, None, scale).expect("sdpa");
@@ -67,17 +67,17 @@ fn sdpa_softmax_rows_sum_to_one() {
     let total: usize = 12; // 1 * 1 * 3 * 4
     let q_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.1).collect();
     let k_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.1).collect();
-    let q = Array::from_slice(&q_data, &[1, 1, 3, 4]).expect("q");
-    let k = Array::from_slice(&k_data, &[1, 1, 3, 4]).expect("k");
+    let q = Array::try_from((&q_data[..], &[1, 1, 3, 4][..])).expect("q");
+    let k = Array::try_from((&k_data[..], &[1, 1, 3, 4][..])).expect("k");
 
     let kt = k.transpose_axes(&[0, 1, 3, 2]).expect("kt");
     let scores = q.matmul(&kt).expect("matmul");
-    let scaled = (&scores * (1.0 / 2.0_f32)).expect("scale");
+    let scaled = &scores * (1.0 / 2.0_f32);
     let m = ops::max(&scaled, -1, true).expect("max");
-    let shifted = (&scaled - &m).expect("sub");
+    let shifted = &scaled - &m;
     let e = shifted.exp().expect("exp");
     let s = ops::sum(&e, -1, true).expect("sum");
-    let weights = (&e / &s).expect("div");
+    let weights = &e / &s;
 
     // Row sums of weights: sum over last axis with keepdim=false → [1, 1, 3]
     let row_sums = ops::sum(&weights, -1, false).expect("row_sums");
@@ -98,19 +98,19 @@ fn sdpa_causal_mask_zeros_future() {
     let total: usize = s * 4; // 1 * 1 * s * 4
     let q_data: Vec<f32> = (0..total).map(|i| 0.1 * (i as f32)).collect();
     let k_data: Vec<f32> = (0..total).map(|i| 0.1 * (i as f32)).collect();
-    let q = Array::from_slice(&q_data, &[1, 1, s as i32, 4]).expect("q");
-    let k = Array::from_slice(&k_data, &[1, 1, s as i32, 4]).expect("k");
+    let q = Array::try_from((&q_data[..], &[1, 1, s as i32, 4][..])).expect("q");
+    let k = Array::try_from((&k_data[..], &[1, 1, s as i32, 4][..])).expect("k");
     let mask = causal_mask(s).expect("mask");
 
     let kt = k.transpose_axes(&[0, 1, 3, 2]).expect("kt");
     let scores = q.matmul(&kt).expect("matmul");
-    let scaled = (&scores * 0.5_f32).expect("scale");
-    let masked = (&scaled + &mask).expect("add mask");
+    let scaled = &scores * 0.5_f32;
+    let masked = &scaled + &mask;
     let m = ops::max(&masked, -1, true).expect("max");
-    let shifted = (&masked - &m).expect("sub");
+    let shifted = &masked - &m;
     let e = shifted.exp().expect("exp");
     let sum_e = ops::sum(&e, -1, true).expect("sum");
-    let weights = (&e / &sum_e).expect("div");
+    let weights = &e / &sum_e;
 
     // Reshape to [S, S] for inspection
     let w_2d = weights.reshape(&[s as i32, s as i32]).expect("reshape");
@@ -141,7 +141,7 @@ fn sdpa_numerical_match_reference() {
     for i in 0..n {
         data[i * n + i] = 1.0;
     }
-    let identity_2d = Array::from_slice(&data, &[n as i32, n as i32]).expect("identity");
+    let identity_2d = Array::try_from((&data[..], &[n as i32, n as i32][..])).expect("identity");
     let q = identity_2d
         .reshape(&[1, 1, n as i32, n as i32])
         .expect("reshape");

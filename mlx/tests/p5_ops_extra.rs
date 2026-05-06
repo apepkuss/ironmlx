@@ -7,13 +7,13 @@ use mlx::Array;
 fn tensordot_axis_matches_matmul_for_2d() {
     // 2D tensordot(a, b, 1) 等价于 matmul(a, b)
     // a: [2, 3], b: [3, 4] → tensordot=matmul=[2, 4]
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("a");
-    let b = Array::from_slice(
+    let a = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[2, 3][..])).expect("a");
+    let b = Array::try_from((
         &[
             7.0_f32, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
-        ],
-        &[3, 4],
-    )
+        ][..],
+        &[3, 4][..],
+    ))
     .expect("b");
     let td = tensordot(&a, &b, 1).expect("tensordot");
     assert_eq!(td.shape().as_slice(), &[2, 4]);
@@ -28,13 +28,13 @@ fn tensordot_axis_matches_matmul_for_2d() {
 #[test]
 fn tensordot_axes_explicit_contraction() {
     // a: [2, 3], b: [3, 4], 收缩 a 的 axis 1 与 b 的 axis 0 → [2, 4]
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("a");
-    let b = Array::from_slice(
+    let a = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[2, 3][..])).expect("a");
+    let b = Array::try_from((
         &[
             1.0_f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-        ],
-        &[3, 4],
-    )
+        ][..],
+        &[3, 4][..],
+    ))
     .expect("b");
     let td = tensordot_axes(&a, &b, &[1], &[0]).expect("tensordot_axes");
     assert_eq!(td.shape().as_slice(), &[2, 4]);
@@ -43,8 +43,8 @@ fn tensordot_axes_explicit_contraction() {
 #[test]
 fn outer_product_shape_and_values() {
     // outer([a0,a1,a2], [b0,b1]) → [[a0*b0, a0*b1], [a1*b0, a1*b1], [a2*b0, a2*b1]]
-    let a = Array::from_slice(&[2.0_f32, 3.0, 5.0], &[3]).expect("a");
-    let b = Array::from_slice(&[7.0_f32, 11.0], &[2]).expect("b");
+    let a = Array::try_from((&[2.0_f32, 3.0, 5.0][..], &[3][..])).expect("a");
+    let b = Array::try_from((&[7.0_f32, 11.0][..], &[2][..])).expect("b");
     let o = outer(&a, &b).expect("outer");
     assert_eq!(o.shape().as_slice(), &[3, 2]);
     let v: Vec<f32> = o.to_vec().expect("vec");
@@ -64,8 +64,8 @@ fn outer_product_shape_and_values() {
 #[test]
 fn inner_product_dot_scalar() {
     // inner_product([1,2,3], [4,5,6]) = 1*4 + 2*5 + 3*6 = 32
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3]).expect("a");
-    let b = Array::from_slice(&[4.0_f32, 5.0, 6.0], &[3]).expect("b");
+    let a = Array::try_from((&[1.0_f32, 2.0, 3.0][..], &[3][..])).expect("a");
+    let b = Array::try_from((&[4.0_f32, 5.0, 6.0][..], &[3][..])).expect("b");
     let dot = inner_product(&a, &b).expect("inner");
     let v: Vec<f32> = dot.to_vec().expect("vec");
     assert_eq!(v.len(), 1);
@@ -84,9 +84,9 @@ fn addmm_alpha_beta_formula() {
     // A: [2, 3], B: [3, 2], C: [2, 2]
     // 设 α=2.0, β=3.0
     // A @ B 的第 [i,j] 元素 = sum_k A[i,k] * B[k,j]
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("a");
-    let b = Array::from_slice(&[1.0_f32, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2]).expect("b");
-    let c = Array::from_slice(&[10.0_f32, 20.0, 30.0, 40.0], &[2, 2]).expect("c");
+    let a = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[2, 3][..])).expect("a");
+    let b = Array::try_from((&[1.0_f32, 0.0, 0.0, 1.0, 1.0, 1.0][..], &[3, 2][..])).expect("b");
+    let c = Array::try_from((&[10.0_f32, 20.0, 30.0, 40.0][..], &[2, 2][..])).expect("c");
 
     let d = addmm(&c, &a, &b, 2.0, 3.0).expect("addmm");
     assert_eq!(d.shape().as_slice(), &[2, 2]);
@@ -112,8 +112,8 @@ fn block_masked_mm_smoke_no_masks() {
     // A: [4, 4], B: [4, 4], block_size=2
     let a_data: Vec<f32> = (0..16).map(|i| i as f32).collect();
     let b_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
-    let a = Array::from_slice(&a_data, &[4, 4]).expect("a");
-    let b = Array::from_slice(&b_data, &[4, 4]).expect("b");
+    let a = Array::try_from((&a_data[..], &[4, 4][..])).expect("a");
+    let b = Array::try_from((&b_data[..], &[4, 4][..])).expect("b");
 
     let result = block_masked_mm(&a, &b, 2, None, None, None);
 
@@ -151,8 +151,8 @@ fn gather_mm_no_indices_smoke() {
     // A: [2, 3, 4], B: [2, 4, 5] → [2, 3, 5]
     let a_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.01).collect();
     let b_data: Vec<f32> = (0..40).map(|i| (i as f32) * 0.005).collect();
-    let a = Array::from_slice(&a_data, &[2, 3, 4]).expect("a");
-    let b = Array::from_slice(&b_data, &[2, 4, 5]).expect("b");
+    let a = Array::try_from((&a_data[..], &[2, 3, 4][..])).expect("a");
+    let b = Array::try_from((&b_data[..], &[2, 4, 5][..])).expect("b");
 
     let out = gather_mm(&a, &b, None, None, false).expect("gather_mm");
     assert_eq!(out.shape().as_slice(), &[2, 3, 5]);
@@ -170,9 +170,9 @@ fn segmented_mm_smoke() {
     // 期望输出 shape [1, 2, 4] (segments shape 去掉末维 + [M, N])
     let a_data: Vec<f32> = (0..6).map(|i| (i as f32) * 0.1).collect();
     let b_data: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05).collect();
-    let a = Array::from_slice(&a_data, &[2, 3]).expect("a");
-    let b = Array::from_slice(&b_data, &[3, 4]).expect("b");
-    let segments = Array::from_slice(&[0_i32, 3], &[1, 2]).expect("segments");
+    let a = Array::try_from((&a_data[..], &[2, 3][..])).expect("a");
+    let b = Array::try_from((&b_data[..], &[3, 4][..])).expect("b");
+    let segments = Array::try_from((&[0_i32, 3][..], &[1, 2][..])).expect("segments");
 
     let result = segmented_mm(&a, &b, &segments);
 
@@ -207,8 +207,8 @@ fn segmented_mm_smoke() {
 #[test]
 fn top_level_re_exports_work() {
     // 验证 P5 公开 API 通过 mlx::ops::* 模块路径访问
-    let a = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3]).expect("a");
-    let b = Array::from_slice(&[4.0_f32, 5.0, 6.0], &[3]).expect("b");
+    let a = Array::try_from((&[1.0_f32, 2.0, 3.0][..], &[3][..])).expect("a");
+    let b = Array::try_from((&[4.0_f32, 5.0, 6.0][..], &[3][..])).expect("b");
     // 确认 ops/mod.rs re-export 链路通过到 P5 新增项
     let dot = mlx::ops::inner_product(&a, &b).expect("inner_product via mlx::ops");
     let v: Vec<f32> = dot.to_vec().expect("vec");

@@ -74,8 +74,8 @@ fn uniform_default_in_zero_to_one() {
 #[test]
 fn uniform_with_low_high_in_range() {
     let k = key(42).expect("key");
-    let low = Array::from_slice(&[2.0_f32], &[]).expect("low");
-    let high = Array::from_slice(&[5.0_f32], &[]).expect("high");
+    let low = Array::try_from((&[2.0_f32][..], &[][..])).expect("low");
+    let high = Array::try_from((&[5.0_f32][..], &[][..])).expect("high");
     let u = uniform(&low, &high, &[100], Dtype::Float32, Some(&k)).expect("uniform");
     let v: Vec<f32> = u.to_vec().expect("to_vec");
     for x in &v {
@@ -102,8 +102,8 @@ fn normal_finite_and_centered() {
 #[test]
 fn randint_in_range_and_int32() {
     let k = key(42).expect("key");
-    let low = Array::from_slice(&[0_i32], &[]).expect("low");
-    let high = Array::from_slice(&[10_i32], &[]).expect("high");
+    let low = Array::try_from((&[0_i32][..], &[][..])).expect("low");
+    let high = Array::try_from((&[10_i32][..], &[][..])).expect("high");
     let r = randint(&low, &high, &[100], Dtype::Int32, Some(&k)).expect("randint");
     let v: Vec<i32> = r.to_vec().expect("to_vec");
     for x in &v {
@@ -116,7 +116,7 @@ use mlx::random::{bernoulli, bernoulli_default, categorical, categorical_n, cate
 #[test]
 fn bernoulli_only_zero_or_one() {
     let k = key(42).expect("key");
-    let p = Array::from_slice(&[0.5_f32], &[]).expect("p");
+    let p = Array::try_from((&[0.5_f32][..], &[][..])).expect("p");
     let b = bernoulli(&p, &[100], Some(&k)).expect("bernoulli");
     assert_eq!(b.shape().as_slice(), &[100]);
     let v: Vec<bool> = b.to_vec().expect("to_vec");
@@ -128,7 +128,7 @@ fn bernoulli_only_zero_or_one() {
 fn bernoulli_default_shape_from_p() {
     // p 是标量 → bernoulli 输出标量
     let k = key(42).expect("key");
-    let p = Array::from_slice(&[0.7_f32], &[]).expect("p");
+    let p = Array::try_from((&[0.7_f32][..], &[][..])).expect("p");
     let b = bernoulli_default(&p, Some(&k)).expect("bernoulli_default");
     // 标量输出 shape 是 [] 空形状
     assert_eq!(b.shape().as_slice(), &[] as &[i32]);
@@ -139,7 +139,7 @@ fn categorical_index_in_vocab() {
     // logits shape [batch=4, vocab=8]，axis=-1 沿 vocab 采样
     let k = key(42).expect("key");
     let logits_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1).collect();
-    let logits = Array::from_slice(&logits_data, &[4, 8]).expect("logits");
+    let logits = Array::try_from((&logits_data[..], &[4, 8][..])).expect("logits");
 
     let out = categorical(&logits, -1, Some(&k)).expect("categorical");
     // 默认 sample 1 along axis：输出 shape [4]
@@ -154,7 +154,7 @@ fn categorical_index_in_vocab() {
 fn categorical_n_returns_n_samples() {
     let k = key(42).expect("key");
     let logits_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1).collect();
-    let logits = Array::from_slice(&logits_data, &[4, 8]).expect("logits");
+    let logits = Array::try_from((&logits_data[..], &[4, 8][..])).expect("logits");
 
     let out = categorical_n(&logits, -1, 3, Some(&k)).expect("categorical_n");
     // 输出 shape [4, 3]：每 batch 3 个采样
@@ -169,7 +169,7 @@ fn categorical_n_returns_n_samples() {
 fn categorical_shaped_returns_explicit_shape() {
     let k = key(42).expect("key");
     let logits_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
-    let logits = Array::from_slice(&logits_data, &[2, 8]).expect("logits");
+    let logits = Array::try_from((&logits_data[..], &[2, 8][..])).expect("logits");
 
     // 显式 shape [5, 2]：在 broadcast-removed shape [2] 前缀添加 5
     let out = categorical_shaped(&logits, -1, &[5, 2], Some(&k)).expect("categorical_shaped");
@@ -183,8 +183,8 @@ use mlx::random::{
 #[test]
 fn truncated_normal_in_bounds() {
     let k = key(42).expect("key");
-    let lower = Array::from_slice(&[-1.0_f32], &[]).expect("lower");
-    let upper = Array::from_slice(&[1.0_f32], &[]).expect("upper");
+    let lower = Array::try_from((&[-1.0_f32][..], &[][..])).expect("lower");
+    let upper = Array::try_from((&[1.0_f32][..], &[][..])).expect("upper");
     let t = truncated_normal(&lower, &upper, &[100], Dtype::Float32, Some(&k))
         .expect("truncated_normal");
     let v: Vec<f32> = t.to_vec().expect("to_vec");
@@ -199,8 +199,8 @@ fn truncated_normal_in_bounds() {
 #[test]
 fn truncated_normal_default_broadcast_shape() {
     let k = key(42).expect("key");
-    let lower = Array::from_slice(&[-1.0_f32, -2.0], &[2]).expect("lower");
-    let upper = Array::from_slice(&[1.0_f32, 2.0], &[2]).expect("upper");
+    let lower = Array::try_from((&[-1.0_f32, -2.0][..], &[2][..])).expect("lower");
+    let upper = Array::try_from((&[1.0_f32, 2.0][..], &[2][..])).expect("upper");
     let t = truncated_normal_default(&lower, &upper, Dtype::Float32, Some(&k))
         .expect("truncated_normal_default");
     // shape 从 broadcast(lower, upper) = [2]
@@ -242,8 +242,8 @@ fn multivariate_normal_binding_smoke() {
     //   - assert all values are finite
     //   - assert sample covariance roughly matches input cov
     let k = key(42).expect("key");
-    let mean = Array::from_slice(&[0.0_f32, 0.0], &[2]).expect("mean");
-    let cov = Array::from_slice(&[1.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("cov");
+    let mean = Array::try_from((&[0.0_f32, 0.0][..], &[2][..])).expect("mean");
+    let cov = Array::try_from((&[1.0_f32, 0.0, 0.0, 1.0][..], &[2, 2][..])).expect("cov");
 
     let result = multivariate_normal(&mean, &cov, &[10], Dtype::Float32, Some(&k));
 
@@ -297,7 +297,7 @@ fn permutation_arange_is_valid_perm() {
 #[test]
 fn permutation_array_preserves_elements() {
     let k = key(42).expect("key");
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0], &[5]).expect("x");
+    let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0, 5.0][..], &[5][..])).expect("x");
     let p = permutation(&x, 0, Some(&k)).expect("permutation");
     assert_eq!(p.shape().as_slice(), &[5]);
 
