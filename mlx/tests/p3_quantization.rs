@@ -192,21 +192,21 @@ fn qqmm_binding_smoke() {
     }
 }
 
-use mlx::quantization::gather_qmm;
+use mlx::quantization::gather_quantized_matmul;
 
 #[test]
-fn gather_qmm_no_indices_binding_smoke() {
-    // gather_qmm 不传 lhs/rhs indices 时退化为常规 quantized_matmul。
+fn gather_quantized_matmul_no_indices_binding_smoke() {
+    // gather_quantized_matmul 不传 lhs/rhs indices 时退化为常规 quantized_matmul。
     // 本测试验证 binding wiring：仅容忍 NYI 错误（与 qqmm_binding_smoke 对齐）。
     //
-    // TODO: 当 MLX 在 Metal 后端完整支持 gather_qmm（含 indices 路径）时，
+    // TODO: 当 MLX 在 Metal 后端完整支持 gather_quantized_matmul（含 indices 路径）时，
     // 加一个 indices=Some 的 round-trip 测试。
     let w = make_test_weight();
     let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
     let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
     let x = Array::try_from((&x_data[..], &[2, 64][..])).expect("x");
 
-    let result = gather_qmm(
+    let result = gather_quantized_matmul(
         &x,
         &parts[0],
         &parts[1],
@@ -231,7 +231,7 @@ fn gather_qmm_no_indices_binding_smoke() {
                 let msg = format!("{e:?}");
                 assert!(
                     msg.contains("NYI"),
-                    "gather_qmm eval failed with non-NYI error (real regression?): {msg}"
+                    "gather_quantized_matmul eval failed with non-NYI error (real regression?): {msg}"
                 );
             }
         },
@@ -239,7 +239,7 @@ fn gather_qmm_no_indices_binding_smoke() {
             let msg = format!("{e:?}");
             assert!(
                 msg.contains("NYI"),
-                "gather_qmm construction failed with non-NYI error (real regression?): {msg}"
+                "gather_quantized_matmul construction failed with non-NYI error (real regression?): {msg}"
             );
         }
     }

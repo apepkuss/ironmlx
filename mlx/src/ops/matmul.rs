@@ -62,7 +62,7 @@ pub fn addmm(c: &Array, a: &Array, b: &Array, alpha: f32, beta: f32) -> Result<A
 
 /// Block-masked matrix product. Each of the 3 masks is optional and applies
 /// at block granularity (`block_size`).
-pub fn block_masked_mm(
+pub fn block_masked_matmul(
     a: &Array,
     b: &Array,
     block_size: i32,
@@ -82,8 +82,8 @@ pub fn block_masked_mm(
 }
 
 /// Matrix product with row-level gather. **Non-quantized** version.
-/// For the quantized counterpart, see `mlx::quantization::gather_qmm` (P3).
-pub fn gather_mm(
+/// For the quantized counterpart, see `mlx::quantization::gather_quantized_matmul` (P3).
+pub fn gather_matmul(
     a: &Array,
     b: &Array,
     lhs_indices: Option<&Array>,
@@ -102,7 +102,7 @@ pub fn gather_mm(
 
 /// Matrix product with segmented inner dimension. `segments` is an i32
 /// array describing how the inner dimension is partitioned across batches.
-pub fn segmented_mm(a: &Array, b: &Array, segments: &Array) -> Result<Array> {
+pub fn segmented_matmul(a: &Array, b: &Array, segments: &Array) -> Result<Array> {
     let inner = mlx_sys::array::ffi::segmented_mm(a.as_inner(), b.as_inner(), segments.as_inner())
         .map_err(Error::from)?;
     Ok(Array::from_inner(inner))

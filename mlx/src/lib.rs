@@ -64,7 +64,7 @@ pub use io::{
 
 pub mod quantization;
 pub use quantization::{
-    dequantize, from_fp8, gather_qmm, qqmm, quantize, quantized_matmul, to_fp8,
+    dequantize, from_fp8, gather_quantized_matmul, qqmm, quantize, quantized_matmul, to_fp8,
 };
 
 pub mod random;

@@ -154,7 +154,7 @@ pub fn qqmm(
 
 /// Quantized matmul with matrix-level gather (MoE / expert routing).
 #[allow(clippy::too_many_arguments)]
-pub fn gather_qmm(
+pub fn gather_quantized_matmul(
     x: &Array,
     w: &Array,
     scales: &Array,

@@ -14,8 +14,8 @@ pub mod unary;
 pub use binary::{add, divide, multiply, negative, subtract};
 pub use indexing::{gather, slice, slice_strided, take, take_along_axis, where_};
 pub use matmul::{
-    addmm, block_masked_mm, gather_mm, inner_product, matmul, outer, segmented_mm, tensordot,
-    tensordot_axes,
+    addmm, block_masked_matmul, gather_matmul, inner_product, matmul, outer, segmented_matmul,
+    tensordot, tensordot_axes,
 };
 pub use reduction::{argmax, max, mean, min, sum, All, IntoAxes};
 pub use shape::{
