@@ -7,7 +7,7 @@ use mlx::Array;
 fn make_test_weight() -> Array {
     let total: usize = 256; // 4 * 64
     let data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.01 - 1.0).collect();
-    Array::from_slice(&data, &[4, 64]).expect("weight")
+    Array::try_from((&data[..], &[4, 64][..])).expect("weight")
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn quantized_matmul_matches_dequantize_matmul() {
     // 两者应在 4-bit 量化容差内一致
     let w = make_test_weight(); // [4, 64]
     let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
-    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+    let x = Array::try_from((&x_data[..], &[2, 64][..])).expect("x");
 
     let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
 
@@ -154,7 +154,7 @@ fn qqmm_binding_smoke() {
     let w = make_test_weight();
     let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
     let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
-    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+    let x = Array::try_from((&x_data[..], &[2, 64][..])).expect("x");
 
     let result = qqmm(
         &x,
@@ -192,21 +192,21 @@ fn qqmm_binding_smoke() {
     }
 }
 
-use mlx::quantization::gather_qmm;
+use mlx::quantization::gather_quantized_matmul;
 
 #[test]
-fn gather_qmm_no_indices_binding_smoke() {
-    // gather_qmm 不传 lhs/rhs indices 时退化为常规 quantized_matmul。
+fn gather_quantized_matmul_no_indices_binding_smoke() {
+    // gather_quantized_matmul 不传 lhs/rhs indices 时退化为常规 quantized_matmul。
     // 本测试验证 binding wiring：仅容忍 NYI 错误（与 qqmm_binding_smoke 对齐）。
     //
-    // TODO: 当 MLX 在 Metal 后端完整支持 gather_qmm（含 indices 路径）时，
+    // TODO: 当 MLX 在 Metal 后端完整支持 gather_quantized_matmul（含 indices 路径）时，
     // 加一个 indices=Some 的 round-trip 测试。
     let w = make_test_weight();
     let parts = quantize(&w, Some(64), Some(4), "affine", None).expect("quantize");
     let x_data: Vec<f32> = (0..128).map(|i| (i as f32) * 0.005).collect();
-    let x = Array::from_slice(&x_data, &[2, 64]).expect("x");
+    let x = Array::try_from((&x_data[..], &[2, 64][..])).expect("x");
 
-    let result = gather_qmm(
+    let result = gather_quantized_matmul(
         &x,
         &parts[0],
         &parts[1],
@@ -231,7 +231,7 @@ fn gather_qmm_no_indices_binding_smoke() {
                 let msg = format!("{e:?}");
                 assert!(
                     msg.contains("NYI"),
-                    "gather_qmm eval failed with non-NYI error (real regression?): {msg}"
+                    "gather_quantized_matmul eval failed with non-NYI error (real regression?): {msg}"
                 );
             }
         },
@@ -239,7 +239,7 @@ fn gather_qmm_no_indices_binding_smoke() {
             let msg = format!("{e:?}");
             assert!(
                 msg.contains("NYI"),
-                "gather_qmm construction failed with non-NYI error (real regression?): {msg}"
+                "gather_quantized_matmul construction failed with non-NYI error (real regression?): {msg}"
             );
         }
     }
@@ -252,7 +252,7 @@ use mlx::Dtype;
 fn fp8_round_trip_f32_small_integers() {
     // 小整数 1.0/2.0/3.0/4.0 在 E4M3 (4-exp 3-mantissa) 范围内可精确或近似表达。
     // E4M3 mantissa 仅 3-bit，相对误差典型 ~6-12%；容差 0.5 安全（绝对误差对小值）。
-    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[4]).expect("x");
+    let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[4][..])).expect("x");
     let fp8 = to_fp8(&x).expect("to_fp8");
 
     let back = from_fp8(&fp8, Dtype::Float32).expect("from_fp8");
@@ -269,9 +269,10 @@ fn fp8_round_trip_f32_small_integers() {
 }
 
 #[test]
-fn top_level_re_exports_work() {
-    // 验证可以通过 mlx::* 顶层访问 P3 公开 API
+fn submodule_path_works() {
+    // 验证通过 mlx::quantization::* 子模块路径访问 P3 公开 API
     let w = make_test_weight();
-    let parts = mlx::quantize(&w, Some(64), Some(4), "affine", None).expect("re-export");
+    let parts =
+        mlx::quantization::quantize(&w, Some(64), Some(4), "affine", None).expect("submodule");
     assert_eq!(parts.len(), 3);
 }

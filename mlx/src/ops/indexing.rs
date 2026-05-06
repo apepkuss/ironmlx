@@ -1,6 +1,6 @@
 //! Indexing ops: `where_`, `take`, `take_along_axis`, `slice`, `slice_strided`, `gather`.
 
-use crate::{broadcast, Array, Error, Result};
+use crate::{broadcast, Array, Error, IntoShape, Result};
 
 /// Element-wise conditional select: `cond ? x : y`, with NumPy broadcasting
 /// across all three operands.
@@ -12,8 +12,8 @@ use crate::{broadcast, Array, Error, Result};
 pub fn where_(cond: &Array, x: &Array, y: &Array) -> Result<Array> {
     // Validate broadcast compatibility in two steps: cond+x, then result+y.
     // This produces structured Error::BroadcastMismatch instead of opaque MLX strings.
-    let cond_x = broadcast::broadcast_shape(&cond.shape(), &x.shape())?;
-    broadcast::broadcast_shape(&cond_x, &y.shape())?;
+    let cond_x = broadcast::broadcast_shape(cond.shape().as_slice(), x.shape().as_slice())?;
+    broadcast::broadcast_shape(&cond_x, y.shape().as_slice())?;
     let inner = mlx_sys::array::ffi::array_where(cond.as_inner(), x.as_inner(), y.as_inner())
         .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
@@ -40,20 +40,37 @@ pub fn take_along_axis(a: &Array, indices: &Array, axis: i32) -> Result<Array> {
 
 /// Slice with stride 1 along every dimension. `start` and `stop` must each have
 /// length equal to `a.ndim()`. Negative indices are supported (per MLX rules).
-pub fn slice(a: &Array, start: &[i32], stop: &[i32]) -> Result<Array> {
+pub fn slice<S1: IntoShape, S2: IntoShape>(a: &Array, start: S1, stop: S2) -> Result<Array> {
     let strides: Vec<i32> = vec![1; a.ndim()];
-    slice_strided(a, start, stop, &strides)
+    let start = start.into_shape();
+    let stop = stop.into_shape();
+    slice_strided_inner(a, start.as_slice(), stop.as_slice(), &strides)
 }
 
 /// Slice with explicit per-dim strides. `start`, `stop`, `strides` must all
 /// have length equal to `a.ndim()`. Negative indices and negative strides are
 /// supported per MLX rules.
-pub fn slice_strided(a: &Array, start: &[i32], stop: &[i32], strides: &[i32]) -> Result<Array> {
+pub fn slice_strided<S1: IntoShape, S2: IntoShape, S3: IntoShape>(
+    a: &Array,
+    start: S1,
+    stop: S2,
+    strides: S3,
+) -> Result<Array> {
+    let start = start.into_shape();
+    let stop = stop.into_shape();
+    let strides = strides.into_shape();
+    slice_strided_inner(a, start.as_slice(), stop.as_slice(), strides.as_slice())
+}
+
+fn slice_strided_inner(a: &Array, start: &[i32], stop: &[i32], strides: &[i32]) -> Result<Array> {
     let ndim = a.ndim();
     if start.len() != ndim || stop.len() != ndim || strides.len() != ndim {
-        let actual = vec![start.len() as i32, stop.len() as i32, strides.len() as i32];
-        let expected = vec![ndim as i32; 3];
-        return Err(Error::ShapeMismatch { expected, actual });
+        return Err(Error::Mlx(format!(
+            "slice: start/stop/strides length must equal ndim={ndim}, got {}/{}/{}",
+            start.len(),
+            stop.len(),
+            strides.len()
+        )));
     }
     let inner = mlx_sys::array::ffi::array_slice_strided(a.as_inner(), start, stop, strides)
         .map_err(Error::from)?;

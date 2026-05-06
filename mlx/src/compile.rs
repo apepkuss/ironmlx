@@ -3,8 +3,9 @@
 //! only exposes the global controls and the `CompileMode` enum.
 
 /// Global compile mode. Mirrors `mlx::core::CompileMode`.
+#[non_exhaustive]
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompileMode {
     /// Compile is fully disabled; functions run eagerly.
     Disabled = 0,
@@ -13,6 +14,7 @@ pub enum CompileMode {
     /// Compile, but skip kernel fusion.
     NoFuse = 2,
     /// Full compile (default).
+    #[default]
     Enabled = 3,
 }
 
@@ -35,6 +37,24 @@ pub fn set_compile_mode(mode: CompileMode) {
 
 use crate::{Array, Error, Result};
 use cxx::UniquePtr;
+
+/// Shape policy for [`compile`]. `Fixed` re-traces on each new input shape;
+/// `Shapeless` traces once and reuses the graph across shapes.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShapeMode {
+    /// Re-trace whenever input shapes change (default, safest).
+    #[default]
+    Fixed,
+    /// Trace once; reuse the graph for any input shape.
+    Shapeless,
+}
+
+impl ShapeMode {
+    pub(crate) fn is_shapeless(self) -> bool {
+        matches!(self, ShapeMode::Shapeless)
+    }
+}
 
 /// A compiled MLX function. Wraps an opaque `std::function` produced by
 /// `mlx::core::compile`. Drop releases the underlying trace.
@@ -73,7 +93,7 @@ impl CompiledFn {
 /// JIT-compile a Rust closure into an MLX traced graph.
 ///
 /// The closure is invoked once at trace time (and again on shape changes
-/// when `shapeless=false`). Every MLX op the closure runs is recorded;
+/// when `mode == ShapeMode::Fixed`). Every MLX op the closure runs is recorded;
 /// subsequent calls to [`CompiledFn::invoke`] replay the optimized graph
 /// without re-running the closure.
 ///
@@ -90,7 +110,7 @@ impl CompiledFn {
 /// `DtypeMismatch`, `BroadcastMismatch`) emerge as `Error::Mlx(String)`
 /// from `compile()` / `invoke()`. Closure callers that need structured
 /// errors should panic with a typed payload instead.
-pub fn compile<F>(f: F, shapeless: bool) -> Result<CompiledFn>
+pub fn compile<F>(f: F, mode: ShapeMode) -> Result<CompiledFn>
 where
     // `Send + 'static` only: `Sync` is intentionally NOT required, so users
     // can capture `Array` (which is `Send` but `!Sync`, see `mlx/src/array.rs`)
@@ -119,6 +139,17 @@ where
         });
 
     let cb = mlx_sys::compile::make_callback(bridge_fn);
-    let inner = mlx_sys::compile::ffi::compile_with_callback(cb, shapeless).map_err(Error::from)?;
+    let inner = mlx_sys::compile::ffi::compile_with_callback(cb, mode.is_shapeless())
+        .map_err(Error::from)?;
     Ok(CompiledFn { inner })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_compile_mode_is_enabled() {
+        assert_eq!(CompileMode::default(), CompileMode::Enabled);
+    }
 }

@@ -44,11 +44,11 @@ fn make_test_tensors() -> HashMap<String, Array> {
     let mut tensors = HashMap::new();
     tensors.insert(
         "alpha".to_string(),
-        Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("alpha"),
+        Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[2, 2][..])).expect("alpha"),
     );
     tensors.insert(
         "beta".to_string(),
-        Array::from_slice(&[10.0_f32, 20.0], &[2]).expect("beta"),
+        Array::try_from((&[10.0_f32, 20.0][..], &[2][..])).expect("beta"),
     );
     tensors
 }
@@ -209,7 +209,7 @@ fn gguf_round_trip_with_array_meta() {
     let path_str = path.to_str().unwrap();
     let tensors = make_test_tensors();
     let mut metadata: HashMap<String, GGUFMetaData> = HashMap::new();
-    let scale_array = Array::from_slice(&[2.5_f32, 3.5], &[2]).expect("scale");
+    let scale_array = Array::try_from((&[2.5_f32, 3.5][..], &[2][..])).expect("scale");
     metadata.insert("scale".to_string(), GGUFMetaData::Array(scale_array));
 
     io::save_gguf(path_str, &tensors, &metadata).expect("save");
@@ -235,7 +235,7 @@ fn npy_round_trip_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("array.npy");
     let path_str = path.to_str().unwrap();
-    let array = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("a");
+    let array = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[2, 3][..])).expect("a");
 
     io::save_npy(path_str, &array).expect("save_npy");
     let loaded = io::load_npy(path_str).expect("load_npy");
@@ -247,7 +247,7 @@ fn npy_round_trip_file() {
 
 #[test]
 fn npy_round_trip_memory() {
-    let array = Array::from_slice(&[10.0_f32, 20.0, 30.0], &[3]).expect("a");
+    let array = Array::try_from((&[10.0_f32, 20.0, 30.0][..], &[3][..])).expect("a");
 
     let mut writer = io::Writer::memory();
     io::save_npy_to_writer(&mut writer, &array).expect("save");
@@ -269,14 +269,14 @@ fn npy_load_nonexistent_file_returns_err() {
 }
 
 #[test]
-fn top_level_re_exports_work() {
-    // 验证可以通过 mlx::* 顶层访问 P2c 公开 API
-    let _r = mlx::Reader::from_bytes(&[]);
-    let _w = mlx::Writer::memory();
+fn submodule_path_works() {
+    // 验证通过 mlx::io::* 子模块路径访问 P2c 公开 API
+    let _r = mlx::io::Reader::from_bytes(&[]);
+    let _w = mlx::io::Writer::memory();
     // GGUFMetaData 类型可访问
-    let _meta = mlx::GGUFMetaData::String("test".to_string());
+    let _meta = mlx::io::GGUFMetaData::String("test".to_string());
 
     // load_safetensors 函数可达（不需要真正成功调用）
-    let result = mlx::load_safetensors("/nonexistent/foo.safetensors");
+    let result = mlx::io::load_safetensors("/nonexistent/foo.safetensors");
     assert!(result.is_err());
 }

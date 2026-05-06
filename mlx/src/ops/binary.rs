@@ -8,14 +8,14 @@ use crate::{broadcast, Array, Error, Result};
 
 /// Element-wise addition with NumPy broadcasting.
 pub fn add(a: &Array, b: &Array) -> Result<Array> {
-    broadcast::broadcast_shape(&a.shape(), &b.shape())?;
+    broadcast::broadcast_shape(a.shape().as_slice(), b.shape().as_slice())?;
     let inner = mlx_sys::array::ffi::array_add(a.as_inner(), b.as_inner()).map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
 /// Element-wise subtraction with NumPy broadcasting.
 pub fn subtract(a: &Array, b: &Array) -> Result<Array> {
-    broadcast::broadcast_shape(&a.shape(), &b.shape())?;
+    broadcast::broadcast_shape(a.shape().as_slice(), b.shape().as_slice())?;
     let inner =
         mlx_sys::array::ffi::array_subtract(a.as_inner(), b.as_inner()).map_err(Error::from)?;
     Ok(Array::from_inner(inner))
@@ -23,7 +23,7 @@ pub fn subtract(a: &Array, b: &Array) -> Result<Array> {
 
 /// Element-wise multiplication with NumPy broadcasting.
 pub fn multiply(a: &Array, b: &Array) -> Result<Array> {
-    broadcast::broadcast_shape(&a.shape(), &b.shape())?;
+    broadcast::broadcast_shape(a.shape().as_slice(), b.shape().as_slice())?;
     let inner =
         mlx_sys::array::ffi::array_multiply(a.as_inner(), b.as_inner()).map_err(Error::from)?;
     Ok(Array::from_inner(inner))
@@ -31,7 +31,7 @@ pub fn multiply(a: &Array, b: &Array) -> Result<Array> {
 
 /// Element-wise division with NumPy broadcasting.
 pub fn divide(a: &Array, b: &Array) -> Result<Array> {
-    broadcast::broadcast_shape(&a.shape(), &b.shape())?;
+    broadcast::broadcast_shape(a.shape().as_slice(), b.shape().as_slice())?;
     let inner =
         mlx_sys::array::ffi::array_divide(a.as_inner(), b.as_inner()).map_err(Error::from)?;
     Ok(Array::from_inner(inner))

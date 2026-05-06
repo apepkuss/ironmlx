@@ -2,12 +2,13 @@
 
 use smallvec::SmallVec;
 
-use crate::{Array, Error, Result};
+use crate::{Array, Error, IntoShape, Result};
 
 /// Reshape an array to the given shape. A single `-1` in the shape is replaced
 /// by the inferred size; multiple `-1`s or a non-divisible product return
 /// `Err(Error::Mlx)`.
-pub fn reshape(a: &Array, shape: &[i32]) -> Result<Array> {
+pub fn reshape<S: IntoShape>(a: &Array, shape: S) -> Result<Array> {
+    let shape = shape.into_shape();
     let total: usize = a.size();
     let neg_count = shape.iter().filter(|&&d| d == -1).count();
     let resolved: SmallVec<[i32; 8]> = match neg_count {
@@ -20,7 +21,7 @@ pub fn reshape(a: &Array, shape: &[i32]) -> Result<Array> {
                 .product();
             if known == 0 || !total.is_multiple_of(known) {
                 return Err(Error::Mlx(format!(
-                    "reshape: cannot infer -1 dim — total {total} not divisible by product {known} of remaining dims {shape:?}"
+                    "reshape: cannot infer -1 dim — total {total} not divisible by product {known} of remaining dims {shape}"
                 )));
             }
             let inferred = (total / known) as i32;
@@ -31,7 +32,7 @@ pub fn reshape(a: &Array, shape: &[i32]) -> Result<Array> {
         }
         _ => {
             return Err(Error::Mlx(format!(
-                "reshape: at most one -1 placeholder allowed, got {neg_count} in {shape:?}"
+                "reshape: at most one -1 placeholder allowed, got {neg_count} in {shape}"
             )))
         }
     };
@@ -47,17 +48,19 @@ pub fn transpose(a: &Array) -> Result<Array> {
 
 /// Permute axes per the given permutation. `axes` must be a permutation of
 /// `[0, a.ndim())`; MLX validates and errors otherwise.
-pub fn transpose_axes(a: &Array, axes: &[i32]) -> Result<Array> {
-    let inner =
-        mlx_sys::array::ffi::array_transpose_axes(a.as_inner(), axes).map_err(Error::from)?;
+pub fn transpose_axes<S: IntoShape>(a: &Array, axes: S) -> Result<Array> {
+    let axes = axes.into_shape();
+    let inner = mlx_sys::array::ffi::array_transpose_axes(a.as_inner(), axes.as_slice())
+        .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
 /// Broadcast `a` to the given shape, replicating dims of size 1. The target
 /// shape must be broadcast-compatible per NumPy rules.
-pub fn broadcast_to(a: &Array, shape: &[i32]) -> Result<Array> {
-    let inner =
-        mlx_sys::array::ffi::array_broadcast_to(a.as_inner(), shape).map_err(Error::from)?;
+pub fn broadcast_to<S: IntoShape>(a: &Array, shape: S) -> Result<Array> {
+    let shape = shape.into_shape();
+    let inner = mlx_sys::array::ffi::array_broadcast_to(a.as_inner(), shape.as_slice())
+        .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
