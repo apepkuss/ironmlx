@@ -97,6 +97,15 @@ void clear_streams() {
 
 // === Transforms ===
 
+void eval_many(rust::Slice<const MlxArray* const> arrays) {
+  std::vector<MlxArray> vec;
+  vec.reserve(arrays.size());
+  for (size_t i = 0; i < arrays.size(); ++i) {
+    vec.push_back(*arrays[i]);  // copy ctor — refcount-shared, cheap
+  }
+  mlx::core::eval(std::move(vec));
+}
+
 void async_eval_many(rust::Slice<const MlxArray* const> arrays) {
   std::vector<MlxArray> vec;
   vec.reserve(arrays.size());

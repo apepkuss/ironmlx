@@ -4,7 +4,11 @@
 //!
 //! - [`synchronize`] — block on the current thread's default stream
 //! - [`synchronize_stream`] — block on a specific stream
-//! - [`async_eval`] — submit + return a runtime-agnostic Future
+//! - [`eval`] — synchronously evaluate a batch of arrays (block until done)
+//! - [`async_eval`] — submit a batch of arrays for async evaluation (returns
+//!   immediately; subsequent reads block until materialized)
+//! - [`async_eval_fut`] — submit + return a runtime-agnostic Future that
+//!   resolves when the batch completes
 
 use crate::{Array, Error, Result, Stream};
 
@@ -23,7 +27,45 @@ pub fn synchronize_stream(s: Stream) -> Result<()> {
     mlx_sys::stream::ffi::synchronize_stream(s.into()).map_err(Error::from)
 }
 
-/// Asynchronously evaluate one or more arrays.
+/// Evaluate multiple arrays in one call. Blocks the current thread until
+/// every array has been computed. More efficient than calling
+/// [`Array::eval`](crate::Array::eval) per array because MLX can fuse and
+/// schedule the combined graph in one pass.
+///
+/// `eval(&[])` is a no-op and returns `Ok(())`.
+pub fn eval(arrays: &[&Array]) -> Result<()> {
+    let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
+        arrays.iter().map(|a| a.as_inner() as *const _).collect();
+    // SAFETY: each pointer borrows a live `&Array` kept alive by the caller
+    // for the duration of this call; MLX `eval` copies the array refs
+    // internally so the pointers need not outlive this call.
+    unsafe { mlx_sys::stream::ffi::eval_many(&raw) }.map_err(Error::from)
+}
+
+/// Asynchronously evaluate multiple arrays. Submits the computation graph
+/// to MLX's stream worker and returns immediately — does **not** block on
+/// completion.
+///
+/// The arrays become observable as their computation finishes. Any later
+/// operation that reads materialized data ([`Array::to_vec`],
+/// [`Array::item`], [`Array::eval`], indexing, …) will implicitly wait for
+/// the queued async work.
+///
+/// `async_eval(&[])` is a no-op and returns `Ok(())`.
+///
+/// To wait on the submitted batch via a runtime-agnostic Future, use
+/// [`async_eval_fut`] instead.
+pub fn async_eval(arrays: &[&Array]) -> Result<()> {
+    let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
+        arrays.iter().map(|a| a.as_inner() as *const _).collect();
+    // SAFETY: each pointer borrows a live `&Array` kept alive by the caller
+    // for the duration of this call; MLX `async_eval` copies the array refs
+    // internally so the pointers need not outlive this call.
+    unsafe { mlx_sys::stream::ffi::async_eval_many(&raw) }.map_err(Error::from)
+}
+
+/// Asynchronously evaluate one or more arrays and return a Future that
+/// resolves when the work completes.
 ///
 /// Submits the computation graph to MLX's stream worker on the **caller's
 /// thread's default stream** (non-blocking, < 1µs), then returns a
@@ -35,6 +77,10 @@ pub fn synchronize_stream(s: Stream) -> Result<()> {
 ///
 /// The future is **runtime-agnostic** — `.await` it under tokio,
 /// async-std, smol, `futures_lite::future::block_on`, or any executor.
+///
+/// If you don't need a Future (just want fire-and-forget submission and
+/// rely on implicit waits when reading the data later), use the cheaper
+/// [`async_eval`] variant which returns `Result<()>` directly.
 ///
 /// # Cancellation
 ///
@@ -60,7 +106,7 @@ pub fn synchronize_stream(s: Stream) -> Result<()> {
 /// pool, negligible vs typical MLX kernel times (µs–ms).
 ///
 /// [`Event`]: https://github.com/ml-explore/mlx/blob/main/mlx/event.h
-pub fn async_eval(
+pub fn async_eval_fut(
     arrays: &[&Array],
 ) -> impl std::future::Future<Output = Result<()>> + Send + use<> {
     // Clone each &Array into an owned Array (cheap: shared refcount on

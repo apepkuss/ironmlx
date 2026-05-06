@@ -36,6 +36,7 @@ rust::Vec<Stream> get_streams();
 void clear_streams();
 
 // === Transforms ===
+void eval_many(rust::Slice<const MlxArray* const> arrays);
 void async_eval_many(rust::Slice<const MlxArray* const> arrays);
 void synchronize();
 void synchronize_stream(Stream s);
