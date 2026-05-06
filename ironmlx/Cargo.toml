@@ -1,0 +1,29 @@
+[package]
+name = "ironmlx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Local LLM inference on Apple Silicon — Rust runtime backed by cxx-mlx"
+
+[[bin]]
+name = "ironmlx"
+path = "src/main.rs"
+
+[dependencies]
+mlx = { path = "../mlx" }
+mlx-sys = { path = "../mlx-sys" }
+thiserror.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls"] }
+dirs = "6"
+anyhow = "1"
+smallvec = "1"
+
+[dev-dependencies]
+approx = "0.5"

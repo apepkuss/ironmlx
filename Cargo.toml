@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["mlx-sys", "mlx"]
+members = ["mlx-sys", "mlx", "ironmlx"]
 
 [workspace.package]
 version = "0.0.1"
