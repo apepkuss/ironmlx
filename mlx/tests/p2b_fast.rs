@@ -307,9 +307,9 @@ fn sdpa_custom_mask_zeros_masked_positions() {
 }
 
 #[test]
-fn top_level_re_exports_work() {
-    // 通过 mlx::rms_norm 直接调用（验证 re-export 可达）
+fn submodule_path_works() {
+    // 通过 mlx::fast::rms_norm 直接调用（验证子模块路径可达）
     let x = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], &[1, 4][..])).expect("x");
-    let out = mlx::rms_norm(&x, None, 1e-5).expect("rms_norm");
+    let out = mlx::fast::rms_norm(&x, None, 1e-5).expect("rms_norm");
     assert_eq!(out.shape().as_slice(), &[1, 4]);
 }

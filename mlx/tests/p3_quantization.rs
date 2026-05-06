@@ -269,9 +269,10 @@ fn fp8_round_trip_f32_small_integers() {
 }
 
 #[test]
-fn top_level_re_exports_work() {
-    // 验证可以通过 mlx::* 顶层访问 P3 公开 API
+fn submodule_path_works() {
+    // 验证通过 mlx::quantization::* 子模块路径访问 P3 公开 API
     let w = make_test_weight();
-    let parts = mlx::quantize(&w, Some(64), Some(4), "affine", None).expect("re-export");
+    let parts =
+        mlx::quantization::quantize(&w, Some(64), Some(4), "affine", None).expect("submodule");
     assert_eq!(parts.len(), 3);
 }

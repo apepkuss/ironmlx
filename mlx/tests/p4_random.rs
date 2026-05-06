@@ -354,9 +354,9 @@ fn permutation_array_preserves_elements() {
 }
 
 #[test]
-fn top_level_re_exports_work() {
-    // 顶层 mlx::key 仍存在；distributions 仅通过 mlx::random 路径访问。
-    let k = mlx::key(42).expect("key via mlx::*");
+fn submodule_path_works() {
+    // 所有 random API 只通过 mlx::random 子模块路径访问。
+    let k = mlx::random::key(42).expect("key via mlx::random");
     let u = mlx::random::uniform()
         .shape(10)
         .dtype(mlx::Dtype::Float32)

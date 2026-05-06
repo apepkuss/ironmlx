@@ -3,12 +3,13 @@
 //! # Quickstart
 //!
 //! ```no_run
-//! use mlx::{Array, Dtype};
+//! use mlx::{Array, Dtype, Result};
+//! use mlx::random;
 //!
-//! # fn main() -> mlx::Result<()> {
-//! let a = Array::try_from((&[1.0_f32, 2.0, 3.0, 4.0][..], (2, 2)))?;
-//! let v: Vec<f32> = a.to_vec()?;
-//! assert_eq!(v, vec![1.0, 2.0, 3.0, 4.0]);
+//! # fn main() -> Result<()> {
+//! let x = random::uniform().shape((2, 3)).sample()?;
+//! let y = random::normal().shape((2, 3)).sample()?;
+//! let z = &x + &y;
 //! # Ok(())
 //! # }
 //! ```
@@ -16,56 +17,37 @@
 //! # Threading
 //!
 //! [`Array`] is `Send` but not `Sync`. To share an array between threads,
-//! clone it (cheap MLX refcount). See the README for details.
+//! clone it (cheap MLX refcount).
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 compile_error!("mlx only supports macOS on Apple Silicon (aarch64-apple-darwin)");
 
 mod array;
 mod broadcast;
-pub mod compile;
 mod device;
 mod dtype;
 mod element;
 mod error;
-pub mod ops;
 mod ops_impl;
 mod shape;
 mod stream;
+
+pub mod compile;
+pub mod fast;
+pub mod io;
+pub mod ops;
+pub mod quantization;
+pub mod random;
 pub mod transforms;
 
 pub use array::Array;
-pub use broadcast::broadcast_shape;
-pub use compile::{
-    compile, disable_compile, enable_compile, set_compile_mode, CompileMode, CompiledFn, ShapeMode,
-};
 pub use device::{
     default_device, device_count, is_available, set_default_device, Device, DeviceType,
 };
 pub use dtype::Dtype;
 pub use element::Element;
 pub use error::{Error, Result};
-pub use ops::All;
 pub use shape::{IntoShape, Shape};
 pub use stream::{
     clear_streams, default_stream, get_streams, new_stream, set_default_stream, Stream,
 };
-pub use transforms::{async_eval, synchronize, synchronize_stream};
-
-pub mod fast;
-pub use fast::{layer_norm, rms_norm, rope, rope_with_array_offset, scaled_dot_product_attention};
-
-pub mod io;
-pub use io::{
-    load_gguf, load_npy, load_npy_from_reader, load_safetensors, load_safetensors_from_reader,
-    save_gguf, save_npy, save_npy_to_writer, save_safetensors, save_safetensors_to_writer,
-    GGUFMetaData, Reader, Writer,
-};
-
-pub mod quantization;
-pub use quantization::{
-    dequantize, from_fp8, gather_quantized_matmul, qqmm, quantize, quantized_matmul, to_fp8,
-};
-
-pub mod random;
-pub use random::{key, seed, split, split_n};

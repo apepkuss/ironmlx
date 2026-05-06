@@ -1,4 +1,5 @@
-use mlx::{ops, All, Array, Dtype, Error};
+use mlx::ops::{self, All};
+use mlx::{Array, Dtype, Error};
 
 #[test]
 fn sum_all_axes_returns_scalar() {

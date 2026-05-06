@@ -188,12 +188,12 @@ fn compile_callback_panic_caught() {
 }
 
 #[test]
-fn top_level_re_exports_work() {
-    use mlx::{
+fn submodule_path_works() {
+    use mlx::compile::{
         compile, disable_compile, enable_compile, set_compile_mode, CompileMode, CompiledFn,
     };
 
-    // Exercise every global control via the crate-root path.
+    // Exercise every global control via the mlx::compile::* submodule path.
     set_compile_mode(CompileMode::Enabled);
     disable_compile();
     enable_compile();
@@ -205,7 +205,7 @@ fn top_level_re_exports_work() {
         },
         ShapeMode::Fixed,
     )
-    .expect("compile via root");
+    .expect("compile via submodule");
 
     let x = Array::try_from((&[10.0_f32][..], &[1][..])).expect("x");
     let v: Vec<f32> = f.invoke(&[&x]).expect("invoke")[0].to_vec().expect("v");
