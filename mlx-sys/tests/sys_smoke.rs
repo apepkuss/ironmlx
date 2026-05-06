@@ -64,10 +64,14 @@ fn reduction_sum_links() {
 #[test]
 fn shape_ops_link() {
     let a = ffi::array_zeros(&[6, 4], FLOAT32).expect("zeros");
-    let _r = mlx_sys::array::ffi::array_reshape(&a, &[2, 3, 4]).expect("reshape");
-    let _t = mlx_sys::array::ffi::array_transpose(&a).expect("transpose");
-    let _ta = mlx_sys::array::ffi::array_transpose_axes(&a, &[1, 0]).expect("transpose_axes");
-    let _b = mlx_sys::array::ffi::array_broadcast_to(&a, &[2, 6, 4]).expect("broadcast_to");
+    // P5.7: shape ops take 4 trailing StreamOrDevice params (default = no target).
+    let _r =
+        mlx_sys::array::ffi::array_reshape(&a, &[2, 3, 4], false, false, 0, 0).expect("reshape");
+    let _t = mlx_sys::array::ffi::array_transpose(&a, false, false, 0, 0).expect("transpose");
+    let _ta = mlx_sys::array::ffi::array_transpose_axes(&a, &[1, 0], false, false, 0, 0)
+        .expect("transpose_axes");
+    let _b = mlx_sys::array::ffi::array_broadcast_to(&a, &[2, 6, 4], false, false, 0, 0)
+        .expect("broadcast_to");
 }
 
 #[test]
@@ -80,7 +84,7 @@ fn matmul_links() {
 #[test]
 fn split_n_links_returns_vec() {
     let a = ffi::array_zeros(&[6, 4], FLOAT32).expect("zeros");
-    let v = mlx_sys::array::ffi::array_split_n(&a, 3, 0).expect("split_n");
+    let v = mlx_sys::array::ffi::array_split_n(&a, 3, 0, false, false, 0, 0).expect("split_n");
     assert_eq!(mlx_sys::array::ffi::split_result_len(&v), 3);
     let _first = mlx_sys::array::ffi::split_result_at(&v, 0).expect("split_result_at");
 }
@@ -96,6 +100,10 @@ fn concatenate_links_with_raw_ptr_slice() {
     let _c = unsafe {
         mlx_sys::array::ffi::array_concatenate(
             std::slice::from_raw_parts(raw_ptrs.as_ptr(), raw_ptrs.len()),
+            0,
+            false,
+            false,
+            0,
             0,
         )
     }

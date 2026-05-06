@@ -1,13 +1,28 @@
 //! Shape ops: reshape, transpose family, broadcast_to, concatenate, stack, split.
+//!
+//! Each op exposes both a default variant (current default stream) and a
+//! `*_on` variant taking `impl Into<StreamOrDevice>` (P5.7). Because most
+//! shape ops are generic over `IntoShape` or take pointer-slice / `Vec<Array>`
+//! return shapes that don't fit cleanly into [`op_with_stream!`], the
+//! variants are written by hand and the default delegates to `*_on(.., ())`.
 
 use smallvec::SmallVec;
 
-use crate::{Array, Error, IntoShape, Result};
+use crate::{Array, Error, IntoShape, Result, StreamOrDevice};
 
 /// Reshape an array to the given shape. A single `-1` in the shape is replaced
 /// by the inferred size; multiple `-1`s or a non-divisible product return
 /// `Err(Error::Mlx)`.
 pub fn reshape<S: IntoShape>(a: &Array, shape: S) -> Result<Array> {
+    reshape_on(a, shape, ())
+}
+
+/// Stream-targeted variant of [`reshape`].
+pub fn reshape_on<S: IntoShape>(
+    a: &Array,
+    shape: S,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
     let shape = shape.into_shape();
     let total: usize = a.size();
     let neg_count = shape.iter().filter(|&&d| d == -1).count();
@@ -36,57 +51,119 @@ pub fn reshape<S: IntoShape>(a: &Array, shape: S) -> Result<Array> {
             )))
         }
     };
-    let inner = mlx_sys::array::ffi::array_reshape(a.as_inner(), &resolved).map_err(Error::from)?;
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner =
+        mlx_sys::array::ffi::array_reshape(a.as_inner(), &resolved, has, dev_only, dev_t, idx)
+            .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
 /// Reverse all axes (NumPy `arr.T` equivalent).
 pub fn transpose(a: &Array) -> Result<Array> {
-    let inner = mlx_sys::array::ffi::array_transpose(a.as_inner()).map_err(Error::from)?;
+    transpose_on(a, ())
+}
+
+/// Stream-targeted variant of [`transpose`].
+pub fn transpose_on(a: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::array::ffi::array_transpose(a.as_inner(), has, dev_only, dev_t, idx)
+        .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
 /// Permute axes per the given permutation. `axes` must be a permutation of
 /// `[0, a.ndim())`; MLX validates and errors otherwise.
 pub fn transpose_axes<S: IntoShape>(a: &Array, axes: S) -> Result<Array> {
+    transpose_axes_on(a, axes, ())
+}
+
+/// Stream-targeted variant of [`transpose_axes`].
+pub fn transpose_axes_on<S: IntoShape>(
+    a: &Array,
+    axes: S,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
     let axes = axes.into_shape();
-    let inner = mlx_sys::array::ffi::array_transpose_axes(a.as_inner(), axes.as_slice())
-        .map_err(Error::from)?;
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::array::ffi::array_transpose_axes(
+        a.as_inner(),
+        axes.as_slice(),
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
 /// Broadcast `a` to the given shape, replicating dims of size 1. The target
 /// shape must be broadcast-compatible per NumPy rules.
 pub fn broadcast_to<S: IntoShape>(a: &Array, shape: S) -> Result<Array> {
+    broadcast_to_on(a, shape, ())
+}
+
+/// Stream-targeted variant of [`broadcast_to`].
+pub fn broadcast_to_on<S: IntoShape>(
+    a: &Array,
+    shape: S,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
     let shape = shape.into_shape();
-    let inner = mlx_sys::array::ffi::array_broadcast_to(a.as_inner(), shape.as_slice())
-        .map_err(Error::from)?;
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::array::ffi::array_broadcast_to(
+        a.as_inner(),
+        shape.as_slice(),
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
 /// Concatenate arrays along the given axis. All arrays must have identical
 /// shape except along the concatenation axis.
 pub fn concatenate(arrays: &[&Array], axis: i32) -> Result<Array> {
+    concatenate_on(arrays, axis, ())
+}
+
+/// Stream-targeted variant of [`concatenate`].
+pub fn concatenate_on(
+    arrays: &[&Array],
+    axis: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
     // Build a slice of raw pointers to bridge to the unsafe shim. Each pointer
     // is valid for the duration of this call because `arrays` (a slice of
     // `&Array`) outlives the FFI invocation.
     let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
         arrays.iter().map(|a| a.as_inner() as *const _).collect();
+    let (has, dev_only, dev_t, idx) = target.into().encode();
     // SAFETY: `raw` contains valid pointers into the borrowed `&Array`s in
     // `arrays`, all live for the duration of this call. The shim copies via
     // copy ctor (refcount-shared, cheap) — no aliasing or lifetime escape.
     let inner =
-        unsafe { mlx_sys::array::ffi::array_concatenate(&raw, axis) }.map_err(Error::from)?;
+        unsafe { mlx_sys::array::ffi::array_concatenate(&raw, axis, has, dev_only, dev_t, idx) }
+            .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
 /// Stack arrays along a new axis. All arrays must have identical shape; the
 /// result has rank `arrays[0].ndim() + 1`.
 pub fn stack(arrays: &[&Array], axis: i32) -> Result<Array> {
+    stack_on(arrays, axis, ())
+}
+
+/// Stream-targeted variant of [`stack`].
+pub fn stack_on(arrays: &[&Array], axis: i32, target: impl Into<StreamOrDevice>) -> Result<Array> {
     let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
         arrays.iter().map(|a| a.as_inner() as *const _).collect();
-    // SAFETY: same as `concatenate` — pointers are bounded by call lifetime.
-    let inner = unsafe { mlx_sys::array::ffi::array_stack(&raw, axis) }.map_err(Error::from)?;
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    // SAFETY: same as `concatenate_on` — pointers are bounded by call lifetime.
+    let inner = unsafe { mlx_sys::array::ffi::array_stack(&raw, axis, has, dev_only, dev_t, idx) }
+        .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
 }
 
@@ -94,8 +171,27 @@ pub fn stack(arrays: &[&Array], axis: i32) -> Result<Array> {
 /// `Vec<Array>` of length `num_splits`. The split axis size must be evenly
 /// divisible by `num_splits`; MLX validates and errors otherwise.
 pub fn split_n(a: &Array, num_splits: i32, axis: i32) -> Result<Vec<Array>> {
-    let v =
-        mlx_sys::array::ffi::array_split_n(a.as_inner(), num_splits, axis).map_err(Error::from)?;
+    split_n_on(a, num_splits, axis, ())
+}
+
+/// Stream-targeted variant of [`split_n`].
+pub fn split_n_on(
+    a: &Array,
+    num_splits: i32,
+    axis: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Vec<Array>> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let v = mlx_sys::array::ffi::array_split_n(
+        a.as_inner(),
+        num_splits,
+        axis,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
     let len = mlx_sys::array::ffi::split_result_len(&v);
     let mut out = Vec::with_capacity(len);
     for i in 0..len {
@@ -109,8 +205,20 @@ pub fn split_n(a: &Array, num_splits: i32, axis: i32) -> Result<Vec<Array>> {
 /// and the split axis size `S`, the result has pieces with sizes
 /// `[i, j-i, ..., S - last_idx]`.
 pub fn split_at(a: &Array, indices: &[i32], axis: i32) -> Result<Vec<Array>> {
+    split_at_on(a, indices, axis, ())
+}
+
+/// Stream-targeted variant of [`split_at`].
+pub fn split_at_on(
+    a: &Array,
+    indices: &[i32],
+    axis: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Vec<Array>> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
     let v =
-        mlx_sys::array::ffi::array_split_at(a.as_inner(), indices, axis).map_err(Error::from)?;
+        mlx_sys::array::ffi::array_split_at(a.as_inner(), indices, axis, has, dev_only, dev_t, idx)
+            .map_err(Error::from)?;
     let len = mlx_sys::array::ffi::split_result_len(&v);
     let mut out = Vec::with_capacity(len);
     for i in 0..len {

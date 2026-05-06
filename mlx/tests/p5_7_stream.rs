@@ -132,3 +132,41 @@ fn reduction_max_on_axes_default_matches() {
     let r2 = ops_reduction::max_on(&a, vec![0_i32, 1], false, ()).expect("max_on default");
     assert_eq!(r1.to_vec::<f32>().unwrap(), r2.to_vec::<f32>().unwrap());
 }
+
+// === Task 5: ops sweep — shape _on variants ===
+
+#[test]
+fn shape_reshape_on_explicit_device() {
+    use mlx::ops::shape as ops_shape;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (4,)).try_into().unwrap();
+    let r = ops_shape::reshape_on(&a, (2, 2), Device::cpu()).expect("reshape_on");
+    assert_eq!(r.shape().as_slice(), &[2, 2]);
+}
+
+#[test]
+fn shape_transpose_on_default_matches() {
+    use mlx::ops::shape as ops_shape;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (2, 2)).try_into().unwrap();
+    let r1 = ops_shape::transpose(&a).expect("transpose");
+    let r2 = ops_shape::transpose_on(&a, ()).expect("transpose_on default");
+    assert_eq!(r1.to_vec::<f32>().unwrap(), r2.to_vec::<f32>().unwrap());
+}
+
+#[test]
+fn shape_concatenate_on_explicit_device() {
+    use mlx::ops::shape as ops_shape;
+    let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+    let b: Array = (&[3.0_f32, 4.0][..], (2,)).try_into().unwrap();
+    let r = ops_shape::concatenate_on(&[&a, &b], 0, Device::cpu()).expect("concatenate_on");
+    assert_eq!(r.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn shape_split_n_on_explicit_device() {
+    use mlx::ops::shape as ops_shape;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (4,)).try_into().unwrap();
+    let parts = ops_shape::split_n_on(&a, 2, 0, Device::cpu()).expect("split_n_on");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
+    assert_eq!(parts[1].to_vec::<f32>().unwrap(), vec![3.0, 4.0]);
+}

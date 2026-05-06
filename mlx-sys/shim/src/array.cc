@@ -423,52 +423,84 @@ std::unique_ptr<MlxArray> array_argmax_axis(
   return std::make_unique<MlxArray>(mlx::core::argmax(a, axis, keepdims, target));
 }
 
-// === P1b2a shape ops ===
+// === P1b2a shape ops (P5.7: + StreamOrDevice 4-arg encoding) ===
 
-std::unique_ptr<MlxArray> array_reshape(const MlxArray& a, rust::Slice<const int32_t> shape) {
+std::unique_ptr<MlxArray> array_reshape(
+    const MlxArray& a, rust::Slice<const int32_t> shape,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape s(shape.begin(), shape.end());
-  return std::make_unique<MlxArray>(mlx::core::reshape(a, std::move(s)));
+  return std::make_unique<MlxArray>(mlx::core::reshape(a, std::move(s), target));
 }
 
-std::unique_ptr<MlxArray> array_transpose(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::transpose(a));
+std::unique_ptr<MlxArray> array_transpose(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::transpose(a, target));
 }
 
-std::unique_ptr<MlxArray> array_transpose_axes(const MlxArray& a, rust::Slice<const int32_t> axes) {
+std::unique_ptr<MlxArray> array_transpose_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   std::vector<int> axes_vec(axes.begin(), axes.end());
-  return std::make_unique<MlxArray>(mlx::core::transpose(a, std::move(axes_vec)));
+  return std::make_unique<MlxArray>(mlx::core::transpose(a, std::move(axes_vec), target));
 }
 
-std::unique_ptr<MlxArray> array_broadcast_to(const MlxArray& a, rust::Slice<const int32_t> shape) {
+std::unique_ptr<MlxArray> array_broadcast_to(
+    const MlxArray& a, rust::Slice<const int32_t> shape,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape s(shape.begin(), shape.end());
-  return std::make_unique<MlxArray>(mlx::core::broadcast_to(a, s));
+  return std::make_unique<MlxArray>(mlx::core::broadcast_to(a, s, target));
 }
 
-std::unique_ptr<MlxArray> array_concatenate(rust::Slice<const MlxArray* const> arrays, int32_t axis) {
+std::unique_ptr<MlxArray> array_concatenate(
+    rust::Slice<const MlxArray* const> arrays, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   std::vector<MlxArray> vec;
   vec.reserve(arrays.size());
   for (size_t i = 0; i < arrays.size(); ++i) {
     vec.push_back(*arrays[i]);  // copy ctor — refcount-shared, cheap
   }
-  return std::make_unique<MlxArray>(mlx::core::concatenate(std::move(vec), axis));
+  return std::make_unique<MlxArray>(mlx::core::concatenate(std::move(vec), axis, target));
 }
 
-std::unique_ptr<MlxArray> array_stack(rust::Slice<const MlxArray* const> arrays, int32_t axis) {
+std::unique_ptr<MlxArray> array_stack(
+    rust::Slice<const MlxArray* const> arrays, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   std::vector<MlxArray> vec;
   vec.reserve(arrays.size());
   for (size_t i = 0; i < arrays.size(); ++i) {
     vec.push_back(*arrays[i]);
   }
-  return std::make_unique<MlxArray>(mlx::core::stack(vec, axis));
+  return std::make_unique<MlxArray>(mlx::core::stack(vec, axis, target));
 }
 
-std::unique_ptr<MlxArrayVec> array_split_n(const MlxArray& a, int32_t num_splits, int32_t axis) {
-  return std::make_unique<MlxArrayVec>(mlx::core::split(a, num_splits, axis));
+std::unique_ptr<MlxArrayVec> array_split_n(
+    const MlxArray& a, int32_t num_splits, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArrayVec>(mlx::core::split(a, num_splits, axis, target));
 }
 
-std::unique_ptr<MlxArrayVec> array_split_at(const MlxArray& a, rust::Slice<const int32_t> indices, int32_t axis) {
+std::unique_ptr<MlxArrayVec> array_split_at(
+    const MlxArray& a, rust::Slice<const int32_t> indices, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   mlx::core::Shape idx(indices.begin(), indices.end());
-  return std::make_unique<MlxArrayVec>(mlx::core::split(a, idx, axis));
+  return std::make_unique<MlxArrayVec>(mlx::core::split(a, idx, axis, target));
 }
 
 size_t split_result_len(const MlxArrayVec& v) {

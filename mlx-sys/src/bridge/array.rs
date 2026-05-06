@@ -297,11 +297,38 @@ pub mod ffi {
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        // === P1b2a shape ops ===
-        fn array_reshape(a: &MlxArray, shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
-        fn array_transpose(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_transpose_axes(a: &MlxArray, axes: &[i32]) -> Result<UniquePtr<MlxArray>>;
-        fn array_broadcast_to(a: &MlxArray, shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
+        // === P1b2a shape ops (P5.7: + 4 trailing stream params) ===
+        fn array_reshape(
+            a: &MlxArray,
+            shape: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_transpose(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_transpose_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_broadcast_to(
+            a: &MlxArray,
+            shape: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // Safety contract: each pointer in `arrays` must point to a valid
         // MlxArray that lives for the duration of the call. The safe wrappers
@@ -309,19 +336,37 @@ pub mod ffi {
         unsafe fn array_concatenate(
             arrays: &[*const MlxArray],
             axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
-        unsafe fn array_stack(arrays: &[*const MlxArray], axis: i32)
-            -> Result<UniquePtr<MlxArray>>;
+        unsafe fn array_stack(
+            arrays: &[*const MlxArray],
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn array_split_n(
             a: &MlxArray,
             num_splits: i32,
             axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArrayVec>>;
         fn array_split_at(
             a: &MlxArray,
             indices: &[i32],
             axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArrayVec>>;
 
         fn split_result_len(v: &MlxArrayVec) -> usize;

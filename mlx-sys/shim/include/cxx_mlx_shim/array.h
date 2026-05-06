@@ -164,21 +164,37 @@ std::unique_ptr<MlxArray> array_argmax_axis(
     const MlxArray& a, int32_t axis, bool keepdims,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-// === P1b2a shape ops ===
+// === P1b2a shape ops (P5.7: + 4 trailing stream params) ===
 
-std::unique_ptr<MlxArray> array_reshape(const MlxArray& a, rust::Slice<const int32_t> shape);
-std::unique_ptr<MlxArray> array_transpose(const MlxArray& a);
-std::unique_ptr<MlxArray> array_transpose_axes(const MlxArray& a, rust::Slice<const int32_t> axes);
-std::unique_ptr<MlxArray> array_broadcast_to(const MlxArray& a, rust::Slice<const int32_t> shape);
+std::unique_ptr<MlxArray> array_reshape(
+    const MlxArray& a, rust::Slice<const int32_t> shape,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_transpose(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_transpose_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_broadcast_to(
+    const MlxArray& a, rust::Slice<const int32_t> shape,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // Concatenate/stack accept raw pointer slices because cxx 1.0 doesn't bridge
 // &[&MlxArray] directly. Caller (Rust safe layer) builds the pointer slice.
-std::unique_ptr<MlxArray> array_concatenate(rust::Slice<const MlxArray* const> arrays, int32_t axis);
-std::unique_ptr<MlxArray> array_stack(rust::Slice<const MlxArray* const> arrays, int32_t axis);
+std::unique_ptr<MlxArray> array_concatenate(
+    rust::Slice<const MlxArray* const> arrays, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_stack(
+    rust::Slice<const MlxArray* const> arrays, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // Split returns std::vector<array> wrapped in MlxArrayVec opaque holder.
-std::unique_ptr<MlxArrayVec> array_split_n(const MlxArray& a, int32_t num_splits, int32_t axis);
-std::unique_ptr<MlxArrayVec> array_split_at(const MlxArray& a, rust::Slice<const int32_t> indices, int32_t axis);
+std::unique_ptr<MlxArrayVec> array_split_n(
+    const MlxArray& a, int32_t num_splits, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArrayVec> array_split_at(
+    const MlxArray& a, rust::Slice<const int32_t> indices, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // MlxArrayVec accessors.
 size_t split_result_len(const MlxArrayVec& v);
