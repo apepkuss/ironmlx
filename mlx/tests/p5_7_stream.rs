@@ -222,3 +222,33 @@ fn matmul_addmm_on_default_matches() {
     let r2 = ops_matmul::addmm_on(&c, &a, &b, 1.0, 1.0, ()).expect("addmm_on default");
     assert_eq!(r1.to_vec::<f32>().unwrap(), r2.to_vec::<f32>().unwrap());
 }
+
+// === Task 5.F: cross-module smoke test for ops _on variants ===
+
+#[test]
+fn ops_smoke_stream_routing() {
+    let a: Array = (&[1.0_f32, 4.0, 9.0][..], (3,)).try_into().unwrap();
+
+    // unary on CPU device
+    let s = mlx::ops::unary::sqrt_on(&a, Device::cpu()).expect("sqrt_on");
+    assert_eq!(s.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+
+    // reduction
+    let m = mlx::ops::reduction::sum_on(&a, mlx::ops::All, false, Device::cpu()).expect("sum_on");
+    assert!((m.item::<f32>().unwrap() - 14.0).abs() < 1e-5);
+
+    // shape
+    let r = mlx::ops::shape::reshape_on(&a, (3,), Device::cpu()).expect("reshape_on");
+    assert_eq!(r.shape().as_slice(), &[3]);
+
+    // indexing
+    let idx: Array = (&[0_u32, 2][..], (2,)).try_into().unwrap();
+    let t = mlx::ops::indexing::take_on(&a, &idx, 0, Device::cpu()).expect("take_on");
+    assert_eq!(t.to_vec::<f32>().unwrap(), vec![1.0, 9.0]);
+
+    // matmul (use 2x2 example)
+    let m1: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (2, 2)).try_into().unwrap();
+    let m2: Array = (&[1.0_f32, 0.0, 0.0, 1.0][..], (2, 2)).try_into().unwrap();
+    let p = mlx::ops::matmul::matmul_on(&m1, &m2, Device::cpu()).expect("matmul_on");
+    assert_eq!(p.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+}
