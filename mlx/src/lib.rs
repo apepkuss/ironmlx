@@ -35,6 +35,9 @@ pub mod transforms;
 
 pub use array::Array;
 pub use broadcast::broadcast_shape;
+pub use compile::{
+    compile, disable_compile, enable_compile, set_compile_mode, CompileMode, CompiledFn,
+};
 pub use device::{
     default_device, device_count, is_available, set_default_device, Device, DeviceType,
 };

@@ -185,3 +185,28 @@ fn compile_callback_panic_caught() {
     };
     assert!(saw_err, "callback panic must be caught and surfaced as Err");
 }
+
+#[test]
+fn top_level_re_exports_work() {
+    use mlx::{
+        compile, disable_compile, enable_compile, set_compile_mode, CompileMode, CompiledFn,
+    };
+
+    // Exercise every global control via the crate-root path.
+    set_compile_mode(CompileMode::Enabled);
+    disable_compile();
+    enable_compile();
+
+    let f: CompiledFn = compile(
+        |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            let one = Array::from_slice(&[1.0_f32], &[1])?;
+            Ok(vec![inputs[0].add(&one)?])
+        },
+        false,
+    )
+    .expect("compile via root");
+
+    let x = Array::from_slice(&[10.0_f32], &[1]).expect("x");
+    let v: Vec<f32> = f.invoke(&[&x]).expect("invoke")[0].to_vec().expect("v");
+    assert_eq!(v, vec![11.0]);
+}
