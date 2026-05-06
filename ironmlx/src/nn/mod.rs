@@ -4,12 +4,13 @@
 //! that reads its weights directly. Forward methods are inherent (per-layer);
 //! there is no `Module` trait — see P1 spec § 3 for rationale.
 
+pub mod embedding;
 pub mod linear;
 
+pub use embedding::Embedding;
 pub use linear::Linear;
 
 // Added in later P1 tasks:
-// pub mod embedding;
 // pub mod norm;
 // pub mod mlp;
 // pub mod mrope;
