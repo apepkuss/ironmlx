@@ -17,6 +17,7 @@ pub mod indexing;
 pub mod matmul;
 pub mod reduction;
 pub mod shape;
+pub mod sort;
 pub mod unary;
 
 pub use binary::{
@@ -67,7 +68,16 @@ pub use shape::{
     split_at_on, split_n, split_n_on, stack, stack_on, transpose, transpose_axes,
     transpose_axes_on, transpose_on,
 };
+// `sort::sort` is intentionally NOT re-exported at this flat level: it
+// would shadow the `sort` module name (`mlx::ops::sort` resolves to the
+// module, and `pub use sort::sort` introduces an item with the same path
+// segment, producing E0255). Users access the free fn as
+// `mlx::ops::sort::sort` (or via `Array::sort`). The other four fns have
+// no such conflict and are re-exported flat for convenience.
+pub use sort::{
+    argpartition, argpartition_on, argsort, argsort_on, partition, partition_on, topk, topk_on,
+};
 pub use unary::{
     erf, erf_on, exp, exp_on, log, log_on, reciprocal, reciprocal_on, rsqrt, rsqrt_on, sigmoid,
-    sigmoid_on, sqrt, sqrt_on, square, square_on, tanh, tanh_on,
+    sigmoid_on, softmax, softmax_on, sqrt, sqrt_on, square, square_on, tanh, tanh_on,
 };

@@ -759,4 +759,69 @@ std::unique_ptr<MlxArray> clip(
       a, helpers::opt_arr(a_min), helpers::opt_arr(a_max), target));
 }
 
+// === P5.5 softmax ===
+
+std::unique_ptr<MlxArray> softmax(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool precise,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  if (axes.empty()) {
+    // Empty axes -> reduce over all axes (last axis behavior in MLX is the
+    // single-axis form; the no-axes overload reduces over the full tensor
+    // making each element 1/N. We want IntoAxes::All to mean "all axes",
+    // which matches MLX's vector<int>{0,1,...,ndim-1} form).
+    std::vector<int> all_axes;
+    all_axes.reserve(a.ndim());
+    for (int i = 0; i < static_cast<int>(a.ndim()); ++i) {
+      all_axes.push_back(i);
+    }
+    return std::make_unique<MlxArray>(mlx::core::softmax(a, all_axes, precise, target));
+  }
+  std::vector<int> ax(axes.begin(), axes.end());
+  return std::make_unique<MlxArray>(mlx::core::softmax(a, ax, precise, target));
+}
+
+// === P5.5 sort family ===
+
+std::unique_ptr<MlxArray> sort(
+    const MlxArray& a, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::sort(a, axis, target));
+}
+
+std::unique_ptr<MlxArray> argsort(
+    const MlxArray& a, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::argsort(a, axis, target));
+}
+
+std::unique_ptr<MlxArray> partition(
+    const MlxArray& a, int32_t kth, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::partition(a, kth, axis, target));
+}
+
+std::unique_ptr<MlxArray> argpartition(
+    const MlxArray& a, int32_t kth, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::argpartition(a, kth, axis, target));
+}
+
+std::unique_ptr<MlxArray> topk(
+    const MlxArray& a, int32_t k, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::topk(a, k, axis, target));
+}
+
 }  // namespace cxx_mlx

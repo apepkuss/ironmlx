@@ -324,4 +324,28 @@ std::unique_ptr<MlxArray> clip(
     const MlxArray* a_max,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.5 softmax (multi-axis dispatch) ===
+// `axes` is empty -> last-axis default (mlx::core::softmax(a, precise, s)).
+// `axes` non-empty -> multi-axis form (mlx::core::softmax(a, vector<int>, precise, s)).
+std::unique_ptr<MlxArray> softmax(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool precise,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.5 sort family (sort/argsort/partition/argpartition/topk) ===
+std::unique_ptr<MlxArray> sort(
+    const MlxArray& a, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> argsort(
+    const MlxArray& a, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> partition(
+    const MlxArray& a, int32_t kth, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> argpartition(
+    const MlxArray& a, int32_t kth, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> topk(
+    const MlxArray& a, int32_t k, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 }  // namespace cxx_mlx

@@ -655,6 +655,90 @@ impl Array {
     ) -> Result<Array> {
         crate::ops::binary::clip_on(self, a_min, a_max, target)
     }
+
+    // === P5.5 softmax ===
+
+    /// Softmax along the given axes. See [`crate::ops::softmax`].
+    pub fn softmax<A: crate::ops::IntoAxes>(&self, axes: A, precise: bool) -> Result<Array> {
+        crate::ops::unary::softmax(self, axes, precise)
+    }
+
+    /// Stream-targeted variant of [`Array::softmax`].
+    pub fn softmax_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        precise: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::unary::softmax_on(self, axes, precise, target)
+    }
+
+    // === P5.5 sort family ===
+
+    /// Sort along `axis` (ascending). See [`crate::ops::sort::sort`].
+    pub fn sort(&self, axis: i32) -> Result<Array> {
+        crate::ops::sort::sort(self, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::sort`].
+    pub fn sort_on(&self, axis: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::sort::sort_on(self, axis, target)
+    }
+
+    /// Indices that would sort `self` along `axis`. See [`crate::ops::argsort`].
+    pub fn argsort(&self, axis: i32) -> Result<Array> {
+        crate::ops::sort::argsort(self, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::argsort`].
+    pub fn argsort_on(&self, axis: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::sort::argsort_on(self, axis, target)
+    }
+
+    /// Partial sort placing `kth`-smallest at position `kth`. See [`crate::ops::partition`].
+    pub fn partition(&self, kth: i32, axis: i32) -> Result<Array> {
+        crate::ops::sort::partition(self, kth, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::partition`].
+    pub fn partition_on(
+        &self,
+        kth: i32,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::sort::partition_on(self, kth, axis, target)
+    }
+
+    /// Indices form of [`Array::partition`]. See [`crate::ops::argpartition`].
+    pub fn argpartition(&self, kth: i32, axis: i32) -> Result<Array> {
+        crate::ops::sort::argpartition(self, kth, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::argpartition`].
+    pub fn argpartition_on(
+        &self,
+        kth: i32,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::sort::argpartition_on(self, kth, axis, target)
+    }
+
+    /// Top-k values along `axis` (values only — not sorted; see [`crate::ops::topk`]).
+    pub fn topk(&self, k: i32, axis: i32) -> Result<Array> {
+        crate::ops::sort::topk(self, k, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::topk`].
+    pub fn topk_on(
+        &self,
+        k: i32,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::sort::topk_on(self, k, axis, target)
+    }
 }
 
 /// Construct an Array from a slice of `T` and any [`IntoShape`].
