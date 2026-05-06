@@ -378,8 +378,15 @@ pub mod ffi {
         fn split_result_len(v: &MlxArrayVec) -> usize;
         fn split_result_at(v: &MlxArrayVec, i: usize) -> Result<UniquePtr<MlxArray>>;
 
-        // === P1b2a matmul ===
-        fn array_matmul(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        // === P1b2a matmul (P5.7: + 4 trailing stream params) ===
+        fn array_matmul(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // === P1b2b dtype extension ===
         fn array_from_u16(data: &[u16], shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
@@ -443,19 +450,45 @@ pub mod ffi {
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        // === P5 ops extensions ===
-        fn tensordot_axis(a: &MlxArray, b: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
+        // === P5 ops extensions (P5.7: + 4 trailing stream params) ===
+        fn tensordot_axis(
+            a: &MlxArray,
+            b: &MlxArray,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn tensordot_axes(
             a: &MlxArray,
             b: &MlxArray,
             axes_a: &[i32],
             axes_b: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn outer(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn outer(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
-        fn inner(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn inner(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn addmm(
             c: &MlxArray,
@@ -463,6 +496,10 @@ pub mod ffi {
             b: &MlxArray,
             alpha: f32,
             beta: f32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn block_masked_mm(
@@ -472,6 +509,10 @@ pub mod ffi {
             mask_out: *const MlxArray,
             mask_lhs: *const MlxArray,
             mask_rhs: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn gather_mm(
@@ -480,12 +521,20 @@ pub mod ffi {
             lhs_indices: *const MlxArray,
             rhs_indices: *const MlxArray,
             sorted_indices: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         fn segmented_mm(
             a: &MlxArray,
             b: &MlxArray,
             segments: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
     }
 }

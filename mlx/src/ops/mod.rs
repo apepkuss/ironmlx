@@ -28,8 +28,9 @@ pub use indexing::{
     take_along_axis_on, take_on, where_, where_on,
 };
 pub use matmul::{
-    addmm, block_masked_matmul, gather_matmul, inner_product, matmul, outer, segmented_matmul,
-    tensordot, tensordot_axes,
+    addmm, addmm_on, block_masked_matmul, block_masked_matmul_on, gather_matmul, gather_matmul_on,
+    inner_product, inner_product_on, matmul, matmul_on, outer, outer_on, segmented_matmul,
+    segmented_matmul_on, tensordot, tensordot_axes, tensordot_axes_on, tensordot_on,
 };
 pub use reduction::{
     argmax, argmax_on, max, max_on, mean, mean_on, min, min_on, sum, sum_on, All, IntoAxes,

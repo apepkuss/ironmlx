@@ -200,3 +200,25 @@ fn indexing_where_on_explicit_device() {
     let r = ops_indexing::where_on(&cond, &x, &y, Device::cpu()).expect("where_on");
     assert_eq!(r.to_vec::<f32>().unwrap(), vec![1.0, 20.0, 3.0]);
 }
+
+// === Task 5: ops sweep — matmul _on variants ===
+
+#[test]
+fn matmul_on_explicit_device() {
+    use mlx::ops::matmul as ops_matmul;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (2, 2)).try_into().unwrap();
+    let b: Array = (&[1.0_f32, 0.0, 0.0, 1.0][..], (2, 2)).try_into().unwrap();
+    let c = ops_matmul::matmul_on(&a, &b, Device::cpu()).expect("matmul_on");
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn matmul_addmm_on_default_matches() {
+    use mlx::ops::matmul as ops_matmul;
+    let c: Array = (&[1.0_f32, 1.0, 1.0, 1.0][..], (2, 2)).try_into().unwrap();
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (2, 2)).try_into().unwrap();
+    let b: Array = (&[1.0_f32, 0.0, 0.0, 1.0][..], (2, 2)).try_into().unwrap();
+    let r1 = ops_matmul::addmm(&c, &a, &b, 1.0, 1.0).expect("addmm");
+    let r2 = ops_matmul::addmm_on(&c, &a, &b, 1.0, 1.0, ()).expect("addmm_on default");
+    assert_eq!(r1.to_vec::<f32>().unwrap(), r2.to_vec::<f32>().unwrap());
+}

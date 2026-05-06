@@ -78,7 +78,8 @@ fn shape_ops_link() {
 fn matmul_links() {
     let a = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
     let b = ffi::array_zeros(&[3, 4], FLOAT32).expect("zeros");
-    let _c = mlx_sys::array::ffi::array_matmul(&a, &b).expect("matmul");
+    // P5.7: array_matmul takes 4 trailing StreamOrDevice params.
+    let _c = mlx_sys::array::ffi::array_matmul(&a, &b, false, false, 0, 0).expect("matmul");
 }
 
 #[test]

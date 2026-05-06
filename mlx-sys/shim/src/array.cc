@@ -511,10 +511,14 @@ std::unique_ptr<MlxArray> split_result_at(const MlxArrayVec& v, size_t i) {
   return std::make_unique<MlxArray>(v.at(i));  // copy ctor — refcount-shared
 }
 
-// === P1b2a matmul ===
+// === P1b2a matmul (P5.7: + StreamOrDevice 4-arg encoding) ===
 
-std::unique_ptr<MlxArray> array_matmul(const MlxArray& a, const MlxArray& b) {
-  return std::make_unique<MlxArray>(mlx::core::matmul(a, b));
+std::unique_ptr<MlxArray> array_matmul(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::matmul(a, b, target));
 }
 
 // === P1b2b dtype extension implementations ===
@@ -596,63 +600,91 @@ std::unique_ptr<MlxArray> array_gather(
   return std::make_unique<MlxArray>(mlx::core::gather(a, idx_vec, axes_vec, ss, target));
 }
 
-// === P5 ops extensions ===
+// === P5 ops extensions (P5.7: + StreamOrDevice 4-arg encoding) ===
 
 std::unique_ptr<MlxArray> tensordot_axis(
-    const MlxArray& a, const MlxArray& b, int32_t axis) {
-  return std::make_unique<MlxArray>(mlx::core::tensordot(a, b, axis));
+    const MlxArray& a, const MlxArray& b, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::tensordot(a, b, axis, target));
 }
 
 std::unique_ptr<MlxArray> tensordot_axes(
     const MlxArray& a, const MlxArray& b,
     rust::Slice<const int32_t> axes_a,
-    rust::Slice<const int32_t> axes_b) {
+    rust::Slice<const int32_t> axes_b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   std::vector<int> va(axes_a.begin(), axes_a.end());
   std::vector<int> vb(axes_b.begin(), axes_b.end());
-  return std::make_unique<MlxArray>(mlx::core::tensordot(a, b, va, vb));
+  return std::make_unique<MlxArray>(mlx::core::tensordot(a, b, va, vb, target));
 }
 
-std::unique_ptr<MlxArray> outer(const MlxArray& a, const MlxArray& b) {
-  return std::make_unique<MlxArray>(mlx::core::outer(a, b));
+std::unique_ptr<MlxArray> outer(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::outer(a, b, target));
 }
 
-std::unique_ptr<MlxArray> inner(const MlxArray& a, const MlxArray& b) {
-  return std::make_unique<MlxArray>(mlx::core::inner(a, b));
+std::unique_ptr<MlxArray> inner(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::inner(a, b, target));
 }
 
 std::unique_ptr<MlxArray> addmm(
     const MlxArray& c, const MlxArray& a, const MlxArray& b,
-    float alpha, float beta) {
-  return std::make_unique<MlxArray>(mlx::core::addmm(c, a, b, alpha, beta));
+    float alpha, float beta,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::addmm(c, a, b, alpha, beta, target));
 }
 
 std::unique_ptr<MlxArray> block_masked_mm(
     const MlxArray& a, const MlxArray& b, int32_t block_size,
     const MlxArray* mask_out,
     const MlxArray* mask_lhs,
-    const MlxArray* mask_rhs) {
+    const MlxArray* mask_rhs,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::block_masked_mm(
       a, b, block_size,
       helpers::opt_arr(mask_out),
       helpers::opt_arr(mask_lhs),
-      helpers::opt_arr(mask_rhs)));
+      helpers::opt_arr(mask_rhs),
+      target));
 }
 
 std::unique_ptr<MlxArray> gather_mm(
     const MlxArray& a, const MlxArray& b,
     const MlxArray* lhs_indices,
     const MlxArray* rhs_indices,
-    bool sorted_indices) {
+    bool sorted_indices,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::gather_mm(
       a, b,
       helpers::opt_arr(lhs_indices),
       helpers::opt_arr(rhs_indices),
-      sorted_indices));
+      sorted_indices,
+      target));
 }
 
 std::unique_ptr<MlxArray> segmented_mm(
-    const MlxArray& a, const MlxArray& b, const MlxArray& segments) {
-  return std::make_unique<MlxArray>(mlx::core::segmented_mm(a, b, segments));
+    const MlxArray& a, const MlxArray& b, const MlxArray& segments,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::segmented_mm(a, b, segments, target));
 }
 
 }  // namespace cxx_mlx
