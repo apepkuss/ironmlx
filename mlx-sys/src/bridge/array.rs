@@ -303,6 +303,134 @@ pub mod ffi {
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
+        // === P5.6 reduction completions (argmin / all / any / prod / logsumexp) ===
+        // argmin has only 2 forms (no multi-axis); others have 3 forms.
+        fn array_argmin_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_argmin_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_all_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_all_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_all_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_any_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_any_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_any_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_prod_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_prod_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_prod_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_logsumexp_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_logsumexp_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_logsumexp_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         // === P1b2a shape ops (P5.7: + 4 trailing stream params) ===
         fn array_reshape(
             a: &MlxArray,

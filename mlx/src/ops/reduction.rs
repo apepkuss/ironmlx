@@ -277,6 +277,213 @@ pub fn argmax_on<A: IntoAxes>(
     Ok(Array::from_inner(inner))
 }
 
+/// Indices of the minimum values along the specified axis. Returns `Uint32`
+/// (MLX convention). For [`All`], reduces over the flattened array.
+///
+/// Multi-axis argmin is not supported by MLX; pass a single `i32` axis or [`All`].
+pub fn argmin<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    argmin_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`argmin`].
+pub fn argmin_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = match axes.as_axes() {
+        None => {
+            mlx_sys::array::ffi::array_argmin_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_argmin_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => {
+            return Err(Error::Mlx(format!(
+                "argmin does not support multi-axis reduction (got axes={axes:?})"
+            )));
+        }
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Logical AND reduction (true iff every element is non-zero) over the
+/// specified axes. See [`sum`] for axes semantics.
+pub fn all<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    all_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`all`].
+pub fn all_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = match axes.as_axes() {
+        None => {
+            mlx_sys::array::ffi::array_all_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_all_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => mlx_sys::array::ffi::array_all_axes(
+            a.as_inner(),
+            axes,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Logical OR reduction (true iff any element is non-zero) over the specified
+/// axes. See [`sum`] for axes semantics.
+pub fn any<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    any_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`any`].
+pub fn any_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = match axes.as_axes() {
+        None => {
+            mlx_sys::array::ffi::array_any_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_any_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => mlx_sys::array::ffi::array_any_axes(
+            a.as_inner(),
+            axes,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Product over the specified axes. See [`sum`] for axes semantics.
+pub fn prod<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    prod_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`prod`].
+pub fn prod_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = match axes.as_axes() {
+        None => {
+            mlx_sys::array::ffi::array_prod_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_prod_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => mlx_sys::array::ffi::array_prod_axes(
+            a.as_inner(),
+            axes,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Numerically stable `log(sum(exp(x)))` over the specified axes. See [`sum`]
+/// for axes semantics.
+pub fn logsumexp<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    logsumexp_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`logsumexp`].
+pub fn logsumexp_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = match axes.as_axes() {
+        None => mlx_sys::array::ffi::array_logsumexp_all(
+            a.as_inner(),
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some([axis]) => mlx_sys::array::ffi::array_logsumexp_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => mlx_sys::array::ffi::array_logsumexp_axes(
+            a.as_inner(),
+            axes,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

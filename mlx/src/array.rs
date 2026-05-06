@@ -439,6 +439,81 @@ impl Array {
         crate::ops::reduction::argmax_on(self, axes, keepdim, target)
     }
 
+    /// Indices of the minimum values along the specified axis. See [`crate::ops::argmin`].
+    pub fn argmin<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::argmin(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::argmin`].
+    pub fn argmin_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::argmin_on(self, axes, keepdim, target)
+    }
+
+    /// Logical AND reduction over the specified axes. See [`crate::ops::all`].
+    pub fn all<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::all(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::all`].
+    pub fn all_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::all_on(self, axes, keepdim, target)
+    }
+
+    /// Logical OR reduction over the specified axes. See [`crate::ops::any`].
+    pub fn any<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::any(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::any`].
+    pub fn any_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::any_on(self, axes, keepdim, target)
+    }
+
+    /// Product over the specified axes. See [`crate::ops::prod`].
+    pub fn prod<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::prod(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::prod`].
+    pub fn prod_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::prod_on(self, axes, keepdim, target)
+    }
+
+    /// Numerically stable `log(sum(exp(x)))` over the specified axes. See [`crate::ops::logsumexp`].
+    pub fn logsumexp<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
+        crate::ops::logsumexp(self, axes, keepdim)
+    }
+
+    /// Stream-targeted variant of [`Array::logsumexp`].
+    pub fn logsumexp_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        keepdim: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::reduction::logsumexp_on(self, axes, keepdim, target)
+    }
+
     /// Reshape this array. See [`crate::ops::reshape`].
     pub fn reshape<S: IntoShape>(&self, shape: S) -> Result<Array> {
         crate::ops::reshape(self, shape)

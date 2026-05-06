@@ -165,3 +165,49 @@ fn remainder_modulo_like() {
     assert_eq!(v[0], 1.0); // 7 % 3 = 1
     assert!((v[1] - 2.0).abs() < 1e-5); // MLX: positive remainder
 }
+
+// === Task 4: reduction 补完 (argmin / all / any / prod / logsumexp) ===
+
+#[test]
+fn argmin_finds_min_index() {
+    use mlx::ops::All;
+    let a: Array = (&[3.0_f32, 1.0, 2.0][..], (3,)).try_into().unwrap();
+    let r = mlx::ops::reduction::argmin(&a, All, false).expect("argmin");
+    assert_eq!(r.item::<u32>().unwrap(), 1);
+}
+
+#[test]
+fn prod_multiplies_all() {
+    use mlx::ops::All;
+    let a: Array = (&[2.0_f32, 3.0, 4.0][..], (3,)).try_into().unwrap();
+    let r = mlx::ops::reduction::prod(&a, All, false).expect("prod");
+    assert!((r.item::<f32>().unwrap() - 24.0).abs() < 1e-5);
+}
+
+#[test]
+fn all_any_bool() {
+    use mlx::ops::All;
+    let mixed: Array = (&[1.0_f32, 1.0, 0.0][..], (3,)).try_into().unwrap();
+    let false_arr: Array = (&[0.0_f32, 0.0, 0.0][..], (3,)).try_into().unwrap();
+    assert!(!mlx::ops::reduction::all(&mixed, All, false)
+        .unwrap()
+        .item::<bool>()
+        .unwrap());
+    assert!(mlx::ops::reduction::any(&mixed, All, false)
+        .unwrap()
+        .item::<bool>()
+        .unwrap());
+    assert!(!mlx::ops::reduction::any(&false_arr, All, false)
+        .unwrap()
+        .item::<bool>()
+        .unwrap());
+}
+
+#[test]
+fn logsumexp_numerically_stable() {
+    use mlx::ops::All;
+    let a: Array = (&[0.0_f32, 0.0][..], (2,)).try_into().unwrap();
+    let r = mlx::ops::reduction::logsumexp(&a, All, false).expect("logsumexp");
+    // log(2) ≈ 0.6931
+    assert!((r.item::<f32>().unwrap() - 0.6931).abs() < 1e-3);
+}

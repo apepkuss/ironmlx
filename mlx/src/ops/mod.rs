@@ -76,7 +76,8 @@ pub use matmul::{
     segmented_matmul_on, tensordot, tensordot_axes, tensordot_axes_on, tensordot_on,
 };
 pub use reduction::{
-    argmax, argmax_on, max, max_on, mean, mean_on, min, min_on, sum, sum_on, All, IntoAxes,
+    all, all_on, any, any_on, argmax, argmax_on, argmin, argmin_on, logsumexp, logsumexp_on, max,
+    max_on, mean, mean_on, min, min_on, prod, prod_on, sum, sum_on, All, IntoAxes,
 };
 pub use shape::{
     broadcast_to, broadcast_to_on, concatenate, concatenate_on, expand_dims, expand_dims_on,
