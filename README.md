@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** 🎉 **P6 complete** — `mlx::compile` 闭包 JIT 绑定 (`compile()` + `CompiledFn::invoke` + global controls). 用户可把任意 Rust 闭包传给 MLX 进行图追踪 + 融合.
+**Status:** 🎉 **P6.5 complete** — Safe API Rust 化重构 (Shape newtype + IntoShape, std::ops 算子, random builders, ShapeMode, _mm rename, non_exhaustive enums, root re-export 收敛).
 
 ## Requirements
 
@@ -76,7 +76,8 @@ Available unary ops: `exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `square`, `rsqrt`,
 Reductions accept axes via the `IntoAxes` trait — pass `mlx::All` to reduce all axes, an `i32` for a single axis, or any of `&[i32]` / `Vec<i32>` / `[i32; N]` for multiple axes:
 
 ```rust
-use mlx::{Array, All, ops};
+use mlx::ops::{self, All};
+use mlx::Array;
 
 fn main() -> mlx::Result<()> {
     let x = Array::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
@@ -162,7 +163,7 @@ let a = Array::zeros(&[1024], Dtype::Float32)?;
 let b = Array::zeros(&[1024], Dtype::Float32)?;
 
 // Submit one or many arrays; await when ready.
-mlx::async_eval(&[&a, &b]).await?;
+mlx::transforms::async_eval(&[&a, &b]).await?;
 
 // Or single-array convenience method:
 let c = Array::zeros(&[256], Dtype::Float32)?;
@@ -176,8 +177,8 @@ the submitted MLX work — MLX has no cancellation primitive. The work runs
 to completion in the background. Subsequent ops on the same arrays will
 implicitly synchronize.
 
-For sync contexts (no executor), use `mlx::synchronize()` (default stream)
-or `mlx::synchronize_stream(s)` (explicit stream) to block.
+For sync contexts (no executor), use `mlx::transforms::synchronize()` (default stream)
+or `mlx::transforms::synchronize_stream(s)` (explicit stream) to block.
 
 ## Threading
 
@@ -218,6 +219,7 @@ mutable access — `clone` is almost always the right answer.
 - ✅ **P4** — `random` (key/seed/split + 17 distributions including categorical) — 23 integration tests
 - ✅ **P5** — `ops` 补漏 (8 matmul family ops) — 9 integration tests
 - ✅ **P6** — `compile` (closure JIT via extern "Rust" callback + ArrayVec opaque + CompiledFn) — 9 integration tests
+- ✅ **P6.5** — API style refactor (Rust idiomatic public surface)
 - ⏳ LLM inference example
 
 ## Architecture
