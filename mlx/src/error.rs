@@ -7,7 +7,7 @@ pub enum Error {
     #[error("MLX runtime error: {0}")]
     Mlx(String),
 
-    #[error("dtype mismatch: expected {expected:?}, got {actual:?}")]
+    #[error("dtype mismatch: expected {expected}, got {actual}")]
     DtypeMismatch { expected: Dtype, actual: Dtype },
 
     #[error("shape mismatch: expected {expected}, got {actual}")]
@@ -36,7 +36,7 @@ mod tests {
             expected: Dtype::Float32,
             actual: Dtype::Int32,
         };
-        assert_eq!(e.to_string(), "dtype mismatch: expected Float32, got Int32");
+        assert_eq!(e.to_string(), "dtype mismatch: expected f32, got i32");
     }
 
     #[test]
