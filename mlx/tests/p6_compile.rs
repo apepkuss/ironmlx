@@ -1,6 +1,11 @@
 //! Integration tests for mlx::compile — JIT compilation of Rust closures.
 
-use mlx::compile::{disable_compile, enable_compile, set_compile_mode, CompileMode};
+use mlx::compile::{compile, disable_compile, enable_compile, set_compile_mode, CompileMode};
+use mlx::Array;
+use mlx_sys::compile::ffi::{
+    array_vec_count, array_vec_get_at, array_vec_new, array_vec_push, array_vec_take_at,
+};
+use std::ops::{Add, Mul};
 
 #[test]
 fn compile_mode_setters() {
@@ -14,16 +19,10 @@ fn compile_mode_setters() {
     enable_compile();
 }
 
-use mlx::Array;
-
 #[test]
 fn array_vec_round_trip() {
     // We don't expose ArrayVec to end users, but we exercise it via the
     // mlx-sys bridge to lock in count/push/get_at/take_at semantics.
-    use mlx_sys::compile::ffi::{
-        array_vec_count, array_vec_get_at, array_vec_new, array_vec_push, array_vec_take_at,
-    };
-
     let a = Array::from_slice(&[1.0_f32, 2.0], &[2]).expect("a");
     let b = Array::from_slice(&[3.0_f32, 4.0, 5.0], &[3]).expect("b");
     let c = Array::from_slice(&[6.0_f32], &[1]).expect("c");
@@ -61,4 +60,128 @@ fn array_vec_round_trip() {
     assert!(array_vec_take_at(v.pin_mut(), 99).is_err());
     // get_at OOB also returns Err.
     assert!(array_vec_get_at(&v, 99).is_err());
+}
+
+#[test]
+fn compile_simple_unary() {
+    enable_compile();
+    let f = compile(
+        |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            let x = inputs[0];
+            let one = Array::from_slice(&[1.0_f32], &[1])?;
+            let y = x.add(&one)?;
+            Ok(vec![y])
+        },
+        false,
+    )
+    .expect("compile");
+
+    let x = Array::from_slice(&[1.0_f32, 2.0, 3.0], &[3]).expect("x");
+    let outs = f.invoke(&[&x]).expect("invoke");
+    assert_eq!(outs.len(), 1);
+    let y: Vec<f32> = outs[0].to_vec().expect("to_vec");
+    assert_eq!(y, vec![2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn compile_two_input() {
+    let f = compile(
+        |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            let a = inputs[0];
+            let b = inputs[1];
+            let prod = a.mul(b)?;
+            let out = prod.add(a)?;
+            Ok(vec![out])
+        },
+        false,
+    )
+    .expect("compile");
+
+    let a = Array::from_slice(&[2.0_f32, 3.0], &[2]).expect("a");
+    let b = Array::from_slice(&[10.0_f32, 100.0], &[2]).expect("b");
+    let outs = f.invoke(&[&a, &b]).expect("invoke");
+    let v: Vec<f32> = outs[0].to_vec().expect("v");
+    assert_eq!(v, vec![22.0, 303.0]);
+}
+
+#[test]
+fn compile_captures_weight() {
+    let w = Array::from_slice(&[10.0_f32, 20.0, 30.0], &[3]).expect("w");
+    let w_for_closure = w.clone();
+
+    let f = compile(
+        move |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            let x = inputs[0];
+            let y = x.mul(&w_for_closure)?;
+            Ok(vec![y])
+        },
+        false,
+    )
+    .expect("compile");
+
+    let x1 = Array::from_slice(&[1.0_f32, 1.0, 1.0], &[3]).expect("x1");
+    let y1: Vec<f32> = f.invoke(&[&x1]).expect("y1")[0].to_vec().expect("v");
+    assert_eq!(y1, vec![10.0, 20.0, 30.0]);
+
+    let x2 = Array::from_slice(&[2.0_f32, 2.0, 2.0], &[3]).expect("x2");
+    let y2: Vec<f32> = f.invoke(&[&x2]).expect("y2")[0].to_vec().expect("v");
+    assert_eq!(y2, vec![20.0, 40.0, 60.0]);
+}
+
+#[test]
+fn compile_shapeless_reuse() {
+    let f = compile(
+        |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            let two = Array::from_slice(&[2.0_f32], &[1])?;
+            Ok(vec![inputs[0].mul(&two)?])
+        },
+        true,
+    )
+    .expect("compile");
+
+    let x1 = Array::from_slice(&[1.0_f32, 2.0], &[2]).expect("x1");
+    let y1: Vec<f32> = f.invoke(&[&x1]).expect("y1")[0].to_vec().expect("v");
+    assert_eq!(y1, vec![2.0, 4.0]);
+
+    let x2 = Array::from_slice(&[3.0_f32, 4.0, 5.0], &[3]).expect("x2");
+    let y2: Vec<f32> = f.invoke(&[&x2]).expect("y2")[0].to_vec().expect("v");
+    assert_eq!(y2, vec![6.0, 8.0, 10.0]);
+}
+
+#[test]
+fn compile_callback_error_propagates() {
+    let f = compile(
+        |_inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            Err(mlx::Error::Mlx("intentional callback failure".into()))
+        },
+        false,
+    );
+
+    let saw_err = match f {
+        Err(_) => true,
+        Ok(cf) => {
+            let x = Array::from_slice(&[1.0_f32], &[1]).expect("x");
+            cf.invoke(&[&x]).is_err()
+        }
+    };
+    assert!(saw_err, "callback Err must propagate as Rust Err");
+}
+
+#[test]
+fn compile_callback_panic_caught() {
+    let f = compile(
+        |_inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            panic!("intentional callback panic");
+        },
+        false,
+    );
+
+    let saw_err = match f {
+        Err(_) => true,
+        Ok(cf) => {
+            let x = Array::from_slice(&[1.0_f32], &[1]).expect("x");
+            cf.invoke(&[&x]).is_err()
+        }
+    };
+    assert!(saw_err, "callback panic must be caught and surfaced as Err");
 }

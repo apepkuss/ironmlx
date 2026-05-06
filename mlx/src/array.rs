@@ -142,6 +142,12 @@ impl Array {
         &self.0
     }
 
+    /// Low-level FFI escape hatch — consume an Array and return the inner cxx UniquePtr<MlxArray>.
+    #[doc(hidden)]
+    pub fn into_inner(self) -> cxx::UniquePtr<mlx_sys::array::ffi::MlxArray> {
+        self.0
+    }
+
     /// Element-wise natural exponential. See [`crate::ops::exp`].
     pub fn exp(&self) -> Result<Array> {
         crate::ops::exp(self)

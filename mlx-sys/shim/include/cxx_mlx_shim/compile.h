@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -10,6 +11,11 @@
 #include "rust/cxx.h"
 
 namespace cxx_mlx {
+
+// Forward decl: cxx-generated for the extern "Rust" CompileCallback type
+// (see mlx-sys/src/bridge/compile.rs). The full definition lives in
+// mlx-sys/src/bridge/compile.rs.h, included only by compile.cc.
+struct CompileCallback;
 
 using MlxArray = mlx::core::array;
 
@@ -43,5 +49,23 @@ std::unique_ptr<MlxArray> array_vec_take_at(ArrayVec& v, size_t i);
 
 // Appends a copy (cheap MLX refcount).
 void array_vec_push(ArrayVec& v, const MlxArray& a);
+
+// ===== CompiledFn (RAII handle for std::function) =====
+struct CompiledFn {
+  std::function<std::vector<mlx::core::array>(
+      const std::vector<mlx::core::array>&)>
+      fn;
+};
+
+// Build a CompiledFn from a Rust callback. The callback is wrapped in a
+// shared_ptr<rust::Box<CompileCallback>> so the lambda passed to
+// mlx::core::compile is CopyConstructible (rust::Box is move-only and
+// std::function requires CopyConstructible).
+std::unique_ptr<CompiledFn> compile_with_callback(
+    rust::Box<CompileCallback> cb, bool shapeless);
+
+// Replay the compiled graph on the given inputs.
+std::unique_ptr<ArrayVec> compiled_fn_invoke(
+    const CompiledFn& cf, const ArrayVec& inputs);
 
 } // namespace cxx_mlx
