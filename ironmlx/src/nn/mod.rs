@@ -6,13 +6,14 @@
 
 pub mod embedding;
 pub mod linear;
+pub mod mlp;
 pub mod norm;
 
 pub use embedding::Embedding;
 pub use linear::Linear;
+pub use mlp::Mlp;
 pub use norm::{LayerNorm, RmsNorm};
 
 // Added in later P1 tasks:
-// pub mod mlp;
 // pub mod mrope;
 // pub mod attention;
