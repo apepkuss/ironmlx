@@ -354,4 +354,42 @@ std::unique_ptr<MlxArray> astype(
     const MlxArray& a, uint8_t dtype_repr,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.5 array constructors ===
+std::unique_ptr<MlxArray> arange(
+    double start, double stop, double step, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> linspace(
+    double start, double stop, int32_t num, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> ones(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> ones_like(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> zeros_like(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> full(
+    rust::Slice<const int32_t> shape, const MlxArray& vals, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> full_like(
+    const MlxArray& a, const MlxArray& vals,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> eye(
+    int32_t n, int32_t m, int32_t k, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> identity(
+    int32_t n, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> tri(
+    int32_t n, int32_t m, int32_t k, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> tril(
+    const MlxArray& x, int32_t k,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> triu(
+    const MlxArray& x, int32_t k,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 }  // namespace cxx_mlx

@@ -14,6 +14,7 @@ mod macros;
 
 pub mod binary;
 pub mod cast;
+pub mod constructors;
 pub mod indexing;
 pub mod matmul;
 pub mod reduction;
@@ -53,6 +54,11 @@ pub use binary::{
     subtract_on,
 };
 pub use cast::{astype, astype_on};
+pub use constructors::{
+    arange, arange_on, eye, eye_on, full, full_like, full_like_on, full_on, identity, identity_on,
+    linspace, linspace_on, ones, ones_like, ones_like_on, ones_on, tri, tri_on, tril, tril_on,
+    triu, triu_on, zeros_like, zeros_like_on,
+};
 pub use indexing::{
     gather, gather_on, slice, slice_on, slice_strided, slice_strided_on, take, take_along_axis,
     take_along_axis_on, take_on, where_, where_on,

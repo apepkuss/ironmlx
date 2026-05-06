@@ -756,6 +756,67 @@ impl Array {
     ) -> Result<Array> {
         crate::ops::cast::astype_on(self, dtype, target)
     }
+
+    // === P5.5 constructors: `_like` family + tril/triu ===
+
+    /// Array with the same shape and dtype as `self`, filled with ones. See
+    /// [`crate::ops::constructors::ones_like`].
+    pub fn ones_like(&self) -> Result<Array> {
+        crate::ops::constructors::ones_like(self)
+    }
+
+    /// Stream-targeted variant of [`Array::ones_like`].
+    pub fn ones_like_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::constructors::ones_like_on(self, target)
+    }
+
+    /// Array with the same shape and dtype as `self`, filled with zeros. See
+    /// [`crate::ops::constructors::zeros_like`].
+    pub fn zeros_like(&self) -> Result<Array> {
+        crate::ops::constructors::zeros_like(self)
+    }
+
+    /// Stream-targeted variant of [`Array::zeros_like`].
+    pub fn zeros_like_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::constructors::zeros_like_on(self, target)
+    }
+
+    /// Array with the same shape (and dtype) as `self`, filled with `vals`
+    /// (broadcast as needed). See [`crate::ops::constructors::full_like`].
+    pub fn full_like(&self, vals: &Array) -> Result<Array> {
+        crate::ops::constructors::full_like(self, vals)
+    }
+
+    /// Stream-targeted variant of [`Array::full_like`].
+    pub fn full_like_on(
+        &self,
+        vals: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::constructors::full_like_on(self, vals, target)
+    }
+
+    /// Lower triangular part of `self` (zero out elements strictly above
+    /// the diagonal offset by `k`). See [`crate::ops::constructors::tril`].
+    pub fn tril(&self, k: i32) -> Result<Array> {
+        crate::ops::constructors::tril(self, k)
+    }
+
+    /// Stream-targeted variant of [`Array::tril`].
+    pub fn tril_on(&self, k: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::constructors::tril_on(self, k, target)
+    }
+
+    /// Upper triangular part of `self` (zero out elements strictly below
+    /// the diagonal offset by `k`). See [`crate::ops::constructors::triu`].
+    pub fn triu(&self, k: i32) -> Result<Array> {
+        crate::ops::constructors::triu(self, k)
+    }
+
+    /// Stream-targeted variant of [`Array::triu`].
+    pub fn triu_on(&self, k: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::constructors::triu_on(self, k, target)
+    }
 }
 
 /// Construct an Array from a slice of `T` and any [`IntoShape`].

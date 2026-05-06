@@ -233,3 +233,73 @@ fn array_method_astype_works() {
     let b = a.astype(Dtype::Float32).expect("astype method");
     assert_eq!(b.dtype(), Dtype::Float32);
 }
+
+// === P5.5 Task 4: array constructors ===
+
+#[test]
+fn arange_with_step() {
+    let r = mlx::ops::constructors::arange(0.0, 5.0, 1.0, Dtype::Int32).expect("arange");
+    let v: Vec<i32> = r.to_vec().unwrap();
+    assert_eq!(v, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn linspace_endpoints() {
+    let r = mlx::ops::constructors::linspace(0.0, 1.0, 5, Dtype::Float32).expect("linspace");
+    let v: Vec<f32> = r.to_vec().unwrap();
+    assert!((v[0] - 0.0).abs() < 1e-5);
+    assert!((v[4] - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn ones_correct_value() {
+    let o = mlx::ops::constructors::ones((2, 3), Dtype::Float32).expect("ones");
+    assert_eq!(o.to_vec::<f32>().unwrap(), vec![1.0; 6]);
+}
+
+#[test]
+fn ones_like_zeros_like() {
+    let a: Array = (&[1.0_f32; 6][..], (2, 3)).try_into().unwrap();
+    let o = mlx::ops::constructors::ones_like(&a).unwrap();
+    assert_eq!(o.shape().as_slice(), &[2, 3]);
+    let z = mlx::ops::constructors::zeros_like(&a).unwrap();
+    assert_eq!(z.to_vec::<f32>().unwrap(), vec![0.0; 6]);
+}
+
+#[test]
+fn full_with_value() {
+    let v: Array = (&[7.0_f32][..], (1,)).try_into().unwrap();
+    let f = mlx::ops::constructors::full((2, 2), &v, Dtype::Float32).expect("full");
+    assert_eq!(f.to_vec::<f32>().unwrap(), vec![7.0; 4]);
+}
+
+#[test]
+fn eye_identity_correct() {
+    let i = mlx::ops::constructors::identity(3, Dtype::Float32).expect("identity");
+    let v: Vec<f32> = i.to_vec().unwrap();
+    assert_eq!(v, vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,]);
+}
+
+#[test]
+fn tri_lower_triangular() {
+    let t = mlx::ops::constructors::tri(3, 3, 0, Dtype::Float32).expect("tri");
+    let v: Vec<f32> = t.to_vec().unwrap();
+    assert_eq!(v, vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0,]);
+}
+
+#[test]
+fn tril_triu_masks() {
+    let a: Array = (&[1.0_f32; 9][..], (3, 3)).try_into().unwrap();
+    let lower = mlx::ops::constructors::tril(&a, 0).expect("tril");
+    let upper = mlx::ops::constructors::triu(&a, 0).expect("triu");
+    let lv: Vec<f32> = lower.to_vec().unwrap();
+    let uv: Vec<f32> = upper.to_vec().unwrap();
+    // Lower triangular zeros above diagonal
+    assert_eq!(lv[1], 0.0);
+    assert_eq!(lv[2], 0.0);
+    assert_eq!(lv[5], 0.0);
+    // Upper triangular zeros below diagonal
+    assert_eq!(uv[3], 0.0);
+    assert_eq!(uv[6], 0.0);
+    assert_eq!(uv[7], 0.0);
+}

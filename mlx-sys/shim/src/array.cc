@@ -835,4 +835,113 @@ std::unique_ptr<MlxArray> astype(
   return std::make_unique<MlxArray>(mlx::core::astype(a, t, target));
 }
 
+// === P5.5 array constructors ===
+
+std::unique_ptr<MlxArray> arange(
+    double start, double stop, double step, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  return std::make_unique<MlxArray>(mlx::core::arange(start, stop, step, t, target));
+}
+
+std::unique_ptr<MlxArray> linspace(
+    double start, double stop, int32_t num, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  return std::make_unique<MlxArray>(mlx::core::linspace(start, stop, num, t, target));
+}
+
+std::unique_ptr<MlxArray> ones(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  mlx::core::Shape s(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::ones(s, t, target));
+}
+
+std::unique_ptr<MlxArray> ones_like(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::ones_like(a, target));
+}
+
+std::unique_ptr<MlxArray> zeros_like(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::zeros_like(a, target));
+}
+
+std::unique_ptr<MlxArray> full(
+    rust::Slice<const int32_t> shape, const MlxArray& vals, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  mlx::core::Shape s(shape.begin(), shape.end());
+  // mlx::core::full takes `array vals` by value (copy ctor — refcount-shared).
+  return std::make_unique<MlxArray>(mlx::core::full(std::move(s), vals, t, target));
+}
+
+std::unique_ptr<MlxArray> full_like(
+    const MlxArray& a, const MlxArray& vals,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::full_like(a, vals, target));
+}
+
+std::unique_ptr<MlxArray> eye(
+    int32_t n, int32_t m, int32_t k, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  return std::make_unique<MlxArray>(mlx::core::eye(n, m, k, t, target));
+}
+
+std::unique_ptr<MlxArray> identity(
+    int32_t n, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  return std::make_unique<MlxArray>(mlx::core::identity(n, t, target));
+}
+
+std::unique_ptr<MlxArray> tri(
+    int32_t n, int32_t m, int32_t k, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  return std::make_unique<MlxArray>(mlx::core::tri(n, m, k, t, target));
+}
+
+std::unique_ptr<MlxArray> tril(
+    const MlxArray& x, int32_t k,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  // mlx::core::tril takes `array x` by value (copy ctor — refcount-shared).
+  return std::make_unique<MlxArray>(mlx::core::tril(x, k, target));
+}
+
+std::unique_ptr<MlxArray> triu(
+    const MlxArray& x, int32_t k,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::triu(x, k, target));
+}
+
 }  // namespace cxx_mlx
