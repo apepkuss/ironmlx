@@ -518,6 +518,17 @@ impl Array {
     pub fn gather(&self, indices: &[&Array], axes: &[i32], slice_sizes: &[i32]) -> Result<Array> {
         crate::ops::gather(self, indices, axes, slice_sizes)
     }
+
+    /// Stream-targeted variant of [`gather`].
+    pub fn gather_on(
+        &self,
+        indices: &[&Array],
+        axes: &[i32],
+        slice_sizes: &[i32],
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::indexing::gather_on(self, indices, axes, slice_sizes, target)
+    }
 }
 
 /// Construct an Array from a slice of `T` and any [`IntoShape`].

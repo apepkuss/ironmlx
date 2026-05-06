@@ -118,7 +118,6 @@ impl StreamOrDevice {
     /// `Stream` → `(true, false, dt, idx)`.
     ///
     /// Consumed by op `_on` variants in subsequent P5.7 tasks.
-    #[allow(dead_code)]
     pub(crate) fn encode(self) -> (bool, bool, u8, i32) {
         match self {
             StreamOrDevice::Default => (false, false, 0, 0),

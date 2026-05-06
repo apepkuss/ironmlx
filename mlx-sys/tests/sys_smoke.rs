@@ -154,3 +154,24 @@ fn stream_default_and_new_links() {
     );
     assert_eq!(new_stream.device.index, d.index);
 }
+
+#[test]
+fn eval_many_links() {
+    use mlx_sys::stream::ffi;
+    // Empty slice — no-op but confirms ABI link.
+    let empty: Vec<*const ffi::MlxArray> = vec![];
+    unsafe { ffi::eval_many(&empty).expect("eval_many ABI") };
+}
+
+#[test]
+fn async_eval_many_links() {
+    use mlx_sys::stream::ffi;
+    let empty: Vec<*const ffi::MlxArray> = vec![];
+    unsafe { ffi::async_eval_many(&empty).expect("async_eval_many ABI") };
+}
+
+#[test]
+fn compile_clear_cache_links() {
+    use mlx_sys::compile::ffi;
+    ffi::compile_clear_cache();
+}
