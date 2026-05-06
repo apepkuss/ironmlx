@@ -6,9 +6,9 @@ use crate::{Dtype, Element, Error, Result};
 pub struct Array(UniquePtr<mlx_sys::array::ffi::MlxArray>);
 
 impl Array {
-    /// Construct from a raw cxx UniquePtr. Internal use only — the safe API
-    /// is `Array::from_slice<T>` / `Array::zeros` / etc.
-    pub(crate) fn from_inner(inner: cxx::UniquePtr<mlx_sys::array::ffi::MlxArray>) -> Self {
+    /// Low-level FFI escape hatch — wrap an existing cxx UniquePtr<MlxArray> as a safe Array. Use the high-level constructors (Array::from_slice / zeros / etc.) for normal code.
+    #[doc(hidden)]
+    pub fn from_inner(inner: cxx::UniquePtr<mlx_sys::array::ffi::MlxArray>) -> Self {
         Array(inner)
     }
 
@@ -136,10 +136,16 @@ impl Array {
         crate::transforms::async_eval(&[self])
     }
 
-    /// Hidden raw FFI access for advanced users and internal tests.
+    /// Low-level FFI escape hatch — borrow the underlying cxx MlxArray. Use the high-level methods for normal code.
     #[doc(hidden)]
     pub fn as_inner(&self) -> &mlx_sys::array::ffi::MlxArray {
         &self.0
+    }
+
+    /// Low-level FFI escape hatch — consume an Array and return the inner cxx UniquePtr<MlxArray>.
+    #[doc(hidden)]
+    pub fn into_inner(self) -> cxx::UniquePtr<mlx_sys::array::ffi::MlxArray> {
+        self.0
     }
 
     /// Element-wise natural exponential. See [`crate::ops::exp`].

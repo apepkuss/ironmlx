@@ -10,6 +10,7 @@
 //! Pure getters (no throw paths) may stay as plain return types.
 
 pub mod array;
+pub mod compile;
 pub mod fast;
 pub mod io;
 pub mod quantization;

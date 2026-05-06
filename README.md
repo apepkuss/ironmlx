@@ -2,7 +2,7 @@
 
 Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](https://cxx.rs) crate.
 
-**Status:** 🎉 **P5 complete** — `mlx::ops` 补漏完成 (tensordot×2, outer, inner_product, addmm, block_masked_mm, gather_mm, segmented_mm). MLX `ops.h` 公开 matmul 家族全覆盖.
+**Status:** 🎉 **P6 complete** — `mlx::compile` 闭包 JIT 绑定 (`compile()` + `CompiledFn::invoke` + global controls). 用户可把任意 Rust 闭包传给 MLX 进行图追踪 + 融合.
 
 ## Requirements
 
@@ -217,7 +217,8 @@ mutable access — `clone` is almost always the right answer.
 - ✅ **P3** — `quantization` (quantize/dequantize/quantized_matmul/qqmm/gather_qmm/fp8) — 8 integration tests
 - ✅ **P4** — `random` (key/seed/split + 17 distributions including categorical) — 23 integration tests
 - ✅ **P5** — `ops` 补漏 (8 matmul family ops) — 9 integration tests
-- ⏳ compile + LLM inference example
+- ✅ **P6** — `compile` (closure JIT via extern "Rust" callback + ArrayVec opaque + CompiledFn) — 9 integration tests
+- ⏳ LLM inference example
 
 ## Architecture
 
