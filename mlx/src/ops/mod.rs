@@ -23,7 +23,10 @@ pub use binary::{
     add, add_on, divide, divide_on, multiply, multiply_on, negative, negative_on, subtract,
     subtract_on,
 };
-pub use indexing::{gather, slice, slice_strided, take, take_along_axis, where_};
+pub use indexing::{
+    gather, gather_on, slice, slice_on, slice_strided, slice_strided_on, take, take_along_axis,
+    take_along_axis_on, take_on, where_, where_on,
+};
 pub use matmul::{
     addmm, block_masked_matmul, gather_matmul, inner_product, matmul, outer, segmented_matmul,
     tensordot, tensordot_axes,

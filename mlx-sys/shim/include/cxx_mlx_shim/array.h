@@ -218,24 +218,32 @@ rust::Vec<uint16_t> array_to_vec_u16(const MlxArray& a);
 rust::Vec<uint32_t> array_to_vec_u32(const MlxArray& a);
 rust::Vec<uint64_t> array_to_vec_u64(const MlxArray& a);
 
-// === P1b2b indexing ops ===
+// === P1b2b indexing ops (P5.7: + 4 trailing stream params) ===
 
-std::unique_ptr<MlxArray> array_where(const MlxArray& cond, const MlxArray& x, const MlxArray& y);
+std::unique_ptr<MlxArray> array_where(
+    const MlxArray& cond, const MlxArray& x, const MlxArray& y,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> array_take(const MlxArray& a, const MlxArray& indices, int32_t axis);
-std::unique_ptr<MlxArray> array_take_along_axis(const MlxArray& a, const MlxArray& indices, int32_t axis);
+std::unique_ptr<MlxArray> array_take(
+    const MlxArray& a, const MlxArray& indices, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_take_along_axis(
+    const MlxArray& a, const MlxArray& indices, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> array_slice_strided(
     const MlxArray& a,
     rust::Slice<const int32_t> start,
     rust::Slice<const int32_t> stop,
-    rust::Slice<const int32_t> strides);
+    rust::Slice<const int32_t> strides,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> array_gather(
     const MlxArray& a,
     rust::Slice<const MlxArray* const> indices,
     rust::Slice<const int32_t> axes,
-    rust::Slice<const int32_t> slice_sizes);
+    rust::Slice<const int32_t> slice_sizes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // === P5 ops extensions: matmul family ===
 

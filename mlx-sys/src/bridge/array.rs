@@ -2,7 +2,13 @@
 // (array_concatenate, array_stack). The Safety contracts are documented in the
 // safe Rust wrappers (`mlx::ops::concatenate`, `mlx::ops::stack`); cxx doesn't
 // propagate doc comments from inside the bridge macro.
-#[allow(clippy::missing_safety_doc)]
+//
+// `clippy::too_many_arguments` is suppressed because P5.7 adds 4 trailing
+// stream-encoding params (has_target/is_device_only/device_type/stream_index)
+// to many ops, pushing several past clippy's default 7-arg threshold. The
+// safe API in `mlx::ops::*` collapses these back into a single
+// `impl Into<StreamOrDevice>` argument.
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "cxx_mlx")]
 pub mod ffi {
     unsafe extern "C++" {
@@ -388,25 +394,53 @@ pub mod ffi {
         fn array_to_vec_u32(a: &MlxArray) -> Result<Vec<u32>>;
         fn array_to_vec_u64(a: &MlxArray) -> Result<Vec<u64>>;
 
-        // === P1b2b indexing ops ===
-        fn array_where(cond: &MlxArray, x: &MlxArray, y: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_take(a: &MlxArray, indices: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
+        // === P1b2b indexing ops (P5.7: + 4 trailing stream params) ===
+        fn array_where(
+            cond: &MlxArray,
+            x: &MlxArray,
+            y: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_take(
+            a: &MlxArray,
+            indices: &MlxArray,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_take_along_axis(
             a: &MlxArray,
             indices: &MlxArray,
             axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
         fn array_slice_strided(
             a: &MlxArray,
             start: &[i32],
             stop: &[i32],
             strides: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
         unsafe fn array_gather(
             a: &MlxArray,
             indices: &[*const MlxArray],
             axes: &[i32],
             slice_sizes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // === P5 ops extensions ===

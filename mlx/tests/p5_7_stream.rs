@@ -170,3 +170,33 @@ fn shape_split_n_on_explicit_device() {
     assert_eq!(parts[0].to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
     assert_eq!(parts[1].to_vec::<f32>().unwrap(), vec![3.0, 4.0]);
 }
+
+// === Task 5: ops sweep — indexing _on variants ===
+
+#[test]
+fn indexing_take_on_explicit_device() {
+    use mlx::ops::indexing as ops_indexing;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (4,)).try_into().unwrap();
+    let idx: Array = (&[0_u32, 2][..], (2,)).try_into().unwrap();
+    let r = ops_indexing::take_on(&a, &idx, 0, Device::cpu()).expect("take_on");
+    assert_eq!(r.to_vec::<f32>().unwrap(), vec![1.0, 3.0]);
+}
+
+#[test]
+fn indexing_slice_on_default_matches() {
+    use mlx::ops::indexing as ops_indexing;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (4,)).try_into().unwrap();
+    let r1 = ops_indexing::slice(&a, [1_i32], [3_i32]).expect("slice");
+    let r2 = ops_indexing::slice_on(&a, [1_i32], [3_i32], ()).expect("slice_on default");
+    assert_eq!(r1.to_vec::<f32>().unwrap(), r2.to_vec::<f32>().unwrap());
+}
+
+#[test]
+fn indexing_where_on_explicit_device() {
+    use mlx::ops::indexing as ops_indexing;
+    let cond: Array = (&[1_u8, 0, 1][..], (3,)).try_into().unwrap();
+    let x: Array = (&[1.0_f32, 2.0, 3.0][..], (3,)).try_into().unwrap();
+    let y: Array = (&[10.0_f32, 20.0, 30.0][..], (3,)).try_into().unwrap();
+    let r = ops_indexing::where_on(&cond, &x, &y, Device::cpu()).expect("where_on");
+    assert_eq!(r.to_vec::<f32>().unwrap(), vec![1.0, 20.0, 3.0]);
+}

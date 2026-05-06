@@ -121,11 +121,13 @@ fn indexing_ops_link() {
     let a = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
     let cond = ffi::array_zeros(&[2, 3], 0).expect("zeros bool"); // bool dtype = 0
     let b = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
-    let _w = mlx_sys::array::ffi::array_where(&cond, &a, &b).expect("where");
-    let _s = mlx_sys::array::ffi::array_slice_strided(&a, &[0, 0], &[2, 3], &[1, 1])
-        .expect("slice_strided");
+    // P5.7: indexing ops take 4 trailing StreamOrDevice params.
+    let _w = mlx_sys::array::ffi::array_where(&cond, &a, &b, false, false, 0, 0).expect("where");
+    let _s =
+        mlx_sys::array::ffi::array_slice_strided(&a, &[0, 0], &[2, 3], &[1, 1], false, false, 0, 0)
+            .expect("slice_strided");
     let indices = mlx_sys::array::ffi::array_from_u32(&[0_u32, 2], &[2]).expect("from_u32");
-    let _t = mlx_sys::array::ffi::array_take(&a, &indices, 1).expect("take");
+    let _t = mlx_sys::array::ffi::array_take(&a, &indices, 1, false, false, 0, 0).expect("take");
 }
 
 #[test]
