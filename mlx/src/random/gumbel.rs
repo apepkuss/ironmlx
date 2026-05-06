@@ -1,6 +1,6 @@
 //! Gumbel distribution builder.
 
-use crate::{Array, Dtype, Error, IntoShape, Result, Shape};
+use crate::{Array, Dtype, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling from the standard Gumbel distribution. Defaults to
 /// `f32` scalar.
@@ -8,6 +8,7 @@ pub struct Gumbel<'k> {
     shape: Shape,
     dtype: Dtype,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'k> Gumbel<'k> {
@@ -17,6 +18,7 @@ impl<'k> Gumbel<'k> {
             shape: Shape::new(),
             dtype: Dtype::Float32,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -35,16 +37,31 @@ impl<'k> Gumbel<'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
         // SAFETY: k is null or borrow valid for this call.
-        let inner =
-            unsafe { mlx_sys::random::ffi::gumbel(self.shape.as_slice(), self.dtype.as_u8(), k) }
-                .map_err(Error::from)?;
+        let inner = unsafe {
+            mlx_sys::random::ffi::gumbel(
+                self.shape.as_slice(),
+                self.dtype.as_u8(),
+                k,
+                has,
+                dev_only,
+                dev_t,
+                idx,
+            )
+        }
+        .map_err(Error::from)?;
         Ok(Array::from_inner(inner))
     }
 }

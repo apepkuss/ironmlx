@@ -49,7 +49,8 @@ fn async_eval_multiple_arrays() {
     // Submit multiple arrays in one async_eval call.
     let a = Array::zeros(&[64], Dtype::Float32).expect("zeros a");
     let b = Array::zeros(&[64], Dtype::Float32).expect("zeros b");
-    futures_lite::future::block_on(transforms::async_eval(&[&a, &b])).expect("async_eval multiple");
+    futures_lite::future::block_on(transforms::async_eval_fut(&[&a, &b]))
+        .expect("async_eval_fut multiple");
     assert_eq!(a.to_vec::<f32>().expect("to_vec a").len(), 64);
     assert_eq!(b.to_vec::<f32>().expect("to_vec b").len(), 64);
 }

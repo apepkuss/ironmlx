@@ -1,12 +1,13 @@
 //! Permutation builders: array permutation along an axis, or `arange(n)`.
 
-use crate::{Array, Error, Result};
+use crate::{Array, Error, Result, StreamOrDevice};
 
 /// Builder for a random permutation of `x` along an axis. Defaults to `axis = 0`.
 pub struct Permutation<'a, 'k> {
     x: &'a Array,
     axis: i32,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'a, 'k> Permutation<'a, 'k> {
@@ -16,6 +17,7 @@ impl<'a, 'k> Permutation<'a, 'k> {
             x,
             axis: 0,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -29,15 +31,31 @@ impl<'a, 'k> Permutation<'a, 'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random permutation. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
         // SAFETY: k is null or borrow valid for this call.
-        let inner = unsafe { mlx_sys::random::ffi::permutation(self.x.as_inner(), self.axis, k) }
-            .map_err(Error::from)?;
+        let inner = unsafe {
+            mlx_sys::random::ffi::permutation(
+                self.x.as_inner(),
+                self.axis,
+                k,
+                has,
+                dev_only,
+                dev_t,
+                idx,
+            )
+        }
+        .map_err(Error::from)?;
         Ok(Array::from_inner(inner))
     }
 }
@@ -46,12 +64,17 @@ impl<'a, 'k> Permutation<'a, 'k> {
 pub struct PermutationRange<'k> {
     n: i32,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'k> PermutationRange<'k> {
     /// Create a new builder for a permutation of `arange(n)`.
     pub fn new(n: i32) -> Self {
-        Self { n, key: None }
+        Self {
+            n,
+            key: None,
+            target: StreamOrDevice::Default,
+        }
     }
 
     /// PRNG key (default: global state via `seed()`).
@@ -59,15 +82,23 @@ impl<'k> PermutationRange<'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random permutation. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
         // SAFETY: k is null or borrow valid for this call.
-        let inner =
-            unsafe { mlx_sys::random::ffi::permutation_arange(self.n, k) }.map_err(Error::from)?;
+        let inner = unsafe {
+            mlx_sys::random::ffi::permutation_arange(self.n, k, has, dev_only, dev_t, idx)
+        }
+        .map_err(Error::from)?;
         Ok(Array::from_inner(inner))
     }
 }

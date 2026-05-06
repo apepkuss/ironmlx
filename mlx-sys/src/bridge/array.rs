@@ -2,7 +2,13 @@
 // (array_concatenate, array_stack). The Safety contracts are documented in the
 // safe Rust wrappers (`mlx::ops::concatenate`, `mlx::ops::stack`); cxx doesn't
 // propagate doc comments from inside the bridge macro.
-#[allow(clippy::missing_safety_doc)]
+//
+// `clippy::too_many_arguments` is suppressed because P5.7 adds 4 trailing
+// stream-encoding params (has_target/is_device_only/device_type/stream_index)
+// to many ops, pushing several past clippy's default 7-arg threshold. The
+// safe API in `mlx::ops::*` collapses these back into a single
+// `impl Into<StreamOrDevice>` argument.
+#[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "cxx_mlx")]
 pub mod ffi {
     unsafe extern "C++" {
@@ -59,72 +65,276 @@ pub mod ffi {
         fn array_to_vec_f64(a: &MlxArray) -> Result<Vec<f64>>;
 
         // Binary ops (P1b1) — Result-wrapped per the shim throw rule.
-        fn array_add(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_subtract(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_multiply(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_divide(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        // 4 trailing stream params encode StreamOrDevice (P5.7).
+        fn array_add(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_subtract(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_multiply(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_divide(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // Unary ops (P1b1) — Result-wrapped (MLX may throw on dtype not supported,
         // e.g. sqrt on integer types).
-        fn array_negative(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_exp(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_log(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_sqrt(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_tanh(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_sigmoid(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_square(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_rsqrt(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_erf(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_reciprocal(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn array_negative(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_exp(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_log(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_sqrt(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_tanh(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_sigmoid(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_square(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_rsqrt(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_erf(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_reciprocal(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // === P1b2a opaque type for std::vector<array> returns ===
         type MlxArrayVec;
 
         // === P1b2a reductions (5 ops × {all, axis, axes}) ===
-        fn array_sum_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_sum_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        // 4 trailing stream params encode StreamOrDevice (P5.7).
+        fn array_sum_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_sum_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_sum_axes(
             a: &MlxArray,
             axes: &[i32],
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn array_mean_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_mean_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_mean_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_mean_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_mean_axes(
             a: &MlxArray,
             axes: &[i32],
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn array_max_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_max_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_max_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_max_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_max_axes(
             a: &MlxArray,
             axes: &[i32],
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn array_min_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_min_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_min_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_min_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_min_axes(
             a: &MlxArray,
             axes: &[i32],
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn array_argmax_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_argmax_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_argmax_axis(
             a: &MlxArray,
             axis: i32,
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        // === P1b2a shape ops ===
-        fn array_reshape(a: &MlxArray, shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
-        fn array_transpose(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_transpose_axes(a: &MlxArray, axes: &[i32]) -> Result<UniquePtr<MlxArray>>;
-        fn array_broadcast_to(a: &MlxArray, shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
+        // === P1b2a shape ops (P5.7: + 4 trailing stream params) ===
+        fn array_reshape(
+            a: &MlxArray,
+            shape: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_transpose(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_transpose_axes(
+            a: &MlxArray,
+            axes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_broadcast_to(
+            a: &MlxArray,
+            shape: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // Safety contract: each pointer in `arrays` must point to a valid
         // MlxArray that lives for the duration of the call. The safe wrappers
@@ -132,26 +342,51 @@ pub mod ffi {
         unsafe fn array_concatenate(
             arrays: &[*const MlxArray],
             axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
-        unsafe fn array_stack(arrays: &[*const MlxArray], axis: i32)
-            -> Result<UniquePtr<MlxArray>>;
+        unsafe fn array_stack(
+            arrays: &[*const MlxArray],
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn array_split_n(
             a: &MlxArray,
             num_splits: i32,
             axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArrayVec>>;
         fn array_split_at(
             a: &MlxArray,
             indices: &[i32],
             axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArrayVec>>;
 
         fn split_result_len(v: &MlxArrayVec) -> usize;
         fn split_result_at(v: &MlxArrayVec, i: usize) -> Result<UniquePtr<MlxArray>>;
 
-        // === P1b2a matmul ===
-        fn array_matmul(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        // === P1b2a matmul (P5.7: + 4 trailing stream params) ===
+        fn array_matmul(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // === P1b2b dtype extension ===
         fn array_from_u16(data: &[u16], shape: &[i32]) -> Result<UniquePtr<MlxArray>>;
@@ -166,40 +401,94 @@ pub mod ffi {
         fn array_to_vec_u32(a: &MlxArray) -> Result<Vec<u32>>;
         fn array_to_vec_u64(a: &MlxArray) -> Result<Vec<u64>>;
 
-        // === P1b2b indexing ops ===
-        fn array_where(cond: &MlxArray, x: &MlxArray, y: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_take(a: &MlxArray, indices: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
+        // === P1b2b indexing ops (P5.7: + 4 trailing stream params) ===
+        fn array_where(
+            cond: &MlxArray,
+            x: &MlxArray,
+            y: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_take(
+            a: &MlxArray,
+            indices: &MlxArray,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_take_along_axis(
             a: &MlxArray,
             indices: &MlxArray,
             axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
         fn array_slice_strided(
             a: &MlxArray,
             start: &[i32],
             stop: &[i32],
             strides: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
         unsafe fn array_gather(
             a: &MlxArray,
             indices: &[*const MlxArray],
             axes: &[i32],
             slice_sizes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        // === P5 ops extensions ===
-        fn tensordot_axis(a: &MlxArray, b: &MlxArray, axis: i32) -> Result<UniquePtr<MlxArray>>;
+        // === P5 ops extensions (P5.7: + 4 trailing stream params) ===
+        fn tensordot_axis(
+            a: &MlxArray,
+            b: &MlxArray,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn tensordot_axes(
             a: &MlxArray,
             b: &MlxArray,
             axes_a: &[i32],
             axes_b: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn outer(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn outer(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
-        fn inner(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn inner(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         fn addmm(
             c: &MlxArray,
@@ -207,6 +496,10 @@ pub mod ffi {
             b: &MlxArray,
             alpha: f32,
             beta: f32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn block_masked_mm(
@@ -216,6 +509,10 @@ pub mod ffi {
             mask_out: *const MlxArray,
             mask_lhs: *const MlxArray,
             mask_rhs: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn gather_mm(
@@ -224,12 +521,20 @@ pub mod ffi {
             lhs_indices: *const MlxArray,
             rhs_indices: *const MlxArray,
             sorted_indices: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         fn segmented_mm(
             a: &MlxArray,
             b: &MlxArray,
             segments: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
     }
 }

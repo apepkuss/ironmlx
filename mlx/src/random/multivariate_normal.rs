@@ -1,6 +1,6 @@
 //! Multivariate normal distribution builder.
 
-use crate::{Array, Dtype, Error, IntoShape, Result, Shape};
+use crate::{Array, Dtype, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling from a multivariate normal distribution with the
 /// given `mean` and covariance `cov`. Defaults to a single sample (`f32`);
@@ -11,6 +11,7 @@ pub struct MultivariateNormal<'a, 'k> {
     shape: Shape,
     dtype: Dtype,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'a, 'k> MultivariateNormal<'a, 'k> {
@@ -22,6 +23,7 @@ impl<'a, 'k> MultivariateNormal<'a, 'k> {
             shape: Shape::new(),
             dtype: Dtype::Float32,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -40,9 +42,15 @@ impl<'a, 'k> MultivariateNormal<'a, 'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
@@ -54,6 +62,10 @@ impl<'a, 'k> MultivariateNormal<'a, 'k> {
                 self.shape.as_slice(),
                 self.dtype.as_u8(),
                 k,
+                has,
+                dev_only,
+                dev_t,
+                idx,
             )
         }
         .map_err(Error::from)?;

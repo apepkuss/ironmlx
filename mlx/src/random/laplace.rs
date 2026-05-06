@@ -1,6 +1,6 @@
 //! Laplace distribution builder.
 
-use crate::{Array, Dtype, Error, IntoShape, Result, Shape};
+use crate::{Array, Dtype, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling from the Laplace distribution. Defaults to standard
 /// Laplace with `loc = 0.0`, `scale = 1.0`, `f32` scalar.
@@ -10,6 +10,7 @@ pub struct Laplace<'k> {
     loc: f64,
     scale: f64,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'k> Laplace<'k> {
@@ -21,6 +22,7 @@ impl<'k> Laplace<'k> {
             loc: 0.0,
             scale: 1.0,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -49,9 +51,15 @@ impl<'k> Laplace<'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
@@ -63,6 +71,10 @@ impl<'k> Laplace<'k> {
                 self.loc as f32,
                 self.scale as f32,
                 k,
+                has,
+                dev_only,
+                dev_t,
+                idx,
             )
         }
         .map_err(Error::from)?;

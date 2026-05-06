@@ -1,6 +1,6 @@
 //! Random integer distribution builder.
 
-use crate::{Array, Dtype, Error, IntoShape, Result, Shape};
+use crate::{Array, Dtype, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling uniform random integers in `[low, high)`. Defaults to
 /// `i32` scalar in `[0, 1)`.
@@ -10,6 +10,7 @@ pub struct RandInt<'k> {
     shape: Shape,
     dtype: Dtype,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'k> RandInt<'k> {
@@ -21,6 +22,7 @@ impl<'k> RandInt<'k> {
             shape: Shape::new(),
             dtype: Dtype::Int32,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -49,9 +51,15 @@ impl<'k> RandInt<'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let low_arr = super::scalar_i32(self.low)?;
         let high_arr = super::scalar_i32(self.high)?;
         let k = self
@@ -65,6 +73,10 @@ impl<'k> RandInt<'k> {
                 self.shape.as_slice(),
                 self.dtype.as_u8(),
                 k,
+                has,
+                dev_only,
+                dev_t,
+                idx,
             )
         }
         .map_err(Error::from)?;

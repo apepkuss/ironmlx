@@ -1,6 +1,6 @@
 //! Uniform distribution builder.
 
-use crate::{Array, Dtype, Error, IntoShape, Result, Shape};
+use crate::{Array, Dtype, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 /// Builder for sampling from the uniform distribution on `[low, high)`.
 /// Defaults to `[0, 1)` `f32` scalar.
@@ -10,6 +10,7 @@ pub struct Uniform<'k> {
     shape: Shape,
     dtype: Dtype,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'k> Uniform<'k> {
@@ -21,6 +22,7 @@ impl<'k> Uniform<'k> {
             shape: Shape::new(),
             dtype: Dtype::Float32,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -49,9 +51,15 @@ impl<'k> Uniform<'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let low_arr = super::scalar_f32(self.low)?;
         let high_arr = super::scalar_f32(self.high)?;
         let k = self
@@ -65,6 +73,10 @@ impl<'k> Uniform<'k> {
                 self.shape.as_slice(),
                 self.dtype.as_u8(),
                 k,
+                has,
+                dev_only,
+                dev_t,
+                idx,
             )
         }
         .map_err(Error::from)?;

@@ -39,13 +39,17 @@ std::unique_ptr<MlxArray> quantize_result_take_at(QuantizeResult& r, size_t idx)
 //   Option<Dtype> → (bool has_dtype, uint8_t dtype_repr)
 //   Option<&Array>→ const MlxArray* (nullptr = None)
 //   &str mode     → rust::Str
+//
+// P5.7: each fn carries 4 trailing StreamOrDevice args
+// (has_target, is_device_only, device_type, stream_index).
 
 std::unique_ptr<QuantizeResult> quantize(
     const MlxArray& w,
     bool has_group_size, int32_t group_size,
     bool has_bits, int32_t bits,
     rust::Str mode,
-    const MlxArray* global_scale);
+    const MlxArray* global_scale,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> dequantize(
     const MlxArray& w,
@@ -55,7 +59,8 @@ std::unique_ptr<MlxArray> dequantize(
     bool has_bits, int32_t bits,
     rust::Str mode,
     const MlxArray* global_scale,
-    bool has_dtype, uint8_t dtype_repr);
+    bool has_dtype, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> quantized_matmul(
     const MlxArray& x,
@@ -65,7 +70,8 @@ std::unique_ptr<MlxArray> quantized_matmul(
     bool transpose,
     bool has_group_size, int32_t group_size,
     bool has_bits, int32_t bits,
-    rust::Str mode);
+    rust::Str mode,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> qqmm(
     const MlxArray& x,
@@ -75,7 +81,8 @@ std::unique_ptr<MlxArray> qqmm(
     bool has_bits, int32_t bits,
     rust::Str mode,
     const MlxArray* global_scale_x,
-    const MlxArray* global_scale_w);
+    const MlxArray* global_scale_w,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> gather_qmm(
     const MlxArray& x,
@@ -88,9 +95,14 @@ std::unique_ptr<MlxArray> gather_qmm(
     bool has_group_size, int32_t group_size,
     bool has_bits, int32_t bits,
     rust::Str mode,
-    bool sorted_indices);
+    bool sorted_indices,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> from_fp8(const MlxArray& x, uint8_t dtype_repr);
-std::unique_ptr<MlxArray> to_fp8(const MlxArray& x);
+std::unique_ptr<MlxArray> from_fp8(
+    const MlxArray& x, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> to_fp8(
+    const MlxArray& x,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 }  // namespace cxx_mlx

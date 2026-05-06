@@ -3,6 +3,12 @@
 #include <stdexcept>
 #include <utility>
 
+// `compile_clear_cache` is declared in MLX's internal-but-installed
+// `compile_impl.h` (namespace `mlx::core::detail`), not the public
+// `compile.h`. Include it here, scoped to the .cc to keep the public
+// shim header clean.
+#include "mlx/compile_impl.h"
+
 // Pull in the cxx-generated header so the CompileCallback type and its
 // `invoke` method are fully defined for the lambda below.
 #include "mlx-sys/src/bridge/compile.rs.h"
@@ -105,6 +111,12 @@ std::unique_ptr<ArrayVec> compiled_fn_invoke(
   auto v = std::make_unique<ArrayVec>();
   v->inner = std::move(outputs);
   return v;
+}
+
+// === P5.7 compile cache control ===
+
+void compile_clear_cache() {
+  mlx::core::detail::compile_clear_cache();
 }
 
 } // namespace cxx_mlx

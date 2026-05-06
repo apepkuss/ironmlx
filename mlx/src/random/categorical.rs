@@ -1,6 +1,6 @@
 //! Categorical distribution builder for token sampling.
 
-use crate::{Array, Error, IntoShape, Result, Shape};
+use crate::{Array, Error, IntoShape, Result, Shape, StreamOrDevice};
 
 enum Output {
     Default,
@@ -22,6 +22,7 @@ pub struct Categorical<'a, 'k> {
     axis: i32,
     output: Output,
     key: Option<&'k Array>,
+    target: StreamOrDevice,
 }
 
 impl<'a, 'k> Categorical<'a, 'k> {
@@ -32,6 +33,7 @@ impl<'a, 'k> Categorical<'a, 'k> {
             axis: -1,
             output: Output::Default,
             key: None,
+            target: StreamOrDevice::Default,
         }
     }
 
@@ -55,21 +57,46 @@ impl<'a, 'k> Categorical<'a, 'k> {
         self.key = Some(k);
         self
     }
+    /// Set the target stream/device for this sample call.
+    pub fn stream(mut self, target: impl Into<StreamOrDevice>) -> Self {
+        self.target = target.into();
+        self
+    }
 
     /// Materialize the random sample. Returns `Err` on FFI failure or invalid params.
     pub fn sample(self) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = self.target.encode();
         let k = self
             .key
             .map_or(std::ptr::null(), |a| a.as_inner() as *const _);
         let inner = match self.output {
             Output::Default => {
                 // SAFETY: k is null or borrow valid for this call.
-                unsafe { mlx_sys::random::ffi::categorical(self.logits.as_inner(), self.axis, k) }
+                unsafe {
+                    mlx_sys::random::ffi::categorical(
+                        self.logits.as_inner(),
+                        self.axis,
+                        k,
+                        has,
+                        dev_only,
+                        dev_t,
+                        idx,
+                    )
+                }
             }
             Output::NumSamples(n) => {
                 // SAFETY: k is null or borrow valid for this call.
                 unsafe {
-                    mlx_sys::random::ffi::categorical_n(self.logits.as_inner(), self.axis, n, k)
+                    mlx_sys::random::ffi::categorical_n(
+                        self.logits.as_inner(),
+                        self.axis,
+                        n,
+                        k,
+                        has,
+                        dev_only,
+                        dev_t,
+                        idx,
+                    )
                 }
             }
             Output::Shape(s) => {
@@ -80,6 +107,10 @@ impl<'a, 'k> Categorical<'a, 'k> {
                         self.axis,
                         s.as_slice(),
                         k,
+                        has,
+                        dev_only,
+                        dev_t,
+                        idx,
                     )
                 }
             }

@@ -64,69 +64,147 @@ rust::Vec<double> array_to_vec_f64(const MlxArray& a);
 
 // Binary element-wise ops (broadcasting handled by MLX after Rust-side
 // shape validation in mlx::broadcast::broadcast_shape).
-std::unique_ptr<MlxArray> array_add(const MlxArray& a, const MlxArray& b);
-std::unique_ptr<MlxArray> array_subtract(const MlxArray& a, const MlxArray& b);
-std::unique_ptr<MlxArray> array_multiply(const MlxArray& a, const MlxArray& b);
-std::unique_ptr<MlxArray> array_divide(const MlxArray& a, const MlxArray& b);
+//
+// 4 trailing stream params encode `mlx::core::StreamOrDevice` per
+// `helpers::decode_stream_or_device` (P5.7).
+std::unique_ptr<MlxArray> array_add(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_subtract(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_multiply(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_divide(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // Unary element-wise ops.
-std::unique_ptr<MlxArray> array_negative(const MlxArray& a);
-std::unique_ptr<MlxArray> array_exp(const MlxArray& a);
-std::unique_ptr<MlxArray> array_log(const MlxArray& a);
-std::unique_ptr<MlxArray> array_sqrt(const MlxArray& a);
-std::unique_ptr<MlxArray> array_tanh(const MlxArray& a);
-std::unique_ptr<MlxArray> array_sigmoid(const MlxArray& a);
-std::unique_ptr<MlxArray> array_square(const MlxArray& a);
-std::unique_ptr<MlxArray> array_rsqrt(const MlxArray& a);
-std::unique_ptr<MlxArray> array_erf(const MlxArray& a);
-std::unique_ptr<MlxArray> array_reciprocal(const MlxArray& a);
+std::unique_ptr<MlxArray> array_negative(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_exp(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_log(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_sqrt(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_tanh(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_sigmoid(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_square(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_rsqrt(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_erf(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_reciprocal(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // === P1b2a reductions (5 ops × 3 forms = 15) ===
+// 4 trailing stream params encode StreamOrDevice (P5.7).
 
-std::unique_ptr<MlxArray> array_sum_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_sum_axis(const MlxArray& a, int32_t axis, bool keepdims);
-std::unique_ptr<MlxArray> array_sum_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+std::unique_ptr<MlxArray> array_sum_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_sum_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_sum_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> array_mean_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_mean_axis(const MlxArray& a, int32_t axis, bool keepdims);
-std::unique_ptr<MlxArray> array_mean_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+std::unique_ptr<MlxArray> array_mean_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_mean_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_mean_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> array_max_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_max_axis(const MlxArray& a, int32_t axis, bool keepdims);
-std::unique_ptr<MlxArray> array_max_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+std::unique_ptr<MlxArray> array_max_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_max_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_max_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> array_min_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_min_axis(const MlxArray& a, int32_t axis, bool keepdims);
-std::unique_ptr<MlxArray> array_min_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+std::unique_ptr<MlxArray> array_min_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_min_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_min_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // argmax: only single-axis variant in MLX. We expose array_argmax_all via
 // flatten-then-argmax for symmetry.
-std::unique_ptr<MlxArray> array_argmax_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_argmax_axis(const MlxArray& a, int32_t axis, bool keepdims);
+std::unique_ptr<MlxArray> array_argmax_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_argmax_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-// === P1b2a shape ops ===
+// === P1b2a shape ops (P5.7: + 4 trailing stream params) ===
 
-std::unique_ptr<MlxArray> array_reshape(const MlxArray& a, rust::Slice<const int32_t> shape);
-std::unique_ptr<MlxArray> array_transpose(const MlxArray& a);
-std::unique_ptr<MlxArray> array_transpose_axes(const MlxArray& a, rust::Slice<const int32_t> axes);
-std::unique_ptr<MlxArray> array_broadcast_to(const MlxArray& a, rust::Slice<const int32_t> shape);
+std::unique_ptr<MlxArray> array_reshape(
+    const MlxArray& a, rust::Slice<const int32_t> shape,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_transpose(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_transpose_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_broadcast_to(
+    const MlxArray& a, rust::Slice<const int32_t> shape,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // Concatenate/stack accept raw pointer slices because cxx 1.0 doesn't bridge
 // &[&MlxArray] directly. Caller (Rust safe layer) builds the pointer slice.
-std::unique_ptr<MlxArray> array_concatenate(rust::Slice<const MlxArray* const> arrays, int32_t axis);
-std::unique_ptr<MlxArray> array_stack(rust::Slice<const MlxArray* const> arrays, int32_t axis);
+std::unique_ptr<MlxArray> array_concatenate(
+    rust::Slice<const MlxArray* const> arrays, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_stack(
+    rust::Slice<const MlxArray* const> arrays, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // Split returns std::vector<array> wrapped in MlxArrayVec opaque holder.
-std::unique_ptr<MlxArrayVec> array_split_n(const MlxArray& a, int32_t num_splits, int32_t axis);
-std::unique_ptr<MlxArrayVec> array_split_at(const MlxArray& a, rust::Slice<const int32_t> indices, int32_t axis);
+std::unique_ptr<MlxArrayVec> array_split_n(
+    const MlxArray& a, int32_t num_splits, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArrayVec> array_split_at(
+    const MlxArray& a, rust::Slice<const int32_t> indices, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // MlxArrayVec accessors.
 size_t split_result_len(const MlxArrayVec& v);
 std::unique_ptr<MlxArray> split_result_at(const MlxArrayVec& v, size_t i);
 
-// === P1b2a matmul ===
+// === P1b2a matmul (P5.7: + 4 trailing stream params) ===
 
-std::unique_ptr<MlxArray> array_matmul(const MlxArray& a, const MlxArray& b);
+std::unique_ptr<MlxArray> array_matmul(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // === P1b2b dtype extension: u16/u32/u64 ===
 
@@ -142,56 +220,74 @@ rust::Vec<uint16_t> array_to_vec_u16(const MlxArray& a);
 rust::Vec<uint32_t> array_to_vec_u32(const MlxArray& a);
 rust::Vec<uint64_t> array_to_vec_u64(const MlxArray& a);
 
-// === P1b2b indexing ops ===
+// === P1b2b indexing ops (P5.7: + 4 trailing stream params) ===
 
-std::unique_ptr<MlxArray> array_where(const MlxArray& cond, const MlxArray& x, const MlxArray& y);
+std::unique_ptr<MlxArray> array_where(
+    const MlxArray& cond, const MlxArray& x, const MlxArray& y,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> array_take(const MlxArray& a, const MlxArray& indices, int32_t axis);
-std::unique_ptr<MlxArray> array_take_along_axis(const MlxArray& a, const MlxArray& indices, int32_t axis);
+std::unique_ptr<MlxArray> array_take(
+    const MlxArray& a, const MlxArray& indices, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_take_along_axis(
+    const MlxArray& a, const MlxArray& indices, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> array_slice_strided(
     const MlxArray& a,
     rust::Slice<const int32_t> start,
     rust::Slice<const int32_t> stop,
-    rust::Slice<const int32_t> strides);
+    rust::Slice<const int32_t> strides,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> array_gather(
     const MlxArray& a,
     rust::Slice<const MlxArray* const> indices,
     rust::Slice<const int32_t> axes,
-    rust::Slice<const int32_t> slice_sizes);
+    rust::Slice<const int32_t> slice_sizes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-// === P5 ops extensions: matmul family ===
+// === P5 ops extensions: matmul family (P5.7: + 4 trailing stream params) ===
 
 std::unique_ptr<MlxArray> tensordot_axis(
-    const MlxArray& a, const MlxArray& b, int32_t axis);
+    const MlxArray& a, const MlxArray& b, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> tensordot_axes(
     const MlxArray& a, const MlxArray& b,
     rust::Slice<const int32_t> axes_a,
-    rust::Slice<const int32_t> axes_b);
+    rust::Slice<const int32_t> axes_b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> outer(const MlxArray& a, const MlxArray& b);
+std::unique_ptr<MlxArray> outer(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> inner(const MlxArray& a, const MlxArray& b);
+std::unique_ptr<MlxArray> inner(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> addmm(
     const MlxArray& c, const MlxArray& a, const MlxArray& b,
-    float alpha, float beta);
+    float alpha, float beta,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> block_masked_mm(
     const MlxArray& a, const MlxArray& b, int32_t block_size,
     const MlxArray* mask_out,
     const MlxArray* mask_lhs,
-    const MlxArray* mask_rhs);
+    const MlxArray* mask_rhs,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> gather_mm(
     const MlxArray& a, const MlxArray& b,
     const MlxArray* lhs_indices,
     const MlxArray* rhs_indices,
-    bool sorted_indices);
+    bool sorted_indices,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> segmented_mm(
-    const MlxArray& a, const MlxArray& b, const MlxArray& segments);
+    const MlxArray& a, const MlxArray& b, const MlxArray& segments,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 }  // namespace cxx_mlx

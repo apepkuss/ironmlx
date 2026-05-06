@@ -42,84 +42,101 @@ std::unique_ptr<MlxArray> split_n(const MlxArray& key, int32_t num);
 
 std::unique_ptr<MlxArray> bits(
     rust::Slice<const int32_t> shape, int32_t width,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> uniform(
     const MlxArray& low, const MlxArray& high,
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> uniform_default(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> normal(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
     const MlxArray* loc, const MlxArray* scale,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> randint(
     const MlxArray& low, const MlxArray& high,
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // ===== Discrete distributions =====
 
 std::unique_ptr<MlxArray> bernoulli(
     const MlxArray& p, rust::Slice<const int32_t> shape,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> bernoulli_default(
     const MlxArray& p,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> categorical(
     const MlxArray& logits, int32_t axis,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> categorical_n(
     const MlxArray& logits, int32_t axis, int32_t num_samples,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> categorical_shaped(
     const MlxArray& logits, int32_t axis,
     rust::Slice<const int32_t> shape,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // ===== Special distributions =====
 
 std::unique_ptr<MlxArray> truncated_normal(
     const MlxArray& lower, const MlxArray& upper,
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> truncated_normal_default(
     const MlxArray& lower, const MlxArray& upper,
     uint8_t dtype_repr,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> gumbel(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> laplace(
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
     float loc, float scale,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> multivariate_normal(
     const MlxArray& mean, const MlxArray& cov,
     rust::Slice<const int32_t> shape, uint8_t dtype_repr,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // ===== Permutation =====
 
 std::unique_ptr<MlxArray> permutation(
     const MlxArray& x, int32_t axis,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> permutation_arange(
     int32_t n,
-    const MlxArray* key);
+    const MlxArray* key,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 }  // namespace cxx_mlx

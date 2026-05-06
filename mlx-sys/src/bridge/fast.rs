@@ -8,6 +8,9 @@
 //! Optional `float` arguments (rope's `base`) are encoded as a
 //! `bool has_base` + `f32 base` pair to avoid raw float pointers across
 //! cxx (which doesn't model `Option<f32>` directly).
+//!
+//! Each fn carries 4 trailing `StreamOrDevice` args (P5.7) — same encoding
+//! as the array bridge: `(has_target, is_device_only, device_type, stream_index)`.
 
 #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "cxx_mlx")]
@@ -21,6 +24,10 @@ pub mod ffi {
             x: &MlxArray,
             weight: *const MlxArray,
             eps: f32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn fast_layer_norm(
@@ -28,6 +35,10 @@ pub mod ffi {
             weight: *const MlxArray,
             bias: *const MlxArray,
             eps: f32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn fast_rope(
@@ -39,6 +50,10 @@ pub mod ffi {
             scale: f32,
             offset: i32,
             freqs: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn fast_rope_with_array_offset(
@@ -50,6 +65,10 @@ pub mod ffi {
             scale: f32,
             offset: &MlxArray,
             freqs: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         unsafe fn fast_scaled_dot_product_attention(
@@ -60,6 +79,10 @@ pub mod ffi {
             mask_mode: &str,
             mask_arr: *const MlxArray,
             sinks: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
     }
 }

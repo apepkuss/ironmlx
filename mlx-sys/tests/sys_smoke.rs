@@ -38,44 +38,54 @@ fn zeros_then_eval() {
 fn binary_add_links() {
     let a = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
     let b = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
-    let _c = mlx_sys::array::ffi::array_add(&a, &b).expect("add should succeed");
+    // P5.7: array_add takes 4 trailing StreamOrDevice params (default = no target).
+    let _c =
+        mlx_sys::array::ffi::array_add(&a, &b, false, false, 0, 0).expect("add should succeed");
 }
 
 #[test]
 fn unary_exp_links() {
     let a = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
-    let _e = mlx_sys::array::ffi::array_exp(&a).expect("exp should succeed");
+    // P5.7: array_exp takes 4 trailing StreamOrDevice params (default = no target).
+    let _e = mlx_sys::array::ffi::array_exp(&a, false, false, 0, 0).expect("exp should succeed");
 }
 
 #[test]
 fn reduction_sum_links() {
     let a = ffi::array_zeros(&[3, 4], FLOAT32).expect("zeros");
-    let _s = mlx_sys::array::ffi::array_sum_all(&a, false).expect("sum_all");
-    let _s2 = mlx_sys::array::ffi::array_sum_axis(&a, 0, false).expect("sum_axis");
+    let _s = mlx_sys::array::ffi::array_sum_all(&a, false, false, false, 0, 0).expect("sum_all");
+    let _s2 =
+        mlx_sys::array::ffi::array_sum_axis(&a, 0, false, false, false, 0, 0).expect("sum_axis");
     let axes: Vec<i32> = vec![0, 1];
-    let _s3 = mlx_sys::array::ffi::array_sum_axes(&a, &axes, false).expect("sum_axes");
+    let _s3 = mlx_sys::array::ffi::array_sum_axes(&a, &axes, false, false, false, 0, 0)
+        .expect("sum_axes");
 }
 
 #[test]
 fn shape_ops_link() {
     let a = ffi::array_zeros(&[6, 4], FLOAT32).expect("zeros");
-    let _r = mlx_sys::array::ffi::array_reshape(&a, &[2, 3, 4]).expect("reshape");
-    let _t = mlx_sys::array::ffi::array_transpose(&a).expect("transpose");
-    let _ta = mlx_sys::array::ffi::array_transpose_axes(&a, &[1, 0]).expect("transpose_axes");
-    let _b = mlx_sys::array::ffi::array_broadcast_to(&a, &[2, 6, 4]).expect("broadcast_to");
+    // P5.7: shape ops take 4 trailing StreamOrDevice params (default = no target).
+    let _r =
+        mlx_sys::array::ffi::array_reshape(&a, &[2, 3, 4], false, false, 0, 0).expect("reshape");
+    let _t = mlx_sys::array::ffi::array_transpose(&a, false, false, 0, 0).expect("transpose");
+    let _ta = mlx_sys::array::ffi::array_transpose_axes(&a, &[1, 0], false, false, 0, 0)
+        .expect("transpose_axes");
+    let _b = mlx_sys::array::ffi::array_broadcast_to(&a, &[2, 6, 4], false, false, 0, 0)
+        .expect("broadcast_to");
 }
 
 #[test]
 fn matmul_links() {
     let a = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
     let b = ffi::array_zeros(&[3, 4], FLOAT32).expect("zeros");
-    let _c = mlx_sys::array::ffi::array_matmul(&a, &b).expect("matmul");
+    // P5.7: array_matmul takes 4 trailing StreamOrDevice params.
+    let _c = mlx_sys::array::ffi::array_matmul(&a, &b, false, false, 0, 0).expect("matmul");
 }
 
 #[test]
 fn split_n_links_returns_vec() {
     let a = ffi::array_zeros(&[6, 4], FLOAT32).expect("zeros");
-    let v = mlx_sys::array::ffi::array_split_n(&a, 3, 0).expect("split_n");
+    let v = mlx_sys::array::ffi::array_split_n(&a, 3, 0, false, false, 0, 0).expect("split_n");
     assert_eq!(mlx_sys::array::ffi::split_result_len(&v), 3);
     let _first = mlx_sys::array::ffi::split_result_at(&v, 0).expect("split_result_at");
 }
@@ -91,6 +101,10 @@ fn concatenate_links_with_raw_ptr_slice() {
     let _c = unsafe {
         mlx_sys::array::ffi::array_concatenate(
             std::slice::from_raw_parts(raw_ptrs.as_ptr(), raw_ptrs.len()),
+            0,
+            false,
+            false,
+            0,
             0,
         )
     }
@@ -108,11 +122,13 @@ fn indexing_ops_link() {
     let a = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
     let cond = ffi::array_zeros(&[2, 3], 0).expect("zeros bool"); // bool dtype = 0
     let b = ffi::array_zeros(&[2, 3], FLOAT32).expect("zeros");
-    let _w = mlx_sys::array::ffi::array_where(&cond, &a, &b).expect("where");
-    let _s = mlx_sys::array::ffi::array_slice_strided(&a, &[0, 0], &[2, 3], &[1, 1])
-        .expect("slice_strided");
+    // P5.7: indexing ops take 4 trailing StreamOrDevice params.
+    let _w = mlx_sys::array::ffi::array_where(&cond, &a, &b, false, false, 0, 0).expect("where");
+    let _s =
+        mlx_sys::array::ffi::array_slice_strided(&a, &[0, 0], &[2, 3], &[1, 1], false, false, 0, 0)
+            .expect("slice_strided");
     let indices = mlx_sys::array::ffi::array_from_u32(&[0_u32, 2], &[2]).expect("from_u32");
-    let _t = mlx_sys::array::ffi::array_take(&a, &indices, 1).expect("take");
+    let _t = mlx_sys::array::ffi::array_take(&a, &indices, 1, false, false, 0, 0).expect("take");
 }
 
 #[test]
@@ -137,4 +153,25 @@ fn stream_default_and_new_links() {
         "new stream should have different index"
     );
     assert_eq!(new_stream.device.index, d.index);
+}
+
+#[test]
+fn eval_many_links() {
+    use mlx_sys::stream::ffi;
+    // Empty slice — no-op but confirms ABI link.
+    let empty: Vec<*const ffi::MlxArray> = vec![];
+    unsafe { ffi::eval_many(&empty).expect("eval_many ABI") };
+}
+
+#[test]
+fn async_eval_many_links() {
+    use mlx_sys::stream::ffi;
+    let empty: Vec<*const ffi::MlxArray> = vec![];
+    unsafe { ffi::async_eval_many(&empty).expect("async_eval_many ABI") };
+}
+
+#[test]
+fn compile_clear_cache_links() {
+    use mlx_sys::compile::ffi;
+    ffi::compile_clear_cache();
 }

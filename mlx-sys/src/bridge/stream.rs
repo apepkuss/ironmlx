@@ -26,9 +26,9 @@ pub enum DeviceType {
 }
 
 // cxx::bridge generates `unsafe fn` declarations for our pointer-slice variants
-// (async_eval_many). The Safety contract is documented in the safe Rust wrapper
-// (`mlx::transforms::async_eval`); cxx doesn't propagate doc comments from
-// inside the bridge macro.
+// (eval_many / async_eval_many). The Safety contract is documented in the safe
+// Rust wrappers (`mlx::transforms::eval` / `async_eval` / `async_eval_fut`);
+// cxx doesn't propagate doc comments from inside the bridge macro.
 #[allow(clippy::missing_safety_doc)]
 #[cxx::bridge(namespace = "cxx_mlx")]
 mod ffi_bridge {
@@ -69,6 +69,7 @@ mod ffi_bridge {
         fn clear_streams();
 
         // === Transforms ===
+        unsafe fn eval_many(arrays: &[*const MlxArray]) -> Result<()>;
         unsafe fn async_eval_many(arrays: &[*const MlxArray]) -> Result<()>;
         fn synchronize() -> Result<()>;
         fn synchronize_stream(s: Stream) -> Result<()>;
@@ -80,8 +81,8 @@ mod ffi_bridge {
 #[allow(clippy::missing_safety_doc)]
 pub mod ffi {
     pub use super::ffi_bridge::{
-        async_eval_many, clear_streams, default_device, default_stream, device_count, get_streams,
-        is_available, new_stream, set_default_device, set_default_stream, synchronize,
+        async_eval_many, clear_streams, default_device, default_stream, device_count, eval_many,
+        get_streams, is_available, new_stream, set_default_device, set_default_stream, synchronize,
         synchronize_stream, Device, MlxArray, Stream,
     };
     pub use super::DeviceType;
