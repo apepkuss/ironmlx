@@ -739,6 +739,23 @@ impl Array {
     ) -> Result<Array> {
         crate::ops::sort::topk_on(self, k, axis, target)
     }
+
+    // === P5.5 astype (dtype conversion) ===
+
+    /// Convert this array to a new array with the given [`Dtype`]. See
+    /// [`crate::ops::cast::astype`] for the free-fn form.
+    pub fn astype(&self, dtype: Dtype) -> Result<Array> {
+        crate::ops::cast::astype(self, dtype)
+    }
+
+    /// Stream-targeted variant of [`Array::astype`].
+    pub fn astype_on(
+        &self,
+        dtype: Dtype,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::cast::astype_on(self, dtype, target)
+    }
 }
 
 /// Construct an Array from a slice of `T` and any [`IntoShape`].

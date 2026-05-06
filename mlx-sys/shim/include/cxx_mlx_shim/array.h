@@ -348,4 +348,10 @@ std::unique_ptr<MlxArray> topk(
     const MlxArray& a, int32_t k, int32_t axis,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.5 astype (dtype conversion) ===
+// `dtype_repr` is `Dtype::as_u8()` from Rust; decoded by `helpers::dtype_from_repr`.
+std::unique_ptr<MlxArray> astype(
+    const MlxArray& a, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 }  // namespace cxx_mlx

@@ -209,3 +209,27 @@ fn stream_routing_for_sort() {
     let s = mlx::ops::sort::sort_on(&a, -1, Device::cpu()).expect("sort_on");
     assert_eq!(s.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
 }
+
+// === Task 3: astype ===
+
+#[test]
+fn astype_f32_to_f16() {
+    let a: Array = (&[1.0_f32, 2.0, 3.0][..], (3,)).try_into().unwrap();
+    let b = mlx::ops::cast::astype(&a, Dtype::Float16).expect("astype");
+    assert_eq!(b.dtype(), Dtype::Float16);
+}
+
+#[test]
+fn astype_int_to_float() {
+    let a: Array = (&[1_i32, 2, 3][..], (3,)).try_into().unwrap();
+    let b = mlx::ops::cast::astype(&a, Dtype::Float32).expect("astype");
+    assert_eq!(b.dtype(), Dtype::Float32);
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn array_method_astype_works() {
+    let a: Array = (&[1_i32, 2][..], (2,)).try_into().unwrap();
+    let b = a.astype(Dtype::Float32).expect("astype method");
+    assert_eq!(b.dtype(), Dtype::Float32);
+}

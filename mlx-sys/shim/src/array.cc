@@ -824,4 +824,15 @@ std::unique_ptr<MlxArray> topk(
   return std::make_unique<MlxArray>(mlx::core::topk(a, k, axis, target));
 }
 
+// === P5.5 astype ===
+
+std::unique_ptr<MlxArray> astype(
+    const MlxArray& a, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  return std::make_unique<MlxArray>(mlx::core::astype(a, t, target));
+}
+
 }  // namespace cxx_mlx

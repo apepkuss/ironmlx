@@ -672,5 +672,16 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 astype (dtype conversion) ===
+        // `dtype_repr` is `Dtype::as_u8()`; shim decodes via `helpers::dtype_from_repr`.
+        fn astype(
+            a: &MlxArray,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }
