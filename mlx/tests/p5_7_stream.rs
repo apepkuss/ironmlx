@@ -104,3 +104,31 @@ fn unary_exp_on_explicit_device() {
     assert!((v[0] - 1.0).abs() < 1e-5);
     assert!((v[1] - std::f32::consts::E).abs() < 1e-5);
 }
+
+// === Task 5: ops sweep — reduction _on variants ===
+
+#[test]
+fn reduction_sum_on_all_axes() {
+    use mlx::ops::reduction as ops_reduction;
+    use mlx::ops::All;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (4,)).try_into().unwrap();
+    let r = ops_reduction::sum_on(&a, All, false, Device::cpu()).expect("sum_on All");
+    assert!((r.item::<f32>().unwrap() - 10.0).abs() < 1e-5);
+}
+
+#[test]
+fn reduction_mean_on_axis() {
+    use mlx::ops::reduction as ops_reduction;
+    let a: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (2, 2)).try_into().unwrap();
+    let r = ops_reduction::mean_on(&a, 0_i32, false, Device::cpu()).expect("mean_on axis");
+    assert_eq!(r.to_vec::<f32>().unwrap(), vec![2.0, 3.0]);
+}
+
+#[test]
+fn reduction_max_on_axes_default_matches() {
+    use mlx::ops::reduction as ops_reduction;
+    let a: Array = (&[1.0_f32, 5.0, 2.0, 8.0][..], (2, 2)).try_into().unwrap();
+    let r1 = ops_reduction::max(&a, vec![0_i32, 1], false).expect("max");
+    let r2 = ops_reduction::max_on(&a, vec![0_i32, 1], false, ()).expect("max_on default");
+    assert_eq!(r1.to_vec::<f32>().unwrap(), r2.to_vec::<f32>().unwrap());
+}

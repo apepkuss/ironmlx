@@ -28,7 +28,9 @@ pub use matmul::{
     addmm, block_masked_matmul, gather_matmul, inner_product, matmul, outer, segmented_matmul,
     tensordot, tensordot_axes,
 };
-pub use reduction::{argmax, max, mean, min, sum, All, IntoAxes};
+pub use reduction::{
+    argmax, argmax_on, max, max_on, mean, mean_on, min, min_on, sum, sum_on, All, IntoAxes,
+};
 pub use shape::{
     broadcast_to, concatenate, reshape, split_at, split_n, stack, transpose, transpose_axes,
 };

@@ -170,43 +170,131 @@ pub mod ffi {
         type MlxArrayVec;
 
         // === P1b2a reductions (5 ops × {all, axis, axes}) ===
-        fn array_sum_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_sum_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        // 4 trailing stream params encode StreamOrDevice (P5.7).
+        fn array_sum_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_sum_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_sum_axes(
             a: &MlxArray,
             axes: &[i32],
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn array_mean_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_mean_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_mean_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_mean_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_mean_axes(
             a: &MlxArray,
             axes: &[i32],
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn array_max_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_max_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_max_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_max_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_max_axes(
             a: &MlxArray,
             axes: &[i32],
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn array_min_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
-        fn array_min_axis(a: &MlxArray, axis: i32, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_min_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_min_axis(
+            a: &MlxArray,
+            axis: i32,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_min_axes(
             a: &MlxArray,
             axes: &[i32],
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        fn array_argmax_all(a: &MlxArray, keepdims: bool) -> Result<UniquePtr<MlxArray>>;
+        fn array_argmax_all(
+            a: &MlxArray,
+            keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_argmax_axis(
             a: &MlxArray,
             axis: i32,
             keepdims: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
         // === P1b2a shape ops ===

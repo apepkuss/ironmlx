@@ -9,8 +9,14 @@
 //!
 //! Keepdim is a positional `bool` (NumPy/PyTorch convention). When `true`,
 //! reduced axes are kept as size-1 to preserve broadcast compatibility.
+//!
+//! Each reduction op exposes both a default variant (current default stream)
+//! and a `*_on` variant taking `impl Into<StreamOrDevice>` (P5.7). Because
+//! reductions dispatch to one of three FFI functions at runtime depending on
+//! `axes`, the macro form does not fit cleanly — both variants are written
+//! by hand and the default delegates to `*_on(.., ())`.
 
-use crate::{Array, Error, Result};
+use crate::{Array, Error, Result, StreamOrDevice};
 
 /// Marker for "reduce over all axes". Use as `sum(&a, All, false)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,10 +79,40 @@ impl<const N: usize> IntoAxes for [i32; N] {
 /// `Vec<i32>` / `[i32; N]` for multiple axes. `keepdim = true` retains
 /// reduced axes as size-1.
 pub fn sum<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    sum_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`sum`]. Pass `()` for the current default
+/// stream, a `Stream`, or a `Device`.
+pub fn sum_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
     let inner = match axes.as_axes() {
-        None => mlx_sys::array::ffi::array_sum_all(a.as_inner(), keepdim),
-        Some([axis]) => mlx_sys::array::ffi::array_sum_axis(a.as_inner(), *axis, keepdim),
-        Some(axes) => mlx_sys::array::ffi::array_sum_axes(a.as_inner(), axes, keepdim),
+        None => {
+            mlx_sys::array::ffi::array_sum_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_sum_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => mlx_sys::array::ffi::array_sum_axes(
+            a.as_inner(),
+            axes,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
     }
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
@@ -84,10 +120,39 @@ pub fn sum<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
 
 /// Mean over the specified axes. See [`sum`] for axes semantics.
 pub fn mean<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    mean_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`mean`].
+pub fn mean_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
     let inner = match axes.as_axes() {
-        None => mlx_sys::array::ffi::array_mean_all(a.as_inner(), keepdim),
-        Some([axis]) => mlx_sys::array::ffi::array_mean_axis(a.as_inner(), *axis, keepdim),
-        Some(axes) => mlx_sys::array::ffi::array_mean_axes(a.as_inner(), axes, keepdim),
+        None => {
+            mlx_sys::array::ffi::array_mean_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_mean_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => mlx_sys::array::ffi::array_mean_axes(
+            a.as_inner(),
+            axes,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
     }
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
@@ -95,10 +160,39 @@ pub fn mean<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
 
 /// Maximum over the specified axes. See [`sum`] for axes semantics.
 pub fn max<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    max_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`max`].
+pub fn max_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
     let inner = match axes.as_axes() {
-        None => mlx_sys::array::ffi::array_max_all(a.as_inner(), keepdim),
-        Some([axis]) => mlx_sys::array::ffi::array_max_axis(a.as_inner(), *axis, keepdim),
-        Some(axes) => mlx_sys::array::ffi::array_max_axes(a.as_inner(), axes, keepdim),
+        None => {
+            mlx_sys::array::ffi::array_max_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_max_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => mlx_sys::array::ffi::array_max_axes(
+            a.as_inner(),
+            axes,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
     }
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
@@ -106,10 +200,39 @@ pub fn max<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
 
 /// Minimum over the specified axes. See [`sum`] for axes semantics.
 pub fn min<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    min_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`min`].
+pub fn min_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
     let inner = match axes.as_axes() {
-        None => mlx_sys::array::ffi::array_min_all(a.as_inner(), keepdim),
-        Some([axis]) => mlx_sys::array::ffi::array_min_axis(a.as_inner(), *axis, keepdim),
-        Some(axes) => mlx_sys::array::ffi::array_min_axes(a.as_inner(), axes, keepdim),
+        None => {
+            mlx_sys::array::ffi::array_min_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_min_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
+        Some(axes) => mlx_sys::array::ffi::array_min_axes(
+            a.as_inner(),
+            axes,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
     }
     .map_err(Error::from)?;
     Ok(Array::from_inner(inner))
@@ -120,9 +243,30 @@ pub fn min<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
 ///
 /// Multi-axis argmax is not supported by MLX; pass a single `i32` axis or [`All`].
 pub fn argmax<A: IntoAxes>(a: &Array, axes: A, keepdim: bool) -> Result<Array> {
+    argmax_on(a, axes, keepdim, ())
+}
+
+/// Stream-targeted variant of [`argmax`].
+pub fn argmax_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    keepdim: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
     let inner = match axes.as_axes() {
-        None => mlx_sys::array::ffi::array_argmax_all(a.as_inner(), keepdim),
-        Some([axis]) => mlx_sys::array::ffi::array_argmax_axis(a.as_inner(), *axis, keepdim),
+        None => {
+            mlx_sys::array::ffi::array_argmax_all(a.as_inner(), keepdim, has, dev_only, dev_t, idx)
+        }
+        Some([axis]) => mlx_sys::array::ffi::array_argmax_axis(
+            a.as_inner(),
+            *axis,
+            keepdim,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        ),
         Some(axes) => {
             return Err(Error::Mlx(format!(
                 "argmax does not support multi-axis reduction (got axes={axes:?})"

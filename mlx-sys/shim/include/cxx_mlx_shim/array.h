@@ -113,27 +113,56 @@ std::unique_ptr<MlxArray> array_reciprocal(
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // === P1b2a reductions (5 ops × 3 forms = 15) ===
+// 4 trailing stream params encode StreamOrDevice (P5.7).
 
-std::unique_ptr<MlxArray> array_sum_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_sum_axis(const MlxArray& a, int32_t axis, bool keepdims);
-std::unique_ptr<MlxArray> array_sum_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+std::unique_ptr<MlxArray> array_sum_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_sum_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_sum_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> array_mean_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_mean_axis(const MlxArray& a, int32_t axis, bool keepdims);
-std::unique_ptr<MlxArray> array_mean_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+std::unique_ptr<MlxArray> array_mean_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_mean_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_mean_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> array_max_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_max_axis(const MlxArray& a, int32_t axis, bool keepdims);
-std::unique_ptr<MlxArray> array_max_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+std::unique_ptr<MlxArray> array_max_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_max_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_max_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
-std::unique_ptr<MlxArray> array_min_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_min_axis(const MlxArray& a, int32_t axis, bool keepdims);
-std::unique_ptr<MlxArray> array_min_axes(const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims);
+std::unique_ptr<MlxArray> array_min_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_min_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_min_axes(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // argmax: only single-axis variant in MLX. We expose array_argmax_all via
 // flatten-then-argmax for symmetry.
-std::unique_ptr<MlxArray> array_argmax_all(const MlxArray& a, bool keepdims);
-std::unique_ptr<MlxArray> array_argmax_axis(const MlxArray& a, int32_t axis, bool keepdims);
+std::unique_ptr<MlxArray> array_argmax_all(
+    const MlxArray& a, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_argmax_axis(
+    const MlxArray& a, int32_t axis, bool keepdims,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // === P1b2a shape ops ===
 

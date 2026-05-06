@@ -47,17 +47,18 @@ fn binary_add_links() {
 fn unary_exp_links() {
     let a = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
     // P5.7: array_exp takes 4 trailing StreamOrDevice params (default = no target).
-    let _e =
-        mlx_sys::array::ffi::array_exp(&a, false, false, 0, 0).expect("exp should succeed");
+    let _e = mlx_sys::array::ffi::array_exp(&a, false, false, 0, 0).expect("exp should succeed");
 }
 
 #[test]
 fn reduction_sum_links() {
     let a = ffi::array_zeros(&[3, 4], FLOAT32).expect("zeros");
-    let _s = mlx_sys::array::ffi::array_sum_all(&a, false).expect("sum_all");
-    let _s2 = mlx_sys::array::ffi::array_sum_axis(&a, 0, false).expect("sum_axis");
+    let _s = mlx_sys::array::ffi::array_sum_all(&a, false, false, false, 0, 0).expect("sum_all");
+    let _s2 =
+        mlx_sys::array::ffi::array_sum_axis(&a, 0, false, false, false, 0, 0).expect("sum_axis");
     let axes: Vec<i32> = vec![0, 1];
-    let _s3 = mlx_sys::array::ffi::array_sum_axes(&a, &axes, false).expect("sum_axes");
+    let _s3 = mlx_sys::array::ffi::array_sum_axes(&a, &axes, false, false, false, 0, 0)
+        .expect("sum_axes");
 }
 
 #[test]
