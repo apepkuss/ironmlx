@@ -9,6 +9,7 @@ compile_error!("mlx-sys only supports macOS on Apple Silicon (aarch64-apple-darw
 mod bridge;
 
 pub use bridge::array;
+pub use bridge::compile;
 pub use bridge::fast;
 pub use bridge::io;
 pub use bridge::quantization;

@@ -23,6 +23,7 @@ compile_error!("mlx only supports macOS on Apple Silicon (aarch64-apple-darwin)"
 
 mod array;
 mod broadcast;
+pub mod compile;
 mod device;
 mod dtype;
 mod element;
