@@ -536,5 +536,84 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 comparison + element-wise binary ===
+        fn equal(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn not_equal(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn less(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn less_equal(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn greater(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn greater_equal(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn maximum(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn minimum(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 clip ===
+        // a_min / a_max are nullable: pass null pointer for "no bound on that side".
+        // unsafe because raw pointers cross FFI; safe wrapper enforces the lifetime contract.
+        unsafe fn clip(
+            a: &MlxArray,
+            a_min: *const MlxArray,
+            a_max: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

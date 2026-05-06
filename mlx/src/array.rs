@@ -529,6 +529,132 @@ impl Array {
     ) -> Result<Array> {
         crate::ops::indexing::gather_on(self, indices, axes, slice_sizes, target)
     }
+
+    // === P5.5 comparison ops ===
+
+    /// Element-wise `self == rhs`. See [`crate::ops::equal`].
+    pub fn equal(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::equal(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::equal`].
+    pub fn equal_on(&self, rhs: &Array, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::binary::equal_on(self, rhs, target)
+    }
+
+    /// Element-wise `self != rhs`. See [`crate::ops::not_equal`].
+    pub fn not_equal(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::not_equal(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::not_equal`].
+    pub fn not_equal_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::not_equal_on(self, rhs, target)
+    }
+
+    /// Element-wise `self < rhs`. See [`crate::ops::less`].
+    pub fn less(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::less(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::less`].
+    pub fn less_on(&self, rhs: &Array, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::binary::less_on(self, rhs, target)
+    }
+
+    /// Element-wise `self <= rhs`. See [`crate::ops::less_equal`].
+    pub fn less_equal(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::less_equal(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::less_equal`].
+    pub fn less_equal_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::less_equal_on(self, rhs, target)
+    }
+
+    /// Element-wise `self > rhs`. See [`crate::ops::greater`].
+    pub fn greater(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::greater(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::greater`].
+    pub fn greater_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::greater_on(self, rhs, target)
+    }
+
+    /// Element-wise `self >= rhs`. See [`crate::ops::greater_equal`].
+    pub fn greater_equal(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::greater_equal(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::greater_equal`].
+    pub fn greater_equal_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::greater_equal_on(self, rhs, target)
+    }
+
+    // === P5.5 element-wise max/min ===
+
+    /// Element-wise `max(self, rhs)`. See [`crate::ops::maximum`].
+    pub fn maximum(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::maximum(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::maximum`].
+    pub fn maximum_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::maximum_on(self, rhs, target)
+    }
+
+    /// Element-wise `min(self, rhs)`. See [`crate::ops::minimum`].
+    pub fn minimum(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::minimum(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::minimum`].
+    pub fn minimum_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::minimum_on(self, rhs, target)
+    }
+
+    // === P5.5 clip ===
+
+    /// Clamp to `[a_min, a_max]`. Pass `None` for either bound to leave it
+    /// unbounded. See [`crate::ops::clip`].
+    pub fn clip(&self, a_min: Option<&Array>, a_max: Option<&Array>) -> Result<Array> {
+        crate::ops::binary::clip(self, a_min, a_max)
+    }
+
+    /// Stream-targeted variant of [`Array::clip`].
+    pub fn clip_on(
+        &self,
+        a_min: Option<&Array>,
+        a_max: Option<&Array>,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::clip_on(self, a_min, a_max, target)
+    }
 }
 
 /// Construct an Array from a slice of `T` and any [`IntoShape`].

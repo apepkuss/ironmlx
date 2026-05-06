@@ -687,4 +687,76 @@ std::unique_ptr<MlxArray> segmented_mm(
   return std::make_unique<MlxArray>(mlx::core::segmented_mm(a, b, segments, target));
 }
 
+// === P5.5 comparison + element-wise binary ===
+
+std::unique_ptr<MlxArray> equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::equal(a, b, target));
+}
+std::unique_ptr<MlxArray> not_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::not_equal(a, b, target));
+}
+std::unique_ptr<MlxArray> less(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::less(a, b, target));
+}
+std::unique_ptr<MlxArray> less_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::less_equal(a, b, target));
+}
+std::unique_ptr<MlxArray> greater(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::greater(a, b, target));
+}
+std::unique_ptr<MlxArray> greater_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::greater_equal(a, b, target));
+}
+std::unique_ptr<MlxArray> maximum(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::maximum(a, b, target));
+}
+std::unique_ptr<MlxArray> minimum(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::minimum(a, b, target));
+}
+
+// === P5.5 clip ===
+
+std::unique_ptr<MlxArray> clip(
+    const MlxArray& a,
+    const MlxArray* a_min,
+    const MlxArray* a_max,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::clip(
+      a, helpers::opt_arr(a_min), helpers::opt_arr(a_max), target));
+}
+
 }  // namespace cxx_mlx

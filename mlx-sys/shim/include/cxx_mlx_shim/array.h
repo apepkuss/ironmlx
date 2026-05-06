@@ -290,4 +290,38 @@ std::unique_ptr<MlxArray> segmented_mm(
     const MlxArray& a, const MlxArray& b, const MlxArray& segments,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.5 comparison + element-wise binary ===
+std::unique_ptr<MlxArray> equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> not_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> less(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> less_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> greater(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> greater_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> maximum(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> minimum(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.5 clip (3-input element-wise with optional bounds) ===
+// `a_min` / `a_max` are nullable: nullptr means "no bound on that side".
+std::unique_ptr<MlxArray> clip(
+    const MlxArray& a,
+    const MlxArray* a_min,
+    const MlxArray* a_max,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 }  // namespace cxx_mlx

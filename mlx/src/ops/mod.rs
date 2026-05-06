@@ -20,7 +20,34 @@ pub mod shape;
 pub mod unary;
 
 pub use binary::{
-    add, add_on, divide, divide_on, multiply, multiply_on, negative, negative_on, subtract,
+    add,
+    add_on,
+    // P5.5 additions
+    clip,
+    clip_on,
+    divide,
+    divide_on,
+    equal,
+    equal_on,
+    greater,
+    greater_equal,
+    greater_equal_on,
+    greater_on,
+    less,
+    less_equal,
+    less_equal_on,
+    less_on,
+    maximum,
+    maximum_on,
+    minimum,
+    minimum_on,
+    multiply,
+    multiply_on,
+    negative,
+    negative_on,
+    not_equal,
+    not_equal_on,
+    subtract,
     subtract_on,
 };
 pub use indexing::{
