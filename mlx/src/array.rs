@@ -333,9 +333,7 @@ impl std::fmt::Debug for Array {
 
 impl std::fmt::Display for Array {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // TODO(p6.5 task 3): switch to `{}` for dtype once `Display for Dtype`
-        // lands. Final form: `Array<f32>[2, 3]`.
-        write!(f, "Array<{:?}>{}", self.dtype(), self.shape())
+        write!(f, "Array<{}>{}", self.dtype(), self.shape())
     }
 }
 
@@ -431,10 +429,9 @@ mod tests {
     }
 
     #[test]
-    fn display_uses_dtype_debug_for_now() {
-        // TODO(p6.5 task 3): switch expected to "Array<f32>[2, 3]".
+    fn array_display_uses_dtype_short_name() {
         let a = Array::zeros((2, 3), Dtype::Float32).unwrap();
-        assert_eq!(format!("{a}"), "Array<Float32>[2, 3]");
+        assert_eq!(format!("{a}"), "Array<f32>[2, 3]");
     }
 
     #[test]

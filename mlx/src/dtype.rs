@@ -8,8 +8,9 @@
 //! the enum, that assertion fires at the C++ build step before this Rust
 //! mirror has a chance to silently drift.
 
+#[non_exhaustive]
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Dtype {
     Bool = 0,
     Uint8 = 1,
@@ -21,6 +22,7 @@ pub enum Dtype {
     Int32 = 7,
     Int64 = 8,
     Float16 = 9,
+    #[default]
     Float32 = 10,
     Float64 = 11,
     Bfloat16 = 12,
@@ -50,5 +52,50 @@ impl Dtype {
             13 => Ok(Dtype::Complex64),
             other => Err(crate::Error::Mlx(format!("unknown Dtype::Val={other}"))),
         }
+    }
+}
+
+impl std::fmt::Display for Dtype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Dtype::Bool => "bool",
+            Dtype::Uint8 => "u8",
+            Dtype::Uint16 => "u16",
+            Dtype::Uint32 => "u32",
+            Dtype::Uint64 => "u64",
+            Dtype::Int8 => "i8",
+            Dtype::Int16 => "i16",
+            Dtype::Int32 => "i32",
+            Dtype::Int64 => "i64",
+            Dtype::Float16 => "f16",
+            Dtype::Float32 => "f32",
+            Dtype::Float64 => "f64",
+            Dtype::Bfloat16 => "bf16",
+            Dtype::Complex64 => "complex64",
+        };
+        f.write_str(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_float32() {
+        assert_eq!(Dtype::default(), Dtype::Float32);
+    }
+
+    #[test]
+    fn display_format() {
+        assert_eq!(format!("{}", Dtype::Float32), "f32");
+        assert_eq!(format!("{}", Dtype::Float16), "f16");
+        assert_eq!(format!("{}", Dtype::Bfloat16), "bf16");
+        assert_eq!(format!("{}", Dtype::Float64), "f64");
+        assert_eq!(format!("{}", Dtype::Bool), "bool");
+        assert_eq!(format!("{}", Dtype::Int8), "i8");
+        assert_eq!(format!("{}", Dtype::Int32), "i32");
+        assert_eq!(format!("{}", Dtype::Uint32), "u32");
+        assert_eq!(format!("{}", Dtype::Complex64), "complex64");
     }
 }

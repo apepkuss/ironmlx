@@ -1,6 +1,7 @@
 use crate::{Dtype, Shape};
 use thiserror::Error;
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("MLX runtime error: {0}")]

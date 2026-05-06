@@ -3,8 +3,9 @@
 //! only exposes the global controls and the `CompileMode` enum.
 
 /// Global compile mode. Mirrors `mlx::core::CompileMode`.
+#[non_exhaustive]
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompileMode {
     /// Compile is fully disabled; functions run eagerly.
     Disabled = 0,
@@ -13,6 +14,7 @@ pub enum CompileMode {
     /// Compile, but skip kernel fusion.
     NoFuse = 2,
     /// Full compile (default).
+    #[default]
     Enabled = 3,
 }
 
@@ -121,4 +123,14 @@ where
     let cb = mlx_sys::compile::make_callback(bridge_fn);
     let inner = mlx_sys::compile::ffi::compile_with_callback(cb, shapeless).map_err(Error::from)?;
     Ok(CompiledFn { inner })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_compile_mode_is_enabled() {
+        assert_eq!(CompileMode::default(), CompileMode::Enabled);
+    }
 }
