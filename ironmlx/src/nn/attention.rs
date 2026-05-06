@@ -10,7 +10,7 @@
 //! shapes only arrive once the Qwen3.5 model assembly (P3) drives the
 //! attention block. KV-cache integration lands in P2.
 
-use mlx::Array;
+use mlx::{Array, StreamOrDevice};
 
 use crate::core::Loader;
 use crate::nn::{Linear, Mrope, RmsNorm};
@@ -113,7 +113,22 @@ impl Attention {
         sin: &Array,
         mask: Option<&Array>,
     ) -> Result<Array> {
+        self.forward_on(x, mrope, cos, sin, mask, ())
+    }
+
+    /// Stream-targeted forward pass — see [`Attention::forward`] for semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_on(
+        &self,
+        x: &Array,
+        mrope: &Mrope,
+        cos: &Array,
+        sin: &Array,
+        mask: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
         let _ = mask; // P1: always causal; explicit masks deferred to P2.
+        let target = target.into();
 
         let shape = x.shape();
         let dims = shape.as_slice();
@@ -121,50 +136,56 @@ impl Attention {
         let seq = dims[1];
 
         // Project Q, K, V.
-        let q = self.q_proj.forward(x)?;
-        let k = self.k_proj.forward(x)?;
-        let v = self.v_proj.forward(x)?;
+        let q = self.q_proj.forward_on(x, target)?;
+        let k = self.k_proj.forward_on(x, target)?;
+        let v = self.v_proj.forward_on(x, target)?;
 
         // Reshape to [batch, seq, heads, head_dim] then transpose to
         // [batch, heads, seq, head_dim] (SDPA convention).
         let q = q
-            .reshape((batch, seq, self.cfg.num_heads, self.cfg.head_dim))?
-            .transpose_axes(&[0, 2, 1, 3][..])?;
+            .reshape_on((batch, seq, self.cfg.num_heads, self.cfg.head_dim), target)?
+            .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
         let k = k
-            .reshape((batch, seq, self.cfg.num_kv_heads, self.cfg.head_dim))?
-            .transpose_axes(&[0, 2, 1, 3][..])?;
+            .reshape_on(
+                (batch, seq, self.cfg.num_kv_heads, self.cfg.head_dim),
+                target,
+            )?
+            .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
         let v = v
-            .reshape((batch, seq, self.cfg.num_kv_heads, self.cfg.head_dim))?
-            .transpose_axes(&[0, 2, 1, 3][..])?;
+            .reshape_on(
+                (batch, seq, self.cfg.num_kv_heads, self.cfg.head_dim),
+                target,
+            )?
+            .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
 
         // Per-head Q/K RMSNorm before rotation (Qwen3+ style).
         let q = if let Some(qn) = &self.q_norm {
-            qn.forward(&q)?
+            qn.forward_on(&q, target)?
         } else {
             q
         };
         let k = if let Some(kn) = &self.k_norm {
-            kn.forward(&k)?
+            kn.forward_on(&k, target)?
         } else {
             k
         };
 
         // Apply rotary positions. Stubbed at P1 — surfaces a clear `Err`.
+        // `Mrope::apply` has no `_on` variant at P1; threaded in P3.
         let q = mrope.apply(&q, cos, sin)?;
         let k = mrope.apply(&k, cos, sin)?;
 
         // Fused SDPA — never compose softmax + matmul by hand.
         // P1 hard-codes causal masking; P2 layers in custom masks + KV cache.
-        let out =
-            mlx::fast::scaled_dot_product_attention(&q, &k, &v, self.scale, "causal", None, None)?;
+        let out = mlx::fast::scaled_dot_product_attention_on(
+            &q, &k, &v, self.scale, "causal", None, None, target,
+        )?;
 
         // Reshape back: [batch, heads, seq, head_dim] -> [batch, seq, hidden].
-        let out = out.transpose_axes(&[0, 2, 1, 3][..])?.reshape((
-            batch,
-            seq,
-            self.cfg.num_heads * self.cfg.head_dim,
-        ))?;
+        let out = out
+            .transpose_axes_on(&[0, 2, 1, 3][..], target)?
+            .reshape_on((batch, seq, self.cfg.num_heads * self.cfg.head_dim), target)?;
 
-        self.o_proj.forward(&out)
+        self.o_proj.forward_on(&out, target)
     }
 }
