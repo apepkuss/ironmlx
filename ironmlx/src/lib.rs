@@ -37,4 +37,4 @@ pub mod nn;
 
 pub use anyhow::{Error, Result};
 
-pub use core::{Loader, QuantMeta};
+pub use core::{ChatTemplate, Loader, Message, QuantMeta, Sampler, Tokenizer};
