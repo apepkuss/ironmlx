@@ -392,6 +392,38 @@ std::unique_ptr<MlxArray> triu(
     const MlxArray& x, int32_t k,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.6 一元补完 (abs/sign/floor/ceil/round/sin/cos/tan/expm1) ===
+// `round` carries an extra `decimals` parameter (forwarded to MLX's overload
+// `mlx::core::round(a, decimals, s)`). The other 8 follow the standard
+// unary signature.
+std::unique_ptr<MlxArray> abs(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> sign(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> floor(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> ceil(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> round(
+    const MlxArray& a, int32_t decimals,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> sin(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> cos(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> tan(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> expm1(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 // === P5.5 expand_dims / squeeze (axis-driven shape ops) ===
 // `axes` slice is forwarded as `std::vector<int>`. For `squeeze`, an empty
 // slice falls through to the no-axis MLX overload (squeeze every size-1 dim).

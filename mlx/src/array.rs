@@ -210,6 +210,102 @@ impl Array {
         crate::ops::unary::reciprocal_on(self, target)
     }
 
+    // === P5.6 一元补完 ===
+
+    /// Element-wise absolute value `|x|`. See [`crate::ops::unary::abs`].
+    pub fn abs(&self) -> Result<Array> {
+        crate::ops::unary::abs(self)
+    }
+
+    /// Stream-targeted variant of [`Array::abs`].
+    pub fn abs_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::abs_on(self, target)
+    }
+
+    /// Element-wise sign. See [`crate::ops::unary::sign`].
+    pub fn sign(&self) -> Result<Array> {
+        crate::ops::unary::sign(self)
+    }
+
+    /// Stream-targeted variant of [`Array::sign`].
+    pub fn sign_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::sign_on(self, target)
+    }
+
+    /// Element-wise floor. See [`crate::ops::unary::floor`].
+    pub fn floor(&self) -> Result<Array> {
+        crate::ops::unary::floor(self)
+    }
+
+    /// Stream-targeted variant of [`Array::floor`].
+    pub fn floor_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::floor_on(self, target)
+    }
+
+    /// Element-wise ceiling. See [`crate::ops::unary::ceil`].
+    pub fn ceil(&self) -> Result<Array> {
+        crate::ops::unary::ceil(self)
+    }
+
+    /// Stream-targeted variant of [`Array::ceil`].
+    pub fn ceil_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::ceil_on(self, target)
+    }
+
+    /// Round to `decimals` decimal places. See [`crate::ops::unary::round`].
+    pub fn round(&self, decimals: i32) -> Result<Array> {
+        crate::ops::unary::round(self, decimals)
+    }
+
+    /// Stream-targeted variant of [`Array::round`].
+    pub fn round_on(
+        &self,
+        decimals: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::unary::round_on(self, decimals, target)
+    }
+
+    /// Element-wise sine. See [`crate::ops::unary::sin`].
+    pub fn sin(&self) -> Result<Array> {
+        crate::ops::unary::sin(self)
+    }
+
+    /// Stream-targeted variant of [`Array::sin`].
+    pub fn sin_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::sin_on(self, target)
+    }
+
+    /// Element-wise cosine. See [`crate::ops::unary::cos`].
+    pub fn cos(&self) -> Result<Array> {
+        crate::ops::unary::cos(self)
+    }
+
+    /// Stream-targeted variant of [`Array::cos`].
+    pub fn cos_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::cos_on(self, target)
+    }
+
+    /// Element-wise tangent. See [`crate::ops::unary::tan`].
+    pub fn tan(&self) -> Result<Array> {
+        crate::ops::unary::tan(self)
+    }
+
+    /// Stream-targeted variant of [`Array::tan`].
+    pub fn tan_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::tan_on(self, target)
+    }
+
+    /// Element-wise `exp(x) - 1`. See [`crate::ops::unary::expm1`].
+    pub fn expm1(&self) -> Result<Array> {
+        crate::ops::unary::expm1(self)
+    }
+
+    /// Stream-targeted variant of [`Array::expm1`].
+    pub fn expm1_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::unary::expm1_on(self, target)
+    }
+
     /// Sum over the specified axes. See [`crate::ops::sum`].
     pub fn sum<A: crate::ops::IntoAxes>(&self, axes: A, keepdim: bool) -> Result<Array> {
         crate::ops::sum(self, axes, keepdim)

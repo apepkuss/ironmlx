@@ -64,6 +64,73 @@ op_with_stream! {
         => mlx_sys::array::ffi::array_reciprocal(a.as_inner());
 }
 
+// === P5.6 一元补完 ===
+//
+// 8 ops follow the standard `op_with_stream!` pattern; `round` carries an
+// extra `decimals: i32` parameter and is hand-written.
+
+op_with_stream! {
+    /// Element-wise absolute value `|x|`.
+    pub fn abs(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::abs(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise sign: `-1` for negatives, `0` for zero, `+1` for positives.
+    pub fn sign(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::sign(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise floor (largest integer `<= x`).
+    pub fn floor(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::floor(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise ceiling (smallest integer `>= x`).
+    pub fn ceil(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::ceil(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise sine.
+    pub fn sin(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::sin(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise cosine.
+    pub fn cos(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::cos(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise tangent.
+    pub fn tan(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::tan(a.as_inner());
+}
+
+op_with_stream! {
+    /// Element-wise `exp(x) - 1` (numerically stable for small `x`).
+    pub fn expm1(a: &Array) -> Result<Array>
+        => mlx_sys::array::ffi::expm1(a.as_inner());
+}
+
+/// Round to `decimals` decimal places. Use `decimals = 0` for nearest integer.
+pub fn round(a: &Array, decimals: i32) -> Result<Array> {
+    round_on(a, decimals, ())
+}
+
+/// Stream-targeted variant of [`round`]. Pass `()` for the current default
+/// stream, a `Stream`, or a `Device`.
+pub fn round_on(a: &Array, decimals: i32, target: impl Into<StreamOrDevice>) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::array::ffi::round(a.as_inner(), decimals, has, dev_only, dev_t, idx)
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 // === P5.5 softmax (axis-driven reduction-style op) ===
 //
 // MLX exposes three softmax overloads (multi-axis vector, single-axis int,

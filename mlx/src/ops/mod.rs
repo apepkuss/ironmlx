@@ -86,6 +86,8 @@ pub use sort::{
     argpartition, argpartition_on, argsort, argsort_on, partition, partition_on, topk, topk_on,
 };
 pub use unary::{
-    erf, erf_on, exp, exp_on, log, log_on, reciprocal, reciprocal_on, rsqrt, rsqrt_on, sigmoid,
-    sigmoid_on, softmax, softmax_on, sqrt, sqrt_on, square, square_on, tanh, tanh_on,
+    abs, abs_on, ceil, ceil_on, cos, cos_on, erf, erf_on, exp, exp_on, expm1, expm1_on, floor,
+    floor_on, log, log_on, reciprocal, reciprocal_on, round, round_on, rsqrt, rsqrt_on, sigmoid,
+    sigmoid_on, sign, sign_on, sin, sin_on, softmax, softmax_on, sqrt, sqrt_on, square, square_on,
+    tan, tan_on, tanh, tanh_on,
 };
