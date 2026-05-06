@@ -64,13 +64,26 @@ rust::Vec<double> array_to_vec_f64(const MlxArray& a);
 
 // Binary element-wise ops (broadcasting handled by MLX after Rust-side
 // shape validation in mlx::broadcast::broadcast_shape).
-std::unique_ptr<MlxArray> array_add(const MlxArray& a, const MlxArray& b);
-std::unique_ptr<MlxArray> array_subtract(const MlxArray& a, const MlxArray& b);
-std::unique_ptr<MlxArray> array_multiply(const MlxArray& a, const MlxArray& b);
-std::unique_ptr<MlxArray> array_divide(const MlxArray& a, const MlxArray& b);
+//
+// 4 trailing stream params encode `mlx::core::StreamOrDevice` per
+// `helpers::decode_stream_or_device` (P5.7).
+std::unique_ptr<MlxArray> array_add(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_subtract(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_multiply(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_divide(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // Unary element-wise ops.
-std::unique_ptr<MlxArray> array_negative(const MlxArray& a);
+std::unique_ptr<MlxArray> array_negative(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 std::unique_ptr<MlxArray> array_exp(const MlxArray& a);
 std::unique_ptr<MlxArray> array_log(const MlxArray& a);
 std::unique_ptr<MlxArray> array_sqrt(const MlxArray& a);

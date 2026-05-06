@@ -38,7 +38,9 @@ fn zeros_then_eval() {
 fn binary_add_links() {
     let a = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
     let b = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
-    let _c = mlx_sys::array::ffi::array_add(&a, &b).expect("add should succeed");
+    // P5.7: array_add takes 4 trailing StreamOrDevice params (default = no target).
+    let _c =
+        mlx_sys::array::ffi::array_add(&a, &b, false, false, 0, 0).expect("add should succeed");
 }
 
 #[test]

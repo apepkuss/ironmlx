@@ -53,3 +53,9 @@ pub use stream::{
     StreamOrDevice,
 };
 pub use transforms::eval;
+
+// Re-export `paste` privately so the `op_with_stream!` macro can reach it
+// via `$crate::__paste` in any downstream module without forcing users to
+// add `paste` themselves.
+#[doc(hidden)]
+pub use paste as __paste;

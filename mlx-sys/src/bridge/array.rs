@@ -59,14 +59,49 @@ pub mod ffi {
         fn array_to_vec_f64(a: &MlxArray) -> Result<Vec<f64>>;
 
         // Binary ops (P1b1) — Result-wrapped per the shim throw rule.
-        fn array_add(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_subtract(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_multiply(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_divide(a: &MlxArray, b: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        // 4 trailing stream params encode StreamOrDevice (P5.7).
+        fn array_add(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_subtract(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_multiply(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_divide(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // Unary ops (P1b1) — Result-wrapped (MLX may throw on dtype not supported,
         // e.g. sqrt on integer types).
-        fn array_negative(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn array_negative(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_exp(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
         fn array_log(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
         fn array_sqrt(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;

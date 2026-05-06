@@ -52,3 +52,34 @@ fn compile_clear_cache_is_callable() {
     // Now clear — must not panic.
     clear_cache();
 }
+
+// === Task 4: op_with_stream! macro pilot — ops::binary _on variants ===
+
+use mlx::ops::binary as ops_binary;
+use mlx::{default_stream, Device};
+
+#[test]
+fn add_on_default_matches_add() {
+    let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+    let b: Array = (&[10.0_f32, 20.0][..], (2,)).try_into().unwrap();
+    let c1 = ops_binary::add(&a, &b).expect("add");
+    let c2 = ops_binary::add_on(&a, &b, ()).expect("add_on default");
+    assert_eq!(c1.to_vec::<f32>().unwrap(), c2.to_vec::<f32>().unwrap());
+}
+
+#[test]
+fn add_on_explicit_stream() {
+    let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+    let b: Array = (&[10.0_f32, 20.0][..], (2,)).try_into().unwrap();
+    let s = default_stream(Device::cpu());
+    let c = ops_binary::add_on(&a, &b, s).expect("add_on stream");
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![11.0, 22.0]);
+}
+
+#[test]
+fn add_on_explicit_device() {
+    let a: Array = (&[1.0_f32, 2.0][..], (2,)).try_into().unwrap();
+    let b: Array = (&[10.0_f32, 20.0][..], (2,)).try_into().unwrap();
+    let c = ops_binary::add_on(&a, &b, Device::cpu()).expect("add_on device");
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![11.0, 22.0]);
+}

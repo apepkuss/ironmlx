@@ -3,6 +3,14 @@
 //!
 //! Every op returns `Result<Array>` because broadcasting validation, dtype
 //! mismatch, or MLX-side errors all surface as recoverable Rust errors.
+//!
+//! Each binary/unary op exposes a default variant (current default stream)
+//! and a `*_on` variant taking `impl Into<StreamOrDevice>` (P5.7). Both
+//! are emitted from a single declaration via the
+//! [`op_with_stream!`](crate::op_with_stream) macro.
+
+#[macro_use]
+mod macros;
 
 pub mod binary;
 pub mod indexing;
@@ -11,7 +19,10 @@ pub mod reduction;
 pub mod shape;
 pub mod unary;
 
-pub use binary::{add, divide, multiply, negative, subtract};
+pub use binary::{
+    add, add_on, divide, divide_on, multiply, multiply_on, negative, negative_on, subtract,
+    subtract_on,
+};
 pub use indexing::{gather, slice, slice_strided, take, take_along_axis, where_};
 pub use matmul::{
     addmm, block_masked_matmul, gather_matmul, inner_product, matmul, outer, segmented_matmul,

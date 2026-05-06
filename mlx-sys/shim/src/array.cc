@@ -210,25 +210,45 @@ rust::Vec<uint16_t> array_to_vec_bf16(const MlxArray& a) {
 rust::Vec<float> array_to_vec_f32(const MlxArray& a)    { return array_to_vec_typed<float>(a); }
 rust::Vec<double> array_to_vec_f64(const MlxArray& a)   { return array_to_vec_typed<double>(a); }
 
-// === P1b1 binary element-wise ops ===
+// === P1b1 binary element-wise ops (P5.7: + StreamOrDevice 4-arg encoding) ===
 
-std::unique_ptr<MlxArray> array_add(const MlxArray& a, const MlxArray& b) {
-  return std::make_unique<MlxArray>(mlx::core::add(a, b));
+std::unique_ptr<MlxArray> array_add(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::add(a, b, target));
 }
-std::unique_ptr<MlxArray> array_subtract(const MlxArray& a, const MlxArray& b) {
-  return std::make_unique<MlxArray>(mlx::core::subtract(a, b));
+std::unique_ptr<MlxArray> array_subtract(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::subtract(a, b, target));
 }
-std::unique_ptr<MlxArray> array_multiply(const MlxArray& a, const MlxArray& b) {
-  return std::make_unique<MlxArray>(mlx::core::multiply(a, b));
+std::unique_ptr<MlxArray> array_multiply(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::multiply(a, b, target));
 }
-std::unique_ptr<MlxArray> array_divide(const MlxArray& a, const MlxArray& b) {
-  return std::make_unique<MlxArray>(mlx::core::divide(a, b));
+std::unique_ptr<MlxArray> array_divide(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::divide(a, b, target));
 }
 
 // === P1b1 unary element-wise ops ===
 
-std::unique_ptr<MlxArray> array_negative(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::negative(a));
+std::unique_ptr<MlxArray> array_negative(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::negative(a, target));
 }
 std::unique_ptr<MlxArray> array_exp(const MlxArray& a) {
   return std::make_unique<MlxArray>(mlx::core::exp(a));
