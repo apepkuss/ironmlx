@@ -1,6 +1,8 @@
 //! Integration tests for mlx::compile — JIT compilation of Rust closures.
 
-use mlx::compile::{compile, disable_compile, enable_compile, set_compile_mode, CompileMode};
+use mlx::compile::{
+    compile, disable_compile, enable_compile, set_compile_mode, CompileMode, ShapeMode,
+};
 use mlx::Array;
 use mlx_sys::compile::ffi::{
     array_vec_count, array_vec_get_at, array_vec_new, array_vec_push, array_vec_take_at,
@@ -71,7 +73,7 @@ fn compile_simple_unary() {
             let y = mlx::ops::add(x, &one)?;
             Ok(vec![y])
         },
-        false,
+        ShapeMode::Fixed,
     )
     .expect("compile");
 
@@ -92,7 +94,7 @@ fn compile_two_input() {
             let out = mlx::ops::add(&prod, a)?;
             Ok(vec![out])
         },
-        false,
+        ShapeMode::Fixed,
     )
     .expect("compile");
 
@@ -114,7 +116,7 @@ fn compile_captures_weight() {
             let y = mlx::ops::multiply(x, &w_for_closure)?;
             Ok(vec![y])
         },
-        false,
+        ShapeMode::Fixed,
     )
     .expect("compile");
 
@@ -134,7 +136,7 @@ fn compile_shapeless_reuse() {
             let two = Array::try_from((&[2.0_f32][..], &[1][..]))?;
             Ok(vec![mlx::ops::multiply(inputs[0], &two)?])
         },
-        true,
+        ShapeMode::Shapeless,
     )
     .expect("compile");
 
@@ -153,7 +155,7 @@ fn compile_callback_error_propagates() {
         |_inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
             Err(mlx::Error::Mlx("intentional callback failure".into()))
         },
-        false,
+        ShapeMode::Fixed,
     );
 
     let saw_err = match f {
@@ -172,7 +174,7 @@ fn compile_callback_panic_caught() {
         |_inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
             panic!("intentional callback panic");
         },
-        false,
+        ShapeMode::Fixed,
     );
 
     let saw_err = match f {
@@ -201,7 +203,7 @@ fn top_level_re_exports_work() {
             let one = Array::try_from((&[1.0_f32][..], &[1][..]))?;
             Ok(vec![mlx::ops::add(inputs[0], &one)?])
         },
-        false,
+        ShapeMode::Fixed,
     )
     .expect("compile via root");
 
