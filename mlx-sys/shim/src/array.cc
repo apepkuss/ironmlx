@@ -250,32 +250,68 @@ std::unique_ptr<MlxArray> array_negative(
       has_target, is_device_only, device_type, stream_index);
   return std::make_unique<MlxArray>(mlx::core::negative(a, target));
 }
-std::unique_ptr<MlxArray> array_exp(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::exp(a));
+std::unique_ptr<MlxArray> array_exp(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::exp(a, target));
 }
-std::unique_ptr<MlxArray> array_log(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::log(a));
+std::unique_ptr<MlxArray> array_log(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::log(a, target));
 }
-std::unique_ptr<MlxArray> array_sqrt(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::sqrt(a));
+std::unique_ptr<MlxArray> array_sqrt(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::sqrt(a, target));
 }
-std::unique_ptr<MlxArray> array_tanh(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::tanh(a));
+std::unique_ptr<MlxArray> array_tanh(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::tanh(a, target));
 }
-std::unique_ptr<MlxArray> array_sigmoid(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::sigmoid(a));
+std::unique_ptr<MlxArray> array_sigmoid(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::sigmoid(a, target));
 }
-std::unique_ptr<MlxArray> array_square(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::square(a));
+std::unique_ptr<MlxArray> array_square(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::square(a, target));
 }
-std::unique_ptr<MlxArray> array_rsqrt(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::rsqrt(a));
+std::unique_ptr<MlxArray> array_rsqrt(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::rsqrt(a, target));
 }
-std::unique_ptr<MlxArray> array_erf(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::erf(a));
+std::unique_ptr<MlxArray> array_erf(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::erf(a, target));
 }
-std::unique_ptr<MlxArray> array_reciprocal(const MlxArray& a) {
-  return std::make_unique<MlxArray>(mlx::core::reciprocal(a));
+std::unique_ptr<MlxArray> array_reciprocal(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::reciprocal(a, target));
 }
 
 // === P1b2a reductions ===

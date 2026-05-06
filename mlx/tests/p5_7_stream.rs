@@ -83,3 +83,24 @@ fn add_on_explicit_device() {
     let c = ops_binary::add_on(&a, &b, Device::cpu()).expect("add_on device");
     assert_eq!(c.to_vec::<f32>().unwrap(), vec![11.0, 22.0]);
 }
+
+// === Task 5: ops sweep — unary _on variants ===
+
+#[test]
+fn unary_sqrt_on_default_matches_sqrt() {
+    use mlx::ops::unary as ops_unary;
+    let a: Array = (&[1.0_f32, 4.0, 9.0][..], (3,)).try_into().unwrap();
+    let r1 = ops_unary::sqrt(&a).expect("sqrt");
+    let r2 = ops_unary::sqrt_on(&a, ()).expect("sqrt_on default");
+    assert_eq!(r1.to_vec::<f32>().unwrap(), r2.to_vec::<f32>().unwrap());
+}
+
+#[test]
+fn unary_exp_on_explicit_device() {
+    use mlx::ops::unary as ops_unary;
+    let a: Array = (&[0.0_f32, 1.0][..], (2,)).try_into().unwrap();
+    let r = ops_unary::exp_on(&a, Device::cpu()).expect("exp_on device");
+    let v = r.to_vec::<f32>().unwrap();
+    assert!((v[0] - 1.0).abs() < 1e-5);
+    assert!((v[1] - std::f32::consts::E).abs() < 1e-5);
+}

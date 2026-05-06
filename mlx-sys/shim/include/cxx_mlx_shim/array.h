@@ -84,15 +84,33 @@ std::unique_ptr<MlxArray> array_divide(
 std::unique_ptr<MlxArray> array_negative(
     const MlxArray& a,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
-std::unique_ptr<MlxArray> array_exp(const MlxArray& a);
-std::unique_ptr<MlxArray> array_log(const MlxArray& a);
-std::unique_ptr<MlxArray> array_sqrt(const MlxArray& a);
-std::unique_ptr<MlxArray> array_tanh(const MlxArray& a);
-std::unique_ptr<MlxArray> array_sigmoid(const MlxArray& a);
-std::unique_ptr<MlxArray> array_square(const MlxArray& a);
-std::unique_ptr<MlxArray> array_rsqrt(const MlxArray& a);
-std::unique_ptr<MlxArray> array_erf(const MlxArray& a);
-std::unique_ptr<MlxArray> array_reciprocal(const MlxArray& a);
+std::unique_ptr<MlxArray> array_exp(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_log(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_sqrt(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_tanh(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_sigmoid(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_square(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_rsqrt(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_erf(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_reciprocal(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 // === P1b2a reductions (5 ops × 3 forms = 15) ===
 

@@ -46,7 +46,9 @@ fn binary_add_links() {
 #[test]
 fn unary_exp_links() {
     let a = ffi::array_zeros(&[3], FLOAT32).expect("zeros");
-    let _e = mlx_sys::array::ffi::array_exp(&a).expect("exp should succeed");
+    // P5.7: array_exp takes 4 trailing StreamOrDevice params (default = no target).
+    let _e =
+        mlx_sys::array::ffi::array_exp(&a, false, false, 0, 0).expect("exp should succeed");
 }
 
 #[test]

@@ -102,15 +102,69 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
-        fn array_exp(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_log(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_sqrt(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_tanh(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_sigmoid(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_square(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_rsqrt(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_erf(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
-        fn array_reciprocal(a: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+        fn array_exp(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_log(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_sqrt(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_tanh(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_sigmoid(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_square(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_rsqrt(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_erf(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_reciprocal(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // === P1b2a opaque type for std::vector<array> returns ===
         type MlxArrayVec;

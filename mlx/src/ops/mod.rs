@@ -32,4 +32,7 @@ pub use reduction::{argmax, max, mean, min, sum, All, IntoAxes};
 pub use shape::{
     broadcast_to, concatenate, reshape, split_at, split_n, stack, transpose, transpose_axes,
 };
-pub use unary::{erf, exp, log, reciprocal, rsqrt, sigmoid, sqrt, square, tanh};
+pub use unary::{
+    erf, erf_on, exp, exp_on, log, log_on, reciprocal, reciprocal_on, rsqrt, rsqrt_on, sigmoid,
+    sigmoid_on, sqrt, sqrt_on, square, square_on, tanh, tanh_on,
+};
