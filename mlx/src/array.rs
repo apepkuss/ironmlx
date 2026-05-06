@@ -529,6 +529,325 @@ impl Array {
     ) -> Result<Array> {
         crate::ops::indexing::gather_on(self, indices, axes, slice_sizes, target)
     }
+
+    // === P5.5 comparison ops ===
+
+    /// Element-wise `self == rhs`. See [`crate::ops::equal`].
+    pub fn equal(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::equal(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::equal`].
+    pub fn equal_on(&self, rhs: &Array, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::binary::equal_on(self, rhs, target)
+    }
+
+    /// Element-wise `self != rhs`. See [`crate::ops::not_equal`].
+    pub fn not_equal(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::not_equal(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::not_equal`].
+    pub fn not_equal_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::not_equal_on(self, rhs, target)
+    }
+
+    /// Element-wise `self < rhs`. See [`crate::ops::less`].
+    pub fn less(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::less(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::less`].
+    pub fn less_on(&self, rhs: &Array, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::binary::less_on(self, rhs, target)
+    }
+
+    /// Element-wise `self <= rhs`. See [`crate::ops::less_equal`].
+    pub fn less_equal(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::less_equal(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::less_equal`].
+    pub fn less_equal_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::less_equal_on(self, rhs, target)
+    }
+
+    /// Element-wise `self > rhs`. See [`crate::ops::greater`].
+    pub fn greater(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::greater(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::greater`].
+    pub fn greater_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::greater_on(self, rhs, target)
+    }
+
+    /// Element-wise `self >= rhs`. See [`crate::ops::greater_equal`].
+    pub fn greater_equal(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::greater_equal(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::greater_equal`].
+    pub fn greater_equal_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::greater_equal_on(self, rhs, target)
+    }
+
+    // === P5.5 element-wise max/min ===
+
+    /// Element-wise `max(self, rhs)`. See [`crate::ops::maximum`].
+    pub fn maximum(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::maximum(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::maximum`].
+    pub fn maximum_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::maximum_on(self, rhs, target)
+    }
+
+    /// Element-wise `min(self, rhs)`. See [`crate::ops::minimum`].
+    pub fn minimum(&self, rhs: &Array) -> Result<Array> {
+        crate::ops::binary::minimum(self, rhs)
+    }
+
+    /// Stream-targeted variant of [`Array::minimum`].
+    pub fn minimum_on(
+        &self,
+        rhs: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::minimum_on(self, rhs, target)
+    }
+
+    // === P5.5 clip ===
+
+    /// Clamp to `[a_min, a_max]`. Pass `None` for either bound to leave it
+    /// unbounded. See [`crate::ops::clip`].
+    pub fn clip(&self, a_min: Option<&Array>, a_max: Option<&Array>) -> Result<Array> {
+        crate::ops::binary::clip(self, a_min, a_max)
+    }
+
+    /// Stream-targeted variant of [`Array::clip`].
+    pub fn clip_on(
+        &self,
+        a_min: Option<&Array>,
+        a_max: Option<&Array>,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::binary::clip_on(self, a_min, a_max, target)
+    }
+
+    // === P5.5 softmax ===
+
+    /// Softmax along the given axes. See [`crate::ops::softmax`].
+    pub fn softmax<A: crate::ops::IntoAxes>(&self, axes: A, precise: bool) -> Result<Array> {
+        crate::ops::unary::softmax(self, axes, precise)
+    }
+
+    /// Stream-targeted variant of [`Array::softmax`].
+    pub fn softmax_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        precise: bool,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::unary::softmax_on(self, axes, precise, target)
+    }
+
+    // === P5.5 sort family ===
+
+    /// Sort along `axis` (ascending). See [`crate::ops::sort::sort`].
+    pub fn sort(&self, axis: i32) -> Result<Array> {
+        crate::ops::sort::sort(self, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::sort`].
+    pub fn sort_on(&self, axis: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::sort::sort_on(self, axis, target)
+    }
+
+    /// Indices that would sort `self` along `axis`. See [`crate::ops::argsort`].
+    pub fn argsort(&self, axis: i32) -> Result<Array> {
+        crate::ops::sort::argsort(self, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::argsort`].
+    pub fn argsort_on(&self, axis: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::sort::argsort_on(self, axis, target)
+    }
+
+    /// Partial sort placing `kth`-smallest at position `kth`. See [`crate::ops::partition`].
+    pub fn partition(&self, kth: i32, axis: i32) -> Result<Array> {
+        crate::ops::sort::partition(self, kth, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::partition`].
+    pub fn partition_on(
+        &self,
+        kth: i32,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::sort::partition_on(self, kth, axis, target)
+    }
+
+    /// Indices form of [`Array::partition`]. See [`crate::ops::argpartition`].
+    pub fn argpartition(&self, kth: i32, axis: i32) -> Result<Array> {
+        crate::ops::sort::argpartition(self, kth, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::argpartition`].
+    pub fn argpartition_on(
+        &self,
+        kth: i32,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::sort::argpartition_on(self, kth, axis, target)
+    }
+
+    /// Top-k values along `axis` (values only — not sorted; see [`crate::ops::topk`]).
+    pub fn topk(&self, k: i32, axis: i32) -> Result<Array> {
+        crate::ops::sort::topk(self, k, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::topk`].
+    pub fn topk_on(
+        &self,
+        k: i32,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::sort::topk_on(self, k, axis, target)
+    }
+
+    // === P5.5 astype (dtype conversion) ===
+
+    /// Convert this array to a new array with the given [`Dtype`]. See
+    /// [`crate::ops::cast::astype`] for the free-fn form.
+    pub fn astype(&self, dtype: Dtype) -> Result<Array> {
+        crate::ops::cast::astype(self, dtype)
+    }
+
+    /// Stream-targeted variant of [`Array::astype`].
+    pub fn astype_on(
+        &self,
+        dtype: Dtype,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::cast::astype_on(self, dtype, target)
+    }
+
+    // === P5.5 constructors: `_like` family + tril/triu ===
+
+    /// Array with the same shape and dtype as `self`, filled with ones. See
+    /// [`crate::ops::constructors::ones_like`].
+    pub fn ones_like(&self) -> Result<Array> {
+        crate::ops::constructors::ones_like(self)
+    }
+
+    /// Stream-targeted variant of [`Array::ones_like`].
+    pub fn ones_like_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::constructors::ones_like_on(self, target)
+    }
+
+    /// Array with the same shape and dtype as `self`, filled with zeros. See
+    /// [`crate::ops::constructors::zeros_like`].
+    pub fn zeros_like(&self) -> Result<Array> {
+        crate::ops::constructors::zeros_like(self)
+    }
+
+    /// Stream-targeted variant of [`Array::zeros_like`].
+    pub fn zeros_like_on(&self, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::constructors::zeros_like_on(self, target)
+    }
+
+    /// Array with the same shape (and dtype) as `self`, filled with `vals`
+    /// (broadcast as needed). See [`crate::ops::constructors::full_like`].
+    pub fn full_like(&self, vals: &Array) -> Result<Array> {
+        crate::ops::constructors::full_like(self, vals)
+    }
+
+    /// Stream-targeted variant of [`Array::full_like`].
+    pub fn full_like_on(
+        &self,
+        vals: &Array,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::constructors::full_like_on(self, vals, target)
+    }
+
+    /// Lower triangular part of `self` (zero out elements strictly above
+    /// the diagonal offset by `k`). See [`crate::ops::constructors::tril`].
+    pub fn tril(&self, k: i32) -> Result<Array> {
+        crate::ops::constructors::tril(self, k)
+    }
+
+    /// Stream-targeted variant of [`Array::tril`].
+    pub fn tril_on(&self, k: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::constructors::tril_on(self, k, target)
+    }
+
+    /// Upper triangular part of `self` (zero out elements strictly below
+    /// the diagonal offset by `k`). See [`crate::ops::constructors::triu`].
+    pub fn triu(&self, k: i32) -> Result<Array> {
+        crate::ops::constructors::triu(self, k)
+    }
+
+    /// Stream-targeted variant of [`Array::triu`].
+    pub fn triu_on(&self, k: i32, target: impl Into<crate::StreamOrDevice>) -> Result<Array> {
+        crate::ops::constructors::triu_on(self, k, target)
+    }
+
+    // === P5.5 expand_dims / squeeze ===
+
+    /// Insert size-1 dims at the given axes. See [`crate::ops::shape::expand_dims`].
+    pub fn expand_dims<A: crate::ops::IntoAxes>(&self, axes: A) -> Result<Array> {
+        crate::ops::shape::expand_dims(self, axes)
+    }
+
+    /// Stream-targeted variant of [`Array::expand_dims`].
+    pub fn expand_dims_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::expand_dims_on(self, axes, target)
+    }
+
+    /// Remove size-1 dims. With [`crate::ops::All`] drops every size-1 dim;
+    /// with explicit axes only those. See [`crate::ops::shape::squeeze`].
+    pub fn squeeze<A: crate::ops::IntoAxes>(&self, axes: A) -> Result<Array> {
+        crate::ops::shape::squeeze(self, axes)
+    }
+
+    /// Stream-targeted variant of [`Array::squeeze`].
+    pub fn squeeze_on<A: crate::ops::IntoAxes>(
+        &self,
+        axes: A,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::shape::squeeze_on(self, axes, target)
+    }
 }
 
 /// Construct an Array from a slice of `T` and any [`IntoShape`].

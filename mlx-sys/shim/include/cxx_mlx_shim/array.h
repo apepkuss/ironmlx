@@ -290,4 +290,117 @@ std::unique_ptr<MlxArray> segmented_mm(
     const MlxArray& a, const MlxArray& b, const MlxArray& segments,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// === P5.5 comparison + element-wise binary ===
+std::unique_ptr<MlxArray> equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> not_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> less(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> less_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> greater(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> greater_equal(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> maximum(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> minimum(
+    const MlxArray& a, const MlxArray& b,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.5 clip (3-input element-wise with optional bounds) ===
+// `a_min` / `a_max` are nullable: nullptr means "no bound on that side".
+std::unique_ptr<MlxArray> clip(
+    const MlxArray& a,
+    const MlxArray* a_min,
+    const MlxArray* a_max,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.5 softmax (multi-axis dispatch) ===
+// `axes` is empty -> last-axis default (mlx::core::softmax(a, precise, s)).
+// `axes` non-empty -> multi-axis form (mlx::core::softmax(a, vector<int>, precise, s)).
+std::unique_ptr<MlxArray> softmax(
+    const MlxArray& a, rust::Slice<const int32_t> axes, bool precise,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.5 sort family (sort/argsort/partition/argpartition/topk) ===
+std::unique_ptr<MlxArray> sort(
+    const MlxArray& a, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> argsort(
+    const MlxArray& a, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> partition(
+    const MlxArray& a, int32_t kth, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> argpartition(
+    const MlxArray& a, int32_t kth, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> topk(
+    const MlxArray& a, int32_t k, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.5 astype (dtype conversion) ===
+// `dtype_repr` is `Dtype::as_u8()` from Rust; decoded by `helpers::dtype_from_repr`.
+std::unique_ptr<MlxArray> astype(
+    const MlxArray& a, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.5 array constructors ===
+std::unique_ptr<MlxArray> arange(
+    double start, double stop, double step, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> linspace(
+    double start, double stop, int32_t num, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> ones(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> ones_like(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> zeros_like(
+    const MlxArray& a,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> full(
+    rust::Slice<const int32_t> shape, const MlxArray& vals, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> full_like(
+    const MlxArray& a, const MlxArray& vals,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> eye(
+    int32_t n, int32_t m, int32_t k, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> identity(
+    int32_t n, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> tri(
+    int32_t n, int32_t m, int32_t k, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> tril(
+    const MlxArray& x, int32_t k,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> triu(
+    const MlxArray& x, int32_t k,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// === P5.5 expand_dims / squeeze (axis-driven shape ops) ===
+// `axes` slice is forwarded as `std::vector<int>`. For `squeeze`, an empty
+// slice falls through to the no-axis MLX overload (squeeze every size-1 dim).
+// For `expand_dims`, an empty slice is illegal and MLX will throw.
+std::unique_ptr<MlxArray> expand_dims(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> squeeze(
+    const MlxArray& a, rust::Slice<const int32_t> axes,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 }  // namespace cxx_mlx

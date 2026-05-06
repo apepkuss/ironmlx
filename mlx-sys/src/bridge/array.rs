@@ -536,5 +536,277 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 comparison + element-wise binary ===
+        fn equal(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn not_equal(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn less(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn less_equal(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn greater(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn greater_equal(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn maximum(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn minimum(
+            a: &MlxArray,
+            b: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 clip ===
+        // a_min / a_max are nullable: pass null pointer for "no bound on that side".
+        // unsafe because raw pointers cross FFI; safe wrapper enforces the lifetime contract.
+        unsafe fn clip(
+            a: &MlxArray,
+            a_min: *const MlxArray,
+            a_max: *const MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 softmax (multi-axis dispatch) ===
+        // Empty `axes` slice means "all axes"; otherwise the supplied axes.
+        fn softmax(
+            a: &MlxArray,
+            axes: &[i32],
+            precise: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 sort family ===
+        fn sort(
+            a: &MlxArray,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn argsort(
+            a: &MlxArray,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn partition(
+            a: &MlxArray,
+            kth: i32,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn argpartition(
+            a: &MlxArray,
+            kth: i32,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn topk(
+            a: &MlxArray,
+            k: i32,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 astype (dtype conversion) ===
+        // `dtype_repr` is `Dtype::as_u8()`; shim decodes via `helpers::dtype_from_repr`.
+        fn astype(
+            a: &MlxArray,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 array constructors ===
+        fn arange(
+            start: f64,
+            stop: f64,
+            step: f64,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn linspace(
+            start: f64,
+            stop: f64,
+            num: i32,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn ones(
+            shape: &[i32],
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn ones_like(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn zeros_like(
+            a: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn full(
+            shape: &[i32],
+            vals: &MlxArray,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn full_like(
+            a: &MlxArray,
+            vals: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn eye(
+            n: i32,
+            m: i32,
+            k: i32,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn identity(
+            n: i32,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn tri(
+            n: i32,
+            m: i32,
+            k: i32,
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn tril(
+            x: &MlxArray,
+            k: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn triu(
+            x: &MlxArray,
+            k: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // === P5.5 expand_dims / squeeze ===
+        // Empty `axes` slice for `squeeze` means "all size-1 dims"; for
+        // `expand_dims` an empty slice is illegal and surfaces as an MLX error.
+        fn expand_dims(
+            a: &MlxArray,
+            axes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn squeeze(
+            a: &MlxArray,
+            axes: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

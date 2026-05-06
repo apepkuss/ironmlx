@@ -8,6 +8,7 @@
 
 use smallvec::SmallVec;
 
+use crate::ops::reduction::IntoAxes;
 use crate::{Array, Error, IntoShape, Result, StreamOrDevice};
 
 /// Reshape an array to the given shape. A single `-1` in the shape is replaced
@@ -226,4 +227,63 @@ pub fn split_at_on(
         out.push(Array::from_inner(inner));
     }
     Ok(out)
+}
+
+// === P5.5 expand_dims / squeeze (axis-driven shape ops) ===
+//
+// Both ops route through the [`IntoAxes`] trait — same dispatch convention
+// as `softmax` and the reductions. Semantics of [`crate::ops::All`]:
+//
+// - `squeeze(a, All)` -> drop every size-1 dim (MLX's no-axis overload).
+// - `expand_dims(a, All)` is **illegal**: MLX rejects an empty axes vector
+//   for expand_dims (every call must specify at least one new axis index).
+//   We document the requirement and let MLX surface the error instead of
+//   adding a Rust-side check, so the failure mode matches the C++ API
+//   exactly (`Error::Mlx`).
+
+/// Insert size-1 dimensions at the given axes. Indices are interpreted
+/// **after** insertion: `expand_dims(a, [0, -1])` on a rank-2 array yields
+/// rank-4 with size-1 dims at the front and back.
+///
+/// Passing [`crate::ops::All`] is illegal — surfaces as `Err(Error::Mlx)`.
+pub fn expand_dims<A: IntoAxes>(a: &Array, axes: A) -> Result<Array> {
+    expand_dims_on(a, axes, ())
+}
+
+/// Stream-targeted variant of [`expand_dims`].
+pub fn expand_dims_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    // `as_axes()` returns `None` for `All` (empty slice) or `Some(slice)`
+    // for specific axes. The shim forwards both cases verbatim; for the
+    // empty case MLX raises an error (illegal for expand_dims).
+    let slice = axes.as_axes().unwrap_or(&[]);
+    let inner = mlx_sys::array::ffi::expand_dims(a.as_inner(), slice, has, dev_only, dev_t, idx)
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Remove size-1 dimensions. With [`crate::ops::All`], drops every size-1
+/// dim; with explicit axes, drops only those (MLX errors if any selected
+/// axis is not size-1).
+pub fn squeeze<A: IntoAxes>(a: &Array, axes: A) -> Result<Array> {
+    squeeze_on(a, axes, ())
+}
+
+/// Stream-targeted variant of [`squeeze`].
+pub fn squeeze_on<A: IntoAxes>(
+    a: &Array,
+    axes: A,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    // For `All` (empty slice) the shim takes the no-axis MLX overload
+    // (drop every size-1 dim); otherwise it forwards the explicit axes.
+    let slice = axes.as_axes().unwrap_or(&[]);
+    let inner = mlx_sys::array::ffi::squeeze(a.as_inner(), slice, has, dev_only, dev_t, idx)
+        .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
 }
