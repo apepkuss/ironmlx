@@ -120,5 +120,8 @@ pub mod ffi {
             shapeless: bool,
         ) -> Result<UniquePtr<CompiledFn>>;
         fn compiled_fn_invoke(cf: &CompiledFn, inputs: &ArrayVec) -> Result<UniquePtr<ArrayVec>>;
+
+        // ===== Compile cache control =====
+        fn compile_clear_cache();
     }
 }

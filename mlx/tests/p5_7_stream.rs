@@ -30,3 +30,25 @@ fn async_eval_many_arrays() {
     assert_eq!(b.to_vec::<f32>().unwrap(), vec![20.0, 40.0]);
     assert_eq!(c.to_vec::<f32>().unwrap(), vec![100.0, 400.0]);
 }
+
+#[test]
+fn compile_clear_cache_is_callable() {
+    use mlx::compile::{clear_cache, compile, ShapeMode};
+    use mlx::Array;
+
+    // Build and call a compiled fn so the cache has at least one entry.
+    let f = compile(
+        |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            let one: Array = (&[1.0_f32][..], (1,)).try_into()?;
+            Ok(vec![inputs[0].try_add(&one)?])
+        },
+        ShapeMode::Fixed,
+    )
+    .expect("compile");
+
+    let x: Array = (&[5.0_f32][..], (1,)).try_into().unwrap();
+    let _ = f.invoke(&[&x]).expect("invoke");
+
+    // Now clear — must not panic.
+    clear_cache();
+}

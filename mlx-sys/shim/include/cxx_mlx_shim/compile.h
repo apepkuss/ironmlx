@@ -68,4 +68,7 @@ std::unique_ptr<CompiledFn> compile_with_callback(
 std::unique_ptr<ArrayVec> compiled_fn_invoke(
     const CompiledFn& cf, const ArrayVec& inputs);
 
+// === P5.7 compile cache control ===
+void compile_clear_cache();
+
 } // namespace cxx_mlx

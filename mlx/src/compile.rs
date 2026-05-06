@@ -33,6 +33,12 @@ pub fn set_compile_mode(mode: CompileMode) {
     mlx_sys::compile::ffi::set_compile_mode(mode as u8);
 }
 
+/// Clear MLX's internal compile cache. Useful for long-running services
+/// to release memory held by compiled graphs that won't be replayed.
+pub fn clear_cache() {
+    mlx_sys::compile::ffi::compile_clear_cache();
+}
+
 // ===== CompiledFn + compile() =====
 
 use crate::{Array, Error, Result};
