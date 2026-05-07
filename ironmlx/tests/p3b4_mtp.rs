@@ -35,6 +35,7 @@ fn load(name: &str) -> Array {
     mlx::io::load_npy(&path).unwrap_or_else(|e| panic!("failed to load {path}: {e}"))
 }
 
+/// max(|a - b|) for arrays cast to fp32.
 fn max_abs_diff(a: &Array, b: &Array) -> f32 {
     let a32 = mlx::ops::cast::astype(a, Dtype::Float32).unwrap();
     let b32 = mlx::ops::cast::astype(b, Dtype::Float32).unwrap();
@@ -146,6 +147,8 @@ fn mtp_forward_matches_python_fixture() {
     assert_eq!(out.dtype(), Dtype::Float32);
     assert_eq!(expected.dtype(), Dtype::Float32);
 
+    // If this fails: check (a) concat order [e, h] vs [h, e]; (b) fc_weight shape
+    // [H, 2H]; (c) rms_norm_eps is 1e-6 at all call sites. See plan Step 4.5.
     let err = max_abs_diff(&out, &expected);
     assert!(err < 1e-3, "Mtp output max abs diff = {err} > 1e-3");
 }
