@@ -6,6 +6,7 @@
 
 pub mod attention;
 pub mod conv;
+pub mod decoder_layer;
 pub mod embedding;
 pub mod gated_attention;
 pub mod gated_delta_net;
@@ -16,6 +17,7 @@ pub mod norm;
 
 pub use attention::{Attention, AttentionConfig};
 pub use conv::{Conv1d, Conv1dConfig};
+pub use decoder_layer::{DecoderLayer, DecoderLayerConfig};
 pub use embedding::Embedding;
 pub use gated_attention::{GatedAttention, GatedAttentionConfig};
 pub use gated_delta_net::{GatedDeltaNet, GatedDeltaNetConfig};
