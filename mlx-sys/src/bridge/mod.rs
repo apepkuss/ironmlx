@@ -11,6 +11,7 @@
 
 pub mod array;
 pub mod compile;
+pub mod conv;
 pub mod fast;
 pub mod io;
 pub mod quantization;

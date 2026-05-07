@@ -15,6 +15,7 @@ mod macros;
 pub mod binary;
 pub mod cast;
 pub mod constructors;
+pub mod conv;
 pub mod cumulative;
 pub mod indexing;
 pub mod matmul;
