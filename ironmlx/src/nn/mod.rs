@@ -5,6 +5,7 @@
 //! there is no `Module` trait — see P1 spec § 3 for rationale.
 
 pub mod attention;
+pub mod conv;
 pub mod embedding;
 pub mod gated_attention;
 pub mod linear;
@@ -13,6 +14,7 @@ pub mod mrope;
 pub mod norm;
 
 pub use attention::{Attention, AttentionConfig};
+pub use conv::{Conv1d, Conv1dConfig};
 pub use embedding::Embedding;
 pub use gated_attention::{GatedAttention, GatedAttentionConfig};
 pub use linear::Linear;
