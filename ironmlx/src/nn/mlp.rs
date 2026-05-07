@@ -26,6 +26,15 @@ impl Mlp {
         })
     }
 
+    /// Test/composition seam: build an `Mlp` from pre-built sub-projections.
+    ///
+    /// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can use it.
+    /// Hidden from rustdoc via `#[doc(hidden)]`.
+    #[doc(hidden)]
+    pub fn from_components(gate: Linear, up: Linear, down: Linear) -> Self {
+        Self { gate, up, down }
+    }
+
     /// Forward pass on the default stream.
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
