@@ -12,6 +12,7 @@
 
 use mlx::{Array, StreamOrDevice};
 
+use crate::core::cache::KVCache;
 use crate::core::Loader;
 use crate::nn::{Linear, Mrope, RmsNorm};
 use crate::Result;
@@ -112,8 +113,9 @@ impl Attention {
         cos: &Array,
         sin: &Array,
         mask: Option<&Array>,
+        cache: Option<&mut KVCache>,
     ) -> Result<Array> {
-        self.forward_on(x, mrope, cos, sin, mask, ())
+        self.forward_on(x, mrope, cos, sin, mask, cache, ())
     }
 
     /// Stream-targeted forward pass — see [`Attention::forward`] for semantics.
@@ -125,6 +127,7 @@ impl Attention {
         cos: &Array,
         sin: &Array,
         mask: Option<&Array>,
+        cache: Option<&mut KVCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let _ = mask; // P1: always causal; explicit masks deferred to P2.
@@ -175,10 +178,17 @@ impl Attention {
         let q = mrope.apply(&q, cos, sin)?;
         let k = mrope.apply(&k, cos, sin)?;
 
+        // Route post-RoPE K/V through KV cache when provided; otherwise pass
+        // through unchanged. SDPA always consumes the full K/V history.
+        let (k_full, v_full) = match cache {
+            Some(c) => c.update_and_fetch_on(&k, &v, target)?,
+            None => (k, v),
+        };
+
         // Fused SDPA — never compose softmax + matmul by hand.
         // P1 hard-codes causal masking; P2 layers in custom masks + KV cache.
         let out = mlx::fast::scaled_dot_product_attention_on(
-            &q, &k, &v, self.scale, "causal", None, None, target,
+            &q, &k_full, &v_full, self.scale, "causal", None, None, target,
         )?;
 
         // Reshape back: [batch, heads, seq, head_dim] -> [batch, seq, hidden].
