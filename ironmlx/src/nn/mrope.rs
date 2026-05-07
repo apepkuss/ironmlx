@@ -246,6 +246,17 @@ impl Mrope {
     /// Returns `(q_rot, k_rot)` with the same shape and dtype as their inputs.
     /// The trailing `HEAD_DIM - ROTARY_DIM` channels pass through unchanged.
     pub fn apply(&self, q: &Array, k: &Array, cos: &Array, sin: &Array) -> Result<(Array, Array)> {
+        // Apply kernel currently supports only interleaved layout (Qwen3.5).
+        // If a future caller constructs Mrope with `interleaved=false`
+        // (LLaMA-style split-half), this guard fires loudly rather than
+        // silently producing wrong results — the shader formula is hardcoded
+        // interleaved.
+        if !self.interleaved {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply: split-half (interleaved=false) layout is not implemented; only interleaved=true is supported (Qwen3.5)"
+            ));
+        }
+
         // Sanity (cheap; full validation is at MLX dispatch boundaries).
         let q_shape = q.shape();
         let k_shape = k.shape();
@@ -264,6 +275,24 @@ impl Mrope {
                 q_dims[3],
                 k_dims[3],
                 self.head_dim
+            ));
+        }
+
+        // The Metal shader reads B and S from q_shape only and applies them
+        // to k's stride math. Consistency check: if Q and K disagree on B or
+        // S, the K addressing is silently wrong.
+        if q_dims[0] != k_dims[0] {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply: q.batch={} != k.batch={}",
+                q_dims[0],
+                k_dims[0]
+            ));
+        }
+        if q_dims[2] != k_dims[2] {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply: q.seq={} != k.seq={}",
+                q_dims[2],
+                k_dims[2]
             ));
         }
 
@@ -338,9 +367,9 @@ impl Mrope {
             h = qk_head % Hq;
         } else {
             is_q = false;
-            uint kqk = qk_head - B * Hq;
-            b = kqk / Hkv;
-            h = kqk % Hkv;
+            uint k_head_flat = qk_head - B * Hq;
+            b = k_head_flat / Hkv;
+            h = k_head_flat % Hkv;
         }
 
         uint H = is_q ? Hq : Hkv;
@@ -522,7 +551,7 @@ mod tests {
         // the rotation formula bit-exactly.
         let mrope = Mrope::new(4, 10000.0, 1.0, &[1, 1, 0], true).unwrap();
 
-        // Q = [1, 2, 3, 4] reshaped as [1, 1, 1, 4]
+        // Q data: [1, 2, 3, 4] shaped [1, 1, 1, 4] (B=1, H=1, S=1, head_dim=4)
         let q: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1, 1, 4))
             .try_into()
             .unwrap();
