@@ -9,6 +9,8 @@
 #include "mlx/fast.h"
 #include "rust/cxx.h"
 
+#include "cxx_mlx_shim/compile.h"  // for ArrayVec
+
 namespace cxx_mlx {
 
 using MlxArray = mlx::core::array;
@@ -109,5 +111,23 @@ std::unique_ptr<MetalKernelInner> metal_kernel_build(
     rust::Str header,
     bool ensure_row_contiguous,
     bool atomic_outputs);
+
+// Forward decl for cxxbridge-generated struct (fully defined in
+// mlx-sys/src/bridge/fast.rs.h, included only by fast.cc to avoid
+// header-ordering issues).
+struct TemplateArgC;
+
+// === metal_kernel_dispatch ===
+std::unique_ptr<ArrayVec> metal_kernel_dispatch(
+    const MetalKernelInner& kernel,
+    const ArrayVec& inputs,
+    const ShapesVec& output_shapes,
+    rust::Slice<const uint8_t> output_dtypes,
+    int32_t gx, int32_t gy, int32_t gz,
+    int32_t tx, int32_t ty, int32_t tz,
+    rust::Slice<const TemplateArgC> template_args,
+    bool has_init, float init_value,
+    bool verbose,
+    bool has_stream, bool dev_only, uint8_t dev_type, int32_t stream_idx);
 
 }  // namespace cxx_mlx

@@ -36,6 +36,8 @@ pub mod ffi {
         type MetalKernelInner;
         type ShapesVec;
 
+        type ArrayVec = crate::bridge::compile::ffi::ArrayVec;
+
         // === P3a ShapesVec ===
         fn shapes_vec_new() -> UniquePtr<ShapesVec>;
         fn shapes_vec_push(v: Pin<&mut ShapesVec>, shape: &[i32]);
@@ -51,6 +53,28 @@ pub mod ffi {
             ensure_row_contiguous: bool,
             atomic_outputs: bool,
         ) -> Result<UniquePtr<MetalKernelInner>>;
+
+        // === P3a metal_kernel_dispatch ===
+        fn metal_kernel_dispatch(
+            kernel: &MetalKernelInner,
+            inputs: &ArrayVec,
+            output_shapes: &ShapesVec,
+            output_dtypes: &[u8],
+            gx: i32,
+            gy: i32,
+            gz: i32,
+            tx: i32,
+            ty: i32,
+            tz: i32,
+            template_args: &[TemplateArgC],
+            has_init: bool,
+            init_value: f32,
+            verbose: bool,
+            has_stream: bool,
+            dev_only: bool,
+            dev_type: u8,
+            stream_idx: i32,
+        ) -> Result<UniquePtr<ArrayVec>>;
 
         unsafe fn fast_rms_norm(
             x: &MlxArray,

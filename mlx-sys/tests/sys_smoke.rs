@@ -207,3 +207,66 @@ fn metal_kernel_build_links() {
     .expect("metal_kernel factory returns Ok");
     assert!(!kernel.is_null());
 }
+
+#[test]
+fn metal_kernel_dispatch_links() {
+    use mlx_sys::array::ffi as array_ffi;
+    use mlx_sys::compile::ffi as compile_ffi;
+    use mlx_sys::fast::ffi as fast_ffi;
+    use mlx_sys::transforms::ffi as transforms_ffi;
+
+    let input_names = vec!["x".to_string()];
+    let output_names = vec!["y".to_string()];
+    let src = r#"
+        uint gid = thread_position_in_grid.x;
+        y[gid] = x[gid] + 1.0;
+    "#;
+    let kernel = fast_ffi::metal_kernel_build(
+        "trivial_add_one",
+        &input_names,
+        &output_names,
+        src,
+        "",
+        true,
+        false,
+    )
+    .expect("metal_kernel factory returns Ok");
+
+    // Build inputs ArrayVec with a single [4] f32 zeros array.
+    let zeros = array_ffi::array_zeros(&[4], FLOAT32).expect("zeros");
+    let mut inputs = compile_ffi::array_vec_new();
+    compile_ffi::array_vec_push(inputs.pin_mut(), &zeros);
+
+    // output_shapes ShapesVec with [4]
+    let mut shapes = fast_ffi::shapes_vec_new();
+    fast_ffi::shapes_vec_push(shapes.pin_mut(), &[4]);
+
+    // Dispatch (default stream — has_stream=false)
+    let mut outputs = fast_ffi::metal_kernel_dispatch(
+        &kernel,
+        &inputs,
+        &shapes,
+        &[FLOAT32],
+        /* grid */ 4,
+        1,
+        1,
+        /* threadgroup */ 4,
+        1,
+        1,
+        /* template_args */ &[],
+        /* has_init */ false,
+        0.0,
+        /* verbose */ false,
+        /* stream */ false,
+        false,
+        0,
+        0,
+    )
+    .expect("dispatch ok");
+
+    // Take output [0] and verify y == [1.0; 4]
+    let y = compile_ffi::array_vec_take_at(outputs.pin_mut(), 0).expect("take 0");
+    transforms_ffi::eval_one(&y).expect("eval");
+    let v = array_ffi::array_to_vec_f32(&y).expect("to vec");
+    assert_eq!(v, vec![1.0, 1.0, 1.0, 1.0]);
+}
