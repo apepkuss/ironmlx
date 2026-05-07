@@ -81,3 +81,30 @@ fn apply_matches_python_fixture() {
     assert!(q_err < 1e-3, "q_rot max abs diff = {q_err} > 1e-3");
     assert!(k_err < 1e-3, "k_rot max abs diff = {k_err} > 1e-3");
 }
+
+#[test]
+fn rotary_plus_sdpa_matches_fixture() {
+    // End-to-end check: Mrope::apply -> SDPA, with input q/k/v from the
+    // fixture, against expected_attn_out. This validates the whole MRoPE +
+    // SDPA path the way Attention::forward will run it.
+    let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
+
+    let q = load("input_q");
+    let k = load("input_k");
+    let v = load("input_v");
+    let cos = load("expected_cos");
+    let sin = load("expected_sin");
+    let expected = load("expected_attn_out");
+
+    let (q_rot, k_rot) = mrope.apply(&q, &k, &cos, &sin).expect("apply");
+
+    let head_dim = 256_f32;
+    let scale = 1.0 / head_dim.sqrt();
+    let out =
+        mlx::fast::scaled_dot_product_attention(&q_rot, &k_rot, &v, scale, "causal", None, None)
+            .expect("sdpa");
+
+    assert_eq!(out.shape().as_slice(), expected.shape().as_slice());
+    let err = max_abs_diff_bf16(&out, &expected);
+    assert!(err < 1e-3, "rotary+sdpa max abs diff = {err} > 1e-3");
+}

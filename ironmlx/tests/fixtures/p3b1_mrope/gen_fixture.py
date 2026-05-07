@@ -138,6 +138,25 @@ def main() -> None:
     save("expected_q_rot", q_rot)
     save("expected_k_rot", k_rot)
 
+    # ---- expected_attn_out: rotary -> SDPA path against fixture inputs ----
+    #
+    # The Rust e2e test runs the same path: load q/k/v + cos/sin from these
+    # fixtures, run Mrope::apply, then mlx::fast::scaled_dot_product_attention,
+    # and compare against expected_attn_out. We do NOT include o_proj here
+    # (would require Qwen3.5 weights) — the Rust test mirrors this scope.
+
+    np.random.seed(43)
+    v_np = np.random.randn(B, HKV, S, HEAD_DIM).astype(np.float32)
+    v = mx.array(v_np).astype(mx.bfloat16)
+    save("input_v", v)
+
+    scale = 1.0 / float(np.sqrt(HEAD_DIM))
+    attn_out = mx.fast.scaled_dot_product_attention(
+        q_rot, k_rot, v, scale=scale, mask="causal"
+    )
+    mx.eval(attn_out)
+    save("expected_attn_out", attn_out)
+
 
 if __name__ == "__main__":
     main()

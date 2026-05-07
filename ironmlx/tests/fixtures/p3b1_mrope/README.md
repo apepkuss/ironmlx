@@ -17,7 +17,7 @@ cd ironmlx/tests/fixtures/p3b1_mrope
 python gen_fixture.py
 ```
 
-Generated `.npy` files (committed to git, ~580KB total — T4 adds `input_v.npy` and `expected_attn_out.npy`):
+Generated `.npy` files (committed to git, ~870KB total):
 
 | File | Shape | Dtype |
 |---|---|---|
@@ -29,5 +29,5 @@ Generated `.npy` files (committed to git, ~580KB total — T4 adds `input_v.npy`
 | `expected_sin.npy` | `[1, 8, 32]` | fp32 |
 | `expected_q_rot.npy` | `[1, 64, 8, 256]` | bf16 |
 | `expected_k_rot.npy` | `[1, 8, 8, 256]` | bf16 |
-
-`expected_attn_out.npy` and `input_v.npy` are added in T4.
+| `input_v.npy` | `[1, 8, 8, 256]` | bf16 |
+| `expected_attn_out.npy` | `[1, 64, 8, 256]` | bf16 |
