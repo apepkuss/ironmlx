@@ -119,8 +119,8 @@ fn output_count_mismatch_errors() {
         .threadgroup(4, 1, 1)
         .dispatch();
 
-    assert!(r.is_err(), "expected error from count mismatch");
-    let msg = format!("{}", r.err().unwrap());
+    let err = r.unwrap_err();
+    let msg = format!("{err}");
     assert!(msg.contains("output_shapes count"), "msg: {msg}");
 }
 
