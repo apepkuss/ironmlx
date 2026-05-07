@@ -8,6 +8,7 @@ pub mod attention;
 pub mod conv;
 pub mod embedding;
 pub mod gated_attention;
+pub mod gated_delta_net; // T5; main struct lands T6
 pub mod linear;
 pub mod mlp;
 pub mod mrope;
