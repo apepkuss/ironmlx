@@ -104,7 +104,7 @@ impl Attention {
     /// model assembly via `Mrope::cos_sin`).
     ///
     /// `cos`, `sin` are the precomputed rotary tables broadcastable against
-    /// Q/K. `mask` is currently ignored — at P1 the kernel is invoked with
+    /// Q/K. `mask` is currently ignored — the kernel is always invoked with
     /// `mask_mode = "causal"`; explicit masks are folded in at P2 once the
     /// KV cache lands.
     pub fn forward(
