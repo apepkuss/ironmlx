@@ -455,6 +455,56 @@ mod tests {
     }
 
     #[test]
+    fn forward_validates_rank_mismatch() {
+        // Rank-2 hidden_states (missing seq dim) → must Err with "rank-3" message.
+        let mtp = build_mtp(1);
+        let cfg = small_layer_cfg();
+
+        // hidden_states is rank-2 [B*S, H] — invalid.
+        let hidden = rand_w(&[4, cfg.hidden_size], Dtype::Bfloat16);
+        let next_embeds = rand_w(&[1, 4, cfg.hidden_size], Dtype::Bfloat16);
+        let mrope = Mrope::new(cfg.head_dim, 1e7, 1.0, &[2, 1, 1], true).unwrap();
+        let pos1d = mlx::ops::constructors::arange(0.0, 4.0, 1.0, Dtype::Int32).unwrap();
+        let pos1d = pos1d.reshape((1, 1, 4)).unwrap();
+        let position_ids = mlx::ops::shape::broadcast_to_on(&pos1d, &[3, 1, 4], ()).unwrap();
+        let (cos, sin) = mrope.cos_sin(&position_ids).unwrap();
+
+        let r = mtp.forward(&hidden, &next_embeds, &mrope, &cos, &sin, None, None);
+        let err = r.expect_err("rank-2 hidden_states must fail validation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rank-3"),
+            "expected rank-3 message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn forward_validates_hidden_size_mismatch() {
+        // Last-axis mismatch (hidden_size in input != cfg.hidden_size) → must Err.
+        let mtp = build_mtp(1);
+        let cfg = small_layer_cfg();
+
+        // Both inputs share the same wrong last-axis (so the shape-equality check passes
+        // and we exercise the hidden_size branch specifically).
+        let bad_h = cfg.hidden_size + 4; // 32 + 4 = 36 — does NOT match cfg.hidden_size=32
+        let hidden = rand_w(&[1, 4, bad_h], Dtype::Bfloat16);
+        let next_embeds = rand_w(&[1, 4, bad_h], Dtype::Bfloat16);
+        let mrope = Mrope::new(cfg.head_dim, 1e7, 1.0, &[2, 1, 1], true).unwrap();
+        let pos1d = mlx::ops::constructors::arange(0.0, 4.0, 1.0, Dtype::Int32).unwrap();
+        let pos1d = pos1d.reshape((1, 1, 4)).unwrap();
+        let position_ids = mlx::ops::shape::broadcast_to_on(&pos1d, &[3, 1, 4], ()).unwrap();
+        let (cos, sin) = mrope.cos_sin(&position_ids).unwrap();
+
+        let r = mtp.forward(&hidden, &next_embeds, &mrope, &cos, &sin, None, None);
+        let err = r.expect_err("hidden_size mismatch must fail validation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cfg.hidden_size") && msg.contains("32"),
+            "expected hidden_size message containing cfg.hidden_size and 32, got: {msg}"
+        );
+    }
+
+    #[test]
     fn forward_concat_layout_e_then_h() {
         // Pin concat order [e, h] (NOT [h, e]) — matches mlx-lm qwen3_5_mtp.py:380.
         //
