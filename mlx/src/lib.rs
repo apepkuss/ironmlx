@@ -47,6 +47,7 @@ pub use device::{
 pub use dtype::Dtype;
 pub use element::Element;
 pub use error::{Error, Result};
+pub use fast::{MetalKernel, MetalKernelBuilder};
 pub use shape::{IntoShape, Shape};
 pub use stream::{
     clear_streams, default_stream, get_streams, new_stream, set_default_stream, Stream,

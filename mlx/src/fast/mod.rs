@@ -12,6 +12,10 @@
 //! cleanly, so the `_on` variants are written by hand and the default
 //! variants delegate to `*_on(.., ())`.
 
+pub mod metal_kernel;
+
+pub use metal_kernel::{MetalKernel, MetalKernelBuilder};
+
 use crate::{Array, Error, Result, StreamOrDevice};
 
 /// Root-mean-square normalization with optional learned scale.
