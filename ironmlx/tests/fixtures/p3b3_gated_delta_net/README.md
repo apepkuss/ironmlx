@@ -22,7 +22,7 @@ cd ironmlx/tests/fixtures/p3b3_gated_delta_net
 python gen_fixture.py
 ```
 
-Generated `.npy` files (committed to git, ~25-30 KB total):
+Generated `.npy` files (committed to git, ~135 KB total):
 
 | File | Shape | Dtype |
 |---|---|---|
@@ -36,8 +36,10 @@ Generated `.npy` files (committed to git, ~25-30 KB total):
 | `out_proj_weight.npy` | `[128, 128]` | bf16 |
 | `A_log.npy` | `[4]` | fp32 |
 | `dt_bias.npy` | `[4]` | fp32 |
-| `expected_output.npy` | `[1, 4, 128]` | (varies; see Note) |
+| `expected_output.npy` | `[1, 4, 128]` | bf16 |
 
-> **Note on output dtype**: `mx.fast.rms_norm(bf16, fp32_weight)` promotes to
-> fp32, which propagates through the rest of the chain. The integration test
-> asserts the dtype matches whatever the fixture produces (likely fp32).
+> **Note on output dtype**: `expected_output.npy` is bf16, matching the input
+> `input_x.npy`. Internally `RmsNormGated` computes the SwiGLU step in fp32
+> for precision (silu(z) * rms_norm(y)), then casts back to the input dtype
+> before `out_proj`. The Rust `GatedDeltaNet::forward` follows the same
+> pattern, so dtypes match end-to-end.
