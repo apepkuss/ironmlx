@@ -6,7 +6,7 @@
 
 pub mod attention;
 pub mod embedding;
-pub mod gated_attention; // NEW — P3b2
+pub mod gated_attention;
 pub mod linear;
 pub mod mlp;
 pub mod mrope;
@@ -14,7 +14,7 @@ pub mod norm;
 
 pub use attention::{Attention, AttentionConfig};
 pub use embedding::Embedding;
-pub use gated_attention::{GatedAttention, GatedAttentionConfig}; // NEW — P3b2
+pub use gated_attention::{GatedAttention, GatedAttentionConfig};
 pub use linear::Linear;
 pub use mlp::Mlp;
 pub use mrope::Mrope;

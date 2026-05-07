@@ -29,28 +29,38 @@ pub struct GatedAttentionConfig {
     pub num_kv_heads: i32,
     pub head_dim: i32,
     pub rms_norm_eps: f32,
+    /// Whether the projection layers carry a bias term. Qwen3.5 sets this to
+    /// `false`. Currently informational — [`GatedAttention::from_loader`]
+    /// auto-detects bias presence via [`Linear::from_loader`] probing rather
+    /// than consulting this field. See `from_loader` doc.
     pub attention_bias: bool,
 }
 
 /// Qwen3.5 / Qwen3-Next gated full attention block.
 #[allow(dead_code)]
 pub struct GatedAttention {
-    q_proj: Linear, // out = num_heads * head_dim * 2
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    q_proj: Linear,  // [hidden] -> [num_heads * head_dim * 2]  (queries + gate halves)
+    k_proj: Linear,  // [hidden] -> [num_kv_heads * head_dim]
+    v_proj: Linear,  // [hidden] -> [num_kv_heads * head_dim]
+    o_proj: Linear,  // [num_heads * head_dim] -> [hidden]
+    q_norm: RmsNorm, // weight: [head_dim]
+    k_norm: RmsNorm, // weight: [head_dim]
     cfg: GatedAttentionConfig,
-    scale: f32,
+    scale: f32, // 1 / sqrt(head_dim)
 }
 
 impl GatedAttention {
     /// Production constructor: load from a project [`Loader`].
     ///
     /// Reads `{prefix}.{q,k,v,o}_proj.{weight,bias?,scales?,biases?}` and
-    /// `{prefix}.{q,k}_norm.weight`. `bias` presence is auto-detected per
-    /// [`Linear::from_loader`].
+    /// `{prefix}.{q,k}_norm.weight`. `bias` presence is currently auto-detected
+    /// by [`Linear::from_loader`] probing `{prefix}.bias` — `cfg.attention_bias`
+    /// is **not** consulted in this constructor (Qwen3.5 has
+    /// `attention_bias=false` and the checkpoint never contains a bias key, so
+    /// the two are consistent in practice). The field is retained as a
+    /// future-extension hook for architectures that explicitly require bias
+    /// validation; a runtime assertion or a `Linear::from_loader_with_bias`
+    /// variant can be added without breaking the public API.
     pub fn from_loader(loader: &Loader, prefix: &str, cfg: GatedAttentionConfig) -> Result<Self> {
         let q_proj = Linear::from_loader(loader, &format!("{prefix}.q_proj"))?;
         let k_proj = Linear::from_loader(loader, &format!("{prefix}.k_proj"))?;
@@ -119,7 +129,10 @@ impl GatedAttention {
         self.forward_on(x, mrope, cos, sin, mask, cache, ())
     }
 
-    /// Stream-targeted forward — currently stubbed (T2 fills body).
+    /// Stream-targeted forward.
+    ///
+    /// **Stub at T1**: returns `Err`. Real implementation lands in T2 (replaces
+    /// only this body; `forward` continues to delegate via `forward_on(..., ())`).
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
