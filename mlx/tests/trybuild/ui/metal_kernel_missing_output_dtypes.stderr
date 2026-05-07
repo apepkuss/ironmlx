@@ -1,0 +1,17 @@
+error[E0599]: no method named `dispatch` found for struct `DispatchBuilder<Set, Set, Unset, Set, Set>` in the current scope
+  --> tests/trybuild/ui/metal_kernel_missing_output_dtypes.rs:18:10
+   |
+12 |       let _ = k
+   |  _____________-
+13 | |         .dispatch_builder()
+14 | |         .inputs(&[&x])
+15 | |         .output_shapes(&[Shape::from((4_i32,))])
+16 | |         .grid(4, 1, 1)
+17 | |         .threadgroup(4, 1, 1)
+18 | |         .dispatch();
+   | |         -^^^^^^^^ method not found in `DispatchBuilder<Set, Set, Unset, Set, Set>`
+   | |_________|
+   |
+   |
+   = note: the method was found for
+           - `DispatchBuilder<Set, Set, Set, Set, Set>`
