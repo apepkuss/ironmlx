@@ -104,6 +104,27 @@ impl Linear {
         self.forward_on(x, ())
     }
 
+    /// Number of input features (the trailing axis of the input the layer accepts).
+    ///
+    /// For fp weights stored as `[out, in]`, returns `weight.shape()[1]`.
+    /// For quantized variants, use of this method is not yet implemented.
+    pub fn in_features(&self) -> usize {
+        match &self.inner {
+            LinearImpl::Fp { weight, .. } => weight.shape().as_slice()[1] as usize,
+            LinearImpl::Quant { .. } => {
+                unimplemented!("Linear::in_features for quantized variant — add when needed")
+            }
+        }
+    }
+
+    /// Number of output features (the trailing axis of the output the layer produces).
+    pub fn out_features(&self) -> usize {
+        match &self.inner {
+            LinearImpl::Fp { weight, .. } => weight.shape().as_slice()[0] as usize,
+            LinearImpl::Quant { weight, .. } => weight.shape().as_slice()[0] as usize,
+        }
+    }
+
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();

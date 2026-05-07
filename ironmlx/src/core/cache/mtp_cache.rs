@@ -50,11 +50,19 @@ impl MtpCache {
     }
 
     /// Immutable view of one layer's cache.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.num_layers()` (Vec indexing).
     pub fn layer(&self, idx: usize) -> &KVCache {
         &self.layers[idx]
     }
 
     /// Mutable view of one layer's cache (used by the consumer's per-layer forward path).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.num_layers()` (Vec indexing).
     pub fn layer_mut(&mut self, idx: usize) -> &mut KVCache {
         &mut self.layers[idx]
     }
@@ -66,7 +74,13 @@ impl MtpCache {
         }
     }
 
-    /// Returns the offset of layer 0; all layers share the same offset by invariant.
+    /// Returns layer 0's offset.
+    ///
+    /// All layers are expected to advance in lock-step when driven through
+    /// [`crate::nn::Mtp::forward_on`]. This is a caller-discipline contract,
+    /// not a structural invariant — if a per-layer `update_and_fetch` errors
+    /// mid-loop, layer 0's offset may diverge from later layers'. In any
+    /// error-recovery path, call [`reset`](Self::reset) before reuse.
     pub fn offset(&self) -> i32 {
         self.layers.first().map(|c| c.offset()).unwrap_or(0)
     }

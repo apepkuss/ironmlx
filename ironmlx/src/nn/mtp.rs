@@ -228,6 +228,23 @@ impl Mtp {
             cfg.layer.rms_norm_eps,
         )?;
         let fc = Linear::from_loader(loader, &format!("{prefix}.fc"))?;
+
+        // Validate fc weight shape. Unlike attention projections (where reshape /
+        // matmul on downstream consumers will surface mismatches), the fc layer's
+        // 2H -> H contract is MTP-specific — a misconfigured weight could silently
+        // propagate wrong-rank features into the DecoderLayer chain. Catch it here
+        // (production-grade stability — explicit bounds > trust caller).
+        let expected_in = (cfg.hidden_size * 2) as usize;
+        let expected_out = cfg.hidden_size as usize;
+        if fc.in_features() != expected_in || fc.out_features() != expected_out {
+            return Err(anyhow!(
+                "Mtp.fc weight shape mismatch under prefix '{prefix}.fc': \
+                 expected [in={expected_in}, out={expected_out}], got [in={}, out={}]",
+                fc.in_features(),
+                fc.out_features(),
+            ));
+        }
+
         let norm = RmsNorm::from_loader(loader, &format!("{prefix}.norm"), cfg.layer.rms_norm_eps)?;
 
         let mut layers = Vec::with_capacity(cfg.num_mtp_layers as usize);
@@ -239,9 +256,6 @@ impl Mtp {
             )?);
         }
 
-        // No construction-time fc dim check — Linear's matmul on concat([e, h]) will
-        // surface any cfg/weight mismatch at first forward_on (matches DecoderLayer
-        // and GatedAttention from_loader precedent).
         Ok(Self {
             pre_fc_norm_hidden,
             pre_fc_norm_embedding,
