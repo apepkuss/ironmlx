@@ -21,6 +21,7 @@ impl ArrayVec {
         mlx_sys::compile::ffi::array_vec_count(&self.inner)
     }
 
+    /// Returns `true` if the vec contains no arrays.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

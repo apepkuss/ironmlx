@@ -197,7 +197,7 @@ impl<I, OS, OD, G> DispatchBuilder<I, OS, OD, G, Unset> {
     }
 }
 
-// === optional setters (don't change markers) ===
+// === 6 optional setters (don't change markers) ===
 
 impl<I, OS, OD, G, TG> DispatchBuilder<I, OS, OD, G, TG> {
     /// Add an `int` template argument.
@@ -243,8 +243,8 @@ impl<I, OS, OD, G, TG> DispatchBuilder<I, OS, OD, G, TG> {
 
 impl DispatchBuilder<Set, Set, Set, Set, Set> {
     /// Execute the kernel and return outputs as `ArrayVec`. Take individual
-    /// outputs via `arr_vec.take_at(i)` in the order declared in
-    /// `MetalKernelBuilder::outputs(...)`.
+    /// outputs via `.take_at(i)` on the returned `ArrayVec`, in the order
+    /// declared in `MetalKernelBuilder::outputs(...)`.
     pub fn dispatch(self) -> Result<ArrayVec> {
         let input_vec = self.inputs.expect("typestate: inputs Set");
         let output_shapes = self.output_shapes.expect("typestate: output_shapes Set");
