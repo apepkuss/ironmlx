@@ -31,11 +31,17 @@ pub(crate) struct MetalKernelInner {
     pub(crate) output_count: usize,
 }
 
-// SAFETY: cxx::UniquePtr<MetalKernelInner> wraps a C++ object holding
-// `std::function<...>`; immutable after construction. The MLX
-// CustomKernelFunction is intended to be called from any thread (the
-// kernel itself is stateless; per-dispatch state is in arguments).
-// Mark Send+Sync to allow Arc-share across threads.
+// SAFETY: `MetalKernelInner` wraps a `cxx::UniquePtr` to a C++ object that
+// holds an immutable `std::function` (set once at build, never mutated).
+// `Send` is straightforward: the underlying object has no Rust-side state
+// that pins it to a thread. `Sync` is sound for sharing a `&MetalKernelInner`
+// (e.g. via `Arc<MetalKernelInner>`) across threads, BUT the caller is
+// responsible for serializing dispatches: invoking `dispatch()` from
+// multiple threads concurrently with the same `MetalKernel` requires that
+// dispatches target separate streams, OR are otherwise externally
+// synchronized. MLX's per-stream evaluation model assumes a single
+// in-flight dispatch per stream; static caches inside MLX's Metal backend
+// are not internally locked.
 unsafe impl Send for MetalKernelInner {}
 unsafe impl Sync for MetalKernelInner {}
 
@@ -68,8 +74,8 @@ impl MetalKernel {
         DispatchBuilder::new(self.inner.clone())
     }
 
-    /// Access the underlying inner Arc (used by dispatch builder; not part
-    /// of the public API).
+    /// Access the underlying inner `Arc` (crate-internal, used by tests
+    /// to verify Arc-share semantics; not part of the public API).
     // T5 will call inner_arc() in DispatchBuilder tests; allow dead_code until then.
     #[allow(dead_code)]
     pub(crate) fn inner_arc(&self) -> &Arc<MetalKernelInner> {
@@ -98,13 +104,19 @@ impl MetalKernelBuilder {
     /// Set output parameter names. Number of outputs is fixed at build time
     /// and must match the size of `output_shapes` / `output_dtypes` passed at
     /// dispatch time (verified at runtime in `dispatch()`).
+    ///
+    /// Calling this method again *replaces* (not appends to) the previous
+    /// names. Output order is load-bearing — it defines the index used by
+    /// `ArrayVec::take_at(i)` after dispatch.
     pub fn outputs(mut self, names: &[&str]) -> Self {
         self.output_names = names.iter().map(|s| (*s).to_string()).collect();
         self
     }
 
-    /// Set the Metal kernel source code (function body — not a full
-    /// `kernel void f(...)` declaration; MLX wraps this).
+    /// Set the Metal kernel source code. Provide the kernel **body** only:
+    /// MLX auto-generates the `kernel void name(...)` signature with input
+    /// and output buffer bindings, so the source string should not include
+    /// the surrounding signature or its closing `}` — MLX wraps the body.
     pub fn source(mut self, src: impl Into<String>) -> Self {
         self.source = src.into();
         self
