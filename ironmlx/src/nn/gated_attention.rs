@@ -10,7 +10,6 @@
 //!
 //! See P3b2 spec § 2 for the data flow.
 
-use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
 use crate::core::cache::KVCache;
@@ -37,7 +36,6 @@ pub struct GatedAttentionConfig {
 }
 
 /// Qwen3.5 / Qwen3-Next gated full attention block.
-#[allow(dead_code)]
 pub struct GatedAttention {
     q_proj: Linear,  // [hidden] -> [num_heads * head_dim * 2]  (queries + gate halves)
     k_proj: Linear,  // [hidden] -> [num_kv_heads * head_dim]
@@ -115,8 +113,6 @@ impl GatedAttention {
     }
 
     /// Forward pass — see [`forward_on`](Self::forward_on) for stream-targeted variant.
-    ///
-    /// **Stub at T1**: returns `Err`. Real implementation lands in T2.
     pub fn forward(
         &self,
         x: &Array,
@@ -131,8 +127,13 @@ impl GatedAttention {
 
     /// Stream-targeted forward.
     ///
-    /// **Stub at T1**: returns `Err`. Real implementation lands in T2 (replaces
-    /// only this body; `forward` continues to delegate via `forward_on(..., ())`).
+    /// `x: [B, S, hidden]`. Returns `[B, S, hidden]`.
+    ///
+    /// `cos`/`sin` are precomputed by [`Mrope::cos_sin`] (caller computes once per
+    /// forward and shares across all attention layers).
+    ///
+    /// `mask` is currently ignored — the kernel is always invoked with
+    /// `mask_mode = "causal"`; explicit masks fold in alongside KV cache extensions.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
@@ -144,10 +145,73 @@ impl GatedAttention {
         cache: Option<&mut KVCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        let _ = (x, mrope, cos, sin, mask, cache, target);
-        Err(anyhow!(
-            "GatedAttention::forward not implemented at T1 — body lands in T2"
-        ))
+        let _ = mask;
+        let target = target.into();
+
+        let dims = x.shape();
+        let dims = dims.as_slice();
+        let batch = dims[0];
+        let seq = dims[1];
+        let h_q = self.cfg.num_heads;
+        let h_kv = self.cfg.num_kv_heads;
+        let d = self.cfg.head_dim;
+
+        // Step 1: project Q (2x), K, V.
+        let q_full = self.q_proj.forward_on(x, target)?; // [B, S, Hq*D*2]
+        let k = self.k_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+        let v = self.v_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+
+        // Step 2: per-head reshape Q to [B, S, Hq, D*2], then split last axis into
+        // (queries [B,S,Hq,D], gate [B,S,Hq,D]). Per-head reshape BEFORE split is
+        // critical: it matches q_proj weight matrix row layout in mlx-lm.
+        let q_per_head = q_full.reshape_on((batch, seq, h_q, d * 2), target)?;
+        let mut parts = mlx::ops::shape::split_n_on(&q_per_head, 2, -1, target)?;
+        // split_n_on returns Vec<Array>; index 0 = queries, index 1 = gate.
+        // Pop in reverse to avoid index-shift surprises (P3b1 polish convention).
+        let gate_per_head = parts.pop().expect("split_n_on returned <2 elements");
+        let queries = parts.pop().expect("split_n_on returned <2 elements");
+
+        // Gate is fed flat to sigmoid + element-wise mul later: [B, S, Hq*D].
+        let gate_flat = gate_per_head.reshape_on((batch, seq, h_q * d), target)?;
+
+        // Step 3: q_norm on per-head queries (last axis = D), then transpose to SDPA
+        // layout [B, Hq, S, D]. mlx-lm applies q_norm BEFORE transpose; either order
+        // is mathematically identical (RMSNorm is on last axis = D) — match mlx-lm.
+        let queries = self.q_norm.forward_on(&queries, target)?;
+        let queries = queries.transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+
+        // Step 4: reshape K to per-head, k_norm, transpose. Same for V (no norm).
+        let k = k.reshape_on((batch, seq, h_kv, d), target)?;
+        let k = self.k_norm.forward_on(&k, target)?;
+        let k = k.transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+
+        let v = v
+            .reshape_on((batch, seq, h_kv, d), target)?
+            .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+
+        // Step 5: rotate Q + K via fused MetalKernel (P3b1).
+        let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+
+        // Step 6: KV cache route + SDPA.
+        let (k_full, v_full) = match cache {
+            Some(c) => c.update_and_fetch_on(&k, &v, target)?,
+            None => (k, v),
+        };
+        let attn_out = mlx::fast::scaled_dot_product_attention_on(
+            &queries, &k_full, &v_full, self.scale, "causal", None, None, target,
+        )?;
+
+        // Step 7: reshape attn out [B, Hq, S, D] -> [B, S, Hq*D], apply sigmoid gate,
+        // o_proj.
+        let attn_out = attn_out
+            .transpose_axes_on(&[0, 2, 1, 3][..], target)?
+            .reshape_on((batch, seq, h_q * d), target)?;
+
+        let gate_sig = gate_flat.sigmoid_on(target)?;
+        // &Array * &Array returns Array (panic-on-err overload), not Result<Array>.
+        let gated = &attn_out * &gate_sig;
+
+        self.o_proj.forward_on(&gated, target)
     }
 }
 
@@ -207,16 +271,189 @@ mod tests {
     }
 
     #[test]
-    fn forward_returns_err_at_t1() {
+    fn forward_shape_and_dtype_fp32() {
         let attn = small_gated_attention();
-        let x = Array::zeros((1_i32, 4, 32), Dtype::Bfloat16).unwrap();
         let mrope = Mrope::new(8, 1e7, 1.0, &[2, 1, 1], true).unwrap();
+
+        // x: [B=1, S=4, hidden=32] fp32
+        let x = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
         let cos = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
         let sin = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
 
-        let r = attn.forward(&x, &mrope, &cos, &sin, None, None);
-        assert!(r.is_err());
-        let msg = format!("{}", r.unwrap_err());
-        assert!(msg.contains("not implemented at T1"), "msg: {msg}");
+        let out = attn
+            .forward(&x, &mrope, &cos, &sin, None, None)
+            .expect("forward");
+
+        // Output shape == input shape [B, S, hidden]
+        assert_eq!(out.shape().as_slice(), &[1, 4, 32]);
+        assert_eq!(out.dtype(), Dtype::Float32);
+    }
+
+    #[test]
+    fn forward_shape_and_dtype_bf16() {
+        // Build a bf16-weight attention so that bf16 input stays bf16 through
+        // the full forward path. MLX promotes bf16 @ fp32 → fp32, so weights
+        // must also be bf16 to preserve the dtype invariant.
+        let q_w = Array::zeros((64_i32, 32), Dtype::Bfloat16).unwrap();
+        let k_w = Array::zeros((16_i32, 32), Dtype::Bfloat16).unwrap();
+        let v_w = Array::zeros((16_i32, 32), Dtype::Bfloat16).unwrap();
+        let o_w = Array::zeros((32_i32, 32), Dtype::Bfloat16).unwrap();
+        // RmsNorm weights must also be bf16 so that the norm kernel stays in bf16.
+        let q_n = constructors::ones((8_i32,), Dtype::Bfloat16).unwrap();
+        let k_n = constructors::ones((8_i32,), Dtype::Bfloat16).unwrap();
+        let cfg = GatedAttentionConfig {
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 8,
+            rms_norm_eps: 1e-6,
+            attention_bias: false,
+        };
+        let attn = GatedAttention::from_components(
+            Linear::new_fp(q_w, None),
+            Linear::new_fp(k_w, None),
+            Linear::new_fp(v_w, None),
+            Linear::new_fp(o_w, None),
+            RmsNorm::new(q_n, cfg.rms_norm_eps),
+            RmsNorm::new(k_n, cfg.rms_norm_eps),
+            cfg,
+        );
+
+        let mrope = Mrope::new(8, 1e7, 1.0, &[2, 1, 1], true).unwrap();
+
+        let x = Array::zeros((1_i32, 4, 32), Dtype::Bfloat16).unwrap();
+        // cos/sin always fp32 per P3b1 spec.
+        let cos = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
+
+        let out = attn
+            .forward(&x, &mrope, &cos, &sin, None, None)
+            .expect("forward bf16");
+
+        assert_eq!(out.shape().as_slice(), &[1, 4, 32]);
+        assert_eq!(out.dtype(), Dtype::Bfloat16);
+    }
+
+    #[test]
+    fn forward_with_zero_gate_produces_finite_output() {
+        // q_proj weight has shape [Hq*D*2, hidden] = [64, 32]. When the input is
+        // all-zeros (or near-zero), q_proj output is ~zero, so the gate is ~zero
+        // and sigmoid(0)=0.5 — gated output ≈ 0.5 * sdpa_out. We just verify
+        // the dispatch succeeds and produces finite values.
+        let attn = small_gated_attention();
+        let mrope = Mrope::new(8, 1e7, 1.0, &[2, 1, 1], true).unwrap();
+
+        // Random-ish input (small range, fp32 to avoid bf16 noise)
+        let x_data: Vec<f32> = (0..(1 * 4 * 32)).map(|i| (i as f32) * 0.01).collect();
+        let x: Array = (x_data.as_slice(), (1_i32, 4, 32)).try_into().unwrap();
+
+        let cos = mlx::ops::constructors::ones((1_i32, 4, 4), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
+
+        let out = attn
+            .forward(&x, &mrope, &cos, &sin, None, None)
+            .expect("forward zero gate");
+
+        // Output exists with the right shape; we don't assert exact values
+        // (those are validated in the integration test against a Python ref).
+        assert_eq!(out.shape().as_slice(), &[1, 4, 32]);
+        let v: Vec<f32> = out.to_vec().unwrap();
+        assert!(v.iter().all(|x| x.is_finite()), "non-finite output element");
+    }
+
+    #[test]
+    fn per_head_split_layout_distinguishable_from_flat_split() {
+        // 2 heads, head_dim = 2 (small for hand-checkable math).
+        // q_proj: [Hq*D*2, hidden] = [8, 4]. Per-head row layout:
+        //
+        //   Row 0..2   = head 0 queries channels 0..2
+        //   Row 2..4   = head 0 gate    channels 0..2
+        //   Row 4..6   = head 1 queries channels 0..2
+        //   Row 6..8   = head 1 gate    channels 0..2
+        //
+        // Set head 0 queries = identity (weight[0..2, 0..2] = I), head 0 gate = 0.
+        // Set head 1 queries = 0, head 1 gate = identity (weight[6..8, 2..4] = I,
+        // mapping x[2..4] -> gate[head 1]).
+        //
+        // Per-HEAD split:
+        //   queries[head 0] = [x[0], x[1]] = [1, 2]
+        //   queries[head 1] = [0, 0]
+        //   gate[head 0]    = [0, 0]    -> sigmoid = [0.5, 0.5]
+        //   gate[head 1]    = [x[2], x[3]] = [3, 4] -> sigmoid ≈ [0.953, 0.982]
+        //
+        // After SDPA + gate + o_proj=identity, head 1 channels (output indices
+        // 2, 3) should have larger magnitude than head 0 channels (0, 1) because
+        // head 1's sigmoid gate is much bigger than head 0's 0.5.
+
+        let mut q_w_data = vec![0.0_f32; 8 * 4];
+        // Row 0..2: head 0 queries = identity on x[0..2]
+        q_w_data[0 * 4 + 0] = 1.0;
+        q_w_data[1 * 4 + 1] = 1.0;
+        // Row 6..8: head 1 gate = identity on x[2..4]
+        q_w_data[6 * 4 + 2] = 1.0;
+        q_w_data[7 * 4 + 3] = 1.0;
+        let q_w: Array = (q_w_data.as_slice(), (8_i32, 4)).try_into().unwrap();
+
+        // K, V projection: per-head 2 dims, 1 KV head -> [Hkv*D, hidden] = [2, 4].
+        // Make k = v constant (broadcast a row of 0.25s).
+        let kv_w_data = vec![0.25_f32; 2 * 4];
+        let k_w: Array = (kv_w_data.as_slice(), (2_i32, 4)).try_into().unwrap();
+        let v_w: Array = (kv_w_data.as_slice(), (2_i32, 4)).try_into().unwrap();
+
+        // o_proj: 4x4 identity.
+        let mut o_w_data = vec![0.0_f32; 4 * 4];
+        for i in 0..4 {
+            o_w_data[i * 4 + i] = 1.0;
+        }
+        let o_w: Array = (o_w_data.as_slice(), (4_i32, 4)).try_into().unwrap();
+
+        let q_n = mlx::ops::constructors::ones((2_i32,), Dtype::Float32).unwrap();
+        let k_n = mlx::ops::constructors::ones((2_i32,), Dtype::Float32).unwrap();
+
+        let cfg = GatedAttentionConfig {
+            num_heads: 2,
+            num_kv_heads: 1,
+            head_dim: 2,
+            rms_norm_eps: 1e-6,
+            attention_bias: false,
+        };
+
+        let attn = GatedAttention::from_components(
+            Linear::new_fp(q_w, None),
+            Linear::new_fp(k_w, None),
+            Linear::new_fp(v_w, None),
+            Linear::new_fp(o_w, None),
+            RmsNorm::new(q_n, cfg.rms_norm_eps),
+            RmsNorm::new(k_n, cfg.rms_norm_eps),
+            cfg,
+        );
+
+        // x = [1, 2, 3, 4]
+        let x: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1, 4))
+            .try_into()
+            .unwrap();
+
+        // rot_dim = 2 * 1.0 = 2, ROT_PAIRS = 1.
+        let mrope = Mrope::new(2, 1e7, 1.0, &[1, 0, 0], true).unwrap();
+        let cos = mlx::ops::constructors::ones((1_i32, 1, 1), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 1, 1), Dtype::Float32).unwrap();
+
+        let out = attn
+            .forward(&x, &mrope, &cos, &sin, None, None)
+            .expect("forward");
+
+        let v: Vec<f32> = out.to_vec().unwrap();
+        // Sanity: finite + non-zero output
+        assert!(v.iter().all(|x| x.is_finite()), "non-finite output");
+        assert!(v.iter().any(|x| x.abs() > 1e-3), "all zeros — likely a bug");
+        // Per-head invariant: head 1's gate is non-zero (sigmoid > 0.9), head 0's
+        // gate is zero (sigmoid = 0.5). With o_proj=identity, output index i comes
+        // from SDPA-output[i] * sigmoid(gate)[i]. SDPA-out is similar across heads
+        // (k=v=constant), so the gate ratio dominates and head 1 channels (indices
+        // 2, 3) should be larger than head 0 channels (indices 0, 1).
+        assert!(
+            v[2].abs() > v[0].abs() && v[3].abs() > v[1].abs(),
+            "head 1 channels not larger than head 0 (per-head split incorrect): {:?}",
+            v
+        );
     }
 }
