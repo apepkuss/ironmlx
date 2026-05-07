@@ -185,3 +185,25 @@ fn shapes_vec_links() {
     ffi::shapes_vec_push(v.pin_mut(), &[8]);
     assert_eq!(ffi::shapes_vec_count(&v), 2);
 }
+
+#[test]
+fn metal_kernel_build_links() {
+    use mlx_sys::fast::ffi;
+    let input_names = vec!["x".to_string()];
+    let output_names = vec!["y".to_string()];
+    let src = r#"
+        uint gid = thread_position_in_grid.x;
+        y[gid] = x[gid] + 1.0;
+    "#;
+    let kernel = ffi::metal_kernel_build(
+        "trivial_add_one",
+        &input_names,
+        &output_names,
+        src,
+        /* header */ "",
+        /* ensure_row_contiguous */ true,
+        /* atomic_outputs */ false,
+    )
+    .expect("kernel compiles");
+    assert!(!kernel.is_null());
+}

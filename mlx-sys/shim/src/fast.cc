@@ -95,4 +95,37 @@ size_t shapes_vec_count(const ShapesVec& v) {
   return v.shapes.size();
 }
 
+// === P3a metal_kernel_build ===
+
+std::unique_ptr<MetalKernelInner> metal_kernel_build(
+    rust::Str name,
+    rust::Slice<const rust::String> input_names,
+    rust::Slice<const rust::String> output_names,
+    rust::Str source,
+    rust::Str header,
+    bool ensure_row_contiguous,
+    bool atomic_outputs) {
+  std::vector<std::string> in_names;
+  in_names.reserve(input_names.size());
+  for (const auto& s : input_names) {
+    in_names.emplace_back(s);
+  }
+  std::vector<std::string> out_names;
+  out_names.reserve(output_names.size());
+  for (const auto& s : output_names) {
+    out_names.emplace_back(s);
+  }
+  auto kernel = mlx::core::fast::metal_kernel(
+      std::string(name),
+      in_names,
+      out_names,
+      std::string(source),
+      std::string(header),
+      ensure_row_contiguous,
+      atomic_outputs);
+  auto inner = std::make_unique<MetalKernelInner>();
+  inner->fn = std::move(kernel);
+  return inner;
+}
+
 }  // namespace cxx_mlx

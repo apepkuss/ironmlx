@@ -41,6 +41,17 @@ pub mod ffi {
         fn shapes_vec_push(v: Pin<&mut ShapesVec>, shape: &[i32]);
         fn shapes_vec_count(v: &ShapesVec) -> usize;
 
+        // === P3a metal_kernel_build ===
+        fn metal_kernel_build(
+            name: &str,
+            input_names: &[String],
+            output_names: &[String],
+            source: &str,
+            header: &str,
+            ensure_row_contiguous: bool,
+            atomic_outputs: bool,
+        ) -> Result<UniquePtr<MetalKernelInner>>;
+
         unsafe fn fast_rms_norm(
             x: &MlxArray,
             weight: *const MlxArray,

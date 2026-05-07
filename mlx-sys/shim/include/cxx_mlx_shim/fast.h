@@ -100,4 +100,14 @@ std::unique_ptr<ShapesVec> shapes_vec_new();
 void shapes_vec_push(ShapesVec& v, rust::Slice<const int32_t> shape);
 size_t shapes_vec_count(const ShapesVec& v);
 
+// === metal_kernel_build ===
+std::unique_ptr<MetalKernelInner> metal_kernel_build(
+    rust::Str name,
+    rust::Slice<const rust::String> input_names,
+    rust::Slice<const rust::String> output_names,
+    rust::Str source,
+    rust::Str header,
+    bool ensure_row_contiguous,
+    bool atomic_outputs);
+
 }  // namespace cxx_mlx
