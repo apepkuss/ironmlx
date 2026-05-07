@@ -82,6 +82,19 @@ impl Linear {
         }
     }
 
+    /// Test/composition seam: build an FP `Linear` from in-memory weight (and optional bias).
+    /// Production code should use [`Linear::from_loader`]. This bypass lets `nn` building
+    /// blocks be composed without writing a safetensors file (used by `GatedAttention`'s
+    /// `from_components` constructor and unit tests).
+    ///
+    /// `weight` must be shape `[out, in]`; `bias` must be `[out]` if `Some`.
+    #[allow(dead_code)]
+    pub(crate) fn new_fp(weight: Array, bias: Option<Array>) -> Self {
+        Self {
+            inner: LinearImpl::Fp { weight, bias },
+        }
+    }
+
     /// Forward pass: `y = x @ W^T (+ bias)`.
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
