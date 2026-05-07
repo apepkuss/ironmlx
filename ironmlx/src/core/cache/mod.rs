@@ -2,6 +2,8 @@
 
 pub mod gated_delta;
 pub mod kv_cache;
+pub mod mtp_cache;
 
 pub use gated_delta::GatedDeltaCache;
 pub use kv_cache::KVCache;
+pub use mtp_cache::MtpCache;
