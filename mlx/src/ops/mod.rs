@@ -68,6 +68,7 @@ pub use constructors::{
     linspace, linspace_on, ones, ones_like, ones_like_on, ones_on, tri, tri_on, tril, tril_on,
     triu, triu_on, zeros_like, zeros_like_on,
 };
+pub use conv::{conv1d, conv1d_on};
 pub use cumulative::{cumprod, cumprod_on, cumsum, cumsum_on};
 pub use indexing::{
     gather, gather_on, slice, slice_on, slice_strided, slice_strided_on, slice_update,
