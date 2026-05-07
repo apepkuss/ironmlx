@@ -33,12 +33,21 @@ pub struct GatedDeltaNetConfig {
 }
 
 impl GatedDeltaNetConfig {
+    /// Total K-side dim: `num_k_heads × head_k_dim`. Used to size q/k slices
+    /// of the qkv projection output and as the K-side stride in the kernel.
     pub fn key_dim(&self) -> i32 {
         self.num_k_heads * self.head_k_dim
     }
+
+    /// Total V-side dim: `num_v_heads × head_v_dim`. Equals the inner dim of
+    /// the V projection and the input dim of `out_proj`.
     pub fn value_dim(&self) -> i32 {
         self.num_v_heads * self.head_v_dim
     }
+
+    /// Total projection-output dim for `in_proj_qkv`:
+    /// `key_dim × 2 + value_dim` — i.e. concatenated Q + K + V output.
+    /// Also the channel count for the depthwise `conv1d`.
     pub fn conv_dim(&self) -> i32 {
         self.key_dim() * 2 + self.value_dim()
     }
@@ -46,6 +55,18 @@ impl GatedDeltaNetConfig {
 
 /// Qwen3.5 / Qwen3-Next "linear attention" branch — recurrent SSM with
 /// delta rule and scalar gating.
+///
+/// Mirrors mlx-lm's `Qwen3NextGatedDeltaNet`
+/// (`/Volumes/Dev/mlx-lm/mlx_lm/models/qwen3_5.py:85-205`). Components:
+///
+/// - `in_proj_qkv` — single matmul producing concat'd Q/K/V (`conv_dim` outputs)
+/// - `in_proj_z` — output gate signal for the final RmsNormGated step
+/// - `in_proj_b` — forget signal (sigmoid → beta)
+/// - `in_proj_a` — decay signal (compute_g → g)
+/// - `conv1d` — depthwise temporal mixing across the Q/K/V channels (then silu)
+/// - `norm` — `RmsNormGated`: `silu(z) * rms_norm(y)` final mixing
+/// - `out_proj` — back to `hidden_size`
+/// - `a_log` / `dt_bias` — per-head learned parameters for compute_g
 pub struct GatedDeltaNet {
     in_proj_qkv: Linear,
     in_proj_z: Linear,
@@ -144,6 +165,12 @@ impl GatedDeltaNet {
     ///   `g = exp(-exp(A_log) * softplus(a + dt_bias))`
     ///
     /// where `softplus(x) = where(x > 20, x, log(1 + exp(x)))` (numerically stable).
+    ///
+    /// The closure returns `mlx::Result<Vec<Array>>` because that's what
+    /// `mlx::compile::compile` requires; the outer `Result<CompiledFn>` here is
+    /// `crate::Result` (anyhow), so the `compile(...)` call is bridged via
+    /// `.map_err(anyhow::Error::from)`. Inside the closure all MLX ops use `?`
+    /// directly since their errors are already `mlx::Error`.
     fn build_compute_g_pipeline() -> Result<CompiledFn> {
         let pipeline = move |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
             let a_log = inputs[0]; // [num_v_heads]
@@ -184,14 +211,15 @@ impl GatedDeltaNet {
 
     /// Stream-targeted forward — Qwen3-Next gated delta net algorithm.
     ///
-    /// 7 steps:
+    /// 8 steps:
     ///   1. project qkv, z, a, b
-    ///   2. conv1d + silu (with conv_state from cache prepended)
+    ///   2. conv1d + silu (with conv_state from cache prepended; cache update)
     ///   3. split + reshape per-head
-    ///   4. q/k rms_norm (no weight)
+    ///   4. q/k rms_norm (no weight) + scale
     ///   5. compute_g via mlx::compile
     ///   6. beta = sigmoid(b)
-    ///   7. dispatch gated_delta_step kernel; update cache; norm + out_proj
+    ///   7. dispatch gated_delta_step kernel + update recurrent cache + advance offset
+    ///   8. RmsNormGated(y, z) + reshape + out_proj
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
@@ -294,7 +322,10 @@ impl GatedDeltaNet {
                 .get_or_init(|| build_gated_delta_kernel(false).expect("build no-mask kernel"))
         };
 
-        // Step 7b: get state_in from cache (or fresh zeros)
+        // Step 7b: get state_in from cache (or fresh zeros).
+        // Note: `Array::clone()` is cheap (Arc-share refcount inc on `array_desc_`,
+        // not a deep memory copy); the kernel dispatch needs an `&Array`, and
+        // the cache must keep its slot for `update_recurrent` later.
         let state_in = match cache.as_deref() {
             Some(c) => c.recurrent_state().clone(),
             None => Array::zeros(
