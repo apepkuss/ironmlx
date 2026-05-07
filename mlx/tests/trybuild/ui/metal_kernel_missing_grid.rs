@@ -1,3 +1,5 @@
+//! Compile-fail: missing .grid(...) on dispatch builder.
+
 use mlx::{Array, Dtype, MetalKernel, Shape};
 
 fn main() {

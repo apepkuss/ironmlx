@@ -3,6 +3,13 @@
 //! `DispatchBuilder` typestate makes `.dispatch()` callable only when all
 //! 5 mandatory fields (inputs / output_shapes / output_dtypes / grid /
 //! threadgroup) have been set.
+//!
+//! **If the compiler error format changes** (e.g., after a Rust toolchain
+//! update), regenerate the `.stderr` files via:
+//!
+//! ```text
+//! TRYBUILD=overwrite MLX_DIR=$HOME/.local/mlx cargo test --release -p mlx --test trybuild
+//! ```
 
 #[test]
 fn metal_kernel_typestate_compile_fails() {

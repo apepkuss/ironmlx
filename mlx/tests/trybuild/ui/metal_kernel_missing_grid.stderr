@@ -1,14 +1,14 @@
 error[E0599]: no method named `dispatch` found for struct `DispatchBuilder<Set, Set, Set, Unset, Set>` in the current scope
-  --> tests/trybuild/ui/metal_kernel_missing_grid.rs:18:10
+  --> tests/trybuild/ui/metal_kernel_missing_grid.rs:20:10
    |
-12 |       let _ = k
+14 |       let _ = k
    |  _____________-
-13 | |         .dispatch_builder()
-14 | |         .inputs(&[&x])
-15 | |         .output_shapes(&[Shape::from((4_i32,))])
-16 | |         .output_dtypes(&[Dtype::Float32])
-17 | |         .threadgroup(4, 1, 1)
-18 | |         .dispatch();
+15 | |         .dispatch_builder()
+16 | |         .inputs(&[&x])
+17 | |         .output_shapes(&[Shape::from((4_i32,))])
+18 | |         .output_dtypes(&[Dtype::Float32])
+19 | |         .threadgroup(4, 1, 1)
+20 | |         .dispatch();
    | |         -^^^^^^^^ method not found in `DispatchBuilder<Set, Set, Set, Unset, Set>`
    | |_________|
    |

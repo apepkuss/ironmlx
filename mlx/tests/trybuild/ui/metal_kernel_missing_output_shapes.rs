@@ -1,3 +1,5 @@
+//! Compile-fail: missing .output_shapes(...) on dispatch builder.
+
 use mlx::{Array, Dtype, MetalKernel};
 
 fn main() {

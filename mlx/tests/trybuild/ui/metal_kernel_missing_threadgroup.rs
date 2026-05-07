@@ -1,3 +1,5 @@
+//! Compile-fail: missing .threadgroup(...) on dispatch builder.
+
 use mlx::{Array, Dtype, MetalKernel, Shape};
 
 fn main() {
