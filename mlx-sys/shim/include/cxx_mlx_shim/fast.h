@@ -2,9 +2,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "mlx/array.h"
+#include "mlx/fast.h"
 #include "rust/cxx.h"
+
+#include "cxx_mlx_shim/compile.h"  // for ArrayVec
 
 namespace cxx_mlx {
 
@@ -79,5 +84,50 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
     bool is_device_only,
     uint8_t device_type,
     int32_t stream_index);
+
+// === P3a metal_kernel ===
+
+// Opaque types crossing cxx (declared here, defined inline because they hold
+// non-cxx-friendly types: std::function and std::vector<Shape>).
+struct MetalKernelInner {
+  mlx::core::fast::CustomKernelFunction fn;
+};
+
+struct ShapesVec {
+  std::vector<mlx::core::Shape> shapes;
+};
+
+// === ShapesVec API ===
+std::unique_ptr<ShapesVec> shapes_vec_new();
+void shapes_vec_push(ShapesVec& v, rust::Slice<const int32_t> shape);
+size_t shapes_vec_count(const ShapesVec& v);
+
+// === metal_kernel_build ===
+std::unique_ptr<MetalKernelInner> metal_kernel_build(
+    rust::Str name,
+    rust::Slice<const rust::String> input_names,
+    rust::Slice<const rust::String> output_names,
+    rust::Str source,
+    rust::Str header,
+    bool ensure_row_contiguous,
+    bool atomic_outputs);
+
+// Forward decl for cxxbridge-generated struct (fully defined in
+// mlx-sys/src/bridge/fast.rs.h, included only by fast.cc to avoid
+// header-ordering issues).
+struct TemplateArgC;
+
+// === metal_kernel_dispatch ===
+std::unique_ptr<ArrayVec> metal_kernel_dispatch(
+    const MetalKernelInner& kernel,
+    const ArrayVec& inputs,
+    const ShapesVec& output_shapes,
+    rust::Slice<const uint8_t> output_dtypes,
+    int32_t gx, int32_t gy, int32_t gz,
+    int32_t tx, int32_t ty, int32_t tz,
+    rust::Slice<const TemplateArgC> template_args,
+    bool has_init, float init_value,
+    bool verbose,
+    bool has_stream, bool dev_only, uint8_t dev_type, int32_t stream_idx);
 
 }  // namespace cxx_mlx
