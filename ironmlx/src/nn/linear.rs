@@ -85,11 +85,15 @@ impl Linear {
     /// Test/composition seam: build an FP `Linear` from in-memory weight (and optional bias).
     /// Production code should use [`Linear::from_loader`]. This bypass lets `nn` building
     /// blocks be composed without writing a safetensors file (used by `GatedAttention`'s
-    /// `from_components` constructor and unit tests).
+    /// `from_components` constructor, unit tests, and integration tests).
     ///
     /// `weight` must be shape `[out, in]`; `bias` must be `[out]` if `Some`.
-    #[allow(dead_code)]
-    pub(crate) fn new_fp(weight: Array, bias: Option<Array>) -> Self {
+    ///
+    /// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can use it
+    /// — those tests are compiled as external crates. Hidden from rustdoc via
+    /// `#[doc(hidden)]`.
+    #[doc(hidden)]
+    pub fn new_fp(weight: Array, bias: Option<Array>) -> Self {
         Self {
             inner: LinearImpl::Fp { weight, bias },
         }

@@ -84,8 +84,11 @@ impl GatedAttention {
     ///
     /// Used by unit tests and the integration fixture path to avoid synthesizing a real
     /// `model_dir/safetensors` for tiny test cases. Production code uses [`from_loader`].
-    #[allow(dead_code)]
-    pub(crate) fn from_components(
+    ///
+    /// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can use it.
+    /// Hidden from rustdoc via `#[doc(hidden)]`.
+    #[doc(hidden)]
+    pub fn from_components(
         q_proj: Linear,
         k_proj: Linear,
         v_proj: Linear,
