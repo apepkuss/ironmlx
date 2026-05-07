@@ -99,6 +99,16 @@ std::unique_ptr<MlxArray> array_zeros(rust::Slice<const int32_t> shape, uint8_t 
   return std::make_unique<MlxArray>(mlx::core::zeros(s, dtype_from_u8(dtype)));
 }
 
+std::unique_ptr<MlxArray> array_zeros_on(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  auto t = cxx_mlx::helpers::dtype_from_repr(dtype_repr);
+  mlx::core::Shape s(shape.begin(), shape.end());
+  return std::make_unique<MlxArray>(mlx::core::zeros(s, t, target));
+}
+
 rust::Vec<int32_t> array_shape(const MlxArray& a) {
   rust::Vec<int32_t> out;
   out.reserve(a.ndim());

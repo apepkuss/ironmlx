@@ -13,6 +13,11 @@ using MlxArray = mlx::core::array;
 using MlxArrayVec = std::vector<mlx::core::array>;
 
 std::unique_ptr<MlxArray> array_zeros(rust::Slice<const int32_t> shape, uint8_t dtype);
+// Stream-targeted variant of `array_zeros`. The 4 trailing params encode
+// `mlx::core::StreamOrDevice` per `helpers::decode_stream_or_device` (P5.7).
+std::unique_ptr<MlxArray> array_zeros_on(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 rust::Vec<int32_t> array_shape(const MlxArray& a);
 size_t array_ndim(const MlxArray& a);
 size_t array_size(const MlxArray& a);
