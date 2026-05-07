@@ -174,6 +174,8 @@ impl DecoderLayer {
         )?;
         let mlp = Mlp::from_loader(loader, &format!("{prefix}.mlp"))?;
 
+        // No construction-time dim checks — shape errors surface at first forward_on
+        // (see GatedAttention::from_loader for the same pattern).
         Ok(Self {
             input_layernorm,
             self_attn,
