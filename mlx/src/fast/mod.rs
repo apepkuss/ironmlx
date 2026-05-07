@@ -14,7 +14,7 @@
 
 pub mod metal_kernel;
 
-pub use metal_kernel::{MetalKernel, MetalKernelBuilder};
+pub use metal_kernel::{DispatchBuilder, MetalKernel, MetalKernelBuilder, Set, TemplateArg, Unset};
 
 use crate::{Array, Error, Result, StreamOrDevice};
 

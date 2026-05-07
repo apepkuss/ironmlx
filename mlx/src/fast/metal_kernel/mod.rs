@@ -24,8 +24,6 @@ pub struct MetalKernel {
     inner: Arc<MetalKernelInner>,
 }
 
-// T5 will read handle and output_count in dispatch(); allow dead_code until then.
-#[allow(dead_code)]
 pub(crate) struct MetalKernelInner {
     pub(crate) handle: cxx::UniquePtr<mlx_sys::fast::ffi::MetalKernelInner>,
     pub(crate) output_count: usize,
@@ -76,8 +74,7 @@ impl MetalKernel {
 
     /// Access the underlying inner `Arc` (crate-internal, used by tests
     /// to verify Arc-share semantics; not part of the public API).
-    // T5 will call inner_arc() in DispatchBuilder tests; allow dead_code until then.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn inner_arc(&self) -> &Arc<MetalKernelInner> {
         &self.inner
     }
