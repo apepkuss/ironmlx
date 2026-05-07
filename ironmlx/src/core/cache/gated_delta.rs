@@ -26,7 +26,11 @@ pub struct GatedDeltaCache {
 impl GatedDeltaCache {
     /// Allocate a fresh cache.
     ///
-    /// `cap` must be ≥ 1. Both states start zero-initialized.
+    /// `cap` and `kernel_size` must each be ≥ 1. Both states start zero-initialized.
+    /// `kernel_size = 1` is technically valid (guard passes) but produces a
+    /// zero-width `conv_state` of shape `[B, 0, conv_dim]`, which means the
+    /// conv1d sees no historical context. Typical usage has `kernel_size ≥ 2`
+    /// (Qwen3.5 uses `kernel_size = 4`).
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_cap(
         b: i32,
@@ -73,11 +77,19 @@ impl GatedDeltaCache {
     }
 
     /// Replace the conv_state with a freshly-computed sliding window.
+    ///
+    /// Caller is responsible for supplying shape `[B, kernel_size - 1, conv_dim]`
+    /// matching the cache's allocation. No shape validation here — downstream
+    /// conv1d dispatch surfaces shape mismatches.
     pub fn update_conv(&mut self, new_conv_state: Array) {
         self.conv_state = new_conv_state;
     }
 
     /// Replace the recurrent_state with the kernel's `state_out`.
+    ///
+    /// Caller is responsible for supplying shape `[B, Hv, Dv, Dk]` matching
+    /// the cache's allocation, dtype fp32. No shape validation here — downstream
+    /// kernel dispatch surfaces shape mismatches.
     pub fn update_recurrent(&mut self, new_state: Array) {
         self.recurrent_state = new_state;
     }
@@ -140,5 +152,13 @@ mod tests {
     fn cache_rejects_zero_cap() {
         let r = GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 0);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn cache_rejects_zero_kernel_size() {
+        let r = GatedDeltaCache::new_with_cap(1, 0, 8, 4, 8, 8, Dtype::Bfloat16, 16);
+        assert!(r.is_err());
+        let msg = format!("{}", r.err().unwrap());
+        assert!(msg.contains("kernel_size"), "msg: {msg}");
     }
 }
