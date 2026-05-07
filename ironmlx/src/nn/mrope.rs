@@ -301,6 +301,38 @@ impl Mrope {
         let hkv = k_dims[1];
         let s = q_dims[2];
 
+        // Per spec § 3.1: cos/sin are produced by Mrope::cos_sin in fp32 with
+        // shape [B, S, rot_dim/2]. Apply() requires that contract — silently
+        // reading wrong dtype or out-of-bounds offsets in the Metal shader
+        // would surface as numerical drift far from the bug origin.
+        let half = self.rot_dim / 2;
+        let expected_cs_shape = [b, s, half];
+        if cos.shape().as_slice() != expected_cs_shape {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply: cos.shape={:?} != expected [B={}, S={}, ROT_PAIRS={}]",
+                cos.shape().as_slice(),
+                b,
+                s,
+                half
+            ));
+        }
+        if sin.shape().as_slice() != expected_cs_shape {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply: sin.shape={:?} != expected [B={}, S={}, ROT_PAIRS={}]",
+                sin.shape().as_slice(),
+                b,
+                s,
+                half
+            ));
+        }
+        if cos.dtype() != Dtype::Float32 || sin.dtype() != Dtype::Float32 {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply: cos.dtype={:?} sin.dtype={:?}; both must be Float32 (per spec § 3.1)",
+                cos.dtype(),
+                sin.dtype()
+            ));
+        }
+
         let kernel = self.apply_kernel.get_or_init(|| {
             self.build_apply_kernel()
                 .expect("build_apply_kernel cannot fail at first call")
@@ -591,5 +623,33 @@ mod tests {
         // Both must produce the right shape under GQA.
         assert_eq!(q_rot.shape().as_slice(), &[1, 64, 2, 256]);
         assert_eq!(k_rot.shape().as_slice(), &[1, 8, 2, 256]);
+    }
+
+    #[test]
+    fn apply_rejects_wrong_cos_shape() {
+        let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
+        let q = Array::zeros((1_i32, 64, 4, 256), Dtype::Float32).unwrap();
+        let k = Array::zeros((1_i32, 8, 4, 256), Dtype::Float32).unwrap();
+        // Wrong: cos has rot_dim=64 instead of rot_dim/2=32 in last axis.
+        let cos = Array::zeros((1_i32, 4, 64), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
+        let r = mrope.apply(&q, &k, &cos, &sin);
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("cos.shape"), "msg: {msg}");
+    }
+
+    #[test]
+    fn apply_rejects_wrong_cos_dtype() {
+        let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
+        let q = Array::zeros((1_i32, 64, 4, 256), Dtype::Float32).unwrap();
+        let k = Array::zeros((1_i32, 8, 4, 256), Dtype::Float32).unwrap();
+        // Wrong: cos is bf16 instead of fp32.
+        let cos = Array::zeros((1_i32, 4, 32), Dtype::Bfloat16).unwrap();
+        let sin = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
+        let r = mrope.apply(&q, &k, &cos, &sin);
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("Float32"), "msg: {msg}");
     }
 }
