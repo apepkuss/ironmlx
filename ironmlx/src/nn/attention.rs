@@ -173,10 +173,8 @@ impl Attention {
             k
         };
 
-        // Apply rotary positions. Stubbed at P1 — surfaces a clear `Err`.
-        // `Mrope::apply` has no `_on` variant at P1; threaded in P3.
-        let q = mrope.apply(&q, cos, sin)?;
-        let k = mrope.apply(&k, cos, sin)?;
+        // Fused Q+K rotary application (T2 MetalKernel: one dispatch for both).
+        let (q, k) = mrope.apply(&q, &k, cos, sin)?;
 
         // Route post-RoPE K/V through KV cache when provided; otherwise pass
         // through unchanged. SDPA always consumes the full K/V history.

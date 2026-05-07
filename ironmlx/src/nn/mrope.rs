@@ -45,8 +45,7 @@ pub struct Mrope {
     /// instance on first `cos_sin()` call; replayed on every subsequent call.
     cos_sin_compiled: OnceLock<CompiledFn>,
     /// Lazily-built `MetalKernel` for the fused (q, k, cos, sin) -> (q', k')
-    /// apply path (filled in T2).
-    #[allow(dead_code)]
+    /// apply path.
     apply_kernel: OnceLock<MetalKernel>,
 }
 
@@ -239,15 +238,158 @@ impl Mrope {
         compile(pipeline, ShapeMode::Fixed).map_err(anyhow::Error::from)
     }
 
-    /// Apply pre-computed cos/sin rotation to `x` (Q or K), leaving the
-    /// trailing `head_dim - rot_dim` channels unchanged.
+    /// Apply rotary rotation to Q and K in a single fused dispatch.
     ///
-    /// **Stubbed at P1.** Returns `Err` — full implementation lands in P3.
-    pub fn apply(&self, x: &Array, cos: &Array, sin: &Array) -> Result<Array> {
-        let _ = (x, cos, sin);
-        Err(anyhow::anyhow!(
-            "Mrope::apply not implemented at P1 — exercised in P3 model assembly"
-        ))
+    /// `q: [B, Hq, S, HEAD_DIM]`, `k: [B, Hkv, S, HEAD_DIM]`,
+    /// `cos: [B, S, ROTARY_DIM/2]` (fp32), `sin: [B, S, ROTARY_DIM/2]` (fp32).
+    ///
+    /// Returns `(q_rot, k_rot)` with the same shape and dtype as their inputs.
+    /// The trailing `HEAD_DIM - ROTARY_DIM` channels pass through unchanged.
+    pub fn apply(&self, q: &Array, k: &Array, cos: &Array, sin: &Array) -> Result<(Array, Array)> {
+        // Sanity (cheap; full validation is at MLX dispatch boundaries).
+        let q_shape = q.shape();
+        let k_shape = k.shape();
+        let q_dims = q_shape.as_slice();
+        let k_dims = k_shape.as_slice();
+        if q_dims.len() != 4 || k_dims.len() != 4 {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply expects rank-4 q/k; got q.ndim={}, k.ndim={}",
+                q_dims.len(),
+                k_dims.len()
+            ));
+        }
+        if q_dims[3] != self.head_dim || k_dims[3] != self.head_dim {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply: q.head_dim={} k.head_dim={} != configured {}",
+                q_dims[3],
+                k_dims[3],
+                self.head_dim
+            ));
+        }
+
+        let b = q_dims[0];
+        let hq = q_dims[1];
+        let hkv = k_dims[1];
+        let s = q_dims[2];
+
+        let kernel = self.apply_kernel.get_or_init(|| {
+            self.build_apply_kernel()
+                .expect("build_apply_kernel cannot fail at first call")
+        });
+
+        // Grid: cover (B*(Hq+Hkv)) × S × HEAD_DIM elements; one thread per element.
+        let grid_x = b * (hq + hkv);
+        let grid_y = s;
+        let grid_z = self.head_dim;
+        // Threadgroup: 1 thread on the (qk_head, t) axes; HEAD_DIM threads on the d axis.
+        // HEAD_DIM=256 fits within Metal's 1024-thread threadgroup limit.
+        let tg_x = 1;
+        let tg_y = 1;
+        let tg_z = self.head_dim;
+
+        let mut outputs = kernel
+            .dispatch_builder()
+            .inputs(&[q, k, cos, sin])
+            .output_shapes(&[q.shape().clone(), k.shape().clone()])
+            .output_dtypes(&[q.dtype(), k.dtype()])
+            .grid(grid_x, grid_y, grid_z)
+            .threadgroup(tg_x, tg_y, tg_z)
+            .template_int("HEAD_DIM", self.head_dim)
+            .template_int("ROTARY_DIM", self.rot_dim)
+            .dispatch()?;
+
+        let q_rot = outputs.take_at(0)?;
+        let k_rot = outputs.take_at(0)?; // erase-and-shift: K shifts to slot 0
+        Ok((q_rot, k_rot))
+    }
+
+    /// Lazily build the fused Q+K rotary `MetalKernel`. Templated on
+    /// `HEAD_DIM` and `ROTARY_DIM` so Metal's compiler unrolls the rotate
+    /// loop and folds index arithmetic. MLX auto-injects `q_shape` / `k_shape`
+    /// buffers when the source references them (see
+    /// `/Volumes/Dev/mlx/mlx/backend/metal/custom_kernel.cpp:93-105,190-192`).
+    fn build_apply_kernel(&self) -> Result<mlx::MetalKernel> {
+        // Metal shader. Templates: HEAD_DIM, ROTARY_DIM. ROT_PAIRS = ROTARY_DIM/2.
+        //
+        // Each thread handles one element of (Q or K) at indices (b, head, t, d).
+        // The first grid dim (qk_head) ranges over B*(Hq+Hkv): the lower B*Hq
+        // values address Q; the upper B*Hkv address K. Hq, Hkv, B, S are pulled
+        // from the input shape buffers (auto-injected by MLX when the source
+        // references `<name>_shape`).
+        let src = r#"
+        constexpr uint ROT_PAIRS = ROTARY_DIM / 2;
+
+        uint qk_head = thread_position_in_grid.x;
+        uint t       = thread_position_in_grid.y;
+        uint d       = thread_position_in_grid.z;
+
+        uint B   = (uint)q_shape[0];
+        uint Hq  = (uint)q_shape[1];
+        uint S   = (uint)q_shape[2];
+        uint Hkv = (uint)k_shape[1];
+
+        // Decode (b, head, is_q)
+        bool is_q;
+        uint b;
+        uint h;
+        if (qk_head < B * Hq) {
+            is_q = true;
+            b = qk_head / Hq;
+            h = qk_head % Hq;
+        } else {
+            is_q = false;
+            uint kqk = qk_head - B * Hq;
+            b = kqk / Hkv;
+            h = kqk % Hkv;
+        }
+
+        uint H = is_q ? Hq : Hkv;
+        // Row-major (B, H, S, HEAD_DIM):
+        uint base = ((b * H + h) * S + t) * HEAD_DIM;
+
+        // cos/sin: row-major (B, S, ROT_PAIRS), broadcast across heads.
+        uint cs_idx = (b * S + t) * ROT_PAIRS;
+
+        if (d < ROTARY_DIM) {
+            // Interleaved: pair (2p, 2p+1) shares cos[p], sin[p].
+            uint p = d >> 1;
+            bool is_even = (d & 1u) == 0u;
+
+            float c = cos[cs_idx + p];
+            float si = sin[cs_idx + p];
+
+            if (is_q) {
+                float x_self = float(q[base + d]);
+                float x_pair = float(q[base + (is_even ? d + 1 : d - 1)]);
+                float rotated = is_even
+                    ? (x_self * c - x_pair * si)
+                    : (x_pair * si + x_self * c);
+                q_out[base + d] = static_cast<__typeof__(*q)>(rotated);
+            } else {
+                float x_self = float(k[base + d]);
+                float x_pair = float(k[base + (is_even ? d + 1 : d - 1)]);
+                float rotated = is_even
+                    ? (x_self * c - x_pair * si)
+                    : (x_pair * si + x_self * c);
+                k_out[base + d] = static_cast<__typeof__(*k)>(rotated);
+            }
+        } else {
+            // Pass-through tail (HEAD_DIM - ROTARY_DIM channels).
+            if (is_q) {
+                q_out[base + d] = q[base + d];
+            } else {
+                k_out[base + d] = k[base + d];
+            }
+        }
+        "#;
+
+        Ok(mlx::MetalKernel::builder("ironmlx_mrope_apply_qk")
+            .inputs(&["q", "k", "cos", "sin"])
+            .outputs(&["q_out", "k_out"])
+            .source(src)
+            .ensure_row_contiguous(true)
+            .atomic_outputs(false)
+            .build()?)
     }
 }
 
@@ -303,5 +445,122 @@ mod tests {
         let (cos, sin) = mrope.cos_sin(&pos).expect("cos_sin seq=1");
         assert_eq!(cos.shape().as_slice(), &[1, 1, 32]);
         assert_eq!(sin.shape().as_slice(), &[1, 1, 32]);
+    }
+
+    #[test]
+    fn apply_shape_and_dtype_fp32() {
+        let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
+
+        // Q [B=1, Hq=64, S=4, head_dim=256], K [B=1, Hkv=8, S=4, head_dim=256]
+        // Use small S=4 to keep the test fast.
+        let q = Array::zeros((1_i32, 64, 4, 256), Dtype::Float32).unwrap();
+        let k = Array::zeros((1_i32, 8, 4, 256), Dtype::Float32).unwrap();
+        let cos = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
+
+        let (q_rot, k_rot) = mrope.apply(&q, &k, &cos, &sin).expect("apply");
+
+        assert_eq!(q_rot.shape().as_slice(), &[1, 64, 4, 256]);
+        assert_eq!(k_rot.shape().as_slice(), &[1, 8, 4, 256]);
+        assert_eq!(q_rot.dtype(), Dtype::Float32);
+        assert_eq!(k_rot.dtype(), Dtype::Float32);
+    }
+
+    #[test]
+    fn apply_shape_and_dtype_bf16() {
+        let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
+        let q = Array::zeros((1_i32, 64, 4, 256), Dtype::Bfloat16).unwrap();
+        let k = Array::zeros((1_i32, 8, 4, 256), Dtype::Bfloat16).unwrap();
+        // cos/sin always fp32 (per spec § 3.1).
+        let cos = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
+
+        let (q_rot, k_rot) = mrope.apply(&q, &k, &cos, &sin).expect("apply bf16");
+
+        assert_eq!(q_rot.dtype(), Dtype::Bfloat16);
+        assert_eq!(k_rot.dtype(), Dtype::Bfloat16);
+    }
+
+    #[test]
+    fn apply_partial_rotary_tail_unchanged() {
+        // head_dim=256, partial=0.25 -> rot_dim=64. Tail [64..256) must be unchanged.
+        let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
+
+        // Distinct integer values per element so we can spot any unintended mutation.
+        // Q shape [1, 1, 1, 256] with values 0..256 (fp32).
+        let q_data: Vec<f32> = (0..256).map(|i| i as f32).collect();
+        let q: Array = (q_data.as_slice(), (1_i32, 1, 1, 256)).try_into().unwrap();
+        let k: Array = (q_data.as_slice(), (1_i32, 1, 1, 256)).try_into().unwrap();
+
+        // cos = ones, sin = zeros: rotation is identity on rotated dims;
+        // tail dims must also stay unchanged.
+        let cos = constructors::ones((1_i32, 1, 32), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 1, 32), Dtype::Float32).unwrap();
+
+        let (q_rot, _k_rot) = mrope.apply(&q, &k, &cos, &sin).expect("apply");
+        let rot_data: Vec<f32> = q_rot.to_vec().unwrap();
+
+        // Tail must be byte-identical to input.
+        for d in 64..256 {
+            assert_eq!(rot_data[d], q_data[d], "tail channel {d} mutated");
+        }
+        // Rotated dims with cos=1 sin=0: identity for both even and odd halves.
+        // even idx: x_even * 1 - x_odd * 0 = x_even
+        // odd idx:  x_even * 0 + x_odd * 1 = x_odd
+        for d in 0..64 {
+            assert_eq!(
+                rot_data[d], q_data[d],
+                "rotated channel {d} not identity under cos=1,sin=0"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_interleaved_pair_known_rotation() {
+        // Build a tiny mrope where head_dim=4, rot_dim=4, sections=[1,1,0]
+        // (or any sections summing to half=2). Manual values let us check
+        // the rotation formula bit-exactly.
+        let mrope = Mrope::new(4, 10000.0, 1.0, &[1, 1, 0], true).unwrap();
+
+        // Q = [1, 2, 3, 4] reshaped as [1, 1, 1, 4]
+        let q: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1, 1, 4))
+            .try_into()
+            .unwrap();
+        let k: Array = (&[10.0_f32, 20.0, 30.0, 40.0][..], (1_i32, 1, 1, 4))
+            .try_into()
+            .unwrap();
+
+        // cos = [c0, c1], sin = [s0, s1] for the 2 pairs.
+        // Use cos = [0, 1], sin = [1, 0]:
+        //   pair 0 (channels 0,1): cos=0, sin=1
+        //     y[0] = x[0]*0 - x[1]*1 = -x[1] = -2
+        //     y[1] = x[0]*1 + x[1]*0 = x[0]  =  1
+        //   pair 1 (channels 2,3): cos=1, sin=0  (identity)
+        //     y[2] = x[2] = 3
+        //     y[3] = x[3] = 4
+        let cos: Array = (&[0.0_f32, 1.0][..], (1_i32, 1, 2)).try_into().unwrap();
+        let sin: Array = (&[1.0_f32, 0.0][..], (1_i32, 1, 2)).try_into().unwrap();
+
+        let (q_rot, k_rot) = mrope.apply(&q, &k, &cos, &sin).expect("apply");
+        let q_out: Vec<f32> = q_rot.to_vec().unwrap();
+        let k_out: Vec<f32> = k_rot.to_vec().unwrap();
+
+        assert_eq!(q_out, vec![-2.0, 1.0, 3.0, 4.0]);
+        assert_eq!(k_out, vec![-20.0, 10.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn apply_gqa_different_q_kv_heads() {
+        // Qwen3.5-style GQA: Hq=64, Hkv=8.
+        let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
+        let q = Array::zeros((1_i32, 64, 2, 256), Dtype::Float32).unwrap();
+        let k = Array::zeros((1_i32, 8, 2, 256), Dtype::Float32).unwrap();
+        let cos = Array::zeros((1_i32, 2, 32), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 2, 32), Dtype::Float32).unwrap();
+
+        let (q_rot, k_rot) = mrope.apply(&q, &k, &cos, &sin).expect("apply gqa");
+        // Both must produce the right shape under GQA.
+        assert_eq!(q_rot.shape().as_slice(), &[1, 64, 2, 256]);
+        assert_eq!(k_rot.shape().as_slice(), &[1, 8, 2, 256]);
     }
 }
