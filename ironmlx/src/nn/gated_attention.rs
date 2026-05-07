@@ -148,6 +148,8 @@ impl GatedAttention {
         let _ = mask;
         let target = target.into();
 
+        // Two-step bind: x.shape() returns an owned Shape; we bind it to extend
+        // its lifetime past .as_slice(), since the slice borrows from the Shape.
         let dims = x.shape();
         let dims = dims.as_slice();
         let batch = dims[0];
@@ -334,11 +336,13 @@ mod tests {
     }
 
     #[test]
-    fn forward_with_zero_gate_produces_finite_output() {
-        // q_proj weight has shape [Hq*D*2, hidden] = [64, 32]. When the input is
-        // all-zeros (or near-zero), q_proj output is ~zero, so the gate is ~zero
-        // and sigmoid(0)=0.5 — gated output ≈ 0.5 * sdpa_out. We just verify
-        // the dispatch succeeds and produces finite values.
+    fn forward_with_zero_weight_dispatch_succeeds() {
+        // q_proj weight has shape [Hq*D*2, hidden] = [64, 32], all zeros. So
+        // q_proj output is zero regardless of input → gate is zero → sigmoid(0)
+        // = 0.5 (half-strength, NOT zero). We don't assert exact values here;
+        // we just verify the full dispatch pipeline runs without crashing and
+        // produces finite output. Exact numerical correctness is validated in
+        // the T3 integration test against the Python fixture.
         let attn = small_gated_attention();
         let mrope = Mrope::new(8, 1e7, 1.0, &[2, 1, 1], true).unwrap();
 
@@ -447,9 +451,17 @@ mod tests {
         assert!(v.iter().any(|x| x.abs() > 1e-3), "all zeros — likely a bug");
         // Per-head invariant: head 1's gate is non-zero (sigmoid > 0.9), head 0's
         // gate is zero (sigmoid = 0.5). With o_proj=identity, output index i comes
-        // from SDPA-output[i] * sigmoid(gate)[i]. SDPA-out is similar across heads
-        // (k=v=constant), so the gate ratio dominates and head 1 channels (indices
-        // 2, 3) should be larger than head 0 channels (indices 0, 1).
+        // from SDPA-output[i] * sigmoid(gate)[i].
+        //
+        // Head 0 query post-RMSNorm is non-zero (input [1, 2] normalized). Head 1
+        // query post-RMSNorm is the result of normalizing [0, 0]; with a small eps
+        // it stays near zero, but SDPA with a near-zero query against constant k/v
+        // still produces a finite, nonzero attention output (softmax over equal
+        // logits => uniform weights => output = v average).
+        //
+        // So both heads produce finite SDPA-out of similar magnitude (k=v=const),
+        // and the gate ratio dominates: head 1 channels (indices 2, 3) should be
+        // larger than head 0 channels (indices 0, 1).
         assert!(
             v[2].abs() > v[0].abs() && v[3].abs() > v[1].abs(),
             "head 1 channels not larger than head 0 (per-head split incorrect): {:?}",
