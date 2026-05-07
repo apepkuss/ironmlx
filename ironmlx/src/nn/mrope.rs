@@ -144,12 +144,23 @@ impl Mrope {
                 .expect("build_cos_sin_pipeline cannot fail at first call")
         });
         let mut outs = f.invoke(&[position_ids, &self.inv_freq])?;
-        // CompiledFn::invoke returns a Vec<Array> in declared order.
-        let sin = outs.remove(1);
-        let cos = outs.remove(0);
+        // CompiledFn::invoke returns a Vec<Array> in the order the closure
+        // pushed them: [cos, sin]. Pop from the back to avoid index shifts.
+        let sin = outs.pop().expect("pipeline returned cos+sin");
+        let cos = outs.pop().expect("pipeline returned cos+sin");
         Ok((cos, sin))
     }
 
+    /// Build the `mlx::compile`d cos/sin pipeline. Captures the cumulative
+    /// section offsets at compile time (model constants) into a `move`
+    /// closure, then traces:
+    ///
+    ///   `pos × inv_freq → cos / sin → per-stream slice + squeeze + concat`
+    ///
+    /// Uses `ShapeMode::Fixed` (re-traces per distinct `(B, S)`) because
+    /// MLX's `Slice` primitive lacks `output_shapes` inference, blocking
+    /// `Shapeless`. Called once per `Mrope` instance from `cos_sin`'s
+    /// `OnceLock::get_or_init`.
     fn build_cos_sin_pipeline(&self) -> Result<CompiledFn> {
         // Cumulative section offsets; e.g. sections=[11,11,10] -> offsets=[0,11,22,32].
         let n_streams = self.sections.len() as i32;
@@ -197,10 +208,11 @@ impl Mrope {
                 let hi = offsets[s as usize + 1];
 
                 // start = [s, 0, 0, lo], stop = [s+1, B, S, hi]
-                // Use i32::MAX for the B and S dims: MLX clamps slice stops to
-                // the actual dimension size, so this is equivalent to "take all"
-                // without capturing a concrete runtime shape — required for
-                // ShapeMode::Shapeless compatibility across variable seq lengths.
+                // Use i32::MAX for B and S stops: MLX clamps slice stops to the
+                // actual dim size at runtime, so this is equivalent to "take all"
+                // without baking a concrete (B, S) into the Fixed-mode trace —
+                // lets the trace stay reusable across distinct shapes within the
+                // same Fixed-shape cache entry.
                 let start = vec![s, 0_i32, 0, lo];
                 let stop = vec![s + 1, i32::MAX, i32::MAX, hi];
 
@@ -213,10 +225,8 @@ impl Mrope {
                 cos_segs.push(cos_seg);
                 sin_segs.push(sin_seg);
             }
-            let cos_segs_refs: Vec<&Array> = cos_segs.iter().collect();
-            let sin_segs_refs: Vec<&Array> = sin_segs.iter().collect();
-            let cos = concatenate(&cos_segs_refs, -1)?;
-            let sin = concatenate(&sin_segs_refs, -1)?;
+            let cos = concatenate(&cos_segs.iter().collect::<Vec<&Array>>(), -1)?;
+            let sin = concatenate(&sin_segs.iter().collect::<Vec<&Array>>(), -1)?;
 
             Ok(vec![cos, sin])
         };
