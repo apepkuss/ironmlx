@@ -39,14 +39,18 @@ pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
         auto hk_idx = hv_idx / (Hv / Hk);
         constexpr int n_per_t = Dk / 32;
 
+        // q, k: [B, T, Hk, Dk]
         auto q_ = q + b_idx * T * Hk * Dk + hk_idx * Dk;
         auto k_ = k + b_idx * T * Hk * Dk + hk_idx * Dk;
+
+        // v, y: [B, T, Hv, Dv]
         auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;
         y += b_idx * T * Hv * Dv + hv_idx * Dv;
 
         auto dk_idx = thread_position_in_threadgroup.x;
         auto dv_idx = thread_position_in_grid.y;
 
+        // state_in, state_out: [B, Hv, Dv, Dk]
         auto i_state = state_in + (n * Dv + dv_idx) * Dk;
         auto o_state = state_out + (n * Dv + dv_idx) * Dk;
 
@@ -83,8 +87,13 @@ pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
               y[dv_idx] = static_cast<InT>(out);
             }}
           }} else {{
+            // Note: all 32 simdgroup threads write the same zero value here
+            // (no `thread_index_in_simdgroup == 0` guard). Matches mlx-lm
+            // reference exactly; wasted write bandwidth is acceptable since
+            // masked tokens are rare and all writes are identical.
             y[dv_idx] = static_cast<InT>(0);
           }}
+          // Advance pointers to the next time step.
           q_ += Hk * Dk;
           k_ += Hk * Dk;
           v_ += Hv * Dv;
