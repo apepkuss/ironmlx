@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "mlx/array.h"
+#include "mlx/fast.h"
 #include "rust/cxx.h"
 
 namespace cxx_mlx {
@@ -79,5 +82,22 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
     bool is_device_only,
     uint8_t device_type,
     int32_t stream_index);
+
+// === P3a metal_kernel ===
+
+// Opaque types crossing cxx (declared here, defined inline because they hold
+// non-cxx-friendly types: std::function and std::vector<Shape>).
+struct MetalKernelInner {
+  mlx::core::fast::CustomKernelFunction fn;
+};
+
+struct ShapesVec {
+  std::vector<mlx::core::Shape> shapes;
+};
+
+// === ShapesVec API ===
+std::unique_ptr<ShapesVec> shapes_vec_new();
+void shapes_vec_push(ShapesVec& v, rust::Slice<const int32_t> shape);
+size_t shapes_vec_count(const ShapesVec& v);
 
 }  // namespace cxx_mlx

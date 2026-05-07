@@ -15,10 +15,28 @@
 #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "cxx_mlx")]
 pub mod ffi {
+    /// cxx-friendly encoding of `mlx::core::fast::TemplateArg`
+    /// (`std::variant<int, bool, Dtype>`).
+    /// `kind`: 0 = Int (`int_val`), 1 = Bool (`bool_val`), 2 = Dtype
+    /// (`int_val` carries the dtype repr).
+    struct TemplateArgC {
+        name: String,
+        kind: u8,
+        int_val: i32,
+        bool_val: bool,
+    }
+
     unsafe extern "C++" {
         include!("cxx_mlx_shim/fast.h");
 
         type MlxArray = crate::bridge::array::ffi::MlxArray;
+        type MetalKernelInner;
+        type ShapesVec;
+
+        // === P3a ShapesVec ===
+        fn shapes_vec_new() -> UniquePtr<ShapesVec>;
+        fn shapes_vec_push(v: Pin<&mut ShapesVec>, shape: &[i32]);
+        fn shapes_vec_count(v: &ShapesVec) -> usize;
 
         unsafe fn fast_rms_norm(
             x: &MlxArray,

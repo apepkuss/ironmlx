@@ -175,3 +175,13 @@ fn compile_clear_cache_links() {
     use mlx_sys::compile::ffi;
     ffi::compile_clear_cache();
 }
+
+#[test]
+fn shapes_vec_links() {
+    use mlx_sys::fast::ffi;
+    let mut v = ffi::shapes_vec_new();
+    assert_eq!(ffi::shapes_vec_count(&v), 0);
+    ffi::shapes_vec_push(v.pin_mut(), &[2, 3, 4]);
+    ffi::shapes_vec_push(v.pin_mut(), &[8]);
+    assert_eq!(ffi::shapes_vec_count(&v), 2);
+}

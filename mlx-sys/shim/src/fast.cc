@@ -81,4 +81,18 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
           target));
 }
 
+// === P3a ShapesVec ===
+
+std::unique_ptr<ShapesVec> shapes_vec_new() {
+  return std::make_unique<ShapesVec>();
+}
+
+void shapes_vec_push(ShapesVec& v, rust::Slice<const int32_t> shape) {
+  v.shapes.emplace_back(shape.begin(), shape.end());
+}
+
+size_t shapes_vec_count(const ShapesVec& v) {
+  return v.shapes.size();
+}
+
 }  // namespace cxx_mlx
