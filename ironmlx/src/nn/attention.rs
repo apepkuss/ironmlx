@@ -97,13 +97,14 @@ impl Attention {
     ///
     /// `x: [batch, seq, hidden]`. Returns `[batch, seq, hidden]`.
     ///
-    /// **At P1 this returns `Err`** because [`Mrope::apply`] is stubbed.
-    /// The full path is verified in P3 once Qwen3.5 model assembly drives
-    /// real position-id streams; this code is the wired structural skeleton
-    /// the P3 path executes against.
+    /// **As of P3b1 this is fully wired end-to-end**: rotary positions are
+    /// applied via the fused MRoPE Q+K MetalKernel, then SDPA runs through
+    /// `mlx::fast::scaled_dot_product_attention`. Caller supplies the
+    /// pre-computed `cos`/`sin` tables (computed once per forward in the
+    /// model assembly via `Mrope::cos_sin`).
     ///
     /// `cos`, `sin` are the precomputed rotary tables broadcastable against
-    /// Q/K. `mask` is currently ignored — at P1 the kernel is invoked with
+    /// Q/K. `mask` is currently ignored — the kernel is always invoked with
     /// `mask_mode = "causal"`; explicit masks are folded in at P2 once the
     /// KV cache lands.
     pub fn forward(
@@ -173,10 +174,8 @@ impl Attention {
             k
         };
 
-        // Apply rotary positions. Stubbed at P1 — surfaces a clear `Err`.
-        // `Mrope::apply` has no `_on` variant at P1; threaded in P3.
-        let q = mrope.apply(&q, cos, sin)?;
-        let k = mrope.apply(&k, cos, sin)?;
+        // Fused Q+K rotary application (T2 MetalKernel: one dispatch for both).
+        let (q, k) = mrope.apply(&q, &k, cos, sin)?;
 
         // Route post-RoPE K/V through KV cache when provided; otherwise pass
         // through unchanged. SDPA always consumes the full K/V history.

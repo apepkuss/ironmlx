@@ -270,3 +270,26 @@ fn metal_kernel_dispatch_links() {
     let v = array_ffi::array_to_vec_f32(&y).expect("to vec");
     assert_eq!(v, vec![1.0, 1.0, 1.0, 1.0]);
 }
+
+#[test]
+fn conv1d_links() {
+    use mlx_sys::array::ffi as array_ffi;
+    use mlx_sys::conv::ffi as conv_ffi;
+
+    // input: [N=1, L=8, C_in=2] fp32, all zeros
+    let input = array_ffi::array_zeros(&[1, 8, 2], FLOAT32).expect("input zeros");
+    // weight: [C_out=4, K=3, C_in/groups=2] fp32, all zeros
+    let weight = array_ffi::array_zeros(&[4, 3, 2], FLOAT32).expect("weight zeros");
+
+    let out = unsafe {
+        conv_ffi::ops_conv1d(
+            &input, &weight, /* stride */ 1, /* padding */ 0, /* dilation */ 1,
+            /* groups */ 1, /* has_target */ false, /* is_device_only */ false,
+            /* device_type */ 0, /* stream_index */ 0,
+        )
+    }
+    .expect("conv1d should succeed");
+    assert!(!out.is_null());
+    // output shape: [N=1, L_out=8-3+1=6, C_out=4]
+    assert_eq!(array_ffi::array_shape(&out), vec![1, 6, 4]);
+}

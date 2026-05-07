@@ -8,7 +8,7 @@
 //! Each layer exposes a default `forward` (current default stream) and a
 //! stream-targeted `forward_on` variant (P5.7 contract).
 
-use mlx::{Array, StreamOrDevice};
+use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
 use crate::Result;
@@ -93,6 +93,66 @@ impl LayerNorm {
     }
 }
 
+/// RMSNorm with optional sigmoid-style gate, matching mlx-lm's `Qwen3NextRMSNormGated`.
+///
+/// `forward(hidden, None)` → `cast(rms_norm(hidden, weight, eps), hidden.dtype())`.
+/// `forward(hidden, Some(gate))` → `cast(silu(gate_fp32) * rms_norm_fp32, hidden.dtype())`,
+/// matching the precise-SwiGLU pattern: fp32 intermediate, cast back to input dtype.
+pub struct RmsNormGated {
+    weight: Array,
+    eps: f32,
+}
+
+impl RmsNormGated {
+    /// Production constructor: load `{prefix}.weight`.
+    pub fn from_loader(loader: &Loader, prefix: &str, eps: f32) -> Result<Self> {
+        let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
+        Ok(Self { weight, eps })
+    }
+
+    /// Test/composition seam: build from in-memory weight + eps.
+    ///
+    /// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can use it
+    /// — those tests are compiled as external crates. Hidden from rustdoc via
+    /// `#[doc(hidden)]`.
+    #[doc(hidden)]
+    pub fn new(weight: Array, eps: f32) -> Self {
+        Self { weight, eps }
+    }
+
+    /// Forward pass with default stream.
+    pub fn forward(&self, hidden: &Array, gate: Option<&Array>) -> Result<Array> {
+        self.forward_on(hidden, gate, ())
+    }
+
+    /// Stream-targeted forward.
+    pub fn forward_on(
+        &self,
+        hidden: &Array,
+        gate: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let hidden_dtype = hidden.dtype();
+
+        let normed = mlx::fast::rms_norm_on(hidden, Some(&self.weight), self.eps, target)?;
+
+        match gate {
+            Some(g) => {
+                // Precise SwiGLU: silu(gate) * normed, computed in fp32, cast back.
+                let g_f32 = mlx::ops::cast::astype(g, Dtype::Float32)?;
+                // silu(x) = x * sigmoid(x)
+                let g_sig = g_f32.sigmoid_on(target)?;
+                let g_silu = &g_f32 * &g_sig;
+                let normed_f32 = mlx::ops::cast::astype(&normed, Dtype::Float32)?;
+                let mul = &g_silu * &normed_f32;
+                Ok(mlx::ops::cast::astype(&mul, hidden_dtype)?)
+            }
+            None => Ok(mlx::ops::cast::astype(&normed, hidden_dtype)?),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +183,48 @@ mod tests {
         };
         let x = Array::zeros((1, 4), Dtype::Float32).unwrap();
         let _ = norm.forward(&x).unwrap();
+    }
+
+    #[test]
+    fn rms_norm_gated_none_path_shape_dtype() {
+        // Verify shape/dtype/finiteness of the gate=None code path.
+        // (Strict equivalence to a separate RmsNorm computation is not asserted —
+        // the integration test in T7 covers that against the Python fixture.)
+        let weight = mlx::ops::constructors::ones((4_i32,), Dtype::Float32).unwrap();
+        let norm = RmsNormGated::new(weight, 1e-6);
+        // input: [1, 4] fp32 with non-trivial values
+        let x_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let x: Array = (x_data.as_slice(), (1_i32, 4)).try_into().unwrap();
+
+        let y = norm.forward(&x, None).expect("forward no gate");
+        assert_eq!(y.shape().as_slice(), &[1, 4]);
+        assert_eq!(y.dtype(), Dtype::Float32);
+        // Check finiteness — exact RMSNorm value isn't asserted (relative shapes vs gate path matter).
+        let v: Vec<f32> = y.to_vec().unwrap();
+        assert!(v.iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn rms_norm_gated_with_gate_finite() {
+        // With gate=Some, dispatch should produce finite output (exact silu * rmsnorm
+        // values aren't asserted at unit level — those go in the integration test).
+        let weight = mlx::ops::constructors::ones((4_i32,), Dtype::Float32).unwrap();
+        let norm = RmsNormGated::new(weight, 1e-6);
+        let x_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let x: Array = (x_data.as_slice(), (1_i32, 4)).try_into().unwrap();
+        let g_data: Vec<f32> = vec![0.5, -0.5, 0.0, 1.0];
+        let g: Array = (g_data.as_slice(), (1_i32, 4)).try_into().unwrap();
+
+        let y = norm.forward(&x, Some(&g)).expect("forward with gate");
+        assert_eq!(y.shape().as_slice(), &[1, 4]);
+        assert_eq!(y.dtype(), Dtype::Float32);
+        let v: Vec<f32> = y.to_vec().unwrap();
+        assert!(v.iter().all(|x| x.is_finite()));
+        // gate=0 channel (index 2): silu(0) = 0 * sigmoid(0) = 0, so y[2] = 0
+        assert!(
+            v[2].abs() < 1e-6,
+            "gate=0 should yield zero output, got {}",
+            v[2]
+        );
     }
 }
