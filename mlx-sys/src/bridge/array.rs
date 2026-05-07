@@ -575,6 +575,17 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+        fn array_slice_update(
+            src: &MlxArray,
+            update: &MlxArray,
+            start: &[i32],
+            stop: &[i32],
+            strides: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         unsafe fn array_gather(
             a: &MlxArray,
             indices: &[*const MlxArray],

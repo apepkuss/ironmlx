@@ -295,6 +295,18 @@ std::unique_ptr<MlxArray> array_slice_strided(
     rust::Slice<const int32_t> strides,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
+// Functional in-place write: returns a new array equal to `src` with the
+// region `src[start:stop:strides]` replaced by `update`. MLX uses
+// copy-on-write internally so this is cheap when `src` has no other refs.
+// Bound only the most general (with-strides) overload — other overloads are
+// not used by ironmlx (KVCache uses unit strides).
+std::unique_ptr<MlxArray> array_slice_update(
+    const MlxArray& src, const MlxArray& update,
+    rust::Slice<const int32_t> start,
+    rust::Slice<const int32_t> stop,
+    rust::Slice<const int32_t> strides,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
 std::unique_ptr<MlxArray> array_gather(
     const MlxArray& a,
     rust::Slice<const MlxArray* const> indices,
