@@ -204,6 +204,6 @@ fn metal_kernel_build_links() {
         /* ensure_row_contiguous */ true,
         /* atomic_outputs */ false,
     )
-    .expect("kernel compiles");
+    .expect("metal_kernel factory returns Ok");
     assert!(!kernel.is_null());
 }
