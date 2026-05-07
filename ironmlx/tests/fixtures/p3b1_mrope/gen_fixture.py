@@ -15,6 +15,20 @@ from pathlib import Path
 import numpy as np
 import mlx.core as mx
 
+# Pin the MLX version this fixture was generated against. Bump this constant
+# (and regenerate via `python gen_fixture.py`) whenever upgrading MLX so the
+# Rust integration tests stay aligned with the exact numerical behavior of
+# the Python reference.
+EXPECTED_MLX_VERSION = "0.31.1"
+
+_mlx_version = mx.__version__
+if _mlx_version != EXPECTED_MLX_VERSION:
+    raise SystemExit(
+        f"mlx version mismatch: got {_mlx_version}, expected "
+        f"{EXPECTED_MLX_VERSION}. Bump EXPECTED_MLX_VERSION in this file "
+        f"and regenerate the .npy fixtures."
+    )
+
 OUT_DIR = Path(__file__).parent
 
 # ---- Qwen3.5 MRoPE constants (per the model config) ----

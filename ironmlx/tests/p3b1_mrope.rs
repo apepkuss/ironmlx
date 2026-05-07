@@ -39,7 +39,7 @@ fn max_abs_diff_bf16(a: &Array, b: &Array) -> f32 {
 }
 
 #[test]
-fn cos_sin_matches_mlx_lm_fixture() {
+fn cos_sin_matches_python_fixture() {
     // head_dim=256, partial=0.25 -> rot_dim=64, half=32, sections=[11,11,10].
     let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
 
@@ -59,7 +59,7 @@ fn cos_sin_matches_mlx_lm_fixture() {
 }
 
 #[test]
-fn apply_matches_mlx_lm_fixture() {
+fn apply_matches_python_fixture() {
     let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
 
     let q = load("input_q");

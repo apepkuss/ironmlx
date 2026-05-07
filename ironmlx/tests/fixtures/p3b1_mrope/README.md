@@ -17,7 +17,7 @@ cd ironmlx/tests/fixtures/p3b1_mrope
 python gen_fixture.py
 ```
 
-Generated `.npy` files (committed to git, ~800KB total):
+Generated `.npy` files (committed to git, ~580KB total — T4 adds `input_v.npy` and `expected_attn_out.npy`):
 
 | File | Shape | Dtype |
 |---|---|---|
