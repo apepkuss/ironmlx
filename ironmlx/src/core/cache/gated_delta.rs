@@ -108,6 +108,23 @@ impl GatedDeltaCache {
         self.offset = new_off;
         Ok(())
     }
+
+    /// Zero both states and reset offset to 0. Retains the existing buffer
+    /// allocations (cap unchanged) — usable for multi-request reuse.
+    pub fn reset(&mut self) -> Result<()> {
+        let conv_dims = self.conv_state.shape();
+        let conv_dims = conv_dims.as_slice();
+        let conv_dtype = self.conv_state.dtype();
+        self.conv_state = Array::zeros(conv_dims, conv_dtype)?;
+
+        let rec_dims = self.recurrent_state.shape();
+        let rec_dims = rec_dims.as_slice();
+        // recurrent_state is always fp32 (per `new_with_cap`), use that.
+        self.recurrent_state = Array::zeros(rec_dims, Dtype::Float32)?;
+
+        self.offset = 0;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -160,5 +177,19 @@ mod tests {
         assert!(r.is_err());
         let msg = format!("{}", r.err().unwrap());
         assert!(msg.contains("kernel_size"), "msg: {msg}");
+    }
+
+    #[test]
+    fn cache_reset_zeros_state_and_offset() {
+        let mut cache = GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16)
+            .expect("cache new");
+        cache.advance(8).unwrap();
+        assert_eq!(cache.offset(), 8);
+
+        cache.reset().expect("reset");
+        assert_eq!(cache.offset(), 0);
+        // shapes preserved
+        assert_eq!(cache.conv_state().shape().as_slice(), &[1, 3, 8]);
+        assert_eq!(cache.recurrent_state().shape().as_slice(), &[1, 4, 8, 8]);
     }
 }

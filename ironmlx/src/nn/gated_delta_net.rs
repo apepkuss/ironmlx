@@ -11,6 +11,7 @@
 
 use std::sync::OnceLock;
 
+use anyhow::anyhow;
 use mlx::compile::{CompiledFn, ShapeMode};
 use mlx::ops::shape::concatenate;
 use mlx::{Array, Dtype, MetalKernel, Shape, StreamOrDevice};
@@ -229,8 +230,41 @@ impl GatedDeltaNet {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
-        let dims = x.shape();
-        let dims = dims.as_slice();
+
+        // Pre-flight validation. Match P3b1 Mrope's "explicit bounds > trust caller"
+        // pattern — surface common misuses at the source rather than as a downstream
+        // shape/MTL dispatch error.
+        let dims_borrow = x.shape();
+        let dims = dims_borrow.as_slice();
+        if dims.len() != 3 {
+            return Err(anyhow!(
+                "GatedDeltaNet::forward: x must be rank-3 [B, S, hidden]; got rank {}",
+                dims.len()
+            ));
+        }
+        if dims[2] != self.cfg.hidden_size {
+            return Err(anyhow!(
+                "GatedDeltaNet::forward: x.last_dim={} != hidden_size={}",
+                dims[2],
+                self.cfg.hidden_size
+            ));
+        }
+        if self.cfg.head_k_dim < 32 || self.cfg.head_k_dim % 32 != 0 {
+            return Err(anyhow!(
+                "GatedDeltaNet::forward: head_k_dim={} must be a positive multiple of 32 \
+                 (Metal kernel requires `n_per_t = Dk/32 >= 1` and full simdgroup coverage)",
+                self.cfg.head_k_dim
+            ));
+        }
+        if self.cfg.num_k_heads == 0 || self.cfg.num_v_heads % self.cfg.num_k_heads != 0 {
+            return Err(anyhow!(
+                "GatedDeltaNet::forward: num_v_heads ({}) must be divisible by num_k_heads ({}) \
+                 — kernel uses `hk_idx = hv_idx / (Hv/Hk)` for GQA indexing",
+                self.cfg.num_v_heads,
+                self.cfg.num_k_heads
+            ));
+        }
+
         let batch = dims[0];
         let seq = dims[1];
 
@@ -379,6 +413,7 @@ impl GatedDeltaNet {
             .template_int("Hv", self.cfg.num_v_heads)
             .template_dtype("InT", in_dtype)
             .template_dtype("StT", st_dtype)
+            .stream(target)
             .dispatch()?;
 
         let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
