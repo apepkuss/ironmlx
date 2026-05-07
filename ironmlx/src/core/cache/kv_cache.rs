@@ -1,12 +1,11 @@
 //! Per-layer KV cache for full-attention layers. See P2 spec § 3 for design.
 //!
-//! Implementation strategy: mlx-lm-style concatenate (slice_update is not
-//! bound in cxx-mlx). Each grow concatenates `[old_keys[..offset], k_new,
-//! zeros[trailing]]` along axis 2. The public API (`new`, `with_step`,
-//! `update_and_fetch`, `offset`, `cap`, `reset`) is stable across
-//! implementation strategies.
+//! Implementation strategy: lazy alloc + step-rounded grow via concatenate;
+//! per-update writes use `slice_update` (single in-place write per call).
+//! The public API (`new`, `with_step`, `update_and_fetch`, `offset`, `cap`,
+//! `reset`) is stable across implementation strategies.
 
-use mlx::ops::indexing::slice_strided_on;
+use mlx::ops::indexing::{slice_strided_on, slice_update_on};
 use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
@@ -121,11 +120,9 @@ impl KVCache {
             self.grow_to(target_capacity, target)?;
         }
 
-        // Write K/V at [..., offset..offset+n_new, ...] via concatenate:
-        //   new_keys = concat([old_keys[..offset], k_new, old_keys[offset+n_new..]])
-        // To avoid materializing the trailing zero region as a separate
-        // operation, we exploit the pre-allocated buffer:
-        //   keys = [..before, k_new, ..after_zero] all stitched once.
+        // Write K/V at [..., offset..offset+n_new, ...] via slice_update:
+        // a single in-place write per call (MLX uses copy-on-write under
+        // the hood; the pre-allocated buffer is the unique owner here).
         self.write_at_offset(k, v, target)?;
         self.offset = new_offset;
 
@@ -218,100 +215,31 @@ impl KVCache {
         Ok(())
     }
 
-    /// Write `k` / `v` into K/V buffers at `[..., self.offset..self.offset+n_new, ...]`.
-    /// Without `slice_update`, we reconstruct the buffer via concatenate of
-    /// three pieces: prefix[..offset], k_new, suffix[offset+n_new..].
+    /// Write `k` / `v` into K/V buffers at `[..., self.offset..self.offset+n_new, ...]`
+    /// via a single `slice_update` call per side (no intermediate concatenate).
     fn write_at_offset(&mut self, k: &Array, v: &Array, target: StreamOrDevice) -> Result<()> {
         let n_new = k.shape().as_slice()[2];
         let end = self.offset + n_new;
-        let capacity = self
-            .keys
-            .as_ref()
-            .map(|a| a.shape().as_slice()[2])
-            .expect("keys allocated by grow_to");
 
-        // Build new keys: [keys[..offset], k, keys[end..capacity]]
-        // - if offset == 0: just [k, suffix]
-        // - if end == capacity: just [prefix, k]
-        // - else: 3-way concat
-        let keys_full = self.keys.as_ref().expect("keys allocated");
-        let new_keys = if self.offset == 0 && end == capacity {
-            k.clone()
-        } else if self.offset == 0 {
-            let suffix = slice_strided_on(
-                keys_full,
-                [0_i32, 0, end, 0],
-                [self.batch, self.n_kv_heads, capacity, self.head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            concatenate_on(&[k, &suffix], 2, target)?
-        } else if end == capacity {
-            let prefix = slice_strided_on(
-                keys_full,
-                [0_i32, 0, 0, 0],
-                [self.batch, self.n_kv_heads, self.offset, self.head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            concatenate_on(&[&prefix, k], 2, target)?
-        } else {
-            let prefix = slice_strided_on(
-                keys_full,
-                [0_i32, 0, 0, 0],
-                [self.batch, self.n_kv_heads, self.offset, self.head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            let suffix = slice_strided_on(
-                keys_full,
-                [0_i32, 0, end, 0],
-                [self.batch, self.n_kv_heads, capacity, self.head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            concatenate_on(&[&prefix, k, &suffix], 2, target)?
-        };
+        let keys_full = self.keys.as_ref().expect("keys allocated by grow_to");
+        let values_full = self.values.as_ref().expect("values allocated by grow_to");
 
-        let values_full = self.values.as_ref().expect("values allocated");
-        let new_values = if self.offset == 0 && end == capacity {
-            v.clone()
-        } else if self.offset == 0 {
-            let suffix = slice_strided_on(
-                values_full,
-                [0_i32, 0, end, 0],
-                [self.batch, self.n_kv_heads, capacity, self.v_head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            concatenate_on(&[v, &suffix], 2, target)?
-        } else if end == capacity {
-            let prefix = slice_strided_on(
-                values_full,
-                [0_i32, 0, 0, 0],
-                [self.batch, self.n_kv_heads, self.offset, self.v_head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            concatenate_on(&[&prefix, v], 2, target)?
-        } else {
-            let prefix = slice_strided_on(
-                values_full,
-                [0_i32, 0, 0, 0],
-                [self.batch, self.n_kv_heads, self.offset, self.v_head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            let suffix = slice_strided_on(
-                values_full,
-                [0_i32, 0, end, 0],
-                [self.batch, self.n_kv_heads, capacity, self.v_head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            concatenate_on(&[&prefix, v, &suffix], 2, target)?
-        };
-
+        let new_keys = slice_update_on(
+            keys_full,
+            k,
+            [0_i32, 0, self.offset, 0],
+            [self.batch, self.n_kv_heads, end, self.head_dim],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        let new_values = slice_update_on(
+            values_full,
+            v,
+            [0_i32, 0, self.offset, 0],
+            [self.batch, self.n_kv_heads, end, self.v_head_dim],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
         self.keys = Some(new_keys);
         self.values = Some(new_values);
         Ok(())
