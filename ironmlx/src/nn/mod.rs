@@ -20,4 +20,4 @@ pub use gated_attention::{GatedAttention, GatedAttentionConfig};
 pub use linear::Linear;
 pub use mlp::Mlp;
 pub use mrope::Mrope;
-pub use norm::{LayerNorm, RmsNorm};
+pub use norm::{LayerNorm, RmsNorm, RmsNormGated};
