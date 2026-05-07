@@ -20,7 +20,7 @@ cd ironmlx/tests/fixtures/p3b2_gated_attention
 python gen_fixture.py
 ```
 
-Generated `.npy` files (committed to git, ~3 KB total):
+Generated `.npy` files (committed to git, ~10 KB total):
 
 | File | Shape | Dtype |
 |---|---|---|
@@ -35,4 +35,11 @@ Generated `.npy` files (committed to git, ~3 KB total):
 | `k_norm_weight.npy` | `[8]` | fp32 |
 | `expected_cos.npy` | `[1, 4, 4]` | fp32 |
 | `expected_sin.npy` | `[1, 4, 4]` | fp32 |
-| `expected_gated_attn_out.npy` | `[1, 4, 32]` | bf16 |
+| `expected_gated_attn_out.npy` | `[1, 4, 32]` | fp32 |
+
+> **Note on output dtype**: `expected_gated_attn_out.npy` is fp32 even though
+> `input_x.npy` is bf16 because `mx.fast.rms_norm(bf16_input, fp32_weight)`
+> promotes the output to fp32 (Metal kernel type-promotion rule). The
+> q_norm/k_norm weights are fp32 here, so the SDPA→sigmoid→o_proj chain runs
+> in fp32 from that point on. The Rust `GatedAttention::forward` follows the
+> same MLX backend, so dtype matches.

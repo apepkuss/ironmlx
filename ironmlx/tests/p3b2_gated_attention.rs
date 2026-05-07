@@ -81,6 +81,12 @@ fn gated_attention_matches_python_fixture() {
         .expect("forward");
 
     assert_eq!(out.shape().as_slice(), expected.shape().as_slice());
+    // Output dtype is fp32 because q_norm/k_norm weights in this fixture are
+    // fp32, and `mx.fast.rms_norm(bf16, fp32_weight)` promotes the output to
+    // fp32 (Metal kernel type-promotion). If a future fixture uses bf16 norm
+    // weights, this assertion needs updating accordingly.
+    assert_eq!(out.dtype(), Dtype::Float32);
+    assert_eq!(expected.dtype(), Dtype::Float32);
 
     let err = max_abs_diff(&out, &expected);
     assert!(

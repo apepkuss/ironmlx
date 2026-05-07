@@ -47,6 +47,10 @@ def _build_position_ids() -> mx.array:
 
 
 def _ref_cos_sin(position_ids: mx.array, inv_freq: mx.array) -> tuple[mx.array, mx.array]:
+    """Compute MRoPE cos/sin tables: per-stream cos/sin then concat sections along last axis.
+
+    Mirrors the algorithm in `ironmlx/src/nn/mrope.rs::Mrope::cos_sin`.
+    """
     pos_f = position_ids.astype(mx.float32)
     pos_unsq = pos_f[..., None]
     inv_unsq = inv_freq.reshape((1, 1, 1, -1))
@@ -67,6 +71,10 @@ def _ref_cos_sin(position_ids: mx.array, inv_freq: mx.array) -> tuple[mx.array, 
 
 
 def _ref_apply_rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+    """Apply interleaved RoPE rotation to `x`'s rotary slice; pass-through tail.
+
+    Mirrors the Metal kernel in `ironmlx/src/nn/mrope.rs::Mrope::apply`.
+    """
     rot = x[..., :ROT_DIM]
     tail = x[..., ROT_DIM:]
     even = rot[..., 0::2]
@@ -80,6 +88,7 @@ def _ref_apply_rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
 
 
 def _ref_rms_norm(x: mx.array, weight: mx.array, eps: float) -> mx.array:
+    """Wrapper around MLX's fused rms_norm — same kernel as Rust's RmsNorm::forward."""
     return mx.fast.rms_norm(x, weight, eps)
 
 
