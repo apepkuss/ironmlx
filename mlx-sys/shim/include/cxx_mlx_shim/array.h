@@ -13,6 +13,11 @@ using MlxArray = mlx::core::array;
 using MlxArrayVec = std::vector<mlx::core::array>;
 
 std::unique_ptr<MlxArray> array_zeros(rust::Slice<const int32_t> shape, uint8_t dtype);
+// Stream-targeted variant of `array_zeros`. The 4 trailing params encode
+// `mlx::core::StreamOrDevice` per `helpers::decode_stream_or_device` (P5.7).
+std::unique_ptr<MlxArray> array_zeros_on(
+    rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 rust::Vec<int32_t> array_shape(const MlxArray& a);
 size_t array_ndim(const MlxArray& a);
 size_t array_size(const MlxArray& a);
@@ -285,6 +290,18 @@ std::unique_ptr<MlxArray> array_take_along_axis(
 
 std::unique_ptr<MlxArray> array_slice_strided(
     const MlxArray& a,
+    rust::Slice<const int32_t> start,
+    rust::Slice<const int32_t> stop,
+    rust::Slice<const int32_t> strides,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// Functional in-place write: returns a new array equal to `src` with the
+// region `src[start:stop:strides]` replaced by `update`. MLX uses
+// copy-on-write internally so this is cheap when `src` has no other refs.
+// Bound only the most general (with-strides) overload — other overloads are
+// not used by ironmlx (KVCache uses unit strides).
+std::unique_ptr<MlxArray> array_slice_update(
+    const MlxArray& src, const MlxArray& update,
     rust::Slice<const int32_t> start,
     rust::Slice<const int32_t> stop,
     rust::Slice<const int32_t> strides,

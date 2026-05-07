@@ -18,6 +18,14 @@ pub mod ffi {
         type MlxArray;
 
         fn array_zeros(shape: &[i32], dtype: u8) -> Result<UniquePtr<MlxArray>>;
+        fn array_zeros_on(
+            shape: &[i32],
+            dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_shape(a: &MlxArray) -> Vec<i32>;
         fn array_ndim(a: &MlxArray) -> usize;
         fn array_size(a: &MlxArray) -> usize;
@@ -559,6 +567,17 @@ pub mod ffi {
         ) -> Result<UniquePtr<MlxArray>>;
         fn array_slice_strided(
             a: &MlxArray,
+            start: &[i32],
+            stop: &[i32],
+            strides: &[i32],
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn array_slice_update(
+            src: &MlxArray,
+            update: &MlxArray,
             start: &[i32],
             stop: &[i32],
             strides: &[i32],

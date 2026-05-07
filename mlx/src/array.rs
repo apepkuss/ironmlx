@@ -56,6 +56,26 @@ impl Array {
         Ok(Array(inner))
     }
 
+    /// Stream-targeted variant of [`Array::zeros`].
+    pub fn zeros_on<S: IntoShape>(
+        shape: S,
+        dtype: Dtype,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Self> {
+        let shape = shape.into_shape();
+        let (has, dev_only, dev_t, idx) = target.into().encode();
+        let inner = mlx_sys::array::ffi::array_zeros_on(
+            shape.as_slice(),
+            dtype.as_u8(),
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        )
+        .map_err(Error::from)?;
+        Ok(Array(inner))
+    }
+
     /// The shape of the array. `[]` denotes a scalar.
     pub fn shape(&self) -> Shape {
         let raw = mlx_sys::array::ffi::array_shape(&self.0);
@@ -1371,5 +1391,12 @@ mod tests {
             a.try_neg().unwrap().to_vec::<f32>().unwrap(),
             vec![-10.0, -20.0]
         );
+    }
+
+    #[test]
+    fn zeros_on_default_target_works() {
+        let a = Array::zeros_on((2, 3), Dtype::Float32, ()).unwrap();
+        assert_eq!(a.shape().as_slice(), &[2, 3]);
+        assert_eq!(a.to_vec::<f32>().unwrap(), vec![0.0; 6]);
     }
 }
