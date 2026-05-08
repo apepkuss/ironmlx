@@ -33,7 +33,7 @@ impl RequestTimings {
     pub fn e2e(&self) -> Duration {
         self.end.duration_since(self.start)
     }
-    /// Generation duration: end - first_token. Falls back to a single tick if no token.
+    /// Generation duration: end - first_token. Falls back to e2e if no token was emitted.
     pub fn gen_duration(&self) -> Duration {
         self.end
             .duration_since(self.first_token.unwrap_or(self.start))
