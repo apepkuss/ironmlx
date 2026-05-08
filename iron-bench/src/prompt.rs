@@ -6,9 +6,6 @@
 //! without nonce, the second run's prefill would be ~0ms — invalidating
 //! PP measurement).
 
-// T2 export used by runner (T3) — allow dead_code until wiring is complete.
-#![allow(dead_code)]
-
 use anyhow::{anyhow, bail, Result};
 use tokenizers::Tokenizer;
 
