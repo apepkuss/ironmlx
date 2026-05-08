@@ -91,3 +91,24 @@ df.groupby(["target", "pp_target"])["tg_tps"].median()
   equally so it cancels in head-to-head comparison.
 - **No GPU memory monitoring** — the HTTP layer is opaque to the engine's memory profile.
 - **OpenAI endpoint only** in v1. Anthropic `/v1/messages` is symmetric work but deferred.
+
+## Measured numbers — Qwen3.5-4B-MLX-4bit, M-series Apple Silicon
+
+Single-request, greedy (`temperature=0`, `top_p=1`), `max_tokens=128`, `runs=3`, `warmup=1`,
+ironmlx as built from current `ironmlx` branch (P8a applied), omlx 0.3.8 from
+`/Volumes/Dev/omlx`.
+
+| Target  | Decode TG (tok/s) median | TTFT PP=128 (ms) | TTFT PP=2048 (ms) | Prefill PP=2048 (tok/s) |
+|---------|--------------------------|------------------|-------------------|-------------------------|
+| ironmlx | 28.9 – 32.0              | 697              | 8530              | 240                     |
+| omlx    | 53.2 – 54.9              | 604              | 7075              | 291                     |
+
+**Decode TG gap**: omlx is ~1.7-1.9× faster across all PP cells. P8a's async-eval pipeline
++ incremental detokenizer landed cleanly (P4 fixture PASS, byte-identical token sequence
+to mlx-lm reference) but only delivered ~5-9% TG improvement. The remaining gap is in the
+GPU forward pass itself (kernel-level), not orchestration; addressing it requires kernel
+profiling and is out of scope for this benchmark harness.
+
+**TTFT / Prefill**: ironmlx is ~14-21% slower across PP — closer to parity than decode but
+still a kernel-level gap. Prefill scales sub-linearly on both engines (GPU saturation
+helps), so the relative gap shrinks as PP grows.
