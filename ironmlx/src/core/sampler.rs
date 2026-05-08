@@ -407,6 +407,17 @@ mod tests {
         let s = Sampler::greedy();
         let result = s.sample_async_greedy(&logits).expect("sample_async_greedy");
 
+        // Pin the shape contract: argmax with keepdims=false returns either
+        // 0-D scalar or [1]. Either is fine for the pipeline (Task 3 will
+        // .reshape((1,1)) which accepts both), but the test asserts the
+        // actual shape to surface any future MLX wrapper changes.
+        let shape = result.shape();
+        let shape_slice = shape.as_slice();
+        assert!(
+            shape_slice.is_empty() || shape_slice == [1_i32],
+            "unexpected shape from argmax(All, keepdims=false): {shape_slice:?}"
+        );
+
         // Materialise to confirm correct value.
         let token: u32 = result.item().expect("item");
         assert_eq!(token, 3, "expected argmax index 3, got {token}");
