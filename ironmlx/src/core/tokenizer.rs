@@ -16,32 +16,69 @@ pub struct Tokenizer {
     eos_token_ids: Vec<u32>,
 }
 
-/// Streaming detokenizer wrapper. Hides the five generics that
-/// [`tokenizers::DecodeStream`] is parameterised by, exposing only
-/// `step(token_id) -> Result<Option<String>>` which returns the
-/// per-token text delta (or `None` if the BPE boundary has not yet
-/// produced a renderable string for this id).
+/// Streaming detokenizer — owns its own state (does NOT delegate to
+/// `tokenizers::DecodeStream`; that crate's `step_decode_stream` has a
+/// known usize-underflow bug at version 0.20.4 — see
+/// `tokenizers/src/tokenizer/mod.rs:1108`, `let new_prefix_index =
+/// ids.len() - *prefix_index` underflows when state variables drift out
+/// of sync, panicking the request handler).
 ///
-/// Lifetime `'a` ties to the borrow of [`Tokenizer`].
+/// Algorithm (correct, simple, O(N) per step over **generated tokens
+/// only** — N is bounded by `max_new_tokens`, typically 128-2048, so the
+/// O(N²) total cost is negligible vs GPU forward time):
+///
+/// 1. push the new id to the rolling token buffer
+/// 2. decode the buffer to a fresh string
+/// 3. if the new string starts with the previously-emitted prefix, return
+///    the suffix (delta) and update prefix; otherwise the BPE has not yet
+///    produced a stable boundary, return `None` and wait for more tokens
+/// 4. drop the leading replacement char (`U+FFFD`) case as `None` — the
+///    next token will resolve it
+///
+/// Lifetime `'a` borrows the underlying [`Tokenizer`] for `decode` calls.
 pub struct DecodeStream<'a> {
-    inner: tokenizers::DecodeStream<
-        'a,
-        tokenizers::models::ModelWrapper,
-        tokenizers::normalizers::NormalizerWrapper,
-        tokenizers::pre_tokenizers::PreTokenizerWrapper,
-        tokenizers::processors::PostProcessorWrapper,
-        tokenizers::decoders::DecoderWrapper,
-    >,
+    tokenizer: &'a Tokenizer,
+    skip_special: bool,
+    /// Generated token ids (NOT including prompt) accumulated so far.
+    ids: Vec<u32>,
+    /// Last text string emitted to the caller — the running prefix.
+    last_text: String,
 }
 
 impl<'a> DecodeStream<'a> {
     /// Feed one token id, get the incremental text delta. `Ok(None)` means
-    /// the underlying BPE has buffered this id (waiting for a boundary)
-    /// and produced no new text on this call.
+    /// the underlying BPE has not yet produced a renderable string for
+    /// this id (e.g. mid-codepoint UTF-8 split, or text shorter than the
+    /// running prefix); the caller should keep streaming and the next
+    /// `step` will catch up.
     pub fn step(&mut self, id: u32) -> Result<Option<String>> {
-        self.inner
-            .step(id)
-            .map_err(|e| anyhow!("decode_stream.step({id}): {e}"))
+        self.ids.push(id);
+        let text = self.tokenizer.decode(&self.ids, self.skip_special)?;
+        // BPE may emit a trailing replacement char while waiting for the
+        // continuation token of a multi-byte UTF-8 sequence. Treat this
+        // as "no progress yet" — return None, do NOT advance prefix.
+        if text.ends_with('\u{FFFD}') {
+            return Ok(None);
+        }
+        if text.len() < self.last_text.len() {
+            // Text shrank (rare BPE re-segmentation). Reset prefix to the
+            // new shorter text and report no delta this step.
+            self.last_text = text;
+            return Ok(None);
+        }
+        if !text.starts_with(&self.last_text) {
+            // Prefix divergence — the latest decode does not extend the
+            // previous prefix. Most likely a temporary BPE boundary shift;
+            // wait for the next token to settle.
+            return Ok(None);
+        }
+        let delta = text[self.last_text.len()..].to_string();
+        self.last_text = text;
+        if delta.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(delta))
+        }
     }
 }
 
@@ -88,14 +125,17 @@ impl Tokenizer {
             .map_err(|e| anyhow!("decode: {e}"))
     }
 
-    /// Construct a streaming detokenizer that maintains BPE-boundary state
-    /// across `step()` calls. Use this on the decode hot path to avoid the
-    /// O(N²) cost of re-decoding the full token sequence per step.
-    ///
-    /// `skip_special` mirrors the same flag on [`Tokenizer::decode`].
+    /// Construct a streaming detokenizer for the decode hot path. Owns its
+    /// own state (rolling token buffer + last-emitted prefix string);
+    /// safe across the long-prompt / large-token-count workloads ironmlx
+    /// targets (10K+ prompts). `skip_special` mirrors the same flag on
+    /// [`Tokenizer::decode`].
     pub fn decode_stream(&self, skip_special: bool) -> DecodeStream<'_> {
         DecodeStream {
-            inner: self.inner.decode_stream(skip_special),
+            tokenizer: self,
+            skip_special,
+            ids: Vec::new(),
+            last_text: String::new(),
         }
     }
 
