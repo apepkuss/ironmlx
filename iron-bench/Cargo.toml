@@ -1,0 +1,21 @@
+[package]
+name = "iron-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Head-to-head HTTP benchmark harness for OpenAI-compatible LLM endpoints"
+
+[[bin]]
+name = "iron-bench"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+anyhow = "1"
