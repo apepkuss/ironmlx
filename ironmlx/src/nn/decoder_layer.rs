@@ -127,6 +127,29 @@ impl DecoderLayer {
         }
     }
 
+    /// Pre-flight: enforce rank-3 input + last-axis matches `cfg.hidden_size`.
+    /// `caller` is embedded in the diagnostic so callers (forward_on,
+    /// forward_on_full_kv) surface in the error string.
+    #[inline]
+    fn preflight_x(&self, x: &Array, caller: &str) -> Result<()> {
+        if x.ndim() != 3 {
+            return Err(anyhow!(
+                "{caller}: x must be rank-3 [B, S, hidden_size], got rank {}",
+                x.ndim()
+            ));
+        }
+        let dims_owned = x.shape();
+        let dims = dims_owned.as_slice();
+        if dims[2] != self.cfg.hidden_size {
+            return Err(anyhow!(
+                "{caller}: x last-axis = {} but cfg.hidden_size = {}",
+                dims[2],
+                self.cfg.hidden_size
+            ));
+        }
+        Ok(())
+    }
+
     /// Default-stream forward pass.
     pub fn forward(
         &self,
@@ -159,21 +182,7 @@ impl DecoderLayer {
         let target = target.into();
 
         // Pre-flight (existing P3b4 invariants).
-        if x.ndim() != 3 {
-            return Err(anyhow!(
-                "DecoderLayer::forward_on: x must be rank-3 [B, S, hidden_size], got rank {}",
-                x.ndim()
-            ));
-        }
-        let dims_owned = x.shape();
-        let dims = dims_owned.as_slice();
-        if dims[2] != self.cfg.hidden_size {
-            return Err(anyhow!(
-                "DecoderLayer::forward_on: x last-axis = {} but cfg.hidden_size = {}",
-                dims[2],
-                self.cfg.hidden_size
-            ));
-        }
+        self.preflight_x(x, "DecoderLayer::forward_on")?;
 
         // Block 1: input_layernorm + attn dispatch + residual
         let normed_in = self.input_layernorm.forward_on(x, target)?;
@@ -289,21 +298,7 @@ impl DecoderLayer {
     ) -> Result<Array> {
         let target = target.into();
 
-        if x.ndim() != 3 {
-            return Err(anyhow!(
-                "DecoderLayer::forward_on_full_kv: x must be rank-3 [B, S, hidden_size], got rank {}",
-                x.ndim()
-            ));
-        }
-        let dims_owned = x.shape();
-        let dims = dims_owned.as_slice();
-        if dims[2] != self.cfg.hidden_size {
-            return Err(anyhow!(
-                "DecoderLayer::forward_on_full_kv: x last-axis = {} but cfg.hidden_size = {}",
-                dims[2],
-                self.cfg.hidden_size
-            ));
-        }
+        self.preflight_x(x, "DecoderLayer::forward_on_full_kv")?;
 
         let normed_in = self.input_layernorm.forward_on(x, target)?;
         let attn_out = match &self.attn {
@@ -657,9 +652,11 @@ mod tests {
     }
 
     #[test]
-    fn linear_layer_with_full_cache_errors() {
-        // Symbolic — the dispatch arm is exercised in T4 with real Linear layer.
-        // Here, just ensure LayerCache::Full discriminator compiles.
+    fn linear_cache_full_arm_compiles() {
+        // The Linear-layer + Full-cache mismatch arm in forward_on requires
+        // a real GatedDeltaNet to construct (heavy P3b3 internals). The
+        // dispatch arm itself is exercised in T4 (Qwen35Model assembly tests);
+        // here we only confirm the LayerCache::Full discriminator compiles.
         let _ = LayerCache::Full;
     }
 }
