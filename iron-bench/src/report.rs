@@ -52,7 +52,8 @@ pub fn reduce_cell(c: &CellResult) -> CellStats {
 
         ttft_ms.push(ttft_seconds * 1000.0);
         tg_tps.push(completion_tokens / gen_seconds);
-        // TPOT excludes the first token (which is the prefill output): divide gen by (N-1) tokens.
+        // TPOT = gen / (N-1) inter-token gaps; floor divisor to 1 when ct <= 1
+        // (only prefill output, no inter-token gap exists — gen_ms acts as a sentinel).
         let tpot_div = (completion_tokens - 1.0).max(1.0);
         tpot_ms.push((gen_seconds / tpot_div) * 1000.0);
         pp_tps.push(prompt_tokens / ttft_seconds);
@@ -362,6 +363,7 @@ pub fn render_json(cells: &[CellResult], targets: &[(String, String)], warmup: u
                     .server_completion_tokens
                     .map(|n| n as f64)
                     .unwrap_or(r.chunk_count as f64);
+                let tpot_div = (completion_tokens - 1.0).max(1.0);
                 serde_json::json!({
                     "target": c.target_name,
                     "pp_target": c.pp_target,
@@ -369,6 +371,7 @@ pub fn render_json(cells: &[CellResult], targets: &[(String, String)], warmup: u
                     "run_idx": o.run_idx,
                     "ttft_ms": ttft_s * 1000.0,
                     "tg_tps": completion_tokens / gen_s,
+                    "tpot_ms": (gen_s / tpot_div) * 1000.0,
                     "pp_tps": prompt_tokens / ttft_s,
                     "e2e_s": r.timings.e2e().as_secs_f64(),
                     "prompt_tokens_local": o.prompt_tokens_local,
