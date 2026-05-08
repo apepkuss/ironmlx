@@ -204,3 +204,98 @@ The **~1.77× decode TG gap** (37 ms vs 20 ms per step) is attributable to:
 The GPU kernel implementations (GDN Metal shader, attention SDPA, quantized matmul) are
 **equivalent** between the two engines — there is no fundamental algorithmic gap. The
 performance difference is purely in **graph compilation and dispatch overhead**.
+
+---
+
+## 7. Post-Capture Verification (controller — 2026-05-09)
+
+This section flags claims in §3 / §5 that did NOT survive a follow-up source read of
+mlx-lm 2026 head. The headline 1.77× number in §2 is real (matches iron-bench), but
+the attribution in §3.1 is speculative.
+
+### 7.1 `@mx.compile` is NOT missing on the GDN dispatch path
+
+The agent claimed (§3.1) that omlx wraps the entire `gated_delta_kernel` in `@mx.compile`,
+implying ironmlx is missing an equivalent. Verified against
+`/Volumes/Dev/omlx/.venv/lib/python3.14/site-packages/mlx_lm/models/{gated_delta,qwen3_next}.py`:
+
+- `gated_delta.py:8` — `@partial(mx.compile, shapeless=True)` on `compute_g`. **Mirrored**
+  in ironmlx as the per-instance `compute_g_compiled: OnceLock<CompiledFn>` field
+  (`gated_delta_net.rs:82`, initialized via `build_compute_g_pipeline()`).
+- `gated_delta.py:126` — `@mx.compile` on `_gated_delta_step_ops`. **This is the
+  CPU/non-Metal fallback** (used when `mx.metal.is_available()` is False). On Apple
+  Silicon, the Metal path goes through `_gated_delta_kernel_vec` / non-vec MetalKernel
+  objects, NOT `_gated_delta_step_ops`. So this `@mx.compile` does not run on our
+  benchmark hardware.
+- `qwen3_next.py:58` — `@partial(mx.compile, shapeless=True)` on `_precise_swiglu`.
+  **Mirrored** in ironmlx as the module-level `swiglu_fused_invoke` thread_local cell
+  added in P8a-stage2 (`norm.rs`).
+
+Conclusion: the two `@mx.compile` decorators that actually run on Metal in mlx-lm
+already have ironmlx equivalents. **Recommendation P2 (wrap `GatedDeltaNet::forward_on`
+in `mlx::compile::compile`) would not match a missing mlx-lm pattern; it would be a
+speculative add.** mlx-lm itself does NOT do that — its forward methods are plain
+Python/MLX-graph code with no outer compile wrapper.
+
+### 7.2 The "tokenizers 0.20.4 DecodeStream panic at token 4+" claim is unreproducible
+
+Verified by direct evidence: P8a-stage2's iron-bench run (commit `080c2e2`'s captured
+data) successfully completed `--max-tokens 128` requests against ironmlx HTTP for
+PP=128/512/2048 across 3 runs each (12+ multi-token completions, all returning real
+text). The P4 logits-match fixture also completed multi-token decode against the real
+Qwen3.5-4B checkpoint and produced byte-identical output.
+
+The agent's panic likely came from their isolated diagnostic harness (max_tokens=4
+edge case with a particular prompt + their own DecodeStream usage), not from
+ironmlx's production HTTP path. The tokenizer code in ironmlx (`tokenizer.rs` +
+`generate.rs`'s pipelined `detok.step(token)` path) is actively serving requests
+without panic.
+
+Recommendation P1 (fix tokenizers DecodeStream bug) is therefore **not critical** —
+no real fix is needed for the production code path. The agent's harness has a usage
+bug.
+
+### 7.3 The "37 ms / 20 ms per-step" timing IS real
+
+Both numbers are consistent with iron-bench's median TPOT measurements
+(`080c2e2`'s README): ironmlx ~34-38 ms/tok, omlx ~18-19 ms/tok. The headline gap
+is corroborated by independent measurement methodology.
+
+### 7.4 Trace data limitations
+
+The Metal Shader Profiler and Metal Driver Event tables were empty in both `.trace`
+bundles. Without per-kernel breakdown data, the cause attribution in §3.1-3.2 is
+inference from source reading, not from measured kernel timings. The trace files
+at `/tmp/{ironmlx,omlx}.trace` contain command-buffer-level timing only.
+
+To get true per-kernel breakdown, future investigation needs:
+- `MTLCaptureManager.shared().startCapture(...)` instrumented into ironmlx (and a
+  patched mlx-lm) before running the workload, OR
+- Use Instruments.app GUI with the running process and manually start a Metal
+  System Trace via the menu (the trace command-line attach mode does NOT enable
+  shader-level capture).
+
+### 7.5 Updated next-step recommendation
+
+P2/P3 in §5 (top-level `mlx::compile` wrappers) are **not** clearly motivated by the
+trace data. They would be speculative changes with no mlx-lm precedent on the Metal
+path.
+
+The pragmatic alternatives:
+
+1. **Pivot to P8c (speculative decoding via MTP)** — The MTP head weights are
+   already prepared (P3b4). MTP gives a documented ~1.3-1.7× decode speedup on
+   acceptance ratio ~0.5-1.0. Even on a 31 tok/s baseline, this would put ironmlx
+   at ~40-50 tok/s, in striking distance of omlx without further per-kernel
+   optimization. **Recommended.**
+
+2. **Try MTLCaptureManager instrumentation** — Add Metal frame capture explicitly
+   before / after one decode step, get a real per-kernel summary. Big tooling
+   investment for unclear payoff.
+
+3. **Accept the gap, ship as-is** — single-request decode at 31 tok/s is acceptable
+   for the use cases we've identified. Multi-request scheduling (P8b) may dominate
+   throughput for production traffic anyway.
+
+Stage4 should pivot to P8c unless Boss has new evidence pointing at a specific
+non-`@mx.compile` cause.
