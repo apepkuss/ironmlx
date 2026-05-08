@@ -136,6 +136,13 @@ impl Loader {
         Ok(serde_json::from_value(self.config_raw.clone())?)
     }
 
+    /// Raw `serde_json::Value` of the parsed `config.json`. Used by model-
+    /// specific code that needs to navigate nested keys (e.g. `text_config`)
+    /// without a wrapping struct.
+    pub fn config_raw_value(&self) -> &serde_json::Value {
+        &self.config_raw
+    }
+
     /// Tokenizer config (chat template, eos token, etc.).
     pub fn tokenizer_config(&self) -> &TokenizerConfig {
         &self.tokenizer_config

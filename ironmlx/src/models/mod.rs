@@ -13,6 +13,9 @@
 //! - **P6** — `qwen3_5_vl` (multimodal): adds vision encoder + cross-modal
 //!   token routing.
 
-// pub mod qwen3_5;
+pub mod qwen3_5;
+
+pub use qwen3_5::{Qwen35Config, RopeParams};
+
 // pub mod qwen3_5_moe;
 // pub mod qwen3_5_vl;
