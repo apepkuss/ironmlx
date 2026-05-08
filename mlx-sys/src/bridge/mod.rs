@@ -14,6 +14,7 @@ pub mod compile;
 pub mod conv;
 pub mod fast;
 pub mod io;
+pub mod metal;
 pub mod quantization;
 pub mod random;
 pub mod stream;

@@ -3,6 +3,8 @@
 //! Borrows a [`Qwen35Model`] and [`Tokenizer`] for the lifetime of the stream;
 //! owns the per-call cache vector and accumulating token history.
 
+use std::sync::OnceLock;
+
 use anyhow::anyhow;
 use mlx::{Array, Dtype};
 
@@ -11,6 +13,13 @@ use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::models::Qwen35Model;
 use crate::nn::LayerCache;
 use crate::Result;
+
+/// Process-lifetime gate: only the FIRST `GenerationStream` constructed in
+/// the process can claim the Metal capture window. Subsequent constructions
+/// see this `OnceLock` already set and skip capture (otherwise stacked
+/// captures would error). The lock is sticky for process lifetime — to
+/// capture another request, restart the server.
+static CAPTURE_CLAIMED: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
@@ -74,6 +83,56 @@ pub struct GenerationStream<'m> {
     /// Last full-text snapshot — diffed against the next decode to produce
     /// incremental text. Sync path only.
     last_decoded_text: String,
+
+    /// True iff this stream owns the in-flight Metal capture (set when env
+    /// var `IRONMLX_CAPTURE_FILE=<path>` was honored at construction time).
+    /// Calls `mlx::metal::stop()` in `Drop`.
+    capture_active: bool,
+}
+
+impl Drop for GenerationStream<'_> {
+    fn drop(&mut self) {
+        if self.capture_active {
+            // Best-effort stop. Errors are logged but not propagated (we're
+            // dropping; the .gputrace file is either complete or partially
+            // written — caller can inspect either way).
+            if let Err(e) = mlx::metal::stop() {
+                tracing::warn!("metal capture stop failed: {e}");
+            }
+        }
+    }
+}
+
+/// Honor the `IRONMLX_CAPTURE_FILE` env var: if set AND this is the FIRST
+/// `GenerationStream` constructed in the process, start a Metal capture
+/// targeting the path. Returns `true` iff a capture was actually started
+/// (the constructor stores this in `capture_active` so `Drop` can call
+/// `stop_capture`).
+fn try_start_capture() -> bool {
+    let Ok(path) = std::env::var("IRONMLX_CAPTURE_FILE") else {
+        return false;
+    };
+    if CAPTURE_CLAIMED.set(()).is_err() {
+        // Another GenerationStream already claimed the capture window.
+        tracing::info!(
+            "IRONMLX_CAPTURE_FILE set but capture already in progress; \
+             this request will not be captured"
+        );
+        return false;
+    }
+    match mlx::metal::start(&path) {
+        Ok(()) => {
+            tracing::info!("metal capture started -> {path}");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                "metal capture failed to start ({path}): {e}; continuing without capture \
+                 (set MTL_CAPTURE_ENABLED=1 before launch + ensure path is writable)"
+            );
+            false
+        }
+    }
 }
 
 /// Build a position_ids Array of shape `[3, 1, len]` with values
@@ -104,6 +163,12 @@ impl<'m> GenerationStream<'m> {
         if request.prompt_ids.is_empty() {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
         }
+
+        // P8a-stage4 Metal capture hook: start BEFORE prefill so the
+        // .gputrace covers the full prefill + decode pipeline. Gated by
+        // `IRONMLX_CAPTURE_FILE` env var + first-construction OnceLock.
+        let capture_active = try_start_capture();
+
         let prompt_len = request.prompt_ids.len();
         let cap = (prompt_len + request.max_new_tokens) as i32;
         let dtype = Dtype::Bfloat16;
@@ -149,6 +214,7 @@ impl<'m> GenerationStream<'m> {
                 pending_token_arr: Some(pending),
                 detok: Some(detok),
                 last_decoded_text: String::new(),
+                capture_active,
             })
         } else {
             // Sync path: existing pre-P8a behavior. First token sampled
@@ -173,6 +239,7 @@ impl<'m> GenerationStream<'m> {
                 pending_token_arr: None,
                 detok: None,
                 last_decoded_text: initial_text,
+                capture_active,
             })
         }
     }
