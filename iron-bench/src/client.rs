@@ -131,6 +131,7 @@ struct ChatRequest<'a> {
     temperature: f32,
     top_p: f32,
     stream_options: StreamOptions,
+    chat_template_kwargs: ChatTemplateKwargs,
 }
 
 #[derive(Serialize)]
@@ -142,6 +143,15 @@ struct ChatMessage<'a> {
 #[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,
+}
+
+// Qwen3+ chat template gates "thinking mode" via this kwarg. With thinking mode
+// enabled, omlx buffers the entire <think>...</think> block into a single SSE
+// event, which collapses gen_duration to ~0 and makes TG tok/s meaningless.
+// Force it off so both engines stream token-by-token under the same protocol.
+#[derive(Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
 }
 
 /// Send one streaming chat completion request and return timing + token counts.
@@ -164,6 +174,9 @@ pub async fn run_chat_completion(
         top_p: 1.0,
         stream_options: StreamOptions {
             include_usage: true,
+        },
+        chat_template_kwargs: ChatTemplateKwargs {
+            enable_thinking: false,
         },
     };
 

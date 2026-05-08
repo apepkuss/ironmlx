@@ -31,6 +31,11 @@ vllm-mlx, llama.cpp, third-party cloud providers — at the same external bounda
   sampler-algorithm bias).
 - **stream_options.include_usage=true** — preferred for authoritative `prompt_tokens` and
   `completion_tokens` from the server; falls back to local SSE chunk count.
+- **chat_template_kwargs.enable_thinking=false** — Qwen3+ chat template gates "thinking
+  mode" via this kwarg. When enabled, omlx buffers the entire `<think>...</think>` block
+  into a single SSE event, which collapses gen_duration to ~0 and inflates TG tok/s into
+  the tens of thousands. Always disabled so both engines stream token-by-token under the
+  same protocol.
 - **Warmup excluded** — first N=1 run materializes MLX compile graphs / KV caches; not counted.
 
 ## Usage
