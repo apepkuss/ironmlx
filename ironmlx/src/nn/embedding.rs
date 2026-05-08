@@ -120,6 +120,18 @@ impl Embedding {
         self.as_output_on(hidden, ())
     }
 
+    /// Test seam — builds a fp Embedding directly from a weight Array.
+    /// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can use it
+    /// — those tests are compiled as external crates. Hidden from rustdoc via
+    /// `#[doc(hidden)]`.
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub fn from_components_fp_for_test(weight: Array) -> Self {
+        Self {
+            inner: EmbeddingImpl::Fp { weight },
+        }
+    }
+
     /// Stream-targeted variant of [`Embedding::as_output`].
     pub fn as_output_on(&self, hidden: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
