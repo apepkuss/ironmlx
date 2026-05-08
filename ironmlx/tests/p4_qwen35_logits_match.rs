@@ -121,3 +121,58 @@ fn greedy_argmax(arr: &Array) -> usize {
         .map(|(i, _)| i)
         .unwrap()
 }
+
+/// Verify that `Qwen35Model::forward_on` works correctly when called from a
+/// tokio blocking-pool thread (i.e. the thread that handles HTTP requests).
+///
+/// The bug this guards against: lazy arrays produced by `concatenate` during
+/// `GatedDeltaNet::from_loader` carry the main thread's MLX stream
+/// (Stream(gpu, 0)).  When a tokio `spawn_blocking` thread initialises its own
+/// stream (Stream(gpu, 1)) and then evaluates those arrays, `gpu::eval` looks
+/// up Stream(gpu, 0) in the current thread's thread_local encoder map and
+/// throws "There is no Stream(gpu, 0) in current thread."
+///
+/// After the fix (eager eval in `GatedDeltaNet::from_loader`) the concatenated
+/// weight tensors are plain data buffers before they enter any `Linear` field,
+/// so no stream mismatch can occur.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires QWEN35_MODEL env var pointing to a real 4-bit checkpoint"]
+async fn p4_model_forward_from_blocking_thread() {
+    use ironmlx::core::generate::build_position_ids;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let model_dir = checkpoint_dir();
+    // Load model on the main thread (simulates `ironmlx serve` startup).
+    let loader = Loader::open(&model_dir).expect("Loader::open");
+    let model = Arc::new(Mutex::new(
+        Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader"),
+    ));
+
+    let model_for_task = model.clone();
+    // Spawn the forward pass on a blocking thread — this is exactly what the
+    // HTTP server does inside `tokio::task::spawn_blocking`.
+    let result = tokio::task::spawn_blocking(move || {
+        let model_guard = model_for_task.blocking_lock();
+        let prompt_ids = [9454u32, 374, 220, 17, 10, 17, 30]; // "What is 2+2?"
+        let s = prompt_ids.len() as i32;
+        let input_ids: Array = (prompt_ids.as_slice(), &[1_i32, s][..])
+            .try_into()
+            .expect("input_ids");
+        let position_ids = build_position_ids(0, s).expect("position_ids");
+        let mut cache = model_guard
+            .make_cache(1, s + 1, Dtype::Bfloat16)
+            .expect("make_cache");
+        model_guard
+            .forward_on(&input_ids, &position_ids, Some(&mut cache), ())
+            .expect("forward_on from blocking thread")
+    })
+    .await
+    .expect("spawn_blocking join");
+
+    // Verify the result has the expected shape: [1, S, vocab_size].
+    let shape = result.shape();
+    assert_eq!(shape.as_slice().len(), 3, "logits must be rank 3");
+    assert_eq!(shape.as_slice()[0], 1, "batch must be 1");
+    assert!(shape.as_slice()[2] > 0, "vocab must be positive");
+}

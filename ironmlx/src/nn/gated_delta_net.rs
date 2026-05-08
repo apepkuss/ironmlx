@@ -9,7 +9,7 @@
 //! Templates: `Dk, Dv, Hk, Hv` (i32), `InT, StT` (Dtype).
 //! Grid: `(32, Dv, B * Hv)`; threadgroup: `(32, 4, 1)`.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::anyhow;
 use mlx::compile::{CompiledFn, ShapeMode};
@@ -127,6 +127,24 @@ impl GatedDeltaNet {
                 ));
             }
         };
+
+        // Eagerly evaluate the fused qkvz tensors on the loading thread so that
+        // no lazy stream-tagged computation escapes into model fields that will
+        // be read from other threads (e.g. tokio blocking-pool during inference).
+        // MLX's CommandEncoder map is thread_local; a lazy Array whose primitive
+        // carries Stream(gpu, N) will panic with "There is no Stream(gpu, N) in
+        // current thread" when gpu::eval is called on a thread that never called
+        // gpu::new_stream(N). The eager eval here materialises the concatenated
+        // tensors so that only plain data buffers (no primitives) are stored.
+        {
+            let mut to_eval: Vec<&Array> = vec![&qkvz_weight, &qkvz_scales];
+            if let Some(b) = &qkvz_biases {
+                to_eval.push(b);
+            }
+            mlx::transforms::eval(&to_eval)
+                .map_err(|e| anyhow!("{prefix}: eager eval of fused qkvz tensors failed: {e}"))?;
+        }
+
         let in_proj_qkvz = Linear::new_quant(
             qkvz_weight,
             qkvz_scales,
@@ -167,6 +185,19 @@ impl GatedDeltaNet {
                 ));
             }
         };
+
+        // Same thread-crossing guard as above: eval fused ba tensors before
+        // storing them so no lazy Stream(gpu, N) primitives escape to the
+        // blocking-pool inference thread.
+        {
+            let mut to_eval: Vec<&Array> = vec![&ba_weight, &ba_scales];
+            if let Some(b) = &ba_biases {
+                to_eval.push(b);
+            }
+            mlx::transforms::eval(&to_eval)
+                .map_err(|e| anyhow!("{prefix}: eager eval of fused ba tensors failed: {e}"))?;
+        }
+
         let in_proj_ba = Linear::new_quant(
             ba_weight,
             ba_scales,
@@ -551,30 +582,38 @@ impl GatedDeltaNet {
     }
 }
 
-/// Module-level lazy-initialized silu graph for the conv1d-output gating in
-/// [`GatedDeltaNet::forward_on`]. Single `OnceLock` shared across all 24 GDN
-/// layers — one trace per process lifetime.
-///
-/// `CompiledFn` is `Send` but not `Sync`; wrapped in `Mutex` so the static is
-/// `Sync`. The lock is acquired only at invoke time; decode is single-threaded
-/// so contention is absent.
-///
-/// Input: `x` (any dtype). Output: `x * sigmoid(x)` (silu) preserving dtype.
-static SILU_FUSED: OnceLock<Mutex<CompiledFn>> = OnceLock::new();
+thread_local! {
+    /// Per-thread lazy-initialized silu compile cell. MLX command
+    /// encoders are stored in a thread_local map (see
+    /// /Volumes/Dev/mlx/mlx/backend/metal/device.cpp:819-822), so a
+    /// CompiledFn traced on thread A throws "There is no Stream(gpu, N)
+    /// in current thread" when invoked on thread B. Using thread_local!
+    /// aligns Rust's compile cell lifetime with MLX's per-thread stream
+    /// model.
+    ///
+    /// See SWIGLU_FUSED in norm.rs for the full rationale including the
+    /// `ManuallyDrop` explanation (TLS destruction-order SIGSEGV).
+    ///
+    /// Input: `x` (any dtype). Output: `x * sigmoid(x)` (silu) preserving dtype.
+    static SILU_FUSED: std::cell::OnceCell<std::mem::ManuallyDrop<CompiledFn>> =
+        const { std::cell::OnceCell::new() };
+}
 
 fn silu_fused_invoke(inputs: &[&Array]) -> crate::Result<Vec<Array>> {
-    let cell = SILU_FUSED.get_or_init(|| {
-        let cfn = mlx::compile::compile(
-            |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
-                let x = inputs[0];
-                Ok(vec![x * &x.sigmoid()?])
-            },
-            ShapeMode::Shapeless,
-        )
-        .expect("compile silu_fused");
-        Mutex::new(cfn)
-    });
-    Ok(cell.lock().expect("silu_fused mutex").invoke(inputs)?)
+    SILU_FUSED.with(|cell| {
+        let cfn = cell.get_or_init(|| {
+            let f = mlx::compile::compile(
+                |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+                    let x = inputs[0];
+                    Ok(vec![x * &x.sigmoid()?])
+                },
+                ShapeMode::Shapeless,
+            )
+            .expect("compile silu_fused");
+            std::mem::ManuallyDrop::new(f)
+        });
+        Ok(cfn.invoke(inputs)?)
+    })
 }
 
 /// Build the `gated_delta_step` MetalKernel (no-mask or masked variant).
