@@ -9,7 +9,7 @@
 //! Templates: `Dk, Dv, Hk, Hv` (i32), `InT, StT` (Dtype).
 //! Grid: `(32, Dv, B * Hv)`; threadgroup: `(32, 4, 1)`.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::anyhow;
 use mlx::compile::{CompiledFn, ShapeMode};
@@ -287,11 +287,13 @@ impl GatedDeltaNet {
             }
         };
 
-        // Step 2b: conv1d + silu
+        // Step 2b: conv1d + silu (silu fused via module-level compile cell)
         let conv_out = self.conv1d.forward_on(&conv_input, target)?;
-        // silu(x) = x * sigmoid(x)
-        let conv_out_sig = conv_out.sigmoid_on(target)?;
-        let conv_out = &conv_out * &conv_out_sig; // panic-on-err, no `?`
+        let outs = silu_fused_invoke(&[&conv_out])?;
+        let conv_out = outs
+            .into_iter()
+            .next()
+            .expect("silu_fused returns one output");
 
         // Step 2c: update conv_state cache (last kernel_size-1 tokens of conv_input)
         if let Some(c) = cache.as_deref_mut() {
@@ -436,6 +438,32 @@ impl GatedDeltaNet {
     }
 }
 
+/// Module-level lazy-initialized silu graph for the conv1d-output gating in
+/// [`GatedDeltaNet::forward_on`]. Single `OnceLock` shared across all 24 GDN
+/// layers — one trace per process lifetime.
+///
+/// `CompiledFn` is `Send` but not `Sync`; wrapped in `Mutex` so the static is
+/// `Sync`. The lock is acquired only at invoke time; decode is single-threaded
+/// so contention is absent.
+///
+/// Input: `x` (any dtype). Output: `x * sigmoid(x)` (silu) preserving dtype.
+static SILU_FUSED: OnceLock<Mutex<CompiledFn>> = OnceLock::new();
+
+fn silu_fused_invoke(inputs: &[&Array]) -> crate::Result<Vec<Array>> {
+    let cell = SILU_FUSED.get_or_init(|| {
+        let cfn = mlx::compile::compile(
+            |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+                let x = inputs[0];
+                Ok(vec![x * &x.sigmoid()?])
+            },
+            ShapeMode::Shapeless,
+        )
+        .expect("compile silu_fused");
+        Mutex::new(cfn)
+    });
+    Ok(cell.lock().expect("silu_fused mutex").invoke(inputs)?)
+}
+
 /// Build the `gated_delta_step` MetalKernel (no-mask or masked variant).
 ///
 /// The shader source is identical between variants except for the per-token
@@ -555,6 +583,31 @@ pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
 mod tests {
     use super::*;
     use mlx::{Array, Dtype, Shape};
+
+    #[test]
+    fn silu_fused_matches_reference_path() {
+        let x_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1 - 1.5).collect();
+        let shape = &[2_i32, 16][..];
+        let x: Array = (x_data.as_slice(), shape).try_into().unwrap();
+
+        // Fused path
+        let outs = silu_fused_invoke(&[&x]).unwrap();
+        let fused = outs.into_iter().next().unwrap();
+        let fused_vec: Vec<f32> = fused.to_vec().unwrap();
+
+        // Reference unfused path
+        let x_sig = x.sigmoid().unwrap();
+        let ref_arr = &x * &x_sig;
+        let ref_vec: Vec<f32> = ref_arr.to_vec().unwrap();
+
+        assert_eq!(fused_vec.len(), ref_vec.len());
+        for (i, (a, b)) in fused_vec.iter().zip(ref_vec.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "mismatch at index {i}: fused={a}, ref={b}",
+            );
+        }
+    }
 
     fn small_gdn_components() -> GatedDeltaNet {
         // Synthetic small model:

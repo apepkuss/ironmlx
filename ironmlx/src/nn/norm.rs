@@ -8,6 +8,9 @@
 //! Each layer exposes a default `forward` (current default stream) and a
 //! stream-targeted `forward_on` variant (P5.7 contract).
 
+use std::sync::{Mutex, OnceLock};
+
+use mlx::compile::{compile, CompiledFn, ShapeMode};
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
@@ -139,18 +142,55 @@ impl RmsNormGated {
 
         match gate {
             Some(g) => {
-                // Precise SwiGLU: silu(gate) * normed, computed in fp32, cast back.
-                let g_f32 = mlx::ops::cast::astype(g, Dtype::Float32)?;
-                // silu(x) = x * sigmoid(x)
-                let g_sig = g_f32.sigmoid_on(target)?;
-                let g_silu = &g_f32 * &g_sig;
-                let normed_f32 = mlx::ops::cast::astype(&normed, Dtype::Float32)?;
-                let mul = &g_silu * &normed_f32;
-                Ok(mlx::ops::cast::astype(&mul, hidden_dtype)?)
+                // Precise SwiGLU via module-level mlx::compile cell — fuses
+                // 6 elementwise ops (astype, sigmoid, mul, astype, mul) into
+                // a single Metal dispatch. Output is fp32; cast back to
+                // hidden_dtype outside the compiled graph (per-call data).
+                let outs = swiglu_fused_invoke(&[g, &normed])?;
+                let mul_f32 = outs
+                    .into_iter()
+                    .next()
+                    .expect("swiglu_fused returns one output");
+                Ok(mlx::ops::cast::astype(&mul_f32, hidden_dtype)?)
             }
             None => Ok(mlx::ops::cast::astype(&normed, hidden_dtype)?),
         }
     }
+}
+
+/// Module-level lazy-initialized SwiGLU graph for [`RmsNormGated`]'s gated
+/// path. Mirrors mlx-lm's `@partial(mx.compile, shapeless=True)` decorator
+/// pattern from `qwen3_next.py:58-62`. Single `OnceLock` shared across all
+/// `RmsNormGated` instances — only one trace per process lifetime.
+///
+/// `CompiledFn` is `Send` but not `Sync` (MLX C++ object with internal state);
+/// we wrap it in a `Mutex` so the static can be `Sync`. The lock is acquired
+/// only at invoke time. Decode is single-threaded, so contention is absent.
+///
+/// Inputs (in order): `g` (gate, any dtype), `normed` (rms-normed hidden,
+/// any dtype). Output: f32 Array equal to `silu(g_f32) * normed_f32` —
+/// caller is responsible for casting back to the input dtype.
+static SWIGLU_FUSED: OnceLock<Mutex<CompiledFn>> = OnceLock::new();
+
+fn swiglu_fused_invoke(inputs: &[&Array]) -> crate::Result<Vec<Array>> {
+    let cell = SWIGLU_FUSED.get_or_init(|| {
+        let cfn = compile(
+            |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+                let g = inputs[0];
+                let normed = inputs[1];
+                let g_f32 = mlx::ops::cast::astype(g, Dtype::Float32)?;
+                let g_sig = g_f32.sigmoid()?;
+                let g_silu = &g_f32 * &g_sig;
+                let normed_f32 = mlx::ops::cast::astype(normed, Dtype::Float32)?;
+                let mul_f32 = &g_silu * &normed_f32;
+                Ok(vec![mul_f32])
+            },
+            ShapeMode::Shapeless,
+        )
+        .expect("compile swiglu_fused");
+        Mutex::new(cfn)
+    });
+    Ok(cell.lock().expect("swiglu_fused mutex").invoke(inputs)?)
 }
 
 #[cfg(test)]
@@ -226,5 +266,36 @@ mod tests {
             "gate=0 should yield zero output, got {}",
             v[2]
         );
+    }
+
+    #[test]
+    fn swiglu_fused_matches_reference_path() {
+        // Build small [4, 4] gate + normed Arrays, run through the
+        // module-level swiglu_fused() compile cell and through a hand-rolled
+        // reference (sigmoid → mul → mul). Assert close in fp32.
+        let g_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1 - 0.5).collect();
+        let normed_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05).collect();
+        let shape = &[4_i32, 4][..];
+        let g: Array = (g_data.as_slice(), shape).try_into().unwrap();
+        let normed: Array = (normed_data.as_slice(), shape).try_into().unwrap();
+
+        // Fused path
+        let fused_outs = swiglu_fused_invoke(&[&g, &normed]).unwrap();
+        let fused = fused_outs.into_iter().next().unwrap();
+        let fused_vec: Vec<f32> = fused.to_vec().unwrap();
+
+        // Reference unfused path: silu(g) * normed, all in fp32 (inputs already fp32).
+        let g_sig = g.sigmoid().unwrap();
+        let g_silu = &g * &g_sig;
+        let ref_arr = &g_silu * &normed;
+        let ref_vec: Vec<f32> = ref_arr.to_vec().unwrap();
+
+        assert_eq!(fused_vec.len(), ref_vec.len());
+        for (i, (a, b)) in fused_vec.iter().zip(ref_vec.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "mismatch at index {i}: fused={a}, ref={b}",
+            );
+        }
     }
 }
