@@ -93,7 +93,9 @@ impl Loader {
 
         let quant = parse_quant_meta(&config_raw)?;
 
-        let tensors = load_safetensors(model_dir)?;
+        let mut tensors = load_safetensors(model_dir)?;
+
+        Self::sanitize(&mut tensors, &config_raw)?;
 
         Ok(Self {
             tensors,
@@ -141,6 +143,86 @@ impl Loader {
     /// without a wrapping struct.
     pub fn config_raw_value(&self) -> &serde_json::Value {
         &self.config_raw
+    }
+
+    /// HF Qwen3.5 sanitize aligned with mlx-lm `qwen3_5.py::TextModel::sanitize`.
+    ///
+    /// Mutates `weights` in place:
+    /// 1. Strips `mtp.*` keys (the dedicated MTP head — see P8c).
+    /// 2. If `text_config.tie_word_embeddings`, drops `lm_head.{weight,scales,biases}`.
+    /// 3. `transpose_axes [0, 2, 1]` on `conv1d.weight` tensors whose last dim != 1
+    ///    (HF stores them as `[out, in, k]`; cxx-mlx Conv1d wants `[out, k, in]`).
+    /// 4. Adds `1.0` to all 1-D RmsNorm weights at known suffixes when either
+    ///    `mtp.*` was present OR an unsanitized conv1d was detected — the HF
+    ///    "offset gamma" convention.
+    fn sanitize(
+        weights: &mut HashMap<String, Array>,
+        config_raw: &serde_json::Value,
+    ) -> Result<()> {
+        // Detection BEFORE mutation.
+        let has_mtp = weights.keys().any(|k| k.contains("mtp."));
+        let has_unsanitized_conv1d = weights.iter().any(|(k, v)| {
+            k.ends_with("conv1d.weight") && v.shape().as_slice().last().copied().unwrap_or(1) != 1
+        });
+        let should_shift_norm = has_mtp || has_unsanitized_conv1d;
+
+        // 1. Strip mtp.*
+        weights.retain(|k, _| !k.contains("mtp."));
+
+        // 2. Strip lm_head if tied.
+        let tie = config_raw
+            .get("text_config")
+            .and_then(|tc| tc.get("tie_word_embeddings"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if tie {
+            weights.remove("lm_head.weight");
+            weights.remove("lm_head.scales");
+            weights.remove("lm_head.biases");
+        }
+
+        // 3. conv1d.weight transpose_axes [0, 2, 1] if old form.
+        let conv1d_keys: Vec<String> = weights
+            .iter()
+            .filter(|(k, v)| {
+                k.ends_with("conv1d.weight")
+                    && v.shape().as_slice().len() == 3
+                    && v.shape().as_slice().last().copied() != Some(1)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in conv1d_keys {
+            let v = weights.get(&k).expect("key just collected").clone();
+            // HF [out, in, k] → cxx-mlx [out, k, in] : axes permutation [0, 2, 1].
+            let moved = mlx::ops::shape::transpose_axes(&v, &[0_i32, 2, 1][..])?;
+            weights.insert(k, moved);
+        }
+
+        // 4. RMSNorm +1.0 shift if triggered.
+        if should_shift_norm {
+            const NORM_SUFFIXES: &[&str] = &[
+                ".input_layernorm.weight",
+                ".post_attention_layernorm.weight",
+                ".q_norm.weight",
+                ".k_norm.weight",
+            ];
+            const NORM_EXACT: &[&str] = &["model.norm.weight"];
+            let keys_to_shift: Vec<String> = weights
+                .iter()
+                .filter(|(k, v)| {
+                    v.shape().as_slice().len() == 1
+                        && (NORM_SUFFIXES.iter().any(|s| k.ends_with(s))
+                            || NORM_EXACT.iter().any(|s| k == s))
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in keys_to_shift {
+                let v = weights.get(&k).expect("key just collected").clone();
+                let shifted = &v + 1.0_f32;
+                weights.insert(k, shifted);
+            }
+        }
+        Ok(())
     }
 
     /// Tokenizer config (chat template, eos token, etc.).
@@ -281,6 +363,89 @@ mod tests {
         match m {
             EosTokenId::Multi(v) => assert_eq!(v, vec![1, 2, 3]),
             _ => panic!("expected Multi"),
+        }
+    }
+
+    fn empty_text_config() -> serde_json::Value {
+        serde_json::json!({"text_config": {}})
+    }
+    fn tied_text_config() -> serde_json::Value {
+        serde_json::json!({"text_config": {"tie_word_embeddings": true}})
+    }
+
+    #[test]
+    fn sanitize_strips_mtp_keys_and_shifts_norm() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        // mtp.* presence triggers should_shift_norm
+        let mtp_arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+        w.insert(
+            "mtp.layers.0.input_layernorm.weight".into(),
+            mtp_arr.clone(),
+        );
+        // a main-model norm at a known suffix
+        let norm_arr: Array = (&[0.5_f32; 4][..], (4_i32,)).try_into().unwrap();
+        w.insert(
+            "model.layers.0.input_layernorm.weight".into(),
+            norm_arr.clone(),
+        );
+
+        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+
+        // mtp.* is gone.
+        assert!(!w.contains_key("mtp.layers.0.input_layernorm.weight"));
+        // main-model norm got +1.0 shift.
+        let shifted = w.get("model.layers.0.input_layernorm.weight").unwrap();
+        let v: Vec<f32> = shifted.to_vec().unwrap();
+        for x in v {
+            assert!((x - 1.5).abs() < 1e-6, "expected 1.5 (0.5+1.0), got {x}");
+        }
+    }
+
+    #[test]
+    fn sanitize_conv1d_moveaxis_when_3d_last_not_one() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        // shape [out=2, in=3, k=4] → after transpose_axes [0,2,1] → [2, 4, 3]
+        let data: Vec<f32> = (0..(2 * 3 * 4)).map(|i| i as f32).collect();
+        let arr: Array = (data.as_slice(), &[2_i32, 3, 4][..]).try_into().unwrap();
+        w.insert("model.layers.0.linear_attn.conv1d.weight".into(), arr);
+
+        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+
+        let after = w.get("model.layers.0.linear_attn.conv1d.weight").unwrap();
+        assert_eq!(after.shape().as_slice(), &[2, 4, 3]);
+    }
+
+    #[test]
+    fn sanitize_strips_lm_head_when_tied() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let h: Array = (&[0.0_f32; 4][..], (2_i32, 2)).try_into().unwrap();
+        w.insert("lm_head.weight".into(), h.clone());
+        w.insert("lm_head.scales".into(), h.clone());
+        w.insert("model.embed_tokens.weight".into(), h);
+
+        Loader::sanitize(&mut w, &tied_text_config()).unwrap();
+
+        assert!(!w.contains_key("lm_head.weight"));
+        assert!(!w.contains_key("lm_head.scales"));
+        // embed_tokens preserved.
+        assert!(w.contains_key("model.embed_tokens.weight"));
+    }
+
+    #[test]
+    fn sanitize_no_norm_shift_when_neither_trigger() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        // No mtp.*, conv1d already in correct form.
+        let conv: Array = (&[0.0_f32; 8][..], &[2_i32, 4, 1][..]).try_into().unwrap();
+        w.insert("layers.0.linear_attn.conv1d.weight".into(), conv);
+        let norm: Array = (&[0.5_f32; 4][..], (4_i32,)).try_into().unwrap();
+        w.insert("model.norm.weight".into(), norm);
+
+        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+
+        let n = w.get("model.norm.weight").unwrap();
+        let v: Vec<f32> = n.to_vec().unwrap();
+        for x in v {
+            assert!((x - 0.5).abs() < 1e-6, "norm should stay at 0.5, got {x}");
         }
     }
 }
