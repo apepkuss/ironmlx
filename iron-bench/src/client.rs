@@ -8,9 +8,6 @@
 //! The per-event handling is split out into `pub(crate) fn process_event` so unit
 //! tests drive the parser without an HTTP server.
 
-// T2 exports used by runner (T3) — allow dead_code until wiring is complete.
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
@@ -51,6 +48,7 @@ pub struct RequestResult {
     /// Local fallback count of SSE chunks with non-empty `delta.content`.
     pub chunk_count: u32,
     pub finish_reason: String,
+    #[allow(dead_code)]
     pub content_chars: usize,
 }
 

@@ -5,9 +5,6 @@
 //! discarded. Timed runs are collected as `RunOutcome`s and reduced by the
 //! `report` module.
 
-// T3 exports used by report (T4) — allow dead_code until T4 wires reduce_cell.
-#![allow(dead_code)]
-
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -19,6 +16,7 @@ use crate::prompt::synthesize_prompt;
 #[derive(Debug)]
 pub struct CellResult {
     pub target_name: String,
+    #[allow(dead_code)]
     pub target_url: String,
     pub pp_target: usize,
     pub tg_target: usize,
