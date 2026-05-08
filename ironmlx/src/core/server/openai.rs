@@ -89,12 +89,20 @@ struct CompletionChoice {
 }
 
 #[derive(Debug, Serialize)]
+struct Usage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
 struct CompletionResponse {
     id: String,
     object: &'static str,
     created: u64,
     model: String,
     choices: Vec<CompletionChoice>,
+    usage: Usage,
 }
 
 fn now_unix() -> u64 {
@@ -149,12 +157,13 @@ pub async fn chat_completions(
         stop_token_ids,
     };
 
+    let prompt_tokens = request.prompt_ids.len() as u32;
     let model_id = req.model.clone().unwrap_or_else(|| state.model_id.clone());
 
     if req.stream {
         chat_completions_stream(state, request, model_id).await
     } else {
-        chat_completions_unary(state, request, model_id).await
+        chat_completions_unary(state, request, model_id, prompt_tokens).await
     }
 }
 
@@ -243,30 +252,33 @@ async fn chat_completions_unary(
     state: AppState,
     request: GenerateRequest,
     model_id: String,
+    prompt_tokens: u32,
 ) -> Response {
     let id = gen_id();
     let result = tokio::task::spawn_blocking(
-        move || -> std::result::Result<(String, &'static str), String> {
+        move || -> std::result::Result<(String, &'static str, u32), String> {
             let model_guard = state.model.blocking_lock();
             let tokenizer = &*state.tokenizer;
             let mut stream = GenerationStream::new(&model_guard, tokenizer, request)
                 .map_err(|e| e.to_string())?;
             let mut buf = String::new();
             let mut finish: &'static str = "stop";
+            let mut completion_tokens: u32 = 0;
             while let Some(ev) = stream.next_token().map_err(|e| e.to_string())? {
                 buf.push_str(&ev.text);
+                completion_tokens += 1;
                 if let Some(reason) = ev.finish_reason {
                     finish = reason;
                     break;
                 }
             }
-            Ok((buf, finish))
+            Ok((buf, finish, completion_tokens))
         },
     )
     .await;
 
-    let (content, finish) = match result {
-        Ok(Ok(pair)) => pair,
+    let (content, finish, completion_tokens) = match result {
+        Ok(Ok(t)) => t,
         Ok(Err(msg)) => return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
         Err(e) => {
             return (
@@ -290,6 +302,11 @@ async fn chat_completions_unary(
             },
             finish_reason: finish,
         }],
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
     };
     Json(resp).into_response()
 }
@@ -380,11 +397,19 @@ mod tests {
                 },
                 finish_reason: "stop",
             }],
+            usage: Usage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                total_tokens: 6,
+            },
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"object\":\"chat.completion\""));
         assert!(s.contains("\"role\":\"assistant\""));
         assert!(s.contains("\"content\":\"hi\""));
         assert!(s.contains("\"finish_reason\":\"stop\""));
+        assert!(s.contains("\"prompt_tokens\":5"));
+        assert!(s.contains("\"completion_tokens\":1"));
+        assert!(s.contains("\"total_tokens\":6"));
     }
 }

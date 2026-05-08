@@ -19,6 +19,8 @@ pub mod chat_format;
 mod openai;
 
 #[derive(Clone)]
+/// HTTP server shared state. The model is wrapped in a tokio Mutex —
+/// concurrent requests serialize behind the lock (P4 single-stream contract).
 pub struct AppState {
     pub model: Arc<Mutex<Qwen35Model>>,
     pub tokenizer: Arc<Tokenizer>,

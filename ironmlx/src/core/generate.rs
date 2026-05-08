@@ -35,6 +35,9 @@ pub struct GenerateEvent {
     pub finish_reason: Option<&'static str>,
 }
 
+/// Single-request prefill+decode driver. Owns a per-call cache vector and
+/// accumulates token history; yields one [`GenerateEvent`] per decode step
+/// until EOS or `max_new_tokens`.
 pub struct GenerationStream<'m> {
     model: &'m Qwen35Model,
     tokenizer: &'m Tokenizer,

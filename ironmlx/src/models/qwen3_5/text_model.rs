@@ -13,6 +13,7 @@ use crate::Result;
 
 use super::config::Qwen35Config;
 
+/// Qwen3.5 text-only core: embed_tokens + N×DecoderLayer + final RmsNorm + per-instance Mrope.
 pub struct Qwen35TextModel {
     embed_tokens: Embedding,
     layers: Vec<DecoderLayer>,

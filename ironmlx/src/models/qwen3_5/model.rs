@@ -11,6 +11,7 @@ use crate::Result;
 use super::config::Qwen35Config;
 use super::text_model::Qwen35TextModel;
 
+/// Top-level Qwen3.5 dense model: hybrid 32-layer text core + tied/untied lm_head.
 pub struct Qwen35Model {
     text: Qwen35TextModel,
     /// `Some` when `!tie_word_embeddings`. `None` reuses `text.embed_tokens` for output projection.
