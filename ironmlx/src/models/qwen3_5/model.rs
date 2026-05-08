@@ -77,14 +77,22 @@ impl Qwen35Model {
         for i in 0..cfg.num_hidden_layers {
             match cfg.layer_kind(i) {
                 AttnKind::Full => {
-                    out.push(LayerCache::Full(KVCache::new(
-                        batch,
-                        cfg.num_key_value_heads,
-                        head_dim,
-                        head_dim,
-                        dtype,
-                        cap,
-                    )));
+                    // P8a-stage6: one-shot allocate to full cap (step >= cap)
+                    // so the first decode step at long context never triggers
+                    // grow_to. KVCache's default step=256 would otherwise
+                    // round prefill alloc down to a step boundary and force
+                    // a full-buffer reallocation + memcpy on decode step 1.
+                    out.push(LayerCache::Full(
+                        KVCache::new(
+                            batch,
+                            cfg.num_key_value_heads,
+                            head_dim,
+                            head_dim,
+                            dtype,
+                            cap,
+                        )
+                        .with_step(cap),
+                    ));
                 }
                 AttnKind::Linear => {
                     let conv_dim = cfg.linear_key_head_dim * cfg.linear_num_key_heads * 2
