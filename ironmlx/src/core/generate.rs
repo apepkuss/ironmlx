@@ -88,6 +88,12 @@ pub struct GenerationStream<'m> {
     /// var `IRONMLX_CAPTURE_FILE=<path>` was honored at construction time).
     /// Calls `mlx::metal::stop()` in `Drop`.
     capture_active: bool,
+
+    /// When `IRONMLX_CAPTURE_PHASE=decode` is set, capture is deferred until
+    /// the first `next_token` call (skipping prefill). This field holds the
+    /// path until that first call starts the capture. `None` once started or
+    /// if not in decode-only mode.
+    capture_pending_decode: Option<String>,
 }
 
 impl Drop for GenerationStream<'_> {
@@ -103,34 +109,44 @@ impl Drop for GenerationStream<'_> {
     }
 }
 
-/// Honor the `IRONMLX_CAPTURE_FILE` env var: if set AND this is the FIRST
-/// `GenerationStream` constructed in the process, start a Metal capture
-/// targeting the path. Returns `true` iff a capture was actually started
-/// (the constructor stores this in `capture_active` so `Drop` can call
-/// `stop_capture`).
-fn try_start_capture() -> bool {
+/// Honor `IRONMLX_CAPTURE_FILE` + `IRONMLX_CAPTURE_PHASE` env vars.
+///
+/// - `IRONMLX_CAPTURE_PHASE` unset / "all" / empty (default): start capture
+///   immediately at construction (covers prefill + decode). Returns
+///   `(capture_active=true, capture_pending_decode=None)`.
+/// - `IRONMLX_CAPTURE_PHASE=decode`: defer capture until the first
+///   `next_token` call (skips prefill — useful at long PP where prefill GPU
+///   work dominates the trace and Xcode replay struggles). Returns
+///   `(capture_active=true, capture_pending_decode=Some(path))`.
+///
+/// Either way, `capture_active=true` means `Drop` calls `stop_capture`.
+fn try_start_capture() -> (bool, Option<String>) {
     let Ok(path) = std::env::var("IRONMLX_CAPTURE_FILE") else {
-        return false;
+        return (false, None);
     };
     if CAPTURE_CLAIMED.set(()).is_err() {
-        // Another GenerationStream already claimed the capture window.
         tracing::info!(
             "IRONMLX_CAPTURE_FILE set but capture already in progress; \
              this request will not be captured"
         );
-        return false;
+        return (false, None);
+    }
+    let decode_only = std::env::var("IRONMLX_CAPTURE_PHASE").ok().as_deref() == Some("decode");
+    if decode_only {
+        tracing::info!("metal capture deferred (phase=decode) -> {path}");
+        return (true, Some(path));
     }
     match mlx::metal::start(&path) {
         Ok(()) => {
             tracing::info!("metal capture started -> {path}");
-            true
+            (true, None)
         }
         Err(e) => {
             tracing::warn!(
                 "metal capture failed to start ({path}): {e}; continuing without capture \
                  (set MTL_CAPTURE_ENABLED=1 before launch + ensure path is writable)"
             );
-            false
+            (false, None)
         }
     }
 }
@@ -164,10 +180,10 @@ impl<'m> GenerationStream<'m> {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
         }
 
-        // P8a-stage4 Metal capture hook: start BEFORE prefill so the
-        // .gputrace covers the full prefill + decode pipeline. Gated by
-        // `IRONMLX_CAPTURE_FILE` env var + first-construction OnceLock.
-        let capture_active = try_start_capture();
+        // P8a-stage4/6 Metal capture hook. Gated by `IRONMLX_CAPTURE_FILE`
+        // env var + first-construction OnceLock. `IRONMLX_CAPTURE_PHASE=decode`
+        // defers start to the first `next_token` call (skips prefill).
+        let (capture_active, capture_pending_decode) = try_start_capture();
 
         let prompt_len = request.prompt_ids.len();
         let cap = (prompt_len + request.max_new_tokens) as i32;
@@ -215,6 +231,7 @@ impl<'m> GenerationStream<'m> {
                 detok: Some(detok),
                 last_decoded_text: String::new(),
                 capture_active,
+                capture_pending_decode,
             })
         } else {
             // Sync path: existing pre-P8a behavior. First token sampled
@@ -240,7 +257,22 @@ impl<'m> GenerationStream<'m> {
                 detok: None,
                 last_decoded_text: initial_text,
                 capture_active,
+                capture_pending_decode,
             })
+        }
+    }
+
+    /// If a capture was deferred (phase=decode), start it now (lazily, on
+    /// first `next_token` call). Idempotent — once started, the pending
+    /// path is cleared.
+    fn start_deferred_capture(&mut self) {
+        if let Some(path) = self.capture_pending_decode.take() {
+            match mlx::metal::start(&path) {
+                Ok(()) => tracing::info!("metal capture started (decode phase) -> {path}"),
+                Err(e) => tracing::warn!(
+                    "metal capture failed to start ({path}): {e}; continuing without capture"
+                ),
+            }
         }
     }
 
@@ -249,6 +281,9 @@ impl<'m> GenerationStream<'m> {
         if self.finished {
             return Ok(None);
         }
+        // If decode-phase Metal capture was deferred, start it now (right
+        // before the first decode-step work hits the GPU).
+        self.start_deferred_capture();
         if self.pipelined {
             self.next_token_pipelined()
         } else {
