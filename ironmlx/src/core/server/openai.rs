@@ -37,6 +37,11 @@ pub struct ChatRequest {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub seed: Option<u64>,
+    /// HuggingFace `apply_chat_template` extra kwargs — passed through as
+    /// top-level template render-context variables. Honors Qwen3+'s
+    /// `enable_thinking` toggle, vLLM's `tools` / `documents`, etc.
+    #[serde(default)]
+    pub chat_template_kwargs: Option<serde_json::Value>,
 }
 
 fn default_max_tokens() -> usize {
@@ -138,7 +143,11 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
 ) -> Response {
-    let prompt_ids = match render_and_encode(&state.tokenizer, &req.messages) {
+    let prompt_ids = match render_and_encode(
+        &state.tokenizer,
+        &req.messages,
+        req.chat_template_kwargs.as_ref(),
+    ) {
         Ok(ids) => ids,
         Err(e) => {
             return (

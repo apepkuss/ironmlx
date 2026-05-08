@@ -54,7 +54,7 @@ pub fn run(args: GenerateArgs) -> Result<()> {
             role: "user".into(),
             content: args.prompt.clone(),
         }];
-        tokenizer.apply_chat_template(&messages, true)?
+        tokenizer.apply_chat_template(&messages, true, /* extra_kwargs = */ None)?
     } else {
         args.prompt.clone()
     };

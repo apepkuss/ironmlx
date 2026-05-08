@@ -18,8 +18,14 @@ pub struct ChatMessage {
 
 /// Apply the model's chat template to render `messages` to a single prompt
 /// string, then tokenize. Returns the token ids feeding into
-/// [`crate::core::generate::GenerationStream`].
-pub fn render_and_encode(tokenizer: &Tokenizer, messages: &[ChatMessage]) -> Result<Vec<u32>> {
+/// [`crate::core::generate::GenerationStream`]. `chat_template_kwargs`,
+/// when present, is forwarded as additional template render-context
+/// variables (e.g. `enable_thinking` for Qwen3+ thinking-mode toggle).
+pub fn render_and_encode(
+    tokenizer: &Tokenizer,
+    messages: &[ChatMessage],
+    chat_template_kwargs: Option<&serde_json::Value>,
+) -> Result<Vec<u32>> {
     if !tokenizer.has_chat_template() {
         return Err(anyhow!(
             "tokenizer has no chat_template — cannot serve /v1/chat/completions or /v1/messages"
@@ -32,8 +38,11 @@ pub fn render_and_encode(tokenizer: &Tokenizer, messages: &[ChatMessage]) -> Res
             content: m.content.clone(),
         })
         .collect();
-    let prompt =
-        tokenizer.apply_chat_template(&internal, /* add_generation_prompt = */ true)?;
+    let prompt = tokenizer.apply_chat_template(
+        &internal,
+        /* add_generation_prompt = */ true,
+        chat_template_kwargs,
+    )?;
     tokenizer.encode(&prompt, /* add_special_tokens = */ false)
 }
 

@@ -93,18 +93,50 @@ impl ChatTemplate {
         Ok(Self { env })
     }
 
-    /// Render `messages` through the template. `add_generation_prompt`
-    /// is forwarded as a top-level template variable.
-    pub fn render(&self, messages: &[Message], add_generation_prompt: bool) -> Result<String> {
+    /// Render `messages` through the template. `add_generation_prompt` is
+    /// forwarded as a top-level template variable. `extra_kwargs`, when
+    /// present, must be a JSON object whose top-level keys are merged into
+    /// the template render context (e.g. `{"enable_thinking": false}` from
+    /// an OpenAI request's `chat_template_kwargs` field). Reserved keys
+    /// `messages` and `add_generation_prompt` in `extra_kwargs` are
+    /// ignored — the explicit args take precedence.
+    pub fn render(
+        &self,
+        messages: &[Message],
+        add_generation_prompt: bool,
+        extra_kwargs: Option<&serde_json::Value>,
+    ) -> Result<String> {
         let tmpl = self
             .env
             .get_template("chat")
             .map_err(|e| anyhow::anyhow!("get chat template: {e}"))?;
-        let ctx = Value::from_serialize(serde_json::json!({
+
+        let mut ctx = serde_json::json!({
             "messages": messages,
             "add_generation_prompt": add_generation_prompt,
-        }));
-        tmpl.render(ctx)
+        });
+        if let Some(extra) = extra_kwargs {
+            let extra_obj = extra.as_object().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "chat_template_kwargs must be a JSON object, got {}",
+                    if extra.is_array() {
+                        "array"
+                    } else if extra.is_string() {
+                        "string"
+                    } else {
+                        "scalar"
+                    }
+                )
+            })?;
+            let dst = ctx.as_object_mut().expect("ctx initialized as object");
+            for (k, v) in extra_obj {
+                if k == "messages" || k == "add_generation_prompt" {
+                    continue;
+                }
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        tmpl.render(Value::from_serialize(ctx))
             .map_err(|e| anyhow::anyhow!("render chat template: {e}"))
     }
 }
@@ -126,7 +158,7 @@ mod tests {
             role: "user".into(),
             content: "hi".into(),
         }];
-        let out = t.render(&msgs, true).unwrap();
+        let out = t.render(&msgs, true, None).unwrap();
         assert!(out.contains("<|im_start|>user"));
         assert!(out.contains("hi"));
         assert!(out.contains("<|im_end|>"));
@@ -141,7 +173,7 @@ mod tests {
             role: "user".into(),
             content: "abc".into(),
         }];
-        let out = t.render(&msgs, false).unwrap();
+        let out = t.render(&msgs, false, None).unwrap();
         assert_eq!(out, "abc");
     }
 
@@ -149,7 +181,52 @@ mod tests {
     fn raise_exception_filter_errors() {
         let src = r#"{{ raise_exception('boom') }}"#;
         let t = ChatTemplate::new(src).unwrap();
-        let res = t.render(&[], false);
+        let res = t.render(&[], false, None);
         assert!(res.is_err(), "expected error from raise_exception");
+    }
+
+    #[test]
+    fn extra_kwargs_merged_into_context() {
+        // Mirrors Qwen3.5's chat_template.jinja:149 idiom:
+        //   {%- if enable_thinking is defined and enable_thinking is false %}
+        let src = r#"{%- if enable_thinking is defined and enable_thinking is false -%}NOTHINK{%- else -%}THINK{%- endif -%}"#;
+        let t = ChatTemplate::new(src).unwrap();
+        // No kwargs → enable_thinking undefined → THINK branch.
+        assert_eq!(t.render(&[], false, None).unwrap(), "THINK");
+        // {"enable_thinking": false} → defined+false → NOTHINK branch.
+        let kw = serde_json::json!({"enable_thinking": false});
+        assert_eq!(t.render(&[], false, Some(&kw)).unwrap(), "NOTHINK");
+        // {"enable_thinking": true} → defined+true → THINK branch (else arm).
+        let kw = serde_json::json!({"enable_thinking": true});
+        assert_eq!(t.render(&[], false, Some(&kw)).unwrap(), "THINK");
+    }
+
+    #[test]
+    fn extra_kwargs_reject_non_object() {
+        let src = r#"hello"#;
+        let t = ChatTemplate::new(src).unwrap();
+        let kw = serde_json::json!([1, 2, 3]);
+        let res = t.render(&[], false, Some(&kw));
+        assert!(res.is_err(), "array kwargs must error");
+        let kw = serde_json::json!("string");
+        let res = t.render(&[], false, Some(&kw));
+        assert!(res.is_err(), "string kwargs must error");
+    }
+
+    #[test]
+    fn extra_kwargs_cannot_override_reserved_keys() {
+        // Caller tries to overwrite `messages` via kwargs — must be ignored.
+        let src = r#"{%- for m in messages -%}{{ m.content }}{%- endfor -%}"#;
+        let t = ChatTemplate::new(src).unwrap();
+        let msgs = vec![Message {
+            role: "user".into(),
+            content: "real".into(),
+        }];
+        let kw = serde_json::json!({"messages": [{"role": "user", "content": "fake"}]});
+        let out = t.render(&msgs, false, Some(&kw)).unwrap();
+        assert_eq!(
+            out, "real",
+            "explicit messages must take precedence over kwargs"
+        );
     }
 }

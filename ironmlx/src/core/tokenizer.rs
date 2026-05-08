@@ -105,17 +105,21 @@ impl Tokenizer {
     }
 
     /// Render a chat template. Errors if the tokenizer config did not
-    /// supply a `chat_template`.
+    /// supply a `chat_template`. `extra_kwargs` (when present) is a JSON
+    /// object whose top-level keys are merged into the template context
+    /// (e.g. `{"enable_thinking": false}` from OpenAI's
+    /// `chat_template_kwargs`).
     pub fn apply_chat_template(
         &self,
         messages: &[Message],
         add_generation_prompt: bool,
+        extra_kwargs: Option<&serde_json::Value>,
     ) -> Result<String> {
         let chat = self
             .chat
             .as_ref()
             .ok_or_else(|| anyhow!("tokenizer has no chat template"))?;
-        chat.render(messages, add_generation_prompt)
+        chat.render(messages, add_generation_prompt, extra_kwargs)
     }
 
     /// True iff a chat template was provided.
