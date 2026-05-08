@@ -150,6 +150,15 @@ impl Linear {
         match &self.inner {
             LinearImpl::Fp { weight, .. } => weight.shape().as_slice()[1] as usize,
             LinearImpl::Quant { weight, bits, .. } => {
+                // Formula assumes power-of-2 bit width (2 / 4 / 8): each u32
+                // lane packs 32/bits elements. mlx-community quants for
+                // Qwen3.x are all 4-bit, so the assumption holds in practice;
+                // the assert prevents silent mis-computation if a future
+                // checkpoint uses non-power-of-2 bits (3 / 5 / 6, byte-packed).
+                debug_assert!(
+                    *bits > 0 && *bits <= 32 && (*bits as u32).is_power_of_two(),
+                    "Linear::in_features: 32/bits packing assumes power-of-2 bits in {{2,4,8,16,32}}, got bits={bits}"
+                );
                 (weight.shape().as_slice()[1] * (32 / bits)) as usize
             }
         }
