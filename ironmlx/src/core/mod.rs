@@ -5,6 +5,7 @@ pub mod chat_template;
 pub mod generate;
 pub mod loader;
 pub mod sampler;
+pub mod server;
 pub mod tokenizer;
 
 pub use cache::KVCache;

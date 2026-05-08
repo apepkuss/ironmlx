@@ -25,6 +25,13 @@ dirs = "6"
 anyhow = "1"
 smallvec = "1"
 minijinja = { version = "2", default-features = false, features = ["builtins", "loader", "serde"] }
+tokio.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 approx = "0.5"
+reqwest.workspace = true
+tokio-stream.workspace = true
