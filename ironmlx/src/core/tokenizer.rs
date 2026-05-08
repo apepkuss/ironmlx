@@ -16,6 +16,35 @@ pub struct Tokenizer {
     eos_token_ids: Vec<u32>,
 }
 
+/// Streaming detokenizer wrapper. Hides the five generics that
+/// [`tokenizers::DecodeStream`] is parameterised by, exposing only
+/// `step(token_id) -> Result<Option<String>>` which returns the
+/// per-token text delta (or `None` if the BPE boundary has not yet
+/// produced a renderable string for this id).
+///
+/// Lifetime `'a` ties to the borrow of [`Tokenizer`].
+pub struct DecodeStream<'a> {
+    inner: tokenizers::DecodeStream<
+        'a,
+        tokenizers::models::ModelWrapper,
+        tokenizers::normalizers::NormalizerWrapper,
+        tokenizers::pre_tokenizers::PreTokenizerWrapper,
+        tokenizers::processors::PostProcessorWrapper,
+        tokenizers::decoders::DecoderWrapper,
+    >,
+}
+
+impl<'a> DecodeStream<'a> {
+    /// Feed one token id, get the incremental text delta. `Ok(None)` means
+    /// the underlying BPE has buffered this id (waiting for a boundary)
+    /// and produced no new text on this call.
+    pub fn step(&mut self, id: u32) -> Result<Option<String>> {
+        self.inner
+            .step(id)
+            .map_err(|e| anyhow!("decode_stream.step({id}): {e}"))
+    }
+}
+
 impl Tokenizer {
     /// Build a [`Tokenizer`] from a [`Loader`]. Loads
     /// `{model_dir}/tokenizer.json` and uses
@@ -57,6 +86,17 @@ impl Tokenizer {
         self.inner
             .decode(tokens, skip_special)
             .map_err(|e| anyhow!("decode: {e}"))
+    }
+
+    /// Construct a streaming detokenizer that maintains BPE-boundary state
+    /// across `step()` calls. Use this on the decode hot path to avoid the
+    /// O(N²) cost of re-decoding the full token sequence per step.
+    ///
+    /// `skip_special` mirrors the same flag on [`Tokenizer::decode`].
+    pub fn decode_stream(&self, skip_special: bool) -> DecodeStream<'_> {
+        DecodeStream {
+            inner: self.inner.decode_stream(skip_special),
+        }
     }
 
     /// Resolved EOS token ids, in declared order. Empty if unresolved.
