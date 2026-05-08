@@ -81,11 +81,14 @@ fn gated_delta_net_matches_python_fixture() {
         },
     );
 
+    // T3 (P8a-stage2): GatedDeltaNet now expects 2 fused projections
+    // (in_proj_qkvz = qkv ⊕ z, in_proj_ba = b ⊕ a). Concat the test's
+    // 4 separate fp weights along axis 0 before passing.
+    let qkvz_w = mlx::ops::shape::concatenate(&[&qkv_w, &z_w], 0).unwrap();
+    let ba_w = mlx::ops::shape::concatenate(&[&b_w, &a_w], 0).unwrap();
     let gdn = GatedDeltaNet::from_components(
-        Linear::new_fp(qkv_w, None),
-        Linear::new_fp(z_w, None),
-        Linear::new_fp(b_w, None),
-        Linear::new_fp(a_w, None),
+        Linear::new_fp(qkvz_w, None),
+        Linear::new_fp(ba_w, None),
         conv1d,
         RmsNormGated::new(norm_w, cfg.rms_norm_eps),
         Linear::new_fp(out_w, None),
