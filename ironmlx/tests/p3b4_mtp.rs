@@ -77,6 +77,11 @@ fn mtp_forward_matches_python_fixture() {
         head_dim: D,
         rms_norm_eps: RMS_EPS,
         attention_bias: false,
+        linear_num_value_heads: 0,
+        linear_num_key_heads: 0,
+        linear_key_head_dim: 0,
+        linear_value_head_dim: 0,
+        linear_conv_kernel_dim: 0,
     };
 
     let attn = GatedAttention::from_components(
@@ -101,7 +106,7 @@ fn mtp_forward_matches_python_fixture() {
         Linear::new_fp(down_w, None),
     );
 
-    let layer0 = DecoderLayer::from_components(
+    let layer0 = DecoderLayer::from_components_full(
         RmsNorm::new(in_ln_w, RMS_EPS),
         attn,
         RmsNorm::new(post_ln_w, RMS_EPS),

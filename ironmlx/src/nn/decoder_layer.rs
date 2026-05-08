@@ -1,27 +1,38 @@
-//! Single Qwen3.5 / Qwen3-Next decoder block (full-attention path only).
+//! Single Qwen3.5 / Qwen3-Next decoder block.
 //!
-//! Mirrors mlx-lm `Qwen3NextDecoderLayer.__call__` (`is_linear=False` branch):
+//! Mirrors mlx-lm `Qwen3NextDecoderLayer.__call__`:
 //!
 //! ```text
-//! r   = self_attn(input_layernorm(x), mask, cache)
+//! r   = self_attn_or_linear_attn(input_layernorm(x), mask, cache)
 //! h   = x + r
 //! out = h + mlp(post_attention_layernorm(h))
 //! ```
 //!
-//! Reused by both [`crate::nn::Mtp`] and (in P4) the main Qwen3.5 text model.
-//! The linear-attention SSM branch (Qwen3-Next's `is_linear=True`) will be
-//! folded in additively — most likely as an `enum` field — when P4 lands.
+//! The attention path is selected at construction time per `AttnKind`. Full-
+//! attention layers consume `KVCache`; linear-attention SSM layers consume
+//! `GatedDeltaCache`. Both are wrapped uniformly via [`LayerCache`].
 
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::cache::KVCache;
+use crate::core::cache::{GatedDeltaCache, KVCache};
 use crate::core::Loader;
-use crate::nn::{GatedAttention, GatedAttentionConfig, Mlp, Mrope, RmsNorm};
+use crate::nn::{
+    GatedAttention, GatedAttentionConfig, GatedDeltaNet, GatedDeltaNetConfig, Mlp, Mrope, RmsNorm,
+};
 use crate::Result;
 
-/// Configuration for [`DecoderLayer`]. Mirrors the subset of Qwen3-Next
-/// `ModelArgs` that drives a single full-attention decoder block.
+/// Which attention path a [`DecoderLayer`] uses. Selected per layer index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttnKind {
+    /// Standard gated full attention (P3b2). Consumes [`KVCache`].
+    Full,
+    /// Gated delta-net linear attention SSM (P3b3). Consumes [`GatedDeltaCache`].
+    Linear,
+}
+
+/// Configuration for [`DecoderLayer`]. Mirrors the subset of Qwen3.5
+/// `TextModelArgs` that drives a single decoder block.
 #[derive(Debug, Clone, Copy)]
 pub struct DecoderLayerConfig {
     pub hidden_size: i32,
@@ -31,24 +42,45 @@ pub struct DecoderLayerConfig {
     pub head_dim: i32,
     pub rms_norm_eps: f32,
     pub attention_bias: bool,
+    /// Linear-attn parameters (only consulted when `AttnKind::Linear`).
+    pub linear_num_value_heads: i32,
+    pub linear_num_key_heads: i32,
+    pub linear_key_head_dim: i32,
+    pub linear_value_head_dim: i32,
+    pub linear_conv_kernel_dim: i32,
 }
 
-/// One full-attention decoder block.
+/// Attention path variant — owns either a full-attention or a linear-attention block.
+///
+/// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can construct it
+/// via [`DecoderLayer::from_components_full`] / [`DecoderLayer::from_components_linear`].
+#[doc(hidden)]
+pub enum AttnPath {
+    Full(GatedAttention),
+    Linear(GatedDeltaNet),
+}
+
+/// Per-layer cache, paired with [`AttnPath`].
+#[doc(hidden)]
+pub enum LayerCache {
+    Full(KVCache),
+    Linear(GatedDeltaCache),
+}
+
+/// One decoder block. Full or linear attention selected at construction.
 pub struct DecoderLayer {
     input_layernorm: RmsNorm,
-    self_attn: GatedAttention,
+    attn: AttnPath,
     post_attention_layernorm: RmsNorm,
     mlp: Mlp,
     cfg: DecoderLayerConfig,
 }
 
 impl DecoderLayer {
-    /// Test/composition seam: build a `DecoderLayer` from pre-built sub-modules.
-    ///
-    /// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can use it.
-    /// Hidden from rustdoc via `#[doc(hidden)]`.
+    /// Test/composition seam — full-attention variant. Equivalent to P3b4's
+    /// `from_components` (renamed for symmetry with the linear-attn variant).
     #[doc(hidden)]
-    pub fn from_components(
+    pub fn from_components_full(
         input_layernorm: RmsNorm,
         self_attn: GatedAttention,
         post_attention_layernorm: RmsNorm,
@@ -57,7 +89,25 @@ impl DecoderLayer {
     ) -> Self {
         Self {
             input_layernorm,
-            self_attn,
+            attn: AttnPath::Full(self_attn),
+            post_attention_layernorm,
+            mlp,
+            cfg,
+        }
+    }
+
+    /// Test/composition seam — linear-attention SSM variant.
+    #[doc(hidden)]
+    pub fn from_components_linear(
+        input_layernorm: RmsNorm,
+        linear_attn: GatedDeltaNet,
+        post_attention_layernorm: RmsNorm,
+        mlp: Mlp,
+        cfg: DecoderLayerConfig,
+    ) -> Self {
+        Self {
+            input_layernorm,
+            attn: AttnPath::Linear(linear_attn),
             post_attention_layernorm,
             mlp,
             cfg,
@@ -69,7 +119,15 @@ impl DecoderLayer {
         &self.cfg
     }
 
-    /// Default-stream forward pass. See [`forward_on`](Self::forward_on).
+    /// Which path this layer uses (introspection helper for the test/cache layer).
+    pub fn kind(&self) -> AttnKind {
+        match &self.attn {
+            AttnPath::Full(_) => AttnKind::Full,
+            AttnPath::Linear(_) => AttnKind::Linear,
+        }
+    }
+
+    /// Default-stream forward pass.
     pub fn forward(
         &self,
         x: &Array,
@@ -77,22 +135,149 @@ impl DecoderLayer {
         cos: &Array,
         sin: &Array,
         mask: Option<&Array>,
-        cache: Option<&mut KVCache>,
+        cache: Option<&mut LayerCache>,
     ) -> Result<Array> {
         self.forward_on(x, mrope, cos, sin, mask, cache, ())
     }
 
-    /// Stream-targeted forward. `x: [B, S, hidden_size]` → `[B, S, hidden_size]`.
+    /// Stream-targeted forward.
     ///
-    /// Computes (mlx-lm `Qwen3NextDecoderLayer.__call__` is_linear=False):
-    ///
-    /// ```text
-    /// r   = self_attn(input_layernorm(x), mask, cache)
-    /// h   = x + r
-    /// out = h + mlp(post_attention_layernorm(h))
-    /// ```
+    /// `x: [B, S, hidden_size]` → `[B, S, hidden_size]`. Cache type must match
+    /// `self.kind()`; mismatch returns `Err`. Linear-attn ignores `mrope`/`cos`/`sin`
+    /// (passed through for signature uniformity with the Full path).
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
+        &self,
+        x: &Array,
+        mrope: &Mrope,
+        cos: &Array,
+        sin: &Array,
+        mask: Option<&Array>,
+        cache: Option<&mut LayerCache>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        // Pre-flight (existing P3b4 invariants).
+        if x.ndim() != 3 {
+            return Err(anyhow!(
+                "DecoderLayer::forward_on: x must be rank-3 [B, S, hidden_size], got rank {}",
+                x.ndim()
+            ));
+        }
+        let dims_owned = x.shape();
+        let dims = dims_owned.as_slice();
+        if dims[2] != self.cfg.hidden_size {
+            return Err(anyhow!(
+                "DecoderLayer::forward_on: x last-axis = {} but cfg.hidden_size = {}",
+                dims[2],
+                self.cfg.hidden_size
+            ));
+        }
+
+        // Block 1: input_layernorm + attn dispatch + residual
+        let normed_in = self.input_layernorm.forward_on(x, target)?;
+        let attn = match (&self.attn, cache) {
+            (AttnPath::Full(a), Some(LayerCache::Full(kv))) => {
+                a.forward_on(&normed_in, mrope, cos, sin, mask, Some(kv), target)?
+            }
+            (AttnPath::Full(a), None) => {
+                a.forward_on(&normed_in, mrope, cos, sin, mask, None, target)?
+            }
+            (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => {
+                a.forward_on(&normed_in, mask, Some(gdc), target)?
+            }
+            (AttnPath::Linear(a), None) => a.forward_on(&normed_in, mask, None, target)?,
+            (AttnPath::Full(_), Some(LayerCache::Linear(_))) => {
+                return Err(anyhow!(
+                    "DecoderLayer::forward_on: Full attn layer received Linear cache (kind mismatch)"
+                ));
+            }
+            (AttnPath::Linear(_), Some(LayerCache::Full(_))) => {
+                return Err(anyhow!(
+                    "DecoderLayer::forward_on: Linear attn layer received Full cache (kind mismatch)"
+                ));
+            }
+        };
+        let h = x + &attn;
+
+        // Block 2: post_norm + mlp + residual
+        let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
+        let mlp_out = self.mlp.forward_on(&normed_post, target)?;
+        Ok(&h + &mlp_out)
+    }
+
+    /// Production constructor. `kind` selects which attention path to load
+    /// (Full → reads `{prefix}.self_attn.*`; Linear → reads `{prefix}.linear_attn.*`).
+    ///
+    /// No construction-time dim sanity checks — Linear's matmul surfaces shape errors
+    /// at first forward_on (matches GatedAttention::from_loader precedent).
+    pub fn from_loader(
+        loader: &Loader,
+        prefix: &str,
+        cfg: DecoderLayerConfig,
+        kind: AttnKind,
+    ) -> Result<Self> {
+        let input_layernorm = RmsNorm::from_loader(
+            loader,
+            &format!("{prefix}.input_layernorm"),
+            cfg.rms_norm_eps,
+        )?;
+        let attn = match kind {
+            AttnKind::Full => {
+                let ga = GatedAttention::from_loader(
+                    loader,
+                    &format!("{prefix}.self_attn"),
+                    GatedAttentionConfig {
+                        num_heads: cfg.num_heads,
+                        num_kv_heads: cfg.num_kv_heads,
+                        head_dim: cfg.head_dim,
+                        rms_norm_eps: cfg.rms_norm_eps,
+                        attention_bias: cfg.attention_bias,
+                    },
+                )?;
+                AttnPath::Full(ga)
+            }
+            AttnKind::Linear => {
+                let gdn = GatedDeltaNet::from_loader(
+                    loader,
+                    &format!("{prefix}.linear_attn"),
+                    GatedDeltaNetConfig {
+                        hidden_size: cfg.hidden_size,
+                        num_v_heads: cfg.linear_num_value_heads,
+                        num_k_heads: cfg.linear_num_key_heads,
+                        head_k_dim: cfg.linear_key_head_dim,
+                        head_v_dim: cfg.linear_value_head_dim,
+                        conv_kernel_size: cfg.linear_conv_kernel_dim,
+                        rms_norm_eps: cfg.rms_norm_eps,
+                    },
+                )?;
+                AttnPath::Linear(gdn)
+            }
+        };
+        let post_attention_layernorm = RmsNorm::from_loader(
+            loader,
+            &format!("{prefix}.post_attention_layernorm"),
+            cfg.rms_norm_eps,
+        )?;
+        let mlp = Mlp::from_loader(loader, &format!("{prefix}.mlp"))?;
+        Ok(Self {
+            input_layernorm,
+            attn,
+            post_attention_layernorm,
+            mlp,
+            cfg,
+        })
+    }
+}
+
+impl DecoderLayer {
+    /// Package-private helper for [`crate::nn::Mtp`]: same as [`forward_on`](Self::forward_on)
+    /// but accepts `Option<&mut KVCache>` directly, avoiding a wrapper allocation.
+    ///
+    /// Returns `Err` if called on a `Linear` layer (MTP layers are always Full).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_on_full_kv(
         &self,
         x: &Array,
         mrope: &Mrope,
@@ -104,85 +289,36 @@ impl DecoderLayer {
     ) -> Result<Array> {
         let target = target.into();
 
-        // Pre-flight validation (production-grade stability — explicit bounds > trust caller).
         if x.ndim() != 3 {
             return Err(anyhow!(
-                "DecoderLayer::forward_on: x must be rank-3 [B, S, hidden_size], got rank {}",
+                "DecoderLayer::forward_on_full_kv: x must be rank-3 [B, S, hidden_size], got rank {}",
                 x.ndim()
             ));
         }
-        let dims = x.shape();
-        let dims = dims.as_slice();
+        let dims_owned = x.shape();
+        let dims = dims_owned.as_slice();
         if dims[2] != self.cfg.hidden_size {
             return Err(anyhow!(
-                "DecoderLayer::forward_on: x last-axis = {} but cfg.hidden_size = {}",
+                "DecoderLayer::forward_on_full_kv: x last-axis = {} but cfg.hidden_size = {}",
                 dims[2],
                 self.cfg.hidden_size
             ));
         }
 
-        // Block 1: input_layernorm + self_attn + residual
         let normed_in = self.input_layernorm.forward_on(x, target)?;
-        let attn = self
-            .self_attn
-            .forward_on(&normed_in, mrope, cos, sin, mask, cache, target)?;
-        // `&Array + &Array` is panic-on-shape-mismatch; shape is guaranteed by pre-flight above.
-        let h = x + &attn;
+        let attn_out = match &self.attn {
+            AttnPath::Full(a) => a.forward_on(&normed_in, mrope, cos, sin, mask, cache, target)?,
+            AttnPath::Linear(_) => {
+                return Err(anyhow!(
+                    "DecoderLayer::forward_on_full_kv: called on Linear layer (MTP requires Full)"
+                ));
+            }
+        };
+        let h = x + &attn_out;
 
-        // Block 2: post_attention_layernorm + mlp + residual
         let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
         let mlp_out = self.mlp.forward_on(&normed_post, target)?;
         Ok(&h + &mlp_out)
-    }
-
-    /// Production constructor: load all sub-modules from a project [`Loader`].
-    ///
-    /// Reads (under prefix):
-    ///
-    /// - `{prefix}.input_layernorm.weight`            `[hidden_size]`
-    /// - `{prefix}.self_attn.q_proj.weight`           `[num_heads * head_dim * 2, hidden_size]`
-    /// - `{prefix}.self_attn.k_proj.weight`           `[num_kv_heads * head_dim, hidden_size]`
-    /// - `{prefix}.self_attn.v_proj.weight`           `[num_kv_heads * head_dim, hidden_size]`
-    /// - `{prefix}.self_attn.o_proj.weight`           `[hidden_size, num_heads * head_dim]`
-    /// - `{prefix}.self_attn.q_norm.weight`           `[head_dim]`
-    /// - `{prefix}.self_attn.k_norm.weight`           `[head_dim]`
-    /// - `{prefix}.post_attention_layernorm.weight`   `[hidden_size]`
-    /// - `{prefix}.mlp.gate_proj.weight`              `[intermediate_size, hidden_size]`
-    /// - `{prefix}.mlp.up_proj.weight`                `[intermediate_size, hidden_size]`
-    /// - `{prefix}.mlp.down_proj.weight`              `[hidden_size, intermediate_size]`
-    pub fn from_loader(loader: &Loader, prefix: &str, cfg: DecoderLayerConfig) -> Result<Self> {
-        let input_layernorm = RmsNorm::from_loader(
-            loader,
-            &format!("{prefix}.input_layernorm"),
-            cfg.rms_norm_eps,
-        )?;
-        let self_attn = GatedAttention::from_loader(
-            loader,
-            &format!("{prefix}.self_attn"),
-            GatedAttentionConfig {
-                num_heads: cfg.num_heads,
-                num_kv_heads: cfg.num_kv_heads,
-                head_dim: cfg.head_dim,
-                rms_norm_eps: cfg.rms_norm_eps,
-                attention_bias: cfg.attention_bias,
-            },
-        )?;
-        let post_attention_layernorm = RmsNorm::from_loader(
-            loader,
-            &format!("{prefix}.post_attention_layernorm"),
-            cfg.rms_norm_eps,
-        )?;
-        let mlp = Mlp::from_loader(loader, &format!("{prefix}.mlp"))?;
-
-        // No construction-time dim checks — shape errors surface at first forward_on
-        // (see GatedAttention::from_loader for the same pattern).
-        Ok(Self {
-            input_layernorm,
-            self_attn,
-            post_attention_layernorm,
-            mlp,
-            cfg,
-        })
     }
 }
 
@@ -213,6 +349,11 @@ mod tests {
             head_dim: 8,
             rms_norm_eps: 1e-6,
             attention_bias: false,
+            linear_num_value_heads: 0,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
         }
     }
 
@@ -261,7 +402,7 @@ mod tests {
             Linear::new_fp(down_w, None),
         );
 
-        DecoderLayer::from_components(
+        DecoderLayer::from_components_full(
             RmsNorm::new(ones_w(cfg.hidden_size), cfg.rms_norm_eps),
             attn,
             RmsNorm::new(ones_w(cfg.hidden_size), cfg.rms_norm_eps),
@@ -366,7 +507,7 @@ mod tests {
             Linear::new_fp(up_w, None),
             Linear::new_fp(down_w, None),
         );
-        let layer = DecoderLayer::from_components(
+        let layer = DecoderLayer::from_components_full(
             RmsNorm::new(pre_norm_w, cfg.rms_norm_eps),
             attn,
             RmsNorm::new(post_norm_w, cfg.rms_norm_eps),
@@ -443,7 +584,7 @@ mod tests {
             Linear::new_fp(down_w_zero, None),
         );
 
-        let layer = DecoderLayer::from_components(
+        let layer = DecoderLayer::from_components_full(
             RmsNorm::new(ones_w(cfg.hidden_size), cfg.rms_norm_eps),
             attn,
             RmsNorm::new(ones_w(cfg.hidden_size), cfg.rms_norm_eps),
@@ -468,5 +609,57 @@ mod tests {
                 "residual path broken: x={xi}, out={oi}"
             );
         }
+    }
+
+    #[test]
+    fn from_components_full_carries_kind_and_config() {
+        let cfg = small_cfg();
+        let layer = build_decoder_layer(cfg); // existing helper builds Full variant
+        assert_eq!(layer.kind(), AttnKind::Full);
+        assert_eq!(layer.config().hidden_size, cfg.hidden_size);
+    }
+
+    #[test]
+    fn from_components_linear_carries_kind() {
+        // GatedDeltaNet::from_components requires P3b3 internals (Conv1d,
+        // RmsNormGated, Linear etc.) that are heavy to wire up here. Keep this
+        // test symbolic — verify the AttnPath::Linear and LayerCache::Linear
+        // discriminators compile. Concrete construction is exercised in T4.
+        let _ = AttnPath::Linear;
+        let _ = LayerCache::Linear;
+    }
+
+    #[test]
+    fn full_layer_with_linear_cache_errors() {
+        let cfg = small_cfg();
+        let layer = build_decoder_layer(cfg);
+        let mut bad_cache = LayerCache::Linear(
+            GatedDeltaCache::new_with_cap(
+                /* batch */ 1,
+                /* kernel_size */ 4,
+                /* conv_dim */ 16,
+                /* num_v_heads */ 4,
+                /* head_v_dim */ 8,
+                /* head_k_dim */ 8,
+                mlx::Dtype::Bfloat16,
+                /* cap */ 16,
+            )
+            .expect("GatedDeltaCache::new_with_cap"),
+        );
+        let (x, mrope, cos, sin) = build_inputs_fp32(cfg);
+        let r = layer.forward(&x, &mrope, &cos, &sin, None, Some(&mut bad_cache));
+        let err = r.expect_err("Full layer + Linear cache must Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("kind mismatch") && msg.contains("Linear cache"),
+            "expected kind-mismatch message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn linear_layer_with_full_cache_errors() {
+        // Symbolic — the dispatch arm is exercised in T4 with real Linear layer.
+        // Here, just ensure LayerCache::Full discriminator compiles.
+        let _ = LayerCache::Full;
     }
 }

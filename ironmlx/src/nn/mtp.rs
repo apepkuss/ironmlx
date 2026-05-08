@@ -24,7 +24,7 @@ use mlx::{Array, StreamOrDevice};
 
 use crate::core::cache::MtpCache;
 use crate::core::Loader;
-use crate::nn::{DecoderLayer, DecoderLayerConfig, Linear, Mrope, RmsNorm};
+use crate::nn::{AttnKind, DecoderLayer, DecoderLayerConfig, Linear, Mrope, RmsNorm};
 use crate::Result;
 
 /// Configuration for [`Mtp`].
@@ -154,7 +154,7 @@ impl Mtp {
         // Step 4: feed through N DecoderLayers, each with its own KV cache slot.
         for (i, layer) in self.layers.iter().enumerate() {
             let layer_cache = mtp_cache.as_deref_mut().map(|mc| mc.layer_mut(i));
-            x = layer.forward_on(&x, mrope, cos, sin, mask, layer_cache, target)?;
+            x = layer.forward_on_full_kv(&x, mrope, cos, sin, mask, layer_cache, target)?;
         }
 
         // Step 5: final norm.
@@ -253,6 +253,7 @@ impl Mtp {
                 loader,
                 &format!("{prefix}.layers.{i}"),
                 cfg.layer,
+                AttnKind::Full,
             )?);
         }
 
@@ -294,6 +295,11 @@ mod tests {
             head_dim: 8,
             rms_norm_eps: 1e-6,
             attention_bias: false,
+            linear_num_value_heads: 0,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
         }
     }
 
@@ -337,7 +343,7 @@ mod tests {
             Linear::new_fp(up_w, None),
             Linear::new_fp(down_w, None),
         );
-        DecoderLayer::from_components(
+        DecoderLayer::from_components_full(
             RmsNorm::new(ones_w(cfg.hidden_size), cfg.rms_norm_eps),
             attn,
             RmsNorm::new(ones_w(cfg.hidden_size), cfg.rms_norm_eps),
@@ -612,7 +618,7 @@ mod tests {
             Linear::new_fp(up_w, None),
             Linear::new_fp(down_w_zero, None),
         );
-        let identity_layer = DecoderLayer::from_components(
+        let identity_layer = DecoderLayer::from_components_full(
             RmsNorm::new(ones_w(layer_cfg.hidden_size), layer_cfg.rms_norm_eps),
             attn,
             RmsNorm::new(ones_w(layer_cfg.hidden_size), layer_cfg.rms_norm_eps),
