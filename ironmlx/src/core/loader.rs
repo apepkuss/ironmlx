@@ -81,7 +81,7 @@ impl Loader {
         .with_context(|| format!("parsing {}", config_path.display()))?;
 
         let tok_path = model_dir.join("tokenizer_config.json");
-        let tokenizer_config: TokenizerConfig = if tok_path.exists() {
+        let mut tokenizer_config: TokenizerConfig = if tok_path.exists() {
             serde_json::from_reader(
                 std::fs::File::open(&tok_path)
                     .with_context(|| format!("opening {}", tok_path.display()))?,
@@ -91,11 +91,41 @@ impl Loader {
             TokenizerConfig::default()
         };
 
+        // Some HF checkpoints (e.g. Qwen3.5-4B-MLX-4bit) store the chat
+        // template in a standalone `chat_template.jinja` instead of inlining
+        // it in `tokenizer_config.json`. Fall back to that file when the JSON
+        // field is absent.
+        if tokenizer_config.chat_template.is_none() {
+            let jinja_path = model_dir.join("chat_template.jinja");
+            if jinja_path.exists() {
+                let tmpl = std::fs::read_to_string(&jinja_path)
+                    .with_context(|| format!("reading {}", jinja_path.display()))?;
+                tokenizer_config.chat_template = Some(tmpl);
+            }
+        }
+
         let quant = parse_quant_meta(&config_raw)?;
 
         let mut tensors = load_safetensors(model_dir)?;
 
         Self::sanitize(&mut tensors, &config_raw)?;
+
+        // Eagerly evaluate all tensors on the loading thread so that no lazy
+        // stream-tagged computation remains in the weight arrays.  This
+        // eliminates a thread-safety hazard: if any sanitize step produced a
+        // lazy result (e.g. transpose_axes, +1.0 norm-shift), its primitive is
+        // tagged with the current thread's default MLX stream.  That stream's
+        // CommandEncoder lives in *this* thread's thread_local map.  A later
+        // inference call on a different thread (e.g. tokio blocking-pool)
+        // would find no encoder for that stream index and panic with
+        // "There is no Stream(gpu, N) in current thread."
+        //
+        // After eval() all tensors are plain data buffers — subsequent threads
+        // can read them without any stream dependency.
+        {
+            let refs: Vec<&Array> = tensors.values().collect();
+            mlx::transforms::eval(&refs).context("Loader::open: eager eval of weights")?;
+        }
 
         Ok(Self {
             tensors,

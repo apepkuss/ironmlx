@@ -79,6 +79,13 @@ impl Mrope {
         let theta_pow = x_log.exp()?;
         let one = constructors::ones((1,), Dtype::Float32)?;
         let inv_freq = &one / &theta_pow;
+        // Eagerly materialise inv_freq on the constructing thread so that no
+        // lazy stream-tagged computation escapes into fields that will be read
+        // from other threads (e.g. tokio blocking-pool during inference).
+        // MLX CommandEncoder lookup is thread_local; a lazy Array whose
+        // primitive is stamped with a stream from thread A will panic when
+        // evaluated on thread B that has no encoder for that stream.
+        mlx::transforms::eval(&[&inv_freq]).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         debug_assert!(
             sections.iter().sum::<i32>() == half,

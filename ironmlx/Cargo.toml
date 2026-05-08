@@ -24,7 +24,7 @@ hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rust
 dirs = "6"
 anyhow = "1"
 smallvec = "1"
-minijinja = { version = "2", default-features = false, features = ["builtins", "loader", "serde"] }
+minijinja = { version = "2", default-features = false, features = ["builtins", "loader", "macros", "serde"] }
 tokio.workspace = true
 axum.workspace = true
 tower-http.workspace = true
