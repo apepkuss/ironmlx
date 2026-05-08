@@ -63,9 +63,9 @@ pub struct GenerationStream<'m> {
     pipelined: bool,
 
     // — Pipelined-mode state (Some iff pipelined=true) —
-    /// Lazy `[shape]` u32 Array — the token next_token() will emit on its
-    /// next non-finished call. Always pre-dispatched via async_eval so the
-    /// GPU has work to do while we materialise it.
+    /// Lazy scalar (shape `[]` or `[1]`) u32 Array — the token next_token()
+    /// will emit on its next non-finished call. Always pre-dispatched via
+    /// async_eval so the GPU has work to do while we materialise it.
     pending_token_arr: Option<Array>,
     /// Incremental BPE detokenizer; receives one push per emitted token.
     detok: Option<DecodeStream<'m>>,
@@ -190,7 +190,8 @@ impl<'m> GenerationStream<'m> {
     }
 
     /// Pipelined hot path. Invariant: `self.pending_token_arr` is `Some` and
-    /// the lazy [shape] u32 Array of the token to be returned on this call.
+    /// the lazy scalar (shape `[]` or `[1]`) u32 Array of the token to be
+    /// returned on this call.
     fn next_token_pipelined(&mut self) -> Result<Option<GenerateEvent>> {
         // 1. Materialise the pending token. The GPU has been working on it
         //    since the previous next_token call's async_eval (or new()).
@@ -235,7 +236,7 @@ impl<'m> GenerationStream<'m> {
         let token_arr_in = self
             .pending_token_arr
             .as_ref()
-            .expect("invariant")
+            .expect("pipelined mode invariant: pending_token_arr is Some")
             .reshape((1_i32, 1_i32))?;
         let pos = (self.history.len() - 1) as i32;
         let position_ids = build_position_ids(pos, 1)?;
@@ -323,6 +324,16 @@ impl<'m> GenerationStream<'m> {
         self.finished
     }
 
+    /// Returns all token ids accumulated so far: prompt tokens plus generated
+    /// tokens.
+    ///
+    /// **Pipelined-mode note**: between construction and the first
+    /// `next_token()` call, `history` does not yet contain the first
+    /// generated token (it's a lazy Array waiting for `.item()`). In sync
+    /// mode the first generated token is already pushed at construction.
+    /// After N successful `next_token()` calls, both modes hold exactly N
+    /// generated tokens beyond the prompt — callers inspecting history
+    /// only after iteration are unaffected by the asymmetry.
     pub fn history(&self) -> &[u32] {
         &self.history
     }
