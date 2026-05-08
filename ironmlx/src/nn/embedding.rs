@@ -94,13 +94,22 @@ impl Embedding {
                 group_size,
                 bits,
             } => {
-                // Per spec § 3.3: dequantize the full table then gather
-                // rows. This defeats some storage savings; a fused
-                // row-lookup kernel is a follow-up.
+                // P8a-stage5: gather packed rows first, then dequantize the
+                // tiny slice — mirrors mlx-lm's QuantizedEmbedding. Per-token
+                // dequant work drops from O(vocab × dim) to O(B × S × dim).
+                // Quantization metadata is per-row (scales / biases sized
+                // along vocab axis), so axis-0 gather preserves group
+                // alignment.
+                let weight_rows = weight.take_on(tokens, 0, target)?;
+                let scales_rows = scales.take_on(tokens, 0, target)?;
+                let biases_rows = biases
+                    .as_ref()
+                    .map(|b| b.take_on(tokens, 0, target))
+                    .transpose()?;
                 let dequant = mlx::quantization::dequantize_on(
-                    weight,
-                    scales,
-                    biases.as_ref(),
+                    &weight_rows,
+                    &scales_rows,
+                    biases_rows.as_ref(),
                     Some(*group_size),
                     Some(*bits),
                     "affine",
@@ -108,7 +117,7 @@ impl Embedding {
                     None,
                     target,
                 )?;
-                Ok(dequant.take_on(tokens, 0, target)?)
+                Ok(dequant)
             }
         }
     }
