@@ -5,6 +5,7 @@
 
 mod generate;
 mod info;
+mod serve;
 
 use clap::{Parser, Subcommand};
 
@@ -27,6 +28,8 @@ enum Command {
     Info(info::InfoArgs),
     /// Generate text from a prompt (prefill + decode).
     Generate(generate::GenerateArgs),
+    /// Boot an OpenAI/Anthropic-compatible HTTP server (single-stream).
+    Serve(serve::ServeArgs),
 }
 
 impl Cli {
@@ -34,6 +37,7 @@ impl Cli {
         match self.command {
             Command::Info(args) => info::run(args),
             Command::Generate(args) => generate::run(args),
+            Command::Serve(args) => serve::run(args),
         }
     }
 }

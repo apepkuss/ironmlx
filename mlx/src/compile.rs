@@ -68,6 +68,14 @@ pub struct CompiledFn {
     inner: UniquePtr<mlx_sys::compile::ffi::CompiledFn>,
 }
 
+// SAFETY: `CompiledFn` wraps an MLX C++ compiled-function handle behind a
+// `UniquePtr` (exclusive ownership; no aliasing). The MLX runtime treats a
+// compiled function as a self-contained heap object — no thread-local state.
+// Concurrent invocation across threads still requires external synchronization
+// (e.g. wrapping in `Mutex` or transferring ownership), but bare `Send` is
+// sound. Parallels `unsafe impl Send for Array` in mlx/src/array.rs.
+unsafe impl Send for CompiledFn {}
+
 impl CompiledFn {
     /// Replay the compiled graph on the given inputs.
     ///

@@ -32,23 +32,24 @@ fn load_qwen35_4b_mlx_4bit() {
     assert_eq!(q.bits, 4);
     assert_eq!(q.group_size, 64);
 
-    // Spot-check key presence
-    assert!(loader.contains("language_model.model.embed_tokens.weight"));
-    assert!(loader.contains("language_model.model.embed_tokens.scales"));
-    assert!(loader.contains("language_model.model.layers.3.self_attn.q_proj.weight"));
-    assert!(loader.contains("language_model.model.layers.3.self_attn.q_proj.scales"));
+    // Spot-check key presence — sanitize strips the `language_model.` prefix so keys
+    // are in plain `model.*` form after Loader::open.
+    assert!(loader.contains("model.embed_tokens.weight"));
+    assert!(loader.contains("model.embed_tokens.scales"));
+    assert!(loader.contains("model.layers.3.self_attn.q_proj.weight"));
+    assert!(loader.contains("model.layers.3.self_attn.q_proj.scales"));
 
     // Linear attention layer 0 keys
-    assert!(loader.contains("language_model.model.layers.0.linear_attn.A_log"));
-    assert!(loader.contains("language_model.model.layers.0.linear_attn.conv1d.weight"));
+    assert!(loader.contains("model.layers.0.linear_attn.A_log"));
+    assert!(loader.contains("model.layers.0.linear_attn.conv1d.weight"));
 
     // Norm weights are not quantized
-    assert!(loader.contains("language_model.model.layers.3.input_layernorm.weight"));
-    assert!(!loader.contains("language_model.model.layers.3.input_layernorm.scales"));
+    assert!(loader.contains("model.layers.3.input_layernorm.weight"));
+    assert!(!loader.contains("model.layers.3.input_layernorm.scales"));
 
     // Final norm
-    assert!(loader.contains("language_model.model.norm.weight"));
+    assert!(loader.contains("model.norm.weight"));
 
     // No standalone lm_head — tied embedding
-    assert!(!loader.contains("language_model.lm_head.weight"));
+    assert!(!loader.contains("lm_head.weight"));
 }

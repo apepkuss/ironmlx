@@ -38,3 +38,4 @@ pub mod nn;
 pub use anyhow::{Error, Result};
 
 pub use core::{ChatTemplate, KVCache, Loader, Message, QuantMeta, Sampler, Tokenizer};
+pub use models::{Qwen35Config, Qwen35Model, Qwen35TextModel};

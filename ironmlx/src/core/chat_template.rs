@@ -4,8 +4,16 @@
 //! (`tojson`, `raise_exception`). We register the latter as a
 //! always-fail function for tolerance — most templates only call it on
 //! malformed inputs.
+//!
+//! ## Python string method compatibility
+//!
+//! Several Qwen / HF templates call Python string methods (`startswith`,
+//! `endswith`, `strip`, `lstrip`, `rstrip`, `split`) directly on template
+//! strings. `minijinja` does not expose those methods by default; we install
+//! an `unknown_method_callback` that handles the subset used in Qwen templates.
 
-use minijinja::{Environment, Value};
+use minijinja::value::{from_args, ValueKind};
+use minijinja::{Environment, ErrorKind, Value};
 use serde::Serialize;
 
 use crate::Result;
@@ -39,6 +47,47 @@ impl ChatTemplate {
                 ))
             },
         );
+        // Python string method shim — covers the subset used by Qwen / HF templates.
+        env.set_unknown_method_callback(|_state, value, method, args| {
+            if value.kind() == ValueKind::String {
+                let s = value.to_string();
+                match method {
+                    "startswith" => {
+                        let (prefix,): (&str,) = from_args(args)?;
+                        return Ok(Value::from(s.starts_with(prefix)));
+                    }
+                    "endswith" => {
+                        let (suffix,): (&str,) = from_args(args)?;
+                        return Ok(Value::from(s.ends_with(suffix)));
+                    }
+                    "strip" => {
+                        let _: () = from_args(args)?;
+                        return Ok(Value::from(s.trim().to_owned()));
+                    }
+                    "lstrip" => {
+                        let _: () = from_args(args)?;
+                        return Ok(Value::from(s.trim_start().to_owned()));
+                    }
+                    "rstrip" => {
+                        let _: () = from_args(args)?;
+                        return Ok(Value::from(s.trim_end().to_owned()));
+                    }
+                    "upper" => {
+                        let _: () = from_args(args)?;
+                        return Ok(Value::from(s.to_uppercase()));
+                    }
+                    "lower" => {
+                        let _: () = from_args(args)?;
+                        return Ok(Value::from(s.to_lowercase()));
+                    }
+                    _ => {}
+                }
+            }
+            Err(minijinja::Error::new(
+                ErrorKind::UnknownMethod,
+                format!("{} has no method named {}", value.kind(), method),
+            ))
+        });
         env.add_template_owned("chat", jinja_source.to_owned())
             .map_err(|e| anyhow::anyhow!("compile chat template: {e}"))?;
         Ok(Self { env })
