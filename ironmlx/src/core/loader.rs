@@ -145,9 +145,13 @@ impl Loader {
         &self.config_raw
     }
 
-    /// HF Qwen3.5 sanitize aligned with mlx-lm `qwen3_5.py::TextModel::sanitize`.
+    /// HF Qwen3.5 sanitize aligned with mlx-lm `qwen3_5.py::Model::sanitize` +
+    /// `TextModel::sanitize`.
     ///
     /// Mutates `weights` in place:
+    /// 0. Drop `vision_tower.*` keys (vision encoder not used for LLM-only inference).
+    ///    Strip `language_model.` prefix from all remaining keys so that downstream
+    ///    code can use plain `model.*` paths (e.g. `model.embed_tokens.weight`).
     /// 1. Strips `mtp.*` keys (the dedicated MTP head — see P8c).
     /// 2. If `text_config.tie_word_embeddings`, drops `lm_head.{weight,scales,biases}`.
     /// 3. `transpose_axes [0, 2, 1]` on `conv1d.weight` tensors whose last dim != 1
@@ -159,7 +163,24 @@ impl Loader {
         weights: &mut HashMap<String, Array>,
         config_raw: &serde_json::Value,
     ) -> Result<()> {
-        // Detection BEFORE mutation.
+        // 0. Drop vision_tower.* keys unconditionally (vision encoder not needed
+        //    for LLM-only inference regardless of checkpoint layout).
+        weights.retain(|k, _| !k.starts_with("vision_tower."));
+
+        // Strip language_model. prefix when present so downstream code can use
+        // plain model.* paths.  This matches the multimodal Qwen3.5 checkpoint
+        // layout where text-model weights sit under language_model.*.
+        if weights.keys().any(|k| k.starts_with("language_model.")) {
+            let old: HashMap<String, Array> = std::mem::take(weights);
+            for (k, v) in old {
+                let new_key = k
+                    .strip_prefix("language_model.")
+                    .map_or(k.clone(), str::to_owned);
+                weights.insert(new_key, v);
+            }
+        }
+
+        // Detection BEFORE mutation (after prefix strip so keys are in model.* form).
         let has_mtp = weights.keys().any(|k| k.contains("mtp."));
         let has_unsanitized_conv1d = weights.iter().any(|(k, v)| {
             k.ends_with("conv1d.weight") && v.shape().as_slice().last().copied().unwrap_or(1) != 1
@@ -447,5 +468,70 @@ mod tests {
         for x in v {
             assert!((x - 0.5).abs() < 1e-6, "norm should stay at 0.5, got {x}");
         }
+    }
+
+    #[test]
+    fn sanitize_drops_vision_tower_keys() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+        // vision_tower.* should be dropped.
+        w.insert("vision_tower.encoder.layers.0.weight".into(), arr.clone());
+        w.insert("vision_tower.patch_embed.proj.weight".into(), arr.clone());
+        // plain model.* key should be preserved.
+        w.insert("model.embed_tokens.weight".into(), arr.clone());
+
+        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+
+        assert!(
+            !w.contains_key("vision_tower.encoder.layers.0.weight"),
+            "vision_tower key must be dropped"
+        );
+        assert!(
+            !w.contains_key("vision_tower.patch_embed.proj.weight"),
+            "vision_tower key must be dropped"
+        );
+        assert!(
+            w.contains_key("model.embed_tokens.weight"),
+            "plain model.* key must be preserved"
+        );
+    }
+
+    #[test]
+    fn sanitize_strips_language_model_prefix() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+        // language_model. prefix should be stripped.
+        w.insert(
+            "language_model.model.embed_tokens.weight".into(),
+            arr.clone(),
+        );
+        w.insert(
+            "language_model.model.layers.0.self_attn.q_proj.weight".into(),
+            arr.clone(),
+        );
+        // vision_tower mixed in should also be dropped.
+        w.insert("vision_tower.foo.weight".into(), arr.clone());
+
+        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+
+        // prefix-stripped keys must exist.
+        assert!(
+            w.contains_key("model.embed_tokens.weight"),
+            "language_model. prefix must be stripped"
+        );
+        assert!(
+            w.contains_key("model.layers.0.self_attn.q_proj.weight"),
+            "language_model. prefix must be stripped"
+        );
+        // original prefixed keys must not exist.
+        assert!(
+            !w.contains_key("language_model.model.embed_tokens.weight"),
+            "original prefixed key must be removed"
+        );
+        // vision_tower must be dropped.
+        assert!(
+            !w.contains_key("vision_tower.foo.weight"),
+            "vision_tower key must be dropped"
+        );
     }
 }
