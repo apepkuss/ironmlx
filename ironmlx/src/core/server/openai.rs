@@ -164,6 +164,7 @@ pub async fn chat_completions(
         max_new_tokens: req.max_tokens,
         sampler,
         stop_token_ids,
+        prefill_chunk_size: state.prefill_chunk_size,
     };
 
     let prompt_tokens = request.prompt_ids.len() as u32;

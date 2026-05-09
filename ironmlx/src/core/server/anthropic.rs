@@ -128,6 +128,7 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         max_new_tokens: req.max_tokens,
         sampler,
         stop_token_ids,
+        prefill_chunk_size: state.prefill_chunk_size,
     };
     let model_id = req.model.clone().unwrap_or_else(|| state.model_id.clone());
 

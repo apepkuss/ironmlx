@@ -25,6 +25,10 @@ pub struct AppState {
     pub model: Arc<Mutex<Qwen35Model>>,
     pub tokenizer: Arc<Tokenizer>,
     pub model_id: String,
+    /// Default prefill chunk size (max tokens per prefill forward). `0`
+    /// disables chunking. Applied to every `GenerateRequest` constructed
+    /// by the request handlers.
+    pub prefill_chunk_size: usize,
 }
 
 pub async fn serve(
@@ -33,11 +37,13 @@ pub async fn serve(
     model_id: String,
     host: &str,
     port: u16,
+    prefill_chunk_size: usize,
 ) -> Result<()> {
     let state = AppState {
         model: Arc::new(Mutex::new(model)),
         tokenizer: Arc::new(tokenizer),
         model_id,
+        prefill_chunk_size,
     };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))

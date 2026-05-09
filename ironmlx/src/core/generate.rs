@@ -31,6 +31,12 @@ pub struct GenerateRequest {
     pub sampler: Sampler,
     /// Token ids that terminate the stream when produced.
     pub stop_token_ids: Vec<u32>,
+    /// Max tokens per prefill forward. `0` disables chunking (entire prompt
+    /// goes through a single forward). The chunked path bounds activation
+    /// memory peak for long agent prompts and lets the GPU pipeline subsequent
+    /// chunks; intermediate chunks update the cache only (no lm_head), the
+    /// last chunk runs the full forward + lm_head.
+    pub prefill_chunk_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -190,17 +196,39 @@ impl<'m> GenerationStream<'m> {
         let dtype = Dtype::Bfloat16;
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
 
-        // Prefill: shape [1, prompt_len] u32.
-        let prompt_arr: Array = (
-            request.prompt_ids.as_slice(),
-            &[1_i32, prompt_len as i32][..],
-        )
-            .try_into()?;
-        let position_ids = build_position_ids(0, prompt_len as i32)?;
+        // Prefill: chunked when `prefill_chunk_size > 0` and the prompt exceeds
+        // it. Intermediate chunks call the text-only forward (cache update,
+        // no lm_head); the last chunk goes through the full forward to produce
+        // the [1, 1, vocab] last-position logits. Each intermediate chunk
+        // closes with `async_eval(hidden)` to flush its lazy graph so the GPU
+        // can start work while the next chunk is being assembled on the CPU.
+        let chunk_size = request.prefill_chunk_size;
+        let prompt_len_i32 = prompt_len as i32;
+        let mut pos: i32 = 0;
+        let last_logits = loop {
+            let remaining = prompt_len_i32 - pos;
+            let n = if chunk_size == 0 {
+                remaining
+            } else {
+                remaining.min(chunk_size as i32)
+            };
+            let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
+            let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
+            let chunk_pos_ids = build_position_ids(pos, n)?;
 
-        let logits = model.forward_on(&prompt_arr, &position_ids, Some(&mut cache), ())?;
-        let vocab = logits.shape().as_slice()[2];
-        let last_logits = logits.reshape((vocab,))?;
+            let is_last = pos + n == prompt_len_i32;
+            if is_last {
+                let logits = model.forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?;
+                let vocab = logits.shape().as_slice()[2];
+                break logits.reshape((vocab,))?;
+            }
+            let hidden =
+                model
+                    .text()
+                    .forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?;
+            mlx::transforms::async_eval(&[&hidden])?;
+            pos += n;
+        };
 
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();

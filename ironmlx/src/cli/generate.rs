@@ -35,6 +35,13 @@ pub struct GenerateArgs {
     /// If set, apply the chat template; otherwise tokenize the raw prompt.
     #[arg(long, default_value_t = true)]
     pub chat: bool,
+
+    /// Prefill chunk size — max tokens per prefill forward call. `0`
+    /// disables chunking (single-shot forward over the whole prompt).
+    /// Intermediate chunks update the cache only; the last chunk runs
+    /// the full forward + lm_head.
+    #[arg(long, default_value_t = 2048)]
+    pub prefill_chunk_size: usize,
 }
 
 pub fn run(args: GenerateArgs) -> Result<()> {
@@ -75,6 +82,7 @@ pub fn run(args: GenerateArgs) -> Result<()> {
         max_new_tokens: args.max_tokens,
         sampler,
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
+        prefill_chunk_size: args.prefill_chunk_size,
     };
 
     let mut stream = GenerationStream::new(&model, &tokenizer, request)?;
