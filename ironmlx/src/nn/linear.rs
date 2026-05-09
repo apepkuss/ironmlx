@@ -192,22 +192,42 @@ impl Linear {
                 group_size,
                 bits,
             } => {
-                let mut y = mlx::quantization::quantized_matmul_on(
-                    x,
-                    weight,
-                    scales,
-                    biases.as_ref(),
-                    /* transpose = */ true,
-                    Some(*group_size),
-                    Some(*bits),
-                    "affine",
-                    target,
-                )?;
+                let mut y = if crate::nn::self_qmm::enabled() {
+                    // Stage 9 opt-in path: self-quant kernel.
+                    // qmm_t_on requires affine biases (per-group zero-points);
+                    // Qwen3.5 mlx-community 4-bit checkpoints always carry them.
+                    // Panic explicitly if missing — silent fallback would hide
+                    // a checkpoint mismatch that the caller needs to know about.
+                    let qbiases = biases.as_ref().expect(
+                        "self_qmm requires affine biases (per-group zero-points); \
+                         checkpoint has none — IRONMLX_USE_SELF_QMM=1 only supports \
+                         4-bit affine-quantized weights",
+                    );
+                    crate::nn::self_qmm::qmm_t_on(
+                        x,
+                        weight,
+                        scales,
+                        qbiases,
+                        *bits,
+                        *group_size,
+                        target,
+                    )?
+                } else {
+                    // Default path — stage 8 commit 811dd36 unchanged.
+                    mlx::quantization::quantized_matmul_on(
+                        x,
+                        weight,
+                        scales,
+                        biases.as_ref(),
+                        /* transpose = */ true,
+                        Some(*group_size),
+                        Some(*bits),
+                        "affine",
+                        target,
+                    )?
+                };
                 if let Some(b) = bias {
                     y = &y + b;
-                }
-                if crate::nn::echo_kernel::echo_enabled() {
-                    y = crate::nn::echo_kernel::echo(&y)?;
                 }
                 Ok(y)
             }
