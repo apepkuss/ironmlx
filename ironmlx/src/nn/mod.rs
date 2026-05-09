@@ -16,6 +16,7 @@ pub mod mlp;
 pub mod mrope;
 pub mod mtp;
 pub mod norm;
+pub mod self_qmm;
 
 pub use attention::{Attention, AttentionConfig};
 pub use conv::{Conv1d, Conv1dConfig};

@@ -1,0 +1,126 @@
+//
+// Self-quant matmul kernel (MLX 4-bit affine, group_size=64) — qmm_t form
+// (x @ w^T). Stage 9 task 2: hardcoded BM=64 BN=64 BK=32.
+//
+// Inputs (auto-injected by mx::fast::metal_kernel as
+//   `const device <dtype>* <name>` parameters):
+//   x:       device const T*           shape [M, K]   (M = flattened batch×seq)
+//   w:       device const uint32_t*    shape [N, K/8] (4-bit packed)
+//   scales:  device const T*           shape [N, K/64]
+//   biases:  device const T*           shape [N, K/64]
+//
+// Output:
+//   out:     device T*                 shape [M, N]
+//
+// Compute is done in fp32 (cast on load, cast on store) so the kernel works
+// uniformly for bf16 / fp16 / fp32 inputs without compile-time type
+// dispatch. Threadgroup memory holds fp32 tiles (16 KiB total — well under
+// Metal's 32 KiB limit). `__typeof__(*out)` recovers the runtime output
+// dtype for the final store.
+//
+// Constants passed via .template_int():
+//   M, N, K (matmul shape)
+
+const int BM = 64;
+const int BN = 64;
+const int BK = 32;
+const int GROUP_SIZE = 64;
+
+uint tg_x = threadgroup_position_in_grid.x; // tile col index
+uint tg_y = threadgroup_position_in_grid.y; // tile row index
+uint lid  = thread_index_in_threadgroup;    // 0..255
+
+int tile_m = (int)tg_y * BM;
+int tile_n = (int)tg_x * BN;
+
+// Threadgroup memory tiles, fp32 for dtype-agnostic compute.
+threadgroup float xs[BM * BK];
+threadgroup float ws[BN * BK];
+
+// 16x16 grid of threads, each owns a 4x4 micro-tile of the (BM, BN) output.
+int row_in_tile = ((int)lid / (BN / 4)) * 4; // 0,4,8,...,60
+int col_in_tile = ((int)lid % (BN / 4)) * 4; // 0,4,8,...,60
+
+float acc[4][4];
+for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+        acc[i][j] = 0.0f;
+    }
+}
+
+for (int k0 = 0; k0 < K; k0 += BK) {
+    // 1. Cooperative load xs[BM, BK] from x[tile_m..+BM, k0..+BK].
+    //    256 threads cover BM*BK = 2048 elems -> 8 elems/thread.
+    for (int t = 0; t < 8; ++t) {
+        int idx = (int)lid * 8 + t;
+        int r = idx / BK;
+        int c = idx % BK;
+        int gr = tile_m + r;
+        int gc = k0 + c;
+        float v = 0.0f;
+        if (gr < M && gc < K) {
+            v = (float)x[gr * K + gc];
+        }
+        xs[r * BK + c] = v;
+    }
+
+    // 2. Cooperative dequant + load ws[BN, BK].
+    //    Each thread unpacks 8 nibbles, applying the per-group affine
+    //    formula: w_real = nibble * scale + bias.
+    for (int t = 0; t < 8; ++t) {
+        int idx = (int)lid * 8 + t;
+        int n_in_tile = idx / BK;
+        int kk = idx % BK;
+        int actual_n = tile_n + n_in_tile;
+        int actual_k = k0 + kk;
+        float v = 0.0f;
+        if (actual_n < N && actual_k < K) {
+            int packed_idx = actual_n * (K / 8) + actual_k / 8;
+            uint pack = w[packed_idx];
+            int shift = (actual_k % 8) * 4;
+            float nibble = (float)((pack >> shift) & 0xFu);
+            int g = actual_k / GROUP_SIZE;
+            int sb_idx = actual_n * (K / GROUP_SIZE) + g;
+            float s = (float)scales[sb_idx];
+            float b = (float)biases[sb_idx];
+            v = nibble * s + b;
+        }
+        ws[n_in_tile * BK + kk] = v;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // 3. MMA: each thread accumulates a 4x4 micro-tile in fp32.
+    for (int kk = 0; kk < BK; ++kk) {
+        float xv[4];
+        float wv[4];
+        for (int i = 0; i < 4; ++i) {
+            xv[i] = xs[(row_in_tile + i) * BK + kk];
+        }
+        for (int j = 0; j < 4; ++j) {
+            wv[j] = ws[(col_in_tile + j) * BK + kk];
+        }
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                acc[i][j] += xv[i] * wv[j];
+            }
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// 4. Store result with bound check; cast fp32 acc back to runtime out dtype.
+for (int i = 0; i < 4; ++i) {
+    int gr = tile_m + row_in_tile + i;
+    if (gr >= M) {
+        continue;
+    }
+    for (int j = 0; j < 4; ++j) {
+        int gc = tile_n + col_in_tile + j;
+        if (gc >= N) {
+            continue;
+        }
+        out[gr * N + gc] = static_cast<__typeof__(*out)>(acc[i][j]);
+    }
+}
