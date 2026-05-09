@@ -4,7 +4,7 @@
 //! Stage 9: prefill (qmm_t) only, M1 Pro tuned. See
 //! `docs/superpowers/specs/2026-05-09-p8a-stage9-quant-kernel-design.md`.
 
-mod kernel;
+pub mod kernel;
 mod lookup;
 
 use std::sync::OnceLock;
