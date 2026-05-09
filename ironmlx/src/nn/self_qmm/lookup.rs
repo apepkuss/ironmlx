@@ -53,10 +53,14 @@ pub fn lookup_tile(
 ) -> Tile {
     static WARNED: OnceLock<()> = OnceLock::new();
     match device_arch {
-        // M1 Pro / M1 Pro Max GPU. Tile populated by task 7 sweep —
-        // initial placeholder is (64, 128, 32), an educated guess at this
-        // arch class (similar in spirit to llama.cpp's NRA=64/NRB=128
-        // shape for Apple GPUs). Will be replaced once the sweep runs.
+        // M1 Pro / M1 Pro Max GPU. Tile = (64, 128, 32) — sweep-derived
+        // (P8a stage 9 task 7). Across Qwen3.5 FFN up_proj /
+        // attn q_proj / FFN down_proj at M=2048, this tile gives the
+        // highest avg self_qmm GFLOP/s among (64,64,32) / (64,128,32)
+        // / (128,128,32) candidates. The kernel itself remains
+        // ~4× slower than mlx::quantized_matmul_on baseline on M1
+        // Pro; closing that gap is stage 10+ work (simdgroup MMA,
+        // larger tile candidates, dequant+matmul fusion tuning).
         "apple_g13s" | "apple_g13d" => Tile {
             bm: 64,
             bn: 128,
