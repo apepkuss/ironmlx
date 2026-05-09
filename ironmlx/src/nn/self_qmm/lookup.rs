@@ -61,7 +61,10 @@ pub fn lookup_tile(
         // ~4× slower than mlx::quantized_matmul_on baseline on M1
         // Pro; closing that gap is stage 10+ work (simdgroup MMA,
         // larger tile candidates, dequant+matmul fusion tuning).
-        "apple_g13s" | "apple_g13d" => Tile {
+        //
+        // Note: mlx returns "applegpu_g13s" / "applegpu_g13d", not
+        // "apple_g13s" / "apple_g13d" — the prefix is "applegpu_".
+        "applegpu_g13s" | "applegpu_g13d" => Tile {
             bm: 64,
             bn: 128,
             bk: 32,
@@ -88,12 +91,12 @@ mod tests {
 
     #[test]
     fn lookup_m1_pro_returns_specific_tile() {
-        let t = lookup_tile("apple_g13s", 2048, 9216, 2560, 4, 64);
+        let t = lookup_tile("applegpu_g13s", 2048, 9216, 2560, 4, 64);
         assert_eq!(t.bm, 64);
         assert_eq!(t.bn, 128);
         assert_eq!(t.bk, 32);
 
-        let t = lookup_tile("apple_g13d", 2048, 9216, 2560, 4, 64);
+        let t = lookup_tile("applegpu_g13d", 2048, 9216, 2560, 4, 64);
         assert_eq!(t.bm, 64);
         assert_eq!(t.bn, 128);
         assert_eq!(t.bk, 32);
