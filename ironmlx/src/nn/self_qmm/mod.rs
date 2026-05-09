@@ -5,6 +5,7 @@
 //! `docs/superpowers/specs/2026-05-09-p8a-stage9-quant-kernel-design.md`.
 
 mod kernel;
+mod lookup;
 
 use std::sync::OnceLock;
 
@@ -16,6 +17,24 @@ use crate::Result;
 pub fn enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| std::env::var("IRONMLX_USE_SELF_QMM").as_deref() == Ok("1"))
+}
+
+/// Cached Metal device architecture string (e.g. `"apple_g13s"`).
+///
+/// Queried once via `mlx::metal::architecture()` and reused across
+/// dispatches — the underlying MLX C++ call hits a `static` map but the
+/// FFI roundtrip + string allocation still cost more than a hashed
+/// `OnceLock` read, and the architecture never changes mid-process.
+///
+/// Stored as `std::result::Result<String, String>` (deliberately fully
+/// qualified to avoid confusion with `crate::Result` / `anyhow::Result`
+/// imported above) so a failed first query (e.g. Metal backend
+/// unavailable in a CI build) is sticky and surfaces consistently — we
+/// don't want one failure path then a second silent success on the
+/// next dispatch.
+fn device_arch() -> &'static std::result::Result<String, String> {
+    static ARCH: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+    ARCH.get_or_init(|| mlx::metal::architecture().map_err(|e| e.to_string()))
 }
 
 /// 4-bit MLX-affine quantized matmul: `x @ w^T` with per-group scales+biases.
@@ -48,9 +67,26 @@ pub fn qmm_t_on(
         "self_qmm stage 9 only supports group_size=64"
     );
     let _ = target.into();
-    // Stage 9 task 3: hardcoded default tile (64, 64, 32). Task 4 introduces
-    // a device + shape lookup that picks the optimal tile per dispatch.
-    kernel::dispatch_qmm_t(x, w, scales, biases, 64, 64, 32)
+
+    // Compute (M, N, K). x is `[..., K]` so M = product of leading dims;
+    // w is `[N, K/8]` (packed uint32, 8 nibbles per word).
+    let x_dims = x.shape();
+    let x_dims_slice = x_dims.as_slice();
+    let k = *x_dims_slice
+        .last()
+        .expect("self_qmm: x must be at least 1-D");
+    let m: i32 = x_dims_slice[..x_dims_slice.len() - 1].iter().product();
+    let n = w.shape().as_slice()[0];
+
+    // Pick (BM, BN, BK) from the per-arch lookup table. If the Metal
+    // architecture query failed at first call, treat that as "unknown
+    // device" — the lookup returns the safe default tile and warns once.
+    let arch_str = match device_arch() {
+        Ok(s) => s.as_str(),
+        Err(_) => "",
+    };
+    let tile = lookup::lookup_tile(arch_str, m, n, k, bits, group_size);
+    kernel::dispatch_qmm_t(x, w, scales, biases, tile.bm, tile.bn, tile.bk)
 }
 
 #[cfg(test)]
