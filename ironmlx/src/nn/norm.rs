@@ -8,10 +8,6 @@
 //! Each layer exposes a default `forward` (current default stream) and a
 //! stream-targeted `forward_on` variant (P5.7 contract).
 
-use std::cell::OnceCell;
-use std::mem::ManuallyDrop;
-
-use mlx::compile::{compile, CompiledFn, ShapeMode};
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
@@ -143,80 +139,16 @@ impl RmsNormGated {
 
         match gate {
             Some(g) => {
-                // Precise SwiGLU via module-level mlx::compile cell — fuses
-                // 6 elementwise ops (astype, sigmoid, mul, astype, mul) into
-                // a single Metal dispatch. Output is fp32; cast back to
-                // hidden_dtype outside the compiled graph (per-call data).
-                let outs = swiglu_fused_invoke(&[g, &normed])?;
-                let mul_f32 = outs
-                    .into_iter()
-                    .next()
-                    .expect("swiglu_fused returns one output");
+                let g_f32 = mlx::ops::cast::astype(g, Dtype::Float32)?;
+                let g_sig = g_f32.sigmoid()?;
+                let g_silu = &g_f32 * &g_sig;
+                let normed_f32 = mlx::ops::cast::astype(&normed, Dtype::Float32)?;
+                let mul_f32 = &g_silu * &normed_f32;
                 Ok(mlx::ops::cast::astype(&mul_f32, hidden_dtype)?)
             }
             None => Ok(mlx::ops::cast::astype(&normed, hidden_dtype)?),
         }
     }
-}
-
-thread_local! {
-    /// Per-thread lazy-initialized SwiGLU compile cell. MLX command
-    /// encoders are stored in a thread_local map (see
-    /// /Volumes/Dev/mlx/mlx/backend/metal/device.cpp:819-822), so a
-    /// CompiledFn traced on thread A throws "There is no Stream(gpu, N)
-    /// in current thread" when invoked on thread B. Using thread_local!
-    /// aligns Rust's compile cell lifetime with MLX's per-thread stream
-    /// model: each thread that calls swiglu_fused_invoke traces once on
-    /// first call, then re-uses the cached CompiledFn for the rest of
-    /// that thread's lifetime.
-    ///
-    /// In ironmlx's HTTP server (tokio::task::spawn_blocking thread
-    /// pool), this means each blocking-pool thread pays a one-time
-    /// trace cost (~10-100ms) on first request landed on it, then
-    /// reuses the cached graph for all subsequent requests on that
-    /// same thread.
-    ///
-    /// ### Why `ManuallyDrop`?
-    ///
-    /// `CompiledFn`'s drop calls into `mlx::core::CompilerCache` (a
-    /// C++ thread_local) to erase its entry. When a thread exits, C++
-    /// thread_locals and Rust thread_locals are both destroyed, but
-    /// their destruction order is undefined by the language. In
-    /// practice, MLX's `CompilerCache` is destroyed before this Rust
-    /// cell, so dropping `CompiledFn` at thread-exit accesses already-
-    /// destroyed memory → SIGSEGV. `ManuallyDrop` intentionally leaks
-    /// the `CompiledFn`; tokio's blocking-pool threads live for the
-    /// process lifetime, so the leak is bounded and harmless (OS
-    /// reclaims the memory at process exit).
-    ///
-    /// Inputs (in order): `g` (gate, any dtype), `normed` (rms-normed
-    /// hidden, any dtype). Output: f32 Array equal to
-    /// `silu(g_f32) * normed_f32` — caller is responsible for casting
-    /// back to the input dtype.
-    static SWIGLU_FUSED: OnceCell<ManuallyDrop<CompiledFn>> = const { OnceCell::new() };
-}
-
-fn swiglu_fused_invoke(inputs: &[&Array]) -> crate::Result<Vec<Array>> {
-    SWIGLU_FUSED.with(|cell| {
-        let cfn = cell.get_or_init(|| {
-            let f = compile(
-                |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
-                    let g = inputs[0];
-                    let normed = inputs[1];
-                    let g_f32 = mlx::ops::cast::astype(g, Dtype::Float32)?;
-                    let g_sig = g_f32.sigmoid()?;
-                    let g_silu = &g_f32 * &g_sig;
-                    let normed_f32 = mlx::ops::cast::astype(normed, Dtype::Float32)?;
-                    let mul_f32 = &g_silu * &normed_f32;
-                    Ok(vec![mul_f32])
-                },
-                ShapeMode::Shapeless,
-            )
-            .expect("compile swiglu_fused");
-            ManuallyDrop::new(f)
-        });
-        Ok(cfn.invoke(inputs)?)
-    })
 }
 
 #[cfg(test)]
@@ -292,36 +224,5 @@ mod tests {
             "gate=0 should yield zero output, got {}",
             v[2]
         );
-    }
-
-    #[test]
-    fn swiglu_fused_matches_reference_path() {
-        // Build small [4, 4] gate + normed Arrays, run through the
-        // module-level swiglu_fused() compile cell and through a hand-rolled
-        // reference (sigmoid → mul → mul). Assert close in fp32.
-        let g_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1 - 0.5).collect();
-        let normed_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.05).collect();
-        let shape = &[4_i32, 4][..];
-        let g: Array = (g_data.as_slice(), shape).try_into().unwrap();
-        let normed: Array = (normed_data.as_slice(), shape).try_into().unwrap();
-
-        // Fused path
-        let fused_outs = swiglu_fused_invoke(&[&g, &normed]).unwrap();
-        let fused = fused_outs.into_iter().next().unwrap();
-        let fused_vec: Vec<f32> = fused.to_vec().unwrap();
-
-        // Reference unfused path: silu(g) * normed, all in fp32 (inputs already fp32).
-        let g_sig = g.sigmoid().unwrap();
-        let g_silu = &g * &g_sig;
-        let ref_arr = &g_silu * &normed;
-        let ref_vec: Vec<f32> = ref_arr.to_vec().unwrap();
-
-        assert_eq!(fused_vec.len(), ref_vec.len());
-        for (i, (a, b)) in fused_vec.iter().zip(ref_vec.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "mismatch at index {i}: fused={a}, ref={b}",
-            );
-        }
     }
 }

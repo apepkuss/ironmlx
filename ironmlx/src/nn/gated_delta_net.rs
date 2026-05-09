@@ -12,7 +12,6 @@
 use std::sync::OnceLock;
 
 use anyhow::anyhow;
-use mlx::compile::{CompiledFn, ShapeMode};
 use mlx::ops::shape::concatenate;
 use mlx::{Array, Dtype, MetalKernel, Shape, StreamOrDevice};
 
@@ -82,7 +81,6 @@ pub struct GatedDeltaNet {
     a_log: Array,   // [num_v_heads]
     dt_bias: Array, // [num_v_heads]
     cfg: GatedDeltaNetConfig,
-    compute_g_compiled: OnceLock<CompiledFn>,
     kernel_no_mask: OnceLock<MetalKernel>,
     kernel_masked: OnceLock<MetalKernel>,
 }
@@ -231,7 +229,6 @@ impl GatedDeltaNet {
             a_log,
             dt_bias,
             cfg,
-            compute_g_compiled: OnceLock::new(),
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
         })
@@ -268,7 +265,6 @@ impl GatedDeltaNet {
             a_log,
             dt_bias,
             cfg,
-            compute_g_compiled: OnceLock::new(),
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
         }
@@ -276,44 +272,6 @@ impl GatedDeltaNet {
 
     pub fn config(&self) -> &GatedDeltaNetConfig {
         &self.cfg
-    }
-
-    /// Build the `compute_g` pipeline:
-    ///   `g = exp(-exp(A_log) * softplus(a + dt_bias))`
-    ///
-    /// where `softplus(x) = where(x > 20, x, log(1 + exp(x)))` (numerically stable).
-    ///
-    /// The closure returns `mlx::Result<Vec<Array>>` because that's what
-    /// `mlx::compile::compile` requires; the outer `Result<CompiledFn>` here is
-    /// `crate::Result` (anyhow), so the `compile(...)` call is bridged via
-    /// `.map_err(anyhow::Error::from)`. Inside the closure all MLX ops use `?`
-    /// directly since their errors are already `mlx::Error`.
-    fn build_compute_g_pipeline() -> Result<CompiledFn> {
-        let pipeline = move |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
-            let a_log = inputs[0]; // [num_v_heads]
-            let a = inputs[1]; // [B, T, num_v_heads]
-            let dt_bias = inputs[2]; // [num_v_heads]
-
-            // softplus(a + dt_bias) — numerically stable
-            let x = a + dt_bias; // panic-on-err overload, returns Array
-            let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
-            let zeros = a.zeros_like()?;
-            // log(1 + exp(x)) via logaddexp(0, x)
-            let safe = zeros.logaddexp(&x)?;
-            let cond = x.greater(&twenty)?;
-            let sp = cond.where_(&x, &safe)?;
-
-            // exp(A_log) cast to fp32, multiply broadcast to [B, T, num_v_heads]
-            let a_log_f32 = mlx::ops::cast::astype(a_log, Dtype::Float32)?;
-            let exp_alog = a_log_f32.exp()?;
-            let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
-            // g = exp(neg_exp_alog * sp)
-            let inner = &neg_exp_alog * &sp; // panic-on-err, no `?`
-            let g = inner.exp()?;
-            Ok(vec![g])
-        };
-
-        mlx::compile::compile(pipeline, ShapeMode::Shapeless).map_err(anyhow::Error::from)
     }
 
     /// Forward pass with default stream.
@@ -431,13 +389,10 @@ impl GatedDeltaNet {
             }
         };
 
-        // Step 2b: conv1d + silu (silu fused via module-level compile cell)
+        // Step 2b: conv1d + silu
         let conv_out = self.conv1d.forward_on(&conv_input, target)?;
-        let outs = silu_fused_invoke(&[&conv_out])?;
-        let conv_out = outs
-            .into_iter()
-            .next()
-            .expect("silu_fused returns one output");
+        let conv_sig = conv_out.sigmoid()?;
+        let conv_out = &conv_out * &conv_sig;
 
         // Step 2c: update conv_state cache (last kernel_size-1 tokens of conv_input)
         if let Some(c) = cache.as_deref_mut() {
@@ -482,13 +437,19 @@ impl GatedDeltaNet {
         let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
         let k_scaled = &k_normed * inv_scale; // panic-on-err, no `?`
 
-        // Step 5: compute_g via compile cell
-        let cg = self.compute_g_compiled.get_or_init(|| {
-            Self::build_compute_g_pipeline()
-                .expect("build_compute_g_pipeline cannot fail at first call")
-        });
-        let g_outs = cg.invoke(&[&self.a_log, &a, &self.dt_bias])?;
-        let g = g_outs.into_iter().next().expect("compute_g returns 1");
+        // Step 5: compute_g = exp(-exp(A_log) * softplus(a + dt_bias))
+        // softplus stabilised: where(x > 20, x, log(1 + exp(x)))
+        let x = &a + &self.dt_bias;
+        let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
+        let zeros = a.zeros_like()?;
+        let safe = zeros.logaddexp(&x)?;
+        let cond = x.greater(&twenty)?;
+        let sp = cond.where_(&x, &safe)?;
+        let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
+        let exp_alog = a_log_f32.exp()?;
+        let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
+        let inner = &neg_exp_alog * &sp;
+        let g = inner.exp()?;
 
         // Step 6: beta = sigmoid(b)
         let beta = b.sigmoid_on(target)?;
@@ -580,40 +541,6 @@ impl GatedDeltaNet {
         let normed_flat = normed.reshape_on((batch, seq, self.cfg.value_dim()), target)?;
         self.out_proj.forward_on(&normed_flat, target)
     }
-}
-
-thread_local! {
-    /// Per-thread lazy-initialized silu compile cell. MLX command
-    /// encoders are stored in a thread_local map (see
-    /// /Volumes/Dev/mlx/mlx/backend/metal/device.cpp:819-822), so a
-    /// CompiledFn traced on thread A throws "There is no Stream(gpu, N)
-    /// in current thread" when invoked on thread B. Using thread_local!
-    /// aligns Rust's compile cell lifetime with MLX's per-thread stream
-    /// model.
-    ///
-    /// See SWIGLU_FUSED in norm.rs for the full rationale including the
-    /// `ManuallyDrop` explanation (TLS destruction-order SIGSEGV).
-    ///
-    /// Input: `x` (any dtype). Output: `x * sigmoid(x)` (silu) preserving dtype.
-    static SILU_FUSED: std::cell::OnceCell<std::mem::ManuallyDrop<CompiledFn>> =
-        const { std::cell::OnceCell::new() };
-}
-
-fn silu_fused_invoke(inputs: &[&Array]) -> crate::Result<Vec<Array>> {
-    SILU_FUSED.with(|cell| {
-        let cfn = cell.get_or_init(|| {
-            let f = mlx::compile::compile(
-                |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
-                    let x = inputs[0];
-                    Ok(vec![x * &x.sigmoid()?])
-                },
-                ShapeMode::Shapeless,
-            )
-            .expect("compile silu_fused");
-            std::mem::ManuallyDrop::new(f)
-        });
-        Ok(cfn.invoke(inputs)?)
-    })
 }
 
 /// Build the `gated_delta_step` MetalKernel (no-mask or masked variant).
@@ -735,31 +662,6 @@ pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
 mod tests {
     use super::*;
     use mlx::{Array, Dtype, Shape};
-
-    #[test]
-    fn silu_fused_matches_reference_path() {
-        let x_data: Vec<f32> = (0..32).map(|i| (i as f32) * 0.1 - 1.5).collect();
-        let shape = &[2_i32, 16][..];
-        let x: Array = (x_data.as_slice(), shape).try_into().unwrap();
-
-        // Fused path
-        let outs = silu_fused_invoke(&[&x]).unwrap();
-        let fused = outs.into_iter().next().unwrap();
-        let fused_vec: Vec<f32> = fused.to_vec().unwrap();
-
-        // Reference unfused path
-        let x_sig = x.sigmoid().unwrap();
-        let ref_arr = &x * &x_sig;
-        let ref_vec: Vec<f32> = ref_arr.to_vec().unwrap();
-
-        assert_eq!(fused_vec.len(), ref_vec.len());
-        for (i, (a, b)) in fused_vec.iter().zip(ref_vec.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "mismatch at index {i}: fused={a}, ref={b}",
-            );
-        }
-    }
 
     fn small_gdn_components() -> GatedDeltaNet {
         // Synthetic small model:
