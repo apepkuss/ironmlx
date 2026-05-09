@@ -71,16 +71,10 @@ fn p4_qwen35_logits_match() {
     let logits = model
         .forward_on(&input_ids, &position_ids, Some(&mut cache), ())
         .expect("forward_on");
+    // logits: [1, 1, vocab] — last-position only (Qwen35Model::forward_on slices
+    // the last hidden state before the lm_head projection).
     let vocab = logits.shape().as_slice()[2];
-    // logits: [1, S, vocab] — extract last position.
-    let last = mlx::ops::indexing::slice_strided(
-        &logits,
-        &[0_i32, s - 1, 0][..],
-        &[1_i32, s, vocab][..],
-        &[1_i32, 1, 1][..],
-    )
-    .expect("slice_strided");
-    let last_flat = last.reshape((vocab,)).expect("reshape");
+    let last_flat = logits.reshape((vocab,)).expect("reshape");
 
     let expected = load_expected_logits();
     assert_eq!(

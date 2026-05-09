@@ -200,13 +200,7 @@ impl<'m> GenerationStream<'m> {
 
         let logits = model.forward_on(&prompt_arr, &position_ids, Some(&mut cache), ())?;
         let vocab = logits.shape().as_slice()[2];
-        let last_logits = mlx::ops::indexing::slice_strided(
-            &logits,
-            &[0_i32, (prompt_len as i32) - 1, 0][..],
-            &[1_i32, prompt_len as i32, vocab][..],
-            &[1_i32, 1, 1][..],
-        )?;
-        let last_logits = last_logits.reshape((vocab,))?;
+        let last_logits = logits.reshape((vocab,))?;
 
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
