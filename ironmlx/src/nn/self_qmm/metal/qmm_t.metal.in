@@ -1,6 +1,8 @@
 //
 // Self-quant matmul kernel (MLX 4-bit affine, group_size=64) — qmm_t form
-// (x @ w^T). Stage 9 task 2: hardcoded BM=64 BN=64 BK=32.
+// (x @ w^T). Stage 9 task 3: tile dimensions (BM/BN/BK) parameterized via
+// MLX `template_int` (C++ template parameters; MLX auto-specializes one PSO
+// per (BM,BN,BK,M,N,K) tuple).
 //
 // Inputs (auto-injected by mx::fast::metal_kernel as
 //   `const device <dtype>* <name>` parameters):
@@ -14,32 +16,45 @@
 //
 // Compute is done in fp32 (cast on load, cast on store) so the kernel works
 // uniformly for bf16 / fp16 / fp32 inputs without compile-time type
-// dispatch. Threadgroup memory holds fp32 tiles (16 KiB total — well under
-// Metal's 32 KiB limit). `__typeof__(*out)` recovers the runtime output
-// dtype for the final store.
+// dispatch. `__typeof__(*out)` recovers the runtime output dtype for the
+// final store.
+//
+// Tile layout (4×4 micro-tile per thread):
+//   threads_per_tg     = (BM * BN) / 16
+//   xs_elems_per_thread = (BM * BK) / threads_per_tg = 16 * BK / BN
+//   ws_elems_per_thread = (BN * BK) / threads_per_tg = 16 * BK / BM
+//
+// Constraints (validated at call site):
+//   - (BM * BN) <= 16384      (threads/TG <= 1024 Metal limit)
+//   - (BM * BN) % 16 == 0     (4×4 micro-tile fits)
+//   - (BM * BK) % threads_per_tg == 0
+//   - (BN * BK) % threads_per_tg == 0
+//   - BN % 4 == 0             (col_in_tile stride)
+//   - BK % GROUP_SIZE divides cleanly (group_size = 64 fixed for stage 9)
 //
 // Constants passed via .template_int():
-//   M, N, K (matmul shape)
+//   M, N, K (matmul shape), BM, BN, BK (tile dims).
 
-const int BM = 64;
-const int BN = 64;
-const int BK = 32;
 const int GROUP_SIZE = 64;
 
 uint tg_x = threadgroup_position_in_grid.x; // tile col index
 uint tg_y = threadgroup_position_in_grid.y; // tile row index
-uint lid  = thread_index_in_threadgroup;    // 0..255
+uint lid  = thread_index_in_threadgroup;
 
 int tile_m = (int)tg_y * BM;
 int tile_n = (int)tg_x * BN;
 
-// Threadgroup memory tiles, fp32 for dtype-agnostic compute.
+// Threadgroup memory tiles (fp32 for dtype-agnostic compute). BM/BN/BK are
+// template parameters at this point — Metal compiler instantiates one
+// specialization per unique tuple, so these dimensions are compile-time
+// constants and the array allocation is legal.
 threadgroup float xs[BM * BK];
 threadgroup float ws[BN * BK];
 
-// 16x16 grid of threads, each owns a 4x4 micro-tile of the (BM, BN) output.
-int row_in_tile = ((int)lid / (BN / 4)) * 4; // 0,4,8,...,60
-int col_in_tile = ((int)lid % (BN / 4)) * 4; // 0,4,8,...,60
+// (BM/4)×(BN/4) grid of threads, each owning a 4×4 micro-tile of the
+// (BM, BN) output region.
+int row_in_tile = ((int)lid / (BN / 4)) * 4;
+int col_in_tile = ((int)lid % (BN / 4)) * 4;
 
 float acc[4][4];
 for (int i = 0; i < 4; ++i) {
@@ -48,11 +63,14 @@ for (int i = 0; i < 4; ++i) {
     }
 }
 
+const int threads_per_tg = (BM * BN) / 16;
+const int xs_elems_per_thread = (BM * BK) / threads_per_tg;
+const int ws_elems_per_thread = (BN * BK) / threads_per_tg;
+
 for (int k0 = 0; k0 < K; k0 += BK) {
     // 1. Cooperative load xs[BM, BK] from x[tile_m..+BM, k0..+BK].
-    //    256 threads cover BM*BK = 2048 elems -> 8 elems/thread.
-    for (int t = 0; t < 8; ++t) {
-        int idx = (int)lid * 8 + t;
+    for (int t = 0; t < xs_elems_per_thread; ++t) {
+        int idx = (int)lid * xs_elems_per_thread + t;
         int r = idx / BK;
         int c = idx % BK;
         int gr = tile_m + r;
@@ -64,11 +82,11 @@ for (int k0 = 0; k0 < K; k0 += BK) {
         xs[r * BK + c] = v;
     }
 
-    // 2. Cooperative dequant + load ws[BN, BK].
-    //    Each thread unpacks 8 nibbles, applying the per-group affine
-    //    formula: w_real = nibble * scale + bias.
-    for (int t = 0; t < 8; ++t) {
-        int idx = (int)lid * 8 + t;
+    // 2. Cooperative dequant + load ws[BN, BK]. Each thread unpacks
+    //    `ws_elems_per_thread` nibbles, applying per-group affine:
+    //    w_real = nibble * scale + bias.
+    for (int t = 0; t < ws_elems_per_thread; ++t) {
+        int idx = (int)lid * ws_elems_per_thread + t;
         int n_in_tile = idx / BK;
         int kk = idx % BK;
         int actual_n = tile_n + n_in_tile;
@@ -90,7 +108,7 @@ for (int k0 = 0; k0 < K; k0 += BK) {
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // 3. MMA: each thread accumulates a 4x4 micro-tile in fp32.
+    // 3. MMA: each thread accumulates a 4×4 micro-tile in fp32.
     for (int kk = 0; kk < BK; ++kk) {
         float xv[4];
         float wv[4];

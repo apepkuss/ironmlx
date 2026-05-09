@@ -48,7 +48,9 @@ pub fn qmm_t_on(
         "self_qmm stage 9 only supports group_size=64"
     );
     let _ = target.into();
-    kernel::dispatch_qmm_t(x, w, scales, biases)
+    // Stage 9 task 3: hardcoded default tile (64, 64, 32). Task 4 introduces
+    // a device + shape lookup that picks the optimal tile per dispatch.
+    kernel::dispatch_qmm_t(x, w, scales, biases, 64, 64, 32)
 }
 
 #[cfg(test)]
@@ -56,12 +58,14 @@ mod tests {
     use super::*;
     use mlx::{ops, Dtype};
 
-    /// Tiny shape unit test — compares self_qmm against the MLX reference
-    /// `quantized_matmul_on`. Decision gate: max abs diff < 0.5 PASS.
-    #[test]
-    fn self_qmm_t_matches_mlx_small_shape() {
-        // Shape: M=4, K=64 (single group), N=8 (partial BN tile to exercise
-        // bound checks).
+    /// Run the self_qmm vs MLX reference comparison for a specific tile
+    /// `(BM, BN, BK)`. Decision gate: max abs diff < 0.5 PASS.
+    ///
+    /// Calls `kernel::dispatch_qmm_t` directly (not `qmm_t_on` which is
+    /// hardcoded to (64,64,32) for now). Shape is small (M=4, K=64, N=8) —
+    /// this is deliberate: it exercises bound-check paths in the kernel
+    /// (partial BM/BN tile coverage) without requiring large allocations.
+    fn run_variant(bm: i32, bn: i32, bk: i32) {
         let m = 4_i32;
         let k = 64_i32;
         let n = 8_i32;
@@ -70,36 +74,25 @@ mod tests {
 
         // Deterministic raw weight data (avoid random-seed test flakiness).
         // Small range (~[-0.3, 0.21]) keeps the matmul output values <~ 1.0,
-        // well within bf16 precision (~7 mantissa bits ≈ 0.008 ulp at 1.0)
-        // so we can verify kernel correctness without bf16 round-off swamping
-        // the comparison against the MLX reference.
+        // well within bf16 precision (~7 mantissa bits ≈ 0.008 ulp at 1.0).
         let raw_data: Vec<f32> = (0..(n * k)).map(|i| (i as f32) * 0.001 - 0.3).collect();
         let raw_w_f32: Array = (raw_data.as_slice(), (n, k)).try_into().unwrap();
         let raw_w_bf16 = ops::cast::astype(&raw_w_f32, Dtype::Bfloat16).unwrap();
 
-        // Quantize via the MLX public API. Returns [packed, scales, biases].
         let q_outs =
             mlx::quantization::quantize(&raw_w_bf16, Some(group_size), Some(bits), "affine", None)
                 .expect("quantize");
-        assert_eq!(
-            q_outs.len(),
-            3,
-            "affine quantize should return [packed, scales, biases]"
-        );
         let w_packed = &q_outs[0];
         let w_scales = &q_outs[1];
         let w_biases = &q_outs[2];
 
-        // Activation x — small deterministic ramp (max ~0.255, see weight comment).
         let x_data: Vec<f32> = (0..(m * k) as usize).map(|i| (i as f32) * 0.001).collect();
         let x_f32: Array = (x_data.as_slice(), (m, k)).try_into().unwrap();
         let x = ops::cast::astype(&x_f32, Dtype::Bfloat16).unwrap();
 
-        // Self-qmm output.
-        let y_self = qmm_t_on(&x, w_packed, w_scales, w_biases, bits, group_size, ())
+        let y_self = kernel::dispatch_qmm_t(&x, w_packed, w_scales, w_biases, bm, bn, bk)
             .expect("self_qmm dispatch");
 
-        // MLX reference output.
         let y_mlx = mlx::quantization::quantized_matmul_on(
             &x,
             w_packed,
@@ -116,7 +109,7 @@ mod tests {
         assert_eq!(
             y_self.shape().as_slice(),
             y_mlx.shape().as_slice(),
-            "shape mismatch: self={:?} mlx={:?}",
+            "tile (BM={bm}, BN={bn}, BK={bk}): shape mismatch self={:?} mlx={:?}",
             y_self.shape().as_slice(),
             y_mlx.shape().as_slice()
         );
@@ -132,10 +125,25 @@ mod tests {
             .zip(mv.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f32, f32::max);
-        eprintln!("self_qmm vs mlx max abs diff = {max_diff}");
+        eprintln!("tile (BM={bm}, BN={bn}, BK={bk}) max abs diff = {max_diff}");
         assert!(
             max_diff < 0.5,
-            "self_qmm vs mlx max abs diff {max_diff} >= 0.5 (kernel correctness bug)"
+            "tile (BM={bm}, BN={bn}, BK={bk}): max abs diff {max_diff} >= 0.5"
         );
+    }
+
+    #[test]
+    fn self_qmm_t_tile_64_64_32() {
+        run_variant(64, 64, 32);
+    }
+
+    #[test]
+    fn self_qmm_t_tile_64_128_32() {
+        run_variant(64, 128, 32);
+    }
+
+    #[test]
+    fn self_qmm_t_tile_128_128_32() {
+        run_variant(128, 128, 32);
     }
 }
