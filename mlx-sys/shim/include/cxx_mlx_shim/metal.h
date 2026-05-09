@@ -19,4 +19,19 @@ namespace cxx_mlx {
 void start_capture(rust::Str path);
 void stop_capture();
 
+// === Device architecture query (tile-lookup tables) ===
+//
+// Returns the Metal device's architecture name as reported by
+// `MTLDevice.architecture.name` (e.g. "apple_g13s" for the M1 Pro 16-core
+// GPU, "apple_g15p" for M3 Pro). Wraps the public
+// `mlx::core::metal::device_info()` map's "architecture" entry so a Rust
+// caller can pick a per-arch tile without re-implementing the Metal device
+// query.
+//
+// Throws `std::runtime_error` if the Metal backend isn't available, or if
+// the entry's variant unexpectedly isn't a string (defensive — current
+// MLX always stores it as `std::string`).
+
+rust::String device_architecture();
+
 }  // namespace cxx_mlx

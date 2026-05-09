@@ -44,3 +44,20 @@ pub fn start(path: &str) -> Result<()> {
 pub fn stop() -> Result<()> {
     mlx_sys::metal::ffi::stop_capture().map_err(Error::from)
 }
+
+/// Return the Metal device's architecture name as reported by MLX
+/// (`MTLDevice.architecture.name` via `mlx::core::metal::device_info()`).
+///
+/// Examples on Apple Silicon:
+/// - `"apple_g13s"` — M1 Pro / M1 Pro Max (16-core GPU)
+/// - `"apple_g13d"` — M1 Pro Max (32-core GPU)
+/// - `"apple_g14g"` — M2
+/// - `"apple_g15p"` — M3 Pro / M3 Max
+///
+/// Used by tile-lookup tables (ironmlx self_qmm) to pick per-chip kernel
+/// dimensions without re-implementing the Metal device query in Rust.
+///
+/// Errors if the Metal backend isn't available on this system.
+pub fn architecture() -> Result<String> {
+    mlx_sys::metal::ffi::device_architecture().map_err(Error::from)
+}
