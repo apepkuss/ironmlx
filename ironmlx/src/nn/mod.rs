@@ -7,6 +7,7 @@
 pub mod attention;
 pub mod conv;
 pub mod decoder_layer;
+pub mod echo_kernel;
 pub mod embedding;
 pub mod gated_attention;
 pub mod gated_delta_net;

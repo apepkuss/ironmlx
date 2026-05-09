@@ -206,6 +206,9 @@ impl Linear {
                 if let Some(b) = bias {
                     y = &y + b;
                 }
+                if crate::nn::echo_kernel::echo_enabled() {
+                    y = crate::nn::echo_kernel::echo(&y)?;
+                }
                 Ok(y)
             }
         }
