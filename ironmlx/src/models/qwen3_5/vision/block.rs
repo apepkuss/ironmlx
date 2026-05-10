@@ -114,25 +114,33 @@ impl VitMLP {
 /// Matches `apply_rotary_pos_emb_vision` from mlx-vlm:
 ///   - Build `cos_full = tile(cos(freqs), 2)` → `[seq, 1, head_dim]`
 ///   - `rotate_half(x) = concat([-x[..., half:], x[..., :half]], axis=-1)`
-///   - `out = x * cos_full + rotate_half(x) * sin_full`
+///   - `out = (x * cos_full + rotate_half(x) * sin_full).astype(orig_dtype)`
+///
+/// Precision: cos/sin remain fp32 for the multiply, matching mlx-vlm's Python
+/// implementation (`output = (tensor * cos) + (rotate_half(tensor) * sin);
+/// return output.astype(orig_dtype)`). MLX promotes bf16×fp32→fp32, computes
+/// in fp32, then we cast back — this avoids the precision loss of a premature
+/// bf16 cast on cos/sin.
 fn apply_rotary_vision(tensor: &Array, freqs: &Array) -> Result<Array> {
     // tensor: [seq, num_heads, head_dim]
-    // freqs:  [seq, head_dim/2]
+    // freqs:  [seq, head_dim/2]  (fp32 from VisionRotaryEmbedding)
+    let orig_dtype = tensor.dtype();
     let shape = tensor.shape();
     let seq = shape[0];
     let num_heads = shape[1];
     let head_dim = shape[2];
     let half = head_dim / 2;
 
-    // cos_half: [seq, half], sin_half: [seq, half]
+    // cos_half: [seq, half] fp32, sin_half: [seq, half] fp32
     let cos_half = ops::cos(freqs)?;
     let sin_half = ops::sin(freqs)?;
 
-    // tile along axis=1: [seq, half] → [seq, half*2] via concat
+    // tile along axis=1: [seq, half] → [seq, head_dim] via concat (fp32)
     let cos_full = ops::concatenate(&[&cos_half, &cos_half], 1)?;
     let sin_full = ops::concatenate(&[&sin_half, &sin_half], 1)?;
 
     // expand to [seq, 1, head_dim] for broadcasting with [seq, num_heads, head_dim]
+    // Keep cos/sin in fp32 — mlx promotes bf16*fp32 → fp32 automatically.
     let cos_bc = ops::shape::reshape(&cos_full, &[seq, 1, head_dim][..])?;
     let sin_bc = ops::shape::reshape(&sin_full, &[seq, 1, head_dim][..])?;
 
@@ -145,12 +153,10 @@ fn apply_rotary_vision(tensor: &Array, freqs: &Array) -> Result<Array> {
     let neg_x2 = -&x2;
     let rotated = ops::concatenate(&[&neg_x2, &x1], 2)?;
 
-    // Cast cos/sin to tensor dtype for bf16 compat
-    let cos_bc = ops::astype(&cos_bc, tensor.dtype())?;
-    let sin_bc = ops::astype(&sin_bc, tensor.dtype())?;
-
-    let out = tensor * &cos_bc + &rotated * &sin_bc;
-    Ok(out)
+    // Compute in fp32 (bf16 tensor * fp32 cos → fp32 via mlx auto-promotion),
+    // then cast back to original dtype — matches Python's `.astype(orig_dtype)`.
+    let out_f32 = tensor * &cos_bc + &rotated * &sin_bc;
+    ops::cast::astype(&out_f32, orig_dtype).map_err(anyhow::Error::from)
 }
 
 // ---------------------------------------------------------------------------

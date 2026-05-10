@@ -111,6 +111,24 @@ impl Qwen35Model {
     /// When `pixel_values` is `None` the output is **numerically identical** to
     /// [`forward_on`] — the same embed → layers → norm → slice → project path.
     ///
+    /// Run transformer + lm_head on pre-built `inputs_embeds [B, S, hidden]`.
+    ///
+    /// Bypasses embed_tokens and vision tower. Used in integration tests to
+    /// isolate LM accuracy from vision tower accuracy.
+    #[doc(hidden)]
+    pub fn forward_from_embeds(
+        &self,
+        inputs_embeds: &Array,
+        position_ids: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let hidden =
+            self.text
+                .forward_post_embedding_on(inputs_embeds, position_ids, None, target)?;
+        self.slice_last_and_project(&hidden, target)
+    }
+
     /// # Arguments
     /// - `input_ids`     — `[B, S]` int32 token ids (B must be 1 for P6).
     /// - `position_ids`  — `[3, B, S]` int32 per Mrope contract.

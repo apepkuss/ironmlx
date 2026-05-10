@@ -282,8 +282,9 @@ mod tests {
 
         // x: [B=1, S=4, hidden=32] fp32
         let x = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
-        let cos = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
-        let sin = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
+        // cos/sin shape: [B, S, rot_dim=8]
+        let cos = Array::zeros((1_i32, 4, 8), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 4, 8), Dtype::Float32).unwrap();
 
         let out = attn
             .forward(&x, &mrope, &cos, &sin, None, None)
@@ -327,8 +328,9 @@ mod tests {
 
         let x = Array::zeros((1_i32, 4, 32), Dtype::Bfloat16).unwrap();
         // cos/sin always fp32 per P3b1 spec.
-        let cos = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
-        let sin = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
+        // cos/sin shape: [B, S, rot_dim=8]
+        let cos = Array::zeros((1_i32, 4, 8), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 4, 8), Dtype::Float32).unwrap();
 
         let out = attn
             .forward(&x, &mrope, &cos, &sin, None, None)
@@ -353,8 +355,9 @@ mod tests {
         let x_data: Vec<f32> = (0..(1 * 4 * 32)).map(|i| (i as f32) * 0.01).collect();
         let x: Array = (x_data.as_slice(), (1_i32, 4, 32)).try_into().unwrap();
 
-        let cos = mlx::ops::constructors::ones((1_i32, 4, 4), Dtype::Float32).unwrap();
-        let sin = Array::zeros((1_i32, 4, 4), Dtype::Float32).unwrap();
+        // cos/sin shape: [B, S, rot_dim=8]
+        let cos = mlx::ops::constructors::ones((1_i32, 4, 8), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 4, 8), Dtype::Float32).unwrap();
 
         let out = attn
             .forward(&x, &mrope, &cos, &sin, None, None)
@@ -439,10 +442,10 @@ mod tests {
             .try_into()
             .unwrap();
 
-        // rot_dim = 2 * 1.0 = 2, ROT_PAIRS = 1.
+        // rot_dim = 2 * 1.0 = 2. cos/sin shape: [B, S, rot_dim=2]
         let mrope = Mrope::new(2, 1e7, 1.0, &[1, 0, 0], true).unwrap();
-        let cos = mlx::ops::constructors::ones((1_i32, 1, 1), Dtype::Float32).unwrap();
-        let sin = Array::zeros((1_i32, 1, 1), Dtype::Float32).unwrap();
+        let cos = mlx::ops::constructors::ones((1_i32, 1, 2), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 1, 2), Dtype::Float32).unwrap();
 
         let out = attn
             .forward(&x, &mrope, &cos, &sin, None, None)

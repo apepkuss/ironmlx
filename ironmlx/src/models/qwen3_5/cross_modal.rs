@@ -2,7 +2,7 @@
 //! text_embeds with vision_embeds. See spec §4.6.
 
 use anyhow::{anyhow, Result};
-use mlx::{ops, Array};
+use mlx::{ops, Array, Dtype};
 
 /// Replace `text_embeds[b, s, :]` with `vision_embeds[k, :]` where
 /// `input_ids[b, s] == image_token_id`.
@@ -49,14 +49,14 @@ pub fn replace_image_tokens(
     );
 
     // --- read input_ids to host (int32 cast first) --------------------------
-    let ids_i32 = ops::astype(input_ids, mlx::Dtype::Int32)?;
+    let ids_i32 = ops::astype(input_ids, Dtype::Int32)?;
     let ids_flat: Vec<i32> = ids_i32
         .reshape(&[b * s][..])?
         .to_vec::<i32>()
         .map_err(|e| anyhow!("to_vec input_ids: {e}"))?;
 
     // --- read vision_embeds to host (via f32) --------------------------------
-    let ve_f32 = ops::astype(vision_embeds, mlx::Dtype::Float32)?;
+    let ve_f32 = ops::astype(vision_embeds, Dtype::Float32)?;
     let ve_flat: Vec<f32> = ve_f32
         .to_vec::<f32>()
         .map_err(|e| anyhow!("to_vec vision_embeds: {e}"))?;
@@ -71,8 +71,8 @@ pub fn replace_image_tokens(
 
     // --- build vision_at_text on host ----------------------------------------
     // Output layout: flat [B * S * hidden] f32, row-major.
-    // For image positions we fill vision_embeds[k, :]; for text positions we
-    // fill zeros (will be multiplied out by inv_mask).
+    // Image positions filled with vision_embeds[k, :]; text positions filled with
+    // zeros (will be discarded by mx::where selection — not multiplied in).
     let total = (b * s * hidden) as usize;
     let mut vat = vec![0.0_f32; total];
 
@@ -97,33 +97,18 @@ pub fn replace_image_tokens(
     // cast to text_embeds dtype (e.g. bf16)
     let vat_arr = ops::astype(&vat_arr, text_embeds.dtype())?;
 
-    // --- build float mask [B, S, 1] -----------------------------------------
-    // mask[b, s, 0] = 1.0 where input_ids[b, s] == image_token_id, else 0.0
-    let mask_flat: Vec<f32> = ids_flat
-        .iter()
-        .map(|&id| {
-            if id == image_token_id {
-                1.0_f32
-            } else {
-                0.0_f32
-            }
-        })
-        .collect();
-    let mask_arr: Array = (mask_flat.as_slice(), &[b, s, 1][..])
+    // --- build bool mask [B, S, 1] for mx::where ----------------------------
+    // true where input_ids[b, s] == image_token_id, else false.
+    // Broadcast over hidden dim via mx::where's broadcasting semantics.
+    let mask_bool: Vec<bool> = ids_flat.iter().map(|&id| id == image_token_id).collect();
+    let mask_arr: Array = (mask_bool.as_slice(), &[b, s, 1][..])
         .try_into()
-        .map_err(|e| anyhow!("mask array construction: {e}"))?;
-    let mask_arr = ops::astype(&mask_arr, text_embeds.dtype())?;
+        .map_err(|e| anyhow!("bool mask array construction: {e}"))?;
 
-    // inv_mask = 1 - mask  (broadcasts over hidden dim automatically)
-    let one_scalar: Array = (&[1.0_f32][..], &[][..])
-        .try_into()
-        .map_err(|e| anyhow!("scalar one: {e}"))?;
-    let one_scalar = ops::astype(&one_scalar, text_embeds.dtype())?;
-    let inv_mask = &one_scalar - &mask_arr;
-
-    // --- blend --------------------------------------------------------------
-    // result = text_embeds * inv_mask + vision_at_text * mask
-    let out = text_embeds * &inv_mask + &vat_arr * &mask_arr;
+    // --- select with mx::where (exact, no multiply) -------------------------
+    // Matches Python's `mx.where(special_image_mask[..., None], image_embeds, text_embeds)`
+    // which performs an exact selection with no arithmetic, preserving bf16 precision.
+    let out = ops::where_(&mask_arr, &vat_arr, text_embeds)?;
     Ok(out)
 }
 
