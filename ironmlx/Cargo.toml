@@ -25,6 +25,8 @@ dirs = "6"
 anyhow = "1"
 smallvec = "1"
 minijinja = { version = "2", default-features = false, features = ["builtins", "loader", "macros", "serde"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+base64 = "0.22"
 tokio.workspace = true
 axum.workspace = true
 # CORS / tracing layers deferred to P8b (multi-request scheduler). When P8b
@@ -32,8 +34,8 @@ axum.workspace = true
 #   tower-http.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 approx = "0.5"
-reqwest.workspace = true
 tokio-stream.workspace = true

@@ -83,6 +83,8 @@ pub fn run(args: GenerateArgs) -> Result<()> {
         sampler,
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: args.prefill_chunk_size,
+        pixel_values: None,
+        image_grid_thw: None,
     };
 
     let mut stream = GenerationStream::new(&model, &tokenizer, request)?;

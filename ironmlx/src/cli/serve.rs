@@ -41,7 +41,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
         ));
     }
 
-    let loader = Loader::open(&model_dir).context("Loader::open")?;
+    // open_multimodal so VL checkpoints retain vision_tower.* keys; for
+    // text-only checkpoints the loader simply finds no vision keys and
+    // Qwen35Model::from_loader sets vision = None.
+    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
     let model = Qwen35Model::from_loader(&loader).context("Qwen35Model::from_loader")?;
     let model_id = args.model.clone();

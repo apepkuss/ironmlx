@@ -21,7 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::sampler::Sampler;
-use crate::core::server::chat_format::{render_and_encode, ChatMessage};
+use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
 
 use super::AppState;
 
@@ -108,9 +108,43 @@ fn format_event(event_type: &str, payload: &serde_json::Value) -> Bytes {
 }
 
 pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesRequest>) -> Response {
+    // Extract fields before partially moving req.messages.
+    let max_tokens = req.max_tokens;
+    let stream = req.stream;
+    let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
+    let sampler = build_sampler(&req);
+
+    // Flatten any multimodal content parts to plain text.
+    // The Anthropic /v1/messages handler is text-only; image_url parts are
+    // stripped (only their text siblings are kept).
+    let flat_messages: Vec<ChatMessage> = req
+        .messages
+        .into_iter()
+        .map(|m| {
+            let text = match &m.content {
+                Content::Text(t) => t.clone(),
+                Content::Parts(parts) => parts
+                    .iter()
+                    .filter_map(|p| {
+                        if let ContentPart::Text { text } = p {
+                            Some(text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            };
+            ChatMessage {
+                role: m.role,
+                content: Content::Text(text),
+            }
+        })
+        .collect();
+
     // Anthropic /v1/messages doesn't surface chat_template_kwargs in its
     // public schema; pass None.
-    let prompt_ids = match render_and_encode(&state.tokenizer, &req.messages, None) {
+    let prompt_ids = match render_and_encode(&state.tokenizer, &flat_messages, None) {
         Ok(ids) => ids,
         Err(e) => {
             return (
@@ -121,21 +155,21 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         }
     };
     let input_tokens = prompt_ids.len() as u32;
-    let sampler = build_sampler(&req);
     let stop_token_ids = state.tokenizer.eos_token_ids().to_vec();
     let request = GenerateRequest {
         prompt_ids,
-        max_new_tokens: req.max_tokens,
+        max_new_tokens: max_tokens,
         sampler,
         stop_token_ids,
         prefill_chunk_size: state.prefill_chunk_size,
+        pixel_values: None,
+        image_grid_thw: None,
     };
-    let model_id = req.model.clone().unwrap_or_else(|| state.model_id.clone());
 
-    if req.stream {
-        messages_stream(state, request, model_id, input_tokens).await
+    if stream {
+        messages_stream(state, request, model_label, input_tokens).await
     } else {
-        messages_unary(state, request, model_id, input_tokens).await
+        messages_unary(state, request, model_label, input_tokens).await
     }
 }
 

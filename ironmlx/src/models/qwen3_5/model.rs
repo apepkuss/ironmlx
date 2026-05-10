@@ -1,21 +1,29 @@
 //! Top-level Qwen3.5 model: text model + (tied or explicit) lm_head + heterogeneous cache.
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{GatedDeltaCache, KVCache};
+use crate::core::generate::IMAGE_TOKEN_ID;
 use crate::core::Loader;
 use crate::nn::{AttnKind, LayerCache, Linear};
 use crate::Result;
 
 use super::config::Qwen35Config;
 use super::text_model::Qwen35TextModel;
+use super::vision::VisionTower;
 
 /// Top-level Qwen3.5 dense model: hybrid 32-layer text core + tied/untied lm_head.
+///
+/// `vision` is present only when the model was loaded via [`Loader::open_multimodal`]
+/// AND the config contains a `vision_config` block. Text-only inference is unaffected when
+/// `vision` is `None`.
 pub struct Qwen35Model {
     text: Qwen35TextModel,
     /// `Some` when `!tie_word_embeddings`. `None` reuses `text.embed_tokens` for output projection.
     lm_head: Option<Linear>,
+    /// Vision encoder; `Some` for VL models loaded with `open_multimodal`. `None` for text-only.
+    vision: Option<VisionTower>,
 }
 
 impl Qwen35Model {
@@ -33,14 +41,39 @@ impl Qwen35Model {
         } else {
             Some(Linear::from_loader(loader, "lm_head")?)
         };
+
+        // Load VisionTower when vision_config is present in the model config AND the loader
+        // actually has vision_tower.* tensor keys retained (i.e. opened via open_multimodal).
+        // Detection strategy: use `loader.contains("vision_tower.patch_embed.proj.weight")` as a
+        // lightweight sentinel rather than attempting VisionTower::from_loader and catching errors.
+        // This avoids spurious error messages for text-only callers who use Loader::open (which
+        // drops all vision_tower.* keys during sanitize).
+        let vision = if let Some(vc) = cfg.vision_config.as_ref() {
+            if loader.contains("vision_tower.patch_embed.proj.weight") {
+                Some(VisionTower::from_loader(loader, vc)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let text = Qwen35TextModel::from_loader(loader, cfg)?;
-        Ok(Self { text, lm_head })
+        Ok(Self {
+            text,
+            lm_head,
+            vision,
+        })
     }
 
     /// Test seam.
     #[doc(hidden)]
     pub fn from_components(text: Qwen35TextModel, lm_head: Option<Linear>) -> Self {
-        Self { text, lm_head }
+        Self {
+            text,
+            lm_head,
+            vision: None,
+        }
     }
 
     pub fn config(&self) -> &Qwen35Config {
@@ -69,18 +102,97 @@ impl Qwen35Model {
         let hidden = self
             .text
             .forward_on(input_ids, position_ids, cache, target)?;
+        self.slice_last_and_project(&hidden, target)
+    }
+
+    /// Multimodal forward: routes `pixel_values` through the vision tower, replaces
+    /// image-token positions in the text embeddings, then runs the full text backbone.
+    ///
+    /// When `pixel_values` is `None` the output is **numerically identical** to
+    /// [`forward_on`] — the same embed → layers → norm → slice → project path.
+    ///
+    /// Run transformer + lm_head on pre-built `inputs_embeds [B, S, hidden]`.
+    ///
+    /// Bypasses embed_tokens and vision tower. Used in integration tests to
+    /// isolate LM accuracy from vision tower accuracy.
+    #[doc(hidden)]
+    pub fn forward_from_embeds(
+        &self,
+        inputs_embeds: &Array,
+        position_ids: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let hidden =
+            self.text
+                .forward_post_embedding_on(inputs_embeds, position_ids, None, target)?;
+        self.slice_last_and_project(&hidden, target)
+    }
+
+    /// # Arguments
+    /// - `input_ids`     — `[B, S]` int32 token ids (B must be 1 for P6).
+    /// - `position_ids`  — `[3, B, S]` int32 per Mrope contract.
+    /// - `cache`         — optional per-layer cache slice.
+    /// - `pixel_values`  — pre-processed image patches `[N, T, C, H, W]`.
+    /// - `grid_thw`      — per-image `(temporal, height, width)` grid sizes;
+    ///   **required** when `pixel_values.is_some()`.
+    /// - `target`        — compute device / stream.
+    pub fn forward_vl(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        cache: Option<&mut [LayerCache]>,
+        pixel_values: Option<&Array>,
+        grid_thw: Option<&[(i32, i32, i32)]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        // Step 1: embed token ids → [B, S, hidden_size]
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+
+        // Step 2: if pixel_values provided, route through vision tower and replace
+        //         image-token positions in the embedded sequence.
+        if let Some(pv) = pixel_values {
+            let grids = grid_thw
+                .ok_or_else(|| anyhow!("grid_thw required when pixel_values is provided"))?;
+            let vision = self
+                .vision
+                .as_ref()
+                .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
+            let vision_embeds = vision.forward(pv, grids)?;
+            hidden = super::cross_modal::replace_image_tokens(
+                &hidden,
+                input_ids,
+                &vision_embeds,
+                IMAGE_TOKEN_ID,
+            )?;
+        }
+
+        // Step 3: run transformer layers + final norm on the (possibly patched) hidden state.
+        let hidden = self
+            .text
+            .forward_post_embedding_on(&hidden, position_ids, cache, target)?;
+
+        // Step 4: slice last position and project to logits.
+        self.slice_last_and_project(&hidden, target)
+    }
+
+    /// Slice the last sequence position from `hidden [B, S, H]` and project to
+    /// vocab logits `[B, 1, vocab_size]`. Shared by [`forward_on`] and [`forward_vl`].
+    fn slice_last_and_project(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
         let dims_borrow = hidden.shape();
         let dims = dims_borrow.as_slice();
         let (b, s, h) = (dims[0], dims[1], dims[2]);
         let last_hidden = if s > 1 {
             mlx::ops::indexing::slice_strided(
-                &hidden,
+                hidden,
                 &[0_i32, s - 1, 0][..],
                 &[b, s, h][..],
                 &[1_i32, 1, 1][..],
             )?
         } else {
-            hidden
+            hidden.clone()
         };
         match &self.lm_head {
             Some(head) => head.forward_on(&last_hidden, target),
@@ -159,6 +271,7 @@ impl Qwen35Model {
         Self {
             text,
             lm_head: None,
+            vision: None,
         }
     }
 }
@@ -193,6 +306,7 @@ mod tests {
                 rope_theta: 1e7,
                 mrope_section: vec![2, 1, 1],
             },
+            vision_config: None,
         }
     }
 
@@ -225,6 +339,55 @@ mod tests {
         assert!(
             matches!(cache[3], LayerCache::Full(_)),
             "layer 3 should be Full"
+        );
+    }
+
+    /// Integration test: text-only `forward_vl` (pixel_values=None) must produce
+    /// output numerically identical to `forward_on`.
+    ///
+    /// Run with:
+    /// ```
+    /// QWEN35_MODEL=<path> cargo test -p ironmlx --lib --release forward_vl_text_only_matches_forward_on -- --ignored
+    /// ```
+    #[test]
+    #[ignore] // real-model heavy
+    fn forward_vl_text_only_matches_forward_on() {
+        use crate::core::generate::build_position_ids;
+        use crate::core::Loader;
+
+        let env = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL not set");
+        let loader =
+            Loader::open_multimodal(std::path::Path::new(&env)).expect("loader open_multimodal");
+        let model = Qwen35Model::from_loader(&loader).expect("model");
+
+        let input_ids: mlx::Array = (&[100_i32, 101, 102][..], &[1_i32, 3][..])
+            .try_into()
+            .expect("input_ids");
+        let pos = build_position_ids(0, 3).expect("build_position_ids");
+
+        // text-only path via forward_on
+        let logits_a = model
+            .forward_on(&input_ids, &pos, None, ())
+            .expect("forward_on");
+
+        // forward_vl with pixel_values=None must be numerically identical
+        let logits_b = model
+            .forward_vl(&input_ids, &pos, None, None, None, ())
+            .expect("forward_vl text-only");
+
+        // Compute max absolute difference
+        let diff = mlx::ops::subtract(&logits_a, &logits_b).expect("subtract");
+        let abs_diff = mlx::ops::abs(&diff).expect("abs");
+        let max_diff_arr = mlx::ops::max(&abs_diff, mlx::ops::All, false).expect("max");
+        let max_diff_f32: Vec<f32> = mlx::ops::astype(&max_diff_arr, mlx::Dtype::Float32)
+            .expect("astype")
+            .to_vec()
+            .expect("to_vec");
+        let max_diff = max_diff_f32[0];
+
+        assert!(
+            max_diff < 1e-5,
+            "forward_vl text-only diverged from forward_on: max_diff={max_diff}"
         );
     }
 }

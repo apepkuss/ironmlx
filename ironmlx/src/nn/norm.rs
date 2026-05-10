@@ -68,6 +68,24 @@ pub struct LayerNorm {
 }
 
 impl LayerNorm {
+    /// Build a `LayerNorm` from pre-loaded weight and optional bias.
+    ///
+    /// Useful when the caller already holds the parameters (e.g. constructed
+    /// inside a ViT block from tensors passed in directly).
+    pub fn new(weight: Array, bias: Option<Array>, eps: f32) -> Self {
+        Self { weight, bias, eps }
+    }
+
+    /// Borrow the weight tensor (for eager-eval bookkeeping).
+    pub fn weight(&self) -> &Array {
+        &self.weight
+    }
+
+    /// Borrow the optional bias tensor.
+    pub fn bias(&self) -> Option<&Array> {
+        self.bias.as_ref()
+    }
+
     /// Build a `LayerNorm` from `loader`, looking for `{prefix}.weight`
     /// (required) and `{prefix}.bias` (optional).
     pub fn from_loader(loader: &Loader, prefix: &str, eps: f32) -> Result<Self> {
