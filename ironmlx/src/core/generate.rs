@@ -176,6 +176,155 @@ pub fn build_position_ids(start_pos: i32, len: i32) -> Result<Array> {
     mlx::ops::shape::broadcast_to(&one_stream, &[3_i32, 1, len][..]).map_err(anyhow::Error::from)
 }
 
+/// Token IDs for Qwen3.5-VL (from model config.json, **not** from mlx-vlm defaults which differ).
+pub const IMAGE_TOKEN_ID: i32 = 248056;
+pub const VISION_START_TOKEN_ID: i32 = 248053;
+pub const VISION_END_TOKEN_ID: i32 = 248054;
+
+/// MRoPE 3-stream position_ids for a VL sequence (B=1, image-only, no video).
+///
+/// Output shape: `[3, 1, S]` (int32).
+///   - Stream 0 (t): temporal positions; equals spatial stream for text tokens.
+///   - Stream 1 (h): height positions; equals temporal stream for text tokens.
+///   - Stream 2 (w): width positions; equals temporal stream for text tokens.
+///
+/// Algorithm: faithful Rust translation of `LanguageModel.get_rope_index` in
+/// `mlx_vlm/models/qwen3_vl/language.py:333-486`, restricted to the B=1
+/// image-only path. Video token support is intentionally omitted (P6 scope).
+///
+/// For each image at grid `(t, h, w)`:
+///   - `llm_grid_t = t`, `llm_grid_h = h / spatial_merge_size`,
+///     `llm_grid_w = w / spatial_merge_size`
+///   - Image token count = `llm_grid_t * llm_grid_h * llm_grid_w`
+///   - t_index: broadcasts `arange(llm_grid_t)` over `(llm_grid_t, llm_grid_h*llm_grid_w)` then flattened
+///   - h_index: broadcasts `arange(llm_grid_h)` over `(llm_grid_t, llm_grid_h, llm_grid_w)` then flattened
+///   - w_index: broadcasts `arange(llm_grid_w)` over `(llm_grid_t, llm_grid_h, llm_grid_w)` then flattened
+///   - Image block = `stack([t_index, h_index, w_index]) + text_len + st_idx`
+///
+/// `grid_thw`: one entry per image, `(t, h, w)` in original pixel-patch units.
+/// `image_token_id`: the sentinel value that marks each image token in `input_ids`.
+/// `spatial_merge_size`: typically 2 (from `vision_config.spatial_merge_size`).
+///
+/// # Panics
+/// Panics if `grid_thw.len() == 0` or `spatial_merge_size == 0`.
+pub fn build_position_ids_vl(
+    input_ids: &[i32],
+    grid_thw: &[(i32, i32, i32)],
+    image_token_id: i32,
+    spatial_merge_size: i32,
+) -> crate::Result<Array> {
+    assert!(
+        !grid_thw.is_empty(),
+        "build_position_ids_vl: grid_thw must be non-empty"
+    );
+    assert!(
+        spatial_merge_size > 0,
+        "build_position_ids_vl: spatial_merge_size must be > 0"
+    );
+
+    // We build every block entirely in Rust (Vec<i32>) and assemble a single
+    // Array at the end. This avoids repeatedly flushing the MLX graph for tiny
+    // integer bookkeeping work.
+    //
+    // `result` accumulates the [3, S] position matrix row-major:
+    //   result[0..S]   → stream 0 (t)
+    //   result[S..2S]  → stream 1 (h)
+    //   result[2S..3S] → stream 2 (w)
+    // We build three parallel Vecs and interleave at the end.
+    let s = input_ids.len();
+    let mut stream_t: Vec<i32> = Vec::with_capacity(s);
+    let mut stream_h: Vec<i32> = Vec::with_capacity(s);
+    let mut stream_w: Vec<i32> = Vec::with_capacity(s);
+
+    let mut st: usize = 0; // current scan position in input_ids
+    let mut st_idx: i32 = 0; // logical position offset (max of last block + 1)
+
+    for (img_idx, &(t, h, w)) in grid_thw.iter().enumerate() {
+        let llm_grid_t = t;
+        let llm_grid_h = h / spatial_merge_size;
+        let llm_grid_w = w / spatial_merge_size;
+
+        // Find the first occurrence of image_token_id at or after `st`.
+        // This is `ed_image` in the Python — the start of the image token span.
+        let ed_image = input_ids[st..]
+            .iter()
+            .position(|&tok| tok == image_token_id)
+            .map(|rel| st + rel)
+            .ok_or_else(|| {
+                anyhow!(
+                    "build_position_ids_vl: no image_token_id found for image {img_idx} \
+                     (st={st}, input_ids len={})",
+                    input_ids.len()
+                )
+            })?;
+
+        // --- Text prefix block [st .. ed_image) ---
+        let text_len = (ed_image - st) as i32;
+        // All three streams hold the same values for text tokens.
+        for k in 0..text_len {
+            stream_t.push(st_idx + k);
+            stream_h.push(st_idx + k);
+            stream_w.push(st_idx + k);
+        }
+
+        // st_idx for the image block = st_idx + text_len (max of text block + 1)
+        let img_st_idx = st_idx + text_len;
+
+        // --- Image block ---
+        // t_index: arange(llm_grid_t) broadcast over (llm_grid_t, llm_grid_h*llm_grid_w), flattened
+        // h_index: arange(llm_grid_h) broadcast over (llm_grid_t, llm_grid_h, llm_grid_w), flattened
+        // w_index: arange(llm_grid_w) broadcast over (llm_grid_t, llm_grid_h, llm_grid_w), flattened
+        let n_img = llm_grid_t * llm_grid_h * llm_grid_w;
+        for ti in 0..llm_grid_t {
+            for hi in 0..llm_grid_h {
+                for wi in 0..llm_grid_w {
+                    stream_t.push(img_st_idx + ti);
+                    stream_h.push(img_st_idx + hi);
+                    stream_w.push(img_st_idx + wi);
+                }
+            }
+        }
+
+        // st_idx for the next iteration = max of this image block + 1.
+        // max of image block = img_st_idx + max(llm_grid_t-1, llm_grid_h-1, llm_grid_w-1)
+        // BUT: st_idx = previous_max + 1, so:
+        let img_block_max = img_st_idx + (llm_grid_t - 1).max(llm_grid_h - 1).max(llm_grid_w - 1);
+        st_idx = img_block_max + 1;
+
+        // Advance input scan past the image token span.
+        st = ed_image + n_img as usize;
+    }
+
+    // --- Trailing text block (after last image) ---
+    if st < input_ids.len() {
+        let trail_len = (input_ids.len() - st) as i32;
+        for k in 0..trail_len {
+            stream_t.push(st_idx + k);
+            stream_h.push(st_idx + k);
+            stream_w.push(st_idx + k);
+        }
+    }
+
+    // Sanity: each stream must have exactly S entries.
+    let total = stream_t.len();
+    assert_eq!(
+        total, s,
+        "build_position_ids_vl: stream length {total} != input_ids length {s}"
+    );
+    assert_eq!(stream_h.len(), s);
+    assert_eq!(stream_w.len(), s);
+
+    // Build [3, S] array and reshape to [3, 1, S].
+    // Layout: [stream_t | stream_h | stream_w] contiguous, shape [3, S].
+    let mut flat: Vec<i32> = Vec::with_capacity(3 * s);
+    flat.extend_from_slice(&stream_t);
+    flat.extend_from_slice(&stream_h);
+    flat.extend_from_slice(&stream_w);
+
+    let arr: Array = (&flat[..], &[3_i32, 1_i32, s as i32][..]).try_into()?;
+    Ok(arr)
+}
+
 impl<'m> GenerationStream<'m> {
     pub fn new(
         model: &'m Qwen35Model,
