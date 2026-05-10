@@ -198,10 +198,20 @@ impl<'m> GenerationStream<'m> {
 
         // Prefill: chunked when `prefill_chunk_size > 0` and the prompt exceeds
         // it. Intermediate chunks call the text-only forward (cache update,
-        // no lm_head); the last chunk goes through the full forward to produce
-        // the [1, 1, vocab] last-position logits. Each intermediate chunk
-        // closes with `async_eval(hidden)` to flush its lazy graph so the GPU
-        // can start work while the next chunk is being assembled on the CPU.
+        // no lm_head); the last chunk goes through the full forward to
+        // produce the [1, 1, vocab] last-position logits.
+        //
+        // Each intermediate chunk closes with `eval(hidden)` — a synchronous
+        // wait. The original design used `async_eval` to overlap chunk N's
+        // CPU graph build with chunk N-1's GPU work, but that's a trap with
+        // KV cache: chunk N+1's graph reads the KV buffers that chunk N just
+        // wrote, so its DFS pulls in the still-unscheduled prior writes,
+        // ballooning the recorded tape with every chunk. Submission overhead
+        // grows quadratically — at chunk_size=512, PP=2048 took 260 s on M1
+        // Pro vs 7.3 s for the synchronous variant (35× regression). The
+        // sync wait is essentially free here because the next chunk's
+        // `forward_on` has nothing to do until the previous chunk's writes
+        // land in the cache anyway.
         let chunk_size = request.prefill_chunk_size;
         let prompt_len_i32 = prompt_len as i32;
         let mut pos: i32 = 0;
@@ -226,7 +236,7 @@ impl<'m> GenerationStream<'m> {
                 model
                     .text()
                     .forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?;
-            mlx::transforms::async_eval(&[&hidden])?;
+            mlx::transforms::eval(&[&hidden])?;
             pos += n;
         };
 
