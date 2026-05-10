@@ -18,12 +18,14 @@ pub struct Tile {
     pub bk: i32,
 }
 
-/// Default fallback tile — used when device/shape doesn't match any
-/// hardcoded entry. Conservative: small enough to fit any threadgroup
-/// memory budget, broad enough to function on every Apple Silicon GPU
-/// supported by MLX.
+/// Default fallback tile — must equal the dimensions hardcoded in the
+/// metal kernel. Stage 9 fix kernel mirrors llama.cpp's Q4_K_M layout
+/// (NR1=32 batch, NR0=64 weight, NK=32) so the tile is fixed at
+/// (BM=32, BN=64, BK=32) for every device. The lookup arity is preserved
+/// so post-stage-9 work can swap in device-specific kernels without an
+/// API break, but right now it always returns the same value.
 const DEFAULT_TILE: Tile = Tile {
-    bm: 64,
+    bm: 32,
     bn: 64,
     bk: 32,
 };
@@ -53,20 +55,17 @@ pub fn lookup_tile(
 ) -> Tile {
     static WARNED: OnceLock<()> = OnceLock::new();
     match device_arch {
-        // M1 Pro / M1 Pro Max GPU. Tile = (64, 128, 32) — sweep-derived
-        // (P8a stage 9 task 7). Across Qwen3.5 FFN up_proj /
-        // attn q_proj / FFN down_proj at M=2048, this tile gives the
-        // highest avg self_qmm GFLOP/s among (64,64,32) / (64,128,32)
-        // / (128,128,32) candidates. The kernel itself remains
-        // ~4× slower than mlx::quantized_matmul_on baseline on M1
-        // Pro; closing that gap is stage 10+ work (simdgroup MMA,
-        // larger tile candidates, dequant+matmul fusion tuning).
+        // M1 Pro / M1 Pro Max GPU. Tile = (32, 64, 32) — equals
+        // llama.cpp's `kernel_mul_mm_q4_K_f32` (NR1=32, NR0=64, NK=32),
+        // remapped to ironmlx's naming (BM=batch rows = NR1,
+        // BN=weight rows = NR0). Same tile applies to every Apple Silicon
+        // GPU because the kernel itself hardcodes the dimensions.
         //
         // Note: mlx returns "applegpu_g13s" / "applegpu_g13d", not
         // "apple_g13s" / "apple_g13d" — the prefix is "applegpu_".
         "applegpu_g13s" | "applegpu_g13d" => Tile {
-            bm: 64,
-            bn: 128,
+            bm: 32,
+            bn: 64,
             bk: 32,
         },
 
@@ -92,20 +91,20 @@ mod tests {
     #[test]
     fn lookup_m1_pro_returns_specific_tile() {
         let t = lookup_tile("applegpu_g13s", 2048, 9216, 2560, 4, 64);
-        assert_eq!(t.bm, 64);
-        assert_eq!(t.bn, 128);
+        assert_eq!(t.bm, 32);
+        assert_eq!(t.bn, 64);
         assert_eq!(t.bk, 32);
 
         let t = lookup_tile("applegpu_g13d", 2048, 9216, 2560, 4, 64);
-        assert_eq!(t.bm, 64);
-        assert_eq!(t.bn, 128);
+        assert_eq!(t.bm, 32);
+        assert_eq!(t.bn, 64);
         assert_eq!(t.bk, 32);
     }
 
     #[test]
     fn lookup_unknown_device_returns_default() {
         let t = lookup_tile("future_chip_xyz", 2048, 9216, 2560, 4, 64);
-        assert_eq!(t.bm, 64);
+        assert_eq!(t.bm, 32);
         assert_eq!(t.bn, 64);
         assert_eq!(t.bk, 32);
     }

@@ -169,17 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn self_qmm_t_tile_64_64_32() {
-        run_variant(64, 64, 32);
-    }
-
-    #[test]
-    fn self_qmm_t_tile_64_128_32() {
-        run_variant(64, 128, 32);
-    }
-
-    #[test]
-    fn self_qmm_t_tile_128_128_32() {
-        run_variant(128, 128, 32);
+    fn self_qmm_t_tile_32_64_32() {
+        run_variant(32, 64, 32);
     }
 }

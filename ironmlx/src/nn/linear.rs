@@ -192,12 +192,30 @@ impl Linear {
                 group_size,
                 bits,
             } => {
-                let mut y = if crate::nn::self_qmm::enabled() {
-                    // Stage 9 opt-in path: self-quant kernel.
-                    // qmm_t_on requires affine biases (per-group zero-points);
-                    // Qwen3.5 mlx-community 4-bit checkpoints always carry them.
-                    // Panic explicitly if missing — silent fallback would hide
-                    // a checkpoint mismatch that the caller needs to know about.
+                // M-aware dispatch: route through self_qmm only when the
+                // batch×seq dim is large enough that the simdgroup-MMA tile
+                // pays for itself. Below the threshold most threads are idle
+                // (M=1 decode would burn the SG-MMA path at <1 tok/s), so
+                // fall back to mlx's compute-light qmv. Threshold = 32 covers
+                // the M=1 / small-prefill cases cleanly while keeping the
+                // PP=128/512/2048 prefill on the hardware-MMA path.
+                let m_total: i32 = {
+                    let dims = x.shape();
+                    let s = dims.as_slice();
+                    if s.is_empty() {
+                        0
+                    } else {
+                        s[..s.len() - 1].iter().product()
+                    }
+                };
+                let use_self_qmm = crate::nn::self_qmm::enabled() && m_total >= 32;
+                let mut y = if use_self_qmm {
+                    // Stage 9 self-quant kernel path. qmm_t_on requires
+                    // affine biases (per-group zero-points); Qwen3.5
+                    // mlx-community 4-bit checkpoints always carry them.
+                    // Panic explicitly if missing — silent fallback would
+                    // hide a checkpoint mismatch that the caller needs to
+                    // know about.
                     let qbiases = biases.as_ref().expect(
                         "self_qmm requires affine biases (per-group zero-points); \
                          checkpoint has none — IRONMLX_USE_SELF_QMM=1 only supports \

@@ -32,37 +32,30 @@ fn cached_kernel() -> Result<&'static MetalKernel> {
     Ok(CELL.get_or_init(|| k))
 }
 
-/// Validate tile parameters against kernel invariants. Centralized so the
-/// dispatch path stays clean.
+/// Stage 9 fix kernel: ports llama.cpp's `kernel_mul_mm_q4_K_f32` structure
+/// (NR1=32 batch rows, NR0=64 weight rows, NK=32 inner K). The 8×8 block
+/// shmem layout, register-tile dequant staging, vec8 activation load, and
+/// SG-MMA pattern (4 SGs in 2×2, mc[8] = 2 batch-frag × 4 wcol-frag) all
+/// hardcode these dimensions — passing a different tile would write past
+/// the 2048-half `sa` / 1024-half `sb` shmem buffers and produce wrong
+/// SG-MMA addressing.
+const KERNEL_BM: i32 = 32; // batch rows per TG (= llama.cpp NR1)
+const KERNEL_BN: i32 = 64; // weight rows per TG (= llama.cpp NR0)
+const KERNEL_BK: i32 = 32; // inner-K block (= llama.cpp NK)
+const KERNEL_THREADS_PER_TG: i32 = 128; // 4 SGs × 32 lanes
+
 fn validate_tile(bm: i32, bn: i32, bk: i32) {
-    assert!(
-        bm > 0 && bn > 0 && bk > 0,
-        "self_qmm: tile dims must be positive (BM={bm} BN={bn} BK={bk})"
+    assert_eq!(
+        bm, KERNEL_BM,
+        "self_qmm stage 9 fix: kernel hardcodes BM={KERNEL_BM} (got {bm})"
     );
     assert_eq!(
-        (bm * bn) % 16,
-        0,
-        "self_qmm: BM*BN must be divisible by 16 (4x4 micro-tile per thread); got BM={bm} BN={bn}"
-    );
-    let threads_per_tg = (bm * bn) / 16;
-    assert!(
-        threads_per_tg <= 1024,
-        "self_qmm: threads/TG = {threads_per_tg} exceeds Metal 1024 limit (BM={bm} BN={bn})"
+        bn, KERNEL_BN,
+        "self_qmm stage 9 fix: kernel hardcodes BN={KERNEL_BN} (got {bn})"
     );
     assert_eq!(
-        (bm * bk) % threads_per_tg,
-        0,
-        "self_qmm: (BM*BK) % threads_per_tg != 0 (BM={bm} BK={bk} threads/TG={threads_per_tg})"
-    );
-    assert_eq!(
-        (bn * bk) % threads_per_tg,
-        0,
-        "self_qmm: (BN*BK) % threads_per_tg != 0 (BN={bn} BK={bk} threads/TG={threads_per_tg})"
-    );
-    assert_eq!(
-        bn % 4,
-        0,
-        "self_qmm: BN must be divisible by 4 (col_in_tile stride); got BN={bn}"
+        bk, KERNEL_BK,
+        "self_qmm stage 9 fix: kernel hardcodes BK={KERNEL_BK} (got {bk})"
     );
 }
 
@@ -110,9 +103,9 @@ pub fn dispatch_qmm_t(
     // MLX `metal_kernel` uses `dispatch_threads` semantics: `grid` is the
     // *total thread count* (not a threadgroup count). The threadgroup size
     // is then clamped to grid per axis. To get `n_tiles_x` x `n_tiles_y`
-    // threadgroups of `threads_per_tg` threads each, set the x dim of grid
-    // to `n_tiles_x * threads_per_tg` and the y dim to `n_tiles_y`.
-    let threads_per_tg = (bm * bn) / 16;
+    // threadgroups of `KERNEL_THREADS_PER_TG` threads each, set the x dim
+    // of grid to `n_tiles_x * threads_per_tg` and the y dim to `n_tiles_y`.
+    let threads_per_tg = KERNEL_THREADS_PER_TG;
     let n_tiles_x = (n + bn - 1) / bn;
     let n_tiles_y = (m + bm - 1) / bm;
     let grid_x = n_tiles_x * threads_per_tg;
