@@ -48,6 +48,13 @@ impl VitMLP {
     /// `fc1_b` shape: `[ffn_dim]`.
     /// `fc2_w` shape: `[d_model, ffn_dim]`, e.g. `[1024, 4096]`.
     /// `fc2_b` shape: `[d_model]`.
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(&self.fc1_w);
+        out.push(&self.fc1_b);
+        out.push(&self.fc2_w);
+        out.push(&self.fc2_b);
+    }
+
     pub fn new(fc1_w: Array, fc1_b: Array, fc2_w: Array, fc2_b: Array) -> Self {
         Self {
             fc1_w,
@@ -186,6 +193,13 @@ impl VitAttention {
     ///
     /// `qkv_w` shape: `[3*dim, dim]`, `qkv_b`: `[3*dim]`.
     /// `proj_w` shape: `[dim, dim]`, `proj_b`: `[dim]`.
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(&self.qkv_w);
+        out.push(&self.qkv_b);
+        out.push(&self.proj_w);
+        out.push(&self.proj_b);
+    }
+
     pub fn new(
         qkv_w: Array,
         qkv_b: Array,
@@ -328,6 +342,19 @@ impl VitBlock {
             norm2,
             mlp,
         }
+    }
+
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(self.norm1.weight());
+        if let Some(b) = self.norm1.bias() {
+            out.push(b);
+        }
+        self.attn.collect_weights(out);
+        out.push(self.norm2.weight());
+        if let Some(b) = self.norm2.bias() {
+            out.push(b);
+        }
+        self.mlp.collect_weights(out);
     }
 
     /// Load from a safetensors checkpoint via `loader`.

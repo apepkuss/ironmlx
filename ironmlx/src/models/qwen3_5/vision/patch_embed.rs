@@ -28,6 +28,11 @@ impl PatchEmbed {
         self.forward_on(x, ())
     }
 
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(&self.weight_2d);
+        out.push(&self.bias);
+    }
+
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
         // x: [N, T=2, C=3, H=16, W=16]  →  [N, T, H, W, C]

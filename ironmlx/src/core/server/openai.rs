@@ -203,7 +203,13 @@ pub async fn expand_image_parts_in_messages(
         None
     } else {
         let refs: Vec<&Array> = all_pixel_values.iter().collect();
-        Some(concatenate(&refs, 0)?)
+        let concat = concatenate(&refs, 0)?;
+        // Eagerly materialize on this (async tokio worker) thread before the
+        // tensor crosses into spawn_blocking, where a different worker thread's
+        // default MLX stream would not be able to evaluate this thread's lazy
+        // graph (errors with "There is no Stream(gpu, N) in current thread").
+        mlx::transforms::eval(&[&concat])?;
+        Some(concat)
     };
 
     Ok((flat_messages, pixel_values, grid_thw))

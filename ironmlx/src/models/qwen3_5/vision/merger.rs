@@ -52,6 +52,17 @@ pub struct PatchMerger {
 }
 
 impl PatchMerger {
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(self.norm.weight());
+        if let Some(b) = self.norm.bias() {
+            out.push(b);
+        }
+        out.push(&self.fc1_w);
+        out.push(&self.fc1_b);
+        out.push(&self.fc2_w);
+        out.push(&self.fc2_b);
+    }
+
     /// Construct from pre-loaded weight Arrays.
     ///
     /// - `norm_w` / `norm_b`: shape `[hidden_size]`, e.g. `[1024]`.

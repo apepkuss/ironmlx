@@ -76,6 +76,16 @@ impl LayerNorm {
         Self { weight, bias, eps }
     }
 
+    /// Borrow the weight tensor (for eager-eval bookkeeping).
+    pub fn weight(&self) -> &Array {
+        &self.weight
+    }
+
+    /// Borrow the optional bias tensor.
+    pub fn bias(&self) -> Option<&Array> {
+        self.bias.as_ref()
+    }
+
     /// Build a `LayerNorm` from `loader`, looking for `{prefix}.weight`
     /// (required) and `{prefix}.bias` (optional).
     pub fn from_loader(loader: &Loader, prefix: &str, eps: f32) -> Result<Self> {

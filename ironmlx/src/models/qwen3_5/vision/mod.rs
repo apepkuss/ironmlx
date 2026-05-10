@@ -63,7 +63,7 @@ impl VisionTower {
         let merger =
             PatchMerger::from_loader(loader, "vision_tower.merger", cfg.spatial_merge_size)?;
         let num_grid_per_side = (cfg.num_position_embeddings as f64).sqrt() as i32;
-        Ok(Self {
+        let tower = Self {
             patch_embed,
             pos_embed,
             rotary_dim: head_dim / 2,
@@ -73,7 +73,26 @@ impl VisionTower {
             hidden_size: cfg.hidden_size,
             num_grid_per_side,
             spatial_merge_size: cfg.spatial_merge_size,
-        })
+        };
+        // Eagerly evaluate every weight tensor held by the tower on the loading
+        // thread. Constructors like `PatchEmbed::new` introduce lazy reshape ops
+        // tagged with this thread's default MLX stream; if a later inference
+        // call runs on a different thread (e.g. tokio blocking-pool), MLX errors
+        // with "There is no Stream(gpu, N) in current thread." This mirrors the
+        // pattern in `Loader::open_impl` for the raw weight map.
+        tower.eval_weights()?;
+        Ok(tower)
+    }
+
+    fn eval_weights(&self) -> Result<()> {
+        let mut refs: Vec<&Array> = vec![&self.pos_embed];
+        self.patch_embed.collect_weights(&mut refs);
+        for blk in &self.blocks {
+            blk.collect_weights(&mut refs);
+        }
+        self.merger.collect_weights(&mut refs);
+        mlx::transforms::eval(&refs).map_err(|e| anyhow::anyhow!("VisionTower eval: {e}"))?;
+        Ok(())
     }
 
     /// Returns the number of ViT blocks in the tower (e.g. 24 for Qwen3.5-VL).
