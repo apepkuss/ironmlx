@@ -103,6 +103,53 @@ impl Qwen35TextModel {
         self.layers.len()
     }
 
+    /// Embed token ids to hidden states `[B, S, hidden_size]`.
+    ///
+    /// Thin wrapper around `embed_tokens.forward_on` exposed for the VL path so
+    /// that `Qwen35Model::forward_vl` can embed first, inject vision embeddings,
+    /// then continue through the transformer layers.
+    pub fn embed_on(&self, input_ids: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
+        self.embed_tokens.forward_on(input_ids, target)
+    }
+
+    /// Transformer + final-norm forward on a pre-embedded hidden state `[B, S, hidden_size]`.
+    ///
+    /// Runs `cos/sin → N×DecoderLayer → RmsNorm`, returns post-norm hidden states.
+    /// The caller is responsible for validating `hidden` shape and cache length.
+    pub fn forward_post_embedding_on(
+        &self,
+        hidden: &Array,
+        position_ids: &Array,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        if let Some(c) = cache.as_deref() {
+            if c.len() != self.layers.len() {
+                return Err(anyhow!(
+                    "Qwen35TextModel::forward_post_embedding_on: cache.len()={} != num_layers={}",
+                    c.len(),
+                    self.layers.len()
+                ));
+            }
+        }
+        let (cos, sin) = self.mrope.cos_sin(position_ids)?;
+        let mut x = hidden.clone();
+        match cache {
+            Some(c) => {
+                for (layer, cell) in self.layers.iter().zip(c.iter_mut()) {
+                    x = layer.forward_on(&x, &self.mrope, &cos, &sin, None, Some(cell), target)?;
+                }
+            }
+            None => {
+                for layer in &self.layers {
+                    x = layer.forward_on(&x, &self.mrope, &cos, &sin, None, None, target)?;
+                }
+            }
+        }
+        self.norm.forward_on(&x, target)
+    }
+
     /// Forward through embed → 32 × DecoderLayer → final RmsNorm.
     ///
     /// `input_ids: [B, S] uint32` — token ids.
@@ -133,23 +180,8 @@ impl Qwen35TextModel {
                 ));
             }
         }
-
-        let mut x = self.embed_tokens.forward_on(input_ids, target)?;
-        let (cos, sin) = self.mrope.cos_sin(position_ids)?;
-
-        match cache {
-            Some(c) => {
-                for (layer, cell) in self.layers.iter().zip(c.iter_mut()) {
-                    x = layer.forward_on(&x, &self.mrope, &cos, &sin, None, Some(cell), target)?;
-                }
-            }
-            None => {
-                for layer in &self.layers {
-                    x = layer.forward_on(&x, &self.mrope, &cos, &sin, None, None, target)?;
-                }
-            }
-        }
-        self.norm.forward_on(&x, target)
+        let hidden = self.embed_on(input_ids, target)?;
+        self.forward_post_embedding_on(&hidden, position_ids, cache, target)
     }
 
     /// Project hidden state to vocab logits via the (tied) `embed_tokens` matrix.
