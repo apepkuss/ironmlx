@@ -6,6 +6,7 @@ use mlx::fast::scaled_dot_product_attention;
 use mlx::{ops, Array, StreamOrDevice};
 
 use crate::core::Loader;
+use crate::nn::LayerNorm;
 
 // sqrt(2/π) = 0.7978845608028654  (tanh GELU approximation constant)
 const SQRT_2_OVER_PI: f32 = 0.797_884_6;
@@ -293,6 +294,76 @@ impl VitAttention {
     }
 }
 
+// ---------------------------------------------------------------------------
+// VitBlock
+// ---------------------------------------------------------------------------
+
+/// One pre-norm transformer block inside the ViT.
+///
+/// Implements the standard residual pattern:
+/// ```text
+/// h = x + attn(norm1(x), rotary, cu_seqlens)
+/// y = h + mlp(norm2(h))
+/// ```
+/// Both `norm1` and `norm2` are `LayerNorm` with eps = 1e-6 (Qwen3.5 config).
+pub struct VitBlock {
+    norm1: LayerNorm,
+    attn: VitAttention,
+    norm2: LayerNorm,
+    mlp: VitMLP,
+}
+
+impl VitBlock {
+    /// Construct from pre-built sub-modules.
+    pub fn new(norm1: LayerNorm, attn: VitAttention, norm2: LayerNorm, mlp: VitMLP) -> Self {
+        Self {
+            norm1,
+            attn,
+            norm2,
+            mlp,
+        }
+    }
+
+    /// Load from a safetensors checkpoint via `loader`.
+    ///
+    /// Expected tensor names (under `prefix`):
+    /// - `{prefix}.norm1.weight` / `.bias`
+    /// - `{prefix}.attn.qkv.weight` / `.bias`
+    /// - `{prefix}.attn.proj.weight` / `.bias`
+    /// - `{prefix}.norm2.weight` / `.bias`
+    /// - `{prefix}.mlp.linear_fc1.weight` / `.bias`
+    /// - `{prefix}.mlp.linear_fc2.weight` / `.bias`
+    pub fn from_loader(
+        loader: &Loader,
+        prefix: &str,
+        num_heads: i32,
+        head_dim: i32,
+    ) -> Result<Self> {
+        let norm1 = LayerNorm::from_loader(loader, &format!("{prefix}.norm1"), 1e-6)?;
+        let attn =
+            VitAttention::from_loader(loader, &format!("{prefix}.attn"), num_heads, head_dim)?;
+        let norm2 = LayerNorm::from_loader(loader, &format!("{prefix}.norm2"), 1e-6)?;
+        let mlp = VitMLP::from_loader(loader, &format!("{prefix}.mlp"))?;
+        Ok(Self::new(norm1, attn, norm2, mlp))
+    }
+
+    /// Forward pass on the default stream.
+    ///
+    /// `rotary_pos_emb`: `[seq, head_dim/2]` float32 frequency table.
+    /// `cu_seqlens`: cumulative sequence lengths, e.g. `[0, seq]` for a single image.
+    pub fn forward(&self, x: &Array, rotary_pos_emb: &Array, cu_seqlens: &[i32]) -> Result<Array> {
+        // h = x + attn(norm1(x))
+        let normed1 = self.norm1.forward(x)?;
+        let attn_out = self.attn.forward(&normed1, rotary_pos_emb, cu_seqlens)?;
+        let h = x + &attn_out;
+
+        // y = h + mlp(norm2(h))
+        let normed2 = self.norm2.forward(&h)?;
+        let mlp_out = self.mlp.forward(&normed2)?;
+        Ok(&h + &mlp_out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +400,59 @@ mod tests {
         let out = gelu_tanh(&x, ().into()).unwrap();
         let v = out.item::<f32>().unwrap();
         assert!((v - 10.0_f32).abs() < 0.1, "gelu_tanh(10) ≈ 10, got {v}");
+    }
+
+    /// Helper: compute max absolute difference between two Arrays (both cast to f32).
+    fn max_abs_diff(a: &Array, b: &Array) -> f32 {
+        let a32 = ops::astype(a, mlx::Dtype::Float32).expect("astype a");
+        let b32 = ops::astype(b, mlx::Dtype::Float32).expect("astype b");
+        let av: Vec<f32> = a32.to_vec().expect("a to_vec");
+        let bv: Vec<f32> = b32.to_vec().expect("b to_vec");
+        av.iter()
+            .zip(bv.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// VitBlock with all-zero attn/mlp weights must pass residuals through unchanged.
+    ///
+    /// Zero-weight attn proj → attn output = zeros → h = x + 0 = x.
+    /// Zero-weight mlp fc1 → mlp output = zeros (post-GELU also zero) → y = h + 0 = x.
+    #[test]
+    fn vit_block_residual_connections() {
+        let n1_w = ops::constructors::ones((1024_i32,), Dtype::Bfloat16).unwrap();
+        let n1_b = Array::zeros(&[1024], Dtype::Bfloat16).unwrap();
+        let norm1 = LayerNorm::new(n1_w, Some(n1_b), 1e-6);
+        let norm2 = LayerNorm::new(
+            ops::constructors::ones((1024_i32,), Dtype::Bfloat16).unwrap(),
+            Some(Array::zeros(&[1024], Dtype::Bfloat16).unwrap()),
+            1e-6,
+        );
+
+        let attn = VitAttention::new(
+            Array::zeros(&[3072, 1024], Dtype::Bfloat16).unwrap(),
+            Array::zeros(&[3072], Dtype::Bfloat16).unwrap(),
+            Array::zeros(&[1024, 1024], Dtype::Bfloat16).unwrap(),
+            Array::zeros(&[1024], Dtype::Bfloat16).unwrap(),
+            16,
+            64,
+        );
+        let mlp = VitMLP::new(
+            Array::zeros(&[4096, 1024], Dtype::Bfloat16).unwrap(),
+            Array::zeros(&[4096], Dtype::Bfloat16).unwrap(),
+            Array::zeros(&[1024, 4096], Dtype::Bfloat16).unwrap(),
+            Array::zeros(&[1024], Dtype::Bfloat16).unwrap(),
+        );
+        let block = VitBlock::new(norm1, attn, norm2, mlp);
+
+        let x = ops::constructors::ones((8_i32, 1024_i32), Dtype::Bfloat16).unwrap();
+        let rotary = Array::zeros(&[8, 32], Dtype::Float32).unwrap();
+        let cu = vec![0_i32, 8];
+        let out = block.forward(&x, &rotary, &cu).unwrap();
+        // zero-weight attn + mlp ⇒ residual passes through ⇒ out == x
+        let diff = max_abs_diff(&out, &x);
+        println!("vit_block_residual max_diff = {diff:.6}");
+        assert!(diff < 1e-3, "residual pass-through failed: max_diff={diff}");
     }
 
     /// Verify VitAttention forward matches mlx-vlm reference to within bf16 tolerance.
