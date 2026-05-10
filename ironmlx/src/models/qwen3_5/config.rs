@@ -27,6 +27,23 @@ fn default_rope_theta() -> f32 {
     100_000.0
 }
 
+/// Vision encoder config from Qwen3.5 `config["vision_config"]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VisionConfig {
+    pub depth: i32,
+    pub hidden_size: i32,
+    pub num_heads: i32,
+    pub intermediate_size: i32,
+    pub out_hidden_size: i32,
+    pub patch_size: i32,
+    pub spatial_merge_size: i32,
+    pub temporal_patch_size: i32,
+    pub in_channels: i32,
+    pub num_position_embeddings: i32,
+    #[serde(default)]
+    pub deepstack_visual_indexes: Vec<i32>,
+}
+
 /// Subset of `config.json["text_config"]` that drives Qwen3.5 inference.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Qwen35Config {
@@ -58,6 +75,9 @@ pub struct Qwen35Config {
     pub linear_conv_kernel_dim: i32,
     #[serde(default)]
     pub rope_parameters: RopeParams,
+    /// Present in multimodal variants (VL models); `None` for text-only.
+    #[serde(default)]
+    pub vision_config: Option<VisionConfig>,
 }
 
 impl Default for RopeParams {
@@ -72,13 +92,21 @@ impl Default for RopeParams {
 
 impl Qwen35Config {
     /// Parse from a [`Loader`]'s `config.json`. Reads `config["text_config"]`.
+    /// For multimodal models, also reads top-level `config["vision_config"]`.
     pub fn from_loader(loader: &Loader) -> Result<Self> {
         let raw = loader.config_raw_value();
         let text_config = raw
             .get("text_config")
             .ok_or_else(|| anyhow!("config.json missing text_config field"))?;
-        let cfg: Qwen35Config = serde_json::from_value(text_config.clone())
+        let mut cfg: Qwen35Config = serde_json::from_value(text_config.clone())
             .context("failed to deserialize Qwen35Config from text_config")?;
+        // 顶层也可能有 vision_config（multimodal model）
+        if let Some(vc) = raw.get("vision_config") {
+            cfg.vision_config = Some(
+                serde_json::from_value(vc.clone())
+                    .context("failed to deserialize VisionConfig")?,
+            );
+        }
         Ok(cfg)
     }
 
@@ -160,6 +188,32 @@ mod tests {
         let cfg: Qwen35Config = serde_json::from_value(realistic_text_config_json()).unwrap();
         // explicit head_dim=256 wins over hidden/heads = 128
         assert_eq!(cfg.effective_head_dim(), 256);
+    }
+
+    #[test]
+    fn vision_config_parsed_from_qwen35_4b() {
+        use crate::core::Loader;
+        let env = std::env::var("QWEN35_MODEL");
+        let dir = match env {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skip: QWEN35_MODEL not set");
+                return;
+            }
+        };
+        let loader = Loader::open(std::path::Path::new(&dir)).expect("load");
+        let cfg = Qwen35Config::from_loader(&loader).expect("parse");
+        let vc = cfg.vision_config.as_ref().expect("vision_config present");
+        assert_eq!(vc.depth, 24);
+        assert_eq!(vc.hidden_size, 1024);
+        assert_eq!(vc.num_heads, 16);
+        assert_eq!(vc.intermediate_size, 4096);
+        assert_eq!(vc.out_hidden_size, 2560);
+        assert_eq!(vc.patch_size, 16);
+        assert_eq!(vc.spatial_merge_size, 2);
+        assert_eq!(vc.temporal_patch_size, 2);
+        assert_eq!(vc.in_channels, 3);
+        assert_eq!(vc.num_position_embeddings, 2304);
     }
 
     #[test]
