@@ -72,7 +72,21 @@ impl Loader {
     /// Open a directory containing `config.json`, `tokenizer_config.json`,
     /// and `model.safetensors` (single-file) or `model.safetensors.index.json`
     /// (sharded). All weights are mmap-loaded eagerly.
+    ///
+    /// `vision_tower.*` keys are **dropped** during sanitize — use
+    /// [`Loader::open_multimodal`] when the vision encoder weights are needed.
     pub fn open(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(model_dir, false)
+    }
+
+    /// Like [`Loader::open`] but retains `vision_tower.*` keys so that the
+    /// VisionTower can load its weights from the same Loader instance.
+    /// Used for multimodal (VL) inference paths.
+    pub fn open_multimodal(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(model_dir, true)
+    }
+
+    fn open_impl(model_dir: &Path, keep_vision_tower: bool) -> Result<Self> {
         let config_path = model_dir.join("config.json");
         let config_raw: serde_json::Value = serde_json::from_reader(
             std::fs::File::open(&config_path)
@@ -108,7 +122,7 @@ impl Loader {
 
         let mut tensors = load_safetensors(model_dir)?;
 
-        Self::sanitize(&mut tensors, &config_raw)?;
+        Self::sanitize(&mut tensors, &config_raw, keep_vision_tower)?;
 
         // Eagerly evaluate all tensors on the loading thread so that no lazy
         // stream-tagged computation remains in the weight arrays.  This
@@ -179,7 +193,8 @@ impl Loader {
     /// `TextModel::sanitize`.
     ///
     /// Mutates `weights` in place:
-    /// 0. Drop `vision_tower.*` keys (vision encoder not used for LLM-only inference).
+    /// 0. Drop `vision_tower.*` keys when `keep_vision_tower` is false (LLM-only
+    ///    inference). Pass `true` via [`Loader::open_multimodal`] to retain them.
     ///    Strip `language_model.` prefix from all remaining keys so that downstream
     ///    code can use plain `model.*` paths (e.g. `model.embed_tokens.weight`).
     /// 1. Strips `mtp.*` keys (the dedicated MTP head — see P8c).
@@ -192,10 +207,14 @@ impl Loader {
     fn sanitize(
         weights: &mut HashMap<String, Array>,
         config_raw: &serde_json::Value,
+        keep_vision_tower: bool,
     ) -> Result<()> {
-        // 0. Drop vision_tower.* keys unconditionally (vision encoder not needed
-        //    for LLM-only inference regardless of checkpoint layout).
-        weights.retain(|k, _| !k.starts_with("vision_tower."));
+        // 0. Drop vision_tower.* keys unless caller explicitly requests them.
+        //    LLM-only inference (Loader::open) drops them; multimodal inference
+        //    (Loader::open_multimodal) retains them for VisionTower.
+        if !keep_vision_tower {
+            weights.retain(|k, _| !k.starts_with("vision_tower."));
+        }
 
         // Strip language_model. prefix when present so downstream code can use
         // plain model.* paths.  This matches the multimodal Qwen3.5 checkpoint
@@ -440,7 +459,7 @@ mod tests {
             norm_arr.clone(),
         );
 
-        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+        Loader::sanitize(&mut w, &empty_text_config(), false).unwrap();
 
         // mtp.* is gone.
         assert!(!w.contains_key("mtp.layers.0.input_layernorm.weight"));
@@ -460,7 +479,7 @@ mod tests {
         let arr: Array = (data.as_slice(), &[2_i32, 3, 4][..]).try_into().unwrap();
         w.insert("model.layers.0.linear_attn.conv1d.weight".into(), arr);
 
-        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+        Loader::sanitize(&mut w, &empty_text_config(), false).unwrap();
 
         let after = w.get("model.layers.0.linear_attn.conv1d.weight").unwrap();
         assert_eq!(after.shape().as_slice(), &[2, 4, 3]);
@@ -474,7 +493,7 @@ mod tests {
         w.insert("lm_head.scales".into(), h.clone());
         w.insert("model.embed_tokens.weight".into(), h);
 
-        Loader::sanitize(&mut w, &tied_text_config()).unwrap();
+        Loader::sanitize(&mut w, &tied_text_config(), false).unwrap();
 
         assert!(!w.contains_key("lm_head.weight"));
         assert!(!w.contains_key("lm_head.scales"));
@@ -491,7 +510,7 @@ mod tests {
         let norm: Array = (&[0.5_f32; 4][..], (4_i32,)).try_into().unwrap();
         w.insert("model.norm.weight".into(), norm);
 
-        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+        Loader::sanitize(&mut w, &empty_text_config(), false).unwrap();
 
         let n = w.get("model.norm.weight").unwrap();
         let v: Vec<f32> = n.to_vec().unwrap();
@@ -504,13 +523,13 @@ mod tests {
     fn sanitize_drops_vision_tower_keys() {
         let mut w: HashMap<String, Array> = HashMap::new();
         let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
-        // vision_tower.* should be dropped.
+        // vision_tower.* should be dropped when keep_vision_tower=false.
         w.insert("vision_tower.encoder.layers.0.weight".into(), arr.clone());
         w.insert("vision_tower.patch_embed.proj.weight".into(), arr.clone());
         // plain model.* key should be preserved.
         w.insert("model.embed_tokens.weight".into(), arr.clone());
 
-        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+        Loader::sanitize(&mut w, &empty_text_config(), false).unwrap();
 
         assert!(
             !w.contains_key("vision_tower.encoder.layers.0.weight"),
@@ -519,6 +538,26 @@ mod tests {
         assert!(
             !w.contains_key("vision_tower.patch_embed.proj.weight"),
             "vision_tower key must be dropped"
+        );
+        assert!(
+            w.contains_key("model.embed_tokens.weight"),
+            "plain model.* key must be preserved"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_vision_tower_keys_when_requested() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+        // vision_tower.* must be retained when keep_vision_tower=true.
+        w.insert("vision_tower.patch_embed.proj.weight".into(), arr.clone());
+        w.insert("model.embed_tokens.weight".into(), arr.clone());
+
+        Loader::sanitize(&mut w, &empty_text_config(), true).unwrap();
+
+        assert!(
+            w.contains_key("vision_tower.patch_embed.proj.weight"),
+            "vision_tower key must be kept when keep_vision_tower=true"
         );
         assert!(
             w.contains_key("model.embed_tokens.weight"),
@@ -542,7 +581,7 @@ mod tests {
         // vision_tower mixed in should also be dropped.
         w.insert("vision_tower.foo.weight".into(), arr.clone());
 
-        Loader::sanitize(&mut w, &empty_text_config()).unwrap();
+        Loader::sanitize(&mut w, &empty_text_config(), false).unwrap();
 
         // prefix-stripped keys must exist.
         assert!(
