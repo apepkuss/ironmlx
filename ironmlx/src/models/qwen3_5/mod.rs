@@ -8,6 +8,10 @@ mod config;
 mod model;
 mod text_model;
 
+pub mod cross_modal;
+pub mod image_processor;
+pub mod vision;
+
 pub use config::{Qwen35Config, RopeParams};
 pub use model::Qwen35Model;
 pub use text_model::Qwen35TextModel;
