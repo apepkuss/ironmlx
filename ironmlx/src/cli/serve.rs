@@ -23,6 +23,13 @@ pub struct ServeArgs {
     /// Bind host.
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
+
+    /// Prefill chunk size — max tokens per prefill forward call. `0`
+    /// disables chunking (single-shot forward over the whole prompt).
+    /// Intermediate chunks update the cache only; the last chunk runs
+    /// the full forward + lm_head.
+    #[arg(long, default_value_t = 2048)]
+    pub prefill_chunk_size: usize,
 }
 
 pub fn run(args: ServeArgs) -> Result<()> {
@@ -44,6 +51,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
         .build()
         .context("tokio::Runtime::new")?;
     runtime.block_on(server::serve(
-        model, tokenizer, model_id, &args.host, args.port,
+        model,
+        tokenizer,
+        model_id,
+        &args.host,
+        args.port,
+        args.prefill_chunk_size,
     ))
 }

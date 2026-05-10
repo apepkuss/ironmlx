@@ -99,6 +99,42 @@ impl Linear {
         }
     }
 
+    /// Compose a quantized [`Linear`] from already-loaded Arrays. Used by
+    /// callers that fuse multiple weight tensors at load time (e.g.
+    /// [`GatedDeltaNet`](crate::nn::GatedDeltaNet)'s concatenated input
+    /// projections). Production code that loads a single weight from a
+    /// safetensors checkpoint should use [`Linear::from_loader`].
+    ///
+    /// `weight` is the packed quantized weight matrix; `scales` is per-group
+    /// scales; `biases` is per-group zero-points (Some for affine
+    /// quantization, None for symmetric); `bias` is the additive linear bias
+    /// term separate from `biases` (typically None for Qwen3.5).
+    /// `group_size` and `bits` are the quantization metadata (typically
+    /// 64 / 4 for Qwen3.5 4-bit checkpoints).
+    ///
+    /// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can
+    /// use it. Hidden from rustdoc via `#[doc(hidden)]`.
+    #[doc(hidden)]
+    pub fn new_quant(
+        weight: Array,
+        scales: Array,
+        biases: Option<Array>,
+        bias: Option<Array>,
+        group_size: i32,
+        bits: i32,
+    ) -> Self {
+        Self {
+            inner: LinearImpl::Quant {
+                weight,
+                scales,
+                biases,
+                bias,
+                group_size,
+                bits,
+            },
+        }
+    }
+
     /// Forward pass: `y = x @ W^T (+ bias)`.
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
@@ -107,12 +143,23 @@ impl Linear {
     /// Number of input features (the trailing axis of the input the layer accepts).
     ///
     /// For fp weights stored as `[out, in]`, returns `weight.shape()[1]`.
-    /// For quantized variants, use of this method is not yet implemented.
+    /// For quantized weights packed at `bits` bits per element into `u32`
+    /// (32-bit) lanes, each stored column covers `32 / bits` logical input
+    /// features, so `in_features = weight.shape()[1] * (32 / bits)`.
     pub fn in_features(&self) -> usize {
         match &self.inner {
             LinearImpl::Fp { weight, .. } => weight.shape().as_slice()[1] as usize,
-            LinearImpl::Quant { .. } => {
-                unimplemented!("Linear::in_features for quantized variant — add when needed")
+            LinearImpl::Quant { weight, bits, .. } => {
+                // Formula assumes power-of-2 bit width (2 / 4 / 8): each u32
+                // lane packs 32/bits elements. mlx-community quants for
+                // Qwen3.x are all 4-bit, so the assumption holds in practice;
+                // the assert prevents silent mis-computation if a future
+                // checkpoint uses non-power-of-2 bits (3 / 5 / 6, byte-packed).
+                debug_assert!(
+                    *bits > 0 && *bits <= 32 && (*bits as u32).is_power_of_two(),
+                    "Linear::in_features: 32/bits packing assumes power-of-2 bits in {{2,4,8,16,32}}, got bits={bits}"
+                );
+                (weight.shape().as_slice()[1] * (32 / bits)) as usize
             }
         }
     }
@@ -145,17 +192,58 @@ impl Linear {
                 group_size,
                 bits,
             } => {
-                let mut y = mlx::quantization::quantized_matmul_on(
-                    x,
-                    weight,
-                    scales,
-                    biases.as_ref(),
-                    /* transpose = */ true,
-                    Some(*group_size),
-                    Some(*bits),
-                    "affine",
-                    target,
-                )?;
+                // M-aware dispatch: route through self_qmm only when the
+                // batch×seq dim is large enough that the simdgroup-MMA tile
+                // pays for itself. Below the threshold most threads are idle
+                // (M=1 decode would burn the SG-MMA path at <1 tok/s), so
+                // fall back to mlx's compute-light qmv. Threshold = 32 covers
+                // the M=1 / small-prefill cases cleanly while keeping the
+                // PP=128/512/2048 prefill on the hardware-MMA path.
+                let m_total: i32 = {
+                    let dims = x.shape();
+                    let s = dims.as_slice();
+                    if s.is_empty() {
+                        0
+                    } else {
+                        s[..s.len() - 1].iter().product()
+                    }
+                };
+                let use_self_qmm = crate::nn::self_qmm::enabled() && m_total >= 32;
+                let mut y = if use_self_qmm {
+                    // Stage 9 self-quant kernel path. qmm_t_on requires
+                    // affine biases (per-group zero-points); Qwen3.5
+                    // mlx-community 4-bit checkpoints always carry them.
+                    // Panic explicitly if missing — silent fallback would
+                    // hide a checkpoint mismatch that the caller needs to
+                    // know about.
+                    let qbiases = biases.as_ref().expect(
+                        "self_qmm requires affine biases (per-group zero-points); \
+                         checkpoint has none — IRONMLX_USE_SELF_QMM=1 only supports \
+                         4-bit affine-quantized weights",
+                    );
+                    crate::nn::self_qmm::qmm_t_on(
+                        x,
+                        weight,
+                        scales,
+                        qbiases,
+                        *bits,
+                        *group_size,
+                        target,
+                    )?
+                } else {
+                    // Default path — stage 8 commit 811dd36 unchanged.
+                    mlx::quantization::quantized_matmul_on(
+                        x,
+                        weight,
+                        scales,
+                        biases.as_ref(),
+                        /* transpose = */ true,
+                        Some(*group_size),
+                        Some(*bits),
+                        "affine",
+                        target,
+                    )?
+                };
                 if let Some(b) = bias {
                     y = &y + b;
                 }
@@ -217,5 +305,37 @@ mod tests {
         let y = layer.forward(&x).expect("forward");
         assert_eq!(x.dtype(), mlx::Dtype::Float32);
         assert_eq!(y.dtype(), mlx::Dtype::Float32);
+    }
+
+    #[test]
+    fn new_quant_round_trips_via_from_loader_shape() {
+        // We cannot construct a real quantized weight from thin air without a
+        // tokenizer / safetensors fixture. Instead verify the structural
+        // contract: new_quant accepts the 6 fields exactly and stores them in
+        // LinearImpl::Quant. Cross-check by inspecting in_features /
+        // out_features which compute from the stored shapes.
+
+        // Build a fake quantized weight matching MLX's packed layout for
+        // 4-bit, group_size=64: weight shape [out, in/8] u32, scales shape
+        // [out, in/64] f32, biases (zero-points) shape [out, in/64] f32.
+        let out = 32_i32;
+        let in_dim = 64_i32; // single q-group along input axis
+        let weight_packed_dim = in_dim / 8; // 4 bits per weight, 8 weights per u32
+        let weight_data = vec![0u32; (out * weight_packed_dim) as usize];
+        let scales_data = vec![0.01_f32; (out * 1) as usize]; // in/group_size=1
+        let weight: Array = (weight_data.as_slice(), &[out, weight_packed_dim][..])
+            .try_into()
+            .unwrap();
+        let scales: Array = (scales_data.as_slice(), &[out, 1_i32][..])
+            .try_into()
+            .unwrap();
+        let biases: Array = (scales_data.as_slice(), &[out, 1_i32][..])
+            .try_into()
+            .unwrap();
+
+        let lin = Linear::new_quant(weight, scales, Some(biases), None, 64, 4);
+
+        assert_eq!(lin.in_features(), in_dim as usize);
+        assert_eq!(lin.out_features(), out as usize);
     }
 }

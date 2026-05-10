@@ -16,6 +16,72 @@ pub struct Tokenizer {
     eos_token_ids: Vec<u32>,
 }
 
+/// Streaming detokenizer — owns its own state (does NOT delegate to
+/// `tokenizers::DecodeStream`; that crate's `step_decode_stream` has a
+/// known usize-underflow bug at version 0.20.4 — see
+/// `tokenizers/src/tokenizer/mod.rs:1108`, `let new_prefix_index =
+/// ids.len() - *prefix_index` underflows when state variables drift out
+/// of sync, panicking the request handler).
+///
+/// Algorithm (correct, simple, O(N) per step over **generated tokens
+/// only** — N is bounded by `max_new_tokens`, typically 128-2048, so the
+/// O(N²) total cost is negligible vs GPU forward time):
+///
+/// 1. push the new id to the rolling token buffer
+/// 2. decode the buffer to a fresh string
+/// 3. if the new string starts with the previously-emitted prefix, return
+///    the suffix (delta) and update prefix; otherwise the BPE has not yet
+///    produced a stable boundary, return `None` and wait for more tokens
+/// 4. drop the leading replacement char (`U+FFFD`) case as `None` — the
+///    next token will resolve it
+///
+/// Lifetime `'a` borrows the underlying [`Tokenizer`] for `decode` calls.
+pub struct DecodeStream<'a> {
+    tokenizer: &'a Tokenizer,
+    skip_special: bool,
+    /// Generated token ids (NOT including prompt) accumulated so far.
+    ids: Vec<u32>,
+    /// Last text string emitted to the caller — the running prefix.
+    last_text: String,
+}
+
+impl<'a> DecodeStream<'a> {
+    /// Feed one token id, get the incremental text delta. `Ok(None)` means
+    /// the underlying BPE has not yet produced a renderable string for
+    /// this id (e.g. mid-codepoint UTF-8 split, or text shorter than the
+    /// running prefix); the caller should keep streaming and the next
+    /// `step` will catch up.
+    pub fn step(&mut self, id: u32) -> Result<Option<String>> {
+        self.ids.push(id);
+        let text = self.tokenizer.decode(&self.ids, self.skip_special)?;
+        // BPE may emit a trailing replacement char while waiting for the
+        // continuation token of a multi-byte UTF-8 sequence. Treat this
+        // as "no progress yet" — return None, do NOT advance prefix.
+        if text.ends_with('\u{FFFD}') {
+            return Ok(None);
+        }
+        if text.len() < self.last_text.len() {
+            // Text shrank (rare BPE re-segmentation). Reset prefix to the
+            // new shorter text and report no delta this step.
+            self.last_text = text;
+            return Ok(None);
+        }
+        if !text.starts_with(&self.last_text) {
+            // Prefix divergence — the latest decode does not extend the
+            // previous prefix. Most likely a temporary BPE boundary shift;
+            // wait for the next token to settle.
+            return Ok(None);
+        }
+        let delta = text[self.last_text.len()..].to_string();
+        self.last_text = text;
+        if delta.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(delta))
+        }
+    }
+}
+
 impl Tokenizer {
     /// Build a [`Tokenizer`] from a [`Loader`]. Loads
     /// `{model_dir}/tokenizer.json` and uses
@@ -59,23 +125,41 @@ impl Tokenizer {
             .map_err(|e| anyhow!("decode: {e}"))
     }
 
+    /// Construct a streaming detokenizer for the decode hot path. Owns its
+    /// own state (rolling token buffer + last-emitted prefix string);
+    /// safe across the long-prompt / large-token-count workloads ironmlx
+    /// targets (10K+ prompts). `skip_special` mirrors the same flag on
+    /// [`Tokenizer::decode`].
+    pub fn decode_stream(&self, skip_special: bool) -> DecodeStream<'_> {
+        DecodeStream {
+            tokenizer: self,
+            skip_special,
+            ids: Vec::new(),
+            last_text: String::new(),
+        }
+    }
+
     /// Resolved EOS token ids, in declared order. Empty if unresolved.
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos_token_ids
     }
 
     /// Render a chat template. Errors if the tokenizer config did not
-    /// supply a `chat_template`.
+    /// supply a `chat_template`. `extra_kwargs` (when present) is a JSON
+    /// object whose top-level keys are merged into the template context
+    /// (e.g. `{"enable_thinking": false}` from OpenAI's
+    /// `chat_template_kwargs`).
     pub fn apply_chat_template(
         &self,
         messages: &[Message],
         add_generation_prompt: bool,
+        extra_kwargs: Option<&serde_json::Value>,
     ) -> Result<String> {
         let chat = self
             .chat
             .as_ref()
             .ok_or_else(|| anyhow!("tokenizer has no chat template"))?;
-        chat.render(messages, add_generation_prompt)
+        chat.render(messages, add_generation_prompt, extra_kwargs)
     }
 
     /// True iff a chat template was provided.

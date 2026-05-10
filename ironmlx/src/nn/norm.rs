@@ -139,14 +139,12 @@ impl RmsNormGated {
 
         match gate {
             Some(g) => {
-                // Precise SwiGLU: silu(gate) * normed, computed in fp32, cast back.
                 let g_f32 = mlx::ops::cast::astype(g, Dtype::Float32)?;
-                // silu(x) = x * sigmoid(x)
-                let g_sig = g_f32.sigmoid_on(target)?;
+                let g_sig = g_f32.sigmoid()?;
                 let g_silu = &g_f32 * &g_sig;
                 let normed_f32 = mlx::ops::cast::astype(&normed, Dtype::Float32)?;
-                let mul = &g_silu * &normed_f32;
-                Ok(mlx::ops::cast::astype(&mul, hidden_dtype)?)
+                let mul_f32 = &g_silu * &normed_f32;
+                Ok(mlx::ops::cast::astype(&mul_f32, hidden_dtype)?)
             }
             None => Ok(mlx::ops::cast::astype(&normed, hidden_dtype)?),
         }

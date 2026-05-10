@@ -3,14 +3,23 @@
 //! Borrows a [`Qwen35Model`] and [`Tokenizer`] for the lifetime of the stream;
 //! owns the per-call cache vector and accumulating token history.
 
+use std::sync::OnceLock;
+
 use anyhow::anyhow;
 use mlx::{Array, Dtype};
 
 use crate::core::sampler::Sampler;
-use crate::core::tokenizer::Tokenizer;
+use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::models::Qwen35Model;
 use crate::nn::LayerCache;
 use crate::Result;
+
+/// Process-lifetime gate: only the FIRST `GenerationStream` constructed in
+/// the process can claim the Metal capture window. Subsequent constructions
+/// see this `OnceLock` already set and skip capture (otherwise stacked
+/// captures would error). The lock is sticky for process lifetime — to
+/// capture another request, restart the server.
+static CAPTURE_CLAIMED: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
@@ -22,6 +31,12 @@ pub struct GenerateRequest {
     pub sampler: Sampler,
     /// Token ids that terminate the stream when produced.
     pub stop_token_ids: Vec<u32>,
+    /// Max tokens per prefill forward. `0` disables chunking (entire prompt
+    /// goes through a single forward). The chunked path bounds activation
+    /// memory peak for long agent prompts and lets the GPU pipeline subsequent
+    /// chunks; intermediate chunks update the cache only (no lm_head), the
+    /// last chunk runs the full forward + lm_head.
+    pub prefill_chunk_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -38,16 +53,108 @@ pub struct GenerateEvent {
 /// Single-request prefill+decode driver. Owns a per-call cache vector and
 /// accumulates token history; yields one [`GenerateEvent`] per decode step
 /// until EOS or `max_new_tokens`.
+///
+/// At construction the driver classifies the sampler:
+/// - **Pipelined mode** (greedy + no penalties): each `next_token` call
+///   pre-dispatches step N+1's forward+argmax+async_eval before
+///   materialising step N's `.item()`, fully overlapping CPU and GPU work.
+///   Token text is produced incrementally via [`DecodeStream`] (O(1) per
+///   step instead of O(N²) full-history decode).
+/// - **Synchronous mode** (temperature > 0 or any penalty configured):
+///   forward → sample.item() → push history → decode full history → diff
+///   loop, identical to pre-P8a behavior. The non-greedy paths already
+///   call `.to_vec()` for penalty masking, defeating any pipelining
+///   benefit, so they stay on the simpler path.
 pub struct GenerationStream<'m> {
     model: &'m Qwen35Model,
     tokenizer: &'m Tokenizer,
     cache: Vec<LayerCache>,
     /// All token ids so far: prompt ++ generated.
     history: Vec<u32>,
-    /// Last full-text snapshot — diffed against the next decode to produce incremental text.
-    last_decoded_text: String,
     request: GenerateRequest,
     finished: bool,
+
+    // Mode selector — set once by `new()`, read each `next_token`.
+    pipelined: bool,
+
+    // — Pipelined-mode state (Some iff pipelined=true) —
+    /// Lazy scalar (shape `[]` or `[1]`) u32 Array — the token next_token()
+    /// will emit on its next non-finished call. Always pre-dispatched via
+    /// async_eval so the GPU has work to do while we materialise it.
+    pending_token_arr: Option<Array>,
+    /// Incremental BPE detokenizer; receives one push per emitted token.
+    detok: Option<DecodeStream<'m>>,
+
+    // — Synchronous-mode state (populated iff pipelined=false) —
+    /// Last full-text snapshot — diffed against the next decode to produce
+    /// incremental text. Sync path only.
+    last_decoded_text: String,
+
+    /// True iff this stream owns the in-flight Metal capture (set when env
+    /// var `IRONMLX_CAPTURE_FILE=<path>` was honored at construction time).
+    /// Calls `mlx::metal::stop()` in `Drop`.
+    capture_active: bool,
+
+    /// When `IRONMLX_CAPTURE_PHASE=decode` is set, capture is deferred until
+    /// the first `next_token` call (skipping prefill). This field holds the
+    /// path until that first call starts the capture. `None` once started or
+    /// if not in decode-only mode.
+    capture_pending_decode: Option<String>,
+}
+
+impl Drop for GenerationStream<'_> {
+    fn drop(&mut self) {
+        if self.capture_active {
+            // Best-effort stop. Errors are logged but not propagated (we're
+            // dropping; the .gputrace file is either complete or partially
+            // written — caller can inspect either way).
+            if let Err(e) = mlx::metal::stop() {
+                tracing::warn!("metal capture stop failed: {e}");
+            }
+        }
+    }
+}
+
+/// Honor `IRONMLX_CAPTURE_FILE` + `IRONMLX_CAPTURE_PHASE` env vars.
+///
+/// - `IRONMLX_CAPTURE_PHASE` unset / "all" / empty (default): start capture
+///   immediately at construction (covers prefill + decode). Returns
+///   `(capture_active=true, capture_pending_decode=None)`.
+/// - `IRONMLX_CAPTURE_PHASE=decode`: defer capture until the first
+///   `next_token` call (skips prefill — useful at long PP where prefill GPU
+///   work dominates the trace and Xcode replay struggles). Returns
+///   `(capture_active=true, capture_pending_decode=Some(path))`.
+///
+/// Either way, `capture_active=true` means `Drop` calls `stop_capture`.
+fn try_start_capture() -> (bool, Option<String>) {
+    let Ok(path) = std::env::var("IRONMLX_CAPTURE_FILE") else {
+        return (false, None);
+    };
+    if CAPTURE_CLAIMED.set(()).is_err() {
+        tracing::info!(
+            "IRONMLX_CAPTURE_FILE set but capture already in progress; \
+             this request will not be captured"
+        );
+        return (false, None);
+    }
+    let decode_only = std::env::var("IRONMLX_CAPTURE_PHASE").ok().as_deref() == Some("decode");
+    if decode_only {
+        tracing::info!("metal capture deferred (phase=decode) -> {path}");
+        return (true, Some(path));
+    }
+    match mlx::metal::start(&path) {
+        Ok(()) => {
+            tracing::info!("metal capture started -> {path}");
+            (true, None)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "metal capture failed to start ({path}): {e}; continuing without capture \
+                 (set MTL_CAPTURE_ENABLED=1 before launch + ensure path is writable)"
+            );
+            (false, None)
+        }
+    }
 }
 
 /// Build a position_ids Array of shape `[3, 1, len]` with values
@@ -78,49 +185,127 @@ impl<'m> GenerationStream<'m> {
         if request.prompt_ids.is_empty() {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
         }
+
+        // P8a-stage4/6 Metal capture hook. Gated by `IRONMLX_CAPTURE_FILE`
+        // env var + first-construction OnceLock. `IRONMLX_CAPTURE_PHASE=decode`
+        // defers start to the first `next_token` call (skips prefill).
+        let (capture_active, capture_pending_decode) = try_start_capture();
+
         let prompt_len = request.prompt_ids.len();
         let cap = (prompt_len + request.max_new_tokens) as i32;
         let dtype = Dtype::Bfloat16;
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
 
-        // Prefill: shape [1, prompt_len] u32.
-        let prompt_arr: Array = (
-            request.prompt_ids.as_slice(),
-            &[1_i32, prompt_len as i32][..],
-        )
-            .try_into()?;
-        let position_ids = build_position_ids(0, prompt_len as i32)?;
+        // Prefill: chunked when `prefill_chunk_size > 0` and the prompt exceeds
+        // it. Intermediate chunks call the text-only forward (cache update,
+        // no lm_head); the last chunk goes through the full forward to
+        // produce the [1, 1, vocab] last-position logits.
+        //
+        // Each intermediate chunk closes with `eval(hidden)` — a synchronous
+        // wait. The original design used `async_eval` to overlap chunk N's
+        // CPU graph build with chunk N-1's GPU work, but that's a trap with
+        // KV cache: chunk N+1's graph reads the KV buffers that chunk N just
+        // wrote, so its DFS pulls in the still-unscheduled prior writes,
+        // ballooning the recorded tape with every chunk. Submission overhead
+        // grows quadratically — at chunk_size=512, PP=2048 took 260 s on M1
+        // Pro vs 7.3 s for the synchronous variant (35× regression). The
+        // sync wait is essentially free here because the next chunk's
+        // `forward_on` has nothing to do until the previous chunk's writes
+        // land in the cache anyway.
+        let chunk_size = request.prefill_chunk_size;
+        let prompt_len_i32 = prompt_len as i32;
+        let mut pos: i32 = 0;
+        let last_logits = loop {
+            let remaining = prompt_len_i32 - pos;
+            let n = if chunk_size == 0 {
+                remaining
+            } else {
+                remaining.min(chunk_size as i32)
+            };
+            let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
+            let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
+            let chunk_pos_ids = build_position_ids(pos, n)?;
 
-        let logits = model.forward_on(&prompt_arr, &position_ids, Some(&mut cache), ())?;
-        // logits shape [1, prompt_len, vocab]. Extract the last position slice.
-        let vocab = logits.shape().as_slice()[2];
-        let last_logits = mlx::ops::indexing::slice_strided(
-            &logits,
-            &[0_i32, (prompt_len as i32) - 1, 0][..],
-            &[1_i32, prompt_len as i32, vocab][..],
-            &[1_i32, 1, 1][..],
-        )?;
-        // Flatten to [vocab] for Sampler.
-        let last_logits = last_logits.reshape((vocab,))?;
+            let is_last = pos + n == prompt_len_i32;
+            if is_last {
+                let logits = model.forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?;
+                let vocab = logits.shape().as_slice()[2];
+                break logits.reshape((vocab,))?;
+            }
+            let hidden =
+                model
+                    .text()
+                    .forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?;
+            mlx::transforms::eval(&[&hidden])?;
+            pos += n;
+        };
 
-        let mut history = request.prompt_ids.clone();
-        let first_token = request.sampler.sample(&last_logits, &history)?;
-        history.push(first_token);
+        let history = request.prompt_ids.clone();
+        let pipelined = request.sampler.is_pipelinable();
 
-        // Initial decoded text = full history decoded; subsequent calls diff against this.
-        let initial_text = tokenizer
-            .decode(&history, /* skip_special = */ true)
-            .unwrap_or_default();
+        if pipelined {
+            // Pipelined path: pending_token_arr starts as the prefill's argmax,
+            // pre-dispatched via async_eval so the GPU is already working on
+            // it by the time the first next_token() call materialises it.
+            let pending = request.sampler.sample_async_greedy(&last_logits)?;
+            mlx::transforms::async_eval(&[&pending])?;
+            let detok = tokenizer.decode_stream(/* skip_special */ true);
 
-        Ok(Self {
-            model,
-            tokenizer,
-            cache,
-            history,
-            last_decoded_text: initial_text,
-            request,
-            finished: false,
-        })
+            Ok(Self {
+                model,
+                tokenizer,
+                cache,
+                history,
+                request,
+                finished: false,
+                pipelined: true,
+                pending_token_arr: Some(pending),
+                detok: Some(detok),
+                last_decoded_text: String::new(),
+                capture_active,
+                capture_pending_decode,
+            })
+        } else {
+            // Sync path: existing pre-P8a behavior. First token sampled
+            // synchronously here; pushed into history; initial text snapshot
+            // captured for incremental diff.
+            let first_token = request.sampler.sample(&last_logits, &history)?;
+            let mut history = history;
+            history.push(first_token);
+
+            let initial_text = tokenizer
+                .decode(&history, /* skip_special = */ true)
+                .unwrap_or_default();
+
+            Ok(Self {
+                model,
+                tokenizer,
+                cache,
+                history,
+                request,
+                finished: false,
+                pipelined: false,
+                pending_token_arr: None,
+                detok: None,
+                last_decoded_text: initial_text,
+                capture_active,
+                capture_pending_decode,
+            })
+        }
+    }
+
+    /// If a capture was deferred (phase=decode), start it now (lazily, on
+    /// first `next_token` call). Idempotent — once started, the pending
+    /// path is cleared.
+    fn start_deferred_capture(&mut self) {
+        if let Some(path) = self.capture_pending_decode.take() {
+            match mlx::metal::start(&path) {
+                Ok(()) => tracing::info!("metal capture started (decode phase) -> {path}"),
+                Err(e) => tracing::warn!(
+                    "metal capture failed to start ({path}): {e}; continuing without capture"
+                ),
+            }
+        }
     }
 
     /// Pull the next event. Returns `Ok(None)` after the stream terminates.
@@ -128,7 +313,87 @@ impl<'m> GenerationStream<'m> {
         if self.finished {
             return Ok(None);
         }
+        // If decode-phase Metal capture was deferred, start it now (right
+        // before the first decode-step work hits the GPU).
+        self.start_deferred_capture();
+        if self.pipelined {
+            self.next_token_pipelined()
+        } else {
+            self.next_token_sync()
+        }
+    }
 
+    /// Pipelined hot path. Invariant: `self.pending_token_arr` is `Some` and
+    /// the lazy scalar (shape `[]` or `[1]`) u32 Array of the token to be
+    /// returned on this call.
+    fn next_token_pipelined(&mut self) -> Result<Option<GenerateEvent>> {
+        // 1. Materialise the pending token. The GPU has been working on it
+        //    since the previous next_token call's async_eval (or new()).
+        let pending = self
+            .pending_token_arr
+            .as_ref()
+            .expect("pipelined mode invariant: pending_token_arr is Some");
+        let token: u32 = pending.item()?;
+
+        // 2. Push to history; produce incremental text via DecodeStream.
+        self.history.push(token);
+        let detok = self
+            .detok
+            .as_mut()
+            .expect("pipelined mode invariant: detok is Some");
+        let text = detok.step(token)?.unwrap_or_default();
+
+        // 3. Termination check.
+        let new_count = self.history.len() - self.request.prompt_ids.len();
+        let finish_reason = if self.request.stop_token_ids.contains(&token) {
+            Some("stop")
+        } else if new_count >= self.request.max_new_tokens {
+            Some("length")
+        } else {
+            None
+        };
+
+        if finish_reason.is_some() {
+            self.finished = true;
+            // Drop pending_token_arr — no further dispatch on this terminal step.
+            self.pending_token_arr = None;
+            return Ok(Some(GenerateEvent {
+                token,
+                text,
+                finish_reason,
+            }));
+        }
+
+        // 4. Dispatch step N+1: build forward graph using the just-materialised
+        //    pending Array (still holds its value), sample greedily, async_eval
+        //    so the GPU starts immediately.
+        let token_arr_in = self
+            .pending_token_arr
+            .as_ref()
+            .expect("pipelined mode invariant: pending_token_arr is Some")
+            .reshape((1_i32, 1_i32))?;
+        let pos = (self.history.len() - 1) as i32;
+        let position_ids = build_position_ids(pos, 1)?;
+        let logits =
+            self.model
+                .forward_on(&token_arr_in, &position_ids, Some(&mut self.cache), ())?;
+        let vocab = logits.shape().as_slice()[2];
+        let logits_flat = logits.reshape((vocab,))?;
+        let next_arr = self.request.sampler.sample_async_greedy(&logits_flat)?;
+        mlx::transforms::async_eval(&[&next_arr])?;
+
+        // 5. Replace pending and return.
+        self.pending_token_arr = Some(next_arr);
+        Ok(Some(GenerateEvent {
+            token,
+            text,
+            finish_reason: None,
+        }))
+    }
+
+    /// Synchronous (pre-P8a) decode path. Used when the sampler is
+    /// not pipelinable (temperature > 0 or any penalty configured).
+    fn next_token_sync(&mut self) -> Result<Option<GenerateEvent>> {
         // The token to emit is the most-recent push to history.
         let token = *self.history.last().expect("history non-empty post-new");
 
@@ -182,10 +447,27 @@ impl<'m> GenerationStream<'m> {
         }))
     }
 
+    /// Returns `true` iff this stream was constructed with a pipelinable
+    /// sampler (greedy + no penalties) and will use the async-eval double-
+    /// buffered decode path. Read-only after construction.
+    pub fn is_pipelined(&self) -> bool {
+        self.pipelined
+    }
+
     pub fn is_finished(&self) -> bool {
         self.finished
     }
 
+    /// Returns all token ids accumulated so far: prompt tokens plus generated
+    /// tokens.
+    ///
+    /// **Pipelined-mode note**: between construction and the first
+    /// `next_token()` call, `history` does not yet contain the first
+    /// generated token (it's a lazy Array waiting for `.item()`). In sync
+    /// mode the first generated token is already pushed at construction.
+    /// After N successful `next_token()` calls, both modes hold exactly N
+    /// generated tokens beyond the prompt — callers inspecting history
+    /// only after iteration are unaffected by the asymmetry.
     pub fn history(&self) -> &[u32] {
         &self.history
     }
@@ -236,5 +518,19 @@ mod tests {
         assert_eq!(ev.token, 7);
         assert_eq!(ev.text, "abc");
         assert_eq!(ev.finish_reason, Some("stop"));
+    }
+
+    #[test]
+    fn is_pipelined_true_for_greedy_sampler() {
+        // GenerationStream::new requires a real Qwen35Model — covered by
+        // tests/p4_qwen35_logits_match.rs. Here we verify the upstream
+        // predicate (Sampler::is_pipelinable) which GenerationStream::new
+        // uses to set the pipelined flag.
+        assert!(Sampler::greedy().is_pipelinable());
+    }
+
+    #[test]
+    fn is_pipelined_false_for_temperature_sampler() {
+        assert!(!Sampler::greedy().with_temperature(0.7).is_pipelinable());
     }
 }

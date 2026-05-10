@@ -139,6 +139,39 @@ impl Sampler {
         self
     }
 
+    /// Returns `true` iff this sampler can be driven by the pipelined
+    /// (async-eval) decode path. The pipelined path requires:
+    /// - greedy short-circuit active (`temperature <= 0.0`)
+    /// - no repetition / frequency / presence penalty (those force
+    ///   `logits.to_vec()` to host, defeating the pipeline).
+    ///
+    /// Callers that get `false` must use the synchronous [`Sampler::sample`]
+    /// path. There is no silent fallback; this predicate is checked
+    /// explicitly at `GenerationStream::new` time.
+    pub fn is_pipelinable(&self) -> bool {
+        self.temperature <= 0.0
+            && self.repetition_penalty.is_none()
+            && self.frequency_penalty.is_none()
+            && self.presence_penalty.is_none()
+    }
+
+    /// Greedy-only async sampling. Returns the lazy argmax Array — the caller
+    /// is responsible for materialization via `.item()` (or `async_eval` to
+    /// pre-dispatch the work for pipelining).
+    ///
+    /// Returns `Err` if any non-greedy parameter is configured. The caller
+    /// must then use [`Sampler::sample`].
+    pub fn sample_async_greedy(&self, logits: &Array) -> Result<Array> {
+        if !self.is_pipelinable() {
+            return Err(anyhow::anyhow!(
+                "sample_async_greedy: only greedy (temperature <= 0, no penalties) is supported"
+            ));
+        }
+        // argmax with keepdims=false matches sample()'s greedy short-circuit
+        // at line 178 in this same file.
+        Ok(reduction::argmax(logits, All, false)?)
+    }
+
     fn ensure_key(&self) -> Result<Array> {
         if let Some(k) = self.key.take() {
             // Took it — split for next call and return one half.
@@ -330,5 +363,93 @@ mod tests {
             .with_seed(42);
         let id = s.sample(&logits, &[]).unwrap();
         assert!((id as i32) < 10);
+    }
+
+    #[test]
+    fn is_pipelinable_accepts_greedy() {
+        assert!(Sampler::greedy().is_pipelinable());
+    }
+
+    #[test]
+    fn is_pipelinable_rejects_temperature() {
+        assert!(!Sampler::greedy().with_temperature(0.7).is_pipelinable());
+    }
+
+    #[test]
+    fn is_pipelinable_rejects_repetition_penalty() {
+        assert!(!Sampler::greedy()
+            .with_repetition_penalty(1.1)
+            .is_pipelinable());
+    }
+
+    #[test]
+    fn is_pipelinable_rejects_frequency_penalty() {
+        assert!(!Sampler::greedy()
+            .with_frequency_penalty(0.5)
+            .is_pipelinable());
+    }
+
+    #[test]
+    fn is_pipelinable_rejects_presence_penalty() {
+        assert!(!Sampler::greedy()
+            .with_presence_penalty(0.5)
+            .is_pipelinable());
+    }
+
+    #[test]
+    fn sample_async_greedy_returns_lazy_array_with_correct_token() {
+        // Construct a [vocab=8] f32 Array with the max at index 3.
+        let logits_data: Vec<f32> = vec![0.1, 0.2, 0.3, 5.0, 0.4, 0.5, 0.6, 0.7];
+        let logits: mlx::Array = (logits_data.as_slice(), &[8_i32][..])
+            .try_into()
+            .expect("build logits array");
+
+        let s = Sampler::greedy();
+        let result = s.sample_async_greedy(&logits).expect("sample_async_greedy");
+
+        // Pin the shape contract: argmax with keepdims=false returns either
+        // 0-D scalar or [1]. Either is fine for the pipeline (Task 3 will
+        // .reshape((1,1)) which accepts both), but the test asserts the
+        // actual shape to surface any future MLX wrapper changes.
+        let shape = result.shape();
+        let shape_slice = shape.as_slice();
+        assert!(
+            shape_slice.is_empty() || shape_slice == [1_i32],
+            "unexpected shape from argmax(All, keepdims=false): {shape_slice:?}"
+        );
+
+        // Materialise to confirm correct value.
+        let token: u32 = result.item().expect("item");
+        assert_eq!(token, 3, "expected argmax index 3, got {token}");
+    }
+
+    #[test]
+    fn sample_async_greedy_rejects_temperature() {
+        let logits_data: Vec<f32> = vec![0.1_f32; 4];
+        let logits: mlx::Array = (logits_data.as_slice(), &[4_i32][..])
+            .try_into()
+            .expect("build logits array");
+
+        let s = Sampler::greedy().with_temperature(0.7);
+        let r = s.sample_async_greedy(&logits);
+        assert!(
+            r.is_err(),
+            "non-greedy temperature must reject async-greedy path"
+        );
+    }
+
+    #[test]
+    fn sample_async_greedy_rejects_penalty() {
+        let logits_data: Vec<f32> = vec![0.1_f32; 4];
+        let logits: mlx::Array = (logits_data.as_slice(), &[4_i32][..])
+            .try_into()
+            .expect("build logits array");
+
+        let s = Sampler::greedy().with_repetition_penalty(1.1);
+        let r = s.sample_async_greedy(&logits);
+        assert!(
+            r.is_err(),
+            "repetition_penalty must reject async-greedy path"
+        );
     }
 }

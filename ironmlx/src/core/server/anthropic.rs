@@ -108,7 +108,9 @@ fn format_event(event_type: &str, payload: &serde_json::Value) -> Bytes {
 }
 
 pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesRequest>) -> Response {
-    let prompt_ids = match render_and_encode(&state.tokenizer, &req.messages) {
+    // Anthropic /v1/messages doesn't surface chat_template_kwargs in its
+    // public schema; pass None.
+    let prompt_ids = match render_and_encode(&state.tokenizer, &req.messages, None) {
         Ok(ids) => ids,
         Err(e) => {
             return (
@@ -126,6 +128,7 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         max_new_tokens: req.max_tokens,
         sampler,
         stop_token_ids,
+        prefill_chunk_size: state.prefill_chunk_size,
     };
     let model_id = req.model.clone().unwrap_or_else(|| state.model_id.clone());
 

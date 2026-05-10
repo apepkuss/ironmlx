@@ -36,6 +36,7 @@ mod stream;
 pub mod compile;
 pub mod fast;
 pub mod io;
+pub mod metal;
 pub mod ops;
 pub mod quantization;
 pub mod random;

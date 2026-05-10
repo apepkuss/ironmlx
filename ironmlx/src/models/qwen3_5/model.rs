@@ -51,7 +51,13 @@ impl Qwen35Model {
         &self.text
     }
 
-    /// Forward to logits `[B, S, vocab_size]`.
+    /// Forward to last-position logits `[B, 1, vocab_size]`.
+    ///
+    /// Sampling only consumes the final position; computing the lm_head
+    /// projection over the entire prefill sequence wastes ~`(S-1)/S` of the
+    /// projection work (vocab=151936 in Qwen3.5 — the largest matmul in the
+    /// graph). Slice the last hidden state before the projection so the
+    /// per-forward lm_head cost is constant in `S`.
     pub fn forward_on(
         &self,
         input_ids: &Array,
@@ -63,9 +69,22 @@ impl Qwen35Model {
         let hidden = self
             .text
             .forward_on(input_ids, position_ids, cache, target)?;
+        let dims_borrow = hidden.shape();
+        let dims = dims_borrow.as_slice();
+        let (b, s, h) = (dims[0], dims[1], dims[2]);
+        let last_hidden = if s > 1 {
+            mlx::ops::indexing::slice_strided(
+                &hidden,
+                &[0_i32, s - 1, 0][..],
+                &[b, s, h][..],
+                &[1_i32, 1, 1][..],
+            )?
+        } else {
+            hidden
+        };
         match &self.lm_head {
-            Some(head) => head.forward_on(&hidden, target),
-            None => self.text.as_output_on(&hidden, target),
+            Some(head) => head.forward_on(&last_hidden, target),
+            None => self.text.as_output_on(&last_hidden, target),
         }
     }
 
@@ -77,14 +96,22 @@ impl Qwen35Model {
         for i in 0..cfg.num_hidden_layers {
             match cfg.layer_kind(i) {
                 AttnKind::Full => {
-                    out.push(LayerCache::Full(KVCache::new(
-                        batch,
-                        cfg.num_key_value_heads,
-                        head_dim,
-                        head_dim,
-                        dtype,
-                        cap,
-                    )));
+                    // P8a-stage6: one-shot allocate to full cap (step >= cap)
+                    // so the first decode step at long context never triggers
+                    // grow_to. KVCache's default step=256 would otherwise
+                    // round prefill alloc down to a step boundary and force
+                    // a full-buffer reallocation + memcpy on decode step 1.
+                    out.push(LayerCache::Full(
+                        KVCache::new(
+                            batch,
+                            cfg.num_key_value_heads,
+                            head_dim,
+                            head_dim,
+                            dtype,
+                            cap,
+                        )
+                        .with_step(cap),
+                    ));
                 }
                 AttnKind::Linear => {
                     let conv_dim = cfg.linear_key_head_dim * cfg.linear_num_key_heads * 2
