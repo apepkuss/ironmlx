@@ -3,6 +3,7 @@
 //! Supports both streaming (`stream: true` → SSE) and non-streaming
 //! (`stream: false` → JSON).
 
+use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -12,15 +13,23 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::Engine;
+use mlx::ops::shape::concatenate;
+use mlx::Array;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::sampler::Sampler;
-use crate::core::server::chat_format::{render_and_encode, ChatMessage};
+use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
+use crate::models::qwen3_5::image_processor;
 
 use super::AppState;
+
+// ---------------------------------------------------------------------------
+// Request / Response shapes
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
@@ -110,6 +119,100 @@ struct CompletionResponse {
     usage: Usage,
 }
 
+// ---------------------------------------------------------------------------
+// Image URL decoding (Step 19.1 + 19.2)
+// ---------------------------------------------------------------------------
+
+/// Decode an image URL to raw bytes.
+///
+/// Supports:
+/// - `data:<mime>;base64,<b64>` — decoded in-process (no network)
+/// - `http://` / `https://` — fetched via the provided async `reqwest::Client`
+pub async fn decode_image_url(url: &str, client: &reqwest::Client) -> anyhow::Result<Vec<u8>> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (_meta, b64) = rest
+            .split_once(',')
+            .ok_or_else(|| anyhow::anyhow!("malformed data URL — missing ','"))?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
+        Ok(bytes)
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        let resp = client.get(url).send().await?;
+        let bytes = resp.bytes().await?.to_vec();
+        Ok(bytes)
+    } else {
+        anyhow::bail!("unsupported image_url scheme: {url}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multimodal message expansion (Step 18.4 + 19.3 helper)
+// ---------------------------------------------------------------------------
+
+/// Walk `messages`, decode + preprocess every `image_url` content part, and
+/// rewrite the messages so all `Content::Parts` are converted to
+/// `Content::Text` with vision token placeholder strings inserted.
+///
+/// Returns:
+/// - rewritten text-only messages (ready for `render_and_encode`)
+/// - concatenated pixel_values Array (None when no images present)
+/// - image_grid_thw list (one entry per image)
+pub async fn expand_image_parts_in_messages(
+    messages: Vec<ChatMessage>,
+    client: &reqwest::Client,
+) -> anyhow::Result<(Vec<ChatMessage>, Option<Array>, Vec<(i32, i32, i32)>)> {
+    let mut all_pixel_values: Vec<Array> = Vec::new();
+    let mut grid_thw: Vec<(i32, i32, i32)> = Vec::new();
+
+    // First pass: collect pixel_values + grid info for every image_url part
+    // across all messages, in order.
+    for msg in &messages {
+        if let Content::Parts(parts) = &msg.content {
+            for part in parts {
+                if let ContentPart::ImageUrl { image_url } = part {
+                    let img_bytes = decode_image_url(&image_url.url, client).await?;
+                    let (pv, gh, gw) = image_processor::preprocess(&img_bytes)?;
+                    all_pixel_values.push(pv);
+                    grid_thw.push((1, gh, gw));
+                }
+            }
+        }
+    }
+
+    // Build per-message image token counts (grid_h/2 * grid_w/2) in the same
+    // order images were collected.
+    let token_counts: Vec<usize> = grid_thw
+        .iter()
+        .map(|&(_, gh, gw)| ((gh / 2) * (gw / 2)) as usize)
+        .collect();
+    let mut counts_deque: VecDeque<usize> = VecDeque::from(token_counts);
+
+    // Second pass: rewrite messages to plain-text with placeholder tokens.
+    let flat_messages: Vec<ChatMessage> = messages
+        .into_iter()
+        .map(|msg| {
+            let flat = msg.content.to_flat_string(&mut counts_deque);
+            ChatMessage {
+                role: msg.role,
+                content: Content::Text(flat),
+            }
+        })
+        .collect();
+
+    // Concatenate pixel_values along axis 0.
+    let pixel_values = if all_pixel_values.is_empty() {
+        None
+    } else {
+        let refs: Vec<&Array> = all_pixel_values.iter().collect();
+        Some(concatenate(&refs, 0)?)
+    };
+
+    Ok((flat_messages, pixel_values, grid_thw))
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -139,14 +242,49 @@ fn build_sampler(req: &ChatRequest) -> Sampler {
     s
 }
 
+// ---------------------------------------------------------------------------
+// Handler (Step 19.3)
+// ---------------------------------------------------------------------------
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
 ) -> Response {
+    // Extract fields we need after consuming req.messages.
+    let stream = req.stream;
+    let max_tokens = req.max_tokens;
+    let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
+    let sampler = build_sampler(&req);
+    let chat_template_kwargs = req.chat_template_kwargs;
+
+    // Build a per-request reqwest client for image fetching.
+    // For text-only requests this is a cheap no-op (no images to fetch).
+    let http_client = reqwest::Client::new();
+
+    // Expand multimodal content parts: decode images, build pixel_values,
+    // rewrite messages to text-with-placeholder.
+    let (flat_messages, pixel_values, image_grid_thw) =
+        match expand_image_parts_in_messages(req.messages, &http_client).await {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("image decode/preprocess: {e}"),
+                )
+                    .into_response();
+            }
+        };
+
+    let image_grid_thw_opt = if image_grid_thw.is_empty() {
+        None
+    } else {
+        Some(image_grid_thw)
+    };
+
     let prompt_ids = match render_and_encode(
         &state.tokenizer,
-        &req.messages,
-        req.chat_template_kwargs.as_ref(),
+        &flat_messages,
+        chat_template_kwargs.as_ref(),
     ) {
         Ok(ids) => ids,
         Err(e) => {
@@ -157,25 +295,23 @@ pub async fn chat_completions(
                 .into_response();
         }
     };
-    let sampler = build_sampler(&req);
     let stop_token_ids = state.tokenizer.eos_token_ids().to_vec();
     let request = GenerateRequest {
         prompt_ids,
-        max_new_tokens: req.max_tokens,
+        max_new_tokens: max_tokens,
         sampler,
         stop_token_ids,
         prefill_chunk_size: state.prefill_chunk_size,
-        pixel_values: None,
-        image_grid_thw: None,
+        pixel_values,
+        image_grid_thw: image_grid_thw_opt,
     };
 
     let prompt_tokens = request.prompt_ids.len() as u32;
-    let model_id = req.model.clone().unwrap_or_else(|| state.model_id.clone());
 
-    if req.stream {
-        chat_completions_stream(state, request, model_id).await
+    if stream {
+        chat_completions_stream(state, request, model_label).await
     } else {
-        chat_completions_unary(state, request, model_id, prompt_tokens).await
+        chat_completions_unary(state, request, model_label, prompt_tokens).await
     }
 }
 
@@ -423,5 +559,19 @@ mod tests {
         assert!(s.contains("\"prompt_tokens\":5"));
         assert!(s.contains("\"completion_tokens\":1"));
         assert!(s.contains("\"total_tokens\":6"));
+    }
+
+    #[tokio::test]
+    async fn data_url_decoded_to_bytes() {
+        // "/9j/4AAQABAA" is a truncated JPEG header (base64):
+        // 0xff 0xd8 0xff 0xe0 0x00 0x10 0x00 0x10 0x00
+        let url = "data:image/jpeg;base64,/9j/4AAQABAA";
+        let bytes = decode_image_url(url, &reqwest::Client::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            bytes,
+            vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00, 0x10, 0x00]
+        );
     }
 }

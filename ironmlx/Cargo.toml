@@ -34,8 +34,8 @@ axum.workspace = true
 #   tower-http.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 approx = "0.5"
-reqwest.workspace = true
 tokio-stream.workspace = true
