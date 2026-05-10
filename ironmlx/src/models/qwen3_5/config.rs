@@ -103,8 +103,7 @@ impl Qwen35Config {
         // 顶层也可能有 vision_config（multimodal model）
         if let Some(vc) = raw.get("vision_config") {
             cfg.vision_config = Some(
-                serde_json::from_value(vc.clone())
-                    .context("failed to deserialize VisionConfig")?,
+                serde_json::from_value(vc.clone()).context("failed to deserialize VisionConfig")?,
             );
         }
         Ok(cfg)

@@ -2,6 +2,7 @@
 //!
 //! Pipeline: decode → smart_resize → normalize → patchify.
 
+use anyhow::{anyhow, Result};
 use mlx::ops::shape::{broadcast_to, expand_dims, transpose_axes};
 use mlx::Array;
 
@@ -84,6 +85,54 @@ pub fn patchify(raw: &[f32], h: i32, w: i32) -> (Array, i32, i32) {
     (arr, grid_h, grid_w)
 }
 
+/// Pipeline: decode → smart_resize → Lanczos resize → normalize → patchify.
+/// Returns `(pixel_values, grid_h, grid_w)`.
+pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
+    // 1. decode
+    let img = image::load_from_memory(img_bytes)
+        .map_err(|e| anyhow!("decode image: {e}"))?
+        .to_rgb8();
+    let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);
+
+    // 2. smart resize target size
+    let (h2, w2) = smart_resize(orig_h, orig_w);
+
+    // 3. Lanczos3 resize (HF default).
+    // Skip resize when target equals source — PIL LANCZOS is a no-op in this
+    // case (identity); resampling through a Lanczos kernel would introduce
+    // rounding error without changing meaning.
+    let n_pix = (3 * h2 * w2) as usize;
+    let mut chw = vec![0.0_f32; n_pix];
+    let plane = (h2 * w2) as usize;
+    if orig_h == h2 && orig_w == w2 {
+        // 4a. Already correct size — normalize directly.
+        for (i, p) in img.pixels().enumerate() {
+            let n = normalize_pixel([p.0[0], p.0[1], p.0[2]]);
+            chw[i] = n[0];
+            chw[plane + i] = n[1];
+            chw[2 * plane + i] = n[2];
+        }
+    } else {
+        let resized = image::imageops::resize(
+            &img,
+            w2 as u32,
+            h2 as u32,
+            image::imageops::FilterType::Lanczos3,
+        );
+        // 4b. normalize: [(H, W, 3) u8] → [(3, H, W) f32], (px/255 - 0.5)/0.5
+        for (i, p) in resized.pixels().enumerate() {
+            let n = normalize_pixel([p.0[0], p.0[1], p.0[2]]);
+            chw[i] = n[0];
+            chw[plane + i] = n[1];
+            chw[2 * plane + i] = n[2];
+        }
+    }
+
+    // 5. patchify
+    let (pixel_values, gh, gw) = patchify(&chw, h2, w2);
+    Ok((pixel_values, gh, gw))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +191,70 @@ mod tests {
         // 长宽比 > 200 应 panic 或 error
         let r = std::panic::catch_unwind(|| smart_resize(1, 250));
         assert!(r.is_err(), "expected panic on extreme aspect ratio");
+    }
+
+    #[test]
+    fn preprocess_coco_sample_matches_hf() {
+        use std::path::Path;
+        let path = Path::new("tests/fixtures/p6_qwen35_vl/coco_sample.jpg");
+        let bytes = std::fs::read(path).expect("read coco sample");
+        let (pixel_values, grid_h, grid_w) = preprocess(&bytes).expect("preprocess");
+        assert!(grid_h * grid_w >= 4); // at least 4 patches
+
+        // Check normalized values match HF
+        let hf_path = Path::new("tests/fixtures/p6_qwen35_vl/coco_sample_normalized.bin");
+        let hf_bytes = std::fs::read(hf_path).expect("read hf normalized");
+        let hf_floats: Vec<f32> = hf_bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+
+        // pixel_values has shape [N=grid_h*grid_w, 2 (T), 3, 16, 16]
+        // We're checking only first temporal frame (T=0; T=1 is identical via broadcast)
+        use mlx::ops;
+        let sliced = ops::slice(
+            &pixel_values,
+            &[0_i32, 0, 0, 0, 0][..],
+            &[grid_h * grid_w, 1, 3, 16, 16][..],
+        )
+        .expect("slice");
+        // sliced shape: [N, 1, 3, 16, 16]
+        // Reorder to match HF normalized layout: [3, h2, w2] = [3, grid_h*16, grid_w*16]
+        // Our pixel_values has been patched (each patch in row-major flatten);
+        // To compare with HF's [3, h2, w2] image, we need to "depatchify" — invert the
+        // patchify operation: [N=grid_h*grid_w, 1, 3, 16, 16]
+        //   → squeeze T dim → [grid_h*grid_w, 3, 16, 16]
+        //   → reshape → [grid_h, grid_w, 3, 16, 16]
+        //   → permute (2, 0, 3, 1, 4) → [3, grid_h, 16, grid_w, 16]
+        //   → reshape → [3, grid_h*16, grid_w*16]
+        let arr = ops::squeeze(&sliced, &[1_i32][..]).expect("squeeze");
+        let arr = arr
+            .reshape(&[grid_h, grid_w, 3_i32, 16, 16][..])
+            .expect("reshape to grid");
+        let arr = ops::shape::transpose_axes(&arr, &[2_i32, 0, 3, 1, 4]).expect("permute");
+        let arr = arr
+            .reshape(&[3_i32, grid_h * 16, grid_w * 16][..])
+            .expect("reshape back to image");
+
+        let our_floats: Vec<f32> = arr.to_vec().expect("vec");
+
+        assert_eq!(
+            our_floats.len(),
+            hf_floats.len(),
+            "length mismatch: ours={} hf={}",
+            our_floats.len(),
+            hf_floats.len()
+        );
+        let max_diff = our_floats
+            .iter()
+            .zip(&hf_floats)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff < 1e-3,
+            "max_diff = {} (HF Lanczos vs Rust Lanczos may differ slightly)",
+            max_diff
+        );
     }
 
     #[test]
