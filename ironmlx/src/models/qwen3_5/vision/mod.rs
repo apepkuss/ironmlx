@@ -128,8 +128,9 @@ impl VisionTower {
             v
         };
         for (i, blk) in self.blocks.iter().enumerate() {
-            x = blk.forward(&x, &rotary, &cu_seqlens)?;
-            dump_tensor(&format!("{:02}_block_{:02}_out", 5 + i, i), &x);
+            let prefix = format!("{:02}_block_{:02}", 5 + i, i);
+            x = blk.forward_with_name_prefix(&x, &rotary, &cu_seqlens, &prefix)?;
+            dump_tensor(&format!("{prefix}_out"), &x);
         }
         let out = self.merger.forward(&x, grid_thw)?;
         dump_tensor("29_merger_out", &out);
@@ -256,12 +257,17 @@ impl VisionTower {
         let weighted = &gathered * &wgt_bc; // [4, total_hw, hidden]
 
         // Sum over 4 corners → [total_hw, hidden]
+        // Use sequential addition (((c0+c1)+c2)+c3) to match mlx-vlm's Python:
+        //   `patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]`
+        // which evaluates left-to-right.  In bfloat16, the paired form
+        // `(c0+c1) + (c2+c3)` can differ by 1 ULP from the sequential form,
+        // and those differences propagate and amplify through 24 ViT blocks.
         let corner_parts = ops::shape::split_n(&weighted, 4, 0)?;
         let c0 = ops::shape::squeeze(&corner_parts[0], &[0][..])?;
         let c1 = ops::shape::squeeze(&corner_parts[1], &[0][..])?;
         let c2 = ops::shape::squeeze(&corner_parts[2], &[0][..])?;
         let c3 = ops::shape::squeeze(&corner_parts[3], &[0][..])?;
-        let patch_pos_embeds = &(&c0 + &c1) + &(&c2 + &c3); // [total_hw, hidden]
+        let patch_pos_embeds = &(&(&c0 + &c1) + &c2) + &c3; // [total_hw, hidden]
 
         // For each grid, permute patches so that within each 2×2 merged block
         // the 4 sub-patches are consecutive (spatial-merge-block order).

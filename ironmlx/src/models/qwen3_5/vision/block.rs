@@ -17,16 +17,42 @@ const SQRT_2_OVER_PI: f32 = 0.797_884_6;
 ///
 /// There is no built-in `gelu_approx` in the mlx Rust bindings, so this is
 /// hand-rolled from the exact polynomial formula used by mlx-vlm / PyTorch.
+///
+/// # Precision note
+///
+/// MLX Python uses `@partial(mx.compile, shapeless=True)` on `gelu_approx`, and
+/// computes `x**3` via `mx.power(x, 3)`.  When the input is BF16, Python scalar
+/// literals (`0.044715`, `0.5`, …) do NOT promote the result to F32 — they stay
+/// in the input dtype.  In contrast, Rust `f32` scalar literals in MLX DO cause
+/// BF16→F32 promotion.
+///
+/// To match Python exactly:
+/// 1. Compute `x^3` with `x.power(&three_i32)` which matches Python's `x**3`.
+/// 2. Use dtype-matched constants for the polynomial scalars so that all
+///    intermediate values stay in the input dtype (BF16).  The final output
+///    remains BF16, matching `gelu_approx`'s output.
 fn gelu_tanh(x: &Array, target: StreamOrDevice) -> Result<Array> {
-    // x^3 via x * x * x  (avoid power() to stay on the fast path)
-    let x2 = x * x;
-    let x3 = &x2 * x;
-    // inner = sqrt(2/π) * (x + 0.044715 * x^3)
-    let inner = (&x3 * 0.044_715_f32 + x) * SQRT_2_OVER_PI;
+    // x^3 via mlx::power(x, 3) — matches Python's `x**3` exactly.
+    // Using x * x * x introduces an extra BF16 rounding step that differs from
+    // mx.power(x, 3) by up to 0.125 in BF16, causing downstream GELU divergence.
+    let three: Array = (&[3_i32][..], ()).try_into()?;
+    let x3 = x.power(&three)?;
+
+    // Keep scalars in the input dtype to avoid BF16→F32 promotion.
+    // Python float literals don't promote; Rust f32 scalars do — so we explicitly
+    // create BF16 (or the input dtype) constants.
+    let dtype = x.dtype();
+    let c_044715: Array = ops::cast::astype(&(&[0.044_715_f32][..], ()).try_into()?, dtype)?;
+    let c_sqrt2pi: Array = ops::cast::astype(&(&[SQRT_2_OVER_PI][..], ()).try_into()?, dtype)?;
+    let c_half: Array = ops::cast::astype(&(&[0.5_f32][..], ()).try_into()?, dtype)?;
+    let c_one: Array = ops::cast::astype(&(&[1.0_f32][..], ()).try_into()?, dtype)?;
+
+    // inner = sqrt(2/π) * (x + 0.044715 * x^3) — all in input dtype
+    let inner = (&(&x3 * &c_044715) + x) * &c_sqrt2pi;
     // tanh(inner)
     let t = inner.tanh_on(target)?;
     // 0.5 * x * (1 + t)
-    let out = x * 0.5_f32 * (&t + 1.0_f32);
+    let out = x * &c_half * (&t + &c_one);
     Ok(out)
 }
 
@@ -88,22 +114,24 @@ impl VitMLP {
 
     /// Stream-targeted forward pass.
     ///
-    /// Computes: `fc2(gelu_tanh(fc1(x)))` where each linear is `x @ W^T + b`.
+    /// Computes: `fc2(gelu_tanh(fc1(x)))` where each linear is `addmm(bias, x, W^T)`.
+    ///
+    /// Uses `mx.addmm` (fused bias-matmul) to match mlx-vlm's `nn.Linear` which
+    /// internally calls `mx.addmm(bias, x, W.T)`.  This avoids the 1-BF16-ULP
+    /// rounding difference that arises when matmul and bias-add are separate ops.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
 
-        // fc1: [T, d_model] @ [d_model, ffn_dim] + bias  →  [T, ffn_dim]
+        // fc1: addmm(b1, x, W1.T) → [T, ffn_dim]
         let wt1 = self.fc1_w.transpose_on(target)?;
-        let h = x.matmul_on(&wt1, target)?;
-        let h = &h + &self.fc1_b;
+        let h = ops::addmm_on(&self.fc1_b, x, &wt1, 1.0, 1.0, target)?;
 
         // GELU tanh approx
         let h = gelu_tanh(&h, target)?;
 
-        // fc2: [T, ffn_dim] @ [ffn_dim, d_model] + bias  →  [T, d_model]
+        // fc2: addmm(b2, h, W2.T) → [T, d_model]
         let wt2 = self.fc2_w.transpose_on(target)?;
-        let out = h.matmul_on(&wt2, target)?;
-        let out = &out + &self.fc2_b;
+        let out = ops::addmm_on(&self.fc2_b, &h, &wt2, 1.0, 1.0, target)?;
 
         Ok(out)
     }
@@ -248,9 +276,11 @@ impl VitAttention {
         let scale = 1.0_f32 / (hd as f32).sqrt();
 
         // Step 1: fused QKV projection → [seq, 3*dim]
+        // Use addmm (fused bias-matmul) to match mlx-vlm's nn.Linear which calls
+        // mx.addmm(bias, x, W.T).  This eliminates the 1-ULP rounding difference
+        // that would arise from separate matmul + bias-add.
         let qkv_wt = self.qkv_w.transpose_on(())?;
-        let qkv = x.matmul_on(&qkv_wt, ())?;
-        let qkv = &qkv + &self.qkv_b;
+        let qkv = ops::addmm(&self.qkv_b, x, &qkv_wt, 1.0, 1.0)?;
 
         // Step 2: reshape to [seq, 3, nh, hd] then transpose(1,0,2,3) → [3, seq, nh, hd]
         let qkv = ops::shape::reshape(&qkv, &[seq, 3, nh, hd][..])?;
@@ -305,10 +335,9 @@ impl VitAttention {
         let dim = nh * hd;
         let output = ops::shape::reshape(&output, &[seq, dim][..])?;
 
-        // Step 8: output projection
+        // Step 8: output projection (fused addmm to match nn.Linear)
         let proj_wt = self.proj_w.transpose_on(())?;
-        let out = output.matmul_on(&proj_wt, ())?;
-        let out = &out + &self.proj_b;
+        let out = ops::addmm(&self.proj_b, &output, &proj_wt, 1.0, 1.0)?;
 
         Ok(out)
     }
@@ -394,6 +423,34 @@ impl VitBlock {
         let normed2 = self.norm2.forward(&h)?;
         let mlp_out = self.mlp.forward(&normed2)?;
         Ok(&h + &mlp_out)
+    }
+
+    /// Like [`Self::forward`] but emits 4 intra-block dumps (post-norm1, attn-residual,
+    /// post-norm2, mlp-residual) under the given name prefix. The non-feature
+    /// build erases the dump calls; in feature builds the dumps fire only if
+    /// `IRONMLX_VISION_DUMP_DIR` is set. Used by the P6.3b op-level diff path.
+    pub fn forward_with_name_prefix(
+        &self,
+        x: &Array,
+        rotary_pos_emb: &Array,
+        cu_seqlens: &[i32],
+        name_prefix: &str,
+    ) -> Result<Array> {
+        use crate::models::qwen3_5::vision::dump::dump_tensor;
+        // h = x + attn(norm1(x))
+        let normed1 = self.norm1.forward(x)?;
+        dump_tensor(&format!("{name_prefix}_a_norm1_out"), &normed1);
+        let attn_out = self.attn.forward(&normed1, rotary_pos_emb, cu_seqlens)?;
+        let h = x + &attn_out;
+        dump_tensor(&format!("{name_prefix}_b_attn_residual"), &h);
+
+        // y = h + mlp(norm2(h))
+        let normed2 = self.norm2.forward(&h)?;
+        dump_tensor(&format!("{name_prefix}_c_norm2_out"), &normed2);
+        let mlp_out = self.mlp.forward(&normed2)?;
+        let out = &h + &mlp_out;
+        dump_tensor(&format!("{name_prefix}_d_mlp_residual"), &out);
+        Ok(out)
     }
 }
 

@@ -50,8 +50,13 @@ pub fn normalize_pixel(rgb: [u8; 3]) -> [f32; 3] {
 
 const PATCH: i32 = 16;
 const TEMPORAL_PATCH: i32 = 2;
+const MERGE_SIZE: i32 = 2;
 
 /// Reshape `[3, H, W]` f32 raw pixels into Qwen3.5 vision patches.
+///
+/// Matches mlx-vlm's `_process_one` merge_size grouping exactly:
+/// patches are ordered as `(grid_h/ms, grid_w/ms, ms, ms)` merge tiles,
+/// NOT simple row-major `(grid_h, grid_w)`.
 ///
 /// Output shape: `[grid_h * grid_w, TEMPORAL_PATCH (=2), 3, PATCH (=16), PATCH]`,
 /// where the temporal axis duplicates the single image frame to match
@@ -64,14 +69,28 @@ pub fn patchify(raw: &[f32], h: i32, w: i32) -> (Array, i32, i32) {
     assert_eq!(w % PATCH, 0);
     let grid_h = h / PATCH;
     let grid_w = w / PATCH;
-    // [3, H, W] → [3, grid_h, PATCH, grid_w, PATCH]
-    //           → permute (1, 3, 0, 2, 4) → [grid_h, grid_w, 3, PATCH, PATCH]
-    //           → reshape → [grid_h * grid_w, 3, PATCH, PATCH]
+    assert_eq!(
+        grid_h % MERGE_SIZE,
+        0,
+        "grid_h must be divisible by merge_size"
+    );
+    assert_eq!(
+        grid_w % MERGE_SIZE,
+        0,
+        "grid_w must be divisible by merge_size"
+    );
+    let mgh = grid_h / MERGE_SIZE; // merge-tile rows
+    let mgw = grid_w / MERGE_SIZE; // merge-tile cols
+    let ms = MERGE_SIZE;
+    // [3, H, W]
+    //   → reshape [3, mgh, ms, PATCH, mgw, ms, PATCH]
+    //   → permute (1, 4, 2, 5, 0, 3, 6) → [mgh, mgw, ms, ms, 3, PATCH, PATCH]
+    //   → reshape → [grid_h * grid_w, 3, PATCH, PATCH]
     let arr: Array = (raw, &[3, h, w][..]).try_into().expect("array");
     let arr = arr
-        .reshape(&[3, grid_h, PATCH, grid_w, PATCH][..])
+        .reshape(&[3, mgh, ms, PATCH, mgw, ms, PATCH][..])
         .expect("reshape");
-    let arr = transpose_axes(&arr, &[1_i32, 3, 0, 2, 4][..]).expect("transpose");
+    let arr = transpose_axes(&arr, &[1_i32, 4, 2, 5, 0, 3, 6][..]).expect("transpose");
     let arr = arr
         .reshape(&[grid_h * grid_w, 3, PATCH, PATCH][..])
         .expect("reshape2");
@@ -263,10 +282,17 @@ mod tests {
         //   → permute (2, 0, 3, 1, 4) → [3, grid_h, 16, grid_w, 16]
         //   → reshape → [3, grid_h*16, grid_w*16]
         let arr = ops::squeeze(&sliced, &[1_i32][..]).expect("squeeze");
+        // Patches are in merge-size order: [N=mgh*mgw*ms*ms, C, ps, ps]
+        // where N is ordered as (mgh, mgw, ms, ms) NOT (grid_h, grid_w).
+        // Depatchify: reverse the merge-size interleaving.
+        let ms = MERGE_SIZE;
+        let mgh = grid_h / ms;
+        let mgw = grid_w / ms;
         let arr = arr
-            .reshape(&[grid_h, grid_w, 3_i32, 16, 16][..])
-            .expect("reshape to grid");
-        let arr = ops::shape::transpose_axes(&arr, &[2_i32, 0, 3, 1, 4]).expect("permute");
+            .reshape(&[mgh, mgw, ms, ms, 3_i32, 16, 16][..])
+            .expect("reshape to merge grid");
+        // permute (4, 0, 2, 5, 1, 3, 6) -> [C, mgh, ms, ps, mgw, ms, ps]
+        let arr = ops::shape::transpose_axes(&arr, &[4_i32, 0, 2, 5, 1, 3, 6]).expect("permute");
         let arr = arr
             .reshape(&[3_i32, grid_h * 16, grid_w * 16][..])
             .expect("reshape back to image");
