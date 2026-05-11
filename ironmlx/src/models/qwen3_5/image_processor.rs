@@ -14,12 +14,17 @@ const MAX_PIXELS: i32 = 14 * 14 * 4 * 1280; // 1003520
 /// Port of mlx-vlm `_smart_resize_image` — 保 aspect ratio + 满足 patch
 /// 对齐 + 总像素在 [MIN_PIXELS, MAX_PIXELS]。
 ///
-/// Panics if absolute aspect ratio > 200.
-pub fn smart_resize(height: i32, width: i32) -> (i32, i32) {
+/// Returns `Err` if absolute aspect ratio > 200 (mlx-vlm parity — bound is
+/// from `_smart_resize_image`).
+pub fn smart_resize(height: i32, width: i32) -> Result<(i32, i32)> {
     let max_dim = height.max(width) as f64;
     let min_dim = height.min(width) as f64;
     if max_dim / min_dim > 200.0 {
-        panic!("absolute aspect ratio must be smaller than 200");
+        return Err(anyhow!(
+            "absolute aspect ratio must be smaller than 200 (got {}x{})",
+            height,
+            width
+        ));
     }
     let f = FACTOR as f64;
     let mut h_bar = ((height as f64 / f).round() * f) as i32;
@@ -33,7 +38,7 @@ pub fn smart_resize(height: i32, width: i32) -> (i32, i32) {
         h_bar = (((height as f64 * beta) / f).ceil() * f) as i32;
         w_bar = (((width as f64 * beta) / f).ceil() * f) as i32;
     }
-    (h_bar, w_bar)
+    Ok((h_bar, w_bar))
 }
 
 const IMAGE_MEAN: [f32; 3] = [0.5, 0.5, 0.5];
@@ -62,23 +67,39 @@ const MERGE_SIZE: i32 = 2;
 /// where the temporal axis duplicates the single image frame to match
 /// `temporal_patch_size=2`.
 ///
-/// Returns `(pixel_values_array, grid_h, grid_w)`.
-pub fn patchify(raw: &[f32], h: i32, w: i32) -> (Array, i32, i32) {
-    assert_eq!(raw.len(), (3 * h * w) as usize);
-    assert_eq!(h % PATCH, 0);
-    assert_eq!(w % PATCH, 0);
+/// Returns `(pixel_values_array, grid_h, grid_w)`. Errors when `h`/`w` are not
+/// multiples of `PATCH * MERGE_SIZE` or when `raw.len()` doesn't match
+/// `3 * h * w` — invariants the production caller (`preprocess` → after
+/// `smart_resize`) always satisfies, but enforced as errors here so a future
+/// caller that feeds a hand-built buffer can't silently corrupt outputs.
+pub fn patchify(raw: &[f32], h: i32, w: i32) -> Result<(Array, i32, i32)> {
+    if raw.len() != (3 * h * w) as usize {
+        return Err(anyhow!(
+            "patchify: raw.len() {} != 3*{}*{} = {}",
+            raw.len(),
+            h,
+            w,
+            3 * h * w
+        ));
+    }
+    if h % PATCH != 0 || w % PATCH != 0 {
+        return Err(anyhow!(
+            "patchify: h={} w={} must be multiples of PATCH={}",
+            h,
+            w,
+            PATCH
+        ));
+    }
     let grid_h = h / PATCH;
     let grid_w = w / PATCH;
-    assert_eq!(
-        grid_h % MERGE_SIZE,
-        0,
-        "grid_h must be divisible by merge_size"
-    );
-    assert_eq!(
-        grid_w % MERGE_SIZE,
-        0,
-        "grid_w must be divisible by merge_size"
-    );
+    if grid_h % MERGE_SIZE != 0 || grid_w % MERGE_SIZE != 0 {
+        return Err(anyhow!(
+            "patchify: grid {}x{} must be divisible by MERGE_SIZE={}",
+            grid_h,
+            grid_w,
+            MERGE_SIZE
+        ));
+    }
     let mgh = grid_h / MERGE_SIZE; // merge-tile rows
     let mgw = grid_w / MERGE_SIZE; // merge-tile cols
     let ms = MERGE_SIZE;
@@ -86,22 +107,19 @@ pub fn patchify(raw: &[f32], h: i32, w: i32) -> (Array, i32, i32) {
     //   → reshape [3, mgh, ms, PATCH, mgw, ms, PATCH]
     //   → permute (1, 4, 2, 5, 0, 3, 6) → [mgh, mgw, ms, ms, 3, PATCH, PATCH]
     //   → reshape → [grid_h * grid_w, 3, PATCH, PATCH]
-    let arr: Array = (raw, &[3, h, w][..]).try_into().expect("array");
-    let arr = arr
-        .reshape(&[3, mgh, ms, PATCH, mgw, ms, PATCH][..])
-        .expect("reshape");
-    let arr = transpose_axes(&arr, &[1_i32, 4, 2, 5, 0, 3, 6][..]).expect("transpose");
-    let arr = arr
-        .reshape(&[grid_h * grid_w, 3, PATCH, PATCH][..])
-        .expect("reshape2");
+    let arr: Array = (raw, &[3, h, w][..])
+        .try_into()
+        .map_err(|e| anyhow!("patchify: array construction: {e}"))?;
+    let arr = arr.reshape(&[3, mgh, ms, PATCH, mgw, ms, PATCH][..])?;
+    let arr = transpose_axes(&arr, &[1_i32, 4, 2, 5, 0, 3, 6][..])?;
+    let arr = arr.reshape(&[grid_h * grid_w, 3, PATCH, PATCH][..])?;
     // expand temporal: [N, 3, P, P] → [N, 1, 3, P, P] → broadcast to [N, 2, 3, P, P]
-    let arr = expand_dims(&arr, &[1_i32][..]).expect("expand");
+    let arr = expand_dims(&arr, &[1_i32][..])?;
     let arr = broadcast_to(
         &arr,
         &[grid_h * grid_w, TEMPORAL_PATCH, 3, PATCH, PATCH][..],
-    )
-    .expect("broadcast");
-    (arr, grid_h, grid_w)
+    )?;
+    Ok((arr, grid_h, grid_w))
 }
 
 /// Pipeline: decode → smart_resize → Lanczos resize → normalize → patchify.
@@ -114,7 +132,7 @@ pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
     let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);
 
     // 2. smart resize target size
-    let (h2, w2) = smart_resize(orig_h, orig_w);
+    let (h2, w2) = smart_resize(orig_h, orig_w)?;
 
     // 3. Lanczos3 resize (HF default).
     // Skip resize when target equals source — PIL LANCZOS is a no-op in this
@@ -148,7 +166,7 @@ pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
     }
 
     // 5. patchify
-    let (pixel_values, gh, gw) = patchify(&chw, h2, w2);
+    let (pixel_values, gh, gw) = patchify(&chw, h2, w2)?;
     Ok((pixel_values, gh, gw))
 }
 
@@ -207,9 +225,17 @@ mod tests {
         // Synthetic [3, 32, 32] → grid 2×2 patches of 16×16, temporal=2
         // Output shape: [grid_h*grid_w=4, 2 (temporal), 3 (channels), 16, 16]
         let raw_pixels = vec![0.0_f32; 3 * 32 * 32];
-        let (out, grid_h, grid_w) = patchify(&raw_pixels, 32, 32);
+        let (out, grid_h, grid_w) = patchify(&raw_pixels, 32, 32).expect("patchify");
         assert_eq!(out.shape().as_slice(), &[4, 2, 3, 16, 16]);
         assert_eq!((grid_h, grid_w), (2, 2));
+    }
+
+    #[test]
+    fn patchify_rejects_mismatched_buffer() {
+        // raw.len() != 3*h*w → Err
+        let raw_pixels = vec![0.0_f32; 100];
+        let r = patchify(&raw_pixels, 32, 32);
+        assert!(r.is_err());
     }
 
     /// Golden values 从 mlx-vlm `_smart_resize_image` 直接取
@@ -217,7 +243,7 @@ mod tests {
     #[test]
     fn smart_resize_typical_image() {
         // 768×1024 输入 → 应该 round 到 32 倍数，没超 max
-        let (h, w) = smart_resize(768, 1024);
+        let (h, w) = smart_resize(768, 1024).expect("smart_resize");
         assert_eq!(h, 768);
         assert_eq!(w, 1024);
     }
@@ -225,7 +251,7 @@ mod tests {
     #[test]
     fn smart_resize_too_large_downscaled() {
         // 4096×4096 = 16M px > max=14*14*4*1280 = 1003520; 应缩小
-        let (h, w) = smart_resize(4096, 4096);
+        let (h, w) = smart_resize(4096, 4096).expect("smart_resize");
         assert!(h * w <= 14 * 14 * 4 * 1280);
         assert_eq!(h % 32, 0);
         assert_eq!(w % 32, 0);
@@ -234,7 +260,7 @@ mod tests {
     #[test]
     fn smart_resize_too_small_upscaled() {
         // 32×32 = 1024 px < min=56*56=3136; 应放大
-        let (h, w) = smart_resize(32, 32);
+        let (h, w) = smart_resize(32, 32).expect("smart_resize");
         assert!(h * w >= 56 * 56);
         assert_eq!(h % 32, 0);
         assert_eq!(w % 32, 0);
@@ -242,9 +268,9 @@ mod tests {
 
     #[test]
     fn smart_resize_extreme_aspect_ratio_rejected() {
-        // 长宽比 > 200 应 panic 或 error
-        let r = std::panic::catch_unwind(|| smart_resize(1, 250));
-        assert!(r.is_err(), "expected panic on extreme aspect ratio");
+        // 长宽比 > 200 → Err (no panic — hostile request safety)
+        let r = smart_resize(1, 250);
+        assert!(r.is_err(), "expected Err on extreme aspect ratio");
     }
 
     #[test]
@@ -324,7 +350,7 @@ mod tests {
         for line in golden.lines() {
             let parts: Vec<i32> = line.split(',').map(|s| s.parse().unwrap()).collect();
             let (h, w, py_h, py_w) = (parts[0], parts[1], parts[2], parts[3]);
-            let (rs_h, rs_w) = smart_resize(h, w);
+            let (rs_h, rs_w) = smart_resize(h, w).expect("smart_resize");
             assert_eq!(
                 (rs_h, rs_w),
                 (py_h, py_w),

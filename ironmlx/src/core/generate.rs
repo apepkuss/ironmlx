@@ -180,10 +180,12 @@ pub fn build_position_ids(start_pos: i32, len: i32) -> Result<Array> {
     mlx::ops::shape::broadcast_to(&one_stream, &[3_i32, 1, len][..]).map_err(anyhow::Error::from)
 }
 
-/// Token IDs for Qwen3.5-VL (from model config.json, **not** from mlx-vlm defaults which differ).
+/// Token ID for `<|image_pad|>` in Qwen3.5-VL (from model `config.json`,
+/// **not** from mlx-vlm defaults which differ).
+///
+/// TODO P6.5 (audit ref B5): plumb from `Tokenizer` at load time so the value
+/// works for sibling VL models with different image-pad token ids.
 pub const IMAGE_TOKEN_ID: i32 = 248056;
-pub const VISION_START_TOKEN_ID: i32 = 248053;
-pub const VISION_END_TOKEN_ID: i32 = 248054;
 
 /// MRoPE 3-stream position_ids for a VL sequence (B=1, image-only, no video).
 ///
@@ -210,21 +212,25 @@ pub const VISION_END_TOKEN_ID: i32 = 248054;
 /// `spatial_merge_size`: typically 2 (from `vision_config.spatial_merge_size`).
 ///
 /// # Panics
-/// Panics if `grid_thw.len() == 0` or `spatial_merge_size == 0`.
+/// Returns `Err` if `grid_thw.is_empty()` or `spatial_merge_size <= 0`. Caller
+/// is responsible for going through [`build_position_ids`] in the text-only
+/// case rather than passing an empty `grid_thw`.
 pub fn build_position_ids_vl(
     input_ids: &[i32],
     grid_thw: &[(i32, i32, i32)],
     image_token_id: i32,
     spatial_merge_size: i32,
 ) -> crate::Result<Array> {
-    assert!(
-        !grid_thw.is_empty(),
-        "build_position_ids_vl: grid_thw must be non-empty"
-    );
-    assert!(
-        spatial_merge_size > 0,
-        "build_position_ids_vl: spatial_merge_size must be > 0"
-    );
+    if grid_thw.is_empty() {
+        return Err(anyhow!(
+            "build_position_ids_vl: grid_thw must be non-empty (use build_position_ids for text-only)"
+        ));
+    }
+    if spatial_merge_size <= 0 {
+        return Err(anyhow!(
+            "build_position_ids_vl: spatial_merge_size must be > 0 (got {spatial_merge_size})"
+        ));
+    }
 
     // We build every block entirely in Rust (Vec<i32>) and assemble a single
     // Array at the end. This avoids repeatedly flushing the MLX graph for tiny
@@ -309,14 +315,12 @@ pub fn build_position_ids_vl(
         }
     }
 
-    // Sanity: each stream must have exactly S entries.
+    // Sanity: each stream must have exactly S entries. Algorithmic invariant
+    // (every push to one stream pushes to the other two), so debug_assert.
     let total = stream_t.len();
-    assert_eq!(
-        total, s,
-        "build_position_ids_vl: stream length {total} != input_ids length {s}"
-    );
-    assert_eq!(stream_h.len(), s);
-    assert_eq!(stream_w.len(), s);
+    debug_assert_eq!(total, s);
+    debug_assert_eq!(stream_h.len(), s);
+    debug_assert_eq!(stream_w.len(), s);
 
     // Build [3, S] array and reshape to [3, 1, S].
     // Layout: [stream_t | stream_h | stream_w] contiguous, shape [3, S].

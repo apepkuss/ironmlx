@@ -122,10 +122,10 @@ impl PatchMerger {
 
     /// Forward pass on the default stream.
     ///
-    /// `x` shape: `[N, hidden_size]` where `N` is total patch count.
-    /// `grid_thw`: list of `(T, H, W)` tuples; not used in current single-image
-    ///   implementation but kept for forward-compat with multi-image batches.
-    pub fn forward(&self, x: &Array, _grid_thw: &[(i32, i32, i32)]) -> Result<Array> {
+    /// `x` shape: `[N, hidden_size]` where `N` is total patch count and must
+    /// satisfy `N % (spatial_merge_size²) == 0` (caller responsibility — the
+    /// vision tower's block stack always produces this).
+    pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
     }
 
@@ -184,7 +184,7 @@ mod tests {
             2, // spatial_merge_size
         );
         let x = constructors::ones((4_i32, 1024_i32), Dtype::Bfloat16).unwrap();
-        let out = merger.forward(&x, &[(1, 2, 2)]).unwrap();
+        let out = merger.forward(&x).unwrap();
         assert_eq!(out.shape().as_slice(), &[1, 2560]);
     }
 
@@ -222,7 +222,7 @@ mod tests {
             2,
         );
         let x = constructors::ones((4_i32, 1024_i32), Dtype::Float32).unwrap();
-        let out = merger.forward(&x, &[(1, 2, 2)]).unwrap();
+        let out = merger.forward(&x).unwrap();
         let vals: Vec<f32> = out.to_vec().unwrap();
         let max_abs = vals.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
         assert!(

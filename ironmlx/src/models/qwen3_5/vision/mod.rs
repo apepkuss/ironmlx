@@ -132,7 +132,7 @@ impl VisionTower {
             x = blk.forward_with_name_prefix(&x, &rotary, &cu_seqlens, &prefix)?;
             dump_tensor(&format!("{prefix}_out"), &x);
         }
-        let out = self.merger.forward(&x, grid_thw)?;
+        let out = self.merger.forward(&x)?;
         dump_tensor("29_merger_out", &out);
         Ok(out)
     }
@@ -150,7 +150,21 @@ impl VisionTower {
         // Collect bilinear-interpolation indices and weights across all grids.
         // For each corner (top-left, top-right, bottom-left, bottom-right) we
         // accumulate flat indices into the [num_g*num_g, hidden] table.
-        let total_hw: i32 = grid_thw.iter().map(|(_, h, w)| h * w).sum();
+        // Use i64 for the sum to avoid i32 overflow on adversarial multi-image
+        // inputs (audit ref A11). Single-image Qwen3.5-VL caps at
+        // MAX_PIXELS = 14*14*4*1280 → total_hw ≤ 3920, so 1M is a comfortable
+        // upper bound even for many-image P7 expansions.
+        let total_hw_i64: i64 = grid_thw
+            .iter()
+            .map(|(_, h, w)| (*h as i64) * (*w as i64))
+            .sum();
+        const MAX_TOTAL_HW: i64 = 1_000_000;
+        if total_hw_i64 > MAX_TOTAL_HW {
+            return Err(anyhow::anyhow!(
+                "add_learned_pos_embed: total_hw {total_hw_i64} exceeds MAX_TOTAL_HW {MAX_TOTAL_HW}"
+            ));
+        }
+        let total_hw = total_hw_i64 as i32;
         let mut idx = [
             Vec::<i32>::with_capacity(total_hw as usize),
             Vec::<i32>::with_capacity(total_hw as usize),
@@ -354,7 +368,7 @@ impl VisionTower {
         //   build_rotary_freqs(max_hw, rotary_dim, theta) gives [max_hw, rotary_dim/2].
         //   Then h_emb [tokens, rotary_dim/2] concat w_emb [tokens, rotary_dim/2]
         //   = [tokens, rotary_dim]. That matches.
-        let freq_table = build_rotary_freqs(max_hw, self.rotary_dim, self.rotary_theta);
+        let freq_table = build_rotary_freqs(max_hw, self.rotary_dim, self.rotary_theta)?;
         // freq_table: [max_hw, rotary_dim/2]
 
         // Build row/col position indices for all grids, then gather from freq_table.
@@ -434,24 +448,30 @@ impl VisionTower {
 
 /// Vision rotary frequency table: `freqs[s, i] = s * (1 / theta^(2i/dim))`,
 /// `i ∈ [0, dim/2)`. Output shape: `[seqlen, dim/2]`.
-pub fn build_rotary_freqs(seqlen: i32, dim: i32, theta: f32) -> Array {
+pub fn build_rotary_freqs(seqlen: i32, dim: i32, theta: f32) -> Result<Array> {
     use mlx::ops;
 
     let half = dim / 2;
 
     let exponents: Vec<f32> = (0..half).map(|i| (2 * i) as f32 / dim as f32).collect();
-    let exponents_arr: Array = (exponents.as_slice(), &[half][..]).try_into().unwrap();
+    let exponents_arr: Array = (exponents.as_slice(), &[half][..])
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("build_rotary_freqs: exponents Array: {e}"))?;
 
-    let theta_arr: Array = (&[theta][..], ()).try_into().unwrap();
-    let theta_pow = ops::power(&theta_arr, &exponents_arr).unwrap();
-    let inv_freq = ops::reciprocal(&theta_pow).unwrap();
+    let theta_arr: Array = (&[theta][..], ())
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("build_rotary_freqs: theta Array: {e}"))?;
+    let theta_pow = ops::power(&theta_arr, &exponents_arr)?;
+    let inv_freq = ops::reciprocal(&theta_pow)?;
 
     let seq: Vec<f32> = (0..seqlen).map(|i| i as f32).collect();
-    let seq_arr: Array = (seq.as_slice(), &[seqlen][..]).try_into().unwrap();
-    let seq2 = ops::shape::reshape(&seq_arr, &[seqlen, 1][..]).unwrap();
-    let inv2 = ops::shape::reshape(&inv_freq, &[1, half][..]).unwrap();
+    let seq_arr: Array = (seq.as_slice(), &[seqlen][..])
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("build_rotary_freqs: seq Array: {e}"))?;
+    let seq2 = ops::shape::reshape(&seq_arr, &[seqlen, 1][..])?;
+    let inv2 = ops::shape::reshape(&inv_freq, &[1, half][..])?;
 
-    &seq2 * &inv2
+    Ok(&seq2 * &inv2)
 }
 
 #[cfg(test)]
@@ -460,13 +480,13 @@ mod tests {
 
     #[test]
     fn rotary_pos_emb_shape() {
-        let freqs = build_rotary_freqs(8, 32, 10000.0);
+        let freqs = build_rotary_freqs(8, 32, 10000.0).unwrap();
         assert_eq!(freqs.shape().as_slice(), &[8, 16]); // dim/2 = 16 entries
     }
 
     #[test]
     fn rotary_pos_emb_values_match_mlx_vlm() {
-        let freqs = build_rotary_freqs(4, 32, 10000.0);
+        let freqs = build_rotary_freqs(4, 32, 10000.0).unwrap();
         let v: Vec<f32> = freqs.to_vec().unwrap();
         let expected_1_1 = 1.0_f32 / 10000.0_f32.powf(2.0 / 32.0);
         assert!((v[0] - 0.0).abs() < 1e-5);

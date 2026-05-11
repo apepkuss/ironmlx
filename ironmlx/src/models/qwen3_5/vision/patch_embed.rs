@@ -11,17 +11,19 @@ pub struct PatchEmbed {
 }
 
 impl PatchEmbed {
-    pub fn new(weight_5d: Array, bias: Array, hidden_size: i32) -> Self {
-        let weight_2d = weight_5d
-            .reshape(&[hidden_size, 2 * 16 * 16 * 3][..])
-            .expect("reshape patch_embed weight");
-        Self { weight_2d, bias }
+    /// Construct from already-loaded `weight_5d` shape
+    /// `[hidden_size, kT, kH, kW, Cin]` (Qwen3.5-VL: `[1024, 2, 16, 16, 3]`)
+    /// and `bias` shape `[hidden_size]`. Returns `Err` if `weight_5d` cannot
+    /// be reshaped to `[hidden_size, kT*kH*kW*Cin]` (size mismatch).
+    pub fn new(weight_5d: Array, bias: Array, hidden_size: i32) -> Result<Self> {
+        let weight_2d = weight_5d.reshape(&[hidden_size, 2 * 16 * 16 * 3][..])?;
+        Ok(Self { weight_2d, bias })
     }
 
     pub fn from_loader(loader: &Loader, prefix: &str, hidden_size: i32) -> Result<Self> {
         let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
         let bias = loader.tensor(&format!("{prefix}.bias"))?.clone();
-        Ok(Self::new(weight, bias, hidden_size))
+        Self::new(weight, bias, hidden_size)
     }
 
     pub fn forward(&self, x: &Array) -> Result<Array> {
@@ -54,7 +56,7 @@ mod tests {
     fn patch_embed_output_shape() {
         let weight = Array::zeros(&[1024, 2, 16, 16, 3], mlx::Dtype::Bfloat16).unwrap();
         let bias = Array::zeros(&[1024], mlx::Dtype::Bfloat16).unwrap();
-        let pe = PatchEmbed::new(weight, bias, 1024);
+        let pe = PatchEmbed::new(weight, bias, 1024).unwrap();
         let input = Array::zeros(&[4, 2, 3, 16, 16], mlx::Dtype::Bfloat16).unwrap();
         let out = pe.forward(&input).unwrap();
         assert_eq!(out.shape().as_slice(), &[4, 1024]);
