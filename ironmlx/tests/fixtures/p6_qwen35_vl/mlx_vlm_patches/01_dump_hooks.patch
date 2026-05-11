@@ -1,27 +1,26 @@
 diff --git a/mlx_vlm/models/qwen3_vl/vision.py b/mlx_vlm/models/qwen3_vl/vision.py
-index dc57d2f..db3d7ce 100644
+index dc57d2f..0e35dac 100644
 --- a/mlx_vlm/models/qwen3_vl/vision.py
 +++ b/mlx_vlm/models/qwen3_vl/vision.py
-@@ -6,6 +6,28 @@ import mlx.nn as nn
+@@ -6,6 +6,27 @@ import mlx.nn as nn
  from ..base import ensure_fused_sdpa
  from .config import VisionConfig
  
 +import os as _os
 +
-+_VISION_DUMP_DIR = _os.environ.get("MLXVLM_VISION_DUMP_DIR")
-+
 +
 +def _maybe_dump(name: str, tensor):
-+    """P6.1 diff hook. No-op unless MLXVLM_VISION_DUMP_DIR is set.
++    """P6.1 diff hook. No-op unless MLXVLM_VISION_DUMP_DIR is set at call time.
 +
 +    See /Volumes/Dev/cxx-mlx/docs/superpowers/specs/2026-05-11-p6-1-vision-diff-pipeline-design.md
 +    """
-+    if not _VISION_DUMP_DIR:
++    dump_dir = _os.environ.get("MLXVLM_VISION_DUMP_DIR")
++    if not dump_dir:
 +        return
 +    try:
 +        mx.eval(tensor)
 +        mx.save_safetensors(
-+            _os.path.join(_VISION_DUMP_DIR, f"{name}.safetensors"),
++            _os.path.join(dump_dir, f"{name}.safetensors"),
 +            {"tensor": tensor},
 +        )
 +    except Exception as e:
@@ -31,7 +30,7 @@ index dc57d2f..db3d7ce 100644
  
  def check_array_shape(arr):
      shape = arr.shape
-@@ -368,6 +390,7 @@ class VisionModel(nn.Module):
+@@ -368,6 +389,7 @@ class VisionModel(nn.Module):
              patch_pos_embeds_permute.append(pos_embed)
  
          patch_pos_embeds = mx.concatenate(patch_pos_embeds_permute)
@@ -39,7 +38,7 @@ index dc57d2f..db3d7ce 100644
          return patch_pos_embeds
  
      def __call__(
-@@ -376,11 +399,15 @@ class VisionModel(nn.Module):
+@@ -376,11 +398,15 @@ class VisionModel(nn.Module):
          grid_thw: mx.array,
          **kwargs,
      ) -> mx.array:
@@ -55,7 +54,7 @@ index dc57d2f..db3d7ce 100644
  
          seq_len = hidden_states.shape[0]
          hidden_states = hidden_states.reshape(seq_len, -1)
-@@ -408,6 +435,7 @@ class VisionModel(nn.Module):
+@@ -408,6 +434,7 @@ class VisionModel(nn.Module):
                  cu_seqlens=cu_seqlens,
                  rotary_pos_emb=rotary_pos_emb,
              )
@@ -63,7 +62,7 @@ index dc57d2f..db3d7ce 100644
              if layer_num in self.deepstack_visual_indexes:
                  deepstack_feature = self.deepstack_merger_list[
                      self.deepstack_visual_indexes.index(layer_num)
-@@ -415,6 +443,7 @@ class VisionModel(nn.Module):
+@@ -415,6 +442,7 @@ class VisionModel(nn.Module):
                  deepstack_feature_lists.append(deepstack_feature)
  
          hidden_states = self.merger(hidden_states)
