@@ -114,9 +114,29 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let sampler = build_sampler(&req);
 
-    // Flatten any multimodal content parts to plain text.
-    // The Anthropic /v1/messages handler is text-only; image_url parts are
-    // stripped (only their text siblings are kept).
+    // The Anthropic /v1/messages handler is text-only. Reject requests that
+    // include image content parts with a clear 400 rather than silently
+    // dropping them — silent drop produced text-only completions that ignored
+    // the image and confused users (audit ref B6). Multimodal support for the
+    // Anthropic shape is a future expansion; today, route image requests to
+    // /v1/chat/completions.
+    for m in &req.messages {
+        if let Content::Parts(parts) = &m.content {
+            for p in parts {
+                if matches!(p, ContentPart::ImageUrl { .. }) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "Anthropic /v1/messages does not yet support image content parts; \
+                         use /v1/chat/completions for image requests"
+                            .to_string(),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    // Flatten any text-only multimodal content parts to plain text.
     let flat_messages: Vec<ChatMessage> = req
         .messages
         .into_iter()
@@ -164,6 +184,10 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         prefill_chunk_size: state.prefill_chunk_size,
         pixel_values: None,
         image_grid_thw: None,
+        // Anthropic path is text-only (see audit B6); both values unused
+        // when image_grid_thw is None.
+        image_spatial_merge_size: 2,
+        image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
     };
 
     if stream {

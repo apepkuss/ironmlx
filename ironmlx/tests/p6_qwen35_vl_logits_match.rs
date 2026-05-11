@@ -203,6 +203,7 @@ fn p6_qwen35_vl_logits_match() {
             None,
             Some(&pv),
             Some(&grids_tup),
+            ironmlx::core::generate::IMAGE_TOKEN_ID,
             (),
         )
         .expect("forward_vl");

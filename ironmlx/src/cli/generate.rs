@@ -85,6 +85,9 @@ pub fn run(args: GenerateArgs) -> Result<()> {
         prefill_chunk_size: args.prefill_chunk_size,
         pixel_values: None,
         image_grid_thw: None,
+        // CLI is text-only; both values unused when image_grid_thw is None.
+        image_spatial_merge_size: 2,
+        image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
     };
 
     let mut stream = GenerationStream::new(&model, &tokenizer, request)?;

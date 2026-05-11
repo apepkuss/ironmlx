@@ -41,6 +41,17 @@ pub struct GenerateRequest {
     pub pixel_values: Option<Array>,
     /// Per-image `(T, H, W)` grids — must match `pixel_values` patch count.
     pub image_grid_thw: Option<Vec<(i32, i32, i32)>>,
+    /// `VisionConfig.spatial_merge_size` for this model. Used to compute the
+    /// MRoPE VL position-id strides; only consulted when `image_grid_thw` is
+    /// `Some`. Default `2` matches Qwen3.5-VL. Sibling VL models with a
+    /// different merge factor must set this explicitly.
+    pub image_spatial_merge_size: i32,
+    /// Token id of `<|image_pad|>` (the per-patch image placeholder). Used to
+    /// locate which input_id positions get replaced with vision embeddings and
+    /// to drive MRoPE VL stride boundaries. Default [`IMAGE_TOKEN_ID`]
+    /// (`248056` for Qwen3.5-VL). Sibling VL models with a different image-pad
+    /// id must set this from `Tokenizer::token_to_id("<|image_pad|>")`.
+    pub image_token_id: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -412,8 +423,8 @@ impl<'m> GenerationStream<'m> {
                 build_position_ids_vl(
                     &ids_i32,
                     grids,
-                    IMAGE_TOKEN_ID,
-                    /* spatial_merge_size */ 2,
+                    request.image_token_id,
+                    request.image_spatial_merge_size,
                 )?
             } else {
                 build_position_ids(pos, n)?
@@ -428,6 +439,7 @@ impl<'m> GenerationStream<'m> {
                         Some(&mut cache),
                         request.pixel_values.as_ref(),
                         request.image_grid_thw.as_deref(),
+                        request.image_token_id,
                         (),
                     )?
                 } else {
@@ -750,6 +762,8 @@ mod tests {
             prefill_chunk_size: 0,
             pixel_values: None,
             image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: IMAGE_TOKEN_ID,
         };
         assert!(req.pixel_values.is_none());
         assert!(req.image_grid_thw.is_none());
@@ -778,6 +792,8 @@ mod tests {
             prefill_chunk_size: 3,
             pixel_values: Some(dummy_pv),
             image_grid_thw: Some(vec![(1, 4, 4)]),
+            image_spatial_merge_size: 2,
+            image_token_id: IMAGE_TOKEN_ID,
         };
         // We cannot call GenerationStream::new without a real model, but we can
         // replicate and exercise the guard logic directly to confirm the message.
