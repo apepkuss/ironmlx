@@ -149,6 +149,41 @@ mod tests {
     }
 
     #[test]
+    fn mlxvlm_c_major_reshape_to_ironmlx_layout() {
+        // The mlx-vlm processor packs pixel_values into [N, 1536] where the
+        // 1536 inner dim is C-major (C, T, H, W) row-major flatten — see
+        // /Volumes/Dev/mlx-vlm/mlx_vlm/models/qwen3_vl/vision.py:114-120
+        // ("reshape(-1, C, T, H, W).moveaxis(1, 4)"). To consume that input
+        // through ironmlx's VisionTower (which expects [N, T, C, H, W]), the
+        // test driver must reshape [N, 1536] → [N, 3, 2, 16, 16] (C-major)
+        // and transpose [0, 2, 1, 3, 4]. This test pins that contract.
+        //
+        // P6.2 regression marker: this is the byte-layout reshape that was
+        // mis-coded in p6_vision_dump.rs (P6.1 Task 4). See
+        // docs/superpowers/specs/2026-05-11-p6-2-patch-embed-reshape-design.md.
+        let flat: Vec<f32> = (0..1536).map(|i| i as f32).collect();
+        let pv: mlx::Array = (flat.as_slice(), &[1_i32, 1536][..]).try_into().unwrap();
+        let pv_5d = pv.reshape(&[1_i32, 3, 2, 16, 16][..]).unwrap();
+        let pv_out = mlx::ops::shape::transpose_axes(&pv_5d, &[0_i32, 2, 1, 3, 4][..]).unwrap();
+        assert_eq!(pv_out.shape().as_slice(), &[1, 2, 3, 16, 16]);
+
+        let v: Vec<f32> = pv_out.to_vec().unwrap();
+        // pv_out[0, t, c, h, w] flat index in [2, 3, 16, 16] layout:
+        let dst =
+            |t: usize, c: usize, h: usize, w: usize| -> usize { ((t * 3 + c) * 16 + h) * 16 + w };
+        // pv_in C-major formula: source byte at (c, t, h, w) is c*2*16*16 + t*16*16 + h*16 + w
+        let src = |c: usize, t: usize, h: usize, w: usize| -> f32 {
+            (c * 2 * 16 * 16 + t * 16 * 16 + h * 16 + w) as f32
+        };
+        // Spot-check several positions
+        assert_eq!(v[dst(0, 0, 0, 0)], src(0, 0, 0, 0)); // byte 0
+        assert_eq!(v[dst(0, 0, 0, 1)], src(0, 0, 0, 1)); // byte 1
+        assert_eq!(v[dst(1, 0, 0, 0)], src(0, 1, 0, 0)); // (t=1) byte 256
+        assert_eq!(v[dst(0, 1, 0, 0)], src(1, 0, 0, 0)); // (c=1) byte 512
+        assert_eq!(v[dst(1, 2, 15, 15)], src(2, 1, 15, 15)); // last byte 1535
+    }
+
+    #[test]
     fn patchify_shape_correct() {
         // Synthetic [3, 32, 32] → grid 2×2 patches of 16×16, temporal=2
         // Output shape: [grid_h*grid_w=4, 2 (temporal), 3 (channels), 16, 16]
