@@ -19,7 +19,7 @@ if [[ -z "${MLX_DIR:-}" || -z "${QWEN35_MODEL:-}" ]]; then
     exit 1
 fi
 
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 FIXTURE_DIR="$REPO_ROOT/ironmlx/tests/fixtures/p6_qwen35_vl"
 PY_DIR="${PY_DIR:-/tmp/p6_diff/python}"
 RUST_DIR="${RUST_DIR:-/tmp/p6_diff/rust}"
