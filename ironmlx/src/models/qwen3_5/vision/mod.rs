@@ -132,7 +132,7 @@ impl VisionTower {
             x = blk.forward_with_name_prefix(&x, &rotary, &cu_seqlens, &prefix)?;
             dump_tensor(&format!("{prefix}_out"), &x);
         }
-        let out = self.merger.forward(&x, grid_thw)?;
+        let out = self.merger.forward(&x)?;
         dump_tensor("29_merger_out", &out);
         Ok(out)
     }
