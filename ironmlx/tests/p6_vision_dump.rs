@@ -36,15 +36,19 @@ fn p6_vision_dump() {
     let vc = cfg.vision_config.expect("vision_config");
     let tower = VisionTower::from_loader(&loader, &vc).expect("tower");
 
-    // mlx-vlm preprocesses pixel_values to [N, 1536] (flattened patches).
-    // Reshape to [N, 2, 16, 16, 3] then transpose to [N, 2, 3, 16, 16] to
-    // match VisionTower's expected [N, T, C, H, W] input convention.
+    // mlx-vlm's processor packs pixel_values as [N, 1536] where the 1536 inner
+    // dim is the (C, T, H, W) C-major row-major flatten — see
+    // /Volumes/Dev/mlx-vlm/mlx_vlm/models/qwen3_vl/vision.py:114-120
+    // (`reshape(-1, C, T, H, W).moveaxis(1, 4)`). We reshape that as
+    // [N, C=3, T=2, H=16, W=16] then transpose [0,2,1,3,4] to land on
+    // [N, T, C, H, W] = ironmlx's VisionTower::forward input contract.
+    // See docs/superpowers/specs/2026-05-11-p6-2-patch-embed-reshape-design.md.
     let (mut loaded, _meta) = mlx::io::load_safetensors(&pv_path).expect("load pixel_values");
     let pv_flat = loaded.remove("tensor").expect("tensor key");
     let n = pv_flat.shape().as_slice()[0];
-    let pv_5d = pv_flat.reshape(&[n, 2, 16, 16, 3][..]).expect("reshape pv");
+    let pv_5d = pv_flat.reshape(&[n, 3, 2, 16, 16][..]).expect("reshape pv");
     let pv = pv_5d
-        .transpose_axes(&[0, 1, 4, 2, 3][..])
+        .transpose_axes(&[0, 2, 1, 3, 4][..])
         .expect("transpose pv");
 
     // Grid for the COCO sample: image_grid_thw = [[1, 30, 40]] (Task 20 fixture).
