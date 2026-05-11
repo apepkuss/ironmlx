@@ -128,8 +128,9 @@ impl VisionTower {
             v
         };
         for (i, blk) in self.blocks.iter().enumerate() {
-            x = blk.forward(&x, &rotary, &cu_seqlens)?;
-            dump_tensor(&format!("{:02}_block_{:02}_out", 5 + i, i), &x);
+            let prefix = format!("{:02}_block_{:02}", 5 + i, i);
+            x = blk.forward_with_name_prefix(&x, &rotary, &cu_seqlens, &prefix)?;
+            dump_tensor(&format!("{prefix}_out"), &x);
         }
         let out = self.merger.forward(&x, grid_thw)?;
         dump_tensor("29_merger_out", &out);

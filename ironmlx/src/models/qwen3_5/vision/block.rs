@@ -395,6 +395,34 @@ impl VitBlock {
         let mlp_out = self.mlp.forward(&normed2)?;
         Ok(&h + &mlp_out)
     }
+
+    /// Like [`Self::forward`] but emits 4 intra-block dumps (post-norm1, attn-residual,
+    /// post-norm2, mlp-residual) under the given name prefix. The non-feature
+    /// build erases the dump calls; in feature builds the dumps fire only if
+    /// `IRONMLX_VISION_DUMP_DIR` is set. Used by the P6.3b op-level diff path.
+    pub fn forward_with_name_prefix(
+        &self,
+        x: &Array,
+        rotary_pos_emb: &Array,
+        cu_seqlens: &[i32],
+        name_prefix: &str,
+    ) -> Result<Array> {
+        use crate::models::qwen3_5::vision::dump::dump_tensor;
+        // h = x + attn(norm1(x))
+        let normed1 = self.norm1.forward(x)?;
+        dump_tensor(&format!("{name_prefix}_a_norm1_out"), &normed1);
+        let attn_out = self.attn.forward(&normed1, rotary_pos_emb, cu_seqlens)?;
+        let h = x + &attn_out;
+        dump_tensor(&format!("{name_prefix}_b_attn_residual"), &h);
+
+        // y = h + mlp(norm2(h))
+        let normed2 = self.norm2.forward(&h)?;
+        dump_tensor(&format!("{name_prefix}_c_norm2_out"), &normed2);
+        let mlp_out = self.mlp.forward(&normed2)?;
+        let out = &h + &mlp_out;
+        dump_tensor(&format!("{name_prefix}_d_mlp_residual"), &out);
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
