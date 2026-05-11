@@ -2,6 +2,7 @@
 //! `docs/superpowers/specs/2026-05-10-p6-vl-design.md` §4.2-4.5.
 
 pub mod block;
+pub mod dump;
 pub mod merger;
 pub mod patch_embed;
 

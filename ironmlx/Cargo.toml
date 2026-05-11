@@ -36,6 +36,10 @@ tokio-stream.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 
+[features]
+default = []
+vision-dump = []
+
 [dev-dependencies]
 approx = "0.5"
 tokio-stream.workspace = true
