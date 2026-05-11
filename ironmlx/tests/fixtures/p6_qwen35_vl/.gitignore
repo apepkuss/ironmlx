@@ -3,3 +3,6 @@ expected_*.npy
 expected_first_token.txt
 # Diagnostic dumps from Task 21 debugging (regenerate locally if needed)
 ref_*.npy
+# P6.1 diff outputs (regenerate via run_p6_1_diff.sh)
+diff_reports/*/
+!diff_reports/.gitkeep
