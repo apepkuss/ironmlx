@@ -159,7 +159,13 @@ pub async fn decode_image_url(url: &str, client: &reqwest::Client) -> anyhow::Re
 pub async fn expand_image_parts_in_messages(
     messages: Vec<ChatMessage>,
     client: &reqwest::Client,
+    spatial_merge_size: i32,
 ) -> anyhow::Result<(Vec<ChatMessage>, Option<Array>, Vec<(i32, i32, i32)>)> {
+    if spatial_merge_size <= 0 {
+        return Err(anyhow::anyhow!(
+            "expand_image_parts_in_messages: spatial_merge_size must be > 0 (got {spatial_merge_size})"
+        ));
+    }
     let mut all_pixel_values: Vec<Array> = Vec::new();
     let mut grid_thw: Vec<(i32, i32, i32)> = Vec::new();
 
@@ -178,11 +184,11 @@ pub async fn expand_image_parts_in_messages(
         }
     }
 
-    // Build per-message image token counts (grid_h/2 * grid_w/2) in the same
-    // order images were collected.
+    // Build per-message image token counts ((gh/m) * (gw/m)) in the same
+    // order images were collected, where m = spatial_merge_size.
     let token_counts: Vec<usize> = grid_thw
         .iter()
-        .map(|&(_, gh, gw)| ((gh / 2) * (gw / 2)) as usize)
+        .map(|&(_, gh, gw)| ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize)
         .collect();
     let mut counts_deque: VecDeque<usize> = VecDeque::from(token_counts);
 
@@ -267,19 +273,38 @@ pub async fn chat_completions(
     // For text-only requests this is a cheap no-op (no images to fetch).
     let http_client = reqwest::Client::new();
 
+    // Read VisionConfig.spatial_merge_size from the model so multi-image
+    // token-count math + MRoPE VL position-id stride pick up whatever the
+    // loaded checkpoint actually uses. Default `2` for text-only models or
+    // VL models without an explicit vision_config (matches Qwen3.5-VL).
+    let spatial_merge_size: i32 = state
+        .model
+        .lock()
+        .await
+        .config()
+        .vision_config
+        .as_ref()
+        .map(|vc| vc.spatial_merge_size)
+        .unwrap_or(2);
+
     // Expand multimodal content parts: decode images, build pixel_values,
     // rewrite messages to text-with-placeholder.
-    let (flat_messages, pixel_values, image_grid_thw) =
-        match expand_image_parts_in_messages(req.messages, &http_client).await {
-            Ok(t) => t,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("image decode/preprocess: {e}"),
-                )
-                    .into_response();
-            }
-        };
+    let (flat_messages, pixel_values, image_grid_thw) = match expand_image_parts_in_messages(
+        req.messages,
+        &http_client,
+        spatial_merge_size,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("image decode/preprocess: {e}"),
+            )
+                .into_response();
+        }
+    };
 
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -310,6 +335,7 @@ pub async fn chat_completions(
         prefill_chunk_size: state.prefill_chunk_size,
         pixel_values,
         image_grid_thw: image_grid_thw_opt,
+        image_spatial_merge_size: spatial_merge_size,
     };
 
     let prompt_tokens = request.prompt_ids.len() as u32;

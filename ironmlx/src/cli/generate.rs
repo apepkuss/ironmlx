@@ -85,6 +85,8 @@ pub fn run(args: GenerateArgs) -> Result<()> {
         prefill_chunk_size: args.prefill_chunk_size,
         pixel_values: None,
         image_grid_thw: None,
+        // CLI is text-only; the value is unused when image_grid_thw is None.
+        image_spatial_merge_size: 2,
     };
 
     let mut stream = GenerationStream::new(&model, &tokenizer, request)?;
