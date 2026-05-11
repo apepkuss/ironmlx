@@ -2,6 +2,7 @@
 //! `docs/superpowers/specs/2026-05-10-p6-vl-design.md` §4.2-4.5.
 
 pub mod block;
+pub mod dump;
 pub mod merger;
 pub mod patch_embed;
 
@@ -12,6 +13,7 @@ use crate::core::Loader;
 use crate::models::qwen3_5::VisionConfig;
 
 use self::block::VitBlock;
+use self::dump::dump_tensor;
 use self::merger::PatchMerger;
 use self::patch_embed::PatchEmbed;
 
@@ -108,8 +110,14 @@ impl VisionTower {
     /// Returns merged patch features, shape `[total_patches / m², out_hidden]`.
     pub fn forward(&self, pixel_values: &Array, grid_thw: &[(i32, i32, i32)]) -> Result<Array> {
         let mut x = self.patch_embed.forward(pixel_values)?;
+        dump_tensor("01_patch_embed_out", &x);
+
         x = self.add_learned_pos_embed(&x, grid_thw)?;
+        dump_tensor("03_after_pos_embed", &x);
+
         let rotary = self.compute_rotary_pos_emb(grid_thw)?;
+        dump_tensor("04_rotary_freqs", &rotary);
+
         let cu_seqlens: Vec<i32> = {
             let mut v = vec![0_i32];
             let mut total = 0_i32;
@@ -119,10 +127,13 @@ impl VisionTower {
             }
             v
         };
-        for blk in &self.blocks {
+        for (i, blk) in self.blocks.iter().enumerate() {
             x = blk.forward(&x, &rotary, &cu_seqlens)?;
+            dump_tensor(&format!("{:02}_block_{:02}_out", 5 + i, i), &x);
         }
-        self.merger.forward(&x, grid_thw)
+        let out = self.merger.forward(&x, grid_thw)?;
+        dump_tensor("29_merger_out", &out);
+        Ok(out)
     }
 
     /// Add learned positional embedding to patch features via bilinear interpolation.
@@ -292,6 +303,7 @@ impl VisionTower {
         // Concatenate across all grids → [total_tokens, hidden]
         let refs: Vec<&Array> = pieces.iter().collect();
         let pos_embed_all = ops::concatenate(&refs, 0)?;
+        dump_tensor("02_pos_embed_contrib", &pos_embed_all);
 
         // Add to patch features
         let x_cast = ops::cast::astype(x, pe_dtype)?;
