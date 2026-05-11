@@ -27,26 +27,35 @@ pub fn replace_image_tokens(
     // --- shape extraction ---------------------------------------------------
     let te_shape = text_embeds.shape();
     let te_dims = te_shape.as_slice();
-    assert_eq!(
-        te_dims.len(),
-        3,
-        "text_embeds must be 3-D [B, S, hidden], got {te_dims:?}"
-    );
+    if te_dims.len() != 3 {
+        return Err(anyhow!(
+            "text_embeds must be 3-D [B, S, hidden], got {te_dims:?}"
+        ));
+    }
     let (b, s, hidden) = (te_dims[0], te_dims[1], te_dims[2]);
-    assert_eq!(b, 1, "P6 only supports B=1, got B={b}");
+    if b != 1 {
+        // Deliberate gate — multi-image / multi-sequence batching is a future
+        // expansion (see audit ref B1). Return Err rather than assert! so the
+        // production HTTP path surfaces it as a clean 4xx.
+        return Err(anyhow!(
+            "replace_image_tokens currently supports B=1 only (got B={b}); \
+             multi-image batched VL is not yet implemented"
+        ));
+    }
 
     let ve_shape = vision_embeds.shape();
     let ve_dims = ve_shape.as_slice();
-    assert_eq!(
-        ve_dims.len(),
-        2,
-        "vision_embeds must be 2-D [N_img, hidden], got {ve_dims:?}"
-    );
+    if ve_dims.len() != 2 {
+        return Err(anyhow!(
+            "vision_embeds must be 2-D [N_img, hidden], got {ve_dims:?}"
+        ));
+    }
     let (n_img, v_hidden) = (ve_dims[0], ve_dims[1]);
-    assert_eq!(
-        hidden, v_hidden,
-        "hidden dim mismatch: text={hidden} vision={v_hidden}"
-    );
+    if hidden != v_hidden {
+        return Err(anyhow!(
+            "hidden dim mismatch: text={hidden} vision={v_hidden}"
+        ));
+    }
 
     // --- read input_ids to host (int32 cast first) --------------------------
     let ids_i32 = ops::astype(input_ids, Dtype::Int32)?;
@@ -87,8 +96,9 @@ pub fn replace_image_tokens(
             k += 1;
         }
     }
-    // Assertion: k should equal n_img (already validated above, but be explicit)
-    assert_eq!(k, n_img as usize);
+    // Algorithmic invariant: loop above iterates exactly img_count == n_img
+    // times by the pre-check at line 67. Asserted via debug_assert only.
+    debug_assert_eq!(k, n_img as usize);
 
     // --- ship vision_at_text back to device ---------------------------------
     let vat_arr: Array = (vat.as_slice(), &[b, s, hidden][..])

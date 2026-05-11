@@ -180,10 +180,12 @@ pub fn build_position_ids(start_pos: i32, len: i32) -> Result<Array> {
     mlx::ops::shape::broadcast_to(&one_stream, &[3_i32, 1, len][..]).map_err(anyhow::Error::from)
 }
 
-/// Token IDs for Qwen3.5-VL (from model config.json, **not** from mlx-vlm defaults which differ).
+/// Token ID for `<|image_pad|>` in Qwen3.5-VL (from model `config.json`,
+/// **not** from mlx-vlm defaults which differ).
+///
+/// TODO P6.5 (audit ref B5): plumb from `Tokenizer` at load time so the value
+/// works for sibling VL models with different image-pad token ids.
 pub const IMAGE_TOKEN_ID: i32 = 248056;
-pub const VISION_START_TOKEN_ID: i32 = 248053;
-pub const VISION_END_TOKEN_ID: i32 = 248054;
 
 /// MRoPE 3-stream position_ids for a VL sequence (B=1, image-only, no video).
 ///
