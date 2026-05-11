@@ -144,6 +144,12 @@ impl Tokenizer {
         &self.eos_token_ids
     }
 
+    /// Resolve a token's textual form to its numeric id. Used for special
+    /// tokens like `<|image_pad|>` so VL-aware callers don't hardcode ids.
+    pub fn token_to_id(&self, token: &str) -> Option<u32> {
+        self.inner.token_to_id(token)
+    }
+
     /// Render a chat template. Errors if the tokenizer config did not
     /// supply a `chat_template`. `extra_kwargs` (when present) is a JSON
     /// object whose top-level keys are merged into the template context

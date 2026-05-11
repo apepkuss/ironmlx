@@ -4,7 +4,6 @@ use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{GatedDeltaCache, KVCache};
-use crate::core::generate::IMAGE_TOKEN_ID;
 use crate::core::Loader;
 use crate::nn::{AttnKind, LayerCache, Linear};
 use crate::Result;
@@ -130,13 +129,16 @@ impl Qwen35Model {
     }
 
     /// # Arguments
-    /// - `input_ids`     — `[B, S]` int32 token ids (B must be 1 for P6).
-    /// - `position_ids`  — `[3, B, S]` int32 per Mrope contract.
-    /// - `cache`         — optional per-layer cache slice.
-    /// - `pixel_values`  — pre-processed image patches `[N, T, C, H, W]`.
-    /// - `grid_thw`      — per-image `(temporal, height, width)` grid sizes;
+    /// - `input_ids`      — `[B, S]` int32 token ids (B must be 1 for P6).
+    /// - `position_ids`   — `[3, B, S]` int32 per Mrope contract.
+    /// - `cache`          — optional per-layer cache slice.
+    /// - `pixel_values`   — pre-processed image patches `[N, T, C, H, W]`.
+    /// - `grid_thw`       — per-image `(temporal, height, width)` grid sizes;
     ///   **required** when `pixel_values.is_some()`.
-    /// - `target`        — compute device / stream.
+    /// - `image_token_id` — tokenizer id of the per-patch image placeholder
+    ///   (e.g. `<|image_pad|>` = 248056 for Qwen3.5-VL).
+    /// - `target`         — compute device / stream.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_vl(
         &self,
         input_ids: &Array,
@@ -144,6 +146,7 @@ impl Qwen35Model {
         cache: Option<&mut [LayerCache]>,
         pixel_values: Option<&Array>,
         grid_thw: Option<&[(i32, i32, i32)]>,
+        image_token_id: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
@@ -165,7 +168,7 @@ impl Qwen35Model {
                 &hidden,
                 input_ids,
                 &vision_embeds,
-                IMAGE_TOKEN_ID,
+                image_token_id,
             )?;
         }
 
@@ -372,7 +375,15 @@ mod tests {
 
         // forward_vl with pixel_values=None must be numerically identical
         let logits_b = model
-            .forward_vl(&input_ids, &pos, None, None, None, ())
+            .forward_vl(
+                &input_ids,
+                &pos,
+                None,
+                None,
+                None,
+                crate::core::generate::IMAGE_TOKEN_ID,
+                (),
+            )
             .expect("forward_vl text-only");
 
         // Compute max absolute difference

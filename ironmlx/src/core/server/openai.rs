@@ -287,6 +287,17 @@ pub async fn chat_completions(
         .map(|vc| vc.spatial_merge_size)
         .unwrap_or(2);
 
+    // Resolve `<|image_pad|>` to its tokenizer id, so VL routing works for
+    // sibling Qwen-family models with different special-token ids. Falls back
+    // to the Qwen3.5-VL default constant if the token is absent (text-only
+    // tokenizer or otherwise non-VL model — in that case image_grid_thw will
+    // also be empty so the id is unused).
+    let image_token_id: i32 = state
+        .tokenizer
+        .token_to_id("<|image_pad|>")
+        .map(|id| id as i32)
+        .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID);
+
     // Expand multimodal content parts: decode images, build pixel_values,
     // rewrite messages to text-with-placeholder.
     let (flat_messages, pixel_values, image_grid_thw) = match expand_image_parts_in_messages(
@@ -336,6 +347,7 @@ pub async fn chat_completions(
         pixel_values,
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size: spatial_merge_size,
+        image_token_id,
     };
 
     let prompt_tokens = request.prompt_ids.len() as u32;

@@ -164,9 +164,10 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         prefill_chunk_size: state.prefill_chunk_size,
         pixel_values: None,
         image_grid_thw: None,
-        // Anthropic path is text-only (see audit B6); the value is unused
+        // Anthropic path is text-only (see audit B6); both values unused
         // when image_grid_thw is None.
         image_spatial_merge_size: 2,
+        image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
     };
 
     if stream {
