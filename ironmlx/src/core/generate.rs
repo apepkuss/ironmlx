@@ -367,27 +367,7 @@ impl<'m> GenerationStream<'m> {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
         }
 
-        // VL requests must fit in a single prefill chunk because the vision tower
-        // runs only once (in the last-chunk forward_vl call).  Intermediate-chunk
-        // text-only forwards would receive un-patched embeddings for the image
-        // token positions, producing incorrect KV cache entries.  Fail explicitly
-        // so the caller can increase prefill_chunk_size (or set it to 0).
         let prompt_len = request.prompt_ids.len();
-        if request.pixel_values.is_some() {
-            let effective_chunk = if request.prefill_chunk_size == 0 {
-                prompt_len
-            } else {
-                request.prefill_chunk_size
-            };
-            if prompt_len > effective_chunk {
-                return Err(anyhow!(
-                    "VL prefill currently requires single-chunk: prompt_len={} > chunk_size={}. \
-                     Set prefill_chunk_size=0 (or a value >= prompt length) for VL requests.",
-                    prompt_len,
-                    effective_chunk,
-                ));
-            }
-        }
 
         // P8a-stage4/6 Metal capture hook. Gated by `IRONMLX_CAPTURE_FILE`
         // env var + first-construction OnceLock. `IRONMLX_CAPTURE_PHASE=decode`
@@ -414,6 +394,29 @@ impl<'m> GenerationStream<'m> {
         // sync wait is essentially free here because the next chunk's
         // `forward_on` has nothing to do until the previous chunk's writes
         // land in the cache anyway.
+
+        // P6.7: For VL requests, run the vision tower once before the
+        // chunking loop and build MRoPE position ids for the full prompt.
+        // Each chunk then slices vision_embeds and position_ids by its
+        // own range, ensuring the chunked path is numerically equivalent
+        // to single-chunk forward_vl.
+        let (vision_embeds_full, position_ids_full) = if let (Some(pv), Some(grids)) = (
+            request.pixel_values.as_ref(),
+            request.image_grid_thw.as_deref(),
+        ) {
+            let ve = model.compute_vision_embeds(pv, grids, ())?;
+            let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
+            let pos_full = build_position_ids_vl(
+                &full_ids_i32,
+                grids,
+                request.image_token_id,
+                request.image_spatial_merge_size,
+            )?;
+            (Some(ve), Some(pos_full))
+        } else {
+            (None, None)
+        };
+
         let chunk_size = request.prefill_chunk_size;
         let prompt_len_i32 = prompt_len as i32;
         let mut pos: i32 = 0;
