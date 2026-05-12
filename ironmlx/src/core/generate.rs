@@ -301,6 +301,34 @@ pub fn build_batch_attention_mask(
     mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
 }
 
+/// Build MRoPE position ids for one batched decode step.
+/// Returns `[3, B, 1]` int32. Each batch row `i` holds the position id
+/// `per_row_pos[i]` for its new token; all three MRoPE streams hold the
+/// same value (text-only convention; VL B>1 in B1-p2.4 will need a
+/// multi-stream variant).
+pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
+    if per_row_pos.is_empty() {
+        return Err(anyhow!(
+            "build_decode_position_ids: per_row_pos must be non-empty"
+        ));
+    }
+    for (i, &p) in per_row_pos.iter().enumerate() {
+        if p < 0 {
+            return Err(anyhow!(
+                "build_decode_position_ids: per_row_pos[{i}] = {p} must be >= 0"
+            ));
+        }
+    }
+
+    let b = per_row_pos.len();
+    let mut flat = Vec::with_capacity(3 * b);
+    for _ in 0..3 {
+        flat.extend_from_slice(per_row_pos);
+    }
+    let arr: Array = (&flat[..], &[3_i32, b as i32, 1_i32][..]).try_into()?;
+    Ok(arr)
+}
+
 /// Token ID for `<|image_pad|>` in Qwen3.5-VL (from model `config.json`,
 /// **not** from mlx-vlm defaults which differ).
 ///
@@ -1081,5 +1109,26 @@ mod b1_p2_1_mask_tests {
             0.0, ni, ni, 0.0, 0.0, ni, 0.0, 0.0, 0.0,
         ];
         assert_eq!(flat, expected);
+    }
+}
+
+#[cfg(test)]
+mod b1_p2_2_decode_position_id_tests {
+    use super::*;
+
+    #[test]
+    fn build_decode_position_ids_basic() {
+        // B=2 with distinct positions.
+        let arr = build_decode_position_ids(&[10, 20]).expect("build");
+        assert_eq!(arr.shape().as_slice(), &[3, 2, 1]);
+        let flat: Vec<i32> = arr.to_vec::<i32>().expect("to_vec");
+        // All 3 streams identical: [10, 20] repeated 3 times.
+        assert_eq!(flat, vec![10, 20, 10, 20, 10, 20]);
+    }
+
+    #[test]
+    fn build_decode_position_ids_rejects_empty() {
+        let err = build_decode_position_ids(&[]).expect_err("must err on empty");
+        assert!(format!("{err}").contains("per_row_pos must be non-empty"));
     }
 }
