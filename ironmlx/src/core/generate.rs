@@ -249,6 +249,58 @@ pub fn build_position_ids_batched(prompt_lens: &[i32], max_len: i32) -> Result<A
     Ok(arr)
 }
 
+/// Build an additive attention mask `[B, 1, max_len, max_len]` for a
+/// left-padded batched prefill. For batch row `i` with actual length
+/// `prompt_lens[i] = L_i` and `pad_start_i = max_len - L_i`:
+///
+///   mask[i, 0, q, k] = 0.0   iff (q >= pad_start_i) AND (k >= pad_start_i) AND (k <= q)
+///                    = -inf  otherwise
+///
+/// The dtype is `dtype` (typically `Dtype::Bfloat16` to match the SDPA promoted
+/// type). Returns a value broadcast-compatible with mlx fast SDPA's expected
+/// `[B, N, T_q, T_kv]` shape.
+pub fn build_batch_attention_mask(
+    prompt_lens: &[i32],
+    max_len: i32,
+    dtype: Dtype,
+) -> Result<Array> {
+    if prompt_lens.is_empty() {
+        return Err(anyhow!(
+            "build_batch_attention_mask: prompt_lens must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_batch_attention_mask: max_len must be > 0, got {max_len}"
+        ));
+    }
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        if l <= 0 || l > max_len {
+            return Err(anyhow!(
+                "build_batch_attention_mask: prompt_lens[{i}] = {l} out of (0, {max_len}]"
+            ));
+        }
+    }
+
+    let b = prompt_lens.len();
+    let s = max_len as usize;
+    let total = b * s * s;
+    let neg_inf = f32::NEG_INFINITY;
+    let mut flat = vec![neg_inf; total];
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        let l = l as usize;
+        let pad_start = s - l;
+        for q in pad_start..s {
+            for k in pad_start..=q {
+                flat[(i * s + q) * s + k] = 0.0;
+            }
+        }
+    }
+
+    let arr_f32: Array = (&flat[..], &[b as i32, 1_i32, max_len, max_len][..]).try_into()?;
+    mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
+}
+
 /// Token ID for `<|image_pad|>` in Qwen3.5-VL (from model `config.json`,
 /// **not** from mlx-vlm defaults which differ).
 ///
@@ -996,6 +1048,38 @@ mod b1_p2_1_position_id_tests {
         for _ in 0..3 {
             expected.extend_from_slice(&one_stream);
         }
+        assert_eq!(flat, expected);
+    }
+}
+
+#[cfg(test)]
+mod b1_p2_1_mask_tests {
+    use super::*;
+
+    #[test]
+    fn build_batch_attention_mask_causal_no_padding() {
+        // B=1, length=3, max_len=3 → standard lower-triangular causal.
+        let mask = build_batch_attention_mask(&[3], 3, Dtype::Float32).expect("mask");
+        assert_eq!(mask.shape().as_slice(), &[1, 1, 3, 3]);
+        let flat: Vec<f32> = mask.to_vec::<f32>().expect("to_vec");
+        let ni = f32::NEG_INFINITY;
+        let expected = vec![0.0, ni, ni, 0.0, 0.0, ni, 0.0, 0.0, 0.0];
+        assert_eq!(flat, expected);
+    }
+
+    #[test]
+    fn build_batch_attention_mask_left_padded() {
+        // B=2, lens [2, 3], max_len=3.
+        let mask = build_batch_attention_mask(&[2, 3], 3, Dtype::Float32).expect("mask");
+        assert_eq!(mask.shape().as_slice(), &[2, 1, 3, 3]);
+        let flat: Vec<f32> = mask.to_vec::<f32>().expect("to_vec");
+        let ni = f32::NEG_INFINITY;
+        let expected = vec![
+            // Row 0 (i=0, pad_start=1)
+            ni, ni, ni, ni, 0.0, ni, ni, 0.0, 0.0,
+            // Row 1 (i=1, pad_start=0, standard causal)
+            0.0, ni, ni, 0.0, 0.0, ni, 0.0, 0.0, 0.0,
+        ];
         assert_eq!(flat, expected);
     }
 }
