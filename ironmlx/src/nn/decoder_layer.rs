@@ -206,6 +206,12 @@ impl DecoderLayer {
         // validity for the `gated_delta_step` kernel). The two have
         // incompatible shapes and dtypes — they cannot be unified.
         let normed_in = self.input_layernorm.forward_on(x, target)?;
+        // Full attention also consumes `linear_attn_mask` (when Some) as its
+        // K/V-validity mask, zeroing pad-position K/V cells before the cache
+        // write. The `[B, T]` boolean shape and "real-vs-pad per token"
+        // semantics are identical to what linear attention uses; reusing it
+        // avoids defining a third mask. See `attention::forward_on` for
+        // details.
         let attn = match (&self.attn, cache) {
             (AttnPath::Full(a), Some(LayerCache::Full(kv))) => a.forward_on(
                 &normed_in,
@@ -213,12 +219,20 @@ impl DecoderLayer {
                 cos,
                 sin,
                 full_attn_mask,
+                linear_attn_mask,
                 Some(kv),
                 target,
             )?,
-            (AttnPath::Full(a), None) => {
-                a.forward_on(&normed_in, mrope, cos, sin, full_attn_mask, None, target)?
-            }
+            (AttnPath::Full(a), None) => a.forward_on(
+                &normed_in,
+                mrope,
+                cos,
+                sin,
+                full_attn_mask,
+                linear_attn_mask,
+                None,
+                target,
+            )?,
             (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => {
                 a.forward_on(&normed_in, linear_attn_mask, Some(gdc), target)?
             }
@@ -330,7 +344,9 @@ impl DecoderLayer {
 
         let normed_in = self.input_layernorm.forward_on(x, target)?;
         let attn_out = match &self.attn {
-            AttnPath::Full(a) => a.forward_on(&normed_in, mrope, cos, sin, mask, cache, target)?,
+            AttnPath::Full(a) => {
+                a.forward_on(&normed_in, mrope, cos, sin, mask, None, cache, target)?
+            }
             AttnPath::Linear(_) => {
                 return Err(anyhow!(
                     "DecoderLayer::forward_on_full_kv: called on Linear layer (MTP requires Full)"

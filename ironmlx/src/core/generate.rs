@@ -290,10 +290,24 @@ pub fn build_batch_attention_mask(
     for (i, &l) in prompt_lens.iter().enumerate() {
         let l = l as usize;
         let pad_start = s - l;
+        // Real query rows (q >= pad_start): attend to real keys (k >= pad_start)
+        // within the causal triangle (k <= q).
         for q in pad_start..s {
             for k in pad_start..=q {
                 flat[(i * s + q) * s + k] = 0.0;
             }
+        }
+        // Pad query rows (q < pad_start): allow self-attention only
+        // (`mask[i, 0, q, q] = 0`). Without this, the row is all `-inf`
+        // and `softmax(all-INF)` yields NaN, which propagates through
+        // subsequent layers and contaminates real-row outputs via
+        // residual connections / layer norms (NaN × any = NaN). Letting
+        // pad-q attend to itself produces a benign zero output (since
+        // `kv_validity_mask` zeros V at pad positions in
+        // `attention::forward_on`), and the pad-q hidden states never
+        // feed into real-row queries (causal mask blocks the path).
+        for q in 0..pad_start {
+            flat[(i * s + q) * s + q] = 0.0;
         }
     }
 
@@ -1152,10 +1166,16 @@ mod b1_p2_1_mask_tests {
         assert_eq!(mask.shape().as_slice(), &[2, 1, 3, 3]);
         let flat: Vec<f32> = mask.to_vec::<f32>().expect("to_vec");
         let ni = f32::NEG_INFINITY;
+        // Row 0 (i=0, pad_start=1):
+        //   q=0 is pad → diagonal allowed (mask[0, 0]=0), rest -inf.
+        //   q=1, q=2 are real → causal lower-triangle from k=pad_start=1.
+        // Row 1 (i=1, pad_start=0): standard causal lower-triangle.
         let expected = vec![
-            // Row 0 (i=0, pad_start=1)
-            ni, ni, ni, ni, 0.0, ni, ni, 0.0, 0.0,
-            // Row 1 (i=1, pad_start=0, standard causal)
+            // Row 0
+            0.0, ni, ni, // q=0 (pad): self-attend only
+            ni, 0.0, ni, // q=1 (real): k=1 allowed
+            ni, 0.0, 0.0, // q=2 (real): k=1, 2 allowed
+            // Row 1 (standard causal)
             0.0, ni, ni, 0.0, 0.0, ni, 0.0, 0.0, 0.0,
         ];
         assert_eq!(flat, expected);

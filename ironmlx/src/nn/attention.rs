@@ -116,10 +116,19 @@ impl Attention {
         mask: Option<&Array>,
         cache: Option<&mut KVCache>,
     ) -> Result<Array> {
-        self.forward_on(x, mrope, cos, sin, mask, cache, ())
+        self.forward_on(x, mrope, cos, sin, mask, None, cache, ())
     }
 
     /// Stream-targeted forward pass — see [`Attention::forward`] for semantics.
+    ///
+    /// `kv_validity_mask: Option<&Array>` is the `[B, T]` boolean per-token
+    /// validity mask consumed during batched prefill: when `Some`, the
+    /// computed K, V tensors are multiplied by it (broadcast to
+    /// `[B, num_kv_heads, T, head_dim]`) BEFORE the cache write, so pad
+    /// positions land as zero K/V cells. Decode-time attention then reads
+    /// a cache with no pad contamination. For single-stream callers (and
+    /// for the `None` mask path) leave this `None` — no zeroing happens
+    /// and the path is bit-identical to the pre-B1-p2.2 behavior.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
@@ -128,6 +137,7 @@ impl Attention {
         cos: &Array,
         sin: &Array,
         mask: Option<&Array>,
+        kv_validity_mask: Option<&Array>,
         cache: Option<&mut KVCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -175,6 +185,22 @@ impl Attention {
 
         // Fused Q+K rotary application (T2 MetalKernel: one dispatch for both).
         let (q, k) = mrope.apply(&q, &k, cos, sin)?;
+
+        // Zero out K, V at pad positions before writing to the cache. The
+        // [B, T] boolean validity mask is broadcast to
+        // [B, num_kv_heads=1 dim, T, head_dim=1 dim] then multiplied in.
+        // Decode-time reads of the cache will see zero K, V at pad slots
+        // → zero attention scores → no contamination of real-row outputs.
+        let (k, v) = if let Some(vm) = kv_validity_mask {
+            let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
+            // [B, T] → [B, 1, T, 1]
+            let vm_broadcast = vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
+            let k_masked = &k * &vm_broadcast;
+            let v_masked = &v * &vm_broadcast;
+            (k_masked, v_masked)
+        } else {
+            (k, v)
+        };
 
         // Route post-RoPE K/V through KV cache when provided; otherwise pass
         // through unchanged. SDPA always consumes the full K/V history.
