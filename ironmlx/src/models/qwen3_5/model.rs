@@ -155,6 +155,53 @@ impl Qwen35Model {
         vision.forward(pixel_values, grid_thw)
     }
 
+    /// Forward a single chunk of a VL prefill. Expects the caller has
+    /// pre-computed `vision_embeds_slice` for the `k_i` `<|image_pad|>`
+    /// occurrences in this chunk's `input_ids`. Pass `None` if the chunk
+    /// contains no image tokens (pure-text segment of a VL prompt).
+    ///
+    /// Compared to `forward_vl`, this method:
+    /// - Does **not** run the vision tower.
+    /// - Skips the scatter step entirely when
+    ///   `vision_embeds_slice.is_none()`, falling back to the text-only
+    ///   embedding path.
+    ///
+    /// # Invariants
+    /// - When `vision_embeds_slice.is_some()`, its row count must equal
+    ///   the number of `image_token_id` occurrences in `input_ids`.
+    ///   `cross_modal::replace_image_tokens` enforces this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_vl_chunk(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        // Step 1: embed token ids → [B, S, hidden_size]
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+
+        // Step 2: if a vision_embeds slice was provided, scatter it into
+        // the image-pad positions of this chunk. The slice's row count
+        // must match the chunk's image-pad count (enforced by callee).
+        if let Some(ve) = vision_embeds_slice {
+            hidden =
+                super::cross_modal::replace_image_tokens(&hidden, input_ids, ve, image_token_id)?;
+        }
+
+        // Step 3: run transformer layers + final norm.
+        let hidden = self
+            .text
+            .forward_post_embedding_on(&hidden, position_ids, cache, target)?;
+
+        // Step 4: slice last position and project to logits.
+        self.slice_last_and_project(&hidden, target)
+    }
+
     /// # Arguments
     /// - `input_ids`      — `[B, S]` int32 token ids (B must be 1 for P6).
     /// - `position_ids`   — `[3, B, S]` int32 per Mrope contract.
