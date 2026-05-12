@@ -243,6 +243,56 @@ impl Qwen35Model {
         )
     }
 
+    /// Static batched prefill — runs one transformer forward across B prompts
+    /// packed left-padded into `input_ids[B, S_max]`. Returns last-position
+    /// logits `[B, vocab]`.
+    ///
+    /// Phase 1 of B1-p2 (multi-request batched serving). Pure text — for VL
+    /// B>1 see B1-p2.4. The caller is responsible for:
+    ///   1. Left-padding each prompt to `S_max` with any pad-token id (the
+    ///      attention mask zeroes out pad positions regardless of which id is
+    ///      used; choosing a real token id is fine).
+    ///   2. Building `position_ids` via [`build_position_ids_batched`] so the
+    ///      pad-region positions are 0 and the real region runs `0..L_i-1`.
+    ///   3. Building `attention_mask` via [`build_batch_attention_mask`] so
+    ///      both causal and left-padding constraints are enforced.
+    ///   4. Allocating `cache` with [`Self::make_cache`] using `batch = B`.
+    ///
+    /// Numerical contract: for batch row `i`, the last-position logits
+    /// `out[i, :]` should match `forward_on(prompt_i)` to within
+    /// `max_abs_diff < 1e-3`, and the greedy argmax must be bit-identical.
+    /// The KV cache row `i` must match the state a per-stream `forward_on`
+    /// would have written (verified by `tests/b1_p2_1_batched_prefill.rs`).
+    ///
+    /// [`build_position_ids_batched`]: crate::core::generate::build_position_ids_batched
+    /// [`build_batch_attention_mask`]: crate::core::generate::build_batch_attention_mask
+    #[allow(clippy::too_many_arguments)]
+    pub fn batched_prefill(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        attention_mask: &Array,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        // Embed: [B, S_max] → [B, S_max, hidden_size]
+        let hidden = self.text.embed_on(input_ids, target)?;
+
+        // Transformer + final norm with explicit attention mask.
+        let hidden = self.text.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            Some(attention_mask),
+            target,
+        )?;
+
+        // Project last position per batch row to vocab logits.
+        self.slice_last_and_project(&hidden, target)
+    }
+
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
     /// vocab logits `[B, 1, vocab_size]`. Shared by [`forward_on`] and [`forward_vl`].
     fn slice_last_and_project(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
