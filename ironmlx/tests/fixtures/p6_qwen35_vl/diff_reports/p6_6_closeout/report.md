@@ -115,3 +115,124 @@ unaffected.
 - E2E logits (Gate 3): `diff_reports/p6_6-2026-05-11-2249/p6_6_logits_match.log`
 - Thresholds + decision: `diff_reports/p6_6-2026-05-11-2249/thresholds.md`
 - Semantic (Gate 4): `diff_reports/p6_6c-2026-05-11-2319/p6_6_semantic_report.md`
+
+---
+
+## Addendum: N=3 stress (2026-05-12)
+
+Verified that the loop-based multi-image code paths in `VisionTower::forward`,
+`build_position_ids_vl`, and `cross_modal::replace_image_tokens` extend
+correctly from N=2 to N=3 with no source changes. Driven by parameterised
+versions of the existing P6.6 tooling (`run_p6_6_dump.py --images`,
+`diff_preprocess_multi.py --n-images`, orchestrator `N_IMAGES=3`,
+`p6_6_semantic_check.py --n-images 3`).
+
+## Fixture
+
+Third image: COCO val2017 60347 — man seated on a wooden bench in a sunlit
+forest. Deliberately picks a third semantic quadrant (vs. image_0 kitchen
+interior, image_1 NYC urban street). Source dims 480×640 → smart_resize
+target matches → identity-resize path; Lanczos3 not invoked.
+
+## Acceptance Table (N=3)
+
+| Gate | Threshold | N=3 Final | N=2 Final | Status |
+| --- | --- | --- | --- | --- |
+| 1A. image_0 preprocess max_diff | < 0.20 | 0.1113 | 0.1113 | ✅ |
+| 1B. image_1 preprocess max_diff | < 0.20 | 0.1963 | 0.1963 | ✅ |
+| 1C. image_2 preprocess max_diff | < 0.20 | **0.0239** | — | ✅ |
+| 2. Vision encoder concat max_diff | < 0.10 | **0.0625** | 0.0625 | ✅ |
+| 3A. E2E logits max_diff | < **1.20** | **1.1250** | 0.9004 | ✅ |
+| 3B. Greedy first-token | bit-identical | 760 == 760 | 760 == 760 | ✅ |
+| 4a. image_0 key facts | ≥ 2/3 | 3/3 | 3/3 | ✅ |
+| 4b. image_1 key facts | ≥ 2/3 | 3/3 | 3/3 | ✅ |
+| 4c. image_2 key facts | ≥ 2/3 | 3/3 | — | ✅ |
+
+## Threshold update — Gate 3A widened 0.95 → 1.20
+
+Boss-approved 2026-05-12. Rule: ceil(1.125/0.05)·0.05 = 1.15, plus safety
+margin → 1.20. Covers N ∈ {2, 3} on this fixture. The N=3 result superseded
+the N=2 threshold of 0.95 because N=3 is the larger validated configuration
+and the elevation is bf16-numerical, not logical (see §Gate 3A scaling
+investigation below).
+
+## Two structural confirmations
+
+### Gate 1C — reverse-confirms the Gate 1 root cause
+
+image_2 (480×640) does NOT need resize after smart_resize, so ironmlx skips
+Lanczos3 entirely. Result: max_diff = 0.0239 — within the JPEG-decoder
+variance floor (P6.3 single-image was 0.0254). This independently confirms
+the Task 8 root-cause finding: Gate 1A/1B elevation is the Lanczos3-vs-BICUBIC
+resize differential, not a multi-image code path bug.
+
+### Gate 2 — multi-image vision encoder is O(1) in N
+
+Gate 2 max_diff is **0.0625 for both N=2 and N=3** — bit-identical. ViT
+multi-grid path (`cu_seqlens` construction, per-image rotary, per-image
+`add_learned_pos_embed`) is verified stable: no per-N drift. The 24-layer
+encoder absorbs upstream preprocess differential to a fixed point.
+
+## Gate 3A scaling investigation
+
+Gate 3A grew from 0.39 (P6.3 N=1) → 0.90 (N=2) → 1.125 (N=3). Sub-linear
+in vision-token count (1040 / 2080 / 3280 patches).
+
+### Signed-diff distribution (N=3, last-position logits, 248320 vocab)
+
+| Stat | Value |
+| --- | --- |
+| max_abs_diff | 1.1250 |
+| signed mean | -0.0856 |
+| signed median | -0.0820 |
+| abs(diff) > 0.5 count | 8863 / 248320 (3.57%) |
+| abs(diff) > 1.0 count | 16 / 248320 (0.0064%) |
+| residual_max (after mean subtraction) | 1.0851 |
+
+### Top-5 outliers (N=3)
+
+| logit idx | ironmlx | mlx-vlm | diff |
+| --- | --- | --- | --- |
+| 18257 | -2.6719 | -1.5469 | -1.1250 |
+| 60025 | 1.8594 | 2.9844 | -1.1250 |
+| 96445 | -5.4062 | -4.2812 | -1.1250 |
+| 9825 | -2.9688 | -1.8672 | -1.1016 |
+| 110112 | -2.4688 | -1.3672 | -1.1016 |
+
+### Verdict — bf16 numerical, not a code bug
+
+Evidence:
+
+1. `residual_max (1.085) ≈ max_diff (1.125)` — the small mean offset
+   contributes almost nothing; this is true scatter, not systematic shift.
+2. Top-5 outliers cluster at diff = -1.1250 across 3 unrelated token ids =
+   bf16 mantissa-grid step (0.0625 × 18). Consistent with LM-head quant
+   path landing on the same quantisation bin.
+3. Gate 3B (greedy first-token bit-identical) and Gate 4 (9/9 keys with
+   detailed accurate descriptions of all three images) confirm output
+   correctness end-to-end. If this were a multi-image data-flow bug it
+   would surface as either an argmax flip or a degraded semantic response.
+4. Scaling is sub-linear (vision-token count: 2.0×→3.15× from N=2 to N=3;
+   max_diff: 1.25×). Linear-cumulative numerical drift through 28 LM layers
+   processing more vision tokens is the expected signature.
+
+No source change attempted; tightening Gate 3A would require an LM-side
+dtype audit (cross_modal scatter, LM-head fp32 vs bf16 path) for diminishing
+return on output correctness. P6.7+ candidate if customer demand surfaces.
+
+## Regression Status (after N=3 addendum)
+
+| Check | Result |
+| --- | --- |
+| `cargo +nightly fmt --all -- --check` | clean |
+| `cargo +nightly clippy --all-features --workspace --exclude ironmlx-app -- -D warnings` | clean |
+| `cargo test -p ironmlx --lib --release -- --test-threads=1` | **153 passed / 0 failed** |
+| P6.3 Task 21 single-image logits-match | **PASS** — max_diff=0.3906, first_token=760 |
+| P6.6 N=2 (re-run not required; no source touched) | unchanged |
+
+## Linked Reports (N=3)
+
+- Preprocess (Gate 1, N=3): `diff_reports/p6_6_n3-2026-05-12-1034/p6_6_preprocess_report.md`
+- Vision encoder (Gate 2, N=3): `diff_reports/p6_6_n3-2026-05-12-1034/vision/report.md`
+- E2E logits + distribution (Gate 3, N=3): `diff_reports/p6_6_n3-2026-05-12-1034/p6_6_logits_match.log`
+- Semantic (Gate 4, N=3): `diff_reports/p6_6c_n3-2026-05-12-1053/p6_6_semantic_report.md`

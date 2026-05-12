@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 # P6.6 multi-image diff orchestrator.
 #
-# Stage 1: mlx-vlm dump (multi-image; op-level hooks active via MLXVLM_VISION_DUMP_DIR)
-# Stage 2: ironmlx preprocess dump (twice — once per image)
+# N images: defaults to 2 (P6.6 baseline). Override with N_IMAGES=3 for the
+# P6.6+ N=3 stress.
+#
+# Stage 1: mlx-vlm dump (N-image; op-level hooks active via MLXVLM_VISION_DUMP_DIR)
+# Stage 2: ironmlx preprocess dump (once per image)
 # Stage 3: ironmlx vision dump on concatenated pixel_values (op-level via existing hooks)
 # Stage 4: diff_preprocess_multi (Gate 1)
 # Stage 5: diff_pipeline_multi (Gate 2 + op-level)
 # Stage 6: p6_6_logits_match (Gate 3, integration test)
 #
 # Required env: MLX_DIR, QWEN35_MODEL
+# Optional env: N_IMAGES (default 2)
 set -euo pipefail
 
 if [[ -z "${MLX_DIR:-}" || -z "${QWEN35_MODEL:-}" ]]; then
     echo "ERROR: set MLX_DIR and QWEN35_MODEL env vars" >&2
+    exit 1
+fi
+
+N_IMAGES="${N_IMAGES:-2}"
+if [[ "$N_IMAGES" -lt 1 ]]; then
+    echo "ERROR: N_IMAGES must be >= 1 (got $N_IMAGES)" >&2
     exit 1
 fi
 
@@ -23,7 +33,7 @@ PY_DIR="${PY_DIR:-/tmp/p6_diff_multi/python}"
 RUST_DIR="${RUST_DIR:-/tmp/p6_diff_multi/rust}"
 IRON_PRE_DIR="${IRON_PRE_DIR:-/tmp/p6_diff_multi/ironmlx_pre}"
 STAMP="$(date +%Y-%m-%d-%H%M)"
-REPORT_DIR="$FIXTURE_DIR/diff_reports/p6_6-$STAMP"
+REPORT_DIR="$FIXTURE_DIR/diff_reports/p6_6_n${N_IMAGES}-$STAMP"
 
 mkdir -p "$PY_DIR" "$RUST_DIR" "$IRON_PRE_DIR" "$REPORT_DIR"
 rm -f "$PY_DIR"/*.safetensors "$PY_DIR"/*.npy "$PY_DIR"/*.txt
@@ -31,18 +41,28 @@ rm -f "$RUST_DIR"/*.safetensors
 rm -rf "$IRON_PRE_DIR"
 mkdir -p "$IRON_PRE_DIR"
 
-echo "=== Stage 1: mlx-vlm 2-image dump (with op-level hooks) ==="
+# Build the --images arg list from $MULTI_DIR/image_{0..N-1}.jpg
+IMAGE_ARGS=()
+for ((i=0; i<N_IMAGES; i++)); do
+    p="$MULTI_DIR/image_${i}.jpg"
+    if [[ ! -f "$p" ]]; then
+        echo "ERROR: missing fixture image: $p" >&2
+        exit 1
+    fi
+    IMAGE_ARGS+=("$p")
+done
+
+echo "=== Stage 1: mlx-vlm N=$N_IMAGES dump (with op-level hooks) ==="
 MLXVLM_VISION_DUMP_DIR="$PY_DIR" \
 QWEN35_MODEL="$QWEN35_MODEL" \
     ~/.venvs/mlxvlm-ref/bin/python "$FIXTURE_DIR/run_p6_6_dump.py" \
-        --image-0 "$MULTI_DIR/image_0.jpg" \
-        --image-1 "$MULTI_DIR/image_1.jpg" \
+        --images "${IMAGE_ARGS[@]}" \
         --out-dir "$PY_DIR" 2>&1 | tail -10
 echo "  PY_DIR files: $(ls "$PY_DIR" | wc -l)"
 
 echo "=== Stage 2: ironmlx preprocess dump (per image) ==="
 cd "$REPO_ROOT"
-for i in 0 1; do
+for ((i=0; i<N_IMAGES; i++)); do
     SUBDIR="$IRON_PRE_DIR/image_${i}"
     mkdir -p "$SUBDIR"
     MLX_DIR="$MLX_DIR" \
@@ -70,7 +90,8 @@ echo "=== Stage 4: Gate 1 — per-image preprocess diff ==="
 ~/.venvs/mlxvlm-ref/bin/python "$FIXTURE_DIR/diff_preprocess_multi.py" \
     --py "$PY_DIR" --iron "$IRON_PRE_DIR" \
     --out "$REPORT_DIR/p6_6_preprocess_report.md" \
-    --gate 0.05 || true
+    --n-images "$N_IMAGES" \
+    --gate 0.20 || true
 
 echo "=== Stage 5: Gate 2 — vision encoder diff ==="
 ~/.venvs/mlxvlm-ref/bin/python "$FIXTURE_DIR/diff_pipeline_multi.py" \
@@ -90,4 +111,4 @@ QWEN35_MODEL="$QWEN35_MODEL" \
     cargo test -p ironmlx --release --test p6_6_logits_match -- --ignored --nocapture 2>&1 \
     | tee "$REPORT_DIR/p6_6_logits_match.log" | tail -15
 
-echo "=== Done. Reports in: $REPORT_DIR ==="
+echo "=== Done (N=$N_IMAGES). Reports in: $REPORT_DIR ==="

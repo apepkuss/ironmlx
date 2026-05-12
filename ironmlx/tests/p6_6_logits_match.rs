@@ -116,7 +116,11 @@ fn p6_6_logits_match() {
         .chunks_exact(3)
         .map(|c| (c[0], c[1], c[2]))
         .collect();
-    assert_eq!(grids.len(), 2, "expected 2 images in grid_thw");
+    assert!(
+        grids.len() >= 1,
+        "expected at least 1 image in grid_thw, got {}",
+        grids.len()
+    );
 
     eprintln!("[p6_6_logits_match] grids: {grids:?}");
 
@@ -163,6 +167,63 @@ fn p6_6_logits_match() {
 
     let max_diff = max_abs_diff(&our_flat, &expected_flat);
     eprintln!("[p6_6_logits_match] max_abs_diff = {max_diff:.4}");
+
+    // Signed-diff distribution diagnostic (helps distinguish systematic offset
+    // vs structural outliers vs uniform noise).
+    {
+        let af = mlx::ops::cast::astype(&our_flat, Dtype::Float32).expect("af");
+        let bf = mlx::ops::cast::astype(&expected_flat, Dtype::Float32).expect("bf");
+        let av: Vec<f32> = af.to_vec::<f32>().expect("av");
+        let bv: Vec<f32> = bf.to_vec::<f32>().expect("bv");
+        let signed: Vec<f32> = av.iter().zip(&bv).map(|(a, b)| a - b).collect();
+        let mean: f64 = signed.iter().map(|&x| x as f64).sum::<f64>() / signed.len() as f64;
+        let mut sorted = signed.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = sorted[sorted.len() / 2];
+        let above_05 = signed.iter().filter(|&&x| x.abs() > 0.5).count();
+        let above_10 = signed.iter().filter(|&&x| x.abs() > 1.0).count();
+        eprintln!(
+            "[p6_6_logits_match] signed diff: mean={mean:.6} median={median:.6} \
+             |diff|>0.5 count={above_05}/{} |diff|>1.0 count={above_10}",
+            signed.len()
+        );
+        // Residual after subtracting mean — indicates whether the elevation
+        // is a uniform offset or true scatter.
+        let residual_max: f32 = signed
+            .iter()
+            .map(|&x| (x - mean as f32).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!(
+            "[p6_6_logits_match] residual max_abs_diff (after mean subtraction): {residual_max:.4}"
+        );
+        // Top-5 absolute outliers — token id + ours / expected / diff.
+        let mut idxd: Vec<(usize, f32)> = signed
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| (i, d.abs()))
+            .collect();
+        idxd.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        eprintln!("[p6_6_logits_match] top-5 outliers:");
+        for &(idx, _) in idxd.iter().take(5) {
+            eprintln!(
+                "  logit[{idx}]: ours={:.4} expected={:.4} diff={:.4}",
+                av[idx],
+                bv[idx],
+                av[idx] - bv[idx]
+            );
+        }
+        // Histogram in 0.25-wide bins covering [-2, 2].
+        eprintln!("[p6_6_logits_match] Signed diff histogram (ours - expected):");
+        let mut lo = -2.0_f32;
+        while lo < 2.0 {
+            let hi = lo + 0.25;
+            let cnt = signed.iter().filter(|&&x| x >= lo && x < hi).count();
+            if cnt > 0 {
+                eprintln!("  [{lo:.2},{hi:.2}): {cnt}");
+            }
+            lo = hi;
+        }
+    }
 
     // Gate 3B: greedy first token must match (hard gate).
     let our_first = greedy_argmax(&our_flat);

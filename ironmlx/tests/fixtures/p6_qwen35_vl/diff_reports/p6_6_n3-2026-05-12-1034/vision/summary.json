@@ -1,0 +1,8 @@
+{
+  "gate2_max_diff": 0.0625,
+  "gate2_pass": true,
+  "vision_embeds_shape": [
+    820,
+    2560
+  ]
+}

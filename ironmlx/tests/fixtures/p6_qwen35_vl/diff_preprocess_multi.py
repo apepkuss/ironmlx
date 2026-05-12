@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """P6.6 per-image preprocess diff (Gate 1).
 
-Runs the diff_preprocess routine twice — once per image — and emits a
-combined report with two verdict lines (1A for image_0, 1B for image_1).
+Runs the diff_preprocess routine once per image (auto-discovers N from
+the number of `image_*_pv.safetensors` files in --py) and emits a combined
+report with one verdict line per image (1A, 1B, 1C, ...).
 
 Each per-image diff treats the ironmlx-side preprocess output (vlmlayout
 [N_i, 1536] C-major) against mlx-vlm's pre-split slice
@@ -53,6 +54,11 @@ def diff_one(vlm: Path, iron: Path) -> dict:
     return diff_stats(a, b)
 
 
+def gate_letter(i: int) -> str:
+    # 0 -> 'A', 1 -> 'B', 2 -> 'C', ...
+    return chr(ord("A") + i)
+
+
 def render(image_id: int, stats: dict, gate: float) -> list[str]:
     if "error" in stats:
         return [f"## image_{image_id}", "", f"**ERROR**: {stats['error']}", ""]
@@ -64,25 +70,38 @@ def render(image_id: int, stats: dict, gate: float) -> list[str]:
         f"- mean: {stats['mean']:.6f}",
         f"- p99: {stats['p99']:.6f}",
         f"- count > 1e-3: {stats['count_above_1e-3']} / {stats['total']}",
-        f"- Gate 1{'A' if image_id == 0 else 'B'} verdict: **{'PASS' if pass_gate else 'FAIL'}**",
+        f"- Gate 1{gate_letter(image_id)} verdict: **{'PASS' if pass_gate else 'FAIL'}**",
         "",
     ]
+
+
+def discover_n(py_dir: Path) -> int:
+    found = sorted(py_dir.glob("image_*_pv.safetensors"))
+    return len(found)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--py", required=True, type=Path,
-                        help="dir with image_0_pv.safetensors + image_1_pv.safetensors")
+                        help="dir with image_{i}_pv.safetensors (i = 0 .. N-1)")
     parser.add_argument("--iron", required=True, type=Path,
-                        help="dir with image_0_pv_vlmlayout.safetensors + image_1_pv_vlmlayout.safetensors")
+                        help="dir with image_{i}_pv_vlmlayout.safetensors (i = 0 .. N-1)")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--gate", type=float, default=0.05)
+    parser.add_argument("--n-images", type=int, default=0,
+                        help="Number of images; 0 = auto-discover from --py")
     args = parser.parse_args()
 
+    n_images = args.n_images if args.n_images > 0 else discover_n(args.py)
+    if n_images < 1:
+        print(f"ERROR: no image_*_pv.safetensors found in {args.py}", file=sys.stderr)
+        return 1
+
     lines = ["# P6.6 Multi-Image Preprocess Diff (Gate 1)", "",
-             f"- Gate 1 threshold: < {args.gate}", ""]
+             f"- Gate 1 threshold: < {args.gate}",
+             f"- N images: {n_images}", ""]
     overall_pass = True
-    for i in (0, 1):
+    for i in range(n_images):
         vlm = args.py / f"image_{i}_pv.safetensors"
         iron = args.iron / f"image_{i}_pv_vlmlayout.safetensors"
         if not vlm.exists() or not iron.exists():

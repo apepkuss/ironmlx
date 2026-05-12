@@ -2,7 +2,7 @@
 """P6.6 mlx-vlm-side multi-image dump driver.
 
 Loads model + processor, builds a 1-chat-request prompt that includes
-TWO image_url parts, runs preprocess to get per-image pixel_values +
+N image_url parts (N >= 1), runs preprocess to get per-image pixel_values +
 image_grid_thw, runs the vision tower once to capture the concatenated
 vision_embeds, then runs the full LM forward to capture last-position
 logits. All outputs are saved as safetensors / .npy under --out-dir.
@@ -14,14 +14,15 @@ write into that dir for op-level Gate 2 diff.
 Usage:
     QWEN35_MODEL=/path/to/Qwen3.5-4B-MLX-4bit \\
     ~/.venvs/mlxvlm-ref/bin/python run_p6_6_dump.py \\
-        --image-0 /path/to/image_0.jpg \\
-        --image-1 /path/to/image_1.jpg \\
+        --images /path/to/image_0.jpg /path/to/image_1.jpg [...] \\
         --out-dir /tmp/p6_diff_multi/python
 
+For N=2 backward compatibility, --image-0 / --image-1 are still accepted.
+
 API notes (mlx-vlm 0.5.0):
-  - prepare_inputs takes flat images=[img0, img1] (PIL objects) and a
-    formatted prompt with 2x <|image_pad|> tokens (via apply_chat_template
-    num_images=2). The [[path0, path1]] nested-list form is NOT used.
+  - prepare_inputs takes flat images=[img0, img1, ...] (PIL objects) and a
+    formatted prompt with N x <|image_pad|> tokens (via apply_chat_template
+    num_images=N).
   - model(input_ids, pixel_values=pv, image_grid_thw=grid_thw) — image_grid_thw
     is accepted via **kwargs in model.__call__ -> get_input_embeddings.
   - model.vision_tower(pv_bf16, grid_thw) returns (hidden_states, deepstack).
@@ -42,17 +43,39 @@ from mlx_vlm.utils import prepare_inputs
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run mlx-vlm on 2 images and dump fixture artifacts."
+        description="Run mlx-vlm on N images and dump fixture artifacts."
     )
-    parser.add_argument("--image-0", required=True, type=Path, help="Path to first image.")
-    parser.add_argument("--image-1", required=True, type=Path, help="Path to second image.")
+    parser.add_argument(
+        "--images",
+        nargs="+",
+        type=Path,
+        default=None,
+        help="Paths to N images (N >= 1).",
+    )
+    parser.add_argument("--image-0", type=Path, default=None, help="Back-compat: first image (N=2).")
+    parser.add_argument("--image-1", type=Path, default=None, help="Back-compat: second image (N=2).")
     parser.add_argument("--out-dir", required=True, type=Path, help="Directory for output artifacts.")
     parser.add_argument(
         "--prompt",
         default="Describe both images in detail. Mention key objects you see in each.",
-        help="Text prompt (2 image placeholders will be prepended by apply_chat_template).",
+        help="Text prompt (N image placeholders will be prepended by apply_chat_template).",
     )
     args = parser.parse_args()
+
+    image_paths: list[Path]
+    if args.images:
+        image_paths = list(args.images)
+    elif args.image_0 is not None and args.image_1 is not None:
+        image_paths = [args.image_0, args.image_1]
+    else:
+        print("ERROR: pass --images img0 [img1 ...] (or back-compat --image-0/--image-1).",
+              file=sys.stderr)
+        return 1
+
+    n_images = len(image_paths)
+    if n_images < 1:
+        print("ERROR: need at least 1 image.", file=sys.stderr)
+        return 1
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -64,7 +87,7 @@ def main() -> int:
     if not Path(model_dir).is_dir():
         print(f"ERROR: QWEN35_MODEL path does not exist: {model_dir}", file=sys.stderr)
         return 1
-    for p in (args.image_0, args.image_1):
+    for p in image_paths:
         if not p.exists():
             print(f"ERROR: image not found: {p}", file=sys.stderr)
             return 1
@@ -72,6 +95,7 @@ def main() -> int:
     # ------------------------------------------------------------------
     # 1. Load model + processor
     # ------------------------------------------------------------------
+    print(f"[run_p6_6_dump] N images       : {n_images}")
     print(f"[run_p6_6_dump] Loading model from {model_dir} ...")
     model, processor = load(model_dir)
     print(f"[run_p6_6_dump] model type  : {type(model).__name__}")
@@ -82,26 +106,24 @@ def main() -> int:
 
     # ------------------------------------------------------------------
     # 2. Build multi-image prompt + preprocess
-    #    apply_chat_template num_images=2 inserts 2x <|image_pad|> tokens.
-    #    prepare_inputs takes flat [img0, img1] PIL list.
+    #    apply_chat_template num_images=N inserts N x <|image_pad|> tokens.
     # ------------------------------------------------------------------
-    img0 = PILImage.open(args.image_0).convert("RGB")
-    img1 = PILImage.open(args.image_1).convert("RGB")
+    pil_images = [PILImage.open(p).convert("RGB") for p in image_paths]
 
     formatted_prompt = apply_chat_template(
-        processor, config_json, args.prompt, num_images=2
+        processor, config_json, args.prompt, num_images=n_images
     )
     print(f"[run_p6_6_dump] Formatted prompt (repr): {repr(formatted_prompt[:120])} ...")
 
     inputs = prepare_inputs(
         processor,
-        images=[img0, img1],
+        images=pil_images,
         prompts=formatted_prompt,
     )
 
     input_ids = inputs["input_ids"]          # (1, S) int64
     pixel_values = inputs["pixel_values"]    # (N_total_patches, 1536) bfloat16 or float32
-    grid_thw = inputs["image_grid_thw"]      # (2, 3) int64
+    grid_thw = inputs["image_grid_thw"]      # (N, 3) int64
     attention_mask = inputs.get("attention_mask")
 
     mx.eval(input_ids, pixel_values, grid_thw)
@@ -113,9 +135,8 @@ def main() -> int:
     print(f"[run_p6_6_dump] pixel_values     : shape={pixel_values.shape}, dtype={pixel_values.dtype}")
     print(f"[run_p6_6_dump] image_grid_thw   : {grid_np.tolist()}")
 
-    # Sanity: must have 2 rows in grid_thw
-    assert grid_thw.shape[0] == 2, \
-        f"expected 2 images, got grid_thw shape={grid_thw.shape}"
+    assert grid_thw.shape[0] == n_images, \
+        f"expected {n_images} images, got grid_thw shape={grid_thw.shape}"
 
     # ------------------------------------------------------------------
     # 3. Save input_ids + image_grid_thw
@@ -141,28 +162,21 @@ def main() -> int:
     # 5. Save per-image pixel_values slices for Gate 1 (preprocess diff)
     #    Split by N_i = grid_h_i * grid_w_i (pre-merger patch count per image)
     # ------------------------------------------------------------------
-    n0 = int(grid_np[0, 1] * grid_np[0, 2])
-    n1 = int(grid_np[1, 1] * grid_np[1, 2])
+    per_image_n = [int(grid_np[i, 1] * grid_np[i, 2]) for i in range(n_images)]
     n_total = pixel_values.shape[0]
-    assert n0 + n1 == n_total, \
-        f"split mismatch: n0={n0}, n1={n1}, total={n_total}"
+    assert sum(per_image_n) == n_total, \
+        f"split mismatch: sum(per_image_n)={sum(per_image_n)}, total={n_total}"
 
-    pv_0 = pv_bf16[:n0]
-    pv_1 = pv_bf16[n0:]
-    mx.save_safetensors(
-        str(args.out_dir / "image_0_pv.safetensors"),
-        {"tensor": pv_0},
-    )
-    mx.save_safetensors(
-        str(args.out_dir / "image_1_pv.safetensors"),
-        {"tensor": pv_1},
-    )
-    print(f"[run_p6_6_dump] saved image_0_pv.safetensors  shape={pv_0.shape}")
-    print(f"[run_p6_6_dump] saved image_1_pv.safetensors  shape={pv_1.shape}")
+    offset = 0
+    for i, n_i in enumerate(per_image_n):
+        pv_i = pv_bf16[offset:offset + n_i]
+        out_path = args.out_dir / f"image_{i}_pv.safetensors"
+        mx.save_safetensors(str(out_path), {"tensor": pv_i})
+        print(f"[run_p6_6_dump] saved image_{i}_pv.safetensors  shape={pv_i.shape}")
+        offset += n_i
 
     # ------------------------------------------------------------------
     # 6. Run vision tower (P6.1+P6.3b dump hooks fire if MLXVLM_VISION_DUMP_DIR set)
-    #    vision_tower(hidden_states, grid_thw) -> (embeds, deepstack_features)
     # ------------------------------------------------------------------
     embeds, _deepstack = model.vision_tower(pv_bf16, grid_thw)
     mx.eval(embeds)
@@ -174,15 +188,12 @@ def main() -> int:
 
     # ------------------------------------------------------------------
     # 7. Full LM forward to get last-position logits + first token
-    #    model(input_ids, pixel_values=pv, **{image_grid_thw=grid_thw})
-    #    image_grid_thw is passed via **kwargs -> get_input_embeddings
     # ------------------------------------------------------------------
     output = model(
         input_ids,
         pixel_values=pv_bf16,
         image_grid_thw=grid_thw,
     )
-    # output is LanguageModelOutput; .logits is (1, S, vocab); take last position
     logits = output.logits if hasattr(output, "logits") else output
     last = logits[:, -1, :]
     mx.eval(last)
@@ -204,8 +215,7 @@ def main() -> int:
         "expected_input_ids.npy",
         "expected_image_grid_thw.npy",
         "expected_pixel_values.safetensors",
-        "image_0_pv.safetensors",
-        "image_1_pv.safetensors",
+        *(f"image_{i}_pv.safetensors" for i in range(n_images)),
         "vision_embeds.safetensors",
         "expected_last_logits.npy",
         "expected_first_token.txt",
@@ -221,7 +231,7 @@ def main() -> int:
         print(f"\nERROR: {len(missing)} missing artifact(s): {missing}", file=sys.stderr)
         return 2
 
-    print(f"\n[run_p6_6_dump] Done. All 8 artifacts written.")
+    print(f"\n[run_p6_6_dump] Done. All {len(artifact_names)} artifacts written (N={n_images}).")
     return 0
 
 

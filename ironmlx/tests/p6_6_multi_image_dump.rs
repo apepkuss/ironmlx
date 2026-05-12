@@ -60,7 +60,7 @@ fn p6_6_multi_image_dump() {
         .transpose_axes(&[0, 2, 1, 3, 4][..])
         .expect("transpose pv");
 
-    // Load grid_thw from .npy. Shape [2, 3] (2 images, each row = [T, H, W]).
+    // Load grid_thw from .npy. Shape [N, 3] (N images, each row = [T, H, W]).
     let grid_arr = mlx::io::load_npy(&grid_path).expect("load grid_thw npy");
     let grid_i32 = mlx::ops::cast::astype(&grid_arr, Dtype::Int32).expect("cast grid to i32");
     mlx::transforms::eval(&[&grid_i32]).expect("eval grid");
@@ -69,7 +69,7 @@ fn p6_6_multi_image_dump() {
         .chunks_exact(3)
         .map(|c| (c[0], c[1], c[2]))
         .collect();
-    assert_eq!(grids.len(), 2, "P6.6 expects exactly 2 images");
+    assert!(!grids.is_empty(), "P6.6 expects at least 1 image, got 0");
 
     eprintln!(
         "[p6_6_multi_image_dump] pv.shape={:?} grids={:?}",

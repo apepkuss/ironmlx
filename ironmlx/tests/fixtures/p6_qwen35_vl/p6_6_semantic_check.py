@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-"""P6.6 Gate 4: 2-image semantic correctness.
+"""P6.6 Gate 4: N-image semantic correctness.
 
 Starts the ironmlx HTTP server, queries it with ONE chat request that
-includes BOTH images as image_url parts, and verifies the response
-text contains key facts from each image.
+includes N images as image_url parts, and verifies the response text
+contains key facts from each image. Default N=2 (P6.6 baseline). Pass
+--n-images 3 for the P6.6+ N=3 stress.
 
 Per-image criteria: >= 2 / 3 keys must match per image.
 
@@ -11,7 +12,7 @@ Usage:
     MLX_DIR=$HOME/.local/mlx \\
     QWEN35_MODEL=/path/to/model \\
     ~/.venvs/mlxvlm-ref/bin/python p6_6_semantic_check.py \\
-        --out /path/to/p6_6_semantic_report.md
+        --out /path/to/p6_6_semantic_report.md [--n-images 3]
 """
 from __future__ import annotations
 
@@ -29,14 +30,11 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FIXTURE_DIR = REPO_ROOT / "ironmlx/tests/fixtures/p6_qwen35_vl"
 MULTI_DIR = FIXTURE_DIR / "multi_image"
-PROMPT = (
-    "There are two images. Describe each one separately. "
-    "For each image, mention the key objects and what is happening."
-)
 
 # Per-image keys based on the actual fixture content:
 #   image_0: kitchen with hanging copper pots/pans + person in apron + dough prep
 #   image_1: NYC street scene with construction scaffolding + pedestrians
+#   image_2: man sitting on a wooden bench in a forest / park
 KEYS_PER_IMAGE = {
     0: [
         ["kitchen", "cooking", "culinary"],
@@ -47,6 +45,11 @@ KEYS_PER_IMAGE = {
         ["street", "sidewalk", "city", "urban", "outdoor", "outdoors"],
         ["construction", "scaffolding", "scaffold", "barrier", "fence"],
         ["person", "people", "pedestrian", "walking", "woman", "man", "men"],
+    ],
+    2: [
+        ["forest", "woods", "tree", "trees", "park", "wooded"],
+        ["bench", "seat"],
+        ["person", "man", "people", "sitting", "seated"],
     ],
 }
 MIN_KEYS_PER_IMAGE = 2  # >= 2 / 3 per image
@@ -63,10 +66,11 @@ def wait_for_port(port: int, timeout_s: int = 180) -> bool:
     return False
 
 
-def evaluate_per_image(text: str) -> dict:
+def evaluate_per_image(text: str, image_ids: list[int]) -> dict:
     t = text.lower()
     per_image_results = {}
-    for i, key_groups in KEYS_PER_IMAGE.items():
+    for i in image_ids:
+        key_groups = KEYS_PER_IMAGE[i]
         hits = []
         for synonyms in key_groups:
             matched = next((s for s in synonyms if s.lower() in t), None)
@@ -81,12 +85,32 @@ def evaluate_per_image(text: str) -> dict:
     return per_image_results
 
 
+def build_prompt(n_images: int) -> str:
+    n_word = {1: "one", 2: "two", 3: "three", 4: "four"}.get(n_images, str(n_images))
+    return (
+        f"There are {n_word} images. Describe each one separately. "
+        "For each image, mention the key objects and what is happening."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--port", type=int, default=8082)
+    parser.add_argument("--n-images", type=int, default=2,
+                        help="N images: reads image_0.jpg .. image_{N-1}.jpg from multi_image/")
     args = parser.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
+
+    n_images = args.n_images
+    if n_images < 1 or n_images not in {1, 2, 3}:
+        print(f"ERROR: --n-images must be 1, 2, or 3 (got {n_images})", file=sys.stderr)
+        return 1
+    if n_images > len(KEYS_PER_IMAGE):
+        print(f"ERROR: --n-images {n_images} > defined KEYS_PER_IMAGE entries "
+              f"({len(KEYS_PER_IMAGE)})", file=sys.stderr)
+        return 1
+    image_ids = list(range(n_images))
 
     model_dir = os.environ.get("QWEN35_MODEL")
     mlx_dir = os.environ.get("MLX_DIR")
@@ -113,19 +137,23 @@ def main() -> int:
             print(f"ERROR: server failed to start; see {log_path}", file=sys.stderr)
             return 2
 
-        b0 = base64.b64encode((MULTI_DIR / "image_0.jpg").read_bytes()).decode("ascii")
-        b1 = base64.b64encode((MULTI_DIR / "image_1.jpg").read_bytes()).decode("ascii")
+        prompt = build_prompt(n_images)
+        content_parts: list[dict] = [{"type": "text", "text": prompt}]
+        for i in image_ids:
+            img_path = MULTI_DIR / f"image_{i}.jpg"
+            if not img_path.exists():
+                print(f"ERROR: missing image {img_path}", file=sys.stderr)
+                return 3
+            b = base64.b64encode(img_path.read_bytes()).decode("ascii")
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b}"},
+            })
+
         payload = {
             "model": "qwen3_5",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": PROMPT},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b0}"}},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b1}"}},
-                ],
-            }],
-            "max_tokens": 600,
+            "messages": [{"role": "user", "content": content_parts}],
+            "max_tokens": 800,
             "temperature": 0.0,
             "chat_template_kwargs": {"enable_thinking": False},
             "stream": False,
@@ -137,10 +165,10 @@ def main() -> int:
         text = body["choices"][0]["message"]["content"]
         finish = body["choices"][0]["finish_reason"]
 
-        per_image = evaluate_per_image(text)
+        per_image = evaluate_per_image(text, image_ids)
         passed = all(v["passed"] for v in per_image.values())
 
-        lines = ["# P6.6 Multi-Image Semantic Verification (Gate 4)", "",
+        lines = [f"# P6.6 Multi-Image Semantic Verification (Gate 4, N={n_images})", "",
                  f"- Finish reason: `{finish}`",
                  f"- Overall verdict: **{'PASS' if passed else 'FAIL'}**",
                  ""]
