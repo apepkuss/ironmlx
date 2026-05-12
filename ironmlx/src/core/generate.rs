@@ -84,6 +84,19 @@ pub struct GenerationStream<'m> {
     model: &'m Qwen35Model,
     tokenizer: &'m Tokenizer,
     cache: Vec<LayerCache>,
+    /// Pre-computed vision-tower output, populated when the request is VL.
+    /// Lives for the duration of prefill; each chunk slices rows from it
+    /// keyed by `image_pad_consumed`.
+    #[allow(dead_code)]
+    vision_embeds_full: Option<Array>,
+    /// Pre-computed MRoPE 3-stream position ids `[3, 1, prompt_len]` for
+    /// VL requests. Each chunk slices on axis 2 by `[pos .. pos + n]`.
+    #[allow(dead_code)]
+    position_ids_full: Option<Array>,
+    /// Running count of `<|image_pad|>` rows already consumed from
+    /// `vision_embeds_full` by previous chunks.
+    #[allow(dead_code)]
+    image_pad_consumed: usize,
     /// All token ids so far: prompt ++ generated.
     history: Vec<u32>,
     request: GenerateRequest,
@@ -471,6 +484,9 @@ impl<'m> GenerationStream<'m> {
                 model,
                 tokenizer,
                 cache,
+                vision_embeds_full: None,
+                position_ids_full: None,
+                image_pad_consumed: 0,
                 history,
                 request,
                 finished: false,
@@ -497,6 +513,9 @@ impl<'m> GenerationStream<'m> {
                 model,
                 tokenizer,
                 cache,
+                vision_embeds_full: None,
+                position_ids_full: None,
+                image_pad_consumed: 0,
                 history,
                 request,
                 finished: false,
