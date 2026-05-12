@@ -128,6 +128,33 @@ impl Qwen35Model {
         self.slice_last_and_project(&hidden, target)
     }
 
+    /// Run only the vision tower; returns the post-merger embeddings
+    /// `[N_total_patches / spatial_merge_size^2, hidden]` ready to be
+    /// scattered into the LM embedding stream by
+    /// [`cross_modal::replace_image_tokens`] (or its chunked equivalent).
+    ///
+    /// Split out from `forward_vl` so callers that drive multi-chunk
+    /// prefill (see `core::generate::GenerationStream`) can run the
+    /// vision tower once and reuse the embeddings across chunks.
+    ///
+    /// # Arguments
+    /// - `pixel_values` — `[N, T, C, H, W]` pre-processed patches.
+    /// - `grid_thw`     — per-image `(temporal, height, width)`; must be
+    ///   non-empty and sum to `N` along T·H·W.
+    /// - `target`       — compute device / stream.
+    pub fn compute_vision_embeds(
+        &self,
+        pixel_values: &Array,
+        grid_thw: &[(i32, i32, i32)],
+        _target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let vision = self
+            .vision
+            .as_ref()
+            .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
+        vision.forward(pixel_values, grid_thw)
+    }
+
     /// # Arguments
     /// - `input_ids`      — `[B, S]` int32 token ids (B must be 1 for P6).
     /// - `position_ids`   — `[3, B, S]` int32 per Mrope contract.
