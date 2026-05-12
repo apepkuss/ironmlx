@@ -329,6 +329,56 @@ pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
     Ok(arr)
 }
 
+/// Build a per-token validity mask `[B, max_len]` for the hybrid model's
+/// **linear-attention** path (`GatedDeltaNet`). For batch row `i` with
+/// actual length `prompt_lens[i] = L_i`:
+///
+///   linear_mask[i, t] = true   if t >= max_len - L_i  (real token)
+///                     = false  otherwise              (left-pad slot)
+///
+/// The kernel reads `mask[b_idx * T + t]` as a boolean (`if (mask[...])`)
+/// — `true` → compute, `false` → emit zero for that position. This
+/// differs in shape from the full-attention mask returned by
+/// [`build_batch_attention_mask`] (which is `[B, 1, T_q, T_kv]` additive
+/// bf16 for `scaled_dot_product_attention`). The hybrid model's
+/// `DecoderLayer` routes each mask to the matching attention path.
+///
+/// The mask dtype is `bool` — the kernel only needs truthiness, not
+/// magnitudes, and bool minimises memory.
+pub fn build_batch_linear_mask(prompt_lens: &[i32], max_len: i32) -> Result<Array> {
+    if prompt_lens.is_empty() {
+        return Err(anyhow!(
+            "build_batch_linear_mask: prompt_lens must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_batch_linear_mask: max_len must be > 0, got {max_len}"
+        ));
+    }
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        if l <= 0 || l > max_len {
+            return Err(anyhow!(
+                "build_batch_linear_mask: prompt_lens[{i}] = {l} out of (0, {max_len}]"
+            ));
+        }
+    }
+
+    let b = prompt_lens.len();
+    let s = max_len as usize;
+    let mut flat = vec![false; b * s];
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        let l = l as usize;
+        let pad_start = s - l;
+        for t in pad_start..s {
+            flat[i * s + t] = true;
+        }
+    }
+
+    let arr: Array = (&flat[..], &[b as i32, max_len][..]).try_into()?;
+    Ok(arr)
+}
+
 /// Token ID for `<|image_pad|>` in Qwen3.5-VL (from model `config.json`,
 /// **not** from mlx-vlm defaults which differ).
 ///
@@ -1130,5 +1180,31 @@ mod b1_p2_2_decode_position_id_tests {
     fn build_decode_position_ids_rejects_empty() {
         let err = build_decode_position_ids(&[]).expect_err("must err on empty");
         assert!(format!("{err}").contains("per_row_pos must be non-empty"));
+    }
+
+    #[test]
+    fn build_batch_linear_mask_same_length() {
+        // B=2, lens [4, 4], max_len=4 → all true (no padding).
+        let mask = build_batch_linear_mask(&[4, 4], 4).expect("build");
+        assert_eq!(mask.shape().as_slice(), &[2, 4]);
+        let flat: Vec<bool> = mask.to_vec::<bool>().expect("to_vec");
+        assert_eq!(flat, vec![true; 8]);
+    }
+
+    #[test]
+    fn build_batch_linear_mask_left_padded() {
+        // B=2, lens [2, 4], max_len=4.
+        // Row 0: pad_start = 4 - 2 = 2, so [false, false, true, true]
+        // Row 1: pad_start = 0, so [true, true, true, true]
+        let mask = build_batch_linear_mask(&[2, 4], 4).expect("build");
+        assert_eq!(mask.shape().as_slice(), &[2, 4]);
+        let flat: Vec<bool> = mask.to_vec::<bool>().expect("to_vec");
+        assert_eq!(
+            flat,
+            vec![
+                false, false, true, true, // row 0
+                true, true, true, true, // row 1
+            ]
+        );
     }
 }
