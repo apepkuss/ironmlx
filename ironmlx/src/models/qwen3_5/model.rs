@@ -225,34 +225,22 @@ impl Qwen35Model {
     ) -> Result<Array> {
         let target = target.into();
 
-        // Step 1: embed token ids → [B, S, hidden_size]
-        let mut hidden = self.text.embed_on(input_ids, target)?;
+        let vision_embeds = match (pixel_values, grid_thw) {
+            (Some(pv), Some(g)) => Some(self.compute_vision_embeds(pv, g, target)?),
+            (Some(_), None) => {
+                return Err(anyhow!("grid_thw required when pixel_values is provided"));
+            }
+            (None, _) => None,
+        };
 
-        // Step 2: if pixel_values provided, route through vision tower and replace
-        //         image-token positions in the embedded sequence.
-        if let Some(pv) = pixel_values {
-            let grids = grid_thw
-                .ok_or_else(|| anyhow!("grid_thw required when pixel_values is provided"))?;
-            let vision = self
-                .vision
-                .as_ref()
-                .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
-            let vision_embeds = vision.forward(pv, grids)?;
-            hidden = super::cross_modal::replace_image_tokens(
-                &hidden,
-                input_ids,
-                &vision_embeds,
-                image_token_id,
-            )?;
-        }
-
-        // Step 3: run transformer layers + final norm on the (possibly patched) hidden state.
-        let hidden = self
-            .text
-            .forward_post_embedding_on(&hidden, position_ids, cache, target)?;
-
-        // Step 4: slice last position and project to logits.
-        self.slice_last_and_project(&hidden, target)
+        self.forward_vl_chunk(
+            input_ids,
+            position_ids,
+            cache,
+            vision_embeds.as_ref(),
+            image_token_id,
+            target,
+        )
     }
 
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
