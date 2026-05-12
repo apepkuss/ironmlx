@@ -84,6 +84,19 @@ pub struct GenerationStream<'m> {
     model: &'m Qwen35Model,
     tokenizer: &'m Tokenizer,
     cache: Vec<LayerCache>,
+    /// Pre-computed vision-tower output, populated when the request is VL.
+    /// Lives for the duration of prefill; each chunk slices rows from it
+    /// keyed by `image_pad_consumed`.
+    #[allow(dead_code)]
+    vision_embeds_full: Option<Array>,
+    /// Pre-computed MRoPE 3-stream position ids `[3, 1, prompt_len]` for
+    /// VL requests. Each chunk slices on axis 2 by `[pos .. pos + n]`.
+    #[allow(dead_code)]
+    position_ids_full: Option<Array>,
+    /// Running count of `<|image_pad|>` rows already consumed from
+    /// `vision_embeds_full` by previous chunks.
+    #[allow(dead_code)]
+    image_pad_consumed: usize,
     /// All token ids so far: prompt ++ generated.
     history: Vec<u32>,
     request: GenerateRequest,
@@ -344,6 +357,66 @@ pub fn build_position_ids_vl(
     Ok(arr)
 }
 
+/// Count occurrences of `image_token_id` in a u32 slice of token ids.
+/// Used by the chunked-prefill loop to know how many vision_embed rows
+/// belong to a given chunk.
+fn count_image_pad(ids: &[u32], image_token_id: i32) -> usize {
+    let target = image_token_id as u32;
+    ids.iter().filter(|&&t| t == target).count()
+}
+
+/// Slice a MRoPE `[3, 1, S]` position-id tensor on axis 2 by a half-open
+/// range `[start, stop)`. Returns `[3, 1, stop - start]`.
+fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<mlx::Array> {
+    let shape = pos_full.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 3 || dims[0] != 3 || dims[1] != 1 {
+        return Err(anyhow!(
+            "slice_pos_ids_axis2: expected [3,1,S] tensor, got {:?}",
+            dims
+        ));
+    }
+    let s_full = dims[2];
+    if start < 0 || stop > s_full || start > stop {
+        return Err(anyhow!(
+            "slice_pos_ids_axis2: bad range [{}, {}) for S={}",
+            start,
+            stop,
+            s_full
+        ));
+    }
+    mlx::ops::slice(pos_full, &[0_i32, 0, start][..], &[3_i32, 1, stop][..])
+        .map_err(|e| anyhow!("slice_pos_ids_axis2 mlx::ops::slice failed: {e}"))
+}
+
+/// Slice rows `[start, stop)` from a `[N, hidden]` vision_embeds tensor.
+fn slice_vision_embeds_rows(ve_full: &mlx::Array, start: usize, stop: usize) -> Result<mlx::Array> {
+    let shape = ve_full.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 2 {
+        return Err(anyhow!(
+            "slice_vision_embeds_rows: expected [N, H] tensor, got {:?}",
+            dims
+        ));
+    }
+    let n = dims[0] as usize;
+    let hidden = dims[1];
+    if stop > n || start > stop {
+        return Err(anyhow!(
+            "slice_vision_embeds_rows: bad range [{}, {}) for N={}",
+            start,
+            stop,
+            n
+        ));
+    }
+    mlx::ops::slice(
+        ve_full,
+        &[start as i32, 0_i32][..],
+        &[stop as i32, hidden][..],
+    )
+    .map_err(|e| anyhow!("slice_vision_embeds_rows mlx::ops::slice failed: {e}"))
+}
+
 impl<'m> GenerationStream<'m> {
     pub fn new(
         model: &'m Qwen35Model,
@@ -354,27 +427,7 @@ impl<'m> GenerationStream<'m> {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
         }
 
-        // VL requests must fit in a single prefill chunk because the vision tower
-        // runs only once (in the last-chunk forward_vl call).  Intermediate-chunk
-        // text-only forwards would receive un-patched embeddings for the image
-        // token positions, producing incorrect KV cache entries.  Fail explicitly
-        // so the caller can increase prefill_chunk_size (or set it to 0).
         let prompt_len = request.prompt_ids.len();
-        if request.pixel_values.is_some() {
-            let effective_chunk = if request.prefill_chunk_size == 0 {
-                prompt_len
-            } else {
-                request.prefill_chunk_size
-            };
-            if prompt_len > effective_chunk {
-                return Err(anyhow!(
-                    "VL prefill currently requires single-chunk: prompt_len={} > chunk_size={}. \
-                     Set prefill_chunk_size=0 (or a value >= prompt length) for VL requests.",
-                    prompt_len,
-                    effective_chunk,
-                ));
-            }
-        }
 
         // P8a-stage4/6 Metal capture hook. Gated by `IRONMLX_CAPTURE_FILE`
         // env var + first-construction OnceLock. `IRONMLX_CAPTURE_PHASE=decode`
@@ -401,9 +454,33 @@ impl<'m> GenerationStream<'m> {
         // sync wait is essentially free here because the next chunk's
         // `forward_on` has nothing to do until the previous chunk's writes
         // land in the cache anyway.
+
+        // P6.7: For VL requests, run the vision tower once before the
+        // chunking loop and build MRoPE position ids for the full prompt.
+        // Each chunk then slices vision_embeds and position_ids by its
+        // own range, ensuring the chunked path is numerically equivalent
+        // to single-chunk forward_vl.
+        let (vision_embeds_full, position_ids_full) = if let (Some(pv), Some(grids)) = (
+            request.pixel_values.as_ref(),
+            request.image_grid_thw.as_deref(),
+        ) {
+            let ve = model.compute_vision_embeds(pv, grids, ())?;
+            let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
+            let pos_full = build_position_ids_vl(
+                &full_ids_i32,
+                grids,
+                request.image_token_id,
+                request.image_spatial_merge_size,
+            )?;
+            (Some(ve), Some(pos_full))
+        } else {
+            (None, None)
+        };
+
         let chunk_size = request.prefill_chunk_size;
         let prompt_len_i32 = prompt_len as i32;
         let mut pos: i32 = 0;
+        let mut image_pad_consumed: usize = 0;
         let last_logits = loop {
             let remaining = prompt_len_i32 - pos;
             let n = if chunk_size == 0 {
@@ -414,47 +491,75 @@ impl<'m> GenerationStream<'m> {
             let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
             let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
 
-            // For VL requests the chunk IS the full prompt (single-chunk guard above
-            // ensures this).  Build MRoPE position ids using the 3-stream VL variant
-            // so image-token positions get the correct (t, h, w) offsets.  Text-only
-            // requests continue to use the simpler single-stream broadcast.
-            let chunk_pos_ids = if let Some(grids) = request.image_grid_thw.as_deref() {
-                let ids_i32: Vec<i32> = chunk_ids.iter().map(|&u| u as i32).collect();
-                build_position_ids_vl(
-                    &ids_i32,
-                    grids,
-                    request.image_token_id,
-                    request.image_spatial_merge_size,
-                )?
+            // VL chunk: slice pre-computed position_ids by chunk range.
+            // Text chunk: use the simpler single-stream builder.
+            let chunk_pos_ids = if let Some(pos_full) = position_ids_full.as_ref() {
+                slice_pos_ids_axis2(pos_full, pos, pos + n)?
             } else {
                 build_position_ids(pos, n)?
             };
 
-            let is_last = pos + n == prompt_len_i32;
-            if is_last {
-                let logits = if request.pixel_values.is_some() {
-                    model.forward_vl(
-                        &chunk_arr,
-                        &chunk_pos_ids,
-                        Some(&mut cache),
-                        request.pixel_values.as_ref(),
-                        request.image_grid_thw.as_deref(),
-                        request.image_token_id,
-                        (),
-                    )?
+            // VL chunk: count image_pad tokens, slice the matching rows
+            // out of vision_embeds_full, advance the consumed counter.
+            let ve_slice = if let Some(ve_full) = vision_embeds_full.as_ref() {
+                let k_i = count_image_pad(chunk_ids, request.image_token_id);
+                if k_i > 0 {
+                    let start = image_pad_consumed;
+                    let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
+                    image_pad_consumed += k_i;
+                    Some(slice)
                 } else {
-                    model.forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?
-                };
+                    None
+                }
+            } else {
+                None
+            };
+
+            let is_last = pos + n == prompt_len_i32;
+            let logits_or_hidden = if vision_embeds_full.is_some() {
+                let logits = model.forward_vl_chunk(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    Some(&mut cache),
+                    ve_slice.as_ref(),
+                    request.image_token_id,
+                    (),
+                )?;
+                if is_last {
+                    Some(logits)
+                } else {
+                    None
+                }
+            } else if is_last {
+                Some(model.forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?)
+            } else {
+                let hidden =
+                    model
+                        .text()
+                        .forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?;
+                mlx::transforms::eval(&[&hidden])?;
+                None
+            };
+
+            if let Some(logits) = logits_or_hidden {
                 let vocab = logits.shape().as_slice()[2];
                 break logits.reshape((vocab,))?;
             }
-            let hidden =
-                model
-                    .text()
-                    .forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?;
-            mlx::transforms::eval(&[&hidden])?;
             pos += n;
         };
+
+        // After the loop, every image_pad must have been consumed by some
+        // chunk. If this fails, the chunked path is dropping data.
+        if let Some(ve_full) = vision_embeds_full.as_ref() {
+            let expected = ve_full.shape().as_slice()[0] as usize;
+            if image_pad_consumed != expected {
+                return Err(anyhow!(
+                    "P6.7 chunked prefill: consumed {} image_pad rows, expected {}",
+                    image_pad_consumed,
+                    expected,
+                ));
+            }
+        }
 
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
@@ -471,6 +576,9 @@ impl<'m> GenerationStream<'m> {
                 model,
                 tokenizer,
                 cache,
+                vision_embeds_full: None,
+                position_ids_full: None,
+                image_pad_consumed: 0,
                 history,
                 request,
                 finished: false,
@@ -497,6 +605,9 @@ impl<'m> GenerationStream<'m> {
                 model,
                 tokenizer,
                 cache,
+                vision_embeds_full: None,
+                position_ids_full: None,
+                image_pad_consumed: 0,
                 history,
                 request,
                 finished: false,
@@ -769,43 +880,44 @@ mod tests {
         assert!(req.image_grid_thw.is_none());
         assert_eq!(req.prompt_ids.len(), 3);
     }
+}
 
-    /// Verify that the VL single-chunk guard fires correctly: if pixel_values is
-    /// Some and prompt_len > prefill_chunk_size, GenerationStream::new must Err.
-    /// This is a pure guard-logic test using only the struct fields — no real
-    /// model is needed because the error is raised before any model call.
-    ///
-    /// Note: this test is *not* marked #[ignore] because it does not need a
-    /// checkpoint — it only exercises the early-return path in new().
+#[cfg(test)]
+mod p6_7_helper_tests {
+    use super::*;
+
     #[test]
-    fn vl_single_chunk_guard_rejects_oversized_prompt() {
-        // Construct a GenerateRequest that triggers the guard:
-        //   prompt_len (5) > prefill_chunk_size (3), pixel_values is Some.
-        // We use a minimal dummy Array as pixel_values — shape doesn't matter
-        // for the guard (it fires before any model call).
-        let dummy_pv: Array = (&[0.0_f32][..], &[1_i32][..]).try_into().unwrap();
-        let req = GenerateRequest {
-            prompt_ids: vec![1_u32, 2, 3, 4, 5],
-            max_new_tokens: 1,
-            sampler: Sampler::greedy(),
-            stop_token_ids: vec![],
-            prefill_chunk_size: 3,
-            pixel_values: Some(dummy_pv),
-            image_grid_thw: Some(vec![(1, 4, 4)]),
-            image_spatial_merge_size: 2,
-            image_token_id: IMAGE_TOKEN_ID,
-        };
-        // We cannot call GenerationStream::new without a real model, but we can
-        // replicate and exercise the guard logic directly to confirm the message.
-        let prompt_len = req.prompt_ids.len();
-        let effective_chunk = if req.prefill_chunk_size == 0 {
-            prompt_len
-        } else {
-            req.prefill_chunk_size
-        };
-        assert!(
-            req.pixel_values.is_some() && prompt_len > effective_chunk,
-            "guard condition must be true for this test to be meaningful"
-        );
+    fn count_image_pad_basic() {
+        let ids: Vec<u32> = vec![1, 248056, 2, 248056, 248056, 3];
+        assert_eq!(count_image_pad(&ids, 248056), 3);
+        assert_eq!(count_image_pad(&ids, 999), 0);
+    }
+
+    #[test]
+    fn slice_pos_ids_axis2_basic() {
+        let data: Vec<i32> = (0..15).collect();
+        let pos: mlx::Array = (&data[..], &[3_i32, 1, 5][..]).try_into().expect("pos arr");
+        let sliced = slice_pos_ids_axis2(&pos, 1, 4).expect("slice");
+        assert_eq!(sliced.shape().as_slice(), &[3, 1, 3]);
+        let flat: Vec<i32> = sliced.to_vec::<i32>().expect("to_vec");
+        assert_eq!(flat, vec![1, 2, 3, 6, 7, 8, 11, 12, 13]);
+    }
+
+    #[test]
+    fn slice_pos_ids_axis2_rejects_bad_shape() {
+        let data: Vec<i32> = vec![0; 6];
+        let bad: mlx::Array = (&data[..], &[2_i32, 1, 3][..]).try_into().expect("bad");
+        let err = slice_pos_ids_axis2(&bad, 0, 2).expect_err("must err on [2,1,S]");
+        assert!(format!("{err}").contains("expected [3,1,S]"));
+    }
+
+    #[test]
+    fn slice_vision_embeds_rows_basic() {
+        let data: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        let ve: mlx::Array = (&data[..], &[4_i32, 3][..]).try_into().expect("ve arr");
+        let sliced = slice_vision_embeds_rows(&ve, 1, 3).expect("slice");
+        assert_eq!(sliced.shape().as_slice(), &[2, 3]);
+        let flat: Vec<f32> = sliced.to_vec::<f32>().expect("to_vec");
+        assert_eq!(flat, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     }
 }

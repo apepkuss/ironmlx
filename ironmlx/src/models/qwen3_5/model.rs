@@ -128,6 +128,80 @@ impl Qwen35Model {
         self.slice_last_and_project(&hidden, target)
     }
 
+    /// Run only the vision tower; returns the post-merger embeddings
+    /// `[N_total_patches / spatial_merge_size^2, hidden]` ready to be
+    /// scattered into the LM embedding stream by
+    /// [`cross_modal::replace_image_tokens`] (or its chunked equivalent).
+    ///
+    /// Split out from `forward_vl` so callers that drive multi-chunk
+    /// prefill (see `core::generate::GenerationStream`) can run the
+    /// vision tower once and reuse the embeddings across chunks.
+    ///
+    /// # Arguments
+    /// - `pixel_values` — `[N, T, C, H, W]` pre-processed patches.
+    /// - `grid_thw`     — per-image `(temporal, height, width)`; must be
+    ///   non-empty and sum to `N` along T·H·W.
+    /// - `target`       — compute device / stream.
+    pub fn compute_vision_embeds(
+        &self,
+        pixel_values: &Array,
+        grid_thw: &[(i32, i32, i32)],
+        _target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let vision = self
+            .vision
+            .as_ref()
+            .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
+        vision.forward(pixel_values, grid_thw)
+    }
+
+    /// Forward a single chunk of a VL prefill. Expects the caller has
+    /// pre-computed `vision_embeds_slice` for the `k_i` `<|image_pad|>`
+    /// occurrences in this chunk's `input_ids`. Pass `None` if the chunk
+    /// contains no image tokens (pure-text segment of a VL prompt).
+    ///
+    /// Compared to `forward_vl`, this method:
+    /// - Does **not** run the vision tower.
+    /// - Skips the scatter step entirely when
+    ///   `vision_embeds_slice.is_none()`, falling back to the text-only
+    ///   embedding path.
+    ///
+    /// # Invariants
+    /// - When `vision_embeds_slice.is_some()`, its row count must equal
+    ///   the number of `image_token_id` occurrences in `input_ids`.
+    ///   `cross_modal::replace_image_tokens` enforces this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_vl_chunk(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        // Step 1: embed token ids → [B, S, hidden_size]
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+
+        // Step 2: if a vision_embeds slice was provided, scatter it into
+        // the image-pad positions of this chunk. The slice's row count
+        // must match the chunk's image-pad count (enforced by callee).
+        if let Some(ve) = vision_embeds_slice {
+            hidden =
+                super::cross_modal::replace_image_tokens(&hidden, input_ids, ve, image_token_id)?;
+        }
+
+        // Step 3: run transformer layers + final norm.
+        let hidden = self
+            .text
+            .forward_post_embedding_on(&hidden, position_ids, cache, target)?;
+
+        // Step 4: slice last position and project to logits.
+        self.slice_last_and_project(&hidden, target)
+    }
+
     /// # Arguments
     /// - `input_ids`      — `[B, S]` int32 token ids (B must be 1 for P6).
     /// - `position_ids`   — `[3, B, S]` int32 per Mrope contract.
@@ -151,34 +225,22 @@ impl Qwen35Model {
     ) -> Result<Array> {
         let target = target.into();
 
-        // Step 1: embed token ids → [B, S, hidden_size]
-        let mut hidden = self.text.embed_on(input_ids, target)?;
+        let vision_embeds = match (pixel_values, grid_thw) {
+            (Some(pv), Some(g)) => Some(self.compute_vision_embeds(pv, g, target)?),
+            (Some(_), None) => {
+                return Err(anyhow!("grid_thw required when pixel_values is provided"));
+            }
+            (None, _) => None,
+        };
 
-        // Step 2: if pixel_values provided, route through vision tower and replace
-        //         image-token positions in the embedded sequence.
-        if let Some(pv) = pixel_values {
-            let grids = grid_thw
-                .ok_or_else(|| anyhow!("grid_thw required when pixel_values is provided"))?;
-            let vision = self
-                .vision
-                .as_ref()
-                .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
-            let vision_embeds = vision.forward(pv, grids)?;
-            hidden = super::cross_modal::replace_image_tokens(
-                &hidden,
-                input_ids,
-                &vision_embeds,
-                image_token_id,
-            )?;
-        }
-
-        // Step 3: run transformer layers + final norm on the (possibly patched) hidden state.
-        let hidden = self
-            .text
-            .forward_post_embedding_on(&hidden, position_ids, cache, target)?;
-
-        // Step 4: slice last position and project to logits.
-        self.slice_last_and_project(&hidden, target)
+        self.forward_vl_chunk(
+            input_ids,
+            position_ids,
+            cache,
+            vision_embeds.as_ref(),
+            image_token_id,
+            target,
+        )
     }
 
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
