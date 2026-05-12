@@ -1,0 +1,6 @@
+# P6.6 generated artifacts — regenerate via run_p6_6_dump.py
+expected_*.npy
+expected_*.safetensors
+image_*_pv*.safetensors
+vision_embeds.safetensors
+expected_first_token.txt
