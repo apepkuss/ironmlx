@@ -124,7 +124,7 @@ impl Qwen35Model {
         let target = target.into();
         let hidden =
             self.text
-                .forward_post_embedding_on(inputs_embeds, position_ids, None, target)?;
+                .forward_post_embedding_on(inputs_embeds, position_ids, None, None, target)?;
         self.slice_last_and_project(&hidden, target)
     }
 
@@ -194,9 +194,9 @@ impl Qwen35Model {
         }
 
         // Step 3: run transformer layers + final norm.
-        let hidden = self
-            .text
-            .forward_post_embedding_on(&hidden, position_ids, cache, target)?;
+        let hidden =
+            self.text
+                .forward_post_embedding_on(&hidden, position_ids, cache, None, target)?;
 
         // Step 4: slice last position and project to logits.
         self.slice_last_and_project(&hidden, target)

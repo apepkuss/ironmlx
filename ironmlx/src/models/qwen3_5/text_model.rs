@@ -116,11 +116,13 @@ impl Qwen35TextModel {
     ///
     /// Runs `cos/sin → N×DecoderLayer → RmsNorm`, returns post-norm hidden states.
     /// The caller is responsible for validating `hidden` shape and cache length.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_post_embedding_on(
         &self,
         hidden: &Array,
         position_ids: &Array,
         cache: Option<&mut [LayerCache]>,
+        attention_mask: Option<&Array>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
@@ -138,12 +140,28 @@ impl Qwen35TextModel {
         match cache {
             Some(c) => {
                 for (layer, cell) in self.layers.iter().zip(c.iter_mut()) {
-                    x = layer.forward_on(&x, &self.mrope, &cos, &sin, None, Some(cell), target)?;
+                    x = layer.forward_on(
+                        &x,
+                        &self.mrope,
+                        &cos,
+                        &sin,
+                        attention_mask,
+                        Some(cell),
+                        target,
+                    )?;
                 }
             }
             None => {
                 for layer in &self.layers {
-                    x = layer.forward_on(&x, &self.mrope, &cos, &sin, None, None, target)?;
+                    x = layer.forward_on(
+                        &x,
+                        &self.mrope,
+                        &cos,
+                        &sin,
+                        attention_mask,
+                        None,
+                        target,
+                    )?;
                 }
             }
         }
@@ -181,7 +199,7 @@ impl Qwen35TextModel {
             }
         }
         let hidden = self.embed_on(input_ids, target)?;
-        self.forward_post_embedding_on(&hidden, position_ids, cache, target)
+        self.forward_post_embedding_on(&hidden, position_ids, cache, None, target)
     }
 
     /// Project hidden state to vocab logits via the (tied) `embed_tokens` matrix.
