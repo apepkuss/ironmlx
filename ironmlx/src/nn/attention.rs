@@ -131,7 +131,6 @@ impl Attention {
         cache: Option<&mut KVCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        let _ = mask; // P1: always causal; explicit masks deferred to P2.
         let target = target.into();
 
         let shape = x.shape();
@@ -184,11 +183,25 @@ impl Attention {
             None => (k, v),
         };
 
-        // Fused SDPA — never compose softmax + matmul by hand.
-        // P1 hard-codes causal masking; P2 layers in custom masks + KV cache.
-        let out = mlx::fast::scaled_dot_product_attention_on(
-            &q, &k_full, &v_full, self.scale, "causal", None, None, target,
-        )?;
+        // Fused SDPA. mlx fast SDPA accepts either a string mask_mode
+        // ("causal") with no mask_arr, or an explicit array mask
+        // broadcast-compatible with [B, N, T_q, T_kv]. Pick based on
+        // whether the caller passed an explicit attention_mask.
+        let out = match mask {
+            None => mlx::fast::scaled_dot_product_attention_on(
+                &q, &k_full, &v_full, self.scale, "causal", None, None, target,
+            )?,
+            Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                &q,
+                &k_full,
+                &v_full,
+                self.scale,
+                "",
+                Some(m),
+                None,
+                target,
+            )?,
+        };
 
         // Reshape back: [batch, heads, seq, head_dim] -> [batch, seq, hidden].
         let out = out
