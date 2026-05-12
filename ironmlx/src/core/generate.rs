@@ -204,6 +204,51 @@ pub fn build_position_ids(start_pos: i32, len: i32) -> Result<Array> {
     mlx::ops::shape::broadcast_to(&one_stream, &[3_i32, 1, len][..]).map_err(anyhow::Error::from)
 }
 
+/// Build MRoPE position ids for a batched, left-padded prefill.
+/// Returns `[3, B, max_len]` int32. For batch row i with actual length
+/// `prompt_lens[i] = L_i`, the trailing `L_i` positions hold `0..L_i-1`;
+/// the leading `max_len - L_i` positions hold 0 (masked out by attention).
+///
+/// All three MRoPE streams hold the same per-batch-row sequence — this is
+/// the text-only convention. VL B>1 (B1-p2.4) will need a multi-stream variant.
+pub fn build_position_ids_batched(prompt_lens: &[i32], max_len: i32) -> Result<Array> {
+    if prompt_lens.is_empty() {
+        return Err(anyhow!(
+            "build_position_ids_batched: prompt_lens must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_position_ids_batched: max_len must be > 0, got {max_len}"
+        ));
+    }
+    let b = prompt_lens.len();
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        if l <= 0 || l > max_len {
+            return Err(anyhow!(
+                "build_position_ids_batched: prompt_lens[{i}] = {l} out of (0, {max_len}]"
+            ));
+        }
+    }
+
+    // Build one stream of shape [B, max_len], then tile to [3, B, max_len].
+    let s = max_len as usize;
+    let mut single_stream = vec![0_i32; b * s];
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        let l = l as usize;
+        let pad_start = s - l;
+        for j in 0..l {
+            single_stream[i * s + pad_start + j] = j as i32;
+        }
+    }
+    let mut flat = Vec::with_capacity(3 * b * s);
+    for _ in 0..3 {
+        flat.extend_from_slice(&single_stream);
+    }
+    let arr: Array = (&flat[..], &[3_i32, b as i32, max_len][..]).try_into()?;
+    Ok(arr)
+}
+
 /// Token ID for `<|image_pad|>` in Qwen3.5-VL (from model `config.json`,
 /// **not** from mlx-vlm defaults which differ).
 ///
@@ -919,5 +964,38 @@ mod p6_7_helper_tests {
         assert_eq!(sliced.shape().as_slice(), &[2, 3]);
         let flat: Vec<f32> = sliced.to_vec::<f32>().expect("to_vec");
         assert_eq!(flat, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    }
+}
+
+#[cfg(test)]
+mod b1_p2_1_position_id_tests {
+    use super::*;
+
+    #[test]
+    fn build_position_ids_batched_same_length() {
+        // B=2, both length 4, max_len=4 → no padding.
+        let arr = build_position_ids_batched(&[4, 4], 4).expect("build");
+        assert_eq!(arr.shape().as_slice(), &[3, 2, 4]);
+        let flat: Vec<i32> = arr.to_vec::<i32>().expect("to_vec");
+        // All 3 streams identical; each row is [0, 1, 2, 3].
+        let expected: Vec<i32> = (0..3).flat_map(|_| (0..2).flat_map(|_| 0..4_i32)).collect();
+        assert_eq!(flat, expected);
+    }
+
+    #[test]
+    fn build_position_ids_batched_left_padded() {
+        // B=2, lens [3, 5], max_len=5.
+        // Row 0: pad at indices 0,1 (zero), then 0,1,2 at indices 2,3,4.
+        // Row 1: full sequence 0..4 at indices 0..4.
+        let arr = build_position_ids_batched(&[3, 5], 5).expect("build");
+        assert_eq!(arr.shape().as_slice(), &[3, 2, 5]);
+        let flat: Vec<i32> = arr.to_vec::<i32>().expect("to_vec");
+        // Single stream: [0,0,0,1,2,  0,1,2,3,4]; replicated 3x along axis 0.
+        let one_stream: Vec<i32> = vec![0, 0, 0, 1, 2, 0, 1, 2, 3, 4];
+        let mut expected = Vec::with_capacity(30);
+        for _ in 0..3 {
+            expected.extend_from_slice(&one_stream);
+        }
+        assert_eq!(flat, expected);
     }
 }
