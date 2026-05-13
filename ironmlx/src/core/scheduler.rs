@@ -320,10 +320,15 @@ impl Scheduler {
         // Build per-row prompt-length vector in slot order. None slots get
         // 0, which build_batch_attention_mask / build_position_ids_batched
         // both accept (the row is treated as a fully-padded no-op).
+        // None slots get a synthetic length=1 so that build_position_ids_batched
+        // and the mask builders accept the input (they assert > 0). Row stays
+        // all-pad-zero in input_ids, attention masks treat its single "real"
+        // column as pad K/V (zeroed by the model's batched_prefill path), so
+        // active rows see no leakage from None slots.
         let prompt_lens: Vec<i32> = self
             .slots
             .iter()
-            .map(|s| s.as_ref().map(|r| r.prompt_ids.len() as i32).unwrap_or(0))
+            .map(|s| s.as_ref().map(|r| r.prompt_ids.len() as i32).unwrap_or(1))
             .collect();
         let max_len = prompt_lens.iter().copied().max().unwrap_or(0);
         if max_len <= 0 {
@@ -402,12 +407,14 @@ impl Scheduler {
             if !was_active {
                 continue;
             }
-            // Slice logits[b_idx, max_len-1, :] → [1, 1, vocab] then reshape to [vocab].
-            // Same pattern as step() uses for logits[b_idx, 0, :].
+            // batched_prefill returns [B, 1, vocab] — the per-row last-token
+            // position is already collapsed internally (see
+            // `tests/b1_p2_1_batched_prefill.rs:173`). Slice
+            // `logits[b_idx, 0, :]` → [1, 1, vocab] then reshape to [vocab].
             let row = mlx::ops::indexing::slice(
                 &logits,
-                &[b_idx as i32, max_len - 1, 0_i32][..],
-                &[b_idx as i32 + 1, max_len, vocab][..],
+                &[b_idx as i32, 0_i32, 0_i32][..],
+                &[b_idx as i32 + 1, 1_i32, vocab][..],
             )
             .map_err(|e| anyhow!("prefill_admitted: slice logits row {b_idx} failed: {e:?}"))?;
             let row_flat = row.reshape(&[vocab][..]).map_err(|e| {
