@@ -195,7 +195,8 @@ impl Scheduler {
         match self.phase {
             Phase::Decoding => {
                 return Err(anyhow!(
-                    "evict illegal in Decoding phase: call evict_all after the batch finishes"
+                    "evict illegal in {:?} phase: call evict_all after the batch finishes",
+                    self.phase
                 ));
             }
             Phase::Idle | Phase::Admitting | Phase::Finished => {}
@@ -424,6 +425,12 @@ mod tests {
     fn phase_starts_idle() {
         let s = Scheduler::new(4);
         assert_eq!(s.phase(), Phase::Idle);
+        // Verify cache starts unallocated (visible through manual Debug impl
+        // which surfaces `cache_layers: None`).
+        assert!(
+            format!("{s:?}").contains("cache_layers: None"),
+            "fresh scheduler should report cache_layers: None — got {s:?}"
+        );
     }
 
     #[test]
@@ -501,5 +508,19 @@ mod tests {
         let mut s = Scheduler::new(4);
         let err = s.evict_all().expect_err("evict_all from Idle must fail");
         assert!(format!("{err}").contains("Idle"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn evict_all_in_admitting_returns_err() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit");
+        // phase is now Admitting; evict_all must reject
+        let err = s
+            .evict_all()
+            .expect_err("evict_all from Admitting must fail");
+        assert!(
+            format!("{err}").contains("Admitting"),
+            "unexpected err: {err}"
+        );
     }
 }
