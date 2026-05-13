@@ -10,9 +10,14 @@
 //! See `docs/superpowers/specs/2026-05-13-b1-p2-3a-scheduler-skeleton-design.md`.
 
 use anyhow::{anyhow, Result};
+use mlx::{Array, Dtype};
 
-use crate::core::generate::GenerateRequest;
+use crate::core::generate::{
+    build_batch_attention_mask, build_batch_linear_mask, build_position_ids_batched,
+    GenerateRequest,
+};
 use crate::core::sampler::Sampler;
+use crate::models::qwen3_5::Qwen35Model;
 use crate::nn::LayerCache;
 
 /// Opaque, monotonically-increasing identifier for an admitted request.
@@ -278,6 +283,99 @@ impl Scheduler {
             }
         }
         self.phase = Phase::Idle;
+        Ok(())
+    }
+
+    /// Run batched prefill for every currently-admitted request. Only legal
+    /// in `Idle`/`Admitting` phase with `active_count() >= 1`.
+    ///
+    /// Lazy-allocates the batched KV cache on first call (`b_max` rows,
+    /// capacity 8192, bf16). On subsequent calls (after `evict_all`) the
+    /// cache is reused — `evict_all` already reset every layer.
+    ///
+    /// Builds left-padded `[B, T_max]` input_ids + `[3, B, T_max]`
+    /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
+    /// linear mask, then calls `Qwen35Model::batched_prefill`. The returned
+    /// logits are discarded (the first decoded token comes from a `step()`
+    /// forward to keep the per-row sampler invocation uniform).
+    ///
+    /// Transitions phase to `Decoding`.
+    pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<()> {
+        match self.phase {
+            Phase::Idle | Phase::Admitting => {}
+            Phase::Decoding | Phase::Finished => {
+                return Err(anyhow!(
+                    "prefill_admitted illegal in {:?} phase: call evict_all first",
+                    self.phase
+                ));
+            }
+        }
+        if self.active_count() == 0 {
+            return Err(anyhow!("prefill_admitted: no admitted requests to prefill"));
+        }
+
+        // Build per-row prompt-length vector in slot order. None slots get
+        // 0, which build_batch_attention_mask / build_position_ids_batched
+        // both accept (the row is treated as a fully-padded no-op).
+        let prompt_lens: Vec<i32> = self
+            .slots
+            .iter()
+            .map(|s| s.as_ref().map(|r| r.prompt_ids.len() as i32).unwrap_or(0))
+            .collect();
+        let max_len = prompt_lens.iter().copied().max().unwrap_or(0);
+        if max_len <= 0 {
+            return Err(anyhow!(
+                "prefill_admitted: max prompt length is 0 — all admitted prompts are empty"
+            ));
+        }
+
+        // Build [B, T_max] left-padded input_ids (pad value 0). Slot order
+        // matches the slots vector — None rows become full-zero.
+        let b = self.b_max;
+        let t = max_len as usize;
+        let mut flat: Vec<i32> = vec![0; b * t];
+        for (row, slot) in self.slots.iter().enumerate() {
+            if let Some(state) = slot {
+                let len = state.prompt_ids.len();
+                let pad = t - len; // left-pad
+                for (j, &tok) in state.prompt_ids.iter().enumerate() {
+                    flat[row * t + pad + j] = tok as i32;
+                }
+            }
+        }
+        let input_ids: Array = (&flat[..], &[b as i32, max_len][..])
+            .try_into()
+            .map_err(|e| anyhow!("input_ids try_into Array failed: {e:?}"))?;
+
+        // Build [3, B, T_max] position ids and [B, 1, T_max, T_max] attn
+        // mask and [B, T_max] linear mask via existing public helpers.
+        let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
+        let attention_mask = build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
+        let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
+
+        // Lazy-allocate the cache (or reuse the existing one — Task 1's
+        // evict_all already reset every layer to offset 0).
+        // TODO: when a non-bf16 model lands, expose dtype via Qwen35Model
+        // accessor and thread it here.
+        if self.cache.is_none() {
+            self.cache = Some(model.make_cache(b as i32, 8192, Dtype::Bfloat16)?);
+        }
+        let cache_ref = self
+            .cache
+            .as_mut()
+            .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?;
+
+        // Run batched prefill. Discard the [B, T_max, vocab] logits.
+        let _ = model.batched_prefill(
+            &input_ids,
+            &position_ids,
+            &attention_mask,
+            &linear_attention_mask,
+            Some(cache_ref),
+            (),
+        )?;
+
+        self.phase = Phase::Decoding;
         Ok(())
     }
 
