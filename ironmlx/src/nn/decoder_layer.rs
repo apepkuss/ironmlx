@@ -150,7 +150,13 @@ impl DecoderLayer {
         Ok(())
     }
 
-    /// Default-stream forward pass.
+    /// Default-stream forward pass. The single `mask` parameter is interpreted
+    /// per layer kind: the full-attention path treats it as the SDPA-style
+    /// `[B, 1, T_q, T_kv]` additive mask, the linear-attention path treats it
+    /// as the `[B, T]` boolean per-token validity mask. For hybrid models that
+    /// need to pass different masks to the two paths, call
+    /// [`Self::forward_on`] directly.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         x: &Array,
@@ -160,7 +166,14 @@ impl DecoderLayer {
         mask: Option<&Array>,
         cache: Option<&mut LayerCache>,
     ) -> Result<Array> {
-        self.forward_on(x, mrope, cos, sin, mask, cache, ())
+        // Convenience: forward `mask` to whichever path applies. The other
+        // gets `None`. Callers that need to populate both should use
+        // `forward_on` directly.
+        let (full_mask, linear_mask) = match self.kind() {
+            AttnKind::Full => (mask, None),
+            AttnKind::Linear => (None, mask),
+        };
+        self.forward_on(x, mrope, cos, sin, full_mask, linear_mask, cache, ())
     }
 
     /// Stream-targeted forward.
@@ -175,7 +188,8 @@ impl DecoderLayer {
         mrope: &Mrope,
         cos: &Array,
         sin: &Array,
-        mask: Option<&Array>,
+        full_attn_mask: Option<&Array>,
+        linear_attn_mask: Option<&Array>,
         cache: Option<&mut LayerCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -185,18 +199,46 @@ impl DecoderLayer {
         self.preflight_x(x, "DecoderLayer::forward_on")?;
 
         // Block 1: input_layernorm + attn dispatch + residual
+        //
+        // Hybrid routing: full-attention layers consume `full_attn_mask`
+        // (`[B, 1, T_q, T_kv]` additive bf16 for SDPA); linear-attention
+        // layers consume `linear_attn_mask` (`[B, T]` boolean per-token
+        // validity for the `gated_delta_step` kernel). The two have
+        // incompatible shapes and dtypes — they cannot be unified.
         let normed_in = self.input_layernorm.forward_on(x, target)?;
+        // Full attention also consumes `linear_attn_mask` (when Some) as its
+        // K/V-validity mask, zeroing pad-position K/V cells before the cache
+        // write. The `[B, T]` boolean shape and "real-vs-pad per token"
+        // semantics are identical to what linear attention uses; reusing it
+        // avoids defining a third mask. See `attention::forward_on` for
+        // details.
         let attn = match (&self.attn, cache) {
-            (AttnPath::Full(a), Some(LayerCache::Full(kv))) => {
-                a.forward_on(&normed_in, mrope, cos, sin, mask, Some(kv), target)?
-            }
-            (AttnPath::Full(a), None) => {
-                a.forward_on(&normed_in, mrope, cos, sin, mask, None, target)?
-            }
+            (AttnPath::Full(a), Some(LayerCache::Full(kv))) => a.forward_on(
+                &normed_in,
+                mrope,
+                cos,
+                sin,
+                full_attn_mask,
+                linear_attn_mask,
+                Some(kv),
+                target,
+            )?,
+            (AttnPath::Full(a), None) => a.forward_on(
+                &normed_in,
+                mrope,
+                cos,
+                sin,
+                full_attn_mask,
+                linear_attn_mask,
+                None,
+                target,
+            )?,
             (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => {
-                a.forward_on(&normed_in, mask, Some(gdc), target)?
+                a.forward_on(&normed_in, linear_attn_mask, Some(gdc), target)?
             }
-            (AttnPath::Linear(a), None) => a.forward_on(&normed_in, mask, None, target)?,
+            (AttnPath::Linear(a), None) => {
+                a.forward_on(&normed_in, linear_attn_mask, None, target)?
+            }
             (AttnPath::Full(_), Some(LayerCache::Linear(_))) => {
                 return Err(anyhow!(
                     "DecoderLayer::forward_on: Full attn layer received Linear cache (kind mismatch)"
@@ -302,7 +344,9 @@ impl DecoderLayer {
 
         let normed_in = self.input_layernorm.forward_on(x, target)?;
         let attn_out = match &self.attn {
-            AttnPath::Full(a) => a.forward_on(&normed_in, mrope, cos, sin, mask, cache, target)?,
+            AttnPath::Full(a) => {
+                a.forward_on(&normed_in, mrope, cos, sin, mask, None, cache, target)?
+            }
             AttnPath::Linear(_) => {
                 return Err(anyhow!(
                     "DecoderLayer::forward_on_full_kv: called on Linear layer (MTP requires Full)"

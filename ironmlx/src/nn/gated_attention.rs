@@ -125,7 +125,7 @@ impl GatedAttention {
         mask: Option<&Array>,
         cache: Option<&mut KVCache>,
     ) -> Result<Array> {
-        self.forward_on(x, mrope, cos, sin, mask, cache, ())
+        self.forward_on(x, mrope, cos, sin, mask, None, cache, ())
     }
 
     /// Stream-targeted forward.
@@ -135,8 +135,21 @@ impl GatedAttention {
     /// `cos`/`sin` are precomputed by [`Mrope::cos_sin`] (caller computes once per
     /// forward and shares across all attention layers).
     ///
-    /// `mask` is currently ignored — the kernel is always invoked with
-    /// `mask_mode = "causal"`; explicit masks fold in alongside KV cache extensions.
+    /// `mask: Option<&Array>` is the explicit SDPA mask. When `None`, SDPA
+    /// runs in `mask_mode="causal"` (lower-right alignment). When `Some`,
+    /// the array is passed directly to mlx fast SDPA's `mask_arr` slot —
+    /// expected shape `[B, 1, T_q, T_kv]` additive, broadcast-compatible
+    /// with `[B, num_heads, T_q, T_kv]`. See B1-p2.1 design for the
+    /// batched-prefill use of this path.
+    ///
+    /// `kv_validity_mask: Option<&Array>` is the `[B, T]` boolean per-token
+    /// validity mask for batched prefill. When `Some`, K and V are
+    /// multiplied by it (broadcast to `[B, num_kv_heads=1, T, head_dim=1]`)
+    /// BEFORE cache write, so pad slots land as zero K/V cells. Decode-time
+    /// reads of the cache see zero K, V at pad positions → zero attention
+    /// scores → no contamination of real-row outputs. Leave `None` for the
+    /// single-stream path; behavior is bit-identical to the pre-B1-p2.2
+    /// implementation.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
@@ -145,10 +158,10 @@ impl GatedAttention {
         cos: &Array,
         sin: &Array,
         mask: Option<&Array>,
+        kv_validity_mask: Option<&Array>,
         cache: Option<&mut KVCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        let _ = mask;
         let target = target.into();
 
         // Two-step bind: x.shape() returns an owned Shape; we bind it to extend
@@ -197,14 +210,45 @@ impl GatedAttention {
         // Step 5: rotate Q + K via fused MetalKernel (P3b1).
         let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
 
-        // Step 6: KV cache route + SDPA.
+        // Step 5b (batched prefill): zero out K, V at pad positions before
+        // writing to the cache. The [B, T] boolean validity mask broadcasts
+        // to [B, num_kv_heads=1 dim, T, head_dim=1 dim] for the multiply.
+        // Decode-time reads of the cache then see zero K, V at pad slots →
+        // zero attention contribution → no contamination of real outputs.
+        let (k, v) = if let Some(vm) = kv_validity_mask {
+            let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
+            let vm_broadcast = vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
+            let k_masked = &k * &vm_broadcast;
+            let v_masked = &v * &vm_broadcast;
+            (k_masked, v_masked)
+        } else {
+            (k, v)
+        };
+
+        // Step 6: KV cache route + SDPA. The explicit array mask (when
+        // provided by the batched-prefill caller) routes via mask_mode=""
+        // + mask_arr=Some; otherwise the kernel runs in "causal" mode
+        // (lower-right alignment) which is correct for the single-stream
+        // path and for decode-time (T_q=1) calls.
         let (k_full, v_full) = match cache {
             Some(c) => c.update_and_fetch_on(&k, &v, target)?,
             None => (k, v),
         };
-        let attn_out = mlx::fast::scaled_dot_product_attention_on(
-            &queries, &k_full, &v_full, self.scale, "causal", None, None, target,
-        )?;
+        let attn_out = match mask {
+            None => mlx::fast::scaled_dot_product_attention_on(
+                &queries, &k_full, &v_full, self.scale, "causal", None, None, target,
+            )?,
+            Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                &queries,
+                &k_full,
+                &v_full,
+                self.scale,
+                "",
+                Some(m),
+                None,
+                target,
+            )?,
+        };
 
         // Step 7: reshape attn out [B, Hq, S, D] -> [B, S, Hq*D], apply sigmoid gate,
         // o_proj.

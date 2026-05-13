@@ -122,9 +122,14 @@ impl Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
-        let hidden =
-            self.text
-                .forward_post_embedding_on(inputs_embeds, position_ids, None, target)?;
+        let hidden = self.text.forward_post_embedding_on(
+            inputs_embeds,
+            position_ids,
+            None,
+            None,
+            None,
+            target,
+        )?;
         self.slice_last_and_project(&hidden, target)
     }
 
@@ -194,9 +199,14 @@ impl Qwen35Model {
         }
 
         // Step 3: run transformer layers + final norm.
-        let hidden = self
-            .text
-            .forward_post_embedding_on(&hidden, position_ids, cache, target)?;
+        let hidden = self.text.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            None,
+            None,
+            target,
+        )?;
 
         // Step 4: slice last position and project to logits.
         self.slice_last_and_project(&hidden, target)
@@ -241,6 +251,69 @@ impl Qwen35Model {
             image_token_id,
             target,
         )
+    }
+
+    /// Static batched prefill — runs one transformer forward across B prompts
+    /// packed left-padded into `input_ids[B, S_max]`. Returns last-position
+    /// logits `[B, vocab]`.
+    ///
+    /// Phase 1 of B1-p2 (multi-request batched serving). Pure text — for VL
+    /// B>1 see B1-p2.4. The caller is responsible for:
+    ///   1. Left-padding each prompt to `S_max` with any pad-token id (the
+    ///      attention mask zeroes out pad positions regardless of which id is
+    ///      used; choosing a real token id is fine).
+    ///   2. Building `position_ids` via [`build_position_ids_batched`] so the
+    ///      pad-region positions are 0 and the real region runs `0..L_i-1`.
+    ///   3. Building `attention_mask` via [`build_batch_attention_mask`] —
+    ///      the SDPA-style `[B, 1, T_q, T_kv]` additive mask consumed by the
+    ///      full-attention layers.
+    ///   4. Building `linear_attention_mask` via [`build_batch_linear_mask`]
+    ///      — the `[B, T]` boolean per-token validity mask consumed by the
+    ///      hybrid model's linear-attention layers (`GatedDeltaNet`).
+    ///   5. Allocating `cache` with [`Self::make_cache`] using `batch = B`.
+    ///
+    /// The two masks have incompatible shapes and dtypes because the
+    /// underlying attention paths are fundamentally different (SDPA with
+    /// additive scores vs gated-delta-step kernel with per-token compute
+    /// guards). They cannot be unified.
+    ///
+    /// Numerical contract: for batch row `i`, the last-position logits
+    /// `out[i, :]` should match `forward_on(prompt_i)` to within
+    /// `max_abs_diff < 1e-3`, and the greedy argmax must be bit-identical.
+    /// The KV cache row `i` must match the state a per-stream `forward_on`
+    /// would have written (verified by `tests/b1_p2_1_batched_prefill.rs`).
+    ///
+    /// [`build_position_ids_batched`]: crate::core::generate::build_position_ids_batched
+    /// [`build_batch_attention_mask`]: crate::core::generate::build_batch_attention_mask
+    /// [`build_batch_linear_mask`]: crate::core::generate::build_batch_linear_mask
+    #[allow(clippy::too_many_arguments)]
+    pub fn batched_prefill(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        attention_mask: &Array,
+        linear_attention_mask: &Array,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        // Embed: [B, S_max] → [B, S_max, hidden_size]
+        let hidden = self.text.embed_on(input_ids, target)?;
+
+        // Transformer + final norm with both attention masks routed to
+        // their respective attention paths inside DecoderLayer.
+        let hidden = self.text.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            Some(attention_mask),
+            Some(linear_attention_mask),
+            target,
+        )?;
+
+        // Project last position per batch row to vocab logits.
+        self.slice_last_and_project(&hidden, target)
     }
 
     /// Slice the last sequence position from `hidden [B, S, H]` and project to

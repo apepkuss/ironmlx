@@ -363,6 +363,33 @@ impl GatedDeltaNet {
             &[1_i32, 1, 1][..],
         )?;
 
+        // Step 1b: zero out qkv at pad positions before conv1d.
+        //
+        // The conv1d is temporal — its output at real-token position t uses
+        // input positions `t-(k-1)..t` as history. For left-padded batched
+        // prefill, those history positions include pad tokens whose embeddings
+        // are non-zero garbage (embed(pad_id) projected through in_proj_qkvz).
+        // If we leave qkv as-is at pad positions, conv1d at the first few real
+        // positions sees pad-embedding history and produces outputs that
+        // diverge from the per-stream reference (which sees zero history).
+        //
+        // The gated_delta_step kernel's per-token mask only skips compute at
+        // pad positions; it does not undo conv1d contamination of real
+        // positions. Zeroing qkv at pad positions before conv1d gives real
+        // tokens the same zero-history as per-stream forward_on.
+        //
+        // The same argument applies to `z` (used in RmsNormGated at output);
+        // however, `z` is only consumed at REAL positions (gated_delta_step
+        // emits zero at pad positions), so pad-position `z` values are
+        // discarded anyway. We zero `qkv` only.
+        let qkv = if let Some(m) = mask {
+            let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
+            let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
+            &qkv * &m_broadcast
+        } else {
+            qkv
+        };
+
         let b = mlx::ops::indexing::slice_strided(
             &ba,
             &[0_i32, 0, 0][..],

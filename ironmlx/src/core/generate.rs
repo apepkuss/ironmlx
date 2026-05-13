@@ -204,6 +204,195 @@ pub fn build_position_ids(start_pos: i32, len: i32) -> Result<Array> {
     mlx::ops::shape::broadcast_to(&one_stream, &[3_i32, 1, len][..]).map_err(anyhow::Error::from)
 }
 
+/// Build MRoPE position ids for a batched, left-padded prefill.
+/// Returns `[3, B, max_len]` int32. For batch row i with actual length
+/// `prompt_lens[i] = L_i`, the trailing `L_i` positions hold `0..L_i-1`;
+/// the leading `max_len - L_i` positions hold 0 (masked out by attention).
+///
+/// All three MRoPE streams hold the same per-batch-row sequence — this is
+/// the text-only convention. VL B>1 (B1-p2.4) will need a multi-stream variant.
+pub fn build_position_ids_batched(prompt_lens: &[i32], max_len: i32) -> Result<Array> {
+    if prompt_lens.is_empty() {
+        return Err(anyhow!(
+            "build_position_ids_batched: prompt_lens must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_position_ids_batched: max_len must be > 0, got {max_len}"
+        ));
+    }
+    let b = prompt_lens.len();
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        if l <= 0 || l > max_len {
+            return Err(anyhow!(
+                "build_position_ids_batched: prompt_lens[{i}] = {l} out of (0, {max_len}]"
+            ));
+        }
+    }
+
+    // Build one stream of shape [B, max_len], then tile to [3, B, max_len].
+    let s = max_len as usize;
+    let mut single_stream = vec![0_i32; b * s];
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        let l = l as usize;
+        let pad_start = s - l;
+        for j in 0..l {
+            single_stream[i * s + pad_start + j] = j as i32;
+        }
+    }
+    let mut flat = Vec::with_capacity(3 * b * s);
+    for _ in 0..3 {
+        flat.extend_from_slice(&single_stream);
+    }
+    let arr: Array = (&flat[..], &[3_i32, b as i32, max_len][..]).try_into()?;
+    Ok(arr)
+}
+
+/// Build an additive attention mask `[B, 1, max_len, max_len]` for a
+/// left-padded batched prefill. For batch row `i` with actual length
+/// `prompt_lens[i] = L_i` and `pad_start_i = max_len - L_i`:
+///
+///   mask[i, 0, q, k] = 0.0   iff (q >= pad_start_i) AND (k >= pad_start_i) AND (k <= q)
+///                    = -inf  otherwise
+///
+/// The dtype is `dtype` (typically `Dtype::Bfloat16` to match the SDPA promoted
+/// type). Returns a value broadcast-compatible with mlx fast SDPA's expected
+/// `[B, N, T_q, T_kv]` shape.
+pub fn build_batch_attention_mask(
+    prompt_lens: &[i32],
+    max_len: i32,
+    dtype: Dtype,
+) -> Result<Array> {
+    if prompt_lens.is_empty() {
+        return Err(anyhow!(
+            "build_batch_attention_mask: prompt_lens must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_batch_attention_mask: max_len must be > 0, got {max_len}"
+        ));
+    }
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        if l <= 0 || l > max_len {
+            return Err(anyhow!(
+                "build_batch_attention_mask: prompt_lens[{i}] = {l} out of (0, {max_len}]"
+            ));
+        }
+    }
+
+    let b = prompt_lens.len();
+    let s = max_len as usize;
+    let total = b * s * s;
+    let neg_inf = f32::NEG_INFINITY;
+    let mut flat = vec![neg_inf; total];
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        let l = l as usize;
+        let pad_start = s - l;
+        // Real query rows (q >= pad_start): attend to real keys (k >= pad_start)
+        // within the causal triangle (k <= q).
+        for q in pad_start..s {
+            for k in pad_start..=q {
+                flat[(i * s + q) * s + k] = 0.0;
+            }
+        }
+        // Pad query rows (q < pad_start): allow self-attention only
+        // (`mask[i, 0, q, q] = 0`). Without this, the row is all `-inf`
+        // and `softmax(all-INF)` yields NaN, which propagates through
+        // subsequent layers and contaminates real-row outputs via
+        // residual connections / layer norms (NaN × any = NaN). Letting
+        // pad-q attend to itself produces a benign zero output (since
+        // `kv_validity_mask` zeros V at pad positions in
+        // `attention::forward_on`), and the pad-q hidden states never
+        // feed into real-row queries (causal mask blocks the path).
+        for q in 0..pad_start {
+            flat[(i * s + q) * s + q] = 0.0;
+        }
+    }
+
+    let arr_f32: Array = (&flat[..], &[b as i32, 1_i32, max_len, max_len][..]).try_into()?;
+    mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
+}
+
+/// Build MRoPE position ids for one batched decode step.
+/// Returns `[3, B, 1]` int32. Each batch row `i` holds the position id
+/// `per_row_pos[i]` for its new token; all three MRoPE streams hold the
+/// same value (text-only convention; VL B>1 in B1-p2.4 will need a
+/// multi-stream variant).
+pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
+    if per_row_pos.is_empty() {
+        return Err(anyhow!(
+            "build_decode_position_ids: per_row_pos must be non-empty"
+        ));
+    }
+    for (i, &p) in per_row_pos.iter().enumerate() {
+        if p < 0 {
+            return Err(anyhow!(
+                "build_decode_position_ids: per_row_pos[{i}] = {p} must be >= 0"
+            ));
+        }
+    }
+
+    let b = per_row_pos.len();
+    let mut flat = Vec::with_capacity(3 * b);
+    for _ in 0..3 {
+        flat.extend_from_slice(per_row_pos);
+    }
+    let arr: Array = (&flat[..], &[3_i32, b as i32, 1_i32][..]).try_into()?;
+    Ok(arr)
+}
+
+/// Build a per-token validity mask `[B, max_len]` for the hybrid model's
+/// **linear-attention** path (`GatedDeltaNet`). For batch row `i` with
+/// actual length `prompt_lens[i] = L_i`:
+///
+///   linear_mask[i, t] = true   if t >= max_len - L_i  (real token)
+///                     = false  otherwise              (left-pad slot)
+///
+/// The kernel reads `mask[b_idx * T + t]` as a boolean (`if (mask[...])`)
+/// — `true` → compute, `false` → emit zero for that position. This
+/// differs in shape from the full-attention mask returned by
+/// [`build_batch_attention_mask`] (which is `[B, 1, T_q, T_kv]` additive
+/// bf16 for `scaled_dot_product_attention`). The hybrid model's
+/// `DecoderLayer` routes each mask to the matching attention path.
+///
+/// The mask dtype is `bool` — the kernel only needs truthiness, not
+/// magnitudes, and bool minimises memory.
+pub fn build_batch_linear_mask(prompt_lens: &[i32], max_len: i32) -> Result<Array> {
+    if prompt_lens.is_empty() {
+        return Err(anyhow!(
+            "build_batch_linear_mask: prompt_lens must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_batch_linear_mask: max_len must be > 0, got {max_len}"
+        ));
+    }
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        if l <= 0 || l > max_len {
+            return Err(anyhow!(
+                "build_batch_linear_mask: prompt_lens[{i}] = {l} out of (0, {max_len}]"
+            ));
+        }
+    }
+
+    let b = prompt_lens.len();
+    let s = max_len as usize;
+    let mut flat = vec![false; b * s];
+    for (i, &l) in prompt_lens.iter().enumerate() {
+        let l = l as usize;
+        let pad_start = s - l;
+        for t in pad_start..s {
+            flat[i * s + t] = true;
+        }
+    }
+
+    let arr: Array = (&flat[..], &[b as i32, max_len][..]).try_into()?;
+    Ok(arr)
+}
+
 /// Token ID for `<|image_pad|>` in Qwen3.5-VL (from model `config.json`,
 /// **not** from mlx-vlm defaults which differ).
 ///
@@ -919,5 +1108,123 @@ mod p6_7_helper_tests {
         assert_eq!(sliced.shape().as_slice(), &[2, 3]);
         let flat: Vec<f32> = sliced.to_vec::<f32>().expect("to_vec");
         assert_eq!(flat, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    }
+}
+
+#[cfg(test)]
+mod b1_p2_1_position_id_tests {
+    use super::*;
+
+    #[test]
+    fn build_position_ids_batched_same_length() {
+        // B=2, both length 4, max_len=4 → no padding.
+        let arr = build_position_ids_batched(&[4, 4], 4).expect("build");
+        assert_eq!(arr.shape().as_slice(), &[3, 2, 4]);
+        let flat: Vec<i32> = arr.to_vec::<i32>().expect("to_vec");
+        // All 3 streams identical; each row is [0, 1, 2, 3].
+        let expected: Vec<i32> = (0..3).flat_map(|_| (0..2).flat_map(|_| 0..4_i32)).collect();
+        assert_eq!(flat, expected);
+    }
+
+    #[test]
+    fn build_position_ids_batched_left_padded() {
+        // B=2, lens [3, 5], max_len=5.
+        // Row 0: pad at indices 0,1 (zero), then 0,1,2 at indices 2,3,4.
+        // Row 1: full sequence 0..4 at indices 0..4.
+        let arr = build_position_ids_batched(&[3, 5], 5).expect("build");
+        assert_eq!(arr.shape().as_slice(), &[3, 2, 5]);
+        let flat: Vec<i32> = arr.to_vec::<i32>().expect("to_vec");
+        // Single stream: [0,0,0,1,2,  0,1,2,3,4]; replicated 3x along axis 0.
+        let one_stream: Vec<i32> = vec![0, 0, 0, 1, 2, 0, 1, 2, 3, 4];
+        let mut expected = Vec::with_capacity(30);
+        for _ in 0..3 {
+            expected.extend_from_slice(&one_stream);
+        }
+        assert_eq!(flat, expected);
+    }
+}
+
+#[cfg(test)]
+mod b1_p2_1_mask_tests {
+    use super::*;
+
+    #[test]
+    fn build_batch_attention_mask_causal_no_padding() {
+        // B=1, length=3, max_len=3 → standard lower-triangular causal.
+        let mask = build_batch_attention_mask(&[3], 3, Dtype::Float32).expect("mask");
+        assert_eq!(mask.shape().as_slice(), &[1, 1, 3, 3]);
+        let flat: Vec<f32> = mask.to_vec::<f32>().expect("to_vec");
+        let ni = f32::NEG_INFINITY;
+        let expected = vec![0.0, ni, ni, 0.0, 0.0, ni, 0.0, 0.0, 0.0];
+        assert_eq!(flat, expected);
+    }
+
+    #[test]
+    fn build_batch_attention_mask_left_padded() {
+        // B=2, lens [2, 3], max_len=3.
+        let mask = build_batch_attention_mask(&[2, 3], 3, Dtype::Float32).expect("mask");
+        assert_eq!(mask.shape().as_slice(), &[2, 1, 3, 3]);
+        let flat: Vec<f32> = mask.to_vec::<f32>().expect("to_vec");
+        let ni = f32::NEG_INFINITY;
+        // Row 0 (i=0, pad_start=1):
+        //   q=0 is pad → diagonal allowed (mask[0, 0]=0), rest -inf.
+        //   q=1, q=2 are real → causal lower-triangle from k=pad_start=1.
+        // Row 1 (i=1, pad_start=0): standard causal lower-triangle.
+        let expected = vec![
+            // Row 0
+            0.0, ni, ni, // q=0 (pad): self-attend only
+            ni, 0.0, ni, // q=1 (real): k=1 allowed
+            ni, 0.0, 0.0, // q=2 (real): k=1, 2 allowed
+            // Row 1 (standard causal)
+            0.0, ni, ni, 0.0, 0.0, ni, 0.0, 0.0, 0.0,
+        ];
+        assert_eq!(flat, expected);
+    }
+}
+
+#[cfg(test)]
+mod b1_p2_2_decode_position_id_tests {
+    use super::*;
+
+    #[test]
+    fn build_decode_position_ids_basic() {
+        // B=2 with distinct positions.
+        let arr = build_decode_position_ids(&[10, 20]).expect("build");
+        assert_eq!(arr.shape().as_slice(), &[3, 2, 1]);
+        let flat: Vec<i32> = arr.to_vec::<i32>().expect("to_vec");
+        // All 3 streams identical: [10, 20] repeated 3 times.
+        assert_eq!(flat, vec![10, 20, 10, 20, 10, 20]);
+    }
+
+    #[test]
+    fn build_decode_position_ids_rejects_empty() {
+        let err = build_decode_position_ids(&[]).expect_err("must err on empty");
+        assert!(format!("{err}").contains("per_row_pos must be non-empty"));
+    }
+
+    #[test]
+    fn build_batch_linear_mask_same_length() {
+        // B=2, lens [4, 4], max_len=4 → all true (no padding).
+        let mask = build_batch_linear_mask(&[4, 4], 4).expect("build");
+        assert_eq!(mask.shape().as_slice(), &[2, 4]);
+        let flat: Vec<bool> = mask.to_vec::<bool>().expect("to_vec");
+        assert_eq!(flat, vec![true; 8]);
+    }
+
+    #[test]
+    fn build_batch_linear_mask_left_padded() {
+        // B=2, lens [2, 4], max_len=4.
+        // Row 0: pad_start = 4 - 2 = 2, so [false, false, true, true]
+        // Row 1: pad_start = 0, so [true, true, true, true]
+        let mask = build_batch_linear_mask(&[2, 4], 4).expect("build");
+        assert_eq!(mask.shape().as_slice(), &[2, 4]);
+        let flat: Vec<bool> = mask.to_vec::<bool>().expect("to_vec");
+        assert_eq!(
+            flat,
+            vec![
+                false, false, true, true, // row 0
+                true, true, true, true, // row 1
+            ]
+        );
     }
 }
