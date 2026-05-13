@@ -109,6 +109,7 @@ pub struct Scheduler {
     next_id: u64,
     phase: Phase,
     cache: Option<Vec<LayerCache>>,
+    poisoned: bool,
 }
 
 impl std::fmt::Debug for Scheduler {
@@ -119,6 +120,7 @@ impl std::fmt::Debug for Scheduler {
             .field("next_id", &self.next_id)
             .field("phase", &self.phase)
             .field("cache_layers", &self.cache.as_ref().map(|c| c.len()))
+            .field("poisoned", &self.poisoned)
             .finish()
     }
 }
@@ -136,6 +138,7 @@ impl Scheduler {
             next_id: 0,
             phase: Phase::Idle,
             cache: None,
+            poisoned: false,
         }
     }
 
@@ -152,6 +155,7 @@ impl Scheduler {
     /// The request's sampler is **cloned** so each row has its own
     /// independent sampler state.
     pub fn admit(&mut self, req: GenerateRequest) -> Result<RequestId> {
+        self.ensure_not_poisoned()?;
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
             Phase::Decoding | Phase::Finished => {
@@ -197,6 +201,7 @@ impl Scheduler {
     /// index is freed but the [`RequestId`] is **never** reissued (the
     /// counter keeps incrementing).
     pub fn evict(&mut self, id: RequestId) -> Result<()> {
+        self.ensure_not_poisoned()?;
         match self.phase {
             Phase::Decoding => {
                 return Err(anyhow!(
@@ -257,6 +262,17 @@ impl Scheduler {
         self.phase
     }
 
+    /// Returns `Err` if the scheduler has been poisoned by a previous `Err`
+    /// return from `prefill_admitted` or `step`. Call `evict_all` to recover.
+    fn ensure_not_poisoned(&self) -> Result<()> {
+        if self.poisoned {
+            return Err(anyhow!(
+                "scheduler poisoned by a previous Err; call evict_all to recover"
+            ));
+        }
+        Ok(())
+    }
+
     /// Free all in-flight rows and reset every layer cache to offset 0
     /// (preserves Array allocations for reuse). Only legal in
     /// `Decoding`/`Finished` phases. After this call the scheduler is back
@@ -283,6 +299,7 @@ impl Scheduler {
             }
         }
         self.phase = Phase::Idle;
+        self.poisoned = false;
         Ok(())
     }
 
@@ -304,6 +321,17 @@ impl Scheduler {
     /// cache trajectory aligned with `GenerationStream`'s pipelined-mode
     /// which also uses the prefill argmax as `token_0`. See spec §4.5.
     pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        match self.prefill_admitted_inner(model) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn prefill_admitted_inner(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
             Phase::Decoding | Phase::Finished => {
@@ -483,6 +511,17 @@ impl Scheduler {
     /// (lockstep cost — see spec §7). Only active-at-start rows contribute
     /// to the returned event list.
     pub fn step(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        match self.step_inner(model) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn step_inner(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step illegal in {:?} phase: call prefill_admitted first",
@@ -853,12 +892,39 @@ mod tests {
     }
 
     #[test]
-    fn step_in_idle_returns_err() {
-        let s = Scheduler::new(4);
-        // step() requires a Qwen35Model handle, so a real call lives in the
-        // integration test. As a unit-test contract marker, confirm that
-        // the scheduler starts in Idle phase — the phase guard inside step()
-        // will reject this state.
+    fn force_poison_then_admit_returns_err() {
+        let mut s = Scheduler::new(4);
+        s.poisoned = true;
+        let err = s
+            .admit(mk_req(vec![1]))
+            .expect_err("admit after poison must fail");
+        assert!(
+            format!("{err}").contains("poisoned"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn force_poison_then_evict_returns_err() {
+        let mut s = Scheduler::new(4);
+        let id = s.admit(mk_req(vec![1])).expect("admit");
+        s.poisoned = true;
+        let err = s.evict(id).expect_err("evict after poison must fail");
+        assert!(
+            format!("{err}").contains("poisoned"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn evict_all_clears_poison() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit");
+        s.force_phase(Phase::Finished); // evict_all requires Decoding/Finished
+        s.poisoned = true;
+        s.evict_all()
+            .expect("evict_all should succeed even when poisoned");
+        assert!(!s.poisoned, "poisoned flag must be cleared after evict_all");
         assert_eq!(s.phase(), Phase::Idle);
     }
 }
