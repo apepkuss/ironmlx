@@ -109,7 +109,13 @@ impl Scheduler {
         let id = RequestId(self.next_id);
         self.next_id += 1;
 
-        let real_len = req.prompt_ids.len() as i32;
+        let prompt_len = req.prompt_ids.len();
+        anyhow::ensure!(
+            prompt_len <= i32::MAX as usize,
+            "prompt too long: {} tokens exceeds i32::MAX",
+            prompt_len
+        );
+        let real_len = prompt_len as i32;
         let state = RequestState {
             id,
             row_idx,
@@ -288,12 +294,7 @@ mod tests {
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let id_b = s.admit(mk_req(vec![2])).expect("admit b");
 
-        // The two `RequestState`s must hold distinct Sampler instances
-        // (separately addressable in memory). Probe via pointer identity
-        // of references — if Sampler shared interior state via Arc it
-        // would still produce different & references, but for ironmlx's
-        // Sampler the clone is value-copy of the configuration plus a
-        // fresh `Cell<Option<Array>>`, so this is the right invariant.
+        // Distinct `RequestState`s must own distinct Sampler instances at distinct addresses.
         let p_a: *const Sampler = &s.get(id_a).unwrap().sampler;
         let p_b: *const Sampler = &s.get(id_b).unwrap().sampler;
         assert_ne!(p_a, p_b);
@@ -302,13 +303,11 @@ mod tests {
     #[test]
     fn occupied_rows_reflects_state() {
         let mut s = Scheduler::new(4);
-        let id_0 = s.admit(mk_req(vec![1])).expect("admit 0");
+        let _id_0 = s.admit(mk_req(vec![1])).expect("admit 0");
         let id_1 = s.admit(mk_req(vec![2])).expect("admit 1");
-        let id_2 = s.admit(mk_req(vec![3])).expect("admit 2");
+        let _id_2 = s.admit(mk_req(vec![3])).expect("admit 2");
         assert_eq!(s.occupied_rows(), vec![0, 1, 2]);
         s.evict(id_1).expect("evict 1");
         assert_eq!(s.occupied_rows(), vec![0, 2]);
-        // Silence unused id warnings.
-        let _ = (id_0, id_2);
     }
 }
