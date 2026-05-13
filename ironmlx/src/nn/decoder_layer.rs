@@ -67,6 +67,20 @@ pub enum LayerCache {
     Linear(GatedDeltaCache),
 }
 
+impl LayerCache {
+    /// Reset to empty state (offset → 0; recurrent state cleared). Preserves
+    /// any underlying Array allocations so the next batch can reuse them.
+    pub fn reset(&mut self) -> anyhow::Result<()> {
+        match self {
+            LayerCache::Full(kv) => {
+                kv.reset();
+                Ok(())
+            }
+            LayerCache::Linear(gd) => gd.reset(),
+        }
+    }
+}
+
 /// One decoder block. Full or linear attention selected at construction.
 pub struct DecoderLayer {
     input_layernorm: RmsNorm,

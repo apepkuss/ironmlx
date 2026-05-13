@@ -10,9 +10,15 @@
 //! See `docs/superpowers/specs/2026-05-13-b1-p2-3a-scheduler-skeleton-design.md`.
 
 use anyhow::{anyhow, Result};
+use mlx::{Array, Dtype};
 
-use crate::core::generate::GenerateRequest;
+use crate::core::generate::{
+    build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
+    build_position_ids_batched, GenerateRequest,
+};
 use crate::core::sampler::Sampler;
+use crate::models::qwen3_5::Qwen35Model;
+use crate::nn::LayerCache;
 
 /// Opaque, monotonically-increasing identifier for an admitted request.
 ///
@@ -22,6 +28,36 @@ use crate::core::sampler::Sampler;
 /// practically infinite).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RequestId(pub u64);
+
+/// Scheduler lifecycle phase. The state machine is `Idle → Admitting →
+/// Decoding → Finished → Idle`.
+///
+/// Transitions are driven by the scheduler methods:
+/// - `admit()` from `Idle`/`Admitting` → `Admitting`
+/// - `prefill_admitted()` from `Idle`/`Admitting` → `Decoding`
+/// - `step()` from `Decoding`: stays `Decoding` while ≥1 row unfinished,
+///   transitions to `Finished` when all active rows are `finished`.
+/// - `evict_all()` from `Decoding`/`Finished` → `Idle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Idle,
+    Admitting,
+    Decoding,
+    Finished,
+}
+
+/// One per-row event emitted by [`Scheduler::step`].
+///
+/// Only rows that were not yet `finished` at the start of the step appear
+/// in the event list. The step in which a row first transitions to
+/// `finished` produces an event with `finish_reason = Some("stop"|"length")`.
+/// Subsequent steps never emit anything for that row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepEvent {
+    pub id: RequestId,
+    pub token: u32,
+    pub finish_reason: Option<&'static str>,
+}
 
 /// All per-request state the scheduler tracks. Pre-allocated at admit time
 /// and held until eviction.
@@ -67,11 +103,26 @@ pub struct RequestState {
 /// 3a is single-threaded only — no `Send + Sync` impls. A later sub-phase
 /// will decide whether to run the scheduler on the main runtime thread or
 /// in `tokio::spawn_blocking`.
-#[derive(Debug)]
 pub struct Scheduler {
     b_max: usize,
     slots: Vec<Option<RequestState>>,
     next_id: u64,
+    phase: Phase,
+    cache: Option<Vec<LayerCache>>,
+    poisoned: bool,
+}
+
+impl std::fmt::Debug for Scheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scheduler")
+            .field("b_max", &self.b_max)
+            .field("slots", &self.slots)
+            .field("next_id", &self.next_id)
+            .field("phase", &self.phase)
+            .field("cache_layers", &self.cache.as_ref().map(|c| c.len()))
+            .field("poisoned", &self.poisoned)
+            .finish()
+    }
 }
 
 impl Scheduler {
@@ -85,6 +136,9 @@ impl Scheduler {
             b_max,
             slots,
             next_id: 0,
+            phase: Phase::Idle,
+            cache: None,
+            poisoned: false,
         }
     }
 
@@ -101,6 +155,16 @@ impl Scheduler {
     /// The request's sampler is **cloned** so each row has its own
     /// independent sampler state.
     pub fn admit(&mut self, req: GenerateRequest) -> Result<RequestId> {
+        self.ensure_not_poisoned()?;
+        match self.phase {
+            Phase::Idle | Phase::Admitting => {}
+            Phase::Decoding | Phase::Finished => {
+                return Err(anyhow!(
+                    "scheduler in {:?} phase: cannot admit; call evict_all first",
+                    self.phase
+                ));
+            }
+        }
         let row_idx =
             self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
                 anyhow!("scheduler full: no row available (b_max={})", self.b_max)
@@ -129,6 +193,7 @@ impl Scheduler {
             finish_reason: None,
         };
         self.slots[row_idx] = Some(state);
+        self.phase = Phase::Admitting;
         Ok(id)
     }
 
@@ -136,12 +201,25 @@ impl Scheduler {
     /// index is freed but the [`RequestId`] is **never** reissued (the
     /// counter keeps incrementing).
     pub fn evict(&mut self, id: RequestId) -> Result<()> {
+        self.ensure_not_poisoned()?;
+        match self.phase {
+            Phase::Decoding => {
+                return Err(anyhow!(
+                    "evict illegal in {:?} phase: call evict_all after the batch finishes",
+                    self.phase
+                ));
+            }
+            Phase::Idle | Phase::Admitting | Phase::Finished => {}
+        }
         let row_idx = self
             .slots
             .iter()
             .position(|s| matches!(s, Some(r) if r.id == id))
             .ok_or_else(|| anyhow!("request id {} not found", id.0))?;
         self.slots[row_idx] = None;
+        if self.phase == Phase::Admitting && self.active_count() == 0 {
+            self.phase = Phase::Idle;
+        }
         Ok(())
     }
 
@@ -177,6 +255,405 @@ impl Scheduler {
             .enumerate()
             .filter_map(|(idx, s)| s.as_ref().map(|_| idx))
             .collect()
+    }
+
+    /// Current scheduler phase. See [`Phase`] for the state machine.
+    pub fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// Returns `Err` if the scheduler has been poisoned by a previous `Err`
+    /// return from `prefill_admitted` or `step`. Call `evict_all` to recover.
+    fn ensure_not_poisoned(&self) -> Result<()> {
+        if self.poisoned {
+            return Err(anyhow!(
+                "scheduler poisoned by a previous Err; call evict_all to recover"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Free all in-flight rows and reset every layer cache to offset 0
+    /// (preserves Array allocations for reuse). Only legal in
+    /// `Decoding`/`Finished` phases. After this call the scheduler is back
+    /// in `Idle` and ready to admit a new batch.
+    ///
+    /// `next_id` is **not** reset — the monotonic-no-reuse guarantee from
+    /// 3a continues across batches.
+    pub fn evict_all(&mut self) -> Result<()> {
+        match self.phase {
+            Phase::Decoding | Phase::Finished => {}
+            Phase::Idle | Phase::Admitting => {
+                return Err(anyhow!(
+                    "evict_all illegal in {:?} phase: only Decoding/Finished are valid",
+                    self.phase
+                ));
+            }
+        }
+        for slot in self.slots.iter_mut() {
+            *slot = None;
+        }
+        if let Some(cache) = self.cache.as_mut() {
+            for lc in cache.iter_mut() {
+                lc.reset()?;
+            }
+        }
+        self.phase = Phase::Idle;
+        self.poisoned = false;
+        Ok(())
+    }
+
+    /// Run batched prefill for every currently-admitted request. Only legal
+    /// in `Idle`/`Admitting` phase with `active_count() >= 1`.
+    ///
+    /// Lazy-allocates the batched KV cache on first call (`b_max` rows,
+    /// capacity 8192, bf16). On subsequent calls (after `evict_all`) the
+    /// cache is reused — `evict_all` already reset every layer.
+    ///
+    /// Builds left-padded `[B, T_max]` input_ids + `[3, B, T_max]`
+    /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
+    /// linear mask, then calls `Qwen35Model::batched_prefill`.
+    ///
+    /// Samples the first token per occupied row from the prefill logits
+    /// (column `max_len - 1`, the last prompt position under left-padding),
+    /// emits a [`StepEvent`] per row, then transitions to `Decoding` (or
+    /// `Finished` if every row's first token was EOS). This keeps the KV
+    /// cache trajectory aligned with `GenerationStream`'s pipelined-mode
+    /// which also uses the prefill argmax as `token_0`. See spec §4.5.
+    pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        match self.prefill_admitted_inner(model) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn prefill_admitted_inner(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+        match self.phase {
+            Phase::Idle | Phase::Admitting => {}
+            Phase::Decoding | Phase::Finished => {
+                return Err(anyhow!(
+                    "prefill_admitted illegal in {:?} phase: call evict_all first",
+                    self.phase
+                ));
+            }
+        }
+        if self.active_count() == 0 {
+            return Err(anyhow!("prefill_admitted: no admitted requests to prefill"));
+        }
+
+        // Build per-row prompt-length vector in slot order. None slots get
+        // 0, which build_batch_attention_mask / build_position_ids_batched
+        // both accept (the row is treated as a fully-padded no-op).
+        // None slots get a synthetic length=1 so that build_position_ids_batched
+        // and the mask builders accept the input (they assert > 0). Row stays
+        // all-pad-zero in input_ids, attention masks treat its single "real"
+        // column as pad K/V (zeroed by the model's batched_prefill path), so
+        // active rows see no leakage from None slots.
+        let prompt_lens: Vec<i32> = self
+            .slots
+            .iter()
+            .map(|s| s.as_ref().map(|r| r.prompt_ids.len() as i32).unwrap_or(1))
+            .collect();
+        let max_len = prompt_lens.iter().copied().max().unwrap_or(0);
+        if max_len <= 0 {
+            return Err(anyhow!(
+                "prefill_admitted: max prompt length is 0 — all admitted prompts are empty"
+            ));
+        }
+
+        // Build [B, T_max] left-padded input_ids (pad value 0). Slot order
+        // matches the slots vector — None rows become full-zero.
+        let b = self.b_max;
+        let t = max_len as usize;
+        let mut flat: Vec<i32> = vec![0; b * t];
+        for (row, slot) in self.slots.iter().enumerate() {
+            if let Some(state) = slot {
+                let len = state.prompt_ids.len();
+                let pad = t - len; // left-pad
+                for (j, &tok) in state.prompt_ids.iter().enumerate() {
+                    flat[row * t + pad + j] = tok as i32;
+                }
+            }
+        }
+        let input_ids: Array = (&flat[..], &[b as i32, max_len][..])
+            .try_into()
+            .map_err(|e| anyhow!("input_ids try_into Array failed: {e:?}"))?;
+
+        // Build [3, B, T_max] position ids and [B, 1, T_max, T_max] attn
+        // mask and [B, T_max] linear mask via existing public helpers.
+        let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
+        let attention_mask = build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
+        let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
+
+        // Lazy-allocate the cache (or reuse the existing one — Task 1's
+        // evict_all already reset every layer to offset 0).
+        // TODO: when a non-bf16 model lands, expose dtype via Qwen35Model
+        // accessor and thread it here.
+        if self.cache.is_none() {
+            self.cache = Some(model.make_cache(b as i32, 8192, Dtype::Bfloat16)?);
+        }
+        let cache_ref = self
+            .cache
+            .as_mut()
+            .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?;
+
+        // Run batched prefill. Capture [B, T_max, vocab] logits for
+        // first-token sampling.
+        let logits = model.batched_prefill(
+            &input_ids,
+            &position_ids,
+            &attention_mask,
+            &linear_attention_mask,
+            Some(cache_ref),
+            (),
+        )?;
+
+        // After left-padded batched prefill, the KV cache has been filled
+        // up to position `max_len - 1` for every row (shorter prompts are
+        // left-padded so their last real token sits at column `max_len - 1`).
+        // The first decode step must use position `max_len` regardless of
+        // each row's actual prompt length. Update `real_len` to reflect this.
+        for slot in self.slots.iter_mut() {
+            if let Some(state) = slot.as_mut() {
+                state.real_len = max_len;
+            }
+        }
+
+        // logits shape: [B, T_max, vocab]
+        let shape = logits.shape();
+        let shape_slice = shape.as_slice();
+        let vocab = shape_slice[2];
+
+        // Sample first token per occupied row from logits[:, max_len-1, :].
+        let mut events: Vec<StepEvent> = Vec::new();
+        for b_idx in 0..b {
+            let was_active = self.slots[b_idx].is_some();
+            if !was_active {
+                continue;
+            }
+            // batched_prefill returns [B, 1, vocab] — the per-row last-token
+            // position is already collapsed internally (see
+            // `tests/b1_p2_1_batched_prefill.rs:173`). Slice
+            // `logits[b_idx, 0, :]` → [1, 1, vocab] then reshape to [vocab].
+            let row = mlx::ops::indexing::slice(
+                &logits,
+                &[b_idx as i32, 0_i32, 0_i32][..],
+                &[b_idx as i32 + 1, 1_i32, vocab][..],
+            )
+            .map_err(|e| anyhow!("prefill_admitted: slice logits row {b_idx} failed: {e:?}"))?;
+            let row_flat = row.reshape(&[vocab][..]).map_err(|e| {
+                anyhow!("prefill_admitted: reshape logits row {b_idx} failed: {e:?}")
+            })?;
+
+            let state = self.slots[b_idx]
+                .as_mut()
+                .expect("was_active guaranteed Some");
+
+            let history: Vec<u32> = state.prompt_ids.clone();
+            let token = state.sampler.sample(&row_flat, &history)?;
+
+            state.generated_tokens.push(token);
+            state.real_len += 1;
+
+            if state.stop_token_ids.contains(&token) {
+                state.finished = true;
+                state.finish_reason = Some("stop");
+            } else if state.generated_tokens.len() >= state.max_new_tokens {
+                state.finished = true;
+                state.finish_reason = Some("length");
+            }
+
+            events.push(StepEvent {
+                id: state.id,
+                token,
+                finish_reason: state.finish_reason,
+            });
+        }
+
+        // Phase transition: Finished if every occupied row already done (rare
+        // corner case — first token of every prompt was EOS), else Decoding.
+        let any_unfinished = self
+            .slots
+            .iter()
+            .any(|s| matches!(s, Some(r) if !r.finished));
+        self.phase = if any_unfinished {
+            Phase::Decoding
+        } else {
+            Phase::Finished
+        };
+
+        Ok(events)
+    }
+
+    /// Advance every non-finished active row by exactly one decode token.
+    /// Only legal in `Decoding` phase.
+    ///
+    /// Packs `[B, 1]` input_ids (each row's last token; pad zero for
+    /// already-finished rows and for empty slots), builds per-row decode
+    /// position ids `[3, B, 1]`, calls `Qwen35Model::forward_on`, then
+    /// loops over rows: slices `logits[b, 0, :]`, samples via
+    /// `RequestState::sampler.sample`, pushes the token, advances
+    /// `real_len`, and checks for EOS / `max_new_tokens` termination.
+    ///
+    /// Returns events **only** for rows that were not yet finished at the
+    /// start of this step. Rows that transition to `finished` during this
+    /// step appear once (with `finish_reason = Some(...)`); rows that were
+    /// already finished are silently skipped.
+    ///
+    /// Transitions phase to `Finished` when every active row has
+    /// `finished == true`.
+    ///
+    /// Note: already-finished rows are still padded into the forward
+    /// (lockstep cost — see spec §7). Only active-at-start rows contribute
+    /// to the returned event list.
+    pub fn step(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        match self.step_inner(model) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn step_inner(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "step illegal in {:?} phase: call prefill_admitted first",
+                self.phase
+            ));
+        }
+
+        let b = self.b_max;
+
+        // Capture which rows were not-yet-finished at the start of this
+        // step. Only these rows participate in sampling and in the event
+        // list. Already-finished rows are still padded into the forward
+        // (lockstep cost — see spec §7).
+        let active_at_start: Vec<bool> = self
+            .slots
+            .iter()
+            .map(|s| matches!(s, Some(r) if !r.finished))
+            .collect();
+
+        // Build [B, 1] input_ids in slot order.
+        // - For active rows: last generated token (prefill_admitted always pushes
+        //   ≥1 token before the first step call, so generated_tokens is non-empty).
+        // - For already-finished rows or empty slots: pad 0.
+        let last_tokens: Vec<i32> = self
+            .slots
+            .iter()
+            .map(|slot| match slot {
+                Some(r) if !r.finished => {
+                    let tok = *r
+                        .generated_tokens
+                        .last()
+                        .expect("prefill_admitted always pushes ≥ 1 token before step");
+                    tok as i32
+                }
+                _ => 0,
+            })
+            .collect();
+        let input_ids: Array = (&last_tokens[..], &[b as i32, 1][..])
+            .try_into()
+            .map_err(|e| anyhow!("step: build input_ids Array failed: {e:?}"))?;
+
+        // Build [3, B, 1] decode position ids. Active rows use real_len
+        // (which is prompt_len + generated_count so far). Pad rows use 0.
+        let per_row_pos: Vec<i32> = self
+            .slots
+            .iter()
+            .map(|s| match s {
+                Some(r) if !r.finished => r.real_len,
+                _ => 0,
+            })
+            .collect();
+        let position_ids = build_decode_position_ids(&per_row_pos)?;
+
+        let cache_ref = self
+            .cache
+            .as_mut()
+            .ok_or_else(|| anyhow!("step: cache absent — was prefill_admitted called?"))?;
+        let logits = model.forward_on(&input_ids, &position_ids, Some(cache_ref), ())?;
+
+        // logits shape: [B, 1, vocab]
+        let shape = logits.shape();
+        let shape_slice = shape.as_slice();
+        let vocab = shape_slice[2];
+
+        let mut events: Vec<StepEvent> = Vec::new();
+        for (b_idx, was_active) in active_at_start.iter().enumerate() {
+            if !was_active {
+                continue;
+            }
+            // Slice logits[b_idx, 0, :] → [1, 1, vocab] then reshape to [vocab].
+            // Using mlx::ops::indexing::slice (same pattern as b1_p2_2_batched_decode.rs).
+            let row = mlx::ops::indexing::slice(
+                &logits,
+                &[b_idx as i32, 0_i32, 0_i32][..],
+                &[b_idx as i32 + 1, 1_i32, vocab][..],
+            )
+            .map_err(|e| anyhow!("step: slice logits row {b_idx} failed: {e:?}"))?;
+            let row_flat = row
+                .reshape(&[vocab][..])
+                .map_err(|e| anyhow!("step: reshape logits row {b_idx} failed: {e:?}"))?;
+
+            let state = self.slots[b_idx]
+                .as_mut()
+                .expect("active_at_start guaranteed Some");
+
+            // Per-row sampler invocation. The sampler.history is the union
+            // of prompt_ids and generated_tokens so far (so repetition
+            // penalty sees both).
+            let mut history: Vec<u32> =
+                Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+            history.extend_from_slice(&state.prompt_ids);
+            history.extend_from_slice(&state.generated_tokens);
+            let token = state.sampler.sample(&row_flat, &history)?;
+
+            state.generated_tokens.push(token);
+            state.real_len += 1;
+
+            // Termination: EOS check first, then max_new_tokens.
+            if state.stop_token_ids.contains(&token) {
+                state.finished = true;
+                state.finish_reason = Some("stop");
+            } else if state.generated_tokens.len() >= state.max_new_tokens {
+                state.finished = true;
+                state.finish_reason = Some("length");
+            }
+
+            events.push(StepEvent {
+                id: state.id,
+                token,
+                finish_reason: state.finish_reason,
+            });
+        }
+
+        // If every active slot is now finished, transition to Finished.
+        let all_done = self
+            .slots
+            .iter()
+            .all(|s| matches!(s, Some(r) if r.finished) || s.is_none());
+        let any_present = self.slots.iter().any(|s| s.is_some());
+        if all_done && any_present {
+            self.phase = Phase::Finished;
+        }
+
+        Ok(events)
+    }
+
+    /// Test-only seam to flip the scheduler's phase without driving a
+    /// model forward. Used to verify phase-guard error paths from unit
+    /// tests; never called by production code.
+    #[cfg(test)]
+    pub(crate) fn force_phase(&mut self, p: Phase) {
+        self.phase = p;
     }
 }
 
@@ -309,5 +786,145 @@ mod tests {
         assert_eq!(s.occupied_rows(), vec![0, 1, 2]);
         s.evict(id_1).expect("evict 1");
         assert_eq!(s.occupied_rows(), vec![0, 2]);
+    }
+
+    #[test]
+    fn phase_starts_idle() {
+        let s = Scheduler::new(4);
+        assert_eq!(s.phase(), Phase::Idle);
+        // Verify cache starts unallocated (visible through manual Debug impl
+        // which surfaces `cache_layers: None`).
+        assert!(
+            format!("{s:?}").contains("cache_layers: None"),
+            "fresh scheduler should report cache_layers: None — got {s:?}"
+        );
+    }
+
+    #[test]
+    fn admit_transitions_idle_to_admitting() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit");
+        assert_eq!(s.phase(), Phase::Admitting);
+    }
+
+    #[test]
+    fn admit_stays_in_admitting() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit 1");
+        let _ = s.admit(mk_req(vec![2])).expect("admit 2");
+        assert_eq!(s.phase(), Phase::Admitting);
+    }
+
+    #[test]
+    fn evict_last_admitted_returns_to_idle() {
+        let mut s = Scheduler::new(4);
+        let id = s.admit(mk_req(vec![1])).expect("admit");
+        assert_eq!(s.phase(), Phase::Admitting);
+        s.evict(id).expect("evict");
+        assert_eq!(s.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn admit_in_decoding_returns_err() {
+        let mut s = Scheduler::new(4);
+        s.force_phase(Phase::Decoding);
+        let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Decoding") && msg.contains("cannot admit"),
+            "unexpected err message: {msg}"
+        );
+    }
+
+    #[test]
+    fn admit_in_finished_returns_err() {
+        let mut s = Scheduler::new(4);
+        s.force_phase(Phase::Finished);
+        let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Finished") && msg.contains("cannot admit"),
+            "unexpected err message: {msg}"
+        );
+    }
+
+    #[test]
+    fn evict_in_decoding_returns_err() {
+        let mut s = Scheduler::new(4);
+        let id = s.admit(mk_req(vec![1])).expect("admit");
+        s.force_phase(Phase::Decoding);
+        let err = s.evict(id).expect_err("evict must fail");
+        assert!(
+            format!("{err}").contains("Decoding"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn evict_all_from_finished_resets_to_idle() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit");
+        s.force_phase(Phase::Finished);
+        s.evict_all().expect("evict_all");
+        assert_eq!(s.phase(), Phase::Idle);
+        assert_eq!(s.active_count(), 0);
+    }
+
+    #[test]
+    fn evict_all_in_idle_returns_err() {
+        let mut s = Scheduler::new(4);
+        let err = s.evict_all().expect_err("evict_all from Idle must fail");
+        assert!(format!("{err}").contains("Idle"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn evict_all_in_admitting_returns_err() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit");
+        // phase is now Admitting; evict_all must reject
+        let err = s
+            .evict_all()
+            .expect_err("evict_all from Admitting must fail");
+        assert!(
+            format!("{err}").contains("Admitting"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn force_poison_then_admit_returns_err() {
+        let mut s = Scheduler::new(4);
+        s.poisoned = true;
+        let err = s
+            .admit(mk_req(vec![1]))
+            .expect_err("admit after poison must fail");
+        assert!(
+            format!("{err}").contains("poisoned"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn force_poison_then_evict_returns_err() {
+        let mut s = Scheduler::new(4);
+        let id = s.admit(mk_req(vec![1])).expect("admit");
+        s.poisoned = true;
+        let err = s.evict(id).expect_err("evict after poison must fail");
+        assert!(
+            format!("{err}").contains("poisoned"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn evict_all_clears_poison() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit");
+        s.force_phase(Phase::Finished); // evict_all requires Decoding/Finished
+        s.poisoned = true;
+        s.evict_all()
+            .expect("evict_all should succeed even when poisoned");
+        assert!(!s.poisoned, "poisoned flag must be cleared after evict_all");
+        assert_eq!(s.phase(), Phase::Idle);
     }
 }
