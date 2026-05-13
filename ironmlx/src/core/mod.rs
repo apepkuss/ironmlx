@@ -14,5 +14,5 @@ pub use chat_template::{ChatTemplate, Message};
 pub use generate::{build_position_ids, GenerateEvent, GenerateRequest, GenerationStream};
 pub use loader::{EosTokenId, Loader, QuantMeta, QuantMode, TokenizerConfig};
 pub use sampler::Sampler;
-pub use scheduler::{RequestId, RequestState, Scheduler};
+pub use scheduler::{Phase, RequestId, RequestState, Scheduler, StepEvent};
 pub use tokenizer::Tokenizer;

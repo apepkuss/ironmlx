@@ -13,6 +13,7 @@ use anyhow::{anyhow, Result};
 
 use crate::core::generate::GenerateRequest;
 use crate::core::sampler::Sampler;
+use crate::nn::LayerCache;
 
 /// Opaque, monotonically-increasing identifier for an admitted request.
 ///
@@ -22,6 +23,36 @@ use crate::core::sampler::Sampler;
 /// practically infinite).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RequestId(pub u64);
+
+/// Scheduler lifecycle phase. The state machine is `Idle → Admitting →
+/// Decoding → Finished → Idle`.
+///
+/// Transitions are driven by the scheduler methods:
+/// - `admit()` from `Idle`/`Admitting` → `Admitting`
+/// - `prefill_admitted()` from `Idle`/`Admitting` → `Decoding`
+/// - `step()` from `Decoding`: stays `Decoding` while ≥1 row unfinished,
+///   transitions to `Finished` when all active rows are `finished`.
+/// - `evict_all()` from `Decoding`/`Finished` → `Idle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Idle,
+    Admitting,
+    Decoding,
+    Finished,
+}
+
+/// One per-row event emitted by [`Scheduler::step`].
+///
+/// Only rows that were not yet `finished` at the start of the step appear
+/// in the event list. The step in which a row first transitions to
+/// `finished` produces an event with `finish_reason = Some("stop"|"length")`.
+/// Subsequent steps never emit anything for that row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepEvent {
+    pub id: RequestId,
+    pub token: u32,
+    pub finish_reason: Option<&'static str>,
+}
 
 /// All per-request state the scheduler tracks. Pre-allocated at admit time
 /// and held until eviction.
@@ -67,11 +98,24 @@ pub struct RequestState {
 /// 3a is single-threaded only — no `Send + Sync` impls. A later sub-phase
 /// will decide whether to run the scheduler on the main runtime thread or
 /// in `tokio::spawn_blocking`.
-#[derive(Debug)]
 pub struct Scheduler {
     b_max: usize,
     slots: Vec<Option<RequestState>>,
     next_id: u64,
+    phase: Phase,
+    cache: Option<Vec<LayerCache>>,
+}
+
+impl std::fmt::Debug for Scheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scheduler")
+            .field("b_max", &self.b_max)
+            .field("slots", &self.slots)
+            .field("next_id", &self.next_id)
+            .field("phase", &self.phase)
+            .field("cache_layers", &self.cache.as_ref().map(|c| c.len()))
+            .finish()
+    }
 }
 
 impl Scheduler {
@@ -85,6 +129,8 @@ impl Scheduler {
             b_max,
             slots,
             next_id: 0,
+            phase: Phase::Idle,
+            cache: None,
         }
     }
 
@@ -101,6 +147,15 @@ impl Scheduler {
     /// The request's sampler is **cloned** so each row has its own
     /// independent sampler state.
     pub fn admit(&mut self, req: GenerateRequest) -> Result<RequestId> {
+        match self.phase {
+            Phase::Idle | Phase::Admitting => {}
+            Phase::Decoding | Phase::Finished => {
+                return Err(anyhow!(
+                    "scheduler in {:?} phase: cannot admit; call evict_all first",
+                    self.phase
+                ));
+            }
+        }
         let row_idx =
             self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
                 anyhow!("scheduler full: no row available (b_max={})", self.b_max)
@@ -129,6 +184,7 @@ impl Scheduler {
             finish_reason: None,
         };
         self.slots[row_idx] = Some(state);
+        self.phase = Phase::Admitting;
         Ok(id)
     }
 
@@ -136,12 +192,23 @@ impl Scheduler {
     /// index is freed but the [`RequestId`] is **never** reissued (the
     /// counter keeps incrementing).
     pub fn evict(&mut self, id: RequestId) -> Result<()> {
+        match self.phase {
+            Phase::Decoding => {
+                return Err(anyhow!(
+                    "evict illegal in Decoding phase: call evict_all after the batch finishes"
+                ));
+            }
+            Phase::Idle | Phase::Admitting | Phase::Finished => {}
+        }
         let row_idx = self
             .slots
             .iter()
             .position(|s| matches!(s, Some(r) if r.id == id))
             .ok_or_else(|| anyhow!("request id {} not found", id.0))?;
         self.slots[row_idx] = None;
+        if self.phase == Phase::Admitting && self.active_count() == 0 {
+            self.phase = Phase::Idle;
+        }
         Ok(())
     }
 
@@ -177,6 +244,48 @@ impl Scheduler {
             .enumerate()
             .filter_map(|(idx, s)| s.as_ref().map(|_| idx))
             .collect()
+    }
+
+    /// Current scheduler phase. See [`Phase`] for the state machine.
+    pub fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// Free all in-flight rows and reset every layer cache to offset 0
+    /// (preserves Array allocations for reuse). Only legal in
+    /// `Decoding`/`Finished` phases. After this call the scheduler is back
+    /// in `Idle` and ready to admit a new batch.
+    ///
+    /// `next_id` is **not** reset — the monotonic-no-reuse guarantee from
+    /// 3a continues across batches.
+    pub fn evict_all(&mut self) -> Result<()> {
+        match self.phase {
+            Phase::Decoding | Phase::Finished => {}
+            Phase::Idle | Phase::Admitting => {
+                return Err(anyhow!(
+                    "evict_all illegal in {:?} phase: only Decoding/Finished are valid",
+                    self.phase
+                ));
+            }
+        }
+        for slot in self.slots.iter_mut() {
+            *slot = None;
+        }
+        if let Some(cache) = self.cache.as_mut() {
+            for lc in cache.iter_mut() {
+                lc.reset()?;
+            }
+        }
+        self.phase = Phase::Idle;
+        Ok(())
+    }
+
+    /// Test-only seam to flip the scheduler's phase without driving a
+    /// model forward. Used to verify phase-guard error paths from unit
+    /// tests; never called by production code.
+    #[cfg(test)]
+    pub(crate) fn force_phase(&mut self, p: Phase) {
+        self.phase = p;
     }
 }
 
@@ -309,5 +418,88 @@ mod tests {
         assert_eq!(s.occupied_rows(), vec![0, 1, 2]);
         s.evict(id_1).expect("evict 1");
         assert_eq!(s.occupied_rows(), vec![0, 2]);
+    }
+
+    #[test]
+    fn phase_starts_idle() {
+        let s = Scheduler::new(4);
+        assert_eq!(s.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn admit_transitions_idle_to_admitting() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit");
+        assert_eq!(s.phase(), Phase::Admitting);
+    }
+
+    #[test]
+    fn admit_stays_in_admitting() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit 1");
+        let _ = s.admit(mk_req(vec![2])).expect("admit 2");
+        assert_eq!(s.phase(), Phase::Admitting);
+    }
+
+    #[test]
+    fn evict_last_admitted_returns_to_idle() {
+        let mut s = Scheduler::new(4);
+        let id = s.admit(mk_req(vec![1])).expect("admit");
+        assert_eq!(s.phase(), Phase::Admitting);
+        s.evict(id).expect("evict");
+        assert_eq!(s.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn admit_in_decoding_returns_err() {
+        let mut s = Scheduler::new(4);
+        s.force_phase(Phase::Decoding);
+        let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Decoding") && msg.contains("cannot admit"),
+            "unexpected err message: {msg}"
+        );
+    }
+
+    #[test]
+    fn admit_in_finished_returns_err() {
+        let mut s = Scheduler::new(4);
+        s.force_phase(Phase::Finished);
+        let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Finished") && msg.contains("cannot admit"),
+            "unexpected err message: {msg}"
+        );
+    }
+
+    #[test]
+    fn evict_in_decoding_returns_err() {
+        let mut s = Scheduler::new(4);
+        let id = s.admit(mk_req(vec![1])).expect("admit");
+        s.force_phase(Phase::Decoding);
+        let err = s.evict(id).expect_err("evict must fail");
+        assert!(
+            format!("{err}").contains("Decoding"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn evict_all_from_finished_resets_to_idle() {
+        let mut s = Scheduler::new(4);
+        let _ = s.admit(mk_req(vec![1])).expect("admit");
+        s.force_phase(Phase::Finished);
+        s.evict_all().expect("evict_all");
+        assert_eq!(s.phase(), Phase::Idle);
+        assert_eq!(s.active_count(), 0);
+    }
+
+    #[test]
+    fn evict_all_in_idle_returns_err() {
+        let mut s = Scheduler::new(4);
+        let err = s.evict_all().expect_err("evict_all from Idle must fail");
+        assert!(format!("{err}").contains("Idle"), "unexpected err: {err}");
     }
 }
