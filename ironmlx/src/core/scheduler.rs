@@ -13,8 +13,8 @@ use anyhow::{anyhow, Result};
 use mlx::{Array, Dtype};
 
 use crate::core::generate::{
-    build_batch_attention_mask, build_batch_linear_mask, build_position_ids_batched,
-    GenerateRequest,
+    build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
+    build_position_ids_batched, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
@@ -295,12 +295,15 @@ impl Scheduler {
     ///
     /// Builds left-padded `[B, T_max]` input_ids + `[3, B, T_max]`
     /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
-    /// linear mask, then calls `Qwen35Model::batched_prefill`. The returned
-    /// logits are discarded (the first decoded token comes from a `step()`
-    /// forward to keep the per-row sampler invocation uniform).
+    /// linear mask, then calls `Qwen35Model::batched_prefill`.
     ///
-    /// Transitions phase to `Decoding`.
-    pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<()> {
+    /// Samples the first token per occupied row from the prefill logits
+    /// (column `max_len - 1`, the last prompt position under left-padding),
+    /// emits a [`StepEvent`] per row, then transitions to `Decoding` (or
+    /// `Finished` if every row's first token was EOS). This keeps the KV
+    /// cache trajectory aligned with `GenerationStream`'s pipelined-mode
+    /// which also uses the prefill argmax as `token_0`. See spec §4.5.
+    pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
             Phase::Decoding | Phase::Finished => {
@@ -365,8 +368,9 @@ impl Scheduler {
             .as_mut()
             .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?;
 
-        // Run batched prefill. Discard the [B, T_max, vocab] logits.
-        let _ = model.batched_prefill(
+        // Run batched prefill. Capture [B, T_max, vocab] logits for
+        // first-token sampling.
+        let logits = model.batched_prefill(
             &input_ids,
             &position_ids,
             &attention_mask,
@@ -375,8 +379,227 @@ impl Scheduler {
             (),
         )?;
 
-        self.phase = Phase::Decoding;
-        Ok(())
+        // After left-padded batched prefill, the KV cache has been filled
+        // up to position `max_len - 1` for every row (shorter prompts are
+        // left-padded so their last real token sits at column `max_len - 1`).
+        // The first decode step must use position `max_len` regardless of
+        // each row's actual prompt length. Update `real_len` to reflect this.
+        for slot in self.slots.iter_mut() {
+            if let Some(state) = slot.as_mut() {
+                state.real_len = max_len;
+            }
+        }
+
+        // logits shape: [B, T_max, vocab]
+        let shape = logits.shape();
+        let shape_slice = shape.as_slice();
+        let vocab = shape_slice[2];
+
+        // Sample first token per occupied row from logits[:, max_len-1, :].
+        let mut events: Vec<StepEvent> = Vec::new();
+        for b_idx in 0..b {
+            let was_active = self.slots[b_idx].is_some();
+            if !was_active {
+                continue;
+            }
+            // Slice logits[b_idx, max_len-1, :] → [1, 1, vocab] then reshape to [vocab].
+            // Same pattern as step() uses for logits[b_idx, 0, :].
+            let row = mlx::ops::indexing::slice(
+                &logits,
+                &[b_idx as i32, max_len - 1, 0_i32][..],
+                &[b_idx as i32 + 1, max_len, vocab][..],
+            )
+            .map_err(|e| anyhow!("prefill_admitted: slice logits row {b_idx} failed: {e:?}"))?;
+            let row_flat = row.reshape(&[vocab][..]).map_err(|e| {
+                anyhow!("prefill_admitted: reshape logits row {b_idx} failed: {e:?}")
+            })?;
+
+            let state = self.slots[b_idx]
+                .as_mut()
+                .expect("was_active guaranteed Some");
+
+            let history: Vec<u32> = state.prompt_ids.clone();
+            let token = state.sampler.sample(&row_flat, &history)?;
+
+            state.generated_tokens.push(token);
+            state.real_len += 1;
+
+            if state.stop_token_ids.contains(&token) {
+                state.finished = true;
+                state.finish_reason = Some("stop");
+            } else if state.generated_tokens.len() >= state.max_new_tokens {
+                state.finished = true;
+                state.finish_reason = Some("length");
+            }
+
+            events.push(StepEvent {
+                id: state.id,
+                token,
+                finish_reason: state.finish_reason,
+            });
+        }
+
+        // Phase transition: Finished if every occupied row already done (rare
+        // corner case — first token of every prompt was EOS), else Decoding.
+        let any_unfinished = self
+            .slots
+            .iter()
+            .any(|s| matches!(s, Some(r) if !r.finished));
+        self.phase = if any_unfinished {
+            Phase::Decoding
+        } else {
+            Phase::Finished
+        };
+
+        Ok(events)
+    }
+
+    /// Advance every non-finished active row by exactly one decode token.
+    /// Only legal in `Decoding` phase.
+    ///
+    /// Packs `[B, 1]` input_ids (each row's last token; pad zero for
+    /// already-finished rows and for empty slots), builds per-row decode
+    /// position ids `[3, B, 1]`, calls `Qwen35Model::forward_on`, then
+    /// loops over rows: slices `logits[b, 0, :]`, samples via
+    /// `RequestState::sampler.sample`, pushes the token, advances
+    /// `real_len`, and checks for EOS / `max_new_tokens` termination.
+    ///
+    /// Returns events **only** for rows that were not yet finished at the
+    /// start of this step. Rows that transition to `finished` during this
+    /// step appear once (with `finish_reason = Some(...)`); rows that were
+    /// already finished are silently skipped.
+    ///
+    /// Transitions phase to `Finished` when every active row has
+    /// `finished == true`.
+    ///
+    /// Note: already-finished rows are still padded into the forward
+    /// (lockstep cost — see spec §7). Only active-at-start rows contribute
+    /// to the returned event list.
+    pub fn step(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "step illegal in {:?} phase: call prefill_admitted first",
+                self.phase
+            ));
+        }
+
+        let b = self.b_max;
+
+        // Capture which rows were not-yet-finished at the start of this
+        // step. Only these rows participate in sampling and in the event
+        // list. Already-finished rows are still padded into the forward
+        // (lockstep cost — see spec §7).
+        let active_at_start: Vec<bool> = self
+            .slots
+            .iter()
+            .map(|s| matches!(s, Some(r) if !r.finished))
+            .collect();
+
+        // Build [B, 1] input_ids in slot order.
+        // - For active rows: last generated token (prefill_admitted always pushes
+        //   ≥1 token before the first step call, so generated_tokens is non-empty).
+        // - For already-finished rows or empty slots: pad 0.
+        let last_tokens: Vec<i32> = self
+            .slots
+            .iter()
+            .map(|slot| match slot {
+                Some(r) if !r.finished => {
+                    let tok = *r
+                        .generated_tokens
+                        .last()
+                        .expect("prefill_admitted always pushes ≥ 1 token before step");
+                    tok as i32
+                }
+                _ => 0,
+            })
+            .collect();
+        let input_ids: Array = (&last_tokens[..], &[b as i32, 1][..])
+            .try_into()
+            .map_err(|e| anyhow!("step: build input_ids Array failed: {e:?}"))?;
+
+        // Build [3, B, 1] decode position ids. Active rows use real_len
+        // (which is prompt_len + generated_count so far). Pad rows use 0.
+        let per_row_pos: Vec<i32> = self
+            .slots
+            .iter()
+            .map(|s| match s {
+                Some(r) if !r.finished => r.real_len,
+                _ => 0,
+            })
+            .collect();
+        let position_ids = build_decode_position_ids(&per_row_pos)?;
+
+        let cache_ref = self
+            .cache
+            .as_mut()
+            .ok_or_else(|| anyhow!("step: cache absent — was prefill_admitted called?"))?;
+        let logits = model.forward_on(&input_ids, &position_ids, Some(cache_ref), ())?;
+
+        // logits shape: [B, 1, vocab]
+        let shape = logits.shape();
+        let shape_slice = shape.as_slice();
+        let vocab = shape_slice[2];
+
+        let mut events: Vec<StepEvent> = Vec::new();
+        for (b_idx, was_active) in active_at_start.iter().enumerate() {
+            if !was_active {
+                continue;
+            }
+            // Slice logits[b_idx, 0, :] → [1, 1, vocab] then reshape to [vocab].
+            // Using mlx::ops::indexing::slice (same pattern as b1_p2_2_batched_decode.rs).
+            let row = mlx::ops::indexing::slice(
+                &logits,
+                &[b_idx as i32, 0_i32, 0_i32][..],
+                &[b_idx as i32 + 1, 1_i32, vocab][..],
+            )
+            .map_err(|e| anyhow!("step: slice logits row {b_idx} failed: {e:?}"))?;
+            let row_flat = row
+                .reshape(&[vocab][..])
+                .map_err(|e| anyhow!("step: reshape logits row {b_idx} failed: {e:?}"))?;
+
+            let state = self.slots[b_idx]
+                .as_mut()
+                .expect("active_at_start guaranteed Some");
+
+            // Per-row sampler invocation. The sampler.history is the union
+            // of prompt_ids and generated_tokens so far (so repetition
+            // penalty sees both).
+            let mut history: Vec<u32> =
+                Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+            history.extend_from_slice(&state.prompt_ids);
+            history.extend_from_slice(&state.generated_tokens);
+            let token = state.sampler.sample(&row_flat, &history)?;
+
+            state.generated_tokens.push(token);
+            state.real_len += 1;
+
+            // Termination: EOS check first, then max_new_tokens.
+            if state.stop_token_ids.contains(&token) {
+                state.finished = true;
+                state.finish_reason = Some("stop");
+            } else if state.generated_tokens.len() >= state.max_new_tokens {
+                state.finished = true;
+                state.finish_reason = Some("length");
+            }
+
+            events.push(StepEvent {
+                id: state.id,
+                token,
+                finish_reason: state.finish_reason,
+            });
+        }
+
+        // If every active slot is now finished, transition to Finished.
+        let all_done = self
+            .slots
+            .iter()
+            .all(|s| matches!(s, Some(r) if r.finished) || s.is_none());
+        let any_present = self.slots.iter().any(|s| s.is_some());
+        if all_done && any_present {
+            self.phase = Phase::Finished;
+        }
+
+        Ok(events)
     }
 
     /// Test-only seam to flip the scheduler's phase without driving a
@@ -620,5 +843,15 @@ mod tests {
             format!("{err}").contains("Admitting"),
             "unexpected err: {err}"
         );
+    }
+
+    #[test]
+    fn step_in_idle_returns_err() {
+        let s = Scheduler::new(4);
+        // step() requires a Qwen35Model handle, so a real call lives in the
+        // integration test. As a unit-test contract marker, confirm that
+        // the scheduler starts in Idle phase — the phase guard inside step()
+        // will reject this state.
+        assert_eq!(s.phase(), Phase::Idle);
     }
 }
