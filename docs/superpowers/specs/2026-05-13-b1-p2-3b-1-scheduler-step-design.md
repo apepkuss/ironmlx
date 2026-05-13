@@ -162,9 +162,9 @@ Steps:
 7. Allocate or reuse cache:
    - If `cache.is_none()`: `self.cache = Some(model.make_cache(b_max as i32, 8192, Dtype::Bfloat16))`. (`Dtype::Bfloat16` is hardcoded for 3b-1; see §9 Open Questions #2.)
    - Else: reuse the existing cache. After `evict_all` every layer is already at offset 0 — caller invariant.
-8. Call `let logits = model.batched_prefill(&input_ids, &position_ids, &attention_mask, &linear_attention_mask, Some(<cache>), ())?`. Returns `[B, max_len, vocab]`.
+8. Call `let logits = model.batched_prefill(&input_ids, &position_ids, &attention_mask, &linear_attention_mask, Some(<cache>), ())?`. Returns `[B, 1, vocab]` — batched_prefill internally collapses each row to its per-row last-prompt-position prediction (see `tests/b1_p2_1_batched_prefill.rs:173` for the empirical assertion). It does **not** return logits for every prefill position.
 9. **Sample first token per occupied row from the prefill logits.** For each `b` where `slots[b].is_some()`:
-   - Slice `row_logits = logits[b, max_len - 1, :]` → `[vocab]`. (The actual last prompt position is at column `max_len - 1` regardless of per-row prompt length because input is left-padded.)
+   - Slice `row_logits = logits[b, 0, :]` → `[vocab]`. (Middle dim is length 1; the per-row last-prompt-position selection is already done by `batched_prefill`.)
    - Sample: `let token = state.sampler.sample(&row_logits, &history)?` where `history = &state.prompt_ids` (no generated tokens yet).
    - Push `token` to `state.generated_tokens`.
    - `state.real_len += 1`.
