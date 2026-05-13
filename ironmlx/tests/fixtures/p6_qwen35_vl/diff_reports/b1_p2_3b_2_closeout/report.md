@@ -57,9 +57,9 @@ No changes to: `core/server/anthropic.rs`, `core/server/chat_format.rs`, `core/s
 | `57e9092` | feat | AppState carries SchedulerActorHandle; serve() spawns driver |
 | `f3c143f` | feat | OpenAI handler routes text/short to SchedulerActor; VL/long to GS |
 | `3c5a36e` | test | SchedulerActor + routing integration (3 scenarios) |
-| `<T5_SHA>` | docs | This close-out |
+| `7862b1f` | docs | This close-out |
 
-(Fill `<T5_SHA>` after Step 5.11 commit.)
+(Fill `7862b1f` after Step 5.11 commit.)
 
 ## Plan-Correction Deviations (Task 4)
 
