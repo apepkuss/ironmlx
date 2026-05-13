@@ -17,6 +17,7 @@ use crate::Result;
 mod anthropic;
 pub mod chat_format;
 mod openai;
+pub mod scheduler_actor;
 
 #[derive(Clone)]
 /// HTTP server shared state. The model is wrapped in a tokio Mutex —
