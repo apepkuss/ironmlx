@@ -5,6 +5,7 @@ pub mod chat_template;
 pub mod generate;
 pub mod loader;
 pub mod sampler;
+pub mod scheduler;
 pub mod server;
 pub mod tokenizer;
 
@@ -13,4 +14,5 @@ pub use chat_template::{ChatTemplate, Message};
 pub use generate::{build_position_ids, GenerateEvent, GenerateRequest, GenerationStream};
 pub use loader::{EosTokenId, Loader, QuantMeta, QuantMode, TokenizerConfig};
 pub use sampler::Sampler;
+pub use scheduler::{RequestId, RequestState, Scheduler};
 pub use tokenizer::Tokenizer;
