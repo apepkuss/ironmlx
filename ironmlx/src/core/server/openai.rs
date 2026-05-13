@@ -20,9 +20,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use tokio::sync::oneshot;
+
 use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::sampler::Sampler;
 use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
+use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::models::qwen3_5::image_processor;
 
 use super::AppState;
@@ -352,14 +355,26 @@ pub async fn chat_completions(
 
     let prompt_tokens = request.prompt_ids.len() as u32;
 
-    if stream {
-        chat_completions_stream(state, request, model_label).await
-    } else {
-        chat_completions_unary(state, request, model_label, prompt_tokens).await
+    // Routing: text-only short-prompt → SchedulerActor; everything else
+    // → GenerationStream path.
+    // COMPAT(3b-2): VL fallback to GS sunsets in B1-p2.4 (batched VL).
+    // COMPAT(3b-2): long-prompt fallback to GS sunsets in 3c+ chunked-prefill phase.
+    let has_images = request.pixel_values.is_some();
+    let prompt_len = request.prompt_ids.len();
+    let use_scheduler =
+        !has_images && (state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size);
+
+    match (stream, use_scheduler) {
+        (true, true) => serve_via_scheduler_stream(state, request, model_label).await,
+        (true, false) => serve_via_gs_stream(state, request, model_label).await,
+        (false, true) => {
+            serve_via_scheduler_unary(state, request, model_label, prompt_tokens).await
+        }
+        (false, false) => serve_via_gs_unary(state, request, model_label, prompt_tokens).await,
     }
 }
 
-async fn chat_completions_stream(
+async fn serve_via_gs_stream(
     state: AppState,
     request: GenerateRequest,
     model_id: String,
@@ -440,7 +455,113 @@ async fn chat_completions_stream(
         .unwrap()
 }
 
-async fn chat_completions_unary(
+/// Text-only short-prompt SSE path via SchedulerActor (3b-2 swap-in).
+async fn serve_via_scheduler_stream(
+    state: AppState,
+    request: GenerateRequest,
+    model_id: String,
+) -> Response {
+    let id = gen_id();
+
+    // 1. Admit request to the actor.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if state
+        .scheduler_handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler actor unavailable",
+        )
+            .into_response();
+    }
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = match reply_rx.await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+        }
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+        }
+    };
+
+    // 2. Stream events as SSE. Spawn a forwarder task that detokenizes
+    // per-event and pushes formatted SSE chunks to a bounded channel.
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let id_for_task = id.clone();
+    let model_id_for_task = model_id.clone();
+    let tokenizer = state.tokenizer.clone();
+
+    tokio::spawn(async move {
+        // First chunk: role.
+        let role_chunk = ChunkResponse {
+            id: id_for_task.clone(),
+            object: "chat.completion.chunk",
+            created: now_unix(),
+            model: model_id_for_task.clone(),
+            choices: vec![Choice {
+                index: 0,
+                delta: DeltaRole {
+                    role: "assistant",
+                    content: String::new(),
+                },
+                finish_reason: None,
+            }],
+        };
+        if tx.send(Ok(format_sse_data(&role_chunk))).await.is_err() {
+            return;
+        }
+
+        let mut detok = tokenizer.decode_stream(/* skip_special */ true);
+        while let Some(ev) = event_rx.recv().await {
+            let text = match detok.step(ev.token) {
+                Ok(Some(s)) => s,
+                Ok(None) => String::new(),
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(format_sse_error(&anyhow::anyhow!("detok: {e}"))))
+                        .await;
+                    break;
+                }
+            };
+            let chunk = ChunkResponse {
+                id: id_for_task.clone(),
+                object: "chat.completion.chunk",
+                created: now_unix(),
+                model: model_id_for_task.clone(),
+                choices: vec![Choice {
+                    index: 0,
+                    delta: DeltaContent { content: &text },
+                    finish_reason: ev.finish_reason,
+                }],
+            };
+            if tx.send(Ok(format_sse_data(&chunk))).await.is_err() {
+                break;
+            }
+            if ev.finish_reason.is_some() {
+                break;
+            }
+        }
+        let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
+    });
+
+    let stream = ReceiverStream::new(rx);
+    let body = Body::from_stream(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(body)
+        .unwrap()
+}
+
+async fn serve_via_gs_unary(
     state: AppState,
     request: GenerateRequest,
     model_id: String,
@@ -480,6 +601,85 @@ async fn chat_completions_unary(
                 .into_response();
         }
     };
+
+    let resp = CompletionResponse {
+        id,
+        object: "chat.completion",
+        created: now_unix(),
+        model: model_id,
+        choices: vec![CompletionChoice {
+            index: 0,
+            message: CompletionMessage {
+                role: "assistant",
+                content,
+            },
+            finish_reason: finish,
+        }],
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
+    };
+    Json(resp).into_response()
+}
+
+/// Text-only short-prompt unary path via SchedulerActor (3b-2 swap-in).
+async fn serve_via_scheduler_unary(
+    state: AppState,
+    request: GenerateRequest,
+    model_id: String,
+    prompt_tokens: u32,
+) -> Response {
+    let id = gen_id();
+
+    // 1. Admit.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if state
+        .scheduler_handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler actor unavailable",
+        )
+            .into_response();
+    }
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = match reply_rx.await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+        }
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+        }
+    };
+
+    // 2. Collect all events, detokenize, build CompletionResponse.
+    let mut detok = state.tokenizer.decode_stream(/* skip_special */ true);
+    let mut content = String::new();
+    let mut finish: &'static str = "stop";
+    let mut completion_tokens: u32 = 0;
+    while let Some(ev) = event_rx.recv().await {
+        completion_tokens += 1;
+        match detok.step(ev.token) {
+            Ok(Some(s)) => content.push_str(&s),
+            Ok(None) => { /* BPE mid-codepoint */ }
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("detok: {e}")).into_response();
+            }
+        }
+        if let Some(reason) = ev.finish_reason {
+            finish = reason;
+            break;
+        }
+    }
 
     let resp = CompletionResponse {
         id,
