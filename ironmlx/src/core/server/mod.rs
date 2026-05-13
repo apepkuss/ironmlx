@@ -22,6 +22,10 @@ pub mod scheduler_actor;
 #[derive(Clone)]
 /// HTTP server shared state. The model is wrapped in a tokio Mutex —
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
+///
+/// 3b-2 adds `scheduler_handle` so text-only short-prompt requests can be
+/// routed through the SchedulerActor; VL / long-prompt requests still
+/// take the GenerationStream path that holds the model lock directly.
 pub struct AppState {
     pub model: Arc<Mutex<Qwen35Model>>,
     pub tokenizer: Arc<Tokenizer>,
@@ -30,6 +34,9 @@ pub struct AppState {
     /// disables chunking. Applied to every `GenerateRequest` constructed
     /// by the request handlers.
     pub prefill_chunk_size: usize,
+    /// SchedulerActor handle. Routed to by text-only short-prompt
+    /// requests. See `serve_via_scheduler_*` in `openai.rs`.
+    pub scheduler_handle: scheduler_actor::SchedulerActorHandle,
 }
 
 pub async fn serve(
@@ -40,11 +47,17 @@ pub async fn serve(
     port: u16,
     prefill_chunk_size: usize,
 ) -> Result<()> {
+    let model = Arc::new(Mutex::new(model));
+    // 3b-2: spawn the SchedulerActor driver task. b_max=4 hardcoded
+    // (matches B1-p2.3b-1 integration coverage). Future phase will make
+    // this configurable.
+    let scheduler_handle = scheduler_actor::spawn_scheduler_actor(model.clone(), 4);
     let state = AppState {
-        model: Arc::new(Mutex::new(model)),
+        model,
         tokenizer: Arc::new(tokenizer),
         model_id,
         prefill_chunk_size,
+        scheduler_handle,
     };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
