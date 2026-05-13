@@ -43,9 +43,7 @@ No changes to: `models/`, `core/server/`, `core/generate.rs`, `core/cache/`, `co
 | --- | --- | --- |
 | `ae5db40` | feat | Scheduler skeleton + 10 unit tests |
 | `8a41ce3` | test | Integration test for admit/evict sequence |
-| `<TASK3_SHA>` | docs | This close-out |
-
-(Fill in `<TASK3_SHA>` after Step 3.8 commit.)
+| `fbeaa68` | docs | This close-out |
 
 ## Regression Status
 
