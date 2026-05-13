@@ -120,11 +120,13 @@ pub struct Scheduler {
 ```rust
 impl Scheduler {
     pub fn phase(&self) -> Phase;
-    pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<()>;
+    pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>>;
     pub fn step(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>>;
     pub fn evict_all(&mut self) -> Result<()>;
 }
 ```
+
+> **Revision note (2026-05-13, during implementation of Task 3):** `prefill_admitted` originally returned `Result<()>`. While implementing Scenario A (B=2 happy), bit-id parity with `GenerationStream` failed because GS runs in **pipelined mode** by default for greedy sampling — its first `next_token` call returns the prefill argmax and pre-fires `forward([token_0])` for the next call. That puts GS's cache trajectory one step ahead of any scheduler that feeds `last_prompt_token` to step 1. To match GS pipelined trajectory exactly (and let 3b-2 swap GS cleanly), `prefill_admitted` now samples the first token per row from prefill logits and emits a `StepEvent` per row, just like `step()` does. See revised §4.5 + §4.6 below.
 
 ### 4.4 `admit` / `evict` phase integration
 
@@ -142,7 +144,7 @@ impl Scheduler {
 
 Why forbid partial evict during `Decoding`? Per §3.2 lockstep, evicting one row mid-decode leaves stale KV in that cache slot at the active global offset. Without per-row offset (3c), there is no way to re-use that slot without invalidating the rest of the batch. The cleanest invariant for 3b-1: **once `Decoding` starts, all rows ride together until they `Finished`, then `evict_all` resets the whole cache.** Future 3d sub-phase will introduce mid-decode preemption with its own cache surgery.
 
-### 4.5 `prefill_admitted(&mut self, model: &Qwen35Model) -> Result<()>`
+### 4.5 `prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>>`
 
 Preconditions:
 - `phase ∈ {Idle, Admitting}` (if `Idle`: `active_count() == 0`, returns `Err("no admitted requests to prefill")`).
@@ -156,14 +158,24 @@ Steps:
    - If `Some(state)`: left-pad `state.prompt_ids` to `max_len` (pad value `0` matches B1-p2.1 path; pad lives at the start).
    - If `None`: row is filled with pad zeros (the row exists in the cache shape because `b_max` is fixed; this is fine — its KV slot becomes effective-empty and never participates in attention).
 5. Build `position_ids: [3, B, max_len]` via `build_position_ids_batched(prompt_lens: &[i32], max_len)` where `prompt_lens[b] = state.prompt_ids.len() as i32` for occupied rows, `0` for None.
-6. Build `attention_mask: [B, 1, max_len, max_len]` and `linear_attention_mask: [B, max_len]` exactly as B1-p2.1's batched test does (helper already in `core/generate.rs` or test fixture — 3b-1 uses the same code path, factoring out to a public helper if needed).
+6. Build `attention_mask: [B, 1, max_len, max_len]` and `linear_attention_mask: [B, max_len]` exactly as B1-p2.1's batched test does — `core::generate::build_batch_attention_mask` and `core::generate::build_batch_linear_mask` (both already `pub`).
 7. Allocate or reuse cache:
-   - If `cache.is_none()`: `self.cache = Some(model.make_cache(b_max as i32, 8192, model.dtype()))`.
-   - Else: assert it's reset (offset == 0 on every layer). If not, returns `Err` — guards against forgetting `evict_all`.
-8. Call `model.batched_prefill(&input_ids, &position_ids, &attention_mask, &linear_attention_mask, Some(&mut cache.as_mut().unwrap()), ())`.
-9. Discard returned `[B, 1, vocab]` — for 3b-1, prefill logits are not used (we don't sample the first decoded token from the last prompt position; 3b-1 always samples from step()'s forward output to keep the API uniform). **Caveat:** this matches B1-p2.2 baseline; if Boss wants to sample first new token directly from prefill logits for throughput, that's a 3e optimization.
-10. Set `phase = Decoding`.
-11. Return `Ok(())`.
+   - If `cache.is_none()`: `self.cache = Some(model.make_cache(b_max as i32, 8192, Dtype::Bfloat16))`. (`Dtype::Bfloat16` is hardcoded for 3b-1; see §9 Open Questions #2.)
+   - Else: reuse the existing cache. After `evict_all` every layer is already at offset 0 — caller invariant.
+8. Call `let logits = model.batched_prefill(&input_ids, &position_ids, &attention_mask, &linear_attention_mask, Some(<cache>), ())?`. Returns `[B, max_len, vocab]`.
+9. **Sample first token per occupied row from the prefill logits.** For each `b` where `slots[b].is_some()`:
+   - Slice `row_logits = logits[b, max_len - 1, :]` → `[vocab]`. (The actual last prompt position is at column `max_len - 1` regardless of per-row prompt length because input is left-padded.)
+   - Sample: `let token = state.sampler.sample(&row_logits, &history)?` where `history = &state.prompt_ids` (no generated tokens yet).
+   - Push `token` to `state.generated_tokens`.
+   - `state.real_len += 1`.
+   - Termination check (same order as `step`): EOS first (`state.stop_token_ids.contains(&token)` → `finished = true; finish_reason = Some("stop")`); else `max_new_tokens` (`state.generated_tokens.len() >= state.max_new_tokens` → `finished = true; finish_reason = Some("length")`).
+   - Build `StepEvent { id: state.id, token, finish_reason: state.finish_reason }` and append to result.
+10. Set `phase`:
+    - If every occupied row finished after step 9 (rare — only when every prompt's first token is EOS or `max_new_tokens == 1`): `phase = Finished`.
+    - Else: `phase = Decoding`.
+11. Return `Ok(events)`.
+
+**Why this matches `GenerationStream` pipelined trajectory:** GS pipelined returns the prefill argmax via its first `next_token` call and pre-fires `forward([token_0])` to populate `pending_token_arr` for next call. After step 9 + 10 here, scheduler's cache and `RequestState` reflect exactly the same state GS reaches after its first `next_token` call: cache offset = max_len (unchanged from batched_prefill), `generated_tokens[0] = token_0`, `real_len = prompt_len + 1`. The next `step()` call feeds `token_0` to `forward_on`, identical to what GS's pipelined pre-fire would do. Cache trajectories agree from this point onward.
 
 ### 4.6 `step(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>>`
 
@@ -172,7 +184,7 @@ Preconditions:
 
 Steps:
 1. Collect per-row inputs in slot order, length `b_max`:
-   - `last_tokens[b]`: if `Some(state)`: `state.generated_tokens.last().copied().unwrap_or_else(|| state.prompt_ids.last())`. If `state.finished` set `last_tokens[b] = 0` (pad — its forward output is discarded). If `None`: `last_tokens[b] = 0`.
+   - `last_tokens[b]`: if `Some(state)` and `!state.finished`: `*state.generated_tokens.last().expect("prefill_admitted always pushes ≥ 1 token before step")`. Else (None slot or finished row): `0`.
    - `per_row_pos[b]`: if `Some(state)` and not finished: `state.real_len`. Else: `0` (None slot or finished row; both contribute pad).
 2. Build `input_ids: [B, 1]` from `last_tokens` (int32).
 3. Build `position_ids: [3, B, 1]` via `build_decode_position_ids(&per_row_pos)`.
@@ -289,10 +301,10 @@ Three scenarios, all using the existing P6 Qwen3.5-VL fixture model (loaded once
 
 **Scenario A — `b1_p2_3b_1_b2_happy`** (B = 2 equal max_new_tokens):
 1. Admit 2 requests with text prompts of unequal length (e.g., 16 and 24 tokens after templating). Both with `max_new_tokens = 16` and greedy sampler.
-2. Call `prefill_admitted`. Assert `phase() == Decoding`.
-3. Loop `step()` 16 times. Collect events per request id.
-4. **In parallel reference:** run a single `GenerationStream` for each prompt with the same sampler and `max_new_tokens`, collect their token sequences.
-5. Compare: for each row, `argmax_bit_id_ratio(scheduler_tokens, baseline_tokens) >= 0.95` (the B1-p2.2 tolerance — bf16 ULP-driven flips expected).
+2. Call `prefill_admitted`. Assert `phase() == Decoding`. **Collect the returned `Vec<StepEvent>` — this is the first token per row** (revised §4.5).
+3. Loop `step()` until `phase() != Decoding`. Collect events per request id, appending to the prefill events.
+4. **In parallel reference:** run a single `GenerationStream` for each prompt with the same sampler and `max_new_tokens`, collect their token sequences (GS's default pipelined mode).
+5. Compare: for each row, `argmax_bit_id_ratio(scheduler_tokens, baseline_tokens) >= 0.95` (the B1-p2.2 tolerance — bf16 ULP-driven flips expected). Token sequences should match closely because `prefill_admitted` now matches GS pipelined cache trajectory by sampling the first token from prefill logits.
 6. Assert `phase() == Finished` at the end.
 7. Call `evict_all`. Assert `phase() == Idle`, `active_count() == 0`.
 8. **Re-use check:** admit 2 more rows + prefill + step a few times — confirm `cache.reset()` is honored (no offset overflow, no NaN, second batch yields plausible logits).
