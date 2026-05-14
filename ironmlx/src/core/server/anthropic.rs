@@ -335,7 +335,7 @@ async fn serve_via_gs_stream(
 /// Emits the same 6-event SSE sequence as `serve_via_gs_stream`:
 ///   message_start → content_block_start → N × content_block_delta →
 ///   content_block_stop → message_delta → message_stop.
-pub(crate) async fn serve_via_scheduler_stream(
+pub async fn serve_via_scheduler_stream(
     state: AppState,
     request: GenerateRequest,
     model_id: String,
@@ -552,7 +552,7 @@ async fn serve_via_gs_unary(
 }
 
 /// Text-only short-prompt unary path via SchedulerActor (3b-4 swap-in).
-pub(crate) async fn serve_via_scheduler_unary(
+pub async fn serve_via_scheduler_unary(
     state: AppState,
     request: GenerateRequest,
     model_id: String,

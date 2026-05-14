@@ -14,7 +14,7 @@ use crate::core::tokenizer::Tokenizer;
 use crate::models::Qwen35Model;
 use crate::Result;
 
-mod anthropic;
+pub mod anthropic;
 pub mod chat_format;
 mod openai;
 pub mod scheduler_actor;

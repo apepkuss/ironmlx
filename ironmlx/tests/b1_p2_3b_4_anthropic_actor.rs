@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use axum::body::to_bytes;
 use tokio::sync::Mutex;
 
 use ironmlx::core::generate::{GenerateRequest, GenerationStream};
@@ -22,6 +23,7 @@ use ironmlx::core::sampler::Sampler;
 use ironmlx::core::server::scheduler_actor::{
     spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand,
 };
+use ironmlx::core::server::AppState;
 use ironmlx::core::{Loader, Message, Tokenizer};
 use ironmlx::models::qwen3_5::Qwen35Model;
 
@@ -226,4 +228,151 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
         "admit_count incremented unexpectedly: {} -> {}",
         before, after
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
+    let (model, tokenizer) = load_fixture();
+
+    let prompt = "Hello.";
+    let prompt_ids = tokenize_prompt(&tokenizer, prompt);
+    let input_tokens = prompt_ids.len() as u32;
+    let stop_token_ids: Vec<u32> = tokenizer.eos_token_ids().to_vec();
+    let max_new_tokens: usize = 4;
+
+    // Construct AppState matching what serve() builds.
+    let handle = spawn_scheduler_actor(model.clone(), 4);
+    let state = AppState {
+        model: model.clone(),
+        tokenizer: tokenizer.clone(),
+        model_id: "test-model".to_string(),
+        prefill_chunk_size: 256,
+        scheduler_handle: handle.clone(),
+    };
+
+    let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);
+
+    // Invoke the scheduler-path helper directly.
+    let response = ironmlx::core::server::anthropic::serve_via_scheduler_stream(
+        state,
+        req,
+        "test-model".to_string(),
+        input_tokens,
+    )
+    .await;
+
+    // Collect the response body bytes.
+    let body_bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = String::from_utf8_lossy(&body_bytes);
+    println!("[anthropic_6event] raw body:\n{body}");
+
+    // Parse SSE chunks: split on \n\n boundary. Each chunk starts with
+    // "event: <type>\ndata: <json>".
+    let mut event_types: Vec<String> = Vec::new();
+    let mut event_payloads: Vec<serde_json::Value> = Vec::new();
+    for chunk in body.split("\n\n") {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut event_type = None;
+        let mut data_line = None;
+        for line in chunk.lines() {
+            if let Some(t) = line.strip_prefix("event: ") {
+                event_type = Some(t.to_string());
+            } else if let Some(d) = line.strip_prefix("data: ") {
+                data_line = Some(d);
+            }
+        }
+        if let (Some(t), Some(d)) = (event_type, data_line) {
+            event_types.push(t);
+            let payload: serde_json::Value = serde_json::from_str(d).expect("parse SSE data");
+            event_payloads.push(payload);
+        }
+    }
+    println!("[anthropic_6event] event_types={:?}", event_types);
+
+    // Assert event sequence shape.
+    assert!(
+        event_types.len() >= 5,
+        "expected ≥5 events (message_start + content_block_start + ≥1 delta + content_block_stop + message_delta + message_stop), got {} events",
+        event_types.len()
+    );
+    assert_eq!(
+        event_types.first().map(|s| s.as_str()),
+        Some("message_start"),
+        "first event must be message_start"
+    );
+    assert_eq!(
+        event_types.get(1).map(|s| s.as_str()),
+        Some("content_block_start"),
+        "second event must be content_block_start"
+    );
+    assert_eq!(
+        event_types.last().map(|s| s.as_str()),
+        Some("message_stop"),
+        "last event must be message_stop"
+    );
+
+    // The last 3 events must be content_block_stop → message_delta → message_stop.
+    let n = event_types.len();
+    assert!(
+        event_types[n - 3] == "content_block_stop"
+            && event_types[n - 2] == "message_delta"
+            && event_types[n - 1] == "message_stop",
+        "tail of event_types must be [content_block_stop, message_delta, message_stop]; got {:?}",
+        &event_types[n - 3..]
+    );
+
+    // Middle events (between content_block_start and content_block_stop)
+    // must all be content_block_delta.
+    for (i, t) in event_types.iter().enumerate().take(n - 3).skip(2) {
+        assert_eq!(
+            t.as_str(),
+            "content_block_delta",
+            "event[{i}] must be content_block_delta, got {t}"
+        );
+    }
+
+    // Verify message_start payload structure.
+    let start = &event_payloads[0];
+    assert_eq!(start["type"], "message_start");
+    assert_eq!(start["message"]["usage"]["input_tokens"], input_tokens);
+    assert_eq!(start["message"]["usage"]["output_tokens"], 0);
+    assert!(
+        start["message"]["stop_reason"].is_null(),
+        "message_start.stop_reason must be null"
+    );
+
+    // Verify message_delta payload structure.
+    let delta = &event_payloads[n - 2];
+    assert_eq!(delta["type"], "message_delta");
+    let stop_reason = delta["delta"]["stop_reason"]
+        .as_str()
+        .expect("stop_reason str");
+    assert!(
+        stop_reason == "end_turn" || stop_reason == "max_tokens",
+        "unexpected stop_reason: {stop_reason}"
+    );
+    let final_output_tokens = delta["usage"]["output_tokens"]
+        .as_u64()
+        .expect("output_tokens u64");
+    // Number of content_block_delta events ≤ output_tokens (some tokens
+    // may produce empty detok text — counted in output_tokens but not emitted).
+    let delta_count = event_types
+        .iter()
+        .filter(|t| t.as_str() == "content_block_delta")
+        .count() as u64;
+    assert!(
+        delta_count <= final_output_tokens,
+        "delta count {delta_count} exceeds output_tokens {final_output_tokens} — counter invariant broken"
+    );
+    println!(
+        "[anthropic_6event] output_tokens={} delta_count={} stop_reason={}",
+        final_output_tokens, delta_count, stop_reason
+    );
+
+    let _ = handle; // keep alive
 }
