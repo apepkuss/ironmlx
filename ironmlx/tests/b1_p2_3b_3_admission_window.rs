@@ -13,7 +13,6 @@
 //!
 //! Tests are `#[ignore]`-gated; run only with `QWEN35_MODEL` env var.
 
-#[allow(unused_imports)]
 use std::time::Duration;
 
 use std::path::Path;
@@ -284,4 +283,104 @@ async fn admission_window_b_max_saturate_triggers_immediate_prefill() {
     for (i, tokens) in results.iter().enumerate() {
         assert!(!tokens.is_empty(), "row {i} produced no tokens");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn admission_window_deadline_fires_with_single_admit() {
+    let (model, tokenizer) = load_fixture();
+
+    let prompt = "What is the capital of France?";
+    let prompt_ids = tokenize_prompt(&tokenizer, prompt);
+    let stop_token_ids: Vec<u32> = tokenizer.eos_token_ids().to_vec();
+    let max_new_tokens: usize = 6;
+
+    let handle = spawn_scheduler_actor(model.clone(), 4);
+    let admit_before = handle.admit_count.load(Ordering::Relaxed);
+    let batch_before = handle.batch_count.load(Ordering::Relaxed);
+    let saturate_before = handle.saturate_triggered.load(Ordering::Relaxed);
+
+    let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);
+    let tokens = admit_and_drain(handle.clone(), req).await;
+    assert!(!tokens.is_empty(), "tokens produced");
+
+    let admit_delta = handle.admit_count.load(Ordering::Relaxed) - admit_before;
+    let batch_delta = handle.batch_count.load(Ordering::Relaxed) - batch_before;
+    let saturate_delta = handle.saturate_triggered.load(Ordering::Relaxed) - saturate_before;
+    println!(
+        "[deadline] admit_delta={} batch_delta={} saturate_delta={}",
+        admit_delta, batch_delta, saturate_delta
+    );
+    assert_eq!(admit_delta, 1);
+    assert_eq!(batch_delta, 1);
+    assert_eq!(
+        saturate_delta, 0,
+        "single admit must use deadline path, not saturate"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn admission_window_concurrent_scheduler_and_gs_no_deadlock() {
+    let (model, tokenizer) = load_fixture();
+    let tokenizer_arc = tokenizer.clone();
+
+    let prompt = "Name a color.";
+    let prompt_ids = tokenize_prompt(&tokenizer, prompt);
+    let stop_token_ids: Vec<u32> = tokenizer.eos_token_ids().to_vec();
+    let max_new_tokens: usize = 4;
+
+    let handle = spawn_scheduler_actor(model.clone(), 4);
+    let admit_before = handle.admit_count.load(Ordering::Relaxed);
+
+    // Task A: scheduler path.
+    let req_a = make_request(prompt_ids.clone(), max_new_tokens, stop_token_ids.clone());
+    let handle_a = handle.clone();
+    let task_a = tokio::spawn(async move { admit_and_drain(handle_a, req_a).await });
+
+    // Task B: GS path. Runs GenerationStream directly on spawn_blocking
+    // to mirror the production HTTP handler GS path.
+    let req_b = make_request(prompt_ids, max_new_tokens, stop_token_ids);
+    let model_b = model.clone();
+    let tokenizer_b = tokenizer_arc.clone();
+    let task_b = tokio::task::spawn_blocking(move || -> Vec<u32> {
+        let model_guard = model_b.blocking_lock();
+        let mut stream =
+            GenerationStream::new(&model_guard, &tokenizer_b, req_b).expect("new stream");
+        let mut tokens = Vec::new();
+        while let Some(ev) = stream.next_token().expect("next_token") {
+            tokens.push(ev.token);
+            if ev.finish_reason.is_some() {
+                break;
+            }
+        }
+        tokens
+    });
+
+    // Both tasks must complete within a generous bound (60s).
+    let tokens_a = tokio::time::timeout(Duration::from_secs(60), task_a)
+        .await
+        .expect("task A timed out — possible deadlock")
+        .expect("task A join");
+    let tokens_b = tokio::time::timeout(Duration::from_secs(60), task_b)
+        .await
+        .expect("task B timed out — possible deadlock")
+        .expect("task B join");
+
+    assert!(
+        !tokens_a.is_empty(),
+        "task A (scheduler) produced no tokens"
+    );
+    assert!(!tokens_b.is_empty(), "task B (GS) produced no tokens");
+    let admit_delta = handle.admit_count.load(Ordering::Relaxed) - admit_before;
+    println!(
+        "[concurrent_no_deadlock] admit_delta={} task_a_len={} task_b_len={}",
+        admit_delta,
+        tokens_a.len(),
+        tokens_b.len()
+    );
+    assert_eq!(
+        admit_delta, 1,
+        "only scheduler path incremented admit_count"
+    );
 }
