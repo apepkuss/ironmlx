@@ -359,6 +359,13 @@ pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
 ///
 /// Differs in shape from [`build_batch_attention_mask`] (which is
 /// prefill-only, `[B, 1, T_q, T_kv]`) because decode has `T_q = 1`.
+///
+/// Every entry of `per_row_real_lens` must be `> 0`: a zero-length row would
+/// produce an all-`-inf` mask, and SDPA's softmax of all-`-inf` yields NaN
+/// which would contaminate other rows via residual connections. Callers
+/// that have inactive slots should omit them from the batch rather than
+/// pass a length-0 mask row. Matches the `prompt_lens[i] > 0` contract
+/// enforced by [`build_batch_attention_mask`].
 pub fn build_per_row_decode_mask(
     per_row_real_lens: &[i32],
     max_len: i32,
@@ -375,9 +382,10 @@ pub fn build_per_row_decode_mask(
         ));
     }
     for (i, &l) in per_row_real_lens.iter().enumerate() {
-        if l < 0 {
+        if l <= 0 {
             return Err(anyhow!(
-                "build_per_row_decode_mask: per_row_real_lens[{i}] = {l} must be >= 0"
+                "build_per_row_decode_mask: per_row_real_lens[{i}] = {l} must be > 0 \
+                 (zero-length row would produce all-`-inf` mask, yielding softmax NaN)"
             ));
         }
         if l > max_len {
@@ -1339,5 +1347,25 @@ mod per_row_decode_mask_tests {
         // negative entry → Err.
         let r3 = build_per_row_decode_mask(&[-1, 4], 4, Dtype::Bfloat16);
         assert!(r3.is_err());
+
+        // zero-length row → Err (would produce all-`-inf` mask).
+        let r4 = build_per_row_decode_mask(&[0, 4], 4, Dtype::Bfloat16);
+        assert!(r4.is_err());
+        let msg = format!("{}", r4.unwrap_err());
+        assert!(
+            msg.contains("must be > 0"),
+            "msg should mention > 0 contract; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mask_per_row_decode_bfloat16_dtype() {
+        // Verify the astype cast to Bfloat16 actually produces a Bfloat16
+        // array. The other tests use Float32 for direct .to_vec() access;
+        // this one confirms the dtype-cast path works for the production
+        // dtype.
+        let m = build_per_row_decode_mask(&[3], 4, Dtype::Bfloat16).expect("mask");
+        assert_eq!(m.dtype(), Dtype::Bfloat16);
+        assert_eq!(m.shape().as_slice(), &[1, 1, 1, 4]);
     }
 }
