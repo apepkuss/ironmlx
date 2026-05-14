@@ -188,6 +188,7 @@ async fn per_row_offset_uniform_lens_matches_lockstep_baseline() {
 
         // After per-row prefill (right-pad), row i's cache occupies [0..prompt_lens[i]].
         // Smoke-check the first Full-attention layer's offsets.
+        let mut full_seen = false;
         for cell in &cache {
             if let LayerCache::Full(kv) = cell {
                 assert_eq!(
@@ -195,9 +196,27 @@ async fn per_row_offset_uniform_lens_matches_lockstep_baseline() {
                     &prompt_lens[..],
                     "Full cache offsets should equal prompt_lens after per-row prefill"
                 );
+                full_seen = true;
                 break;
             }
         }
+        assert!(full_seen, "expected at least one Full layer in cache");
+
+        // Linear (GatedDelta) layer offsets — same expectation on real-text prompts
+        // (Scenario 2 asserts this with synthetic IDs; this covers the real-prompt path).
+        let mut linear_seen = false;
+        for cell in &cache {
+            if let LayerCache::Linear(gdc) = cell {
+                assert_eq!(
+                    gdc.offsets(),
+                    &prompt_lens[..],
+                    "Linear cache offsets should equal prompt_lens after per-row prefill"
+                );
+                linear_seen = true;
+                break;
+            }
+        }
+        assert!(linear_seen, "expected at least one Linear layer in cache");
 
         // Sample first token per row from prefill logits.
         // logits shape: [B, 1, vocab] (slice_last_and_project per-row collapsed).
@@ -234,6 +253,9 @@ async fn per_row_offset_uniform_lens_matches_lockstep_baseline() {
         for _ in 0..DECODE_STEPS {
             let last = [*tokens_a.last().expect("a"), *tokens_b.last().expect("b")];
             let next_input: Array = (&last[..], &[2_i32, 1_i32][..]).try_into().expect("next");
+            // Each row's position for the next forward = prompt_lens[i] + tokens.len() - 1.
+            // Entering the loop, tokens_{a,b}.len() == 1 (first token from prefill), so
+            // step 0's positions = prompt_lens[i] (the slot where the new token lands).
             let per_row_pos: Vec<i32> = vec![
                 prompt_lens[0] + tokens_a.len() as i32 - 1,
                 prompt_lens[1] + tokens_b.len() as i32 - 1,
@@ -418,7 +440,10 @@ async fn per_row_offset_zero_len_skips_row() {
 
         // ── GatedDeltaCache::advance: row 0 advance 0, row 1 advance 12 ────
         {
-            // B=2, kernel_size=4, conv_dim=8, hv=4, dv=8, dk=8, cap=20.
+            // Params (b=2, kernel_size=4, conv_dim=8, hv=4, dv=8, dk=8, Bfloat16, cap=20)
+            // mirror gated_delta.rs unit test helper `make_cache_b` — arbitrary small
+            // values for testing the per-row offset invariant, not Qwen3.5 production
+            // sizes.
             let mut gdc = GatedDeltaCache::new_with_cap(2, 4, 8, 4, 8, 8, Dtype::Bfloat16, 20)
                 .expect("gdc new");
 
