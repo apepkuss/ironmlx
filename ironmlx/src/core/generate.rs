@@ -204,10 +204,11 @@ pub fn build_position_ids(start_pos: i32, len: i32) -> Result<Array> {
     mlx::ops::shape::broadcast_to(&one_stream, &[3_i32, 1, len][..]).map_err(anyhow::Error::from)
 }
 
-/// Build MRoPE position ids for a batched, left-padded prefill.
+/// Build MRoPE position ids for a batched, right-padded prefill.
 /// Returns `[3, B, max_len]` int32. For batch row i with actual length
-/// `prompt_lens[i] = L_i`, the trailing `L_i` positions hold `0..L_i-1`;
-/// the leading `max_len - L_i` positions hold 0 (masked out by attention).
+/// `prompt_lens[i] = L_i`, the leading `L_i` positions hold `0..L_i-1`;
+/// the trailing `max_len - L_i` positions hold 0 (pad — masked out by
+/// attention).
 ///
 /// All three MRoPE streams hold the same per-batch-row sequence — this is
 /// the text-only convention. VL B>1 (B1-p2.4) will need a multi-stream variant.
@@ -236,10 +237,10 @@ pub fn build_position_ids_batched(prompt_lens: &[i32], max_len: i32) -> Result<A
     let mut single_stream = vec![0_i32; b * s];
     for (i, &l) in prompt_lens.iter().enumerate() {
         let l = l as usize;
-        let pad_start = s - l;
         for j in 0..l {
-            single_stream[i * s + pad_start + j] = j as i32;
+            single_stream[i * s + j] = j as i32;
         }
+        // positions [l..s] stay 0 (pad — masked out)
     }
     let mut flat = Vec::with_capacity(3 * b * s);
     for _ in 0..3 {
@@ -250,11 +251,15 @@ pub fn build_position_ids_batched(prompt_lens: &[i32], max_len: i32) -> Result<A
 }
 
 /// Build an additive attention mask `[B, 1, max_len, max_len]` for a
-/// left-padded batched prefill. For batch row `i` with actual length
-/// `prompt_lens[i] = L_i` and `pad_start_i = max_len - L_i`:
+/// right-padded batched prefill. For batch row `i` with actual length
+/// `prompt_lens[i] = L_i`:
 ///
-///   mask[i, 0, q, k] = 0.0   iff (q >= pad_start_i) AND (k >= pad_start_i) AND (k <= q)
+///   mask[i, 0, q, k] = 0.0   iff (q < L_i) AND (k < L_i) AND (k <= q)
 ///                    = -inf  otherwise
+///
+/// Real tokens occupy columns `[0..L_i)`; the trailing `max_len - L_i`
+/// columns are pad. Pad query rows (`q >= L_i`) attend only to themselves
+/// (`mask[i, 0, q, q] = 0`) to prevent `softmax(all-`-inf`)` NaN.
 ///
 /// The dtype is `dtype` (typically `Dtype::Bfloat16` to match the SDPA promoted
 /// type). Returns a value broadcast-compatible with mlx fast SDPA's expected
@@ -289,24 +294,22 @@ pub fn build_batch_attention_mask(
     let mut flat = vec![neg_inf; total];
     for (i, &l) in prompt_lens.iter().enumerate() {
         let l = l as usize;
-        let pad_start = s - l;
-        // Real query rows (q >= pad_start): attend to real keys (k >= pad_start)
-        // within the causal triangle (k <= q).
-        for q in pad_start..s {
-            for k in pad_start..=q {
+        // Real query rows (q < l): causal attend to real keys (k < l, k <= q).
+        for q in 0..l {
+            for k in 0..=q {
                 flat[(i * s + q) * s + k] = 0.0;
             }
         }
-        // Pad query rows (q < pad_start): allow self-attention only
+        // Pad query rows (q >= l): allow self-attention only
         // (`mask[i, 0, q, q] = 0`). Without this, the row is all `-inf`
         // and `softmax(all-INF)` yields NaN, which propagates through
         // subsequent layers and contaminates real-row outputs via
         // residual connections / layer norms (NaN × any = NaN). Letting
         // pad-q attend to itself produces a benign zero output (since
-        // `kv_validity_mask` zeros V at pad positions in
-        // `attention::forward_on`), and the pad-q hidden states never
-        // feed into real-row queries (causal mask blocks the path).
-        for q in 0..pad_start {
+        // pad-row outputs are discarded by `slice_last_and_project`'s
+        // per-row slice anyway, and `kv_validity_mask` zeros V at pad
+        // positions in `attention::forward_on`).
+        for q in l..s {
             flat[(i * s + q) * s + q] = 0.0;
         }
     }
@@ -343,12 +346,79 @@ pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
     Ok(arr)
 }
 
+/// Build a per-row decode attention mask `[B, 1, 1, max_len]`.
+///
+/// Each batch row `b` attends to K/V positions `0..per_row_real_lens[b]`
+/// (real cache) and is `-inf`-masked at positions
+/// `per_row_real_lens[b]..max_len` (stale / unused cache slots). Used by
+/// the decode path when rows have ragged cache offsets — typically
+/// `per_row_real_lens[b] = cache.offsets()[b] + 1` after a per-row write.
+///
+/// `max_len` must satisfy `max_len >= max(per_row_real_lens)` — it sets
+/// the K-dimension of the returned mask and must equal the fetched K/V
+/// slice's K dim. The returned mask is additive (consumed by mlx fast
+/// SDPA's `mask_arr` slot with `mask_mode = ""`); 0.0 means attend, -inf
+/// means mask out.
+///
+/// Differs in shape from [`build_batch_attention_mask`] (which is
+/// prefill-only, `[B, 1, T_q, T_kv]`) because decode has `T_q = 1`.
+///
+/// Every entry of `per_row_real_lens` must be `> 0`: a zero-length row would
+/// produce an all-`-inf` mask, and SDPA's softmax of all-`-inf` yields NaN
+/// which would contaminate other rows via residual connections. Callers
+/// that have inactive slots should omit them from the batch rather than
+/// pass a length-0 mask row. Matches the `prompt_lens[i] > 0` contract
+/// enforced by [`build_batch_attention_mask`].
+pub fn build_per_row_decode_mask(
+    per_row_real_lens: &[i32],
+    max_len: i32,
+    dtype: Dtype,
+) -> Result<Array> {
+    if per_row_real_lens.is_empty() {
+        return Err(anyhow!(
+            "build_per_row_decode_mask: per_row_real_lens must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_per_row_decode_mask: max_len must be > 0, got {max_len}"
+        ));
+    }
+    for (i, &l) in per_row_real_lens.iter().enumerate() {
+        if l <= 0 {
+            return Err(anyhow!(
+                "build_per_row_decode_mask: per_row_real_lens[{i}] = {l} must be > 0 \
+                 (zero-length row would produce all-`-inf` mask, yielding softmax NaN)"
+            ));
+        }
+        if l > max_len {
+            return Err(anyhow!(
+                "build_per_row_decode_mask: per_row_real_lens[{i}] = {l} > max_len = {max_len}"
+            ));
+        }
+    }
+
+    let b = per_row_real_lens.len();
+    let s = max_len as usize;
+    let neg_inf = f32::NEG_INFINITY;
+    let mut flat = vec![neg_inf; b * s];
+    for (i, &l) in per_row_real_lens.iter().enumerate() {
+        let l = l as usize;
+        for k in 0..l {
+            flat[i * s + k] = 0.0;
+        }
+    }
+
+    let arr_f32: Array = (&flat[..], &[b as i32, 1_i32, 1_i32, max_len][..]).try_into()?;
+    mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
+}
+
 /// Build a per-token validity mask `[B, max_len]` for the hybrid model's
 /// **linear-attention** path (`GatedDeltaNet`). For batch row `i` with
-/// actual length `prompt_lens[i] = L_i`:
+/// actual length `prompt_lens[i] = L_i` (right-padded prefill):
 ///
-///   linear_mask[i, t] = true   if t >= max_len - L_i  (real token)
-///                     = false  otherwise              (left-pad slot)
+///   linear_mask[i, t] = true   if t < L_i        (real token)
+///                     = false  otherwise         (right-pad slot)
 ///
 /// The kernel reads `mask[b_idx * T + t]` as a boolean (`if (mask[...])`)
 /// — `true` → compute, `false` → emit zero for that position. This
@@ -383,10 +453,10 @@ pub fn build_batch_linear_mask(prompt_lens: &[i32], max_len: i32) -> Result<Arra
     let mut flat = vec![false; b * s];
     for (i, &l) in prompt_lens.iter().enumerate() {
         let l = l as usize;
-        let pad_start = s - l;
-        for t in pad_start..s {
+        for t in 0..l {
             flat[i * s + t] = true;
         }
+        // positions [l..s] stay false (pad — kernel skips compute)
     }
 
     let arr: Array = (&flat[..], &[b as i32, max_len][..]).try_into()?;
@@ -710,6 +780,7 @@ impl<'m> GenerationStream<'m> {
                     &chunk_arr,
                     &chunk_pos_ids,
                     Some(&mut cache),
+                    None,
                     ve_slice.as_ref(),
                     request.image_token_id,
                     (),
@@ -720,12 +791,15 @@ impl<'m> GenerationStream<'m> {
                     None
                 }
             } else if is_last {
-                Some(model.forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?)
+                Some(model.forward_on(&chunk_arr, &chunk_pos_ids, None, Some(&mut cache), ())?)
             } else {
-                let hidden =
-                    model
-                        .text()
-                        .forward_on(&chunk_arr, &chunk_pos_ids, Some(&mut cache), ())?;
+                let hidden = model.text().forward_on(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None,
+                    Some(&mut cache),
+                    (),
+                )?;
                 mlx::transforms::eval(&[&hidden])?;
                 None
             };
@@ -890,9 +964,13 @@ impl<'m> GenerationStream<'m> {
             .reshape((1_i32, 1_i32))?;
         let pos = (self.history.len() - 1) as i32;
         let position_ids = build_position_ids(pos, 1)?;
-        let logits =
-            self.model
-                .forward_on(&token_arr_in, &position_ids, Some(&mut self.cache), ())?;
+        let logits = self.model.forward_on(
+            &token_arr_in,
+            &position_ids,
+            None,
+            Some(&mut self.cache),
+            (),
+        )?;
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
         let next_arr = self.request.sampler.sample_async_greedy(&logits_flat)?;
@@ -947,9 +1025,9 @@ impl<'m> GenerationStream<'m> {
         let token_arr: Array = (&[token][..], &[1_i32, 1][..]).try_into()?;
         let pos = (self.history.len() - 1) as i32;
         let position_ids = build_position_ids(pos, 1)?;
-        let logits = self
-            .model
-            .forward_on(&token_arr, &position_ids, Some(&mut self.cache), ())?;
+        let logits =
+            self.model
+                .forward_on(&token_arr, &position_ids, None, Some(&mut self.cache), ())?;
         // Logits shape [1, 1, vocab] — flatten to [vocab].
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
@@ -1127,15 +1205,15 @@ mod b1_p2_1_position_id_tests {
     }
 
     #[test]
-    fn build_position_ids_batched_left_padded() {
-        // B=2, lens [3, 5], max_len=5.
-        // Row 0: pad at indices 0,1 (zero), then 0,1,2 at indices 2,3,4.
+    fn build_position_ids_batched_right_padded() {
+        // B=2, lens [3, 5], max_len=5 (right-padded).
+        // Row 0: real positions 0,1,2 at indices 0,1,2; pad (zero) at indices 3,4.
         // Row 1: full sequence 0..4 at indices 0..4.
         let arr = build_position_ids_batched(&[3, 5], 5).expect("build");
         assert_eq!(arr.shape().as_slice(), &[3, 2, 5]);
         let flat: Vec<i32> = arr.to_vec::<i32>().expect("to_vec");
-        // Single stream: [0,0,0,1,2,  0,1,2,3,4]; replicated 3x along axis 0.
-        let one_stream: Vec<i32> = vec![0, 0, 0, 1, 2, 0, 1, 2, 3, 4];
+        // Single stream: [0,1,2,0,0,  0,1,2,3,4]; replicated 3x along axis 0.
+        let one_stream: Vec<i32> = vec![0, 1, 2, 0, 0, 0, 1, 2, 3, 4];
         let mut expected = Vec::with_capacity(30);
         for _ in 0..3 {
             expected.extend_from_slice(&one_stream);
@@ -1160,21 +1238,22 @@ mod b1_p2_1_mask_tests {
     }
 
     #[test]
-    fn build_batch_attention_mask_left_padded() {
-        // B=2, lens [2, 3], max_len=3.
+    fn build_batch_attention_mask_right_padded() {
+        // B=2, lens [2, 3], max_len=3 (right-padded).
         let mask = build_batch_attention_mask(&[2, 3], 3, Dtype::Float32).expect("mask");
         assert_eq!(mask.shape().as_slice(), &[2, 1, 3, 3]);
         let flat: Vec<f32> = mask.to_vec::<f32>().expect("to_vec");
         let ni = f32::NEG_INFINITY;
-        // Row 0 (i=0, pad_start=1):
-        //   q=0 is pad → diagonal allowed (mask[0, 0]=0), rest -inf.
-        //   q=1, q=2 are real → causal lower-triangle from k=pad_start=1.
-        // Row 1 (i=1, pad_start=0): standard causal lower-triangle.
+        // Row 0 (i=0, L=2): real at columns 0,1; pad at column 2.
+        //   q=0 is real → k=0 allowed.
+        //   q=1 is real → k=0,1 allowed.
+        //   q=2 is pad → self-attend only (mask[2,2]=0).
+        // Row 1 (i=1, L=3, no pad): standard causal lower-triangle.
         let expected = vec![
             // Row 0
-            0.0, ni, ni, // q=0 (pad): self-attend only
-            ni, 0.0, ni, // q=1 (real): k=1 allowed
-            ni, 0.0, 0.0, // q=2 (real): k=1, 2 allowed
+            0.0, ni, ni, // q=0 (real): k=0 allowed
+            0.0, 0.0, ni, // q=1 (real): k=0,1 allowed
+            ni, ni, 0.0, // q=2 (pad): self-attend only
             // Row 1 (standard causal)
             0.0, ni, ni, 0.0, 0.0, ni, 0.0, 0.0, 0.0,
         ];
@@ -1212,19 +1291,93 @@ mod b1_p2_2_decode_position_id_tests {
     }
 
     #[test]
-    fn build_batch_linear_mask_left_padded() {
-        // B=2, lens [2, 4], max_len=4.
-        // Row 0: pad_start = 4 - 2 = 2, so [false, false, true, true]
-        // Row 1: pad_start = 0, so [true, true, true, true]
+    fn build_batch_linear_mask_right_padded() {
+        // B=2, lens [2, 4], max_len=4 (right-padded).
+        // Row 0: L=2 → [true, true, false, false]
+        // Row 1: L=4 (no pad) → [true, true, true, true]
         let mask = build_batch_linear_mask(&[2, 4], 4).expect("build");
         assert_eq!(mask.shape().as_slice(), &[2, 4]);
         let flat: Vec<bool> = mask.to_vec::<bool>().expect("to_vec");
         assert_eq!(
             flat,
             vec![
-                false, false, true, true, // row 0
+                true, true, false, false, // row 0
                 true, true, true, true, // row 1
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod per_row_decode_mask_tests {
+    use super::*;
+    use mlx::Dtype;
+
+    #[test]
+    fn mask_per_row_decode_uniform_lens() {
+        // B=2, both rows have real_len = 4, max_len = 4.
+        // Expected: all zeros (every column is valid).
+        let m = build_per_row_decode_mask(&[4, 4], 4, Dtype::Float32).expect("mask");
+        assert_eq!(m.shape().as_slice(), &[2, 1, 1, 4]);
+        let v: Vec<f32> = m.to_vec().expect("read mask");
+        for x in &v {
+            assert_eq!(*x, 0.0_f32, "uniform-lens mask must be all zeros");
+        }
+    }
+
+    #[test]
+    fn mask_per_row_decode_ragged() {
+        // B=2, real_lens = [2, 5], max_len = 5.
+        // Row 0: positions 0,1 = 0; positions 2,3,4 = -inf.
+        // Row 1: positions 0..5 = 0.
+        let m = build_per_row_decode_mask(&[2, 5], 5, Dtype::Float32).expect("mask");
+        assert_eq!(m.shape().as_slice(), &[2, 1, 1, 5]);
+        let v: Vec<f32> = m.to_vec().expect("read mask");
+        // Layout: [B=2][1][1][K=5] → row-major flat 10.
+        // Row 0:
+        assert_eq!(v[0], 0.0);
+        assert_eq!(v[1], 0.0);
+        assert!(v[2].is_infinite() && v[2].is_sign_negative());
+        assert!(v[3].is_infinite() && v[3].is_sign_negative());
+        assert!(v[4].is_infinite() && v[4].is_sign_negative());
+        // Row 1:
+        for k in 5..10 {
+            assert_eq!(v[k], 0.0, "row 1 position {} should be 0", k - 5);
+        }
+    }
+
+    #[test]
+    fn mask_per_row_decode_invalid_args() {
+        // max_len < max(per_row_real_lens) → Err.
+        let r = build_per_row_decode_mask(&[3, 5], 4, Dtype::Bfloat16);
+        assert!(r.is_err());
+
+        // empty per_row_real_lens → Err.
+        let r2 = build_per_row_decode_mask(&[], 4, Dtype::Bfloat16);
+        assert!(r2.is_err());
+
+        // negative entry → Err.
+        let r3 = build_per_row_decode_mask(&[-1, 4], 4, Dtype::Bfloat16);
+        assert!(r3.is_err());
+
+        // zero-length row → Err (would produce all-`-inf` mask).
+        let r4 = build_per_row_decode_mask(&[0, 4], 4, Dtype::Bfloat16);
+        assert!(r4.is_err());
+        let msg = format!("{}", r4.unwrap_err());
+        assert!(
+            msg.contains("must be > 0"),
+            "msg should mention > 0 contract; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mask_per_row_decode_bfloat16_dtype() {
+        // Verify the astype cast to Bfloat16 actually produces a Bfloat16
+        // array. The other tests use Float32 for direct .to_vec() access;
+        // this one confirms the dtype-cast path works for the production
+        // dtype.
+        let m = build_per_row_decode_mask(&[3], 4, Dtype::Bfloat16).expect("mask");
+        assert_eq!(m.dtype(), Dtype::Bfloat16);
+        assert_eq!(m.shape().as_slice(), &[1, 1, 1, 4]);
     }
 }

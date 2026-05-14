@@ -19,8 +19,8 @@ fn kv_cache_standalone_prefill_then_decode() {
     let v1_data: Vec<f32> = (0..prefill_total).map(|i| (i as f32) * 10.0).collect();
     let k1: mlx::Array = (&k1_data[..], (1, 4, 8, 256)).try_into().unwrap();
     let v1: mlx::Array = (&v1_data[..], (1, 4, 8, 256)).try_into().unwrap();
-    let (k_full1, v_full1) = cache.update_and_fetch(&k1, &v1).unwrap();
-    assert_eq!(cache.offset(), 8);
+    let (k_full1, v_full1) = cache.update_and_fetch(&k1, &v1, &[8]).unwrap();
+    assert_eq!(cache.offsets()[0], 8);
     assert_eq!(k_full1.shape().as_slice(), &[1, 4, 8, 256]);
     assert_eq!(v_full1.shape().as_slice(), &[1, 4, 8, 256]);
 
@@ -30,8 +30,8 @@ fn kv_cache_standalone_prefill_then_decode() {
     let v2_data: Vec<f32> = (0..one_total).map(|i| (i + 200000) as f32).collect();
     let k2: mlx::Array = (&k2_data[..], (1, 4, 1, 256)).try_into().unwrap();
     let v2: mlx::Array = (&v2_data[..], (1, 4, 1, 256)).try_into().unwrap();
-    let (k_full2, v_full2) = cache.update_and_fetch(&k2, &v2).unwrap();
-    assert_eq!(cache.offset(), 9);
+    let (k_full2, v_full2) = cache.update_and_fetch(&k2, &v2, &[1]).unwrap();
+    assert_eq!(cache.offsets()[0], 9);
     assert_eq!(k_full2.shape().as_slice(), &[1, 4, 9, 256]);
     assert_eq!(v_full2.shape().as_slice(), &[1, 4, 9, 256]);
 }
@@ -45,8 +45,8 @@ fn kv_cache_with_step_eq_cap_one_shot_alloc() {
     let v_data: Vec<f32> = (0..total).map(|i| i as f32).collect();
     let k: mlx::Array = (&k_data[..], (1, 4, 8, 256)).try_into().unwrap();
     let v: mlx::Array = (&v_data[..], (1, 4, 8, 256)).try_into().unwrap();
-    cache.update_and_fetch(&k, &v).unwrap();
-    assert_eq!(cache.offset(), 8);
+    cache.update_and_fetch(&k, &v, &[8]).unwrap();
+    assert_eq!(cache.offsets()[0], 8);
     assert_eq!(cache.cap(), 64);
 }
 
@@ -58,9 +58,9 @@ fn kv_cache_reset_allows_session_reuse() {
     let v_data: Vec<f32> = (0..total).map(|i| i as f32).collect();
     let k: mlx::Array = (&k_data[..], (1, 4, 8, 256)).try_into().unwrap();
     let v: mlx::Array = (&v_data[..], (1, 4, 8, 256)).try_into().unwrap();
-    cache.update_and_fetch(&k, &v).unwrap();
+    cache.update_and_fetch(&k, &v, &[8]).unwrap();
     cache.reset();
-    assert_eq!(cache.offset(), 0);
-    cache.update_and_fetch(&k, &v).unwrap();
-    assert_eq!(cache.offset(), 8);
+    assert_eq!(cache.offsets()[0], 0);
+    cache.update_and_fetch(&k, &v, &[8]).unwrap();
+    assert_eq!(cache.offsets()[0], 8);
 }

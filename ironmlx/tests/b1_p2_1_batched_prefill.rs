@@ -3,7 +3,7 @@
 //! For each (B, prompt_lens) configuration:
 //!   1. Per-stream reference: for each prompt i, run Qwen35Model::forward_on
 //!      with a fresh batch=1 cache; record last-position logits.
-//!   2. Batched call: build left-padded input_ids[B, S_max], position_ids[3,B,S_max],
+//!   2. Batched call: build right-padded input_ids[B, S_max], position_ids[3,B,S_max],
 //!      attention_mask[B,1,S_max,S_max], linear_attention_mask[B,S_max],
 //!      cache(batch=B); call batched_prefill.
 //!   3. Per batch row i, assert max_abs_diff < `LOGITS_TOL` (1.0). Argmax
@@ -33,7 +33,7 @@ use ironmlx::models::qwen3_5::Qwen35Model;
 const LOGITS_TOL: f32 = 1.0;
 const ARGMAX_BIT_ID_FLOOR: f32 = 0.75; // ≥ 75% of rows must be argmax bit-identical
 
-/// Pad-token id used to fill the left side of each batch row.
+/// Pad-token id used to fill the trailing slots of each batch row.
 /// Any in-vocab id works; the attention mask discards these positions.
 const PAD_TOKEN_ID: u32 = 0;
 
@@ -88,7 +88,7 @@ fn per_stream_reference(model: &Qwen35Model, prompt: &[u32]) -> Array {
         .make_cache(/* batch */ 1, s + 1, Dtype::Bfloat16)
         .expect("make_cache");
     let logits = model
-        .forward_on(&input_ids, &pos_ids, Some(&mut cache), ())
+        .forward_on(&input_ids, &pos_ids, Some(&[s]), Some(&mut cache), ())
         .expect("forward_on");
     // forward_on returns [B, 1, vocab]; reshape to [vocab].
     let vocab = logits.shape().as_slice()[2];
@@ -131,14 +131,14 @@ fn run_point(model: &Qwen35Model, prompt_lens: &[i32], seed_base: u64, stats: &m
         .map(|p| per_stream_reference(model, p))
         .collect();
 
-    // Build batched inputs (left-padded).
+    // Build batched inputs (right-padded).
     let mut packed: Vec<u32> = Vec::with_capacity(b * max_len);
     for p in &prompts {
+        packed.extend_from_slice(p);
         let pad_n = max_len - p.len();
         for _ in 0..pad_n {
             packed.push(PAD_TOKEN_ID);
         }
-        packed.extend_from_slice(p);
     }
     let input_ids: Array = (&packed[..], &[b as i32, max_len as i32][..])
         .try_into()
@@ -161,6 +161,7 @@ fn run_point(model: &Qwen35Model, prompt_lens: &[i32], seed_base: u64, stats: &m
             &pos_ids,
             &attn_mask,
             &linear_mask,
+            prompt_lens,
             Some(&mut cache),
             (),
         )
@@ -221,7 +222,7 @@ fn b1_p2_1_batched_prefill_matrix() {
 
     // Point 1: B=2 same length.
     run_point(&model, &[128, 128], 0x1111, &mut stats);
-    // Point 2: B=2 mixed length (left-padded).
+    // Point 2: B=2 mixed length (right-padded).
     run_point(&model, &[128, 96], 0x2222, &mut stats);
     // Point 3: B=4 same length.
     run_point(&model, &[128, 128, 128, 128], 0x3333, &mut stats);

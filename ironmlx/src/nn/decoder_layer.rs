@@ -187,7 +187,7 @@ impl DecoderLayer {
             AttnKind::Full => (mask, None),
             AttnKind::Linear => (None, mask),
         };
-        self.forward_on(x, mrope, cos, sin, full_mask, linear_mask, cache, ())
+        self.forward_on(x, mrope, cos, sin, full_mask, linear_mask, None, cache, ())
     }
 
     /// Stream-targeted forward.
@@ -204,6 +204,7 @@ impl DecoderLayer {
         sin: &Array,
         full_attn_mask: Option<&Array>,
         linear_attn_mask: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
         cache: Option<&mut LayerCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -234,6 +235,7 @@ impl DecoderLayer {
                 sin,
                 full_attn_mask,
                 linear_attn_mask,
+                per_row_lens,
                 Some(kv),
                 target,
             )?,
@@ -244,14 +246,19 @@ impl DecoderLayer {
                 sin,
                 full_attn_mask,
                 linear_attn_mask,
+                per_row_lens,
                 None,
                 target,
             )?,
-            (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => {
-                a.forward_on(&normed_in, linear_attn_mask, Some(gdc), target)?
-            }
+            (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => a.forward_on(
+                &normed_in,
+                linear_attn_mask,
+                per_row_lens,
+                Some(gdc),
+                target,
+            )?,
             (AttnPath::Linear(a), None) => {
-                a.forward_on(&normed_in, linear_attn_mask, None, target)?
+                a.forward_on(&normed_in, linear_attn_mask, per_row_lens, None, target)?
             }
             (AttnPath::Full(_), Some(LayerCache::Linear(_))) => {
                 return Err(anyhow!(
@@ -359,7 +366,7 @@ impl DecoderLayer {
         let normed_in = self.input_layernorm.forward_on(x, target)?;
         let attn_out = match &self.attn {
             AttnPath::Full(a) => {
-                a.forward_on(&normed_in, mrope, cos, sin, mask, None, cache, target)?
+                a.forward_on(&normed_in, mrope, cos, sin, mask, None, None, cache, target)?
             }
             AttnPath::Linear(_) => {
                 return Err(anyhow!(

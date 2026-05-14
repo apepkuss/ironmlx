@@ -148,6 +148,7 @@ fn p6_6_logits_match() {
             &input_ids,
             &pos_ids,
             None,
+            None,
             Some(&pv),
             Some(&grids),
             IMAGE_TOKEN_ID,

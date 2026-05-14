@@ -116,7 +116,7 @@ impl Attention {
         mask: Option<&Array>,
         cache: Option<&mut KVCache>,
     ) -> Result<Array> {
-        self.forward_on(x, mrope, cos, sin, mask, None, cache, ())
+        self.forward_on(x, mrope, cos, sin, mask, None, None, cache, ())
     }
 
     /// Stream-targeted forward pass — see [`Attention::forward`] for semantics.
@@ -138,6 +138,7 @@ impl Attention {
         sin: &Array,
         mask: Option<&Array>,
         kv_validity_mask: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
         cache: Option<&mut KVCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -205,7 +206,19 @@ impl Attention {
         // Route post-RoPE K/V through KV cache when provided; otherwise pass
         // through unchanged. SDPA always consumes the full K/V history.
         let (k_full, v_full) = match cache {
-            Some(c) => c.update_and_fetch_on(&k, &v, target)?,
+            Some(c) => {
+                let lens_owned: Vec<i32>;
+                let lens_ref: &[i32] = match per_row_lens {
+                    Some(l) => l,
+                    None => {
+                        // Non-batched single-stream caller (e.g., GenerationStream):
+                        // construct lockstep-equivalent uniform lens from the K seq dim.
+                        lens_owned = vec![seq; batch as usize];
+                        &lens_owned
+                    }
+                };
+                c.update_and_fetch_on(&k, &v, lens_ref, target)?
+            }
             None => (k, v),
         };
 
