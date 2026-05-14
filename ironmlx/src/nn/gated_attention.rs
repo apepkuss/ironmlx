@@ -231,7 +231,12 @@ impl GatedAttention {
         // (lower-right alignment) which is correct for the single-stream
         // path and for decode-time (T_q=1) calls.
         let (k_full, v_full) = match cache {
-            Some(c) => c.update_and_fetch_on(&k, &v, target)?,
+            Some(c) => {
+                // TEMP(b1-p2.3c-1 Task 1): uniform per-row lens from the K
+                // seq dim — replaced in Task 4 by caller-provided per_row_lens.
+                let per_row_lens = vec![seq; batch as usize];
+                c.update_and_fetch_on(&k, &v, &per_row_lens, target)?
+            }
             None => (k, v),
         };
         let attn_out = match mask {

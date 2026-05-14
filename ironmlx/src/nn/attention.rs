@@ -205,7 +205,12 @@ impl Attention {
         // Route post-RoPE K/V through KV cache when provided; otherwise pass
         // through unchanged. SDPA always consumes the full K/V history.
         let (k_full, v_full) = match cache {
-            Some(c) => c.update_and_fetch_on(&k, &v, target)?,
+            Some(c) => {
+                // TEMP(b1-p2.3c-1 Task 1): uniform per-row lens from the K
+                // seq dim — replaced in Task 4 by caller-provided per_row_lens.
+                let per_row_lens = vec![seq; batch as usize];
+                c.update_and_fetch_on(&k, &v, &per_row_lens, target)?
+            }
             None => (k, v),
         };
 

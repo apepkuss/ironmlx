@@ -74,7 +74,8 @@ impl MtpCache {
         }
     }
 
-    /// Returns layer 0's offset.
+    /// Returns layer 0's offset (the maximum offset across rows in the
+    /// lockstep-uniform case).
     ///
     /// All layers are expected to advance in lock-step when driven through
     /// [`crate::nn::Mtp::forward_on`]. This is a caller-discipline contract,
@@ -82,7 +83,10 @@ impl MtpCache {
     /// mid-loop, layer 0's offset may diverge from later layers'. In any
     /// error-recovery path, call [`reset`](Self::reset) before reuse.
     pub fn offset(&self) -> i32 {
-        self.layers.first().map(|c| c.offset()).unwrap_or(0)
+        self.layers
+            .first()
+            .and_then(|c| c.offsets().iter().copied().max())
+            .unwrap_or(0)
     }
 }
 
@@ -109,15 +113,16 @@ mod tests {
         // Drive layer 0 forward by one update to advance its offset.
         let k0: mlx::Array = mlx::Array::zeros((1, 2, 4, 8), Dtype::Bfloat16).unwrap();
         let v0: mlx::Array = mlx::Array::zeros((1, 2, 4, 8), Dtype::Bfloat16).unwrap();
-        cache.layer_mut(0).update_and_fetch(&k0, &v0).unwrap();
+        // TEMP(b1-p2.3c-1 Task 1): uniform per-row lens — batch=1, seq=4.
+        cache.layer_mut(0).update_and_fetch(&k0, &v0, &[4]).unwrap();
         // Drive layer 1 forward similarly.
-        cache.layer_mut(1).update_and_fetch(&k0, &v0).unwrap();
-        assert_eq!(cache.layer(0).offset(), 4);
-        assert_eq!(cache.layer(1).offset(), 4);
+        cache.layer_mut(1).update_and_fetch(&k0, &v0, &[4]).unwrap();
+        assert_eq!(cache.layer(0).offsets(), &[4]);
+        assert_eq!(cache.layer(1).offsets(), &[4]);
 
         cache.reset();
-        assert_eq!(cache.layer(0).offset(), 0);
-        assert_eq!(cache.layer(1).offset(), 0);
+        assert_eq!(cache.layer(0).offsets(), &[0]);
+        assert_eq!(cache.layer(1).offsets(), &[0]);
         assert_eq!(cache.offset(), 0);
     }
 }
