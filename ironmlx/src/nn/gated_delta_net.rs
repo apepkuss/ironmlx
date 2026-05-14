@@ -556,7 +556,10 @@ impl GatedDeltaNet {
         // Step 7e: update cache recurrent_state, advance offset
         if let Some(c) = cache {
             c.update_recurrent(new_state);
-            c.advance(seq)?;
+            // TEMP(b1-p2.3c-1 Task 2): uniform per-row n = seq across all B
+            // rows — replaced in Task 4 by caller-provided per_row_lens.
+            let per_row_n = vec![seq; batch as usize];
+            c.advance(&per_row_n)?;
         }
 
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
@@ -795,7 +798,7 @@ mod tests {
         let _out = gdn
             .forward(&x, None, Some(&mut cache))
             .expect("forward with cache");
-        assert_eq!(cache.offset(), 4);
+        assert_eq!(cache.offsets(), &[4]);
     }
 
     #[test]
