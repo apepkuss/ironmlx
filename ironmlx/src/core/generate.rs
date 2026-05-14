@@ -343,6 +343,65 @@ pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
     Ok(arr)
 }
 
+/// Build a per-row decode attention mask `[B, 1, 1, max_len]`.
+///
+/// Each batch row `b` attends to K/V positions `0..per_row_real_lens[b]`
+/// (real cache) and is `-inf`-masked at positions
+/// `per_row_real_lens[b]..max_len` (stale / unused cache slots). Used by
+/// the decode path when rows have ragged cache offsets — typically
+/// `per_row_real_lens[b] = cache.offsets()[b] + 1` after a per-row write.
+///
+/// `max_len` must satisfy `max_len >= max(per_row_real_lens)` — it sets
+/// the K-dimension of the returned mask and must equal the fetched K/V
+/// slice's K dim. The returned mask is additive (consumed by mlx fast
+/// SDPA's `mask_arr` slot with `mask_mode = ""`); 0.0 means attend, -inf
+/// means mask out.
+///
+/// Differs in shape from [`build_batch_attention_mask`] (which is
+/// prefill-only, `[B, 1, T_q, T_kv]`) because decode has `T_q = 1`.
+pub fn build_per_row_decode_mask(
+    per_row_real_lens: &[i32],
+    max_len: i32,
+    dtype: Dtype,
+) -> Result<Array> {
+    if per_row_real_lens.is_empty() {
+        return Err(anyhow!(
+            "build_per_row_decode_mask: per_row_real_lens must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_per_row_decode_mask: max_len must be > 0, got {max_len}"
+        ));
+    }
+    for (i, &l) in per_row_real_lens.iter().enumerate() {
+        if l < 0 {
+            return Err(anyhow!(
+                "build_per_row_decode_mask: per_row_real_lens[{i}] = {l} must be >= 0"
+            ));
+        }
+        if l > max_len {
+            return Err(anyhow!(
+                "build_per_row_decode_mask: per_row_real_lens[{i}] = {l} > max_len = {max_len}"
+            ));
+        }
+    }
+
+    let b = per_row_real_lens.len();
+    let s = max_len as usize;
+    let neg_inf = f32::NEG_INFINITY;
+    let mut flat = vec![neg_inf; b * s];
+    for (i, &l) in per_row_real_lens.iter().enumerate() {
+        let l = l as usize;
+        for k in 0..l {
+            flat[i * s + k] = 0.0;
+        }
+    }
+
+    let arr_f32: Array = (&flat[..], &[b as i32, 1_i32, 1_i32, max_len][..]).try_into()?;
+    mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
+}
+
 /// Build a per-token validity mask `[B, max_len]` for the hybrid model's
 /// **linear-attention** path (`GatedDeltaNet`). For batch row `i` with
 /// actual length `prompt_lens[i] = L_i`:
@@ -1226,5 +1285,59 @@ mod b1_p2_2_decode_position_id_tests {
                 true, true, true, true, // row 1
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod per_row_decode_mask_tests {
+    use super::*;
+    use mlx::Dtype;
+
+    #[test]
+    fn mask_per_row_decode_uniform_lens() {
+        // B=2, both rows have real_len = 4, max_len = 4.
+        // Expected: all zeros (every column is valid).
+        let m = build_per_row_decode_mask(&[4, 4], 4, Dtype::Float32).expect("mask");
+        assert_eq!(m.shape().as_slice(), &[2, 1, 1, 4]);
+        let v: Vec<f32> = m.to_vec().expect("read mask");
+        for x in &v {
+            assert_eq!(*x, 0.0_f32, "uniform-lens mask must be all zeros");
+        }
+    }
+
+    #[test]
+    fn mask_per_row_decode_ragged() {
+        // B=2, real_lens = [2, 5], max_len = 5.
+        // Row 0: positions 0,1 = 0; positions 2,3,4 = -inf.
+        // Row 1: positions 0..5 = 0.
+        let m = build_per_row_decode_mask(&[2, 5], 5, Dtype::Float32).expect("mask");
+        assert_eq!(m.shape().as_slice(), &[2, 1, 1, 5]);
+        let v: Vec<f32> = m.to_vec().expect("read mask");
+        // Layout: [B=2][1][1][K=5] → row-major flat 10.
+        // Row 0:
+        assert_eq!(v[0], 0.0);
+        assert_eq!(v[1], 0.0);
+        assert!(v[2].is_infinite() && v[2].is_sign_negative());
+        assert!(v[3].is_infinite() && v[3].is_sign_negative());
+        assert!(v[4].is_infinite() && v[4].is_sign_negative());
+        // Row 1:
+        for k in 5..10 {
+            assert_eq!(v[k], 0.0, "row 1 position {} should be 0", k - 5);
+        }
+    }
+
+    #[test]
+    fn mask_per_row_decode_invalid_args() {
+        // max_len < max(per_row_real_lens) → Err.
+        let r = build_per_row_decode_mask(&[3, 5], 4, Dtype::Bfloat16);
+        assert!(r.is_err());
+
+        // empty per_row_real_lens → Err.
+        let r2 = build_per_row_decode_mask(&[], 4, Dtype::Bfloat16);
+        assert!(r2.is_err());
+
+        // negative entry → Err.
+        let r3 = build_per_row_decode_mask(&[-1, 4], 4, Dtype::Bfloat16);
+        assert!(r3.is_err());
     }
 }
