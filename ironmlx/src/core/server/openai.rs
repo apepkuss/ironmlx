@@ -359,6 +359,12 @@ pub async fn chat_completions(
     // → GenerationStream path.
     // COMPAT(3b-2): VL fallback to GS sunsets in B1-p2.4 (batched VL).
     // COMPAT(3b-2): long-prompt fallback to GS sunsets in 3c+ chunked-prefill phase.
+    //
+    // Note (3b-3): when prefill_chunk_size == 0 (chunking disabled by
+    // config), this predicate routes ALL text-only requests to the
+    // SchedulerActor regardless of length — equivalent to the GS path's
+    // behavior when chunking is also disabled there. The 3c+
+    // chunked-prefill phase will need to revisit this semantic.
     let has_images = request.pixel_values.is_some();
     let prompt_len = request.prompt_ids.len();
     let use_scheduler =
