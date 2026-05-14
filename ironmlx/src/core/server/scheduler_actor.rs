@@ -108,7 +108,6 @@ pub fn spawn_scheduler_actor(model: Arc<Mutex<Qwen35Model>>, b_max: usize) -> Sc
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn driver_loop(
     model: Arc<Mutex<Qwen35Model>>,
     b_max: usize,
@@ -279,8 +278,8 @@ mod tests {
     /// Drop the SchedulerActorHandle (and thus cmd_tx); confirm the driver
     /// task exits cleanly. We can't construct a real Qwen35Model in a unit
     /// test, so we never send any commands — we only verify the driver's
-    /// `while let Some(cmd) = cmd_rx.blocking_recv()` loop terminates when
-    /// all senders are dropped.
+    /// `rt.block_on(cmd_rx.recv())` outer loop (3b-3) terminates when all
+    /// senders are dropped.
     ///
     /// To keep this test self-contained without a model, we don't call
     /// `spawn_scheduler_actor` (which would require a real model handle).
