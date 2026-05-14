@@ -4,7 +4,7 @@
 //!   1. Per-stream reference: for each prompt i, run forward_on prefill + 4
 //!      greedy-decode steps with a fresh batch=1 cache; record last_logits
 //!      per step.
-//!   2. Batched: build left-padded input_ids[B, S_max] + pos_ids[3,B,S_max] +
+//!   2. Batched: build right-padded input_ids[B, S_max] + pos_ids[3,B,S_max] +
 //!      attention_mask[B,1,S_max,S_max] + linear_attention_mask[B,S_max],
 //!      cache(batch=B); call batched_prefill, then run 4 decode steps via
 //!      forward_on([B, 1], [3, B, 1], cache_B).
@@ -118,7 +118,7 @@ fn per_stream_reference(model: &Qwen35Model, prompt: &[u32], n_decode: usize) ->
         .expect("input_ids");
     let pos_ids = build_position_ids(0, s).expect("build_position_ids prefill");
     let prefill_logits = model
-        .forward_on(&input_ids, &pos_ids, Some(&mut cache), ())
+        .forward_on(&input_ids, &pos_ids, Some(&[s]), Some(&mut cache), ())
         .expect("forward_on prefill");
     let vocab = prefill_logits.shape().as_slice()[2];
     let mut out: Vec<Array> = Vec::with_capacity(n_decode + 1);
@@ -139,7 +139,7 @@ fn per_stream_reference(model: &Qwen35Model, prompt: &[u32], n_decode: usize) ->
         let pos = s + k as i32 - 1;
         let pos_ids = build_position_ids(pos, 1).expect("build_position_ids decode");
         let logits = model
-            .forward_on(&next_input, &pos_ids, Some(&mut cache), ())
+            .forward_on(&next_input, &pos_ids, Some(&[1]), Some(&mut cache), ())
             .expect("forward_on decode");
         let flat = logits.reshape(&[vocab][..]).expect("reshape decode");
         next_token = argmax(&flat);
@@ -186,14 +186,14 @@ fn run_point(model: &Qwen35Model, prompt_lens: &[i32], seed_base: u64, stats: &m
         .map(|p| per_stream_reference(model, p, DECODE_STEPS))
         .collect();
 
-    // Build batched prefill inputs (left-padded).
+    // Build batched prefill inputs (right-padded).
     let mut packed: Vec<u32> = Vec::with_capacity(b * max_len);
     for p in &prompts {
+        packed.extend_from_slice(p);
         let pad_n = max_len - p.len();
         for _ in 0..pad_n {
             packed.push(PAD_TOKEN_ID);
         }
-        packed.extend_from_slice(p);
     }
     let input_ids: Array = (&packed[..], &[b as i32, max_len as i32][..])
         .try_into()
@@ -220,6 +220,7 @@ fn run_point(model: &Qwen35Model, prompt_lens: &[i32], seed_base: u64, stats: &m
             &prefill_pos,
             &attn_mask,
             &linear_mask,
+            prompt_lens,
             Some(&mut cache),
             (),
         )
@@ -270,18 +271,26 @@ fn run_point(model: &Qwen35Model, prompt_lens: &[i32], seed_base: u64, stats: &m
     }
 
     // Decode loop.
-    let max_len_i32 = max_len as i32;
     for k in 1..=DECODE_STEPS {
         let next_input: Array = (&next_tokens[..], &[b as i32, 1_i32][..])
             .try_into()
             .expect("decode input_ids");
 
-        // Each row's current position = max_len + k - 1.
-        let per_row_pos: Vec<i32> = vec![max_len_i32 + k as i32 - 1; b];
+        // Each row's decode position = prompt_lens[i] + k - 1 (right-padded
+        // cache holds row i's real tokens at offsets [0..prompt_lens[i]);
+        // step k writes the k-th decode token at position prompt_lens[i]+k-1).
+        let per_row_pos: Vec<i32> = prompt_lens.iter().map(|&l| l + k as i32 - 1).collect();
         let pos_ids = build_decode_position_ids(&per_row_pos).expect("build_decode_position_ids");
 
+        let per_row_lens_decode: Vec<i32> = vec![1; b];
         let step_logits = model
-            .forward_on(&next_input, &pos_ids, Some(&mut cache), ())
+            .forward_on(
+                &next_input,
+                &pos_ids,
+                Some(&per_row_lens_decode),
+                Some(&mut cache),
+                (),
+            )
             .expect("forward_on decode");
         let step_dims = step_logits.shape();
         let step_dims = step_dims.as_slice();
@@ -339,7 +348,7 @@ fn b1_p2_2_batched_decode_matrix() {
 
     // Point 1: B=2 same length.
     run_point(&model, &[128, 128], 0x1111, &mut stats);
-    // Point 2: B=2 mixed length (left-padded).
+    // Point 2: B=2 mixed length (right-padded).
     run_point(&model, &[128, 96], 0x2222, &mut stats);
     // Point 3: B=4 same length.
     run_point(&model, &[128, 128, 128, 128], 0x3333, &mut stats);

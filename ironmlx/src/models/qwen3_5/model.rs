@@ -94,14 +94,15 @@ impl Qwen35Model {
         &self,
         input_ids: &Array,
         position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
         let hidden = self
             .text
-            .forward_on(input_ids, position_ids, cache, target)?;
-        self.slice_last_and_project(&hidden, target)
+            .forward_on(input_ids, position_ids, per_row_lens, cache, target)?;
+        self.slice_last_and_project(&hidden, None, target)
     }
 
     /// Multimodal forward: routes `pixel_values` through the vision tower, replaces
@@ -128,9 +129,10 @@ impl Qwen35Model {
             None,
             None,
             None,
+            None,
             target,
         )?;
-        self.slice_last_and_project(&hidden, target)
+        self.slice_last_and_project(&hidden, None, target)
     }
 
     /// Run only the vision tower; returns the post-merger embeddings
@@ -181,6 +183,7 @@ impl Qwen35Model {
         input_ids: &Array,
         position_ids: &Array,
         cache: Option<&mut [LayerCache]>,
+        per_row_lens: Option<&[i32]>,
         vision_embeds_slice: Option<&Array>,
         image_token_id: i32,
         target: impl Into<StreamOrDevice>,
@@ -205,11 +208,13 @@ impl Qwen35Model {
             cache,
             None,
             None,
+            per_row_lens,
             target,
         )?;
 
         // Step 4: slice last position and project to logits.
-        self.slice_last_and_project(&hidden, target)
+        // VL chunk path is single-stream B=1; no per-row last position needed.
+        self.slice_last_and_project(&hidden, None, target)
     }
 
     /// # Arguments
@@ -228,6 +233,7 @@ impl Qwen35Model {
         input_ids: &Array,
         position_ids: &Array,
         cache: Option<&mut [LayerCache]>,
+        per_row_lens: Option<&[i32]>,
         pixel_values: Option<&Array>,
         grid_thw: Option<&[(i32, i32, i32)]>,
         image_token_id: i32,
@@ -247,6 +253,7 @@ impl Qwen35Model {
             input_ids,
             position_ids,
             cache,
+            per_row_lens,
             vision_embeds.as_ref(),
             image_token_id,
             target,
@@ -254,16 +261,18 @@ impl Qwen35Model {
     }
 
     /// Static batched prefill — runs one transformer forward across B prompts
-    /// packed left-padded into `input_ids[B, S_max]`. Returns last-position
-    /// logits `[B, vocab]`.
+    /// packed right-padded into `input_ids[B, S_max]`. Returns last-position
+    /// logits `[B, 1, vocab]`.
     ///
     /// Phase 1 of B1-p2 (multi-request batched serving). Pure text — for VL
     /// B>1 see B1-p2.4. The caller is responsible for:
-    ///   1. Left-padding each prompt to `S_max` with any pad-token id (the
+    ///   1. Right-padding each prompt to `S_max` with any pad-token id (real
+    ///      tokens at columns `[0..L_i)`, pad at columns `[L_i..S_max)`). The
     ///      attention mask zeroes out pad positions regardless of which id is
-    ///      used; choosing a real token id is fine).
+    ///      used; choosing a real token id is fine.
     ///   2. Building `position_ids` via [`build_position_ids_batched`] so the
-    ///      pad-region positions are 0 and the real region runs `0..L_i-1`.
+    ///      real region runs `0..L_i-1` at columns `[0..L_i)` and the pad
+    ///      region is 0 at columns `[L_i..S_max)`.
     ///   3. Building `attention_mask` via [`build_batch_attention_mask`] —
     ///      the SDPA-style `[B, 1, T_q, T_kv]` additive mask consumed by the
     ///      full-attention layers.
@@ -293,6 +302,7 @@ impl Qwen35Model {
         position_ids: &Array,
         attention_mask: &Array,
         linear_attention_mask: &Array,
+        per_row_lens: &[i32],
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -309,28 +319,81 @@ impl Qwen35Model {
             cache,
             Some(attention_mask),
             Some(linear_attention_mask),
+            Some(per_row_lens),
             target,
         )?;
 
         // Project last position per batch row to vocab logits.
-        self.slice_last_and_project(&hidden, target)
+        // Under right-padding, row i's last real token sits at column
+        // prompt_lens[i] - 1 — build that vector and let
+        // slice_last_and_project per-row slice + concatenate.
+        let last_positions: Vec<i32> = per_row_lens.iter().map(|&l| l - 1).collect();
+        self.slice_last_and_project(&hidden, Some(&last_positions), target)
     }
 
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
     /// vocab logits `[B, 1, vocab_size]`. Shared by [`forward_on`] and [`forward_vl`].
-    fn slice_last_and_project(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
+    ///
+    /// When `last_positions` is `Some(positions)` (length == B), each row's
+    /// last real token is at column `positions[i]` — used by the right-padded
+    /// `batched_prefill` path where rows have ragged real lengths. The
+    /// function per-row slices `hidden[i, positions[i], :]` and concatenates
+    /// along axis 0 to produce `[B, 1, H]`.
+    ///
+    /// When `last_positions` is `None` (single-stream `forward_on` and VL
+    /// chunk callers), the fallback slices column `S - 1` for every row —
+    /// behaviourally equivalent for B=1 or uniform-length inputs.
+    fn slice_last_and_project(
+        &self,
+        hidden: &Array,
+        last_positions: Option<&[i32]>,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
         let dims_borrow = hidden.shape();
         let dims = dims_borrow.as_slice();
         let (b, s, h) = (dims[0], dims[1], dims[2]);
-        let last_hidden = if s > 1 {
-            mlx::ops::indexing::slice_strided(
-                hidden,
-                &[0_i32, s - 1, 0][..],
-                &[b, s, h][..],
-                &[1_i32, 1, 1][..],
-            )?
-        } else {
-            hidden.clone()
+        let last_hidden = match last_positions {
+            Some(positions) if s > 1 => {
+                if positions.len() as i32 != b {
+                    return Err(anyhow!(
+                        "slice_last_and_project: last_positions.len()={} != batch={}",
+                        positions.len(),
+                        b
+                    ));
+                }
+                for (i, &p) in positions.iter().enumerate() {
+                    if p < 0 || p >= s {
+                        return Err(anyhow!(
+                            "slice_last_and_project: last_positions[{i}]={p} out of [0, {s})"
+                        ));
+                    }
+                }
+                // Per-row slice: row i takes hidden[i, positions[i], :] →
+                // [1, 1, H]. Concatenate along axis 0 to build [B, 1, H].
+                let mut rows: Vec<Array> = Vec::with_capacity(b as usize);
+                for (i, &pos) in positions.iter().enumerate() {
+                    let row = mlx::ops::indexing::slice_strided_on(
+                        hidden,
+                        &[i as i32, pos, 0][..],
+                        &[i as i32 + 1, pos + 1, h][..],
+                        &[1_i32, 1, 1][..],
+                        target,
+                    )?;
+                    rows.push(row);
+                }
+                let row_refs: Vec<&Array> = rows.iter().collect();
+                mlx::ops::shape::concatenate_on(&row_refs[..], 0, target)?
+            }
+            _ if s > 1 => {
+                // Single-stream / uniform-length fallback: slice column s-1.
+                mlx::ops::indexing::slice_strided(
+                    hidden,
+                    &[0_i32, s - 1, 0][..],
+                    &[b, s, h][..],
+                    &[1_i32, 1, 1][..],
+                )?
+            }
+            _ => hidden.clone(),
         };
         match &self.lm_head {
             Some(head) => head.forward_on(&last_hidden, target),
@@ -505,7 +568,7 @@ mod tests {
 
         // text-only path via forward_on
         let logits_a = model
-            .forward_on(&input_ids, &pos, None, ())
+            .forward_on(&input_ids, &pos, None, None, ())
             .expect("forward_on");
 
         // forward_vl with pixel_values=None must be numerically identical
@@ -513,6 +576,7 @@ mod tests {
             .forward_vl(
                 &input_ids,
                 &pos,
+                None,
                 None,
                 None,
                 None,

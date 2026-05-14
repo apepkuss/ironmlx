@@ -310,16 +310,17 @@ impl Scheduler {
     /// capacity 8192, bf16). On subsequent calls (after `evict_all`) the
     /// cache is reused — `evict_all` already reset every layer.
     ///
-    /// Builds left-padded `[B, T_max]` input_ids + `[3, B, T_max]`
+    /// Builds right-padded `[B, T_max]` input_ids + `[3, B, T_max]`
     /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
     /// linear mask, then calls `Qwen35Model::batched_prefill`.
     ///
     /// Samples the first token per occupied row from the prefill logits
-    /// (column `max_len - 1`, the last prompt position under left-padding),
-    /// emits a [`StepEvent`] per row, then transitions to `Decoding` (or
-    /// `Finished` if every row's first token was EOS). This keeps the KV
-    /// cache trajectory aligned with `GenerationStream`'s pipelined-mode
-    /// which also uses the prefill argmax as `token_0`. See spec §4.5.
+    /// (`batched_prefill` already collapses per-row to the last real position
+    /// `prompt_lens[i] - 1`, returning `[B, 1, vocab]`). Emits a
+    /// [`StepEvent`] per row, then transitions to `Decoding` (or `Finished`
+    /// if every row's first token was EOS). This keeps the KV cache
+    /// trajectory aligned with `GenerationStream`'s pipelined-mode which also
+    /// uses the prefill argmax as `token_0`. See spec §4.5.
     pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.prefill_admitted_inner(model) {
@@ -365,18 +366,17 @@ impl Scheduler {
             ));
         }
 
-        // Build [B, T_max] left-padded input_ids (pad value 0). Slot order
+        // Build [B, T_max] right-padded input_ids (pad value 0). Slot order
         // matches the slots vector — None rows become full-zero.
         let b = self.b_max;
         let t = max_len as usize;
         let mut flat: Vec<i32> = vec![0; b * t];
         for (row, slot) in self.slots.iter().enumerate() {
             if let Some(state) = slot {
-                let len = state.prompt_ids.len();
-                let pad = t - len; // left-pad
                 for (j, &tok) in state.prompt_ids.iter().enumerate() {
-                    flat[row * t + pad + j] = tok as i32;
+                    flat[row * t + j] = tok as i32;
                 }
+                // positions [state.prompt_ids.len() .. t] stay 0 (pad)
             }
         }
         let input_ids: Array = (&flat[..], &[b as i32, max_len][..])
@@ -408,18 +408,17 @@ impl Scheduler {
             &position_ids,
             &attention_mask,
             &linear_attention_mask,
+            &prompt_lens,
             Some(cache_ref),
             (),
         )?;
 
-        // After left-padded batched prefill, the KV cache has been filled
-        // up to position `max_len - 1` for every row (shorter prompts are
-        // left-padded so their last real token sits at column `max_len - 1`).
-        // The first decode step must use position `max_len` regardless of
-        // each row's actual prompt length. Update `real_len` to reflect this.
-        for slot in self.slots.iter_mut() {
+        // After per-row prefill, row i's cache is filled up to position
+        // prompt_lens[i] - 1. The first decode step must use position
+        // prompt_lens[i] for that row.
+        for (slot, &plen) in self.slots.iter_mut().zip(prompt_lens.iter()) {
             if let Some(state) = slot.as_mut() {
-                state.real_len = max_len;
+                state.real_len = plen;
             }
         }
 
@@ -575,11 +574,28 @@ impl Scheduler {
             .collect();
         let position_ids = build_decode_position_ids(&per_row_pos)?;
 
+        // Per-row lens for decode: each active row writes 1 token; pad
+        // rows (finished or None slots) write 0 to skip the K/V write.
+        let per_row_lens: Vec<i32> = self
+            .slots
+            .iter()
+            .map(|s| match s {
+                Some(r) if !r.finished => 1,
+                _ => 0,
+            })
+            .collect();
+
         let cache_ref = self
             .cache
             .as_mut()
             .ok_or_else(|| anyhow!("step: cache absent — was prefill_admitted called?"))?;
-        let logits = model.forward_on(&input_ids, &position_ids, Some(cache_ref), ())?;
+        let logits = model.forward_on(
+            &input_ids,
+            &position_ids,
+            Some(&per_row_lens),
+            Some(cache_ref),
+            (),
+        )?;
 
         // logits shape: [B, 1, vocab]
         let shape = logits.shape();

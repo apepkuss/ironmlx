@@ -69,7 +69,7 @@ fn p4_qwen35_logits_match() {
         .make_cache(/* batch */ 1, s + 1, Dtype::Bfloat16)
         .expect("make_cache");
     let logits = model
-        .forward_on(&input_ids, &position_ids, Some(&mut cache), ())
+        .forward_on(&input_ids, &position_ids, Some(&[s]), Some(&mut cache), ())
         .expect("forward_on");
     // logits: [1, 1, vocab] — last-position only (Qwen35Model::forward_on slices
     // the last hidden state before the lm_head projection).
@@ -158,7 +158,7 @@ async fn p4_model_forward_from_blocking_thread() {
             .make_cache(1, s + 1, Dtype::Bfloat16)
             .expect("make_cache");
         model_guard
-            .forward_on(&input_ids, &position_ids, Some(&mut cache), ())
+            .forward_on(&input_ids, &position_ids, Some(&[s]), Some(&mut cache), ())
             .expect("forward_on from blocking thread")
     })
     .await

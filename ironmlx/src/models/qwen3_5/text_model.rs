@@ -124,6 +124,7 @@ impl Qwen35TextModel {
         cache: Option<&mut [LayerCache]>,
         attention_mask: Option<&Array>,
         linear_attention_mask: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
@@ -148,6 +149,7 @@ impl Qwen35TextModel {
                         &sin,
                         attention_mask,
                         linear_attention_mask,
+                        per_row_lens,
                         Some(cell),
                         target,
                     )?;
@@ -162,6 +164,7 @@ impl Qwen35TextModel {
                         &sin,
                         attention_mask,
                         linear_attention_mask,
+                        per_row_lens,
                         None,
                         target,
                     )?;
@@ -182,6 +185,7 @@ impl Qwen35TextModel {
         &self,
         input_ids: &Array,
         position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -202,7 +206,15 @@ impl Qwen35TextModel {
             }
         }
         let hidden = self.embed_on(input_ids, target)?;
-        self.forward_post_embedding_on(&hidden, position_ids, cache, None, None, target)
+        self.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            None,
+            None,
+            per_row_lens,
+            target,
+        )
     }
 
     /// Project hidden state to vocab logits via the (tied) `embed_tokens` matrix.

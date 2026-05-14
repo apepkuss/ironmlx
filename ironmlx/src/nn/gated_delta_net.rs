@@ -281,7 +281,7 @@ impl GatedDeltaNet {
         mask: Option<&Array>,
         cache: Option<&mut GatedDeltaCache>,
     ) -> Result<Array> {
-        self.forward_on(x, mask, cache, ())
+        self.forward_on(x, mask, None, cache, ())
     }
 
     /// Stream-targeted forward — Qwen3-Next gated delta net algorithm.
@@ -300,6 +300,7 @@ impl GatedDeltaNet {
         &self,
         x: &Array,
         mask: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
         mut cache: Option<&mut GatedDeltaCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -366,12 +367,17 @@ impl GatedDeltaNet {
         // Step 1b: zero out qkv at pad positions before conv1d.
         //
         // The conv1d is temporal — its output at real-token position t uses
-        // input positions `t-(k-1)..t` as history. For left-padded batched
-        // prefill, those history positions include pad tokens whose embeddings
-        // are non-zero garbage (embed(pad_id) projected through in_proj_qkvz).
-        // If we leave qkv as-is at pad positions, conv1d at the first few real
-        // positions sees pad-embedding history and produces outputs that
-        // diverge from the per-stream reference (which sees zero history).
+        // input positions `t-(k-1)..t` as history. Under right-padded batched
+        // prefill, real qkv occupies positions `[0, L_i)` and the trailing
+        // `[L_i, max_len)` positions are pad; conv1d output AT real positions
+        // (t < L_i) only consumes earlier real positions (causal kernel), so
+        // it stays clean even without zeroing pad qkv. However, conv1d output
+        // AT pad positions reads back into the real-tail (positions
+        // `[L_i - (k-1), L_i)`), and the kernel post-write of conv_state then
+        // captures those pad-slot outputs — so we zero pad qkv up front to
+        // keep pad-slot conv1d output benign and avoid leaking pad embeddings
+        // (which are non-zero garbage from in_proj_qkvz) into the cache
+        // update path's per-row slice.
         //
         // The gated_delta_step kernel's per-token mask only skips compute at
         // pad positions; it does not undo conv1d contamination of real
@@ -421,17 +427,59 @@ impl GatedDeltaNet {
         let conv_sig = conv_out.sigmoid()?;
         let conv_out = &conv_out * &conv_sig;
 
-        // Step 2c: update conv_state cache (last kernel_size-1 tokens of conv_input)
+        // Step 2c: update conv_state cache.
+        //
+        // The new conv_state for the next call must capture the last
+        // `n_keep = kernel_size - 1` tokens of each row's REAL input. Under
+        // right-padded batched prefill the real qkv occupies positions
+        // `[k-1, k-1 + L_i)` of conv_input (= old conv_state prepended +
+        // qkv with pad zeroed). For row i the real-tail window therefore
+        // sits at `[k-1 + L_i - n_keep, k-1 + L_i) == [L_i, L_i + n_keep)`
+        // of conv_input — uniform-length and B=1 cases collapse to the
+        // last n_keep positions of conv_input (matches pre-right-pad
+        // behaviour).
+        //
+        // When `per_row_lens` is `None` (single-stream / non-batched), we
+        // fall back to the simple "last n_keep positions" slice.
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = self.cfg.conv_kernel_size - 1;
-            // slice last n_keep tokens along axis=1
             let conv_input_dims = conv_input.shape();
             let total_len = conv_input_dims.as_slice()[1];
-            let new_conv_state = mlx::ops::indexing::slice(
-                &conv_input,
-                vec![0_i32, total_len - n_keep, 0].as_slice(),
-                vec![batch, total_len, self.cfg.conv_dim()].as_slice(),
-            )?;
+            let conv_dim = self.cfg.conv_dim();
+            let new_conv_state = match per_row_lens {
+                Some(lens) if batch > 1 => {
+                    // Per-row slice + concatenate along axis 0.
+                    if lens.len() as i32 != batch {
+                        return Err(anyhow::anyhow!(
+                            "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
+                            lens.len(),
+                            batch
+                        ));
+                    }
+                    let mut rows: Vec<Array> = Vec::with_capacity(batch as usize);
+                    for (i, &l) in lens.iter().enumerate() {
+                        // The real-tail window starts at position l in
+                        // conv_input. Bound: l + n_keep <= total_len iff
+                        // l <= total_len - n_keep = max_len, which always
+                        // holds because l <= max_len = seq.
+                        let row = mlx::ops::indexing::slice_strided_on(
+                            &conv_input,
+                            &[i as i32, l, 0][..],
+                            &[i as i32 + 1, l + n_keep, conv_dim][..],
+                            &[1_i32, 1, 1][..],
+                            target,
+                        )?;
+                        rows.push(row);
+                    }
+                    let row_refs: Vec<&Array> = rows.iter().collect();
+                    mlx::ops::shape::concatenate_on(&row_refs[..], 0, target)?
+                }
+                _ => mlx::ops::indexing::slice(
+                    &conv_input,
+                    vec![0_i32, total_len - n_keep, 0].as_slice(),
+                    vec![batch, total_len, conv_dim].as_slice(),
+                )?,
+            };
             c.update_conv(new_conv_state);
         }
 
@@ -556,10 +604,16 @@ impl GatedDeltaNet {
         // Step 7e: update cache recurrent_state, advance offset
         if let Some(c) = cache {
             c.update_recurrent(new_state);
-            // TEMP(b1-p2.3c-1 Task 2): uniform per-row n = seq across all B
-            // rows — replaced in Task 4 by caller-provided per_row_lens.
-            let per_row_n = vec![seq; batch as usize];
-            c.advance(&per_row_n)?;
+            let lens_owned: Vec<i32>;
+            let lens_ref: &[i32] = match per_row_lens {
+                Some(l) => l,
+                None => {
+                    // Non-batched single-stream caller: lockstep-equivalent uniform.
+                    lens_owned = vec![seq; batch as usize];
+                    &lens_owned
+                }
+            };
+            c.advance(lens_ref)?;
         }
 
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
