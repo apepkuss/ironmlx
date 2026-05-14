@@ -16,12 +16,13 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::sampler::Sampler;
 use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
+use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 
 use super::AppState;
 
@@ -190,14 +191,23 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
     };
 
-    if stream {
-        messages_stream(state, request, model_label, input_tokens).await
-    } else {
-        messages_unary(state, request, model_label, input_tokens).await
+    // COMPAT(3b-2/3b-4): long-prompt fallback to GS sunsets in 3c+
+    // chunked-prefill phase. Note: when prefill_chunk_size == 0 (chunking
+    // disabled by config), this predicate routes ALL text requests to the
+    // SchedulerActor regardless of length — equivalent to the GS path's
+    // behavior when chunking is also disabled there.
+    let prompt_len = request.prompt_ids.len();
+    let use_scheduler = state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size;
+
+    match (stream, use_scheduler) {
+        (true, true) => serve_via_scheduler_stream(state, request, model_label, input_tokens).await,
+        (true, false) => serve_via_gs_stream(state, request, model_label, input_tokens).await,
+        (false, true) => serve_via_scheduler_unary(state, request, model_label, input_tokens).await,
+        (false, false) => serve_via_gs_unary(state, request, model_label, input_tokens).await,
     }
 }
 
-async fn messages_stream(
+async fn serve_via_gs_stream(
     state: AppState,
     request: GenerateRequest,
     model_id: String,
@@ -321,7 +331,167 @@ async fn messages_stream(
         .unwrap()
 }
 
-async fn messages_unary(
+/// Text-only short-prompt streaming path via SchedulerActor (3b-4 swap-in).
+/// Emits the same 6-event SSE sequence as `serve_via_gs_stream`:
+///   message_start → content_block_start → N × content_block_delta →
+///   content_block_stop → message_delta → message_stop.
+pub async fn serve_via_scheduler_stream(
+    state: AppState,
+    request: GenerateRequest,
+    model_id: String,
+    input_tokens: u32,
+) -> Response {
+    let msg_id = gen_msg_id();
+
+    // 1. Admit request to the actor.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if state
+        .scheduler_handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler actor unavailable",
+        )
+            .into_response();
+    }
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = match reply_rx.await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+        }
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+        }
+    };
+
+    // 2. Spawn forwarder that emits the 6-event SSE sequence.
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let msg_id_for_task = msg_id.clone();
+    let model_id_for_task = model_id.clone();
+    let tokenizer = state.tokenizer.clone();
+
+    tokio::spawn(async move {
+        // Event 1: message_start
+        let start_payload = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": msg_id_for_task,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": model_id_for_task,
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {"input_tokens": input_tokens, "output_tokens": 0}
+            }
+        });
+        if tx
+            .send(Ok(format_event("message_start", &start_payload)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        // Event 2: content_block_start
+        let block_start = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""}
+        });
+        if tx
+            .send(Ok(format_event("content_block_start", &block_start)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        // Events 3..N+2: content_block_delta per non-empty detok output.
+        // output_tokens increments UNCONDITIONALLY per StepEvent (mirrors
+        // GS path line 277 — counter reflects generated tokens, NOT
+        // emitted deltas. Tokens whose detok output is empty still count.)
+        let mut detok = tokenizer.decode_stream(/* skip_special */ true);
+        let mut output_tokens: u32 = 0;
+        let mut stop_reason: &'static str = "end_turn";
+        while let Some(ev) = event_rx.recv().await {
+            let text = match detok.step(ev.token) {
+                Ok(Some(s)) => s,
+                Ok(None) => String::new(), // BPE mid-codepoint
+                Err(_) => String::new(),   // best-effort; skip emit
+            };
+            if !text.is_empty() {
+                let delta = serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text}
+                });
+                if tx
+                    .send(Ok(format_event("content_block_delta", &delta)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            output_tokens += 1;
+            if let Some(reason) = ev.finish_reason {
+                stop_reason = match reason {
+                    "stop" => "end_turn",
+                    "length" => "max_tokens",
+                    other => other,
+                };
+                break;
+            }
+        }
+
+        // Event N+3: content_block_stop
+        let block_stop = serde_json::json!({"type": "content_block_stop", "index": 0});
+        if tx
+            .send(Ok(format_event("content_block_stop", &block_stop)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        // Event N+4: message_delta (carries final stop_reason + output_tokens)
+        let msg_delta = serde_json::json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+            "usage": {"output_tokens": output_tokens}
+        });
+        if tx
+            .send(Ok(format_event("message_delta", &msg_delta)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        // Event N+5: message_stop
+        let msg_stop = serde_json::json!({"type": "message_stop"});
+        let _ = tx.send(Ok(format_event("message_stop", &msg_stop))).await;
+    });
+
+    let stream = ReceiverStream::new(rx);
+    let body = Body::from_stream(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(body)
+        .unwrap()
+}
+
+async fn serve_via_gs_unary(
     state: AppState,
     request: GenerateRequest,
     model_id: String,
@@ -361,6 +531,84 @@ async fn messages_unary(
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response();
         }
     };
+
+    let envelope = MessageEnvelope {
+        id,
+        kind: "message",
+        role: "assistant",
+        content: vec![ContentBlockText {
+            kind: "text",
+            text: content,
+        }],
+        model: model_id,
+        stop_reason: Some(stop_reason),
+        stop_sequence: None,
+        usage: Usage {
+            input_tokens,
+            output_tokens,
+        },
+    };
+    Json(envelope).into_response()
+}
+
+/// Text-only short-prompt unary path via SchedulerActor (3b-4 swap-in).
+pub async fn serve_via_scheduler_unary(
+    state: AppState,
+    request: GenerateRequest,
+    model_id: String,
+    input_tokens: u32,
+) -> Response {
+    let id = gen_msg_id();
+
+    // 1. Admit.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if state
+        .scheduler_handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scheduler actor unavailable",
+        )
+            .into_response();
+    }
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = match reply_rx.await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+        }
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+        }
+    };
+
+    // 2. Drain events; build envelope.
+    let mut detok = state.tokenizer.decode_stream(/* skip_special */ true);
+    let mut content = String::new();
+    let mut output_tokens: u32 = 0;
+    let mut stop_reason: &'static str = "end_turn";
+    while let Some(ev) = event_rx.recv().await {
+        match detok.step(ev.token) {
+            Ok(Some(s)) => content.push_str(&s),
+            Ok(None) => { /* BPE mid-codepoint */ }
+            Err(_) => { /* best-effort */ }
+        }
+        output_tokens += 1;
+        if let Some(reason) = ev.finish_reason {
+            stop_reason = match reason {
+                "stop" => "end_turn",
+                "length" => "max_tokens",
+                other => other,
+            };
+            break;
+        }
+    }
 
     let envelope = MessageEnvelope {
         id,
