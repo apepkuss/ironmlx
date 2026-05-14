@@ -25,6 +25,56 @@ pub struct Qwen35Model {
     vision: Option<VisionTower>,
 }
 
+/// Slice per-row last hidden states from `hidden [B, S, H]`.
+///
+/// For row `i`, extracts `hidden[i, last_positions[i], :]` then stacks
+/// to `[B, 1, H]`. Used by [`Qwen35Model::batched_prefill`] to project
+/// per-row last-token logits when prompts have different lengths under
+/// right-padding.
+///
+/// # Errors
+/// - `last_positions.len() != B`
+/// - `last_positions[i] < 0 || last_positions[i] >= S` for any `i`
+fn per_row_slice_last(
+    hidden: &Array,
+    last_positions: &[i32],
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let target = target.into();
+    let dims_borrow = hidden.shape();
+    let dims = dims_borrow.as_slice();
+    let (b, s, h) = (dims[0], dims[1], dims[2]);
+    if last_positions.len() as i32 != b {
+        return Err(anyhow!(
+            "per_row_slice_last: last_positions.len()={} != batch={}",
+            last_positions.len(),
+            b
+        ));
+    }
+    for (i, &pos) in last_positions.iter().enumerate() {
+        if pos < 0 || pos >= s {
+            return Err(anyhow!(
+                "per_row_slice_last: last_positions[{i}]={pos} out of [0, {s})"
+            ));
+        }
+    }
+    // Per-row slice: row i takes hidden[i, positions[i], :] → [1, 1, H].
+    // Concatenate along axis 0 to build [B, 1, H].
+    let mut rows: Vec<Array> = Vec::with_capacity(b as usize);
+    for (i, &pos) in last_positions.iter().enumerate() {
+        let row = mlx::ops::indexing::slice_strided_on(
+            hidden,
+            &[i as i32, pos, 0][..],
+            &[i as i32 + 1, pos + 1, h][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        rows.push(row);
+    }
+    let row_refs: Vec<&Array> = rows.iter().collect();
+    Ok(mlx::ops::shape::concatenate_on(&row_refs[..], 0, target)?)
+}
+
 impl Qwen35Model {
     /// Production constructor. Calls [`Qwen35Config::from_loader`] then
     /// [`Qwen35TextModel::from_loader`]; loads `lm_head` only when not tied.
@@ -353,37 +403,7 @@ impl Qwen35Model {
         let dims = dims_borrow.as_slice();
         let (b, s, h) = (dims[0], dims[1], dims[2]);
         let last_hidden = match last_positions {
-            Some(positions) if s > 1 => {
-                if positions.len() as i32 != b {
-                    return Err(anyhow!(
-                        "slice_last_and_project: last_positions.len()={} != batch={}",
-                        positions.len(),
-                        b
-                    ));
-                }
-                for (i, &p) in positions.iter().enumerate() {
-                    if p < 0 || p >= s {
-                        return Err(anyhow!(
-                            "slice_last_and_project: last_positions[{i}]={p} out of [0, {s})"
-                        ));
-                    }
-                }
-                // Per-row slice: row i takes hidden[i, positions[i], :] →
-                // [1, 1, H]. Concatenate along axis 0 to build [B, 1, H].
-                let mut rows: Vec<Array> = Vec::with_capacity(b as usize);
-                for (i, &pos) in positions.iter().enumerate() {
-                    let row = mlx::ops::indexing::slice_strided_on(
-                        hidden,
-                        &[i as i32, pos, 0][..],
-                        &[i as i32 + 1, pos + 1, h][..],
-                        &[1_i32, 1, 1][..],
-                        target,
-                    )?;
-                    rows.push(row);
-                }
-                let row_refs: Vec<&Array> = rows.iter().collect();
-                mlx::ops::shape::concatenate_on(&row_refs[..], 0, target)?
-            }
+            Some(positions) if s > 1 => per_row_slice_last(hidden, positions, target)?,
             _ if s > 1 => {
                 // Single-stream / uniform-length fallback: slice column s-1.
                 mlx::ops::indexing::slice_strided(
@@ -599,5 +619,59 @@ mod tests {
             max_diff < 1e-5,
             "forward_vl text-only diverged from forward_on: max_diff={max_diff}"
         );
+    }
+}
+
+#[cfg(test)]
+mod per_row_slice_tests {
+    use super::*;
+
+    #[test]
+    fn per_row_slice_last_uniform_pick() {
+        // hidden [2, 4, 3] with deterministic values: hidden[i, j, c] = (i*4 + j)*3 + c.
+        let data: Vec<f32> = (0..(2 * 4 * 3)).map(|i| i as f32).collect();
+        let hidden: Array = (&data[..], (2_i32, 4_i32, 3_i32))
+            .try_into()
+            .expect("hidden try_into");
+        // Pick last positions [3, 3] (the same column = degenerate per-row case).
+        let out = per_row_slice_last(&hidden, &[3, 3], ()).expect("per_row_slice_last");
+        assert_eq!(out.shape().as_slice(), &[2, 1, 3]);
+        // Row 0 last (j=3): values 9,10,11
+        // Row 1 last (j=3): values 21,22,23
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert_eq!(v, vec![9.0, 10.0, 11.0, 21.0, 22.0, 23.0]);
+    }
+
+    #[test]
+    fn per_row_slice_last_ragged_pick() {
+        // hidden [2, 4, 3] same as above.
+        let data: Vec<f32> = (0..(2 * 4 * 3)).map(|i| i as f32).collect();
+        let hidden: Array = (&data[..], (2_i32, 4_i32, 3_i32))
+            .try_into()
+            .expect("hidden try_into");
+        // Row 0 last position = 1 (only 2 real tokens); row 1 last position = 3 (all 4).
+        let out = per_row_slice_last(&hidden, &[1, 3], ()).expect("per_row_slice_last ragged");
+        assert_eq!(out.shape().as_slice(), &[2, 1, 3]);
+        // Row 0 j=1: values 3,4,5
+        // Row 1 j=3: values 21,22,23
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert_eq!(v, vec![3.0, 4.0, 5.0, 21.0, 22.0, 23.0]);
+    }
+
+    #[test]
+    fn per_row_slice_last_invalid_args_return_err() {
+        let data: Vec<f32> = (0..(2 * 4 * 3)).map(|i| i as f32).collect();
+        let hidden: Array = (&data[..], (2_i32, 4_i32, 3_i32))
+            .try_into()
+            .expect("hidden try_into");
+        // len mismatch (3 vs batch=2)
+        let r1 = per_row_slice_last(&hidden, &[0, 1, 2], ());
+        assert!(r1.is_err(), "len mismatch must Err");
+        // negative position
+        let r2 = per_row_slice_last(&hidden, &[-1, 1], ());
+        assert!(r2.is_err(), "negative position must Err");
+        // position >= s (s=4)
+        let r3 = per_row_slice_last(&hidden, &[0, 4], ());
+        assert!(r3.is_err(), "out-of-range position must Err");
     }
 }

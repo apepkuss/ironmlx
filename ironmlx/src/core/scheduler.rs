@@ -347,13 +347,11 @@ impl Scheduler {
         }
 
         // Build per-row prompt-length vector in slot order. None slots get
-        // 0, which build_batch_attention_mask / build_position_ids_batched
-        // both accept (the row is treated as a fully-padded no-op).
-        // None slots get a synthetic length=1 so that build_position_ids_batched
-        // and the mask builders accept the input (they assert > 0). Row stays
-        // all-pad-zero in input_ids, attention masks treat its single "real"
-        // column as pad K/V (zeroed by the model's batched_prefill path), so
-        // active rows see no leakage from None slots.
+        // a synthetic length=1 so that build_position_ids_batched and the
+        // mask builders accept the input (they assert > 0). The row stays
+        // all-pad-zero in input_ids; attention masks treat its single
+        // "real" column as pad K/V (zeroed by the model's batched_prefill
+        // path), so active rows see no leakage from None slots.
         let prompt_lens: Vec<i32> = self
             .slots
             .iter()
@@ -401,8 +399,9 @@ impl Scheduler {
             .as_mut()
             .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?;
 
-        // Run batched prefill. Capture [B, T_max, vocab] logits for
-        // first-token sampling.
+        // Run batched prefill. Capture [B, 1, vocab] logits (sequence axis
+        // already collapsed via slice_last_and_project) for first-token
+        // sampling.
         let logits = model.batched_prefill(
             &input_ids,
             &position_ids,
@@ -422,7 +421,8 @@ impl Scheduler {
             }
         }
 
-        // logits shape: [B, T_max, vocab]
+        // logits shape: [B, 1, vocab] — batched_prefill already collapsed
+        // the sequence axis via slice_last_and_project.
         let shape = logits.shape();
         let shape_slice = shape.as_slice();
         let vocab = shape_slice[2];

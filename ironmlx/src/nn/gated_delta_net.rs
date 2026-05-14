@@ -447,32 +447,44 @@ impl GatedDeltaNet {
             let total_len = conv_input_dims.as_slice()[1];
             let conv_dim = self.cfg.conv_dim();
             let new_conv_state = match per_row_lens {
-                Some(lens) if batch > 1 => {
-                    // Per-row slice + concatenate along axis 0.
+                Some(lens) if batch > 1 && !lens.iter().all(|&l| l + n_keep == total_len) => {
+                    // Per-row real-tail window starts at position `lens[i]`
+                    // in conv_input and spans `n_keep` rows. Express as a
+                    // single `take_along_axis` over axis 1 with index tensor
+                    // `[B, n_keep, 1]` (broadcasts to [B, n_keep, conv_dim]).
+                    // This collapses the previous per-row
+                    // `slice_strided_on + concatenate_on` (B+1 graph nodes
+                    // per layer per call) into one fusable op — the
+                    // per-row loop blocked downstream JIT fusion and
+                    // caused a 3.45x decode slowdown.
+                    //
+                    // The match guard `!lens.iter().all(|&l| l + n_keep == total_len)`
+                    // routes uniform-length batches to the seq-wide slice
+                    // fast path (the `_` arm), so this arm only fires when
+                    // at least one row has a true ragged tail.
                     if lens.len() as i32 != batch {
-                        return Err(anyhow::anyhow!(
+                        return Err(anyhow!(
                             "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
                             lens.len(),
                             batch
                         ));
                     }
-                    let mut rows: Vec<Array> = Vec::with_capacity(batch as usize);
-                    for (i, &l) in lens.iter().enumerate() {
-                        // The real-tail window starts at position l in
-                        // conv_input. Bound: l + n_keep <= total_len iff
-                        // l <= total_len - n_keep = max_len, which always
-                        // holds because l <= max_len = seq.
-                        let row = mlx::ops::indexing::slice_strided_on(
-                            &conv_input,
-                            &[i as i32, l, 0][..],
-                            &[i as i32 + 1, l + n_keep, conv_dim][..],
-                            &[1_i32, 1, 1][..],
-                            target,
-                        )?;
-                        rows.push(row);
+                    // Bound check: l in [0, max_len] (= [0, total_len - n_keep]),
+                    // so l + j in [0, total_len) for j in [0, n_keep). Always
+                    // holds when prefill_admitted set lens[i] = prompt_lens[i]
+                    // with prompt_lens[i] <= max_len = seq.
+                    let mut idx_flat: Vec<u32> = Vec::with_capacity((batch * n_keep) as usize);
+                    for &l in lens {
+                        for j in 0..n_keep {
+                            idx_flat.push((l + j) as u32);
+                        }
                     }
-                    let row_refs: Vec<&Array> = rows.iter().collect();
-                    mlx::ops::shape::concatenate_on(&row_refs[..], 0, target)?
+                    let idx: Array = (&idx_flat[..], &[batch, n_keep, 1_i32][..])
+                        .try_into()
+                        .map_err(|e| {
+                            anyhow!("GatedDeltaNet::forward_on: idx try_into Array failed: {e:?}")
+                        })?;
+                    mlx::ops::indexing::take_along_axis_on(&conv_input, &idx, 1, target)?
                 }
                 _ => mlx::ops::indexing::slice(
                     &conv_input,
