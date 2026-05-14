@@ -136,6 +136,23 @@ impl KVCache {
             }
         }
 
+        // All-zero fast path: every row skips its write. Return empty slices
+        // along axis 2 without touching backing buffers (avoids a panic when
+        // keys/values are not yet allocated).
+        if per_row_lens.iter().all(|&n| n == 0) {
+            let empty_k = Array::zeros_on(
+                (self.batch, self.n_kv_heads, 0_i32, self.head_dim),
+                self.dtype,
+                target,
+            )?;
+            let empty_v = Array::zeros_on(
+                (self.batch, self.n_kv_heads, 0_i32, self.v_head_dim),
+                self.dtype,
+                target,
+            )?;
+            return Ok((empty_k, empty_v));
+        }
+
         // Compute the post-write max offset across rows (the K dim of the
         // returned fetched slice).
         let max_off_after: i32 = self
@@ -376,6 +393,21 @@ mod tests {
         let (k, v) = make_kv_b(2, 8);
         let (_kf, _vf) = c.update_and_fetch(&k, &v, &[0, 8]).expect("update zero");
         assert_eq!(c.offsets(), &[0, 8], "row 0 unchanged, row 1 advanced");
+    }
+
+    #[test]
+    fn kvcache_all_zero_lens_on_fresh_cache_returns_empty_slices() {
+        // Regression: previously panicked with "keys allocated" because the
+        // grow check skipped allocation when max_off_after == 0 and the
+        // post-write fetch unwrapped a None keys buffer.
+        let mut c = make_cache_b(2, 1024);
+        let (k, v) = make_kv_b(2, 8);
+        let (kf, vf) = c
+            .update_and_fetch(&k, &v, &[0, 0])
+            .expect("all-zero update should not panic");
+        assert_eq!(c.offsets(), &[0, 0]);
+        assert_eq!(kf.shape().as_slice(), &[2, 4, 0, 256]);
+        assert_eq!(vf.shape().as_slice(), &[2, 4, 0, 256]);
     }
 
     #[test]
