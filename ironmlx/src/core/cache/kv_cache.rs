@@ -532,31 +532,37 @@ mod tests {
         assert_eq!(c.offsets(), &[8, 8]);
         assert_eq!(kf2.shape().as_slice(), &[2, 4, 8, 256]);
 
-        // Verify accumulated K: row 0 cols [0..4]=1.0 (step 1), cols [4..8]=3.0 (step 2).
-        // Row 1 cols [0..4]=2.0 (step 1), cols [4..8]=4.0 (step 2).
-        let kf2_vec: Vec<f32> = kf2.to_vec().expect("to_vec");
-        let stride_row = 4 * 8 * 256; // n_kv_heads * cap_so_far * head_dim
+        // Verify accumulated K exhaustively. Row-major [B=2, n_kv_heads=4, S=8, head_dim=256]:
+        //   row 0 cols [0..4] = 1.0 (step 1), cols [4..8] = 3.0 (step 2)
+        //   row 1 cols [0..4] = 2.0 (step 1), cols [4..8] = 4.0 (step 2)
+        let kf2_vec: Vec<f32> = kf2.to_vec().expect("to_vec K");
+        let total_k = 2 * 4 * 8 * 256;
+        assert_eq!(kf2_vec.len(), total_k);
+        let stride_batch = 4 * 8 * 256; // n_kv_heads * S * head_dim
+        let stride_head = 8 * 256; // S * head_dim
         let stride_seq = 256; // head_dim
-                              // Sample row 0 col 0 head 0 dim 0 — expect 1.0
-        assert_eq!(
-            kf2_vec[0 * stride_row + 0 * 8 * stride_seq + 0 * stride_seq + 0],
-            1.0
-        );
-        // Row 0 col 5 (in step 2 range) head 0 dim 0 — expect 3.0
-        assert_eq!(
-            kf2_vec[0 * stride_row + 0 * 8 * stride_seq + 5 * stride_seq + 0],
-            3.0
-        );
-        // Row 1 col 2 head 0 dim 0 — expect 2.0
-        assert_eq!(
-            kf2_vec[1 * stride_row + 0 * 8 * stride_seq + 2 * stride_seq + 0],
-            2.0
-        );
-        // Row 1 col 6 head 0 dim 0 — expect 4.0
-        assert_eq!(
-            kf2_vec[1 * stride_row + 0 * 8 * stride_seq + 6 * stride_seq + 0],
-            4.0
-        );
+        for b_idx in 0..2 {
+            let row_marker_step1 = if b_idx == 0 { 1.0_f32 } else { 2.0_f32 };
+            let row_marker_step2 = if b_idx == 0 { 3.0_f32 } else { 4.0_f32 };
+            for h in 0..4 {
+                for col in 0..8 {
+                    for d in 0..256 {
+                        let idx = b_idx * stride_batch + h * stride_head + col * stride_seq + d;
+                        let expected = if col < 4 {
+                            row_marker_step1
+                        } else {
+                            row_marker_step2
+                        };
+                        assert_eq!(
+                            kf2_vec[idx],
+                            expected,
+                            "K mismatch at b={b_idx} h={h} col={col} d={d}: expected {expected}, got {}",
+                            kf2_vec[idx]
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -581,20 +587,31 @@ mod tests {
             .try_into()
             .unwrap();
 
-        let (kf, _vf) = c.update_and_fetch(&k, &v, &[4, 4]).expect("update");
+        let (kf, vf) = c.update_and_fetch(&k, &v, &[4, 4]).expect("update");
         assert_eq!(c.offsets(), &[4, 4]);
 
-        let kf_vec: Vec<f32> = kf.to_vec().expect("to_vec");
+        let kf_vec: Vec<f32> = kf.to_vec().expect("to_vec K");
         let total = (2 * 4 * 4 * 256) as usize;
         assert_eq!(kf_vec.len(), total);
         let row_stride = 4 * 4 * 256; // n_kv_heads * cap_so_far * head_dim
-                                      // Row 0: every element in slab [0 * row_stride .. 1 * row_stride] must be 1.0
+                                      // K row 0: every element in slab [0 * row_stride .. 1 * row_stride] must be 1.0
         for i in 0..row_stride {
-            assert_eq!(kf_vec[i], 1.0_f32, "row 0 slab corrupted at index {i}");
+            assert_eq!(kf_vec[i], 1.0_f32, "K row 0 slab corrupted at index {i}");
         }
-        // Row 1: every element in slab [1 * row_stride .. 2 * row_stride] must be 2.0
+        // K row 1: every element in slab [1 * row_stride .. 2 * row_stride] must be 2.0
         for i in row_stride..(2 * row_stride) {
-            assert_eq!(kf_vec[i], 2.0_f32, "row 1 slab corrupted at index {i}");
+            assert_eq!(kf_vec[i], 2.0_f32, "K row 1 slab corrupted at index {i}");
+        }
+
+        // V verification: same exhaustive loop pattern as K, but V markers are
+        // 10.0 (row 0) / 20.0 (row 1) because v_data = k_data * 10.0.
+        let vf_vec: Vec<f32> = vf.to_vec().expect("to_vec V");
+        assert_eq!(vf_vec.len(), total);
+        for i in 0..row_stride {
+            assert_eq!(vf_vec[i], 10.0_f32, "V row 0 slab corrupted at index {i}");
+        }
+        for i in row_stride..(2 * row_stride) {
+            assert_eq!(vf_vec[i], 20.0_f32, "V row 1 slab corrupted at index {i}");
         }
     }
 }
