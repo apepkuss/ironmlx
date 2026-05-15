@@ -5,8 +5,14 @@
 //! the first admit starts a [`ADMISSION_DEADLINE`] timer; further admits
 //! accumulate until either [`Scheduler::active_count`] saturates at
 //! `b_max` (saturate path) or the deadline expires (hard limit, no
-//! reset on new admits). Then a single `run_batch_once` call processes
-//! the entire batch.
+//! reset on new admits).
+//!
+//! 3c-3 introduces the rolling decode loop: after first-batch prefill
+//! the driver biased-selects between `cmd_rx.recv()` (mid-batch admit)
+//! and an always-ready step branch. Mid admits route through
+//! [`Scheduler::admit_mid`] (B=1 temp-cache prefill + adopt-into-main);
+//! step branch calls [`Scheduler::step`] + [`Scheduler::gc_finished_rows`].
+//! The loop exits when `active_count == 0` AND `cmd_rx` is empty.
 //!
 //! See `docs/superpowers/specs/2026-05-13-b1-p2-3b-3-admission-window-design.md` § 4.
 
@@ -18,7 +24,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::core::generate::GenerateRequest;
-use crate::core::scheduler::{Phase, RequestId, Scheduler, StepEvent};
+use crate::core::scheduler::{RequestId, Scheduler, StepEvent};
 use crate::models::Qwen35Model;
 use crate::Result;
 
@@ -44,6 +50,15 @@ pub enum SchedulerCommand {
     },
 }
 
+/// Event yielded by the rolling decode loop's biased select. Either a
+/// new admit command arrived (mid-batch admit), the always-ready step
+/// branch fired, or the cmd_rx channel was closed (shutdown).
+enum RollingEvent {
+    Admit(SchedulerCommand),
+    Step,
+    Shutdown,
+}
+
 /// Reply payload for [`SchedulerCommand::Admit`]. Carries the assigned
 /// [`RequestId`] and the per-request event receiver.
 pub struct AdmitReply {
@@ -65,9 +80,9 @@ pub struct SchedulerActorHandle {
     #[doc(hidden)]
     pub admit_count: Arc<AtomicU64>,
     /// Test-observable counter. Incremented by the driver once per
-    /// `run_batch_once` invocation (including failed batches — diagnostic
-    /// purpose). When multi-admit batching is working, integration tests
-    /// expect `batch_count < admit_count`. Doc-hidden.
+    /// batch (prefill_admitted invocation, including failed batches —
+    /// diagnostic purpose). When multi-admit batching is working,
+    /// integration tests expect `batch_count < admit_count`. Doc-hidden.
     #[doc(hidden)]
     pub batch_count: Arc<AtomicU64>,
     /// Test-observable counter. Incremented by `drain_window` when it
@@ -120,23 +135,20 @@ fn driver_loop(
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let rt = tokio::runtime::Handle::current();
 
-    loop {
-        // Idle: block waiting for the first admit (or shutdown).
+    'outer: loop {
+        // ===== Outer Idle: block waiting for first admit (or shutdown). =====
         let Some(first_cmd) = rt.block_on(cmd_rx.recv()) else {
-            // cmd_rx closed — all senders dropped. Exit cleanly.
-            return;
+            return; // cmd_rx closed; all senders dropped.
         };
         handle_admit(first_cmd, &mut sched, &mut event_txs, &admit_count);
 
-        // Admitting: drain additional admits until deadline or saturate.
-        // Skip if the first admit already saturated the scheduler (e.g.,
-        // b_max == 1) or if `handle_admit` failed and active_count is 0
-        // (then there's nothing to prefill — bail to next outer iteration).
         if sched.active_count() == 0 {
-            // First admit failed (admit returned Err); nothing to prefill.
-            // Loop back to wait for next cmd.
-            continue;
+            // First admit failed (Err) — nothing to prefill. Wait for next.
+            continue 'outer;
         }
+
+        // ===== Admission window: drain additional admits until deadline
+        //       or saturate at b_max. =====
         if sched.active_count() < b_max {
             rt.block_on(drain_window(
                 &mut cmd_rx,
@@ -149,21 +161,162 @@ fn driver_loop(
             ));
         }
 
-        // Run the batch. Count it BEFORE invocation so failed batches still
-        // appear in the diagnostic counter.
+        // ===== First-batch prefill. =====
         batch_count.fetch_add(1, Ordering::Relaxed);
-        if let Err(e) = run_batch_once(&mut sched, &model, &mut event_txs) {
-            tracing::error!("[SchedulerActor] batch error: {e:?}");
-            // M1 fix (3b-2 final-review): surface evict_all failure; rely
-            // on 3b-1 poison flag to reject subsequent admits.
-            if let Err(evict_err) = sched.evict_all() {
-                tracing::warn!(
-                    "[SchedulerActor] evict_all after batch error also failed: {evict_err:?}; \
-                     relying on 3b-1 poison flag to reject subsequent admits"
-                );
+        let prefill_result = {
+            let model_lock = model.blocking_lock();
+            sched.prefill_admitted(&model_lock)
+        };
+        match prefill_result {
+            Ok(prefill_events) => {
+                for ev in prefill_events {
+                    route_event(ev, &event_txs);
+                }
             }
-            event_txs.clear();
+            Err(e) => {
+                tracing::error!("[SchedulerActor] prefill error: {e:?}");
+                if let Err(evict_err) = sched.evict_all() {
+                    tracing::warn!(
+                        "[SchedulerActor] evict_all after prefill error also failed: \
+                         {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
+                    );
+                }
+                event_txs.clear();
+                continue 'outer;
+            }
         }
+
+        // ===== Rolling decode loop with biased mid-batch admit. =====
+        'rolling: loop {
+            let evt: RollingEvent = rt.block_on(async {
+                tokio::select! {
+                    biased;
+                    maybe_cmd = cmd_rx.recv() => match maybe_cmd {
+                        Some(cmd) => RollingEvent::Admit(cmd),
+                        None => RollingEvent::Shutdown,
+                    },
+                    _ = std::future::ready(()) => RollingEvent::Step,
+                }
+            });
+
+            match evt {
+                RollingEvent::Shutdown => {
+                    // cmd_rx closed. Drop event_txs (handlers see EOF), return.
+                    event_txs.clear();
+                    return;
+                }
+                RollingEvent::Admit(cmd) => {
+                    handle_admit_mid(cmd, &mut sched, &mut event_txs, &admit_count, &model);
+                }
+                RollingEvent::Step => {
+                    let step_result = {
+                        let model_lock = model.blocking_lock();
+                        sched.step(&model_lock)
+                    };
+                    match step_result {
+                        Ok(events) => {
+                            for ev in events {
+                                route_event(ev, &event_txs);
+                            }
+                            sched.gc_finished_rows(&mut event_txs);
+                        }
+                        Err(e) => {
+                            tracing::error!("[SchedulerActor] step error: {e:?}");
+                            if let Err(evict_err) = sched.evict_all() {
+                                tracing::warn!(
+                                    "[SchedulerActor] evict_all after step error also failed: \
+                                     {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
+                                );
+                            }
+                            event_txs.clear();
+                            continue 'outer;
+                        }
+                    }
+                }
+            }
+
+            // ===== Exit rolling loop when active_count == 0. =====
+            if sched.active_count() == 0 {
+                match cmd_rx.try_recv() {
+                    Ok(cmd) => {
+                        // Pending command arrived after last row finished but
+                        // before the next select tick. Treat as start of a new
+                        // outer batch: drop Finished->Idle via evict_all, then
+                        // handle_admit + drain_window + prefill_admitted
+                        // inline (cannot requeue into mpsc::Receiver).
+                        if let Err(evict_err) = sched.evict_all() {
+                            tracing::warn!(
+                                "[SchedulerActor] evict_all between batches failed: \
+                                 {evict_err:?}; rejecting incoming admit"
+                            );
+                            // Surface the failure to the caller (best effort).
+                            let SchedulerCommand::Admit { reply_tx, .. } = cmd;
+                            let _ = reply_tx.send(Err(evict_err));
+                            event_txs.clear();
+                            continue 'outer;
+                        }
+                        event_txs.clear();
+                        handle_admit(cmd, &mut sched, &mut event_txs, &admit_count);
+                        if sched.active_count() == 0 {
+                            // admit failed; nothing more to do.
+                            break 'rolling;
+                        }
+                        if sched.active_count() < b_max {
+                            rt.block_on(drain_window(
+                                &mut cmd_rx,
+                                &mut sched,
+                                &mut event_txs,
+                                &admit_count,
+                                &saturate_triggered,
+                                b_max,
+                                ADMISSION_DEADLINE,
+                            ));
+                        }
+                        batch_count.fetch_add(1, Ordering::Relaxed);
+                        let prefill_result = {
+                            let model_lock = model.blocking_lock();
+                            sched.prefill_admitted(&model_lock)
+                        };
+                        match prefill_result {
+                            Ok(events) => {
+                                for ev in events {
+                                    route_event(ev, &event_txs);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("[SchedulerActor] re-prefill error: {e:?}");
+                                if let Err(evict_err) = sched.evict_all() {
+                                    tracing::warn!(
+                                        "[SchedulerActor] evict_all after re-prefill error \
+                                         also failed: {evict_err:?}; relying on 3b-1 poison \
+                                         flag to reject subsequent admits"
+                                    );
+                                }
+                                event_txs.clear();
+                                continue 'outer;
+                            }
+                        }
+                        continue 'rolling;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        break 'rolling;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        event_txs.clear();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // After rolling loop: reset cache + Phase for next outer iteration.
+        if let Err(evict_err) = sched.evict_all() {
+            tracing::warn!(
+                "[SchedulerActor] evict_all at end of batch failed: {evict_err:?}; \
+                 relying on 3b-1 poison flag to reject subsequent admits"
+            );
+        }
+        event_txs.clear();
     }
 }
 
@@ -234,39 +387,55 @@ fn handle_admit(
     }
 }
 
-/// Acquire the model lock, drive prefill + step loop to completion, evict
-/// the batch, and release the lock. Lock held only for the duration of
-/// this call.
-fn run_batch_once(
+/// Mid-batch admit handler. Acquires the model lock, calls
+/// [`Scheduler::admit_mid`] (which runs B=1 prefill into a temp cache
+/// and adopts the row into the main cache), then registers the
+/// per-request event channel and routes the first generated token's
+/// event. Lock is held only for the duration of `admit_mid`.
+fn handle_admit_mid(
+    cmd: SchedulerCommand,
     sched: &mut Scheduler,
-    model: &Arc<Mutex<Qwen35Model>>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
-) -> Result<()> {
-    let model = model.blocking_lock();
-
-    let prefill_events = sched.prefill_admitted(&model)?;
-    for ev in prefill_events {
-        route_event(ev, event_txs);
-    }
-
-    while sched.phase() == Phase::Decoding {
-        let events = sched.step(&model)?;
-        for ev in events {
-            route_event(ev, event_txs);
+    admit_count: &Arc<AtomicU64>,
+    model: &Arc<Mutex<Qwen35Model>>,
+) {
+    let SchedulerCommand::Admit { request, reply_tx } = cmd;
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let admit_result = {
+        let model_lock = model.blocking_lock();
+        sched.admit_mid(request, &model_lock)
+    };
+    match admit_result {
+        Ok((id, prefill_event)) => {
+            admit_count.fetch_add(1, Ordering::Relaxed);
+            event_txs.insert(id, event_tx);
+            if reply_tx
+                .send(Ok(AdmitReply {
+                    request_id: id,
+                    event_rx,
+                }))
+                .is_err()
+            {
+                // Caller dropped reply_rx before we could send.
+                // Evict the orphan slot.
+                let _ = sched.evict(id);
+                event_txs.remove(&id);
+                return;
+            }
+            // Route the first generated token event.
+            route_event(prefill_event, event_txs);
+        }
+        Err(e) => {
+            let _ = reply_tx.send(Err(e));
         }
     }
-
-    sched.evict_all()?;
-    // Drop all per-request senders → handlers see channel close (EOF).
-    event_txs.clear();
-    Ok(())
 }
 
 fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>) {
     if let Some(tx) = event_txs.get(&ev.id) {
         // Unbounded channel — only fails when the receiver was dropped
         // (handler abandoned). That's fine; the entry naturally clears
-        // at the next `event_txs.clear()` in run_batch_once.
+        // at the next `event_txs.clear()` in driver_loop.
         let _ = tx.send(ev);
     }
 }
@@ -278,7 +447,7 @@ mod tests {
     /// Drop the SchedulerActorHandle (and thus cmd_tx); confirm the driver
     /// task exits cleanly. We can't construct a real Qwen35Model in a unit
     /// test, so we never send any commands — we only verify the driver's
-    /// `rt.block_on(cmd_rx.recv())` outer loop (3b-3) terminates when all
+    /// `rt.block_on(cmd_rx.recv())` outer loop terminates when all
     /// senders are dropped.
     ///
     /// To keep this test self-contained without a model, we don't call

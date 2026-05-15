@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
-    build_per_row_decode_mask, build_position_ids_batched, GenerateRequest,
+    build_per_row_decode_mask, build_position_ids_batched, slice_logits_row, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
@@ -664,26 +664,13 @@ impl Scheduler {
         )?;
 
         // logits shape: [B, 1, vocab]
-        let shape = logits.shape();
-        let shape_slice = shape.as_slice();
-        let vocab = shape_slice[2];
-
         let mut events: Vec<StepEvent> = Vec::new();
         for (b_idx, was_active) in active_at_start.iter().enumerate() {
             if !was_active {
                 continue;
             }
-            // Slice logits[b_idx, 0, :] → [1, 1, vocab] then reshape to [vocab].
-            // Using mlx::ops::indexing::slice (same pattern as b1_p2_2_batched_decode.rs).
-            let row = mlx::ops::indexing::slice(
-                &logits,
-                &[b_idx as i32, 0_i32, 0_i32][..],
-                &[b_idx as i32 + 1, 1_i32, vocab][..],
-            )
-            .map_err(|e| anyhow!("step: slice logits row {b_idx} failed: {e:?}"))?;
-            let row_flat = row
-                .reshape(&[vocab][..])
-                .map_err(|e| anyhow!("step: reshape logits row {b_idx} failed: {e:?}"))?;
+            let row_flat = slice_logits_row(&logits, b_idx)
+                .map_err(|e| anyhow!("step: slice_logits_row(row {b_idx}) failed: {e:?}"))?;
 
             let state = self.slots[b_idx]
                 .as_mut()
@@ -728,6 +715,149 @@ impl Scheduler {
         }
 
         Ok(events)
+    }
+
+    /// Mid-batch admit + prefill. Caller is `SchedulerActor::driver_loop`
+    /// after `cmd_rx` delivers an Admit during the rolling decode loop.
+    ///
+    /// Architecture: runs prefill in a temporary B=1 cache (the
+    /// `GenerationStream`-equivalent path), then adopts the prefilled
+    /// row into the main cache via per-layer `adopt_row_from` copies.
+    /// This avoids wasted compute on a B=b_max sub-batch + variable-
+    /// shape mask construction + GatedDeltaNet state corruption for
+    /// other active rows.
+    ///
+    /// Synchronous: stalls active rows for ~L_new × B=1_prefill_per_
+    /// token_time. Adoption cost is sub-microsecond. 3c+ chunked prefill
+    /// reduces stall further.
+    ///
+    /// Returns `(RequestId, StepEvent)` — the assigned request ID and
+    /// the first generated token's event. Caller registers the event
+    /// channel using the returned `id`.
+    pub fn admit_mid(
+        &mut self,
+        req: GenerateRequest,
+        model: &Qwen35Model,
+    ) -> Result<(RequestId, StepEvent)> {
+        self.ensure_not_poisoned()?;
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "admit_mid illegal in {:?} phase: only Decoding (use admit for Idle/Admitting)",
+                self.phase
+            ));
+        }
+        let row_idx =
+            self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
+                anyhow!("scheduler full: no row available (b_max={})", self.b_max)
+            })?;
+
+        // 1. Insert RequestState via the relaxed admit() path. Phase stays Decoding.
+        let id = self.admit(req)?;
+        let (prompt_ids, prompt_len, max_new_tokens) = {
+            let state = self.slots[row_idx].as_ref().expect("admit inserted");
+            (
+                state.prompt_ids.clone(),
+                state.prompt_ids.len() as i32,
+                state.max_new_tokens,
+            )
+        };
+        let cap_for_temp = (prompt_len + max_new_tokens as i32).max(prompt_len);
+
+        // 2. Capture KVCache dtype from main cache (first Full layer).
+        let dtype = {
+            let main_cache = self
+                .cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("admit_mid called before prefill_admitted: cache absent"))?;
+            main_cache
+                .iter()
+                .find_map(|c| match c {
+                    LayerCache::Full(kv) => Some(kv.dtype()),
+                    _ => None,
+                })
+                .unwrap_or(Dtype::Bfloat16)
+        };
+
+        // 3. Allocate a fresh B=1 temp cache.
+        let mut temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
+
+        // 4. Build B=1 prefill inputs (mirror GenerationStream prefill).
+        let input_ids_data: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
+        let input_ids: Array = (&input_ids_data[..], &[1_i32, prompt_len][..])
+            .try_into()
+            .map_err(|e| anyhow!("admit_mid: build input_ids Array failed: {e:?}"))?;
+        let position_ids = build_position_ids_batched(&[prompt_len], prompt_len)?;
+        let attention_mask = build_batch_attention_mask(&[prompt_len], prompt_len, dtype)?;
+        let linear_attention_mask = build_batch_linear_mask(&[prompt_len], prompt_len)?;
+
+        // 5. Run B=1 prefill into the temp cache. Returns logits [1, 1, vocab].
+        let logits = model.batched_prefill(
+            &input_ids,
+            &position_ids,
+            &attention_mask,
+            &linear_attention_mask,
+            &[prompt_len],
+            Some(&mut temp_cache),
+            (),
+        )?;
+
+        // 6. Adopt the temp cache's row 0 into main_cache at row_idx.
+        {
+            let main_cache = self.cache.as_mut().expect("cache asserted Some above");
+            if main_cache.len() != temp_cache.len() {
+                return Err(anyhow!(
+                    "admit_mid: cache layer count mismatch ({} vs {})",
+                    main_cache.len(),
+                    temp_cache.len()
+                ));
+            }
+            for (main_layer, temp_layer) in main_cache.iter_mut().zip(temp_cache.iter()) {
+                match (main_layer, temp_layer) {
+                    (LayerCache::Full(main_kv), LayerCache::Full(temp_kv)) => {
+                        main_kv.adopt_row_from(temp_kv, row_idx, 0)?;
+                    }
+                    (LayerCache::Linear(main_gd), LayerCache::Linear(temp_gd)) => {
+                        main_gd.adopt_row_from(temp_gd, row_idx, 0)?;
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "admit_mid: cache layer kind mismatch between main and temp"
+                        ))
+                    }
+                }
+            }
+        }
+
+        // 7. Sample first token from prefill logits (last position).
+        //    Logits shape [1, 1, vocab] -- slice row 0.
+        let row_logits = slice_logits_row(&logits, 0)?;
+        let token = {
+            let state = self.slots[row_idx].as_ref().expect("admit_mid slot");
+            let history: Vec<u32> = prompt_ids.clone();
+            state.sampler.sample(&row_logits, &history)?
+        };
+
+        // 8. Update state + check termination.
+        let state = self.slots[row_idx].as_mut().expect("admit_mid slot");
+        state.generated_tokens.push(token);
+        state.real_len += 1;
+
+        if state.stop_token_ids.contains(&token) {
+            state.finished = true;
+            state.finish_reason = Some("stop");
+        } else if state.generated_tokens.len() >= state.max_new_tokens {
+            state.finished = true;
+            state.finish_reason = Some("length");
+        }
+
+        Ok((
+            id,
+            StepEvent {
+                id,
+                token,
+                finish_reason: state.finish_reason,
+            },
+        ))
     }
 
     /// Sweep finished rows: clear their slot, drop their event channel,
