@@ -873,5 +873,109 @@ mod tests {
         assert!(md.contains("Per-worker breakdown"));
         assert!(md.contains("p50 TTFT"));
         assert!(md.contains("tokens/s"));
+        assert!(md.contains("## Notes"), "Notes section should be present");
+    }
+
+    #[test]
+    fn reduce_concurrent_cell_aggregates_correctly() {
+        use crate::runner::{ConcurrentCellResult, RequestOutcome};
+
+        // Synthetic ConcurrentCellResult: 2 workers, 3 requests each (6 total).
+        // Each request:
+        //   - ttft = 10ms
+        //   - gen_duration = 90ms (5 completion tokens => ITL = 90/(5-1) = 22.5ms)
+        //   - completion_tokens = 5
+        //   - prompt_tokens = 16
+        // Wall duration of cell = 1 second exactly (cell_end - cell_start).
+
+        let cell_start = Instant::now();
+        let cell_end = cell_start + Duration::from_secs(1);
+
+        let mut outcomes: Vec<RequestOutcome> = Vec::new();
+        for worker_id in 0..2_usize {
+            for _ in 0..3_usize {
+                let start = Instant::now();
+                let first_token = start + Duration::from_millis(10);
+                let end = first_token + Duration::from_millis(90);
+                let timings = RequestTimings {
+                    start,
+                    first_token: Some(first_token),
+                    end,
+                };
+                let result = RequestResult {
+                    timings,
+                    server_prompt_tokens: Some(16),
+                    server_completion_tokens: Some(5),
+                    server_cached_tokens: None,
+                    chunk_count: 5,
+                    finish_reason: "stop".to_string(),
+                    content_chars: 0,
+                };
+                outcomes.push(RequestOutcome {
+                    worker_id,
+                    prompt_tokens_local: 16,
+                    result,
+                });
+            }
+        }
+
+        let cell = ConcurrentCellResult {
+            target_name: "synthetic".into(),
+            target_url: "http://0".into(),
+            pp_target: 16,
+            tg_target: 5,
+            concurrent: 2,
+            cell_start,
+            cell_end,
+            outcomes,
+        };
+
+        let stats = reduce_concurrent_cell(&cell);
+
+        // Totals.
+        assert_eq!(stats.n_requests, 6, "6 total requests across 2 workers");
+        assert_eq!(stats.per_worker_req_count, vec![3, 3]);
+
+        // Aggregate throughput: 6 reqs × 5 tokens = 30 tokens / 1 sec = 30 tok/s.
+        assert!(
+            (stats.agg_tokens_per_sec - 30.0).abs() < 1e-6,
+            "agg_tokens_per_sec should be 30.0; got {}",
+            stats.agg_tokens_per_sec,
+        );
+        assert!(
+            (stats.agg_req_per_sec - 6.0).abs() < 1e-6,
+            "agg_req_per_sec should be 6.0; got {}",
+            stats.agg_req_per_sec,
+        );
+
+        // Per-worker tokens/s: 3 reqs × 5 tokens = 15 tokens / 1 sec = 15 tok/s.
+        assert!(
+            (stats.per_worker_tokens_per_sec[0] - 15.0).abs() < 1e-6
+                && (stats.per_worker_tokens_per_sec[1] - 15.0).abs() < 1e-6,
+            "per-worker tokens/s should be 15.0 each; got {:?}",
+            stats.per_worker_tokens_per_sec,
+        );
+
+        // TTFT and ITL: all requests are identical (10ms / 22.5ms), so all
+        // percentiles should be those values.
+        assert!(
+            (stats.ttft_ms_p50 - 10.0).abs() < 1e-3,
+            "ttft p50 should be ~10ms; got {}",
+            stats.ttft_ms_p50,
+        );
+        assert!(
+            (stats.itl_ms_p99 - 22.5).abs() < 1e-3,
+            "itl p99 should be ~22.5ms; got {}",
+            stats.itl_ms_p99,
+        );
+
+        // finish_reasons should be {"stop": 6}.
+        assert!(
+            stats.finish_reason_summary.contains("stop=6"),
+            "finish_reason_summary should contain 'stop=6'; got: {}",
+            stats.finish_reason_summary,
+        );
+
+        assert!(!stats.cached_tokens_warning);
     }
 }

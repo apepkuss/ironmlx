@@ -148,7 +148,7 @@ pub async fn run_cell_concurrent(
             let url = target_url.to_string();
             let model_w = model.to_string();
             warmup_handles.push(tokio::spawn(async move {
-                let mut nonce = nonce_seed() ^ (worker_id as u64);
+                let mut nonce = nonce_seed() ^ ((worker_id as u64) << 48);
                 while Instant::now() < warmup_deadline {
                     let (prompt, _) = crate::prompt::synthesize_prompt(&tokenizer_w, pp, nonce)?;
                     let _ =
@@ -202,7 +202,14 @@ pub async fn run_cell_concurrent(
     for h in timed_handles {
         all_outcomes.extend(h.await??);
     }
-    let cell_end = Instant::now();
+    // Note: cell_end is the planned deadline (cell_start + duration), NOT the
+    // moment all worker handles finish joining. Workers respect timed_deadline
+    // (they don't start new requests after it), but their final in-flight
+    // request may complete slightly past it; including those final completions
+    // in wall_duration would systematically inflate the denominator and deflate
+    // reported tokens/s + req/s. Using the planned deadline keeps the metric
+    // exact for the duration the user requested.
+    let cell_end = timed_deadline;
 
     eprintln!(
         "[{target_name}] PP={pp} TG={tg} concurrent={concurrent}: {} requests completed",
