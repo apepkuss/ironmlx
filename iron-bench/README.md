@@ -56,7 +56,7 @@ comma-separated; iron-bench iterates `prompt_len × target` cells.
 
 ## Sample Markdown output
 
-```
+```text
 # iron-bench results
 
 - Targets: ironmlx=http://localhost:8080, omlx=http://localhost:8081
@@ -83,14 +83,77 @@ df = pd.read_csv("results.csv")
 df.groupby(["target", "pp_target"])["tg_tps"].median()
 ```
 
+## Integration smoke test
+
+The `concurrent_smoke` test (`iron-bench/tests/concurrent_smoke.rs`) launches an
+in-process axum mock SSE server and invokes the iron-bench binary with `--concurrent 2
+--duration 1`. It self-skips gracefully when the tokenizer fixture is absent.
+
+Stage the fixture once before running:
+
+```sh
+SNAP=$(ls -d $HOME/.ironmlx/models/models--*Qwen3.5-4B-MLX-4bit*/snapshots/*/ | head -1)
+cp "${SNAP}tokenizer.json" iron-bench/tests/fixtures/tokenizer.json
+cargo test -p iron-bench --release --test concurrent_smoke
+```
+
+The fixture is gitignored (`iron-bench/tests/fixtures/.gitignore`) because the
+Qwen tokenizer weighs ~19 MB.
+
+## Concurrency modes
+
+iron-bench supports two modes:
+
+### v1 sequential (default)
+
+```sh
+cargo run --release -p iron-bench -- \
+  --target ironmlx=http://localhost:8080 \
+  --target omlx=http://localhost:8081 \
+  --model-dir /path/to/Qwen3.5-4B-MLX-4bit/snapshot \
+  --prompt-len 128,512,2048 \
+  --max-tokens 128 \
+  --runs 5 --warmup 1
+```
+
+One request at a time per (target, prompt_len) cell. Reports median + p95 over the
+`--runs` timed iterations. Good for **single-request latency** comparison.
+
+### v2 concurrent (multi-worker)
+
+```sh
+cargo run --release -p iron-bench -- \
+  --target ironmlx=http://localhost:8080 \
+  --target omlx=http://localhost:8081 \
+  --model-dir /path/to/Qwen3.5-4B-MLX-4bit/snapshot \
+  --prompt-len 128,512,2048 \
+  --max-tokens 128 \
+  --concurrent 4 --duration 30 --warmup-duration 5
+```
+
+`N` concurrent workers per cell run for `--duration` seconds (after `--warmup-duration`
+discarded warmup). Reports **p50/p95/p99 TTFT + ITL + aggregate tokens/s + per-worker
+breakdown**. Good for **multi-request throughput** comparison.
+
+Server requirements for v2:
+
+- **ironmlx**: needs B1-p2.3c-3 (continuous batching, mid-batch admit). Set `b_max ≥ N`
+  to avoid scheduler-full errors during the cell.
+- **omlx**, **mlx-lm-server**: native multi-request support, no extra flags needed.
+- **vllm-mlx**, **llama.cpp**: configure server-side `--max-num-seqs ≥ N`.
+
 ## Limitations
 
-- **Single-request only**. Multi-request concurrency comes in v2 once ironmlx P8b ships
-  the batched scheduler.
+- **Closed-loop only.** Each worker awaits its response before firing the next.
+  Open-loop (Poisson arrival rate) ships in **v3** when fairness metrics become
+  meaningful (ironmlx 3d admission queue).
+- **No fairness metrics** (Jain's index, per-tenant quotas). Deferred to v3.
+- **No distributed load generation.** v2 runs from one machine. For higher load,
+  scale `--concurrent` up (constrained by OS fd limits — `ulimit -n 65536` for N > 256).
 - **HTTP overhead** (~0.1-0.5ms loopback) is included in TTFT/E2E. Both targets bear it
   equally so it cancels in head-to-head comparison.
 - **No GPU memory monitoring** — the HTTP layer is opaque to the engine's memory profile.
-- **OpenAI endpoint only** in v1. Anthropic `/v1/messages` is symmetric work but deferred.
+- **OpenAI endpoint only**. Anthropic `/v1/messages` is symmetric work but deferred.
 
 ## Measured numbers — Qwen3.5-4B-MLX-4bit, M-series Apple Silicon
 
@@ -103,11 +166,7 @@ ironmlx as built from current `ironmlx` branch (P8a applied), omlx 0.3.8 from
 | ironmlx | 28.9 – 32.0              | 697              | 8530              | 240                     |
 | omlx    | 53.2 – 54.9              | 604              | 7075              | 291                     |
 
-**Decode TG gap**: omlx is ~1.7-1.9× faster across all PP cells. P8a's async-eval pipeline
-+ incremental detokenizer landed cleanly (P4 fixture PASS, byte-identical token sequence
-to mlx-lm reference) but only delivered ~5-9% TG improvement. The remaining gap is in the
-GPU forward pass itself (kernel-level), not orchestration; addressing it requires kernel
-profiling and is out of scope for this benchmark harness.
+**Decode TG gap**: omlx is ~1.7-1.9× faster across all PP cells. P8a's async-eval pipeline + incremental detokenizer landed cleanly (P4 fixture PASS, byte-identical token sequence to mlx-lm reference) but only delivered ~5-9% TG improvement. The remaining gap is in the GPU forward pass itself (kernel-level), not orchestration; addressing it requires kernel profiling and is out of scope for this benchmark harness.
 
 **TTFT / Prefill**: ironmlx is ~14-21% slower across PP — closer to parity than decode but
 still a kernel-level gap. Prefill scales sub-linearly on both engines (GPU saturation
