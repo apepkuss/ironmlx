@@ -140,18 +140,25 @@ impl Qwen35Model {
     /// projection work (vocab=151936 in Qwen3.5 — the largest matmul in the
     /// graph). Slice the last hidden state before the projection so the
     /// per-forward lm_head cost is constant in `S`.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
         input_ids: &Array,
         position_ids: &Array,
         per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
-        let hidden = self
-            .text
-            .forward_on(input_ids, position_ids, per_row_lens, cache, target)?;
+        let hidden = self.text.forward_on(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            target,
+        )?;
         self.slice_last_and_project(&hidden, None, target)
     }
 
@@ -232,8 +239,9 @@ impl Qwen35Model {
         &self,
         input_ids: &Array,
         position_ids: &Array,
-        cache: Option<&mut [LayerCache]>,
         per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
         vision_embeds_slice: Option<&Array>,
         image_token_id: i32,
         target: impl Into<StreamOrDevice>,
@@ -256,7 +264,7 @@ impl Qwen35Model {
             &hidden,
             position_ids,
             cache,
-            None,
+            decode_mask,
             None,
             per_row_lens,
             target,
@@ -282,8 +290,9 @@ impl Qwen35Model {
         &self,
         input_ids: &Array,
         position_ids: &Array,
-        cache: Option<&mut [LayerCache]>,
         per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
         pixel_values: Option<&Array>,
         grid_thw: Option<&[(i32, i32, i32)]>,
         image_token_id: i32,
@@ -302,8 +311,9 @@ impl Qwen35Model {
         self.forward_vl_chunk(
             input_ids,
             position_ids,
-            cache,
             per_row_lens,
+            decode_mask,
+            cache,
             vision_embeds.as_ref(),
             image_token_id,
             target,
@@ -588,7 +598,7 @@ mod tests {
 
         // text-only path via forward_on
         let logits_a = model
-            .forward_on(&input_ids, &pos, None, None, ())
+            .forward_on(&input_ids, &pos, None, None, None, ())
             .expect("forward_on");
 
         // forward_vl with pixel_values=None must be numerically identical
@@ -596,6 +606,7 @@ mod tests {
             .forward_vl(
                 &input_ids,
                 &pos,
+                None,
                 None,
                 None,
                 None,

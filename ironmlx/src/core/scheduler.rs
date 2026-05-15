@@ -593,6 +593,7 @@ impl Scheduler {
             &input_ids,
             &position_ids,
             Some(&per_row_lens),
+            None, // TEMP(b1-p2.3c-2 Task 2): decode_mask placeholder — Task 3 builds and passes the real mask
             Some(cache_ref),
             (),
         )?;

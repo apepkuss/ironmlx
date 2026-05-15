@@ -786,8 +786,9 @@ impl<'m> GenerationStream<'m> {
                 let logits = model.forward_vl_chunk(
                     &chunk_arr,
                     &chunk_pos_ids,
+                    None, // per_row_lens
+                    None, // decode_mask
                     Some(&mut cache),
-                    None,
                     ve_slice.as_ref(),
                     request.image_token_id,
                     (),
@@ -798,12 +799,20 @@ impl<'m> GenerationStream<'m> {
                     None
                 }
             } else if is_last {
-                Some(model.forward_on(&chunk_arr, &chunk_pos_ids, None, Some(&mut cache), ())?)
+                Some(model.forward_on(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None, // per_row_lens
+                    None, // decode_mask
+                    Some(&mut cache),
+                    (),
+                )?)
             } else {
                 let hidden = model.text().forward_on(
                     &chunk_arr,
                     &chunk_pos_ids,
-                    None,
+                    None, // per_row_lens
+                    None, // decode_mask
                     Some(&mut cache),
                     (),
                 )?;
@@ -974,7 +983,8 @@ impl<'m> GenerationStream<'m> {
         let logits = self.model.forward_on(
             &token_arr_in,
             &position_ids,
-            None,
+            None, // per_row_lens
+            None, // decode_mask
             Some(&mut self.cache),
             (),
         )?;
@@ -1032,9 +1042,14 @@ impl<'m> GenerationStream<'m> {
         let token_arr: Array = (&[token][..], &[1_i32, 1][..]).try_into()?;
         let pos = (self.history.len() - 1) as i32;
         let position_ids = build_position_ids(pos, 1)?;
-        let logits =
-            self.model
-                .forward_on(&token_arr, &position_ids, None, Some(&mut self.cache), ())?;
+        let logits = self.model.forward_on(
+            &token_arr,
+            &position_ids,
+            None, // per_row_lens
+            None, // decode_mask
+            Some(&mut self.cache),
+            (),
+        )?;
         // Logits shape [1, 1, vocab] — flatten to [vocab].
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;

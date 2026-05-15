@@ -147,8 +147,9 @@ fn p6_6_logits_match() {
         .forward_vl(
             &input_ids,
             &pos_ids,
-            None,
-            None,
+            None, // per_row_lens
+            None, // decode_mask
+            None, // cache
             Some(&pv),
             Some(&grids),
             IMAGE_TOKEN_ID,
