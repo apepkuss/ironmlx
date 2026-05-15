@@ -42,13 +42,30 @@ struct Args {
     #[arg(long, default_value_t = 128)]
     max_tokens: usize,
 
-    /// Timed runs per cell (after warmup).
-    #[arg(long, default_value_t = 5)]
+    /// (v1 sequential mode) Timed runs per cell. Mutually exclusive with `--concurrent`.
+    #[arg(long, default_value_t = 5, conflicts_with = "concurrent")]
     runs: usize,
 
-    /// Warmup runs per cell (excluded from stats).
-    #[arg(long, default_value_t = 1)]
+    /// (v1 sequential mode) Warmup runs per cell (excluded from stats).
+    /// Mutually exclusive with `--concurrent`.
+    #[arg(long, default_value_t = 1, conflicts_with = "concurrent")]
     warmup: usize,
+
+    /// (v2 concurrent mode) Number of concurrent workers per cell. Each worker
+    /// fires request -> awaits response -> repeats until `--duration` deadline.
+    /// When absent, runs in v1 sequential mode.
+    #[arg(long)]
+    concurrent: Option<usize>,
+
+    /// (v2 concurrent mode) Wall-clock duration per cell (seconds).
+    /// Only meaningful when `--concurrent` is set; ignored otherwise.
+    #[arg(long, default_value_t = 30)]
+    duration: u64,
+
+    /// (v2 concurrent mode) Wall-clock warmup duration per cell (seconds).
+    /// Only meaningful when `--concurrent` is set; ignored otherwise.
+    #[arg(long, default_value_t = 5)]
+    warmup_duration: u64,
 
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
@@ -75,14 +92,25 @@ fn parse_target(s: &str) -> std::result::Result<(String, String), String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    eprintln!(
-        "iron-bench: {} target(s), prompt_len={:?}, max_tokens={}, runs={}, warmup={}",
-        args.target.len(),
-        args.prompt_len,
-        args.max_tokens,
-        args.runs,
-        args.warmup,
-    );
+    match args.concurrent {
+        None => eprintln!(
+            "iron-bench v1 (sequential): {} target(s), prompt_len={:?}, max_tokens={}, runs={}, warmup={}",
+            args.target.len(),
+            args.prompt_len,
+            args.max_tokens,
+            args.runs,
+            args.warmup,
+        ),
+        Some(n) => eprintln!(
+            "iron-bench v2 (concurrent): {} target(s), prompt_len={:?}, max_tokens={}, concurrent={}, duration={}s, warmup_duration={}s",
+            args.target.len(),
+            args.prompt_len,
+            args.max_tokens,
+            n,
+            args.duration,
+            args.warmup_duration,
+        ),
+    }
 
     // Load tokenizer.json from --model-dir for synthetic prompt construction.
     let tokenizer_path = args.model_dir.join("tokenizer.json");
@@ -98,30 +126,108 @@ async fn main() -> Result<()> {
         .build()
         .context("reqwest::Client::build")?;
 
-    let mut cells: Vec<runner::CellResult> = Vec::new();
-    for pp in &args.prompt_len {
-        for (target_name, target_url) in &args.target {
-            let cell = runner::run_cell(
-                &client,
-                target_name,
-                target_url,
-                &args.model,
-                *pp,
-                args.max_tokens,
-                args.warmup,
-                args.runs,
-                &tokenizer,
-            )
-            .await?;
-            cells.push(cell);
+    // Cells are heterogeneous between v1 (Sequential) and v2 (Concurrent) modes.
+    // Use the unified enum so the existing `for cell in cells { render }` loop
+    // in main.rs stays clean.
+    enum AnyCell {
+        Sequential(runner::CellResult),
+        Concurrent(runner::ConcurrentCellResult),
+    }
+
+    let mut cells: Vec<AnyCell> = Vec::new();
+
+    match args.concurrent {
+        None => {
+            // v1 sequential path
+            for pp in &args.prompt_len {
+                for (target_name, target_url) in &args.target {
+                    let cell = runner::run_cell(
+                        &client,
+                        target_name,
+                        target_url,
+                        &args.model,
+                        *pp,
+                        args.max_tokens,
+                        args.warmup,
+                        args.runs,
+                        &tokenizer,
+                    )
+                    .await?;
+                    cells.push(AnyCell::Sequential(cell));
+                }
+            }
+        }
+        Some(concurrent) => {
+            // v2 concurrent path: share Client + Tokenizer via Arc.
+            let client_arc = std::sync::Arc::new(client);
+            let tokenizer_arc = std::sync::Arc::new(tokenizer);
+            for pp in &args.prompt_len {
+                for (target_name, target_url) in &args.target {
+                    let cell = runner::run_cell_concurrent(
+                        client_arc.clone(),
+                        target_name,
+                        target_url,
+                        &args.model,
+                        *pp,
+                        args.max_tokens,
+                        std::time::Duration::from_secs(args.warmup_duration),
+                        std::time::Duration::from_secs(args.duration),
+                        concurrent,
+                        tokenizer_arc.clone(),
+                    )
+                    .await?;
+                    cells.push(AnyCell::Concurrent(cell));
+                }
+            }
         }
     }
 
-    // Render output via report module (T4 fills in the formatters).
-    let out = match args.format {
-        OutputFormat::Markdown => report::render_markdown(&cells, &args.target, args.warmup),
-        OutputFormat::Csv => report::render_csv(&cells),
-        OutputFormat::Json => report::render_json(&cells, &args.target, args.warmup),
+    // Split cells back into sequential vs concurrent slices for the existing
+    // (v1) renderers + the new (v2) renderers. Per-cell mode mixing is
+    // impossible (CLI dispatches uniformly), so all cells share one mode.
+    let out = match args.concurrent {
+        None => {
+            let seq_cells: Vec<runner::CellResult> = cells
+                .into_iter()
+                .filter_map(|c| match c {
+                    AnyCell::Sequential(s) => Some(s),
+                    AnyCell::Concurrent(_) => None,
+                })
+                .collect();
+            match args.format {
+                OutputFormat::Markdown => {
+                    report::render_markdown(&seq_cells, &args.target, args.warmup)
+                }
+                OutputFormat::Csv => report::render_csv(&seq_cells),
+                OutputFormat::Json => report::render_json(&seq_cells, &args.target, args.warmup),
+            }
+        }
+        Some(concurrent) => {
+            let conc_cells: Vec<runner::ConcurrentCellResult> = cells
+                .into_iter()
+                .filter_map(|c| match c {
+                    AnyCell::Sequential(_) => None,
+                    AnyCell::Concurrent(c) => Some(c),
+                })
+                .collect();
+            match args.format {
+                OutputFormat::Markdown => report::render_markdown_concurrent(
+                    &conc_cells,
+                    &args.target,
+                    concurrent,
+                    args.duration,
+                    args.warmup_duration,
+                ),
+                OutputFormat::Csv => report::render_csv_concurrent(&conc_cells),
+                OutputFormat::Json => report::render_json_concurrent(
+                    &conc_cells,
+                    &args.target,
+                    concurrent,
+                    args.duration,
+                    args.warmup_duration,
+                ),
+            }
+        }
     };
     println!("{out}");
 

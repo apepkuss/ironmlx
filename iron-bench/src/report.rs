@@ -89,6 +89,134 @@ pub fn reduce_cell(c: &CellResult) -> CellStats {
     }
 }
 
+// === v2 (concurrent mode) reductions + percentile helpers ===
+
+/// Per-cell aggregated stats for v2 concurrent mode.
+#[derive(Debug, Clone)]
+pub struct ConcurrentCellStats {
+    pub target_name: String,
+    pub pp_target: usize,
+    pub tg_target: usize,
+    pub concurrent: usize,
+    pub wall_duration_s: f64,
+    pub n_requests: usize,
+    // TTFT (ms) distribution
+    pub ttft_ms_p50: f64,
+    pub ttft_ms_p95: f64,
+    pub ttft_ms_p99: f64,
+    // ITL (ms / inter-token) distribution. Per-request mean ITL = gen_duration / (completion_tokens - 1).
+    pub itl_ms_p50: f64,
+    pub itl_ms_p95: f64,
+    pub itl_ms_p99: f64,
+    // Aggregate throughput
+    pub agg_tokens_per_sec: f64,
+    pub agg_req_per_sec: f64,
+    // Per-worker breakdown (N entries, sorted by worker_id)
+    pub per_worker_req_count: Vec<usize>,
+    pub per_worker_tokens_per_sec: Vec<f64>,
+    pub finish_reason_summary: String,
+    pub cached_tokens_warning: bool,
+}
+
+/// Compute p (0-100) percentile by sort-and-index. Empty input returns 0.0.
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+/// Reduce one concurrent cell's outcomes to aggregated stats.
+pub fn reduce_concurrent_cell(c: &crate::runner::ConcurrentCellResult) -> ConcurrentCellStats {
+    let wall_duration_s = (c.cell_end - c.cell_start).as_secs_f64().max(1e-9);
+    let n = c.outcomes.len();
+
+    let mut ttft_ms: Vec<f64> = Vec::with_capacity(n);
+    let mut itl_ms: Vec<f64> = Vec::with_capacity(n);
+    let mut total_tokens: u64 = 0;
+    let mut finish_reasons: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut cached_warning = false;
+    let mut per_worker_req_count: Vec<usize> = vec![0; c.concurrent];
+    let mut per_worker_tokens: Vec<u64> = vec![0; c.concurrent];
+
+    for outcome in &c.outcomes {
+        let r = &outcome.result;
+        let ttft = r.timings.ttft();
+        let gen = r.timings.gen_duration();
+
+        let completion_tokens = r
+            .server_completion_tokens
+            .map(|n| n as f64)
+            .unwrap_or(r.chunk_count as f64);
+
+        let ttft_seconds = ttft.as_secs_f64().max(1e-9);
+        let gen_seconds = gen.as_secs_f64().max(1e-9);
+
+        ttft_ms.push(ttft_seconds * 1000.0);
+        // ITL: average inter-token-latency for this request = gen_seconds / (completion - 1).
+        // Floor divisor to 1.0 when completion <= 1 (matches reduce_cell TPOT semantics).
+        let itl_div = (completion_tokens - 1.0).max(1.0);
+        itl_ms.push((gen_seconds / itl_div) * 1000.0);
+
+        total_tokens = total_tokens.saturating_add(completion_tokens as u64);
+
+        if outcome.worker_id < c.concurrent {
+            per_worker_req_count[outcome.worker_id] += 1;
+            per_worker_tokens[outcome.worker_id] =
+                per_worker_tokens[outcome.worker_id].saturating_add(completion_tokens as u64);
+        }
+
+        *finish_reasons.entry(r.finish_reason.clone()).or_insert(0) += 1;
+        if r.server_cached_tokens.map(|n| n > 0).unwrap_or(false) {
+            cached_warning = true;
+        }
+    }
+
+    ttft_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    itl_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let agg_tokens_per_sec = (total_tokens as f64) / wall_duration_s;
+    let agg_req_per_sec = (n as f64) / wall_duration_s;
+
+    let per_worker_tokens_per_sec: Vec<f64> = per_worker_tokens
+        .iter()
+        .map(|&t| (t as f64) / wall_duration_s)
+        .collect();
+
+    let finish_reason_summary = if finish_reasons.is_empty() {
+        "(none)".to_string()
+    } else {
+        finish_reasons
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+
+    ConcurrentCellStats {
+        target_name: c.target_name.clone(),
+        pp_target: c.pp_target,
+        tg_target: c.tg_target,
+        concurrent: c.concurrent,
+        wall_duration_s,
+        n_requests: n,
+        ttft_ms_p50: percentile(&ttft_ms, 50.0),
+        ttft_ms_p95: percentile(&ttft_ms, 95.0),
+        ttft_ms_p99: percentile(&ttft_ms, 99.0),
+        itl_ms_p50: percentile(&itl_ms, 50.0),
+        itl_ms_p95: percentile(&itl_ms, 95.0),
+        itl_ms_p99: percentile(&itl_ms, 99.0),
+        agg_tokens_per_sec,
+        agg_req_per_sec,
+        per_worker_req_count,
+        per_worker_tokens_per_sec,
+        finish_reason_summary,
+        cached_tokens_warning: cached_warning,
+    }
+}
+
 /// Median of a slice of f64. Mutates input (sorts in place). Empty input yields 0.0.
 fn median(xs: &mut [f64]) -> f64 {
     if xs.is_empty() {
@@ -244,6 +372,110 @@ pub fn render_markdown(
     out
 }
 
+pub fn render_markdown_concurrent(
+    cells: &[crate::runner::ConcurrentCellResult],
+    targets: &[(String, String)],
+    concurrent: usize,
+    duration: u64,
+    warmup_duration: u64,
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    writeln!(out, "# iron-bench v2 (concurrent) results\n").unwrap();
+    writeln!(
+        out,
+        "- concurrent workers per cell: **{concurrent}**\n- timed duration: **{duration}s**\n- warmup duration: **{warmup_duration}s**\n",
+    )
+    .unwrap();
+    writeln!(out, "Targets:").unwrap();
+    for (name, url) in targets {
+        writeln!(out, "- `{name}` → `{url}`").unwrap();
+    }
+    writeln!(out).unwrap();
+
+    let stats: Vec<ConcurrentCellStats> = cells.iter().map(reduce_concurrent_cell).collect();
+    if stats.is_empty() {
+        writeln!(out, "_(no cells)_").unwrap();
+        return out;
+    }
+
+    // Aggregate table: one row per cell.
+    writeln!(out, "## Per-cell aggregate metrics\n").unwrap();
+    writeln!(
+        out,
+        "| target | PP | TG | N req | p50 TTFT (ms) | p95 TTFT (ms) | p99 TTFT (ms) | p50 ITL (ms) | p95 ITL (ms) | p99 ITL (ms) | tokens/s | req/s |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    )
+    .unwrap();
+    for s in &stats {
+        writeln!(
+            out,
+            "| {} | {} | {} | {} | {:.1} | {:.1} | {:.1} | {:.2} | {:.2} | {:.2} | {:.1} | {:.2} |",
+            s.target_name,
+            s.pp_target,
+            s.tg_target,
+            s.n_requests,
+            s.ttft_ms_p50,
+            s.ttft_ms_p95,
+            s.ttft_ms_p99,
+            s.itl_ms_p50,
+            s.itl_ms_p95,
+            s.itl_ms_p99,
+            s.agg_tokens_per_sec,
+            s.agg_req_per_sec,
+        )
+        .unwrap();
+    }
+
+    // Per-worker breakdown.
+    writeln!(out, "\n## Per-worker breakdown\n").unwrap();
+    for s in &stats {
+        writeln!(
+            out,
+            "### {} | PP={} TG={} | {} workers\n",
+            s.target_name, s.pp_target, s.tg_target, s.concurrent
+        )
+        .unwrap();
+        writeln!(out, "| worker | req count | tokens/s |").unwrap();
+        writeln!(out, "| --- | --- | --- |").unwrap();
+        for w in 0..s.concurrent {
+            writeln!(
+                out,
+                "| {} | {} | {:.1} |",
+                w, s.per_worker_req_count[w], s.per_worker_tokens_per_sec[w]
+            )
+            .unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+
+    // Notes.
+    writeln!(out, "## Notes\n").unwrap();
+    for s in &stats {
+        writeln!(
+            out,
+            "- `{}` PP={} TG={}: finish_reasons={}{}",
+            s.target_name,
+            s.pp_target,
+            s.tg_target,
+            s.finish_reason_summary,
+            if s.cached_tokens_warning {
+                " \u{26a0} cached_tokens > 0 (PP measurement may be unreliable)"
+            } else {
+                ""
+            }
+        )
+        .unwrap();
+    }
+
+    out
+}
+
 /// CSV output: one row per timed run. Stable column order.
 pub fn render_csv(cells: &[CellResult]) -> String {
     let mut out = String::new();
@@ -254,6 +486,61 @@ pub fn render_csv(cells: &[CellResult]) -> String {
         for outcome in &c.runs {
             out.push_str(&csv_row(c, outcome));
             out.push('\n');
+        }
+    }
+    out
+}
+
+pub fn render_csv_concurrent(cells: &[crate::runner::ConcurrentCellResult]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    // Header: one row per request (worker_id-level detail). Pandas-friendly.
+    writeln!(
+        out,
+        "target,pp,tg,concurrent,worker_id,request_idx_in_worker,ttft_ms,gen_secs,e2e_s,completion_tokens,prompt_tokens,finish_reason"
+    )
+    .unwrap();
+    for c in cells {
+        // Track per-worker request index for CSV row ordering.
+        let mut per_worker_idx: Vec<usize> = vec![0; c.concurrent];
+        for outcome in &c.outcomes {
+            let r = &outcome.result;
+            let ttft_ms = r.timings.ttft().as_secs_f64() * 1000.0;
+            let gen_s = r.timings.gen_duration().as_secs_f64();
+            let e2e_s = r.timings.e2e().as_secs_f64();
+            let completion_tokens = r
+                .server_completion_tokens
+                .map(|n| n as f64)
+                .unwrap_or(r.chunk_count as f64);
+            let prompt_tokens = r
+                .server_prompt_tokens
+                .map(|n| n as f64)
+                .unwrap_or(outcome.prompt_tokens_local as f64);
+            let req_idx = if outcome.worker_id < c.concurrent {
+                let i = per_worker_idx[outcome.worker_id];
+                per_worker_idx[outcome.worker_id] += 1;
+                i
+            } else {
+                0
+            };
+            writeln!(
+                out,
+                "{},{},{},{},{},{},{:.3},{:.6},{:.6},{:.0},{:.0},{}",
+                c.target_name,
+                c.pp_target,
+                c.tg_target,
+                c.concurrent,
+                outcome.worker_id,
+                req_idx,
+                ttft_ms,
+                gen_s,
+                e2e_s,
+                completion_tokens,
+                prompt_tokens,
+                r.finish_reason,
+            )
+            .unwrap();
         }
     }
     out
@@ -392,6 +679,61 @@ pub fn render_json(cells: &[CellResult], targets: &[(String, String)], warmup: u
     serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".into())
 }
 
+pub fn render_json_concurrent(
+    cells: &[crate::runner::ConcurrentCellResult],
+    targets: &[(String, String)],
+    concurrent: usize,
+    duration: u64,
+    warmup_duration: u64,
+) -> String {
+    let stats: Vec<ConcurrentCellStats> = cells.iter().map(reduce_concurrent_cell).collect();
+
+    let stats_json: Vec<serde_json::Value> = stats
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "target_name": s.target_name,
+                "pp_target": s.pp_target,
+                "tg_target": s.tg_target,
+                "concurrent": s.concurrent,
+                "wall_duration_s": s.wall_duration_s,
+                "n_requests": s.n_requests,
+                "ttft_ms": {
+                    "p50": s.ttft_ms_p50,
+                    "p95": s.ttft_ms_p95,
+                    "p99": s.ttft_ms_p99,
+                },
+                "itl_ms": {
+                    "p50": s.itl_ms_p50,
+                    "p95": s.itl_ms_p95,
+                    "p99": s.itl_ms_p99,
+                },
+                "aggregate": {
+                    "tokens_per_sec": s.agg_tokens_per_sec,
+                    "req_per_sec": s.agg_req_per_sec,
+                },
+                "per_worker": {
+                    "req_count": s.per_worker_req_count,
+                    "tokens_per_sec": s.per_worker_tokens_per_sec,
+                },
+                "finish_reason_summary": s.finish_reason_summary,
+                "cached_tokens_warning": s.cached_tokens_warning,
+            })
+        })
+        .collect();
+
+    let payload = serde_json::json!({
+        "mode": "concurrent",
+        "concurrent": concurrent,
+        "duration_s": duration,
+        "warmup_duration_s": warmup_duration,
+        "targets": targets.iter().map(|(n, u)| serde_json::json!({"name": n, "url": u})).collect::<Vec<_>>(),
+        "cells": stats_json,
+    });
+
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +824,54 @@ mod tests {
             body.ends_with(",stop"),
             "expected to end with finish_reason=stop, got: {body}"
         );
+    }
+
+    #[test]
+    fn percentile_basic() {
+        // v = [1.0, 2.0, ..., 10.0], len = 10.
+        // p50: idx = round(0.50 * 9) = round(4.5) = 5 → sorted[5] = 6.0
+        // p95: idx = round(0.95 * 9) = round(8.55) = 9 → sorted[9] = 10.0
+        // p99: idx = round(0.99 * 9) = round(8.91) = 9 → sorted[9] = 10.0
+        // p0:  idx = round(0.00 * 9) = 0 → sorted[0] = 1.0
+        let v: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+        assert_eq!(percentile(&v, 50.0), 6.0);
+        assert_eq!(percentile(&v, 95.0), 10.0);
+        assert_eq!(percentile(&v, 99.0), 10.0);
+        assert_eq!(percentile(&v, 0.0), 1.0);
+    }
+
+    #[test]
+    fn percentile_edge_cases() {
+        assert_eq!(percentile(&[], 50.0), 0.0);
+        assert_eq!(percentile(&[42.0], 50.0), 42.0);
+        assert_eq!(percentile(&[42.0], 99.0), 42.0);
+        let same = vec![7.0_f64; 100];
+        assert_eq!(percentile(&same, 50.0), 7.0);
+        assert_eq!(percentile(&same, 99.0), 7.0);
+    }
+
+    #[test]
+    fn render_markdown_concurrent_smoke() {
+        // Synthetic ConcurrentCellResult with 0 outcomes — verifies the
+        // formatter doesn't crash on empty input and emits the expected
+        // section headers.
+        let now = std::time::Instant::now();
+        let cell = crate::runner::ConcurrentCellResult {
+            target_name: "mock".into(),
+            target_url: "http://localhost:0".into(),
+            pp_target: 128,
+            tg_target: 64,
+            concurrent: 2,
+            cell_start: now,
+            cell_end: now + std::time::Duration::from_secs(1),
+            outcomes: Vec::new(),
+        };
+        let targets = vec![("mock".into(), "http://localhost:0".into())];
+        let md = render_markdown_concurrent(&[cell], &targets, 2, 1, 0);
+        assert!(md.contains("iron-bench v2 (concurrent)"));
+        assert!(md.contains("Per-cell aggregate metrics"));
+        assert!(md.contains("Per-worker breakdown"));
+        assert!(md.contains("p50 TTFT"));
+        assert!(md.contains("tokens/s"));
     }
 }
