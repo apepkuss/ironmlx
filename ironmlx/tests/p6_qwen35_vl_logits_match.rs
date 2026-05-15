@@ -200,8 +200,9 @@ fn p6_qwen35_vl_logits_match() {
         .forward_vl(
             &input_ids_arr,
             &pos_ids,
-            None,
-            None,
+            None, // per_row_lens
+            None, // decode_mask
+            None, // cache
             Some(&pv),
             Some(&grids_tup),
             ironmlx::core::generate::IMAGE_TOKEN_ID,

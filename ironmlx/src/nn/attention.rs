@@ -104,9 +104,11 @@ impl Attention {
     /// model assembly via `Mrope::cos_sin`).
     ///
     /// `cos`, `sin` are the precomputed rotary tables broadcastable against
-    /// Q/K. `mask` is currently ignored — the kernel is always invoked with
-    /// `mask_mode = "causal"`; explicit masks are folded in at P2 once the
-    /// KV cache lands.
+    /// Q/K. `mask` routes through `mlx::fast::scaled_dot_product_attention`:
+    /// `None` invokes `mask_mode = "causal"`; `Some(m)` invokes
+    /// `mask_mode = ""` with `mask_arr = Some(m)` consuming an additive
+    /// `[B, N, T_q, T_kv]`-broadcastable mask (typical shapes: `[B, 1, T, T]`
+    /// for batched prefill, `[B, 1, 1, K]` for batched decode).
     pub fn forward(
         &self,
         x: &Array,
@@ -248,5 +250,120 @@ impl Attention {
             .reshape_on((batch, seq, self.cfg.num_heads * self.cfg.head_dim), target)?;
 
         self.o_proj.forward_on(&out, target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nn::Linear;
+    use mlx::ops::constructors;
+    use mlx::{Array, Dtype};
+
+    /// Risk #1 mitigation (b1-p2.3c-2 spec §9): verify mlx fast SDPA accepts
+    /// a `[B, 1, 1, K]` additive bf16 mask passed via the existing
+    /// `mask: Option<&Array>` parameter of `Attention::forward_on`.
+    ///
+    /// Decode-time `T_q = 1`; mask broadcasts against the
+    /// `[B, n_heads, T_q=1, T_kv=K]` SDPA expected shape. The mask values
+    /// here are 0 / -inf so the kernel applies them additively — we only
+    /// assert the call succeeds and the output has the right shape.
+    #[test]
+    fn attention_forward_on_accepts_decode_mask_shape() {
+        // B=2, n_heads=2, n_kv_heads=2, head_dim=32, hidden=64
+        let cfg = AttentionConfig {
+            num_heads: 2,
+            num_kv_heads: 2,
+            head_dim: 32,
+            rms_norm_eps: 1e-6,
+            has_qk_norm: false,
+        };
+
+        let q_w = Array::zeros((64_i32, 64), Dtype::Bfloat16).unwrap();
+        let k_w = Array::zeros((64_i32, 64), Dtype::Bfloat16).unwrap();
+        let v_w = Array::zeros((64_i32, 64), Dtype::Bfloat16).unwrap();
+        let o_w = Array::zeros((64_i32, 64), Dtype::Bfloat16).unwrap();
+
+        let scale = 1.0 / (cfg.head_dim as f32).sqrt();
+        let attn = Attention {
+            q_proj: Linear::new_fp(q_w, None),
+            k_proj: Linear::new_fp(k_w, None),
+            v_proj: Linear::new_fp(v_w, None),
+            o_proj: Linear::new_fp(o_w, None),
+            q_norm: None,
+            k_norm: None,
+            cfg,
+            scale,
+        };
+
+        // rot_dim = 32; sections sum to 16.
+        let mrope = Mrope::new(32, 1e7, 1.0, &[6, 5, 5], true).unwrap();
+
+        // Pre-populate cache to offsets=[3, 3] via a 3-token write.
+        let mut cache = KVCache::new(
+            /* batch */ 2,
+            /* n_kv_heads */ 2,
+            /* head_dim */ 32,
+            /* v_head_dim */ 32,
+            Dtype::Bfloat16,
+            /* cap */ 16,
+        );
+
+        let prefill_x = Array::zeros((2_i32, 3, 64), Dtype::Bfloat16).unwrap();
+        let prefill_cos = constructors::ones((2_i32, 3, 32), Dtype::Float32).unwrap();
+        let prefill_sin = Array::zeros((2_i32, 3, 32), Dtype::Float32).unwrap();
+        let _ = attn
+            .forward_on(
+                &prefill_x,
+                &mrope,
+                &prefill_cos,
+                &prefill_sin,
+                None,
+                None,
+                Some(&[3, 3]),
+                Some(&mut cache),
+                (),
+            )
+            .expect("prefill warm-up failed");
+        assert_eq!(cache.offsets(), &[3, 3]);
+
+        // Decode step: x shape [B=2, S=1, hidden=64] bf16.
+        let x = Array::zeros((2_i32, 1, 64), Dtype::Bfloat16).unwrap();
+        let cos = constructors::ones((2_i32, 1, 32), Dtype::Float32).unwrap();
+        let sin = Array::zeros((2_i32, 1, 32), Dtype::Float32).unwrap();
+
+        // Build [B=2, 1, 1, K=4] bf16 mask. After the 1-token decode write,
+        // K = max(offsets_after) = 4. Row 0 sees only positions [0, 1]
+        // (positions [2, 3] are -inf); row 1 sees all 4 positions.
+        let neg_inf = f32::NEG_INFINITY;
+        let mask_data: Vec<f32> = vec![
+            // batch 0: valid [0, 1], blocked [2, 3]
+            0.0, 0.0, neg_inf, neg_inf, // batch 1: valid [0, 1, 2, 3]
+            0.0, 0.0, 0.0, 0.0,
+        ];
+        let mask_f32: Array = (mask_data.as_slice(), (2_i32, 1, 1, 4))
+            .try_into()
+            .expect("build mask");
+        let mask = mlx::ops::cast::astype(&mask_f32, Dtype::Bfloat16).expect("cast mask bf16");
+
+        let out = attn
+            .forward_on(
+                &x,
+                &mrope,
+                &cos,
+                &sin,
+                Some(&mask),
+                None,
+                Some(&[1, 1]),
+                Some(&mut cache),
+                (),
+            )
+            .expect("decode-time forward_on with [B, 1, 1, K] mask must succeed");
+
+        // Output shape must be [B, S, hidden] = [2, 1, 64].
+        assert_eq!(out.shape().as_slice(), &[2, 1, 64]);
+        assert_eq!(out.dtype(), Dtype::Bfloat16);
+        // Verify cache write happened.
+        assert_eq!(cache.offsets(), &[4, 4]);
     }
 }

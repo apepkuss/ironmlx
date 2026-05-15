@@ -14,7 +14,7 @@ use mlx::{Array, Dtype};
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
-    build_position_ids_batched, GenerateRequest,
+    build_per_row_decode_mask, build_position_ids_batched, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
@@ -96,6 +96,28 @@ pub struct RequestState {
     pub finished: bool,
     /// `"stop"` or `"length"` when `finished` is `true`; otherwise `None`.
     pub finish_reason: Option<&'static str>,
+}
+
+/// Read pre-write per-row offsets from the first Full-attention layer's
+/// `KVCache`. Used by [`Scheduler::step`] to construct the per-row decode
+/// mask before the forward.
+///
+/// All Full-attention layers advance their `KVCache.offsets()` in
+/// lockstep across decode steps (per-row offsets diverge across rows
+/// but NOT across layers for a given row). Any Full layer's offsets
+/// view is equivalent — picking the first is arbitrary but consistent.
+fn first_full_layer_offsets(cache: &[LayerCache]) -> Result<&[i32]> {
+    cache
+        .iter()
+        .find_map(|c| match c {
+            LayerCache::Full(kv) => Some(kv.offsets()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "Scheduler::step: no Full-attention layer in cache; per-row offsets unavailable"
+            )
+        })
 }
 
 /// Fixed-capacity scheduler holding up to `b_max` in-flight requests.
@@ -589,10 +611,38 @@ impl Scheduler {
             .cache
             .as_mut()
             .ok_or_else(|| anyhow!("step: cache absent — was prefill_admitted called?"))?;
+
+        // Build per-row decode mask BEFORE the forward — necessary so
+        // SDPA correctly masks stale K/V cells for rows whose cache
+        // offsets have diverged from max(offsets). Without the mask,
+        // finished rows would attend to stale buffer-init zero K/V at
+        // positions [offsets[i]..max_off], deflating their real-position
+        // softmax weights. Outputs of finished rows are discarded by
+        // this step, but the mask is also a prerequisite for 3c-3's
+        // mid-batch admit/evict where slot reuse would expose
+        // previously-written stale K/V to new admissions.
+        //
+        // Clone offsets into Vec to release the immutable borrow before
+        // re-borrowing cache_ref mutably for the forward.
+        let pre_offsets: Vec<i32> = first_full_layer_offsets(cache_ref)?.to_vec();
+        let per_row_real_lens: Vec<i32> = pre_offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .collect();
+        let max_real_len = per_row_real_lens
+            .iter()
+            .copied()
+            .max()
+            .expect("Decoding phase guarantees b_max >= 1 and per_row_real_lens is non-empty");
+        let decode_mask =
+            build_per_row_decode_mask(&per_row_real_lens, max_real_len, Dtype::Bfloat16)?;
+
         let logits = model.forward_on(
             &input_ids,
             &position_ids,
             Some(&per_row_lens),
+            Some(&decode_mask),
             Some(cache_ref),
             (),
         )?;

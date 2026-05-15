@@ -88,7 +88,7 @@ fn per_stream_reference(model: &Qwen35Model, prompt: &[u32]) -> Array {
         .make_cache(/* batch */ 1, s + 1, Dtype::Bfloat16)
         .expect("make_cache");
     let logits = model
-        .forward_on(&input_ids, &pos_ids, Some(&[s]), Some(&mut cache), ())
+        .forward_on(&input_ids, &pos_ids, Some(&[s]), None, Some(&mut cache), ())
         .expect("forward_on");
     // forward_on returns [B, 1, vocab]; reshape to [vocab].
     let vocab = logits.shape().as_slice()[2];

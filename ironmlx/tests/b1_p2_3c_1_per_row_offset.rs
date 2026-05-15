@@ -262,7 +262,14 @@ async fn per_row_offset_uniform_lens_matches_lockstep_baseline() {
             ];
             let pos_ids = build_decode_position_ids(&per_row_pos).expect("pos");
             let step_logits = model_guard
-                .forward_on(&next_input, &pos_ids, Some(&[1, 1]), Some(&mut cache), ())
+                .forward_on(
+                    &next_input,
+                    &pos_ids,
+                    Some(&[1, 1]),
+                    None,
+                    Some(&mut cache),
+                    (),
+                )
                 .expect("forward_on decode");
             for b_idx in 0..2_usize {
                 let row = mlx::ops::indexing::slice(
@@ -568,7 +575,14 @@ async fn per_row_offset_decode_with_ragged_offsets() {
             let pos_b = len_b + tokens_b.len() as i32 - 1;
             let pos_ids = build_decode_position_ids(&[pos_a, pos_b]).expect("pos");
             let step_logits = model_guard
-                .forward_on(&next_input, &pos_ids, Some(&[1, 1]), Some(&mut cache), ())
+                .forward_on(
+                    &next_input,
+                    &pos_ids,
+                    Some(&[1, 1]),
+                    None,
+                    Some(&mut cache),
+                    (),
+                )
                 .expect("forward_on decode");
             for b_idx in 0..2_usize {
                 let row = mlx::ops::indexing::slice(

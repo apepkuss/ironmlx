@@ -118,7 +118,7 @@ fn per_stream_reference(model: &Qwen35Model, prompt: &[u32], n_decode: usize) ->
         .expect("input_ids");
     let pos_ids = build_position_ids(0, s).expect("build_position_ids prefill");
     let prefill_logits = model
-        .forward_on(&input_ids, &pos_ids, Some(&[s]), Some(&mut cache), ())
+        .forward_on(&input_ids, &pos_ids, Some(&[s]), None, Some(&mut cache), ())
         .expect("forward_on prefill");
     let vocab = prefill_logits.shape().as_slice()[2];
     let mut out: Vec<Array> = Vec::with_capacity(n_decode + 1);
@@ -139,7 +139,14 @@ fn per_stream_reference(model: &Qwen35Model, prompt: &[u32], n_decode: usize) ->
         let pos = s + k as i32 - 1;
         let pos_ids = build_position_ids(pos, 1).expect("build_position_ids decode");
         let logits = model
-            .forward_on(&next_input, &pos_ids, Some(&[1]), Some(&mut cache), ())
+            .forward_on(
+                &next_input,
+                &pos_ids,
+                Some(&[1]),
+                None,
+                Some(&mut cache),
+                (),
+            )
             .expect("forward_on decode");
         let flat = logits.reshape(&[vocab][..]).expect("reshape decode");
         next_token = argmax(&flat);
@@ -288,6 +295,7 @@ fn run_point(model: &Qwen35Model, prompt_lens: &[i32], seed_base: u64, stats: &m
                 &next_input,
                 &pos_ids,
                 Some(&per_row_lens_decode),
+                None, // decode_mask
                 Some(&mut cache),
                 (),
             )

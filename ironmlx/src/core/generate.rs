@@ -369,6 +369,13 @@ pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
 /// that have inactive slots should omit them from the batch rather than
 /// pass a length-0 mask row. Matches the `prompt_lens[i] > 0` contract
 /// enforced by [`build_batch_attention_mask`].
+///
+/// **Production callers (B1-p2.3c-2):** [`Scheduler::step`](crate::core::scheduler::Scheduler::step)
+/// — builds this mask from per-row cache offsets + per_row_lens before
+/// each decode forward, so SDPA correctly masks out stale K/V cells for
+/// rows whose offsets have diverged from `max(offsets)` (typically because
+/// the row has finished and its cache no longer advances while other rows
+/// continue).
 pub fn build_per_row_decode_mask(
     per_row_real_lens: &[i32],
     max_len: i32,
@@ -779,8 +786,9 @@ impl<'m> GenerationStream<'m> {
                 let logits = model.forward_vl_chunk(
                     &chunk_arr,
                     &chunk_pos_ids,
+                    None, // per_row_lens
+                    None, // decode_mask
                     Some(&mut cache),
-                    None,
                     ve_slice.as_ref(),
                     request.image_token_id,
                     (),
@@ -791,12 +799,20 @@ impl<'m> GenerationStream<'m> {
                     None
                 }
             } else if is_last {
-                Some(model.forward_on(&chunk_arr, &chunk_pos_ids, None, Some(&mut cache), ())?)
+                Some(model.forward_on(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None, // per_row_lens
+                    None, // decode_mask
+                    Some(&mut cache),
+                    (),
+                )?)
             } else {
                 let hidden = model.text().forward_on(
                     &chunk_arr,
                     &chunk_pos_ids,
-                    None,
+                    None, // per_row_lens
+                    None, // decode_mask
                     Some(&mut cache),
                     (),
                 )?;
@@ -967,7 +983,8 @@ impl<'m> GenerationStream<'m> {
         let logits = self.model.forward_on(
             &token_arr_in,
             &position_ids,
-            None,
+            None, // per_row_lens
+            None, // decode_mask
             Some(&mut self.cache),
             (),
         )?;
@@ -1025,9 +1042,14 @@ impl<'m> GenerationStream<'m> {
         let token_arr: Array = (&[token][..], &[1_i32, 1][..]).try_into()?;
         let pos = (self.history.len() - 1) as i32;
         let position_ids = build_position_ids(pos, 1)?;
-        let logits =
-            self.model
-                .forward_on(&token_arr, &position_ids, None, Some(&mut self.cache), ())?;
+        let logits = self.model.forward_on(
+            &token_arr,
+            &position_ids,
+            None, // per_row_lens
+            None, // decode_mask
+            Some(&mut self.cache),
+            (),
+        )?;
         // Logits shape [1, 1, vocab] — flatten to [vocab].
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;

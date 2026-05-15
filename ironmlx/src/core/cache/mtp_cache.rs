@@ -113,7 +113,6 @@ mod tests {
         // Drive layer 0 forward by one update to advance its offset.
         let k0: mlx::Array = mlx::Array::zeros((1, 2, 4, 8), Dtype::Bfloat16).unwrap();
         let v0: mlx::Array = mlx::Array::zeros((1, 2, 4, 8), Dtype::Bfloat16).unwrap();
-        // TEMP(b1-p2.3c-1 Task 1): uniform per-row lens — batch=1, seq=4.
         cache.layer_mut(0).update_and_fetch(&k0, &v0, &[4]).unwrap();
         // Drive layer 1 forward similarly.
         cache.layer_mut(1).update_and_fetch(&k0, &v0, &[4]).unwrap();

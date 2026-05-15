@@ -181,11 +181,13 @@ impl Qwen35TextModel {
     /// `cache: Some(slice)` — `slice.len() == self.num_layers()`; per-layer kind
     /// must match the layer's `AttnPath` (mismatch returns Err from DecoderLayer).
     /// Returns hidden states `[B, S, hidden_size]` (post-final-norm).
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
         input_ids: &Array,
         position_ids: &Array,
         per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -210,7 +212,7 @@ impl Qwen35TextModel {
             &hidden,
             position_ids,
             cache,
-            None,
+            decode_mask,
             None,
             per_row_lens,
             target,
