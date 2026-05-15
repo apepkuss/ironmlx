@@ -9,8 +9,11 @@
 //!
 //! See `docs/superpowers/specs/2026-05-13-b1-p2-3a-scheduler-skeleton-design.md`.
 
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Result};
 use mlx::{Array, Dtype};
+use tokio::sync::mpsc;
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
@@ -178,15 +181,16 @@ impl Scheduler {
     /// independent sampler state.
     pub fn admit(&mut self, req: GenerateRequest) -> Result<RequestId> {
         self.ensure_not_poisoned()?;
-        match self.phase {
-            Phase::Idle | Phase::Admitting => {}
-            Phase::Decoding | Phase::Finished => {
-                return Err(anyhow!(
-                    "scheduler in {:?} phase: cannot admit; call evict_all first",
-                    self.phase
-                ));
-            }
+        if self.phase == Phase::Finished {
+            return Err(anyhow!(
+                "scheduler in Finished phase: cannot admit; call evict_all first"
+            ));
         }
+        // Idle / Admitting / Decoding all allow admit.
+        //   Idle -> Admitting (first admit transitions below).
+        //   Admitting -> Admitting (subsequent admits during window).
+        //   Decoding -> Decoding (mid-batch admit; caller is responsible
+        //     for prefilling the new slot via admit_mid in Task 4).
         let row_idx =
             self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
                 anyhow!("scheduler full: no row available (b_max={})", self.b_max)
@@ -215,7 +219,10 @@ impl Scheduler {
             finish_reason: None,
         };
         self.slots[row_idx] = Some(state);
-        self.phase = Phase::Admitting;
+        if self.phase == Phase::Idle {
+            self.phase = Phase::Admitting;
+        }
+        // Decoding stays Decoding (no transition on mid-batch admit).
         Ok(id)
     }
 
@@ -224,23 +231,25 @@ impl Scheduler {
     /// counter keeps incrementing).
     pub fn evict(&mut self, id: RequestId) -> Result<()> {
         self.ensure_not_poisoned()?;
-        match self.phase {
-            Phase::Decoding => {
-                return Err(anyhow!(
-                    "evict illegal in {:?} phase: call evict_all after the batch finishes",
-                    self.phase
-                ));
-            }
-            Phase::Idle | Phase::Admitting | Phase::Finished => {}
-        }
+        // 3c-3: evict allowed in all phases. Slot is cleared; main cache
+        // state for this row stays in place (no resource leak; next
+        // admit_mid into this slot overwrites via adopt_row_from).
         let row_idx = self
             .slots
             .iter()
             .position(|s| matches!(s, Some(r) if r.id == id))
             .ok_or_else(|| anyhow!("request id {} not found", id.0))?;
         self.slots[row_idx] = None;
-        if self.phase == Phase::Admitting && self.active_count() == 0 {
-            self.phase = Phase::Idle;
+        // Phase transitions on evict:
+        //   Admitting + active_count==0 -> Idle (pre-3c-3 behavior)
+        //   Decoding  + active_count==0 -> Finished (NEW in 3c-3)
+        //   Idle / Finished: no transition
+        if self.active_count() == 0 {
+            if self.phase == Phase::Admitting {
+                self.phase = Phase::Idle;
+            } else if self.phase == Phase::Decoding {
+                self.phase = Phase::Finished;
+            }
         }
         Ok(())
     }
@@ -714,6 +723,48 @@ impl Scheduler {
         Ok(events)
     }
 
+    /// Sweep finished rows: clear their slot, drop their event channel,
+    /// and return the evicted IDs. Cache buffer entries for evicted
+    /// slots stay in place — a subsequent `admit_mid` into the same
+    /// slot overwrites via `adopt_row_from`.
+    ///
+    /// Phase transition: Decoding -> Finished if `active_count == 0`
+    /// after the sweep. This duplicates `step_inner`'s end-of-loop
+    /// Phase transition (both call `phase = Finished` when no active
+    /// rows remain after the last row finishes). The duplication is
+    /// idempotent: in the rolling decode loop (Task 4), step runs
+    /// first (may transition Phase) and gc_finished_rows runs second
+    /// (re-affirms transition + clears slots). Either path alone is
+    /// correct; the redundancy is harmless and preserves backward
+    /// compatibility with direct-step callers (3b-1 integration tests).
+    ///
+    /// Called by `SchedulerActor::driver_loop` after every successful
+    /// `step` invocation in 3c-3's rolling decode loop (Task 4).
+    ///
+    /// Generic over the event-payload type `S` so the Scheduler does
+    /// not need to import `StepEvent`'s concrete channel type; in
+    /// production `S = StepEvent`.
+    pub fn gc_finished_rows<S>(
+        &mut self,
+        event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<S>>,
+    ) -> Vec<RequestId> {
+        let mut evicted: Vec<RequestId> = Vec::new();
+        for slot in self.slots.iter_mut() {
+            if let Some(state) = slot.as_ref() {
+                if state.finished {
+                    let id = state.id;
+                    event_txs.remove(&id);
+                    evicted.push(id);
+                    *slot = None;
+                }
+            }
+        }
+        if self.phase == Phase::Decoding && self.active_count() == 0 {
+            self.phase = Phase::Finished;
+        }
+        evicted
+    }
+
     /// Test-only seam to flip the scheduler's phase without driving a
     /// model forward. Used to verify phase-guard error paths from unit
     /// tests; never called by production code.
@@ -891,15 +942,15 @@ mod tests {
     }
 
     #[test]
-    fn admit_in_decoding_returns_err() {
+    fn admit_in_decoding_ok_phase_stays_decoding() {
+        // 3c-3: admit during Decoding is now legal (mid-batch admit).
         let mut s = Scheduler::new(4);
         s.force_phase(Phase::Decoding);
-        let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("Decoding") && msg.contains("cannot admit"),
-            "unexpected err message: {msg}"
-        );
+        let id = s
+            .admit(mk_req(vec![1]))
+            .expect("admit during Decoding must succeed");
+        assert_eq!(s.phase(), Phase::Decoding, "phase must stay Decoding");
+        assert!(s.get(id).is_some());
     }
 
     #[test]
@@ -915,15 +966,15 @@ mod tests {
     }
 
     #[test]
-    fn evict_in_decoding_returns_err() {
+    fn evict_in_decoding_ok_transitions_to_finished_when_last() {
+        // 3c-3: evict during Decoding is now legal.
+        // Evicting the last row transitions Decoding -> Finished.
         let mut s = Scheduler::new(4);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Decoding);
-        let err = s.evict(id).expect_err("evict must fail");
-        assert!(
-            format!("{err}").contains("Decoding"),
-            "unexpected err: {err}"
-        );
+        s.evict(id).expect("evict during Decoding must succeed");
+        assert_eq!(s.active_count(), 0);
+        assert_eq!(s.phase(), Phase::Finished);
     }
 
     #[test]
@@ -992,5 +1043,67 @@ mod tests {
             .expect("evict_all should succeed even when poisoned");
         assert!(!s.poisoned, "poisoned flag must be cleared after evict_all");
         assert_eq!(s.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn scheduler_admit_during_decoding_ok() {
+        // Force phase to Decoding (test seam); admit should succeed and
+        // Phase should stay Decoding (mid-batch admit semantics).
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        s.force_phase(Phase::Decoding);
+
+        let id_b = s
+            .admit(mk_req(vec![4, 5, 6, 7]))
+            .expect("admit b during Decoding");
+        assert_eq!(s.phase(), Phase::Decoding, "phase should remain Decoding");
+        assert_eq!(s.active_count(), 2);
+        // Both ids should be findable.
+        assert!(s.get(id_a).is_some());
+        assert!(s.get(id_b).is_some());
+    }
+
+    #[test]
+    fn scheduler_evict_during_decoding_transitions_to_finished_when_last() {
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        s.force_phase(Phase::Decoding);
+
+        // Evict during Decoding: legal now (was Err pre-3c-3).
+        s.evict(id_a).expect("evict during Decoding");
+        // active_count == 0 + was Decoding -> Finished
+        assert_eq!(s.active_count(), 0);
+        assert_eq!(s.phase(), Phase::Finished);
+    }
+
+    #[test]
+    fn scheduler_gc_finished_rows_clears_slots_and_transitions() {
+        use std::collections::HashMap;
+        use tokio::sync::mpsc;
+
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
+        s.force_phase(Phase::Decoding);
+
+        // Mark both as finished (test seam: directly mutate state).
+        s.get_mut(id_a).unwrap().finished = true;
+        s.get_mut(id_a).unwrap().finish_reason = Some("length");
+        s.get_mut(id_b).unwrap().finished = true;
+        s.get_mut(id_b).unwrap().finish_reason = Some("stop");
+
+        let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel::<StepEvent>();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel::<StepEvent>();
+        event_txs.insert(id_a, tx_a);
+        event_txs.insert(id_b, tx_b);
+
+        let evicted = s.gc_finished_rows(&mut event_txs);
+        assert_eq!(evicted.len(), 2);
+        assert!(evicted.contains(&id_a));
+        assert!(evicted.contains(&id_b));
+        assert_eq!(s.active_count(), 0);
+        assert_eq!(s.phase(), Phase::Finished);
+        assert!(event_txs.is_empty(), "event_txs should be empty after gc");
     }
 }
