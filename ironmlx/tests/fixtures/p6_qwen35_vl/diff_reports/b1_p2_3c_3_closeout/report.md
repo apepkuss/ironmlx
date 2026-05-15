@@ -91,7 +91,7 @@ No changes to: `nn/*`, `models/*`, `core/server/{openai,anthropic}.rs`, `core/ge
 | `90d6e65` | docs+test | T3 review followup: Phase doc + edge-case test coverage |
 | `9c1e9e5` | feat | T4: admit_mid + rolling decode loop |
 | `584cba4` | fix | T4 review followup: admit_mid rollback + overflow + Phase guard |
-| `(T5 SHA — filled at commit)` | test+docs | T5: continuous batching scenarios + close-out |
+| `ceff1c6` | test+docs | T5: continuous batching scenarios + close-out |
 
 ## Regression Status
 
