@@ -634,7 +634,7 @@ impl Scheduler {
             .iter()
             .copied()
             .max()
-            .expect("b_max >= 1 so per_row_real_lens is non-empty");
+            .expect("Decoding phase guarantees b_max >= 1 and per_row_real_lens is non-empty");
         let decode_mask =
             build_per_row_decode_mask(&per_row_real_lens, max_real_len, Dtype::Bfloat16)?;
 
