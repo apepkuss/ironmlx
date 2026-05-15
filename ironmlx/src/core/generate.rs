@@ -369,6 +369,13 @@ pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
 /// that have inactive slots should omit them from the batch rather than
 /// pass a length-0 mask row. Matches the `prompt_lens[i] > 0` contract
 /// enforced by [`build_batch_attention_mask`].
+///
+/// **Production callers (B1-p2.3c-2):** [`Scheduler::step`](crate::core::scheduler::Scheduler::step)
+/// — builds this mask from per-row cache offsets + per_row_lens before
+/// each decode forward, so SDPA correctly masks out stale K/V cells for
+/// rows whose offsets have diverged from `max(offsets)` (typically because
+/// the row has finished and its cache no longer advances while other rows
+/// continue).
 pub fn build_per_row_decode_mask(
     per_row_real_lens: &[i32],
     max_len: i32,
