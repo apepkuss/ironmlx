@@ -5,6 +5,7 @@
 //! offset ≤ cap.
 
 use anyhow::anyhow;
+use mlx::ops::indexing::{slice_strided_on, slice_update_on};
 use mlx::{Array, Dtype};
 
 use crate::Result;
@@ -135,6 +136,123 @@ impl GatedDeltaCache {
         self.offsets.fill(0);
         Ok(())
     }
+
+    /// Copy a single row's full SSM state from `src` into `self` at
+    /// `dst_row`. The destination's `conv_state[dst_row, :, :]` and
+    /// `recurrent_state[dst_row, :, :, :]` slabs are overwritten;
+    /// `self.offsets[dst_row]` is set to `src.offsets[src_row]`.
+    ///
+    /// Unlike `KVCache::adopt_row_from`, the conv_state and recurrent_state
+    /// slabs are written unconditionally (no `src_off == 0` skip). The SSM
+    /// kernel reads state_in for every forward, so leaving stale state
+    /// from a previous occupant would corrupt the next prefill's conv1d
+    /// output. For a fresh src cache (zero-init), the adoption writes
+    /// zeros into the dst slab — which is what we want.
+    ///
+    /// Requires matching `kernel_size - 1`, `conv_dim`, `Hv`, `Dv`, `Dk`
+    /// between src and self. Batch dimensions may differ (typical usage:
+    /// src.B = 1, self.B = b_max).
+    ///
+    /// Errors on conv_state / recurrent_state shape mismatch,
+    /// dst_row >= self.B, src_row >= src.B, or src.offsets[src_row] > self.cap.
+    pub fn adopt_row_from(
+        &mut self,
+        src: &GatedDeltaCache,
+        dst_row: usize,
+        src_row: usize,
+    ) -> Result<()> {
+        let self_conv_dims = self.conv_state.shape();
+        let self_conv_dims = self_conv_dims.as_slice();
+        let src_conv_dims = src.conv_state.shape();
+        let src_conv_dims = src_conv_dims.as_slice();
+        if self_conv_dims[1] != src_conv_dims[1] || self_conv_dims[2] != src_conv_dims[2] {
+            anyhow::bail!(
+                "GatedDeltaCache::adopt_row_from: conv_state shape mismatch (self [_,{},{}] src [_,{},{}])",
+                self_conv_dims[1], self_conv_dims[2],
+                src_conv_dims[1], src_conv_dims[2],
+            );
+        }
+        let self_rec_dims = self.recurrent_state.shape();
+        let self_rec_dims = self_rec_dims.as_slice();
+        let src_rec_dims = src.recurrent_state.shape();
+        let src_rec_dims = src_rec_dims.as_slice();
+        if self_rec_dims[1] != src_rec_dims[1]
+            || self_rec_dims[2] != src_rec_dims[2]
+            || self_rec_dims[3] != src_rec_dims[3]
+        {
+            anyhow::bail!(
+                "GatedDeltaCache::adopt_row_from: recurrent_state shape mismatch (self [_,{},{},{}] src [_,{},{},{}])",
+                self_rec_dims[1], self_rec_dims[2], self_rec_dims[3],
+                src_rec_dims[1], src_rec_dims[2], src_rec_dims[3],
+            );
+        }
+        if dst_row >= self.offsets.len() {
+            anyhow::bail!(
+                "GatedDeltaCache::adopt_row_from: dst_row {} >= self.B {}",
+                dst_row,
+                self.offsets.len(),
+            );
+        }
+        if src_row >= src.offsets.len() {
+            anyhow::bail!(
+                "GatedDeltaCache::adopt_row_from: src_row {} >= src.B {}",
+                src_row,
+                src.offsets.len(),
+            );
+        }
+        let src_off = src.offsets[src_row];
+        if src_off > self.cap {
+            anyhow::bail!(
+                "GatedDeltaCache::adopt_row_from: src.offsets[{}] = {} > self.cap {}",
+                src_row,
+                src_off,
+                self.cap,
+            );
+        }
+
+        let kernel_minus_one = self_conv_dims[1];
+        let conv_dim = self_conv_dims[2];
+        let hv = self_rec_dims[1];
+        let dv = self_rec_dims[2];
+        let dk = self_rec_dims[3];
+
+        // Copy conv_state[src_row, :, :] -> self.conv_state[dst_row, :, :].
+        let src_conv_slice = slice_strided_on(
+            &src.conv_state,
+            [src_row as i32, 0, 0],
+            [src_row as i32 + 1, kernel_minus_one, conv_dim],
+            [1_i32, 1, 1],
+            (),
+        )?;
+        self.conv_state = slice_update_on(
+            &self.conv_state,
+            &src_conv_slice,
+            [dst_row as i32, 0, 0],
+            [dst_row as i32 + 1, kernel_minus_one, conv_dim],
+            [1_i32, 1, 1],
+            (),
+        )?;
+
+        // Copy recurrent_state[src_row, :, :, :] -> self.recurrent_state[dst_row, :, :, :].
+        let src_rec_slice = slice_strided_on(
+            &src.recurrent_state,
+            [src_row as i32, 0, 0, 0],
+            [src_row as i32 + 1, hv, dv, dk],
+            [1_i32, 1, 1, 1],
+            (),
+        )?;
+        self.recurrent_state = slice_update_on(
+            &self.recurrent_state,
+            &src_rec_slice,
+            [dst_row as i32, 0, 0, 0],
+            [dst_row as i32 + 1, hv, dv, dk],
+            [1_i32, 1, 1, 1],
+            (),
+        )?;
+
+        self.offsets[dst_row] = src_off;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -229,5 +347,75 @@ mod tests {
         assert!(r.is_err());
         let msg = format!("{}", r.err().unwrap());
         assert!(msg.contains("kernel_size"), "msg: {msg}");
+    }
+
+    #[test]
+    fn gdcache_adopt_row_from_state_and_offset() {
+        // src: B=1 cache. Mutate conv_state to all 1.0 (bf16) and
+        // recurrent_state to all 2.0 (f32 — recurrent is always f32 per
+        // new_with_cap). Advance offset to 4.
+        let mut src =
+            GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("src new");
+        let conv_marker =
+            mlx::ops::constructors::ones((1_i32, 3, 8), Dtype::Bfloat16).expect("conv_marker");
+        src.update_conv(conv_marker);
+        let rec_marker_f32: Array = (&vec![2.0_f32; 256][..], &[1_i32, 4, 8, 8][..])
+            .try_into()
+            .expect("rec_marker");
+        src.update_recurrent(rec_marker_f32);
+        src.advance(&[4]).expect("src advance");
+        assert_eq!(src.offsets(), &[4]);
+
+        // dst: B=2 cache, fresh (all zeros).
+        let mut dst =
+            GatedDeltaCache::new_with_cap(2, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("dst new");
+        dst.adopt_row_from(&src, /*dst_row=*/ 1, /*src_row=*/ 0)
+            .expect("adopt_row_from");
+
+        assert_eq!(dst.offsets(), &[0, 4]);
+
+        // Verify dst.conv_state[1, :, :] is all 1.0 (adopted from src)
+        // and dst.conv_state[0, :, :] is all 0.0 (untouched).
+        let conv_as_f32 =
+            mlx::ops::cast::astype(dst.conv_state(), Dtype::Float32).expect("cast conv to f32");
+        let conv_vec: Vec<f32> = conv_as_f32.to_vec().expect("conv to_vec");
+        assert_eq!(conv_vec.len(), 2 * 3 * 8); // [B=2, k-1=3, conv_dim=8]
+        let conv_stride_row = 3 * 8; // (k-1) * conv_dim
+        for i in 0..conv_stride_row {
+            assert_eq!(
+                conv_vec[i], 0.0_f32,
+                "dst.conv_state row 0 corrupted at {i}"
+            );
+        }
+        for i in conv_stride_row..(2 * conv_stride_row) {
+            assert_eq!(conv_vec[i], 1.0_f32, "dst.conv_state row 1 wrong at {i}");
+        }
+
+        // Verify dst.recurrent_state[1, :, :, :] is all 2.0 and [0, ...] is 0.0.
+        let rec_vec: Vec<f32> = dst.recurrent_state().to_vec().expect("rec to_vec");
+        assert_eq!(rec_vec.len(), 2 * 4 * 8 * 8); // [B=2, Hv=4, Dv=8, Dk=8]
+        let rec_stride_row = 4 * 8 * 8;
+        for i in 0..rec_stride_row {
+            assert_eq!(rec_vec[i], 0.0_f32, "dst.rec row 0 corrupted at {i}");
+        }
+        for i in rec_stride_row..(2 * rec_stride_row) {
+            assert_eq!(rec_vec[i], 2.0_f32, "dst.rec row 1 wrong at {i}");
+        }
+    }
+
+    #[test]
+    fn gdcache_adopt_row_from_out_of_bounds_err() {
+        let src =
+            GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("src new");
+        let mut dst =
+            GatedDeltaCache::new_with_cap(2, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("dst new");
+        // dst_row=2 is OOB for dst.B=2.
+        let r = dst.adopt_row_from(&src, 2, 0);
+        assert!(r.is_err());
+        let msg = format!("{}", r.err().unwrap());
+        assert!(
+            msg.contains("dst_row") || msg.contains("B"),
+            "msg should mention dst_row OOB; got: {msg}"
+        );
     }
 }
