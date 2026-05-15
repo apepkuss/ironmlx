@@ -459,31 +459,17 @@ impl Scheduler {
             }
         }
 
-        // logits shape: [B, 1, vocab] — batched_prefill already collapsed
-        // the sequence axis via slice_last_and_project.
-        let shape = logits.shape();
-        let shape_slice = shape.as_slice();
-        let vocab = shape_slice[2];
-
-        // Sample first token per occupied row from logits[:, max_len-1, :].
+        // Sample first token per occupied row from logits[:, 0, :].
+        // batched_prefill returns [B, 1, vocab] with the sequence axis already
+        // collapsed internally. Use slice_logits_row (same helper as step_inner).
         let mut events: Vec<StepEvent> = Vec::new();
         for b_idx in 0..b {
             let was_active = self.slots[b_idx].is_some();
             if !was_active {
                 continue;
             }
-            // batched_prefill returns [B, 1, vocab] — the per-row last-token
-            // position is already collapsed internally (see
-            // `tests/b1_p2_1_batched_prefill.rs:173`). Slice
-            // `logits[b_idx, 0, :]` → [1, 1, vocab] then reshape to [vocab].
-            let row = mlx::ops::indexing::slice(
-                &logits,
-                &[b_idx as i32, 0_i32, 0_i32][..],
-                &[b_idx as i32 + 1, 1_i32, vocab][..],
-            )
-            .map_err(|e| anyhow!("prefill_admitted: slice logits row {b_idx} failed: {e:?}"))?;
-            let row_flat = row.reshape(&[vocab][..]).map_err(|e| {
-                anyhow!("prefill_admitted: reshape logits row {b_idx} failed: {e:?}")
+            let row_flat = slice_logits_row(&logits, b_idx).map_err(|e| {
+                anyhow!("prefill_admitted: slice_logits_row(row {b_idx}) failed: {e:?}")
             })?;
 
             let state = self.slots[b_idx]
@@ -753,6 +739,29 @@ impl Scheduler {
 
         // 1. Insert RequestState via the relaxed admit() path. Phase stays Decoding.
         let id = self.admit(req)?;
+
+        // Steps 2-8: prefill into temp cache, adopt, sample, update.
+        // If anything fails, roll back by evicting the orphan slot —
+        // otherwise next step() would panic on empty generated_tokens.
+        match self.admit_mid_inner(id, row_idx, model) {
+            Ok(event) => Ok((id, event)),
+            Err(e) => {
+                // Rollback: evict the orphan slot. evict ignores poison
+                // and works in any Phase including Decoding (per Task 3).
+                let _ = self.evict(id);
+                Err(e)
+            }
+        }
+    }
+
+    /// Inner body of admit_mid (steps 2-8 from the spec). Separated so
+    /// `admit_mid` can roll back the inserted slot if any `?` fails.
+    fn admit_mid_inner(
+        &mut self,
+        id: RequestId,
+        row_idx: usize,
+        model: &Qwen35Model,
+    ) -> Result<StepEvent> {
         let (prompt_ids, prompt_len, max_new_tokens) = {
             let state = self.slots[row_idx].as_ref().expect("admit inserted");
             (
@@ -761,7 +770,13 @@ impl Scheduler {
                 state.max_new_tokens,
             )
         };
-        let cap_for_temp = (prompt_len + max_new_tokens as i32).max(prompt_len);
+
+        // Saturating conversion: max_new_tokens is usize and may exceed
+        // i32::MAX in pathological caller inputs. Saturate to i32::MAX so
+        // cap_for_temp stays a valid i32 even at the API limit (the
+        // actual cap is bounded by model + memory anyway).
+        let max_new_i32 = i32::try_from(max_new_tokens).unwrap_or(i32::MAX);
+        let cap_for_temp = prompt_len.saturating_add(max_new_i32).max(prompt_len);
 
         // 2. Capture KVCache dtype from main cache (first Full layer).
         let dtype = {
@@ -850,14 +865,11 @@ impl Scheduler {
             state.finish_reason = Some("length");
         }
 
-        Ok((
+        Ok(StepEvent {
             id,
-            StepEvent {
-                id,
-                token,
-                finish_reason: state.finish_reason,
-            },
-        ))
+            token,
+            finish_reason: state.finish_reason,
+        })
     }
 
     /// Sweep finished rows: clear their slot, drop their event channel,

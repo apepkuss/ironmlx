@@ -24,7 +24,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::core::generate::GenerateRequest;
-use crate::core::scheduler::{RequestId, Scheduler, StepEvent};
+use crate::core::scheduler::{Phase, RequestId, Scheduler, StepEvent};
 use crate::models::Qwen35Model;
 use crate::Result;
 
@@ -310,11 +310,15 @@ fn driver_loop(
         }
 
         // After rolling loop: reset cache + Phase for next outer iteration.
-        if let Err(evict_err) = sched.evict_all() {
-            tracing::warn!(
-                "[SchedulerActor] evict_all at end of batch failed: {evict_err:?}; \
-                 relying on 3b-1 poison flag to reject subsequent admits"
-            );
+        // evict_all is only legal in Decoding/Finished. Skip if already Idle
+        // (e.g., the Ok(cmd) -> admit failed sub-path already called evict_all).
+        if matches!(sched.phase(), Phase::Decoding | Phase::Finished) {
+            if let Err(evict_err) = sched.evict_all() {
+                tracing::warn!(
+                    "[SchedulerActor] evict_all at end of outer failed: {evict_err:?}; \
+                     relying on 3b-1 poison flag to reject subsequent admits"
+                );
+            }
         }
         event_txs.clear();
     }
