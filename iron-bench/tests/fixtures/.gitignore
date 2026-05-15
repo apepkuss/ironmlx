@@ -1,0 +1,8 @@
+# tokenizer.json is too large to commit (19 MB).
+# Stage it locally before running the smoke test:
+#
+#   SNAP=$(ls -d $HOME/.ironmlx/models/models--*Qwen3.5-4B-MLX-4bit*/snapshots/*/ | head -1)
+#   cp "${SNAP}tokenizer.json" iron-bench/tests/fixtures/tokenizer.json
+#
+# The smoke test self-skips gracefully when this file is absent.
+*.json
