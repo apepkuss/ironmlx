@@ -36,10 +36,17 @@ pub struct RequestId(pub u64);
 /// Decoding → Finished → Idle`.
 ///
 /// Transitions are driven by the scheduler methods:
-/// - `admit()` from `Idle`/`Admitting` → `Admitting`
-/// - `prefill_admitted()` from `Idle`/`Admitting` → `Decoding`
+/// - `admit()` from `Idle` → `Admitting`.
+/// - `admit()` from `Admitting` → `Admitting`.
+/// - `admit()` from `Decoding` → `Decoding` (mid-batch admit, 3c-3;
+///   caller is responsible for prefilling the new slot via `admit_mid`).
+/// - `evict()` from `Admitting` + `active_count==0` → `Idle`.
+/// - `evict()` from `Decoding` + `active_count==0` → `Finished` (3c-3).
+/// - `prefill_admitted()` from `Idle`/`Admitting` → `Decoding`.
 /// - `step()` from `Decoding`: stays `Decoding` while ≥1 row unfinished,
 ///   transitions to `Finished` when all active rows are `finished`.
+/// - `gc_finished_rows()` from `Decoding` + `active_count==0` → `Finished`
+///   (3c-3, idempotent with `step`'s end-of-loop transition).
 /// - `evict_all()` from `Decoding`/`Finished` → `Idle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -1077,6 +1084,24 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_evict_during_decoding_not_last_stays_decoding() {
+        // Evict one row mid-Decoding when other rows are still active:
+        // Phase must stay Decoding (only last-evict transitions to Finished).
+        let mut s = Scheduler::new(4);
+        let id_a = s.admit(mk_req(vec![1])).expect("admit a");
+        let _id_b = s.admit(mk_req(vec![2])).expect("admit b");
+        s.force_phase(Phase::Decoding);
+
+        s.evict(id_a).expect("evict id_a mid-Decoding");
+        assert_eq!(s.active_count(), 1, "id_b should remain active");
+        assert_eq!(
+            s.phase(),
+            Phase::Decoding,
+            "phase must stay Decoding when other rows are still active"
+        );
+    }
+
+    #[test]
     fn scheduler_gc_finished_rows_clears_slots_and_transitions() {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
@@ -1105,5 +1130,72 @@ mod tests {
         assert_eq!(s.active_count(), 0);
         assert_eq!(s.phase(), Phase::Finished);
         assert!(event_txs.is_empty(), "event_txs should be empty after gc");
+    }
+
+    #[test]
+    fn scheduler_gc_finished_rows_partial_sweep_stays_decoding() {
+        use std::collections::HashMap;
+        use tokio::sync::mpsc;
+
+        // 2 rows admitted; only row A finishes. gc should evict A only,
+        // leave B alive, and Phase must stay Decoding (active_count==1).
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
+        s.force_phase(Phase::Decoding);
+
+        s.get_mut(id_a).unwrap().finished = true;
+        s.get_mut(id_a).unwrap().finish_reason = Some("length");
+        // id_b stays unfinished.
+
+        let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel::<StepEvent>();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel::<StepEvent>();
+        event_txs.insert(id_a, tx_a);
+        event_txs.insert(id_b, tx_b);
+
+        let evicted = s.gc_finished_rows(&mut event_txs);
+        assert_eq!(evicted, vec![id_a], "only id_a should be evicted");
+        assert_eq!(s.active_count(), 1, "id_b should remain active");
+        assert_eq!(
+            s.phase(),
+            Phase::Decoding,
+            "phase must stay Decoding when other rows continue"
+        );
+        assert!(
+            event_txs.contains_key(&id_b),
+            "id_b's event channel must remain"
+        );
+        assert!(
+            !event_txs.contains_key(&id_a),
+            "id_a's event channel must be dropped"
+        );
+    }
+
+    #[test]
+    fn scheduler_gc_finished_rows_noop_when_no_finished() {
+        use std::collections::HashMap;
+        use tokio::sync::mpsc;
+
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        s.force_phase(Phase::Decoding);
+
+        let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel::<StepEvent>();
+        event_txs.insert(id_a, tx_a);
+
+        let evicted = s.gc_finished_rows(&mut event_txs);
+        assert!(
+            evicted.is_empty(),
+            "no rows finished, evicted should be empty"
+        );
+        assert_eq!(s.active_count(), 1);
+        assert_eq!(
+            s.phase(),
+            Phase::Decoding,
+            "phase unchanged when no eviction"
+        );
+        assert!(event_txs.contains_key(&id_a), "event channel must persist");
     }
 }
