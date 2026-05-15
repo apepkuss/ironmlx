@@ -346,6 +346,40 @@ pub fn build_decode_position_ids(per_row_pos: &[i32]) -> Result<Array> {
     Ok(arr)
 }
 
+/// Slice `logits[row_idx, 0, :]` and reshape to `[vocab]`.
+///
+/// Common pattern used by both [`Scheduler::step`](crate::core::scheduler::Scheduler::step)
+/// (per-row decode sampling) and [`Scheduler::admit_mid`](crate::core::scheduler::Scheduler::admit_mid)
+/// (first-token sampling after temp-cache adoption in 3c-3). Extracted so
+/// the indexing math lives in one place.
+///
+/// Requires `logits` to be a rank-3 tensor `[B, 1, vocab]` (the shape
+/// produced by both `Qwen35Model::batched_prefill` and
+/// `Qwen35Model::forward_on` on the decode path).
+pub fn slice_logits_row(logits: &Array, row_idx: usize) -> Result<Array> {
+    let shape = logits.shape();
+    let shape_slice = shape.as_slice();
+    if shape_slice.len() != 3 {
+        return Err(anyhow!(
+            "slice_logits_row: expected logits shape [B, 1, vocab]; got rank {}",
+            shape_slice.len()
+        ));
+    }
+    let b = shape_slice[0];
+    if row_idx as i32 >= b {
+        return Err(anyhow!("slice_logits_row: row_idx {} >= B {}", row_idx, b));
+    }
+    let vocab = shape_slice[2];
+    let row = mlx::ops::indexing::slice(
+        logits,
+        &[row_idx as i32, 0_i32, 0_i32][..],
+        &[row_idx as i32 + 1, 1_i32, vocab][..],
+    )
+    .map_err(|e| anyhow!("slice_logits_row: slice failed: {e:?}"))?;
+    row.reshape(&[vocab][..])
+        .map_err(|e| anyhow!("slice_logits_row: reshape failed: {e:?}"))
+}
+
 /// Build a per-row decode attention mask `[B, 1, 1, max_len]`.
 ///
 /// Each batch row `b` attends to K/V positions `0..per_row_real_lens[b]`

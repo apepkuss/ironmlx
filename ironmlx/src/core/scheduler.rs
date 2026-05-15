@@ -9,12 +9,15 @@
 //!
 //! See `docs/superpowers/specs/2026-05-13-b1-p2-3a-scheduler-skeleton-design.md`.
 
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Result};
 use mlx::{Array, Dtype};
+use tokio::sync::mpsc;
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
-    build_per_row_decode_mask, build_position_ids_batched, GenerateRequest,
+    build_per_row_decode_mask, build_position_ids_batched, slice_logits_row, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
@@ -33,10 +36,17 @@ pub struct RequestId(pub u64);
 /// Decoding → Finished → Idle`.
 ///
 /// Transitions are driven by the scheduler methods:
-/// - `admit()` from `Idle`/`Admitting` → `Admitting`
-/// - `prefill_admitted()` from `Idle`/`Admitting` → `Decoding`
+/// - `admit()` from `Idle` → `Admitting`.
+/// - `admit()` from `Admitting` → `Admitting`.
+/// - `admit()` from `Decoding` → `Decoding` (mid-batch admit, 3c-3;
+///   caller is responsible for prefilling the new slot via `admit_mid`).
+/// - `evict()` from `Admitting` + `active_count==0` → `Idle`.
+/// - `evict()` from `Decoding` + `active_count==0` → `Finished` (3c-3).
+/// - `prefill_admitted()` from `Idle`/`Admitting` → `Decoding`.
 /// - `step()` from `Decoding`: stays `Decoding` while ≥1 row unfinished,
 ///   transitions to `Finished` when all active rows are `finished`.
+/// - `gc_finished_rows()` from `Decoding` + `active_count==0` → `Finished`
+///   (3c-3, idempotent with `step`'s end-of-loop transition).
 /// - `evict_all()` from `Decoding`/`Finished` → `Idle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -178,15 +188,16 @@ impl Scheduler {
     /// independent sampler state.
     pub fn admit(&mut self, req: GenerateRequest) -> Result<RequestId> {
         self.ensure_not_poisoned()?;
-        match self.phase {
-            Phase::Idle | Phase::Admitting => {}
-            Phase::Decoding | Phase::Finished => {
-                return Err(anyhow!(
-                    "scheduler in {:?} phase: cannot admit; call evict_all first",
-                    self.phase
-                ));
-            }
+        if self.phase == Phase::Finished {
+            return Err(anyhow!(
+                "scheduler in Finished phase: cannot admit; call evict_all first"
+            ));
         }
+        // Idle / Admitting / Decoding all allow admit.
+        //   Idle -> Admitting (first admit transitions below).
+        //   Admitting -> Admitting (subsequent admits during window).
+        //   Decoding -> Decoding (mid-batch admit; caller is responsible
+        //     for prefilling the new slot via admit_mid in Task 4).
         let row_idx =
             self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
                 anyhow!("scheduler full: no row available (b_max={})", self.b_max)
@@ -215,7 +226,10 @@ impl Scheduler {
             finish_reason: None,
         };
         self.slots[row_idx] = Some(state);
-        self.phase = Phase::Admitting;
+        if self.phase == Phase::Idle {
+            self.phase = Phase::Admitting;
+        }
+        // Decoding stays Decoding (no transition on mid-batch admit).
         Ok(id)
     }
 
@@ -224,23 +238,25 @@ impl Scheduler {
     /// counter keeps incrementing).
     pub fn evict(&mut self, id: RequestId) -> Result<()> {
         self.ensure_not_poisoned()?;
-        match self.phase {
-            Phase::Decoding => {
-                return Err(anyhow!(
-                    "evict illegal in {:?} phase: call evict_all after the batch finishes",
-                    self.phase
-                ));
-            }
-            Phase::Idle | Phase::Admitting | Phase::Finished => {}
-        }
+        // 3c-3: evict allowed in all phases. Slot is cleared; main cache
+        // state for this row stays in place (no resource leak; next
+        // admit_mid into this slot overwrites via adopt_row_from).
         let row_idx = self
             .slots
             .iter()
             .position(|s| matches!(s, Some(r) if r.id == id))
             .ok_or_else(|| anyhow!("request id {} not found", id.0))?;
         self.slots[row_idx] = None;
-        if self.phase == Phase::Admitting && self.active_count() == 0 {
-            self.phase = Phase::Idle;
+        // Phase transitions on evict:
+        //   Admitting + active_count==0 -> Idle (pre-3c-3 behavior)
+        //   Decoding  + active_count==0 -> Finished (NEW in 3c-3)
+        //   Idle / Finished: no transition
+        if self.active_count() == 0 {
+            if self.phase == Phase::Admitting {
+                self.phase = Phase::Idle;
+            } else if self.phase == Phase::Decoding {
+                self.phase = Phase::Finished;
+            }
         }
         Ok(())
     }
@@ -443,31 +459,17 @@ impl Scheduler {
             }
         }
 
-        // logits shape: [B, 1, vocab] — batched_prefill already collapsed
-        // the sequence axis via slice_last_and_project.
-        let shape = logits.shape();
-        let shape_slice = shape.as_slice();
-        let vocab = shape_slice[2];
-
-        // Sample first token per occupied row from logits[:, max_len-1, :].
+        // Sample first token per occupied row from logits[:, 0, :].
+        // batched_prefill returns [B, 1, vocab] with the sequence axis already
+        // collapsed internally. Use slice_logits_row (same helper as step_inner).
         let mut events: Vec<StepEvent> = Vec::new();
         for b_idx in 0..b {
             let was_active = self.slots[b_idx].is_some();
             if !was_active {
                 continue;
             }
-            // batched_prefill returns [B, 1, vocab] — the per-row last-token
-            // position is already collapsed internally (see
-            // `tests/b1_p2_1_batched_prefill.rs:173`). Slice
-            // `logits[b_idx, 0, :]` → [1, 1, vocab] then reshape to [vocab].
-            let row = mlx::ops::indexing::slice(
-                &logits,
-                &[b_idx as i32, 0_i32, 0_i32][..],
-                &[b_idx as i32 + 1, 1_i32, vocab][..],
-            )
-            .map_err(|e| anyhow!("prefill_admitted: slice logits row {b_idx} failed: {e:?}"))?;
-            let row_flat = row.reshape(&[vocab][..]).map_err(|e| {
-                anyhow!("prefill_admitted: reshape logits row {b_idx} failed: {e:?}")
+            let row_flat = slice_logits_row(&logits, b_idx).map_err(|e| {
+                anyhow!("prefill_admitted: slice_logits_row(row {b_idx}) failed: {e:?}")
             })?;
 
             let state = self.slots[b_idx]
@@ -648,26 +650,13 @@ impl Scheduler {
         )?;
 
         // logits shape: [B, 1, vocab]
-        let shape = logits.shape();
-        let shape_slice = shape.as_slice();
-        let vocab = shape_slice[2];
-
         let mut events: Vec<StepEvent> = Vec::new();
         for (b_idx, was_active) in active_at_start.iter().enumerate() {
             if !was_active {
                 continue;
             }
-            // Slice logits[b_idx, 0, :] → [1, 1, vocab] then reshape to [vocab].
-            // Using mlx::ops::indexing::slice (same pattern as b1_p2_2_batched_decode.rs).
-            let row = mlx::ops::indexing::slice(
-                &logits,
-                &[b_idx as i32, 0_i32, 0_i32][..],
-                &[b_idx as i32 + 1, 1_i32, vocab][..],
-            )
-            .map_err(|e| anyhow!("step: slice logits row {b_idx} failed: {e:?}"))?;
-            let row_flat = row
-                .reshape(&[vocab][..])
-                .map_err(|e| anyhow!("step: reshape logits row {b_idx} failed: {e:?}"))?;
+            let row_flat = slice_logits_row(&logits, b_idx)
+                .map_err(|e| anyhow!("step: slice_logits_row(row {b_idx}) failed: {e:?}"))?;
 
             let state = self.slots[b_idx]
                 .as_mut()
@@ -712,6 +701,217 @@ impl Scheduler {
         }
 
         Ok(events)
+    }
+
+    /// Mid-batch admit + prefill. Caller is `SchedulerActor::driver_loop`
+    /// after `cmd_rx` delivers an Admit during the rolling decode loop.
+    ///
+    /// Architecture: runs prefill in a temporary B=1 cache (the
+    /// `GenerationStream`-equivalent path), then adopts the prefilled
+    /// row into the main cache via per-layer `adopt_row_from` copies.
+    /// This avoids wasted compute on a B=b_max sub-batch + variable-
+    /// shape mask construction + GatedDeltaNet state corruption for
+    /// other active rows.
+    ///
+    /// Synchronous: stalls active rows for ~L_new × B=1_prefill_per_
+    /// token_time. Adoption cost is sub-microsecond. 3c+ chunked prefill
+    /// reduces stall further.
+    ///
+    /// Returns `(RequestId, StepEvent)` — the assigned request ID and
+    /// the first generated token's event. Caller registers the event
+    /// channel using the returned `id`.
+    pub fn admit_mid(
+        &mut self,
+        req: GenerateRequest,
+        model: &Qwen35Model,
+    ) -> Result<(RequestId, StepEvent)> {
+        self.ensure_not_poisoned()?;
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "admit_mid illegal in {:?} phase: only Decoding (use admit for Idle/Admitting)",
+                self.phase
+            ));
+        }
+        let row_idx =
+            self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
+                anyhow!("scheduler full: no row available (b_max={})", self.b_max)
+            })?;
+
+        // 1. Insert RequestState via the relaxed admit() path. Phase stays Decoding.
+        let id = self.admit(req)?;
+
+        // Steps 2-8: prefill into temp cache, adopt, sample, update.
+        // If anything fails, roll back by evicting the orphan slot —
+        // otherwise next step() would panic on empty generated_tokens.
+        match self.admit_mid_inner(id, row_idx, model) {
+            Ok(event) => Ok((id, event)),
+            Err(e) => {
+                // Rollback: evict the orphan slot. evict ignores poison
+                // and works in any Phase including Decoding (per Task 3).
+                let _ = self.evict(id);
+                Err(e)
+            }
+        }
+    }
+
+    /// Inner body of admit_mid (steps 2-8 from the spec). Separated so
+    /// `admit_mid` can roll back the inserted slot if any `?` fails.
+    fn admit_mid_inner(
+        &mut self,
+        id: RequestId,
+        row_idx: usize,
+        model: &Qwen35Model,
+    ) -> Result<StepEvent> {
+        let (prompt_ids, prompt_len, max_new_tokens) = {
+            let state = self.slots[row_idx].as_ref().expect("admit inserted");
+            (
+                state.prompt_ids.clone(),
+                state.prompt_ids.len() as i32,
+                state.max_new_tokens,
+            )
+        };
+
+        // Saturating conversion: max_new_tokens is usize and may exceed
+        // i32::MAX in pathological caller inputs. Saturate to i32::MAX so
+        // cap_for_temp stays a valid i32 even at the API limit (the
+        // actual cap is bounded by model + memory anyway).
+        let max_new_i32 = i32::try_from(max_new_tokens).unwrap_or(i32::MAX);
+        let cap_for_temp = prompt_len.saturating_add(max_new_i32).max(prompt_len);
+
+        // 2. Capture KVCache dtype from main cache (first Full layer).
+        let dtype = {
+            let main_cache = self
+                .cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("admit_mid called before prefill_admitted: cache absent"))?;
+            main_cache
+                .iter()
+                .find_map(|c| match c {
+                    LayerCache::Full(kv) => Some(kv.dtype()),
+                    _ => None,
+                })
+                .unwrap_or(Dtype::Bfloat16)
+        };
+
+        // 3. Allocate a fresh B=1 temp cache.
+        let mut temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
+
+        // 4. Build B=1 prefill inputs (mirror GenerationStream prefill).
+        let input_ids_data: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
+        let input_ids: Array = (&input_ids_data[..], &[1_i32, prompt_len][..])
+            .try_into()
+            .map_err(|e| anyhow!("admit_mid: build input_ids Array failed: {e:?}"))?;
+        let position_ids = build_position_ids_batched(&[prompt_len], prompt_len)?;
+        let attention_mask = build_batch_attention_mask(&[prompt_len], prompt_len, dtype)?;
+        let linear_attention_mask = build_batch_linear_mask(&[prompt_len], prompt_len)?;
+
+        // 5. Run B=1 prefill into the temp cache. Returns logits [1, 1, vocab].
+        let logits = model.batched_prefill(
+            &input_ids,
+            &position_ids,
+            &attention_mask,
+            &linear_attention_mask,
+            &[prompt_len],
+            Some(&mut temp_cache),
+            (),
+        )?;
+
+        // 6. Adopt the temp cache's row 0 into main_cache at row_idx.
+        {
+            let main_cache = self.cache.as_mut().expect("cache asserted Some above");
+            if main_cache.len() != temp_cache.len() {
+                return Err(anyhow!(
+                    "admit_mid: cache layer count mismatch ({} vs {})",
+                    main_cache.len(),
+                    temp_cache.len()
+                ));
+            }
+            for (main_layer, temp_layer) in main_cache.iter_mut().zip(temp_cache.iter()) {
+                match (main_layer, temp_layer) {
+                    (LayerCache::Full(main_kv), LayerCache::Full(temp_kv)) => {
+                        main_kv.adopt_row_from(temp_kv, row_idx, 0)?;
+                    }
+                    (LayerCache::Linear(main_gd), LayerCache::Linear(temp_gd)) => {
+                        main_gd.adopt_row_from(temp_gd, row_idx, 0)?;
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "admit_mid: cache layer kind mismatch between main and temp"
+                        ))
+                    }
+                }
+            }
+        }
+
+        // 7. Sample first token from prefill logits (last position).
+        //    Logits shape [1, 1, vocab] -- slice row 0.
+        let row_logits = slice_logits_row(&logits, 0)?;
+        let token = {
+            let state = self.slots[row_idx].as_ref().expect("admit_mid slot");
+            let history: Vec<u32> = prompt_ids.clone();
+            state.sampler.sample(&row_logits, &history)?
+        };
+
+        // 8. Update state + check termination.
+        let state = self.slots[row_idx].as_mut().expect("admit_mid slot");
+        state.generated_tokens.push(token);
+        state.real_len += 1;
+
+        if state.stop_token_ids.contains(&token) {
+            state.finished = true;
+            state.finish_reason = Some("stop");
+        } else if state.generated_tokens.len() >= state.max_new_tokens {
+            state.finished = true;
+            state.finish_reason = Some("length");
+        }
+
+        Ok(StepEvent {
+            id,
+            token,
+            finish_reason: state.finish_reason,
+        })
+    }
+
+    /// Sweep finished rows: clear their slot, drop their event channel,
+    /// and return the evicted IDs. Cache buffer entries for evicted
+    /// slots stay in place — a subsequent `admit_mid` into the same
+    /// slot overwrites via `adopt_row_from`.
+    ///
+    /// Phase transition: Decoding -> Finished if `active_count == 0`
+    /// after the sweep. This duplicates `step_inner`'s end-of-loop
+    /// Phase transition (both call `phase = Finished` when no active
+    /// rows remain after the last row finishes). The duplication is
+    /// idempotent: in the rolling decode loop (Task 4), step runs
+    /// first (may transition Phase) and gc_finished_rows runs second
+    /// (re-affirms transition + clears slots). Either path alone is
+    /// correct; the redundancy is harmless and preserves backward
+    /// compatibility with direct-step callers (3b-1 integration tests).
+    ///
+    /// Called by `SchedulerActor::driver_loop` after every successful
+    /// `step` invocation in 3c-3's rolling decode loop (Task 4).
+    ///
+    /// Generic over the event-payload type `S` so the Scheduler does
+    /// not need to import `StepEvent`'s concrete channel type; in
+    /// production `S = StepEvent`.
+    pub fn gc_finished_rows<S>(
+        &mut self,
+        event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<S>>,
+    ) -> Vec<RequestId> {
+        let mut evicted: Vec<RequestId> = Vec::new();
+        for slot in self.slots.iter_mut() {
+            if let Some(state) = slot.as_ref() {
+                if state.finished {
+                    let id = state.id;
+                    event_txs.remove(&id);
+                    evicted.push(id);
+                    *slot = None;
+                }
+            }
+        }
+        if self.phase == Phase::Decoding && self.active_count() == 0 {
+            self.phase = Phase::Finished;
+        }
+        evicted
     }
 
     /// Test-only seam to flip the scheduler's phase without driving a
@@ -891,15 +1091,15 @@ mod tests {
     }
 
     #[test]
-    fn admit_in_decoding_returns_err() {
+    fn admit_in_decoding_ok_phase_stays_decoding() {
+        // 3c-3: admit during Decoding is now legal (mid-batch admit).
         let mut s = Scheduler::new(4);
         s.force_phase(Phase::Decoding);
-        let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("Decoding") && msg.contains("cannot admit"),
-            "unexpected err message: {msg}"
-        );
+        let id = s
+            .admit(mk_req(vec![1]))
+            .expect("admit during Decoding must succeed");
+        assert_eq!(s.phase(), Phase::Decoding, "phase must stay Decoding");
+        assert!(s.get(id).is_some());
     }
 
     #[test]
@@ -915,15 +1115,15 @@ mod tests {
     }
 
     #[test]
-    fn evict_in_decoding_returns_err() {
+    fn evict_in_decoding_ok_transitions_to_finished_when_last() {
+        // 3c-3: evict during Decoding is now legal.
+        // Evicting the last row transitions Decoding -> Finished.
         let mut s = Scheduler::new(4);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Decoding);
-        let err = s.evict(id).expect_err("evict must fail");
-        assert!(
-            format!("{err}").contains("Decoding"),
-            "unexpected err: {err}"
-        );
+        s.evict(id).expect("evict during Decoding must succeed");
+        assert_eq!(s.active_count(), 0);
+        assert_eq!(s.phase(), Phase::Finished);
     }
 
     #[test]
@@ -992,5 +1192,152 @@ mod tests {
             .expect("evict_all should succeed even when poisoned");
         assert!(!s.poisoned, "poisoned flag must be cleared after evict_all");
         assert_eq!(s.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn scheduler_admit_during_decoding_ok() {
+        // Force phase to Decoding (test seam); admit should succeed and
+        // Phase should stay Decoding (mid-batch admit semantics).
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        s.force_phase(Phase::Decoding);
+
+        let id_b = s
+            .admit(mk_req(vec![4, 5, 6, 7]))
+            .expect("admit b during Decoding");
+        assert_eq!(s.phase(), Phase::Decoding, "phase should remain Decoding");
+        assert_eq!(s.active_count(), 2);
+        // Both ids should be findable.
+        assert!(s.get(id_a).is_some());
+        assert!(s.get(id_b).is_some());
+    }
+
+    #[test]
+    fn scheduler_evict_during_decoding_transitions_to_finished_when_last() {
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        s.force_phase(Phase::Decoding);
+
+        // Evict during Decoding: legal now (was Err pre-3c-3).
+        s.evict(id_a).expect("evict during Decoding");
+        // active_count == 0 + was Decoding -> Finished
+        assert_eq!(s.active_count(), 0);
+        assert_eq!(s.phase(), Phase::Finished);
+    }
+
+    #[test]
+    fn scheduler_evict_during_decoding_not_last_stays_decoding() {
+        // Evict one row mid-Decoding when other rows are still active:
+        // Phase must stay Decoding (only last-evict transitions to Finished).
+        let mut s = Scheduler::new(4);
+        let id_a = s.admit(mk_req(vec![1])).expect("admit a");
+        let _id_b = s.admit(mk_req(vec![2])).expect("admit b");
+        s.force_phase(Phase::Decoding);
+
+        s.evict(id_a).expect("evict id_a mid-Decoding");
+        assert_eq!(s.active_count(), 1, "id_b should remain active");
+        assert_eq!(
+            s.phase(),
+            Phase::Decoding,
+            "phase must stay Decoding when other rows are still active"
+        );
+    }
+
+    #[test]
+    fn scheduler_gc_finished_rows_clears_slots_and_transitions() {
+        use std::collections::HashMap;
+        use tokio::sync::mpsc;
+
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
+        s.force_phase(Phase::Decoding);
+
+        // Mark both as finished (test seam: directly mutate state).
+        s.get_mut(id_a).unwrap().finished = true;
+        s.get_mut(id_a).unwrap().finish_reason = Some("length");
+        s.get_mut(id_b).unwrap().finished = true;
+        s.get_mut(id_b).unwrap().finish_reason = Some("stop");
+
+        let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel::<StepEvent>();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel::<StepEvent>();
+        event_txs.insert(id_a, tx_a);
+        event_txs.insert(id_b, tx_b);
+
+        let evicted = s.gc_finished_rows(&mut event_txs);
+        assert_eq!(evicted.len(), 2);
+        assert!(evicted.contains(&id_a));
+        assert!(evicted.contains(&id_b));
+        assert_eq!(s.active_count(), 0);
+        assert_eq!(s.phase(), Phase::Finished);
+        assert!(event_txs.is_empty(), "event_txs should be empty after gc");
+    }
+
+    #[test]
+    fn scheduler_gc_finished_rows_partial_sweep_stays_decoding() {
+        use std::collections::HashMap;
+        use tokio::sync::mpsc;
+
+        // 2 rows admitted; only row A finishes. gc should evict A only,
+        // leave B alive, and Phase must stay Decoding (active_count==1).
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
+        s.force_phase(Phase::Decoding);
+
+        s.get_mut(id_a).unwrap().finished = true;
+        s.get_mut(id_a).unwrap().finish_reason = Some("length");
+        // id_b stays unfinished.
+
+        let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel::<StepEvent>();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel::<StepEvent>();
+        event_txs.insert(id_a, tx_a);
+        event_txs.insert(id_b, tx_b);
+
+        let evicted = s.gc_finished_rows(&mut event_txs);
+        assert_eq!(evicted, vec![id_a], "only id_a should be evicted");
+        assert_eq!(s.active_count(), 1, "id_b should remain active");
+        assert_eq!(
+            s.phase(),
+            Phase::Decoding,
+            "phase must stay Decoding when other rows continue"
+        );
+        assert!(
+            event_txs.contains_key(&id_b),
+            "id_b's event channel must remain"
+        );
+        assert!(
+            !event_txs.contains_key(&id_a),
+            "id_a's event channel must be dropped"
+        );
+    }
+
+    #[test]
+    fn scheduler_gc_finished_rows_noop_when_no_finished() {
+        use std::collections::HashMap;
+        use tokio::sync::mpsc;
+
+        let mut s = Scheduler::new(2);
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        s.force_phase(Phase::Decoding);
+
+        let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel::<StepEvent>();
+        event_txs.insert(id_a, tx_a);
+
+        let evicted = s.gc_finished_rows(&mut event_txs);
+        assert!(
+            evicted.is_empty(),
+            "no rows finished, evicted should be empty"
+        );
+        assert_eq!(s.active_count(), 1);
+        assert_eq!(
+            s.phase(),
+            Phase::Decoding,
+            "phase unchanged when no eviction"
+        );
+        assert!(event_txs.contains_key(&id_a), "event channel must persist");
     }
 }

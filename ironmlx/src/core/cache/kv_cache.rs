@@ -79,6 +79,12 @@ impl KVCache {
         self.cap
     }
 
+    /// Dtype used for the K/V buffer. Exposed so `adopt_row_from` can
+    /// validate that `src` and `self` agree before slicing.
+    pub fn dtype(&self) -> Dtype {
+        self.dtype
+    }
+
     /// Reset every row's offset to 0; retains allocated buffers for reuse.
     pub fn reset(&mut self) {
         for o in &mut self.offsets {
@@ -207,6 +213,133 @@ impl KVCache {
             target,
         )?;
         Ok((k_slice, v_slice))
+    }
+
+    /// Copy a single row's cache state from `src` into `self` at
+    /// `dst_row`. The destination slot's K/V at positions
+    /// `[0..src.offsets[src_row]]` is overwritten; positions beyond
+    /// (stale or unallocated) are not touched. `self.offsets[dst_row]`
+    /// is set to `src.offsets[src_row]`.
+    ///
+    /// Requires matching n_kv_heads / head_dim / v_head_dim / dtype.
+    /// src and self may have different batch sizes (typical usage:
+    /// src.batch = 1, self.batch = b_max).
+    ///
+    /// Errors on shape/dtype mismatch, dst_row >= self.batch,
+    /// src_row >= src.batch, or src.offsets[src_row] > self.cap.
+    pub fn adopt_row_from(&mut self, src: &KVCache, dst_row: usize, src_row: usize) -> Result<()> {
+        if self.n_kv_heads != src.n_kv_heads
+            || self.head_dim != src.head_dim
+            || self.v_head_dim != src.v_head_dim
+            || self.dtype != src.dtype
+        {
+            anyhow::bail!(
+                "KVCache::adopt_row_from: shape/dtype mismatch (self={}/{}/{}/{:?}, src={}/{}/{}/{:?})",
+                self.n_kv_heads, self.head_dim, self.v_head_dim, self.dtype,
+                src.n_kv_heads, src.head_dim, src.v_head_dim, src.dtype,
+            );
+        }
+        if dst_row >= self.batch as usize {
+            anyhow::bail!(
+                "KVCache::adopt_row_from: dst_row {} >= self.batch {}",
+                dst_row,
+                self.batch,
+            );
+        }
+        if src_row >= src.batch as usize {
+            anyhow::bail!(
+                "KVCache::adopt_row_from: src_row {} >= src.batch {}",
+                src_row,
+                src.batch,
+            );
+        }
+        let src_off = src.offsets[src_row];
+        if src_off > self.cap {
+            anyhow::bail!(
+                "KVCache::adopt_row_from: src.offsets[{}] = {} > self.cap {}",
+                src_row,
+                src_off,
+                self.cap,
+            );
+        }
+
+        if src_off > 0 {
+            // Ensure self.keys / values are allocated up to src_off.
+            let current_capacity = self
+                .keys
+                .as_ref()
+                .map(|a| a.shape().as_slice()[2])
+                .unwrap_or(0);
+            if src_off > current_capacity {
+                let target_capacity =
+                    ((src_off + self.step - 1) / self.step * self.step).min(self.cap);
+                self.grow_to(target_capacity, ().into())?;
+            }
+
+            let src_keys = src.keys.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "KVCache::adopt_row_from: src has offset {} but keys are unallocated",
+                    src_off
+                )
+            })?;
+            let src_values = src.values.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "KVCache::adopt_row_from: src has offset {} but values are unallocated",
+                    src_off
+                )
+            })?;
+
+            // Slice src[src_row, :, 0..src_off, :].
+            let k_slice = slice_strided_on(
+                src_keys,
+                [src_row as i32, 0, 0, 0],
+                [src_row as i32 + 1, self.n_kv_heads, src_off, self.head_dim],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            let v_slice = slice_strided_on(
+                src_values,
+                [src_row as i32, 0, 0, 0],
+                [
+                    src_row as i32 + 1,
+                    self.n_kv_heads,
+                    src_off,
+                    self.v_head_dim,
+                ],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+
+            // Write into self[dst_row, :, 0..src_off, :].
+            let keys_full = self.keys.as_ref().expect("grow_to allocated keys");
+            let values_full = self.values.as_ref().expect("grow_to allocated values");
+            let new_keys = slice_update_on(
+                keys_full,
+                &k_slice,
+                [dst_row as i32, 0, 0, 0],
+                [dst_row as i32 + 1, self.n_kv_heads, src_off, self.head_dim],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            let new_values = slice_update_on(
+                values_full,
+                &v_slice,
+                [dst_row as i32, 0, 0, 0],
+                [
+                    dst_row as i32 + 1,
+                    self.n_kv_heads,
+                    src_off,
+                    self.v_head_dim,
+                ],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            self.keys = Some(new_keys);
+            self.values = Some(new_values);
+        }
+
+        self.offsets[dst_row] = src_off;
+        Ok(())
     }
 
     /// Grow underlying K/V buffers to `new_capacity` along axis 2 (sequence
@@ -613,5 +746,174 @@ mod tests {
         for i in row_stride..(2 * row_stride) {
             assert_eq!(vf_vec[i], 20.0_f32, "V row 1 slab corrupted at index {i}");
         }
+    }
+
+    #[test]
+    fn kvcache_adopt_row_from_basic() {
+        // src: B=1, write 4 K/V tokens with marker values:
+        // K = 7.0, V = 70.0. Shape: [B=1, n_kv_heads=4, seq=4, head_dim=256].
+        let mut src = KVCache::new(1, 4, 256, 256, Dtype::Float32, 1024);
+        let n_per_row = (4 * 4 * 256) as usize;
+        let k_data: Vec<f32> = std::iter::repeat(7.0_f32).take(n_per_row).collect();
+        let v_data: Vec<f32> = std::iter::repeat(70.0_f32).take(n_per_row).collect();
+        let k: Array = (&k_data[..], (1_i32, 4_i32, 4_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (&v_data[..], (1_i32, 4_i32, 4_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        src.update_and_fetch(&k, &v, &[4]).expect("src write");
+        assert_eq!(src.offsets(), &[4]);
+
+        // dst: B=2, fresh.
+        let mut dst = KVCache::new(2, 4, 256, 256, Dtype::Float32, 1024);
+        dst.adopt_row_from(&src, /*dst_row=*/ 1, /*src_row=*/ 0)
+            .expect("adopt_row_from basic");
+
+        assert_eq!(dst.offsets(), &[0, 4]);
+        assert_eq!(dst.cap(), 1024);
+
+        // Read back dst K/V by doing a 1-token write to row 1 with
+        // per_row_lens=[0, 1] (row 0 skipped, row 1 writes 1 token at
+        // offset 4 → post-write offsets=[0, 5]). The returned slice
+        // is [B=2, n_kv_heads=4, max_off=5, head_dim=256]. Row 1 cols
+        // [0..4] are the adopted values from src.
+        let probe_k_data: Vec<f32> = vec![0.0_f32; (2 * 4 * 1 * 256) as usize];
+        let probe_v_data: Vec<f32> = vec![0.0_f32; (2 * 4 * 1 * 256) as usize];
+        let probe_k: Array = (&probe_k_data[..], (2_i32, 4_i32, 1_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        let probe_v: Array = (&probe_v_data[..], (2_i32, 4_i32, 1_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        let (kf, vf) = dst
+            .update_and_fetch(&probe_k, &probe_v, &[0, 1])
+            .expect("probe write to row 1");
+        assert_eq!(kf.shape().as_slice(), &[2, 4, 5, 256]);
+        assert_eq!(vf.shape().as_slice(), &[2, 4, 5, 256]);
+        let kf_vec: Vec<f32> = kf.to_vec().expect("kf to_vec");
+        let vf_vec: Vec<f32> = vf.to_vec().expect("vf to_vec");
+
+        // Layout: [B=2, n_kv_heads=4, S=5, head_dim=256] row-major.
+        let stride_batch = 4 * 5 * 256;
+        let stride_head = 5 * 256;
+        let stride_seq = 256;
+
+        // Row 1 (adopted), col 0, head 0, dim 0 → K=7.0 / V=70.0
+        assert_eq!(
+            kf_vec[stride_batch + 0 * stride_head + 0 * stride_seq + 0],
+            7.0_f32,
+            "dst row 1 col 0 head 0 dim 0 should be 7.0 (adopted K)"
+        );
+        assert_eq!(
+            vf_vec[stride_batch + 0 * stride_head + 0 * stride_seq + 0],
+            70.0_f32,
+            "dst row 1 col 0 head 0 dim 0 should be 70.0 (adopted V)"
+        );
+        // Row 1, col 3 (last adopted), head 3, dim 255 → K=7.0 / V=70.0
+        assert_eq!(
+            kf_vec[stride_batch + 3 * stride_head + 3 * stride_seq + 255],
+            7.0_f32,
+            "dst row 1 col 3 head 3 dim 255 should be 7.0 (adopted K, last cell)"
+        );
+        assert_eq!(
+            vf_vec[stride_batch + 3 * stride_head + 3 * stride_seq + 255],
+            70.0_f32,
+            "dst row 1 col 3 head 3 dim 255 should be 70.0 (adopted V, last cell)"
+        );
+        // Row 0 (un-adopted), any cell → 0.0 (untouched zero buffer)
+        assert_eq!(
+            kf_vec[0 * stride_batch + 0 * stride_head + 0 * stride_seq + 0],
+            0.0_f32,
+            "dst row 0 should be untouched (zero buffer)"
+        );
+        assert_eq!(
+            vf_vec[0 * stride_batch + 0 * stride_head + 0 * stride_seq + 0],
+            0.0_f32,
+            "dst row 0 V should be untouched (zero buffer)"
+        );
+    }
+
+    #[test]
+    fn kvcache_adopt_row_from_shape_mismatch_err() {
+        // src has different n_kv_heads → adopt_row_from must Err.
+        let src = KVCache::new(
+            1,
+            8, /* different n_kv_heads */
+            256,
+            256,
+            Dtype::Float32,
+            1024,
+        );
+        let mut dst = KVCache::new(2, 4, 256, 256, Dtype::Float32, 1024);
+        let r = dst.adopt_row_from(&src, 1, 0);
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("mismatch") || msg.contains("shape"),
+            "msg should mention shape mismatch; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn kvcache_adopt_row_from_out_of_bounds_err() {
+        // Case 1: dst_row >= self.batch
+        let src = KVCache::new(1, 4, 256, 256, Dtype::Float32, 1024);
+        let mut dst = KVCache::new(2, 4, 256, 256, Dtype::Float32, 1024);
+        let r = dst.adopt_row_from(&src, 2, 0);
+        assert!(r.is_err(), "dst_row=2 with batch=2 should Err");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("dst_row") || msg.contains("batch"),
+            "msg should mention dst_row OOB; got: {msg}"
+        );
+
+        // Case 2: src_row >= src.batch
+        let src2 = KVCache::new(1, 4, 256, 256, Dtype::Float32, 1024);
+        let mut dst2 = KVCache::new(2, 4, 256, 256, Dtype::Float32, 1024);
+        let r2 = dst2.adopt_row_from(&src2, 0, 1);
+        assert!(r2.is_err(), "src_row=1 with src.batch=1 should Err");
+        let msg2 = format!("{}", r2.unwrap_err());
+        assert!(
+            msg2.contains("src_row") || msg2.contains("batch"),
+            "msg should mention src_row OOB; got: {msg2}"
+        );
+
+        // Case 3: src.offsets[src_row] > self.cap
+        // src writes 8 tokens (offset=8); dst has cap=4. adopt_row_from must Err.
+        let mut src3 = KVCache::new(1, 4, 256, 256, Dtype::Float32, 1024);
+        let n_per_row = (4 * 8 * 256) as usize;
+        let k_data: Vec<f32> = std::iter::repeat(1.0_f32).take(n_per_row).collect();
+        let v_data: Vec<f32> = std::iter::repeat(1.0_f32).take(n_per_row).collect();
+        let k: Array = (&k_data[..], (1_i32, 4_i32, 8_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (&v_data[..], (1_i32, 4_i32, 8_i32, 256_i32))
+            .try_into()
+            .unwrap();
+        src3.update_and_fetch(&k, &v, &[8]).expect("src3 write");
+        // dst with cap=4 (< src's offset=8) → adopt_row_from should Err.
+        let mut dst3 = KVCache::new(2, 4, 256, 256, Dtype::Float32, 4 /* cap=4 */);
+        let r3 = dst3.adopt_row_from(&src3, 0, 0);
+        assert!(r3.is_err(), "src.offsets=8 > self.cap=4 should Err");
+        let msg3 = format!("{}", r3.unwrap_err());
+        assert!(
+            msg3.contains("cap"),
+            "msg should mention cap exceeded; got: {msg3}"
+        );
+    }
+
+    #[test]
+    fn kvcache_adopt_row_from_dtype_mismatch_err() {
+        // src: Bfloat16; dst: Float32 → adopt_row_from must Err.
+        let src = KVCache::new(1, 4, 256, 256, Dtype::Bfloat16, 1024);
+        let mut dst = KVCache::new(2, 4, 256, 256, Dtype::Float32, 1024);
+        let r = dst.adopt_row_from(&src, 1, 0);
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("mismatch") || msg.contains("dtype"),
+            "msg should mention dtype mismatch; got: {msg}"
+        );
     }
 }
