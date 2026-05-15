@@ -405,17 +405,80 @@ mod tests {
 
     #[test]
     fn gdcache_adopt_row_from_out_of_bounds_err() {
+        // Case 1: dst_row >= self.B
         let src =
             GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("src new");
         let mut dst =
             GatedDeltaCache::new_with_cap(2, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("dst new");
-        // dst_row=2 is OOB for dst.B=2.
         let r = dst.adopt_row_from(&src, 2, 0);
-        assert!(r.is_err());
+        assert!(r.is_err(), "dst_row=2 with B=2 should Err");
         let msg = format!("{}", r.err().unwrap());
         assert!(
             msg.contains("dst_row") || msg.contains("B"),
             "msg should mention dst_row OOB; got: {msg}"
+        );
+
+        // Case 2: src_row >= src.B
+        let src2 =
+            GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("src2 new");
+        let mut dst2 =
+            GatedDeltaCache::new_with_cap(2, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("dst2 new");
+        let r2 = dst2.adopt_row_from(&src2, 0, 1);
+        assert!(r2.is_err(), "src_row=1 with src.B=1 should Err");
+        let msg2 = format!("{}", r2.err().unwrap());
+        assert!(
+            msg2.contains("src_row") || msg2.contains("B"),
+            "msg should mention src_row OOB; got: {msg2}"
+        );
+
+        // Case 3: src.offsets[src_row] > self.cap
+        // src has cap=16, advance offset to 8. dst has cap=4 < src.offset=8 → Err.
+        let mut src3 =
+            GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16).expect("src3 new");
+        src3.advance(&[8]).expect("src3 advance to 8");
+        let mut dst3 =
+            GatedDeltaCache::new_with_cap(2, 4, 8, 4, 8, 8, Dtype::Bfloat16, 4 /* cap=4 */)
+                .expect("dst3 new with cap=4");
+        let r3 = dst3.adopt_row_from(&src3, 0, 0);
+        assert!(r3.is_err(), "src.offsets=8 > self.cap=4 should Err");
+        let msg3 = format!("{}", r3.err().unwrap());
+        assert!(
+            msg3.contains("cap"),
+            "msg should mention cap exceeded; got: {msg3}"
+        );
+    }
+
+    #[test]
+    fn gdcache_adopt_row_from_shape_mismatch_err() {
+        // Case A: conv_state shape mismatch — different kernel_size.
+        // src: kernel_size=4 → conv_state.dim[1] = 3
+        // dst: kernel_size=6 → conv_state.dim[1] = 5
+        let src_a = GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16)
+            .expect("src_a new");
+        let mut dst_a = GatedDeltaCache::new_with_cap(2, 6, 8, 4, 8, 8, Dtype::Bfloat16, 16)
+            .expect("dst_a new");
+        let r_a = dst_a.adopt_row_from(&src_a, 0, 0);
+        assert!(r_a.is_err(), "conv_state kernel_size mismatch should Err");
+        let msg_a = format!("{}", r_a.err().unwrap());
+        assert!(
+            msg_a.contains("conv_state") && (msg_a.contains("mismatch") || msg_a.contains("shape")),
+            "msg should mention conv_state shape mismatch; got: {msg_a}"
+        );
+
+        // Case B: recurrent_state shape mismatch — different Hv.
+        // src: hv=4 → recurrent_state.dim[1] = 4
+        // dst: hv=8 → recurrent_state.dim[1] = 8
+        let src_b = GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Bfloat16, 16)
+            .expect("src_b new");
+        let mut dst_b = GatedDeltaCache::new_with_cap(2, 4, 8, 8, 8, 8, Dtype::Bfloat16, 16)
+            .expect("dst_b new");
+        let r_b = dst_b.adopt_row_from(&src_b, 0, 0);
+        assert!(r_b.is_err(), "recurrent_state hv mismatch should Err");
+        let msg_b = format!("{}", r_b.err().unwrap());
+        assert!(
+            msg_b.contains("recurrent_state")
+                && (msg_b.contains("mismatch") || msg_b.contains("shape")),
+            "msg should mention recurrent_state shape mismatch; got: {msg_b}"
         );
     }
 }
