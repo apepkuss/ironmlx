@@ -140,7 +140,6 @@ impl Qwen35Model {
     /// projection work (vocab=151936 in Qwen3.5 — the largest matmul in the
     /// graph). Slice the last hidden state before the projection so the
     /// per-forward lm_head cost is constant in `S`.
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
         input_ids: &Array,

@@ -104,9 +104,11 @@ impl Attention {
     /// model assembly via `Mrope::cos_sin`).
     ///
     /// `cos`, `sin` are the precomputed rotary tables broadcastable against
-    /// Q/K. `mask` is currently ignored — the kernel is always invoked with
-    /// `mask_mode = "causal"`; explicit masks are folded in at P2 once the
-    /// KV cache lands.
+    /// Q/K. `mask` routes through `mlx::fast::scaled_dot_product_attention`:
+    /// `None` invokes `mask_mode = "causal"`; `Some(m)` invokes
+    /// `mask_mode = ""` with `mask_arr = Some(m)` consuming an additive
+    /// `[B, N, T_q, T_kv]`-broadcastable mask (typical shapes: `[B, 1, T, T]`
+    /// for batched prefill, `[B, 1, 1, K]` for batched decode).
     pub fn forward(
         &self,
         x: &Array,
@@ -331,8 +333,8 @@ mod tests {
         let sin = Array::zeros((2_i32, 1, 32), Dtype::Float32).unwrap();
 
         // Build [B=2, 1, 1, K=4] bf16 mask. After the 1-token decode write,
-        // K = max(offsets_after) = 4. Row 0 valid at [0, 1] (last two slots
-        // -inf), row 1 valid at [0..4] (all zeros).
+        // K = max(offsets_after) = 4. Row 0 sees only positions [0, 1]
+        // (positions [2, 3] are -inf); row 1 sees all 4 positions.
         let neg_inf = f32::NEG_INFINITY;
         let mask_data: Vec<f32> = vec![
             // batch 0: valid [0, 1], blocked [2, 3]
