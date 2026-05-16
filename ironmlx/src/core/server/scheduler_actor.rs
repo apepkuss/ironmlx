@@ -669,6 +669,13 @@ fn enqueue_or_reject(
 /// slots. Each drained entry is handed to `handle_admit_mid` which runs
 /// the B=1 prefill + adopts the row + sends `AdmitReply`. Stops when the
 /// queue empties or `active_count() == b_max`.
+///
+/// IMPORTANT: `admit_mid` is only legal in `Decoding` phase. If
+/// `gc_finished_rows` just transitioned the scheduler to `Finished`
+/// (because `active_count` dropped to 0), the caller's rolling-loop
+/// exit branch (`active_count == 0 && queue non-empty`) will handle the
+/// queued entries via `evict_all` + fresh `prefill_admitted`. Return
+/// early here so we do not call `admit_mid` in an illegal phase.
 fn drain_admission_queue(
     queue: &mut VecDeque<PendingAdmit>,
     sched: &mut Scheduler,
@@ -677,6 +684,10 @@ fn drain_admission_queue(
     model: &Arc<Mutex<Qwen35Model>>,
     b_max: usize,
 ) {
+    // admit_mid is only legal in Decoding phase.
+    if sched.phase() != Phase::Decoding {
+        return;
+    }
     while sched.active_count() < b_max {
         let Some(pending) = queue.pop_front() else {
             return;
@@ -686,6 +697,11 @@ fn drain_admission_queue(
             reply_tx: pending.reply_tx,
         };
         handle_admit_mid(cmd, sched, event_txs, admit_count, model);
+        // Re-check phase after each mid-admit — if admit_mid itself
+        // exhausted remaining rows and transitioned to Finished, stop.
+        if sched.phase() != Phase::Decoding {
+            return;
+        }
     }
 }
 
@@ -727,5 +743,244 @@ mod tests {
             .await
             .expect("driver did not shut down within 2s")
             .expect("driver join error");
+    }
+
+    /// b_max=1 + queue_max=2; admit 3 short requests in rapid succession;
+    /// verify the queue grows to peak >= 1 before slots free up.
+    /// Real-model heavy — gated by `#[ignore]`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore] // real-model heavy: loads Qwen3.5-4B-MLX-4bit
+    async fn admission_queue_push_when_full() {
+        use crate::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
+        use crate::core::sampler::Sampler;
+        use crate::core::{Loader, Tokenizer};
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tokio::sync::Mutex;
+
+        let model_dir = std::env::var("IRONMLX_MODEL_DIR").unwrap_or_else(|_| {
+            let glob = format!(
+                "{}/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
+                std::env::var("HOME").unwrap()
+            );
+            std::fs::read_dir(&glob)
+                .expect("snapshots dir")
+                .filter_map(|e| e.ok())
+                .next()
+                .expect("snapshot")
+                .path()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let loader = Loader::open_multimodal(std::path::Path::new(&model_dir)).unwrap();
+        let tokenizer = Tokenizer::from_loader(&loader).unwrap();
+        let model = Arc::new(Mutex::new(
+            crate::models::Qwen35Model::from_loader(&loader).unwrap(),
+        ));
+
+        let handle = spawn_scheduler_actor(
+            model.clone(),
+            /* b_max */ 1,
+            /* admission_deadline */ Duration::from_millis(5),
+            /* admission_queue_max */ 2,
+        );
+
+        let mk_req = |text: &str| -> GenerateRequest {
+            let msgs = vec![crate::core::Message {
+                role: "user".into(),
+                content: text.into(),
+            }];
+            let kw = serde_json::json!({"enable_thinking": false});
+            let rendered = tokenizer
+                .apply_chat_template(&msgs, true, Some(&kw))
+                .unwrap();
+            let prompt_ids = tokenizer.encode(&rendered, false).unwrap();
+            GenerateRequest {
+                prompt_ids,
+                max_new_tokens: 8,
+                sampler: Sampler::greedy(),
+                stop_token_ids: tokenizer.eos_token_ids().to_vec(),
+                prefill_chunk_size: 0,
+                pixel_values: None,
+                image_grid_thw: None,
+                image_spatial_merge_size: 2,
+                image_token_id: IMAGE_TOKEN_ID,
+            }
+        };
+
+        let mut replies = Vec::new();
+        for text in ["Hello", "World", "Goodbye"] {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            handle
+                .cmd_tx
+                .send(SchedulerCommand::Admit {
+                    request: mk_req(text),
+                    reply_tx,
+                })
+                .await
+                .expect("cmd_tx.send");
+            replies.push(reply_rx);
+        }
+
+        let mut counts = Vec::new();
+        for rx in replies {
+            let admit_reply = rx.await.expect("reply").expect("admit ok");
+            let mut event_rx = admit_reply.event_rx;
+            let mut n = 0;
+            while let Some(ev) = event_rx.recv().await {
+                n += 1;
+                if ev.finish_reason.is_some() {
+                    break;
+                }
+            }
+            counts.push(n);
+        }
+
+        for c in &counts {
+            assert!(*c >= 1, "expected ≥1 event per request, got {c}");
+        }
+
+        let peak = handle.queue_depth_peak.load(Ordering::Relaxed);
+        assert!(peak >= 1, "expected queue_depth_peak >= 1, got {peak}");
+
+        let rejected = handle.queue_rejected.load(Ordering::Relaxed);
+        assert_eq!(rejected, 0, "expected no rejections, got {rejected}");
+
+        drop(handle);
+    }
+
+    /// b_max=1 + queue_max=1; send 3 admits back-to-back. The 3rd one
+    /// must be rejected with Err("admission queue full").
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore] // real-model heavy
+    async fn admission_queue_overflow_returns_err() {
+        use crate::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
+        use crate::core::sampler::Sampler;
+        use crate::core::{Loader, Tokenizer};
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use tokio::sync::Mutex;
+
+        let model_dir = std::env::var("IRONMLX_MODEL_DIR").unwrap_or_else(|_| {
+            let glob = format!(
+                "{}/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
+                std::env::var("HOME").unwrap()
+            );
+            std::fs::read_dir(&glob)
+                .expect("snapshots dir")
+                .filter_map(|e| e.ok())
+                .next()
+                .expect("snapshot")
+                .path()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let loader = Loader::open_multimodal(std::path::Path::new(&model_dir)).unwrap();
+        let tokenizer = Tokenizer::from_loader(&loader).unwrap();
+        let model = Arc::new(Mutex::new(
+            crate::models::Qwen35Model::from_loader(&loader).unwrap(),
+        ));
+
+        let handle = spawn_scheduler_actor(
+            model.clone(),
+            /* b_max */ 1,
+            /* admission_deadline */ Duration::from_millis(5),
+            /* admission_queue_max */ 1,
+        );
+
+        let mk_req = |text: &str, max_new: usize| -> GenerateRequest {
+            let msgs = vec![crate::core::Message {
+                role: "user".into(),
+                content: text.into(),
+            }];
+            let kw = serde_json::json!({"enable_thinking": false});
+            let rendered = tokenizer
+                .apply_chat_template(&msgs, true, Some(&kw))
+                .unwrap();
+            let prompt_ids = tokenizer.encode(&rendered, false).unwrap();
+            GenerateRequest {
+                prompt_ids,
+                max_new_tokens: max_new,
+                sampler: Sampler::greedy(),
+                stop_token_ids: tokenizer.eos_token_ids().to_vec(),
+                prefill_chunk_size: 0,
+                pixel_values: None,
+                image_grid_thw: None,
+                image_spatial_merge_size: 2,
+                image_token_id: IMAGE_TOKEN_ID,
+            }
+        };
+
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: mk_req("Hello", 64),
+                reply_tx: tx1,
+            })
+            .await
+            .unwrap();
+
+        // Wait briefly so first admit enters Decoding before #2/#3 arrive.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: mk_req("World", 8),
+                reply_tx: tx2,
+            })
+            .await
+            .unwrap();
+
+        let (tx3, rx3) = tokio::sync::oneshot::channel();
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: mk_req("Goodbye", 8),
+                reply_tx: tx3,
+            })
+            .await
+            .unwrap();
+
+        let reply3 = tokio::time::timeout(Duration::from_secs(5), rx3)
+            .await
+            .expect("rx3 timeout")
+            .expect("rx3 recv");
+        match reply3 {
+            Err(e) => {
+                let msg = format!("{e:#}");
+                assert!(
+                    msg.contains("admission queue full"),
+                    "expected 'admission queue full' Err, got: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected Err for #3, got Ok"),
+        }
+
+        let rejected = handle.queue_rejected.load(Ordering::Relaxed);
+        assert!(rejected >= 1, "expected queue_rejected ≥ 1, got {rejected}");
+
+        let _ = tokio::time::timeout(Duration::from_secs(120), async {
+            let r1 = rx1.await.unwrap().unwrap();
+            let mut e1 = r1.event_rx;
+            while let Some(ev) = e1.recv().await {
+                if ev.finish_reason.is_some() {
+                    break;
+                }
+            }
+            let r2 = rx2.await.unwrap().unwrap();
+            let mut e2 = r2.event_rx;
+            while let Some(ev) = e2.recv().await {
+                if ev.finish_reason.is_some() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("rx1/rx2 drain timeout");
+
+        drop(handle);
     }
 }
