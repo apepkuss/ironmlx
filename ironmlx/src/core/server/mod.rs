@@ -66,8 +66,12 @@ pub async fn serve(
 
     // 3f: effective_cap_max = min(--max-cache-cap CLI, model.config.max_position_embeddings).
     // i32 → usize: saturating-clamp at 0 (negative i32 invalid for cap).
+    // Use async lock — `serve` runs inside a Tokio runtime so `blocking_lock`
+    // would panic with "Cannot block the current thread from within a runtime"
+    // when serve is invoked via `tokio::spawn(server::serve(...))` (tests S5
+    // of 3d / 3f-T4 caught this).
     let model_max_context: usize = {
-        let m = model.blocking_lock();
+        let m = model.lock().await;
         m.config().max_position_embeddings.max(0) as usize
     };
     let effective_cap_max = max_cache_cap.min(model_max_context);
