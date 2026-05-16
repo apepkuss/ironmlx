@@ -12,6 +12,26 @@ use super::config::Qwen35Config;
 use super::text_model::Qwen35TextModel;
 use super::vision::VisionTower;
 
+/// Minimum K/V cache cap that `make_cache` allocates regardless of the
+/// caller-requested cap. Empirically (B1-p2.3f T4), `KVCache::with_step(cap)`
+/// with `cap < ~256` makes the bf16 attention forward run ~100-300× slower
+/// on Apple Silicon (a 4B decode step grows from ~50 ms to ~10 s). The
+/// most likely cause is MLX's Metal kernel tile picker missing its
+/// preferred power-of-two tile for tight K/V buffer widths.
+///
+/// 256 is the natural floor: matches `KVCache`'s default `step`, aligns
+/// with common GPU block sizes, and costs only a few MB across 32
+/// 4B-bf16 layers. Larger caps (long prompts) pass through unchanged.
+///
+/// Applied silently inside `make_cache` so every caller (Scheduler main
+/// cache, Scheduler admit_mid temp cache, GenerationStream cache, test
+/// fixtures) is protected. The raise does NOT shrink user-set
+/// `--max-cache-cap`: cap_max is enforced at admit time on the
+/// **request size** (`prompt_len + max_new_tokens`); a request cleared
+/// by the admit gate may still be backed by a slightly oversized K/V
+/// buffer.
+pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 = 256;
+
 /// Top-level Qwen3.5 dense model: hybrid 32-layer text core + tied/untied lm_head.
 ///
 /// `vision` is present only when the model was loaded via [`Loader::open_multimodal`]
@@ -536,7 +556,25 @@ impl Qwen35Model {
     }
 
     /// Construct a per-layer cache list matching this model's hybrid topology.
+    ///
+    /// **GPU-perf floor (B1-p2.3f T4):** the per-layer K/V buffer width
+    /// equals the cap because `KVCache::with_step(cap)` is used for
+    /// one-shot allocation (avoids grow_to + memcpy on first decode
+    /// step at long context — P8a-stage6 optimization). Empirically,
+    /// cap < ~256 hits MLX Metal kernel slow path on Apple Silicon
+    /// (4B decode step 50 ms → 10 s, 100-300× cliff). To shield every
+    /// caller (Scheduler main cache + admit_mid temp cache,
+    /// GenerationStream cache, test fixtures), this method silently
+    /// raises `cap` to `MIN_KV_CACHE_CAP_FOR_GPU_PERF` if smaller.
+    ///
+    /// The raise is invisible to logical request-size accounting:
+    /// Scheduler's admit gate (`cap_needed > effective_cap_max`) uses
+    /// the user-requested cap directly; the KVCache's slightly larger
+    /// physical buffer just absorbs short prompts at zero functional
+    /// cost (a few MB of slack memory across 32 layers — negligible
+    /// vs. the perf cliff).
     pub fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
+        let cap = cap.max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let cfg = self.config();
         let head_dim = cfg.effective_head_dim();
         let mut out = Vec::with_capacity(cfg.num_hidden_layers as usize);
