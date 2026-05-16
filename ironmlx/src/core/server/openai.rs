@@ -355,20 +355,12 @@ pub async fn chat_completions(
 
     let prompt_tokens = request.prompt_ids.len() as u32;
 
-    // Routing: text-only short-prompt → SchedulerActor; everything else
-    // → GenerationStream path.
-    // COMPAT(3b-2): VL fallback to GS sunsets in B1-p2.4 (batched VL).
+    // Routing: short-prompt → SchedulerActor; long-prompt → GenerationStream.
+    // B1-p2.4: VL fallback removed — VL requests now route through Scheduler
+    // via Scheduler::admit/admit_mid + batched_prefill_vl.
     // COMPAT(3b-2): long-prompt fallback to GS sunsets in 3c+ chunked-prefill phase.
-    //
-    // Note (3b-3): when prefill_chunk_size == 0 (chunking disabled by
-    // config), this predicate routes ALL text-only requests to the
-    // SchedulerActor regardless of length — equivalent to the GS path's
-    // behavior when chunking is also disabled there. The 3c+
-    // chunked-prefill phase will need to revisit this semantic.
-    let has_images = request.pixel_values.is_some();
     let prompt_len = request.prompt_ids.len();
-    let use_scheduler =
-        !has_images && (state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size);
+    let use_scheduler = state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size;
 
     match (stream, use_scheduler) {
         (true, true) => serve_via_scheduler_stream(state, request, model_label).await,
