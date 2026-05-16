@@ -30,23 +30,35 @@ use super::AppState;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Map a SchedulerActor admit Err into an HTTP response. Spec §4.7:
-/// `SchedulerError::QueueFull` → 503 + Retry-After: 5; everything else → 400.
+/// Map a SchedulerActor admit Err into an HTTP response. Spec §4.7 + §2 G7:
+/// - `SchedulerError::QueueFull` → 503 Service Unavailable + Retry-After: 5
+/// - `SchedulerError::RequestTooLarge` → 413 Payload Too Large (no Retry-After)
+/// - Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request
 ///
 /// Pre-3e.3 used `err.to_string().contains("admission queue full")` string
 /// match (spec §9 R3 acknowledged-fragile). 3e.3 replaces with typed
-/// `anyhow::Error::downcast_ref::<SchedulerError>()`.
+/// `anyhow::Error::downcast_ref::<SchedulerError>()`. 3f adds RequestTooLarge arm.
 fn admit_err_to_response(err: anyhow::Error) -> Response {
     use crate::core::SchedulerError;
     use axum::http::HeaderValue;
     let msg = format!("{err:#}");
-    if let Some(SchedulerError::QueueFull { .. }) = err.downcast_ref::<SchedulerError>() {
-        let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
-        resp.headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-        resp
-    } else {
-        (StatusCode::BAD_REQUEST, msg).into_response()
+    match err.downcast_ref::<SchedulerError>() {
+        Some(SchedulerError::QueueFull { .. }) => {
+            // 503 Service Unavailable + Retry-After
+            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+            resp
+        }
+        Some(SchedulerError::RequestTooLarge { .. }) => {
+            // 413 Payload Too Large — request needed cap exceeds server's
+            // effective_cap_max. Body includes needed + max via Display.
+            (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response()
+        }
+        None => {
+            // Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request.
+            (StatusCode::BAD_REQUEST, msg).into_response()
+        }
     }
 }
 
