@@ -250,6 +250,9 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         model_id: "test-model".to_string(),
         prefill_chunk_size: 256,
         scheduler_handle: handle.clone(),
+        b_max: 4,
+        admission_deadline_ms: 5,
+        admission_queue_max: 32,
     };
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);
