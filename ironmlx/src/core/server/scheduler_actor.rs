@@ -16,8 +16,8 @@
 //!
 //! See `docs/superpowers/specs/2026-05-13-b1-p2-3b-3-admission-window-design.md` § 4.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,15 +27,6 @@ use crate::core::generate::GenerateRequest;
 use crate::core::scheduler::{Phase, RequestId, Scheduler, StepEvent};
 use crate::models::Qwen35Model;
 use crate::Result;
-
-/// Admission window deadline: maximum time `driver_loop` waits to pack
-/// additional `Admit` commands into the current batch after the first
-/// admit arrives. Hard limit — new admits during the window do NOT
-/// reset it (prevents starvation under sustained admit pressure).
-///
-/// Hardcoded for 3b-3; a future phase (3d/3e) will surface this via
-/// `AppConfig` and a CLI flag.
-const ADMISSION_DEADLINE: Duration = Duration::from_millis(5);
 
 /// Commands accepted by the actor. 3b-2 ships only [`Admit`]; later
 /// phases may add `Cancel { id }`, `Stats`, etc.
@@ -48,6 +39,14 @@ pub enum SchedulerCommand {
         request: GenerateRequest,
         reply_tx: oneshot::Sender<Result<AdmitReply>>,
     },
+}
+
+/// A request parked in `driver_loop`'s admission queue while the scheduler
+/// is at `active_count == b_max`. Drained when `gc_finished_rows` frees a
+/// slot, then handed to `handle_admit_mid`.
+struct PendingAdmit {
+    request: GenerateRequest,
+    reply_tx: oneshot::Sender<Result<AdmitReply>>,
 }
 
 /// Event yielded by the rolling decode loop's biased select. Either a
@@ -92,27 +91,57 @@ pub struct SchedulerActorHandle {
     /// Doc-hidden.
     #[doc(hidden)]
     pub saturate_triggered: Arc<AtomicU64>,
+    /// Test-observable peak `admission_queue.len()` ever reached. Used by
+    /// integration tests to confirm the queue drained (e.g., `peak >= N` for
+    /// c=N+b_max admit burst). Doc-hidden — production code shouldn't read it.
+    #[doc(hidden)]
+    pub queue_depth_peak: Arc<AtomicUsize>,
+    /// Test-observable count of admit requests rejected with "admission
+    /// queue full" Err (queue_max overflow). Doc-hidden.
+    #[doc(hidden)]
+    pub queue_rejected: Arc<AtomicU64>,
 }
 
 /// Spawn the driver task and return a handle. The driver runs on
 /// `tokio::task::spawn_blocking` because [`Scheduler`] is `!Send` (sampler
 /// holds a `Cell<Array>`) and the model lock is sync.
-pub fn spawn_scheduler_actor(model: Arc<Mutex<Qwen35Model>>, b_max: usize) -> SchedulerActorHandle {
+///
+/// # Arguments
+/// - `model` — shared model handle (Mutex-protected sync state).
+/// - `b_max` — maximum concurrent in-flight requests (Scheduler slot count).
+/// - `admission_deadline` — drain-window timeout after the first admit in a
+///   batch arrives. Hard limit; new admits do not reset it.
+/// - `admission_queue_max` — capacity of the FIFO admission queue. `0`
+///   disables queueing (immediate Err on saturation, mirroring pre-3d).
+pub fn spawn_scheduler_actor(
+    model: Arc<Mutex<Qwen35Model>>,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+) -> SchedulerActorHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let admit_count = Arc::new(AtomicU64::new(0));
     let batch_count = Arc::new(AtomicU64::new(0));
     let saturate_triggered = Arc::new(AtomicU64::new(0));
+    let queue_depth_peak = Arc::new(AtomicUsize::new(0));
+    let queue_rejected = Arc::new(AtomicU64::new(0));
     let admit_count_for_task = admit_count.clone();
     let batch_count_for_task = batch_count.clone();
     let saturate_triggered_for_task = saturate_triggered.clone();
+    let queue_depth_peak_for_task = queue_depth_peak.clone();
+    let queue_rejected_for_task = queue_rejected.clone();
     tokio::task::spawn_blocking(move || {
         driver_loop(
             model,
             b_max,
+            admission_deadline,
+            admission_queue_max,
             cmd_rx,
             admit_count_for_task,
             batch_count_for_task,
             saturate_triggered_for_task,
+            queue_depth_peak_for_task,
+            queue_rejected_for_task,
         );
     });
     SchedulerActorHandle {
@@ -120,23 +149,34 @@ pub fn spawn_scheduler_actor(model: Arc<Mutex<Qwen35Model>>, b_max: usize) -> Sc
         admit_count,
         batch_count,
         saturate_triggered,
+        queue_depth_peak,
+        queue_rejected,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn driver_loop(
     model: Arc<Mutex<Qwen35Model>>,
     b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
     admit_count: Arc<AtomicU64>,
     batch_count: Arc<AtomicU64>,
     saturate_triggered: Arc<AtomicU64>,
+    queue_depth_peak: Arc<AtomicUsize>,
+    queue_rejected: Arc<AtomicU64>,
 ) {
     let mut sched = Scheduler::new(b_max);
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+    let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();
 
     'outer: loop {
         // ===== Outer Idle: block waiting for first admit (or shutdown). =====
+        // Outer Idle is reached only after evict_all clears all slots; the
+        // admission queue is invariantly empty here (any queue elements were
+        // drained inside the rolling loop before reaching this point).
         let Some(first_cmd) = rt.block_on(cmd_rx.recv()) else {
             return; // cmd_rx closed; all senders dropped.
         };
@@ -148,16 +188,21 @@ fn driver_loop(
         }
 
         // ===== Admission window: drain additional admits until deadline
-        //       or saturate at b_max. =====
+        //       or saturate at b_max. Beyond b_max within the window, push
+        //       to admission_queue (bounded by admission_queue_max). =====
         if sched.active_count() < b_max {
             rt.block_on(drain_window(
                 &mut cmd_rx,
                 &mut sched,
                 &mut event_txs,
+                &mut admission_queue,
                 &admit_count,
                 &saturate_triggered,
+                &queue_depth_peak,
+                &queue_rejected,
                 b_max,
-                ADMISSION_DEADLINE,
+                admission_queue_max,
+                admission_deadline,
             ));
         }
 
@@ -182,11 +227,19 @@ fn driver_loop(
                     );
                 }
                 event_txs.clear();
+                // Anything queued during the failed-batch window has nowhere
+                // to land — reject with Err so callers see a clear error
+                // rather than hanging.
+                while let Some(pending) = admission_queue.pop_front() {
+                    let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                        "scheduler poisoned after prefill error"
+                    )));
+                }
                 continue 'outer;
             }
         }
 
-        // ===== Rolling decode loop with biased mid-batch admit. =====
+        // ===== Rolling decode loop with biased mid-batch admit + queue drain. =====
         'rolling: loop {
             let evt: RollingEvent = rt.block_on(async {
                 tokio::select! {
@@ -201,12 +254,28 @@ fn driver_loop(
 
             match evt {
                 RollingEvent::Shutdown => {
-                    // cmd_rx closed. Drop event_txs (handlers see EOF), return.
                     event_txs.clear();
+                    // Reject any queued admits — callers shouldn't hang.
+                    while let Some(pending) = admission_queue.pop_front() {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err(anyhow::anyhow!("scheduler shutting down")));
+                    }
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
-                    handle_admit_mid(cmd, &mut sched, &mut event_txs, &admit_count, &model);
+                    if sched.active_count() >= b_max {
+                        // Slot full — push to queue (or reject if queue full).
+                        enqueue_or_reject(
+                            cmd,
+                            &mut admission_queue,
+                            admission_queue_max,
+                            &queue_depth_peak,
+                            &queue_rejected,
+                        );
+                    } else {
+                        handle_admit_mid(cmd, &mut sched, &mut event_txs, &admit_count, &model);
+                    }
                 }
                 RollingEvent::Step => {
                     let step_result = {
@@ -219,6 +288,18 @@ fn driver_loop(
                                 route_event(ev, &event_txs);
                             }
                             sched.gc_finished_rows(&mut event_txs);
+                            // ===== Post-gc queue drain. =====
+                            // Free slots → pull from admission_queue head
+                            // until either the queue empties or we re-
+                            // saturate at b_max.
+                            drain_admission_queue(
+                                &mut admission_queue,
+                                &mut sched,
+                                &mut event_txs,
+                                &admit_count,
+                                &model,
+                                b_max,
+                            );
                         }
                         Err(e) => {
                             tracing::error!("[SchedulerActor] step error: {e:?}");
@@ -229,27 +310,134 @@ fn driver_loop(
                                 );
                             }
                             event_txs.clear();
+                            while let Some(pending) = admission_queue.pop_front() {
+                                let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                                    "scheduler poisoned after step error"
+                                )));
+                            }
                             continue 'outer;
                         }
                     }
                 }
             }
 
-            // ===== Exit rolling loop when active_count == 0. =====
+            // ===== Exit rolling loop when active_count == 0 AND queue empty. =====
+            // Spec §9 R1: if `active_count() == 0` but admission_queue is
+            // non-empty (mid-rolling admit arrived AFTER all rows finished),
+            // treat as a "new batch within rolling": evict_all to reset to
+            // Idle, then admit from queue + drain_window + prefill_admitted
+            // inline (mirrors the existing post-empty path but pulls the
+            // first admit from the queue instead of cmd_rx).
             if sched.active_count() == 0 {
+                if !admission_queue.is_empty() {
+                    // Reset to Idle for fresh batch.
+                    if let Err(evict_err) = sched.evict_all() {
+                        tracing::warn!(
+                            "[SchedulerActor] evict_all between batches (queue drain) failed: \
+                             {evict_err:?}; rejecting queued admits"
+                        );
+                        while let Some(pending) = admission_queue.pop_front() {
+                            let _ = pending
+                                .reply_tx
+                                .send(Err(anyhow::anyhow!("scheduler evict_all failed")));
+                        }
+                        event_txs.clear();
+                        continue 'outer;
+                    }
+                    event_txs.clear();
+                    // Pop first queued admit as the new batch's first admit.
+                    let pending = admission_queue
+                        .pop_front()
+                        .expect("queue non-empty checked");
+                    handle_admit(
+                        SchedulerCommand::Admit {
+                            request: pending.request,
+                            reply_tx: pending.reply_tx,
+                        },
+                        &mut sched,
+                        &mut event_txs,
+                        &admit_count,
+                    );
+                    if sched.active_count() == 0 {
+                        // Admit failed; loop to drain more queue (or exit).
+                        continue 'rolling;
+                    }
+                    if sched.active_count() < b_max {
+                        // Drain queue head-by-head into the new batch (no
+                        // deadline — these are already-queued admits, not
+                        // racing-in cmd_rx). Then optionally drain_window
+                        // for fresh cmd_rx admits.
+                        while sched.active_count() < b_max {
+                            let Some(p) = admission_queue.pop_front() else {
+                                break;
+                            };
+                            handle_admit(
+                                SchedulerCommand::Admit {
+                                    request: p.request,
+                                    reply_tx: p.reply_tx,
+                                },
+                                &mut sched,
+                                &mut event_txs,
+                                &admit_count,
+                            );
+                        }
+                        // Optionally absorb cmd_rx admits arriving right now.
+                        if sched.active_count() < b_max {
+                            rt.block_on(drain_window(
+                                &mut cmd_rx,
+                                &mut sched,
+                                &mut event_txs,
+                                &mut admission_queue,
+                                &admit_count,
+                                &saturate_triggered,
+                                &queue_depth_peak,
+                                &queue_rejected,
+                                b_max,
+                                admission_queue_max,
+                                admission_deadline,
+                            ));
+                        }
+                    }
+                    batch_count.fetch_add(1, Ordering::Relaxed);
+                    let prefill_result = {
+                        let model_lock = model.blocking_lock();
+                        sched.prefill_admitted(&model_lock)
+                    };
+                    match prefill_result {
+                        Ok(events) => {
+                            for ev in events {
+                                route_event(ev, &event_txs);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "[SchedulerActor] re-prefill (queue drain) error: {e:?}"
+                            );
+                            if let Err(evict_err) = sched.evict_all() {
+                                tracing::warn!(
+                                    "[SchedulerActor] evict_all after re-prefill error also \
+                                     failed: {evict_err:?}; rejecting remaining queued admits"
+                                );
+                            }
+                            event_txs.clear();
+                            while let Some(p) = admission_queue.pop_front() {
+                                let _ = p.reply_tx.send(Err(anyhow::anyhow!(
+                                    "scheduler poisoned after re-prefill error"
+                                )));
+                            }
+                            continue 'outer;
+                        }
+                    }
+                    continue 'rolling;
+                }
+                // Queue empty + no active rows — same logic as pre-3d.
                 match cmd_rx.try_recv() {
                     Ok(cmd) => {
-                        // Pending command arrived after last row finished but
-                        // before the next select tick. Treat as start of a new
-                        // outer batch: drop Finished->Idle via evict_all, then
-                        // handle_admit + drain_window + prefill_admitted
-                        // inline (cannot requeue into mpsc::Receiver).
                         if let Err(evict_err) = sched.evict_all() {
                             tracing::warn!(
                                 "[SchedulerActor] evict_all between batches failed: \
                                  {evict_err:?}; rejecting incoming admit"
                             );
-                            // Surface the failure to the caller (best effort).
                             let SchedulerCommand::Admit { reply_tx, .. } = cmd;
                             let _ = reply_tx.send(Err(evict_err));
                             event_txs.clear();
@@ -258,7 +446,6 @@ fn driver_loop(
                         event_txs.clear();
                         handle_admit(cmd, &mut sched, &mut event_txs, &admit_count);
                         if sched.active_count() == 0 {
-                            // admit failed; nothing more to do.
                             break 'rolling;
                         }
                         if sched.active_count() < b_max {
@@ -266,10 +453,14 @@ fn driver_loop(
                                 &mut cmd_rx,
                                 &mut sched,
                                 &mut event_txs,
+                                &mut admission_queue,
                                 &admit_count,
                                 &saturate_triggered,
+                                &queue_depth_peak,
+                                &queue_rejected,
                                 b_max,
-                                ADMISSION_DEADLINE,
+                                admission_queue_max,
+                                admission_deadline,
                             ));
                         }
                         batch_count.fetch_add(1, Ordering::Relaxed);
@@ -310,8 +501,6 @@ fn driver_loop(
         }
 
         // After rolling loop: reset cache + Phase for next outer iteration.
-        // evict_all is only legal in Decoding/Finished. Skip if already Idle
-        // (e.g., the Ok(cmd) -> admit failed sub-path already called evict_all).
         if matches!(sched.phase(), Phase::Decoding | Phase::Finished) {
             if let Err(evict_err) = sched.evict_all() {
                 tracing::warn!(
@@ -325,31 +514,50 @@ fn driver_loop(
 }
 
 /// Drain additional `Admit` commands until either the deadline expires or
-/// `Scheduler::active_count()` saturates at `b_max`. Hard deadline — new
-/// admits do NOT reset the timer.
+/// the Scheduler saturates at `b_max`. Hard deadline — new admits do NOT
+/// reset the timer. Once saturated, additional admits within the window
+/// go to the admission queue (bounded by `admission_queue_max`).
+#[allow(clippy::too_many_arguments)]
 async fn drain_window(
     cmd_rx: &mut mpsc::Receiver<SchedulerCommand>,
     sched: &mut Scheduler,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    admission_queue: &mut VecDeque<PendingAdmit>,
     admit_count: &Arc<AtomicU64>,
     saturate_triggered: &Arc<AtomicU64>,
+    queue_depth_peak: &Arc<AtomicUsize>,
+    queue_rejected: &Arc<AtomicU64>,
     b_max: usize,
+    queue_max: usize,
     deadline: Duration,
 ) {
     let timer = tokio::time::sleep(deadline);
     tokio::pin!(timer);
+    let mut saturated = false;
     loop {
         tokio::select! {
-            // `biased;` gives the deadline branch priority when both are
-            // ready in the same tick, guaranteeing the hard-limit semantic.
             biased;
             _ = &mut timer => return,
             maybe = cmd_rx.recv() => {
                 let Some(cmd) = maybe else { return }; // channel closed
+                if saturated {
+                    // Already at b_max — push to queue or reject.
+                    enqueue_or_reject(
+                        cmd,
+                        admission_queue,
+                        queue_max,
+                        queue_depth_peak,
+                        queue_rejected,
+                    );
+                    continue;
+                }
                 handle_admit(cmd, sched, event_txs, admit_count);
                 if sched.active_count() >= b_max {
                     saturate_triggered.fetch_add(1, Ordering::Relaxed);
-                    return;
+                    saturated = true;
+                    // Stay in the loop until deadline so queued admits
+                    // arriving during the window's remaining time are
+                    // captured. (Pre-3d returned here; 3d keeps draining.)
                 }
             }
         }
@@ -432,6 +640,52 @@ fn handle_admit_mid(
         Err(e) => {
             let _ = reply_tx.send(Err(e));
         }
+    }
+}
+
+/// Push a pending admit into the queue if there's capacity; otherwise reply
+/// with Err("admission queue full") and bump `queue_rejected`. Updates
+/// `queue_depth_peak` via `fetch_max`.
+fn enqueue_or_reject(
+    cmd: SchedulerCommand,
+    queue: &mut VecDeque<PendingAdmit>,
+    queue_max: usize,
+    queue_depth_peak: &Arc<AtomicUsize>,
+    queue_rejected: &Arc<AtomicU64>,
+) {
+    let SchedulerCommand::Admit { request, reply_tx } = cmd;
+    if queue.len() >= queue_max {
+        queue_rejected.fetch_add(1, Ordering::Relaxed);
+        let _ = reply_tx.send(Err(anyhow::anyhow!(
+            "admission queue full: capacity={queue_max} reached"
+        )));
+        return;
+    }
+    queue.push_back(PendingAdmit { request, reply_tx });
+    queue_depth_peak.fetch_max(queue.len(), Ordering::Relaxed);
+}
+
+/// Drain the admission queue head-by-head while the Scheduler has free
+/// slots. Each drained entry is handed to `handle_admit_mid` which runs
+/// the B=1 prefill + adopts the row + sends `AdmitReply`. Stops when the
+/// queue empties or `active_count() == b_max`.
+fn drain_admission_queue(
+    queue: &mut VecDeque<PendingAdmit>,
+    sched: &mut Scheduler,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    admit_count: &Arc<AtomicU64>,
+    model: &Arc<Mutex<Qwen35Model>>,
+    b_max: usize,
+) {
+    while sched.active_count() < b_max {
+        let Some(pending) = queue.pop_front() else {
+            return;
+        };
+        let cmd = SchedulerCommand::Admit {
+            request: pending.request,
+            reply_tx: pending.reply_tx,
+        };
+        handle_admit_mid(cmd, sched, event_txs, admit_count, model);
     }
 }
 

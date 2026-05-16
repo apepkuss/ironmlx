@@ -51,7 +51,12 @@ pub async fn serve(
     // 3b-2: spawn the SchedulerActor driver task. b_max=4 hardcoded
     // (matches B1-p2.3b-1 integration coverage). Future phase will make
     // this configurable.
-    let scheduler_handle = scheduler_actor::spawn_scheduler_actor(model.clone(), 4);
+    let scheduler_handle = scheduler_actor::spawn_scheduler_actor(
+        model.clone(),
+        4,
+        std::time::Duration::from_millis(5),
+        32,
+    );
     let state = AppState {
         model,
         tokenizer: Arc::new(tokenizer),

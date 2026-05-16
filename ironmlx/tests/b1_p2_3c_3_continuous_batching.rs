@@ -182,7 +182,7 @@ async fn continuous_batching_mid_decode_admit() {
     };
 
     // Drive actor.
-    let handle = spawn_scheduler_actor(model.clone(), 2);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32);
 
     let reply_a = submit_admit(
         &handle.cmd_tx,
@@ -272,7 +272,7 @@ async fn continuous_batching_full_reject() {
     let prompt_c = tokenize_prompt(&tokenizer, "Goodbye");
     let stop: Vec<u32> = tokenizer.eos_token_ids().to_vec();
 
-    let handle = spawn_scheduler_actor(model.clone(), 2);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32);
 
     let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 20, stop.clone()))
         .await
@@ -315,7 +315,7 @@ async fn continuous_batching_drains_to_empty() {
     let prompt_b = tokenize_prompt(&tokenizer, "World");
     let stop: Vec<u32> = tokenizer.eos_token_ids().to_vec();
 
-    let handle = spawn_scheduler_actor(model.clone(), 2);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32);
 
     // First admit + drain.
     let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 4, stop.clone()))
