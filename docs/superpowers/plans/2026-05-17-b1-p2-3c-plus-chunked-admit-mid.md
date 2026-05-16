@@ -44,7 +44,13 @@ Expected: all three exit 0. If not, stop and ask Boss — base branch is broken.
 
 ---
 
-## Task 1: Scheduler::admit_mid_begin/chunk/finalize + AdmitMidHandle (~1d, sonnet)
+## Task 1 + Task 2: Scheduler API refactor + driver_loop orchestrator (atomic, ~1.5d, sonnet)
+
+**Why combined:** removing `Scheduler::admit_mid` breaks `scheduler_actor.rs::handle_admit_mid`'s call site. Boss's "no compat code" preference + "every commit fmt/clippy/build green" gate require these two changes to land in one commit. Subagent does T1 + T2 together; reviewer subagent verifies both halves.
+
+### Original T1 steps below; original T2 steps spliced in at the end before Task 3
+
+## Task 1 (subtask): Scheduler::admit_mid_begin/chunk/finalize + AdmitMidHandle
 
 **Files:**
 - Modify: `ironmlx/src/core/scheduler.rs` (replace `admit_mid_inner`, add 3 new public methods + `AdmitMidHandle` struct)
@@ -703,36 +709,11 @@ MLX_DIR=$HOME/.local/mlx cargo +stable test --release --lib -p ironmlx -- core::
 
 Expected: existing tests still pass + 3 new VL-helper tests pass. If any existing test fails, it's likely from removed `admit_mid` API — refactor the test to use the new chunked path or remove if obsolete.
 
-- [ ] **Step 1.15: Hygiene gate + commit T1.**
-
-```bash
-MLX_DIR=$HOME/.local/mlx cargo +nightly fmt --all -- --check
-MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace --exclude ironmlx-app -- -D warnings
-MLX_DIR=$HOME/.local/mlx cargo +stable build --release
-git add ironmlx/src/core/scheduler.rs ironmlx/src/core/generate.rs
-git commit -m "$(cat <<'EOF'
-feat(b1-p2.3c+-t1): Scheduler::admit_mid_{begin,chunk,finalize}
-
-Replaces Scheduler::admit_mid + admit_mid_inner (single-shot
-batched_prefill) with three-phase chunked entry points carrying state
-via AdmitMidHandle. Caller (driver_loop in T2) orchestrates the chunk
-loop and interleaves Scheduler::step between chunks.
-
-Adds RequestState::prefill_chunk_size carry-through, build_chunked_prefill_*
-mask helpers (or reuses GS chunked-prefill helpers), and 3 unit tests
-covering the VL image_pad boundary-crossing detection helper.
-
-Spec ref: §4.2-4.3. Breaks scheduler_actor.rs::handle_admit_mid
-intentionally; T2 rewrites the caller.
-
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-EOF
-)"
-```
+- [ ] **Step 1.15: DO NOT commit yet.** This subtask intentionally breaks `scheduler_actor.rs::handle_admit_mid`'s call site. The combined T1+T2 commit happens at the end of Task 2 (subtask) below. Proceed directly to Task 2 (subtask).
 
 ---
 
-## Task 2: handle_admit_mid_chunked in scheduler_actor.rs (~0.5d, sonnet)
+## Task 2 (subtask of combined T1+T2): handle_admit_mid_chunked in scheduler_actor.rs
 
 **Files:**
 - Modify: `ironmlx/src/core/server/scheduler_actor.rs` (replace `handle_admit_mid` with `handle_admit_mid_chunked`)
@@ -851,13 +832,15 @@ Change `handle_admit_mid(cmd, ...)` → `handle_admit_mid_chunked(cmd, ...)` at 
 
 - [ ] **Remove the old `handle_admit_mid` fn outright.** No compat shim.
 
-### Step 2.4: Build + hygiene + commit T2
+### Step 2.4: Build + hygiene + commit combined T1+T2
 
 - [ ] **Build:**
 
 ```bash
 MLX_DIR=$HOME/.local/mlx cargo +stable build --release 2>&1 | tail -5
 ```
+
+Expected: clean build (T1's broken state is now fixed by T2's caller swap).
 
 - [ ] **Hygiene:**
 
@@ -872,20 +855,32 @@ MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace --excl
 MLX_DIR=$HOME/.local/mlx cargo +stable test --release --lib -p ironmlx 2>&1 | tail -10
 ```
 
-- [ ] **Commit:**
+- [ ] **Commit (combined T1+T2 atomic):**
 
 ```bash
-git add ironmlx/src/core/server/scheduler_actor.rs
+git add ironmlx/src/core/scheduler.rs ironmlx/src/core/generate.rs ironmlx/src/core/server/scheduler_actor.rs
 git commit -m "$(cat <<'EOF'
-feat(b1-p2.3c+-t2): driver_loop handle_admit_mid_chunked
+feat(b1-p2.3c+-t1+t2): chunked admit_mid Scheduler API + driver_loop orchestrator
 
-Replaces single-shot handle_admit_mid with a 3-phase orchestrator that
-loops admit_mid_chunk ↔ step ↔ ... ↔ admit_mid_finalize. The model
-lock is acquired per phase (begin / per-chunk / per-step / finalize)
-so chunk forward and active-row step alternate, and active rows'
-SSE consumers see token events at chunk-boundary cadence.
+Replaces Scheduler::admit_mid (single-shot batched_prefill) with three
+chunked entry points carrying state via AdmitMidHandle:
+- admit_mid_begin: reserve slot, alloc temp cache, capture vision args.
+- admit_mid_chunk: one chunk into temp_cache; returns is_last.
+- admit_mid_finalize: adopt temp → main + sample first token.
 
-Spec ref: §4.3 driver_loop orchestration.
+Driver_loop's new handle_admit_mid_chunked loops admit_mid_chunk ↔
+Scheduler::step ↔ ... ↔ admit_mid_finalize. Model lock reacquired per
+phase so active-row SSE consumers see token events at chunk-boundary
+cadence rather than a single multi-second prefill stall.
+
+Adds RequestState::prefill_chunk_size carry-through, build_chunked_prefill_*
+mask helpers (or reuses GS chunked-prefill helpers), and 3 unit tests
+covering the VL image_pad boundary-crossing detection helper.
+
+T1 + T2 are atomic per Boss "no compat code" preference — single
+deletion + replacement of pre-3c+ admit_mid call path.
+
+Spec ref: §4.2-4.3.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
