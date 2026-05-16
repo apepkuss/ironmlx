@@ -23,6 +23,12 @@ fn default_partial_rotary_factor() -> f32 {
     0.25
 }
 
+fn default_max_position_embeddings() -> i32 {
+    // Conservative fallback for older / non-Qwen3 configs that omit the field.
+    // Production Qwen3.5 configs always declare it (262144 for 4B variant).
+    32768
+}
+
 fn default_rope_theta() -> f32 {
     100_000.0
 }
@@ -78,6 +84,12 @@ pub struct Qwen35Config {
     /// Present in multimodal variants (VL models); `None` for text-only.
     #[serde(default)]
     pub vision_config: Option<VisionConfig>,
+    /// Maximum sequence length the model supports (= `text_config.max_position_embeddings`
+    /// from config.json). Qwen3.5-4B: 262144. Used as a hard upper bound on
+    /// per-request `prompt_len + max_new_tokens` to prevent MRoPE
+    /// out-of-distribution garbage. B1-p2.3f.
+    #[serde(default = "default_max_position_embeddings")]
+    pub max_position_embeddings: i32,
 }
 
 impl Default for RopeParams {

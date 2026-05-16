@@ -167,7 +167,7 @@ fn driver_loop(
     queue_depth_peak: Arc<AtomicUsize>,
     queue_rejected: Arc<AtomicU64>,
 ) {
-    let mut sched = Scheduler::new(b_max);
+    let mut sched = Scheduler::new(b_max, 32768); // T2 will plumb real effective_cap_max
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();

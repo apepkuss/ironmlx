@@ -138,7 +138,7 @@ fn b1_p2_3b_1_b2_happy() {
     );
 
     // 2. Scheduler B=2 run.
-    let mut sched = Scheduler::new(2);
+    let mut sched = Scheduler::new(2, 32768);
     assert_eq!(sched.phase(), Phase::Idle);
 
     let id_a = sched
@@ -312,7 +312,7 @@ fn b1_p2_3b_1_b4_happy() {
     }
 
     // 2. Scheduler B=4 run (Option A: prefill_admitted returns Vec<StepEvent>).
-    let mut sched = Scheduler::new(4);
+    let mut sched = Scheduler::new(4, 32768);
     let ids: Vec<_> = prompt_ids
         .iter()
         .map(|p| {
@@ -414,7 +414,7 @@ fn b1_p2_3b_1_mixed_finish() {
         stop_token_ids.clone(),
     );
 
-    let mut sched = Scheduler::new(2);
+    let mut sched = Scheduler::new(2, 32768);
     let id_a = sched
         .admit(GenerateRequest {
             prompt_ids: prompt_ids.clone(),

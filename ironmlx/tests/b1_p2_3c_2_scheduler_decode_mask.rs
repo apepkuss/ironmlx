@@ -168,7 +168,7 @@ async fn scheduler_per_row_finish_different_steps() {
     let (tokens_a, tokens_b, finish_step_a) = tokio::task::spawn_blocking(move || {
         let model_guard = model.blocking_lock();
 
-        let mut sched = Scheduler::new(2);
+        let mut sched = Scheduler::new(2, 32768);
         let id_a = sched
             .admit(make_request(
                 prompt_ids_outer.clone(),

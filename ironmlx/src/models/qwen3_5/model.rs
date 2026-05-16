@@ -642,6 +642,7 @@ mod tests {
                 mrope_section: vec![2, 1, 1],
             },
             vision_config: None,
+            max_position_embeddings: 32768,
         }
     }
 

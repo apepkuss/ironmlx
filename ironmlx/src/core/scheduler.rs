@@ -33,6 +33,13 @@ pub enum SchedulerError {
     /// at `capacity`. Maps to HTTP 503 + Retry-After.
     #[error("admission queue full: capacity={capacity} reached")]
     QueueFull { capacity: usize },
+
+    /// Request's `prompt_len + max_new_tokens` exceeds the server's
+    /// effective cap_max (the smaller of `--max-cache-cap` CLI flag and
+    /// the model's `max_position_embeddings`). Maps to HTTP 413
+    /// Payload Too Large. B1-p2.3f.
+    #[error("request too large: needs cap={needed} but server max_cache_cap={max}")]
+    RequestTooLarge { needed: usize, max: usize },
 }
 
 use crate::core::generate::{
@@ -181,6 +188,11 @@ pub struct Scheduler {
     phase: Phase,
     cache: Option<Vec<LayerCache>>,
     poisoned: bool,
+    /// Upper bound on `prompt_len + max_new_tokens` per request, computed
+    /// at boot as `min(cli_max_cache_cap, model.config.max_position_embeddings)`.
+    /// `admit` and `admit_mid` reject requests exceeding this with
+    /// [`SchedulerError::RequestTooLarge`]. B1-p2.3f.
+    effective_cap_max: usize,
 }
 
 impl std::fmt::Debug for Scheduler {
@@ -198,7 +210,10 @@ impl std::fmt::Debug for Scheduler {
 
 impl Scheduler {
     /// Construct a scheduler with `b_max` pre-allocated slots, all `None`.
-    pub fn new(b_max: usize) -> Self {
+    /// `effective_cap_max` is the hard upper bound on per-request
+    /// `prompt_len + max_new_tokens` — admit gates reject requests beyond
+    /// this with [`SchedulerError::RequestTooLarge`] (HTTP 413 downstream).
+    pub fn new(b_max: usize, effective_cap_max: usize) -> Self {
         let mut slots = Vec::with_capacity(b_max);
         for _ in 0..b_max {
             slots.push(None);
@@ -210,6 +225,7 @@ impl Scheduler {
             phase: Phase::Idle,
             cache: None,
             poisoned: false,
+            effective_cap_max,
         }
     }
 
@@ -227,6 +243,15 @@ impl Scheduler {
     /// independent sampler state.
     pub fn admit(&mut self, req: GenerateRequest) -> Result<RequestId> {
         self.ensure_not_poisoned()?;
+        // B1-p2.3f: cap check before admission. Reject oversize requests
+        // upfront rather than allocating a slot then failing at prefill.
+        let cap_needed = req.prompt_ids.len().saturating_add(req.max_new_tokens);
+        if cap_needed > self.effective_cap_max {
+            return Err(anyhow::Error::new(SchedulerError::RequestTooLarge {
+                needed: cap_needed,
+                max: self.effective_cap_max,
+            }));
+        }
         if self.phase == Phase::Finished {
             return Err(anyhow!(
                 "scheduler in Finished phase: cannot admit; call evict_all first"
@@ -374,11 +399,12 @@ impl Scheduler {
         for slot in self.slots.iter_mut() {
             *slot = None;
         }
-        if let Some(cache) = self.cache.as_mut() {
-            for lc in cache.iter_mut() {
-                lc.reset()?;
-            }
-        }
+        // B1-p2.3f: drop the cache so the next prefill_admitted lazy-allocates
+        // with cap matching the new batch's requirements. ~10ms re-alloc per
+        // outer batch is negligible vs prefill GPU time (100s of ms to
+        // seconds). Pre-3f kept the cache + reset offsets but locked the
+        // first batch's cap forever — incompatible with dynamic cap.
+        self.cache = None;
         self.phase = Phase::Idle;
         self.poisoned = false;
         Ok(())
@@ -834,6 +860,16 @@ impl Scheduler {
         model: &Qwen35Model,
     ) -> Result<(RequestId, StepEvent)> {
         self.ensure_not_poisoned()?;
+        // B1-p2.3f: mirror admit's cap gate. Mid-batch admits must also
+        // respect the bound — otherwise the queue drain path could push an
+        // oversize request through.
+        let cap_needed = req.prompt_ids.len().saturating_add(req.max_new_tokens);
+        if cap_needed > self.effective_cap_max {
+            return Err(anyhow::Error::new(SchedulerError::RequestTooLarge {
+                needed: cap_needed,
+                max: self.effective_cap_max,
+            }));
+        }
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "admit_mid illegal in {:?} phase: only Decoding (use admit for Idle/Admitting)",
@@ -1092,7 +1128,7 @@ mod tests {
 
     #[test]
     fn scheduler_new_empty() {
-        let s = Scheduler::new(4);
+        let s = Scheduler::new(4, 32768);
         assert_eq!(s.b_max(), 4);
         assert_eq!(s.active_count(), 0);
         assert!(s.active().is_empty());
@@ -1101,7 +1137,7 @@ mod tests {
 
     #[test]
     fn admit_happy_path() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
         assert_eq!(id, RequestId(0));
         assert_eq!(s.active_count(), 1);
@@ -1116,7 +1152,7 @@ mod tests {
 
     #[test]
     fn admit_assigns_distinct_rows() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let ids: Vec<_> = (0..4)
             .map(|i| s.admit(mk_req(vec![i as u32])).expect("admit"))
             .collect();
@@ -1127,7 +1163,7 @@ mod tests {
 
     #[test]
     fn evict_releases_row() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.active_count(), 1);
         s.evict(id).expect("evict");
@@ -1137,7 +1173,7 @@ mod tests {
 
     #[test]
     fn admit_after_evict_reuses_row() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         assert_eq!(s.get(id_a).unwrap().row_idx, 0);
         s.evict(id_a).expect("evict a");
@@ -1148,7 +1184,7 @@ mod tests {
 
     #[test]
     fn admit_full_returns_err() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         s.admit(mk_req(vec![1])).expect("admit 0");
         s.admit(mk_req(vec![2])).expect("admit 1");
         let err = s.admit(mk_req(vec![3])).expect_err("admit full");
@@ -1159,14 +1195,14 @@ mod tests {
 
     #[test]
     fn evict_unknown_id_returns_err() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let err = s.evict(RequestId(42)).expect_err("evict unknown");
         assert!(format!("{err}").contains("not found"));
     }
 
     #[test]
     fn id_monotonic_after_evict() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         s.evict(id_a).expect("evict a");
         let id_b = s.admit(mk_req(vec![2])).expect("admit b");
@@ -1180,7 +1216,7 @@ mod tests {
 
     #[test]
     fn sampler_cloned_per_request() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let id_b = s.admit(mk_req(vec![2])).expect("admit b");
 
@@ -1192,7 +1228,7 @@ mod tests {
 
     #[test]
     fn occupied_rows_reflects_state() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _id_0 = s.admit(mk_req(vec![1])).expect("admit 0");
         let id_1 = s.admit(mk_req(vec![2])).expect("admit 1");
         let _id_2 = s.admit(mk_req(vec![3])).expect("admit 2");
@@ -1203,7 +1239,7 @@ mod tests {
 
     #[test]
     fn phase_starts_idle() {
-        let s = Scheduler::new(4);
+        let s = Scheduler::new(4, 32768);
         assert_eq!(s.phase(), Phase::Idle);
         // Verify cache starts unallocated (visible through manual Debug impl
         // which surfaces `cache_layers: None`).
@@ -1215,14 +1251,14 @@ mod tests {
 
     #[test]
     fn admit_transitions_idle_to_admitting() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.phase(), Phase::Admitting);
     }
 
     #[test]
     fn admit_stays_in_admitting() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit 1");
         let _ = s.admit(mk_req(vec![2])).expect("admit 2");
         assert_eq!(s.phase(), Phase::Admitting);
@@ -1230,7 +1266,7 @@ mod tests {
 
     #[test]
     fn evict_last_admitted_returns_to_idle() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.phase(), Phase::Admitting);
         s.evict(id).expect("evict");
@@ -1240,7 +1276,7 @@ mod tests {
     #[test]
     fn admit_in_decoding_ok_phase_stays_decoding() {
         // 3c-3: admit during Decoding is now legal (mid-batch admit).
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         s.force_phase(Phase::Decoding);
         let id = s
             .admit(mk_req(vec![1]))
@@ -1251,7 +1287,7 @@ mod tests {
 
     #[test]
     fn admit_in_finished_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         s.force_phase(Phase::Finished);
         let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
         let msg = format!("{err}");
@@ -1265,7 +1301,7 @@ mod tests {
     fn evict_in_decoding_ok_transitions_to_finished_when_last() {
         // 3c-3: evict during Decoding is now legal.
         // Evicting the last row transitions Decoding -> Finished.
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Decoding);
         s.evict(id).expect("evict during Decoding must succeed");
@@ -1275,7 +1311,7 @@ mod tests {
 
     #[test]
     fn evict_all_from_finished_resets_to_idle() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Finished);
         s.evict_all().expect("evict_all");
@@ -1285,14 +1321,14 @@ mod tests {
 
     #[test]
     fn evict_all_in_idle_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let err = s.evict_all().expect_err("evict_all from Idle must fail");
         assert!(format!("{err}").contains("Idle"), "unexpected err: {err}");
     }
 
     #[test]
     fn evict_all_in_admitting_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         // phase is now Admitting; evict_all must reject
         let err = s
@@ -1306,7 +1342,7 @@ mod tests {
 
     #[test]
     fn force_poison_then_admit_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         s.poisoned = true;
         let err = s
             .admit(mk_req(vec![1]))
@@ -1319,7 +1355,7 @@ mod tests {
 
     #[test]
     fn force_poison_then_evict_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.poisoned = true;
         let err = s.evict(id).expect_err("evict after poison must fail");
@@ -1331,7 +1367,7 @@ mod tests {
 
     #[test]
     fn evict_all_clears_poison() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Finished); // evict_all requires Decoding/Finished
         s.poisoned = true;
@@ -1345,7 +1381,7 @@ mod tests {
     fn scheduler_admit_during_decoding_ok() {
         // Force phase to Decoding (test seam); admit should succeed and
         // Phase should stay Decoding (mid-batch admit semantics).
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -1361,7 +1397,7 @@ mod tests {
 
     #[test]
     fn scheduler_evict_during_decoding_transitions_to_finished_when_last() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -1376,7 +1412,7 @@ mod tests {
     fn scheduler_evict_during_decoding_not_last_stays_decoding() {
         // Evict one row mid-Decoding when other rows are still active:
         // Phase must stay Decoding (only last-evict transitions to Finished).
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let _id_b = s.admit(mk_req(vec![2])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -1395,7 +1431,7 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -1428,7 +1464,7 @@ mod tests {
 
         // 2 rows admitted; only row A finishes. gc should evict A only,
         // leave B alive, and Phase must stay Decoding (active_count==1).
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -1466,7 +1502,7 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -1494,7 +1530,7 @@ mod tests {
         use crate::core::sampler::Sampler;
         use mlx::Dtype;
 
-        let mut sched = Scheduler::new(2);
+        let mut sched = Scheduler::new(2, 32768);
 
         // Synthesize a dummy pixel_values array (shape doesn't matter for plumbing)
         let pv: Array = (&[0.0_f32; 4][..], &[1_i32, 4][..]).try_into().unwrap();
@@ -1525,5 +1561,87 @@ mod tests {
         assert_eq!(slot.image_grid_thw.as_deref(), Some(&grids[..]));
         assert_eq!(slot.image_spatial_merge_size, 2);
         assert_eq!(slot.image_token_id, IMAGE_TOKEN_ID);
+    }
+
+    #[test]
+    fn evict_all_drops_cache() {
+        // B1-p2.3f: evict_all drops cache (replaces pre-3f offset reset) so
+        // the next prefill_admitted lazy-allocates with the new batch's cap.
+        let mut s = Scheduler::new(4, 32768);
+
+        let req = GenerateRequest {
+            prompt_ids: vec![1, 2, 3],
+            max_new_tokens: 8,
+            sampler: crate::core::sampler::Sampler::greedy(),
+            stop_token_ids: vec![],
+            prefill_chunk_size: 0,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+        };
+        let _id = s.admit(req).expect("admit");
+        s.force_phase(Phase::Decoding);
+
+        assert!(
+            s.cache.is_none(),
+            "pre-evict_all: cache should be None (no prefill)"
+        );
+
+        s.evict_all().expect("evict_all");
+
+        assert!(
+            s.cache.is_none(),
+            "post-evict_all: cache must be None (3f drops)"
+        );
+    }
+
+    #[test]
+    fn admit_rejects_oversize_request() {
+        // B1-p2.3f: admit cap gate. cap_max=1024; request with
+        // prompt_len=1500 + max_new=600 = 2100 > 1024 must reject with
+        // SchedulerError::RequestTooLarge.
+        use crate::core::SchedulerError;
+
+        let mut s = Scheduler::new(1, 1024);
+
+        let oversize_req = GenerateRequest {
+            prompt_ids: vec![0; 1500],
+            max_new_tokens: 600,
+            sampler: crate::core::sampler::Sampler::greedy(),
+            stop_token_ids: vec![],
+            prefill_chunk_size: 0,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+        };
+
+        let result = s.admit(oversize_req);
+        let err = result.expect_err("admit should reject oversize");
+
+        let sched_err = err
+            .downcast_ref::<SchedulerError>()
+            .expect("err should be downcast-able to SchedulerError");
+        match sched_err {
+            SchedulerError::RequestTooLarge { needed, max } => {
+                assert_eq!(*needed, 2100, "needed cap should be prompt+max_new");
+                assert_eq!(
+                    *max, 1024,
+                    "max should be effective_cap_max from Scheduler::new"
+                );
+            }
+            other => panic!("expected RequestTooLarge, got {other:?}"),
+        }
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("2100"),
+            "msg should contain needed=2100, got: {msg}"
+        );
+        assert!(
+            msg.contains("1024"),
+            "msg should contain max=1024, got: {msg}"
+        );
     }
 }
