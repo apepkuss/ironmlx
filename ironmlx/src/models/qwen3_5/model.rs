@@ -408,7 +408,8 @@ impl Qwen35Model {
     /// Numerical contract: for batch row `i`, `out[i, :]` matches
     /// `forward_vl(prompt_i_alone)` to within `max_abs_diff < 1e-3` and the
     /// greedy argmax is bit-identical. Verified by integration scenarios in
-    /// `tests/b1_p2_4_batched_vl.rs`.
+    /// the unit tests below (text-only equivalence vs `batched_prefill`,
+    /// and B=1 equivalence vs `forward_vl`).
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn batched_prefill_vl(
         &self,
@@ -745,6 +746,7 @@ mod tests {
     ///   batched_prefill_vl_text_only_matches_batched_prefill -- --nocapture
     /// ```
     #[test]
+    #[ignore] // real-model heavy: needs IRONMLX_MODEL_DIR
     fn batched_prefill_vl_text_only_matches_batched_prefill() {
         use crate::core::generate::{
             build_batch_attention_mask, build_batch_linear_mask, build_position_ids_batched,
@@ -846,6 +848,7 @@ mod tests {
     ///   batched_prefill_vl_b1_matches_forward_vl -- --nocapture
     /// ```
     #[test]
+    #[ignore] // real-model heavy: needs IRONMLX_MODEL_DIR
     fn batched_prefill_vl_b1_matches_forward_vl() {
         use crate::core::generate::{
             build_batch_attention_mask, build_batch_linear_mask, build_position_ids_vl,
