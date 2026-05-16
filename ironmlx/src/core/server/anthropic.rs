@@ -26,6 +26,25 @@ use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 
 use super::AppState;
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Map a SchedulerActor admit Err into an HTTP response. Spec §4.7:
+/// "admission queue full" → 503 + Retry-After: 5; everything else → 400.
+fn admit_err_to_response(err: anyhow::Error) -> Response {
+    use axum::http::HeaderValue;
+    let msg = format!("{err:#}");
+    if msg.contains("admission queue full") {
+        let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        resp
+    } else {
+        (StatusCode::BAD_REQUEST, msg).into_response()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MessagesRequest {
     #[serde(default)]
@@ -364,7 +383,7 @@ pub async fn serve_via_scheduler_stream(
     } = match reply_rx.await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+            return admit_err_to_response(e);
         }
         Err(_) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
@@ -581,7 +600,7 @@ pub async fn serve_via_scheduler_unary(
     } = match reply_rx.await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+            return admit_err_to_response(e);
         }
         Err(_) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();

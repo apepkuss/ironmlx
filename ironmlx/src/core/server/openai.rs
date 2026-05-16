@@ -31,6 +31,25 @@ use crate::models::qwen3_5::image_processor;
 use super::AppState;
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Map a SchedulerActor admit Err into an HTTP response. Spec §4.7:
+/// "admission queue full" → 503 + Retry-After: 5; everything else → 400.
+fn admit_err_to_response(err: anyhow::Error) -> Response {
+    use axum::http::HeaderValue;
+    let msg = format!("{err:#}");
+    if msg.contains("admission queue full") {
+        let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        resp
+    } else {
+        (StatusCode::BAD_REQUEST, msg).into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Request / Response shapes
 // ---------------------------------------------------------------------------
 
@@ -482,7 +501,7 @@ async fn serve_via_scheduler_stream(
     } = match reply_rx.await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+            return admit_err_to_response(e);
         }
         Err(_) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
@@ -652,7 +671,7 @@ async fn serve_via_scheduler_unary(
     } = match reply_rx.await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+            return admit_err_to_response(e);
         }
         Err(_) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
@@ -815,5 +834,30 @@ mod tests {
             bytes,
             vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00, 0x10, 0x00]
         );
+    }
+
+    #[tokio::test]
+    async fn admit_err_503_for_queue_full() {
+        let err = anyhow::anyhow!("admission queue full: capacity=32 reached");
+        let resp = admit_err_to_response(err);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry = resp
+            .headers()
+            .get("retry-after")
+            .expect("retry-after header");
+        assert_eq!(retry.to_str().unwrap(), "5");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_str.contains("admission queue full"));
+    }
+
+    #[tokio::test]
+    async fn admit_err_400_for_other() {
+        let err = anyhow::anyhow!("prompt too long: 999999 tokens exceeds limit");
+        let resp = admit_err_to_response(err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.headers().get("retry-after").is_none());
     }
 }
