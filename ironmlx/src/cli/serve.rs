@@ -30,6 +30,23 @@ pub struct ServeArgs {
     /// the full forward + lm_head.
     #[arg(long, default_value_t = 2048)]
     pub prefill_chunk_size: usize,
+
+    /// Maximum concurrent in-flight requests (Scheduler slot count).
+    /// Requests beyond this limit go to the admission queue.
+    #[arg(long, default_value_t = 4)]
+    pub b_max: usize,
+
+    /// Admission-window deadline in milliseconds. After the first
+    /// admit in a batch arrives, additional admits are absorbed until
+    /// this deadline expires or the batch saturates at b_max.
+    #[arg(long, default_value_t = 5)]
+    pub admission_deadline_ms: u64,
+
+    /// Capacity of the FIFO admission queue. Requests received while
+    /// the scheduler is saturated are parked here. `0` disables queueing
+    /// (immediate Err on saturation — mirrors pre-3d behavior).
+    #[arg(long, default_value_t = 32)]
+    pub admission_queue_max: usize,
 }
 
 pub fn run(args: ServeArgs) -> Result<()> {
@@ -60,5 +77,8 @@ pub fn run(args: ServeArgs) -> Result<()> {
         &args.host,
         args.port,
         args.prefill_chunk_size,
+        args.b_max,
+        args.admission_deadline_ms,
+        args.admission_queue_max,
     ))
 }

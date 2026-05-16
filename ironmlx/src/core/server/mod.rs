@@ -37,8 +37,15 @@ pub struct AppState {
     /// SchedulerActor handle. Routed to by text-only short-prompt
     /// requests. See `serve_via_scheduler_*` in `openai.rs`.
     pub scheduler_handle: scheduler_actor::SchedulerActorHandle,
+    /// Maximum concurrent in-flight requests routed to the SchedulerActor.
+    pub b_max: usize,
+    /// Admission-window deadline (milliseconds) — drain-window timeout.
+    pub admission_deadline_ms: u64,
+    /// FIFO admission queue capacity.
+    pub admission_queue_max: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     model: Qwen35Model,
     tokenizer: Tokenizer,
@@ -46,16 +53,17 @@ pub async fn serve(
     host: &str,
     port: u16,
     prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
 ) -> Result<()> {
     let model = Arc::new(Mutex::new(model));
-    // 3b-2: spawn the SchedulerActor driver task. b_max=4 hardcoded
-    // (matches B1-p2.3b-1 integration coverage). Future phase will make
-    // this configurable.
+    let admission_deadline = std::time::Duration::from_millis(admission_deadline_ms);
     let scheduler_handle = scheduler_actor::spawn_scheduler_actor(
         model.clone(),
-        4,
-        std::time::Duration::from_millis(5),
-        32,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
     );
     let state = AppState {
         model,
@@ -63,6 +71,9 @@ pub async fn serve(
         model_id,
         prefill_chunk_size,
         scheduler_handle,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
     };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
