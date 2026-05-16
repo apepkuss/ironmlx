@@ -16,6 +16,8 @@ use mlx::{Array, Dtype};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+use crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
+
 /// Typed scheduler-side errors that need HTTP-level discrimination.
 ///
 /// Anyhow remains the default error type for internal Scheduler paths
@@ -520,11 +522,19 @@ impl Scheduler {
                 .max()
                 .unwrap_or(256);
             // Logical cap: largest per-slot (prompt_len + max_new_tokens),
-            // bounded by user's effective_cap_max. The GPU-perf floor
-            // (MIN_KV_CACHE_CAP_FOR_GPU_PERF) is applied silently inside
-            // `make_cache` — it protects the K/V buffer width without
-            // affecting Scheduler's admit-gate logic.
-            let cap = slots_max.min(self.effective_cap_max as i32);
+            // bounded by user's effective_cap_max. Then floored at
+            // MIN_KV_CACHE_CAP_FOR_GPU_PERF to avoid the MLX Metal
+            // kernel slow-path cliff for tight K/V buffer widths
+            // (cap < ~256 → 100-300× decode-step slowdown).
+            //
+            // Order: floor LAST so it can exceed `effective_cap_max`
+            // when the user-set cap_max is itself below the floor.
+            // The floor is a physical-buffer concern; admit-gate
+            // semantics use `cap_needed > effective_cap_max` based on
+            // the user-requested size, not the physical KVCache cap.
+            let cap = slots_max
+                .min(self.effective_cap_max as i32)
+                .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
             self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
         }
         let cache_ref = self
@@ -967,9 +977,14 @@ impl Scheduler {
         // Saturating conversion: max_new_tokens is usize and may exceed
         // i32::MAX in pathological caller inputs. Saturate to i32::MAX so
         // cap_for_temp stays a valid i32 even at the API limit (the
-        // actual cap is bounded by model + memory anyway).
+        // actual cap is bounded by model + memory anyway). Floored at
+        // MIN_KV_CACHE_CAP_FOR_GPU_PERF for the same Metal-kernel
+        // reason as prefill_admitted_inner's main cache.
         let max_new_i32 = i32::try_from(max_new_tokens).unwrap_or(i32::MAX);
-        let cap_for_temp = prompt_len.saturating_add(max_new_i32).max(prompt_len);
+        let cap_for_temp = prompt_len
+            .saturating_add(max_new_i32)
+            .max(prompt_len)
+            .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
 
         // 2. Capture KVCache dtype from main cache (first Full layer).
         let dtype = {
@@ -1171,10 +1186,10 @@ impl Scheduler {
         self.phase = p;
     }
 
-    /// cfg(test)-only accessor: compute the **logical** cap that
-    /// `prefill_admitted_inner` passes to `model.make_cache`. The
-    /// physical KVCache `cap` may be slightly larger if `make_cache`'s
-    /// GPU-perf floor kicks in (cap < MIN_KV_CACHE_CAP_FOR_GPU_PERF).
+    /// cfg(test)-only accessor: compute the cap that `prefill_admitted_inner`
+    /// passes to `model.make_cache`, including the GPU-perf floor.
+    /// Mirrors the production formula
+    /// `slots_max.min(effective_cap_max).max(MIN_KV_CACHE_CAP_FOR_GPU_PERF)`.
     /// Used by 3f unit tests to verify cap-formula correctness without
     /// invoking a real model.
     #[cfg(test)]
@@ -1189,7 +1204,9 @@ impl Scheduler {
             })
             .max()
             .unwrap_or(256);
-        slots_max.min(self.effective_cap_max as i32)
+        slots_max
+            .min(self.effective_cap_max as i32)
+            .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF)
     }
 }
 
@@ -1733,12 +1750,11 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_cap_from_slots_bounded_by_cap_max() {
-        // B1-p2.3f: logical cap = min(max(prompt_len + max_new_tokens) over slots,
-        // effective_cap_max). The GPU-perf floor (MIN_KV_CACHE_CAP_FOR_GPU_PERF)
-        // is applied silently inside `Qwen35Model::make_cache` and does NOT
-        // affect Scheduler's logical cap accounting (admit-gate uses the
-        // request's cap_needed, not the physical KVCache cap).
+    fn dynamic_cap_from_slots_bounded_by_cap_max_and_gpu_floor() {
+        // B1-p2.3f: cap = max(min(slots_max, effective_cap_max), MIN_KV_CACHE_CAP_FOR_GPU_PERF).
+        // The GPU-perf floor is applied by Scheduler before handing the cap
+        // to `make_cache` (so callers `prefill_admitted_inner` and
+        // `admit_mid_inner` consistently pass a kernel-friendly cap).
         let mut s = Scheduler::new(4, 2048);
 
         let req = |prompt_len: usize, max_new: usize| GenerateRequest {
@@ -1753,39 +1769,38 @@ mod tests {
             image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
         };
 
-        // Case A: slots_max well below cap_max.
+        // Case A: slots_max well above the floor; cap_max does not bind.
         // Admit 3 slots: cap_needed values [50+50=100, 700+100=800, 1300+200=1500].
         s.admit(req(50, 50)).expect("admit 1");
         s.admit(req(700, 100)).expect("admit 2");
         s.admit(req(1300, 200)).expect("admit 3");
 
-        // logical cap = max(100, 800, 1500).min(2048) = 1500.
+        // cap = max(min(1500, 2048), 256) = max(1500, 256) = 1500.
         let cap = s.computed_cap_for_prefill();
         assert_eq!(
             cap, 1500,
-            "logical cap should equal max(slot cap_needed); cap_max does not bind"
+            "cap should equal max(slot cap_needed); floor & cap_max don't bind"
         );
 
-        // Case B: cap_max binds.
+        // Case B: cap_max < floor; floor wins.
         let mut s3 = Scheduler::new(4, 200);
         s3.admit(req(50, 50)).expect("admit (cap_needed=100 < 200)");
         s3.admit(req(150, 30))
             .expect("admit (cap_needed=180 < 200)");
+        // cap = max(min(180, 200), 256) = max(180, 256) = 256. Floor exceeds cap_max.
         let cap3 = s3.computed_cap_for_prefill();
         assert_eq!(
-            cap3, 180,
-            "logical cap = max(100, 180).min(200) = 180; cap_max does not bind"
+            cap3, 256,
+            "cap = max(180, 256) = 256; floor exceeds user cap_max (allowed — physical-buffer concern)"
         );
 
-        // Case C: small slots_max, no cap_max binding. Below the GPU-perf
-        // floor, but the floor lives in make_cache — Scheduler still
-        // reports the logical cap_needed.
-        let mut s_logical = Scheduler::new(4, 2048);
-        s_logical.admit(req(50, 50)).expect("admit cap_needed=100");
-        let cap_logical = s_logical.computed_cap_for_prefill();
+        // Case C: small slots_max, no cap_max binding. Floor binds.
+        let mut s_floor = Scheduler::new(4, 2048);
+        s_floor.admit(req(50, 50)).expect("admit cap_needed=100");
+        let cap_floor = s_floor.computed_cap_for_prefill();
         assert_eq!(
-            cap_logical, 100,
-            "logical cap = max(100).min(2048) = 100; make_cache will floor physically"
+            cap_floor, 256,
+            "cap = max(min(100, 2048), 256) = 256; floor binds"
         );
 
         // Case D: empty-slot fallback. slots_max defaults to 256

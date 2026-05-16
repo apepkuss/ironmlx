@@ -13,5 +13,5 @@ pub mod image_processor;
 pub mod vision;
 
 pub use config::{Qwen35Config, RopeParams, VisionConfig};
-pub use model::Qwen35Model;
+pub use model::{Qwen35Model, MIN_KV_CACHE_CAP_FOR_GPU_PERF};
 pub use text_model::Qwen35TextModel;

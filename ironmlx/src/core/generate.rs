@@ -844,7 +844,14 @@ impl<'m> GenerationStream<'m> {
         // defers start to the first `next_token` call (skips prefill).
         let (capture_active, capture_pending_decode) = try_start_capture();
 
-        let cap = (prompt_len + request.max_new_tokens) as i32;
+        // B1-p2.3f T4: floor the cap at MIN_KV_CACHE_CAP_FOR_GPU_PERF so
+        // short-prompt single-stream decode doesn't fall off the MLX
+        // Metal kernel slow path (cap < ~256 → 100-300× decode slowdown
+        // on Apple Silicon). Caught by b1_p2_3b_3
+        // `admission_window_concurrent_scheduler_and_gs_no_deadlock`
+        // standalone regression.
+        let cap = ((prompt_len + request.max_new_tokens) as i32)
+            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = Dtype::Bfloat16;
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
 

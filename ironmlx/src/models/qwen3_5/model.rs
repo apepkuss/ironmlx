@@ -557,24 +557,22 @@ impl Qwen35Model {
 
     /// Construct a per-layer cache list matching this model's hybrid topology.
     ///
-    /// **GPU-perf floor (B1-p2.3f T4):** the per-layer K/V buffer width
+    /// **GPU-perf note (B1-p2.3f T4):** the per-layer K/V buffer width
     /// equals the cap because `KVCache::with_step(cap)` is used for
     /// one-shot allocation (avoids grow_to + memcpy on first decode
-    /// step at long context — P8a-stage6 optimization). Empirically,
-    /// cap < ~256 hits MLX Metal kernel slow path on Apple Silicon
-    /// (4B decode step 50 ms → 10 s, 100-300× cliff). To shield every
-    /// caller (Scheduler main cache + admit_mid temp cache,
-    /// GenerationStream cache, test fixtures), this method silently
-    /// raises `cap` to `MIN_KV_CACHE_CAP_FOR_GPU_PERF` if smaller.
+    /// step at long context — P8a-stage6 optimization). Production
+    /// callers (Scheduler main cache + admit_mid temp cache,
+    /// GenerationStream cache) MUST pre-clamp their requested cap to
+    /// at least `MIN_KV_CACHE_CAP_FOR_GPU_PERF` to avoid the MLX
+    /// Metal kernel slow path (cap < ~256 → 100-300× decode-step
+    /// slowdown on Apple Silicon — verified in T4 sweep regression
+    /// against p4_http_smoke + b1_p2_3b_3 concurrent-gs test).
     ///
-    /// The raise is invisible to logical request-size accounting:
-    /// Scheduler's admit gate (`cap_needed > effective_cap_max`) uses
-    /// the user-requested cap directly; the KVCache's slightly larger
-    /// physical buffer just absorbs short prompts at zero functional
-    /// cost (a few MB of slack memory across 32 layers — negligible
-    /// vs. the perf cliff).
+    /// `make_cache` does NOT apply the floor itself so unit tests that
+    /// validate tight-cap overflow rejection (e.g.
+    /// `b1_p2_3c_1_per_row_offset_invalid_args_return_err`) keep
+    /// working unchanged.
     pub fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
-        let cap = cap.max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let cfg = self.config();
         let head_dim = cfg.effective_head_dim();
         let mut out = Vec::with_capacity(cfg.num_hidden_layers as usize);
