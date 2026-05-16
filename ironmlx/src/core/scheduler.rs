@@ -16,6 +16,28 @@ use mlx::{Array, Dtype};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+/// Minimum KV-cache capacity used when lazy-allocating the main cache in
+/// `prefill_admitted_inner`. The dynamic-cap computation (B1-p2.3f) sets
+/// `cap = max(slots_max, MIN_CACHE_CAP_FOR_GPU_PERF).min(effective_cap_max)`.
+///
+/// **Why a floor exists:** `Qwen35Model::make_cache` constructs every
+/// `KVCache` with `with_step(cap)`, so the per-layer K/V buffer width
+/// equals `cap`. Empirically (T4 sweep regression on p4_http_smoke),
+/// caps below ~256 cause the bf16 attention forward to fall off a cliff
+/// — a 4B-model decode step grows from ~50 ms to ~10 s. Likely cause is
+/// MLX's Metal kernel tile picker missing its preferred power-of-two
+/// tile when the buffer's sequence dimension is small or odd-shaped.
+/// 256 is the natural floor: it matches `KVCache`'s default `step`,
+/// keeps the attention K/V buffer above the slow regime, and costs only
+/// `b_max × n_kv_heads × 256 × head_dim × dtype` bytes (~64 MB across
+/// 32 layers for a 4B bf16 model — negligible).
+///
+/// User-configured `--max-cache-cap` below this floor still binds: the
+/// `.min(effective_cap_max)` after the floor preserves the user's hard
+/// upper bound. Users explicitly choosing such a tight cap accept the
+/// performance tradeoff.
+const MIN_CACHE_CAP_FOR_GPU_PERF: i32 = 256;
+
 /// Typed scheduler-side errors that need HTTP-level discrimination.
 ///
 /// Anyhow remains the default error type for internal Scheduler paths
@@ -519,7 +541,19 @@ impl Scheduler {
                 })
                 .max()
                 .unwrap_or(256);
-            let cap = slots_max.min(self.effective_cap_max as i32);
+            // B1-p2.3f T4 GPU-perf floor: enforce min cap = MIN_CACHE_CAP_FOR_GPU_PERF.
+            // `make_cache` uses `with_step(cap)`, so the KV buffer width equals
+            // `cap`. With cap < ~256 the bf16 attention forward runs O(100×)
+            // slower than expected (4B model decode goes from ~50ms to ~10s
+            // per step). Suspected cause: small/non-power-of-2 buffer widths
+            // miss MLX's preferred Metal kernel tiles, falling back to a
+            // slower generic kernel. Floor cap at MIN_CACHE_CAP_FOR_GPU_PERF
+            // so short-prompt batches still get a GPU-friendly buffer.
+            // Floor is applied BEFORE the effective_cap_max cap so user-
+            // configured tight caps still bind.
+            let cap = slots_max
+                .max(MIN_CACHE_CAP_FOR_GPU_PERF)
+                .min(self.effective_cap_max as i32);
             self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
         }
         let cache_ref = self
@@ -1167,9 +1201,10 @@ impl Scheduler {
     }
 
     /// cfg(test)-only accessor: compute what cap `prefill_admitted_inner`
-    /// would use to lazy-allocate the cache. Returns the bounded cap
-    /// (min of slots_max and effective_cap_max). Used by 3f unit tests
-    /// to verify cap calculation without invoking a real model.
+    /// would use to lazy-allocate the cache. Mirrors the production
+    /// formula `slots_max.max(MIN_CACHE_CAP_FOR_GPU_PERF).min(effective_cap_max)`.
+    /// Used by 3f unit tests to verify cap calculation without invoking
+    /// a real model.
     #[cfg(test)]
     pub(crate) fn computed_cap_for_prefill(&self) -> i32 {
         let slots_max = self
@@ -1182,7 +1217,9 @@ impl Scheduler {
             })
             .max()
             .unwrap_or(256);
-        slots_max.min(self.effective_cap_max as i32)
+        slots_max
+            .max(MIN_CACHE_CAP_FOR_GPU_PERF)
+            .min(self.effective_cap_max as i32)
     }
 }
 
@@ -1726,8 +1763,11 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_cap_from_slots_bounded_by_cap_max() {
-        // B1-p2.3f: cap = min(max(prompt_len + max_new_tokens over slots), effective_cap_max).
+    fn dynamic_cap_from_slots_bounded_by_cap_max_and_gpu_floor() {
+        // B1-p2.3f: cap = max(slots_max, MIN_CACHE_CAP_FOR_GPU_PERF).min(effective_cap_max).
+        // The GPU-perf floor (256) prevents tight short-prompt caps from
+        // triggering the slow Metal-kernel fallback path that p4_http_smoke
+        // regression caught (T4f).
         let mut s = Scheduler::new(4, 2048);
 
         let req = |prompt_len: usize, max_new: usize| GenerateRequest {
@@ -1742,35 +1782,48 @@ mod tests {
             image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
         };
 
+        // Case A: slots_max well above the floor. Floor does not bind; cap_max=2048 does not bind either.
         // Admit 3 slots: cap_needed values [50+50=100, 700+100=800, 1300+200=1500].
         s.admit(req(50, 50)).expect("admit 1");
         s.admit(req(700, 100)).expect("admit 2");
         s.admit(req(1300, 200)).expect("admit 3");
 
-        // computed_cap = max(100, 800, 1500) = 1500, bounded by cap_max=2048 → 1500.
+        // computed_cap = max(1500, 256).min(2048) = 1500.
         let cap = s.computed_cap_for_prefill();
         assert_eq!(
             cap, 1500,
-            "cap should equal max(slot cap_needed); cap_max=2048 doesn't bind"
+            "cap should equal max(slot cap_needed); floor & cap_max don't bind"
         );
 
-        // Smaller cap_max binds.
+        // Case B: cap_max binds tighter than the floor. Slot cap_needed values
+        // {100, 180} both below the 256 floor; effective_cap_max=200 < floor.
+        // cap = max(180, 256).min(200) = 256.min(200) = 200.
         let mut s3 = Scheduler::new(4, 200);
         s3.admit(req(50, 50)).expect("admit (cap_needed=100 < 200)");
         s3.admit(req(150, 30))
             .expect("admit (cap_needed=180 < 200)");
         let cap3 = s3.computed_cap_for_prefill();
         assert_eq!(
-            cap3, 180,
-            "cap = max(100, 180) = 180; bound at 200 doesn't bind"
+            cap3, 200,
+            "cap = max(180, 256).min(200) = 200; cap_max wins over floor"
         );
 
-        // Empty-slot fallback.
+        // Case C: floor binds (slots_max < 256 < cap_max).
+        // cap = max(100, 256).min(2048) = 256.
+        let mut s_floor = Scheduler::new(4, 2048);
+        s_floor.admit(req(50, 50)).expect("admit cap_needed=100");
+        let cap_floor = s_floor.computed_cap_for_prefill();
+        assert_eq!(
+            cap_floor, 256,
+            "cap = max(100, 256).min(2048) = 256; floor binds"
+        );
+
+        // Case D: empty-slot fallback. slots_max defaults to 256; floor + cap_max neither bind.
         let s4 = Scheduler::new(4, 1000);
         assert_eq!(
             s4.computed_cap_for_prefill(),
             256,
-            "empty slots fallback = 256"
+            "empty slots fallback = 256 (matches floor)"
         );
     }
 }
