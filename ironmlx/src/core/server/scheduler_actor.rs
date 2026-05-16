@@ -644,8 +644,11 @@ fn handle_admit_mid(
 }
 
 /// Push a pending admit into the queue if there's capacity; otherwise reply
-/// with Err("admission queue full") and bump `queue_rejected`. Updates
-/// `queue_depth_peak` via `fetch_max`.
+/// with `Err(SchedulerError::QueueFull)` (wrapped in anyhow) and bump
+/// `queue_rejected`. Updates `queue_depth_peak` via `fetch_max`.
+///
+/// HTTP handlers downcast the anyhow Err to [`SchedulerError`] to map
+/// QueueFull → HTTP 503 + Retry-After; other errors → HTTP 400.
 fn enqueue_or_reject(
     cmd: SchedulerCommand,
     queue: &mut VecDeque<PendingAdmit>,
@@ -656,8 +659,10 @@ fn enqueue_or_reject(
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
     if queue.len() >= queue_max {
         queue_rejected.fetch_add(1, Ordering::Relaxed);
-        let _ = reply_tx.send(Err(anyhow::anyhow!(
-            "admission queue full: capacity={queue_max} reached"
+        let _ = reply_tx.send(Err(anyhow::Error::new(
+            crate::core::scheduler::SchedulerError::QueueFull {
+                capacity: queue_max,
+            },
         )));
         return;
     }

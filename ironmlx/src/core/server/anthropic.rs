@@ -31,11 +31,16 @@ use super::AppState;
 // ---------------------------------------------------------------------------
 
 /// Map a SchedulerActor admit Err into an HTTP response. Spec §4.7:
-/// "admission queue full" → 503 + Retry-After: 5; everything else → 400.
+/// `SchedulerError::QueueFull` → 503 + Retry-After: 5; everything else → 400.
+///
+/// Pre-3e.3 used `err.to_string().contains("admission queue full")` string
+/// match (spec §9 R3 acknowledged-fragile). 3e.3 replaces with typed
+/// `anyhow::Error::downcast_ref::<SchedulerError>()`.
 fn admit_err_to_response(err: anyhow::Error) -> Response {
+    use crate::core::SchedulerError;
     use axum::http::HeaderValue;
     let msg = format!("{err:#}");
-    if msg.contains("admission queue full") {
+    if let Some(SchedulerError::QueueFull { .. }) = err.downcast_ref::<SchedulerError>() {
         let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
         resp.headers_mut()
             .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));

@@ -13,7 +13,27 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use mlx::{Array, Dtype};
+use thiserror::Error;
 use tokio::sync::mpsc;
+
+/// Typed scheduler-side errors that need HTTP-level discrimination.
+///
+/// Anyhow remains the default error type for internal Scheduler paths
+/// (out-of-memory, prompt parsing, MLX failures, etc.). `SchedulerError`
+/// only enumerates errors the HTTP server needs to map to non-400
+/// responses. Wrap into anyhow via `anyhow::Error::new(SchedulerError::...)`
+/// at the emit site; HTTP handlers downcast with
+/// `err.downcast_ref::<SchedulerError>()`.
+///
+/// Replaces the pre-3e.3 string-match `err.to_string().contains("admission
+/// queue full")` pattern (spec §9 R3 acknowledged-fragile).
+#[derive(Error, Debug)]
+pub enum SchedulerError {
+    /// Admission queue rejected a request because the queue was already
+    /// at `capacity`. Maps to HTTP 503 + Retry-After.
+    #[error("admission queue full: capacity={capacity} reached")]
+    QueueFull { capacity: usize },
+}
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
