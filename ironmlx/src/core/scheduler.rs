@@ -915,6 +915,33 @@ impl Scheduler {
         }
     }
 
+    /// Raise every layer of the main cache's `cap` to `target_cap` if
+    /// smaller. Used by `admit_mid_inner` before adoption so that a
+    /// longer mid-batch request can land into a cache that was sized
+    /// for the original batch's `slots_max`.
+    ///
+    /// `KVCache::grow_cap` lifts the bound only; the physical K/V
+    /// buffer is grown lazily by `adopt_row_from`'s `grow_to`.
+    /// `GatedDeltaCache::grow_cap` is a pure i32 field update — its
+    /// `conv_state` and `recurrent_state` shapes do not depend on
+    /// `cap`. Both are no-ops if `target_cap <= layer.cap`.
+    ///
+    /// Errs only if the cache has not been lazy-allocated yet — which
+    /// is impossible from `admit_mid` (Decoding phase guarantees
+    /// `prefill_admitted` already ran).
+    fn grow_main_cache_to(&mut self, target_cap: i32) -> Result<()> {
+        let cache = self.cache.as_mut().ok_or_else(|| {
+            anyhow!("grow_main_cache_to: cache absent — internal bug (admit_mid in Decoding phase implies prefill_admitted ran)")
+        })?;
+        for layer in cache.iter_mut() {
+            match layer {
+                LayerCache::Full(kv) => kv.grow_cap(target_cap),
+                LayerCache::Linear(gd) => gd.grow_cap(target_cap),
+            }
+        }
+        Ok(())
+    }
+
     /// Inner body of admit_mid (steps 2-8 from the spec). Separated so
     /// `admit_mid` can roll back the inserted slot if any `?` fails.
     fn admit_mid_inner(
@@ -1017,6 +1044,23 @@ impl Scheduler {
         };
 
         // 6. Adopt the temp cache's row 0 into main_cache at row_idx.
+        //
+        // B1-p2.3f (Option C): before adoption, raise each main-cache
+        // layer's `cap` to `cap_for_temp` if smaller. The main cache's
+        // initial cap was sized to the *original* batch's
+        // `max(prompt_len + max_new_tokens)`; a mid-batch admit may
+        // bring a longer request whose temp_cache `src.offsets[0]`
+        // (== prompt_len after prefill) exceeds the main cap and would
+        // trip `adopt_row_from`'s `src_off > self.cap` bail. The admit
+        // gate at `admit_mid` entry already verifies the request fits
+        // within `effective_cap_max`, so growing here stays within the
+        // configured server bound.
+        //
+        // `grow_cap` is a single-i32 update on both KVCache (lazy
+        // physical buffer — adopt_row_from's own `grow_to` handles the
+        // expansion) and GatedDeltaCache (logical-only cap). No
+        // device work runs here.
+        self.grow_main_cache_to(cap_for_temp)?;
         {
             let main_cache = self.cache.as_mut().expect("cache asserted Some above");
             if main_cache.len() != temp_cache.len() {
