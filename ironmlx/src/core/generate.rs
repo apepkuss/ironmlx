@@ -670,7 +670,7 @@ pub fn build_position_ids_vl(
 /// # Arguments
 /// - `per_row_prompt_ids` — exactly `B` slices; each slice is row `i`'s prompt token ids.
 /// - `per_row_grid_thw` — exactly `B` options; `Some(grids)` for VL row, `None` for text row.
-///   `grids.is_empty()` is rejected (use `None` for text row).
+///   `Some(&[])` (empty grids) is treated as text row (degraded MRoPE), not an error.
 /// - `image_token_id` — token id of `<|image_pad|>`.
 /// - `image_spatial_merge_size` — same as [`build_position_ids_vl`].
 /// - `max_len` — must be `>= max(L_i)`. Pad columns beyond `L_i` get position 0.
@@ -679,7 +679,8 @@ pub fn build_position_ids_vl(
 /// - Length of `per_row_prompt_ids` != length of `per_row_grid_thw`.
 /// - Empty slice in `per_row_prompt_ids` (zero-length row).
 /// - `max_len < L_i` for any row.
-/// - `image_spatial_merge_size <= 0`.
+/// - `image_spatial_merge_size <= 0` (only checked when at least one VL row is present;
+///   propagates from `build_position_ids_vl`).
 /// - Any per-row VL build error propagates from `build_position_ids_vl`.
 #[allow(clippy::type_complexity)]
 pub fn build_position_ids_vl_batched(
