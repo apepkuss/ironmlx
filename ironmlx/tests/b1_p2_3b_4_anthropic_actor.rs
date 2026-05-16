@@ -148,7 +148,7 @@ async fn anthropic_actor_b1_text_only_swap() {
     assert!(!baseline.is_empty(), "baseline produced no tokens");
 
     // 2. Route through SchedulerActor.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);
@@ -216,7 +216,7 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
     );
 
     // Verify admit_count doesn't change when GS path is taken.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     // Drop the request — the GS path bypasses the actor; the test only
@@ -243,7 +243,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
     let max_new_tokens: usize = 4;
 
     // Construct AppState matching what serve() builds.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
     let state = AppState {
         model: model.clone(),
         tokenizer: tokenizer.clone(),
@@ -253,6 +253,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         b_max: 4,
         admission_deadline_ms: 5,
         admission_queue_max: 32,
+        effective_cap_max: 32768, // 3f
     };
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);

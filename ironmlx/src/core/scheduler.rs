@@ -413,9 +413,11 @@ impl Scheduler {
     /// Run batched prefill for every currently-admitted request. Only legal
     /// in `Idle`/`Admitting` phase with `active_count() >= 1`.
     ///
-    /// Lazy-allocates the batched KV cache on first call (`b_max` rows,
-    /// capacity 8192, bf16). On subsequent calls (after `evict_all`) the
-    /// cache is reused — `evict_all` already reset every layer.
+    /// Lazy-allocates the batched KV cache on first call (`b_max` rows;
+    /// capacity = `min(max(prompt_len + max_new_tokens) over slots,
+    /// effective_cap_max)`, bf16). Subsequent calls after `evict_all`
+    /// allocate fresh — `evict_all` drops the cache (3f) so the next
+    /// batch's cap is sized to its slots, not inherited from the prior batch.
     ///
     /// Builds right-padded `[B, T_max]` input_ids + `[3, B, T_max]`
     /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
@@ -498,12 +500,27 @@ impl Scheduler {
         let attention_mask = build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
         let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
 
-        // Lazy-allocate the cache (or reuse the existing one — Task 1's
-        // evict_all already reset every layer to offset 0).
+        // Lazy-allocate the cache.
         // TODO: when a non-bf16 model lands, expose dtype via Qwen35Model
         // accessor and thread it here.
         if self.cache.is_none() {
-            self.cache = Some(model.make_cache(b as i32, 8192, Dtype::Bfloat16)?);
+            // B1-p2.3f: dynamic cap = max(prompt_len + max_new_tokens) over
+            // admitted slots, bounded by effective_cap_max (defense-in-depth;
+            // admit gate already rejects oversize). min_cap=256 fallback if
+            // all slots None (defensive — not reachable in production since
+            // prefill_admitted asserts active_count() >= 1 earlier).
+            let slots_max = self
+                .slots
+                .iter()
+                .filter_map(|s| s.as_ref())
+                .map(|r| {
+                    let max_new_i32 = i32::try_from(r.max_new_tokens).unwrap_or(i32::MAX);
+                    (r.prompt_ids.len() as i32).saturating_add(max_new_i32)
+                })
+                .max()
+                .unwrap_or(256);
+            let cap = slots_max.min(self.effective_cap_max as i32);
+            self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
         }
         let cache_ref = self
             .cache
@@ -1104,6 +1121,25 @@ impl Scheduler {
     pub(crate) fn force_phase(&mut self, p: Phase) {
         self.phase = p;
     }
+
+    /// cfg(test)-only accessor: compute what cap `prefill_admitted_inner`
+    /// would use to lazy-allocate the cache. Returns the bounded cap
+    /// (min of slots_max and effective_cap_max). Used by 3f unit tests
+    /// to verify cap calculation without invoking a real model.
+    #[cfg(test)]
+    pub(crate) fn computed_cap_for_prefill(&self) -> i32 {
+        let slots_max = self
+            .slots
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .map(|r| {
+                let max_new_i32 = i32::try_from(r.max_new_tokens).unwrap_or(i32::MAX);
+                (r.prompt_ids.len() as i32).saturating_add(max_new_i32)
+            })
+            .max()
+            .unwrap_or(256);
+        slots_max.min(self.effective_cap_max as i32)
+    }
 }
 
 #[cfg(test)]
@@ -1642,6 +1678,55 @@ mod tests {
         assert!(
             msg.contains("1024"),
             "msg should contain max=1024, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn dynamic_cap_from_slots_bounded_by_cap_max() {
+        // B1-p2.3f: cap = min(max(prompt_len + max_new_tokens over slots), effective_cap_max).
+        let mut s = Scheduler::new(4, 2048);
+
+        let req = |prompt_len: usize, max_new: usize| GenerateRequest {
+            prompt_ids: vec![0; prompt_len],
+            max_new_tokens: max_new,
+            sampler: crate::core::sampler::Sampler::greedy(),
+            stop_token_ids: vec![],
+            prefill_chunk_size: 0,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+        };
+
+        // Admit 3 slots: cap_needed values [50+50=100, 700+100=800, 1300+200=1500].
+        s.admit(req(50, 50)).expect("admit 1");
+        s.admit(req(700, 100)).expect("admit 2");
+        s.admit(req(1300, 200)).expect("admit 3");
+
+        // computed_cap = max(100, 800, 1500) = 1500, bounded by cap_max=2048 → 1500.
+        let cap = s.computed_cap_for_prefill();
+        assert_eq!(
+            cap, 1500,
+            "cap should equal max(slot cap_needed); cap_max=2048 doesn't bind"
+        );
+
+        // Smaller cap_max binds.
+        let mut s3 = Scheduler::new(4, 200);
+        s3.admit(req(50, 50)).expect("admit (cap_needed=100 < 200)");
+        s3.admit(req(150, 30))
+            .expect("admit (cap_needed=180 < 200)");
+        let cap3 = s3.computed_cap_for_prefill();
+        assert_eq!(
+            cap3, 180,
+            "cap = max(100, 180) = 180; bound at 200 doesn't bind"
+        );
+
+        // Empty-slot fallback.
+        let s4 = Scheduler::new(4, 1000);
+        assert_eq!(
+            s4.computed_cap_for_prefill(),
+            256,
+            "empty slots fallback = 256"
         );
     }
 }

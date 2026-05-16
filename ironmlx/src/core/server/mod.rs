@@ -43,6 +43,9 @@ pub struct AppState {
     pub admission_deadline_ms: u64,
     /// FIFO admission queue capacity.
     pub admission_queue_max: usize,
+    /// Effective cap_max = min(--max-cache-cap CLI flag, model.config.max_position_embeddings).
+    /// Per-request `prompt_len + max_new_tokens` exceeding this returns HTTP 413. B1-p2.3f.
+    pub effective_cap_max: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -56,14 +59,33 @@ pub async fn serve(
     b_max: usize,
     admission_deadline_ms: u64,
     admission_queue_max: usize,
+    max_cache_cap: usize, // 3f
 ) -> Result<()> {
     let model = Arc::new(Mutex::new(model));
     let admission_deadline = std::time::Duration::from_millis(admission_deadline_ms);
+
+    // 3f: effective_cap_max = min(--max-cache-cap CLI, model.config.max_position_embeddings).
+    // i32 → usize: saturating-clamp at 0 (negative i32 invalid for cap).
+    let model_max_context: usize = {
+        let m = model.blocking_lock();
+        m.config().max_position_embeddings.max(0) as usize
+    };
+    let effective_cap_max = max_cache_cap.min(model_max_context);
+    if max_cache_cap > model_max_context {
+        tracing::warn!(
+            "max_cache_cap CLI flag {} exceeds model_max_context {} — capping at {}",
+            max_cache_cap,
+            model_max_context,
+            model_max_context
+        );
+    }
+
     let scheduler_handle = scheduler_actor::spawn_scheduler_actor(
         model.clone(),
         b_max,
         admission_deadline,
         admission_queue_max,
+        effective_cap_max, // 3f
     );
     let state = AppState {
         model,
@@ -74,6 +96,7 @@ pub async fn serve(
         b_max,
         admission_deadline_ms,
         admission_queue_max,
+        effective_cap_max, // 3f
     };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))

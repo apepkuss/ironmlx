@@ -26,7 +26,7 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
     let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
     let model_id = "qwen3.5-4b".to_string();
 
-    // serve() signature gained 4 args across 3b-2 / 3d phases; p4 smoke uses defaults.
+    // serve() signature gained 5 args across 3b-2 / 3d / 3f phases; p4 smoke uses defaults.
     tokio::spawn(async move {
         server::serve(
             model,
@@ -38,6 +38,7 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             /* b_max */ 4,
             /* admission_deadline_ms */ 5,
             /* admission_queue_max */ 32,
+            /* max_cache_cap */ 32768,
         )
         .await
     })

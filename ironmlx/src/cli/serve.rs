@@ -47,6 +47,12 @@ pub struct ServeArgs {
     /// (immediate Err on saturation — mirrors pre-3d behavior).
     #[arg(long, default_value_t = 32)]
     pub admission_queue_max: usize,
+
+    /// Maximum allowed `prompt_len + max_new_tokens` per request. Capped
+    /// further at the model's `max_position_embeddings` (Qwen3.5-4B: 262144).
+    /// Requests beyond this return HTTP 413 Payload Too Large. B1-p2.3f.
+    #[arg(long, default_value_t = 32768)]
+    pub max_cache_cap: usize,
 }
 
 pub fn run(args: ServeArgs) -> Result<()> {
@@ -80,5 +86,6 @@ pub fn run(args: ServeArgs) -> Result<()> {
         args.b_max,
         args.admission_deadline_ms,
         args.admission_queue_max,
+        args.max_cache_cap, // 3f
     ))
 }

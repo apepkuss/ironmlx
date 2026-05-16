@@ -113,11 +113,16 @@ pub struct SchedulerActorHandle {
 ///   batch arrives. Hard limit; new admits do not reset it.
 /// - `admission_queue_max` — capacity of the FIFO admission queue. `0`
 ///   disables queueing (immediate Err on saturation, mirroring pre-3d).
+/// - `effective_cap_max` — upper bound on `prompt_len + max_new_tokens`
+///   per request. Computed at boot as
+///   `min(--max-cache-cap CLI, model.config.max_position_embeddings)`.
+///   Passed directly to `Scheduler::new`. B1-p2.3f.
 pub fn spawn_scheduler_actor(
     model: Arc<Mutex<Qwen35Model>>,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
+    effective_cap_max: usize, // 3f new
 ) -> SchedulerActorHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let admit_count = Arc::new(AtomicU64::new(0));
@@ -130,12 +135,14 @@ pub fn spawn_scheduler_actor(
     let saturate_triggered_for_task = saturate_triggered.clone();
     let queue_depth_peak_for_task = queue_depth_peak.clone();
     let queue_rejected_for_task = queue_rejected.clone();
+    let effective_cap_max_for_task = effective_cap_max;
     tokio::task::spawn_blocking(move || {
         driver_loop(
             model,
             b_max,
             admission_deadline,
             admission_queue_max,
+            effective_cap_max_for_task, // 3f
             cmd_rx,
             admit_count_for_task,
             batch_count_for_task,
@@ -160,6 +167,7 @@ fn driver_loop(
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
+    effective_cap_max: usize, // 3f
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
     admit_count: Arc<AtomicU64>,
     batch_count: Arc<AtomicU64>,
@@ -167,7 +175,7 @@ fn driver_loop(
     queue_depth_peak: Arc<AtomicUsize>,
     queue_rejected: Arc<AtomicU64>,
 ) {
-    let mut sched = Scheduler::new(b_max, 32768); // T2 will plumb real effective_cap_max
+    let mut sched = Scheduler::new(b_max, effective_cap_max); // 3f: replaces hardcoded 32768
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();
@@ -788,6 +796,7 @@ mod tests {
             /* b_max */ 1,
             /* admission_deadline */ Duration::from_millis(5),
             /* admission_queue_max */ 2,
+            /* effective_cap_max */ 32768,
         );
 
         let mk_req = |text: &str| -> GenerateRequest {
@@ -891,6 +900,7 @@ mod tests {
             /* b_max */ 1,
             /* admission_deadline */ Duration::from_millis(5),
             /* admission_queue_max */ 1,
+            /* effective_cap_max */ 32768,
         );
 
         let mk_req = |text: &str, max_new: usize| -> GenerateRequest {

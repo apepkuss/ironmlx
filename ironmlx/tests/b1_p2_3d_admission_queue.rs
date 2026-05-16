@@ -71,7 +71,7 @@ async fn queue_drains_fifo_at_bmax2_c4() {
     // b_max=2, queue_max=8; submit 4 requests back-to-back. All 4 must
     // complete; queue_depth_peak >= 2 (2 had to queue).
     let (model, tokenizer) = load_fixture();
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 8);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 8, 32768);
 
     let texts = ["Hello", "World", "Goodbye", "Farewell"];
     let mut replies = Vec::new();
@@ -122,7 +122,7 @@ async fn queue_overflow_returns_err_via_actor() {
     // the saturation burst sees active_count == b_max. On Metal GPU, decode
     // is ~150 ms/step regardless of Rust opt-level; 1024 tokens ≈ 150s.
     let (model, tokenizer) = load_fixture();
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 3);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 3, 32768);
 
     let (tx1, _rx1) = tokio::sync::oneshot::channel();
     handle
@@ -219,7 +219,7 @@ async fn admission_deadline_config_observed() {
     // apart should land in the same batch (drain_window covers both).
     // batch_count should be 1 (not 2).
     let (model, tokenizer) = load_fixture();
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(30), 32);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(30), 32, 32768);
 
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
 
@@ -274,7 +274,7 @@ async fn b_max_config_8_no_queue() {
     // b_max=8 + admission_deadline_ms=50: 6 concurrent admits all fit in
     // one batch (queue stays empty).
     let (model, tokenizer) = load_fixture();
-    let handle = spawn_scheduler_actor(model.clone(), 8, Duration::from_millis(50), 32);
+    let handle = spawn_scheduler_actor(model.clone(), 8, Duration::from_millis(50), 32, 32768);
 
     let texts = ["a", "b", "c", "d", "e", "f"];
     let mut rxs = Vec::new();
@@ -331,10 +331,11 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             "qwen35".to_string(),
             "127.0.0.1",
             port,
-            2048, // prefill_chunk_size default
-            4,    // b_max
-            5,    // admission_deadline_ms
-            32,   // admission_queue_max
+            2048,  // prefill_chunk_size default
+            4,     // b_max
+            5,     // admission_deadline_ms
+            32,    // admission_queue_max
+            32768, // max_cache_cap (3f default)
         )
         .await
     });
