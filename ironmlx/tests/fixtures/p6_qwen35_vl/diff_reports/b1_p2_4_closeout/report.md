@@ -13,7 +13,7 @@ SchedulerActor + continuous batching.
 
 Decode path (`step_inner` / `build_per_row_decode_mask` /
 `build_decode_position_ids`) UNCHANGED -- VL row K/V is bit-equivalent
-to text row K/V at the cache abstraction (verified by 12-suite regression
+to text row K/V at the cache abstraction (verified by 13-suite regression
 sweep).
 
 ## Acceptance
@@ -76,7 +76,7 @@ B>1 batched paths.
 - T2: `2b99acd` build_position_ids_vl_batched + `95f8323` doc fix
 - T3: `1a4c535` batched_prefill_vl + `ed63cff` ignore/doc fix
 - T4: `3c025d2` Scheduler dispatch + HTTP fallback removal
-- T5: integration scenarios + 12-suite regression + close-out
+- T5: integration scenarios + 13-suite regression + close-out
 
 ## Regression Status
 
