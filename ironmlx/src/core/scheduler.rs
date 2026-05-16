@@ -17,11 +17,15 @@ use tokio::sync::mpsc;
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
-    build_per_row_decode_mask, build_position_ids_batched, slice_logits_row, GenerateRequest,
+    build_per_row_decode_mask, build_position_ids_batched, build_position_ids_vl_batched,
+    slice_logits_row, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
 use crate::nn::LayerCache;
+
+/// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
+type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
 
 /// Opaque, monotonically-increasing identifier for an admitted request.
 ///
@@ -106,6 +110,21 @@ pub struct RequestState {
     pub finished: bool,
     /// `"stop"` or `"length"` when `finished` is `true`; otherwise `None`.
     pub finish_reason: Option<&'static str>,
+
+    // ─── B1-p2.4: VL fields, carried from GenerateRequest at admit ───
+    /// Vision input. `None` for text-only rows. `Array` clone is mlx
+    /// reference-counted — cheap. Lives until evict.
+    pub pixel_values: Option<Array>,
+    /// Per-image `(temporal, height, width)` grid sizes; same len as image
+    /// count for this row. `None` ⇔ `pixel_values.is_none()`.
+    pub image_grid_thw: Option<Vec<(i32, i32, i32)>>,
+    /// Spatial merge factor for image patches → embedding rows. Carried
+    /// from `GenerateRequest::image_spatial_merge_size`. Unused if
+    /// `pixel_values` is None.
+    pub image_spatial_merge_size: i32,
+    /// Tokenizer id of `<|image_pad|>`. Carried from
+    /// `GenerateRequest::image_token_id`. Unused if `pixel_values` is None.
+    pub image_token_id: i32,
 }
 
 /// Read pre-write per-row offsets from the first Full-attention layer's
@@ -224,6 +243,10 @@ impl Scheduler {
             real_len,
             finished: false,
             finish_reason: None,
+            pixel_values: req.pixel_values,
+            image_grid_thw: req.image_grid_thw,
+            image_spatial_merge_size: req.image_spatial_merge_size,
+            image_token_id: req.image_token_id,
         };
         self.slots[row_idx] = Some(state);
         if self.phase == Phase::Idle {
@@ -419,9 +442,13 @@ impl Scheduler {
             .try_into()
             .map_err(|e| anyhow!("input_ids try_into Array failed: {e:?}"))?;
 
-        // Build [3, B, T_max] position ids and [B, 1, T_max, T_max] attn
-        // mask and [B, T_max] linear mask via existing public helpers.
-        let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
+        // B1-p2.4: detect any VL row. Dispatch determines both position_ids
+        // builder and prefill entry point.
+        let any_vl = self
+            .slots
+            .iter()
+            .any(|s| s.as_ref().is_some_and(|r| r.pixel_values.is_some()));
+
         let attention_mask = build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
         let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
 
@@ -440,15 +467,76 @@ impl Scheduler {
         // Run batched prefill. Capture [B, 1, vocab] logits (sequence axis
         // already collapsed via slice_last_and_project) for first-token
         // sampling.
-        let logits = model.batched_prefill(
-            &input_ids,
-            &position_ids,
-            &attention_mask,
-            &linear_attention_mask,
-            &prompt_lens,
-            Some(cache_ref),
-            (),
-        )?;
+        let logits = if any_vl {
+            // Collect per-row prompt_ids (i32 conversion) + per-row vision args + tokenizer consts.
+            let per_row_ids_i32: Vec<Vec<i32>> = self
+                .slots
+                .iter()
+                .map(|s| match s {
+                    Some(r) => r.prompt_ids.iter().map(|&t| t as i32).collect(),
+                    None => vec![0_i32], // synthetic length-1 zero row (matches prompt_lens fallback)
+                })
+                .collect();
+            let per_row_ids_refs: Vec<&[i32]> =
+                per_row_ids_i32.iter().map(|v| v.as_slice()).collect();
+            let per_row_grids_owned: Vec<Option<Vec<(i32, i32, i32)>>> = self
+                .slots
+                .iter()
+                .map(|s| s.as_ref().and_then(|r| r.image_grid_thw.clone()))
+                .collect();
+            let per_row_grids: Vec<GridThwSlice<'_>> = per_row_grids_owned
+                .iter()
+                .map(|opt| opt.as_deref())
+                .collect();
+            let per_row_pv: Vec<Option<&Array>> = self
+                .slots
+                .iter()
+                .map(|s| s.as_ref().and_then(|r| r.pixel_values.as_ref()))
+                .collect();
+
+            // Tokenizer-defined constants from the first VL slot.
+            let (img_token_id, merge_size) = self
+                .slots
+                .iter()
+                .find_map(|s| {
+                    s.as_ref()
+                        .filter(|r| r.pixel_values.is_some())
+                        .map(|r| (r.image_token_id, r.image_spatial_merge_size))
+                })
+                .expect("any_vl == true implies at least one VL slot");
+
+            let position_ids = build_position_ids_vl_batched(
+                &per_row_ids_refs,
+                &per_row_grids,
+                img_token_id,
+                merge_size,
+                max_len,
+            )?;
+
+            model.batched_prefill_vl(
+                &input_ids,
+                &position_ids,
+                &attention_mask,
+                &linear_attention_mask,
+                &prompt_lens,
+                &per_row_pv,
+                &per_row_grids,
+                img_token_id,
+                Some(cache_ref),
+                (),
+            )?
+        } else {
+            let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
+            model.batched_prefill(
+                &input_ids,
+                &position_ids,
+                &attention_mask,
+                &linear_attention_mask,
+                &prompt_lens,
+                Some(cache_ref),
+                (),
+            )?
+        };
 
         // After per-row prefill, row i's cache is filled up to position
         // prompt_lens[i] - 1. The first decode step must use position
@@ -801,20 +889,59 @@ impl Scheduler {
         let input_ids: Array = (&input_ids_data[..], &[1_i32, prompt_len][..])
             .try_into()
             .map_err(|e| anyhow!("admit_mid: build input_ids Array failed: {e:?}"))?;
-        let position_ids = build_position_ids_batched(&[prompt_len], prompt_len)?;
+
+        // B1-p2.4: VL-aware position_ids — VL path uses build_position_ids_vl_batched
+        // so MRoPE three-stream values match what forward_vl/batched_prefill_vl expect.
+        let (state_pv, state_grids, state_img_token_id, state_merge_size) = {
+            let state = self.slots[row_idx].as_ref().expect("admit inserted");
+            (
+                state.pixel_values.clone(),
+                state.image_grid_thw.clone(),
+                state.image_token_id,
+                state.image_spatial_merge_size,
+            )
+        };
+        let position_ids = if state_pv.is_some() {
+            build_position_ids_vl_batched(
+                &[&input_ids_data[..]],
+                &[state_grids.as_deref()],
+                state_img_token_id,
+                state_merge_size,
+                prompt_len,
+            )?
+        } else {
+            build_position_ids_batched(&[prompt_len], prompt_len)?
+        };
         let attention_mask = build_batch_attention_mask(&[prompt_len], prompt_len, dtype)?;
         let linear_attention_mask = build_batch_linear_mask(&[prompt_len], prompt_len)?;
 
         // 5. Run B=1 prefill into the temp cache. Returns logits [1, 1, vocab].
-        let logits = model.batched_prefill(
-            &input_ids,
-            &position_ids,
-            &attention_mask,
-            &linear_attention_mask,
-            &[prompt_len],
-            Some(&mut temp_cache),
-            (),
-        )?;
+        let logits = if state_pv.is_some() {
+            let per_row_pv: Vec<Option<&Array>> = vec![state_pv.as_ref()];
+            let per_row_grids_inner: Vec<GridThwSlice<'_>> = vec![state_grids.as_deref()];
+            model.batched_prefill_vl(
+                &input_ids,
+                &position_ids,
+                &attention_mask,
+                &linear_attention_mask,
+                &[prompt_len],
+                &per_row_pv,
+                &per_row_grids_inner,
+                state_img_token_id,
+                Some(&mut temp_cache),
+                (),
+            )?
+        } else {
+            model.batched_prefill(
+                &input_ids,
+                &position_ids,
+                &attention_mask,
+                &linear_attention_mask,
+                &[prompt_len],
+                Some(&mut temp_cache),
+                (),
+            )?
+        };
 
         // 6. Adopt the temp cache's row 0 into main_cache at row_idx.
         {
@@ -1339,5 +1466,44 @@ mod tests {
             "phase unchanged when no eviction"
         );
         assert!(event_txs.contains_key(&id_a), "event channel must persist");
+    }
+
+    #[test]
+    fn admit_carries_vl_fields() {
+        use crate::core::generate::IMAGE_TOKEN_ID;
+        use crate::core::sampler::Sampler;
+        use mlx::Dtype;
+
+        let mut sched = Scheduler::new(2);
+
+        // Synthesize a dummy pixel_values array (shape doesn't matter for plumbing)
+        let pv: Array = (&[0.0_f32; 4][..], &[1_i32, 4][..]).try_into().unwrap();
+        let pv_bf16 = mlx::ops::astype(&pv, Dtype::Bfloat16).unwrap();
+        let grids = vec![(1_i32, 4_i32, 4_i32)];
+
+        let req = GenerateRequest {
+            prompt_ids: vec![1, 2, 3, IMAGE_TOKEN_ID as u32, 4],
+            max_new_tokens: 8,
+            sampler: Sampler::greedy(),
+            stop_token_ids: vec![],
+            prefill_chunk_size: 0,
+            pixel_values: Some(pv_bf16),
+            image_grid_thw: Some(grids.clone()),
+            image_spatial_merge_size: 2,
+            image_token_id: IMAGE_TOKEN_ID,
+        };
+
+        let id = sched.admit(req).expect("admit");
+
+        let slot = sched
+            .slots
+            .iter()
+            .find_map(|s| s.as_ref().filter(|r| r.id == id))
+            .expect("slot");
+
+        assert!(slot.pixel_values.is_some(), "pixel_values carried");
+        assert_eq!(slot.image_grid_thw.as_deref(), Some(&grids[..]));
+        assert_eq!(slot.image_spatial_merge_size, 2);
+        assert_eq!(slot.image_token_id, IMAGE_TOKEN_ID);
     }
 }

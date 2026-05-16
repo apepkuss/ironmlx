@@ -390,6 +390,111 @@ impl Qwen35Model {
         self.slice_last_and_project(&hidden, Some(&last_positions), target)
     }
 
+    /// VL-capable batched prefill. Single transformer forward over `[B, S_max]`
+    /// right-padded mixed text/VL prompts. Each row independently carries
+    /// `pixel_values + grid_thw` (vision row) or both `None` (text row).
+    ///
+    /// Vision encoder is run **per-row** (sequential) inside this function;
+    /// the resulting `vision_embeds_i` are concatenated along axis 0 and
+    /// scattered into `image_pad` positions across the whole batch via
+    /// [`cross_modal::replace_image_tokens`]. Per-row concat ordering must
+    /// match row-major scan of `input_ids` — guaranteed by iterating slots
+    /// in row order both in the vision-embed collection loop and in the
+    /// downstream scatter.
+    ///
+    /// Returns `[B, 1, vocab]` last-position logits (per-row, sliced via
+    /// `slice_last_and_project` with `last_positions = per_row_lens - 1`).
+    ///
+    /// Numerical contract: for batch row `i`, `out[i, :]` matches
+    /// `forward_vl(prompt_i_alone)` to within `max_abs_diff < 1e-3` and the
+    /// greedy argmax is bit-identical. Verified by integration scenarios in
+    /// the unit tests below (text-only equivalence vs `batched_prefill`,
+    /// and B=1 equivalence vs `forward_vl`).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn batched_prefill_vl(
+        &self,
+        input_ids: &Array,                       // [B, S_max] right-padded
+        position_ids: &Array,                    // [3, B, S_max] MRoPE
+        attention_mask: &Array,                  // [B, 1, S_max, S_max] additive bf16
+        linear_attention_mask: &Array,           // [B, S_max] bool
+        per_row_lens: &[i32],                    // real prompt lens
+        per_row_pixel_values: &[Option<&Array>], // None for text rows
+        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        image_token_id: i32,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        let b = per_row_lens.len();
+        if per_row_pixel_values.len() != b {
+            return Err(anyhow!(
+                "batched_prefill_vl: per_row_pixel_values.len()={} != B={}",
+                per_row_pixel_values.len(),
+                b
+            ));
+        }
+        if per_row_grid_thw.len() != b {
+            return Err(anyhow!(
+                "batched_prefill_vl: per_row_grid_thw.len()={} != B={}",
+                per_row_grid_thw.len(),
+                b
+            ));
+        }
+
+        // Embed: [B, S_max] → [B, S_max, hidden]
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+
+        // Per-row vision encoder calls (sequential — see NG1).
+        let mut all_vision_embeds: Vec<Array> = Vec::new();
+        for i in 0..b {
+            match (per_row_pixel_values[i], per_row_grid_thw[i]) {
+                (Some(pv), Some(grids)) if !grids.is_empty() => {
+                    let ve = self.compute_vision_embeds(pv, grids, target)?;
+                    all_vision_embeds.push(ve);
+                }
+                (Some(_), None) => {
+                    return Err(anyhow!(
+                        "batched_prefill_vl: row {i} has pixel_values but grid_thw is None"
+                    ));
+                }
+                _ => { /* text row or VL row with empty grids — skipped */ }
+            }
+        }
+
+        // Scatter vision embeds into image_pad positions (only if any).
+        if !all_vision_embeds.is_empty() {
+            let vision_concat = if all_vision_embeds.len() == 1 {
+                all_vision_embeds.pop().expect("len == 1")
+            } else {
+                let refs: Vec<&Array> = all_vision_embeds.iter().collect();
+                mlx::ops::concatenate(&refs, 0)
+                    .map_err(|e| anyhow!("vision_embeds concatenate: {e:?}"))?
+            };
+            hidden = super::cross_modal::replace_image_tokens(
+                &hidden,
+                input_ids,
+                &vision_concat,
+                image_token_id,
+            )?;
+        }
+
+        // Transformer + final norm (same path as batched_prefill).
+        let hidden = self.text.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            Some(attention_mask),
+            Some(linear_attention_mask),
+            Some(per_row_lens),
+            target,
+        )?;
+
+        // Per-row last-position slice + lm_head project.
+        let last_positions: Vec<i32> = per_row_lens.iter().map(|&l| l - 1).collect();
+        self.slice_last_and_project(&hidden, Some(&last_positions), target)
+    }
+
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
     /// vocab logits `[B, 1, vocab_size]`. Shared by [`forward_on`] and [`forward_vl`].
     ///
@@ -629,6 +734,247 @@ mod tests {
             max_diff < 1e-5,
             "forward_vl text-only diverged from forward_on: max_diff={max_diff}"
         );
+    }
+
+    /// Integration test: text-only batch (all per_row_pv = None) →
+    /// `batched_prefill_vl` must be byte-equal to `batched_prefill` because
+    /// the vision path is fully skipped when no row carries pixel_values.
+    ///
+    /// Run with:
+    /// ```
+    /// IRONMLX_MODEL_DIR=<path> cargo test -p ironmlx --lib \
+    ///   batched_prefill_vl_text_only_matches_batched_prefill -- --nocapture
+    /// ```
+    #[test]
+    #[ignore] // real-model heavy: needs IRONMLX_MODEL_DIR
+    fn batched_prefill_vl_text_only_matches_batched_prefill() {
+        use crate::core::generate::{
+            build_batch_attention_mask, build_batch_linear_mask, build_position_ids_batched,
+            IMAGE_TOKEN_ID,
+        };
+        use crate::core::Loader;
+
+        let model_dir = std::env::var("IRONMLX_MODEL_DIR")
+            .or_else(|_| {
+                let glob = format!(
+                    "{}/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
+                    std::env::var("HOME").unwrap()
+                );
+                let entries = std::fs::read_dir(&glob).map_err(|e| e.to_string())?;
+                let first = entries
+                    .filter_map(|e| e.ok())
+                    .next()
+                    .ok_or_else(|| "no snapshot dir".to_string())?;
+                Ok::<String, String>(first.path().to_string_lossy().into_owned())
+            })
+            .expect("model dir");
+        let model_path = std::path::PathBuf::from(model_dir);
+
+        let loader = Loader::open(&model_path).expect("Loader::open");
+        let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
+
+        let prompt_lens = vec![5_i32, 4_i32];
+        let max_len = 5_i32;
+        let b = prompt_lens.len() as i32;
+
+        // Build input_ids [B=2, max_len=5] right-padded
+        let mut flat: Vec<i32> = vec![0; (b * max_len) as usize];
+        flat[0..5].copy_from_slice(&[1_i32, 2, 3, 4, 5]);
+        flat[5..9].copy_from_slice(&[10, 11, 12, 13]);
+        // flat[9] stays 0 (pad)
+        let input_ids: Array = (&flat[..], &[b, max_len][..]).try_into().unwrap();
+
+        let position_ids = build_position_ids_batched(&prompt_lens, max_len).unwrap();
+        let attention_mask =
+            build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16).unwrap();
+        let linear_mask = build_batch_linear_mask(&prompt_lens, max_len).unwrap();
+
+        let mut cache_a = model.make_cache(b, max_len, Dtype::Bfloat16).unwrap();
+        let mut cache_b = model.make_cache(b, max_len, Dtype::Bfloat16).unwrap();
+
+        let logits_baseline = model
+            .batched_prefill(
+                &input_ids,
+                &position_ids,
+                &attention_mask,
+                &linear_mask,
+                &prompt_lens,
+                Some(&mut cache_a),
+                (),
+            )
+            .unwrap();
+
+        let per_row_pv: Vec<Option<&Array>> = vec![None, None];
+        let per_row_grids: Vec<Option<&[(i32, i32, i32)]>> = vec![None, None];
+        let logits_vl = model
+            .batched_prefill_vl(
+                &input_ids,
+                &position_ids,
+                &attention_mask,
+                &linear_mask,
+                &prompt_lens,
+                &per_row_pv,
+                &per_row_grids,
+                IMAGE_TOKEN_ID,
+                Some(&mut cache_b),
+                (),
+            )
+            .unwrap();
+
+        let a: Vec<f32> = mlx::ops::astype(&logits_baseline, Dtype::Float32)
+            .unwrap()
+            .to_vec()
+            .unwrap();
+        let b_vec: Vec<f32> = mlx::ops::astype(&logits_vl, Dtype::Float32)
+            .unwrap()
+            .to_vec()
+            .unwrap();
+
+        assert_eq!(a.len(), b_vec.len(), "logits length");
+        for (i, (av, bv)) in a.iter().zip(b_vec.iter()).enumerate() {
+            assert_eq!(av, bv, "logits[{i}] differ: {av} vs {bv}");
+        }
+    }
+
+    /// Integration test: B=1 with a single image — `batched_prefill_vl` must
+    /// produce logits numerically equivalent to `forward_vl` on the same
+    /// single-stream input (both paths share vision encoder + scatter +
+    /// transformer + last-position project). Allows small bf16-roundoff
+    /// tolerance (max_abs < 1e-3) and requires bit-identical greedy argmax.
+    ///
+    /// Run with:
+    /// ```
+    /// IRONMLX_MODEL_DIR=<path> cargo test -p ironmlx --lib \
+    ///   batched_prefill_vl_b1_matches_forward_vl -- --nocapture
+    /// ```
+    #[test]
+    #[ignore] // real-model heavy: needs IRONMLX_MODEL_DIR
+    fn batched_prefill_vl_b1_matches_forward_vl() {
+        use crate::core::generate::{
+            build_batch_attention_mask, build_batch_linear_mask, build_position_ids_vl,
+            build_position_ids_vl_batched, IMAGE_TOKEN_ID,
+        };
+        use crate::core::Loader;
+
+        let model_dir = std::env::var("IRONMLX_MODEL_DIR").unwrap_or_else(|_| {
+            let glob = format!(
+                "{}/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots",
+                std::env::var("HOME").unwrap()
+            );
+            let entries = std::fs::read_dir(&glob).expect("snapshots dir");
+            entries
+                .filter_map(|e| e.ok())
+                .next()
+                .expect("snapshot")
+                .path()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let model_path = std::path::PathBuf::from(model_dir);
+
+        let loader = Loader::open_multimodal(&model_path).expect("Loader::open_multimodal");
+        let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
+
+        // Synthesize a real preprocessed pixel_values from image_0 fixture.
+        let fixture_bytes = std::fs::read("tests/fixtures/p6_qwen35_vl/multi_image/image_0.jpg")
+            .expect("image_0 fixture");
+        let (pixel_values, grid_h, grid_w) =
+            crate::models::qwen3_5::image_processor::preprocess(&fixture_bytes)
+                .expect("preprocess");
+        let merge_size = 2_i32;
+        let grids_real: Vec<(i32, i32, i32)> = vec![(1, grid_h, grid_w)];
+        let n_pads = (grid_h * grid_w / (merge_size * merge_size)) as usize;
+        // Compose prompt: [1, 2, 3, IMG×n_pads, 4, 5]
+        let mut prompt_ids: Vec<i32> = vec![1, 2, 3];
+        prompt_ids.extend(std::iter::repeat(IMAGE_TOKEN_ID).take(n_pads));
+        prompt_ids.extend([4_i32, 5]);
+        let prompt_len = prompt_ids.len() as i32;
+
+        // forward_vl baseline (B=1)
+        let input_ids_b1: Array = (&prompt_ids[..], &[1_i32, prompt_len][..])
+            .try_into()
+            .unwrap();
+        let position_ids_b1 =
+            build_position_ids_vl(&prompt_ids, &grids_real, IMAGE_TOKEN_ID, merge_size).unwrap();
+        let mut cache_a = model.make_cache(1, prompt_len, Dtype::Bfloat16).unwrap();
+        let logits_a = model
+            .forward_vl(
+                &input_ids_b1,
+                &position_ids_b1,
+                None,
+                None,
+                Some(&mut cache_a),
+                Some(&pixel_values),
+                Some(&grids_real),
+                IMAGE_TOKEN_ID,
+                (),
+            )
+            .unwrap();
+
+        // batched_prefill_vl B=1
+        let position_ids_batched = build_position_ids_vl_batched(
+            &[&prompt_ids[..]],
+            &[Some(&grids_real[..])],
+            IMAGE_TOKEN_ID,
+            merge_size,
+            prompt_len,
+        )
+        .unwrap();
+        let attention_mask =
+            build_batch_attention_mask(&[prompt_len], prompt_len, Dtype::Bfloat16).unwrap();
+        let linear_mask = build_batch_linear_mask(&[prompt_len], prompt_len).unwrap();
+        let per_row_pv: Vec<Option<&Array>> = vec![Some(&pixel_values)];
+        let per_row_grids: Vec<Option<&[(i32, i32, i32)]>> = vec![Some(&grids_real[..])];
+        let mut cache_b = model.make_cache(1, prompt_len, Dtype::Bfloat16).unwrap();
+        let logits_b = model
+            .batched_prefill_vl(
+                &input_ids_b1,
+                &position_ids_batched,
+                &attention_mask,
+                &linear_mask,
+                &[prompt_len],
+                &per_row_pv,
+                &per_row_grids,
+                IMAGE_TOKEN_ID,
+                Some(&mut cache_b),
+                (),
+            )
+            .unwrap();
+
+        let a: Vec<f32> = mlx::ops::astype(&logits_a, Dtype::Float32)
+            .unwrap()
+            .to_vec()
+            .unwrap();
+        let b_vec: Vec<f32> = mlx::ops::astype(&logits_b, Dtype::Float32)
+            .unwrap()
+            .to_vec()
+            .unwrap();
+
+        assert_eq!(a.len(), b_vec.len(), "logits length");
+        // bf16 round-trip can introduce ULP-level diffs; require <1e-3 max-abs diff
+        // and bit-identical greedy argmax.
+        let mut max_abs = 0.0_f32;
+        for (av, bv) in a.iter().zip(b_vec.iter()) {
+            let d = (av - bv).abs();
+            if d > max_abs {
+                max_abs = d;
+            }
+        }
+        assert!(max_abs < 1e-3, "max-abs logits diff = {max_abs} >= 1e-3");
+
+        let argmax_a = a
+            .iter()
+            .enumerate()
+            .max_by(|x, y| x.1.partial_cmp(y.1).unwrap())
+            .unwrap()
+            .0;
+        let argmax_b = b_vec
+            .iter()
+            .enumerate()
+            .max_by(|x, y| x.1.partial_cmp(y.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(argmax_a, argmax_b, "greedy argmax mismatch");
     }
 }
 

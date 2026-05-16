@@ -657,6 +657,116 @@ pub fn build_position_ids_vl(
     Ok(arr)
 }
 
+/// Build MRoPE position ids `[3, B, max_len]` for mixed text+VL batch prefill
+/// (right-padded). Each row independently builds its `[3, L_i]` position ids:
+/// - VL row (`per_row_grid_thw[i].is_some()`): reuse [`build_position_ids_vl`].
+/// - Text row (`per_row_grid_thw[i].is_none()`): triple-replicated `0..L_i`
+///   (same convention as `build_position_ids_batched`'s per-row degraded MRoPE).
+///
+/// Pad columns `[L_i..max_len]` get position 0 on all three streams. This
+/// matches `build_position_ids_batched` pad convention and is harmless under
+/// the right-pad attention mask which zeroes pad K/V.
+///
+/// # Arguments
+/// - `per_row_prompt_ids` — exactly `B` slices; each slice is row `i`'s prompt token ids.
+/// - `per_row_grid_thw` — exactly `B` options; `Some(grids)` for VL row, `None` for text row.
+///   `Some(&[])` (empty grids) is treated as text row (degraded MRoPE), not an error.
+/// - `image_token_id` — token id of `<|image_pad|>`.
+/// - `image_spatial_merge_size` — same as [`build_position_ids_vl`].
+/// - `max_len` — must be `>= max(L_i)`. Pad columns beyond `L_i` get position 0.
+///
+/// # Errors
+/// - Length of `per_row_prompt_ids` != length of `per_row_grid_thw`.
+/// - Empty slice in `per_row_prompt_ids` (zero-length row).
+/// - `max_len < L_i` for any row.
+/// - `image_spatial_merge_size <= 0` (only checked when at least one VL row is present;
+///   propagates from `build_position_ids_vl`).
+/// - Any per-row VL build error propagates from `build_position_ids_vl`.
+#[allow(clippy::type_complexity)]
+pub fn build_position_ids_vl_batched(
+    per_row_prompt_ids: &[&[i32]],
+    per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+    image_token_id: i32,
+    image_spatial_merge_size: i32,
+    max_len: i32,
+) -> Result<Array> {
+    let b = per_row_prompt_ids.len();
+    if b != per_row_grid_thw.len() {
+        return Err(anyhow!(
+            "build_position_ids_vl_batched: per_row_prompt_ids.len()={} != per_row_grid_thw.len()={}",
+            b,
+            per_row_grid_thw.len()
+        ));
+    }
+    if b == 0 {
+        return Err(anyhow!(
+            "build_position_ids_vl_batched: batch must be non-empty"
+        ));
+    }
+    if max_len <= 0 {
+        return Err(anyhow!(
+            "build_position_ids_vl_batched: max_len must be > 0 (got {max_len})"
+        ));
+    }
+
+    let m = max_len as usize;
+    // Flat output layout: [3, B, max_len] contiguous row-major.
+    // Element (s, b, col) at index s*B*max_len + b*max_len + col.
+    let mut flat: Vec<i32> = vec![0; 3 * b * m];
+
+    for (row, (&ids, grids_opt)) in per_row_prompt_ids
+        .iter()
+        .zip(per_row_grid_thw.iter())
+        .enumerate()
+    {
+        let l_i = ids.len();
+        if l_i == 0 {
+            return Err(anyhow!(
+                "build_position_ids_vl_batched: row {row} has zero-length prompt"
+            ));
+        }
+        if l_i > m {
+            return Err(anyhow!(
+                "build_position_ids_vl_batched: row {row} length {l_i} > max_len {max_len}"
+            ));
+        }
+
+        // Per-row [3, L_i] flat: stream s at offset s*L_i + col within row buffer.
+        let row_flat: Vec<i32> = match grids_opt {
+            Some(grids) if !grids.is_empty() => {
+                // VL row: reuse existing single-stream builder.
+                let arr =
+                    build_position_ids_vl(ids, grids, image_token_id, image_spatial_merge_size)?;
+                arr.to_vec::<i32>()
+                    .map_err(|e| anyhow!("row {row} to_vec: {e}"))?
+            }
+            _ => {
+                // Text row (None) or VL row with empty grids: degrade to triple-replicated 0..L_i.
+                let mut buf = vec![0_i32; 3 * l_i];
+                for col in 0..l_i {
+                    buf[col] = col as i32;
+                    buf[l_i + col] = col as i32;
+                    buf[2 * l_i + col] = col as i32;
+                }
+                buf
+            }
+        };
+
+        // Scatter per-row [3, L_i] into [3, B, max_len] flat. Pad columns
+        // [L_i..max_len] stay 0 from the initial fill.
+        for s in 0..3 {
+            for col in 0..l_i {
+                flat[s * b * m + row * m + col] = row_flat[s * l_i + col];
+            }
+        }
+    }
+
+    let arr: Array = (&flat[..], &[3_i32, b as i32, max_len][..])
+        .try_into()
+        .map_err(|e| anyhow!("build_position_ids_vl_batched try_into: {e:?}"))?;
+    Ok(arr)
+}
+
 /// Count occurrences of `image_token_id` in a u32 slice of token ids.
 /// Used by the chunked-prefill loop to know how many vision_embed rows
 /// belong to a given chunk.
@@ -1202,6 +1312,167 @@ mod tests {
         assert!(req.pixel_values.is_none());
         assert!(req.image_grid_thw.is_none());
         assert_eq!(req.prompt_ids.len(), 3);
+    }
+
+    #[test]
+    fn position_ids_vl_batched_b2_each_one_image_matches_per_stream() {
+        // Two VL rows, different prompts, both contain exactly one
+        // image. Verify [3, B, max_len] matches per-row [3, 1, L_i]
+        // sliced+padded.
+        let image_token_id = 248056_i32;
+        let merge_size = 2_i32;
+
+        // Row 0 prompt: 4 text + 4 image_pad + 2 text = 10 tokens, grid (1,4,4) → 4 pads after spatial_merge_size
+        let row0_ids: Vec<i32> = vec![
+            100,
+            101,
+            102,
+            103,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            200,
+            201,
+        ];
+        let row0_grids: Vec<(i32, i32, i32)> = vec![(1, 4, 4)];
+
+        // Row 1 prompt: 2 text + 1 image_pad + 3 text = 6 tokens, grid (1,2,2) → 1 pad
+        let row1_ids: Vec<i32> = vec![300, 301, image_token_id, 400, 401, 402];
+        let row1_grids: Vec<(i32, i32, i32)> = vec![(1, 2, 2)];
+
+        let max_len = row0_ids.len().max(row1_ids.len()) as i32;
+
+        // Per-row reference build via existing single-stream API
+        let row0_pos = build_position_ids_vl(&row0_ids, &row0_grids, image_token_id, merge_size)
+            .expect("row0 single-stream");
+        let row1_pos = build_position_ids_vl(&row1_ids, &row1_grids, image_token_id, merge_size)
+            .expect("row1 single-stream");
+
+        // Batched build under test
+        let per_row_prompt_ids: Vec<&[i32]> = vec![&row0_ids[..], &row1_ids[..]];
+        let per_row_grid_thw: Vec<Option<&[(i32, i32, i32)]>> =
+            vec![Some(&row0_grids[..]), Some(&row1_grids[..])];
+        let batched = build_position_ids_vl_batched(
+            &per_row_prompt_ids,
+            &per_row_grid_thw,
+            image_token_id,
+            merge_size,
+            max_len,
+        )
+        .expect("batched build");
+
+        // Expected shape [3, 2, max_len]
+        let shape = batched.shape();
+        let dims = shape.as_slice();
+        assert_eq!(dims, &[3_i32, 2_i32, max_len], "batched shape");
+
+        // Read both as Vec<i32>
+        let batched_flat: Vec<i32> = batched.to_vec().expect("batched to_vec");
+        let row0_flat: Vec<i32> = row0_pos.to_vec().expect("row0 to_vec");
+        let row1_flat: Vec<i32> = row1_pos.to_vec().expect("row1 to_vec");
+        // row0_pos shape = [3, 1, L_0] flat layout [stream0 | stream1 | stream2]
+        // batched_flat layout for [3, B, max_len]: stream s at offset s*B*max_len + b*max_len + col
+        let b_len = max_len as usize;
+        let len0 = row0_ids.len();
+        let len1 = row1_ids.len();
+        for s in 0..3 {
+            for col in 0..len0 {
+                let bat = batched_flat[s * 2 * b_len + 0 * b_len + col];
+                let ref_v = row0_flat[s * len0 + col];
+                assert_eq!(bat, ref_v, "row 0 stream {s} col {col}");
+            }
+            for col in len0..b_len {
+                let bat = batched_flat[s * 2 * b_len + 0 * b_len + col];
+                assert_eq!(bat, 0, "row 0 pad stream {s} col {col}");
+            }
+            for col in 0..len1 {
+                let bat = batched_flat[s * 2 * b_len + 1 * b_len + col];
+                let ref_v = row1_flat[s * len1 + col];
+                assert_eq!(bat, ref_v, "row 1 stream {s} col {col}");
+            }
+            for col in len1..b_len {
+                let bat = batched_flat[s * 2 * b_len + 1 * b_len + col];
+                assert_eq!(bat, 0, "row 1 pad stream {s} col {col}");
+            }
+        }
+    }
+
+    #[test]
+    fn position_ids_vl_batched_mixed_text_vl_matches_per_stream() {
+        // B=2: row 0 text-only (no images), row 1 VL with 1 image.
+        // Verify text row uses degraded MRoPE (0..L_i triple-replicated),
+        // VL row matches single-stream build_position_ids_vl.
+        let image_token_id = 248056_i32;
+        let merge_size = 2_i32;
+
+        // Row 0: 4 text tokens (no image)
+        let row0_ids: Vec<i32> = vec![10, 11, 12, 13];
+        // Row 1: 2 text + 4 image_pad = 6 tokens, grid (1, 4, 4) → 4 pads
+        let row1_ids: Vec<i32> = vec![
+            20,
+            21,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+        ];
+        let row1_grids: Vec<(i32, i32, i32)> = vec![(1, 4, 4)];
+        let max_len = row1_ids.len() as i32; // 6
+
+        // Reference: text row degraded; VL row via build_position_ids_vl
+        let row1_pos = build_position_ids_vl(&row1_ids, &row1_grids, image_token_id, merge_size)
+            .expect("row1 single-stream");
+        let row1_flat: Vec<i32> = row1_pos.to_vec().expect("row1 to_vec");
+        let l1 = row1_ids.len();
+
+        let per_row_prompt_ids: Vec<&[i32]> = vec![&row0_ids[..], &row1_ids[..]];
+        let per_row_grid_thw: Vec<Option<&[(i32, i32, i32)]>> = vec![None, Some(&row1_grids[..])];
+        let batched = build_position_ids_vl_batched(
+            &per_row_prompt_ids,
+            &per_row_grid_thw,
+            image_token_id,
+            merge_size,
+            max_len,
+        )
+        .expect("batched build");
+
+        let shape = batched.shape();
+        assert_eq!(shape.as_slice(), &[3_i32, 2_i32, max_len]);
+
+        let batched_flat: Vec<i32> = batched.to_vec().expect("batched to_vec");
+        let m = max_len as usize;
+
+        // Row 0 (text-only, 4 real + 2 pad): all three streams = 0..L_0 then pad zeros
+        let l0 = row0_ids.len();
+        for s in 0..3 {
+            for col in 0..l0 {
+                assert_eq!(
+                    batched_flat[s * 2 * m + 0 * m + col],
+                    col as i32,
+                    "row 0 (text) stream {s} col {col}"
+                );
+            }
+            for col in l0..m {
+                assert_eq!(
+                    batched_flat[s * 2 * m + 0 * m + col],
+                    0,
+                    "row 0 pad stream {s} col {col}"
+                );
+            }
+        }
+
+        // Row 1 (VL): matches per-row build for real columns, pad = 0
+        // (here L_1 == max_len so no pad columns)
+        for s in 0..3 {
+            for col in 0..l1 {
+                assert_eq!(
+                    batched_flat[s * 2 * m + 1 * m + col],
+                    row1_flat[s * l1 + col],
+                    "row 1 (VL) stream {s} col {col}"
+                );
+            }
+        }
     }
 }
 
