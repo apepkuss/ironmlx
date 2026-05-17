@@ -701,9 +701,7 @@ fn handle_admit_mid_chunked(
                 sched.gc_finished_rows(event_txs);
             }
             Err(e) => {
-                tracing::error!(
-                    "[SchedulerActor] step error inside chunked admit_mid loop: {e:?}"
-                );
+                tracing::error!("[SchedulerActor] step error inside chunked admit_mid loop: {e:?}");
                 let _ = sched.evict(id);
                 event_txs.remove(&id);
                 return;

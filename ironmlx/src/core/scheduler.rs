@@ -392,9 +392,7 @@ impl Scheduler {
             image_grid_thw: req.image_grid_thw,
             image_spatial_merge_size: req.image_spatial_merge_size,
             image_token_id: req.image_token_id,
-            prefill_chunk_size: i32::try_from(req.prefill_chunk_size)
-                .unwrap_or(512)
-                .max(1),
+            prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(512).max(1),
         };
         self.slots[row_idx] = Some(state);
         if self.phase == Phase::Idle {
@@ -727,24 +725,41 @@ impl Scheduler {
         }
 
         // Sample first token per occupied row from logits[:, 0, :].
-        // batched_prefill returns [B, 1, vocab] with the sequence axis already
-        // collapsed internally. Use slice_logits_row (same helper as step_inner).
-        let mut events: Vec<StepEvent> = Vec::new();
+        // batched_prefill returns [B, 1, vocab]. Reshape to [B, vocab] for
+        // sample_batch, then dispatch once to coalesce all-greedy batches.
+        let logits_shape = logits.shape();
+        let vocab = logits_shape.as_slice()[2];
+        let logits_bv = logits.reshape(&[b as i32, vocab][..]).map_err(|e| {
+            anyhow!("prefill_admitted: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}")
+        })?;
+
+        // Stage A — collect per-row sampler refs + histories in slot order.
+        // Sentinel covers None / pad rows; their tokens are discarded.
+        let sentinel = Sampler::greedy();
+        let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
+        let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
         for b_idx in 0..b {
-            let was_active = self.slots[b_idx].is_some();
-            if !was_active {
+            if let Some(state) = self.slots[b_idx].as_ref() {
+                row_samplers.push(&state.sampler);
+                row_histories.push(state.prompt_ids.clone());
+            } else {
+                row_samplers.push(&sentinel);
+                row_histories.push(Vec::new());
+            }
+        }
+
+        // Stage B — dispatch sample_batch once over [B, vocab].
+        let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
+        let tokens = crate::core::sampler::sample_batch(&row_samplers, &logits_bv, &history_refs)
+            .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"))?;
+
+        // Stage C — distribute tokens + termination per occupied row.
+        let mut events: Vec<StepEvent> = Vec::new();
+        for (b_idx, &token) in tokens.iter().enumerate() {
+            if self.slots[b_idx].is_none() {
                 continue;
             }
-            let row_flat = slice_logits_row(&logits, b_idx).map_err(|e| {
-                anyhow!("prefill_admitted: slice_logits_row(row {b_idx}) failed: {e:?}")
-            })?;
-
-            let state = self.slots[b_idx]
-                .as_mut()
-                .expect("was_active guaranteed Some");
-
-            let history: Vec<u32> = state.prompt_ids.clone();
-            let token = state.sampler.sample(&row_flat, &history)?;
+            let state = self.slots[b_idx].as_mut().expect("is_some checked above");
 
             state.generated_tokens.push(token);
             state.real_len += 1;
@@ -930,27 +945,50 @@ impl Scheduler {
             (),
         )?;
 
-        // logits shape: [B, 1, vocab]
+        // logits shape: [B, 1, vocab]. Reshape to [B, vocab] for sample_batch.
+        let logits_shape = logits.shape();
+        let vocab = logits_shape.as_slice()[2];
+        let logits_bv = logits
+            .reshape(&[b as i32, vocab][..])
+            .map_err(|e| anyhow!("step: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}"))?;
+
+        // Stage A — collect per-row sampler refs + histories in slot order.
+        // Sentinel covers pad / inactive rows; their tokens are discarded.
+        let sentinel = Sampler::greedy();
+        let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
+        let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
+        for (b_idx, &was_active) in active_at_start.iter().enumerate() {
+            if was_active {
+                let state = self.slots[b_idx]
+                    .as_ref()
+                    .expect("active_at_start guaranteed Some");
+                row_samplers.push(&state.sampler);
+                let mut hist: Vec<u32> =
+                    Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+                hist.extend_from_slice(&state.prompt_ids);
+                hist.extend_from_slice(&state.generated_tokens);
+                row_histories.push(hist);
+            } else {
+                row_samplers.push(&sentinel);
+                row_histories.push(Vec::new());
+            }
+        }
+
+        // Stage B — dispatch sample_batch once over [B, vocab].
+        let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
+        let tokens = crate::core::sampler::sample_batch(&row_samplers, &logits_bv, &history_refs)
+            .map_err(|e| anyhow!("step: sample_batch failed: {e:?}"))?;
+
+        // Stage C — distribute tokens + termination per active row.
         let mut events: Vec<StepEvent> = Vec::new();
-        for (b_idx, was_active) in active_at_start.iter().enumerate() {
+        for (b_idx, &was_active) in active_at_start.iter().enumerate() {
             if !was_active {
                 continue;
             }
-            let row_flat = slice_logits_row(&logits, b_idx)
-                .map_err(|e| anyhow!("step: slice_logits_row(row {b_idx}) failed: {e:?}"))?;
-
+            let token = tokens[b_idx];
             let state = self.slots[b_idx]
                 .as_mut()
                 .expect("active_at_start guaranteed Some");
-
-            // Per-row sampler invocation. The sampler.history is the union
-            // of prompt_ids and generated_tokens so far (so repetition
-            // penalty sees both).
-            let mut history: Vec<u32> =
-                Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
-            history.extend_from_slice(&state.prompt_ids);
-            history.extend_from_slice(&state.generated_tokens);
-            let token = state.sampler.sample(&row_flat, &history)?;
 
             state.generated_tokens.push(token);
             state.real_len += 1;
@@ -1272,9 +1310,10 @@ impl Scheduler {
             // correspond to this chunk's `image_pad` token count.
             let k_i = count_image_pad(chunk_ids_u32, handle.image_token_id);
             let ve_slice = if k_i > 0 {
-                let ve_full = handle.vision_embeds_full.as_ref().expect(
-                    "is_vl implies vision_embeds_full was computed in admit_mid_begin",
-                );
+                let ve_full = handle
+                    .vision_embeds_full
+                    .as_ref()
+                    .expect("is_vl implies vision_embeds_full was computed in admit_mid_begin");
                 let start = handle.image_pad_consumed;
                 let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
                 handle.image_pad_consumed += k_i;
@@ -1353,9 +1392,8 @@ impl Scheduler {
             ..
         } = handle;
 
-        let logits = last_logits.ok_or_else(|| {
-            anyhow!("admit_mid_finalize: last_logits absent (no chunks ran?)")
-        })?;
+        let logits = last_logits
+            .ok_or_else(|| anyhow!("admit_mid_finalize: last_logits absent (no chunks ran?)"))?;
 
         // Grow main cache cap from temp_cache.cap (3f Option C).
         let cap_for_temp = temp_cache
@@ -1388,11 +1426,7 @@ impl Scheduler {
                     (LayerCache::Linear(main_gd), LayerCache::Linear(temp_gd)) => {
                         main_gd.adopt_row_from(temp_gd, row_idx, 0)?;
                     }
-                    _ => {
-                        return Err(anyhow!(
-                            "admit_mid_finalize: cache layer kind mismatch"
-                        ))
-                    }
+                    _ => return Err(anyhow!("admit_mid_finalize: cache layer kind mismatch")),
                 }
             }
         }
@@ -2116,7 +2150,13 @@ mod tests {
         // image_token_id=42, run at positions 250..260, chunk_size=256.
         // Run crosses 256-boundary (positions 250-255 in chunk 0, 256-259 in chunk 1).
         let ids: Vec<u32> = (0..400_u32)
-            .map(|i| if (250..260).contains(&(i as i32)) { 42 } else { 1 })
+            .map(|i| {
+                if (250..260).contains(&(i as i32)) {
+                    42
+                } else {
+                    1
+                }
+            })
             .collect();
         assert!(
             super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
@@ -2154,7 +2194,13 @@ mod tests {
     fn vl_image_pad_run_within_single_chunk_returns_false() {
         // image_pad run [100..150], chunk_size=256 — all in chunk 0.
         let ids: Vec<u32> = (0..200_u32)
-            .map(|i| if (100..150).contains(&(i as i32)) { 42 } else { 1 })
+            .map(|i| {
+                if (100..150).contains(&(i as i32)) {
+                    42
+                } else {
+                    1
+                }
+            })
             .collect();
         assert!(
             !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
@@ -2164,7 +2210,13 @@ mod tests {
         // Run [200..256], chunk_size=256. Run start chunk = 200/256 = 0.
         // Run end-1 = 255, 255/256 = 0. Same chunk → no crossing.
         let ids2: Vec<u32> = (0..400_u32)
-            .map(|i| if (200..256).contains(&(i as i32)) { 42 } else { 1 })
+            .map(|i| {
+                if (200..256).contains(&(i as i32)) {
+                    42
+                } else {
+                    1
+                }
+            })
             .collect();
         assert!(
             !super::vl_image_pad_crosses_chunk_boundary(&ids2, 42, 256),

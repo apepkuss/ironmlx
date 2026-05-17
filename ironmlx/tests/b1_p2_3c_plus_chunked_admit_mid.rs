@@ -162,13 +162,8 @@ async fn chunked_admit_mid_stall_delta() {
     //     kernels. Separate actor so warmup tokens don't pollute the
     //     measurement.
     {
-        let warmup_handle = spawn_scheduler_actor(
-            model.clone(),
-            4,
-            Duration::from_millis(5),
-            32,
-            32768,
-        );
+        let warmup_handle =
+            spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
         let warmup_req = make_request(
             tokenize_prompt(&tokenizer, "Warmup."),
             4,
@@ -189,13 +184,8 @@ async fn chunked_admit_mid_stall_delta() {
     //     bake ~5×20s of first-time-compile latency into the baseline
     //     gap, swamping the actual stall measurement (T4 finding).
     {
-        let warmup_handle = spawn_scheduler_actor(
-            model.clone(),
-            4,
-            Duration::from_millis(5),
-            32,
-            32768,
-        );
+        let warmup_handle =
+            spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
         // A short "active" row to make the long admit route through
         // admit_mid_chunked (active_count > 0).
         let h_short = warmup_handle.clone();
@@ -210,8 +200,7 @@ async fn chunked_admit_mid_stall_delta() {
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         let long_warmup_req = make_request(long_prompt.clone(), 4, stop_tokens.clone(), 128);
-        let long_warmup_tokens =
-            admit_short_drain(warmup_handle.clone(), long_warmup_req).await;
+        let long_warmup_tokens = admit_short_drain(warmup_handle.clone(), long_warmup_req).await;
         assert!(
             !long_warmup_tokens.is_empty(),
             "long-admit warmup must produce ≥ 1 token"

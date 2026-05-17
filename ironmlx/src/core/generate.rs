@@ -883,7 +883,11 @@ pub fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Resu
 }
 
 /// Slice rows `[start, stop)` from a `[N, hidden]` vision_embeds tensor.
-pub fn slice_vision_embeds_rows(ve_full: &mlx::Array, start: usize, stop: usize) -> Result<mlx::Array> {
+pub fn slice_vision_embeds_rows(
+    ve_full: &mlx::Array,
+    start: usize,
+    stop: usize,
+) -> Result<mlx::Array> {
     let shape = ve_full.shape();
     let dims = shape.as_slice();
     if dims.len() != 2 {
