@@ -206,12 +206,6 @@ impl Sampler {
         Ok(b)
     }
 
-    /// Replace the cached PRNG key. Used by [`sample_batched_categorical`]
-    /// to advance the key after a batch sample.
-    fn store_key(&self, k: Array) {
-        self.key.set(Some(k));
-    }
-
     /// Sample a single token id from `logits` (1-D `[vocab]`).
     /// `history` feeds repetition / frequency / presence penalties.
     pub fn sample(&self, logits: &Array, history: &[u32]) -> Result<u32> {
@@ -472,12 +466,10 @@ fn apply_penalties(
 /// reproducibility is NOT preserved (spec NG6 accepts this drift; 3e.2 will
 /// centralize PRNG state).
 fn sample_batched_categorical(samplers: &[&Sampler], probs: &Array) -> Result<Vec<u32>> {
+    // `ensure_key` splits internally: stores one half back into the Cell
+    // and returns the other. One call advances the PRNG exactly once —
+    // no additional split or store step needed.
     let key = samplers[0].ensure_key()?;
-    // Advance the key for the first sampler so the next batch step
-    // uses a fresh PRNG state.
-    let (new_key, _used_key) = random::split(&key)?;
-    samplers[0].store_key(new_key);
-
     let tokens = random::categorical(probs).key(&key).sample()?;
     Ok(tokens.to_vec::<u32>()?)
 }
@@ -1038,7 +1030,7 @@ mod tests {
     fn sample_batch_configured_fallback_no_panic_in_range() {
         // B=4 where ONE row has temperature → mixed batch → configured_pipeline (3e.1b).
         // Per-row PRNG reproducibility is NOT preserved (spec NG6); test verifies
-        // no panic + tokens in vocab range + greedy rows hit their argmax.
+        // no panic + all tokens in vocab range. PRNG drift accepted per NG6.
         let s_greedy = Sampler::greedy();
         let s_temp = Sampler::greedy().with_temperature(0.7).with_seed(42);
         let samplers: Vec<&Sampler> = vec![&s_greedy, &s_temp, &s_greedy, &s_greedy];
