@@ -55,7 +55,7 @@ The primary value of 3e.1a is eliminating the B-proportional `.item()` synchroni
 ## Architecture Notes
 
 ### `Sampler::is_greedy()`
-A 7-field predicate returning `true` when all sampling parameters match greedy defaults: temperature=0, top_p=1.0, top_k=0, no repetition/frequency/presence penalty, seed=None. Zero GPU ops — pure struct comparison.
+A 7-field predicate returning `true` when `temperature <= 0.0` AND all of `top_k` / `top_p` / `min_p` / `repetition_penalty` / `frequency_penalty` / `presence_penalty` are `None`. Zero GPU ops — pure struct comparison. Distinct from `is_pipelinable` (which permits non-greedy temperature as long as penalties are off).
 
 ### `sample_batch(samplers, logits, histories)`
 Routes based on whether all samplers in the batch are greedy:
