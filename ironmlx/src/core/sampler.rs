@@ -139,6 +139,27 @@ impl Sampler {
         self
     }
 
+    /// Returns `true` iff this sampler is in the "default greedy"
+    /// configuration: `temperature <= 0` and no penalties / filters
+    /// (`top_k`, `top_p`, `min_p`, repetition / frequency / presence
+    /// penalty all `None` / zero). Used by [`sample_batch`] (3e.1a) to
+    /// pick the vectorized argmax fast path when every active row's
+    /// sampler is greedy.
+    ///
+    /// Distinct from [`is_pipelinable`] which permits non-greedy
+    /// temperature as long as penalties are off: pipelined decode only
+    /// requires no host-side penalty math, whereas `is_greedy` requires
+    /// the full greedy short-circuit at `Sampler::sample` line ~210.
+    pub fn is_greedy(&self) -> bool {
+        self.temperature <= 0.0
+            && self.top_k.is_none()
+            && self.top_p.is_none()
+            && self.min_p.is_none()
+            && self.repetition_penalty.is_none()
+            && self.frequency_penalty.is_none()
+            && self.presence_penalty.is_none()
+    }
+
     /// Returns `true` iff this sampler can be driven by the pipelined
     /// (async-eval) decode path. The pipelined path requires:
     /// - greedy short-circuit active (`temperature <= 0.0`)
@@ -240,6 +261,96 @@ impl Sampler {
             .sample()?;
         Ok(sample.item::<u32>()?)
     }
+}
+
+/// Batched per-row sampling for `Scheduler::step` and
+/// `Scheduler::prefill_admitted_inner` (B1-p2.3e.1a).
+///
+/// `logits` shape: `[B, vocab]` (caller already collapsed the
+/// `[B, 1, vocab]` step output to drop the seq=1 dim).
+/// `samplers` and `histories` must be length `B`, indexed in row
+/// order. Each row's sampler is cloned per-request at admit time
+/// (`RequestState::sampler`) so this borrow does not contend with
+/// concurrent admits.
+///
+/// Returns `[B]` `Vec<u32>` of sampled token ids, one per row.
+///
+/// # Routing (spec §4.1)
+/// - **All-greedy fast path** (every `samplers[b].is_greedy()`):
+///   single `argmax(logits, axis=-1)` GPU dispatch → one
+///   `.to_vec::<u32>()` host transfer for the whole batch. Replaces
+///   B sequential `.item()` syncs (~1-3 ms each) with one
+///   coalesced dispatch (~1-2 ms total). 3-4× per-step sampler
+///   speedup at B=4.
+/// - **Mixed / configured fallback** (any row not greedy): per-row
+///   loop calling `Sampler::sample` exactly as the pre-3e.1a step
+///   did. 3e.1b extends this fallback to vectorize temperature /
+///   top-p / repetition penalty; top-k remains per-row pending a
+///   custom Metal partial-sort kernel.
+///
+/// # Errors
+/// - `samplers.len() != B` or `histories.len() != B` (`B` is
+///   `logits.shape()[0]`).
+/// - `logits` is not 2-D `[B, vocab]`.
+/// - Underlying MLX argmax / `.to_vec` failures bubble up.
+pub fn sample_batch(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+) -> Result<Vec<u32>> {
+    let shape = logits.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 2 {
+        anyhow::bail!(
+            "sample_batch: logits must be 2-D [B, vocab]; got shape {:?}",
+            dims
+        );
+    }
+    let b = dims[0] as usize;
+    if samplers.len() != b {
+        anyhow::bail!("sample_batch: samplers.len()={} != B={}", samplers.len(), b);
+    }
+    if histories.len() != b {
+        anyhow::bail!(
+            "sample_batch: histories.len()={} != B={}",
+            histories.len(),
+            b
+        );
+    }
+
+    // All-greedy fast path.
+    if samplers.iter().all(|s| s.is_greedy()) {
+        // `argmax(logits, axis=-1, keepdims=false)` over [B, vocab]
+        // returns [B] u32 indices. One GPU dispatch, one host sync.
+        let ids = reduction::argmax(logits, -1, false)?;
+        let tokens: Vec<u32> = ids.to_vec()?;
+        if tokens.len() != b {
+            anyhow::bail!(
+                "sample_batch: argmax returned {} tokens, expected B={}",
+                tokens.len(),
+                b
+            );
+        }
+        return Ok(tokens);
+    }
+
+    // Mixed / configured fallback: per-row sequential. 3e.1b will
+    // vectorize this for non-top-k configs.
+    let mut tokens = Vec::with_capacity(b);
+    for (i, sampler) in samplers.iter().enumerate() {
+        // Slice row i out of [B, vocab] into [1, vocab] then reshape
+        // to [vocab] for Sampler::sample.
+        let row = indexing::slice_strided_on(
+            logits,
+            &[i as i32, 0_i32][..],
+            &[i as i32 + 1, dims[1]][..],
+            &[1_i32, 1_i32][..],
+            (),
+        )?;
+        let row_flat = row.reshape(&[dims[1]][..])?;
+        tokens.push(sampler.sample(&row_flat, histories[i])?);
+    }
+    Ok(tokens)
 }
 
 fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<Array> {
@@ -451,5 +562,144 @@ mod tests {
             r.is_err(),
             "repetition_penalty must reject async-greedy path"
         );
+    }
+
+    // ── is_greedy tests ──────────────────────────────────────────────
+
+    #[test]
+    fn is_greedy_true_for_default() {
+        let s = Sampler::greedy();
+        assert!(s.is_greedy());
+    }
+
+    #[test]
+    fn is_greedy_false_when_temperature_set() {
+        let s = Sampler::greedy().with_temperature(0.7);
+        assert!(!s.is_greedy());
+    }
+
+    #[test]
+    fn is_greedy_false_when_top_p_set() {
+        let s = Sampler::greedy().with_top_p(0.9);
+        assert!(!s.is_greedy());
+    }
+
+    #[test]
+    fn is_greedy_false_when_repetition_penalty_set() {
+        let s = Sampler::greedy().with_repetition_penalty(1.1);
+        assert!(!s.is_greedy());
+    }
+
+    // ── sample_batch tests ───────────────────────────────────────────
+
+    fn make_logits_b_vocab(b: usize, vocab: usize, max_at_per_row: &[usize]) -> Array {
+        // Build a [B, vocab] f32 Array with row i's argmax at column max_at_per_row[i].
+        assert_eq!(b, max_at_per_row.len(), "max indices must match B");
+        let mut flat: Vec<f32> = vec![0.0; b * vocab];
+        for (i, &max_col) in max_at_per_row.iter().enumerate() {
+            flat[i * vocab + max_col] = 100.0;
+        }
+        let arr: Array = (&flat[..], &[b as i32, vocab as i32][..])
+            .try_into()
+            .expect("logits Array");
+        arr
+    }
+
+    #[test]
+    fn sample_batch_all_greedy_returns_per_row_argmax() {
+        let samplers_owned: Vec<Sampler> = (0..4).map(|_| Sampler::greedy()).collect();
+        let samplers: Vec<&Sampler> = samplers_owned.iter().collect();
+        let logits = make_logits_b_vocab(4, 64, &[3, 7, 17, 63]);
+        let histories: Vec<&[u32]> = vec![&[], &[], &[], &[]];
+        let tokens = sample_batch(&samplers, &logits, &histories).expect("sample_batch greedy");
+        assert_eq!(tokens, vec![3, 7, 17, 63]);
+    }
+
+    #[test]
+    fn sample_batch_b1_greedy() {
+        // B=1 edge case.
+        let s = Sampler::greedy();
+        let samplers = vec![&s];
+        let logits = make_logits_b_vocab(1, 32, &[15]);
+        let histories: Vec<&[u32]> = vec![&[]];
+        let tokens = sample_batch(&samplers, &logits, &histories).expect("sample_batch B=1");
+        assert_eq!(tokens, vec![15]);
+    }
+
+    #[test]
+    fn sample_batch_mismatched_samplers_errs() {
+        let s = Sampler::greedy();
+        let samplers = vec![&s, &s]; // 2 samplers
+        let logits = make_logits_b_vocab(4, 32, &[0, 1, 2, 3]); // B=4
+        let histories: Vec<&[u32]> = vec![&[]; 2];
+        let r = sample_batch(&samplers, &logits, &histories);
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("samplers.len()"), "msg: {msg}");
+    }
+
+    #[test]
+    fn sample_batch_mismatched_histories_errs() {
+        let s = Sampler::greedy();
+        let samplers = vec![&s, &s, &s, &s];
+        let logits = make_logits_b_vocab(4, 32, &[0, 1, 2, 3]);
+        let histories: Vec<&[u32]> = vec![&[], &[]]; // 2 histories
+        let r = sample_batch(&samplers, &logits, &histories);
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("histories.len()"), "msg: {msg}");
+    }
+
+    #[test]
+    fn sample_batch_3d_logits_errs() {
+        let s = Sampler::greedy();
+        let samplers = vec![&s];
+        // 3D logits [1, 1, 32] — caller should slice to 2D first.
+        let flat: Vec<f32> = vec![0.0; 32];
+        let logits: Array = (&flat[..], &[1_i32, 1_i32, 32_i32][..]).try_into().unwrap();
+        let histories: Vec<&[u32]> = vec![&[]];
+        let r = sample_batch(&samplers, &logits, &histories);
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("2-D"), "msg: {msg}");
+    }
+
+    #[test]
+    fn sample_batch_configured_fallback_matches_per_row() {
+        // B=4 where ONE row has temperature → mixed batch → fallback.
+        // Use Sampler::sample with fixed seed for deterministic compare.
+        let s_greedy = Sampler::greedy();
+        let s_temp = Sampler::greedy().with_temperature(0.7).with_seed(42);
+        let samplers: Vec<&Sampler> = vec![&s_greedy, &s_temp, &s_greedy, &s_greedy];
+        let logits = make_logits_b_vocab(4, 32, &[5, 10, 15, 20]);
+        let histories: Vec<&[u32]> = vec![&[], &[], &[], &[]];
+
+        // Vectorized batch path (will take fallback because s_temp not greedy).
+        let tokens_batch =
+            sample_batch(&samplers, &logits, &histories).expect("sample_batch mixed");
+
+        // Per-row reference using fresh samplers (Sampler is !Clone-safe across
+        // PRNG state; rebuild the with_seed(42) one to get the same key).
+        let s_temp_ref = Sampler::greedy().with_temperature(0.7).with_seed(42);
+        let mut tokens_ref: Vec<u32> = Vec::with_capacity(4);
+        for (i, expected_argmax) in [5_usize, 10, 15, 20].iter().enumerate() {
+            let row = indexing::slice_strided_on(
+                &logits,
+                &[i as i32, 0_i32][..],
+                &[i as i32 + 1, 32_i32][..],
+                &[1_i32, 1_i32][..],
+                (),
+            )
+            .unwrap();
+            let row_flat = row.reshape(&[32_i32][..]).unwrap();
+            let s_ref = if i == 1 { &s_temp_ref } else { &s_greedy };
+            tokens_ref.push(s_ref.sample(&row_flat, &[]).unwrap());
+            // Greedy rows must produce their argmax index.
+            if i != 1 {
+                assert_eq!(tokens_ref[i] as usize, *expected_argmax);
+            }
+        }
+
+        assert_eq!(tokens_batch, tokens_ref);
     }
 }
