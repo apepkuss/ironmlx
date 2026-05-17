@@ -10,7 +10,7 @@
 
 **Spec ref:** [`docs/superpowers/specs/2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md`](../specs/2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md) (commit `92b5b50`).
 
-**Branch target:** `ironmlx-b1-p2-3e1b-vectorize-configured` cut from `ironmlx-b1-p2-3e1a-vectorize-greedy` HEAD `978d288`.
+**Branch target:** `ironmlx-b1-p2-3e1b-vectorize-configured` cut from `ironmlx-b1-p2-3e1a-vectorize-greedy` HEAD (commit `461240a` plan or later; verify with `git rev-parse HEAD`). Note: 3e.1a branch has docs ancestors (`ab4c839` / `92b5b50` / `978d288` / `461240a`) carried into 3e.1b — `git push` of 3e.1b will publish them as well; this is intentional.
 
 ---
 
