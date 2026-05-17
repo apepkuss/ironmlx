@@ -46,8 +46,8 @@ pub enum SchedulerError {
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_chunked_prefill_attention_mask,
-    build_chunked_prefill_linear_mask, build_decode_position_ids, build_per_row_decode_mask,
-    build_position_ids_batched, build_position_ids_vl_batched, slice_logits_row, GenerateRequest,
+    build_decode_position_ids, build_per_row_decode_mask, build_position_ids_batched,
+    build_position_ids_vl_batched, slice_logits_row, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
@@ -813,32 +813,44 @@ impl Scheduler {
 
         let b = self.b_max;
 
-        // Capture which rows were not-yet-finished at the start of this
-        // step. Only these rows participate in sampling and in the event
-        // list. Already-finished rows are still padded into the forward
+        // Capture which rows are eligible to step at the start of this
+        // call. Eligible = `Some` slot AND not finished AND already has
+        // at least one generated token. The `!generated_tokens.is_empty()`
+        // guard excludes B1-p2.3c+ admit_mid chunk-loop rows: those have
+        // an inserted `RequestState` (slot reserved by `admit_mid_begin`)
+        // but no first token until `admit_mid_finalize` runs (which
+        // adopts the temp cache + samples the first token). Treating
+        // them as pad here makes the interleaved step a no-op for the
+        // mid-admit row — the main cache slot stays empty until
+        // finalize's adopt overwrites it.
+        //
+        // Already-finished rows are also padded into the forward
         // (lockstep cost — see spec §7).
         let active_at_start: Vec<bool> = self
             .slots
             .iter()
-            .map(|s| matches!(s, Some(r) if !r.finished))
+            .map(|s| matches!(s, Some(r) if !r.finished && !r.generated_tokens.is_empty()))
             .collect();
 
         // Build [B, 1] input_ids in slot order.
-        // - For active rows: last generated token (prefill_admitted always pushes
-        //   ≥1 token before the first step call, so generated_tokens is non-empty).
-        // - For already-finished rows or empty slots: pad 0.
+        // - For active rows: last generated token. `active_at_start`
+        //   guarantees `generated_tokens` is non-empty so .last() unwrap
+        //   is safe.
+        // - For pad / mid-admit / finished rows: pad 0.
         let last_tokens: Vec<i32> = self
             .slots
             .iter()
-            .map(|slot| match slot {
-                Some(r) if !r.finished => {
-                    let tok = *r
-                        .generated_tokens
+            .zip(active_at_start.iter())
+            .map(|(slot, &active)| {
+                if active {
+                    let r = slot.as_ref().expect("active implies Some");
+                    *r.generated_tokens
                         .last()
-                        .expect("prefill_admitted always pushes ≥ 1 token before step");
-                    tok as i32
+                        .expect("active_at_start guarantees ≥1 generated token")
+                        as i32
+                } else {
+                    0
                 }
-                _ => 0,
             })
             .collect();
         let input_ids: Array = (&last_tokens[..], &[b as i32, 1][..])
@@ -850,22 +862,24 @@ impl Scheduler {
         let per_row_pos: Vec<i32> = self
             .slots
             .iter()
-            .map(|s| match s {
-                Some(r) if !r.finished => r.real_len,
-                _ => 0,
+            .zip(active_at_start.iter())
+            .map(|(slot, &active)| {
+                if active {
+                    slot.as_ref().expect("active implies Some").real_len
+                } else {
+                    0
+                }
             })
             .collect();
         let position_ids = build_decode_position_ids(&per_row_pos)?;
 
         // Per-row lens for decode: each active row writes 1 token; pad
-        // rows (finished or None slots) write 0 to skip the K/V write.
-        let per_row_lens: Vec<i32> = self
-            .slots
+        // rows (finished, mid-admit, or None slots) write 0 to skip the
+        // K/V write. Mid-admit rows must skip so finalize's adopt_row_from
+        // can cleanly install the prefilled state at offset 0.
+        let per_row_lens: Vec<i32> = active_at_start
             .iter()
-            .map(|s| match s {
-                Some(r) if !r.finished => 1,
-                _ => 0,
-            })
+            .map(|&active| if active { 1 } else { 0 })
             .collect();
 
         let cache_ref = self
@@ -1226,11 +1240,18 @@ impl Scheduler {
             })
             .unwrap_or(Dtype::Bfloat16);
 
-        // Cross-chunk attention: [1, 1, chunk_len, chunk_start + chunk_len].
+        // Full attention sees this chunk's queries against the union of
+        // KV from earlier chunks + this chunk → mask is
+        // `[1, 1, chunk_len, chunk_start + chunk_len]`.
+        //
+        // Linear attention (GatedDeltaNet) carries recurrent state across
+        // chunks rather than a KV cache, so its mask only covers the
+        // current chunk's input tokens → shape `[1, chunk_len]`. Using
+        // the chunked-width mask here would trip a reshape error inside
+        // the GatedDelta forward (size mismatch vs the input seq dim).
         let attention_mask =
             build_chunked_prefill_attention_mask(handle.chunk_start, chunk_len, dtype)?;
-        let linear_attention_mask =
-            build_chunked_prefill_linear_mask(handle.chunk_start, chunk_len)?;
+        let linear_attention_mask = build_batch_linear_mask(&[chunk_len], chunk_len)?;
 
         // Vision args: only the first chunk carries pixel_values; later
         // chunks pass None because v1 enforces image_pad fully within
