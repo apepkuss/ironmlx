@@ -33,17 +33,25 @@ The `.item()` call synchronously evaluates the lazy MLX graph and pulls one u32 
 
 **Goal:** replace the per-row Python-style loop with a single vectorized GPU operation that processes all B rows in one dispatch. Default-config (greedy) is the hot path and benefits the most. Configured-sampler (temperature, top-p, repetition penalty, top-k) needs careful per-row variant handling but most of it can also be vectorized.
 
-## 1.1 Brainstorm-time analysis correction
+## 1.1 Brainstorm-time analysis correction (Boss-approved 2026-05-17)
 
 Boss originally suggested "tokio/rayon CPU parallel sampler" as 3e.1a — running each row's `Sampler::sample` on a separate thread. Deep analysis (autonomous-loop, 2026-05-17) found this is **not viable** under current `Sampler` design:
 
 - `Sampler` holds `Cell<Option<Array>>` for the PRNG key (`core/sampler.rs:43`). `Cell` is `!Send`, blocking `tokio::spawn` and `rayon::spawn`.
 - Making `Sampler` `Send` (replacing `Cell` with `Mutex`) trades the lock-free property for synchronization overhead per call — Mutex acquire + release on every sample defeats the CPU parallelism win.
 - Even with `Send` `Sampler`, the actual hot path is GPU dispatch + `.item()` sync, not CPU math. CPU parallelism wins are limited to penalty multiplier construction (≤ 0.5 ms per row).
+- Further: MLX dispatches to a **single GPU stream**, so multi-threaded `.item()` calls queue serially on the GPU. True CPU parallelism only buys the ~0.5 ms/row penalty math (≤ 2 ms across B=4), not the ~1-3 ms/row GPU sync time (B-serialised). Realistic speedup with CPU parallel: ~2× (vs vectorize greedy's ~3-4× from coalesced [B, vocab] argmax).
 
-**Revised approach:** skip CPU parallelism entirely and go directly to vectorized GPU sampling. This is what 3e.1b was already targeting. Net effect: **3e.1a renamed to "vectorize greedy argmax"** (the trivial half), **3e.1b stays "vectorize temperature + top-p + repetition penalty"** (the configurable half, harder). Top-k continues to require host-side partial sort and stays per-row (or moves to a custom Metal kernel as a future task — out of scope).
+**Revised approach (Boss-approved):** skip CPU parallelism entirely and go directly to vectorized GPU sampling. The "incremental" staging Boss chose (3e.1a then 3e.1b) is preserved — only the *technical content* of 3e.1a changes:
 
-Boss can override this revision at review time and request the CPU-parallel direction instead. The risk/win analysis above stands and is the basis for the revision.
+| | Original | Revised (current) |
+| --- | --- | --- |
+| 3e.1a (~< 1 d) | tokio/rayon CPU parallel sampler (~2× greedy + all configured) | **Vectorize greedy argmax** (~3-4× greedy only; configured falls back to per-row) |
+| 3e.1b (~2-3 d) | Vectorize temperature + top-p + repetition penalty (top-k stays CPU) | (unchanged) |
+| Top-k handling | CPU per-row (future Metal kernel) | (unchanged) |
+| Total | 3-4 d | 3-4 d |
+
+**Foundation-for-3e.1b property:** vectorize-greedy 3e.1a builds the `sample_batch` infrastructure (function signature, Scheduler::step integration, all-greedy fast path, mixed-batch routing, per-row PRNG key handling pattern) that 3e.1b extends in place — no rework. CPU-parallel 3e.1a would have built `Sampler::Send` refactor + thread spawning code, all of which 3e.1b vectorize would discard. The revised path is therefore strictly cleaner toward the final goal "all-config batched vectorized sampler".
 
 ## 2. Goals
 
@@ -273,4 +281,10 @@ iron-bench v2 c=8 PP=512 max_new=64:
 | 3e.1b-T3 | Vectorize top-p + min-p. Top-k routing fallback (Option A). U5 | 0.5 d | sonnet |
 | 3e.1b-T4 | I2 + 17-suite regression + perf gate + close-out | 1 d | sonnet |
 
-Spec → plan → subagent-driven implementation. Plan deferred until Boss reviews this spec and confirms or revises the "skip CPU parallelism" decision (§1.1).
+Spec → plan → subagent-driven implementation.
+
+Status update (2026-05-17): Boss reviewed §1.1 and confirmed the
+"skip CPU parallelism, vectorize greedy in 3e.1a" direction. Plan
+authoring starts immediately on branch
+`ironmlx-b1-p2-3e1a-vectorize-greedy` (cut from
+`ironmlx-b1-p2-3c-plus-chunked-admit-mid` HEAD).
