@@ -853,14 +853,14 @@ pub fn build_position_ids_vl_batched(
 /// Count occurrences of `image_token_id` in a u32 slice of token ids.
 /// Used by the chunked-prefill loop to know how many vision_embed rows
 /// belong to a given chunk.
-fn count_image_pad(ids: &[u32], image_token_id: i32) -> usize {
+pub fn count_image_pad(ids: &[u32], image_token_id: i32) -> usize {
     let target = image_token_id as u32;
     ids.iter().filter(|&&t| t == target).count()
 }
 
 /// Slice a MRoPE `[3, 1, S]` position-id tensor on axis 2 by a half-open
 /// range `[start, stop)`. Returns `[3, 1, stop - start]`.
-fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<mlx::Array> {
+pub fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<mlx::Array> {
     let shape = pos_full.shape();
     let dims = shape.as_slice();
     if dims.len() != 3 || dims[0] != 3 || dims[1] != 1 {
@@ -883,7 +883,7 @@ fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<m
 }
 
 /// Slice rows `[start, stop)` from a `[N, hidden]` vision_embeds tensor.
-fn slice_vision_embeds_rows(ve_full: &mlx::Array, start: usize, stop: usize) -> Result<mlx::Array> {
+pub fn slice_vision_embeds_rows(ve_full: &mlx::Array, start: usize, stop: usize) -> Result<mlx::Array> {
     let shape = ve_full.shape();
     let dims = shape.as_slice();
     if dims.len() != 2 {

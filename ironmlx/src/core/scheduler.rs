@@ -45,9 +45,10 @@ pub enum SchedulerError {
 }
 
 use crate::core::generate::{
-    build_batch_attention_mask, build_batch_linear_mask, build_chunked_prefill_attention_mask,
-    build_decode_position_ids, build_per_row_decode_mask, build_position_ids_batched,
-    build_position_ids_vl_batched, slice_logits_row, GenerateRequest,
+    build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
+    build_per_row_decode_mask, build_position_ids, build_position_ids_batched,
+    build_position_ids_vl, build_position_ids_vl_batched, count_image_pad, slice_logits_row,
+    slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
@@ -132,15 +133,22 @@ pub struct AdmitMidHandle {
     /// `prompt_len` across the chunk loop.
     pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
     pub(crate) is_vl: bool,
-    pub(crate) pixel_values: Option<Array>,
-    pub(crate) image_grid_thw: Option<Vec<(i32, i32, i32)>>,
     pub(crate) image_token_id: i32,
     /// Pre-computed `[3, 1, prompt_len]` MRoPE position ids for the
     /// full prompt — sliced per chunk inside `admit_mid_chunk` to
-    /// avoid rebuilding on each iteration. (`image_spatial_merge_size`
-    /// is consumed once when building this Array in `admit_mid_begin`;
-    /// no need to carry it forward.)
+    /// avoid rebuilding on each iteration. For VL it incorporates
+    /// `image_spatial_merge_size` + `image_grid_thw` (consumed in
+    /// `admit_mid_begin` when building this Array — no need to carry
+    /// the inputs forward).
     pub(crate) position_ids_full: Array,
+    /// Pre-computed full-prompt vision embeddings
+    /// `[N_image_pad_total, hidden]` — only populated for VL requests.
+    /// Each chunk slices the rows it consumes; `image_pad_consumed`
+    /// tracks the running offset. `pixel_values` + `image_grid_thw`
+    /// are consumed by `compute_vision_embeds` in `admit_mid_begin`
+    /// and not carried forward in the handle.
+    pub(crate) vision_embeds_full: Option<Array>,
+    pub(crate) image_pad_consumed: usize,
     /// Last chunk's `[1, 1, vocab]` logits, captured only at the final
     /// chunk for first-token sampling in `admit_mid_finalize`.
     pub(crate) last_logits: Option<Array>,
@@ -1146,20 +1154,36 @@ impl Scheduler {
             chunk_size = prompt_len;
         }
 
-        // Pre-build full-prompt MRoPE position ids. Chunked path slices
-        // axis 2 inside admit_mid_chunk; full build once is cheaper than
-        // per-chunk rebuild.
+        // Pre-build full-prompt MRoPE position ids in the B=1 single-stream
+        // shape that `model.forward_on` / `model.forward_vl_chunk` expect:
+        // `[3, 1, prompt_len]`. Chunked path slices axis 2 per chunk.
         let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
         let position_ids_full = if is_vl {
-            build_position_ids_vl_batched(
-                &[&prompt_ids_i32[..]],
-                &[image_grid_thw.as_deref()],
+            build_position_ids_vl(
+                &prompt_ids_i32,
+                image_grid_thw
+                    .as_deref()
+                    .expect("is_vl implies image_grid_thw is Some"),
                 image_token_id,
                 image_spatial_merge_size,
-                prompt_len,
             )?
         } else {
-            build_position_ids_batched(&[prompt_len], prompt_len)?
+            build_position_ids(0, prompt_len)?
+        };
+
+        // For VL: pre-compute vision embeddings once (`[N_image_pad_total,
+        // hidden]`). Each chunk slices the rows it consumes; tracking the
+        // running offset via `image_pad_consumed`.
+        let vision_embeds_full = if is_vl {
+            let pv = pixel_values
+                .as_ref()
+                .expect("is_vl implies pixel_values is Some");
+            let grids = image_grid_thw
+                .as_deref()
+                .expect("is_vl implies image_grid_thw is Some");
+            Some(model.compute_vision_embeds(pv, grids, ())?)
+        } else {
+            None
         };
 
         Ok(AdmitMidHandle {
@@ -1171,10 +1195,10 @@ impl Scheduler {
             chunk_start: 0,
             temp_cache,
             is_vl,
-            pixel_values,
-            image_grid_thw,
             image_token_id,
             position_ids_full,
+            vision_embeds_full,
+            image_pad_consumed: 0,
             last_logits: None,
         })
     }
@@ -1211,91 +1235,97 @@ impl Scheduler {
         }
 
         // Build chunk-local input_ids [1, chunk_len].
-        let chunk_ids: Vec<i32> = handle.prompt_ids
-            [handle.chunk_start as usize..chunk_end as usize]
-            .iter()
-            .map(|&t| t as i32)
-            .collect();
-        let input_ids: Array = (&chunk_ids[..], &[1_i32, chunk_len][..])
+        let chunk_ids_u32 = &handle.prompt_ids[handle.chunk_start as usize..chunk_end as usize];
+        let chunk_ids_i32: Vec<i32> = chunk_ids_u32.iter().map(|&t| t as i32).collect();
+        let input_ids: Array = (&chunk_ids_i32[..], &[1_i32, chunk_len][..])
             .try_into()
             .map_err(|e| anyhow!("admit_mid_chunk: input_ids try_into Array failed: {e:?}"))?;
 
         // Slice axis 2 of the pre-built full-prompt position ids.
         // position_ids_full shape: [3, 1, prompt_len].
-        let position_ids = mlx::ops::indexing::slice_strided_on(
-            &handle.position_ids_full,
-            [0_i32, 0, handle.chunk_start],
-            [3_i32, 1, chunk_end],
-            [1_i32, 1, 1],
-            (),
-        )?;
+        let position_ids =
+            slice_pos_ids_axis2(&handle.position_ids_full, handle.chunk_start, chunk_end)?;
 
-        // Dtype matches temp_cache's first Full layer.
-        let dtype = handle
-            .temp_cache
-            .iter()
-            .find_map(|c| match c {
-                LayerCache::Full(kv) => Some(kv.dtype()),
-                _ => None,
-            })
-            .unwrap_or(Dtype::Bfloat16);
-
-        // Full attention sees this chunk's queries against the union of
-        // KV from earlier chunks + this chunk → mask is
-        // `[1, 1, chunk_len, chunk_start + chunk_len]`.
+        // Forward via the B=1 single-stream API (same path GS chunked
+        // prefill uses). The pre-3c+ implementation went through
+        // `batched_prefill` (a B>1 path) which adds per-row mask and
+        // B-loop overhead that dominated cold + warm runs alike
+        // (3c+ T4 finding: chunks ran 10-25× slower than expected with
+        // batched_prefill). Going through `forward_on` removes the
+        // overhead AND removes the need for caller-built attention /
+        // linear masks — the B=1 path derives them internally from
+        // input shape + cache state.
         //
-        // Linear attention (GatedDeltaNet) carries recurrent state across
-        // chunks rather than a KV cache, so its mask only covers the
-        // current chunk's input tokens → shape `[1, chunk_len]`. Using
-        // the chunked-width mask here would trip a reshape error inside
-        // the GatedDelta forward (size mismatch vs the input seq dim).
-        let attention_mask =
-            build_chunked_prefill_attention_mask(handle.chunk_start, chunk_len, dtype)?;
-        let linear_attention_mask = build_batch_linear_mask(&[chunk_len], chunk_len)?;
+        // - Last chunk: `forward_on` returns `[1, 1, vocab]` logits via
+        //   lm_head, captured for first-token sampling in
+        //   `admit_mid_finalize`.
+        // - Intermediate chunk: text path uses `text().forward_on`
+        //   (skips lm_head; we don't need logits), VL path uses
+        //   `forward_vl_chunk` (always returns logits — we discard).
+        //   Either way the result is `eval`-d before return so the
+        //   chunk's lazy graph materialises here rather than ballooning
+        //   into the interleaved `Scheduler::step` call. (GenerationStream
+        //   chunked prefill at core/generate.rs ~line 1053 uses the
+        //   same `eval(hidden)` pattern for the same reason.)
+        let result_logits: Option<Array> = if handle.is_vl {
+            // VL chunk: slice the rows of `vision_embeds_full` that
+            // correspond to this chunk's `image_pad` token count.
+            let k_i = count_image_pad(chunk_ids_u32, handle.image_token_id);
+            let ve_slice = if k_i > 0 {
+                let ve_full = handle.vision_embeds_full.as_ref().expect(
+                    "is_vl implies vision_embeds_full was computed in admit_mid_begin",
+                );
+                let start = handle.image_pad_consumed;
+                let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
+                handle.image_pad_consumed += k_i;
+                Some(slice)
+            } else {
+                None
+            };
 
-        // Vision args: only the first chunk carries pixel_values; later
-        // chunks pass None because v1 enforces image_pad fully within
-        // chunk 0 (R6 fallback otherwise forces single-chunk).
-        let logits = if handle.is_vl {
-            let pv_for_chunk: Vec<Option<&Array>> = if handle.chunk_start == 0 {
-                vec![handle.pixel_values.as_ref()]
-            } else {
-                vec![None]
-            };
-            let grids_for_chunk: Vec<GridThwSlice<'_>> = if handle.chunk_start == 0 {
-                vec![handle.image_grid_thw.as_deref()]
-            } else {
-                vec![None]
-            };
-            model.batched_prefill_vl(
+            let logits = model.forward_vl_chunk(
                 &input_ids,
                 &position_ids,
-                &attention_mask,
-                &linear_attention_mask,
-                &[chunk_len],
-                &pv_for_chunk,
-                &grids_for_chunk,
+                None, // per_row_lens (B=1 path derives from input shape)
+                None, // decode_mask (prefill — model builds its own causal mask)
+                Some(&mut handle.temp_cache),
+                ve_slice.as_ref(),
                 handle.image_token_id,
-                Some(&mut handle.temp_cache),
                 (),
-            )?
-        } else {
-            model.batched_prefill(
+            )?;
+            if is_last {
+                Some(logits)
+            } else {
+                mlx::transforms::eval(&[&logits])?;
+                None
+            }
+        } else if is_last {
+            // Text last chunk: full forward returns logits.
+            Some(model.forward_on(
                 &input_ids,
                 &position_ids,
-                &attention_mask,
-                &linear_attention_mask,
-                &[chunk_len],
+                None,
+                None,
                 Some(&mut handle.temp_cache),
                 (),
-            )?
+            )?)
+        } else {
+            // Text intermediate chunk: skip lm_head, just update KV cache.
+            let hidden = model.text().forward_on(
+                &input_ids,
+                &position_ids,
+                None,
+                None,
+                Some(&mut handle.temp_cache),
+                (),
+            )?;
+            mlx::transforms::eval(&[&hidden])?;
+            None
         };
 
-        if is_last {
+        if let Some(logits) = result_logits {
             handle.last_logits = Some(logits);
         }
-        // Discard intermediate-chunk logits — sampling only uses the last
-        // chunk's [1, 1, vocab] last-position slice.
         handle.chunk_start = chunk_end;
         Ok(is_last)
     }
