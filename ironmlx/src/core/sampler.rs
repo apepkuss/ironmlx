@@ -513,6 +513,107 @@ fn configured_pipeline(
     anyhow::bail!("configured_pipeline: not yet implemented (3e.1b T1-T3)")
 }
 
+// ── T2: batched ops over [B, vocab] ─────────────────────────────────────────
+
+/// Scale logits by per-row temperature: `logits / temp[:, None]`.
+/// No-op when `temp == 1.0`.
+#[allow(dead_code)]
+fn apply_temperature(logits: &Array, temp_per_row: &Array) -> Result<Array> {
+    let b = logits.shape().as_slice()[0];
+    let temp_bv = temp_per_row.reshape(&[b, 1][..])?;
+    Ok(logits / &temp_bv)
+}
+
+/// Mask logits below per-row top-k threshold with NEG_INFINITY.
+/// Uses partition (T0 bench: 1.15ms vs sort 11.84ms at vocab=151k).
+/// Per-row `top_k_per_row[i]` = `vocab_size` → no-op (mask passes everything).
+#[allow(dead_code)]
+fn apply_top_k_batched(logits: &Array, top_k_per_row: &Array) -> Result<Array> {
+    let dims_owned = logits.shape();
+    let dims = dims_owned.as_slice();
+    let b = dims[0];
+    let vocab = dims[1];
+
+    // Partition: place the (vocab - max_top_k)-th smallest element at its sorted position.
+    // After partition, elements >= top_k threshold are in the upper part of the row.
+    // We need per-row threshold = (vocab - top_k[i])-th element in sorted order.
+    //
+    // Strategy: read max(top_k_per_row) from host (CPU side cheap), partition by
+    // kth=(vocab - max_top_k), then take_along_axis to extract per-row threshold.
+    let top_k_host: Vec<i32> = top_k_per_row.to_vec()?;
+    let max_top_k = top_k_host.iter().copied().max().unwrap_or(vocab).min(vocab);
+    let kth = (vocab - max_top_k).max(0);
+    let parted = sort::partition(logits, kth, -1)?; // [B, vocab]; index kth is in sorted position
+
+    // Per-row threshold index in the partitioned array: vocab - top_k[i]
+    let vocab_arr: Array = (&[vocab][..], ()).try_into()?;
+    let thresh_idx = &vocab_arr - top_k_per_row; // [B] i32
+    let thresh_idx_bv = thresh_idx.reshape(&[b, 1][..])?;
+    let threshold = indexing::take_along_axis(&parted, &thresh_idx_bv, -1)?; // [B, 1]
+
+    // Mask: keep logits >= threshold
+    let mask = mlx::ops::binary::greater_equal(logits, &threshold)?;
+    let neg_inf: Array = (&[f32::NEG_INFINITY][..], ()).try_into()?;
+    Ok(indexing::where_(&mask, logits, &neg_inf)?)
+}
+
+/// Numerically stable softmax over axis=-1.
+#[allow(dead_code)]
+fn apply_softmax(logits: &Array) -> Result<Array> {
+    Ok(unary::softmax(logits, &[-1_i32][..], false)?)
+}
+
+/// Nucleus filter: zero out probs that fall outside the smallest
+/// set summing to `top_p[i]`. The first token whose inclusion crosses
+/// `top_p` is RETAINED (matches HF semantics).
+#[allow(dead_code)]
+fn apply_top_p_batched(probs: &Array, top_p_per_row: &Array) -> Result<Array> {
+    use mlx::ops::cumulative::cumsum;
+    let b = probs.shape().as_slice()[0];
+
+    // Negate to make argsort give descending order indices.
+    let neg_one: Array = (&[-1.0_f32][..], ()).try_into()?;
+    let neg_probs = probs * &neg_one;
+    let sort_idx_desc = sort::argsort(&neg_probs, -1)?; // [B, vocab] u32
+
+    // Gather probs in descending order.
+    let sorted_probs = indexing::take_along_axis(probs, &sort_idx_desc, -1)?;
+    // cumsum(axis=-1, reverse=false, inclusive=true) then subtract self → exclusive cumsum
+    let csum = cumsum(&sorted_probs, -1, false, true)?;
+    // mask_sorted[i, j] = (csum[i, j] - sorted[i, j]) < top_p[i]
+    //   (keep first token whose inclusion crosses threshold)
+    let csum_excl = &csum - &sorted_probs;
+    let top_p_bv = top_p_per_row.reshape(&[b, 1][..])?;
+    let mask_sorted = mlx::ops::binary::less(&csum_excl, &top_p_bv)?;
+    let zero_f32: Array = (&[0.0_f32][..], ()).try_into()?;
+    let sorted_masked = indexing::where_(&mask_sorted, &sorted_probs, &zero_f32)?;
+
+    // Scatter back to vocab order using inverse permutation:
+    //   inv_perm = argsort(sort_idx_desc) — verified in probe_argsort_inverse_permutation_identity
+    let inv_perm = sort::argsort(&sort_idx_desc, -1)?;
+    Ok(indexing::take_along_axis(&sorted_masked, &inv_perm, -1)?)
+}
+
+/// min_p floor: keep probs >= min_p[i] * max_prob[i]. Sets others to 0.
+#[allow(dead_code)]
+fn apply_min_p_batched(probs: &Array, min_p_per_row: &Array) -> Result<Array> {
+    let b = probs.shape().as_slice()[0];
+    let max_per_row = reduction::max(probs, &[-1_i32][..], true)?; // [B, 1] keepdims
+    let min_p_bv = min_p_per_row.reshape(&[b, 1][..])?;
+    let threshold = &min_p_bv * &max_per_row;
+    let mask = mlx::ops::binary::greater_equal(probs, &threshold)?;
+    let zero_f32: Array = (&[0.0_f32][..], ()).try_into()?;
+    Ok(indexing::where_(&mask, probs, &zero_f32)?)
+}
+
+/// Renormalize per-row probs so each row sums to 1.0. Used after
+/// top_p / min_p possibly zero out tokens.
+#[allow(dead_code)]
+fn renormalize(probs: &Array) -> Result<Array> {
+    let row_sum = reduction::sum(probs, &[-1_i32][..], true)?; // [B, 1] keepdims
+    Ok(probs / &row_sum)
+}
+
 fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<Array> {
     // For each token id in history, scale `logits[id]` by `1/p` if the
     // logit is positive, by `p` if negative — this matches the HF
@@ -1054,5 +1155,83 @@ mod tests {
         let out = apply_penalties(&logits, None, &cfg).expect("out");
         let v: Vec<f32> = out.to_vec().expect("to_vec");
         assert!(v.iter().all(|&x| (x - 5.0).abs() < 1e-5));
+    }
+
+    // ── T2 batched ops unit tests ────────────────────────────────────────
+
+    #[test]
+    fn apply_temperature_scales_per_row() {
+        let data: Vec<f32> = vec![2.0, 4.0, 3.0, 6.0];
+        let logits: Array = (&data[..], &[2_i32, 2_i32][..]).try_into().unwrap();
+        let temp: Array = (&[2.0_f32, 3.0][..], &[2_i32][..]).try_into().unwrap();
+        let out = apply_temperature(&logits, &temp).expect("scaled");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert!((v[0] - 1.0).abs() < 1e-5);
+        assert!((v[1] - 2.0).abs() < 1e-5);
+        assert!((v[2] - 1.0).abs() < 1e-5);
+        assert!((v[3] - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn apply_top_k_batched_keeps_top_k_per_row() {
+        let data: Vec<f32> = vec![1.0, 5.0, 3.0, 2.0, 1.0, 2.0, 3.0, 4.0];
+        let logits: Array = (&data[..], &[2_i32, 4_i32][..]).try_into().unwrap();
+        let topk: Array = (&[2_i32, 4_i32][..], &[2_i32][..]).try_into().unwrap();
+        let out = apply_top_k_batched(&logits, &topk).expect("top_k");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        // Row 0 top-2: {5.0, 3.0} — indices 1 and 2; index 0 (1.0) and 3 (2.0) masked
+        assert_eq!(v[0], f32::NEG_INFINITY);
+        assert_eq!(v[1], 5.0);
+        assert_eq!(v[2], 3.0);
+        assert_eq!(v[3], f32::NEG_INFINITY);
+        // Row 1 top-4 (all): all values kept
+        assert_eq!(&v[4..8], &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn apply_top_p_batched_keeps_nucleus_first_crossing_retained() {
+        // probs row 0 (sorted desc by hand): 0.5, 0.3, 0.15, 0.05
+        // top_p=0.6 → keep 0.5 + 0.3 (0.8 > 0.6, first crossing at 0.3 retained)
+        let probs_row: Vec<f32> = vec![0.5, 0.05, 0.15, 0.3];
+        let probs: Array = (&probs_row[..], &[1_i32, 4_i32][..]).try_into().unwrap();
+        let tp: Array = (&[0.6_f32][..], &[1_i32][..]).try_into().unwrap();
+        let out = apply_top_p_batched(&probs, &tp).expect("top_p");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert!((v[0] - 0.5).abs() < 1e-5, "col 0 (0.5) kept");
+        assert_eq!(v[1], 0.0);
+        assert_eq!(v[2], 0.0);
+        assert!(
+            (v[3] - 0.3).abs() < 1e-5,
+            "col 3 (0.3, first crossing) kept"
+        );
+    }
+
+    #[test]
+    fn apply_min_p_batched_filters_below_threshold() {
+        let probs: Array = (&[0.5_f32, 0.3, 0.15, 0.05][..], &[1_i32, 4_i32][..])
+            .try_into()
+            .unwrap();
+        let mp: Array = (&[0.4_f32][..], &[1_i32][..]).try_into().unwrap();
+        let out = apply_min_p_batched(&probs, &mp).expect("min_p");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        // threshold = 0.4 * 0.5 = 0.2 → keep >= 0.2: {0.5, 0.3}; zero {0.15, 0.05}
+        assert!((v[0] - 0.5).abs() < 1e-5);
+        assert!((v[1] - 0.3).abs() < 1e-5);
+        assert_eq!(v[2], 0.0);
+        assert_eq!(v[3], 0.0);
+    }
+
+    #[test]
+    fn renormalize_rows_sum_to_one() {
+        let data: Vec<f32> = vec![0.5, 0.0, 0.0, 0.3, 0.2, 0.1, 0.0, 0.0];
+        let probs: Array = (&data[..], &[2_i32, 4_i32][..]).try_into().unwrap();
+        let out = renormalize(&probs).expect("renorm");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        let row0_sum = v[0] + v[1] + v[2] + v[3];
+        let row1_sum = v[4] + v[5] + v[6] + v[7];
+        assert!((row0_sum - 1.0).abs() < 1e-5);
+        assert!((row1_sum - 1.0).abs() < 1e-5);
+        // row0: 0.5 / (0.5+0.3) = 0.5/0.8 = 0.625
+        assert!((v[0] - 0.625).abs() < 1e-5, "0.5 / 0.8 = 0.625");
     }
 }
