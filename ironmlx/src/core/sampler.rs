@@ -353,6 +353,35 @@ pub fn sample_batch(
     Ok(tokens)
 }
 
+/// Configured-sampler vectorized pipeline. Called by [`sample_batch`]
+/// when not all rows are greedy. See spec
+/// `docs/superpowers/specs/2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md`.
+///
+/// **mlx API verification (T0, plan §Step 0):**
+/// - `mlx::random::categorical(logits=[B,vocab]).key(&single_key).sample() → [B]`
+///   — single key + automatic row-independent batching. Per-row PRNG
+///   reproducibility (each Sampler having its own seed) is NOT preserved
+///   by the batched op; spec NG6 accepts this drift.
+/// - `mlx::ops::sort::partition(kth, axis)` and `sort(axis)` both exist;
+///   plan T0 §0.1 bench result: sort([B=4,vocab=151936]) measured 11.84 ms
+///   (> 3 ms threshold) vs partition(kth=151886) measured 1.15 ms. Top_k
+///   path chosen: partition(kth = vocab - top_k_max, axis=-1) (R2 mitigation,
+///   sort exceeded threshold).
+/// - `scatter_along_axis` not exposed in mlx Rust binding; top_p scatter
+///   back uses `argsort(sort_idx) = inverse permutation` then
+///   `take_along_axis(sorted_masked, inv_perm, -1)`. Verified in
+///   `probe_argsort_inverse_permutation_identity`. Note: `argsort` returns
+///   `Uint32`; `to_vec::<u32>()` must be used (not `i32`).
+#[allow(dead_code)]
+fn configured_pipeline(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+) -> Result<Vec<u32>> {
+    let _ = (samplers, logits, histories);
+    anyhow::bail!("configured_pipeline: not yet implemented (3e.1b T1-T3)")
+}
+
 fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<Array> {
     // For each token id in history, scale `logits[id]` by `1/p` if the
     // logit is positive, by `p` if negative — this matches the HF
@@ -662,6 +691,83 @@ mod tests {
         assert!(r.is_err());
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("2-D"), "msg: {msg}");
+    }
+
+    #[test]
+    fn probe_categorical_batched_single_key_independent_rows() {
+        use mlx::random;
+        // Build [B=4, vocab=8] logits where each row has its argmax at a different col.
+        let mut data: Vec<f32> = vec![0.0; 32];
+        for i in 0..4 {
+            data[i * 8 + i] = 100.0;
+        } // row i argmax at col i
+        let logits: Array = (&data[..], &[4_i32, 8_i32][..]).try_into().expect("logits");
+        let key = random::key(42).expect("key");
+        let tokens = random::categorical(&logits)
+            .key(&key)
+            .sample()
+            .expect("sample");
+        assert_eq!(
+            tokens.shape().as_slice(),
+            &[4],
+            "categorical([B,vocab]) → [B]"
+        );
+        let v: Vec<u32> = tokens.to_vec().expect("to_vec");
+        // Each row's argmax dominates → categorical concentrates on that col.
+        assert_eq!(
+            v,
+            vec![0, 1, 2, 3],
+            "row i should sample col i (skewed logits)"
+        );
+    }
+
+    #[test]
+    #[ignore] // bench-mode, run on demand
+    fn probe_sort_vs_partition_vocab_151k() {
+        use mlx::ops::sort;
+        use std::time::Instant;
+        let b = 4usize;
+        let vocab = 151936usize;
+        let data: Vec<f32> = (0..b * vocab).map(|i| (i as f32).sin()).collect();
+        let arr: Array = (&data[..], &[b as i32, vocab as i32][..])
+            .try_into()
+            .unwrap();
+        arr.eval().unwrap();
+
+        let t0 = Instant::now();
+        let sorted = sort::sort(&arr, -1).unwrap();
+        sorted.eval().unwrap();
+        let dt_sort = t0.elapsed();
+
+        let t1 = Instant::now();
+        let parted = sort::partition(&arr, (vocab - 50) as i32, -1).unwrap();
+        parted.eval().unwrap();
+        let dt_part = t1.elapsed();
+
+        eprintln!(
+            "[T0 bench] sort=[B=4,vocab=151936] {dt_sort:?} | partition(kth=151886) {dt_part:?}"
+        );
+    }
+
+    #[test]
+    fn probe_argsort_inverse_permutation_identity() {
+        use mlx::ops::{indexing, sort};
+        let b = 2usize;
+        let vocab = 8usize;
+        let data: Vec<f32> = vec![
+            0.1, 0.05, 0.2, 0.3, 0.05, 0.1, 0.1, 0.1, // row 0
+            0.2, 0.15, 0.1, 0.05, 0.1, 0.15, 0.15, 0.1, // row 1
+        ];
+        let probs: Array = (&data[..], &[b as i32, vocab as i32][..])
+            .try_into()
+            .unwrap();
+        let idx = sort::argsort(&probs, -1).unwrap();
+        let inv = sort::argsort(&idx, -1).unwrap();
+        // For each row: take_along_axis(idx, inv, -1) should produce arange(vocab) per row
+        let got = indexing::take_along_axis(&idx, &inv, -1).unwrap();
+        let got_v: Vec<u32> = got.to_vec().unwrap();
+        let expected: Vec<u32> = (0..vocab as u32).chain(0..vocab as u32).collect();
+        assert_eq!(got_v, expected, "inverse permutation identity failed");
     }
 
     #[test]
