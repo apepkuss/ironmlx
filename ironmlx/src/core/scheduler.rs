@@ -524,13 +524,16 @@ impl Scheduler {
     /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
     /// linear mask, then calls `Qwen35Model::batched_prefill`.
     ///
-    /// Samples the first token per occupied row from the prefill logits
-    /// (`batched_prefill` already collapses per-row to the last real position
-    /// `prompt_lens[i] - 1`, returning `[B, 1, vocab]`). Emits a
-    /// [`StepEvent`] per row, then transitions to `Decoding` (or `Finished`
-    /// if every row's first token was EOS). This keeps the KV cache
-    /// trajectory aligned with `GenerationStream`'s pipelined-mode which also
-    /// uses the prefill argmax as `token_0`. See spec §4.5.
+    /// After prefill, samples the first token via a three-stage dispatch:
+    /// Stage A collects per-row `sampler` refs + prompt histories (sentinel
+    /// greedy + empty history for `None` slots so sample_batch sees a uniform
+    /// `[B]` view without branching). Stage B reshapes `[B, 1, vocab]` →
+    /// `[B, vocab]` and calls `sample_batch` once — coalescing all-greedy
+    /// batches into a single GPU op rather than B serial kernel launches.
+    /// Stage C distributes tokens to occupied rows, checks EOS / `max_new_tokens`,
+    /// and emits one [`StepEvent`] per occupied row. Sentinel-row outputs are
+    /// silently discarded. Transitions to `Decoding` (or `Finished` if every
+    /// first token was EOS). See spec §4.5.
     pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.prefill_admitted_inner(model) {
@@ -797,24 +800,22 @@ impl Scheduler {
     /// Advance every non-finished active row by exactly one decode token.
     /// Only legal in `Decoding` phase.
     ///
-    /// Packs `[B, 1]` input_ids (each row's last token; pad zero for
-    /// already-finished rows and for empty slots), builds per-row decode
-    /// position ids `[3, B, 1]`, calls `Qwen35Model::forward_on`, then
-    /// loops over rows: slices `logits[b, 0, :]`, samples via
-    /// `RequestState::sampler.sample`, pushes the token, advances
-    /// `real_len`, and checks for EOS / `max_new_tokens` termination.
+    /// Advance every non-finished active row by one decode token using a
+    /// three-stage sample_batch dispatch rather than per-row sampler calls.
+    /// Stage A collects `active_at_start` flags, then builds per-row sampler
+    /// refs + token histories — sentinel greedy + empty history for pad /
+    /// finished / mid-admit rows so sample_batch sees a uniform `[B]` view;
+    /// sentinel tokens are discarded in Stage C, avoiding conditional dispatch
+    /// inside the hot sampling path. Stage B packs `[B, 1]` input_ids, runs
+    /// `forward_on`, reshapes `[B, 1, vocab]` → `[B, vocab]`, and calls
+    /// `sample_batch` once — coalescing all-greedy batches into one GPU op.
+    /// Stage C distributes tokens only to `active_at_start` rows, advances
+    /// `real_len`, checks EOS / `max_new_tokens`, and collects events.
     ///
-    /// Returns events **only** for rows that were not yet finished at the
-    /// start of this step. Rows that transition to `finished` during this
-    /// step appear once (with `finish_reason = Some(...)`); rows that were
-    /// already finished are silently skipped.
-    ///
-    /// Transitions phase to `Finished` when every active row has
-    /// `finished == true`.
-    ///
-    /// Note: already-finished rows are still padded into the forward
-    /// (lockstep cost — see spec §7). Only active-at-start rows contribute
-    /// to the returned event list.
+    /// Already-finished rows are still padded into the forward (lockstep
+    /// cost — see spec §7). Only active-at-start rows appear in the returned
+    /// event list. Transitions phase to `Finished` when all occupied rows
+    /// are done.
     pub fn step(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.step_inner(model) {
