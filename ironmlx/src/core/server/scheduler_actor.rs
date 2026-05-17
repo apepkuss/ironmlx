@@ -43,7 +43,7 @@ pub enum SchedulerCommand {
 
 /// A request parked in `driver_loop`'s admission queue while the scheduler
 /// is at `active_count == b_max`. Drained when `gc_finished_rows` frees a
-/// slot, then handed to `handle_admit_mid`.
+/// slot, then handed to `handle_admit_mid_chunked`.
 struct PendingAdmit {
     request: GenerateRequest,
     reply_tx: oneshot::Sender<Result<AdmitReply>>,
@@ -282,7 +282,13 @@ fn driver_loop(
                             &queue_rejected,
                         );
                     } else {
-                        handle_admit_mid(cmd, &mut sched, &mut event_txs, &admit_count, &model);
+                        handle_admit_mid_chunked(
+                            cmd,
+                            &mut sched,
+                            &mut event_txs,
+                            &admit_count,
+                            &model,
+                        );
                     }
                 }
                 RollingEvent::Step => {
@@ -607,12 +613,26 @@ fn handle_admit(
     }
 }
 
-/// Mid-batch admit handler. Acquires the model lock, calls
-/// [`Scheduler::admit_mid`] (which runs B=1 prefill into a temp cache
-/// and adopts the row into the main cache), then registers the
-/// per-request event channel and routes the first generated token's
-/// event. Lock is held only for the duration of `admit_mid`.
-fn handle_admit_mid(
+/// Mid-batch admit handler — chunked (B1-p2.3c+).
+///
+/// Orchestrates the three-phase chunked admit:
+/// 1. `Scheduler::admit_mid_begin` — reserve slot + alloc temp cache.
+/// 2. Loop `admit_mid_chunk` until last chunk, interleaving one
+///    `Scheduler::step` between chunks so active rows continue
+///    emitting tokens at chunk-boundary cadence (spec §4.5.5
+///    chunk:step = 1:1).
+/// 3. `Scheduler::admit_mid_finalize` — adopt temp → main cache,
+///    sample first generated token.
+///
+/// Acquires `model.blocking_lock()` per phase (begin / per-chunk /
+/// per-step / finalize) so each phase yields the lock between calls.
+/// Active rows' SSE consumers see token events at ~chunk forward time
+/// granularity instead of one multi-second prefill stall.
+///
+/// On any error during the loop, the orphan slot is evicted and
+/// `event_txs[id]` removed so the next `step()` does not panic on an
+/// empty `generated_tokens`.
+fn handle_admit_mid_chunked(
     cmd: SchedulerCommand,
     sched: &mut Scheduler,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
@@ -621,32 +641,87 @@ fn handle_admit_mid(
 ) {
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let admit_result = {
-        let model_lock = model.blocking_lock();
-        sched.admit_mid(request, &model_lock)
+
+    // Phase 1: begin.
+    let mut handle = {
+        let m = model.blocking_lock();
+        match sched.admit_mid_begin(request, &m) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = reply_tx.send(Err(e));
+                return;
+            }
+        }
     };
-    match admit_result {
-        Ok((id, prefill_event)) => {
-            admit_count.fetch_add(1, Ordering::Relaxed);
-            event_txs.insert(id, event_tx);
-            if reply_tx
-                .send(Ok(AdmitReply {
-                    request_id: id,
-                    event_rx,
-                }))
-                .is_err()
-            {
-                // Caller dropped reply_rx before we could send.
-                // Evict the orphan slot.
+    let id = handle.request_id;
+    event_txs.insert(id, event_tx);
+    if reply_tx
+        .send(Ok(AdmitReply {
+            request_id: id,
+            event_rx,
+        }))
+        .is_err()
+    {
+        // Caller dropped reply_rx before we did any GPU work.
+        let _ = sched.evict(id);
+        event_txs.remove(&id);
+        return;
+    }
+
+    // Phase 2: chunk loop. Interleave one active-row step per chunk
+    // except after the last chunk (finalize is the next step there).
+    loop {
+        let is_last = {
+            let m = model.blocking_lock();
+            match sched.admit_mid_chunk(&mut handle, &m) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
+                    let _ = sched.evict(id);
+                    event_txs.remove(&id);
+                    return;
+                }
+            }
+        };
+
+        if is_last {
+            break;
+        }
+
+        // Interleave one active-row decode step.
+        let step_result = {
+            let m = model.blocking_lock();
+            sched.step(&m)
+        };
+        match step_result {
+            Ok(events) => {
+                for ev in events {
+                    route_event(ev, event_txs);
+                }
+                sched.gc_finished_rows(event_txs);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "[SchedulerActor] step error inside chunked admit_mid loop: {e:?}"
+                );
                 let _ = sched.evict(id);
                 event_txs.remove(&id);
                 return;
             }
-            // Route the first generated token event.
-            route_event(prefill_event, event_txs);
+        }
+    }
+
+    // Phase 3: finalize.
+    let m = model.blocking_lock();
+    match sched.admit_mid_finalize(handle, &m) {
+        Ok((_id, first_event)) => {
+            admit_count.fetch_add(1, Ordering::Relaxed);
+            route_event(first_event, event_txs);
         }
         Err(e) => {
-            let _ = reply_tx.send(Err(e));
+            tracing::error!("[SchedulerActor] admit_mid_finalize error: {e:?}");
+            let _ = sched.evict(id);
+            event_txs.remove(&id);
         }
     }
 }
@@ -679,7 +754,7 @@ fn enqueue_or_reject(
 }
 
 /// Drain the admission queue head-by-head while the Scheduler has free
-/// slots. Each drained entry is handed to `handle_admit_mid` which runs
+/// slots. Each drained entry is handed to `handle_admit_mid_chunked` which runs
 /// the B=1 prefill + adopts the row + sends `AdmitReply`. Stops when the
 /// queue empties or `active_count() == b_max`.
 ///
@@ -709,7 +784,7 @@ fn drain_admission_queue(
             request: pending.request,
             reply_tx: pending.reply_tx,
         };
-        handle_admit_mid(cmd, sched, event_txs, admit_count, model);
+        handle_admit_mid_chunked(cmd, sched, event_txs, admit_count, model);
         // Re-check phase after each mid-admit — if admit_mid itself
         // exhausted remaining rows and transitioned to Finished, stop.
         if sched.phase() != Phase::Decoding {

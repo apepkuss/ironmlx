@@ -45,9 +45,9 @@ pub enum SchedulerError {
 }
 
 use crate::core::generate::{
-    build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
-    build_per_row_decode_mask, build_position_ids_batched, build_position_ids_vl_batched,
-    slice_logits_row, GenerateRequest,
+    build_batch_attention_mask, build_batch_linear_mask, build_chunked_prefill_attention_mask,
+    build_chunked_prefill_linear_mask, build_decode_position_ids, build_per_row_decode_mask,
+    build_position_ids_batched, build_position_ids_vl_batched, slice_logits_row, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
@@ -102,6 +102,91 @@ pub struct StepEvent {
     pub finish_reason: Option<&'static str>,
 }
 
+/// State shared across the three `admit_mid_*` calls that make up a
+/// chunked mid-batch admit (B1-p2.3c+). Built by [`Scheduler::admit_mid_begin`],
+/// mutated by [`Scheduler::admit_mid_chunk`] calls, consumed by
+/// [`Scheduler::admit_mid_finalize`]. The caller
+/// (`SchedulerActor::driver_loop`'s `handle_admit_mid_chunked`) owns this
+/// between calls and interleaves `Scheduler::step` between chunks so
+/// active rows continue emitting tokens during a long-prompt mid-batch
+/// admit.
+///
+/// All fields except `request_id` are `pub(crate)` so the chunk loop
+/// in `scheduler.rs` itself can read/write them; HTTP / actor code
+/// treats the handle as opaque (only inspects `request_id`).
+#[doc(hidden)]
+pub struct AdmitMidHandle {
+    /// Slot the admit reserved at `admit_mid_begin`.
+    pub request_id: RequestId,
+    pub(crate) row_idx: usize,
+    /// Full prompt token ids cloned from `RequestState` so we can index
+    /// per-chunk without re-borrowing slot state across calls.
+    pub(crate) prompt_ids: Vec<u32>,
+    pub(crate) prompt_len: i32,
+    /// Per-chunk max token count; equals `req.prefill_chunk_size.max(1)`
+    /// at construction, unless the VL R6 fallback forces single-chunk
+    /// (image_pad straddles a chunk boundary — spec §4.6 NG7).
+    pub(crate) chunk_size: i32,
+    pub(crate) chunk_start: i32,
+    /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
+    /// `prompt_len` across the chunk loop.
+    pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
+    pub(crate) is_vl: bool,
+    pub(crate) pixel_values: Option<Array>,
+    pub(crate) image_grid_thw: Option<Vec<(i32, i32, i32)>>,
+    pub(crate) image_token_id: i32,
+    /// Pre-computed `[3, 1, prompt_len]` MRoPE position ids for the
+    /// full prompt — sliced per chunk inside `admit_mid_chunk` to
+    /// avoid rebuilding on each iteration. (`image_spatial_merge_size`
+    /// is consumed once when building this Array in `admit_mid_begin`;
+    /// no need to carry it forward.)
+    pub(crate) position_ids_full: Array,
+    /// Last chunk's `[1, 1, vocab]` logits, captured only at the final
+    /// chunk for first-token sampling in `admit_mid_finalize`.
+    pub(crate) last_logits: Option<Array>,
+}
+
+/// Returns true if any `image_pad` run in `prompt_ids` would straddle
+/// a chunk boundary at `chunk_size`. Used by `admit_mid_begin` to
+/// detect the VL v1 fallback condition (spec §4.6 NG7 / §4.7 R6):
+/// when an image's `image_pad` tokens span chunks, we'd need per-chunk
+/// vision-arg slicing — deferred to v2. v1 forces single-chunk in
+/// this case.
+fn vl_image_pad_crosses_chunk_boundary(
+    prompt_ids: &[u32],
+    image_token_id: i32,
+    chunk_size: i32,
+) -> bool {
+    if image_token_id < 0 || chunk_size <= 0 {
+        return false;
+    }
+    let pad = image_token_id as u32;
+    let cs = chunk_size as usize;
+    let mut in_run = false;
+    let mut run_start = 0usize;
+    for (i, &t) in prompt_ids.iter().enumerate() {
+        if t == pad {
+            if !in_run {
+                in_run = true;
+                run_start = i;
+            }
+        } else if in_run {
+            let run_end = i; // exclusive
+            if run_start / cs != (run_end - 1) / cs {
+                return true;
+            }
+            in_run = false;
+        }
+    }
+    if in_run {
+        let run_end = prompt_ids.len();
+        if run_start / cs != (run_end - 1) / cs {
+            return true;
+        }
+    }
+    false
+}
+
 /// All per-request state the scheduler tracks. Pre-allocated at admit time
 /// and held until eviction.
 ///
@@ -154,6 +239,11 @@ pub struct RequestState {
     /// Tokenizer id of `<|image_pad|>`. Carried from
     /// `GenerateRequest::image_token_id`. Unused if `pixel_values` is None.
     pub image_token_id: i32,
+    /// Per-request chunk size for chunked mid-batch prefill. Copied from
+    /// `GenerateRequest::prefill_chunk_size` at admit time, clamped to i32
+    /// and floored at 1. Used by `admit_mid_begin` to initialise
+    /// `AdmitMidHandle::chunk_size`.
+    pub prefill_chunk_size: i32,
 }
 
 /// Read pre-write per-row offsets from the first Full-attention layer's
@@ -294,6 +384,9 @@ impl Scheduler {
             image_grid_thw: req.image_grid_thw,
             image_spatial_merge_size: req.image_spatial_merge_size,
             image_token_id: req.image_token_id,
+            prefill_chunk_size: i32::try_from(req.prefill_chunk_size)
+                .unwrap_or(512)
+                .max(1),
         };
         self.slots[row_idx] = Some(state);
         if self.phase == Phase::Idle {
@@ -869,69 +962,8 @@ impl Scheduler {
         Ok(events)
     }
 
-    /// Mid-batch admit + prefill. Caller is `SchedulerActor::driver_loop`
-    /// after `cmd_rx` delivers an Admit during the rolling decode loop.
-    ///
-    /// Architecture: runs prefill in a temporary B=1 cache (the
-    /// `GenerationStream`-equivalent path), then adopts the prefilled
-    /// row into the main cache via per-layer `adopt_row_from` copies.
-    /// This avoids wasted compute on a B=b_max sub-batch + variable-
-    /// shape mask construction + GatedDeltaNet state corruption for
-    /// other active rows.
-    ///
-    /// Synchronous: stalls active rows for ~L_new × B=1_prefill_per_
-    /// token_time. Adoption cost is sub-microsecond. 3c+ chunked prefill
-    /// reduces stall further.
-    ///
-    /// Returns `(RequestId, StepEvent)` — the assigned request ID and
-    /// the first generated token's event. Caller registers the event
-    /// channel using the returned `id`.
-    pub fn admit_mid(
-        &mut self,
-        req: GenerateRequest,
-        model: &Qwen35Model,
-    ) -> Result<(RequestId, StepEvent)> {
-        self.ensure_not_poisoned()?;
-        // B1-p2.3f: mirror admit's cap gate. Mid-batch admits must also
-        // respect the bound — otherwise the queue drain path could push an
-        // oversize request through.
-        let cap_needed = req.prompt_ids.len().saturating_add(req.max_new_tokens);
-        if cap_needed > self.effective_cap_max {
-            return Err(anyhow::Error::new(SchedulerError::RequestTooLarge {
-                needed: cap_needed,
-                max: self.effective_cap_max,
-            }));
-        }
-        if self.phase != Phase::Decoding {
-            return Err(anyhow!(
-                "admit_mid illegal in {:?} phase: only Decoding (use admit for Idle/Admitting)",
-                self.phase
-            ));
-        }
-        let row_idx =
-            self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
-                anyhow!("scheduler full: no row available (b_max={})", self.b_max)
-            })?;
-
-        // 1. Insert RequestState via the relaxed admit() path. Phase stays Decoding.
-        let id = self.admit(req)?;
-
-        // Steps 2-8: prefill into temp cache, adopt, sample, update.
-        // If anything fails, roll back by evicting the orphan slot —
-        // otherwise next step() would panic on empty generated_tokens.
-        match self.admit_mid_inner(id, row_idx, model) {
-            Ok(event) => Ok((id, event)),
-            Err(e) => {
-                // Rollback: evict the orphan slot. evict ignores poison
-                // and works in any Phase including Decoding (per Task 3).
-                let _ = self.evict(id);
-                Err(e)
-            }
-        }
-    }
-
     /// Raise every layer of the main cache's `cap` to `target_cap` if
-    /// smaller. Used by `admit_mid_inner` before adoption so that a
+    /// smaller. Used by `admit_mid_finalize` before adoption so that a
     /// longer mid-batch request can land into a cache that was sized
     /// for the original batch's `slots_max`.
     ///
@@ -942,7 +974,7 @@ impl Scheduler {
     /// `cap`. Both are no-ops if `target_cap <= layer.cap`.
     ///
     /// Errs only if the cache has not been lazy-allocated yet — which
-    /// is impossible from `admit_mid` (Decoding phase guarantees
+    /// is impossible from `admit_mid_begin` (Decoding phase guarantees
     /// `prefill_admitted` already ran).
     fn grow_main_cache_to(&mut self, target_cap: i32) -> Result<()> {
         let cache = self.cache.as_mut().ok_or_else(|| {
@@ -957,41 +989,123 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Inner body of admit_mid (steps 2-8 from the spec). Separated so
-    /// `admit_mid` can roll back the inserted slot if any `?` fails.
-    fn admit_mid_inner(
+    /// Begin a chunked mid-batch admit (B1-p2.3c+).
+    ///
+    /// Reserves a slot, allocates a B=1 temp cache sized to
+    /// `prompt_len + max_new_tokens` (floored at
+    /// [`MIN_KV_CACHE_CAP_FOR_GPU_PERF`] for the same Metal-kernel reason
+    /// as the main cache), and pre-computes the full-prompt MRoPE
+    /// position ids so subsequent `admit_mid_chunk` calls can slice
+    /// without rebuilding.
+    ///
+    /// Returns an [`AdmitMidHandle`] the caller passes to
+    /// `admit_mid_chunk` (looped until `is_last=true`) and finally
+    /// `admit_mid_finalize`. The caller interleaves
+    /// [`Scheduler::step`] between chunks so active rows continue
+    /// emitting tokens.
+    ///
+    /// # VL fallback (spec §4.6 NG7 / §4.7 R6)
+    /// If the request has `image_pad` token runs that span a chunk
+    /// boundary, this v1 implementation forces single-chunk path
+    /// (`chunk_size = prompt_len`). Per-chunk vision slicing is a v2
+    /// task. A warning is logged.
+    ///
+    /// # Errors
+    /// - [`SchedulerError::RequestTooLarge`] when
+    ///   `prompt_len + max_new_tokens > effective_cap_max`.
+    /// - `phase != Decoding` (`admit_mid_begin` is only callable
+    ///   mid-batch; use `admit` for fresh batches).
+    /// - `scheduler full` when no slot is free (admission queue is
+    ///   `driver_loop`'s concern; here we surface the raw error).
+    /// - dtype / make_cache failures bubble up; the orphan slot is
+    ///   rolled back via `evict` so the next `step()` does not panic.
+    pub fn admit_mid_begin(
+        &mut self,
+        req: GenerateRequest,
+        model: &Qwen35Model,
+    ) -> Result<AdmitMidHandle> {
+        self.ensure_not_poisoned()?;
+
+        // Cap gate — mirror admit's, otherwise queue drain could push an
+        // oversize request through.
+        let cap_needed = req.prompt_ids.len().saturating_add(req.max_new_tokens);
+        if cap_needed > self.effective_cap_max {
+            return Err(anyhow::Error::new(SchedulerError::RequestTooLarge {
+                needed: cap_needed,
+                max: self.effective_cap_max,
+            }));
+        }
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "admit_mid_begin illegal in {:?} phase: only Decoding (use admit for Idle/Admitting)",
+                self.phase
+            ));
+        }
+        let row_idx =
+            self.slots.iter().position(|s| s.is_none()).ok_or_else(|| {
+                anyhow!("scheduler full: no row available (b_max={})", self.b_max)
+            })?;
+
+        // 1. Reserve slot via the relaxed admit() path. Phase stays Decoding.
+        let id = self.admit(req)?;
+
+        // From here on, any Err must roll back the slot.
+        match self.admit_mid_begin_inner(id, row_idx, model) {
+            Ok(h) => Ok(h),
+            Err(e) => {
+                let _ = self.evict(id);
+                Err(e)
+            }
+        }
+    }
+
+    /// Body of `admit_mid_begin` separated so the caller can centralise
+    /// rollback. Steps: extract per-row state, compute floored
+    /// `cap_for_temp`, detect dtype, allocate temp_cache, pre-build
+    /// full-prompt position ids, run VL R6 fallback detection.
+    fn admit_mid_begin_inner(
         &mut self,
         id: RequestId,
         row_idx: usize,
         model: &Qwen35Model,
-    ) -> Result<StepEvent> {
-        let (prompt_ids, prompt_len, max_new_tokens) = {
+    ) -> Result<AdmitMidHandle> {
+        let (
+            prompt_ids,
+            prompt_len_usz,
+            max_new_tokens,
+            pixel_values,
+            image_grid_thw,
+            image_token_id,
+            image_spatial_merge_size,
+            prefill_chunk_size,
+        ) = {
             let state = self.slots[row_idx].as_ref().expect("admit inserted");
             (
                 state.prompt_ids.clone(),
-                state.prompt_ids.len() as i32,
+                state.prompt_ids.len(),
                 state.max_new_tokens,
+                state.pixel_values.clone(),
+                state.image_grid_thw.clone(),
+                state.image_token_id,
+                state.image_spatial_merge_size,
+                state.prefill_chunk_size,
             )
         };
-
-        // Saturating conversion: max_new_tokens is usize and may exceed
-        // i32::MAX in pathological caller inputs. Saturate to i32::MAX so
-        // cap_for_temp stays a valid i32 even at the API limit (the
-        // actual cap is bounded by model + memory anyway). Floored at
-        // MIN_KV_CACHE_CAP_FOR_GPU_PERF for the same Metal-kernel
-        // reason as prefill_admitted_inner's main cache.
+        let prompt_len = prompt_len_usz as i32;
+        // Saturate max_new to i32 then floor cap for GPU-perf (same reason
+        // as prefill_admitted_inner main cache; spec §4.5.5).
         let max_new_i32 = i32::try_from(max_new_tokens).unwrap_or(i32::MAX);
         let cap_for_temp = prompt_len
             .saturating_add(max_new_i32)
             .max(prompt_len)
             .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
 
-        // 2. Capture KVCache dtype from main cache (first Full layer).
+        // Dtype from main cache's first Full layer.
         let dtype = {
             let main_cache = self
                 .cache
                 .as_ref()
-                .ok_or_else(|| anyhow!("admit_mid called before prefill_admitted: cache absent"))?;
+                .ok_or_else(|| anyhow!("admit_mid_begin: main cache absent"))?;
             main_cache
                 .iter()
                 .find_map(|c| match c {
@@ -1001,54 +1115,147 @@ impl Scheduler {
                 .unwrap_or(Dtype::Bfloat16)
         };
 
-        // 3. Allocate a fresh B=1 temp cache.
-        let mut temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
+        let temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
 
-        // 4. Build B=1 prefill inputs (mirror GenerationStream prefill).
-        let input_ids_data: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
-        let input_ids: Array = (&input_ids_data[..], &[1_i32, prompt_len][..])
-            .try_into()
-            .map_err(|e| anyhow!("admit_mid: build input_ids Array failed: {e:?}"))?;
+        let is_vl = pixel_values.is_some();
 
-        // B1-p2.4: VL-aware position_ids — VL path uses build_position_ids_vl_batched
-        // so MRoPE three-stream values match what forward_vl/batched_prefill_vl expect.
-        let (state_pv, state_grids, state_img_token_id, state_merge_size) = {
-            let state = self.slots[row_idx].as_ref().expect("admit inserted");
-            (
-                state.pixel_values.clone(),
-                state.image_grid_thw.clone(),
-                state.image_token_id,
-                state.image_spatial_merge_size,
-            )
-        };
-        let position_ids = if state_pv.is_some() {
+        // VL R6 fallback: if any image_pad run straddles a chunk
+        // boundary, force single-chunk path (v1 does not slice vision
+        // args per chunk).
+        let mut chunk_size = prefill_chunk_size.max(1);
+        if is_vl && vl_image_pad_crosses_chunk_boundary(&prompt_ids, image_token_id, chunk_size) {
+            tracing::warn!(
+                "[admit_mid_begin] VL request with image_pad spanning chunk boundary; \
+                 forcing single-chunk (chunk_size={chunk_size} -> {prompt_len}); \
+                 v2 will support per-chunk vision slicing",
+            );
+            chunk_size = prompt_len;
+        }
+
+        // Pre-build full-prompt MRoPE position ids. Chunked path slices
+        // axis 2 inside admit_mid_chunk; full build once is cheaper than
+        // per-chunk rebuild.
+        let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
+        let position_ids_full = if is_vl {
             build_position_ids_vl_batched(
-                &[&input_ids_data[..]],
-                &[state_grids.as_deref()],
-                state_img_token_id,
-                state_merge_size,
+                &[&prompt_ids_i32[..]],
+                &[image_grid_thw.as_deref()],
+                image_token_id,
+                image_spatial_merge_size,
                 prompt_len,
             )?
         } else {
             build_position_ids_batched(&[prompt_len], prompt_len)?
         };
-        let attention_mask = build_batch_attention_mask(&[prompt_len], prompt_len, dtype)?;
-        let linear_attention_mask = build_batch_linear_mask(&[prompt_len], prompt_len)?;
 
-        // 5. Run B=1 prefill into the temp cache. Returns logits [1, 1, vocab].
-        let logits = if state_pv.is_some() {
-            let per_row_pv: Vec<Option<&Array>> = vec![state_pv.as_ref()];
-            let per_row_grids_inner: Vec<GridThwSlice<'_>> = vec![state_grids.as_deref()];
+        Ok(AdmitMidHandle {
+            request_id: id,
+            row_idx,
+            prompt_ids,
+            prompt_len,
+            chunk_size,
+            chunk_start: 0,
+            temp_cache,
+            is_vl,
+            pixel_values,
+            image_grid_thw,
+            image_token_id,
+            position_ids_full,
+            last_logits: None,
+        })
+    }
+
+    /// Run one chunk of admit_mid prefill into `handle.temp_cache`.
+    /// Returns `true` if this was the last chunk (`chunk_end ==
+    /// prompt_len`); caller then proceeds to `admit_mid_finalize`.
+    /// Otherwise caller should run one `Scheduler::step` against the
+    /// main cache before the next `admit_mid_chunk` call so active rows
+    /// continue emitting tokens (spec §4.5.5 chunk:step = 1:1).
+    ///
+    /// On the last chunk this method stashes the `[1, 1, vocab]` logits
+    /// into `handle.last_logits` for first-token sampling in
+    /// `admit_mid_finalize`.
+    pub fn admit_mid_chunk(
+        &mut self,
+        handle: &mut AdmitMidHandle,
+        model: &Qwen35Model,
+    ) -> Result<bool /* is_last */> {
+        self.ensure_not_poisoned()?;
+
+        let chunk_end = handle
+            .chunk_start
+            .saturating_add(handle.chunk_size)
+            .min(handle.prompt_len);
+        let is_last = chunk_end == handle.prompt_len;
+        let chunk_len = chunk_end - handle.chunk_start;
+        if chunk_len <= 0 {
+            return Err(anyhow!(
+                "admit_mid_chunk: chunk_len <= 0 (chunk_start={}, chunk_end={})",
+                handle.chunk_start,
+                chunk_end
+            ));
+        }
+
+        // Build chunk-local input_ids [1, chunk_len].
+        let chunk_ids: Vec<i32> = handle.prompt_ids
+            [handle.chunk_start as usize..chunk_end as usize]
+            .iter()
+            .map(|&t| t as i32)
+            .collect();
+        let input_ids: Array = (&chunk_ids[..], &[1_i32, chunk_len][..])
+            .try_into()
+            .map_err(|e| anyhow!("admit_mid_chunk: input_ids try_into Array failed: {e:?}"))?;
+
+        // Slice axis 2 of the pre-built full-prompt position ids.
+        // position_ids_full shape: [3, 1, prompt_len].
+        let position_ids = mlx::ops::indexing::slice_strided_on(
+            &handle.position_ids_full,
+            [0_i32, 0, handle.chunk_start],
+            [3_i32, 1, chunk_end],
+            [1_i32, 1, 1],
+            (),
+        )?;
+
+        // Dtype matches temp_cache's first Full layer.
+        let dtype = handle
+            .temp_cache
+            .iter()
+            .find_map(|c| match c {
+                LayerCache::Full(kv) => Some(kv.dtype()),
+                _ => None,
+            })
+            .unwrap_or(Dtype::Bfloat16);
+
+        // Cross-chunk attention: [1, 1, chunk_len, chunk_start + chunk_len].
+        let attention_mask =
+            build_chunked_prefill_attention_mask(handle.chunk_start, chunk_len, dtype)?;
+        let linear_attention_mask =
+            build_chunked_prefill_linear_mask(handle.chunk_start, chunk_len)?;
+
+        // Vision args: only the first chunk carries pixel_values; later
+        // chunks pass None because v1 enforces image_pad fully within
+        // chunk 0 (R6 fallback otherwise forces single-chunk).
+        let logits = if handle.is_vl {
+            let pv_for_chunk: Vec<Option<&Array>> = if handle.chunk_start == 0 {
+                vec![handle.pixel_values.as_ref()]
+            } else {
+                vec![None]
+            };
+            let grids_for_chunk: Vec<GridThwSlice<'_>> = if handle.chunk_start == 0 {
+                vec![handle.image_grid_thw.as_deref()]
+            } else {
+                vec![None]
+            };
             model.batched_prefill_vl(
                 &input_ids,
                 &position_ids,
                 &attention_mask,
                 &linear_attention_mask,
-                &[prompt_len],
-                &per_row_pv,
-                &per_row_grids_inner,
-                state_img_token_id,
-                Some(&mut temp_cache),
+                &[chunk_len],
+                &pv_for_chunk,
+                &grids_for_chunk,
+                handle.image_token_id,
+                Some(&mut handle.temp_cache),
                 (),
             )?
         } else {
@@ -1057,35 +1264,67 @@ impl Scheduler {
                 &position_ids,
                 &attention_mask,
                 &linear_attention_mask,
-                &[prompt_len],
-                Some(&mut temp_cache),
+                &[chunk_len],
+                Some(&mut handle.temp_cache),
                 (),
             )?
         };
 
-        // 6. Adopt the temp cache's row 0 into main_cache at row_idx.
-        //
-        // B1-p2.3f (Option C): before adoption, raise each main-cache
-        // layer's `cap` to `cap_for_temp` if smaller. The main cache's
-        // initial cap was sized to the *original* batch's
-        // `max(prompt_len + max_new_tokens)`; a mid-batch admit may
-        // bring a longer request whose temp_cache `src.offsets[0]`
-        // (== prompt_len after prefill) exceeds the main cap and would
-        // trip `adopt_row_from`'s `src_off > self.cap` bail. The admit
-        // gate at `admit_mid` entry already verifies the request fits
-        // within `effective_cap_max`, so growing here stays within the
-        // configured server bound.
-        //
-        // `grow_cap` is a single-i32 update on both KVCache (lazy
-        // physical buffer — adopt_row_from's own `grow_to` handles the
-        // expansion) and GatedDeltaCache (logical-only cap). No
-        // device work runs here.
+        if is_last {
+            handle.last_logits = Some(logits);
+        }
+        // Discard intermediate-chunk logits — sampling only uses the last
+        // chunk's [1, 1, vocab] last-position slice.
+        handle.chunk_start = chunk_end;
+        Ok(is_last)
+    }
+
+    /// Finalise a chunked mid-batch admit: grow the main cache to
+    /// `temp_cache.cap` if needed (Option C from 3f), adopt
+    /// `temp_cache` row 0 into `main_cache` at `handle.row_idx`,
+    /// sample the new row's first token from `handle.last_logits`,
+    /// then update the row's termination state.
+    ///
+    /// Returns `(request_id, first_event)`; caller routes the event
+    /// to its `event_rx`.
+    pub fn admit_mid_finalize(
+        &mut self,
+        handle: AdmitMidHandle,
+        _model: &Qwen35Model,
+    ) -> Result<(RequestId, StepEvent)> {
+        self.ensure_not_poisoned()?;
+        let AdmitMidHandle {
+            request_id: id,
+            row_idx,
+            temp_cache,
+            last_logits,
+            prompt_ids,
+            ..
+        } = handle;
+
+        let logits = last_logits.ok_or_else(|| {
+            anyhow!("admit_mid_finalize: last_logits absent (no chunks ran?)")
+        })?;
+
+        // Grow main cache cap from temp_cache.cap (3f Option C).
+        let cap_for_temp = temp_cache
+            .iter()
+            .find_map(|c| match c {
+                LayerCache::Full(kv) => Some(kv.cap()),
+                _ => None,
+            })
+            .unwrap_or(0);
         self.grow_main_cache_to(cap_for_temp)?;
+
+        // Adopt temp → main per layer.
         {
-            let main_cache = self.cache.as_mut().expect("cache asserted Some above");
+            let main_cache = self
+                .cache
+                .as_mut()
+                .expect("cache asserted Some by Decoding phase");
             if main_cache.len() != temp_cache.len() {
                 return Err(anyhow!(
-                    "admit_mid: cache layer count mismatch ({} vs {})",
+                    "admit_mid_finalize: cache layer count mismatch ({} vs {})",
                     main_cache.len(),
                     temp_cache.len()
                 ));
@@ -1100,27 +1339,29 @@ impl Scheduler {
                     }
                     _ => {
                         return Err(anyhow!(
-                            "admit_mid: cache layer kind mismatch between main and temp"
+                            "admit_mid_finalize: cache layer kind mismatch"
                         ))
                     }
                 }
             }
         }
 
-        // 7. Sample first token from prefill logits (last position).
-        //    Logits shape [1, 1, vocab] -- slice row 0.
+        // Sample first generated token.
         let row_logits = slice_logits_row(&logits, 0)?;
         let token = {
-            let state = self.slots[row_idx].as_ref().expect("admit_mid slot");
+            let state = self.slots[row_idx]
+                .as_ref()
+                .expect("admit_mid_begin reserved the slot");
             let history: Vec<u32> = prompt_ids.clone();
             state.sampler.sample(&row_logits, &history)?
         };
 
-        // 8. Update state + check termination.
-        let state = self.slots[row_idx].as_mut().expect("admit_mid slot");
+        // Update RequestState + termination.
+        let state = self.slots[row_idx]
+            .as_mut()
+            .expect("admit_mid_begin reserved the slot");
         state.generated_tokens.push(token);
         state.real_len += 1;
-
         if state.stop_token_ids.contains(&token) {
             state.finished = true;
             state.finish_reason = Some("stop");
@@ -1128,12 +1369,16 @@ impl Scheduler {
             state.finished = true;
             state.finish_reason = Some("length");
         }
+        let finish_reason = state.finish_reason;
 
-        Ok(StepEvent {
+        Ok((
             id,
-            token,
-            finish_reason: state.finish_reason,
-        })
+            StepEvent {
+                id,
+                token,
+                finish_reason,
+            },
+        ))
     }
 
     /// Sweep finished rows: clear their slot, drop their event channel,
@@ -1810,6 +2055,69 @@ mod tests {
             s4.computed_cap_for_prefill(),
             256,
             "empty slots fallback = 256 (defensive default)"
+        );
+    }
+
+    // ─── B1-p2.3c+ chunked admit_mid helper unit tests ──────────────────
+
+    #[test]
+    fn vl_image_pad_crosses_chunk_boundary_detects_run_across() {
+        // image_token_id=42, run at positions 250..260, chunk_size=256.
+        // Run crosses 256-boundary (positions 250-255 in chunk 0, 256-259 in chunk 1).
+        let ids: Vec<u32> = (0..400_u32)
+            .map(|i| if (250..260).contains(&(i as i32)) { 42 } else { 1 })
+            .collect();
+        assert!(
+            super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
+            "run [250..260] should cross 256-boundary at chunk_size=256"
+        );
+        // chunk_size=512 → entire run fits in chunk 0; no crossing.
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 512),
+            "run [250..260] should NOT cross at chunk_size=512"
+        );
+    }
+
+    #[test]
+    fn vl_image_pad_no_pads_returns_false() {
+        // Empty pad run set.
+        let ids: Vec<u32> = (0..200_u32).collect();
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 64),
+            "no image_pad tokens → no crossing possible"
+        );
+        // Also degenerate: empty prompt.
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&[], 42, 64),
+            "empty prompt → no crossing"
+        );
+        // Degenerate: image_token_id < 0 disables the check.
+        let ids2: Vec<u32> = vec![5; 100];
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids2, -1, 32),
+            "image_token_id < 0 disables detection"
+        );
+    }
+
+    #[test]
+    fn vl_image_pad_run_within_single_chunk_returns_false() {
+        // image_pad run [100..150], chunk_size=256 — all in chunk 0.
+        let ids: Vec<u32> = (0..200_u32)
+            .map(|i| if (100..150).contains(&(i as i32)) { 42 } else { 1 })
+            .collect();
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
+            "run [100..150] within chunk 0 should NOT cross"
+        );
+        // Adjacent boundary case: run ends exactly at chunk boundary.
+        // Run [200..256], chunk_size=256. Run start chunk = 200/256 = 0.
+        // Run end-1 = 255, 255/256 = 0. Same chunk → no crossing.
+        let ids2: Vec<u32> = (0..400_u32)
+            .map(|i| if (200..256).contains(&(i as i32)) { 42 } else { 1 })
+            .collect();
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids2, 42, 256),
+            "run [200..256] ends exactly at boundary — fits in chunk 0"
         );
     }
 }

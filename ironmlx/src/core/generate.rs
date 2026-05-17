@@ -454,6 +454,89 @@ pub fn build_per_row_decode_mask(
     mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
 }
 
+/// Build a cross-chunk prefill attention mask for one chunk of a chunked
+/// mid-batch admit. Shape: `[1, 1, chunk_len, chunk_start + chunk_len]`.
+///
+/// Row `q` in the chunk queries K/V positions `0..chunk_start + q + 1`:
+/// - Columns `0..chunk_start`: attend to earlier-chunk KV cells (all 0.0).
+/// - Columns `chunk_start..chunk_start + q + 1`: causal within-chunk (0.0).
+/// - Columns `chunk_start + q + 1..`: masked out (-inf).
+///
+/// This matches the KV slice returned by the model's internal `KVCache::update_and_fetch_on`
+/// after `temp_cache.offsets[0] = chunk_start` at call time: the model reads back
+/// `chunk_start + chunk_len` keys/values (earlier chunks' + this chunk's).
+///
+/// `dtype` is typically `Dtype::Bfloat16` to match the SDPA promoted type.
+pub fn build_chunked_prefill_attention_mask(
+    chunk_start: i32,
+    chunk_len: i32,
+    dtype: Dtype,
+) -> Result<Array> {
+    if chunk_len <= 0 {
+        return Err(anyhow!(
+            "build_chunked_prefill_attention_mask: chunk_len must be > 0, got {chunk_len}"
+        ));
+    }
+    if chunk_start < 0 {
+        return Err(anyhow!(
+            "build_chunked_prefill_attention_mask: chunk_start must be >= 0, got {chunk_start}"
+        ));
+    }
+
+    let kv_len = (chunk_start + chunk_len) as usize;
+    let q_len = chunk_len as usize;
+    let cs = chunk_start as usize;
+    let neg_inf = f32::NEG_INFINITY;
+    let mut flat = vec![neg_inf; q_len * kv_len];
+
+    for q in 0..q_len {
+        // Attend to all earlier-chunk positions [0..chunk_start].
+        for k in 0..cs {
+            flat[q * kv_len + k] = 0.0;
+        }
+        // Causal within current chunk: attend to chunk positions [0..=q].
+        for k in 0..=q {
+            flat[q * kv_len + cs + k] = 0.0;
+        }
+        // Positions cs + q + 1..kv_len stay -inf (not yet written).
+    }
+
+    let arr_f32: Array = (
+        &flat[..],
+        &[1_i32, 1_i32, chunk_len, chunk_start + chunk_len][..],
+    )
+        .try_into()
+        .map_err(|e| anyhow!("build_chunked_prefill_attention_mask try_into: {e:?}"))?;
+    mlx::ops::cast::astype(&arr_f32, dtype)
+        .map_err(|e| anyhow!("build_chunked_prefill_attention_mask astype: {e}"))
+}
+
+/// Build a per-token validity mask `[1, chunk_start + chunk_len]` (bool) for
+/// the hybrid model's linear-attention path for one chunk of a chunked
+/// mid-batch admit.
+///
+/// All positions `0..chunk_start + chunk_len` are `true` — every position
+/// from earlier chunks and the current chunk is real (no padding).
+pub fn build_chunked_prefill_linear_mask(chunk_start: i32, chunk_len: i32) -> Result<Array> {
+    if chunk_len <= 0 {
+        return Err(anyhow!(
+            "build_chunked_prefill_linear_mask: chunk_len must be > 0, got {chunk_len}"
+        ));
+    }
+    if chunk_start < 0 {
+        return Err(anyhow!(
+            "build_chunked_prefill_linear_mask: chunk_start must be >= 0, got {chunk_start}"
+        ));
+    }
+
+    let total = (chunk_start + chunk_len) as usize;
+    let flat = vec![true; total];
+    let arr: Array = (&flat[..], &[1_i32, chunk_start + chunk_len][..])
+        .try_into()
+        .map_err(|e| anyhow!("build_chunked_prefill_linear_mask try_into: {e:?}"))?;
+    Ok(arr)
+}
+
 /// Build a per-token validity mask `[B, max_len]` for the hybrid model's
 /// **linear-attention** path (`GatedDeltaNet`). For batch row `i` with
 /// actual length `prompt_lens[i] = L_i` (right-padded prefill):
