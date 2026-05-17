@@ -353,6 +353,137 @@ pub fn sample_batch(
     Ok(tokens)
 }
 
+/// Per-row config tensors used by [`configured_pipeline`]. Each
+/// field is shape `[B]`; no-op defaults make the corresponding op
+/// behave as identity for rows that don't need it.
+#[allow(dead_code)]
+struct PerRowConfigs {
+    /// `[B] f32`. None → 1.0 (identity divisor).
+    temp: Array,
+    /// `[B] i32`. None → `vocab_size` (no clip).
+    top_k: Array,
+    /// `[B] f32`. None → 1.0 (no nucleus cut).
+    top_p: Array,
+    /// `[B] f32`. None → 0.0 (no min_p floor).
+    min_p: Array,
+    /// `[B] f32`. None → 1.0 (no repetition penalty).
+    rep_pen: Array,
+    /// `[B] f32`. None → 0.0 (no frequency penalty).
+    freq_pen: Array,
+    /// `[B] f32`. None → 0.0 (no presence penalty).
+    pres_pen: Array,
+    /// True if any row has rep_pen / freq_pen / pres_pen set —
+    /// drives the history-bincount short-circuit.
+    need_history: bool,
+}
+
+#[allow(dead_code)]
+fn collect_per_row_configs(samplers: &[&Sampler], vocab: i32) -> Result<PerRowConfigs> {
+    let b = samplers.len();
+    let mut temp = Vec::with_capacity(b);
+    let mut top_k = Vec::with_capacity(b);
+    let mut top_p = Vec::with_capacity(b);
+    let mut min_p = Vec::with_capacity(b);
+    let mut rep_pen = Vec::with_capacity(b);
+    let mut freq_pen = Vec::with_capacity(b);
+    let mut pres_pen = Vec::with_capacity(b);
+    let mut need_history = false;
+    for s in samplers {
+        // temperature: <=0 means greedy in per-row Sampler::sample, but
+        // configured_pipeline is only entered when batch is mixed.
+        // Greedy rows in a mixed batch use temp=1.0 (no-op).
+        temp.push(if s.temperature > 0.0 {
+            s.temperature
+        } else {
+            1.0
+        });
+        top_k.push(s.top_k.unwrap_or(vocab));
+        top_p.push(s.top_p.unwrap_or(1.0));
+        min_p.push(s.min_p.unwrap_or(0.0));
+        rep_pen.push(s.repetition_penalty.unwrap_or(1.0));
+        freq_pen.push(s.frequency_penalty.unwrap_or(0.0));
+        pres_pen.push(s.presence_penalty.unwrap_or(0.0));
+        if s.repetition_penalty.is_some()
+            || s.frequency_penalty.is_some()
+            || s.presence_penalty.is_some()
+        {
+            need_history = true;
+        }
+    }
+    let dim = &[b as i32][..];
+    Ok(PerRowConfigs {
+        temp: (&temp[..], dim).try_into()?,
+        top_k: (&top_k[..], dim).try_into()?,
+        top_p: (&top_p[..], dim).try_into()?,
+        min_p: (&min_p[..], dim).try_into()?,
+        rep_pen: (&rep_pen[..], dim).try_into()?,
+        freq_pen: (&freq_pen[..], dim).try_into()?,
+        pres_pen: (&pres_pen[..], dim).try_into()?,
+        need_history,
+    })
+}
+
+/// Build `[B, vocab] u32` count tensor from per-row histories. CPU
+/// bincount → device upload.
+#[allow(dead_code)]
+fn build_history_count(histories: &[&[u32]], vocab: usize) -> Result<Array> {
+    let b = histories.len();
+    let mut flat = vec![0_u32; b * vocab];
+    for (row, hist) in histories.iter().enumerate() {
+        let offset = row * vocab;
+        for &tok in *hist {
+            let idx = tok as usize;
+            if idx < vocab {
+                flat[offset + idx] = flat[offset + idx].saturating_add(1);
+            }
+        }
+    }
+    let arr: Array = (&flat[..], &[b as i32, vocab as i32][..]).try_into()?;
+    Ok(arr)
+}
+
+/// Apply repetition + frequency + presence penalties as a single
+/// fused op over `[B, vocab]` logits. Returns updated logits (or
+/// `logits.clone()` if `history_count.is_none()`).
+#[allow(dead_code)]
+fn apply_penalties(
+    logits: &Array,
+    history_count: Option<&Array>,
+    configs: &PerRowConfigs,
+) -> Result<Array> {
+    let Some(history_count) = history_count else {
+        return Ok(logits.clone());
+    };
+    let history_count_f32 = history_count.astype(mlx::Dtype::Float32)?;
+    let zero_u32: Array = (&[0_u32][..], ()).try_into()?;
+    let history_mask_bool = mlx::ops::binary::greater(history_count, &zero_u32)?;
+    let history_mask_f32 = history_mask_bool.astype(mlx::Dtype::Float32)?;
+
+    let b = logits.shape().as_slice()[0];
+    let rep_pen_bv = configs.rep_pen.reshape(&[b, 1][..])?;
+    let freq_pen_bv = configs.freq_pen.reshape(&[b, 1][..])?;
+    let pres_pen_bv = configs.pres_pen.reshape(&[b, 1][..])?;
+
+    // Repetition: where(logit > 0, logit / rep_pen, logit * rep_pen) for seen tokens
+    let one_f32: Array = (&[1.0_f32][..], ()).try_into()?;
+    let rep_inv_bv = &one_f32 / &rep_pen_bv;
+    let zero_f32: Array = (&[0.0_f32][..], ()).try_into()?;
+    let positive_logit_mask = mlx::ops::binary::greater(logits, &zero_f32)?;
+    let rep_factor = indexing::where_(&positive_logit_mask, &rep_inv_bv, &rep_pen_bv)?;
+    let logits_rep_full = logits * &rep_factor;
+    let logits_rep = indexing::where_(&history_mask_bool, &logits_rep_full, logits)?;
+
+    // Frequency: logit -= freq_pen * count
+    let freq_term = &freq_pen_bv * &history_count_f32;
+    let logits_freq = &logits_rep - &freq_term;
+
+    // Presence: logit -= pres_pen * (history_mask as f32)
+    let pres_term = &pres_pen_bv * &history_mask_f32;
+    let logits_pres = &logits_freq - &pres_term;
+
+    Ok(logits_pres)
+}
+
 /// Configured-sampler vectorized pipeline. Called by [`sample_batch`]
 /// when not all rows are greedy. See spec
 /// `docs/superpowers/specs/2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md`.
@@ -807,5 +938,121 @@ mod tests {
         }
 
         assert_eq!(tokens_batch, tokens_ref);
+    }
+
+    // ── PerRowConfigs / collect_per_row_configs tests ─────────────────
+
+    #[test]
+    fn collect_per_row_configs_defaults_and_overrides() {
+        let s1 = Sampler::greedy().with_temperature(0.7);
+        let s2 = Sampler::greedy()
+            .with_top_p(0.9)
+            .with_repetition_penalty(1.1);
+        let s3 = Sampler::greedy();
+        let samplers: Vec<&Sampler> = vec![&s1, &s2, &s3];
+        let cfg = collect_per_row_configs(&samplers, 32000).expect("collect");
+        let temp: Vec<f32> = cfg.temp.to_vec().expect("temp vec");
+        assert_eq!(temp, vec![0.7, 1.0, 1.0]);
+        let top_p: Vec<f32> = cfg.top_p.to_vec().expect("top_p vec");
+        assert_eq!(top_p, vec![1.0, 0.9, 1.0]);
+        let rep: Vec<f32> = cfg.rep_pen.to_vec().expect("rep vec");
+        assert_eq!(rep, vec![1.0, 1.1, 1.0]);
+        let top_k: Vec<i32> = cfg.top_k.to_vec().expect("top_k vec");
+        assert_eq!(top_k, vec![32000, 32000, 32000]);
+        assert!(cfg.need_history);
+    }
+
+    // ── build_history_count tests ────────────────────────────────────
+
+    #[test]
+    fn build_history_count_per_row_bincount() {
+        let h0: &[u32] = &[3, 3, 5];
+        let h1: &[u32] = &[7];
+        let h2: &[u32] = &[];
+        let histories: Vec<&[u32]> = vec![h0, h1, h2];
+        let counts = build_history_count(&histories, 8).expect("counts");
+        let v: Vec<u32> = counts.to_vec().expect("to_vec");
+        assert_eq!(&v[0..8], &[0, 0, 0, 2, 0, 1, 0, 0]);
+        assert_eq!(&v[8..16], &[0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(&v[16..24], &[0; 8]);
+    }
+
+    // ── apply_penalties tests ────────────────────────────────────────
+
+    fn make_logits(b: usize, vocab: usize, fill: f32) -> Array {
+        let v: Vec<f32> = vec![fill; b * vocab];
+        (&v[..], &[b as i32, vocab as i32][..])
+            .try_into()
+            .expect("logits")
+    }
+
+    #[test]
+    fn apply_penalties_repetition_divides_seen_when_positive() {
+        let logits = make_logits(1, 8, 2.0);
+        let h0: &[u32] = &[5];
+        let s = Sampler::greedy().with_repetition_penalty(2.0);
+        let samplers: Vec<&Sampler> = vec![&s];
+        let cfg = collect_per_row_configs(&samplers, 8).expect("cfg");
+        let history_count = build_history_count(&[h0], 8).expect("hc");
+        let out = apply_penalties(&logits, Some(&history_count), &cfg).expect("out");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert!(
+            (v[5] - 1.0).abs() < 1e-5,
+            "row 0 token 5 should be 2.0/2.0=1.0; got {}",
+            v[5]
+        );
+        assert!(
+            (v[0] - 2.0).abs() < 1e-5,
+            "row 0 token 0 unseen → unchanged"
+        );
+    }
+
+    #[test]
+    fn apply_penalties_frequency_subtracts_count_times_penalty() {
+        let logits = make_logits(1, 8, 5.0);
+        let h0: &[u32] = &[3, 3, 3];
+        let s = Sampler::greedy().with_frequency_penalty(1.5);
+        let samplers: Vec<&Sampler> = vec![&s];
+        let cfg = collect_per_row_configs(&samplers, 8).expect("cfg");
+        let history_count = build_history_count(&[h0], 8).expect("hc");
+        let out = apply_penalties(&logits, Some(&history_count), &cfg).expect("out");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert!(
+            (v[3] - 0.5).abs() < 1e-4,
+            "row 0 token 3 should be 5.0-4.5=0.5; got {}",
+            v[3]
+        );
+        assert!((v[0] - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn apply_penalties_presence_subtracts_once_per_token() {
+        let logits = make_logits(1, 8, 5.0);
+        let h0: &[u32] = &[3, 3, 3];
+        let s = Sampler::greedy().with_presence_penalty(1.5);
+        let samplers: Vec<&Sampler> = vec![&s];
+        let cfg = collect_per_row_configs(&samplers, 8).expect("cfg");
+        let history_count = build_history_count(&[h0], 8).expect("hc");
+        let out = apply_penalties(&logits, Some(&history_count), &cfg).expect("out");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert!(
+            (v[3] - 3.5).abs() < 1e-4,
+            "row 0 token 3 should be 5.0-1.5=3.5; got {}",
+            v[3]
+        );
+        assert!((v[0] - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn apply_penalties_short_circuit_when_no_history_needed() {
+        let logits = make_logits(2, 8, 5.0);
+        let s1 = Sampler::greedy().with_temperature(0.7);
+        let s2 = Sampler::greedy().with_top_p(0.9);
+        let samplers: Vec<&Sampler> = vec![&s1, &s2];
+        let cfg = collect_per_row_configs(&samplers, 8).expect("cfg");
+        assert!(!cfg.need_history);
+        let out = apply_penalties(&logits, None, &cfg).expect("out");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert!(v.iter().all(|&x| (x - 5.0).abs() < 1e-5));
     }
 }
