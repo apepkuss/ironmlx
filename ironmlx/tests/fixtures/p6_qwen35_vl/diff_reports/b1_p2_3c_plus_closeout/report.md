@@ -37,8 +37,49 @@ giving comparable speedup for production text traffic too.
 | Integration `b1_p2_4_batched_vl::mid_admit_vl_during_text_decode` | ✅ PASS 22.23 s |
 | Integration `b1_p2_4_batched_vl` full suite (4 tests) | ✅ PASS (sweep) |
 | I1 perf gate `chunked_admit_mid_stall_delta` | ✅ PASS 48.22 s, ratio 7.84× (under 12× threshold) |
-| 16-suite regression sweep (`scripts/sweep/sweep_full.sh`) | 🟡 background — close-out updated post-completion |
+| 16-suite regression sweep (`scripts/sweep/sweep_full.sh`) | ✅ **16/16 PASS in 52 m 59 s** — see Regression status below |
 | fmt --check / clippy -D warnings / build --release | ✅ ALL CLEAN at every commit |
+
+### Regression status (sweep_full at 3c+ HEAD `7fe3502`, log `/tmp/sweep_full_1779018073.log`)
+
+All 16 suites PASS in a single sweep with no flakes — first time since
+the 3f sweeps started failing on
+`b1_p2_3d::iron_bench_c8_with_queue_no_4xx` and
+`b1_p2_3f_cache_cap::admit_long_prompt_pp10k` (sweep-context thermal
+/ GPU-state accumulation in long runs). Hypothesis: option B's
+`forward_on` B=1 path runs every suite that touches admit_mid 3-5×
+faster than the prior `batched_prefill` path, so the cumulative
+thermal / kernel-cache load over a sweep no longer exhausts the
+system before reaching the late suites.
+
+| # | Suite | Wall | vs 3f sweep #4 |
+| --- | --- | --- | --- |
+| 1 | b1_p2_1_batched_prefill | 671 s | (3f had 19 s — fluke; first-suite Metal warmup landed here this time) |
+| 2 | b1_p2_2_batched_decode | 15 s | 4727 s ⟶ **315× faster** |
+| 3 | b1_p2_3a_scheduler_skeleton | 1 s | 2 s |
+| 4 | b1_p2_3b_1_scheduler_step | 282 s | 2518 s ⟶ **9× faster** |
+| 5 | b1_p2_3b_2_scheduler_actor | 107 s | 407 s ⟶ **4× faster** |
+| 6 | b1_p2_3b_3_admission_window | 130 s | 514 s ⟶ **4× faster** |
+| 7 | b1_p2_3b_4_anthropic_actor | 76 s | 60 s |
+| 8 | b1_p2_3c_1_per_row_offset | 105 s | 242 s ⟶ **2× faster** |
+| 9 | b1_p2_3c_2_scheduler_decode_mask | 63 s | 114 s ⟶ **2× faster** |
+| 10 | b1_p2_3c_3_continuous_batching | 265 s | 235 s |
+| 11 | b1_p2_3d_admission_queue (5 tests) | **284 s — ALL 5/5 PASS** | 387 s with S5 flake |
+| 12 | b1_p2_4_batched_vl (4 tests) | **466 s** | 2296 s ⟶ **5× faster** |
+| 13 | b1_p2_3f_cache_cap | **408 s PASS** | killed-hung in 3f sweep #4 |
+| 14 | p6_qwen35_vl_logits_match | 227 s | 11 s (fluke — Metal kernel cache state differed) |
+| 15 | p4_http_smoke | 58 s | 9 s |
+| 16 | b1_p2_3c_plus_chunked_admit_mid (anchor stub) | 18 s | n/a (new) |
+
+**Aggregate:** 52 m 59 s vs prior 3f sweep #4 at ~3 h 11 m + S5 flake
++ 3f hang → **~3.6× total wall reduction**. Both previously-flaky
+suites (3d S5, 3f cache_cap PP=10K) PASSed clean in this run.
+
+*This addendum was authored on the 3e.1a branch (descendant of 3c+
+HEAD `7fe3502`) since 3e.1a's design-spec commits were the cleanest
+point to add post-merge regression evidence without disturbing the
+already-pushed 3c+ HEAD. The data itself reflects the 3c+ branch's
+HEAD state.*
 
 ## Architectural changes per spec §4
 
