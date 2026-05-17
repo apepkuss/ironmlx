@@ -525,36 +525,57 @@ fn apply_temperature(logits: &Array, temp_per_row: &Array) -> Result<Array> {
 }
 
 /// Mask logits below per-row top-k threshold with NEG_INFINITY.
-/// Uses partition (T0 bench: 1.15ms vs sort 11.84ms at vocab=151k).
-/// Per-row `top_k_per_row[i]` = `vocab_size` → no-op (mask passes everything).
+///
+/// Hybrid path:
+/// - **Uniform top_k** (all rows same value): single `partition(kth=vocab-top_k)`
+///   places the threshold at index `vocab-top_k` in sorted position.
+///   T0 §0.1 bench: 1.15ms at vocab=151k.
+/// - **Mixed top_k** (rare): fallback to `sort(logits)` for correct per-row
+///   threshold extraction. T0 §0.1 bench: 11.84ms at vocab=151k.
+///
+/// Reason for hybrid: `partition` leaves elements at indices > kth in
+/// *unsorted* order (only guaranteeing they're >= arr[kth]). For mixed
+/// top_k, per-row threshold at index `vocab - top_k[i] > kth` would
+/// land in the unsorted region — wrong value.
+///
+/// Per-row `top_k_per_row[i]` = `vocab_size` → no-op (mask passes
+/// everything).
 #[allow(dead_code)]
 fn apply_top_k_batched(logits: &Array, top_k_per_row: &Array) -> Result<Array> {
+    use mlx::ops::{
+        binary,
+        indexing::{take_along_axis, where_},
+        sort,
+    };
     let dims_owned = logits.shape();
     let dims = dims_owned.as_slice();
     let b = dims[0];
     let vocab = dims[1];
 
-    // Partition: place the (vocab - max_top_k)-th smallest element at its sorted position.
-    // After partition, elements >= top_k threshold are in the upper part of the row.
-    // We need per-row threshold = (vocab - top_k[i])-th element in sorted order.
-    //
-    // Strategy: read max(top_k_per_row) from host (CPU side cheap), partition by
-    // kth=(vocab - max_top_k), then take_along_axis to extract per-row threshold.
     let top_k_host: Vec<i32> = top_k_per_row.to_vec()?;
     let max_top_k = top_k_host.iter().copied().max().unwrap_or(vocab).min(vocab);
-    let kth = (vocab - max_top_k).max(0);
-    let parted = sort::partition(logits, kth, -1)?; // [B, vocab]; index kth is in sorted position
+    let min_top_k = top_k_host.iter().copied().min().unwrap_or(vocab).min(vocab);
 
-    // Per-row threshold index in the partitioned array: vocab - top_k[i]
+    // Pre-compute per-row threshold index: vocab - top_k[i].
     let vocab_arr: Array = (&[vocab][..], ()).try_into()?;
     let thresh_idx = &vocab_arr - top_k_per_row; // [B] i32
     let thresh_idx_bv = thresh_idx.reshape(&[b, 1][..])?;
-    let threshold = indexing::take_along_axis(&parted, &thresh_idx_bv, -1)?; // [B, 1]
 
-    // Mask: keep logits >= threshold
-    let mask = mlx::ops::binary::greater_equal(logits, &threshold)?;
+    let sorted_or_parted = if max_top_k == min_top_k {
+        // Uniform top_k: partition with kth = vocab - max_top_k (fast).
+        let kth = (vocab - max_top_k).max(0);
+        sort::partition(logits, kth, -1)?
+    } else {
+        // Mixed top_k: full sort for correct per-row threshold (slower
+        // but correct; rare production case).
+        sort::sort(logits, -1)?
+    };
+
+    // Per-row threshold value at vocab - top_k[i] in (partially) sorted order.
+    let threshold = take_along_axis(&sorted_or_parted, &thresh_idx_bv, -1)?; // [B, 1]
+    let mask = binary::greater_equal(logits, &threshold)?;
     let neg_inf: Array = (&[f32::NEG_INFINITY][..], ()).try_into()?;
-    Ok(indexing::where_(&mask, logits, &neg_inf)?)
+    Ok(where_(&mask, logits, &neg_inf)?)
 }
 
 /// Numerically stable softmax over axis=-1.
@@ -1186,6 +1207,51 @@ mod tests {
         assert_eq!(v[3], f32::NEG_INFINITY);
         // Row 1 top-4 (all): all values kept
         assert_eq!(&v[4..8], &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn apply_top_k_batched_mixed_per_row() {
+        // row 0: top_k=1 (keep max only); row 1: top_k=3 (keep top 3)
+        // Forces mixed path (sort fallback).
+        let data: Vec<f32> = vec![
+            5.0, 1.0, 10.0, 2.0, // row 0: max is 10.0 at col 2
+            4.0, 8.0, 3.0,
+            7.0, // row 1: top 3 are 8.0, 7.0, 4.0 (cols 1, 3, 0); col 2 (3.0) → -inf
+        ];
+        let logits: Array = (&data[..], &[2_i32, 4_i32][..]).try_into().unwrap();
+        let topk: Array = (&[1_i32, 3_i32][..], &[2_i32][..]).try_into().unwrap();
+        let out = apply_top_k_batched(&logits, &topk).expect("top_k");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        // row 0: only col 2 (10.0) kept; others → -inf
+        assert_eq!(v[0], f32::NEG_INFINITY, "row 0 col 0 (5.0) → -inf");
+        assert_eq!(v[1], f32::NEG_INFINITY, "row 0 col 1 (1.0) → -inf");
+        assert_eq!(v[2], 10.0, "row 0 col 2 (10.0) → kept");
+        assert_eq!(v[3], f32::NEG_INFINITY, "row 0 col 3 (2.0) → -inf");
+        // row 1: top 3 kept (col 0/1/3); col 2 (3.0) → -inf
+        assert_eq!(v[4], 4.0, "row 1 col 0 (4.0) → kept (top 3)");
+        assert_eq!(v[5], 8.0, "row 1 col 1 (8.0) → kept (max)");
+        assert_eq!(v[6], f32::NEG_INFINITY, "row 1 col 2 (3.0) → -inf (rank 4)");
+        assert_eq!(v[7], 7.0, "row 1 col 3 (7.0) → kept (top 3)");
+    }
+
+    #[test]
+    fn apply_top_k_batched_uniform_per_row_uses_partition_fast_path() {
+        // Uniform top_k=2 across batch → partition path. Verify correctness.
+        let data: Vec<f32> = vec![1.0, 5.0, 3.0, 2.0, 4.0, 1.0, 6.0, 2.0];
+        let logits: Array = (&data[..], &[2_i32, 4_i32][..]).try_into().unwrap();
+        let topk: Array = (&[2_i32, 2_i32][..], &[2_i32][..]).try_into().unwrap();
+        let out = apply_top_k_batched(&logits, &topk).expect("top_k");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        // row 0: top 2 are 5.0, 3.0 (cols 1, 2)
+        assert_eq!(v[0], f32::NEG_INFINITY);
+        assert_eq!(v[1], 5.0);
+        assert_eq!(v[2], 3.0);
+        assert_eq!(v[3], f32::NEG_INFINITY);
+        // row 1: top 2 are 6.0, 4.0 (cols 2, 0)
+        assert_eq!(v[4], 4.0);
+        assert_eq!(v[5], f32::NEG_INFINITY);
+        assert_eq!(v[6], 6.0);
+        assert_eq!(v[7], f32::NEG_INFINITY);
     }
 
     #[test]
