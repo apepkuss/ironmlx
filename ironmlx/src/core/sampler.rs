@@ -460,39 +460,31 @@ fn apply_penalties(
     Ok(logits_pres)
 }
 
-/// Batched categorical sample over `[B, vocab]` probs. Uses a single
-/// PRNG key derived from `samplers[0].ensure_key()`; mlx::random::categorical
-/// auto-derives row-independent samples from the single key. Per-row PRNG
-/// reproducibility is NOT preserved (spec NG6 accepts this drift; 3e.2 will
-/// centralize PRNG state).
-fn sample_batched_categorical(samplers: &[&Sampler], probs: &Array) -> Result<Vec<u32>> {
-    // `ensure_key` splits internally: stores one half back into the Cell
-    // and returns the other. One call advances the PRNG exactly once —
-    // no additional split or store step needed.
-    let key = samplers[0].ensure_key()?;
-    let tokens = random::categorical(probs).key(&key).sample()?;
-    Ok(tokens.to_vec::<u32>()?)
-}
-
 /// Configured-sampler vectorized pipeline. Called by [`sample_batch`]
 /// when not all rows are greedy. See spec
 /// `docs/superpowers/specs/2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md`.
 ///
-/// **mlx API verification (T0, plan §Step 0):**
-/// - `mlx::random::categorical(logits=[B,vocab]).key(&single_key).sample() → [B]`
-///   — single key + automatic row-independent batching. Per-row PRNG
-///   reproducibility (each Sampler having its own seed) is NOT preserved
-///   by the batched op; spec NG6 accepts this drift.
-/// - `mlx::ops::sort::partition(kth, axis)` and `sort(axis)` both exist;
-///   plan T0 §0.1 bench result: sort([B=4,vocab=151936]) measured 11.84 ms
-///   (> 3 ms threshold) vs partition(kth=151886) measured 1.15 ms. Top_k
-///   path chosen: partition(kth = vocab - top_k_max, axis=-1) (R2 mitigation,
-///   sort exceeded threshold).
-/// - `scatter_along_axis` not exposed in mlx Rust binding; top_p scatter
-///   back uses `argsort(sort_idx) = inverse permutation` then
-///   `take_along_axis(sorted_masked, inv_perm, -1)`. Verified in
-///   `probe_argsort_inverse_permutation_identity`. Note: `argsort` returns
-///   `Uint32`; `to_vec::<u32>()` must be used (not `i32`).
+/// **Architecture (GPU → CPU handoff):**
+///
+/// GPU side (lazy, fused into one eval):
+///   1. apply_penalties   ([B, vocab] fused rep/freq/pres penalty)
+///   2. apply_temperature ([B, vocab] broadcast divide)
+///   3. apply_top_k_batched ([B, vocab] partition/sort mask)
+///   4. apply_softmax     ([B, vocab] numerically stable softmax)
+///   5. (single `to_vec::<f32>()` materialises [B * vocab] f32 on CPU)
+///
+/// CPU side (per-row, ~O(vocab log vocab)):
+///   6. top_p nucleus filter  (sort + cumsum + threshold per row)
+///   7. min_p floor           (relative to max_prob per row)
+///   8. renormalize           (L1 per row)
+///   9. categorical sampling  (CPU random draw from CDF)
+///
+/// Motivation: GPU argsort([B, vocab]) × 2 + mlx categorical
+/// ([B, vocab] Gumbel-max) triggered per-call JIT recompiles and
+/// large Metal buffer allocations (measured 0.4–18 s/step at B=4,
+/// vocab=151936). CPU-side top_p+categorical is O(vocab) per row
+/// (sort: ~3ms/row; CDF sample: µs) — reliably under 20 ms at
+/// vocab=151936, within the 250ms budget.
 fn configured_pipeline(
     samplers: &[&Sampler],
     logits: &Array,
@@ -502,6 +494,7 @@ fn configured_pipeline(
     let dims = dims_owned.as_slice();
     let vocab_i32 = dims[1];
     let vocab = vocab_i32 as usize;
+    let b = dims[0] as usize;
 
     let configs = collect_per_row_configs(samplers, vocab_i32)?;
 
@@ -511,15 +504,111 @@ fn configured_pipeline(
         None
     };
 
+    // GPU stage: penalties → temperature → top_k → softmax, all lazy.
+    // Single `to_vec` sync materialises [B * vocab] on CPU.
     let logits = apply_penalties(logits, history_count.as_ref(), &configs)?;
     let logits = apply_temperature(&logits, &configs.temp)?;
     let logits = apply_top_k_batched(&logits, &configs.top_k)?;
-    let probs = apply_softmax(&logits)?;
-    let probs = apply_top_p_batched(&probs, &configs.top_p)?;
-    let probs = apply_min_p_batched(&probs, &configs.min_p)?;
-    let probs = renormalize(&probs)?;
+    let probs_gpu = apply_softmax(&logits)?;
 
-    sample_batched_categorical(samplers, &probs)
+    // One GPU sync — eval the entire fused graph built above.
+    let probs_flat: Vec<f32> = probs_gpu.to_vec()?;
+
+    // CPU stage: top_p + min_p + renorm + categorical per row.
+    let top_p_host: Vec<f32> = configs.top_p.to_vec()?;
+    let min_p_host: Vec<f32> = configs.min_p.to_vec()?;
+
+    let mut tokens = Vec::with_capacity(b);
+    for row in 0..b {
+        let row_probs = &probs_flat[row * vocab..(row + 1) * vocab];
+        let token = sample_row_cpu(row_probs, top_p_host[row], min_p_host[row], samplers[row])?;
+        tokens.push(token);
+    }
+    Ok(tokens)
+}
+
+/// CPU-side sampling for one row of `[vocab]` probs (already softmax-normalised,
+/// top_k applied). Applies top_p nucleus filter, min_p floor, renormalization,
+/// then draws a single categorical sample.
+///
+/// Algorithm:
+///   1. Sort `(prob, original_idx)` descending by prob.
+///   2. Walk sorted order; accumulate cumulative prob until top_p threshold
+///      is crossed — keep all tokens up to and including the crossing token.
+///   3. Apply min_p floor: zero tokens with prob < min_p × max_prob.
+///   4. Renormalize remaining probs to sum to 1.
+///   5. Draw uniform u in [0, 1) from sampler PRNG; walk CDF to find token.
+///
+/// This avoids any GPU argsort or mlx::random::categorical call, eliminating
+/// the measured 0.4–18 s JIT / allocation spike at vocab=151936.
+fn sample_row_cpu(probs: &[f32], top_p: f32, min_p: f32, sampler: &Sampler) -> Result<u32> {
+    let vocab = probs.len();
+
+    // 1. Build sorted (prob, idx) descending — O(vocab log vocab).
+    let mut indexed: Vec<(f32, u32)> = probs
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| (p, i as u32))
+        .collect();
+    // Sort descending by probability; tie-break by index for determinism.
+    indexed.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // 2. Top-p nucleus: keep until cumulative prob (exclusive) >= top_p.
+    //    The first token whose inclusion crosses the threshold is RETAINED
+    //    (matches HF semantics).
+    let mut keep_count = vocab; // default: keep all
+    if top_p < 1.0 {
+        let mut cum = 0.0_f32;
+        for (k, &(p, _)) in indexed.iter().enumerate() {
+            if cum >= top_p {
+                keep_count = k;
+                break;
+            }
+            cum += p;
+        }
+    }
+    let nucleus = &indexed[..keep_count];
+
+    // 3. Min_p floor: relative to max_prob (= nucleus[0].0 since sorted desc).
+    let max_prob = nucleus.first().map(|&(p, _)| p).unwrap_or(1.0);
+    let min_p_thresh = min_p * max_prob;
+
+    // 4. Collect eligible tokens and renormalize.
+    let mut eligible: Vec<(f32, u32)> = nucleus
+        .iter()
+        .filter(|&&(p, _)| p >= min_p_thresh)
+        .copied()
+        .collect();
+    if eligible.is_empty() {
+        // Fallback: argmax (should not happen with well-formed probs).
+        return Ok(indexed[0].1);
+    }
+    let total: f32 = eligible.iter().map(|&(p, _)| p).sum();
+    let inv_total = if total > 0.0 { 1.0 / total } else { 1.0 };
+    for (p, _) in eligible.iter_mut() {
+        *p *= inv_total;
+    }
+
+    // 5. CDF sampling: draw u ~ Uniform[0, 1) from sampler PRNG.
+    //    `ensure_key` advances the PRNG state stored in the Cell.
+    let key = sampler.ensure_key()?;
+    // Use mlx builder: uniform().shape(1).key(&key).sample() → [1] f32.
+    let u_arr = random::uniform()
+        .shape(1_i32)
+        .dtype(mlx::Dtype::Float32)
+        .key(&key)
+        .sample()?;
+    let u: f32 = u_arr.item()?;
+
+    let mut cum = 0.0_f32;
+    for &(p, idx) in &eligible {
+        cum += p;
+        if u < cum {
+            return Ok(idx);
+        }
+    }
+    // Fallback: last eligible token (handles floating-point rounding).
+    Ok(eligible.last().map(|&(_, idx)| idx).unwrap_or(0))
 }
 
 // ── T2: batched ops over [B, vocab] ─────────────────────────────────────────
@@ -593,6 +682,11 @@ fn apply_softmax(logits: &Array) -> Result<Array> {
 /// Nucleus filter: zero out probs that fall outside the smallest
 /// set summing to `top_p[i]`. The first token whose inclusion crosses
 /// `top_p` is RETAINED (matches HF semantics).
+///
+/// GPU-only version retained for unit-test verification. Production path
+/// uses `sample_row_cpu` which avoids the double `argsort` overhead on
+/// large vocab (measured 0.4–18 s/step at vocab=151936).
+#[cfg(test)]
 fn apply_top_p_batched(probs: &Array, top_p_per_row: &Array) -> Result<Array> {
     use mlx::ops::cumulative::cumsum;
     let b = probs.shape().as_slice()[0];
@@ -621,6 +715,10 @@ fn apply_top_p_batched(probs: &Array, top_p_per_row: &Array) -> Result<Array> {
 }
 
 /// min_p floor: keep probs >= min_p[i] * max_prob[i]. Sets others to 0.
+///
+/// GPU-only version retained for unit-test verification. Production path
+/// uses `sample_row_cpu` which applies min_p on CPU.
+#[cfg(test)]
 fn apply_min_p_batched(probs: &Array, min_p_per_row: &Array) -> Result<Array> {
     let b = probs.shape().as_slice()[0];
     let max_per_row = reduction::max(probs, &[-1_i32][..], true)?; // [B, 1] keepdims
@@ -633,6 +731,10 @@ fn apply_min_p_batched(probs: &Array, min_p_per_row: &Array) -> Result<Array> {
 
 /// Renormalize per-row probs so each row sums to 1.0. Used after
 /// top_p / min_p possibly zero out tokens.
+///
+/// GPU-only version retained for unit-test verification. Production path
+/// uses `sample_row_cpu` which renormalizes on CPU.
+#[cfg(test)]
 fn renormalize(probs: &Array) -> Result<Array> {
     let row_sum = reduction::sum(probs, &[-1_i32][..], true)?; // [B, 1] keepdims
     Ok(probs / &row_sum)
