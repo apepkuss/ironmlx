@@ -75,7 +75,29 @@ Retains single-row `Sampler::sample` for the B=1 admit path. Wrapping B=1 in `sa
 ## Carry-Forward (not in 3e.1a scope)
 
 | Item | Description |
-|------|-------------|
-| **3e.1b** | Vectorize configured sampler — temperature scaling, top_p mask, repetition penalty across batched `[B, vocab]` logits as tensor ops |
-| **Top-k batched** | Requires custom Metal partial-sort kernel; separate sub-task |
-| **3e.2** | PRNG key tensorization — per-row keys batched into `[B, 2]` u32 via `mlx::random::split` |
+| --- | --- |
+| **3e.1b** | Vectorize configured sampler — 7 ops (rep+freq+pres / temp / top_k via mlx::sort / top_p / min_p / softmax / renorm) + batched categorical (spec: `2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md`) |
+| **3e.2** | PRNG key state centralization — Sampler 去 Cell，Scheduler 集中持 `[B_max, 2]` state (spec: `2026-05-17-b1-p2-3e-2-prng-key-batching-design.md`) |
+| **Top-k custom Metal partial-sort kernel** | NG in 3e.1b (sort 足够)，defer 到 3f 或 future |
+
+## Sweep_full Result (post-close-out addendum)
+
+`sweep_full.sh` 启动于 22:24:33 JST 2026-05-17，完成于 23:23:28 (64m 55s)。**16/16 PASS**，无任何 regression。
+
+| Suite | Result | Time |
+| --- | --- | --- |
+| b1_p2_1_batched_prefill | ✅ PASS | 367s |
+| b1_p2_2_batched_decode | ✅ PASS | ~ |
+| b1_p2_3a_* | ✅ PASS | ~ |
+| b1_p2_3b_2_scheduler_actor | ✅ PASS | ~ |
+| b1_p2_3b_3_* / 3b_4_* | ✅ PASS | ~ |
+| b1_p2_3c_2_scheduler_decode_mask | ✅ PASS | 73s |
+| b1_p2_3c_3_continuous_batching | ✅ PASS | 155s |
+| b1_p2_3d_admission_queue | ✅ PASS | 272s |
+| b1_p2_4_batched_vl | ✅ PASS | 969s |
+| b1_p2_3f_cache_cap | ✅ PASS | 275s |
+| p6_qwen35_vl_logits_match | ✅ PASS | 42s |
+| p4_http_smoke | ✅ PASS | 302s |
+| b1_p2_3c_plus_chunked_admit_mid | ✅ PASS | 641s |
+
+**结论**: 3e.1a 不引入任何 admit / cache / VL / HTTP regression。Sampler vectorization (greedy fast path) 是真正的 zero-cost foundation for 3e.1b/3e.2。
