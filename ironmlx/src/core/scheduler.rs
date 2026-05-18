@@ -321,7 +321,6 @@ pub struct Scheduler {
     pub(crate) meta: crate::core::memory_budget::ModelMeta,
     /// Count of admits rejected by the admission queue (full). Wired in T3
     /// for /healthz; declared here so T1 can initialise it. (B1-p2.5)
-    #[allow(dead_code)] // T3 wires this into /healthz metrics.
     pub(crate) admission_queue_full_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Count of admits rejected by the memory budget gate. Used by T3
     /// /healthz. (B1-p2.5)

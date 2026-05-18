@@ -16,6 +16,7 @@ use crate::Result;
 
 pub mod anthropic;
 pub mod chat_format;
+pub mod health;
 mod openai;
 pub mod scheduler_actor;
 
@@ -46,6 +47,9 @@ pub struct AppState {
     /// Effective cap_max = min(--max-cache-cap CLI flag, model.config.max_position_embeddings).
     /// Per-request `prompt_len + max_new_tokens` exceeding this returns HTTP 413. B1-p2.3f.
     pub effective_cap_max: usize,
+    /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
+    /// wired to the SchedulerActor driver loop + BudgetState. B1-p2.5 G3.
+    pub health_collector: Arc<health::SchedulerHealthCollector>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -99,6 +103,24 @@ pub async fn serve(
         effective_cap_max,
         meta,
     )?;
+
+    // B1-p2.5 G3: Build SchedulerHealthCollector from shared Arc atomics
+    // exposed by SchedulerActorHandle. max_position_embeddings already resolved
+    // into model_max_context above (i32 → usize). Re-read from model_max_context.
+    let health_collector = Arc::new(health::SchedulerHealthCollector {
+        start_time: std::time::Instant::now(),
+        b_max,
+        queue_max: admission_queue_max,
+        model_name: model_id.clone(),
+        max_position_embeddings: model_max_context as i32,
+        b_active: scheduler_handle.b_active.clone(),
+        b_queued: scheduler_handle.b_queued.clone(),
+        admission_queue_full_count: scheduler_handle.admission_queue_full_count.clone(),
+        memory_budget_exceeded_count: scheduler_handle.memory_budget_exceeded_count.clone(),
+        kv_cache_active_bytes: scheduler_handle.kv_cache_active_bytes.clone(),
+        kv_cache_soft_limit_bytes: scheduler_handle.kv_cache_soft_limit_bytes,
+    });
+
     let state = AppState {
         model,
         tokenizer: Arc::new(tokenizer),
@@ -109,9 +131,11 @@ pub async fn serve(
         admission_deadline_ms,
         admission_queue_max,
         effective_cap_max, // 3f
+        health_collector,
     };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/healthz", get(healthz_handler))
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/messages", post(anthropic::messages))
         .with_state(state);
@@ -125,6 +149,14 @@ pub async fn serve(
         .with_context(|| format!("binding {addr}"))?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// GET /healthz — returns a JSON HealthSnapshot. Reads only Arc atomics;
+/// no lock contention with the model or SchedulerActor. B1-p2.5 G3.
+async fn healthz_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<health::HealthSnapshot> {
+    axum::Json(state.health_collector.snapshot())
 }
 
 #[cfg(test)]

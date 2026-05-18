@@ -100,6 +100,23 @@ pub struct SchedulerActorHandle {
     /// queue full" Err (queue_max overflow). Doc-hidden.
     #[doc(hidden)]
     pub queue_rejected: Arc<AtomicU64>,
+    // ── B1-p2.5 G3: /healthz monitoring atomics ──────────────────────────
+    /// Live count of in-flight (active) requests in the scheduler slots.
+    /// Updated by driver_loop tail on every rolling iteration.
+    pub b_active: Arc<AtomicU64>,
+    /// Live count of requests parked in the admission queue.
+    /// Updated by driver_loop tail on every rolling iteration.
+    pub b_queued: Arc<AtomicU64>,
+    /// Monotonic count of admits rejected due to admission queue full.
+    /// Cloned from Scheduler::admission_queue_full_count.
+    pub admission_queue_full_count: Arc<AtomicU64>,
+    /// Monotonic count of admits rejected due to memory budget exceeded.
+    /// Cloned from Scheduler::memory_budget_exceeded_count.
+    pub memory_budget_exceeded_count: Arc<AtomicU64>,
+    /// Shared Arc into BudgetState::active — live bytes charged to KV cache.
+    pub kv_cache_active_bytes: Arc<AtomicUsize>,
+    /// KV cache soft limit in bytes (computed at startup; static for lifetime).
+    pub kv_cache_soft_limit_bytes: usize,
 }
 
 /// Spawn the driver task and return a handle. The driver runs on
@@ -126,19 +143,30 @@ pub fn spawn_scheduler_actor(
     effective_cap_max: usize,
     meta: crate::core::memory_budget::ModelMeta,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
-    // Validate budget before spawning (fail fast at startup). B1-p2.5.
-    let _budget_check = Scheduler::new(b_max, effective_cap_max, meta)?;
+    // Validate budget and extract health atomics before spawning. B1-p2.5.
+    let budget_check = Scheduler::new(b_max, effective_cap_max, meta)?;
+    let admission_queue_full_count = budget_check.admission_queue_full_count.clone();
+    let memory_budget_exceeded_count = budget_check.memory_budget_exceeded_count.clone();
+    let kv_cache_active_bytes = budget_check.budget_state.shared_active();
+    let kv_cache_soft_limit_bytes = budget_check.budget_state.soft_limit();
+
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let admit_count = Arc::new(AtomicU64::new(0));
     let batch_count = Arc::new(AtomicU64::new(0));
     let saturate_triggered = Arc::new(AtomicU64::new(0));
     let queue_depth_peak = Arc::new(AtomicUsize::new(0));
     let queue_rejected = Arc::new(AtomicU64::new(0));
+    // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
+    let b_active = Arc::new(AtomicU64::new(0));
+    let b_queued = Arc::new(AtomicU64::new(0));
+
     let admit_count_for_task = admit_count.clone();
     let batch_count_for_task = batch_count.clone();
     let saturate_triggered_for_task = saturate_triggered.clone();
     let queue_depth_peak_for_task = queue_depth_peak.clone();
     let queue_rejected_for_task = queue_rejected.clone();
+    let b_active_for_task = b_active.clone();
+    let b_queued_for_task = b_queued.clone();
     let effective_cap_max_for_task = effective_cap_max;
     tokio::task::spawn_blocking(move || {
         driver_loop(
@@ -154,6 +182,8 @@ pub fn spawn_scheduler_actor(
             saturate_triggered_for_task,
             queue_depth_peak_for_task,
             queue_rejected_for_task,
+            b_active_for_task,
+            b_queued_for_task,
         );
     });
     Ok(SchedulerActorHandle {
@@ -163,6 +193,12 @@ pub fn spawn_scheduler_actor(
         saturate_triggered,
         queue_depth_peak,
         queue_rejected,
+        b_active,
+        b_queued,
+        admission_queue_full_count,
+        memory_budget_exceeded_count,
+        kv_cache_active_bytes,
+        kv_cache_soft_limit_bytes,
     })
 }
 
@@ -180,6 +216,8 @@ fn driver_loop(
     saturate_triggered: Arc<AtomicU64>,
     queue_depth_peak: Arc<AtomicUsize>,
     queue_rejected: Arc<AtomicU64>,
+    b_active: Arc<AtomicU64>,
+    b_queued: Arc<AtomicU64>,
 ) {
     // Budget already validated in spawn_scheduler_actor; expect("...") is safe.
     let mut sched = Scheduler::new(b_max, effective_cap_max, meta)
@@ -342,6 +380,10 @@ fn driver_loop(
                     }
                 }
             }
+
+            // B1-p2.5 G3: update /healthz live counters at tail of every rolling step.
+            b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+            b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
 
             // ===== Exit rolling loop when active_count == 0 AND queue empty. =====
             // Spec §9 R1: if `active_count() == 0` but admission_queue is
