@@ -100,11 +100,30 @@ pub struct SchedulerActorHandle {
     /// queue full" Err (queue_max overflow). Doc-hidden.
     #[doc(hidden)]
     pub queue_rejected: Arc<AtomicU64>,
+    // ── B1-p2.5 G3: /healthz monitoring atomics ──────────────────────────
+    /// Live count of in-flight (active) requests in the scheduler slots.
+    /// Updated by driver_loop tail on every rolling iteration.
+    pub b_active: Arc<AtomicU64>,
+    /// Live count of requests parked in the admission queue.
+    /// Updated by driver_loop tail on every rolling iteration.
+    pub b_queued: Arc<AtomicU64>,
+    /// Monotonic count of admits rejected due to admission queue full.
+    /// Aliased from `queue_rejected` — single source of truth in driver_loop.
+    /// P1.1: Scheduler.admission_queue_full_count field removed (no fetch_add
+    /// caller); health collector now reads from this Arc directly. B1-p2.5.
+    pub admission_queue_full_count: Arc<AtomicU64>,
+    /// Monotonic count of admits rejected due to memory budget exceeded.
+    /// Cloned from Scheduler::memory_budget_exceeded_count.
+    pub memory_budget_exceeded_count: Arc<AtomicU64>,
+    /// Shared Arc into BudgetState::active — live bytes charged to KV cache.
+    pub kv_cache_active_bytes: Arc<AtomicUsize>,
+    /// KV cache soft limit in bytes (computed at startup; static for lifetime).
+    pub kv_cache_soft_limit_bytes: usize,
 }
 
 /// Spawn the driver task and return a handle. The driver runs on
-/// `tokio::task::spawn_blocking` because [`Scheduler`] is `!Send` (sampler
-/// holds a `Cell<Array>`) and the model lock is sync.
+/// `tokio::task::spawn_blocking` because [`Scheduler`] is `!Send`
+/// (holds Array fields: KVCache, prng_state) and the model lock is sync.
 ///
 /// # Arguments
 /// - `model` — shared model handle (Mutex-protected sync state).
@@ -117,65 +136,126 @@ pub struct SchedulerActorHandle {
 ///   per request. Computed at boot as
 ///   `min(--max-cache-cap CLI, model.config.max_position_embeddings)`.
 ///   Passed directly to `Scheduler::new`. B1-p2.3f.
+/// - `meta` — model memory-budget metadata for startup validation. B1-p2.5.
 pub fn spawn_scheduler_actor(
     model: Arc<Mutex<Qwen35Model>>,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
-    effective_cap_max: usize, // 3f new
-) -> SchedulerActorHandle {
+    effective_cap_max: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
+    // ── Step 1: Budget validation on the calling thread. ──────────────────
+    // No Scheduler / Array is allocated here — just pure arithmetic + RAM
+    // check. Returns Err early if the budget is too tight.
+    let budget_state =
+        crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?;
+
+    // ── Step 2: Shared atomics created on the calling thread. ─────────────
+    // Cloned for both the handle (returned to caller) and the driver thread.
+    // This is the single source of truth — handle + driver share the same
+    // Arc instances, so /healthz reads the live values the driver updates.
+    //
+    // B1-p2.5 P0 fix v2: the previous fix (c043ce9) created Scheduler::new
+    // on the calling thread then moved it into spawn_blocking. That caused
+    // "MLX runtime error: There is no Stream(gpu, N) in current thread"
+    // because Array::zeros (prng_state) was bound to the calling thread's
+    // Metal Stream. This fix keeps budget validation + Arc creation on the
+    // calling thread while deferring Scheduler::new_with_state (and thus
+    // Array allocation) to the spawn_blocking worker thread.
+    let memory_budget_exceeded_count = Arc::new(AtomicU64::new(0));
+
+    // Healthz observables cloned from BudgetState (Arc<AtomicUsize> inside).
+    let kv_cache_active_bytes = budget_state.shared_active();
+    let kv_cache_soft_limit_bytes = budget_state.soft_limit();
+
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let admit_count = Arc::new(AtomicU64::new(0));
     let batch_count = Arc::new(AtomicU64::new(0));
     let saturate_triggered = Arc::new(AtomicU64::new(0));
     let queue_depth_peak = Arc::new(AtomicUsize::new(0));
     let queue_rejected = Arc::new(AtomicU64::new(0));
+    // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
+    let b_active = Arc::new(AtomicU64::new(0));
+    let b_queued = Arc::new(AtomicU64::new(0));
+
+    // Clone Arcs for the driver thread.
+    let driver_budget_state = budget_state.clone();
+    let driver_mb_exceeded = memory_budget_exceeded_count.clone();
     let admit_count_for_task = admit_count.clone();
     let batch_count_for_task = batch_count.clone();
     let saturate_triggered_for_task = saturate_triggered.clone();
     let queue_depth_peak_for_task = queue_depth_peak.clone();
     let queue_rejected_for_task = queue_rejected.clone();
-    let effective_cap_max_for_task = effective_cap_max;
+    let b_active_for_task = b_active.clone();
+    let b_queued_for_task = b_queued.clone();
+
+    // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
+    //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
+    //    worker thread's Metal Stream. Thread affinity preserved.
     tokio::task::spawn_blocking(move || {
-        driver_loop(
-            model,
+        let scheduler = Scheduler::new_with_state(
             b_max,
+            effective_cap_max,
+            driver_budget_state,
+            driver_mb_exceeded,
+            meta,
+        )
+        .expect("budget already validated above; new_with_state must not fail");
+        driver_loop(
+            scheduler,
+            model,
             admission_deadline,
             admission_queue_max,
-            effective_cap_max_for_task, // 3f
             cmd_rx,
             admit_count_for_task,
             batch_count_for_task,
             saturate_triggered_for_task,
             queue_depth_peak_for_task,
             queue_rejected_for_task,
+            b_active_for_task,
+            b_queued_for_task,
         );
     });
-    SchedulerActorHandle {
+
+    Ok(SchedulerActorHandle {
         cmd_tx,
         admit_count,
         batch_count,
         saturate_triggered,
         queue_depth_peak,
-        queue_rejected,
-    }
+        queue_rejected: queue_rejected.clone(),
+        b_active,
+        b_queued,
+        // P1.1: alias admission_queue_full_count to queue_rejected Arc —
+        // driver_loop is the single fetch_add site; Scheduler field removed.
+        admission_queue_full_count: queue_rejected,
+        memory_budget_exceeded_count,
+        kv_cache_active_bytes,
+        kv_cache_soft_limit_bytes,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn driver_loop(
+    scheduler: Scheduler,
     model: Arc<Mutex<Qwen35Model>>,
-    b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
-    effective_cap_max: usize, // 3f
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
     admit_count: Arc<AtomicU64>,
     batch_count: Arc<AtomicU64>,
     saturate_triggered: Arc<AtomicU64>,
     queue_depth_peak: Arc<AtomicUsize>,
     queue_rejected: Arc<AtomicU64>,
+    b_active: Arc<AtomicU64>,
+    b_queued: Arc<AtomicU64>,
 ) {
-    let mut sched = Scheduler::new(b_max, effective_cap_max); // 3f: replaces hardcoded 32768
+    // Receive Scheduler ownership from spawn_scheduler_actor (single instance).
+    // P0 fix: previously driver_loop called Scheduler::new a second time,
+    // creating fresh Arc atomics disconnected from the handle. B1-p2.5.
+    let mut sched = scheduler;
+    let b_max = sched.b_max();
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();
@@ -334,6 +414,10 @@ fn driver_loop(
                     }
                 }
             }
+
+            // B1-p2.5 G3: update /healthz live counters at tail of every rolling step.
+            b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+            b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
 
             // ===== Exit rolling loop when active_count == 0 AND queue empty. =====
             // Spec §9 R1: if `active_count() == 0` but admission_queue is
@@ -863,6 +947,7 @@ mod tests {
         let model = Arc::new(Mutex::new(
             crate::models::Qwen35Model::from_loader(&loader).unwrap(),
         ));
+        let meta = model.lock().await.model_meta();
 
         let handle = spawn_scheduler_actor(
             model.clone(),
@@ -870,7 +955,9 @@ mod tests {
             /* admission_deadline */ Duration::from_millis(5),
             /* admission_queue_max */ 2,
             /* effective_cap_max */ 32768,
-        );
+            meta,
+        )
+        .expect("spawn");
 
         let mk_req = |text: &str| -> GenerateRequest {
             let msgs = vec![crate::core::Message {
@@ -967,6 +1054,7 @@ mod tests {
         let model = Arc::new(Mutex::new(
             crate::models::Qwen35Model::from_loader(&loader).unwrap(),
         ));
+        let meta = model.lock().await.model_meta();
 
         let handle = spawn_scheduler_actor(
             model.clone(),
@@ -974,7 +1062,9 @@ mod tests {
             /* admission_deadline */ Duration::from_millis(5),
             /* admission_queue_max */ 1,
             /* effective_cap_max */ 32768,
-        );
+            meta,
+        )
+        .expect("spawn");
 
         let mk_req = |text: &str, max_new: usize| -> GenerateRequest {
             let msgs = vec![crate::core::Message {

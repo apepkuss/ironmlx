@@ -48,6 +48,7 @@ fn load_fixture() -> (Arc<Mutex<Qwen35Model>>, Arc<Tokenizer>) {
 #[ignore] // real-model heavy: needs QWEN35_MODEL
 async fn admit_long_prompt_pp10k() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     // Build a long prompt: repeat phrase ~900 times to reach ≥ 8200 tokens.
     let phrase = "Hello world, this is a long test prompt. ";
@@ -70,7 +71,9 @@ async fn admit_long_prompt_pp10k() {
         /* admission_deadline */ Duration::from_millis(5),
         /* admission_queue_max */ 32,
         /* effective_cap_max */ 32768,
-    );
+        meta,
+    )
+    .expect("spawn");
 
     let max_new = 20_usize;
     let req = GenerateRequest {

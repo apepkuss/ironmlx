@@ -59,6 +59,14 @@ fn admit_err_to_response(err: anyhow::Error) -> Response {
             // effective_cap_max. Body includes needed + max via Display.
             (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response()
         }
+        Some(SchedulerError::MemoryBudgetExceeded { .. }) => {
+            // 503 Service Unavailable — runtime KV budget soft-limit hit.
+            // Retry-After: 5s (fixed conservative backoff). B1-p2.5 §4.1.4.
+            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+            resp
+        }
         None => {
             // Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request.
             (StatusCode::BAD_REQUEST, msg).into_response()
@@ -914,6 +922,24 @@ mod tests {
             body_str.contains("32768"),
             "body should mention max=32768, got: {body_str}"
         );
+    }
+
+    #[test]
+    fn admit_err_503_for_memory_budget_exceeded() {
+        // B1-p2.5 §4.1.4: MemoryBudgetExceeded → 503 + Retry-After: 5.
+        let err: anyhow::Error = crate::core::SchedulerError::MemoryBudgetExceeded {
+            active_bytes: 500_000_000,
+            requested_bytes: 200_000_000,
+            soft_limit_bytes: 600_000_000,
+        }
+        .into();
+        let resp = admit_err_to_response(err);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry = resp
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .expect("Retry-After header should be set");
+        assert_eq!(retry, "5");
     }
 
     #[tokio::test]

@@ -42,6 +42,19 @@ pub enum SchedulerError {
     /// Payload Too Large. B1-p2.3f.
     #[error("request too large: needs cap={needed} but server max_cache_cap={max}")]
     RequestTooLarge { needed: usize, max: usize },
+
+    /// Admission gate: request's KV cache bytes plus active bytes would
+    /// exceed the soft limit (85% of total budget). Maps to HTTP 503
+    /// + Retry-After (T2). B1-p2.5.
+    #[error(
+        "memory budget exceeded: active {active_bytes} + requested {requested_bytes} > \
+         soft limit {soft_limit_bytes}"
+    )]
+    MemoryBudgetExceeded {
+        active_bytes: usize,
+        requested_bytes: usize,
+        soft_limit_bytes: usize,
+    },
 }
 
 use crate::core::generate::{
@@ -221,8 +234,9 @@ pub struct RequestState {
     /// `GenerateRequest::stop_token_ids`.
     pub stop_token_ids: Vec<u32>,
     /// Per-row sampler — cloned from the request's sampler at admit time so
-    /// each row owns independent sampler state (the `Cell` inside `Sampler`
-    /// requires per-row independence — see `core/sampler.rs:43`).
+    /// each row owns independent sampler state. Sampler is `Copy` post-3e.2;
+    /// PRNG state lives in `Scheduler.prng_state` (centralized) — see
+    /// `docs/superpowers/specs/2026-05-17-b1-p2-3e-2-prng-key-batching-design.md`.
     pub sampler: Sampler,
     /// Effective KV-cache length for this row: starts at `prompt_ids.len()`
     /// and is incremented by 1 per decode step (3b). Used by 3c to build
@@ -252,6 +266,9 @@ pub struct RequestState {
     /// and floored at 1. Used by `admit_mid_begin` to initialise
     /// `AdmitMidHandle::chunk_size`.
     pub prefill_chunk_size: i32,
+    /// KV cache bytes charged to budget at admit time. Released on
+    /// row completion / eviction. B1-p2.5.
+    pub kv_bytes_admitted: usize,
 }
 
 /// Read pre-write per-row offsets from the first Full-attention layer's
@@ -297,6 +314,15 @@ pub struct Scheduler {
     /// Row `i` holds the PRNG key for slot `i`. Initialized to zeros;
     /// `init_row_prng` seeds a row on every new admission. (B1-p2.3e.2)
     pub(crate) prng_state: Array,
+    /// Runtime memory budget tracker. Charged at admit; released on slot
+    /// clear. Also holds the soft_limit for admission gating. (B1-p2.5)
+    pub(crate) budget_state: crate::core::memory_budget::BudgetState,
+    /// Snapshot of the model's memory-budget metadata, used to compute
+    /// per-request KV byte cost in admit. (B1-p2.5)
+    pub(crate) meta: crate::core::memory_budget::ModelMeta,
+    /// Count of admits rejected by the memory budget gate. Used by T3
+    /// /healthz. (B1-p2.5)
+    pub(crate) memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl std::fmt::Debug for Scheduler {
@@ -317,16 +343,60 @@ impl Scheduler {
     /// `effective_cap_max` is the hard upper bound on per-request
     /// `prompt_len + max_new_tokens` — admit gates reject requests beyond
     /// this with [`SchedulerError::RequestTooLarge`] (HTTP 413 downstream).
-    pub fn new(b_max: usize, effective_cap_max: usize) -> Self {
+    ///
+    /// Validates startup memory budget via `validate_startup_budget`; returns
+    /// `Err(MemoryBudgetError)` if `b_max × effective_cap_max × per_token_bytes`
+    /// exceeds available system RAM. (B1-p2.5)
+    ///
+    /// **Thread affinity**: `Array::zeros` for `prng_state` is allocated on
+    /// the current thread's Metal Stream. Call this on the thread that will
+    /// own the Scheduler. For actor spawning, prefer [`Scheduler::new_with_state`]
+    /// so budget validation can happen on the calling thread while Array
+    /// allocation happens on the worker thread.
+    pub fn new(
+        b_max: usize,
+        effective_cap_max: usize,
+        meta: crate::core::memory_budget::ModelMeta,
+    ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
+        let budget_state =
+            crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?;
+        let memory_budget_exceeded_count =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        Self::new_with_state(
+            b_max,
+            effective_cap_max,
+            budget_state,
+            memory_budget_exceeded_count,
+            meta,
+        )
+    }
+
+    /// Variant that accepts pre-created [`BudgetState`] and
+    /// `memory_budget_exceeded_count` Arc. Used by [`spawn_scheduler_actor`]
+    /// for thread-affinity-correct construction: budget validation happens on
+    /// the calling thread; Array allocation (prng_state) happens inside
+    /// `spawn_blocking` on the worker thread that will own the Scheduler.
+    ///
+    /// Callers are responsible for ensuring `budget_state` was produced by
+    /// [`validate_startup_budget`] with consistent `b_max` / `effective_cap_max`.
+    pub fn new_with_state(
+        b_max: usize,
+        effective_cap_max: usize,
+        budget_state: crate::core::memory_budget::BudgetState,
+        memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        meta: crate::core::memory_budget::ModelMeta,
+    ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
         let mut slots = Vec::with_capacity(b_max);
         for _ in 0..b_max {
             slots.push(None);
         }
         // Initialize prng_state to zeros [b_max, 2] u32. Each slot's row is
         // seeded via init_row_prng on admission.
+        // IMPORTANT: Array::zeros binds to the current thread's Metal Stream.
+        // This method must be called on the thread that will drive the Scheduler.
         let prng_state =
             Array::zeros(&[b_max as i32, 2_i32][..], Dtype::Uint32).expect("prng_state zeros");
-        Self {
+        Ok(Self {
             b_max,
             slots,
             next_id: 0,
@@ -335,7 +405,10 @@ impl Scheduler {
             poisoned: false,
             effective_cap_max,
             prng_state,
-        }
+            budget_state,
+            meta,
+            memory_budget_exceeded_count,
+        })
     }
 
     /// Seed the PRNG state for `row_idx` from `seed`.
@@ -413,6 +486,19 @@ impl Scheduler {
                 anyhow!("scheduler full: no row available (b_max={})", self.b_max)
             })?;
 
+        // B1-p2.5: memory budget admission gate.
+        let row_cap = req.prompt_ids.len().saturating_add(req.max_new_tokens);
+        let requested_bytes = crate::core::memory_budget::kv_cache_bytes(1, row_cap, &self.meta);
+        if let Err((active, requested, soft_limit)) = self.budget_state.try_admit(requested_bytes) {
+            self.memory_budget_exceeded_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(anyhow::Error::new(SchedulerError::MemoryBudgetExceeded {
+                active_bytes: active,
+                requested_bytes: requested,
+                soft_limit_bytes: soft_limit,
+            }));
+        }
+
         let id = RequestId(self.next_id);
         self.next_id += 1;
 
@@ -439,6 +525,7 @@ impl Scheduler {
             image_spatial_merge_size: req.image_spatial_merge_size,
             image_token_id: req.image_token_id,
             prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(512).max(1),
+            kv_bytes_admitted: requested_bytes,
         };
         let seed = state.sampler.seed;
         self.slots[row_idx] = Some(state);
@@ -464,7 +551,10 @@ impl Scheduler {
             .iter()
             .position(|s| matches!(s, Some(r) if r.id == id))
             .ok_or_else(|| anyhow!("request id {} not found", id.0))?;
-        self.slots[row_idx] = None;
+        // B1-p2.5: release budget before clearing the slot.
+        if let Some(state) = self.slots[row_idx].take() {
+            self.budget_state.release(state.kv_bytes_admitted);
+        }
         // Phase transitions on evict:
         //   Admitting + active_count==0 -> Idle (pre-3c-3 behavior)
         //   Decoding  + active_count==0 -> Finished (NEW in 3c-3)
@@ -547,7 +637,10 @@ impl Scheduler {
             }
         }
         for slot in self.slots.iter_mut() {
-            *slot = None;
+            // B1-p2.5: release budget before clearing slot.
+            if let Some(state) = slot.take() {
+                self.budget_state.release(state.kv_bytes_admitted);
+            }
         }
         // B1-p2.3f: drop the cache so the next prefill_admitted lazy-allocates
         // with cap matching the new batch's requirements. ~10ms re-alloc per
@@ -1495,7 +1588,7 @@ impl Scheduler {
         let row_logits = slice_logits_row(&logits, 0)?;
         let token = {
             let history: Vec<u32> = prompt_ids.clone();
-            // Clone the sampler so we release the borrow on self.slots before
+            // Copy the sampler (Sampler: Copy post-3e.2) so we release the borrow on self.slots before
             // calling write_row_prng (which needs &mut self).
             let sampler = self.slots[row_idx]
                 .as_ref()
@@ -1563,12 +1656,12 @@ impl Scheduler {
     ) -> Vec<RequestId> {
         let mut evicted: Vec<RequestId> = Vec::new();
         for slot in self.slots.iter_mut() {
-            if let Some(state) = slot.as_ref() {
-                if state.finished {
-                    let id = state.id;
-                    event_txs.remove(&id);
-                    evicted.push(id);
-                    *slot = None;
+            if slot.as_ref().is_some_and(|s| s.finished) {
+                // B1-p2.5: release budget on slot clear.
+                if let Some(state) = slot.take() {
+                    event_txs.remove(&state.id);
+                    evicted.push(state.id);
+                    self.budget_state.release(state.kv_bytes_admitted);
                 }
             }
         }
@@ -1632,7 +1725,8 @@ mod tests {
 
     #[test]
     fn scheduler_new_empty() {
-        let s = Scheduler::new(4, 32768);
+        let s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         assert_eq!(s.b_max(), 4);
         assert_eq!(s.active_count(), 0);
         assert!(s.active().is_empty());
@@ -1641,7 +1735,8 @@ mod tests {
 
     #[test]
     fn admit_happy_path() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
         assert_eq!(id, RequestId(0));
         assert_eq!(s.active_count(), 1);
@@ -1656,7 +1751,8 @@ mod tests {
 
     #[test]
     fn admit_assigns_distinct_rows() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let ids: Vec<_> = (0..4)
             .map(|i| s.admit(mk_req(vec![i as u32])).expect("admit"))
             .collect();
@@ -1667,7 +1763,8 @@ mod tests {
 
     #[test]
     fn evict_releases_row() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.active_count(), 1);
         s.evict(id).expect("evict");
@@ -1677,7 +1774,8 @@ mod tests {
 
     #[test]
     fn admit_after_evict_reuses_row() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         assert_eq!(s.get(id_a).unwrap().row_idx, 0);
         s.evict(id_a).expect("evict a");
@@ -1688,7 +1786,8 @@ mod tests {
 
     #[test]
     fn admit_full_returns_err() {
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         s.admit(mk_req(vec![1])).expect("admit 0");
         s.admit(mk_req(vec![2])).expect("admit 1");
         let err = s.admit(mk_req(vec![3])).expect_err("admit full");
@@ -1699,14 +1798,16 @@ mod tests {
 
     #[test]
     fn evict_unknown_id_returns_err() {
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let err = s.evict(RequestId(42)).expect_err("evict unknown");
         assert!(format!("{err}").contains("not found"));
     }
 
     #[test]
     fn id_monotonic_after_evict() {
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         s.evict(id_a).expect("evict a");
         let id_b = s.admit(mk_req(vec![2])).expect("admit b");
@@ -1720,7 +1821,8 @@ mod tests {
 
     #[test]
     fn sampler_cloned_per_request() {
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let id_b = s.admit(mk_req(vec![2])).expect("admit b");
 
@@ -1732,7 +1834,8 @@ mod tests {
 
     #[test]
     fn occupied_rows_reflects_state() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let _id_0 = s.admit(mk_req(vec![1])).expect("admit 0");
         let id_1 = s.admit(mk_req(vec![2])).expect("admit 1");
         let _id_2 = s.admit(mk_req(vec![3])).expect("admit 2");
@@ -1743,7 +1846,8 @@ mod tests {
 
     #[test]
     fn phase_starts_idle() {
-        let s = Scheduler::new(4, 32768);
+        let s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         assert_eq!(s.phase(), Phase::Idle);
         // Verify cache starts unallocated (visible through manual Debug impl
         // which surfaces `cache_layers: None`).
@@ -1755,14 +1859,16 @@ mod tests {
 
     #[test]
     fn admit_transitions_idle_to_admitting() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.phase(), Phase::Admitting);
     }
 
     #[test]
     fn admit_stays_in_admitting() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit 1");
         let _ = s.admit(mk_req(vec![2])).expect("admit 2");
         assert_eq!(s.phase(), Phase::Admitting);
@@ -1770,7 +1876,8 @@ mod tests {
 
     #[test]
     fn evict_last_admitted_returns_to_idle() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.phase(), Phase::Admitting);
         s.evict(id).expect("evict");
@@ -1780,7 +1887,8 @@ mod tests {
     #[test]
     fn admit_in_decoding_ok_phase_stays_decoding() {
         // 3c-3: admit during Decoding is now legal (mid-batch admit).
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         s.force_phase(Phase::Decoding);
         let id = s
             .admit(mk_req(vec![1]))
@@ -1791,7 +1899,8 @@ mod tests {
 
     #[test]
     fn admit_in_finished_returns_err() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         s.force_phase(Phase::Finished);
         let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
         let msg = format!("{err}");
@@ -1805,7 +1914,8 @@ mod tests {
     fn evict_in_decoding_ok_transitions_to_finished_when_last() {
         // 3c-3: evict during Decoding is now legal.
         // Evicting the last row transitions Decoding -> Finished.
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Decoding);
         s.evict(id).expect("evict during Decoding must succeed");
@@ -1815,7 +1925,8 @@ mod tests {
 
     #[test]
     fn evict_all_from_finished_resets_to_idle() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Finished);
         s.evict_all().expect("evict_all");
@@ -1825,14 +1936,16 @@ mod tests {
 
     #[test]
     fn evict_all_in_idle_returns_err() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let err = s.evict_all().expect_err("evict_all from Idle must fail");
         assert!(format!("{err}").contains("Idle"), "unexpected err: {err}");
     }
 
     #[test]
     fn evict_all_in_admitting_returns_err() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         // phase is now Admitting; evict_all must reject
         let err = s
@@ -1846,7 +1959,8 @@ mod tests {
 
     #[test]
     fn force_poison_then_admit_returns_err() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         s.poisoned = true;
         let err = s
             .admit(mk_req(vec![1]))
@@ -1859,7 +1973,8 @@ mod tests {
 
     #[test]
     fn force_poison_then_evict_returns_err() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.poisoned = true;
         let err = s.evict(id).expect_err("evict after poison must fail");
@@ -1871,7 +1986,8 @@ mod tests {
 
     #[test]
     fn evict_all_clears_poison() {
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Finished); // evict_all requires Decoding/Finished
         s.poisoned = true;
@@ -1885,7 +2001,8 @@ mod tests {
     fn scheduler_admit_during_decoding_ok() {
         // Force phase to Decoding (test seam); admit should succeed and
         // Phase should stay Decoding (mid-batch admit semantics).
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -1901,7 +2018,8 @@ mod tests {
 
     #[test]
     fn scheduler_evict_during_decoding_transitions_to_finished_when_last() {
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -1916,7 +2034,8 @@ mod tests {
     fn scheduler_evict_during_decoding_not_last_stays_decoding() {
         // Evict one row mid-Decoding when other rows are still active:
         // Phase must stay Decoding (only last-evict transitions to Finished).
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let _id_b = s.admit(mk_req(vec![2])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -1935,7 +2054,8 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -1968,7 +2088,8 @@ mod tests {
 
         // 2 rows admitted; only row A finishes. gc should evict A only,
         // leave B alive, and Phase must stay Decoding (active_count==1).
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -2006,7 +2127,8 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::new(2, 32768);
+        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -2034,7 +2156,8 @@ mod tests {
         use crate::core::sampler::Sampler;
         use mlx::Dtype;
 
-        let mut sched = Scheduler::new(2, 32768);
+        let mut sched = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
 
         // Synthesize a dummy pixel_values array (shape doesn't matter for plumbing)
         let pv: Array = (&[0.0_f32; 4][..], &[1_i32, 4][..]).try_into().unwrap();
@@ -2071,7 +2194,8 @@ mod tests {
     fn evict_all_drops_cache() {
         // B1-p2.3f: evict_all drops cache (replaces pre-3f offset reset) so
         // the next prefill_admitted lazy-allocates with the new batch's cap.
-        let mut s = Scheduler::new(4, 32768);
+        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
 
         let req = GenerateRequest {
             prompt_ids: vec![1, 2, 3],
@@ -2107,7 +2231,8 @@ mod tests {
         // SchedulerError::RequestTooLarge.
         use crate::core::SchedulerError;
 
-        let mut s = Scheduler::new(1, 1024);
+        let mut s = Scheduler::new(1, 1024, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
 
         let oversize_req = GenerateRequest {
             prompt_ids: vec![0; 1500],
@@ -2155,7 +2280,8 @@ mod tests {
         // The GPU-perf floor is applied by Scheduler before handing the cap
         // to `make_cache` (so callers `prefill_admitted_inner` and
         // `admit_mid_inner` consistently pass a kernel-friendly cap).
-        let mut s = Scheduler::new(4, 2048);
+        let mut s = Scheduler::new(4, 2048, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
 
         let req = |prompt_len: usize, max_new: usize| GenerateRequest {
             prompt_ids: vec![0; prompt_len],
@@ -2183,7 +2309,8 @@ mod tests {
         );
 
         // Case B: cap_max < floor; floor wins.
-        let mut s3 = Scheduler::new(4, 200);
+        let mut s3 = Scheduler::new(4, 200, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         s3.admit(req(50, 50)).expect("admit (cap_needed=100 < 200)");
         s3.admit(req(150, 30))
             .expect("admit (cap_needed=180 < 200)");
@@ -2195,7 +2322,8 @@ mod tests {
         );
 
         // Case C: small slots_max, no cap_max binding. Floor binds.
-        let mut s_floor = Scheduler::new(4, 2048);
+        let mut s_floor = Scheduler::new(4, 2048, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         s_floor.admit(req(50, 50)).expect("admit cap_needed=100");
         let cap_floor = s_floor.computed_cap_for_prefill();
         assert_eq!(
@@ -2205,7 +2333,8 @@ mod tests {
 
         // Case D: empty-slot fallback. slots_max defaults to 256
         // (defensive — not reachable in production).
-        let s4 = Scheduler::new(4, 1000);
+        let s4 = Scheduler::new(4, 1000, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
         assert_eq!(
             s4.computed_cap_for_prefill(),
             256,

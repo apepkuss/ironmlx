@@ -71,7 +71,9 @@ async fn queue_drains_fifo_at_bmax2_c4() {
     // b_max=2, queue_max=8; submit 4 requests back-to-back. All 4 must
     // complete; queue_depth_peak >= 2 (2 had to queue).
     let (model, tokenizer) = load_fixture();
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 8, 32768);
+    let meta = model.lock().await.model_meta();
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 8, 32768, meta)
+        .expect("spawn");
 
     let texts = ["Hello", "World", "Goodbye", "Farewell"];
     let mut replies = Vec::new();
@@ -122,7 +124,9 @@ async fn queue_overflow_returns_err_via_actor() {
     // the saturation burst sees active_count == b_max. On Metal GPU, decode
     // is ~150 ms/step regardless of Rust opt-level; 1024 tokens ≈ 150s.
     let (model, tokenizer) = load_fixture();
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 3, 32768);
+    let meta = model.lock().await.model_meta();
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 3, 32768, meta)
+        .expect("spawn");
 
     let (tx1, _rx1) = tokio::sync::oneshot::channel();
     handle
@@ -219,7 +223,10 @@ async fn admission_deadline_config_observed() {
     // apart should land in the same batch (drain_window covers both).
     // batch_count should be 1 (not 2).
     let (model, tokenizer) = load_fixture();
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(30), 32, 32768);
+    let meta = model.lock().await.model_meta();
+    let handle =
+        spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(30), 32, 32768, meta)
+            .expect("spawn");
 
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
 
@@ -271,10 +278,26 @@ async fn admission_deadline_config_observed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore] // real-model heavy
 async fn b_max_config_8_no_queue() {
+    // B1-p2.5 budget gate: this test intentionally uses b_max=8 × cap=32768
+    // (32 GiB nominal KV cache) that would exceed a real 32 GiB Mac's budget.
+    // Override IRONMLX_TOTAL_RAM_BYTES to simulate a 64 GiB machine so the
+    // budget validation passes. EnvGuard Drop cleans up even on panic.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        }
+    }
+    std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "68719476736"); // 64 GiB
+    let _guard = EnvGuard;
+
     // b_max=8 + admission_deadline_ms=50: 6 concurrent admits all fit in
     // one batch (queue stays empty).
     let (model, tokenizer) = load_fixture();
-    let handle = spawn_scheduler_actor(model.clone(), 8, Duration::from_millis(50), 32, 32768);
+    let meta = model.lock().await.model_meta();
+    let handle =
+        spawn_scheduler_actor(model.clone(), 8, Duration::from_millis(50), 32, 32768, meta)
+            .expect("spawn");
 
     let texts = ["a", "b", "c", "d", "e", "f"];
     let mut rxs = Vec::new();
@@ -313,6 +336,18 @@ async fn b_max_config_8_no_queue() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore] // real-model heavy + HTTP server
 async fn iron_bench_c8_with_queue_no_4xx() {
+    // B1-p2.5 budget gate: server::serve is called with cap=32768 which
+    // triggers budget validation. Override to 64 GiB so it passes.
+    // EnvGuard Drop cleans up even on panic.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        }
+    }
+    std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "68719476736"); // 64 GiB
+    let _guard = EnvGuard;
+
     // Boot the server on a random port; spawn 8 concurrent HTTP clients
     // hitting /v1/chat/completions for 15s. With b_max=4 + queue_max=32,
     // no HTTP 4xx should occur.

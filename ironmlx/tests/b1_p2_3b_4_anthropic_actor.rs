@@ -129,6 +129,7 @@ fn make_request(
 #[ignore]
 async fn anthropic_actor_b1_text_only_swap() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let prompt = "What is the capital of France?";
     let prompt_ids = tokenize_prompt(&tokenizer, prompt);
@@ -148,7 +149,8 @@ async fn anthropic_actor_b1_text_only_swap() {
     assert!(!baseline.is_empty(), "baseline produced no tokens");
 
     // 2. Route through SchedulerActor.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);
@@ -178,6 +180,7 @@ async fn anthropic_actor_b1_text_only_swap() {
 #[ignore]
 async fn anthropic_actor_long_prompt_routes_to_gs() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     // Build a synthetic long prompt > chunk_size = 64.
     let chunk_size: usize = 64;
@@ -216,7 +219,8 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
     );
 
     // Verify admit_count doesn't change when GS path is taken.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     // Drop the request — the GS path bypasses the actor; the test only
@@ -235,6 +239,7 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
 #[ignore]
 async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let prompt = "Hello.";
     let prompt_ids = tokenize_prompt(&tokenizer, prompt);
@@ -243,7 +248,21 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
     let max_new_tokens: usize = 4;
 
     // Construct AppState matching what serve() builds.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
+    let health_collector = Arc::new(ironmlx::core::server::health::SchedulerHealthCollector {
+        start_time: std::time::Instant::now(),
+        b_max: 4,
+        queue_max: 32,
+        model_name: "test-model".to_string(),
+        max_position_embeddings: 32768_i32,
+        b_active: handle.b_active.clone(),
+        b_queued: handle.b_queued.clone(),
+        admission_queue_full_count: handle.admission_queue_full_count.clone(),
+        memory_budget_exceeded_count: handle.memory_budget_exceeded_count.clone(),
+        kv_cache_active_bytes: handle.kv_cache_active_bytes.clone(),
+        kv_cache_soft_limit_bytes: handle.kv_cache_soft_limit_bytes,
+    });
     let state = AppState {
         model: model.clone(),
         tokenizer: tokenizer.clone(),
@@ -254,6 +273,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         admission_deadline_ms: 5,
         admission_queue_max: 32,
         effective_cap_max: 32768, // 3f
+        health_collector,
     };
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);

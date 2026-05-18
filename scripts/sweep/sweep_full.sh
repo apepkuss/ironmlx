@@ -31,6 +31,9 @@ SUITES=(
   "b1_p2_3d_admission_queue"
   "b1_p2_4_batched_vl"
   "b1_p2_3f_cache_cap"
+  "b1_p2_3e_1a_vectorize_greedy"
+  "b1_p2_3e_1b_configured_sampler"
+  "b1_p2_5_production_hardening"
   "p6_qwen35_vl_logits_match"
   "p4_http_smoke"
 )
@@ -69,6 +72,10 @@ for s in "${SUITES[@]}"; do
     echo "$OUT" | tail -30 | sed 's/^/    /' | tee -a "$REPORT"
     FAIL_LIST+=("$s")
   fi
+
+  # B1-p2.5 G4: inter-suite hygiene check.
+  HYGIENE_OUT=$(MLX_DIR=$MLX_DIR cargo +stable test --release --test integration_clean_state -- --ignored 2>&1 | grep -E "clean state OK|clean state DEGRADED" | head -1 || echo "(hygiene check skipped)")
+  log "  hygiene: $HYGIENE_OUT"
 done
 
 TOTAL_T1=$(date +%s)

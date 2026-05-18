@@ -132,6 +132,7 @@ fn make_request(
 #[ignore]
 async fn admission_window_two_concurrent_admits_batch_together() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let prompt_a = "What is the capital of France?";
     let prompt_b = "Name three primary colors used in painting.";
@@ -165,7 +166,8 @@ async fn admission_window_two_concurrent_admits_batch_together() {
     );
 
     // 2. Spawn the actor.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
 
@@ -231,6 +233,7 @@ async fn admission_window_two_concurrent_admits_batch_together() {
 #[ignore]
 async fn admission_window_b_max_saturate_triggers_immediate_prefill() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let prompts = [
         "What is two plus two?",
@@ -252,7 +255,9 @@ async fn admission_window_b_max_saturate_triggers_immediate_prefill() {
         Duration::from_millis(5),
         32,
         32768,
-    );
+        meta,
+    )
+    .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
     let saturate_before = handle.saturate_triggered.load(Ordering::Relaxed);
@@ -295,13 +300,15 @@ async fn admission_window_b_max_saturate_triggers_immediate_prefill() {
 #[ignore]
 async fn admission_window_deadline_fires_with_single_admit() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let prompt = "What is the capital of France?";
     let prompt_ids = tokenize_prompt(&tokenizer, prompt);
     let stop_token_ids: Vec<u32> = tokenizer.eos_token_ids().to_vec();
     let max_new_tokens: usize = 6;
 
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
     let saturate_before = handle.saturate_triggered.load(Ordering::Relaxed);
@@ -329,6 +336,7 @@ async fn admission_window_deadline_fires_with_single_admit() {
 #[ignore]
 async fn admission_window_concurrent_scheduler_and_gs_no_deadlock() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
     let tokenizer_arc = tokenizer.clone();
 
     let prompt = "Name a color.";
@@ -336,7 +344,8 @@ async fn admission_window_concurrent_scheduler_and_gs_no_deadlock() {
     let stop_token_ids: Vec<u32> = tokenizer.eos_token_ids().to_vec();
     let max_new_tokens: usize = 4;
 
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
 
     // Task A: scheduler path.
