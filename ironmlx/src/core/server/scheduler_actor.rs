@@ -120,8 +120,8 @@ pub struct SchedulerActorHandle {
 }
 
 /// Spawn the driver task and return a handle. The driver runs on
-/// `tokio::task::spawn_blocking` because [`Scheduler`] is `!Send` (sampler
-/// holds a `Cell<Array>`) and the model lock is sync.
+/// `tokio::task::spawn_blocking` because [`Scheduler`] is `!Send`
+/// (holds Array fields: KVCache, prng_state) and the model lock is sync.
 ///
 /// # Arguments
 /// - `model` — shared model handle (Mutex-protected sync state).

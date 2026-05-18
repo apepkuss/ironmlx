@@ -234,8 +234,9 @@ pub struct RequestState {
     /// `GenerateRequest::stop_token_ids`.
     pub stop_token_ids: Vec<u32>,
     /// Per-row sampler — cloned from the request's sampler at admit time so
-    /// each row owns independent sampler state (the `Cell` inside `Sampler`
-    /// requires per-row independence — see `core/sampler.rs:43`).
+    /// each row owns independent sampler state. Sampler is `Copy` post-3e.2;
+    /// PRNG state lives in `Scheduler.prng_state` (centralized) — see
+    /// `docs/superpowers/specs/2026-05-17-b1-p2-3e-2-prng-key-batching-design.md`.
     pub sampler: Sampler,
     /// Effective KV-cache length for this row: starts at `prompt_ids.len()`
     /// and is incremented by 1 per decode step (3b). Used by 3c to build
@@ -1557,7 +1558,7 @@ impl Scheduler {
         let row_logits = slice_logits_row(&logits, 0)?;
         let token = {
             let history: Vec<u32> = prompt_ids.clone();
-            // Clone the sampler so we release the borrow on self.slots before
+            // Copy the sampler (Sampler: Copy post-3e.2) so we release the borrow on self.slots before
             // calling write_row_prng (which needs &mut self).
             let sampler = self.slots[row_idx]
                 .as_ref()
