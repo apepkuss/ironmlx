@@ -59,6 +59,14 @@ fn admit_err_to_response(err: anyhow::Error) -> Response {
             // effective_cap_max. Body includes needed + max via Display.
             (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response()
         }
+        Some(SchedulerError::MemoryBudgetExceeded { .. }) => {
+            // 503 Service Unavailable — runtime KV budget soft-limit hit.
+            // T2 will add fine-grained Retry-After; stub 5s here. B1-p2.5.
+            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+            resp
+        }
         None => {
             // Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request.
             (StatusCode::BAD_REQUEST, msg).into_response()

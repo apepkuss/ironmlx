@@ -149,6 +149,34 @@ impl Qwen35Model {
         self.text.config()
     }
 
+    /// Extract memory-budget-relevant model attributes for Scheduler::new
+    /// (B1-p2.5 G1).
+    pub fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        let cfg = self.config();
+        crate::core::memory_budget::ModelMeta {
+            num_hidden_layers: cfg.num_hidden_layers,
+            num_attention_heads: cfg.num_attention_heads,
+            num_key_value_heads: cfg.num_key_value_heads,
+            hidden_size: cfg.hidden_size,
+            head_dim: cfg.head_dim,
+            weight_bytes: self.approx_weight_bytes(),
+        }
+    }
+
+    /// Conservative weight-bytes estimate for memory budgeting (B1-p2.5).
+    /// Returns approx total quantized weight bytes for 4-bit Qwen3.5-like
+    /// model: FF (~12 hidden² per layer × 4-bit) + attention (~4 hidden²)
+    /// + embedding (vocab × hidden / 8 for 4-bit).
+    fn approx_weight_bytes(&self) -> usize {
+        let cfg = self.config();
+        let h = cfg.hidden_size as usize;
+        let l = cfg.num_hidden_layers as usize;
+        // 16 hidden² total (FF + attn) per layer, divide by 2 for 4-bit storage.
+        let ff_attn = l * h * h * 16 / 2;
+        let embed = (cfg.vocab_size as usize) * h / 2;
+        ff_attn + embed
+    }
+
     pub fn text(&self) -> &Qwen35TextModel {
         &self.text
     }

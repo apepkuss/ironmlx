@@ -150,6 +150,7 @@ fn run_b1_baseline(
 #[ignore = "real-model heavy: needs QWEN35_MODEL env"]
 async fn batched_vl_b2_full_vl_bit_id() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let (prompt_a, pv_a, grids_a) = build_vl_request_inputs(
         &tokenizer,
@@ -206,7 +207,8 @@ async fn batched_vl_b2_full_vl_bit_id() {
     eprintln!("[S1] baseline_a={baseline_a:?}  baseline_b={baseline_b:?}");
 
     // Scheduler B=2
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let req_a = GenerateRequest {
@@ -307,6 +309,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
 #[ignore = "real-model heavy: needs QWEN35_MODEL env"]
 async fn batched_vl_b2_mixed_text_and_vl() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let prompt_text = build_text_request_inputs(&tokenizer, "hello");
     let (prompt_vl, pv, grids) = build_vl_request_inputs(
@@ -341,7 +344,8 @@ async fn batched_vl_b2_mixed_text_and_vl() {
 
     eprintln!("[S2] baseline_text={baseline_text:?}  baseline_vl={baseline_vl:?}");
 
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let req_text = GenerateRequest {
@@ -434,6 +438,7 @@ async fn batched_vl_b2_mixed_text_and_vl() {
 #[ignore = "real-model heavy: needs QWEN35_MODEL env"]
 async fn mid_admit_vl_during_text_decode() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let prompt_text_a = build_text_request_inputs(&tokenizer, "say hi");
     let prompt_text_b = build_text_request_inputs(&tokenizer, "say bye");
@@ -485,7 +490,8 @@ async fn mid_admit_vl_during_text_decode() {
     );
 
     // b_max=4 so mid-admit VL can fit alongside A+B
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let (tx_a, rx_a) = oneshot::channel();
@@ -620,6 +626,7 @@ async fn mid_admit_vl_during_text_decode() {
 #[ignore = "real-model heavy: needs QWEN35_MODEL env"]
 async fn batched_vl_multi_image_per_row() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let fixture = std::path::PathBuf::from(FIXTURE_DIR);
     let img_a = std::fs::read(fixture.join("image_0.jpg")).unwrap();
@@ -686,7 +693,8 @@ async fn batched_vl_multi_image_per_row() {
 
     eprintln!("[S4] baseline_0={baseline_0:?}  baseline_1={baseline_1:?}");
 
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let (tx_0, rx_0) = oneshot::channel();

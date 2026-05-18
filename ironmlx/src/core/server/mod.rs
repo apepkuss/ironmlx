@@ -84,13 +84,21 @@ pub async fn serve(
         );
     }
 
+    // B1-p2.5: extract ModelMeta inside the async lock guard (serve() runs
+    // in a Tokio runtime; blocking_lock would panic here).
+    let meta = {
+        let guard = model.lock().await;
+        guard.model_meta()
+    };
+
     let scheduler_handle = scheduler_actor::spawn_scheduler_actor(
         model.clone(),
         b_max,
         admission_deadline,
         admission_queue_max,
-        effective_cap_max, // 3f
-    );
+        effective_cap_max,
+        meta,
+    )?;
     let state = AppState {
         model,
         tokenizer: Arc::new(tokenizer),

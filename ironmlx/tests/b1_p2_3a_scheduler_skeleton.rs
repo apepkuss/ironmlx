@@ -30,7 +30,8 @@ fn mk_req(seed: u32, n: usize) -> GenerateRequest {
 
 #[test]
 fn b1_p2_3a_admit_evict_sequence() {
-    let mut s = Scheduler::new(4, 32768);
+    let mut s = Scheduler::new(4, 32768, ironmlx::core::memory_budget::test_meta_qwen35())
+        .expect("scheduler startup");
 
     // 1. Admit 4 mock requests; verify monotonic ids 0..3 and row_idx 0..3.
     let mut ids: Vec<RequestId> = Vec::new();

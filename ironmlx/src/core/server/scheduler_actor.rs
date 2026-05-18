@@ -117,13 +117,17 @@ pub struct SchedulerActorHandle {
 ///   per request. Computed at boot as
 ///   `min(--max-cache-cap CLI, model.config.max_position_embeddings)`.
 ///   Passed directly to `Scheduler::new`. B1-p2.3f.
+/// - `meta` — model memory-budget metadata for startup validation. B1-p2.5.
 pub fn spawn_scheduler_actor(
     model: Arc<Mutex<Qwen35Model>>,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
-    effective_cap_max: usize, // 3f new
-) -> SchedulerActorHandle {
+    effective_cap_max: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
+    // Validate budget before spawning (fail fast at startup). B1-p2.5.
+    let _budget_check = Scheduler::new(b_max, effective_cap_max, meta)?;
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let admit_count = Arc::new(AtomicU64::new(0));
     let batch_count = Arc::new(AtomicU64::new(0));
@@ -142,7 +146,8 @@ pub fn spawn_scheduler_actor(
             b_max,
             admission_deadline,
             admission_queue_max,
-            effective_cap_max_for_task, // 3f
+            effective_cap_max_for_task,
+            meta,
             cmd_rx,
             admit_count_for_task,
             batch_count_for_task,
@@ -151,14 +156,14 @@ pub fn spawn_scheduler_actor(
             queue_rejected_for_task,
         );
     });
-    SchedulerActorHandle {
+    Ok(SchedulerActorHandle {
         cmd_tx,
         admit_count,
         batch_count,
         saturate_triggered,
         queue_depth_peak,
         queue_rejected,
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -167,7 +172,8 @@ fn driver_loop(
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
-    effective_cap_max: usize, // 3f
+    effective_cap_max: usize,
+    meta: crate::core::memory_budget::ModelMeta,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
     admit_count: Arc<AtomicU64>,
     batch_count: Arc<AtomicU64>,
@@ -175,7 +181,9 @@ fn driver_loop(
     queue_depth_peak: Arc<AtomicUsize>,
     queue_rejected: Arc<AtomicU64>,
 ) {
-    let mut sched = Scheduler::new(b_max, effective_cap_max); // 3f: replaces hardcoded 32768
+    // Budget already validated in spawn_scheduler_actor; expect("...") is safe.
+    let mut sched = Scheduler::new(b_max, effective_cap_max, meta)
+        .expect("Scheduler::new: budget already validated in spawn_scheduler_actor");
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();
@@ -863,6 +871,7 @@ mod tests {
         let model = Arc::new(Mutex::new(
             crate::models::Qwen35Model::from_loader(&loader).unwrap(),
         ));
+        let meta = model.lock().await.model_meta();
 
         let handle = spawn_scheduler_actor(
             model.clone(),
@@ -870,7 +879,9 @@ mod tests {
             /* admission_deadline */ Duration::from_millis(5),
             /* admission_queue_max */ 2,
             /* effective_cap_max */ 32768,
-        );
+            meta,
+        )
+        .expect("spawn");
 
         let mk_req = |text: &str| -> GenerateRequest {
             let msgs = vec![crate::core::Message {
@@ -967,6 +978,7 @@ mod tests {
         let model = Arc::new(Mutex::new(
             crate::models::Qwen35Model::from_loader(&loader).unwrap(),
         ));
+        let meta = model.lock().await.model_meta();
 
         let handle = spawn_scheduler_actor(
             model.clone(),
@@ -974,7 +986,9 @@ mod tests {
             /* admission_deadline */ Duration::from_millis(5),
             /* admission_queue_max */ 1,
             /* effective_cap_max */ 32768,
-        );
+            meta,
+        )
+        .expect("spawn");
 
         let mk_req = |text: &str, max_new: usize| -> GenerateRequest {
             let msgs = vec![crate::core::Message {

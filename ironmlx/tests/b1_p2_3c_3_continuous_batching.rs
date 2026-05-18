@@ -136,6 +136,7 @@ async fn drain_until_finished(
 #[ignore]
 async fn continuous_batching_mid_decode_admit() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
 
     let prompt_a = tokenize_prompt(&tokenizer, "Hello");
     let prompt_b = tokenize_prompt(&tokenizer, "World");
@@ -182,7 +183,8 @@ async fn continuous_batching_mid_decode_admit() {
     };
 
     // Drive actor.
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
 
     let reply_a = submit_admit(
         &handle.cmd_tx,
@@ -267,6 +269,7 @@ async fn continuous_batching_mid_decode_admit() {
 #[ignore]
 async fn continuous_batching_full_reject() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
     let prompt_a = tokenize_prompt(&tokenizer, "Hello");
     let prompt_b = tokenize_prompt(&tokenizer, "World");
     let prompt_c = tokenize_prompt(&tokenizer, "Goodbye");
@@ -274,7 +277,8 @@ async fn continuous_batching_full_reject() {
 
     // admission_queue_max=0: disable the 3d queue so this test exercises
     // the immediate-reject path (c > b_max → Err "scheduler full").
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 0, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 0, 32768, meta)
+        .expect("spawn");
 
     let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 20, stop.clone()))
         .await
@@ -320,11 +324,13 @@ async fn continuous_batching_full_reject() {
 #[ignore]
 async fn continuous_batching_drains_to_empty() {
     let (model, tokenizer) = load_fixture();
+    let meta = model.lock().await.model_meta();
     let prompt_a = tokenize_prompt(&tokenizer, "Hello");
     let prompt_b = tokenize_prompt(&tokenizer, "World");
     let stop: Vec<u32> = tokenizer.eos_token_ids().to_vec();
 
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
+        .expect("spawn");
 
     // First admit + drain.
     let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 4, stop.clone()))
