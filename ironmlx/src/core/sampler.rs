@@ -11,18 +11,29 @@
 //!    primitive)
 //! 7. greedy: argmax | sample: categorical(num_samples=1)
 
-use std::cell::Cell;
-
 use mlx::{
     ops::{indexing, reduction, sort, unary, All},
-    random, Array,
+    Array,
 };
 
 use crate::Result;
 
-/// Configurable sampler. Build via [`Sampler::greedy`] then chain
-/// `with_*` setters. The PRNG key is split internally on every
-/// [`Sampler::sample`] call so successive calls draw distinct samples.
+// Compile-time verification that Sampler is a pure config POD.
+const _: () = {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+    fn assert_clone<T: Clone>() {}
+    fn assert_copy<T: Copy>() {}
+    let _ = assert_send::<Sampler>;
+    let _ = assert_sync::<Sampler>;
+    let _ = assert_clone::<Sampler>;
+    let _ = assert_copy::<Sampler>;
+};
+
+/// Configurable sampler — pure config POD. Build via [`Sampler::greedy`]
+/// then chain `with_*` setters. PRNG state is managed externally via
+/// `prng_state: &mut Array` (3e.2) rather than stored inside this struct.
+#[derive(Debug, Clone, Copy)]
 pub struct Sampler {
     /// Temperature; `<= 0` short-circuits to greedy argmax.
     pub temperature: f32,
@@ -38,43 +49,8 @@ pub struct Sampler {
     pub frequency_penalty: Option<f32>,
     /// Optional presence penalty (subtracts `presence` for any token in history).
     pub presence_penalty: Option<f32>,
-    /// PRNG seed (used to lazily mint the first key).
+    /// PRNG seed (retained for external key initialisation in 3e.2 Scheduler).
     pub seed: u64,
-    key: Cell<Option<Array>>,
-}
-
-impl std::fmt::Debug for Sampler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sampler")
-            .field("temperature", &self.temperature)
-            .field("top_k", &self.top_k)
-            .field("top_p", &self.top_p)
-            .field("min_p", &self.min_p)
-            .field("repetition_penalty", &self.repetition_penalty)
-            .field("frequency_penalty", &self.frequency_penalty)
-            .field("presence_penalty", &self.presence_penalty)
-            .field("seed", &self.seed)
-            .finish()
-    }
-}
-
-impl Clone for Sampler {
-    fn clone(&self) -> Self {
-        // We snapshot the configuration; the PRNG key state is a
-        // runtime detail and is reset to the configured seed for the
-        // clone (each generation owns its own stream).
-        Self {
-            temperature: self.temperature,
-            top_k: self.top_k,
-            top_p: self.top_p,
-            min_p: self.min_p,
-            repetition_penalty: self.repetition_penalty,
-            frequency_penalty: self.frequency_penalty,
-            presence_penalty: self.presence_penalty,
-            seed: self.seed,
-            key: Cell::new(None),
-        }
-    }
 }
 
 impl Sampler {
@@ -89,7 +65,6 @@ impl Sampler {
             frequency_penalty: None,
             presence_penalty: None,
             seed: 0,
-            key: Cell::new(None),
         }
     }
 
@@ -182,84 +157,33 @@ impl Sampler {
     ///
     /// Returns `Err` if any non-greedy parameter is configured. The caller
     /// must then use [`Sampler::sample`].
+    ///
+    /// # Note (3e.2 INTERMEDIATE STATE)
+    /// This function is retained because `generate.rs` calls it.
+    /// T2 will wire per-request `prng_state: &mut Array` into the pipeline;
+    /// at that point the greedy path here remains valid (argmax needs no PRNG).
     pub fn sample_async_greedy(&self, logits: &Array) -> Result<Array> {
         if !self.is_pipelinable() {
             return Err(anyhow::anyhow!(
                 "sample_async_greedy: only greedy (temperature <= 0, no penalties) is supported"
             ));
         }
-        // argmax with keepdims=false matches sample()'s greedy short-circuit
-        // at line 178 in this same file.
+        // argmax with keepdims=false matches sample()'s greedy short-circuit.
         Ok(reduction::argmax(logits, All, false)?)
     }
 
-    fn ensure_key(&self) -> Result<Array> {
-        if let Some(k) = self.key.take() {
-            // Took it — split for next call and return one half.
-            let (a, b) = random::split(&k)?;
-            self.key.set(Some(a));
-            return Ok(b);
-        }
-        let k = random::key(self.seed)?;
-        let (a, b) = random::split(&k)?;
-        self.key.set(Some(a));
-        Ok(b)
-    }
-
     /// Sample a single token id from `logits` (1-D `[vocab]`).
-    /// `history` feeds repetition / frequency / presence penalties.
-    pub fn sample(&self, logits: &Array, history: &[u32]) -> Result<u32> {
-        let mut logits = logits.clone();
-
-        // 1. repetition penalty
-        if let Some(p) = self.repetition_penalty {
-            if !history.is_empty() && (p - 1.0).abs() > f32::EPSILON {
-                logits = apply_repetition_penalty(&logits, history, p)?;
-            }
-        }
-
-        // 2. frequency / presence penalty
-        if self.frequency_penalty.unwrap_or(0.0).abs() > f32::EPSILON
-            || self.presence_penalty.unwrap_or(0.0).abs() > f32::EPSILON
-        {
-            let f = self.frequency_penalty.unwrap_or(0.0);
-            let pp = self.presence_penalty.unwrap_or(0.0);
-            logits = apply_freq_presence_penalty(&logits, history, f, pp)?;
-        }
-
-        // 3. greedy short-circuit
-        if self.temperature <= 0.0 {
-            let idx = reduction::argmax(&logits, All, false)?;
-            return Ok(idx.item::<u32>()?);
-        }
-
-        // temperature scaling (scalar-RHS Mul panics on shape error;
-        // for finite f32 / 1-D logits this cannot fail)
-        let inv_t = 1.0_f32 / self.temperature;
-        let mut logits = &logits * inv_t;
-
-        // 4. top_k
-        if let Some(k) = self.top_k {
-            logits = apply_top_k(&logits, k)?;
-        }
-        // 5. min_p
-        if let Some(p) = self.min_p {
-            logits = apply_min_p(&logits, p)?;
-        }
-        // 6. top_p
-        if let Some(p) = self.top_p {
-            if p < 1.0 {
-                logits = apply_top_p(&logits, p)?;
-            }
-        }
-
-        // 7. categorical sample
-        let key = self.ensure_key()?;
-        let sample = random::categorical(&logits)
-            .num_samples(1)
-            .key(&key)
-            .sample()?;
-        Ok(sample.item::<u32>()?)
+    ///
+    /// # INTERMEDIATE STATE (3e.2 T1)
+    /// This function requires `prng_state: &mut Array` to be threaded through
+    /// from the Scheduler. T2 reimplements with the new signature. Until then
+    /// all callers must be migrated to `sample_batch`.
+    #[allow(dead_code)]
+    pub fn sample(&self, _logits: &Array, _history: &[u32]) -> Result<u32> {
+        anyhow::bail!(
+            "Sampler::sample: API requires &mut Array prng_state in 3e.2; \
+             use sample_batch or sample_row_cpu via Scheduler"
+        )
     }
 }
 
@@ -527,88 +451,18 @@ fn configured_pipeline(
     Ok(tokens)
 }
 
-/// CPU-side sampling for one row of `[vocab]` probs (already softmax-normalised,
-/// top_k applied). Applies top_p nucleus filter, min_p floor, renormalization,
-/// then draws a single categorical sample.
+/// CPU-side sampling for one row of `[vocab]` probs.
 ///
-/// Algorithm:
-///   1. Sort `(prob, original_idx)` descending by prob.
-///   2. Walk sorted order; accumulate cumulative prob until top_p threshold
-///      is crossed — keep all tokens up to and including the crossing token.
-///   3. Apply min_p floor: zero tokens with prob < min_p × max_prob.
-///   4. Renormalize remaining probs to sum to 1.
-///   5. Draw uniform u in [0, 1) from sampler PRNG; walk CDF to find token.
-///
-/// This avoids any GPU argsort or mlx::random::categorical call, eliminating
-/// the measured 0.4–18 s JIT / allocation spike at vocab=151936.
-fn sample_row_cpu(probs: &[f32], top_p: f32, min_p: f32, sampler: &Sampler) -> Result<u32> {
-    let vocab = probs.len();
-
-    // 1. Build sorted (prob, idx) descending — O(vocab log vocab).
-    let mut indexed: Vec<(f32, u32)> = probs
-        .iter()
-        .enumerate()
-        .map(|(i, &p)| (p, i as u32))
-        .collect();
-    // Sort descending by probability; tie-break by index for determinism.
-    indexed.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // 2. Top-p nucleus: keep until cumulative prob (exclusive) >= top_p.
-    //    The first token whose inclusion crosses the threshold is RETAINED
-    //    (matches HF semantics).
-    let mut keep_count = vocab; // default: keep all
-    if top_p < 1.0 {
-        let mut cum = 0.0_f32;
-        for (k, &(p, _)) in indexed.iter().enumerate() {
-            if cum >= top_p {
-                keep_count = k;
-                break;
-            }
-            cum += p;
-        }
-    }
-    let nucleus = &indexed[..keep_count];
-
-    // 3. Min_p floor: relative to max_prob (= nucleus[0].0 since sorted desc).
-    let max_prob = nucleus.first().map(|&(p, _)| p).unwrap_or(1.0);
-    let min_p_thresh = min_p * max_prob;
-
-    // 4. Collect eligible tokens and renormalize.
-    let mut eligible: Vec<(f32, u32)> = nucleus
-        .iter()
-        .filter(|&&(p, _)| p >= min_p_thresh)
-        .copied()
-        .collect();
-    if eligible.is_empty() {
-        // Fallback: argmax (should not happen with well-formed probs).
-        return Ok(indexed[0].1);
-    }
-    let total: f32 = eligible.iter().map(|&(p, _)| p).sum();
-    let inv_total = if total > 0.0 { 1.0 / total } else { 1.0 };
-    for (p, _) in eligible.iter_mut() {
-        *p *= inv_total;
-    }
-
-    // 5. CDF sampling: draw u ~ Uniform[0, 1) from sampler PRNG.
-    //    `ensure_key` advances the PRNG state stored in the Cell.
-    let key = sampler.ensure_key()?;
-    // Use mlx builder: uniform().shape(1).key(&key).sample() → [1] f32.
-    let u_arr = random::uniform()
-        .shape(1_i32)
-        .dtype(mlx::Dtype::Float32)
-        .key(&key)
-        .sample()?;
-    let u: f32 = u_arr.item()?;
-
-    let mut cum = 0.0_f32;
-    for &(p, idx) in &eligible {
-        cum += p;
-        if u < cum {
-            return Ok(idx);
-        }
-    }
-    // Fallback: last eligible token (handles floating-point rounding).
-    Ok(eligible.last().map(|&(_, idx)| idx).unwrap_or(0))
+/// # INTERMEDIATE STATE (3e.2 T1)
+/// T2 reimplements with `prng_state_row: &mut Array` replacing `&Sampler`
+/// (Scheduler plumbing). Until then this function bails so callers can be
+/// identified and migrated.
+#[allow(dead_code)]
+fn sample_row_cpu(_probs: &[f32], _top_p: f32, _min_p: f32, _sampler: &Sampler) -> Result<u32> {
+    anyhow::bail!(
+        "sample_row_cpu: API requires &mut Array prng_state_row in 3e.2 T2 \
+         (Scheduler plumbing)"
+    )
 }
 
 // ── T2: batched ops over [B, vocab] ─────────────────────────────────────────
@@ -740,6 +594,7 @@ fn renormalize(probs: &Array) -> Result<Array> {
     Ok(probs / &row_sum)
 }
 
+#[allow(dead_code)]
 fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<Array> {
     // For each token id in history, scale `logits[id]` by `1/p` if the
     // logit is positive, by `p` if negative — this matches the HF
@@ -760,6 +615,7 @@ fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<A
     Ok(logits * &mul_arr)
 }
 
+#[allow(dead_code)]
 fn apply_freq_presence_penalty(
     logits: &Array,
     history: &[u32],
@@ -787,6 +643,7 @@ fn apply_freq_presence_penalty(
 /// excluded (strict `<` matches the `mask` semantics), so the output
 /// may have fewer than `k` surviving tokens when duplicates exist at
 /// the boundary.
+#[allow(dead_code)]
 fn apply_top_k(logits: &Array, k: i32) -> Result<Array> {
     // Sort ascending; cut threshold is `sorted[len - k]`.
     let sorted = sort::sort(logits, -1)?;
@@ -798,6 +655,7 @@ fn apply_top_k(logits: &Array, k: i32) -> Result<Array> {
     Ok(indexing::where_(&mask, &neg_inf, logits)?)
 }
 
+#[allow(dead_code)]
 fn apply_min_p(logits: &Array, p: f32) -> Result<Array> {
     let probs = unary::softmax(logits, All, false)?;
     let max_p = reduction::max(&probs, All, true)?;
@@ -807,6 +665,7 @@ fn apply_min_p(logits: &Array, p: f32) -> Result<Array> {
     Ok(indexing::where_(&mask, &neg_inf, logits)?)
 }
 
+#[allow(dead_code)]
 fn apply_top_p(logits: &Array, p: f32) -> Result<Array> {
     // MVP coarse surrogate (P1 follow-up tracks exact nucleus): mask
     // tokens whose individual softmax prob is below `(1 - p) / vocab`.
