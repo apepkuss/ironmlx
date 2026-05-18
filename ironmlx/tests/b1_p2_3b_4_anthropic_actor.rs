@@ -250,6 +250,19 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
     // Construct AppState matching what serve() builds.
     let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
         .expect("spawn");
+    let health_collector = Arc::new(ironmlx::core::server::health::SchedulerHealthCollector {
+        start_time: std::time::Instant::now(),
+        b_max: 4,
+        queue_max: 32,
+        model_name: "test-model".to_string(),
+        max_position_embeddings: 32768_i32,
+        b_active: handle.b_active.clone(),
+        b_queued: handle.b_queued.clone(),
+        admission_queue_full_count: handle.admission_queue_full_count.clone(),
+        memory_budget_exceeded_count: handle.memory_budget_exceeded_count.clone(),
+        kv_cache_active_bytes: handle.kv_cache_active_bytes.clone(),
+        kv_cache_soft_limit_bytes: handle.kv_cache_soft_limit_bytes,
+    });
     let state = AppState {
         model: model.clone(),
         tokenizer: tokenizer.clone(),
@@ -260,6 +273,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         admission_deadline_ms: 5,
         admission_queue_max: 32,
         effective_cap_max: 32768, // 3f
+        health_collector,
     };
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);
