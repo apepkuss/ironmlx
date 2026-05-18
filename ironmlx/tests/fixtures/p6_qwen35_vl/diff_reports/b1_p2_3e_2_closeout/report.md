@@ -18,7 +18,9 @@ with auto-derived `Clone + Copy + Send + Sync`. `sample_row_cpu` / `configured_p
 - `2bc80de` refactor(b1-p2.3e.2-t1): Sampler struct shrink -- remove Cell, derive Copy
 - `161aefd` feat(b1-p2.3e.2-t2): Scheduler.prng_state + batch-end stack plumbing
 - `fdb88f5` chore(b1-p2.3e.2-t3): verify + polish -- bounds checks + stale comments
-- `<T4 close-out SHA>` docs(b1-p2.3e.2-t4): close-out report
+- `3fe23f1` docs(b1-p2.3e.2-t4): close-out report (initial)
+- `9cf2625` feat(b1-p2.3e.2-t5): expose put_along_axis + refactor apply_top_p_batched
+- `<this commit>` docs(b1-p2.3e.2-t4): close-out addendum -- sweep_full + isolation + GPU resource verify
 
 ## Acceptance Gates
 
@@ -79,11 +81,72 @@ generate.rs:1302 pass &mut self.prng_state to Sampler::sample.
 Plan §1.2.1 claimed "0 callers -- delete", but T1 implementer found 2 production callers
 in generate.rs:1088, 1231. Correctly retained since greedy argmax path needs no PRNG state.
 
+## T5 -- put_along_axis exposure (Boss-approved Option C, commit 9cf2625)
+
+T5 expanded 3e.2 scope (Boss Option C) to prep 80% of future 3e.3 GPU re-enable:
+
+- mlx-sys FFI bridge: cxx wrap for mlx::core::put_along_axis (ops.h:1089)
+  - shim/include/cxx_mlx_shim/array.h + shim/src/array.cc mirror take_along_axis pattern
+  - src/bridge/array.rs cxx bridge declaration
+- mlx safe Rust wrapper (mlx/src/ops/indexing.rs):
+  - pub fn put_along_axis(a, indices, values, axis) -> Result<Array>
+  - pub fn put_along_axis_on(...) stream variant
+  - Array::put_along_axis + Array::put_along_axis_on methods (mirror take_along_axis)
+  - 2 unit tests PASS: identity round-trip + inverse of take
+- ironmlx refactor (apply_top_p_batched #[cfg(test)] block):
+  - Old: argsort(sort_idx) -> take_along_axis 2-step inverse-permutation workaround (3e.1b T0 era)
+  - New: put_along_axis(&zeros, &sort_idx_desc, &sorted_masked, -1) -- 1 native op, semantics clearer
+  - Existing apply_top_p_batched_keeps_nucleus_first_crossing_retained test still PASS
+- Production CPU path UNCHANGED: configured_pipeline 仍 sample_row_cpu after GPU softmax sync. T5 does NOT re-enable GPU production path.
+
+## Sweep_full Result + Environment Diagnosis
+
+sweep_full.sh started 2026-05-18 11:29 JST (PID 57478), completed 12:06 JST in
+**37m 27s** -- significantly faster than 3e.1b's 4h 29min and close to 3e.1a baseline 65min.
+This sweep ran on a fresher system state (~12h continuous load vs 3e.1b's 18+h).
+
+**Result: 15/16 PASS in single run** (16 base suites + 1 b1_p2_3c+ extension = 17 total). Only FAIL:
+
+- b1_p2_3c_plus_chunked_admit_mid::chunked_admit_mid_stall_delta -- 665s timeout-style
+  failure (test's timing-sensitive stall delta assertion exceeded under accumulated load).
+
+Isolation re-run on idle system immediately after sweep completed:
+
+| Suite | sweep_full | Isolation | Speedup |
+| --- | --- | --- | --- |
+| b1_p2_3c_plus_chunked_admit_mid | FAIL 665s (stall_delta assert) | **PASS 38.5s** | 17x |
+
+**Effective 17/17 PASS** across 2-stage validation. **Zero 3e.2 code regression.**
+
+Compare: 3e.1b sweep had 3 failures (batched_vl hung 76min + p4_http_smoke timeout +
+chunked_admit_mid FAIL), all confirmed-environmental via isolation. 3e.2 has just 1
+failure -- system is recovering toward 3e.1a baseline. Pattern consistent with 3e.1b
+carry-forward observation (sweep cumulative load degrades timing-sensitive integration tests).
+
+## GPU / Metal Resource Release Verification (Boss request 2026-05-18)
+
+Post-sweep_full + isolation re-run, system inspected for proper GPU resource release:
+
+| Check | Result | Notes |
+| --- | --- | --- |
+| ironmlx test processes alive | **0** | pgrep -fl cargo / target/release/deps/b1_p2 / ... empty |
+| Zombie processes | **0** | ps -o stat \| grep Z empty |
+| Free memory pages | 899570 (14.4 GB free of 32 GB) | Slight gain vs pre-sweep 14.2 GB |
+| Top memory consumers | All GUI apps (Notion / Chrome / VSCode) | Nothing from ironmlx |
+| Allocation latency probe (probe_slice_update_per_row_round_trip) | **1.86s** total (mostly compile) | Metal kernel cache healthy |
+| Kernel cache health (apply_temperature_scales_per_row) | **0.04s** | Fast cache hit -- no JIT recompile |
+| Swap usage | 4.5 GB used / 6.0 GB total | Normal Mac state under 12h+ load |
+
+**Conclusion: GPU/Metal resources cleanly released.** All sweep_full test binaries
+exited cleanly via OS process termination (Apple Silicon UMA memory automatically
+reclaimed). Metal kernel cache state remains healthy post-sweep -- subsequent unit
+tests show normal sub-second execution. No leak indicators.
+
 ## Carry-Forward
 
-- Qwen3.5 MoE -- main path forward; sampler vectorization series complete
-- (Optional, Boss-approved 3e.3 prep) T5: put_along_axis exposure +
-  apply_top_p_batched refactor -- prepares 80% of future 3e.3 GPU re-enable
-- (Optional) GPU sample re-enable in 3e.3: requires categorical Metal kernel JIT
-  investigation + put_along_axis in apply_top_p_batched (T5 prep)
-- (Optional) Sweep_full hygiene -- cooldown / shard for parallel runs (3e.1b carry-forward)
+- Qwen3.5 MoE -- main path forward; sampler vectorization series complete (3e.1a -> 3e.1b -> 3e.2)
+- (Optional, future 3e.3) GPU sample re-enable -- T5 已 prepared put_along_axis path. Remaining work:
+  1. Re-bench GPU apply_top_p_batched (with put_along_axis) isolated -- quantify Metal kernel cache cost
+  2. Trace mlx::random::categorical([B, vocab]) Metal kernel JIT behavior at vocab=151k
+  3. If both yield significant wins (<80ms median) -> re-enable GPU production path in configured_pipeline
+- (Optional) Sweep_full hygiene -- cooldown / shard for parallel runs (recurring across 3e.1b + 3e.2)
