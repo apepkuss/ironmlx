@@ -293,6 +293,10 @@ pub struct Scheduler {
     /// `admit` and `admit_mid` reject requests exceeding this with
     /// [`SchedulerError::RequestTooLarge`]. B1-p2.3f.
     effective_cap_max: usize,
+    /// Centralized per-row PRNG state, shape `[b_max, 2]` u32.
+    /// Row `i` holds the PRNG key for slot `i`. Initialized to zeros;
+    /// `init_row_prng` seeds a row on every new admission. (B1-p2.3e.2)
+    pub(crate) prng_state: Array,
 }
 
 impl std::fmt::Debug for Scheduler {
@@ -318,6 +322,10 @@ impl Scheduler {
         for _ in 0..b_max {
             slots.push(None);
         }
+        // Initialize prng_state to zeros [b_max, 2] u32. Each slot's row is
+        // seeded via init_row_prng on admission.
+        let prng_state =
+            Array::zeros(&[b_max as i32, 2_i32][..], Dtype::Uint32).expect("prng_state zeros");
         Self {
             b_max,
             slots,
@@ -326,7 +334,37 @@ impl Scheduler {
             cache: None,
             poisoned: false,
             effective_cap_max,
+            prng_state,
         }
+    }
+
+    /// Seed the PRNG state for `row_idx` from `seed`.
+    ///
+    /// Uses the to_vec + host-replace + try_from pattern to avoid
+    /// `slice_update` (T0 measured at 274 ms/call in hot path).
+    /// Called only on admission (not in hot path) so ~80 µs to_vec cost is OK.
+    fn init_row_prng(&mut self, row_idx: usize, seed: u64) -> Result<()> {
+        let key = mlx::random::key(seed)?;
+        let key_host: Vec<u32> = key.to_vec()?;
+        let b_max = self.prng_state.shape().as_slice()[0] as usize;
+        let mut new_host: Vec<u32> = self.prng_state.to_vec()?;
+        new_host[row_idx * 2] = key_host[0];
+        new_host[row_idx * 2 + 1] = key_host[1];
+        self.prng_state = (new_host.as_slice(), &[b_max as i32, 2_i32][..]).try_into()?;
+        Ok(())
+    }
+
+    /// Write an updated row key back into `prng_state` after sampling.
+    ///
+    /// Same to_vec + host-replace + try_from pattern as `init_row_prng`.
+    fn write_row_prng(&mut self, row_idx: usize, row_key: &Array) -> Result<()> {
+        let key_host: Vec<u32> = row_key.to_vec()?;
+        let b_max = self.prng_state.shape().as_slice()[0] as usize;
+        let mut host: Vec<u32> = self.prng_state.to_vec()?;
+        host[row_idx * 2] = key_host[0];
+        host[row_idx * 2 + 1] = key_host[1];
+        self.prng_state = (host.as_slice(), &[b_max as i32, 2_i32][..]).try_into()?;
+        Ok(())
     }
 
     /// Maximum concurrent in-flight requests this scheduler can hold.
@@ -394,7 +432,10 @@ impl Scheduler {
             image_token_id: req.image_token_id,
             prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(512).max(1),
         };
+        let seed = state.sampler.seed;
         self.slots[row_idx] = Some(state);
+        // Seed this row's PRNG state from the request's sampler seed.
+        self.init_row_prng(row_idx, seed)?;
         if self.phase == Phase::Idle {
             self.phase = Phase::Admitting;
         }
@@ -753,8 +794,13 @@ impl Scheduler {
 
         // Stage B — dispatch sample_batch once over [B, vocab].
         let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
-        let tokens = crate::core::sampler::sample_batch(&row_samplers, &logits_bv, &history_refs)
-            .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"))?;
+        let tokens = crate::core::sampler::sample_batch(
+            &row_samplers,
+            &logits_bv,
+            &history_refs,
+            &mut self.prng_state,
+        )
+        .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"))?;
 
         // Stage C — distribute tokens + termination per occupied row.
         let mut events: Vec<StepEvent> = Vec::new();
@@ -977,8 +1023,13 @@ impl Scheduler {
 
         // Stage B — dispatch sample_batch once over [B, vocab].
         let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
-        let tokens = crate::core::sampler::sample_batch(&row_samplers, &logits_bv, &history_refs)
-            .map_err(|e| anyhow!("step: sample_batch failed: {e:?}"))?;
+        let tokens = crate::core::sampler::sample_batch(
+            &row_samplers,
+            &logits_bv,
+            &history_refs,
+            &mut self.prng_state,
+        )
+        .map_err(|e| anyhow!("step: sample_batch failed: {e:?}"))?;
 
         // Stage C — distribute tokens + termination per active row.
         let mut events: Vec<StepEvent> = Vec::new();
@@ -1432,14 +1483,24 @@ impl Scheduler {
             }
         }
 
-        // Sample first generated token.
+        // Sample first generated token using centralized PRNG state.
         let row_logits = slice_logits_row(&logits, 0)?;
         let token = {
-            let state = self.slots[row_idx]
-                .as_ref()
-                .expect("admit_mid_begin reserved the slot");
             let history: Vec<u32> = prompt_ids.clone();
-            state.sampler.sample(&row_logits, &history)?
+            // Clone the sampler so we release the borrow on self.slots before
+            // calling write_row_prng (which needs &mut self).
+            let sampler = self.slots[row_idx]
+                .as_ref()
+                .expect("admit_mid_begin reserved the slot")
+                .sampler;
+            // Extract this row's PRNG key from centralized state.
+            let prng_host: Vec<u32> = self.prng_state.to_vec()?;
+            let row_bytes = &prng_host[row_idx * 2..(row_idx + 1) * 2];
+            let mut row_key: Array = (row_bytes, &[2_i32][..]).try_into()?;
+            let tok = sampler.sample(&row_logits, &history, &mut row_key)?;
+            // Write updated key back (releases sampler borrow, &mut self OK now).
+            self.write_row_prng(row_idx, &row_key)?;
+            tok
         };
 
         // Update RequestState + termination.

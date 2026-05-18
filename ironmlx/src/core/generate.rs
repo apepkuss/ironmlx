@@ -128,6 +128,10 @@ pub struct GenerationStream<'m> {
     /// path until that first call starts the capture. `None` once started or
     /// if not in decode-only mode.
     capture_pending_decode: Option<String>,
+
+    /// Per-stream PRNG state `[2]` u32. Initialized from `request.sampler.seed`
+    /// in `new()`. Advanced by each `Sampler::sample` call. (B1-p2.3e.2)
+    prng_state: Array,
 }
 
 impl Drop for GenerationStream<'_> {
@@ -1081,6 +1085,9 @@ impl<'m> GenerationStream<'m> {
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
 
+        // Initialize per-stream PRNG state from sampler seed. [2] u32.
+        let mut prng_state = mlx::random::key(request.sampler.seed)?;
+
         if pipelined {
             // Pipelined path: pending_token_arr starts as the prefill's argmax,
             // pre-dispatched via async_eval so the GPU is already working on
@@ -1105,12 +1112,15 @@ impl<'m> GenerationStream<'m> {
                 last_decoded_text: String::new(),
                 capture_active,
                 capture_pending_decode,
+                prng_state,
             })
         } else {
             // Sync path: existing pre-P8a behavior. First token sampled
             // synchronously here; pushed into history; initial text snapshot
             // captured for incremental diff.
-            let first_token = request.sampler.sample(&last_logits, &history)?;
+            let first_token = request
+                .sampler
+                .sample(&last_logits, &history, &mut prng_state)?;
             let mut history = history;
             history.push(first_token);
 
@@ -1134,6 +1144,7 @@ impl<'m> GenerationStream<'m> {
                 last_decoded_text: initial_text,
                 capture_active,
                 capture_pending_decode,
+                prng_state,
             })
         }
     }
@@ -1291,7 +1302,10 @@ impl<'m> GenerationStream<'m> {
         // Logits shape [1, 1, vocab] — flatten to [vocab].
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
-        let next = self.request.sampler.sample(&logits_flat, &self.history)?;
+        let next =
+            self.request
+                .sampler
+                .sample(&logits_flat, &self.history, &mut self.prng_state)?;
         self.history.push(next);
 
         Ok(Some(GenerateEvent {

@@ -13,7 +13,7 @@
 
 use mlx::{
     ops::{indexing, reduction, sort, unary, All},
-    Array,
+    random, Array,
 };
 
 use crate::Result;
@@ -174,16 +174,52 @@ impl Sampler {
 
     /// Sample a single token id from `logits` (1-D `[vocab]`).
     ///
-    /// # INTERMEDIATE STATE (3e.2 T1)
-    /// This function requires `prng_state: &mut Array` to be threaded through
-    /// from the Scheduler. T2 reimplements with the new signature. Until then
-    /// all callers must be migrated to `sample_batch`.
-    #[allow(dead_code)]
-    pub fn sample(&self, _logits: &Array, _history: &[u32]) -> Result<u32> {
-        anyhow::bail!(
-            "Sampler::sample: API requires &mut Array prng_state in 3e.2; \
-             use sample_batch or sample_row_cpu via Scheduler"
-        )
+    /// `prng_state_row` is a `[2]` u32 Array representing this row's PRNG
+    /// state. It is advanced in-place (split → next_key assigned back).
+    pub fn sample(
+        &self,
+        logits: &Array,
+        history: &[u32],
+        prng_state_row: &mut Array,
+    ) -> Result<u32> {
+        let mut logits = logits.clone();
+        if let Some(p) = self.repetition_penalty {
+            if !history.is_empty() && (p - 1.0).abs() > f32::EPSILON {
+                logits = apply_repetition_penalty(&logits, history, p)?;
+            }
+        }
+        if self.frequency_penalty.unwrap_or(0.0).abs() > f32::EPSILON
+            || self.presence_penalty.unwrap_or(0.0).abs() > f32::EPSILON
+        {
+            let f = self.frequency_penalty.unwrap_or(0.0);
+            let pp = self.presence_penalty.unwrap_or(0.0);
+            logits = apply_freq_presence_penalty(&logits, history, f, pp)?;
+        }
+        if self.temperature <= 0.0 {
+            let idx = reduction::argmax(&logits, All, false)?;
+            return Ok(idx.item::<u32>()?);
+        }
+        let inv_t = 1.0_f32 / self.temperature;
+        let mut logits = &logits * inv_t;
+        if let Some(k) = self.top_k {
+            logits = apply_top_k(&logits, k)?;
+        }
+        if let Some(p) = self.min_p {
+            logits = apply_min_p(&logits, p)?;
+        }
+        if let Some(p) = self.top_p {
+            if p < 1.0 {
+                logits = apply_top_p(&logits, p)?;
+            }
+        }
+        // PRNG: split + advance
+        let (next_key, sample_key) = random::split(prng_state_row)?;
+        let sample = random::categorical(&logits)
+            .num_samples(1)
+            .key(&sample_key)
+            .sample()?;
+        *prng_state_row = next_key;
+        Ok(sample.item::<u32>()?)
     }
 }
 
@@ -216,6 +252,7 @@ pub fn sample_batch(
     samplers: &[&Sampler],
     logits: &Array,
     histories: &[&[u32]],
+    prng_state: &mut Array,
 ) -> Result<Vec<u32>> {
     let shape = logits.shape();
     let dims = shape.as_slice();
@@ -237,7 +274,7 @@ pub fn sample_batch(
         );
     }
 
-    // All-greedy fast path.
+    // All-greedy fast path (no PRNG needed).
     if samplers.iter().all(|s| s.is_greedy()) {
         // `argmax(logits, axis=-1, keepdims=false)` over [B, vocab]
         // returns [B] u32 indices. One GPU dispatch, one host sync.
@@ -254,7 +291,7 @@ pub fn sample_batch(
     }
 
     // Mixed / configured pipeline (3e.1b).
-    configured_pipeline(samplers, logits, histories)
+    configured_pipeline(samplers, logits, histories, prng_state)
 }
 
 /// Per-row config tensors used by [`configured_pipeline`]. Each
@@ -413,6 +450,7 @@ fn configured_pipeline(
     samplers: &[&Sampler],
     logits: &Array,
     histories: &[&[u32]],
+    prng_state: &mut Array,
 ) -> Result<Vec<u32>> {
     let dims_owned = logits.shape();
     let dims = dims_owned.as_slice();
@@ -438,31 +476,111 @@ fn configured_pipeline(
     // One GPU sync — eval the entire fused graph built above.
     let probs_flat: Vec<f32> = probs_gpu.to_vec()?;
 
-    // CPU stage: top_p + min_p + renorm + categorical per row.
+    // CPU stage: top_p + min_p + renorm + CDF per row.
     let top_p_host: Vec<f32> = configs.top_p.to_vec()?;
     let min_p_host: Vec<f32> = configs.min_p.to_vec()?;
 
+    // Read all prng_state rows to host ONCE (cheap: B*2 u32 scalars).
+    let prng_host: Vec<u32> = prng_state.to_vec()?;
+
     let mut tokens = Vec::with_capacity(b);
+    let mut row_keys_after: Vec<Array> = Vec::with_capacity(b);
+
     for row in 0..b {
         let row_probs = &probs_flat[row * vocab..(row + 1) * vocab];
-        let token = sample_row_cpu(row_probs, top_p_host[row], min_p_host[row], samplers[row])?;
+        // Build row_key Array from host slice [2] u32.
+        let row_key_bytes = &prng_host[row * 2..(row + 1) * 2];
+        let mut row_key: Array = (row_key_bytes, &[2_i32][..]).try_into()?;
+        let token = sample_row_cpu(row_probs, top_p_host[row], min_p_host[row], &mut row_key)?;
+        row_keys_after.push(row_key);
         tokens.push(token);
     }
+
+    // Batch-end stack: 1 GPU op vs B slice_updates (T0: slice_update is 274 ms/call).
+    let refs: Vec<&Array> = row_keys_after.iter().collect();
+    *prng_state = mlx::ops::shape::stack(&refs, 0)?;
+
     Ok(tokens)
 }
 
 /// CPU-side sampling for one row of `[vocab]` probs.
 ///
-/// # INTERMEDIATE STATE (3e.2 T1)
-/// T2 reimplements with `prng_state_row: &mut Array` replacing `&Sampler`
-/// (Scheduler plumbing). Until then this function bails so callers can be
-/// identified and migrated.
-#[allow(dead_code)]
-fn sample_row_cpu(_probs: &[f32], _top_p: f32, _min_p: f32, _sampler: &Sampler) -> Result<u32> {
-    anyhow::bail!(
-        "sample_row_cpu: API requires &mut Array prng_state_row in 3e.2 T2 \
-         (Scheduler plumbing)"
-    )
+/// `prng_state_row` is a `[2]` u32 Array representing this row's PRNG key.
+/// It is split + advanced in-place each call.
+///
+/// Algorithm: top_p nucleus → min_p floor → renormalize → CDF walk with
+/// uniform random draw from `prng_state_row`.
+fn sample_row_cpu(
+    probs: &[f32],
+    top_p: f32,
+    min_p: f32,
+    prng_state_row: &mut Array,
+) -> Result<u32> {
+    let vocab = probs.len();
+
+    // Sort descending by prob (stable tie-break by index via partial_cmp).
+    let mut indexed: Vec<(f32, u32)> = probs
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| (p, i as u32))
+        .collect();
+    indexed.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Top_p nucleus: keep tokens until cumulative mass >= top_p.
+    let mut keep_count = vocab;
+    if top_p < 1.0 {
+        let mut cum = 0.0_f32;
+        for (k, &(p, _)) in indexed.iter().enumerate() {
+            if cum >= top_p {
+                keep_count = k;
+                break;
+            }
+            cum += p;
+        }
+    }
+    let nucleus = &indexed[..keep_count];
+
+    // Min_p floor: drop tokens whose prob < min_p * max_prob.
+    let max_prob = nucleus.first().map(|&(p, _)| p).unwrap_or(1.0);
+    let min_p_thresh = min_p * max_prob;
+
+    let mut eligible: Vec<(f32, u32)> = nucleus
+        .iter()
+        .filter(|&&(p, _)| p >= min_p_thresh)
+        .copied()
+        .collect();
+    if eligible.is_empty() {
+        // Fallback: return the top token.
+        return Ok(indexed[0].1);
+    }
+
+    // Renormalize.
+    let total: f32 = eligible.iter().map(|&(p, _)| p).sum();
+    let inv_total = if total > 0.0 { 1.0 / total } else { 1.0 };
+    for (p, _) in eligible.iter_mut() {
+        *p *= inv_total;
+    }
+
+    // PRNG advance + sample uniform u in [0, 1).
+    let (next_key, sample_key) = random::split(prng_state_row)?;
+    let u_arr = random::uniform()
+        .shape(1_i32)
+        .dtype(mlx::Dtype::Float32)
+        .key(&sample_key)
+        .sample()?;
+    let u: f32 = u_arr.item()?;
+    *prng_state_row = next_key;
+
+    // CDF walk.
+    let mut cum = 0.0_f32;
+    for &(p, idx) in &eligible {
+        cum += p;
+        if cum > u {
+            return Ok(idx);
+        }
+    }
+    // FP rounding fallback.
+    Ok(eligible.last().unwrap().1)
 }
 
 // ── T2: batched ops over [B, vocab] ─────────────────────────────────────────
@@ -594,7 +712,6 @@ fn renormalize(probs: &Array) -> Result<Array> {
     Ok(probs / &row_sum)
 }
 
-#[allow(dead_code)]
 fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<Array> {
     // For each token id in history, scale `logits[id]` by `1/p` if the
     // logit is positive, by `p` if negative — this matches the HF
@@ -615,7 +732,6 @@ fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<A
     Ok(logits * &mul_arr)
 }
 
-#[allow(dead_code)]
 fn apply_freq_presence_penalty(
     logits: &Array,
     history: &[u32],
@@ -643,7 +759,6 @@ fn apply_freq_presence_penalty(
 /// excluded (strict `<` matches the `mask` semantics), so the output
 /// may have fewer than `k` surviving tokens when duplicates exist at
 /// the boundary.
-#[allow(dead_code)]
 fn apply_top_k(logits: &Array, k: i32) -> Result<Array> {
     // Sort ascending; cut threshold is `sorted[len - k]`.
     let sorted = sort::sort(logits, -1)?;
@@ -655,7 +770,6 @@ fn apply_top_k(logits: &Array, k: i32) -> Result<Array> {
     Ok(indexing::where_(&mask, &neg_inf, logits)?)
 }
 
-#[allow(dead_code)]
 fn apply_min_p(logits: &Array, p: f32) -> Result<Array> {
     let probs = unary::softmax(logits, All, false)?;
     let max_p = reduction::max(&probs, All, true)?;
@@ -665,7 +779,6 @@ fn apply_min_p(logits: &Array, p: f32) -> Result<Array> {
     Ok(indexing::where_(&mask, &neg_inf, logits)?)
 }
 
-#[allow(dead_code)]
 fn apply_top_p(logits: &Array, p: f32) -> Result<Array> {
     // MVP coarse surrogate (P1 follow-up tracks exact nucleus): mask
     // tokens whose individual softmax prob is below `(1 - p) / vocab`.
@@ -690,7 +803,9 @@ mod tests {
     fn greedy_picks_argmax() {
         let logits: Array = (&[0.1_f32, 5.0, 2.0, -1.0][..], (4,)).try_into().unwrap();
         let s = Sampler::greedy();
-        let id = s.sample(&logits, &[]).unwrap();
+        // Greedy: PRNG unused, but API requires &mut Array.
+        let mut prng = mlx::random::key(0).unwrap();
+        let id = s.sample(&logits, &[], &mut prng).unwrap();
         assert_eq!(id, 1);
     }
 
@@ -698,7 +813,8 @@ mod tests {
     fn temperature_zero_is_greedy() {
         let logits: Array = (&[0.1_f32, 5.0, 2.0][..], (3,)).try_into().unwrap();
         let s = Sampler::greedy().with_temperature(0.0);
-        assert_eq!(s.sample(&logits, &[]).unwrap(), 1);
+        let mut prng = mlx::random::key(0).unwrap();
+        assert_eq!(s.sample(&logits, &[], &mut prng).unwrap(), 1);
     }
 
     #[test]
@@ -707,7 +823,8 @@ mod tests {
         // picking 0 again should be suppressed in favour of token 1.
         let logits: Array = (&[5.0_f32, 4.0, 3.0][..], (3,)).try_into().unwrap();
         let s = Sampler::greedy().with_repetition_penalty(10.0);
-        let id = s.sample(&logits, &[0]).unwrap();
+        let mut prng = mlx::random::key(0).unwrap();
+        let id = s.sample(&logits, &[0], &mut prng).unwrap();
         assert_eq!(id, 1);
     }
 
@@ -718,7 +835,8 @@ mod tests {
             .with_temperature(1.0)
             .with_top_p(0.9)
             .with_seed(42);
-        let id = s.sample(&logits, &[]).unwrap();
+        let mut prng = mlx::random::key(42).unwrap();
+        let id = s.sample(&logits, &[], &mut prng).unwrap();
         assert!((id as i32) < 10);
     }
 
@@ -857,7 +975,10 @@ mod tests {
         let samplers: Vec<&Sampler> = samplers_owned.iter().collect();
         let logits = make_logits_b_vocab(4, 64, &[3, 7, 17, 63]);
         let histories: Vec<&[u32]> = vec![&[], &[], &[], &[]];
-        let tokens = sample_batch(&samplers, &logits, &histories).expect("sample_batch greedy");
+        // All-greedy fast path: PRNG unused, but API requires &mut Array [4, 2].
+        let mut prng: Array = (&[0_u32; 8][..], &[4_i32, 2_i32][..]).try_into().unwrap();
+        let tokens =
+            sample_batch(&samplers, &logits, &histories, &mut prng).expect("sample_batch greedy");
         assert_eq!(tokens, vec![3, 7, 17, 63]);
     }
 
@@ -868,7 +989,9 @@ mod tests {
         let samplers = vec![&s];
         let logits = make_logits_b_vocab(1, 32, &[15]);
         let histories: Vec<&[u32]> = vec![&[]];
-        let tokens = sample_batch(&samplers, &logits, &histories).expect("sample_batch B=1");
+        let mut prng: Array = (&[0_u32; 2][..], &[1_i32, 2_i32][..]).try_into().unwrap();
+        let tokens =
+            sample_batch(&samplers, &logits, &histories, &mut prng).expect("sample_batch B=1");
         assert_eq!(tokens, vec![15]);
     }
 
@@ -878,7 +1001,8 @@ mod tests {
         let samplers = vec![&s, &s]; // 2 samplers
         let logits = make_logits_b_vocab(4, 32, &[0, 1, 2, 3]); // B=4
         let histories: Vec<&[u32]> = vec![&[]; 2];
-        let r = sample_batch(&samplers, &logits, &histories);
+        let mut prng: Array = (&[0_u32; 8][..], &[4_i32, 2_i32][..]).try_into().unwrap();
+        let r = sample_batch(&samplers, &logits, &histories, &mut prng);
         assert!(r.is_err());
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("samplers.len()"), "msg: {msg}");
@@ -890,7 +1014,8 @@ mod tests {
         let samplers = vec![&s, &s, &s, &s];
         let logits = make_logits_b_vocab(4, 32, &[0, 1, 2, 3]);
         let histories: Vec<&[u32]> = vec![&[], &[]]; // 2 histories
-        let r = sample_batch(&samplers, &logits, &histories);
+        let mut prng: Array = (&[0_u32; 8][..], &[4_i32, 2_i32][..]).try_into().unwrap();
+        let r = sample_batch(&samplers, &logits, &histories, &mut prng);
         assert!(r.is_err());
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("histories.len()"), "msg: {msg}");
@@ -904,7 +1029,8 @@ mod tests {
         let flat: Vec<f32> = vec![0.0; 32];
         let logits: Array = (&flat[..], &[1_i32, 1_i32, 32_i32][..]).try_into().unwrap();
         let histories: Vec<&[u32]> = vec![&[]];
-        let r = sample_batch(&samplers, &logits, &histories);
+        let mut prng: Array = (&[0_u32; 2][..], &[1_i32, 2_i32][..]).try_into().unwrap();
+        let r = sample_batch(&samplers, &logits, &histories, &mut prng);
         assert!(r.is_err());
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("2-D"), "msg: {msg}");
@@ -998,8 +1124,9 @@ mod tests {
         let logits = make_logits_b_vocab(4, 32, &[5, 10, 15, 20]);
         let histories: Vec<&[u32]> = vec![&[], &[], &[], &[]];
 
+        let mut prng: Array = (&[0_u32; 8][..], &[4_i32, 2_i32][..]).try_into().unwrap();
         let tokens_batch =
-            sample_batch(&samplers, &logits, &histories).expect("sample_batch mixed");
+            sample_batch(&samplers, &logits, &histories, &mut prng).expect("sample_batch mixed");
 
         assert_eq!(tokens_batch.len(), 4);
         for (i, &t) in tokens_batch.iter().enumerate() {
@@ -1275,7 +1402,8 @@ mod tests {
         let h3: &[u32] = &[3, 3]; // exercises rep_pen on row 3
         let histories: Vec<&[u32]> = vec![h0, h1, h2, h3];
 
-        let tokens = sample_batch(&samplers, &logits, &histories).expect("sample_batch");
+        let mut prng: Array = (&[0_u32; 8][..], &[4_i32, 2_i32][..]).try_into().unwrap();
+        let tokens = sample_batch(&samplers, &logits, &histories, &mut prng).expect("sample_batch");
         assert_eq!(tokens.len(), 4);
         for (i, &t) in tokens.iter().enumerate() {
             assert!((t as usize) < vocab, "row {i} token {t} out of range");
@@ -1297,7 +1425,8 @@ mod tests {
         let logits: Array = (&data[..], &[4_i32, vocab as i32][..]).try_into().unwrap();
         let h: &[u32] = &[];
         let histories: Vec<&[u32]> = vec![h, h, h, h];
-        let tokens = sample_batch(&samplers, &logits, &histories).expect("sample_batch");
+        let mut prng: Array = (&[0_u32; 8][..], &[4_i32, 2_i32][..]).try_into().unwrap();
+        let tokens = sample_batch(&samplers, &logits, &histories, &mut prng).expect("sample_batch");
         assert_eq!(tokens.len(), 4);
         for (i, &t) in tokens.iter().enumerate() {
             assert!((t as usize) < vocab, "row {i} token {t} out of range");
@@ -1314,7 +1443,8 @@ mod tests {
         let logits: Array = (&data[..], &[2_i32, vocab as i32][..]).try_into().unwrap();
         let h: &[u32] = &[];
         let histories: Vec<&[u32]> = vec![h, h];
-        let tokens = sample_batch(&samplers, &logits, &histories).expect("sample_batch");
+        let mut prng: Array = (&[0_u32; 4][..], &[2_i32, 2_i32][..]).try_into().unwrap();
+        let tokens = sample_batch(&samplers, &logits, &histories, &mut prng).expect("sample_batch");
         assert_eq!(
             tokens,
             vec![1, 0],
