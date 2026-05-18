@@ -31,6 +31,9 @@ SUITES=(
   "b1_p2_3d_admission_queue"
   "b1_p2_4_batched_vl"
   "b1_p2_3f_cache_cap"
+  "b1_p2_3e_1a_vectorize_greedy"
+  "b1_p2_3e_1b_configured_sampler"
+  "b1_p2_5_production_hardening"
   "p6_qwen35_vl_logits_match"
   "p4_http_smoke"
 )
