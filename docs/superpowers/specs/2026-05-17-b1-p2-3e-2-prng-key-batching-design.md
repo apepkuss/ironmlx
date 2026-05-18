@@ -1,67 +1,83 @@
-# B1-p2.3e.2 PRNG Key Centralization — Design (Lightweight Outline)
+# B1-p2.3e.2 PRNG Key Centralization — Design (Post-3e.1b)
 
-**Status:** Outline (brainstormed 2026-05-17, post-3e.1a ship)
+**Status:** Plan-grade detail (3e.1b shipped 2026-05-18 commit `d146d60`)
 **Owner:** ironmlx
 **Parent program:** B1-p2 batched serving (see [B1-p2.1 §0](2026-05-12-b1-p2-1-batched-prefill-design.md))
-**Predecessor:** [B1-p2.3e.1b vectorize configured sampler](2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md) (必须先 land)
-**Branch target:** TBD（3e.1b ship 后定）
+**Predecessor:** [B1-p2.3e.1b vectorize configured sampler](2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md) (shipped)
+**Branch target:** `ironmlx-b1-p2-3e2-prng-centralization` (cut from `ironmlx-b1-p2-3e1b-vectorize-configured` HEAD `d146d60`)
 
-> **Lightweight outline rationale**: 3e.2 detailed plan 强依赖 3e.1b 实施后 `sample_batch` 实际签名和 PRNG plumbing 的实际形态。本文档现写定大方向 + interface boundary + acceptance，**plan-grade detail 等 3e.1b land 后再补**。
+> **Spec rewrite note**: 原 spec (commit 92b5b50) 是 lightweight outline，写于 3e.1b ship 前，assumes 3e.1b would ship full GPU `sample_batched_categorical([B, vocab] + [B, 2] keys)`。实际 3e.1b T4 hot-fix (commit 684ca05) 把 sample step 改为 CPU `sample_row_cpu`，per-row 调 `sampler.ensure_key()`。本文 update §1 / §4 / §5 反映 ship reality。Motivation (Sampler → pure config struct) 不变。
 
 ## 0. Program context
 
 | Sub-spec | Status |
 | --- | --- |
-| 3e.1a vectorize greedy argmax | ✅ DONE |
-| 3e.1b vectorize configured sampler | Spec written ([sibling](2026-05-17-b1-p2-3e-1b-vectorize-configured-sampler-design.md)) |
-| **3e.2 PRNG key centralization** | **This outline** |
+| 3e.1a vectorize greedy argmax | ✅ DONE (2026-05-17 commit ab4c839) |
+| 3e.1b vectorize configured sampler (CPU handoff path) | ✅ DONE (2026-05-18 commit d146d60) |
+| **3e.2 PRNG key centralization** | **This spec** |
 
 ## 1. Goal
 
-3e.1b 完成 batched categorical 后，`sample_batched_categorical` 内 host-side plumbing 仍有：
+3e.1b ship 后的 PRNG 路径：
 
-- **Stage A** — B 次 `Sampler.cell.take()` collect PRNG keys
-- **Stage Z** — B 次 `Sampler.cell.set()` distribute new keys 回 Cell
-- B 次 Array slice clone 在 `advance_keys[i, :]` 提取
+```text
+sample_row_cpu(probs[vocab], top_p, min_p, sampler: &Sampler) {
+    ...                                          // CPU sort / nucleus / min_p / renorm
+    let key = sampler.ensure_key()?;             // <- per-row Cell<Option<Array>>.take()
+                                                 //    + mlx::random::split + Cell.set
+    let u = mlx::random::uniform().shape(1).key(&key).sample()?.item::<f32>()?;
+    // CDF walk
+}
+```
 
-3e.2 把 PRNG state 从 per-row `Sampler.cell` 移到 Scheduler 集中持有的 `[B_max, 2]` 张量，消除以上 plumbing。
+每个 row 的 Sampler 各自持 `key: Cell<Option<Array>>` (interior mutability，line 43 of sampler.rs)，`ensure_key` 内部 split + store。这是 3e.1b ship 状态。
+
+3e.2 把 PRNG state ownership 从 per-row `Sampler.key` 移到 Scheduler 集中持 `[B_max, 2] u32` 张量，并把 `sample_row_cpu` 签名从 `(sampler: &Sampler)` 改为 `(prng_state_row: &mut Array)`。
 
 ## 2. Motivation
 
 ### 2.1 Code simplicity > performance
 
-3e.2 的 perf 收益微小：B × 3 µs ≈ 12 µs at B=4 = 0.02% of 64.7ms step。
+3e.2 perf gain 微小：每 step B 次 `Cell.take()` + B 次 `Cell.set()` + B 次小 Array clone = `B × ~5µs ≈ 20µs at B=4` = **0.024% of 82.57ms step** (3e.1b 实测)。
 
-3e.2 的真正价值在 **代码 simplicity**：
+3e.2 真正价值在 **代码 simplicity**：
 
-| | Pre-3e.2 | Post-3e.2 |
-|---|---|---|
-| `Sampler` trait bounds | `!Send` (Cell)、`!Copy` | `Send + Sync + Clone + Copy` |
+| | Pre-3e.2 (3e.1b ship) | Post-3e.2 |
+| --- | --- | --- |
+| `Sampler` trait bounds | `!Send` (Cell), `!Copy`, manual `Clone` impl (resets PRNG) | `Send + Sync + Clone + Copy` (auto-derive) |
 | Interior mutability | `Cell<Option<Array>>` | 无 |
-| sample_batch 内 borrow | `&[&Sampler]` + 手动 take/set | `&[&Sampler]` + 显式 `prng_state: &mut Array` 参数 |
-| Cross-thread safety | 需要文档化 single-thread 假设 | 类型系统保证 |
+| `Sampler::clone()` semantics | Custom impl: 配置 copy + PRNG state 重置 | `#[derive(Clone, Copy)]` |
+| `sample_row_cpu` 签名 | `sample_row_cpu(probs, top_p, min_p, sampler: &Sampler)` | `sample_row_cpu(probs, top_p, min_p, prng_state: &mut Array)` |
+| PRNG state ownership | Per-row Sampler instance | Centralized: Scheduler.prng_state |
+| Cross-thread safety | 文档化 single-thread 假设 (Cell !Sync) | 类型系统保证 |
 
-3e.1b 后 `Cell<Option<Array>>` 是 `Sampler` 唯一的 interior mutability source。移除后 `Sampler` 变成 pure config struct，简化所有 borrow / threading concern。
+3e.1b 后 `Cell<Option<Array>>` 是 `Sampler` 唯一的 interior mutability source + 唯一阻止 auto `Clone + Copy + Send + Sync` derive 的 field。移除后 `Sampler` 变成 pure config POD，简化所有 borrow / threading concern。
 
 ### 2.2 Why not merged into 3e.1b
 
-3e.1b scope 已经 7 ops + batched categorical + history bincount，规模较大。3e.2 独立成 stage：
+3e.1b scope 已经 7 ops + GPU→CPU hot-fix + 10 commits 规模较大；T4 hot-fix 后 review 已经 carry 较多 design adaptation。3e.2 独立 stage:
 
-- 3e.1b 在 batched categorical 接口处保留 `&Sampler` plumbing（不动 Sampler struct），让 3e.1b ship 风险可控
-- 3e.2 单独 land 让 review 聚焦 PRNG ownership 重构，不混业务逻辑
+- 3e.1b 保留 `Sampler.key` Cell 接口 (3e.1a 已有)，3e.1b implementer 不需碰 Sampler struct
+- 3e.2 单独 land 让 review 聚焦 PRNG ownership 重构本身，不混业务逻辑改动
+
+### 2.3 Test-impact preview
+
+`Sampler::with_seed(N)` 仍是 public API。但 PRNG init path 从 "Cell mint from seed on first ensure_key" 改为 "Scheduler 在 admit 时从 seed mint 写入 prng_state[row]"。语义上每 row 用同 seed 输出应该一致 (mlx::random::key(seed) 是 deterministic)，但 fresh-seed 与 lazy-init 时机不同，bit-exact 不保证。Tests 用 `Sampler::with_seed(N)` + 比较 token 序列的，**可能需 adjust 期望值** — 或改 statistical (1000 sample freq) 校验。
 
 ## 3. Non-goals
 
-- **NG1.** Reproducibility bit-exact parity 3e.1b ↔ 3e.2 PRNG 输出（init path 不同，相同 `Sampler.seed` 输出 token 序列可能 differ — 接受）
-- **NG2.** 新的 sampler op / vectorization 工作（3e.2 仅 state ownership 重构）
-- **NG3.** PRNG seed 通过 API endpoint 透传策略变更（保留 `Sampler.seed` 字段）
+- **NG1.** Reproducibility bit-exact parity 3e.1b ↔ 3e.2 PRNG 输出 — init path 时机不同 (admit-time vs lazy)，相同 `Sampler.seed` 输出 token 序列 may differ. 接受 drift; integration tests 改 statistical 校验 (1000 sample freq check) 或 update expected values.
+- **NG2.** 新的 sampler op / vectorization (3e.2 pure ownership refactor)
+- **NG3.** `Sampler.seed` 字段 API 变更 (保留)
+- **NG4.** sample_row_cpu CPU 算法变更 (sort / nucleus / min_p / renorm / CDF 算法都不动)
+- **NG5.** GPU pipeline 重新 batched (T4 hot-fix CPU path 保留，CPU 仍是 sample 路径；3e.2 仅改 PRNG state ownership)
 
-## 4. Architecture sketch
+## 4. Design
 
 ### 4.1 Sampler struct (post-3e.2)
 
 ```rust
-#[derive(Debug, Clone, Copy)]   // ← Copy 是新增的 (Cell 移除后)
+#[derive(Debug, Clone, Copy)]   // ← Copy 新增 (Cell 移除后)
 pub struct Sampler {
     pub temperature: f32,
     pub top_k: Option<i32>,
@@ -70,126 +86,214 @@ pub struct Sampler {
     pub repetition_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
-    pub seed: Option<u64>,
-    // REMOVED: pub(crate) prng_cell: Cell<Option<Array>>
+    pub seed: u64,
+    // REMOVED: key: Cell<Option<Array>>
+}
+
+impl Sampler {
+    pub fn greedy() -> Self { /* unchanged */ }
+    pub fn with_temperature(mut self, t: f32) -> Self { /* unchanged */ }
+    // ... all with_* builders unchanged ...
+    // ensure_key / store_key REMOVED (now Scheduler's responsibility)
 }
 ```
 
-`Sampler` 变成 pure config struct。
+Old manual `Clone` impl (which reset PRNG) deleted — auto-derive `Clone + Copy` 现给出 trivial bit-copy (PRNG state 不在 Sampler 内，无需 reset 逻辑)。
 
 ### 4.2 Scheduler PRNG state
 
 ```rust
 pub struct Scheduler {
     // ... existing fields ...
-    pub(crate) prng_state: Array,  // [b_max, 2] u32, 持续持有整 batch 的 PRNG keys
+    /// Per-row PRNG state. Shape `[b_max, 2]` u32. Row `i` 持 row i 的 mlx
+    /// random key. Init from `Sampler.seed` 在 admit 时，advance 在每次
+    /// configured_pipeline sample step.
+    pub(crate) prng_state: Array,
 }
 
 impl Scheduler {
-    pub fn new(b_max: usize, ...) -> Self {
-        let prng_state = Array::zeros(&[b_max as i32, 2]);  // 占位，admit 时填充
-        // ...
+    pub fn new(b_max: usize, /* ... */) -> Self {
+        let prng_state = mlx::ops::constructors::zeros(
+            &[b_max as i32, 2_i32], mlx::Dtype::Uint32, ()
+        )?;
+        Self { /* ... */, prng_state }
     }
 
-    fn init_row_prng(&mut self, row_idx: usize, seed: Option<u64>) -> Result<()> {
-        let key = match seed {
-            Some(s) => mlx::random::key(s),
-            None => mlx::random::key(default_seed_from_time_xor_idx(row_idx)),
-        };
-        // Write key into self.prng_state[row_idx, :]
-        // (用 mlx scatter 或 slice update)
-        ...
+    /// Initialize row `row_idx`'s PRNG state from `seed`. Called by
+    /// `admit_inner` / `admit_mid_inner` when a new request occupies the slot.
+    fn init_row_prng(&mut self, row_idx: usize, seed: u64) -> Result<()> {
+        let key = mlx::random::key(seed)?;  // [2] u32
+        // Write key into prng_state[row_idx, :]
+        // mlx slice_update API:
+        let key_2d = key.reshape(&[1_i32, 2][..])?;  // [1, 2]
+        self.prng_state = mlx::ops::indexing::slice_update(
+            &self.prng_state,
+            &key_2d,
+            &[row_idx as i32, 0][..],
+            &[row_idx as i32 + 1, 2][..],
+        )?;
+        Ok(())
     }
 }
 ```
 
 - `admit_inner` / `admit_mid_inner` / `prefill_admitted_inner` 入口加 `self.init_row_prng(row_idx, sampler.seed)` call
-- `evict_row` / `evict_all` 时可以选择 zero 出 row 对应 prng_state slot（也可不动 — 反正下次 admit 时会覆盖）
+- `evict_row` / `evict_all` **不动 prng_state** — 下次 admit 会 overwrite (R2)
+- `b_max == 0` edge case: prng_state shape `[0, 2]` (mlx 允许 0-sized dimension)
 
-### 4.3 sample_batch 签名变更
-
-```rust
-pub fn sample_batch(
-    samplers: &[&Sampler],     // config only, no PRNG state
-    logits: &Array,            // [B, vocab]
-    histories: &[&[u32]],
-    prng_state: &mut Array,    // [B, 2] u32 — NEW; in-place advance
-) -> Result<Vec<u32>>
-```
-
-Sample step internal:
+### 4.3 `sample_row_cpu` 签名变更
 
 ```rust
-fn sample_batched_categorical_v2(
-    probs: &Array,
-    prng_state: &mut Array,
-) -> Result<Vec<u32>> {
-    let split = mlx::random::split(prng_state, 2)?;            // [2, B, 2]
-    let advance_keys = split.slice_axis(0, 0, 1)?.squeeze(0)?;  // [B, 2]
-    let sample_keys = split.slice_axis(0, 1, 2)?.squeeze(0)?;   // [B, 2]
-    let tokens = mlx::random::categorical(probs, &sample_keys, -1, ())?;
-    *prng_state = advance_keys;  // in-place advance
-    tokens.to_vec::<u32>()
+fn sample_row_cpu(
+    probs: &[f32],
+    top_p: f32,
+    min_p: f32,
+    prng_state_row: &mut Array,  // [2] u32 — NEW; replaces &Sampler
+) -> Result<u32> {
+    // ... unchanged sort / nucleus / min_p / renorm ...
+
+    // PRNG: split + advance + sample
+    let (next_key, sample_key) = mlx::random::split(prng_state_row)?;
+    let u_arr = mlx::random::uniform()
+        .shape(1_i32)
+        .dtype(mlx::Dtype::Float32)
+        .key(&sample_key)
+        .sample()?;
+    let u: f32 = u_arr.item()?;
+    *prng_state_row = next_key;  // in-place advance
+
+    // ... unchanged CDF walk ...
 }
 ```
 
-无 host-side Cell.take/set；in-place advance。
+`sample_row_cpu` 不再 import `Sampler` — 仅消费 probs + 2 scalars + per-row PRNG state slice.
 
-### 4.4 Scheduler::step / prefill_admitted_inner 调用方式
+### 4.4 `configured_pipeline` 调用方式
 
 ```rust
-let tokens = sample_batch(&row_samplers, &logits_bv, &history_refs, &mut self.prng_state)?;
+fn configured_pipeline(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+    prng_state: &mut Array,  // [B, 2] u32 — passed by Scheduler::step
+) -> Result<Vec<u32>> {
+    // ... unchanged GPU stage (penalties / temp / top_k / softmax) ...
+    let probs_flat: Vec<f32> = probs_gpu.to_vec()?;
+    let top_p_host: Vec<f32> = configs.top_p.to_vec()?;
+    let min_p_host: Vec<f32> = configs.min_p.to_vec()?;
+
+    let mut tokens = Vec::with_capacity(b);
+    for row in 0..b {
+        let row_probs = &probs_flat[row * vocab..(row + 1) * vocab];
+        // Take a slice view of prng_state[row, :] for in-place advance.
+        // Approach: slice → call → write back via slice_update.
+        let mut row_key = mlx::ops::indexing::slice(
+            prng_state,
+            &[row as i32, 0][..],
+            &[row as i32 + 1, 2][..],
+        )?.reshape(&[2_i32][..])?;
+        let token = sample_row_cpu(row_probs, top_p_host[row], min_p_host[row], &mut row_key)?;
+        // Write advanced key back into prng_state[row, :]
+        let row_key_2d = row_key.reshape(&[1_i32, 2][..])?;
+        *prng_state = mlx::ops::indexing::slice_update(
+            prng_state,
+            &row_key_2d,
+            &[row as i32, 0][..],
+            &[row as i32 + 1, 2][..],
+        )?;
+        tokens.push(token);
+    }
+    Ok(tokens)
+}
 ```
 
-Scheduler 持 `prng_state`，每 step 通过 `&mut self.prng_state` 传递 (Stage A collect 消失)。
+Alternative if `slice_update` overhead 在 hot path 测过太重 — collect updated `row_key` into Vec, stack at end. Plan T1 测决。
+
+### 4.5 `sample_batch` 签名变更
+
+```rust
+pub fn sample_batch(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+    prng_state: &mut Array,  // NEW
+) -> Result<Vec<u32>> {
+    // ... validation ...
+    if samplers.iter().all(|s| s.is_greedy()) {
+        // all-greedy fast path UNCHANGED (no PRNG needed for argmax)
+    }
+    configured_pipeline(samplers, logits, histories, prng_state)
+}
+```
+
+`Scheduler::step` / `prefill_admitted_inner` 调用方加 `&mut self.prng_state`。
+
+### 4.6 admit_mid_finalize 处理
+
+`admit_mid_finalize` is B=1 path — 用 single-row PRNG state slice:
+
+```rust
+let mut row_key = mlx::ops::indexing::slice(&self.prng_state, /* row_idx */)?.reshape([2])?;
+let token = sample_row_cpu(probs, top_p, min_p, &mut row_key)?;
+// write back
+```
+
+或者 admit_mid_finalize 可以 short-circuit 用 `Sampler::sample` 现有 B=1 path？但 `Sampler::sample` 现也用 self.key Cell — 3e.2 后该 fn 内部也需改为接受 `&mut Array` PRNG state。Plan T2 决定: 改 `Sampler::sample` 签名 OR 把 admit_mid_finalize 切到 sample_row_cpu。
 
 ## 5. Implementation footprint
 
 | File | Change |
-|---|---|
-| `core/sampler.rs` | 移除 `Cell<Option<Array>>` field；移除 `prng_cell.take()/set()` 内部 helpers；`#[derive(Clone, Copy)]` |
-| `core/scheduler.rs` | `Scheduler::new` 加 `prng_state` init；`admit_inner` / `admit_mid_inner` / `prefill_admitted_inner` 加 `init_row_prng` call；`evict_row` / `evict_all` 可选 zero 出 row prng_state |
-| `core/sampler.rs::sample_batch` | 签名加 `prng_state: &mut Array`；移除 `Sampler.cell` 操作；改 `sample_batched_categorical_v2` |
-| `Scheduler::step` / `prefill_admitted_inner` | sample_batch 调用加 `&mut self.prng_state` 参数 |
-| `Scheduler::admit_mid_finalize` | 仍 B=1，但用 single-row PRNG state slice 替代 `state.sampler.cell` |
-| Tests | 修：所有用 `Sampler::with_seed(N)` 后比较 token 的 unit/integration tests，可能需 update seed value 或改 statistical check (因 init path 变) |
+| --- | --- |
+| `ironmlx/src/core/sampler.rs` | 移除 `Sampler.key: Cell<Option<Array>>` field; 移除 manual `Clone` impl (auto-derive `Clone + Copy`); 移除 `ensure_key` + `store_key` fns; `Sampler::sample` 签名加 `prng_state: &mut Array` 参数; `sample_row_cpu` 签名加 `prng_state_row: &mut Array` 替代 `sampler: &Sampler`; `configured_pipeline` 签名加 `prng_state: &mut Array` |
+| `ironmlx/src/core/scheduler.rs` | `Scheduler` struct 加 `prng_state: Array` field; `Scheduler::new` init `prng_state = zeros([b_max, 2], u32)`; `admit_inner` / `admit_mid_inner` / `prefill_admitted_inner` 加 `self.init_row_prng(row_idx, request.sampler.seed)` call; `Scheduler::step` / `prefill_admitted_inner` 调 `sample_batch(..., &mut self.prng_state)`; `admit_mid_finalize` 调 `Sampler::sample(..., &mut self.prng_state slice)` (or sample_row_cpu) |
+| Tests | 修 expected token values in tests using `Sampler::with_seed(N)` (init time差异)，或改 statistical assertions (1000 sample freq within tolerance)。Check: sample_batch_configured_fallback_no_panic_in_range (no exact tokens); sample_batch_no_op_default_configured_pipeline_in_range; perf gate b1_p2_3e_1b_configured_decode_speedup (timing-only, no expected tokens) |
 
-预估代码改动：~150-250 lines net。
+预估代码改动：~150-300 lines net (sampler.rs ~120 lines, scheduler.rs ~80 lines, tests ~50-100 lines).
 
 ## 6. Acceptance
 
-- ✅ `Sampler` 改为 `#[derive(Clone, Copy)]`，类型系统验证 Send + Sync
-- ✅ 36+ scheduler lib tests no regress (token 输出可能 differ — 改 statistical / functional 测试)
-- ✅ 10+ sample_batch unit tests no regress（含 mixed batch + identity)
-- ✅ 真模型 smoke：3e.1b perf gate 测试在 3e.2 上仍 PASS（per-row median ≤ 250 ms, lockstep ratio ≤ 2×）
-- ✅ sweep_full 17 suites PASS
+- ✅ `Sampler` 改为 `#[derive(Debug, Clone, Copy)]`, types verify Send + Sync via static_assertions
+- ✅ 36+ scheduler lib tests no regress (token outputs may differ — change to statistical or update expected)
+- ✅ 40+ sampler unit tests no regress (mostly behavior-based, statistical or identity check)
+- ✅ Real-model 3e.1b perf gate (`b1_p2_3e_1b_configured_decode_speedup`) post-3e.2 仍 PASS (median ≤ 250 ms, lockstep ratio ≤ 2×)
+- ✅ sweep_full 16+1 suites PASS (3e.1b sweep showed 13/16 with environment issues; 3e.2 sweep target: 16/16 in single run if M1 not under cumulative load)
 - ✅ Hygiene 全绿
-- ✅ 无 backwards-compat 代码（Cell 完全移除，无 Optional wrap）
+- ✅ 无 backwards-compat 代码 (Cell 完全移除，无 Option wrapper)
 
 ## 7. Risks
 
 | R# | Risk | Mitigation |
-|---|---|---|
-| **R1** | 现有 unit tests 依赖 `Sampler::with_seed(N)` → bit-exact 输出 | Update tests 改 statistical (1000 sample freq check) 或 update seed values；记入 plan T-fix |
-| **R2** | `Scheduler.prng_state` evict 时不 zero → 下次 admit 同 row 可能用旧 key | 在 init_row_prng 直接 overwrite — 上一行 evict 不需要 clear |
-| **R3** | `mlx::ops::slice update` (在 prng_state 上局部 write) mlx-rs API 不齐 | 用整个 prng_state 重新 stack 替代 slice update；plan T0 verify |
-| **R4** | `admit_mid_finalize` 单 row PRNG state 与 batch state 不一致 | finalize 把 admitted row 的 PRNG init 作为 finalize 步骤；用 single-row slice from batch state |
+| --- | --- | --- |
+| **R1** | 现有 unit tests 依赖 `Sampler::with_seed(N)` → bit-exact 输出 | Plan T2 update tests: statistical (1000 sample freq) 或 update seed/expected pairs; document drift in test comment |
+| **R2** | `Scheduler.prng_state` evict 时不 zero → 下次 admit 同 row 可能用旧 key | `init_row_prng` 在 admit 时 overwrite — 上一行 evict 不需 clear; R2 minor |
+| **R3** | `mlx::ops::indexing::slice_update` 在 hot path overhead 重 | Plan T1 bench: 1 sample_row_cpu call 增加 N µs slice_update cost? 若太重则 batch end stack-rewrite alternative |
+| **R4** | `admit_mid_finalize` B=1 PRNG state 与 batch state 不一致 | Plan T2 选 path: (a) Sampler::sample 签名也加 prng_state，admit_mid_finalize 传 single-row slice; (b) admit_mid_finalize 切到 sample_row_cpu 减少 code paths |
+| **R5** | `mlx::random::key(seed)` mint cost 在 admit-time 阻塞 admission latency | mlx::random::key 是 cheap (creates [2] u32 from seed via hash); admit overhead 可忽略 |
+| **R6** | Sampler-derived `Copy` traits broke down-stream code 假设 `Sampler` not Copy | Static analysis: scan ironmlx codebase for `*sampler` or `clone()` patterns; auto-Copy is strict superset |
 
-## 8. Plan deferral
+## 8. Implementation plan decomposition (preview)
 
-3e.2 plan 文档 (`docs/superpowers/plans/YYYY-MM-DD-b1-p2-3e-2-prng-key-batching.md`) 等 3e.1b land 后写。原因：
+Plan 文档 (`docs/superpowers/plans/2026-05-18-b1-p2-3e-2-prng-key-centralization.md`) 会拆约 3-4 tasks:
 
-- 3e.1b 实施过程会确定 `sample_batched_categorical` 的实际签名（特别是 PRNG plumbing 的 in/out 形状），3e.2 plan 基于 actual API 写
-- 3e.1b 实施中可能发现 mlx::random API 不完全符合预期（R1/R3），导致 3e.2 实现路径需要调整
-- 3e.1b 实施过程会自然 surface 哪些 helper 需要 share / 哪些可 inline，影响 3e.2 footprint
+- **T0 (optional, ~0.5h)** — `mlx::ops::indexing::slice_update` API verify + 1-row write/read probe + perf micro-bench (R3 mitigation pre-check)
+- **T1 (~0.5d)** — `Sampler` struct shrink: remove `Cell<Option<Array>>` field + `ensure_key`/`store_key` fns + manual `Clone` impl; add `#[derive(Clone, Copy)]`; static_assertions for Send + Sync
+- **T2 (~1d)** — `Scheduler.prng_state` field + `init_row_prng` + `sample_row_cpu` signature change + `configured_pipeline` signature change + `sample_batch` signature change + `Scheduler::step` / `prefill_admitted_inner` / `admit_inner` / `admit_mid_inner` / `prefill_admitted_inner` / `admit_mid_finalize` call site updates
+- **T3 (~0.5d)** — Test updates: fix expected token values (statistical or value adjust); ensure perf gate compatible
+- **T4 (~0.5d)** — perf gate run + sweep_smoke + sweep_full + close-out
 
-Plan-grade detail 包括：task 拆分、step-by-step 代码 diff、unit test list、perf gate、commit 节奏。
+预估总: 2-3 days。
 
 ## 9. Carry-forward (post-3e.2)
 
-3e.2 后 sampler vectorization series 收尾。下一步：进入 Qwen3.5 MoE 路径。
+3e.2 后 sampler vectorization series 收尾。后续路径:
+
+- **Qwen3.5 MoE** — main path forward
+- **(Optional) GPU sample re-enable** — 等 mlx 暴露 `scatter_along_axis` + 优化 categorical Metal kernel cache (T4 hot-fix carry-forward)
+- **(Optional) Sweep_full hygiene** — cooldown / shard for parallel (3e.1b carry-forward)
 
 ---
 
 **Document history:**
-- 2026-05-17 — Initial outline (brainstormed alongside 3e.1b spec, plan-grade detail deferred to post-3e.1b)
+
+- 2026-05-17 — Initial outline (commit 92b5b50, brainstormed alongside 3e.1b spec)
+- 2026-05-18 — Rewritten to plan-grade detail post-3e.1b ship (T4 GPU→CPU handoff adjustment)
