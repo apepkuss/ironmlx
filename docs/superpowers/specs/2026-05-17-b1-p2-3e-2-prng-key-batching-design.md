@@ -273,23 +273,60 @@ let token = sample_row_cpu(probs, top_p, min_p, &mut row_key)?;
 
 ## 8. Implementation plan decomposition (preview)
 
-Plan 文档 (`docs/superpowers/plans/2026-05-18-b1-p2-3e-2-prng-key-centralization.md`) 会拆约 3-4 tasks:
+Plan 文档 (`docs/superpowers/plans/2026-05-18-b1-p2-3e-2-prng-key-centralization.md`) 拆 5 tasks (Boss-approved Option C: add T5 for GPU sample prep):
 
-- **T0 (optional, ~0.5h)** — `mlx::ops::indexing::slice_update` API verify + 1-row write/read probe + perf micro-bench (R3 mitigation pre-check)
+- **T0 (~0.5h)** — `mlx::ops::indexing::slice_update` API verify + 1-row write/read probe + perf micro-bench (R3 mitigation pre-check)
 - **T1 (~0.5d)** — `Sampler` struct shrink: remove `Cell<Option<Array>>` field + `ensure_key`/`store_key` fns + manual `Clone` impl; add `#[derive(Clone, Copy)]`; static_assertions for Send + Sync
-- **T2 (~1d)** — `Scheduler.prng_state` field + `init_row_prng` + `sample_row_cpu` signature change + `configured_pipeline` signature change + `sample_batch` signature change + `Scheduler::step` / `prefill_admitted_inner` / `admit_inner` / `admit_mid_inner` / `prefill_admitted_inner` / `admit_mid_finalize` call site updates
+- **T2 (~1d)** — `Scheduler.prng_state` field + `init_row_prng` + `sample_row_cpu` signature change + `configured_pipeline` signature change + `sample_batch` signature change + `Scheduler::step` / `prefill_admitted_inner` / `admit_inner` / `admit_mid_inner` / `admit_mid_finalize` call site updates
 - **T3 (~0.5d)** — Test updates: fix expected token values (statistical or value adjust); ensure perf gate compatible
 - **T4 (~0.5d)** — perf gate run + sweep_smoke + sweep_full + close-out
+- **T5 (~0.5d)** — `put_along_axis` exposure in cxx-mlx (FFI + Rust safe wrapper + unit test) + refactor `apply_top_p_batched` (`#[cfg(test)]` GPU impl) to use `put_along_axis` instead of inverse-permutation workaround. **NOT** re-enable GPU production path (configured_pipeline stays CPU).
 
-预估总: 2-3 days。
+预估总: 2.5-3.5 days。
+
+### 8.1 T5 — `put_along_axis` exposure scope (Boss Option C, 2026-05-18)
+
+**Goal**: Prepare 80% of the work to re-enable GPU sample path in a future 3e.3. Expose the missing op (`put_along_axis`) so that GPU `apply_top_p_batched` can scatter-back without the inverse-permutation workaround. Keep production CPU path unchanged.
+
+**C++ MLX baseline confirmation**:
+- `/Volumes/Dev/mlx/mlx/ops.h:1089` exposes `MLX_API array put_along_axis(array a, array indices, int axis, StreamOrDevice s = {});`
+- `/Volumes/Dev/mlx/mlx/ops.cpp:3551` is the impl
+- Also available: `scatter_add_axis` (additive variant)
+
+**cxx-mlx footprint** (T5 work):
+
+| File | Change |
+| --- | --- |
+| `cxx-mlx/mlx-sys/include/mlx_sys/ops.hpp` (or equivalent FFI header) | Add `put_along_axis` cxx bridge declaration |
+| `cxx-mlx/mlx-sys/src/ops.rs.cc` (or equivalent FFI impl) | Add C++ wrapper calling `mlx::put_along_axis` |
+| `cxx-mlx/mlx-sys/src/lib.rs` (or where cxx bridge is defined) | Add `fn put_along_axis(...)` to cxx bridge |
+| `cxx-mlx/mlx/src/ops/indexing.rs` | Add safe Rust wrapper `pub fn put_along_axis(a: &Array, indices: &Array, values: &Array, axis: i32) -> Result<Array>` mirror `take_along_axis` style + unit test |
+| `cxx-mlx/ironmlx/src/core/sampler.rs::apply_top_p_batched` (`#[cfg(test)]` block, line ~672+) | Refactor to use `put_along_axis` for scatter-back, replacing `argsort(sort_idx_desc) → inv_perm + take_along_axis` workaround |
+| `cxx-mlx/ironmlx/src/core/sampler.rs::mod tests` | Existing `apply_top_p_batched` test should still PASS unchanged (functional output identical) |
+
+**T5 acceptance**:
+- ✅ `put_along_axis` exposed in cxx-mlx Rust API with unit test (in mlx crate's own test suite)
+- ✅ `apply_top_p_batched` (cfg(test) impl) uses `put_along_axis`; T2 era unit test for it still PASS
+- ✅ Hygiene 全绿
+- ✅ Production path unchanged (CPU sample_row_cpu); perf gate identical to T1-T4 result
+
+**Out of T5 scope (defer to future 3e.3)**:
+- GPU production path re-enable (configured_pipeline 仍 CPU)
+- Investigate `mlx::random::categorical` Metal kernel JIT cost
+- End-to-end GPU pipeline re-bench
+
+T5 leaves the codebase ready for 3e.3 to swap CPU → GPU when categorical kernel issue is resolved.
 
 ## 9. Carry-forward (post-3e.2)
 
-3e.2 后 sampler vectorization series 收尾。后续路径:
+3e.2 后 sampler series 主路径完成。后续:
 
 - **Qwen3.5 MoE** — main path forward
-- **(Optional) GPU sample re-enable** — 等 mlx 暴露 `scatter_along_axis` + 优化 categorical Metal kernel cache (T4 hot-fix carry-forward)
-- **(Optional) Sweep_full hygiene** — cooldown / shard for parallel (3e.1b carry-forward)
+- **(Optional) 3e.3 GPU sample re-enable experiment** — uses T5-exposed `put_along_axis`; deep-dive categorical Metal kernel cache; conditional on producing < 80ms GPU path. Sub-tasks:
+  - Re-bench GPU `apply_top_p_batched` with `put_along_axis` (isolated)
+  - Trace mlx Metal kernel cache for `categorical([B, vocab])` cost
+  - If both yield significant wins → re-enable GPU production path in configured_pipeline
+- **(Optional) Sweep_full hygiene** — cooldown / shard for parallel runs (3e.1b carry-forward)
 
 ---
 
