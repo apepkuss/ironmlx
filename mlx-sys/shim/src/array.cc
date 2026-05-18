@@ -687,6 +687,14 @@ std::unique_ptr<MlxArray> array_take_along_axis(
   return std::make_unique<MlxArray>(mlx::core::take_along_axis(a, indices, axis, target));
 }
 
+std::unique_ptr<MlxArray> array_put_along_axis(
+    const MlxArray& a, const MlxArray& indices, const MlxArray& values, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::put_along_axis(a, indices, values, axis, target));
+}
+
 std::unique_ptr<MlxArray> array_slice_strided(
     const MlxArray& a,
     rust::Slice<const int32_t> start,

@@ -678,10 +678,18 @@ fn apply_top_p_batched(probs: &Array, top_p_per_row: &Array) -> Result<Array> {
     let zero_f32: Array = (&[0.0_f32][..], ()).try_into()?;
     let sorted_masked = indexing::where_(&mask_sorted, &sorted_probs, &zero_f32)?;
 
-    // Scatter back to vocab order using inverse permutation:
-    //   inv_perm = argsort(sort_idx_desc) — verified in probe_argsort_inverse_permutation_identity
-    let inv_perm = sort::argsort(&sort_idx_desc, -1)?;
-    Ok(indexing::take_along_axis(&sorted_masked, &inv_perm, -1)?)
+    // Scatter sorted_masked back to vocab order via put_along_axis.
+    // out[sort_idx_desc[i, j]] = sorted_masked[i, j]
+    // Replaces the double-argsort inverse-permutation workaround from 3e.1b T4.
+    let zeros: Array = (&vec![0_f32; probs.size()][..], probs.shape().as_slice())
+        .try_into()
+        .map_err(mlx::Error::from)?;
+    Ok(mlx::ops::indexing::put_along_axis(
+        &zeros,
+        &sort_idx_desc,
+        &sorted_masked,
+        -1,
+    )?)
 }
 
 /// min_p floor: keep probs >= min_p[i] * max_prob[i]. Sets others to 0.

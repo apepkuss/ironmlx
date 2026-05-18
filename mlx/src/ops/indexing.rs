@@ -101,6 +101,43 @@ pub fn take_along_axis_on(
     Ok(Array::from_inner(inner))
 }
 
+/// Put `values` into `a` along `axis` at positions given by `indices`.
+/// Returns a new array (`a` is not mutated — MLX is copy-on-write).
+///
+/// `indices` must have the same shape as `values`, and both must broadcast
+/// with `a` along all axes except `axis`.
+///
+/// Equivalent to NumPy's `np.put_along_axis(a, indices, values, axis)`.
+/// Inverse of [`take_along_axis`]: `put_along_axis(zeros, sort_idx, take_along_axis(src, sort_idx, ax), ax) == src`.
+///
+/// Wraps `mlx::core::put_along_axis` (Apple C++ MLX `ops.h:1089`).
+pub fn put_along_axis(a: &Array, indices: &Array, values: &Array, axis: i32) -> Result<Array> {
+    put_along_axis_on(a, indices, values, axis, ())
+}
+
+/// Stream-targeted variant of [`put_along_axis`].
+pub fn put_along_axis_on(
+    a: &Array,
+    indices: &Array,
+    values: &Array,
+    axis: i32,
+    target: impl Into<crate::StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::array::ffi::array_put_along_axis(
+        a.as_inner(),
+        indices.as_inner(),
+        values.as_inner(),
+        axis,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 /// Slice with stride 1 along every dimension. `start` and `stop` must each have
 /// length equal to `a.ndim()`. Negative indices are supported (per MLX rules).
 pub fn slice<S1: IntoShape, S2: IntoShape>(a: &Array, start: S1, stop: S2) -> Result<Array> {
@@ -341,5 +378,42 @@ mod tests {
                 0.0, 0.0, 0.0,
             ]
         );
+    }
+
+    // put_along_axis: identity scatter (indices are sorted 0..N along axis=-1,
+    // so put(zeros, idx, values, -1) == values).
+    #[test]
+    fn put_along_axis_round_trip() {
+        let base: Array = (&[0_f32; 6][..], &[2_i32, 3_i32][..]).try_into().unwrap();
+        let idx: Array = (&[0_u32, 1, 2, 0, 1, 2][..], &[2_i32, 3_i32][..])
+            .try_into()
+            .unwrap();
+        let values: Array = (&[1_f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[2_i32, 3_i32][..])
+            .try_into()
+            .unwrap();
+        let out = put_along_axis(&base, &idx, &values, -1).expect("put");
+        let v: Vec<f32> = out.to_vec().expect("to_vec");
+        assert_eq!(v, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    // put_along_axis is the inverse of take_along_axis:
+    // put(zeros, sort_idx, take(src, sort_idx, ax), ax) == src.
+    #[test]
+    fn put_along_axis_inverse_of_take() {
+        let probs: Array = (
+            &[0.5_f32, 0.05, 0.15, 0.3, 0.2, 0.15, 0.1, 0.05][..],
+            &[2_i32, 4_i32][..],
+        )
+            .try_into()
+            .unwrap();
+        let sort_idx = crate::ops::sort::argsort(&probs, -1).expect("argsort");
+        let sorted = take_along_axis(&probs, &sort_idx, -1).expect("take");
+        let zeros: Array = (&[0_f32; 8][..], &[2_i32, 4_i32][..]).try_into().unwrap();
+        let restored = put_along_axis(&zeros, &sort_idx, &sorted, -1).expect("put");
+        let got: Vec<f32> = restored.to_vec().expect("to_vec");
+        let orig: Vec<f32> = probs.to_vec().expect("to_vec orig");
+        for (g, o) in got.iter().zip(orig.iter()) {
+            assert!((g - o).abs() < 1e-5, "got {g}, orig {o}");
+        }
     }
 }

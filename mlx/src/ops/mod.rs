@@ -71,8 +71,9 @@ pub use constructors::{
 pub use conv::{conv1d, conv1d_on};
 pub use cumulative::{cumprod, cumprod_on, cumsum, cumsum_on};
 pub use indexing::{
-    gather, gather_on, slice, slice_on, slice_strided, slice_strided_on, slice_update,
-    slice_update_on, take, take_along_axis, take_along_axis_on, take_on, where_, where_on,
+    gather, gather_on, put_along_axis, put_along_axis_on, slice, slice_on, slice_strided,
+    slice_strided_on, slice_update, slice_update_on, take, take_along_axis, take_along_axis_on,
+    take_on, where_, where_on,
 };
 pub use matmul::{
     addmm, addmm_on, block_masked_matmul, block_masked_matmul_on, gather_matmul, gather_matmul_on,

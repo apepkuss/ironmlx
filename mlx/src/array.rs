@@ -727,6 +727,23 @@ impl Array {
         crate::ops::indexing::take_along_axis_on(self, indices, axis, target)
     }
 
+    /// Scatter `values` into `self` along `axis` at positions given by `indices`.
+    /// Returns a new array. See [`crate::ops::put_along_axis`].
+    pub fn put_along_axis(&self, indices: &Array, values: &Array, axis: i32) -> Result<Array> {
+        crate::ops::put_along_axis(self, indices, values, axis)
+    }
+
+    /// Stream-targeted variant of [`Array::put_along_axis`].
+    pub fn put_along_axis_on(
+        &self,
+        indices: &Array,
+        values: &Array,
+        axis: i32,
+        target: impl Into<crate::StreamOrDevice>,
+    ) -> Result<Array> {
+        crate::ops::indexing::put_along_axis_on(self, indices, values, axis, target)
+    }
+
     /// Slice with stride 1. See [`crate::ops::slice`].
     pub fn slice<S1: IntoShape, S2: IntoShape>(&self, start: S1, stop: S2) -> Result<Array> {
         crate::ops::slice(self, start, stop)
