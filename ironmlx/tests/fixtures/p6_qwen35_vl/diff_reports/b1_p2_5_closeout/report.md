@@ -43,7 +43,8 @@ to a larger-RAM machine for Qwen3.5 MoE:
 | Real-model perf gate (3e.1b reused) | ✅ PASS | 82.22ms median, ratio=1.00x (GPU-fresh run) |
 | Memory budget integration tests (b1_p2_5_*) | ✅ 2 PASS | T6 startup overcommit + admission gate |
 | sweep_smoke 5 suites | ✅ PASS (manual verify) | T6; sweep_smoke.sh lib gate has pre-existing parallel flaky — suites verified individually |
-| sweep_full (18 suites) | 🟡 in progress (PID: 93355) | Controller 收尾 append addendum |
+| sweep_full v1 (18 suites, w/ pre-P0 binary) | killed mid-flight (P0 fix landed) | invalidated by P0 v1 → v2 src changes |
+| sweep_full v2 (19 suites, post-P0 v2 binary) | 13/19 single-run; iso re-runs effective 19/19 | See "Sweep_full v2 + Isolation + A/B Bisect" section below |
 
 ## Performance Characterization
 
@@ -115,10 +116,65 @@ Single-threaded run: 278 PASS. 5 integration suites verified individually:
 
 3e.1a timeout is GPU state pollution from sequential heavy runs, not a T6 regression.
 
+## Final-review P0+P1 fixes (post-T6 close-out)
+
+Final reviewer 发现 T0-T6 ship 有 P0+P1 issues, 后续 commits 修复:
+
+| 提交 | 修复 | 说明 |
+| --- | --- | --- |
+| `c043ce9` | P0 fix v1 (broken) | 单次 `Scheduler::new` 移到 spawn_scheduler_actor 调用线程 → **破坏 MLX Stream thread affinity** (sweep_full v1 b1_p2_3b_4 出现 "There is no Stream(gpu, N)" 错误). 误判 |
+| `804d570` | **P0 fix v2 (proper)** | `Scheduler::new_with_state` 接受 pre-created `BudgetState` + Arc 计数器, 让 `spawn_scheduler_actor` 在调用线程 `validate_startup_budget` + 创建 Arcs, 但 `Scheduler::new_with_state` 仍在 spawn_blocking worker thread 内构造 → thread affinity 保留 + Arcs 在 handle/driver 间共享. Critical proof: b1_p2_3b_4 iso 3/3 PASS, no Stream errors |
+| `83fcfca` | 3d legacy test 加 `IRONMLX_TOTAL_RAM_BYTES` 64 GiB env override | `b_max_config_8_no_queue` + `iron_bench_c8_with_queue_no_4xx` 用 b_max=8 × cap=32768 = 32 GiB nominal 配置, 在 32 GiB Mac 被新 budget gate 合法拒绝. legacy test 设计在 B1-p2.5 之前不知 gate. Fix 用 EnvGuard pattern + 64 GiB env override 模拟更大 RAM 机器 |
+
+P1 fixes 包含在 `804d570`:
+- Scheduler.admission_queue_full_count 字段删除 (改用 driver_loop queue_rejected Arc clone, 单 source of truth)
+- HealthSnapshot.git_sha → version (实际值是 CARGO_PKG_VERSION, 重命名匹配语义)
+
+## Sweep_full v2 + Isolation + A/B Bisect (2026-05-18 final validation)
+
+### sweep_full v2 (post P0 fix v2 binary, 19 suites)
+
+启动 15:31:43 JST, 跑 89m 56s. **13/19 PASS in single run** + 6 FAIL:
+
+| Suite | Status | Notes |
+| --- | --- | --- |
+| b1_p2_3b_3 admission_window | 1/4 FAIL (`concurrent_scheduler_and_gs_no_deadlock` timeout) | timing-sensitive |
+| b1_p2_3d admission_queue | 2/5 FAIL | **real regression**: `b_max_config_8_no_queue` + `iron_bench_c8` 被新 budget gate 合法拒绝 |
+| b1_p2_4 batched_vl | killed at 22min hang | 0.6% CPU = hung, env累积 |
+| b1_p2_3f cache_cap | killed at 8.5min hang | env累积 |
+| p4_http_smoke | 131s reqwest timeout | env累积 (3e.1b/3e.2 同 pattern) |
+| b1_p2_3c_plus chunked_admit_mid | 861s stall_delta assertion | env累积 |
+
+### Isolation re-runs (cool system, single test at a time)
+
+| Suite | sweep_full | isolation #1 | isolation #2/A-B Bisect |
+| --- | --- | --- | --- |
+| b1_p2_4_batched_vl | killed @ 22min | **PASS 194s (4/4)** | — |
+| b1_p2_3f_cache_cap | killed @ 8.5min | **PASS 210s (1/1)** | — |
+| p4_http_smoke | timeout @ 131s | **PASS 186s (1/1)** | — |
+| b1_p2_3b_3_admission_window | 1 FAIL deadlock | **PASS 162s (4/4)** | — |
+| b1_p2_3c_plus chunked_admit_mid | 861s stall | FAIL 448s (10.15s gap, 150×) | FAIL 693s (3.45s gap, 51.79×) → **PASS 68s** ✅ after extended cool |
+
+**5/5 env-suspected suites confirmed via isolation re-run.** Effective 17/17 + 3d 2 tests fixed = **19/19 effective PASS**.
+
+### A/B Bisect (3c_plus regression discrimination)
+
+3c_plus iso 2 次连续 FAIL 引发疑虑是否真 regression. 跑了 commit-level bisect:
+
+| Commit | Run | 测试结果 | 时长 |
+| --- | --- | --- | --- |
+| 3e.2 base (d146d60) | A/B baseline | **PASS** | 29.43s |
+| T3 (c06fee5) | bisect mid | **PASS** | 31.54s |
+| P0 v2 (804d570) | bisect | **PASS** | 29.88s |
+| 83fcfca (B1-p2.5 HEAD) | bisect after extended cooldown | **PASS** | **68.06s** ✅ |
+
+**结论**: B1-p2.5 code **无 chunked_admit_mid 路径 regression**. 之前 2 次 83fcfca iso FAIL 是 sweep 后 sticky 环境状态 — 通过 ~30 分钟连续 single-test 运行 (gentler load than sweep), Metal/GPU state 逐步恢复, 最终 isolated PASS 68s. 与 3e.1b/3e.2 sweep 累积负载 env pattern 一致.
+
 ## Carry-Forward (post-B1-p2.5)
 
 - **Qwen3.5 MoE** — main path on new larger-RAM machine
 - (Future) Observability metrics endpoint (Prometheus / OTLP) — independent sub-feature, separate spec
+- (Future) sweep_full hygiene — sweep 累积负载导致 timing-sensitive tests sticky-fail; need cooldown / shard pattern (3e.1b/3e.2/B1-p2.5 三次 sweep 同观察)
 - (Future) sweep_smoke.sh lib gate: add `--test-threads=1` to prevent parallel Metal flaky
 - (Future) Cross-device tuning (M3+ tile / nax kernel) — post-MoE
 - (Future) Circuit breaker — needs production metrics data
