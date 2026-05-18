@@ -4,6 +4,7 @@ pub mod cache;
 pub mod chat_template;
 pub mod generate;
 pub mod loader;
+pub mod memory_budget;
 pub mod sampler;
 pub mod scheduler;
 pub mod server;
