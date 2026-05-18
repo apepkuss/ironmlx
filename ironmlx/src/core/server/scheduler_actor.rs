@@ -145,16 +145,29 @@ pub fn spawn_scheduler_actor(
     effective_cap_max: usize,
     meta: crate::core::memory_budget::ModelMeta,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
-    // Single Scheduler::new — both budget validation + driver_loop use this
-    // instance. Arc atomics are cloned before ownership moves into the task.
-    // B1-p2.5 P0 fix: previously two Scheduler instances were created; the
-    // handle held Arc clones from the dropped #1 while driver_loop mutated #2.
-    let scheduler = Scheduler::new(b_max, effective_cap_max, meta)?;
+    // ── Step 1: Budget validation on the calling thread. ──────────────────
+    // No Scheduler / Array is allocated here — just pure arithmetic + RAM
+    // check. Returns Err early if the budget is too tight.
+    let budget_state =
+        crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?;
 
-    // Clone health atomics BEFORE moving scheduler into driver_loop.
-    let memory_budget_exceeded_count = scheduler.memory_budget_exceeded_count.clone();
-    let kv_cache_active_bytes = scheduler.budget_state.shared_active();
-    let kv_cache_soft_limit_bytes = scheduler.budget_state.soft_limit();
+    // ── Step 2: Shared atomics created on the calling thread. ─────────────
+    // Cloned for both the handle (returned to caller) and the driver thread.
+    // This is the single source of truth — handle + driver share the same
+    // Arc instances, so /healthz reads the live values the driver updates.
+    //
+    // B1-p2.5 P0 fix v2: the previous fix (c043ce9) created Scheduler::new
+    // on the calling thread then moved it into spawn_blocking. That caused
+    // "MLX runtime error: There is no Stream(gpu, N) in current thread"
+    // because Array::zeros (prng_state) was bound to the calling thread's
+    // Metal Stream. This fix keeps budget validation + Arc creation on the
+    // calling thread while deferring Scheduler::new_with_state (and thus
+    // Array allocation) to the spawn_blocking worker thread.
+    let memory_budget_exceeded_count = Arc::new(AtomicU64::new(0));
+
+    // Healthz observables cloned from BudgetState (Arc<AtomicUsize> inside).
+    let kv_cache_active_bytes = budget_state.shared_active();
+    let kv_cache_soft_limit_bytes = budget_state.soft_limit();
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let admit_count = Arc::new(AtomicU64::new(0));
@@ -166,6 +179,9 @@ pub fn spawn_scheduler_actor(
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
 
+    // Clone Arcs for the driver thread.
+    let driver_budget_state = budget_state.clone();
+    let driver_mb_exceeded = memory_budget_exceeded_count.clone();
     let admit_count_for_task = admit_count.clone();
     let batch_count_for_task = batch_count.clone();
     let saturate_triggered_for_task = saturate_triggered.clone();
@@ -173,7 +189,19 @@ pub fn spawn_scheduler_actor(
     let queue_rejected_for_task = queue_rejected.clone();
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
+
+    // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
+    //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
+    //    worker thread's Metal Stream. Thread affinity preserved.
     tokio::task::spawn_blocking(move || {
+        let scheduler = Scheduler::new_with_state(
+            b_max,
+            effective_cap_max,
+            driver_budget_state,
+            driver_mb_exceeded,
+            meta,
+        )
+        .expect("budget already validated above; new_with_state must not fail");
         driver_loop(
             scheduler,
             model,
@@ -189,6 +217,7 @@ pub fn spawn_scheduler_actor(
             b_queued_for_task,
         );
     });
+
     Ok(SchedulerActorHandle {
         cmd_tx,
         admit_count,

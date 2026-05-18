@@ -347,6 +347,12 @@ impl Scheduler {
     /// Validates startup memory budget via `validate_startup_budget`; returns
     /// `Err(MemoryBudgetError)` if `b_max × effective_cap_max × per_token_bytes`
     /// exceeds available system RAM. (B1-p2.5)
+    ///
+    /// **Thread affinity**: `Array::zeros` for `prng_state` is allocated on
+    /// the current thread's Metal Stream. Call this on the thread that will
+    /// own the Scheduler. For actor spawning, prefer [`Scheduler::new_with_state`]
+    /// so budget validation can happen on the calling thread while Array
+    /// allocation happens on the worker thread.
     pub fn new(
         b_max: usize,
         effective_cap_max: usize,
@@ -354,12 +360,40 @@ impl Scheduler {
     ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
         let budget_state =
             crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?;
+        let memory_budget_exceeded_count =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        Self::new_with_state(
+            b_max,
+            effective_cap_max,
+            budget_state,
+            memory_budget_exceeded_count,
+            meta,
+        )
+    }
+
+    /// Variant that accepts pre-created [`BudgetState`] and
+    /// `memory_budget_exceeded_count` Arc. Used by [`spawn_scheduler_actor`]
+    /// for thread-affinity-correct construction: budget validation happens on
+    /// the calling thread; Array allocation (prng_state) happens inside
+    /// `spawn_blocking` on the worker thread that will own the Scheduler.
+    ///
+    /// Callers are responsible for ensuring `budget_state` was produced by
+    /// [`validate_startup_budget`] with consistent `b_max` / `effective_cap_max`.
+    pub fn new_with_state(
+        b_max: usize,
+        effective_cap_max: usize,
+        budget_state: crate::core::memory_budget::BudgetState,
+        memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        meta: crate::core::memory_budget::ModelMeta,
+    ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
         let mut slots = Vec::with_capacity(b_max);
         for _ in 0..b_max {
             slots.push(None);
         }
         // Initialize prng_state to zeros [b_max, 2] u32. Each slot's row is
         // seeded via init_row_prng on admission.
+        // IMPORTANT: Array::zeros binds to the current thread's Metal Stream.
+        // This method must be called on the thread that will drive the Scheduler.
         let prng_state =
             Array::zeros(&[b_max as i32, 2_i32][..], Dtype::Uint32).expect("prng_state zeros");
         Ok(Self {
@@ -373,7 +407,7 @@ impl Scheduler {
             prng_state,
             budget_state,
             meta,
-            memory_budget_exceeded_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            memory_budget_exceeded_count,
         })
     }
 
