@@ -50,7 +50,7 @@ pub struct HealthSnapshot {
     pub model: ModelInfo,
     pub scheduler: SchedulerInfo,
     pub memory: MemoryInfo,
-    pub git_sha: &'static str,
+    pub version: &'static str,
 }
 
 pub struct SchedulerHealthCollector {
@@ -107,7 +107,7 @@ impl SchedulerHealthCollector {
                 kv_cache_active_bytes: kv_active,
                 kv_cache_soft_limit_bytes: self.kv_cache_soft_limit_bytes,
             },
-            git_sha: env!("CARGO_PKG_VERSION"),
+            version: env!("CARGO_PKG_VERSION"),
         }
     }
 }

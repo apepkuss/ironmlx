@@ -108,7 +108,9 @@ pub struct SchedulerActorHandle {
     /// Updated by driver_loop tail on every rolling iteration.
     pub b_queued: Arc<AtomicU64>,
     /// Monotonic count of admits rejected due to admission queue full.
-    /// Cloned from Scheduler::admission_queue_full_count.
+    /// Aliased from `queue_rejected` — single source of truth in driver_loop.
+    /// P1.1: Scheduler.admission_queue_full_count field removed (no fetch_add
+    /// caller); health collector now reads from this Arc directly. B1-p2.5.
     pub admission_queue_full_count: Arc<AtomicU64>,
     /// Monotonic count of admits rejected due to memory budget exceeded.
     /// Cloned from Scheduler::memory_budget_exceeded_count.
@@ -143,12 +145,16 @@ pub fn spawn_scheduler_actor(
     effective_cap_max: usize,
     meta: crate::core::memory_budget::ModelMeta,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
-    // Validate budget and extract health atomics before spawning. B1-p2.5.
-    let budget_check = Scheduler::new(b_max, effective_cap_max, meta)?;
-    let admission_queue_full_count = budget_check.admission_queue_full_count.clone();
-    let memory_budget_exceeded_count = budget_check.memory_budget_exceeded_count.clone();
-    let kv_cache_active_bytes = budget_check.budget_state.shared_active();
-    let kv_cache_soft_limit_bytes = budget_check.budget_state.soft_limit();
+    // Single Scheduler::new — both budget validation + driver_loop use this
+    // instance. Arc atomics are cloned before ownership moves into the task.
+    // B1-p2.5 P0 fix: previously two Scheduler instances were created; the
+    // handle held Arc clones from the dropped #1 while driver_loop mutated #2.
+    let scheduler = Scheduler::new(b_max, effective_cap_max, meta)?;
+
+    // Clone health atomics BEFORE moving scheduler into driver_loop.
+    let memory_budget_exceeded_count = scheduler.memory_budget_exceeded_count.clone();
+    let kv_cache_active_bytes = scheduler.budget_state.shared_active();
+    let kv_cache_soft_limit_bytes = scheduler.budget_state.soft_limit();
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let admit_count = Arc::new(AtomicU64::new(0));
@@ -167,15 +173,12 @@ pub fn spawn_scheduler_actor(
     let queue_rejected_for_task = queue_rejected.clone();
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
-    let effective_cap_max_for_task = effective_cap_max;
     tokio::task::spawn_blocking(move || {
         driver_loop(
+            scheduler,
             model,
-            b_max,
             admission_deadline,
             admission_queue_max,
-            effective_cap_max_for_task,
-            meta,
             cmd_rx,
             admit_count_for_task,
             batch_count_for_task,
@@ -192,10 +195,12 @@ pub fn spawn_scheduler_actor(
         batch_count,
         saturate_triggered,
         queue_depth_peak,
-        queue_rejected,
+        queue_rejected: queue_rejected.clone(),
         b_active,
         b_queued,
-        admission_queue_full_count,
+        // P1.1: alias admission_queue_full_count to queue_rejected Arc —
+        // driver_loop is the single fetch_add site; Scheduler field removed.
+        admission_queue_full_count: queue_rejected,
         memory_budget_exceeded_count,
         kv_cache_active_bytes,
         kv_cache_soft_limit_bytes,
@@ -204,12 +209,10 @@ pub fn spawn_scheduler_actor(
 
 #[allow(clippy::too_many_arguments)]
 fn driver_loop(
+    scheduler: Scheduler,
     model: Arc<Mutex<Qwen35Model>>,
-    b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
-    effective_cap_max: usize,
-    meta: crate::core::memory_budget::ModelMeta,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
     admit_count: Arc<AtomicU64>,
     batch_count: Arc<AtomicU64>,
@@ -219,9 +222,11 @@ fn driver_loop(
     b_active: Arc<AtomicU64>,
     b_queued: Arc<AtomicU64>,
 ) {
-    // Budget already validated in spawn_scheduler_actor; expect("...") is safe.
-    let mut sched = Scheduler::new(b_max, effective_cap_max, meta)
-        .expect("Scheduler::new: budget already validated in spawn_scheduler_actor");
+    // Receive Scheduler ownership from spawn_scheduler_actor (single instance).
+    // P0 fix: previously driver_loop called Scheduler::new a second time,
+    // creating fresh Arc atomics disconnected from the handle. B1-p2.5.
+    let mut sched = scheduler;
+    let b_max = sched.b_max();
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();

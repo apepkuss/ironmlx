@@ -320,9 +320,6 @@ pub struct Scheduler {
     /// Snapshot of the model's memory-budget metadata, used to compute
     /// per-request KV byte cost in admit. (B1-p2.5)
     pub(crate) meta: crate::core::memory_budget::ModelMeta,
-    /// Count of admits rejected by the admission queue (full). Wired in T3
-    /// for /healthz; declared here so T1 can initialise it. (B1-p2.5)
-    pub(crate) admission_queue_full_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Count of admits rejected by the memory budget gate. Used by T3
     /// /healthz. (B1-p2.5)
     pub(crate) memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -376,7 +373,6 @@ impl Scheduler {
             prng_state,
             budget_state,
             meta,
-            admission_queue_full_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             memory_budget_exceeded_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
