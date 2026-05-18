@@ -13,12 +13,42 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use mlx::{Array, Dtype};
+use thiserror::Error;
 use tokio::sync::mpsc;
+
+use crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
+
+/// Typed scheduler-side errors that need HTTP-level discrimination.
+///
+/// Anyhow remains the default error type for internal Scheduler paths
+/// (out-of-memory, prompt parsing, MLX failures, etc.). `SchedulerError`
+/// only enumerates errors the HTTP server needs to map to non-400
+/// responses. Wrap into anyhow via `anyhow::Error::new(SchedulerError::...)`
+/// at the emit site; HTTP handlers downcast with
+/// `err.downcast_ref::<SchedulerError>()`.
+///
+/// Replaces the pre-3e.3 string-match `err.to_string().contains("admission
+/// queue full")` pattern (spec §9 R3 acknowledged-fragile).
+#[derive(Error, Debug)]
+pub enum SchedulerError {
+    /// Admission queue rejected a request because the queue was already
+    /// at `capacity`. Maps to HTTP 503 + Retry-After.
+    #[error("admission queue full: capacity={capacity} reached")]
+    QueueFull { capacity: usize },
+
+    /// Request's `prompt_len + max_new_tokens` exceeds the server's
+    /// effective cap_max (the smaller of `--max-cache-cap` CLI flag and
+    /// the model's `max_position_embeddings`). Maps to HTTP 413
+    /// Payload Too Large. B1-p2.3f.
+    #[error("request too large: needs cap={needed} but server max_cache_cap={max}")]
+    RequestTooLarge { needed: usize, max: usize },
+}
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
-    build_per_row_decode_mask, build_position_ids_batched, build_position_ids_vl_batched,
-    slice_logits_row, GenerateRequest,
+    build_per_row_decode_mask, build_position_ids, build_position_ids_batched,
+    build_position_ids_vl, build_position_ids_vl_batched, count_image_pad, slice_logits_row,
+    slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateRequest,
 };
 use crate::core::sampler::Sampler;
 use crate::models::qwen3_5::Qwen35Model;
@@ -73,6 +103,98 @@ pub struct StepEvent {
     pub finish_reason: Option<&'static str>,
 }
 
+/// State shared across the three `admit_mid_*` calls that make up a
+/// chunked mid-batch admit (B1-p2.3c+). Built by [`Scheduler::admit_mid_begin`],
+/// mutated by [`Scheduler::admit_mid_chunk`] calls, consumed by
+/// [`Scheduler::admit_mid_finalize`]. The caller
+/// (`SchedulerActor::driver_loop`'s `handle_admit_mid_chunked`) owns this
+/// between calls and interleaves `Scheduler::step` between chunks so
+/// active rows continue emitting tokens during a long-prompt mid-batch
+/// admit.
+///
+/// All fields except `request_id` are `pub(crate)` so the chunk loop
+/// in `scheduler.rs` itself can read/write them; HTTP / actor code
+/// treats the handle as opaque (only inspects `request_id`).
+#[doc(hidden)]
+pub struct AdmitMidHandle {
+    /// Slot the admit reserved at `admit_mid_begin`.
+    pub request_id: RequestId,
+    pub(crate) row_idx: usize,
+    /// Full prompt token ids cloned from `RequestState` so we can index
+    /// per-chunk without re-borrowing slot state across calls.
+    pub(crate) prompt_ids: Vec<u32>,
+    pub(crate) prompt_len: i32,
+    /// Per-chunk max token count; equals `req.prefill_chunk_size.max(1)`
+    /// at construction, unless the VL R6 fallback forces single-chunk
+    /// (image_pad straddles a chunk boundary — spec §4.6 NG7).
+    pub(crate) chunk_size: i32,
+    pub(crate) chunk_start: i32,
+    /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
+    /// `prompt_len` across the chunk loop.
+    pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
+    pub(crate) is_vl: bool,
+    pub(crate) image_token_id: i32,
+    /// Pre-computed `[3, 1, prompt_len]` MRoPE position ids for the
+    /// full prompt — sliced per chunk inside `admit_mid_chunk` to
+    /// avoid rebuilding on each iteration. For VL it incorporates
+    /// `image_spatial_merge_size` + `image_grid_thw` (consumed in
+    /// `admit_mid_begin` when building this Array — no need to carry
+    /// the inputs forward).
+    pub(crate) position_ids_full: Array,
+    /// Pre-computed full-prompt vision embeddings
+    /// `[N_image_pad_total, hidden]` — only populated for VL requests.
+    /// Each chunk slices the rows it consumes; `image_pad_consumed`
+    /// tracks the running offset. `pixel_values` + `image_grid_thw`
+    /// are consumed by `compute_vision_embeds` in `admit_mid_begin`
+    /// and not carried forward in the handle.
+    pub(crate) vision_embeds_full: Option<Array>,
+    pub(crate) image_pad_consumed: usize,
+    /// Last chunk's `[1, 1, vocab]` logits, captured only at the final
+    /// chunk for first-token sampling in `admit_mid_finalize`.
+    pub(crate) last_logits: Option<Array>,
+}
+
+/// Returns true if any `image_pad` run in `prompt_ids` would straddle
+/// a chunk boundary at `chunk_size`. Used by `admit_mid_begin` to
+/// detect the VL v1 fallback condition (spec §4.6 NG7 / §4.7 R6):
+/// when an image's `image_pad` tokens span chunks, we'd need per-chunk
+/// vision-arg slicing — deferred to v2. v1 forces single-chunk in
+/// this case.
+fn vl_image_pad_crosses_chunk_boundary(
+    prompt_ids: &[u32],
+    image_token_id: i32,
+    chunk_size: i32,
+) -> bool {
+    if image_token_id < 0 || chunk_size <= 0 {
+        return false;
+    }
+    let pad = image_token_id as u32;
+    let cs = chunk_size as usize;
+    let mut in_run = false;
+    let mut run_start = 0usize;
+    for (i, &t) in prompt_ids.iter().enumerate() {
+        if t == pad {
+            if !in_run {
+                in_run = true;
+                run_start = i;
+            }
+        } else if in_run {
+            let run_end = i; // exclusive
+            if run_start / cs != (run_end - 1) / cs {
+                return true;
+            }
+            in_run = false;
+        }
+    }
+    if in_run {
+        let run_end = prompt_ids.len();
+        if run_start / cs != (run_end - 1) / cs {
+            return true;
+        }
+    }
+    false
+}
+
 /// All per-request state the scheduler tracks. Pre-allocated at admit time
 /// and held until eviction.
 ///
@@ -125,6 +247,11 @@ pub struct RequestState {
     /// Tokenizer id of `<|image_pad|>`. Carried from
     /// `GenerateRequest::image_token_id`. Unused if `pixel_values` is None.
     pub image_token_id: i32,
+    /// Per-request chunk size for chunked mid-batch prefill. Copied from
+    /// `GenerateRequest::prefill_chunk_size` at admit time, clamped to i32
+    /// and floored at 1. Used by `admit_mid_begin` to initialise
+    /// `AdmitMidHandle::chunk_size`.
+    pub prefill_chunk_size: i32,
 }
 
 /// Read pre-write per-row offsets from the first Full-attention layer's
@@ -161,6 +288,15 @@ pub struct Scheduler {
     phase: Phase,
     cache: Option<Vec<LayerCache>>,
     poisoned: bool,
+    /// Upper bound on `prompt_len + max_new_tokens` per request, computed
+    /// at boot as `min(cli_max_cache_cap, model.config.max_position_embeddings)`.
+    /// `admit` and `admit_mid` reject requests exceeding this with
+    /// [`SchedulerError::RequestTooLarge`]. B1-p2.3f.
+    effective_cap_max: usize,
+    /// Centralized per-row PRNG state, shape `[b_max, 2]` u32.
+    /// Row `i` holds the PRNG key for slot `i`. Initialized to zeros;
+    /// `init_row_prng` seeds a row on every new admission. (B1-p2.3e.2)
+    pub(crate) prng_state: Array,
 }
 
 impl std::fmt::Debug for Scheduler {
@@ -178,11 +314,18 @@ impl std::fmt::Debug for Scheduler {
 
 impl Scheduler {
     /// Construct a scheduler with `b_max` pre-allocated slots, all `None`.
-    pub fn new(b_max: usize) -> Self {
+    /// `effective_cap_max` is the hard upper bound on per-request
+    /// `prompt_len + max_new_tokens` — admit gates reject requests beyond
+    /// this with [`SchedulerError::RequestTooLarge`] (HTTP 413 downstream).
+    pub fn new(b_max: usize, effective_cap_max: usize) -> Self {
         let mut slots = Vec::with_capacity(b_max);
         for _ in 0..b_max {
             slots.push(None);
         }
+        // Initialize prng_state to zeros [b_max, 2] u32. Each slot's row is
+        // seeded via init_row_prng on admission.
+        let prng_state =
+            Array::zeros(&[b_max as i32, 2_i32][..], Dtype::Uint32).expect("prng_state zeros");
         Self {
             b_max,
             slots,
@@ -190,7 +333,46 @@ impl Scheduler {
             phase: Phase::Idle,
             cache: None,
             poisoned: false,
+            effective_cap_max,
+            prng_state,
         }
+    }
+
+    /// Seed the PRNG state for `row_idx` from `seed`.
+    ///
+    /// Uses the to_vec + host-replace + try_from pattern to avoid
+    /// `slice_update` (T0 measured at 274 ms/call in hot path).
+    /// Called only on admission (not in hot path) so ~80 µs to_vec cost is OK.
+    fn init_row_prng(&mut self, row_idx: usize, seed: u64) -> Result<()> {
+        let b_max = self.prng_state.shape().as_slice()[0] as usize;
+        anyhow::ensure!(
+            row_idx < b_max,
+            "init_row_prng: row_idx={row_idx} >= b_max={b_max}"
+        );
+        let key = mlx::random::key(seed)?;
+        let key_host: Vec<u32> = key.to_vec()?;
+        let mut new_host: Vec<u32> = self.prng_state.to_vec()?;
+        new_host[row_idx * 2] = key_host[0];
+        new_host[row_idx * 2 + 1] = key_host[1];
+        self.prng_state = (new_host.as_slice(), &[b_max as i32, 2_i32][..]).try_into()?;
+        Ok(())
+    }
+
+    /// Write an updated row key back into `prng_state` after sampling.
+    ///
+    /// Same to_vec + host-replace + try_from pattern as `init_row_prng`.
+    fn write_row_prng(&mut self, row_idx: usize, row_key: &Array) -> Result<()> {
+        let b_max = self.prng_state.shape().as_slice()[0] as usize;
+        anyhow::ensure!(
+            row_idx < b_max,
+            "write_row_prng: row_idx={row_idx} >= b_max={b_max}"
+        );
+        let key_host: Vec<u32> = row_key.to_vec()?;
+        let mut host: Vec<u32> = self.prng_state.to_vec()?;
+        host[row_idx * 2] = key_host[0];
+        host[row_idx * 2 + 1] = key_host[1];
+        self.prng_state = (host.as_slice(), &[b_max as i32, 2_i32][..]).try_into()?;
+        Ok(())
     }
 
     /// Maximum concurrent in-flight requests this scheduler can hold.
@@ -207,6 +389,15 @@ impl Scheduler {
     /// independent sampler state.
     pub fn admit(&mut self, req: GenerateRequest) -> Result<RequestId> {
         self.ensure_not_poisoned()?;
+        // B1-p2.3f: cap check before admission. Reject oversize requests
+        // upfront rather than allocating a slot then failing at prefill.
+        let cap_needed = req.prompt_ids.len().saturating_add(req.max_new_tokens);
+        if cap_needed > self.effective_cap_max {
+            return Err(anyhow::Error::new(SchedulerError::RequestTooLarge {
+                needed: cap_needed,
+                max: self.effective_cap_max,
+            }));
+        }
         if self.phase == Phase::Finished {
             return Err(anyhow!(
                 "scheduler in Finished phase: cannot admit; call evict_all first"
@@ -247,8 +438,12 @@ impl Scheduler {
             image_grid_thw: req.image_grid_thw,
             image_spatial_merge_size: req.image_spatial_merge_size,
             image_token_id: req.image_token_id,
+            prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(512).max(1),
         };
+        let seed = state.sampler.seed;
         self.slots[row_idx] = Some(state);
+        // Seed this row's PRNG state from the request's sampler seed.
+        self.init_row_prng(row_idx, seed)?;
         if self.phase == Phase::Idle {
             self.phase = Phase::Admitting;
         }
@@ -354,11 +549,12 @@ impl Scheduler {
         for slot in self.slots.iter_mut() {
             *slot = None;
         }
-        if let Some(cache) = self.cache.as_mut() {
-            for lc in cache.iter_mut() {
-                lc.reset()?;
-            }
-        }
+        // B1-p2.3f: drop the cache so the next prefill_admitted lazy-allocates
+        // with cap matching the new batch's requirements. ~10ms re-alloc per
+        // outer batch is negligible vs prefill GPU time (100s of ms to
+        // seconds). Pre-3f kept the cache + reset offsets but locked the
+        // first batch's cap forever — incompatible with dynamic cap.
+        self.cache = None;
         self.phase = Phase::Idle;
         self.poisoned = false;
         Ok(())
@@ -367,21 +563,26 @@ impl Scheduler {
     /// Run batched prefill for every currently-admitted request. Only legal
     /// in `Idle`/`Admitting` phase with `active_count() >= 1`.
     ///
-    /// Lazy-allocates the batched KV cache on first call (`b_max` rows,
-    /// capacity 8192, bf16). On subsequent calls (after `evict_all`) the
-    /// cache is reused — `evict_all` already reset every layer.
+    /// Lazy-allocates the batched KV cache on first call (`b_max` rows;
+    /// capacity = `min(max(prompt_len + max_new_tokens) over slots,
+    /// effective_cap_max)`, bf16). Subsequent calls after `evict_all`
+    /// allocate fresh — `evict_all` drops the cache (3f) so the next
+    /// batch's cap is sized to its slots, not inherited from the prior batch.
     ///
     /// Builds right-padded `[B, T_max]` input_ids + `[3, B, T_max]`
     /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
     /// linear mask, then calls `Qwen35Model::batched_prefill`.
     ///
-    /// Samples the first token per occupied row from the prefill logits
-    /// (`batched_prefill` already collapses per-row to the last real position
-    /// `prompt_lens[i] - 1`, returning `[B, 1, vocab]`). Emits a
-    /// [`StepEvent`] per row, then transitions to `Decoding` (or `Finished`
-    /// if every row's first token was EOS). This keeps the KV cache
-    /// trajectory aligned with `GenerationStream`'s pipelined-mode which also
-    /// uses the prefill argmax as `token_0`. See spec §4.5.
+    /// After prefill, samples the first token via a three-stage dispatch:
+    /// Stage A collects per-row `sampler` refs + prompt histories (sentinel
+    /// greedy + empty history for `None` slots so sample_batch sees a uniform
+    /// `[B]` view without branching). Stage B reshapes `[B, 1, vocab]` →
+    /// `[B, vocab]` and calls `sample_batch` once — coalescing all-greedy
+    /// batches into a single GPU op rather than B serial kernel launches.
+    /// Stage C distributes tokens to occupied rows, checks EOS / `max_new_tokens`,
+    /// and emits one [`StepEvent`] per occupied row. Sentinel-row outputs are
+    /// silently discarded. Transitions to `Decoding` (or `Finished` if every
+    /// first token was EOS). See spec §4.5.
     pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.prefill_admitted_inner(model) {
@@ -452,12 +653,40 @@ impl Scheduler {
         let attention_mask = build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
         let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
 
-        // Lazy-allocate the cache (or reuse the existing one — Task 1's
-        // evict_all already reset every layer to offset 0).
+        // Lazy-allocate the cache.
         // TODO: when a non-bf16 model lands, expose dtype via Qwen35Model
         // accessor and thread it here.
         if self.cache.is_none() {
-            self.cache = Some(model.make_cache(b as i32, 8192, Dtype::Bfloat16)?);
+            // B1-p2.3f: dynamic cap = max(prompt_len + max_new_tokens) over
+            // admitted slots, bounded by effective_cap_max (defense-in-depth;
+            // admit gate already rejects oversize). min_cap=256 fallback if
+            // all slots None (defensive — not reachable in production since
+            // prefill_admitted asserts active_count() >= 1 earlier).
+            let slots_max = self
+                .slots
+                .iter()
+                .filter_map(|s| s.as_ref())
+                .map(|r| {
+                    let max_new_i32 = i32::try_from(r.max_new_tokens).unwrap_or(i32::MAX);
+                    (r.prompt_ids.len() as i32).saturating_add(max_new_i32)
+                })
+                .max()
+                .unwrap_or(256);
+            // Logical cap: largest per-slot (prompt_len + max_new_tokens),
+            // bounded by user's effective_cap_max. Then floored at
+            // MIN_KV_CACHE_CAP_FOR_GPU_PERF to avoid the MLX Metal
+            // kernel slow-path cliff for tight K/V buffer widths
+            // (cap < ~256 → 100-300× decode-step slowdown).
+            //
+            // Order: floor LAST so it can exceed `effective_cap_max`
+            // when the user-set cap_max is itself below the floor.
+            // The floor is a physical-buffer concern; admit-gate
+            // semantics use `cap_needed > effective_cap_max` based on
+            // the user-requested size, not the physical KVCache cap.
+            let cap = slots_max
+                .min(self.effective_cap_max as i32)
+                .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+            self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
         }
         let cache_ref = self
             .cache
@@ -548,24 +777,46 @@ impl Scheduler {
         }
 
         // Sample first token per occupied row from logits[:, 0, :].
-        // batched_prefill returns [B, 1, vocab] with the sequence axis already
-        // collapsed internally. Use slice_logits_row (same helper as step_inner).
-        let mut events: Vec<StepEvent> = Vec::new();
+        // batched_prefill returns [B, 1, vocab]. Reshape to [B, vocab] for
+        // sample_batch, then dispatch once to coalesce all-greedy batches.
+        let logits_shape = logits.shape();
+        let vocab = logits_shape.as_slice()[2];
+        let logits_bv = logits.reshape(&[b as i32, vocab][..]).map_err(|e| {
+            anyhow!("prefill_admitted: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}")
+        })?;
+
+        // Stage A — collect per-row sampler refs + histories in slot order.
+        // Sentinel covers None / pad rows; their tokens are discarded.
+        let sentinel = Sampler::greedy();
+        let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
+        let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
         for b_idx in 0..b {
-            let was_active = self.slots[b_idx].is_some();
-            if !was_active {
+            if let Some(state) = self.slots[b_idx].as_ref() {
+                row_samplers.push(&state.sampler);
+                row_histories.push(state.prompt_ids.clone());
+            } else {
+                row_samplers.push(&sentinel);
+                row_histories.push(Vec::new());
+            }
+        }
+
+        // Stage B — dispatch sample_batch once over [B, vocab].
+        let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
+        let tokens = crate::core::sampler::sample_batch(
+            &row_samplers,
+            &logits_bv,
+            &history_refs,
+            &mut self.prng_state,
+        )
+        .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"))?;
+
+        // Stage C — distribute tokens + termination per occupied row.
+        let mut events: Vec<StepEvent> = Vec::new();
+        for (b_idx, &token) in tokens.iter().enumerate() {
+            if self.slots[b_idx].is_none() {
                 continue;
             }
-            let row_flat = slice_logits_row(&logits, b_idx).map_err(|e| {
-                anyhow!("prefill_admitted: slice_logits_row(row {b_idx}) failed: {e:?}")
-            })?;
-
-            let state = self.slots[b_idx]
-                .as_mut()
-                .expect("was_active guaranteed Some");
-
-            let history: Vec<u32> = state.prompt_ids.clone();
-            let token = state.sampler.sample(&row_flat, &history)?;
+            let state = self.slots[b_idx].as_mut().expect("is_some checked above");
 
             state.generated_tokens.push(token);
             state.real_len += 1;
@@ -603,24 +854,22 @@ impl Scheduler {
     /// Advance every non-finished active row by exactly one decode token.
     /// Only legal in `Decoding` phase.
     ///
-    /// Packs `[B, 1]` input_ids (each row's last token; pad zero for
-    /// already-finished rows and for empty slots), builds per-row decode
-    /// position ids `[3, B, 1]`, calls `Qwen35Model::forward_on`, then
-    /// loops over rows: slices `logits[b, 0, :]`, samples via
-    /// `RequestState::sampler.sample`, pushes the token, advances
-    /// `real_len`, and checks for EOS / `max_new_tokens` termination.
+    /// Advance every non-finished active row by one decode token using a
+    /// three-stage sample_batch dispatch rather than per-row sampler calls.
+    /// Stage A collects `active_at_start` flags, then builds per-row sampler
+    /// refs + token histories — sentinel greedy + empty history for pad /
+    /// finished / mid-admit rows so sample_batch sees a uniform `[B]` view;
+    /// sentinel tokens are discarded in Stage C, avoiding conditional dispatch
+    /// inside the hot sampling path. Stage B packs `[B, 1]` input_ids, runs
+    /// `forward_on`, reshapes `[B, 1, vocab]` → `[B, vocab]`, and calls
+    /// `sample_batch` once — coalescing all-greedy batches into one GPU op.
+    /// Stage C distributes tokens only to `active_at_start` rows, advances
+    /// `real_len`, checks EOS / `max_new_tokens`, and collects events.
     ///
-    /// Returns events **only** for rows that were not yet finished at the
-    /// start of this step. Rows that transition to `finished` during this
-    /// step appear once (with `finish_reason = Some(...)`); rows that were
-    /// already finished are silently skipped.
-    ///
-    /// Transitions phase to `Finished` when every active row has
-    /// `finished == true`.
-    ///
-    /// Note: already-finished rows are still padded into the forward
-    /// (lockstep cost — see spec §7). Only active-at-start rows contribute
-    /// to the returned event list.
+    /// Already-finished rows are still padded into the forward (lockstep
+    /// cost — see spec §7). Only active-at-start rows appear in the returned
+    /// event list. Transitions phase to `Finished` when all occupied rows
+    /// are done.
     pub fn step(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.step_inner(model) {
@@ -642,32 +891,44 @@ impl Scheduler {
 
         let b = self.b_max;
 
-        // Capture which rows were not-yet-finished at the start of this
-        // step. Only these rows participate in sampling and in the event
-        // list. Already-finished rows are still padded into the forward
+        // Capture which rows are eligible to step at the start of this
+        // call. Eligible = `Some` slot AND not finished AND already has
+        // at least one generated token. The `!generated_tokens.is_empty()`
+        // guard excludes B1-p2.3c+ admit_mid chunk-loop rows: those have
+        // an inserted `RequestState` (slot reserved by `admit_mid_begin`)
+        // but no first token until `admit_mid_finalize` runs (which
+        // adopts the temp cache + samples the first token). Treating
+        // them as pad here makes the interleaved step a no-op for the
+        // mid-admit row — the main cache slot stays empty until
+        // finalize's adopt overwrites it.
+        //
+        // Already-finished rows are also padded into the forward
         // (lockstep cost — see spec §7).
         let active_at_start: Vec<bool> = self
             .slots
             .iter()
-            .map(|s| matches!(s, Some(r) if !r.finished))
+            .map(|s| matches!(s, Some(r) if !r.finished && !r.generated_tokens.is_empty()))
             .collect();
 
         // Build [B, 1] input_ids in slot order.
-        // - For active rows: last generated token (prefill_admitted always pushes
-        //   ≥1 token before the first step call, so generated_tokens is non-empty).
-        // - For already-finished rows or empty slots: pad 0.
+        // - For active rows: last generated token. `active_at_start`
+        //   guarantees `generated_tokens` is non-empty so .last() unwrap
+        //   is safe.
+        // - For pad / mid-admit / finished rows: pad 0.
         let last_tokens: Vec<i32> = self
             .slots
             .iter()
-            .map(|slot| match slot {
-                Some(r) if !r.finished => {
-                    let tok = *r
-                        .generated_tokens
+            .zip(active_at_start.iter())
+            .map(|(slot, &active)| {
+                if active {
+                    let r = slot.as_ref().expect("active implies Some");
+                    *r.generated_tokens
                         .last()
-                        .expect("prefill_admitted always pushes ≥ 1 token before step");
-                    tok as i32
+                        .expect("active_at_start guarantees ≥1 generated token")
+                        as i32
+                } else {
+                    0
                 }
-                _ => 0,
             })
             .collect();
         let input_ids: Array = (&last_tokens[..], &[b as i32, 1][..])
@@ -679,22 +940,24 @@ impl Scheduler {
         let per_row_pos: Vec<i32> = self
             .slots
             .iter()
-            .map(|s| match s {
-                Some(r) if !r.finished => r.real_len,
-                _ => 0,
+            .zip(active_at_start.iter())
+            .map(|(slot, &active)| {
+                if active {
+                    slot.as_ref().expect("active implies Some").real_len
+                } else {
+                    0
+                }
             })
             .collect();
         let position_ids = build_decode_position_ids(&per_row_pos)?;
 
         // Per-row lens for decode: each active row writes 1 token; pad
-        // rows (finished or None slots) write 0 to skip the K/V write.
-        let per_row_lens: Vec<i32> = self
-            .slots
+        // rows (finished, mid-admit, or None slots) write 0 to skip the
+        // K/V write. Mid-admit rows must skip so finalize's adopt_row_from
+        // can cleanly install the prefilled state at offset 0.
+        let per_row_lens: Vec<i32> = active_at_start
             .iter()
-            .map(|s| match s {
-                Some(r) if !r.finished => 1,
-                _ => 0,
-            })
+            .map(|&active| if active { 1 } else { 0 })
             .collect();
 
         let cache_ref = self
@@ -737,27 +1000,55 @@ impl Scheduler {
             (),
         )?;
 
-        // logits shape: [B, 1, vocab]
+        // logits shape: [B, 1, vocab]. Reshape to [B, vocab] for sample_batch.
+        let logits_shape = logits.shape();
+        let vocab = logits_shape.as_slice()[2];
+        let logits_bv = logits
+            .reshape(&[b as i32, vocab][..])
+            .map_err(|e| anyhow!("step: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}"))?;
+
+        // Stage A — collect per-row sampler refs + histories in slot order.
+        // Sentinel covers pad / inactive rows; their tokens are discarded.
+        let sentinel = Sampler::greedy();
+        let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
+        let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
+        for (b_idx, &was_active) in active_at_start.iter().enumerate() {
+            if was_active {
+                let state = self.slots[b_idx]
+                    .as_ref()
+                    .expect("active_at_start guaranteed Some");
+                row_samplers.push(&state.sampler);
+                let mut hist: Vec<u32> =
+                    Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+                hist.extend_from_slice(&state.prompt_ids);
+                hist.extend_from_slice(&state.generated_tokens);
+                row_histories.push(hist);
+            } else {
+                row_samplers.push(&sentinel);
+                row_histories.push(Vec::new());
+            }
+        }
+
+        // Stage B — dispatch sample_batch once over [B, vocab].
+        let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
+        let tokens = crate::core::sampler::sample_batch(
+            &row_samplers,
+            &logits_bv,
+            &history_refs,
+            &mut self.prng_state,
+        )
+        .map_err(|e| anyhow!("step: sample_batch failed: {e:?}"))?;
+
+        // Stage C — distribute tokens + termination per active row.
         let mut events: Vec<StepEvent> = Vec::new();
-        for (b_idx, was_active) in active_at_start.iter().enumerate() {
+        for (b_idx, &was_active) in active_at_start.iter().enumerate() {
             if !was_active {
                 continue;
             }
-            let row_flat = slice_logits_row(&logits, b_idx)
-                .map_err(|e| anyhow!("step: slice_logits_row(row {b_idx}) failed: {e:?}"))?;
-
+            let token = tokens[b_idx];
             let state = self.slots[b_idx]
                 .as_mut()
                 .expect("active_at_start guaranteed Some");
-
-            // Per-row sampler invocation. The sampler.history is the union
-            // of prompt_ids and generated_tokens so far (so repetition
-            // penalty sees both).
-            let mut history: Vec<u32> =
-                Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
-            history.extend_from_slice(&state.prompt_ids);
-            history.extend_from_slice(&state.generated_tokens);
-            let token = state.sampler.sample(&row_flat, &history)?;
 
             state.generated_tokens.push(token);
             state.real_len += 1;
@@ -791,32 +1082,82 @@ impl Scheduler {
         Ok(events)
     }
 
-    /// Mid-batch admit + prefill. Caller is `SchedulerActor::driver_loop`
-    /// after `cmd_rx` delivers an Admit during the rolling decode loop.
+    /// Raise every layer of the main cache's `cap` to `target_cap` if
+    /// smaller. Used by `admit_mid_finalize` before adoption so that a
+    /// longer mid-batch request can land into a cache that was sized
+    /// for the original batch's `slots_max`.
     ///
-    /// Architecture: runs prefill in a temporary B=1 cache (the
-    /// `GenerationStream`-equivalent path), then adopts the prefilled
-    /// row into the main cache via per-layer `adopt_row_from` copies.
-    /// This avoids wasted compute on a B=b_max sub-batch + variable-
-    /// shape mask construction + GatedDeltaNet state corruption for
-    /// other active rows.
+    /// `KVCache::grow_cap` lifts the bound only; the physical K/V
+    /// buffer is grown lazily by `adopt_row_from`'s `grow_to`.
+    /// `GatedDeltaCache::grow_cap` is a pure i32 field update — its
+    /// `conv_state` and `recurrent_state` shapes do not depend on
+    /// `cap`. Both are no-ops if `target_cap <= layer.cap`.
     ///
-    /// Synchronous: stalls active rows for ~L_new × B=1_prefill_per_
-    /// token_time. Adoption cost is sub-microsecond. 3c+ chunked prefill
-    /// reduces stall further.
+    /// Errs only if the cache has not been lazy-allocated yet — which
+    /// is impossible from `admit_mid_begin` (Decoding phase guarantees
+    /// `prefill_admitted` already ran).
+    fn grow_main_cache_to(&mut self, target_cap: i32) -> Result<()> {
+        let cache = self.cache.as_mut().ok_or_else(|| {
+            anyhow!("grow_main_cache_to: cache absent — internal bug (admit_mid in Decoding phase implies prefill_admitted ran)")
+        })?;
+        for layer in cache.iter_mut() {
+            match layer {
+                LayerCache::Full(kv) => kv.grow_cap(target_cap),
+                LayerCache::Linear(gd) => gd.grow_cap(target_cap),
+            }
+        }
+        Ok(())
+    }
+
+    /// Begin a chunked mid-batch admit (B1-p2.3c+).
     ///
-    /// Returns `(RequestId, StepEvent)` — the assigned request ID and
-    /// the first generated token's event. Caller registers the event
-    /// channel using the returned `id`.
-    pub fn admit_mid(
+    /// Reserves a slot, allocates a B=1 temp cache sized to
+    /// `prompt_len + max_new_tokens` (floored at
+    /// [`MIN_KV_CACHE_CAP_FOR_GPU_PERF`] for the same Metal-kernel reason
+    /// as the main cache), and pre-computes the full-prompt MRoPE
+    /// position ids so subsequent `admit_mid_chunk` calls can slice
+    /// without rebuilding.
+    ///
+    /// Returns an [`AdmitMidHandle`] the caller passes to
+    /// `admit_mid_chunk` (looped until `is_last=true`) and finally
+    /// `admit_mid_finalize`. The caller interleaves
+    /// [`Scheduler::step`] between chunks so active rows continue
+    /// emitting tokens.
+    ///
+    /// # VL fallback (spec §4.6 NG7 / §4.7 R6)
+    /// If the request has `image_pad` token runs that span a chunk
+    /// boundary, this v1 implementation forces single-chunk path
+    /// (`chunk_size = prompt_len`). Per-chunk vision slicing is a v2
+    /// task. A warning is logged.
+    ///
+    /// # Errors
+    /// - [`SchedulerError::RequestTooLarge`] when
+    ///   `prompt_len + max_new_tokens > effective_cap_max`.
+    /// - `phase != Decoding` (`admit_mid_begin` is only callable
+    ///   mid-batch; use `admit` for fresh batches).
+    /// - `scheduler full` when no slot is free (admission queue is
+    ///   `driver_loop`'s concern; here we surface the raw error).
+    /// - dtype / make_cache failures bubble up; the orphan slot is
+    ///   rolled back via `evict` so the next `step()` does not panic.
+    pub fn admit_mid_begin(
         &mut self,
         req: GenerateRequest,
         model: &Qwen35Model,
-    ) -> Result<(RequestId, StepEvent)> {
+    ) -> Result<AdmitMidHandle> {
         self.ensure_not_poisoned()?;
+
+        // Cap gate — mirror admit's, otherwise queue drain could push an
+        // oversize request through.
+        let cap_needed = req.prompt_ids.len().saturating_add(req.max_new_tokens);
+        if cap_needed > self.effective_cap_max {
+            return Err(anyhow::Error::new(SchedulerError::RequestTooLarge {
+                needed: cap_needed,
+                max: self.effective_cap_max,
+            }));
+        }
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
-                "admit_mid illegal in {:?} phase: only Decoding (use admit for Idle/Admitting)",
+                "admit_mid_begin illegal in {:?} phase: only Decoding (use admit for Idle/Admitting)",
                 self.phase
             ));
         }
@@ -825,53 +1166,66 @@ impl Scheduler {
                 anyhow!("scheduler full: no row available (b_max={})", self.b_max)
             })?;
 
-        // 1. Insert RequestState via the relaxed admit() path. Phase stays Decoding.
+        // 1. Reserve slot via the relaxed admit() path. Phase stays Decoding.
         let id = self.admit(req)?;
 
-        // Steps 2-8: prefill into temp cache, adopt, sample, update.
-        // If anything fails, roll back by evicting the orphan slot —
-        // otherwise next step() would panic on empty generated_tokens.
-        match self.admit_mid_inner(id, row_idx, model) {
-            Ok(event) => Ok((id, event)),
+        // From here on, any Err must roll back the slot.
+        match self.admit_mid_begin_inner(id, row_idx, model) {
+            Ok(h) => Ok(h),
             Err(e) => {
-                // Rollback: evict the orphan slot. evict ignores poison
-                // and works in any Phase including Decoding (per Task 3).
                 let _ = self.evict(id);
                 Err(e)
             }
         }
     }
 
-    /// Inner body of admit_mid (steps 2-8 from the spec). Separated so
-    /// `admit_mid` can roll back the inserted slot if any `?` fails.
-    fn admit_mid_inner(
+    /// Body of `admit_mid_begin` separated so the caller can centralise
+    /// rollback. Steps: extract per-row state, compute floored
+    /// `cap_for_temp`, detect dtype, allocate temp_cache, pre-build
+    /// full-prompt position ids, run VL R6 fallback detection.
+    fn admit_mid_begin_inner(
         &mut self,
         id: RequestId,
         row_idx: usize,
         model: &Qwen35Model,
-    ) -> Result<StepEvent> {
-        let (prompt_ids, prompt_len, max_new_tokens) = {
+    ) -> Result<AdmitMidHandle> {
+        let (
+            prompt_ids,
+            prompt_len_usz,
+            max_new_tokens,
+            pixel_values,
+            image_grid_thw,
+            image_token_id,
+            image_spatial_merge_size,
+            prefill_chunk_size,
+        ) = {
             let state = self.slots[row_idx].as_ref().expect("admit inserted");
             (
                 state.prompt_ids.clone(),
-                state.prompt_ids.len() as i32,
+                state.prompt_ids.len(),
                 state.max_new_tokens,
+                state.pixel_values.clone(),
+                state.image_grid_thw.clone(),
+                state.image_token_id,
+                state.image_spatial_merge_size,
+                state.prefill_chunk_size,
             )
         };
-
-        // Saturating conversion: max_new_tokens is usize and may exceed
-        // i32::MAX in pathological caller inputs. Saturate to i32::MAX so
-        // cap_for_temp stays a valid i32 even at the API limit (the
-        // actual cap is bounded by model + memory anyway).
+        let prompt_len = prompt_len_usz as i32;
+        // Saturate max_new to i32 then floor cap for GPU-perf (same reason
+        // as prefill_admitted_inner main cache; spec §4.5.5).
         let max_new_i32 = i32::try_from(max_new_tokens).unwrap_or(i32::MAX);
-        let cap_for_temp = prompt_len.saturating_add(max_new_i32).max(prompt_len);
+        let cap_for_temp = prompt_len
+            .saturating_add(max_new_i32)
+            .max(prompt_len)
+            .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
 
-        // 2. Capture KVCache dtype from main cache (first Full layer).
+        // Dtype from main cache's first Full layer.
         let dtype = {
             let main_cache = self
                 .cache
                 .as_ref()
-                .ok_or_else(|| anyhow!("admit_mid called before prefill_admitted: cache absent"))?;
+                .ok_or_else(|| anyhow!("admit_mid_begin: main cache absent"))?;
             main_cache
                 .iter()
                 .find_map(|c| match c {
@@ -881,74 +1235,245 @@ impl Scheduler {
                 .unwrap_or(Dtype::Bfloat16)
         };
 
-        // 3. Allocate a fresh B=1 temp cache.
-        let mut temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
+        let temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
 
-        // 4. Build B=1 prefill inputs (mirror GenerationStream prefill).
-        let input_ids_data: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
-        let input_ids: Array = (&input_ids_data[..], &[1_i32, prompt_len][..])
+        let is_vl = pixel_values.is_some();
+
+        // VL R6 fallback: if any image_pad run straddles a chunk
+        // boundary, force single-chunk path (v1 does not slice vision
+        // args per chunk).
+        let mut chunk_size = prefill_chunk_size.max(1);
+        if is_vl && vl_image_pad_crosses_chunk_boundary(&prompt_ids, image_token_id, chunk_size) {
+            tracing::warn!(
+                "[admit_mid_begin] VL request with image_pad spanning chunk boundary; \
+                 forcing single-chunk (chunk_size={chunk_size} -> {prompt_len}); \
+                 v2 will support per-chunk vision slicing",
+            );
+            chunk_size = prompt_len;
+        }
+
+        // Pre-build full-prompt MRoPE position ids in the B=1 single-stream
+        // shape that `model.forward_on` / `model.forward_vl_chunk` expect:
+        // `[3, 1, prompt_len]`. Chunked path slices axis 2 per chunk.
+        let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
+        let position_ids_full = if is_vl {
+            build_position_ids_vl(
+                &prompt_ids_i32,
+                image_grid_thw
+                    .as_deref()
+                    .expect("is_vl implies image_grid_thw is Some"),
+                image_token_id,
+                image_spatial_merge_size,
+            )?
+        } else {
+            build_position_ids(0, prompt_len)?
+        };
+
+        // For VL: pre-compute vision embeddings once (`[N_image_pad_total,
+        // hidden]`). Each chunk slices the rows it consumes; tracking the
+        // running offset via `image_pad_consumed`.
+        let vision_embeds_full = if is_vl {
+            let pv = pixel_values
+                .as_ref()
+                .expect("is_vl implies pixel_values is Some");
+            let grids = image_grid_thw
+                .as_deref()
+                .expect("is_vl implies image_grid_thw is Some");
+            Some(model.compute_vision_embeds(pv, grids, ())?)
+        } else {
+            None
+        };
+
+        Ok(AdmitMidHandle {
+            request_id: id,
+            row_idx,
+            prompt_ids,
+            prompt_len,
+            chunk_size,
+            chunk_start: 0,
+            temp_cache,
+            is_vl,
+            image_token_id,
+            position_ids_full,
+            vision_embeds_full,
+            image_pad_consumed: 0,
+            last_logits: None,
+        })
+    }
+
+    /// Run one chunk of admit_mid prefill into `handle.temp_cache`.
+    /// Returns `true` if this was the last chunk (`chunk_end ==
+    /// prompt_len`); caller then proceeds to `admit_mid_finalize`.
+    /// Otherwise caller should run one `Scheduler::step` against the
+    /// main cache before the next `admit_mid_chunk` call so active rows
+    /// continue emitting tokens (spec §4.5.5 chunk:step = 1:1).
+    ///
+    /// On the last chunk this method stashes the `[1, 1, vocab]` logits
+    /// into `handle.last_logits` for first-token sampling in
+    /// `admit_mid_finalize`.
+    pub fn admit_mid_chunk(
+        &mut self,
+        handle: &mut AdmitMidHandle,
+        model: &Qwen35Model,
+    ) -> Result<bool /* is_last */> {
+        self.ensure_not_poisoned()?;
+
+        let chunk_end = handle
+            .chunk_start
+            .saturating_add(handle.chunk_size)
+            .min(handle.prompt_len);
+        let is_last = chunk_end == handle.prompt_len;
+        let chunk_len = chunk_end - handle.chunk_start;
+        if chunk_len <= 0 {
+            return Err(anyhow!(
+                "admit_mid_chunk: chunk_len <= 0 (chunk_start={}, chunk_end={})",
+                handle.chunk_start,
+                chunk_end
+            ));
+        }
+
+        // Build chunk-local input_ids [1, chunk_len].
+        let chunk_ids_u32 = &handle.prompt_ids[handle.chunk_start as usize..chunk_end as usize];
+        let chunk_ids_i32: Vec<i32> = chunk_ids_u32.iter().map(|&t| t as i32).collect();
+        let input_ids: Array = (&chunk_ids_i32[..], &[1_i32, chunk_len][..])
             .try_into()
-            .map_err(|e| anyhow!("admit_mid: build input_ids Array failed: {e:?}"))?;
+            .map_err(|e| anyhow!("admit_mid_chunk: input_ids try_into Array failed: {e:?}"))?;
 
-        // B1-p2.4: VL-aware position_ids — VL path uses build_position_ids_vl_batched
-        // so MRoPE three-stream values match what forward_vl/batched_prefill_vl expect.
-        let (state_pv, state_grids, state_img_token_id, state_merge_size) = {
-            let state = self.slots[row_idx].as_ref().expect("admit inserted");
-            (
-                state.pixel_values.clone(),
-                state.image_grid_thw.clone(),
-                state.image_token_id,
-                state.image_spatial_merge_size,
-            )
-        };
-        let position_ids = if state_pv.is_some() {
-            build_position_ids_vl_batched(
-                &[&input_ids_data[..]],
-                &[state_grids.as_deref()],
-                state_img_token_id,
-                state_merge_size,
-                prompt_len,
-            )?
-        } else {
-            build_position_ids_batched(&[prompt_len], prompt_len)?
-        };
-        let attention_mask = build_batch_attention_mask(&[prompt_len], prompt_len, dtype)?;
-        let linear_attention_mask = build_batch_linear_mask(&[prompt_len], prompt_len)?;
+        // Slice axis 2 of the pre-built full-prompt position ids.
+        // position_ids_full shape: [3, 1, prompt_len].
+        let position_ids =
+            slice_pos_ids_axis2(&handle.position_ids_full, handle.chunk_start, chunk_end)?;
 
-        // 5. Run B=1 prefill into the temp cache. Returns logits [1, 1, vocab].
-        let logits = if state_pv.is_some() {
-            let per_row_pv: Vec<Option<&Array>> = vec![state_pv.as_ref()];
-            let per_row_grids_inner: Vec<GridThwSlice<'_>> = vec![state_grids.as_deref()];
-            model.batched_prefill_vl(
+        // Forward via the B=1 single-stream API (same path GS chunked
+        // prefill uses). The pre-3c+ implementation went through
+        // `batched_prefill` (a B>1 path) which adds per-row mask and
+        // B-loop overhead that dominated cold + warm runs alike
+        // (3c+ T4 finding: chunks ran 10-25× slower than expected with
+        // batched_prefill). Going through `forward_on` removes the
+        // overhead AND removes the need for caller-built attention /
+        // linear masks — the B=1 path derives them internally from
+        // input shape + cache state.
+        //
+        // - Last chunk: `forward_on` returns `[1, 1, vocab]` logits via
+        //   lm_head, captured for first-token sampling in
+        //   `admit_mid_finalize`.
+        // - Intermediate chunk: text path uses `text().forward_on`
+        //   (skips lm_head; we don't need logits), VL path uses
+        //   `forward_vl_chunk` (always returns logits — we discard).
+        //   Either way the result is `eval`-d before return so the
+        //   chunk's lazy graph materialises here rather than ballooning
+        //   into the interleaved `Scheduler::step` call. (GenerationStream
+        //   chunked prefill at core/generate.rs ~line 1053 uses the
+        //   same `eval(hidden)` pattern for the same reason.)
+        let result_logits: Option<Array> = if handle.is_vl {
+            // VL chunk: slice the rows of `vision_embeds_full` that
+            // correspond to this chunk's `image_pad` token count.
+            let k_i = count_image_pad(chunk_ids_u32, handle.image_token_id);
+            let ve_slice = if k_i > 0 {
+                let ve_full = handle
+                    .vision_embeds_full
+                    .as_ref()
+                    .expect("is_vl implies vision_embeds_full was computed in admit_mid_begin");
+                let start = handle.image_pad_consumed;
+                let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
+                handle.image_pad_consumed += k_i;
+                Some(slice)
+            } else {
+                None
+            };
+
+            let logits = model.forward_vl_chunk(
                 &input_ids,
                 &position_ids,
-                &attention_mask,
-                &linear_attention_mask,
-                &[prompt_len],
-                &per_row_pv,
-                &per_row_grids_inner,
-                state_img_token_id,
-                Some(&mut temp_cache),
+                None, // per_row_lens (B=1 path derives from input shape)
+                None, // decode_mask (prefill — model builds its own causal mask)
+                Some(&mut handle.temp_cache),
+                ve_slice.as_ref(),
+                handle.image_token_id,
                 (),
-            )?
-        } else {
-            model.batched_prefill(
+            )?;
+            if is_last {
+                Some(logits)
+            } else {
+                mlx::transforms::eval(&[&logits])?;
+                None
+            }
+        } else if is_last {
+            // Text last chunk: full forward returns logits.
+            Some(model.forward_on(
                 &input_ids,
                 &position_ids,
-                &attention_mask,
-                &linear_attention_mask,
-                &[prompt_len],
-                Some(&mut temp_cache),
+                None,
+                None,
+                Some(&mut handle.temp_cache),
                 (),
-            )?
+            )?)
+        } else {
+            // Text intermediate chunk: skip lm_head, just update KV cache.
+            let hidden = model.text().forward_on(
+                &input_ids,
+                &position_ids,
+                None,
+                None,
+                Some(&mut handle.temp_cache),
+                (),
+            )?;
+            mlx::transforms::eval(&[&hidden])?;
+            None
         };
 
-        // 6. Adopt the temp cache's row 0 into main_cache at row_idx.
+        if let Some(logits) = result_logits {
+            handle.last_logits = Some(logits);
+        }
+        handle.chunk_start = chunk_end;
+        Ok(is_last)
+    }
+
+    /// Finalise a chunked mid-batch admit: grow the main cache to
+    /// `temp_cache.cap` if needed (Option C from 3f), adopt
+    /// `temp_cache` row 0 into `main_cache` at `handle.row_idx`,
+    /// sample the new row's first token from `handle.last_logits`,
+    /// then update the row's termination state.
+    ///
+    /// Returns `(request_id, first_event)`; caller routes the event
+    /// to its `event_rx`.
+    pub fn admit_mid_finalize(
+        &mut self,
+        handle: AdmitMidHandle,
+        _model: &Qwen35Model,
+    ) -> Result<(RequestId, StepEvent)> {
+        self.ensure_not_poisoned()?;
+        let AdmitMidHandle {
+            request_id: id,
+            row_idx,
+            temp_cache,
+            last_logits,
+            prompt_ids,
+            ..
+        } = handle;
+
+        let logits = last_logits
+            .ok_or_else(|| anyhow!("admit_mid_finalize: last_logits absent (no chunks ran?)"))?;
+
+        // Grow main cache cap from temp_cache.cap (3f Option C).
+        let cap_for_temp = temp_cache
+            .iter()
+            .find_map(|c| match c {
+                LayerCache::Full(kv) => Some(kv.cap()),
+                _ => None,
+            })
+            .unwrap_or(0);
+        self.grow_main_cache_to(cap_for_temp)?;
+
+        // Adopt temp → main per layer.
         {
-            let main_cache = self.cache.as_mut().expect("cache asserted Some above");
+            let main_cache = self
+                .cache
+                .as_mut()
+                .expect("cache asserted Some by Decoding phase");
             if main_cache.len() != temp_cache.len() {
                 return Err(anyhow!(
-                    "admit_mid: cache layer count mismatch ({} vs {})",
+                    "admit_mid_finalize: cache layer count mismatch ({} vs {})",
                     main_cache.len(),
                     temp_cache.len()
                 ));
@@ -961,29 +1486,37 @@ impl Scheduler {
                     (LayerCache::Linear(main_gd), LayerCache::Linear(temp_gd)) => {
                         main_gd.adopt_row_from(temp_gd, row_idx, 0)?;
                     }
-                    _ => {
-                        return Err(anyhow!(
-                            "admit_mid: cache layer kind mismatch between main and temp"
-                        ))
-                    }
+                    _ => return Err(anyhow!("admit_mid_finalize: cache layer kind mismatch")),
                 }
             }
         }
 
-        // 7. Sample first token from prefill logits (last position).
-        //    Logits shape [1, 1, vocab] -- slice row 0.
+        // Sample first generated token using centralized PRNG state.
         let row_logits = slice_logits_row(&logits, 0)?;
         let token = {
-            let state = self.slots[row_idx].as_ref().expect("admit_mid slot");
             let history: Vec<u32> = prompt_ids.clone();
-            state.sampler.sample(&row_logits, &history)?
+            // Clone the sampler so we release the borrow on self.slots before
+            // calling write_row_prng (which needs &mut self).
+            let sampler = self.slots[row_idx]
+                .as_ref()
+                .expect("admit_mid_begin reserved the slot")
+                .sampler;
+            // Extract this row's PRNG key from centralized state.
+            let prng_host: Vec<u32> = self.prng_state.to_vec()?;
+            let row_bytes = &prng_host[row_idx * 2..(row_idx + 1) * 2];
+            let mut row_key: Array = (row_bytes, &[2_i32][..]).try_into()?;
+            let tok = sampler.sample(&row_logits, &history, &mut row_key)?;
+            // Write updated key back (releases sampler borrow, &mut self OK now).
+            self.write_row_prng(row_idx, &row_key)?;
+            tok
         };
 
-        // 8. Update state + check termination.
-        let state = self.slots[row_idx].as_mut().expect("admit_mid slot");
+        // Update RequestState + termination.
+        let state = self.slots[row_idx]
+            .as_mut()
+            .expect("admit_mid_begin reserved the slot");
         state.generated_tokens.push(token);
         state.real_len += 1;
-
         if state.stop_token_ids.contains(&token) {
             state.finished = true;
             state.finish_reason = Some("stop");
@@ -991,12 +1524,16 @@ impl Scheduler {
             state.finished = true;
             state.finish_reason = Some("length");
         }
+        let finish_reason = state.finish_reason;
 
-        Ok(StepEvent {
+        Ok((
             id,
-            token,
-            finish_reason: state.finish_reason,
-        })
+            StepEvent {
+                id,
+                token,
+                finish_reason,
+            },
+        ))
     }
 
     /// Sweep finished rows: clear their slot, drop their event channel,
@@ -1048,6 +1585,29 @@ impl Scheduler {
     pub(crate) fn force_phase(&mut self, p: Phase) {
         self.phase = p;
     }
+
+    /// cfg(test)-only accessor: compute the cap that `prefill_admitted_inner`
+    /// passes to `model.make_cache`, including the GPU-perf floor.
+    /// Mirrors the production formula
+    /// `slots_max.min(effective_cap_max).max(MIN_KV_CACHE_CAP_FOR_GPU_PERF)`.
+    /// Used by 3f unit tests to verify cap-formula correctness without
+    /// invoking a real model.
+    #[cfg(test)]
+    pub(crate) fn computed_cap_for_prefill(&self) -> i32 {
+        let slots_max = self
+            .slots
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .map(|r| {
+                let max_new_i32 = i32::try_from(r.max_new_tokens).unwrap_or(i32::MAX);
+                (r.prompt_ids.len() as i32).saturating_add(max_new_i32)
+            })
+            .max()
+            .unwrap_or(256);
+        slots_max
+            .min(self.effective_cap_max as i32)
+            .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF)
+    }
 }
 
 #[cfg(test)]
@@ -1072,7 +1632,7 @@ mod tests {
 
     #[test]
     fn scheduler_new_empty() {
-        let s = Scheduler::new(4);
+        let s = Scheduler::new(4, 32768);
         assert_eq!(s.b_max(), 4);
         assert_eq!(s.active_count(), 0);
         assert!(s.active().is_empty());
@@ -1081,7 +1641,7 @@ mod tests {
 
     #[test]
     fn admit_happy_path() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
         assert_eq!(id, RequestId(0));
         assert_eq!(s.active_count(), 1);
@@ -1096,7 +1656,7 @@ mod tests {
 
     #[test]
     fn admit_assigns_distinct_rows() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let ids: Vec<_> = (0..4)
             .map(|i| s.admit(mk_req(vec![i as u32])).expect("admit"))
             .collect();
@@ -1107,7 +1667,7 @@ mod tests {
 
     #[test]
     fn evict_releases_row() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.active_count(), 1);
         s.evict(id).expect("evict");
@@ -1117,7 +1677,7 @@ mod tests {
 
     #[test]
     fn admit_after_evict_reuses_row() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         assert_eq!(s.get(id_a).unwrap().row_idx, 0);
         s.evict(id_a).expect("evict a");
@@ -1128,7 +1688,7 @@ mod tests {
 
     #[test]
     fn admit_full_returns_err() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         s.admit(mk_req(vec![1])).expect("admit 0");
         s.admit(mk_req(vec![2])).expect("admit 1");
         let err = s.admit(mk_req(vec![3])).expect_err("admit full");
@@ -1139,14 +1699,14 @@ mod tests {
 
     #[test]
     fn evict_unknown_id_returns_err() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let err = s.evict(RequestId(42)).expect_err("evict unknown");
         assert!(format!("{err}").contains("not found"));
     }
 
     #[test]
     fn id_monotonic_after_evict() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         s.evict(id_a).expect("evict a");
         let id_b = s.admit(mk_req(vec![2])).expect("admit b");
@@ -1160,7 +1720,7 @@ mod tests {
 
     #[test]
     fn sampler_cloned_per_request() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let id_b = s.admit(mk_req(vec![2])).expect("admit b");
 
@@ -1172,7 +1732,7 @@ mod tests {
 
     #[test]
     fn occupied_rows_reflects_state() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _id_0 = s.admit(mk_req(vec![1])).expect("admit 0");
         let id_1 = s.admit(mk_req(vec![2])).expect("admit 1");
         let _id_2 = s.admit(mk_req(vec![3])).expect("admit 2");
@@ -1183,7 +1743,7 @@ mod tests {
 
     #[test]
     fn phase_starts_idle() {
-        let s = Scheduler::new(4);
+        let s = Scheduler::new(4, 32768);
         assert_eq!(s.phase(), Phase::Idle);
         // Verify cache starts unallocated (visible through manual Debug impl
         // which surfaces `cache_layers: None`).
@@ -1195,14 +1755,14 @@ mod tests {
 
     #[test]
     fn admit_transitions_idle_to_admitting() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.phase(), Phase::Admitting);
     }
 
     #[test]
     fn admit_stays_in_admitting() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit 1");
         let _ = s.admit(mk_req(vec![2])).expect("admit 2");
         assert_eq!(s.phase(), Phase::Admitting);
@@ -1210,7 +1770,7 @@ mod tests {
 
     #[test]
     fn evict_last_admitted_returns_to_idle() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.phase(), Phase::Admitting);
         s.evict(id).expect("evict");
@@ -1220,7 +1780,7 @@ mod tests {
     #[test]
     fn admit_in_decoding_ok_phase_stays_decoding() {
         // 3c-3: admit during Decoding is now legal (mid-batch admit).
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         s.force_phase(Phase::Decoding);
         let id = s
             .admit(mk_req(vec![1]))
@@ -1231,7 +1791,7 @@ mod tests {
 
     #[test]
     fn admit_in_finished_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         s.force_phase(Phase::Finished);
         let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
         let msg = format!("{err}");
@@ -1245,7 +1805,7 @@ mod tests {
     fn evict_in_decoding_ok_transitions_to_finished_when_last() {
         // 3c-3: evict during Decoding is now legal.
         // Evicting the last row transitions Decoding -> Finished.
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Decoding);
         s.evict(id).expect("evict during Decoding must succeed");
@@ -1255,7 +1815,7 @@ mod tests {
 
     #[test]
     fn evict_all_from_finished_resets_to_idle() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Finished);
         s.evict_all().expect("evict_all");
@@ -1265,14 +1825,14 @@ mod tests {
 
     #[test]
     fn evict_all_in_idle_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let err = s.evict_all().expect_err("evict_all from Idle must fail");
         assert!(format!("{err}").contains("Idle"), "unexpected err: {err}");
     }
 
     #[test]
     fn evict_all_in_admitting_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         // phase is now Admitting; evict_all must reject
         let err = s
@@ -1286,7 +1846,7 @@ mod tests {
 
     #[test]
     fn force_poison_then_admit_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         s.poisoned = true;
         let err = s
             .admit(mk_req(vec![1]))
@@ -1299,7 +1859,7 @@ mod tests {
 
     #[test]
     fn force_poison_then_evict_returns_err() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.poisoned = true;
         let err = s.evict(id).expect_err("evict after poison must fail");
@@ -1311,7 +1871,7 @@ mod tests {
 
     #[test]
     fn evict_all_clears_poison() {
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Finished); // evict_all requires Decoding/Finished
         s.poisoned = true;
@@ -1325,7 +1885,7 @@ mod tests {
     fn scheduler_admit_during_decoding_ok() {
         // Force phase to Decoding (test seam); admit should succeed and
         // Phase should stay Decoding (mid-batch admit semantics).
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -1341,7 +1901,7 @@ mod tests {
 
     #[test]
     fn scheduler_evict_during_decoding_transitions_to_finished_when_last() {
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -1356,7 +1916,7 @@ mod tests {
     fn scheduler_evict_during_decoding_not_last_stays_decoding() {
         // Evict one row mid-Decoding when other rows are still active:
         // Phase must stay Decoding (only last-evict transitions to Finished).
-        let mut s = Scheduler::new(4);
+        let mut s = Scheduler::new(4, 32768);
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let _id_b = s.admit(mk_req(vec![2])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -1375,7 +1935,7 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -1408,7 +1968,7 @@ mod tests {
 
         // 2 rows admitted; only row A finishes. gc should evict A only,
         // leave B alive, and Phase must stay Decoding (active_count==1).
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
         s.force_phase(Phase::Decoding);
@@ -1446,7 +2006,7 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::new(2);
+        let mut s = Scheduler::new(2, 32768);
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
 
@@ -1474,7 +2034,7 @@ mod tests {
         use crate::core::sampler::Sampler;
         use mlx::Dtype;
 
-        let mut sched = Scheduler::new(2);
+        let mut sched = Scheduler::new(2, 32768);
 
         // Synthesize a dummy pixel_values array (shape doesn't matter for plumbing)
         let pv: Array = (&[0.0_f32; 4][..], &[1_i32, 4][..]).try_into().unwrap();
@@ -1505,5 +2065,232 @@ mod tests {
         assert_eq!(slot.image_grid_thw.as_deref(), Some(&grids[..]));
         assert_eq!(slot.image_spatial_merge_size, 2);
         assert_eq!(slot.image_token_id, IMAGE_TOKEN_ID);
+    }
+
+    #[test]
+    fn evict_all_drops_cache() {
+        // B1-p2.3f: evict_all drops cache (replaces pre-3f offset reset) so
+        // the next prefill_admitted lazy-allocates with the new batch's cap.
+        let mut s = Scheduler::new(4, 32768);
+
+        let req = GenerateRequest {
+            prompt_ids: vec![1, 2, 3],
+            max_new_tokens: 8,
+            sampler: crate::core::sampler::Sampler::greedy(),
+            stop_token_ids: vec![],
+            prefill_chunk_size: 0,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+        };
+        let _id = s.admit(req).expect("admit");
+        s.force_phase(Phase::Decoding);
+
+        assert!(
+            s.cache.is_none(),
+            "pre-evict_all: cache should be None (no prefill)"
+        );
+
+        s.evict_all().expect("evict_all");
+
+        assert!(
+            s.cache.is_none(),
+            "post-evict_all: cache must be None (3f drops)"
+        );
+    }
+
+    #[test]
+    fn admit_rejects_oversize_request() {
+        // B1-p2.3f: admit cap gate. cap_max=1024; request with
+        // prompt_len=1500 + max_new=600 = 2100 > 1024 must reject with
+        // SchedulerError::RequestTooLarge.
+        use crate::core::SchedulerError;
+
+        let mut s = Scheduler::new(1, 1024);
+
+        let oversize_req = GenerateRequest {
+            prompt_ids: vec![0; 1500],
+            max_new_tokens: 600,
+            sampler: crate::core::sampler::Sampler::greedy(),
+            stop_token_ids: vec![],
+            prefill_chunk_size: 0,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+        };
+
+        let result = s.admit(oversize_req);
+        let err = result.expect_err("admit should reject oversize");
+
+        let sched_err = err
+            .downcast_ref::<SchedulerError>()
+            .expect("err should be downcast-able to SchedulerError");
+        match sched_err {
+            SchedulerError::RequestTooLarge { needed, max } => {
+                assert_eq!(*needed, 2100, "needed cap should be prompt+max_new");
+                assert_eq!(
+                    *max, 1024,
+                    "max should be effective_cap_max from Scheduler::new"
+                );
+            }
+            other => panic!("expected RequestTooLarge, got {other:?}"),
+        }
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("2100"),
+            "msg should contain needed=2100, got: {msg}"
+        );
+        assert!(
+            msg.contains("1024"),
+            "msg should contain max=1024, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn dynamic_cap_from_slots_bounded_by_cap_max_and_gpu_floor() {
+        // B1-p2.3f: cap = max(min(slots_max, effective_cap_max), MIN_KV_CACHE_CAP_FOR_GPU_PERF).
+        // The GPU-perf floor is applied by Scheduler before handing the cap
+        // to `make_cache` (so callers `prefill_admitted_inner` and
+        // `admit_mid_inner` consistently pass a kernel-friendly cap).
+        let mut s = Scheduler::new(4, 2048);
+
+        let req = |prompt_len: usize, max_new: usize| GenerateRequest {
+            prompt_ids: vec![0; prompt_len],
+            max_new_tokens: max_new,
+            sampler: crate::core::sampler::Sampler::greedy(),
+            stop_token_ids: vec![],
+            prefill_chunk_size: 0,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+        };
+
+        // Case A: slots_max well above the floor; cap_max does not bind.
+        // Admit 3 slots: cap_needed values [50+50=100, 700+100=800, 1300+200=1500].
+        s.admit(req(50, 50)).expect("admit 1");
+        s.admit(req(700, 100)).expect("admit 2");
+        s.admit(req(1300, 200)).expect("admit 3");
+
+        // cap = max(min(1500, 2048), 256) = max(1500, 256) = 1500.
+        let cap = s.computed_cap_for_prefill();
+        assert_eq!(
+            cap, 1500,
+            "cap should equal max(slot cap_needed); floor & cap_max don't bind"
+        );
+
+        // Case B: cap_max < floor; floor wins.
+        let mut s3 = Scheduler::new(4, 200);
+        s3.admit(req(50, 50)).expect("admit (cap_needed=100 < 200)");
+        s3.admit(req(150, 30))
+            .expect("admit (cap_needed=180 < 200)");
+        // cap = max(min(180, 200), 256) = max(180, 256) = 256. Floor exceeds cap_max.
+        let cap3 = s3.computed_cap_for_prefill();
+        assert_eq!(
+            cap3, 256,
+            "cap = max(180, 256) = 256; floor exceeds user cap_max (allowed — physical-buffer concern)"
+        );
+
+        // Case C: small slots_max, no cap_max binding. Floor binds.
+        let mut s_floor = Scheduler::new(4, 2048);
+        s_floor.admit(req(50, 50)).expect("admit cap_needed=100");
+        let cap_floor = s_floor.computed_cap_for_prefill();
+        assert_eq!(
+            cap_floor, 256,
+            "cap = max(min(100, 2048), 256) = 256; floor binds"
+        );
+
+        // Case D: empty-slot fallback. slots_max defaults to 256
+        // (defensive — not reachable in production).
+        let s4 = Scheduler::new(4, 1000);
+        assert_eq!(
+            s4.computed_cap_for_prefill(),
+            256,
+            "empty slots fallback = 256 (defensive default)"
+        );
+    }
+
+    // ─── B1-p2.3c+ chunked admit_mid helper unit tests ──────────────────
+
+    #[test]
+    fn vl_image_pad_crosses_chunk_boundary_detects_run_across() {
+        // image_token_id=42, run at positions 250..260, chunk_size=256.
+        // Run crosses 256-boundary (positions 250-255 in chunk 0, 256-259 in chunk 1).
+        let ids: Vec<u32> = (0..400_u32)
+            .map(|i| {
+                if (250..260).contains(&(i as i32)) {
+                    42
+                } else {
+                    1
+                }
+            })
+            .collect();
+        assert!(
+            super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
+            "run [250..260] should cross 256-boundary at chunk_size=256"
+        );
+        // chunk_size=512 → entire run fits in chunk 0; no crossing.
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 512),
+            "run [250..260] should NOT cross at chunk_size=512"
+        );
+    }
+
+    #[test]
+    fn vl_image_pad_no_pads_returns_false() {
+        // Empty pad run set.
+        let ids: Vec<u32> = (0..200_u32).collect();
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 64),
+            "no image_pad tokens → no crossing possible"
+        );
+        // Also degenerate: empty prompt.
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&[], 42, 64),
+            "empty prompt → no crossing"
+        );
+        // Degenerate: image_token_id < 0 disables the check.
+        let ids2: Vec<u32> = vec![5; 100];
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids2, -1, 32),
+            "image_token_id < 0 disables detection"
+        );
+    }
+
+    #[test]
+    fn vl_image_pad_run_within_single_chunk_returns_false() {
+        // image_pad run [100..150], chunk_size=256 — all in chunk 0.
+        let ids: Vec<u32> = (0..200_u32)
+            .map(|i| {
+                if (100..150).contains(&(i as i32)) {
+                    42
+                } else {
+                    1
+                }
+            })
+            .collect();
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
+            "run [100..150] within chunk 0 should NOT cross"
+        );
+        // Adjacent boundary case: run ends exactly at chunk boundary.
+        // Run [200..256], chunk_size=256. Run start chunk = 200/256 = 0.
+        // Run end-1 = 255, 255/256 = 0. Same chunk → no crossing.
+        let ids2: Vec<u32> = (0..400_u32)
+            .map(|i| {
+                if (200..256).contains(&(i as i32)) {
+                    42
+                } else {
+                    1
+                }
+            })
+            .collect();
+        assert!(
+            !super::vl_image_pad_crosses_chunk_boundary(&ids2, 42, 256),
+            "run [200..256] ends exactly at boundary — fits in chunk 0"
+        );
     }
 }

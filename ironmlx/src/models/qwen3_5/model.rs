@@ -12,6 +12,26 @@ use super::config::Qwen35Config;
 use super::text_model::Qwen35TextModel;
 use super::vision::VisionTower;
 
+/// Minimum K/V cache cap that `make_cache` allocates regardless of the
+/// caller-requested cap. Empirically (B1-p2.3f T4), `KVCache::with_step(cap)`
+/// with `cap < ~256` makes the bf16 attention forward run ~100-300× slower
+/// on Apple Silicon (a 4B decode step grows from ~50 ms to ~10 s). The
+/// most likely cause is MLX's Metal kernel tile picker missing its
+/// preferred power-of-two tile for tight K/V buffer widths.
+///
+/// 256 is the natural floor: matches `KVCache`'s default `step`, aligns
+/// with common GPU block sizes, and costs only a few MB across 32
+/// 4B-bf16 layers. Larger caps (long prompts) pass through unchanged.
+///
+/// Applied silently inside `make_cache` so every caller (Scheduler main
+/// cache, Scheduler admit_mid temp cache, GenerationStream cache, test
+/// fixtures) is protected. The raise does NOT shrink user-set
+/// `--max-cache-cap`: cap_max is enforced at admit time on the
+/// **request size** (`prompt_len + max_new_tokens`); a request cleared
+/// by the admit gate may still be backed by a slightly oversized K/V
+/// buffer.
+pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 = 256;
+
 /// Top-level Qwen3.5 dense model: hybrid 32-layer text core + tied/untied lm_head.
 ///
 /// `vision` is present only when the model was loaded via [`Loader::open_multimodal`]
@@ -536,6 +556,22 @@ impl Qwen35Model {
     }
 
     /// Construct a per-layer cache list matching this model's hybrid topology.
+    ///
+    /// **GPU-perf note (B1-p2.3f T4):** the per-layer K/V buffer width
+    /// equals the cap because `KVCache::with_step(cap)` is used for
+    /// one-shot allocation (avoids grow_to + memcpy on first decode
+    /// step at long context — P8a-stage6 optimization). Production
+    /// callers (Scheduler main cache + admit_mid temp cache,
+    /// GenerationStream cache) MUST pre-clamp their requested cap to
+    /// at least `MIN_KV_CACHE_CAP_FOR_GPU_PERF` to avoid the MLX
+    /// Metal kernel slow path (cap < ~256 → 100-300× decode-step
+    /// slowdown on Apple Silicon — verified in T4 sweep regression
+    /// against p4_http_smoke + b1_p2_3b_3 concurrent-gs test).
+    ///
+    /// `make_cache` does NOT apply the floor itself so unit tests that
+    /// validate tight-cap overflow rejection (e.g.
+    /// `b1_p2_3c_1_per_row_offset_invalid_args_return_err`) keep
+    /// working unchanged.
     pub fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
         let cfg = self.config();
         let head_dim = cfg.effective_head_dim();
@@ -642,6 +678,7 @@ mod tests {
                 mrope_section: vec![2, 1, 1],
             },
             vision_config: None,
+            max_position_embeddings: 32768,
         }
     }
 

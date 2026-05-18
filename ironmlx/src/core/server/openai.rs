@@ -31,6 +31,42 @@ use crate::models::qwen3_5::image_processor;
 use super::AppState;
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Map a SchedulerActor admit Err into an HTTP response. Spec §4.7 + §2 G7:
+/// - `SchedulerError::QueueFull` → 503 Service Unavailable + Retry-After: 5
+/// - `SchedulerError::RequestTooLarge` → 413 Payload Too Large (no Retry-After)
+/// - Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request
+///
+/// Pre-3e.3 used `err.to_string().contains("admission queue full")` string
+/// match (spec §9 R3 acknowledged-fragile). 3e.3 replaces with typed
+/// `anyhow::Error::downcast_ref::<SchedulerError>()`. 3f adds RequestTooLarge arm.
+fn admit_err_to_response(err: anyhow::Error) -> Response {
+    use crate::core::SchedulerError;
+    use axum::http::HeaderValue;
+    let msg = format!("{err:#}");
+    match err.downcast_ref::<SchedulerError>() {
+        Some(SchedulerError::QueueFull { .. }) => {
+            // 503 Service Unavailable + Retry-After
+            let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+            resp
+        }
+        Some(SchedulerError::RequestTooLarge { .. }) => {
+            // 413 Payload Too Large — request needed cap exceeds server's
+            // effective_cap_max. Body includes needed + max via Display.
+            (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response()
+        }
+        None => {
+            // Other anyhow Errs (prompt parsing, OOM, etc.) → 400 Bad Request.
+            (StatusCode::BAD_REQUEST, msg).into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Request / Response shapes
 // ---------------------------------------------------------------------------
 
@@ -482,7 +518,7 @@ async fn serve_via_scheduler_stream(
     } = match reply_rx.await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+            return admit_err_to_response(e);
         }
         Err(_) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
@@ -652,7 +688,7 @@ async fn serve_via_scheduler_unary(
     } = match reply_rx.await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            return (StatusCode::BAD_REQUEST, format!("admit failed: {e}")).into_response();
+            return admit_err_to_response(e);
         }
         Err(_) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
@@ -815,5 +851,84 @@ mod tests {
             bytes,
             vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00, 0x10, 0x00]
         );
+    }
+
+    #[tokio::test]
+    async fn admit_err_503_for_queue_full() {
+        // 3e.3: typed SchedulerError::QueueFull → 503 via downcast.
+        let err = anyhow::Error::new(crate::core::SchedulerError::QueueFull { capacity: 32 });
+        let resp = admit_err_to_response(err);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry = resp
+            .headers()
+            .get("retry-after")
+            .expect("retry-after header");
+        assert_eq!(retry.to_str().unwrap(), "5");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_str.contains("admission queue full"));
+    }
+
+    #[tokio::test]
+    async fn admit_err_400_for_untyped_anyhow() {
+        // Anyhow Err WITHOUT SchedulerError::QueueFull → 400 (even if message
+        // mentions "admission queue full" — string match is gone in 3e.3).
+        let err = anyhow::anyhow!("admission queue full (untyped message, not the typed Err)");
+        let resp = admit_err_to_response(err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.headers().get("retry-after").is_none());
+    }
+
+    #[tokio::test]
+    async fn admit_err_400_for_other() {
+        let err = anyhow::anyhow!("prompt too long: 999999 tokens exceeds limit");
+        let resp = admit_err_to_response(err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.headers().get("retry-after").is_none());
+    }
+
+    #[tokio::test]
+    async fn admit_err_413_for_request_too_large() {
+        use axum::body::to_bytes;
+
+        // 3f: typed SchedulerError::RequestTooLarge → 413 Payload Too Large.
+        let err = anyhow::Error::new(crate::core::SchedulerError::RequestTooLarge {
+            needed: 50000,
+            max: 32768,
+        });
+        let resp = admit_err_to_response(err);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // No Retry-After header for 413 (client error, not transient).
+        assert!(resp.headers().get("retry-after").is_none());
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body_str.contains("50000"),
+            "body should mention needed=50000, got: {body_str}"
+        );
+        assert!(
+            body_str.contains("32768"),
+            "body should mention max=32768, got: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admit_err_400_for_unrelated_typed_error() {
+        // A typed Err that is NOT SchedulerError → falls through to 400.
+        #[derive(Debug, thiserror::Error)]
+        #[error("test error: {msg}")]
+        struct OtherError {
+            msg: String,
+        }
+        let err = anyhow::Error::new(OtherError {
+            msg: "unrelated".to_string(),
+        });
+        let resp = admit_err_to_response(err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.headers().get("retry-after").is_none());
     }
 }

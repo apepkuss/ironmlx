@@ -14,6 +14,7 @@
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 
@@ -105,7 +106,7 @@ async fn scheduler_actor_b1_text_only_swap() {
     //    The actor takes Arc<Mutex<Qwen35Model>>; wrap the model we already
     //    loaded (no second disk load needed).
     let model_arc = Arc::new(Mutex::new(model));
-    let handle = spawn_scheduler_actor(model_arc, 4);
+    let handle = spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768);
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -204,7 +205,7 @@ async fn scheduler_actor_long_prompt_routes_to_gs() {
     // dispatch decision is correct. The admit_count invariant holds trivially
     // because no SchedulerCommand is ever sent on the GS path.
     let model_arc = Arc::new(Mutex::new(model));
-    let handle = spawn_scheduler_actor(model_arc, 4);
+    let handle = spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768);
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     // GS path: no SchedulerCommand sent → admit_count unchanged.
@@ -263,7 +264,7 @@ async fn scheduler_actor_vl_routes_to_gs() {
     );
 
     let model_arc = Arc::new(Mutex::new(model));
-    let handle = spawn_scheduler_actor(model_arc, 4);
+    let handle = spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768);
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     // Routing predicate verified above; drop the request without running

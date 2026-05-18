@@ -79,6 +79,21 @@ impl KVCache {
         self.cap
     }
 
+    /// Raise `self.cap` to `new_cap` if larger; no-op otherwise. The
+    /// physical K/V buffers are not reallocated here — they remain at
+    /// their current capacity until the next `update_and_fetch` or
+    /// `adopt_row_from` triggers `grow_to` against the new cap.
+    ///
+    /// B1-p2.3f: enables `Scheduler::admit_mid` to extend the main
+    /// cache when a new row's `prompt_len + max_new_tokens` exceeds
+    /// the initial batch's cap. Shrinking is intentionally not
+    /// supported — existing rows may rely on the current cap.
+    pub fn grow_cap(&mut self, new_cap: i32) {
+        if new_cap > self.cap {
+            self.cap = new_cap;
+        }
+    }
+
     /// Dtype used for the K/V buffer. Exposed so `adopt_row_from` can
     /// validate that `src` and `self` agree before slicing.
     pub fn dtype(&self) -> Dtype {
@@ -604,6 +619,37 @@ mod tests {
     #[test]
     fn with_step_overrides_default() {
         let _ = KVCache::new(1, 4, 256, 256, Dtype::Float32, 4096).with_step(512);
+    }
+
+    #[test]
+    fn kvcache_grow_cap_extends_and_allows_writes_beyond_initial_cap() {
+        // Initial cap=8 — after writing 4 tokens, a second 6-token write
+        // would exceed cap. grow_cap(64) lifts the limit so the second
+        // write succeeds + post-grow capacity reflects the new cap.
+        let mut c = make_cache_b(2, 8);
+        let (k1, v1) = make_kv_b(2, 4);
+        c.update_and_fetch(&k1, &v1, &[4, 4]).expect("write 1");
+        assert_eq!(c.cap(), 8);
+
+        c.grow_cap(64);
+        assert_eq!(c.cap(), 64);
+
+        let (k2, v2) = make_kv_b(2, 6);
+        // 4+6=10 > old cap=8; passes against new cap=64.
+        let (kf, _vf) = c.update_and_fetch(&k2, &v2, &[6, 6]).expect("write 2");
+        assert_eq!(c.offsets(), &[10, 10]);
+        assert_eq!(kf.shape().as_slice(), &[2, 4, 10, 256]);
+    }
+
+    #[test]
+    fn kvcache_grow_cap_is_monotonic_noop_on_shrink() {
+        let mut c = make_cache_b(2, 100);
+        c.grow_cap(50); // smaller than current — no-op
+        assert_eq!(c.cap(), 100);
+        c.grow_cap(100); // equal — no-op
+        assert_eq!(c.cap(), 100);
+        c.grow_cap(200); // larger — grows
+        assert_eq!(c.cap(), 200);
     }
 
     #[test]

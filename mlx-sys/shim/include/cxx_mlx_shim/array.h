@@ -287,6 +287,9 @@ std::unique_ptr<MlxArray> array_take(
 std::unique_ptr<MlxArray> array_take_along_axis(
     const MlxArray& a, const MlxArray& indices, int32_t axis,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+std::unique_ptr<MlxArray> array_put_along_axis(
+    const MlxArray& a, const MlxArray& indices, const MlxArray& values, int32_t axis,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
 
 std::unique_ptr<MlxArray> array_slice_strided(
     const MlxArray& a,

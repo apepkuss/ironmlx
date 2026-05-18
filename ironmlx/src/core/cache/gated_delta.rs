@@ -72,6 +72,21 @@ impl GatedDeltaCache {
         self.cap
     }
 
+    /// Raise `self.cap` to `new_cap` if larger; no-op otherwise. `cap` is
+    /// a purely logical bound here — `conv_state` and `recurrent_state`
+    /// shapes are kernel/state-defined and do not depend on `cap`, so
+    /// this is a single i32 field update with no buffer work.
+    ///
+    /// B1-p2.3f: paired with [`crate::core::cache::KVCache::grow_cap`],
+    /// lets `Scheduler::admit_mid` extend the main cache when a new
+    /// row's `prompt_len + max_new_tokens` exceeds the initial batch's
+    /// cap. Shrinking is intentionally not supported.
+    pub fn grow_cap(&mut self, new_cap: i32) {
+        if new_cap > self.cap {
+            self.cap = new_cap;
+        }
+    }
+
     /// Replace the conv_state with a freshly-computed sliding window.
     ///
     /// Caller is responsible for supplying shape `[B, kernel_size - 1, conv_dim]`
@@ -321,6 +336,32 @@ mod tests {
             msg.contains("cap") || msg.contains("exceeds"),
             "msg should mention cap; got: {msg}"
         );
+    }
+
+    #[test]
+    fn gdcache_grow_cap_extends_and_allows_advance_beyond_initial_cap() {
+        // Initial cap=4 — after advancing to 4, a further +6 would exceed
+        // cap. grow_cap(32) lifts the limit so the advance succeeds.
+        let mut c = make_cache_b(2, 4);
+        c.advance(&[4, 4]).expect("advance to cap");
+        assert_eq!(c.cap(), 4);
+
+        c.grow_cap(32);
+        assert_eq!(c.cap(), 32);
+
+        c.advance(&[6, 6]).expect("advance past old cap");
+        assert_eq!(c.offsets(), &[10, 10]);
+    }
+
+    #[test]
+    fn gdcache_grow_cap_is_monotonic_noop_on_shrink() {
+        let mut c = make_cache_b(1, 100);
+        c.grow_cap(50);
+        assert_eq!(c.cap(), 100);
+        c.grow_cap(100);
+        assert_eq!(c.cap(), 100);
+        c.grow_cap(200);
+        assert_eq!(c.cap(), 200);
     }
 
     #[test]

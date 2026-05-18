@@ -565,6 +565,16 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+        fn array_put_along_axis(
+            a: &MlxArray,
+            indices: &MlxArray,
+            values: &MlxArray,
+            axis: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_slice_strided(
             a: &MlxArray,
             start: &[i32],

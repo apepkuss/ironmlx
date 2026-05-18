@@ -182,7 +182,7 @@ async fn continuous_batching_mid_decode_admit() {
     };
 
     // Drive actor.
-    let handle = spawn_scheduler_actor(model.clone(), 2);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768);
 
     let reply_a = submit_admit(
         &handle.cmd_tx,
@@ -272,7 +272,9 @@ async fn continuous_batching_full_reject() {
     let prompt_c = tokenize_prompt(&tokenizer, "Goodbye");
     let stop: Vec<u32> = tokenizer.eos_token_ids().to_vec();
 
-    let handle = spawn_scheduler_actor(model.clone(), 2);
+    // admission_queue_max=0: disable the 3d queue so this test exercises
+    // the immediate-reject path (c > b_max → Err "scheduler full").
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 0, 32768);
 
     let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 20, stop.clone()))
         .await
@@ -284,15 +286,22 @@ async fn continuous_batching_full_reject() {
     // Wait briefly so A + B reach Decoding phase.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Now submit C — both slots full + Decoding -> admit_mid Err.
+    // Now submit C — both slots full + Decoding + queue disabled -> admit_mid Err.
     let admit_c_result =
         submit_admit(&handle.cmd_tx, make_request(prompt_c, 5, stop.clone())).await;
     match admit_c_result {
         Err(e) => {
             let msg = format!("{e:?}");
+            // With B1-p2.3d's admission queue, c>b_max is intercepted by the
+            // queue layer before reaching Scheduler. queue_max=0 makes the
+            // queue layer immediately reject with "admission queue full".
+            // The semantic invariant (C is rejected when b_max saturated +
+            // queue disabled) holds; only the Err message changed.
             assert!(
-                msg.contains("scheduler full") || msg.contains("no row available"),
-                "expected 'scheduler full' Err; got: {msg}"
+                msg.contains("admission queue full")
+                    || msg.contains("scheduler full")
+                    || msg.contains("no row available"),
+                "expected rejection Err; got: {msg}"
             );
         }
         Ok(_) => panic!("C admit should have failed but succeeded"),
@@ -315,7 +324,7 @@ async fn continuous_batching_drains_to_empty() {
     let prompt_b = tokenize_prompt(&tokenizer, "World");
     let stop: Vec<u32> = tokenizer.eos_token_ids().to_vec();
 
-    let handle = spawn_scheduler_actor(model.clone(), 2);
+    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768);
 
     // First admit + drain.
     let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 4, stop.clone()))

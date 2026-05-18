@@ -128,6 +128,10 @@ pub struct GenerationStream<'m> {
     /// path until that first call starts the capture. `None` once started or
     /// if not in decode-only mode.
     capture_pending_decode: Option<String>,
+
+    /// Per-stream PRNG state `[2]` u32. Initialized from `request.sampler.seed`
+    /// in `new()`. Advanced by each `Sampler::sample` call. (B1-p2.3e.2)
+    prng_state: Array,
 }
 
 impl Drop for GenerationStream<'_> {
@@ -454,6 +458,89 @@ pub fn build_per_row_decode_mask(
     mlx::ops::cast::astype(&arr_f32, dtype).map_err(|e| anyhow!("astype mask: {e}"))
 }
 
+/// Build a cross-chunk prefill attention mask for one chunk of a chunked
+/// mid-batch admit. Shape: `[1, 1, chunk_len, chunk_start + chunk_len]`.
+///
+/// Row `q` in the chunk queries K/V positions `0..chunk_start + q + 1`:
+/// - Columns `0..chunk_start`: attend to earlier-chunk KV cells (all 0.0).
+/// - Columns `chunk_start..chunk_start + q + 1`: causal within-chunk (0.0).
+/// - Columns `chunk_start + q + 1..`: masked out (-inf).
+///
+/// This matches the KV slice returned by the model's internal `KVCache::update_and_fetch_on`
+/// after `temp_cache.offsets[0] = chunk_start` at call time: the model reads back
+/// `chunk_start + chunk_len` keys/values (earlier chunks' + this chunk's).
+///
+/// `dtype` is typically `Dtype::Bfloat16` to match the SDPA promoted type.
+pub fn build_chunked_prefill_attention_mask(
+    chunk_start: i32,
+    chunk_len: i32,
+    dtype: Dtype,
+) -> Result<Array> {
+    if chunk_len <= 0 {
+        return Err(anyhow!(
+            "build_chunked_prefill_attention_mask: chunk_len must be > 0, got {chunk_len}"
+        ));
+    }
+    if chunk_start < 0 {
+        return Err(anyhow!(
+            "build_chunked_prefill_attention_mask: chunk_start must be >= 0, got {chunk_start}"
+        ));
+    }
+
+    let kv_len = (chunk_start + chunk_len) as usize;
+    let q_len = chunk_len as usize;
+    let cs = chunk_start as usize;
+    let neg_inf = f32::NEG_INFINITY;
+    let mut flat = vec![neg_inf; q_len * kv_len];
+
+    for q in 0..q_len {
+        // Attend to all earlier-chunk positions [0..chunk_start].
+        for k in 0..cs {
+            flat[q * kv_len + k] = 0.0;
+        }
+        // Causal within current chunk: attend to chunk positions [0..=q].
+        for k in 0..=q {
+            flat[q * kv_len + cs + k] = 0.0;
+        }
+        // Positions cs + q + 1..kv_len stay -inf (not yet written).
+    }
+
+    let arr_f32: Array = (
+        &flat[..],
+        &[1_i32, 1_i32, chunk_len, chunk_start + chunk_len][..],
+    )
+        .try_into()
+        .map_err(|e| anyhow!("build_chunked_prefill_attention_mask try_into: {e:?}"))?;
+    mlx::ops::cast::astype(&arr_f32, dtype)
+        .map_err(|e| anyhow!("build_chunked_prefill_attention_mask astype: {e}"))
+}
+
+/// Build a per-token validity mask `[1, chunk_start + chunk_len]` (bool) for
+/// the hybrid model's linear-attention path for one chunk of a chunked
+/// mid-batch admit.
+///
+/// All positions `0..chunk_start + chunk_len` are `true` — every position
+/// from earlier chunks and the current chunk is real (no padding).
+pub fn build_chunked_prefill_linear_mask(chunk_start: i32, chunk_len: i32) -> Result<Array> {
+    if chunk_len <= 0 {
+        return Err(anyhow!(
+            "build_chunked_prefill_linear_mask: chunk_len must be > 0, got {chunk_len}"
+        ));
+    }
+    if chunk_start < 0 {
+        return Err(anyhow!(
+            "build_chunked_prefill_linear_mask: chunk_start must be >= 0, got {chunk_start}"
+        ));
+    }
+
+    let total = (chunk_start + chunk_len) as usize;
+    let flat = vec![true; total];
+    let arr: Array = (&flat[..], &[1_i32, chunk_start + chunk_len][..])
+        .try_into()
+        .map_err(|e| anyhow!("build_chunked_prefill_linear_mask try_into: {e:?}"))?;
+    Ok(arr)
+}
+
 /// Build a per-token validity mask `[B, max_len]` for the hybrid model's
 /// **linear-attention** path (`GatedDeltaNet`). For batch row `i` with
 /// actual length `prompt_lens[i] = L_i` (right-padded prefill):
@@ -770,14 +857,14 @@ pub fn build_position_ids_vl_batched(
 /// Count occurrences of `image_token_id` in a u32 slice of token ids.
 /// Used by the chunked-prefill loop to know how many vision_embed rows
 /// belong to a given chunk.
-fn count_image_pad(ids: &[u32], image_token_id: i32) -> usize {
+pub fn count_image_pad(ids: &[u32], image_token_id: i32) -> usize {
     let target = image_token_id as u32;
     ids.iter().filter(|&&t| t == target).count()
 }
 
 /// Slice a MRoPE `[3, 1, S]` position-id tensor on axis 2 by a half-open
 /// range `[start, stop)`. Returns `[3, 1, stop - start]`.
-fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<mlx::Array> {
+pub fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<mlx::Array> {
     let shape = pos_full.shape();
     let dims = shape.as_slice();
     if dims.len() != 3 || dims[0] != 3 || dims[1] != 1 {
@@ -800,7 +887,11 @@ fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<m
 }
 
 /// Slice rows `[start, stop)` from a `[N, hidden]` vision_embeds tensor.
-fn slice_vision_embeds_rows(ve_full: &mlx::Array, start: usize, stop: usize) -> Result<mlx::Array> {
+pub fn slice_vision_embeds_rows(
+    ve_full: &mlx::Array,
+    start: usize,
+    stop: usize,
+) -> Result<mlx::Array> {
     let shape = ve_full.shape();
     let dims = shape.as_slice();
     if dims.len() != 2 {
@@ -844,7 +935,14 @@ impl<'m> GenerationStream<'m> {
         // defers start to the first `next_token` call (skips prefill).
         let (capture_active, capture_pending_decode) = try_start_capture();
 
-        let cap = (prompt_len + request.max_new_tokens) as i32;
+        // B1-p2.3f T4: floor the cap at MIN_KV_CACHE_CAP_FOR_GPU_PERF so
+        // short-prompt single-stream decode doesn't fall off the MLX
+        // Metal kernel slow path (cap < ~256 → 100-300× decode slowdown
+        // on Apple Silicon). Caught by b1_p2_3b_3
+        // `admission_window_concurrent_scheduler_and_gs_no_deadlock`
+        // standalone regression.
+        let cap = ((prompt_len + request.max_new_tokens) as i32)
+            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = Dtype::Bfloat16;
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
 
@@ -987,6 +1085,9 @@ impl<'m> GenerationStream<'m> {
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
 
+        // Initialize per-stream PRNG state from sampler seed. [2] u32.
+        let mut prng_state = mlx::random::key(request.sampler.seed)?;
+
         if pipelined {
             // Pipelined path: pending_token_arr starts as the prefill's argmax,
             // pre-dispatched via async_eval so the GPU is already working on
@@ -1011,12 +1112,15 @@ impl<'m> GenerationStream<'m> {
                 last_decoded_text: String::new(),
                 capture_active,
                 capture_pending_decode,
+                prng_state,
             })
         } else {
             // Sync path: existing pre-P8a behavior. First token sampled
             // synchronously here; pushed into history; initial text snapshot
             // captured for incremental diff.
-            let first_token = request.sampler.sample(&last_logits, &history)?;
+            let first_token = request
+                .sampler
+                .sample(&last_logits, &history, &mut prng_state)?;
             let mut history = history;
             history.push(first_token);
 
@@ -1040,6 +1144,7 @@ impl<'m> GenerationStream<'m> {
                 last_decoded_text: initial_text,
                 capture_active,
                 capture_pending_decode,
+                prng_state,
             })
         }
     }
@@ -1197,7 +1302,10 @@ impl<'m> GenerationStream<'m> {
         // Logits shape [1, 1, vocab] — flatten to [vocab].
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
-        let next = self.request.sampler.sample(&logits_flat, &self.history)?;
+        let next =
+            self.request
+                .sampler
+                .sample(&logits_flat, &self.history, &mut self.prng_state)?;
         self.history.push(next);
 
         Ok(Some(GenerateEvent {
