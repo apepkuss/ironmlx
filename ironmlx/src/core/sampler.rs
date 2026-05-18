@@ -1462,4 +1462,87 @@ mod tests {
             "argmax: row 0→col 1 (5.0), row 1→col 0 (9.0)"
         );
     }
+
+    // ── slice_update probe tests (b1-p2.3e.2-t0) ────────────────────
+
+    #[test]
+    fn probe_slice_update_per_row_round_trip() {
+        use mlx::ops::indexing::{slice, slice_update};
+        let b_max = 4_usize;
+        let zeros: Array =
+            Array::zeros(&[b_max as i32, 2_i32][..], mlx::Dtype::Uint32).expect("zeros");
+        // Write key [42, 43] into row 1.
+        let key_row1: Array = (&[42_u32, 43_u32][..], &[1_i32, 2_i32][..])
+            .try_into()
+            .expect("key_row1");
+        let after_write = slice_update(
+            &zeros,
+            &key_row1,
+            &[1_i32, 0_i32][..],
+            &[2_i32, 2_i32][..],
+            &[1_i32, 1_i32][..],
+        )
+        .expect("slice_update");
+        // Read row 1 back.
+        let read_back =
+            slice(&after_write, &[1_i32, 0_i32][..], &[2_i32, 2_i32][..]).expect("slice");
+        let read_flat = read_back.reshape(&[2_i32][..]).expect("reshape");
+        let v: Vec<u32> = read_flat.to_vec().expect("to_vec");
+        assert_eq!(v, vec![42, 43], "round-trip slice_update + slice");
+        // Row 0 should still be zeros.
+        let row0 =
+            slice(&after_write, &[0_i32, 0_i32][..], &[1_i32, 2_i32][..]).expect("slice row0");
+        let row0_flat: Vec<u32> = row0
+            .reshape(&[2_i32][..])
+            .expect("reshape row0")
+            .to_vec()
+            .expect("to_vec row0");
+        assert_eq!(row0_flat, vec![0, 0], "row 0 unmodified");
+    }
+
+    #[test]
+    #[ignore] // bench-mode
+    fn probe_slice_update_per_row_bench() {
+        use mlx::ops::indexing::slice_update;
+        use std::time::Instant;
+        let b_max = 4_usize;
+        let mut prng_state: Array =
+            Array::zeros(&[b_max as i32, 2_i32][..], mlx::Dtype::Uint32).expect("zeros");
+        prng_state.eval().expect("eval");
+
+        let key_new: Array = (&[1_u32, 2_u32][..], &[1_i32, 2_i32][..])
+            .try_into()
+            .expect("key");
+        key_new.eval().expect("eval key");
+
+        // Warm-up
+        for _ in 0..3 {
+            prng_state = slice_update(
+                &prng_state,
+                &key_new,
+                &[0_i32, 0_i32][..],
+                &[1_i32, 2_i32][..],
+                &[1_i32, 1_i32][..],
+            )
+            .expect("warm");
+            prng_state.eval().expect("eval");
+        }
+
+        // Bench: 100 iterations
+        let t0 = Instant::now();
+        for _ in 0..100 {
+            prng_state = slice_update(
+                &prng_state,
+                &key_new,
+                &[0_i32, 0_i32][..],
+                &[1_i32, 2_i32][..],
+                &[1_i32, 1_i32][..],
+            )
+            .expect("bench iter");
+            prng_state.eval().expect("eval iter");
+        }
+        let elapsed = t0.elapsed();
+        let per_call_us = elapsed.as_secs_f64() * 1e6 / 100.0;
+        eprintln!("[T0 bench] slice_update [b_max=4, write row 0]: {per_call_us:.2} µs/call");
+    }
 }
