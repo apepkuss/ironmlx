@@ -278,6 +278,19 @@ async fn admission_deadline_config_observed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore] // real-model heavy
 async fn b_max_config_8_no_queue() {
+    // B1-p2.5 budget gate: this test intentionally uses b_max=8 × cap=32768
+    // (32 GiB nominal KV cache) that would exceed a real 32 GiB Mac's budget.
+    // Override IRONMLX_TOTAL_RAM_BYTES to simulate a 64 GiB machine so the
+    // budget validation passes. EnvGuard Drop cleans up even on panic.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        }
+    }
+    std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "68719476736"); // 64 GiB
+    let _guard = EnvGuard;
+
     // b_max=8 + admission_deadline_ms=50: 6 concurrent admits all fit in
     // one batch (queue stays empty).
     let (model, tokenizer) = load_fixture();
@@ -323,6 +336,18 @@ async fn b_max_config_8_no_queue() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore] // real-model heavy + HTTP server
 async fn iron_bench_c8_with_queue_no_4xx() {
+    // B1-p2.5 budget gate: server::serve is called with cap=32768 which
+    // triggers budget validation. Override to 64 GiB so it passes.
+    // EnvGuard Drop cleans up even on panic.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        }
+    }
+    std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "68719476736"); // 64 GiB
+    let _guard = EnvGuard;
+
     // Boot the server on a random port; spawn 8 concurrent HTTP clients
     // hitting /v1/chat/completions for 15s. With b_max=4 + queue_max=32,
     // no HTTP 4xx should occur.
