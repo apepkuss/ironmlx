@@ -57,7 +57,7 @@ fn admit_err_to_response(err: anyhow::Error) -> Response {
         }
         Some(SchedulerError::MemoryBudgetExceeded { .. }) => {
             // 503 Service Unavailable — runtime KV budget soft-limit hit.
-            // T2 will add fine-grained Retry-After; stub 5s here. B1-p2.5.
+            // Retry-After: 5s (fixed conservative backoff). B1-p2.5 §4.1.4.
             let mut resp = (StatusCode::SERVICE_UNAVAILABLE, msg).into_response();
             resp.headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
