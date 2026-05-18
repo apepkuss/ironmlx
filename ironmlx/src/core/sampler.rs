@@ -158,10 +158,8 @@ impl Sampler {
     /// Returns `Err` if any non-greedy parameter is configured. The caller
     /// must then use [`Sampler::sample`].
     ///
-    /// # Note (3e.2 INTERMEDIATE STATE)
-    /// This function is retained because `generate.rs` calls it.
-    /// T2 will wire per-request `prng_state: &mut Array` into the pipeline;
-    /// at that point the greedy path here remains valid (argmax needs no PRNG).
+    /// Retained post-3e.2: greedy argmax sampling path needs no PRNG state.
+    /// Used by `GenerationStream` for the greedy fast-path in `generate.rs`.
     pub fn sample_async_greedy(&self, logits: &Array) -> Result<Array> {
         if !self.is_pipelinable() {
             return Err(anyhow::anyhow!(

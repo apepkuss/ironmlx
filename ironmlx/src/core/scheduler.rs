@@ -344,9 +344,13 @@ impl Scheduler {
     /// `slice_update` (T0 measured at 274 ms/call in hot path).
     /// Called only on admission (not in hot path) so ~80 µs to_vec cost is OK.
     fn init_row_prng(&mut self, row_idx: usize, seed: u64) -> Result<()> {
+        let b_max = self.prng_state.shape().as_slice()[0] as usize;
+        anyhow::ensure!(
+            row_idx < b_max,
+            "init_row_prng: row_idx={row_idx} >= b_max={b_max}"
+        );
         let key = mlx::random::key(seed)?;
         let key_host: Vec<u32> = key.to_vec()?;
-        let b_max = self.prng_state.shape().as_slice()[0] as usize;
         let mut new_host: Vec<u32> = self.prng_state.to_vec()?;
         new_host[row_idx * 2] = key_host[0];
         new_host[row_idx * 2 + 1] = key_host[1];
@@ -358,8 +362,12 @@ impl Scheduler {
     ///
     /// Same to_vec + host-replace + try_from pattern as `init_row_prng`.
     fn write_row_prng(&mut self, row_idx: usize, row_key: &Array) -> Result<()> {
-        let key_host: Vec<u32> = row_key.to_vec()?;
         let b_max = self.prng_state.shape().as_slice()[0] as usize;
+        anyhow::ensure!(
+            row_idx < b_max,
+            "write_row_prng: row_idx={row_idx} >= b_max={b_max}"
+        );
+        let key_host: Vec<u32> = row_key.to_vec()?;
         let mut host: Vec<u32> = self.prng_state.to_vec()?;
         host[row_idx * 2] = key_host[0];
         host[row_idx * 2 + 1] = key_host[1];
