@@ -170,52 +170,22 @@ impl SparseMoeBlock {
     ///
     /// Stream-targeted. Caller is responsible for passing the correct stream;
     /// `()` selects the MLX default stream.
-    ///
-    /// # P5e Stage 1 A.2 (`p5e-compile` feature) — investigation outcome
-    ///
-    /// Goal was to wrap this body in `mlx::compile(..., ShapeMode::Shapeless)`
-    /// so prefill (variable PP) and decode (PP=1) could share one compiled
-    /// graph and the SwiGLU epilogue (`silu(gate) * up`) could fuse into
-    /// the preceding `gather_qmm` kernels.
-    ///
-    /// Blockers found while reading `mlx/src/compile.rs`:
-    ///
-    /// 1. `mlx::compile` requires the user closure to be
-    ///    `Fn(&[&Array]) -> Result<Vec<Array>> + Send + 'static`.
-    ///    A `'static` bound makes capturing `&self` impossible; the
-    ///    closure must own (or share via `Arc`) every weight `Array` it
-    ///    touches.
-    /// 2. `Linear` and `Mlp` keep their backing `Array`s private behind
-    ///    `LinearImpl` / `MlpImpl` enums. Driving the compile closure
-    ///    therefore needs either (a) new public accessors on those nn
-    ///    primitives, or (b) lifting `SparseMoeBlock` into an
-    ///    `Arc<SparseMoeBlock>` + `Send + Sync` refactor so the closure
-    ///    can call `self.router_gate.forward_on` directly. Both touch a
-    ///    much larger surface than the A.2 budget allows.
-    /// 3. `Linear::forward_on` dispatches on `crate::nn::self_qmm::enabled()`
-    ///    and `m_total >= 32`. A traced graph would freeze whichever
-    ///    branch was taken at trace time and lose the M-aware threshold,
-    ///    so a literal `compile(forward_on)` would silently regress at
-    ///    decode (M=1) or vice versa.
-    /// 4. The current body materializes `[bs, h]` and `[b, s, h]` as Rust
-    ///    integer arrays passed to `reshape`. To be truly shapeless those
-    ///    have to become MLX scalar-array inputs to the traced function,
-    ///    which is another full pass of edits.
-    ///
-    /// Per the P5e plan's explicit "abort A.2 if the safe wrapper adaptation
-    /// runs >~30 min" guidance from Boss, T2 ships as a NO-OP gate: the
-    /// `p5e-compile` feature flag is wired up, but the cfg block falls
-    /// through to the default body unchanged. This lets T4 record a clean
-    /// 0-impact measurement and decide deprecation without any code drift
-    /// vs. T0. T3 / T4 remain free to revisit if the above blockers get
-    /// resolved as part of a broader compile-everywhere effort.
     pub fn forward_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
-        // P5e Stage 1 A.2: feature flag present but intentionally a no-op
-        // gate. See doc comment above for the API-surface analysis.
-        // Reference the feature so the cfg gate is exercised at build time
-        // even though the body is shared with the default path.
+        // P5e A.2 (Cargo feature `p5e-compile`): tried to wrap this body in
+        // mlx::compile(.., Shapeless) for SwiGLU fusion + decode/prefill graph
+        // sharing. Blocked by 4 safe-wrapper gaps; left as 0-impact gate, T4
+        // decides whether to delete:
+        //   1. mlx::compile closure requires `Fn(...) + Send + 'static` — can't
+        //      borrow &self; would need owned weight Arrays via Linear/Mlp accessor.
+        //   2. LinearImpl/MlpImpl fields are non-pub; no public accessor to
+        //      extract weights for owned closure capture.
+        //   3. Linear::forward_on runtime-dispatches on `self_qmm::enabled() &&
+        //      m_total >= 32`; compile would freeze one branch and lose M-aware
+        //      tile selection.
+        //   4. Body uses Rust integer reshape args (`[bs, h]`, `[b, s, h]`);
+        //      Shapeless mode wants MLX scalar Array shape inputs.
         #[cfg(feature = "p5e-compile")]
-        let _p5e_compile_noop: () = ();
+        {}
         let dims = x.shape();
         let dvec = dims.as_slice();
         if dvec.len() != 3 {
