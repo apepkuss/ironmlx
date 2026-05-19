@@ -4,13 +4,14 @@
 //! P5 D2: text-only LM path. VL + MTP intentionally out of scope.
 
 pub mod config;
+pub mod decoder_layer;
 pub mod sparse_moe;
+pub mod text_model;
 // 后续 P5b task 解开：
-// pub mod decoder_layer;
-// pub mod text_model;
 // pub mod model;
 
 pub use config::{Qwen35MoeConfig, RopeParams};
+pub use decoder_layer::{DecoderLayerMoe, DecoderLayerMoeConfig};
 pub use sparse_moe::{RoutedExperts, SparseMoeBlock};
+pub use text_model::Qwen35MoeTextModel;
 // pub use model::Qwen35MoeModel;
-// pub use text_model::Qwen35MoeTextModel;
