@@ -1,12 +1,12 @@
-# P5d — Perf Gate + mlx-vlm Validation Implementation Plan
+# P5d — Perf Gate + omlx Validation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 完成 P5 端到端验证：iron-bench 加 35B-A3B-4bit profile；与 mlx-vlm reference 进行 ≥50 prompt × ≥200 token 抽样对齐验证（greedy argmax 100% 一致 + top-K logits max_abs_diff < 1e-3）；性能基线录入历史；close-out 报告 commit。
+**Goal:** 完成 P5 端到端验证：iron-bench 加 35B-A3B-4bit profile；与 omlx serve 进行 ≥50 prompt × ≥200 token 抽样对齐验证（greedy argmax 100% 一致 + top-K logits max_abs_diff < 1e-3）；性能基线录入历史；close-out 报告 commit。
 
 **Architecture:** 仅验证 + 测量，不引入新功能。本 phase 是 P5 整体验收守门人。
 
-**Tech Stack:** Rust 1.94 / iron-bench (cargo workspace member) / mlx-vlm Python (via uv run --with-editable) / Bash 集成脚本。
+**Tech Stack:** Rust 1.94 / iron-bench (cargo workspace member) / omlx CLI (via uv run --with-editable from /Users/xin/workspace/iron-rivals/omlx, started as HTTP server) / Bash 集成脚本。
 
 **Spec reference:** [docs/superpowers/specs/2026-05-18-ironmlx-p5-qwen35-moe-design.md](../specs/2026-05-18-ironmlx-p5-qwen35-moe-design.md) §4 / §7
 
@@ -45,29 +45,38 @@ cargo test -p ironmlx --release --test p5_qwen35_moe_http_smoke -- --ignored
 
 Expected: 全 PASS
 
-### Step 0.3: mlx-vlm 环境就绪 (P5b T0 已验证)
+### Step 0.3: omlx 环境就绪
 
-- [ ] mlx-vlm 可加载 35B-A3B-4bit + generate 1 token
+- [ ] omlx serve 可启动 + 返回 5 token completion
 
 Run:
 
-```
-cd /Users/xin/workspace/iron-rivals/mlx-vlm
-uv run --with-editable . python -c "
-from mlx_vlm import load, generate
-model, processor = load('~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/<sha>')
-out = generate(model, processor, prompt='Hello', max_tokens=5, temperature=0.0, verbose=False)
-print(out.text)
-"
+```bash
+cd /Users/xin/workspace/iron-rivals/omlx
+uv run --with-editable . omlx serve mlx-community/Qwen3.5-35B-A3B-4bit --port 8091 &
+OMLX_PID=$!
+# wait for /v1/models
+for i in {1..120}; do
+  if curl -fsS http://localhost:8091/v1/models >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+curl -X POST http://localhost:8091/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3_5_moe","messages":[{"role":"user","content":"Hello"}],"max_tokens":5,"temperature":0.0,"stream":false}' \
+  | jq .choices[0].message.content
+kill $OMLX_PID
 ```
 
-Expected: 5 tokens 输出无 OOM/crash (P5b T0 already verified — peak ~20.4GB, gen ~105 tok/s).
+Expected: 5 token completion JSON returned.
+
+> **Note:** P5b correctness baseline used mlx-vlm `generate()` (Python function), not omlx. omlx CLI lacks a `generate` subcommand — but omlx serve speaks OpenAI HTTP, which iron-bench drives natively. mlx-vlm is retained ONLY for P5d T4 supplemental top-K logits (omlx HTTP doesn't expose raw logits).
 
 ---
 
 ## Task 1: iron-bench `qwen3.5-moe` profile
 
 **Files:**
+
 - Modify: `iron-bench/src/profiles.rs` 或对应 profile 配置文件（按 iron-bench 实际结构调整）
 - Modify: `iron-bench/configs/qwen3.5-moe.toml`（新建，或直接编辑 profiles.rs 表）
 
@@ -129,33 +138,52 @@ EOF
 ## Task 2: 跑 iron-bench `qwen3.5-moe` 基线落地
 
 **Files:**
+
 - Create: `docs/superpowers/plans/p5d-perf-baseline.md`（基线数字记录，gitignore exempt）
 
-- [ ] **Step 2.1: 串行跑 ironmlx + mlx-vlm 两侧 iron-bench**
+- [ ] **Step 2.1: 串行跑 ironmlx + omlx 两侧 iron-bench**
 
 按 [feedback_serial_perf_experiments](../../../.claude/projects/-Users-xin-workspace-ironmlx-backend/memory/feedback_serial_perf_experiments.md) 串行规则，**一次只跑一个 server，避免 GPU/swap 互相污染**。
 
-ironmlx 侧：
+Phase A — ironmlx 侧：
 
+```bash
+./target/release/ironmlx serve --model <snap> --port 8090 --b-max 1 --max-cache-cap 4096 &
+IRONMLX_PID=$!
+# wait for healthz...
+for i in {1..60}; do
+  if curl -fsS http://localhost:8090/v1/models >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+cargo run --release -p iron-bench -- \
+  --target ironmlx=http://localhost:8090 \
+  --model qwen3_5_moe \
+  --model-dir <snap> \
+  --prompt-len 128,512,2048 \
+  --max-tokens 50 --runs 3 --warmup 1 \
+  --format json > reports/p5d-ironmlx-moe.json 2>&1 | tee reports/p5d-ironmlx-moe.log
+kill $IRONMLX_PID
 ```
+
+Phase B — omlx 侧（停掉 ironmlx 后串行）：
+
+```bash
+cd /Users/xin/workspace/iron-rivals/omlx
+uv run --with-editable . omlx serve mlx-community/Qwen3.5-35B-A3B-4bit --port 8091 &
+OMLX_PID=$!
+for i in {1..120}; do
+  if curl -fsS http://localhost:8091/v1/models >/dev/null 2>&1; then break; fi
+  sleep 1
+done
 cd /Users/xin/workspace/ironmlx-backend
 cargo run --release -p iron-bench -- \
-  --profile qwen3.5-moe \
-  --backend ironmlx \
-  --prefill 128,512,2048 \
-  --decode-steady 50 \
-  --output reports/p5d-ironmlx-moe.json 2>&1 | tee reports/p5d-ironmlx-moe.log
-```
-
-mlx-vlm 侧（停掉 ironmlx server 后跑）：
-
-```
-cargo run --release -p iron-bench -- \
-  --profile qwen3.5-moe \
-  --backend mlx-vlm \
-  --prefill 128,512,2048 \
-  --decode-steady 50 \
-  --output reports/p5d-mlxvlm-moe.json 2>&1 | tee reports/p5d-mlxvlm-moe.log
+  --target omlx=http://localhost:8091 \
+  --model qwen3_5_moe \
+  --model-dir <snap> \
+  --prompt-len 128,512,2048 \
+  --max-tokens 50 --runs 3 --warmup 1 \
+  --format json > reports/p5d-omlx-moe.json 2>&1 | tee reports/p5d-omlx-moe.log
+kill $OMLX_PID
 ```
 
 Expected: 两份 JSON + 两份 log 报告，跑完无 OOM/crash。
@@ -164,8 +192,8 @@ Expected: 两份 JSON + 两份 log 报告，跑完无 OOM/crash。
 
 把数据回填到本任务 step 2.3 表格：
 
-| 指标 | ironmlx | mlx-vlm | 相对差 |
-|---|---|---|---|
+| 指标 | ironmlx | omlx | 相对差 |
+| --- | --- | --- | --- |
 | prefill PP=128 (tok/s) | ___ | ___ | ___% |
 | prefill PP=512 | ___ | ___ | ___% |
 | prefill PP=2048 | ___ | ___ | ___% |
@@ -177,7 +205,7 @@ Expected: 两份 JSON + 两份 log 报告，跑完无 OOM/crash。
 
 按 spec §4.3 "perf gate 阈值由 T1 实测数据落定后定" 原则：
 
-- **可接受**：ironmlx 相对 mlx-vlm 在所有 prefill/decode 指标上相对差 < 20% (mlx-vlm 是 Python overhead 但 backend 同 mlx Metal; ironmlx Rust 应该相当或更优)
+- **可接受**：ironmlx 相对 omlx 在所有 prefill/decode 指标上相对差 < 20% (omlx 是 Python over mlx-c FFI; ironmlx Rust 通过 cxx 走 mlx C++，二者使用同一 Metal backend，性能差距应反映 FFI/runtime 开销而非 backend；ironmlx 应相当或更优)
 - **退化** (> 20%)：surface 给 Boss，分析根因（可能 SparseMoeBlock G2 fallback 性能问题）；如 T0 决定走 G1 但 mlx::gather_qmm 仍不优，留 P5e 优化 phase
 
 若可接受 → 写入 close-out 报告（T5）；若退化 → Boss 决定是否阻塞 P5 整体闭环。
@@ -187,12 +215,12 @@ Expected: 两份 JSON + 两份 log 报告，跑完无 OOM/crash。
 ```bash
 git add reports/p5d-*.json reports/p5d-*.log
 git commit -m "$(cat <<'EOF'
-test(p5d-t2): MoE perf baseline — iron-bench serial run vs mlx-vlm
+test(p5d-t2): MoE perf baseline — iron-bench serial run vs omlx
 
 Serial benchmark per memory[feedback_serial_perf_experiments].
 Records prefill PP=128/512/2048 + decode steady ITL on
-Qwen3.5-35B-A3B-4bit. Both ironmlx and mlx-vlm backends profiled
-under identical hardware + prompt set.
+Qwen3.5-35B-A3B-4bit. Both ironmlx and omlx serve backends profiled
+under identical hardware + prompt set via iron-bench HTTP client.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -201,11 +229,11 @@ EOF
 
 ---
 
-## Task 3: mlx-vlm greedy argmax 跨 prompt 对齐验证
+## Task 3: omlx greedy argmax 跨 prompt 对齐验证
 
 **Files:**
 
-- Create: `scripts/p5d_mlxvlm_argmax_align.sh`
+- Create: `scripts/p5d_omlx_argmax_align.sh`
 - Create: `scripts/p5d_compare_argmax.py`
 
 - [ ] **Step 3.1: 准备 50-prompt 对齐集**
@@ -227,12 +255,13 @@ Write a haiku about autumn.
 
 - [ ] **Step 3.2: 写跑对齐脚本**
 
-Create `scripts/p5d_mlxvlm_argmax_align.sh`:
+Create `scripts/p5d_omlx_argmax_align.sh`:
 
 ```bash
 #!/bin/bash
-# 串行跑 ironmlx + mlx-vlm，对每个 prompt 拿 first 200 token greedy 输出，
+# 串行跑 ironmlx + omlx，对每个 prompt 拿 first 200 token greedy 输出，
 # 输出 JSON 文件供 Python 脚本比对。
+# omlx serve 需先在 8091 启动（或由本脚本内部管理）。
 set -euo pipefail
 
 MODEL_DIR=${IRONMLX_MOE_MODEL_DIR:?set IRONMLX_MOE_MODEL_DIR}
@@ -241,37 +270,46 @@ OUT_DIR=reports/p5d-argmax
 
 mkdir -p "$OUT_DIR"
 
-# (1) ironmlx CLI 生成
+# (1) ironmlx 侧 — 通过 HTTP 请求 ironmlx serve（port 8090）
+# 假设 ironmlx serve 已在 8090 运行，或在此启动
 i=0
 while IFS= read -r prompt; do
-  out=$(cargo run --release -p ironmlx --quiet -- generate \
-    --model "$MODEL_DIR" --prompt "$prompt" --max-tokens 200 --temperature 0)
+  out=$(curl -fsS -X POST http://localhost:8090/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg p "$prompt" '{model:"qwen3_5_moe",messages:[{role:"user",content:$p}],max_tokens:200,temperature:0.0,stream:false}')" \
+    | jq -r .choices[0].message.content)
   echo "{\"idx\":$i,\"prompt\":$(printf %s "$prompt" | jq -Rs .),\"output\":$(printf %s "$out" | jq -Rs .)}" \
     >> "$OUT_DIR/ironmlx.jsonl"
   i=$((i+1))
 done < "$PROMPTS"
 
-# (2) mlx-vlm 生成（停掉 ironmlx 后串行）
-cd /Users/xin/workspace/iron-rivals/mlx-vlm
+# (2) omlx 侧（停掉 ironmlx 后串行，omlx serve 在 port 8091）
+cd /Users/xin/workspace/iron-rivals/omlx
+uv run --with-editable . omlx serve mlx-community/Qwen3.5-35B-A3B-4bit --port 8091 &
+OMLX_PID=$!
+for j in {1..120}; do
+  if curl -fsS http://localhost:8091/v1/models >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+cd - >/dev/null
+
 i=0
 while IFS= read -r prompt; do
-  out=$(uv run --with-editable . python -c "
-from mlx_vlm import load, generate
-model, processor = load('$MODEL_DIR')
-out = generate(model, processor, prompt='$prompt', max_tokens=200, temperature=0.0, verbose=False)
-print(out.text)
-")
+  out=$(curl -fsS -X POST http://localhost:8091/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg p "$prompt" '{model:"qwen3_5_moe",messages:[{role:"user",content:$p}],max_tokens:200,temperature:0.0,stream:false}')" \
+    | jq -r .choices[0].message.content)
   echo "{\"idx\":$i,\"prompt\":$(printf %s "$prompt" | jq -Rs .),\"output\":$(printf %s "$out" | jq -Rs .)}" \
-    >> "$OLDPWD/$OUT_DIR/mlx-vlm.jsonl"
+    >> "$OUT_DIR/omlx.jsonl"
   i=$((i+1))
-done < "$OLDPWD/$PROMPTS"
-cd - >/dev/null
+done < "$PROMPTS"
+kill $OMLX_PID
 ```
 
 加可执行权限：
 
 ```bash
-chmod +x scripts/p5d_mlxvlm_argmax_align.sh
+chmod +x scripts/p5d_omlx_argmax_align.sh
 ```
 
 - [ ] **Step 3.3: 写比对 Python 脚本**
@@ -280,11 +318,11 @@ Create `scripts/p5d_compare_argmax.py`:
 
 ```python
 #!/usr/bin/env python3
-"""Compare ironmlx vs mlx-vlm greedy outputs per prompt. Exit 0 if all match."""
+"""Compare ironmlx vs omlx greedy outputs per prompt. Exit 0 if all match."""
 import json, sys
 
 ironmlx = [json.loads(l) for l in open("reports/p5d-argmax/ironmlx.jsonl")]
-ref     = [json.loads(l) for l in open("reports/p5d-argmax/mlx-vlm.jsonl")]
+ref     = [json.loads(l) for l in open("reports/p5d-argmax/omlx.jsonl")]
 assert len(ironmlx) == len(ref), f"length mismatch: {len(ironmlx)} vs {len(ref)}"
 
 mismatches = []
@@ -304,7 +342,7 @@ if mismatches:
     for idx, at, ai, bi in mismatches[:5]:
         print(f"\n  prompt {idx} diverges at char {at}")
         print(f"    ironmlx: {ai!r}")
-        print(f"    mlx-vlm: {bi!r}")
+        print(f"    omlx:    {bi!r}")
     sys.exit(1)
 print(f"OK All {len(ironmlx)} prompts: greedy output identical")
 ```
@@ -313,25 +351,25 @@ print(f"OK All {len(ironmlx)} prompts: greedy output identical")
 
 ```bash
 chmod +x scripts/p5d_compare_argmax.py
-bash scripts/p5d_mlxvlm_argmax_align.sh
+bash scripts/p5d_omlx_argmax_align.sh
 python3 scripts/p5d_compare_argmax.py
 ```
 
 Expected: `OK All 50 prompts: greedy output identical`
 
-如有 mismatch：分析第一个 divergence 位置的 routing / topk renorm / softmax 顺序是否与 mlx-lm 算法 reference 一致。
+如有 mismatch：分析第一个 divergence 位置的 routing / topk renorm / softmax 顺序是否与 omlx 算法 reference 一致。
 
 - [ ] **Step 3.5: Commit T3**
 
 ```bash
-git add scripts/p5d_mlxvlm_argmax_align.sh scripts/p5d_compare_argmax.py scripts/p5d_prompts.txt
+git add scripts/p5d_omlx_argmax_align.sh scripts/p5d_compare_argmax.py scripts/p5d_prompts.txt
 git commit -m "$(cat <<'EOF'
-test(p5d-t3): cross-prompt mlx-vlm argmax alignment (50 prompts × 200 token)
+test(p5d-t3): cross-prompt omlx argmax alignment (50 prompts × 200 token)
 
 Serial harness + comparator. Validates ironmlx greedy output
-byte-identical to mlx-vlm reference on 50-prompt fixture set under
-mlx-community/Qwen3.5-35B-A3B-4bit. Strict pass criteria —
-any divergence surfaces with first-mismatch context.
+byte-identical to omlx serve reference on 50-prompt fixture set under
+mlx-community/Qwen3.5-35B-A3B-4bit. Both sides driven via OpenAI HTTP.
+Strict pass criteria — any divergence surfaces with first-mismatch context.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -340,7 +378,9 @@ EOF
 
 ---
 
-## Task 4: top-K logits max_abs_diff 验证
+## Task 4: top-K logits max_abs_diff 验证（mlx-vlm 为 logits 来源）
+
+> **Scope note:** T4 logits source = mlx-vlm，因为 omlx HTTP API 不暴露原始 logits（只返回文本）。mlx-vlm Python `generate(logprobs=...)` 可直接访问 forward 输出张量。T4 是 T3 omlx argmax 的补充精度验证（correctness-supplemental），不是 perf 对比。P5b T5 已做单 prompt exhaustive logit check；T4 做 5-prompt 样本扩展确认。
 
 **Files:**
 
@@ -353,6 +393,10 @@ Create `scripts/p5d_logits_align.py`:
 ```python
 #!/usr/bin/env python3
 """Compare top-K logits per first decode step on 5 prompts.
+
+T4 logits source: mlx-vlm (Python generate() — direct tensor access).
+omlx HTTP does not expose raw logits; mlx-vlm is ONLY used here for
+this supplemental precision check, not for perf baseline.
 
 Requires ironmlx + mlx-vlm to dump logits to file:
   - mlx-vlm: monkey-patch forward in uv run script to save logits via numpy
@@ -453,7 +497,7 @@ Create `docs/superpowers/plans/2026-05-18-ironmlx-p5-closeout.md`:
 - norm_topk_prob 默认值：___
 
 ### 性能基线（M1 Pro 32GB 实测）
-| 指标 | ironmlx | mlx-vlm | 相对差 |
+| 指标 | ironmlx | omlx | 相对差 |
 |---|---|---|---|
 | prefill PP=128 (tok/s) | ___ | ___ | ___% |
 | prefill PP=512 | ___ | ___ | ___% |
@@ -462,8 +506,8 @@ Create `docs/superpowers/plans/2026-05-18-ironmlx-p5-closeout.md`:
 | peak RAM | ___ GB | ___ GB | — |
 
 ### 数值对齐验收
-- 50 prompt × 200 token greedy 输出：___/50 PASS（≥1 fail 为不闭环）
-- top-100 logits max_abs_diff：___（要求 < 1e-3）
+- 50 prompt × 200 token greedy 输出（vs omlx serve HTTP）：___/50 PASS（≥1 fail 为不闭环）
+- top-100 logits max_abs_diff（vs mlx-vlm Python，T4 supplemental）：___（要求 < 1e-3）
 
 ### Dense 路径回归
 - p4_http_smoke：PASS / FAIL
@@ -506,7 +550,7 @@ cargo test -p ironmlx --release --test p4_http_smoke -- --ignored
 cargo test -p ironmlx --release --test p5_qwen35_moe_smoke -- --ignored
 cargo test -p ironmlx --release --test p5_qwen35_moe_batched -- --ignored
 cargo test -p ironmlx --release --test p5_qwen35_moe_http_smoke -- --ignored
-bash scripts/p5d_mlxvlm_argmax_align.sh
+bash scripts/p5d_omlx_argmax_align.sh
 python3 scripts/p5d_compare_argmax.py
 python3 scripts/p5d_logits_align.py
 ```
@@ -537,8 +581,8 @@ docs(p5): close-out report — Qwen3.5 MoE foundation complete
 
 End-of-phase report covering: actual MoE forward path decisions
 (T0 research outputs), perf baseline (M1 Pro 32GB), numerical
-alignment with mlx-vlm (50 prompts × 200 token greedy + top-100
-logits), dense regression status, known issues queued for
+alignment (omlx: 50 prompts × 200 token greedy argmax; mlx-vlm T4:
+top-100 logits supplemental), dense regression status, known issues queued for
 follow-up phases.
 
 Verification: sweep_full 19/19 PASS, clippy zero warnings,
@@ -558,8 +602,8 @@ EOF
 ## P5d 闭环条件 = P5 整体闭环条件
 
 - [ ] iron-bench `qwen3.5-moe` profile 跑通且数据落地（reports/p5d-*.json）
-- [ ] 50 prompt greedy 输出与 mlx-vlm 100% 一致
-- [ ] top-100 logits max_abs_diff < 1e-3 vs mlx-vlm
+- [ ] 50 prompt greedy 输出与 omlx serve HTTP 100% 一致（T3）
+- [ ] top-100 logits max_abs_diff < 1e-3 vs mlx-vlm Python（T4 supplemental）
 - [ ] dense 路径 p4_http_smoke 不退化
 - [ ] clippy / fmt / release build / lib unit test 全 PASS
 - [ ] sweep_full 19/19 PASS
@@ -572,6 +616,6 @@ EOF
 ## Self-Review Notes
 
 - ✓ Spec coverage：§4.1 单测 (前 phase 已实现) / §4.2 集成测试 / §4.3 perf gate 全部覆盖
-- ✓ mlx-vlm 主 baseline (P5b T0 验证)，与 spec §1.2 Q4 一致（不对齐实现，只对齐输出）
+- ✓ omlx serve 主 perf + argmax baseline (T2/T3)；mlx-vlm 仅 T4 logits supplemental (P5b T0 已验证正确性)；与 spec §1.2 Q4 一致（不对齐实现，只对齐输出）
 - ✓ Task 数 = 5 + Pre-flight，符合 5-7 范围
 - ✓ Close-out 报告留实测填空槽位，避免 plan 阶段虚构数字
