@@ -8,9 +8,10 @@ use std::sync::OnceLock;
 use anyhow::anyhow;
 use mlx::{Array, Dtype};
 
+use crate::core::model::Model;
 use crate::core::sampler::Sampler;
+use crate::core::scheduler::DenseVlMethods;
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
-use crate::models::Qwen35Model;
 use crate::nn::LayerCache;
 use crate::Result;
 
@@ -80,8 +81,8 @@ pub struct GenerateEvent {
 ///   loop, identical to pre-P8a behavior. The non-greedy paths already
 ///   call `.to_vec()` for penalty masking, defeating any pipelining
 ///   benefit, so they stay on the simpler path.
-pub struct GenerationStream<'m> {
-    model: &'m Qwen35Model,
+pub struct GenerationStream<'m, M: Model> {
+    model: &'m M,
     tokenizer: &'m Tokenizer,
     cache: Vec<LayerCache>,
     /// Pre-computed vision-tower output, populated when the request is VL.
@@ -134,7 +135,7 @@ pub struct GenerationStream<'m> {
     prng_state: Array,
 }
 
-impl Drop for GenerationStream<'_> {
+impl<M: Model> Drop for GenerationStream<'_, M> {
     fn drop(&mut self) {
         if self.capture_active {
             // Best-effort stop. Errors are logged but not propagated (we're
@@ -918,12 +919,8 @@ pub fn slice_vision_embeds_rows(
     .map_err(|e| anyhow!("slice_vision_embeds_rows mlx::ops::slice failed: {e}"))
 }
 
-impl<'m> GenerationStream<'m> {
-    pub fn new(
-        model: &'m Qwen35Model,
-        tokenizer: &'m Tokenizer,
-        request: GenerateRequest,
-    ) -> Result<Self> {
+impl<'m, M: Model + DenseVlMethods> GenerationStream<'m, M> {
+    pub fn new(model: &'m M, tokenizer: &'m Tokenizer, request: GenerateRequest) -> Result<Self> {
         if request.prompt_ids.is_empty() {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
         }
@@ -972,7 +969,7 @@ impl<'m> GenerationStream<'m> {
             request.pixel_values.as_ref(),
             request.image_grid_thw.as_deref(),
         ) {
-            let ve = model.compute_vision_embeds(pv, grids, ())?;
+            let ve = model.compute_vision_embeds(pv, grids, ().into())?;
             let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
             let pos_full = build_position_ids_vl(
                 &full_ids_i32,
@@ -1033,7 +1030,7 @@ impl<'m> GenerationStream<'m> {
                     Some(&mut cache),
                     ve_slice.as_ref(),
                     request.image_token_id,
-                    (),
+                    ().into(),
                 )?;
                 if is_last {
                     Some(logits)
@@ -1047,16 +1044,16 @@ impl<'m> GenerationStream<'m> {
                     None, // per_row_lens
                     None, // decode_mask
                     Some(&mut cache),
-                    (),
+                    ().into(),
                 )?)
             } else {
-                let hidden = model.text().forward_on(
+                let hidden = model.forward_text_hidden(
                     &chunk_arr,
                     &chunk_pos_ids,
                     None, // per_row_lens
                     None, // decode_mask
                     Some(&mut cache),
-                    (),
+                    ().into(),
                 )?;
                 mlx::transforms::eval(&[&hidden])?;
                 None
@@ -1235,7 +1232,7 @@ impl<'m> GenerationStream<'m> {
             None, // per_row_lens
             None, // decode_mask
             Some(&mut self.cache),
-            (),
+            ().into(),
         )?;
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
@@ -1297,7 +1294,7 @@ impl<'m> GenerationStream<'m> {
             None, // per_row_lens
             None, // decode_mask
             Some(&mut self.cache),
-            (),
+            ().into(),
         )?;
         // Logits shape [1, 1, vocab] — flatten to [vocab].
         let vocab = logits.shape().as_slice()[2];
