@@ -76,7 +76,7 @@ fn run_b1_baseline(
     request: GenerateRequest,
 ) -> Vec<u32> {
     let model_guard = model.blocking_lock();
-    let mut stream = GenerationStream::new(&model_guard, tokenizer, request).expect("new stream");
+    let mut stream = GenerationStream::new(&*model_guard, tokenizer, request).expect("new stream");
     let mut tokens = Vec::new();
     loop {
         match stream.next_token().expect("next_token") {
@@ -169,7 +169,7 @@ async fn scheduler_per_row_finish_different_steps() {
         let model_guard = model.blocking_lock();
 
         let mut sched =
-            Scheduler::new(2, 32768, model_guard.model_meta()).expect("scheduler startup");
+            Scheduler::<ironmlx::models::Qwen35Model>::new(2, 32768, model_guard.model_meta()).expect("scheduler startup");
         let id_a = sched
             .admit(make_request(
                 prompt_ids_outer.clone(),
@@ -182,7 +182,7 @@ async fn scheduler_per_row_finish_different_steps() {
             .expect("admit b");
 
         // Prefill emits 1 token per row.
-        let prefill_events = sched.prefill_admitted(&model_guard).expect("prefill");
+        let prefill_events = sched.prefill_admitted(&*model_guard).expect("prefill");
         assert_eq!(
             prefill_events.len(),
             2,
@@ -203,7 +203,7 @@ async fn scheduler_per_row_finish_different_steps() {
         let mut finish_step_a: Option<usize> = None;
         let mut step_count = 0usize;
         while sched.phase() != Phase::Finished {
-            let events = sched.step(&model_guard).expect("step");
+            let events = sched.step(&*model_guard).expect("step");
             step_count += 1;
 
             for ev in &events {

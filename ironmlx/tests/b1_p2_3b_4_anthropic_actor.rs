@@ -65,7 +65,7 @@ fn run_b1_baseline(
     request: GenerateRequest,
 ) -> Vec<u32> {
     let model_guard = model.blocking_lock();
-    let mut stream = GenerationStream::new(&model_guard, tokenizer, request).expect("new stream");
+    let mut stream = GenerationStream::new(&*model_guard, tokenizer, request).expect("new stream");
     let mut tokens = Vec::new();
     while let Some(ev) = stream.next_token().expect("next_token") {
         tokens.push(ev.token);
