@@ -35,14 +35,14 @@ to scatter results back to original token order before weighted sum + shared
 expert.
 
 MLX fast path verified at `mlx/backend/metal/quantized.cpp:1484`: when
-`right_sorted_ = sorted_indices && !rhs_indices_` is true and the shape condition
-is met, MLX dispatches `gather_qmm_rhs` (specialized kernel) instead of the
-generic `gather_qmm`. (T5 commit `b8e3f26` body referenced `lhs_indices_` in the
-narrative — that was a typo; the formula in source at `mlx/ops.cpp:5359` is
-`right_sorted_ = sorted_indices && !rhs_indices_`. T5 implementation passes
-`rhs_indices = sorted_topk` and `lhs_indices = None`, so the predicate evaluates
-correctly. Documenting here per CLAUDE.md "no-amend" — commit narrative typo
-does not affect runtime behavior.)
+`right_sorted_ == true` and the shape condition is met, MLX dispatches
+`gather_qmm_rhs` (specialized kernel) instead of the generic `gather_qmm`.
+The `right_sorted_` field is set in `mlx/ops.cpp:5359` to
+`sorted_indices && !lhs_indices_` (positional arg 7 of the `GatherQMM`
+constructor at `mlx/primitives.h:1680-1694`). ironmlx's call passes
+`lhs_indices = None`, so `!lhs_indices_` evaluates to `true` and
+`right_sorted_` becomes `true` when we set `sorted_indices = true` — the
+predicate evaluates correctly and the specialized kernel fires.
 
 Measured impact at PP=2048: 990.6 tok/s → 1901.6 tok/s (1.92× throughput).
 
