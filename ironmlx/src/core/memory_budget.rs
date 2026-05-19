@@ -189,6 +189,31 @@ pub fn test_meta_qwen35() -> ModelMeta {
     }
 }
 
+/// Realistic Qwen3.5-35B-A3B-4bit ModelMeta for tests.
+///
+/// Values from real snapshot text_config (verified P5b T0). The
+/// `weight_bytes` is computed via the MoE-aware formula and rounded
+/// to 17 GiB which matches `Qwen35MoeModel::approx_weight_bytes`
+/// closely for the published config.
+#[doc(hidden)]
+pub fn test_meta_qwen35_moe() -> ModelMeta {
+    ModelMeta {
+        num_hidden_layers: 40,
+        num_attention_heads: 16,
+        num_key_value_heads: 2,
+        hidden_size: 2048,
+        head_dim: Some(256),
+        // approx: attn (4 * 2048^2 * 40 / 2) ≈ 335 MB
+        //         routed (3 * 256 * 2048 * 512 * 40 / 2) ≈ 16.1 GB
+        //         shared (3 * 2048 * 512 * 40 / 2) ≈ 63 MB
+        //         embed + lm_head (2 * 248320 * 2048 / 2) ≈ 0.5 GB
+        // total ≈ 17 GB
+        weight_bytes: 17 * 1024 * 1024 * 1024,
+        max_position_embeddings: 262144,
+        spatial_merge_size: 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +269,34 @@ mod tests {
         );
         st.release(500_000);
         assert_eq!(st.active_bytes(), 0);
+    }
+
+    #[test]
+    fn moe_kv_bytes_per_token_matches_gqa_formula() {
+        let m = test_meta_qwen35_moe();
+        // 40 layers × 2 KV heads × 256 head_dim × 2 (K+V) × 2 (bf16) = 81920 bytes/token
+        let expected = 40 * 2 * 256 * 2 * 2;
+        assert_eq!(kv_bytes_per_token(&m), expected as usize);
+    }
+
+    #[test]
+    fn moe_validate_budget_realistic_32gb_fits() {
+        std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "34359738368"); // 32 GiB
+        let st = validate_startup_budget(1, 8192, &test_meta_qwen35_moe())
+            .expect("32GB host should fit 1 stream × 8K context for MoE");
+        assert!(st.soft_limit() > 0);
+        std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+    }
+
+    #[test]
+    fn moe_validate_budget_rejects_overcommit_16gb() {
+        std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "17179869184"); // 16 GiB
+                                                                     // 16 GB - 17 GB weights - 2 GB safety margin = negative budget,
+                                                                     // any cap must be rejected.
+        let err = validate_startup_budget(1, 4096, &test_meta_qwen35_moe())
+            .expect_err("16GB host cannot fit 17GB MoE weights");
+        let msg = format!("{err}");
+        assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
+        std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
     }
 }
