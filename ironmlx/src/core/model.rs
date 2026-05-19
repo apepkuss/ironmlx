@@ -11,12 +11,7 @@ use crate::nn::LayerCache;
 use crate::Result;
 
 pub trait Model {
-    fn make_cache(
-        &self,
-        batch: i32,
-        cap: i32,
-        dtype: Dtype,
-    ) -> Result<Vec<LayerCache>>;
+    fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>>;
 
     #[allow(clippy::too_many_arguments)]
     fn forward_on(

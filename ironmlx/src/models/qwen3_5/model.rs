@@ -694,7 +694,15 @@ impl crate::core::model::Model for Qwen35Model {
         cache: Option<&mut [crate::nn::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
-        Qwen35Model::forward_on(self, input_ids, position_ids, per_row_lens, decode_mask, cache, target)
+        Qwen35Model::forward_on(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            target,
+        )
     }
 
     fn batched_prefill(
@@ -708,8 +716,14 @@ impl crate::core::model::Model for Qwen35Model {
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Qwen35Model::batched_prefill(
-            self, input_ids, position_ids, attention_mask, linear_attention_mask,
-            per_row_lens, cache, target,
+            self,
+            input_ids,
+            position_ids,
+            attention_mask,
+            linear_attention_mask,
+            per_row_lens,
+            cache,
+            target,
         )
     }
 

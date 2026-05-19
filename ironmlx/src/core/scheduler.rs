@@ -10,6 +10,7 @@
 //! See `docs/superpowers/specs/2026-05-13-b1-p2-3a-scheduler-skeleton-design.md`.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use anyhow::{anyhow, Result};
 use mlx::{Array, Dtype};
@@ -56,8 +57,6 @@ pub enum SchedulerError {
         soft_limit_bytes: usize,
     },
 }
-
-use std::marker::PhantomData;
 
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
@@ -812,7 +811,7 @@ impl<M: Model> Scheduler<M> {
     ///
     /// Builds right-padded `[B, T_max]` input_ids + `[3, B, T_max]`
     /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
-    /// linear mask, then calls `Qwen35Model::batched_prefill`.
+    /// linear mask, then calls `M::batched_prefill` via the `Model` trait.
     ///
     /// After prefill, samples the first token via a three-stage dispatch:
     /// Stage A collects per-row `sampler` refs + prompt histories (sentinel
@@ -901,8 +900,8 @@ impl<M: Model> Scheduler<M> {
         let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
 
         // Lazy-allocate the cache.
-        // TODO: when a non-bf16 model lands, expose dtype via Qwen35Model
-        // accessor and thread it here.
+        // TODO: when a non-bf16 model lands, expose dtype via the `Model`
+        // trait and thread it here.
         if self.cache.is_none() {
             // B1-p2.3f: dynamic cap = max(prompt_len + max_new_tokens) over
             // admitted slots, bounded by effective_cap_max (defense-in-depth;
