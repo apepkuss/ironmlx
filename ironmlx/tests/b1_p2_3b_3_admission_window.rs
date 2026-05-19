@@ -64,7 +64,7 @@ fn run_b1_baseline(
     request: GenerateRequest,
 ) -> Vec<u32> {
     let model_guard = model.blocking_lock();
-    let mut stream = GenerationStream::new(&model_guard, tokenizer, request).expect("new stream");
+    let mut stream = GenerationStream::new(&*model_guard, tokenizer, request).expect("new stream");
     let mut tokens = Vec::new();
     loop {
         match stream.next_token().expect("next_token") {
@@ -361,7 +361,7 @@ async fn admission_window_concurrent_scheduler_and_gs_no_deadlock() {
     let task_b = tokio::task::spawn_blocking(move || -> Vec<u32> {
         let model_guard = model_b.blocking_lock();
         let mut stream =
-            GenerationStream::new(&model_guard, &tokenizer_b, req_b).expect("new stream");
+            GenerationStream::new(&*model_guard, &tokenizer_b, req_b).expect("new stream");
         let mut tokens = Vec::new();
         while let Some(ev) = stream.next_token().expect("next_token") {
             tokens.push(ev.token);
