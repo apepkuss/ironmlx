@@ -675,6 +675,53 @@ impl Qwen35Model {
     }
 }
 
+impl crate::core::model::Model for Qwen35Model {
+    fn make_cache(
+        &self,
+        batch: i32,
+        cap: i32,
+        dtype: mlx::Dtype,
+    ) -> crate::Result<Vec<crate::nn::LayerCache>> {
+        Qwen35Model::make_cache(self, batch, cap, dtype)
+    }
+
+    fn forward_on(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::forward_on(self, input_ids, position_ids, per_row_lens, decode_mask, cache, target)
+    }
+
+    fn batched_prefill(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        attention_mask: &mlx::Array,
+        linear_attention_mask: &mlx::Array,
+        per_row_lens: &[i32],
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::batched_prefill(
+            self, input_ids, position_ids, attention_mask, linear_attention_mask,
+            per_row_lens, cache, target,
+        )
+    }
+
+    fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        Qwen35Model::model_meta(self)
+    }
+
+    fn num_hidden_layers(&self) -> usize {
+        self.config().num_hidden_layers as usize
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
