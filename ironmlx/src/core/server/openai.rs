@@ -23,7 +23,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio::sync::oneshot;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::model::Model;
 use crate::core::sampler::Sampler;
+use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::models::qwen3_5::image_processor;
@@ -305,10 +307,13 @@ fn build_sampler(req: &ChatRequest) -> Sampler {
 // Handler (Step 19.3)
 // ---------------------------------------------------------------------------
 
-pub async fn chat_completions(
-    State(state): State<AppState>,
+pub async fn chat_completions<M>(
+    State(state): State<AppState<M>>,
     Json(req): Json<ChatRequest>,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     // Extract fields we need after consuming req.messages.
     let stream = req.stream;
     let max_tokens = req.max_tokens;
@@ -320,19 +325,11 @@ pub async fn chat_completions(
     // For text-only requests this is a cheap no-op (no images to fetch).
     let http_client = reqwest::Client::new();
 
-    // Read VisionConfig.spatial_merge_size from the model so multi-image
-    // token-count math + MRoPE VL position-id stride pick up whatever the
-    // loaded checkpoint actually uses. Default `2` for text-only models or
-    // VL models without an explicit vision_config (matches Qwen3.5-VL).
-    let spatial_merge_size: i32 = state
-        .model
-        .lock()
-        .await
-        .config()
-        .vision_config
-        .as_ref()
-        .map(|vc| vc.spatial_merge_size)
-        .unwrap_or(2);
+    // Read spatial_merge_size from ModelMeta so generic M doesn't need a
+    // model-specific config() method. ModelMeta.spatial_merge_size is set
+    // from VisionConfig at model construction time; defaults to 2 for
+    // text-only models (matches Qwen3.5-VL default).
+    let spatial_merge_size: i32 = state.model.lock().await.model_meta().spatial_merge_size;
 
     // Resolve `<|image_pad|>` to its tokenizer id, so VL routing works for
     // sibling Qwen-family models with different special-token ids. Falls back
@@ -416,11 +413,14 @@ pub async fn chat_completions(
     }
 }
 
-async fn serve_via_gs_stream(
-    state: AppState,
+async fn serve_via_gs_stream<M>(
+    state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let id = gen_id();
     let id_for_task = id.clone();
@@ -429,7 +429,7 @@ async fn serve_via_gs_stream(
     tokio::task::spawn_blocking(move || {
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
-        let mut stream = match GenerationStream::new(&model_guard, tokenizer, request) {
+        let mut stream = match GenerationStream::new(&*model_guard, tokenizer, request) {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx.blocking_send(Ok(format_sse_error(&e)));
@@ -498,11 +498,14 @@ async fn serve_via_gs_stream(
 }
 
 /// Text-only short-prompt SSE path via SchedulerActor (3b-2 swap-in).
-async fn serve_via_scheduler_stream(
-    state: AppState,
+async fn serve_via_scheduler_stream<M>(
+    state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let id = gen_id();
 
     // 1. Admit request to the actor.
@@ -603,18 +606,21 @@ async fn serve_via_scheduler_stream(
         .unwrap()
 }
 
-async fn serve_via_gs_unary(
-    state: AppState,
+async fn serve_via_gs_unary<M>(
+    state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
     prompt_tokens: u32,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let id = gen_id();
     let result = tokio::task::spawn_blocking(
         move || -> std::result::Result<(String, &'static str, u32), String> {
             let model_guard = state.model.blocking_lock();
             let tokenizer = &*state.tokenizer;
-            let mut stream = GenerationStream::new(&model_guard, tokenizer, request)
+            let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)
                 .map_err(|e| e.to_string())?;
             let mut buf = String::new();
             let mut finish: &'static str = "stop";
@@ -667,12 +673,15 @@ async fn serve_via_gs_unary(
 }
 
 /// Text-only short-prompt unary path via SchedulerActor (3b-2 swap-in).
-async fn serve_via_scheduler_unary(
-    state: AppState,
+async fn serve_via_scheduler_unary<M>(
+    state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
     prompt_tokens: u32,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let id = gen_id();
 
     // 1. Admit.

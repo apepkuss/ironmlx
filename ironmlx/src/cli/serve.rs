@@ -1,12 +1,10 @@
 //! `ironmlx serve` — boot HTTP server with OpenAI + Anthropic compatibility.
 
-use std::path::PathBuf;
-
 use anyhow::Context;
 use clap::Args;
 
-use crate::core::{server, Loader, Tokenizer};
-use crate::models::Qwen35Model;
+use crate::core::scheduler::DenseVlMethods;
+use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
 
 #[derive(Args, Debug)]
@@ -55,23 +53,18 @@ pub struct ServeArgs {
     pub max_cache_cap: usize,
 }
 
-pub fn run(args: ServeArgs) -> Result<()> {
-    let model_dir = PathBuf::from(&args.model);
-    if !model_dir.exists() {
-        return Err(anyhow::anyhow!(
-            "--model must point to a local directory (got '{}'); HF hub auto-download is deferred",
-            args.model
-        ));
-    }
-
-    // open_multimodal so VL checkpoints retain vision_tower.* keys; for
-    // text-only checkpoints the loader simply finds no vision keys and
-    // Qwen35Model::from_loader sets vision = None.
-    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
-    let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-    let model = Qwen35Model::from_loader(&loader).context("Qwen35Model::from_loader")?;
+/// Generic serve helper — shared by all model types that satisfy the
+/// `SchedulerActor<M>` / `AppState<M>` bounds.
+///
+/// The `DenseVlMethods` bound is required by `server::serve<M>` /
+/// `SchedulerActor<M>`. For text-only models (e.g. `Qwen35MoeModel`) a
+/// panic-on-call stub impl satisfies the bound at compile time; those code
+/// paths are never reachable because VL endpoints are dense-only (P5c §3.10).
+fn serve_with_model<M>(model: M, tokenizer: Tokenizer, args: &ServeArgs) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let model_id = args.model.clone();
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -86,6 +79,42 @@ pub fn run(args: ServeArgs) -> Result<()> {
         args.b_max,
         args.admission_deadline_ms,
         args.admission_queue_max,
-        args.max_cache_cap, // 3f
+        args.max_cache_cap,
     ))
+}
+
+pub fn run(args: ServeArgs) -> Result<()> {
+    let model_dir = std::path::PathBuf::from(&args.model);
+    if !model_dir.exists() {
+        return Err(anyhow::anyhow!(
+            "--model must point to a local directory (got '{}'); HF hub auto-download is deferred",
+            args.model
+        ));
+    }
+
+    // open_multimodal so VL checkpoints retain vision_tower.* keys; for
+    // text-only checkpoints the loader simply finds no vision keys.
+    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
+
+    let model_type = loader
+        .config_raw_value()
+        .get("model_type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))?
+        .to_owned();
+
+    match model_type.as_str() {
+        "qwen3_5" => {
+            let model = crate::models::Qwen35Model::from_loader(&loader)
+                .context("Qwen35Model::from_loader")?;
+            serve_with_model(model, tokenizer, &args)
+        }
+        "qwen3_5_moe" => {
+            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                .context("Qwen35MoeModel::from_loader")?;
+            serve_with_model(model, tokenizer, &args)
+        }
+        other => Err(anyhow::anyhow!("unsupported model_type: {other}")),
+    }
 }

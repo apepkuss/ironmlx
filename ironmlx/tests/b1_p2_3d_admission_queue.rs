@@ -43,6 +43,16 @@ fn load_fixture() -> (Arc<Mutex<Qwen35Model>>, Arc<Tokenizer>) {
 }
 
 fn make_req(tokenizer: &Tokenizer, text: &str, max_new: usize) -> GenerateRequest {
+    make_req_with_stop(tokenizer, text, max_new, tokenizer.eos_token_ids().to_vec())
+}
+
+/// Variant with explicit stop_token_ids (pass vec![] to disable EOS stopping).
+fn make_req_with_stop(
+    tokenizer: &Tokenizer,
+    text: &str,
+    max_new: usize,
+    stop_token_ids: Vec<u32>,
+) -> GenerateRequest {
     let msgs = vec![Message {
         role: "user".into(),
         content: text.into(),
@@ -56,7 +66,7 @@ fn make_req(tokenizer: &Tokenizer, text: &str, max_new: usize) -> GenerateReques
         prompt_ids,
         max_new_tokens: max_new,
         sampler: Sampler::greedy(),
-        stop_token_ids: tokenizer.eos_token_ids().to_vec(),
+        stop_token_ids,
         prefill_chunk_size: 0,
         pixel_values: None,
         image_grid_thw: None,
@@ -128,11 +138,15 @@ async fn queue_overflow_returns_err_via_actor() {
     let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 3, 32768, meta)
         .expect("spawn");
 
+    // stop_token_ids: vec![] (disable EOS) so A/B don't short-circuit on
+    // "Hello"/"World" + cold GPU; ensures the burst below finds A/B still
+    // active in Decoding. Pre-P5 relied on accumulated thermal load to slow
+    // decode — fragile, replaced with explicit no-EOS.
     let (tx1, _rx1) = tokio::sync::oneshot::channel();
     handle
         .cmd_tx
         .send(SchedulerCommand::Admit {
-            request: make_req(&tokenizer, "Hello", 1024),
+            request: make_req_with_stop(&tokenizer, "Hello", 1024, vec![]),
             reply_tx: tx1,
         })
         .await
@@ -141,7 +155,7 @@ async fn queue_overflow_returns_err_via_actor() {
     handle
         .cmd_tx
         .send(SchedulerCommand::Admit {
-            request: make_req(&tokenizer, "World", 1024),
+            request: make_req_with_stop(&tokenizer, "World", 1024, vec![]),
             reply_tx: tx2,
         })
         .await

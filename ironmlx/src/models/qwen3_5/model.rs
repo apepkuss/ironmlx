@@ -153,6 +153,11 @@ impl Qwen35Model {
     /// (B1-p2.5 G1).
     pub fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
         let cfg = self.config();
+        let spatial_merge_size = cfg
+            .vision_config
+            .as_ref()
+            .map(|vc| vc.spatial_merge_size)
+            .unwrap_or(2);
         crate::core::memory_budget::ModelMeta {
             num_hidden_layers: cfg.num_hidden_layers,
             num_attention_heads: cfg.num_attention_heads,
@@ -160,6 +165,8 @@ impl Qwen35Model {
             hidden_size: cfg.hidden_size,
             head_dim: cfg.head_dim,
             weight_bytes: self.approx_weight_bytes(),
+            max_position_embeddings: cfg.max_position_embeddings,
+            spatial_merge_size,
         }
     }
 
@@ -672,6 +679,86 @@ impl Qwen35Model {
             lm_head: None,
             vision: None,
         }
+    }
+}
+
+impl crate::core::model::Model for Qwen35Model {
+    fn make_cache(
+        &self,
+        batch: i32,
+        cap: i32,
+        dtype: mlx::Dtype,
+    ) -> crate::Result<Vec<crate::nn::LayerCache>> {
+        Qwen35Model::make_cache(self, batch, cap, dtype)
+    }
+
+    fn forward_on(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::forward_on(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            target,
+        )
+    }
+
+    fn batched_prefill(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        attention_mask: &mlx::Array,
+        linear_attention_mask: &mlx::Array,
+        per_row_lens: &[i32],
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35Model::batched_prefill(
+            self,
+            input_ids,
+            position_ids,
+            attention_mask,
+            linear_attention_mask,
+            per_row_lens,
+            cache,
+            target,
+        )
+    }
+
+    fn forward_text_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        self.text().forward_on(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            target,
+        )
+    }
+
+    fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+        Qwen35Model::model_meta(self)
+    }
+
+    fn num_hidden_layers(&self) -> usize {
+        self.config().num_hidden_layers as usize
     }
 }
 

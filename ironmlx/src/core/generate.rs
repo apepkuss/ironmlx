@@ -8,9 +8,10 @@ use std::sync::OnceLock;
 use anyhow::anyhow;
 use mlx::{Array, Dtype};
 
+use crate::core::model::Model;
 use crate::core::sampler::Sampler;
+use crate::core::scheduler::DenseVlMethods;
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
-use crate::models::Qwen35Model;
 use crate::nn::LayerCache;
 use crate::Result;
 
@@ -80,8 +81,8 @@ pub struct GenerateEvent {
 ///   loop, identical to pre-P8a behavior. The non-greedy paths already
 ///   call `.to_vec()` for penalty masking, defeating any pipelining
 ///   benefit, so they stay on the simpler path.
-pub struct GenerationStream<'m> {
-    model: &'m Qwen35Model,
+pub struct GenerationStream<'m, M: Model> {
+    model: &'m M,
     tokenizer: &'m Tokenizer,
     cache: Vec<LayerCache>,
     /// Pre-computed vision-tower output, populated when the request is VL.
@@ -134,7 +135,7 @@ pub struct GenerationStream<'m> {
     prng_state: Array,
 }
 
-impl Drop for GenerationStream<'_> {
+impl<M: Model> Drop for GenerationStream<'_, M> {
     fn drop(&mut self) {
         if self.capture_active {
             // Best-effort stop. Errors are logged but not propagated (we're
@@ -918,12 +919,13 @@ pub fn slice_vision_embeds_rows(
     .map_err(|e| anyhow!("slice_vision_embeds_rows mlx::ops::slice failed: {e}"))
 }
 
-impl<'m> GenerationStream<'m> {
-    pub fn new(
-        model: &'m Qwen35Model,
-        tokenizer: &'m Tokenizer,
-        request: GenerateRequest,
-    ) -> Result<Self> {
+// VL-bearing methods (gated by DenseVlMethods).
+// new() calls model.compute_vision_embeds + model.forward_vl_chunk (only on VL path),
+// but also calls model.forward_text_hidden (which is now Model trait — works for any M).
+// The new() function STILL needs DenseVlMethods because the VL branches
+// (compute_vision_embeds, forward_vl_chunk) are called conditionally in its body.
+impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
+    pub fn new(model: &'m M, tokenizer: &'m Tokenizer, request: GenerateRequest) -> Result<Self> {
         if request.prompt_ids.is_empty() {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
         }
@@ -972,7 +974,7 @@ impl<'m> GenerationStream<'m> {
             request.pixel_values.as_ref(),
             request.image_grid_thw.as_deref(),
         ) {
-            let ve = model.compute_vision_embeds(pv, grids, ())?;
+            let ve = model.compute_vision_embeds(pv, grids, ().into())?;
             let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
             let pos_full = build_position_ids_vl(
                 &full_ids_i32,
@@ -1033,7 +1035,7 @@ impl<'m> GenerationStream<'m> {
                     Some(&mut cache),
                     ve_slice.as_ref(),
                     request.image_token_id,
-                    (),
+                    ().into(),
                 )?;
                 if is_last {
                     Some(logits)
@@ -1047,16 +1049,16 @@ impl<'m> GenerationStream<'m> {
                     None, // per_row_lens
                     None, // decode_mask
                     Some(&mut cache),
-                    (),
+                    ().into(),
                 )?)
             } else {
-                let hidden = model.text().forward_on(
+                let hidden = model.forward_text_hidden(
                     &chunk_arr,
                     &chunk_pos_ids,
                     None, // per_row_lens
                     None, // decode_mask
                     Some(&mut cache),
-                    (),
+                    ().into(),
                 )?;
                 mlx::transforms::eval(&[&hidden])?;
                 None
@@ -1128,6 +1130,139 @@ impl<'m> GenerationStream<'m> {
                 .decode(&history, /* skip_special = */ true)
                 .unwrap_or_default();
 
+            Ok(Self {
+                model,
+                tokenizer,
+                cache,
+                vision_embeds_full: None,
+                position_ids_full: None,
+                image_pad_consumed: 0,
+                history,
+                request,
+                finished: false,
+                pipelined: false,
+                pending_token_arr: None,
+                detok: None,
+                last_decoded_text: initial_text,
+                capture_active,
+                capture_pending_decode,
+                prng_state,
+            })
+        }
+    }
+}
+
+// Non-VL methods (works for any Model) — decode path and helpers that only
+// call model.forward_on / model.forward_text_hidden (both Model trait methods).
+impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
+    /// Text-only constructor: works for any `M: Model`, including MoE models
+    /// that do not implement `DenseVlMethods`.
+    ///
+    /// Asserts `request.pixel_values.is_none()` — returns `Err` if called with
+    /// image inputs. For VL (dense) models use `GenerationStream::new` instead.
+    pub fn new_text_only(
+        model: &'m M,
+        tokenizer: &'m Tokenizer,
+        request: GenerateRequest,
+    ) -> Result<Self> {
+        if request.pixel_values.is_some() {
+            return Err(anyhow!(
+                "GenerationStream::new_text_only called with pixel_values; use new() for VL requests"
+            ));
+        }
+        if request.prompt_ids.is_empty() {
+            return Err(anyhow!(
+                "GenerationStream::new_text_only: prompt_ids cannot be empty"
+            ));
+        }
+
+        let prompt_len = request.prompt_ids.len();
+        let (capture_active, capture_pending_decode) = try_start_capture();
+
+        let cap = ((prompt_len + request.max_new_tokens) as i32)
+            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+        let dtype = Dtype::Bfloat16;
+        let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
+
+        let chunk_size = request.prefill_chunk_size;
+        let prompt_len_i32 = prompt_len as i32;
+        let mut pos: i32 = 0;
+        let last_logits = loop {
+            let remaining = prompt_len_i32 - pos;
+            let n = if chunk_size == 0 {
+                remaining
+            } else {
+                remaining.min(chunk_size as i32)
+            };
+            let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
+            let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
+            let chunk_pos_ids = build_position_ids(pos, n)?;
+
+            let is_last = pos + n == prompt_len_i32;
+            let logits_or_hidden = if is_last {
+                Some(model.forward_on(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None, // per_row_lens
+                    None, // decode_mask
+                    Some(&mut cache),
+                    ().into(),
+                )?)
+            } else {
+                let hidden = model.forward_text_hidden(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None, // per_row_lens
+                    None, // decode_mask
+                    Some(&mut cache),
+                    ().into(),
+                )?;
+                mlx::transforms::eval(&[&hidden])?;
+                None
+            };
+
+            if let Some(logits) = logits_or_hidden {
+                let vocab = logits.shape().as_slice()[2];
+                break logits.reshape((vocab,))?;
+            }
+            pos += n;
+        };
+
+        let history = request.prompt_ids.clone();
+        let pipelined = request.sampler.is_pipelinable();
+        let mut prng_state = mlx::random::key(request.sampler.seed)?;
+
+        if pipelined {
+            let pending = request.sampler.sample_async_greedy(&last_logits)?;
+            mlx::transforms::async_eval(&[&pending])?;
+            let detok = tokenizer.decode_stream(/* skip_special */ true);
+            Ok(Self {
+                model,
+                tokenizer,
+                cache,
+                vision_embeds_full: None,
+                position_ids_full: None,
+                image_pad_consumed: 0,
+                history,
+                request,
+                finished: false,
+                pipelined: true,
+                pending_token_arr: Some(pending),
+                detok: Some(detok),
+                last_decoded_text: String::new(),
+                capture_active,
+                capture_pending_decode,
+                prng_state,
+            })
+        } else {
+            let first_token = request
+                .sampler
+                .sample(&last_logits, &history, &mut prng_state)?;
+            let mut history = history;
+            history.push(first_token);
+            let initial_text = tokenizer
+                .decode(&history, /* skip_special = */ true)
+                .unwrap_or_default();
             Ok(Self {
                 model,
                 tokenizer,
@@ -1235,7 +1370,7 @@ impl<'m> GenerationStream<'m> {
             None, // per_row_lens
             None, // decode_mask
             Some(&mut self.cache),
-            (),
+            ().into(),
         )?;
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
@@ -1297,7 +1432,7 @@ impl<'m> GenerationStream<'m> {
             None, // per_row_lens
             None, // decode_mask
             Some(&mut self.cache),
-            (),
+            ().into(),
         )?;
         // Logits shape [1, 1, vocab] — flatten to [vocab].
         let vocab = logits.shape().as_slice()[2];
