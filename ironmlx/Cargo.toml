@@ -40,6 +40,7 @@ reqwest.workspace = true
 default = []
 vision-dump = []
 p5e-stream-parallel = []
+p5e-compile = []
 
 [dev-dependencies]
 approx = "0.5"
