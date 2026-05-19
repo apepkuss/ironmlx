@@ -72,5 +72,7 @@ if errors:
     print("FAIL: some prompts returned <ERROR>")
     sys.exit(1)
 
-print(f"ALL {len(ironmlx)} PROMPTS IDENTICAL — argmax alignment PASS")
+print(f"All {len(ironmlx)} prompts: ironmlx greedy output coincides with the "
+      f"external reference recording (observational triangulation, NOT an "
+      f"alignment gate — ironmlx is an independent implementation).")
 sys.exit(0)

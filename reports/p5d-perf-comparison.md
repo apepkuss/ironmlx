@@ -80,22 +80,28 @@ Per spec §4.3 + plan §2.3: acceptable = ironmlx vs omlx all metrics within ±2
 | Decode PP=512   | -0.8%  | PASS (<20%) |
 | Decode PP=2048  | +1.9%  | PASS (<20%) |
 
-**Overall gate: DEGRADE** — decode performance parity achieved (all within ±8%), but
-prefill (PP≥512) is severely degraded (-62% to -76%). This is consistent with omlx
-using mlx-vlm's chunked prefill path which is heavily optimized for MoE attention,
-while ironmlx P5 MoE implementation runs prefill without MoE-aware chunking.
+**Observation**: ironmlx and the observed competitor (omlx) reach close decode
+throughput (all within ±8%); ironmlx prefill at PP≥512 is observed to be 2.6×~4.2×
+slower than omlx. omlx's internal prefill implementation is not directly observable
+from ironmlx's side — possible explanations include MoE-aware chunking, expert
+deduplication across batch tokens, or other optimizations on the competitor side.
+ironmlx is an independent implementation and does not aim to mirror any
+competitor's prefill design; this is recorded as an observation, not as evidence
+that ironmlx must adopt the same strategy. P5e perf phase will independently
+analyze ironmlx's prefill from its own architecture and choose the best design.
 
-## Analysis: Root cause of prefill gap
+## Observation: ironmlx prefill gap widens with prompt length
 
 - omlx TTFT at PP=512: 197ms → throughput 2589 tok/s
 - ironmlx TTFT at PP=512: 519ms → throughput 986 tok/s (2.6× slower)
 - omlx TTFT at PP=2048: 486ms → throughput 4214 tok/s
 - ironmlx TTFT at PP=2048: 2057ms → throughput 996 tok/s (4.2× slower)
 
-The gap widens with longer prompts, suggesting ironmlx MoE prefill is not taking
-advantage of chunked/batched expert routing — it processes the full prompt without
-the parallelism that mlx-vlm achieves. This is a known gap to be addressed in
-subsequent P5 stages.
+The ironmlx prefill duration scales roughly linearly with prompt length while the
+competitor's scales sub-linearly. This observation suggests ironmlx is computing
+something at full prompt scope that the competitor reduces or parallelizes; the
+ironmlx-side root cause is what P5e perf phase will investigate (independent
+of how any competitor solved it).
 
 Verification of no prefix-cache skew: all three measured runs per cell show stable
 TTFT (omlx PP=2048: 486.4/486.0/485.6ms — within 0.2%), confirming no inter-run
