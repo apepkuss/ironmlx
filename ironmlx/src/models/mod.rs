@@ -17,6 +17,8 @@ pub mod qwen3_5;
 pub mod qwen3_5_moe;
 
 pub use qwen3_5::{Qwen35Config, Qwen35Model, Qwen35TextModel, RopeParams};
-pub use qwen3_5_moe::{Qwen35MoeConfig, RopeParams as MoeRopeParams};
+pub use qwen3_5_moe::{
+    Qwen35MoeConfig, Qwen35MoeModel, Qwen35MoeTextModel, RopeParams as MoeRopeParams,
+};
 
 // pub mod qwen3_5_vl;
