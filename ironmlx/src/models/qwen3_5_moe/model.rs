@@ -370,6 +370,58 @@ impl Model for Qwen35MoeModel {
     }
 }
 
+/// **Stub** impl to satisfy `Scheduler<M>` / `SchedulerActor<M>` /
+/// `AppState<M>` bound `M: DenseVlMethods + ...` so MoE can flow through
+/// the generic infrastructure. All VL methods panic — MoE is text-only
+/// per P5 D2 and VL endpoints are dense-only per P5c §3.10 CLI dispatch.
+///
+/// This is a compile-time accommodation, not a runtime VL capability.
+/// P6.x (VL phase) will properly factor out the trait or introduce a
+/// `MultimodalModel` marker trait.
+impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
+    fn batched_prefill_vl(
+        &self,
+        _input_ids: &mlx::Array,
+        _position_ids: &mlx::Array,
+        _attention_mask: &mlx::Array,
+        _linear_attention_mask: &mlx::Array,
+        _per_row_lens: &[i32],
+        _per_row_pixel_values: &[Option<&mlx::Array>],
+        _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        _image_token_id: i32,
+        _cache: Option<&mut [crate::nn::LayerCache]>,
+        _target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        panic!(
+            "Qwen35MoeModel::batched_prefill_vl: MoE is text-only (P5 D2). \
+             VL endpoints should not be wired to MoE; this is a runtime guard."
+        );
+    }
+
+    fn compute_vision_embeds(
+        &self,
+        _pixel_values: &mlx::Array,
+        _grid_thw: &[(i32, i32, i32)],
+        _target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        panic!("Qwen35MoeModel::compute_vision_embeds: MoE is text-only (P5 D2).");
+    }
+
+    fn forward_vl_chunk(
+        &self,
+        _input_ids: &mlx::Array,
+        _position_ids: &mlx::Array,
+        _per_row_lens: Option<&[i32]>,
+        _decode_mask: Option<&mlx::Array>,
+        _cache: Option<&mut [crate::nn::LayerCache]>,
+        _vision_embeds_slice: Option<&mlx::Array>,
+        _image_token_id: i32,
+        _target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        panic!("Qwen35MoeModel::forward_vl_chunk: MoE is text-only (P5 D2).");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
