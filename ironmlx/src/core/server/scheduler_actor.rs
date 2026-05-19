@@ -28,6 +28,10 @@ use crate::core::scheduler::{Phase, RequestId, Scheduler, StepEvent};
 use crate::models::Qwen35Model;
 use crate::Result;
 
+/// Concrete scheduler type used by this actor. Fixed to `Qwen35Model` until
+/// P5b introduces `Qwen35MoeModel` and the actor is made generic.
+type DenseScheduler = Scheduler<Qwen35Model>;
+
 /// Commands accepted by the actor. 3b-2 ships only [`Admit`]; later
 /// phases may add `Cancel { id }`, `Stats`, etc.
 pub enum SchedulerCommand {
@@ -194,7 +198,7 @@ pub fn spawn_scheduler_actor(
     //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
     //    worker thread's Metal Stream. Thread affinity preserved.
     tokio::task::spawn_blocking(move || {
-        let scheduler = Scheduler::new_with_state(
+        let scheduler = DenseScheduler::new_with_state(
             b_max,
             effective_cap_max,
             driver_budget_state,
@@ -238,7 +242,7 @@ pub fn spawn_scheduler_actor(
 
 #[allow(clippy::too_many_arguments)]
 fn driver_loop(
-    scheduler: Scheduler,
+    scheduler: DenseScheduler,
     model: Arc<Mutex<Qwen35Model>>,
     admission_deadline: Duration,
     admission_queue_max: usize,
@@ -618,7 +622,7 @@ fn driver_loop(
 #[allow(clippy::too_many_arguments)]
 async fn drain_window(
     cmd_rx: &mut mpsc::Receiver<SchedulerCommand>,
-    sched: &mut Scheduler,
+    sched: &mut DenseScheduler,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admission_queue: &mut VecDeque<PendingAdmit>,
     admit_count: &Arc<AtomicU64>,
@@ -668,7 +672,7 @@ async fn drain_window(
 /// (caller abandoned) causes the slot to be evicted as cleanup.
 fn handle_admit(
     cmd: SchedulerCommand,
-    sched: &mut Scheduler,
+    sched: &mut DenseScheduler,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
 ) {
@@ -718,7 +722,7 @@ fn handle_admit(
 /// empty `generated_tokens`.
 fn handle_admit_mid_chunked(
     cmd: SchedulerCommand,
-    sched: &mut Scheduler,
+    sched: &mut DenseScheduler,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<Qwen35Model>>,
@@ -848,7 +852,7 @@ fn enqueue_or_reject(
 /// early here so we do not call `admit_mid` in an illegal phase.
 fn drain_admission_queue(
     queue: &mut VecDeque<PendingAdmit>,
-    sched: &mut Scheduler,
+    sched: &mut DenseScheduler,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<Qwen35Model>>,

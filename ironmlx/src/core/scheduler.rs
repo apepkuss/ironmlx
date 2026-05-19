@@ -57,18 +57,164 @@ pub enum SchedulerError {
     },
 }
 
+use std::marker::PhantomData;
+
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
     build_per_row_decode_mask, build_position_ids, build_position_ids_batched,
     build_position_ids_vl, build_position_ids_vl_batched, count_image_pad, slice_logits_row,
     slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateRequest,
 };
+use crate::core::model::Model;
 use crate::core::sampler::Sampler;
-use crate::models::qwen3_5::Qwen35Model;
 use crate::nn::LayerCache;
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
 type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
+
+/// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
+/// (per P5 spec §3.1 — VL methods stay inherent / extension-trait-only).
+///
+/// Only `Qwen35Model` implements this. `Scheduler<M>` methods that call VL
+/// code paths (vision tower + cross-modal scatter + VL prefill) require
+/// `M: Model + DenseVlMethods`; instantiating such methods with a non-VL model
+/// (e.g., the future `Qwen35MoeModel`) is a compile-time error.
+pub trait DenseVlMethods {
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn batched_prefill_vl(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        attention_mask: &mlx::Array,
+        linear_attention_mask: &mlx::Array,
+        per_row_lens: &[i32],
+        per_row_pixel_values: &[Option<&mlx::Array>],
+        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        image_token_id: i32,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array>;
+
+    fn compute_vision_embeds(
+        &self,
+        pixel_values: &mlx::Array,
+        grid_thw: &[(i32, i32, i32)],
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_vl_chunk(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array>;
+
+    /// Forward through transformer layers only (no lm_head), returning hidden
+    /// states `[B, S, hidden]`. Used by `admit_mid_chunk` for text-only
+    /// intermediate chunks where logits are not needed (only KV cache update).
+    fn forward_text_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array>;
+}
+
+impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
+    fn batched_prefill_vl(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        attention_mask: &mlx::Array,
+        linear_attention_mask: &mlx::Array,
+        per_row_lens: &[i32],
+        per_row_pixel_values: &[Option<&mlx::Array>],
+        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        image_token_id: i32,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        crate::models::qwen3_5::Qwen35Model::batched_prefill_vl(
+            self,
+            input_ids,
+            position_ids,
+            attention_mask,
+            linear_attention_mask,
+            per_row_lens,
+            per_row_pixel_values,
+            per_row_grid_thw,
+            image_token_id,
+            cache,
+            target,
+        )
+    }
+
+    fn compute_vision_embeds(
+        &self,
+        pixel_values: &mlx::Array,
+        grid_thw: &[(i32, i32, i32)],
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        crate::models::qwen3_5::Qwen35Model::compute_vision_embeds(
+            self,
+            pixel_values,
+            grid_thw,
+            target,
+        )
+    }
+
+    fn forward_vl_chunk(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        crate::models::qwen3_5::Qwen35Model::forward_vl_chunk(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
+    }
+
+    fn forward_text_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        self.text().forward_on(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            target,
+        )
+    }
+}
 
 /// Opaque, monotonically-increasing identifier for an admitted request.
 ///
@@ -298,7 +444,7 @@ fn first_full_layer_offsets(cache: &[LayerCache]) -> Result<&[i32]> {
 /// 3a is single-threaded only — no `Send + Sync` impls. A later sub-phase
 /// will decide whether to run the scheduler on the main runtime thread or
 /// in `tokio::spawn_blocking`.
-pub struct Scheduler {
+pub struct Scheduler<M: Model> {
     b_max: usize,
     slots: Vec<Option<RequestState>>,
     next_id: u64,
@@ -323,9 +469,10 @@ pub struct Scheduler {
     /// Count of admits rejected by the memory budget gate. Used by T3
     /// /healthz. (B1-p2.5)
     pub(crate) memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    _marker: PhantomData<fn(&M) -> ()>,
 }
 
-impl std::fmt::Debug for Scheduler {
+impl<M: Model> std::fmt::Debug for Scheduler<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Scheduler")
             .field("b_max", &self.b_max)
@@ -338,7 +485,7 @@ impl std::fmt::Debug for Scheduler {
     }
 }
 
-impl Scheduler {
+impl<M: Model> Scheduler<M> {
     /// Construct a scheduler with `b_max` pre-allocated slots, all `None`.
     /// `effective_cap_max` is the hard upper bound on per-request
     /// `prompt_len + max_new_tokens` — admit gates reject requests beyond
@@ -408,6 +555,7 @@ impl Scheduler {
             budget_state,
             meta,
             memory_budget_exceeded_count,
+            _marker: PhantomData,
         })
     }
 
@@ -676,7 +824,10 @@ impl Scheduler {
     /// and emits one [`StepEvent`] per occupied row. Sentinel-row outputs are
     /// silently discarded. Transitions to `Decoding` (or `Finished` if every
     /// first token was EOS). See spec §4.5.
-    pub fn prefill_admitted(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+    pub fn prefill_admitted(&mut self, model: &M) -> Result<Vec<StepEvent>>
+    where
+        M: DenseVlMethods,
+    {
         self.ensure_not_poisoned()?;
         match self.prefill_admitted_inner(model) {
             Ok(events) => Ok(events),
@@ -687,7 +838,10 @@ impl Scheduler {
         }
     }
 
-    fn prefill_admitted_inner(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+    fn prefill_admitted_inner(&mut self, model: &M) -> Result<Vec<StepEvent>>
+    where
+        M: DenseVlMethods,
+    {
         match self.phase {
             Phase::Idle | Phase::Admitting => {}
             Phase::Decoding | Phase::Finished => {
@@ -845,7 +999,7 @@ impl Scheduler {
                 &per_row_grids,
                 img_token_id,
                 Some(cache_ref),
-                (),
+                mlx::StreamOrDevice::default(),
             )?
         } else {
             let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
@@ -856,7 +1010,7 @@ impl Scheduler {
                 &linear_attention_mask,
                 &prompt_lens,
                 Some(cache_ref),
-                (),
+                mlx::StreamOrDevice::default(),
             )?
         };
 
@@ -963,7 +1117,7 @@ impl Scheduler {
     /// cost — see spec §7). Only active-at-start rows appear in the returned
     /// event list. Transitions phase to `Finished` when all occupied rows
     /// are done.
-    pub fn step(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+    pub fn step(&mut self, model: &M) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.step_inner(model) {
             Ok(events) => Ok(events),
@@ -974,7 +1128,7 @@ impl Scheduler {
         }
     }
 
-    fn step_inner(&mut self, model: &Qwen35Model) -> Result<Vec<StepEvent>> {
+    fn step_inner(&mut self, model: &M) -> Result<Vec<StepEvent>> {
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step illegal in {:?} phase: call prefill_admitted first",
@@ -1090,7 +1244,7 @@ impl Scheduler {
             Some(&per_row_lens),
             Some(&decode_mask),
             Some(cache_ref),
-            (),
+            mlx::StreamOrDevice::default(),
         )?;
 
         // logits shape: [B, 1, vocab]. Reshape to [B, vocab] for sample_batch.
@@ -1232,11 +1386,10 @@ impl Scheduler {
     ///   `driver_loop`'s concern; here we surface the raw error).
     /// - dtype / make_cache failures bubble up; the orphan slot is
     ///   rolled back via `evict` so the next `step()` does not panic.
-    pub fn admit_mid_begin(
-        &mut self,
-        req: GenerateRequest,
-        model: &Qwen35Model,
-    ) -> Result<AdmitMidHandle> {
+    pub fn admit_mid_begin(&mut self, req: GenerateRequest, model: &M) -> Result<AdmitMidHandle>
+    where
+        M: DenseVlMethods,
+    {
         self.ensure_not_poisoned()?;
 
         // Cap gate — mirror admit's, otherwise queue drain could push an
@@ -1280,8 +1433,11 @@ impl Scheduler {
         &mut self,
         id: RequestId,
         row_idx: usize,
-        model: &Qwen35Model,
-    ) -> Result<AdmitMidHandle> {
+        model: &M,
+    ) -> Result<AdmitMidHandle>
+    where
+        M: DenseVlMethods,
+    {
         let (
             prompt_ids,
             prompt_len_usz,
@@ -1372,7 +1528,7 @@ impl Scheduler {
             let grids = image_grid_thw
                 .as_deref()
                 .expect("is_vl implies image_grid_thw is Some");
-            Some(model.compute_vision_embeds(pv, grids, ())?)
+            Some(model.compute_vision_embeds(pv, grids, mlx::StreamOrDevice::default())?)
         } else {
             None
         };
@@ -1407,8 +1563,11 @@ impl Scheduler {
     pub fn admit_mid_chunk(
         &mut self,
         handle: &mut AdmitMidHandle,
-        model: &Qwen35Model,
-    ) -> Result<bool /* is_last */> {
+        model: &M,
+    ) -> Result<bool /* is_last */>
+    where
+        M: DenseVlMethods,
+    {
         self.ensure_not_poisoned()?;
 
         let chunk_end = handle
@@ -1483,7 +1642,7 @@ impl Scheduler {
                 Some(&mut handle.temp_cache),
                 ve_slice.as_ref(),
                 handle.image_token_id,
-                (),
+                mlx::StreamOrDevice::default(),
             )?;
             if is_last {
                 Some(logits)
@@ -1499,17 +1658,17 @@ impl Scheduler {
                 None,
                 None,
                 Some(&mut handle.temp_cache),
-                (),
+                mlx::StreamOrDevice::default(),
             )?)
         } else {
             // Text intermediate chunk: skip lm_head, just update KV cache.
-            let hidden = model.text().forward_on(
+            let hidden = model.forward_text_hidden(
                 &input_ids,
                 &position_ids,
                 None,
                 None,
                 Some(&mut handle.temp_cache),
-                (),
+                mlx::StreamOrDevice::default(),
             )?;
             mlx::transforms::eval(&[&hidden])?;
             None
@@ -1533,7 +1692,7 @@ impl Scheduler {
     pub fn admit_mid_finalize(
         &mut self,
         handle: AdmitMidHandle,
-        _model: &Qwen35Model,
+        _model: &M,
     ) -> Result<(RequestId, StepEvent)> {
         self.ensure_not_poisoned()?;
         let AdmitMidHandle {
@@ -1707,6 +1866,10 @@ impl Scheduler {
 mod tests {
     use super::*;
 
+    /// Concrete scheduler type for unit tests — pinned to `Qwen35Model` so
+    /// `Scheduler::new` calls don't need turbofish at every site.
+    type TestScheduler = Scheduler<crate::models::qwen3_5::Qwen35Model>;
+
     /// Helper: build a minimal `GenerateRequest` for tests. Uses
     /// `Sampler::greedy()` and an arbitrary 4-token prompt unless overridden.
     fn mk_req(prompt_ids: Vec<u32>) -> GenerateRequest {
@@ -1725,7 +1888,7 @@ mod tests {
 
     #[test]
     fn scheduler_new_empty() {
-        let s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         assert_eq!(s.b_max(), 4);
         assert_eq!(s.active_count(), 0);
@@ -1735,7 +1898,7 @@ mod tests {
 
     #[test]
     fn admit_happy_path() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
         assert_eq!(id, RequestId(0));
@@ -1751,7 +1914,7 @@ mod tests {
 
     #[test]
     fn admit_assigns_distinct_rows() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let ids: Vec<_> = (0..4)
             .map(|i| s.admit(mk_req(vec![i as u32])).expect("admit"))
@@ -1763,7 +1926,7 @@ mod tests {
 
     #[test]
     fn evict_releases_row() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.active_count(), 1);
@@ -1774,7 +1937,7 @@ mod tests {
 
     #[test]
     fn admit_after_evict_reuses_row() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         assert_eq!(s.get(id_a).unwrap().row_idx, 0);
@@ -1786,7 +1949,7 @@ mod tests {
 
     #[test]
     fn admit_full_returns_err() {
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         s.admit(mk_req(vec![1])).expect("admit 0");
         s.admit(mk_req(vec![2])).expect("admit 1");
@@ -1798,7 +1961,7 @@ mod tests {
 
     #[test]
     fn evict_unknown_id_returns_err() {
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let err = s.evict(RequestId(42)).expect_err("evict unknown");
         assert!(format!("{err}").contains("not found"));
@@ -1806,7 +1969,7 @@ mod tests {
 
     #[test]
     fn id_monotonic_after_evict() {
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         s.evict(id_a).expect("evict a");
@@ -1821,7 +1984,7 @@ mod tests {
 
     #[test]
     fn sampler_cloned_per_request() {
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let id_b = s.admit(mk_req(vec![2])).expect("admit b");
@@ -1834,7 +1997,7 @@ mod tests {
 
     #[test]
     fn occupied_rows_reflects_state() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let _id_0 = s.admit(mk_req(vec![1])).expect("admit 0");
         let id_1 = s.admit(mk_req(vec![2])).expect("admit 1");
@@ -1846,7 +2009,7 @@ mod tests {
 
     #[test]
     fn phase_starts_idle() {
-        let s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         assert_eq!(s.phase(), Phase::Idle);
         // Verify cache starts unallocated (visible through manual Debug impl
@@ -1859,7 +2022,7 @@ mod tests {
 
     #[test]
     fn admit_transitions_idle_to_admitting() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.phase(), Phase::Admitting);
@@ -1867,7 +2030,7 @@ mod tests {
 
     #[test]
     fn admit_stays_in_admitting() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit 1");
         let _ = s.admit(mk_req(vec![2])).expect("admit 2");
@@ -1876,7 +2039,7 @@ mod tests {
 
     #[test]
     fn evict_last_admitted_returns_to_idle() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1])).expect("admit");
         assert_eq!(s.phase(), Phase::Admitting);
@@ -1887,7 +2050,7 @@ mod tests {
     #[test]
     fn admit_in_decoding_ok_phase_stays_decoding() {
         // 3c-3: admit during Decoding is now legal (mid-batch admit).
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         s.force_phase(Phase::Decoding);
         let id = s
@@ -1899,7 +2062,7 @@ mod tests {
 
     #[test]
     fn admit_in_finished_returns_err() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         s.force_phase(Phase::Finished);
         let err = s.admit(mk_req(vec![1])).expect_err("admit must fail");
@@ -1914,7 +2077,7 @@ mod tests {
     fn evict_in_decoding_ok_transitions_to_finished_when_last() {
         // 3c-3: evict during Decoding is now legal.
         // Evicting the last row transitions Decoding -> Finished.
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Decoding);
@@ -1925,7 +2088,7 @@ mod tests {
 
     #[test]
     fn evict_all_from_finished_resets_to_idle() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Finished);
@@ -1936,7 +2099,7 @@ mod tests {
 
     #[test]
     fn evict_all_in_idle_returns_err() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let err = s.evict_all().expect_err("evict_all from Idle must fail");
         assert!(format!("{err}").contains("Idle"), "unexpected err: {err}");
@@ -1944,7 +2107,7 @@ mod tests {
 
     #[test]
     fn evict_all_in_admitting_returns_err() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         // phase is now Admitting; evict_all must reject
@@ -1959,7 +2122,7 @@ mod tests {
 
     #[test]
     fn force_poison_then_admit_returns_err() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         s.poisoned = true;
         let err = s
@@ -1973,7 +2136,7 @@ mod tests {
 
     #[test]
     fn force_poison_then_evict_returns_err() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id = s.admit(mk_req(vec![1])).expect("admit");
         s.poisoned = true;
@@ -1986,7 +2149,7 @@ mod tests {
 
     #[test]
     fn evict_all_clears_poison() {
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let _ = s.admit(mk_req(vec![1])).expect("admit");
         s.force_phase(Phase::Finished); // evict_all requires Decoding/Finished
@@ -2001,7 +2164,7 @@ mod tests {
     fn scheduler_admit_during_decoding_ok() {
         // Force phase to Decoding (test seam); admit should succeed and
         // Phase should stay Decoding (mid-batch admit semantics).
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
@@ -2018,7 +2181,7 @@ mod tests {
 
     #[test]
     fn scheduler_evict_during_decoding_transitions_to_finished_when_last() {
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
@@ -2034,7 +2197,7 @@ mod tests {
     fn scheduler_evict_during_decoding_not_last_stays_decoding() {
         // Evict one row mid-Decoding when other rows are still active:
         // Phase must stay Decoding (only last-evict transitions to Finished).
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1])).expect("admit a");
         let _id_b = s.admit(mk_req(vec![2])).expect("admit b");
@@ -2054,7 +2217,7 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
@@ -2088,7 +2251,7 @@ mod tests {
 
         // 2 rows admitted; only row A finishes. gc should evict A only,
         // leave B alive, and Phase must stay Decoding (active_count==1).
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
@@ -2127,7 +2290,7 @@ mod tests {
         use std::collections::HashMap;
         use tokio::sync::mpsc;
 
-        let mut s = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
         s.force_phase(Phase::Decoding);
@@ -2156,8 +2319,9 @@ mod tests {
         use crate::core::sampler::Sampler;
         use mlx::Dtype;
 
-        let mut sched = Scheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
-            .expect("scheduler startup");
+        let mut sched =
+            TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+                .expect("scheduler startup");
 
         // Synthesize a dummy pixel_values array (shape doesn't matter for plumbing)
         let pv: Array = (&[0.0_f32; 4][..], &[1_i32, 4][..]).try_into().unwrap();
@@ -2194,7 +2358,7 @@ mod tests {
     fn evict_all_drops_cache() {
         // B1-p2.3f: evict_all drops cache (replaces pre-3f offset reset) so
         // the next prefill_admitted lazy-allocates with the new batch's cap.
-        let mut s = Scheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
 
         let req = GenerateRequest {
@@ -2231,7 +2395,7 @@ mod tests {
         // SchedulerError::RequestTooLarge.
         use crate::core::SchedulerError;
 
-        let mut s = Scheduler::new(1, 1024, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(1, 1024, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
 
         let oversize_req = GenerateRequest {
@@ -2280,7 +2444,7 @@ mod tests {
         // The GPU-perf floor is applied by Scheduler before handing the cap
         // to `make_cache` (so callers `prefill_admitted_inner` and
         // `admit_mid_inner` consistently pass a kernel-friendly cap).
-        let mut s = Scheduler::new(4, 2048, crate::core::memory_budget::test_meta_qwen35())
+        let mut s = TestScheduler::new(4, 2048, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
 
         let req = |prompt_len: usize, max_new: usize| GenerateRequest {
@@ -2309,7 +2473,7 @@ mod tests {
         );
 
         // Case B: cap_max < floor; floor wins.
-        let mut s3 = Scheduler::new(4, 200, crate::core::memory_budget::test_meta_qwen35())
+        let mut s3 = TestScheduler::new(4, 200, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         s3.admit(req(50, 50)).expect("admit (cap_needed=100 < 200)");
         s3.admit(req(150, 30))
@@ -2322,8 +2486,9 @@ mod tests {
         );
 
         // Case C: small slots_max, no cap_max binding. Floor binds.
-        let mut s_floor = Scheduler::new(4, 2048, crate::core::memory_budget::test_meta_qwen35())
-            .expect("scheduler startup");
+        let mut s_floor =
+            TestScheduler::new(4, 2048, crate::core::memory_budget::test_meta_qwen35())
+                .expect("scheduler startup");
         s_floor.admit(req(50, 50)).expect("admit cap_needed=100");
         let cap_floor = s_floor.computed_cap_for_prefill();
         assert_eq!(
@@ -2333,7 +2498,7 @@ mod tests {
 
         // Case D: empty-slot fallback. slots_max defaults to 256
         // (defensive — not reachable in production).
-        let s4 = Scheduler::new(4, 1000, crate::core::memory_budget::test_meta_qwen35())
+        let s4 = TestScheduler::new(4, 1000, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
         assert_eq!(
             s4.computed_cap_for_prefill(),
