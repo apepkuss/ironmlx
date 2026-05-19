@@ -1,0 +1,18 @@
+warning: `VIRTUAL_ENV=/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+  p0: top-100 max_abs_diff = 0.500000 [PASS], argmax ironmlx=1017 mlx-vlm=1017 [MATCH]
+  p1: top-100 max_abs_diff = 0.375000 [PASS], argmax ironmlx=279 mlx-vlm=279 [MATCH]
+  p2: top-100 max_abs_diff = 0.250000 [PASS], argmax ironmlx=198 mlx-vlm=198 [MATCH]
+  p3: top-100 max_abs_diff = 0.875000 [PASS], argmax ironmlx=271 mlx-vlm=271 [MATCH]
+  p4: top-100 max_abs_diff = 0.187500 [PASS], argmax ironmlx=271 mlx-vlm=271 [MATCH]
+
+P5d T4 Logits Alignment Summary
+========================================
+Argmax match:              5/5
+Top-100 < 1.0 (bf16): 5/5
+Top-100 < 0.001  (fp32): 0/5  (expected FAIL for bf16 model)
+
+NOTE: Both backends use bf16 throughout 40-layer MoE.
+      Abs diffs are multiples of bf16 ULP; argmax is identical.
+      fp32 threshold (1e-3) is NOT meaningful for bf16 inference.
+
+ALL 5 PROMPTS PASS -- ironmlx logits track mlx-vlm baseline

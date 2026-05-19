@@ -1,0 +1,8 @@
+[project]
+name = "mlx-lm-bench"
+version = "0.1.0"
+description = "Isolated venv for benchmarking ml-explore/mlx-lm@ed1fca4 (v0.31.3) against ironmlx; pinned to the same commit omlx uses but with zero omlx packages installed (no monkey-patch injection)."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "mlx-lm @ git+https://github.com/ml-explore/mlx-lm@ed1fca4cef15a824c5f1702c80f70b4cffc8e4dd",
+]

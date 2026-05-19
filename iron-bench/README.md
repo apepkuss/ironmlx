@@ -54,6 +54,29 @@ cargo run --release -p iron-bench -- \
 `--target name=URL` can be repeated for any number of endpoints. `--prompt-len` is
 comma-separated; iron-bench iterates `prompt_len × target` cells.
 
+### Profile: qwen3.5-moe (Qwen3.5-35B-A3B-4bit MoE)
+
+Model: `mlx-community/Qwen3.5-35B-A3B-4bit`
+Local path hint: `~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/<sha>/`
+
+```sh
+SNAP=$(ls -d $HOME/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/*/ | head -1)
+cargo run --release -p iron-bench -- \
+  --target ironmlx=http://localhost:8080 \
+  --target omlx=http://localhost:8081 \
+  --model qwen3.5-moe \
+  --model-dir "$SNAP" \
+  --prompt-len 128,512,2048 \
+  --max-tokens 128 \
+  --runs 50 --warmup 5 \
+  --format markdown
+```
+
+Key differences from the dense 4B profile:
+
+- `--runs 50 --warmup 5` (more steady-state samples to average over MoE expert routing variance)
+- `--prompt-len 128,512,2048` — same prefill sweep, but MoE PP will be meaningfully slower at 2048
+
 ## Sample Markdown output
 
 ```text
