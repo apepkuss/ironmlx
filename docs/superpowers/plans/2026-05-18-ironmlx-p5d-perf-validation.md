@@ -438,7 +438,12 @@ sys.exit(1)
 仅当 4.1 脚本需要 numpy logits dump 时执行。否则 4.1 可以改为：
 
 - 在 ironmlx `tests/p5_qwen35_moe_logits_dump.rs` 内调用 forward + `numpy_save` 落盘
-- 用 mlx-vlm Python (`uv run --with-editable`) 写一个小脚本 monkey-patch forward dump 同 prompt 的 first-step logits
+- 用 mlx-vlm Python 写一个小脚本 monkey-patch forward dump 同 prompt 的 first-step logits，**从 `/Users/xin/workspace/iron-rivals/mlx-vlm` 目录 `uv run --with-editable .` 启动**（不要用 PyPI 包；本机 iron-rivals 下的 editable install 是 baseline 工具的官方路径，见 memory `reference_iron_rivals_baselines`）：
+
+```bash
+cd /Users/xin/workspace/iron-rivals/mlx-vlm
+uv run --with-editable . python /Users/xin/workspace/ironmlx-backend/scripts/p5d_mlxvlm_dump_logits.py
+```
 
 - [ ] **Step 4.3: 跑 logits 对齐**
 
