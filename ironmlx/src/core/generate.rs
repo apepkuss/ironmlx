@@ -1155,6 +1155,135 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
 // Non-VL methods (works for any Model) — decode path and helpers that only
 // call model.forward_on / model.forward_text_hidden (both Model trait methods).
 impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
+    /// Text-only constructor: works for any `M: Model`, including MoE models
+    /// that do not implement `DenseVlMethods`.
+    ///
+    /// Asserts `request.pixel_values.is_none()` — returns `Err` if called with
+    /// image inputs. For VL (dense) models use `GenerationStream::new` instead.
+    pub fn new_text_only(
+        model: &'m M,
+        tokenizer: &'m Tokenizer,
+        request: GenerateRequest,
+    ) -> Result<Self> {
+        if request.pixel_values.is_some() {
+            return Err(anyhow!(
+                "GenerationStream::new_text_only called with pixel_values; use new() for VL requests"
+            ));
+        }
+        if request.prompt_ids.is_empty() {
+            return Err(anyhow!(
+                "GenerationStream::new_text_only: prompt_ids cannot be empty"
+            ));
+        }
+
+        let prompt_len = request.prompt_ids.len();
+        let (capture_active, capture_pending_decode) = try_start_capture();
+
+        let cap = ((prompt_len + request.max_new_tokens) as i32)
+            .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+        let dtype = Dtype::Bfloat16;
+        let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
+
+        let chunk_size = request.prefill_chunk_size;
+        let prompt_len_i32 = prompt_len as i32;
+        let mut pos: i32 = 0;
+        let last_logits = loop {
+            let remaining = prompt_len_i32 - pos;
+            let n = if chunk_size == 0 {
+                remaining
+            } else {
+                remaining.min(chunk_size as i32)
+            };
+            let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
+            let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
+            let chunk_pos_ids = build_position_ids(pos, n)?;
+
+            let is_last = pos + n == prompt_len_i32;
+            let logits_or_hidden = if is_last {
+                Some(model.forward_on(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None, // per_row_lens
+                    None, // decode_mask
+                    Some(&mut cache),
+                    ().into(),
+                )?)
+            } else {
+                let hidden = model.forward_text_hidden(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None, // per_row_lens
+                    None, // decode_mask
+                    Some(&mut cache),
+                    ().into(),
+                )?;
+                mlx::transforms::eval(&[&hidden])?;
+                None
+            };
+
+            if let Some(logits) = logits_or_hidden {
+                let vocab = logits.shape().as_slice()[2];
+                break logits.reshape((vocab,))?;
+            }
+            pos += n;
+        };
+
+        let history = request.prompt_ids.clone();
+        let pipelined = request.sampler.is_pipelinable();
+        let mut prng_state = mlx::random::key(request.sampler.seed)?;
+
+        if pipelined {
+            let pending = request.sampler.sample_async_greedy(&last_logits)?;
+            mlx::transforms::async_eval(&[&pending])?;
+            let detok = tokenizer.decode_stream(/* skip_special */ true);
+            Ok(Self {
+                model,
+                tokenizer,
+                cache,
+                vision_embeds_full: None,
+                position_ids_full: None,
+                image_pad_consumed: 0,
+                history,
+                request,
+                finished: false,
+                pipelined: true,
+                pending_token_arr: Some(pending),
+                detok: Some(detok),
+                last_decoded_text: String::new(),
+                capture_active,
+                capture_pending_decode,
+                prng_state,
+            })
+        } else {
+            let first_token = request
+                .sampler
+                .sample(&last_logits, &history, &mut prng_state)?;
+            let mut history = history;
+            history.push(first_token);
+            let initial_text = tokenizer
+                .decode(&history, /* skip_special = */ true)
+                .unwrap_or_default();
+            Ok(Self {
+                model,
+                tokenizer,
+                cache,
+                vision_embeds_full: None,
+                position_ids_full: None,
+                image_pad_consumed: 0,
+                history,
+                request,
+                finished: false,
+                pipelined: false,
+                pending_token_arr: None,
+                detok: None,
+                last_decoded_text: initial_text,
+                capture_active,
+                capture_pending_decode,
+                prng_state,
+            })
+        }
+    }
+
     /// If a capture was deferred (phase=decode), start it now (lazily, on
     /// first `next_token` call). Idempotent — once started, the pending
     /// path is cleared.
