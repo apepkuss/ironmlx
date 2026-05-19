@@ -1,0 +1,54 @@
+//! Trait abstracting the inference model used by [`crate::core::scheduler::Scheduler`],
+//! [`crate::core::generate::GenerationStream`], and [`crate::core::server::SchedulerActor`].
+//!
+//! VL-related methods (`forward_vl_chunk` / `batched_prefill_vl` / `compute_vision_embeds`)
+//! intentionally remain inherent on concrete models; see spec §3.1 / §3.9.
+
+use mlx::{Array, Dtype, StreamOrDevice};
+
+use crate::core::memory_budget::ModelMeta;
+use crate::nn::LayerCache;
+use crate::Result;
+
+pub trait Model {
+    fn make_cache(
+        &self,
+        batch: i32,
+        cap: i32,
+        dtype: Dtype,
+    ) -> Result<Vec<LayerCache>>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_on(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        target: StreamOrDevice,
+    ) -> Result<Array>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn batched_prefill(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        attention_mask: &Array,
+        linear_attention_mask: &Array,
+        per_row_lens: &[i32],
+        cache: Option<&mut [LayerCache]>,
+        target: StreamOrDevice,
+    ) -> Result<Array>;
+
+    fn model_meta(&self) -> ModelMeta;
+
+    fn num_hidden_layers(&self) -> usize;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Model;
+
+    fn _assert_trait_signature_exists<M: Model>(_: &M) {}
+}
