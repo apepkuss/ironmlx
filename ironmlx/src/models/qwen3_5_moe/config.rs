@@ -47,6 +47,11 @@ impl Default for RopeParams {
 pub struct Qwen35MoeConfig {
     // ─ Dense-shared fields (same names as Qwen35Config) ─
     pub hidden_size: i32,
+    /// Dense MLP intermediate size. Present in some config.json variants but
+    /// absent from the real Qwen3.5-35B-A3B-4bit snapshot (which uses
+    /// `moe_intermediate_size` / `shared_expert_intermediate_size` instead).
+    /// Unused at inference time; kept for forward-compatibility.
+    #[serde(default)]
     pub intermediate_size: i32,
     pub num_hidden_layers: i32,
     pub num_attention_heads: i32,
