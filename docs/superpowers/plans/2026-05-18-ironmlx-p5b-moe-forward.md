@@ -122,18 +122,34 @@ find ~/.venv ~/workspace/iron-rivals -name 'qwen3_moe.py' 2>/dev/null | head -3
 
 **记录结论**到 `docs/superpowers/plans/p5b-algorithm-reference.txt`（gitignore），供 T2 实现引用。**禁止 copy 代码，只摘要算法步骤**。
 
-- [ ] **Step 0.5: 决策 + 记录到 plan inline**
+- [x] **Step 0.5: 决策 + 记录到 plan inline**
 
-回填本任务的"研究产出"小节，写在本文件 Task 0 末尾：
-```markdown
-**T0 产出（实测填入）：**
-- 实际 expert key 命名前缀：______（fused stacked / per-expert 等）
-- mlx::gather_qmm 是否暴露：✓/✗
-- 选定 kernel 路径：G1 / G2
-- omlx 在 35B-A3B-4bit 是否可加载：✓/✗
-- norm_topk_prob 默认：true / false
-- softmax 在 topk 之前 / 之后
+**T0 产出（实测 2026-05-19）：**
+
+- **实际 expert key 命名前缀**：`language_model.model.layers.{i}.mlp.{switch_mlp,shared_expert,shared_expert_gate,gate}.*` — mlx-community 已 pre-sanitize 为 stacked `switch_mlp.{gate,up,down}_proj` 布局，**无需 split `gate_up_proj`**。ironmlx Loader 现有 `language_model.` 前缀 strip 直接适用。
+- **`mlx::gather_qmm` 是否暴露**：**✓ 已在 cxx-mlx Rust wrapper ready**（`mlx::quantization::gather_quantized_matmul_on`，位于 `mlx/src/quantization.rs:302`）。无需新增 wrapper。
+- **选定 kernel 路径**：**G1**（fused `gather_quantized_matmul_on`），G2 fallback 不需要。
+- **omlx 在 35B-A3B-4bit 是否可加载**：omlx 是 server-only CLI，**无 `generate` 子命令**，不适合做 batch 数值验证 baseline。**改用 `mlx-vlm` 作为 P5b/P5d numerical baseline**（mlx-vlm 内置 Qwen3.5-MoE 实现，加载 + 生成实测 PASS：peak 20.4GB，gen ~105 tok/s，prompt `Once upon a time` 首生成 token id=310 `,`）。
+- **norm_topk_prob 默认**：mlx-vlm 实际代码**未读 `norm_topk_prob` 字段**——**always renormalize**。spec 中 `Qwen35MoeConfig.norm_topk_prob` 字段保留但 P5b 实施时忽略（或删除）。
+- **softmax 在 topk 之前**：先 `softmax(gate(x))` 再 `argpartition` 取 top-k，**最后 renormalize** scores（`scores /= scores.sum(-1, keepdim=true)`）。
+- **额外发现（spec 漏掉，T2 必须补）**：shared_expert 输出有**独立 sigmoid gate** —— `out = sigmoid(shared_expert_gate(x)) * shared_expert(x)`。`shared_expert_gate` 是 `Linear(hidden, 1, bias=False)`，**且本身也是 quantized**（shape `weight: [1, 256] uint32`）。
+- **额外发现**：router gate `mlp.gate` 也是 quantized 4-bit（`weight: [256, 256] uint32`，shape `[num_experts, hidden_packed]`），P5b T2 router 用 `nn::Linear::from_loader` 自动走 quantized path。
+- **额外发现**：argpartition (非 topk sort within k) 是 mlx-lm 性能优化，ironmlx Rust 实现需评估是否复用此模式或用 mlx::ops 已暴露的等价 op。
+
+**实际 layer 0 MoE 张量 shape 速查**（4-bit affine, group_size=64, hidden=2048, moe_inter=512, shared_inter=512, num_experts=256）：
+
 ```
+mlp.gate.{weight[256,256]u32, scales[256,32]bf16, biases[256,32]bf16}      router (quantized)
+mlp.switch_mlp.gate_proj.{weight[256,512,256]u32, scales[256,512,32], biases[256,512,32]}
+mlp.switch_mlp.up_proj.{...}                                                same shape
+mlp.switch_mlp.down_proj.{weight[256,2048,64]u32, scales[256,2048,8], biases[256,2048,8]}
+mlp.shared_expert.gate_proj.{weight[512,256]u32, ...}                       standard SwiGLU
+mlp.shared_expert.up_proj.{...}
+mlp.shared_expert.down_proj.{weight[2048,64]u32, ...}
+mlp.shared_expert_gate.{weight[1,256]u32, scales[1,32], biases[1,32]}       sigmoid gate
+```
+
+详细 algorithm reference + gather_qmm 调用模式 → `.claude/p5b-research-notes.md`（gitignored，供 T1+ implementer subagent 阅读）。
 
 - [ ] **Step 0.6: Commit T0**
 
