@@ -1,0 +1,76 @@
+warning: `VIRTUAL_ENV=/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+2026-05-19 15:27:25,453 - omlx.settings - INFO - Saved settings to /Users/xin/.omlx/settings.json
+2026-05-19 15:27:25,558 - omlx.server - INFO - CORS origins: ['*']
+2026-05-19 15:27:25,558 - omlx.model_discovery - INFO - Discovered model: qwen3_5_moe (type: vlm, engine: vlm, size: 19.94GB)
+2026-05-19 15:27:25,558 - omlx.engine_pool - INFO - Discovered 1 models, max memory: 108.00GB
+2026-05-19 15:27:25,558 - omlx.server_metrics - INFO - Loaded all-time stats from /Users/xin/.omlx/stats.json
+2026-05-19 15:27:25,558 - omlx.server - INFO - Server initialized with 1 models
+2026-05-19 15:27:25,558 - omlx.server - INFO - Default model: qwen3_5_moe
+2026-05-19 15:27:25,559 - omlx.server - INFO - Max model memory: 108.00GB
+2026-05-19 15:27:25,559 - omlx.server - INFO - Default max tokens: 32768
+2026-05-19 15:27:25,559 - omlx.server - INFO - HF Downloader initialized
+2026-05-19 15:27:25,559 - omlx.server - INFO - ModelScope SDK not installed, MS downloader disabled
+2026-05-19 15:27:25,560 - omlx.server - INFO - oQ Quantizer initialized
+2026-05-19 15:27:25,560 - omlx.server - INFO - HF Uploader initialized
+INFO:     Started server process [76025]
+INFO:     Waiting for application startup.
+2026-05-19 15:27:25,562 - omlx.process_memory_enforcer - INFO - Process memory enforcer started (limit: 120.0GB, interval: 1.0s)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8091 (Press CTRL+C to quit)
+2026-05-19 15:27:39,293 - omlx.engine_pool - INFO - Loading model: qwen3_5_moe
+2026-05-19 15:27:39,293 - omlx.engine_core - INFO - MLX executor thread initialized: generation_stream = ThreadLocalStream(Device(gpu, 0), 2)
+2026-05-19 15:27:40,497 - omlx.engine.vlm - INFO - Vision feature cache enabled (SSD: /Users/xin/.omlx/cache/vision_features)
+2026-05-19 15:27:40,694 - omlx.patches.gated_delta_advance - INFO - GatedDeltaNet patch applied (body replacement): mlx_vlm.models.qwen3_5.language.Qwen3_5GatedDeltaNet
+2026-05-19 15:27:40,694 - omlx.patches.qwen3_5_attention - INFO - Qwen3_5Attention patch applied (body replacement): mlx_vlm.models.qwen3_5.language.Qwen3_5Attention
+2026-05-19 15:27:40,886 - omlx.scheduler - INFO - Loaded 1 additional EOS token(s) from generation_config.json: {248044}
+2026-05-19 15:27:40,886 - omlx.scheduler - INFO - Enlarging paged cache block_size=256 to 2048 for ArraysCache hybrid model (reduces boundary snapshot overhead)
+2026-05-19 15:27:40,886 - omlx.scheduler - INFO - paged SSD-only mode: max_blocks=100000, block_size=2048 tokens
+2026-05-19 15:27:40,886 - omlx.cache.paged_cache - INFO - PagedCacheManager initialized: block_size=2048, initial_blocks=256, max_blocks=100000, max_tokens=204800000
+2026-05-19 15:27:40,886 - omlx.cache.paged_ssd_cache - INFO - Scanning SSD cache directory: /Users/xin/.omlx/cache
+2026-05-19 15:27:40,887 - omlx.cache.paged_ssd_cache - INFO - SSD cache scan complete: scanned=0, indexed=0, errors=0, total_size=0 B
+2026-05-19 15:27:40,887 - omlx.cache.paged_ssd_cache - INFO - PagedSSDCacheManager initialized: dir=/Users/xin/.omlx/cache, max_size=185.81 GB, existing_files=0, disk_free=1747.98 GB, cache_used=0 B
+2026-05-19 15:27:40,887 - omlx.cache.paged_cache - INFO - paged SSD cache manager connected to PagedCacheManager
+2026-05-19 15:27:40,887 - omlx.cache.prefix_cache - INFO - PagedSSDCacheManager connected to BlockAwarePrefixCache
+2026-05-19 15:27:40,887 - omlx.scheduler - INFO - paged SSD cache enabled: cache_dir=/Users/xin/.omlx/cache, max_size=185.81 GB, block_size=2048 tokens
+2026-05-19 15:27:40,887 - omlx.scheduler - INFO - paged SSD cache enabled: /Users/xin/.omlx/cache, block_size=2048, max_blocks=100000
+2026-05-19 15:27:40,888 - omlx.engine_core - INFO - Engine started
+2026-05-19 15:27:40,922 - omlx.engine.vlm - INFO - VLM tool calling enabled: parser=qwen3_coder
+2026-05-19 15:27:40,925 - omlx.engine.vlm - INFO - VLMBatchedEngine loaded: /private/tmp/omlx-models/qwen3_5_moe
+2026-05-19 15:27:40,927 - omlx.engine_pool - INFO - Loaded model: qwen3_5_moe (estimated: 19.94GB, total: 19.94GB)
+2026-05-19 15:27:40,927 - omlx.engine.vlm - INFO - Structured output requires xgrammar. Install with: pip install 'omlx[grammar]'
+2026-05-19 15:27:41,607 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.0ms/1, store_cache_main_eval=0.5ms/1, store_cache_main_prep=0.5ms/1
+2026-05-19 15:27:42,113 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.0ms/2, store_cache_main_eval=0.9ms/2, store_cache_main_prep=0.9ms/2
+2026-05-19 15:27:42,618 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.1ms/3, store_cache_main_eval=1.4ms/3, store_cache_main_prep=1.4ms/3
+2026-05-19 15:27:43,125 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.1ms/4, store_cache_main_eval=1.8ms/4, store_cache_main_prep=1.9ms/4
+2026-05-19 15:27:43,705 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.1ms/5, store_cache_main_eval=2.5ms/5, store_cache_main_prep=2.6ms/5
+2026-05-19 15:27:44,285 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.1ms/6, store_cache_main_eval=3.1ms/6, store_cache_main_prep=3.2ms/6
+2026-05-19 15:27:44,808 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.1ms/7, store_cache_main_eval=3.7ms/7, store_cache_main_prep=3.8ms/7
+2026-05-19 15:27:45,365 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.2ms/8, store_cache_main_eval=4.3ms/8, store_cache_main_prep=4.4ms/8
+2026-05-19 15:27:46,356 - omlx.scheduler - INFO - Using boundary cache snapshot for e644b380-9c2c-4ed1-b8f1-62e32ab4ec8f: storing 2048/2110 tokens (skipping trailing partial block, 0 intermediate snapshots)
+2026-05-19 15:27:46,359 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.2ms/9, store_cache_main_eval=7.4ms/9, store_cache_main_prep=7.8ms/9
+2026-05-19 15:27:47,256 - omlx.scheduler - INFO - Using boundary cache snapshot for bad76d7a-d26a-449f-8f8d-96911ca9a85d: storing 2048/2110 tokens (skipping trailing partial block, 0 intermediate snapshots)
+2026-05-19 15:27:47,260 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.2ms/10, store_cache_main_eval=10.4ms/10, store_cache_main_prep=11.2ms/10
+2026-05-19 15:27:48,146 - omlx.scheduler - INFO - Using boundary cache snapshot for bbef718f-f382-4ed1-adbb-5068a5cce120: storing 2048/2110 tokens (skipping trailing partial block, 0 intermediate snapshots)
+2026-05-19 15:27:48,149 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.2ms/11, store_cache_main_eval=13.8ms/11, store_cache_main_prep=15.0ms/11
+2026-05-19 15:27:49,013 - omlx.scheduler - INFO - Using boundary cache snapshot for eed3c44c-1c49-43f6-b183-e86ff8443cff: storing 2048/2106 tokens (skipping trailing partial block, 0 intermediate snapshots)
+2026-05-19 15:27:49,016 - omlx.scheduler - INFO - Cache phase timings: cleanup_finished_sync=0.3ms/12, store_cache_main_eval=16.6ms/12, store_cache_main_prep=18.1ms/12
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-05-19 15:28:02,724 - omlx.process_memory_enforcer - INFO - Process memory enforcer stopped
+2026-05-19 15:28:02,724 - omlx.server - INFO - Process memory enforcer stopped
+2026-05-19 15:28:02,724 - omlx.admin.hf_downloader - INFO - HF Downloader shut down
+2026-05-19 15:28:02,724 - omlx.server - INFO - HF Downloader stopped
+2026-05-19 15:28:02,724 - omlx.engine_pool - INFO - Unloading model: qwen3_5_moe (immediate abort)
+2026-05-19 15:28:02,724 - omlx.engine_core - INFO - Engine stopped
+2026-05-19 15:28:02,724 - omlx.scheduler - INFO - Scheduler shutdown initiated...
+2026-05-19 15:28:02,724 - omlx.scheduler - INFO - Waiting for 1 inflight async store_cache future(s)...
+2026-05-19 15:28:02,729 - omlx.cache.paged_ssd_cache - INFO - Shutting down PagedSSDCacheManager...
+2026-05-19 15:28:02,735 - omlx.scheduler - INFO - Scheduler shutdown completed
+2026-05-19 15:28:02,736 - omlx.cache.paged_cache - INFO - PagedCacheManager cleared (reset to 256 initial blocks)
+2026-05-19 15:28:02,784 - omlx.scheduler - INFO - Deep reset completed - all caches cleared
+2026-05-19 15:28:02,789 - omlx.engine.vlm - INFO - VLMBatchedEngine stopped
+2026-05-19 15:28:02,930 - omlx.engine_pool - INFO - Unloaded model: qwen3_5_moe, freed=19.09GB (expected>=17.94GB), active_memory: 20.00B (settled)
+2026-05-19 15:28:02,930 - omlx.engine_pool - INFO - Engine pool shutdown complete
+2026-05-19 15:28:02,930 - omlx.server - INFO - Engine pool shutdown
+INFO:     Application shutdown complete.
+INFO:     Finished server process [76025]
