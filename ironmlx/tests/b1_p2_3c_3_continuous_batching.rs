@@ -280,15 +280,37 @@ async fn continuous_batching_full_reject() {
     let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 0, 32768, meta)
         .expect("spawn");
 
-    let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 20, stop.clone()))
+    // stop_token_ids: vec![] (disable EOS) so A/B don't short-circuit on
+    // "Hello"/"World" + cold GPU; ensures the 200ms sleep below + C arrival
+    // finds A/B still active. Pre-P5 sweep relied on accumulated thermal load
+    // to slow decode enough — fragile, replaced with explicit no-EOS.
+    let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 20, vec![]))
         .await
         .expect("admit A");
-    let reply_b = submit_admit(&handle.cmd_tx, make_request(prompt_b, 20, stop.clone()))
+    let reply_b = submit_admit(&handle.cmd_tx, make_request(prompt_b, 20, vec![]))
         .await
         .expect("admit B");
 
-    // Wait briefly so A + B reach Decoding phase.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until A + B have completed at least one decode Step (batch_count >= 1),
+    // confirming both slots are occupied in Decoding before C arrives.
+    // A fixed sleep is fragile on cold GPU (prefill can take >200ms); polling
+    // batch_count is the reliable signal.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if handle
+            .batch_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1
+        {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("batch_count never reached 1 within 60s — A/B prefill stalled");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // One extra tick to ensure the rolling decode loop is active.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Now submit C — both slots full + Decoding + queue disabled -> admit_mid Err.
     let admit_c_result =

@@ -169,7 +169,8 @@ async fn scheduler_per_row_finish_different_steps() {
         let model_guard = model.blocking_lock();
 
         let mut sched =
-            Scheduler::<ironmlx::models::Qwen35Model>::new(2, 32768, model_guard.model_meta()).expect("scheduler startup");
+            Scheduler::<ironmlx::models::Qwen35Model>::new(2, 32768, model_guard.model_meta())
+                .expect("scheduler startup");
         let id_a = sched
             .admit(make_request(
                 prompt_ids_outer.clone(),
