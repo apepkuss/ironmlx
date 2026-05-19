@@ -12,9 +12,10 @@
 //!   3. inds   = argpartition(probs, -k, axis=-1)[..., -k:]  [B, S, k]
 //!   4. scores = take_along_axis(probs, inds, -1) / scores.sum(-1, keepdim)
 //!   5. routed = gather_quantized_matmul_on on flat [BS, H]:
-//!      gate_out, up_out: [BS, k, moe_inter]
-//!      act = silu(gate_out) * up_out
-//!      down_out: [BS, k, hidden]
+//!      x_in = expand_dims(flat, [-2,-3])  → [BS, 1, 1, H]
+//!      gate_out, up_out: [BS, k, 1, moe_inter]
+//!      act = silu(gate_out) * up_out       [BS, k, 1, moe_inter]
+//!      down_out_4d: [BS, k, 1, hidden], squeeze(-2) → [BS, k, hidden]
 //!      routed_y = (down_out * scores_unsq).sum(-2)  → [BS, H]
 //!   6. shared = shared_expert(x_flat)
 //!      shared = sigmoid(shared_expert_gate(x_flat)) * shared
@@ -216,12 +217,17 @@ impl SparseMoeBlock {
 
         // (5) Routed SwiGLU via gather_quantized_matmul_on (G1 path).
         //
-        // x: [BS, H], w: [E, out, H_packed], rhs_indices: [BS, k]
-        // → output [BS, k, out_dim]
-        //
-        // gate_proj and up_proj produce [BS, k, moe_intermediate_size].
+        // Per mlx-lm SwitchGLU pattern: expand x to [BS, 1, 1, H] before
+        // passing to gather_qmm. With x rank-2 [BS, H] and rhs_indices [BS, k],
+        // mlx auto-generates lhs_indices from x.shape()[:-2] = [] (scalar),
+        // which broadcasts incorrectly to [BS, k, BS, out_dim]. The fix adds
+        // two size-1 dims so x is rank-4 [BS, 1, 1, H]; gather_qmm then
+        // produces [BS, k, 1, out_dim] and squeeze(-2) recovers [BS, k, out_dim].
+        let x_in = mlx::ops::shape::expand_dims_on(&flat_x, &[-2_i32, -3_i32][..], target)
+            .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")?; // [BS, 1, 1, H]
+
         let gate_out = mlx::quantization::gather_quantized_matmul_on(
-            &flat_x,
+            &x_in,
             &self.routed.gate_weight,
             &self.routed.gate_scales,
             self.routed.gate_biases.as_ref(),
@@ -234,10 +240,10 @@ impl SparseMoeBlock {
             /* sorted_indices */ false,
             target,
         )
-        .context("SparseMoeBlock: gate_proj gather_qmm")?; // [BS, k, moe_inter]
+        .context("SparseMoeBlock: gate_proj gather_qmm")?; // [BS, k, 1, moe_inter]
 
         let up_out = mlx::quantization::gather_quantized_matmul_on(
-            &flat_x,
+            &x_in,
             &self.routed.up_weight,
             &self.routed.up_scales,
             self.routed.up_biases.as_ref(),
@@ -250,17 +256,18 @@ impl SparseMoeBlock {
             false,
             target,
         )
-        .context("SparseMoeBlock: up_proj gather_qmm")?; // [BS, k, moe_inter]
+        .context("SparseMoeBlock: up_proj gather_qmm")?; // [BS, k, 1, moe_inter]
 
         // SwiGLU activation: silu(gate) * up  where silu(z) = z * sigmoid(z)
+        // gate_out, up_out: [BS, k, 1, moe_inter]
         let gate_sig = gate_out
             .sigmoid_on(target)
             .context("SparseMoeBlock: gate sigmoid")?;
-        let gate_silu = &gate_out * &gate_sig; // [BS, k, moe_inter]
-        let act = &gate_silu * &up_out; // [BS, k, moe_inter]
+        let gate_silu = &gate_out * &gate_sig; // [BS, k, 1, moe_inter]
+        let act = &gate_silu * &up_out; // [BS, k, 1, moe_inter]
 
-        // down_proj: [BS, k, moe_inter] → [BS, k, H]
-        let down_out = mlx::quantization::gather_quantized_matmul_on(
+        // down_proj: act [BS, k, 1, moe_inter] → [BS, k, 1, H], then squeeze(-2) → [BS, k, H]
+        let down_out_4d = mlx::quantization::gather_quantized_matmul_on(
             &act,
             &self.routed.down_weight,
             &self.routed.down_scales,
@@ -274,10 +281,12 @@ impl SparseMoeBlock {
             false,
             target,
         )
-        .context("SparseMoeBlock: down_proj gather_qmm")?; // [BS, k, H]
+        .context("SparseMoeBlock: down_proj gather_qmm")?; // [BS, k, 1, H]
+        let down_out = mlx::ops::shape::squeeze_on(&down_out_4d, &[-2_i32][..], target)
+            .context("SparseMoeBlock: squeeze down_proj dim -2")?; // [BS, k, H]
 
         // (6) Weight by renormalized scores and sum across the k axis.
-        //     scores: [BS, k] → unsqueeze → [BS, k, 1] for broadcast.
+        //     scores: [BS, k] → unsqueeze → [BS, k, 1] for broadcast with [BS, k, H].
         let scores_unsq = mlx::ops::shape::expand_dims_on(&scores, -1_i32, target)
             .context("SparseMoeBlock: expand scores dim")?; // [BS, k, 1]
         let weighted = &down_out * &scores_unsq; // [BS, k, H]
