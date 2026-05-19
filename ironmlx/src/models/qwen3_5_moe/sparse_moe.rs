@@ -328,16 +328,36 @@ impl SparseMoeBlock {
             target,
         )
         .context("SparseMoeBlock: down_proj gather_qmm")?; // [BS, k, 1, H]
-        let down_out = mlx::ops::shape::squeeze_on(&down_out_4d, &[-2_i32][..], target)
-            .context("SparseMoeBlock: squeeze down_proj dim -2")?; // [BS, k, H]
 
-        // (6) Weight by renormalized scores and sum across the k axis.
-        //     scores: [BS, k] → unsqueeze → [BS, k, 1] for broadcast with [BS, k, H].
-        let scores_unsq = mlx::ops::shape::expand_dims_on(&scores, -1_i32, target)
-            .context("SparseMoeBlock: expand scores dim")?; // [BS, k, 1]
-        let weighted = &down_out * &scores_unsq; // [BS, k, H]
-        let routed_y = mlx::ops::sum_on(&weighted, -2_i32, false, target)
-            .context("SparseMoeBlock: sum across k")?; // [BS, H]
+        // (6) Weight by renormalized scores and reduce over k.
+        #[cfg(not(feature = "p5e-shape-elim"))]
+        let routed_y = {
+            // down_out_4d: [BS, k, 1, H] → squeeze(-2) → [BS, k, H].
+            let down_out = mlx::ops::shape::squeeze_on(&down_out_4d, &[-2_i32][..], target)
+                .context("SparseMoeBlock: squeeze down_proj dim -2")?;
+            // scores: [BS, k] → unsqueeze → [BS, k, 1] for broadcast with [BS, k, H].
+            let scores_unsq = mlx::ops::shape::expand_dims_on(&scores, -1_i32, target)
+                .context("SparseMoeBlock: expand scores dim")?; // [BS, k, 1]
+            let weighted = &down_out * &scores_unsq; // [BS, k, H]
+            mlx::ops::sum_on(&weighted, -2_i32, false, target)
+                .context("SparseMoeBlock: sum across k")?
+        };
+        #[cfg(feature = "p5e-shape-elim")]
+        let routed_y = {
+            // P5e A.3: keep down_proj output at rank 4 [BS, k, 1, H] through the
+            // weighted sum. Saves one squeeze(-2) kernel + one element-wise
+            // multiply on the smaller rank-3 tensor, and collapses both the k
+            // axis and the singleton axis in a single multi-axis sum_on call.
+            // scores [BS, k] → [BS, k, 1, 1] via two-axis expand_dims. Axes are
+            // interpreted after insertion: positions 2, 3 in the rank-4 result
+            // (equivalently -2, -1).
+            let scores_unsq =
+                mlx::ops::shape::expand_dims_on(&scores, &[-2_i32, -1_i32][..], target)
+                    .context("SparseMoeBlock: expand scores → [BS, k, 1, 1]")?;
+            let weighted = &down_out_4d * &scores_unsq; // [BS, k, 1, H]
+            mlx::ops::sum_on(&weighted, &[-3_i32, -2_i32][..], false, target)
+                .context("SparseMoeBlock: sum over (k, singleton)")?
+        };
 
         // (7) Shared expert with independent sigmoid gate.
         let shared_y = self

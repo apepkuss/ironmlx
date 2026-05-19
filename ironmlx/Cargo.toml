@@ -41,6 +41,7 @@ default = []
 vision-dump = []
 p5e-stream-parallel = []
 p5e-compile = []
+p5e-shape-elim = []
 
 [dev-dependencies]
 approx = "0.5"
