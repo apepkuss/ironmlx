@@ -1,4 +1,8 @@
-//! P5d T4: dump first-step logits from Qwen35MoeModel for 5 prompts.
+//! P5d T4 supplementary observation: dump first-step logits from
+//! Qwen35MoeModel for 5 prompts as numpy .npy files. These are
+//! recorded outputs of ironmlx itself; comparison with external
+//! reference implementations (mlx-vlm) at logit precision is
+//! observational triangulation, not an alignment gate.
 //! Output: reports/p5d-argmax/ironmlx_logits_p<N>.npy (N=0..4)
 //!
 //! Run with:

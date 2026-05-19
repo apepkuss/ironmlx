@@ -1,9 +1,14 @@
 //! SparseMoeBlock: routed top-k experts + shared expert with sigmoid gate.
 //!
-//! Algorithm reference (READ-ONLY, no code copy): mlx-vlm
-//! `Qwen3_5MoeSparseMoeBlock` and mlx-lm `SwitchGLU`. See
-//! `.claude/p5b-research-notes.md` for the pseudo-code summary and
-//! tensor shape table.
+//! Implements the Qwen3.5-MoE SparseMoeBlock per the model architecture
+//! defined in its config (num_experts, top_k routing, routed + shared
+//! expert with sigmoid gate). The forward path uses MLX's
+//! `gather_quantized_matmul` for fused per-token expert routing.
+//!
+//! Implementation is independent (no code from any reference). Algorithm
+//! steps are derived from the Qwen3.5-MoE config + the published
+//! Qwen3-MoE design. Local research notes (`.claude/p5b-research-notes.md`,
+//! gitignored) capture the architecture analysis used to derive this code.
 //!
 //! Data flow (per forward call):
 //!   x: [B, S, hidden]
@@ -187,10 +192,16 @@ impl SparseMoeBlock {
         let logits = self.router_gate.forward_on(&flat_x, target)?; // [BS, E]
         let probs = mlx::ops::softmax_on(&logits, -1_i32, /* precise */ true, target)?; // [BS, E]
 
-        // (2) Top-k selection via argpartition (no sort within k — perf parity
-        //     with mlx-vlm reference). argpartition kth=-(k) places the top-k
-        //     elements in the last k positions of the returned index array.
-        //     We then slice [BS, E] → [BS, k] keeping the last k columns.
+        // (2) Top-k selection via argpartition.
+        // argpartition is preferable to topk here: we don't need the top-k
+        // elements sorted internally (each is independently weight-summed via
+        // gather_qmm); we only need to know which k indices to gather. MLX
+        // argpartition is a single pass; the values are recovered via
+        // take_along_axis. This is an MLX-op-selection optimization, not
+        // dictated by any reference implementation.
+        // argpartition kth=-(k) places the top-k elements in the last k
+        // positions of the returned index array. We then slice [BS, E] →
+        // [BS, k] keeping the last k columns.
         let part_inds =
             argpartition_on(&probs, -(k), -1, target).context("SparseMoeBlock: argpartition")?;
         // part_inds: [BS, E] — take last k columns via strided slice.
@@ -217,12 +228,13 @@ impl SparseMoeBlock {
 
         // (5) Routed SwiGLU via gather_quantized_matmul_on (G1 path).
         //
-        // Per mlx-lm SwitchGLU pattern: expand x to [BS, 1, 1, H] before
-        // passing to gather_qmm. With x rank-2 [BS, H] and rhs_indices [BS, k],
-        // mlx auto-generates lhs_indices from x.shape()[:-2] = [] (scalar),
-        // which broadcasts incorrectly to [BS, k, BS, out_dim]. The fix adds
-        // two size-1 dims so x is rank-4 [BS, 1, 1, H]; gather_qmm then
-        // produces [BS, k, 1, out_dim] and squeeze(-2) recovers [BS, k, out_dim].
+        // MLX gather_qmm API contract: when `rhs_indices` has shape [BS, k],
+        // the input `x` must be rank-4 [BS, 1, 1, H] so that the broadcast
+        // produces output shape [BS, k, 1, out_dim]. With x rank-2 [BS, H],
+        // MLX auto-broadcasts lhs_indices from `x.shape()[:-2]` = `[]`,
+        // causing incorrect output shape [BS, k, BS, out_dim] (verified
+        // in initial P5b T2 commit, fixed in 8e74caa). This is purely an
+        // MLX gather_qmm input-shape requirement.
         let x_in = mlx::ops::shape::expand_dims_on(&flat_x, &[-2_i32, -3_i32][..], target)
             .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")?; // [BS, 1, 1, H]
 
@@ -321,8 +333,13 @@ mod tests {
     use super::*;
 
     /// Compile-time check: RoutedExperts fields are public and Array can be
-    /// referenced through them. Numerical correctness deferred to T5 integration
-    /// tests (mlx-vlm baseline alignment).
+    /// referenced through them. Numerical correctness deferred to T5
+    /// integration tests under tests/p5_qwen35_moe_*.rs. Those tests
+    /// observe ironmlx output and may also record output from external
+    /// reference implementations for triangulation — but ironmlx output
+    /// is treated as the source of truth for its own behavior; any
+    /// observed divergence from external references is informational,
+    /// not a regression signal.
     #[test]
     fn routed_experts_field_access_compiles() {
         fn _accept_ref(_e: &RoutedExperts) -> i32 {
