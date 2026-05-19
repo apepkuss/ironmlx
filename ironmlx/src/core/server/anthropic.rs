@@ -20,7 +20,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::generate::{GenerateRequest, GenerationStream};
+use crate::core::model::Model;
 use crate::core::sampler::Sampler;
+use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 
@@ -152,7 +154,13 @@ fn format_event(event_type: &str, payload: &serde_json::Value) -> Bytes {
     Bytes::from(buf)
 }
 
-pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesRequest>) -> Response {
+pub async fn messages<M>(
+    State(state): State<AppState<M>>,
+    Json(req): Json<MessagesRequest>,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     // Extract fields before partially moving req.messages.
     let max_tokens = req.max_tokens;
     let stream = req.stream;
@@ -251,12 +259,15 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
     }
 }
 
-async fn serve_via_gs_stream(
-    state: AppState,
+async fn serve_via_gs_stream<M>(
+    state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
     input_tokens: u32,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let id = gen_msg_id();
     let id_for_task = id.clone();
@@ -299,7 +310,7 @@ async fn serve_via_gs_stream(
         // 3. N × content_block_delta + final stop_reason capture.
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
-        let mut stream = match GenerationStream::new(&model_guard, tokenizer, request) {
+        let mut stream = match GenerationStream::new(&*model_guard, tokenizer, request) {
             Ok(s) => s,
             Err(e) => {
                 let payload = serde_json::json!({
@@ -379,12 +390,15 @@ async fn serve_via_gs_stream(
 /// Emits the same 6-event SSE sequence as `serve_via_gs_stream`:
 ///   message_start → content_block_start → N × content_block_delta →
 ///   content_block_stop → message_delta → message_stop.
-pub async fn serve_via_scheduler_stream(
-    state: AppState,
+pub async fn serve_via_scheduler_stream<M>(
+    state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
     input_tokens: u32,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let msg_id = gen_msg_id();
 
     // 1. Admit request to the actor.
@@ -535,18 +549,21 @@ pub async fn serve_via_scheduler_stream(
         .unwrap()
 }
 
-async fn serve_via_gs_unary(
-    state: AppState,
+async fn serve_via_gs_unary<M>(
+    state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
     input_tokens: u32,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let id = gen_msg_id();
     let result = tokio::task::spawn_blocking(
         move || -> std::result::Result<(String, &'static str, u32), String> {
             let model_guard = state.model.blocking_lock();
             let tokenizer = &*state.tokenizer;
-            let mut stream = GenerationStream::new(&model_guard, tokenizer, request)
+            let mut stream = GenerationStream::new(&*model_guard, tokenizer, request)
                 .map_err(|e| e.to_string())?;
             let mut buf = String::new();
             let mut finish: &'static str = "end_turn";
@@ -596,12 +613,15 @@ async fn serve_via_gs_unary(
 }
 
 /// Text-only short-prompt unary path via SchedulerActor (3b-4 swap-in).
-pub async fn serve_via_scheduler_unary(
-    state: AppState,
+pub async fn serve_via_scheduler_unary<M>(
+    state: AppState<M>,
     request: GenerateRequest,
     model_id: String,
     input_tokens: u32,
-) -> Response {
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let id = gen_msg_id();
 
     // 1. Admit.

@@ -24,13 +24,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::core::generate::GenerateRequest;
-use crate::core::scheduler::{Phase, RequestId, Scheduler, StepEvent};
-use crate::models::Qwen35Model;
+use crate::core::model::Model;
+use crate::core::scheduler::{DenseVlMethods, Phase, RequestId, Scheduler, StepEvent};
 use crate::Result;
-
-/// Concrete scheduler type used by this actor. Fixed to `Qwen35Model` until
-/// P5b introduces `Qwen35MoeModel` and the actor is made generic.
-type DenseScheduler = Scheduler<Qwen35Model>;
 
 /// Commands accepted by the actor. 3b-2 ships only [`Admit`]; later
 /// phases may add `Cancel { id }`, `Stats`, etc.
@@ -141,14 +137,17 @@ pub struct SchedulerActorHandle {
 ///   `min(--max-cache-cap CLI, model.config.max_position_embeddings)`.
 ///   Passed directly to `Scheduler::new`. B1-p2.3f.
 /// - `meta` — model memory-budget metadata for startup validation. B1-p2.5.
-pub fn spawn_scheduler_actor(
-    model: Arc<Mutex<Qwen35Model>>,
+pub fn spawn_scheduler_actor<M>(
+    model: Arc<Mutex<M>>,
     b_max: usize,
     admission_deadline: Duration,
     admission_queue_max: usize,
     effective_cap_max: usize,
     meta: crate::core::memory_budget::ModelMeta,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     // ── Step 1: Budget validation on the calling thread. ──────────────────
     // No Scheduler / Array is allocated here — just pure arithmetic + RAM
     // check. Returns Err early if the budget is too tight.
@@ -198,7 +197,7 @@ pub fn spawn_scheduler_actor(
     //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
     //    worker thread's Metal Stream. Thread affinity preserved.
     tokio::task::spawn_blocking(move || {
-        let scheduler = DenseScheduler::new_with_state(
+        let scheduler = Scheduler::<M>::new_with_state(
             b_max,
             effective_cap_max,
             driver_budget_state,
@@ -241,9 +240,9 @@ pub fn spawn_scheduler_actor(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn driver_loop(
-    scheduler: DenseScheduler,
-    model: Arc<Mutex<Qwen35Model>>,
+fn driver_loop<M>(
+    scheduler: Scheduler<M>,
+    model: Arc<Mutex<M>>,
     admission_deadline: Duration,
     admission_queue_max: usize,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
@@ -254,7 +253,9 @@ fn driver_loop(
     queue_rejected: Arc<AtomicU64>,
     b_active: Arc<AtomicU64>,
     b_queued: Arc<AtomicU64>,
-) {
+) where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     // Receive Scheduler ownership from spawn_scheduler_actor (single instance).
     // P0 fix: previously driver_loop called Scheduler::new a second time,
     // creating fresh Arc atomics disconnected from the handle. B1-p2.5.
@@ -620,9 +621,9 @@ fn driver_loop(
 /// reset the timer. Once saturated, additional admits within the window
 /// go to the admission queue (bounded by `admission_queue_max`).
 #[allow(clippy::too_many_arguments)]
-async fn drain_window(
+async fn drain_window<M>(
     cmd_rx: &mut mpsc::Receiver<SchedulerCommand>,
-    sched: &mut DenseScheduler,
+    sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admission_queue: &mut VecDeque<PendingAdmit>,
     admit_count: &Arc<AtomicU64>,
@@ -632,7 +633,9 @@ async fn drain_window(
     b_max: usize,
     queue_max: usize,
     deadline: Duration,
-) {
+) where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let timer = tokio::time::sleep(deadline);
     tokio::pin!(timer);
     let mut saturated = false;
@@ -670,12 +673,14 @@ async fn drain_window(
 /// register the per-request event channel and increment admit_count;
 /// on failure forward the Err to the caller. Reply-tx send failure
 /// (caller abandoned) causes the slot to be evicted as cleanup.
-fn handle_admit(
+fn handle_admit<M>(
     cmd: SchedulerCommand,
-    sched: &mut DenseScheduler,
+    sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
-) {
+) where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     match sched.admit(request) {
@@ -720,13 +725,15 @@ fn handle_admit(
 /// On any error during the loop, the orphan slot is evicted and
 /// `event_txs[id]` removed so the next `step()` does not panic on an
 /// empty `generated_tokens`.
-fn handle_admit_mid_chunked(
+fn handle_admit_mid_chunked<M>(
     cmd: SchedulerCommand,
-    sched: &mut DenseScheduler,
+    sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
-    model: &Arc<Mutex<Qwen35Model>>,
-) {
+    model: &Arc<Mutex<M>>,
+) where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -850,14 +857,16 @@ fn enqueue_or_reject(
 /// exit branch (`active_count == 0 && queue non-empty`) will handle the
 /// queued entries via `evict_all` + fresh `prefill_admitted`. Return
 /// early here so we do not call `admit_mid` in an illegal phase.
-fn drain_admission_queue(
+fn drain_admission_queue<M>(
     queue: &mut VecDeque<PendingAdmit>,
-    sched: &mut DenseScheduler,
+    sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
-    model: &Arc<Mutex<Qwen35Model>>,
+    model: &Arc<Mutex<M>>,
     b_max: usize,
-) {
+) where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     // admit_mid is only legal in Decoding phase.
     if sched.phase() != Phase::Decoding {
         return;

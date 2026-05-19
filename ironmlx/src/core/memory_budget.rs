@@ -20,6 +20,16 @@ pub struct ModelMeta {
     pub hidden_size: i32,
     pub head_dim: Option<i32>,
     pub weight_bytes: usize,
+    /// Maximum sequence length the model supports. Used by `serve()` for
+    /// computing `effective_cap_max = min(--max-cache-cap CLI, max_position_embeddings)`.
+    /// P5a-T5: added here so `serve<M>()` can read it from the `Model` trait
+    /// without requiring a concrete model-specific `config()` method.
+    pub max_position_embeddings: i32,
+    /// VL vision spatial merge size (= VisionConfig.spatial_merge_size).
+    /// Defaults to 2 for text-only models (unused when no images present).
+    /// P5a-T5: carried here so generic HTTP handlers don't need a
+    /// model-specific `config()` method.
+    pub spatial_merge_size: i32,
 }
 
 impl ModelMeta {
@@ -174,6 +184,8 @@ pub fn test_meta_qwen35() -> ModelMeta {
         hidden_size: 4096,
         head_dim: None,
         weight_bytes: 3 * 1024 * 1024 * 1024,
+        max_position_embeddings: 32768,
+        spatial_merge_size: 2,
     }
 }
 

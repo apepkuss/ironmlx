@@ -10,8 +10,9 @@ use anyhow::Context;
 use axum::{routing::get, routing::post, Router};
 use tokio::sync::Mutex;
 
+use crate::core::model::Model;
+use crate::core::scheduler::DenseVlMethods;
 use crate::core::tokenizer::Tokenizer;
-use crate::models::Qwen35Model;
 use crate::Result;
 
 pub mod anthropic;
@@ -20,15 +21,22 @@ pub mod health;
 mod openai;
 pub mod scheduler_actor;
 
-#[derive(Clone)]
 /// HTTP server shared state. The model is wrapped in a tokio Mutex —
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
 ///
 /// 3b-2 adds `scheduler_handle` so text-only short-prompt requests can be
 /// routed through the SchedulerActor; VL / long-prompt requests still
 /// take the GenerationStream path that holds the model lock directly.
-pub struct AppState {
-    pub model: Arc<Mutex<Qwen35Model>>,
+///
+/// P5a-T5: AppState is now generic over `M: Model + DenseVlMethods + Send +
+/// 'static`. CLI call sites pass `Qwen35Model` as the concrete type;
+/// P5c will add the MoE path separately.
+///
+/// `Clone` is implemented manually so the derive macro doesn't emit an
+/// unwanted `M: Clone` bound — all fields clone without needing `M: Clone`
+/// because `Arc<Mutex<M>>` and `Arc<...>` are `Clone` unconditionally.
+pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
+    pub model: Arc<Mutex<M>>,
     pub tokenizer: Arc<Tokenizer>,
     pub model_id: String,
     /// Default prefill chunk size (max tokens per prefill forward). `0`
@@ -52,9 +60,26 @@ pub struct AppState {
     pub health_collector: Arc<health::SchedulerHealthCollector>,
 }
 
+impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
+    fn clone(&self) -> Self {
+        AppState {
+            model: self.model.clone(),
+            tokenizer: self.tokenizer.clone(),
+            model_id: self.model_id.clone(),
+            prefill_chunk_size: self.prefill_chunk_size,
+            scheduler_handle: self.scheduler_handle.clone(),
+            b_max: self.b_max,
+            admission_deadline_ms: self.admission_deadline_ms,
+            admission_queue_max: self.admission_queue_max,
+            effective_cap_max: self.effective_cap_max,
+            health_collector: self.health_collector.clone(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn serve(
-    model: Qwen35Model,
+pub async fn serve<M>(
+    model: M,
     tokenizer: Tokenizer,
     model_id: String,
     host: &str,
@@ -64,20 +89,22 @@ pub async fn serve(
     admission_deadline_ms: u64,
     admission_queue_max: usize,
     max_cache_cap: usize, // 3f
-) -> Result<()> {
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let model = Arc::new(Mutex::new(model));
     let admission_deadline = std::time::Duration::from_millis(admission_deadline_ms);
 
-    // 3f: effective_cap_max = min(--max-cache-cap CLI, model.config.max_position_embeddings).
-    // i32 → usize: saturating-clamp at 0 (negative i32 invalid for cap).
-    // Use async lock — `serve` runs inside a Tokio runtime so `blocking_lock`
-    // would panic with "Cannot block the current thread from within a runtime"
-    // when serve is invoked via `tokio::spawn(server::serve(...))` (tests S5
-    // of 3d / 3f-T4 caught this).
-    let model_max_context: usize = {
-        let m = model.lock().await;
-        m.config().max_position_embeddings.max(0) as usize
+    // 3f + P5a-T5: extract ModelMeta (which now carries max_position_embeddings)
+    // inside a single async lock guard so serve<M>() doesn't need a concrete
+    // model-specific `config()` method. `blocking_lock` would panic here because
+    // `serve` runs inside a Tokio runtime (tests S5 of 3d / 3f-T4 caught this).
+    let meta = {
+        let guard = model.lock().await;
+        guard.model_meta()
     };
+    let model_max_context: usize = meta.max_position_embeddings.max(0) as usize;
     let effective_cap_max = max_cache_cap.min(model_max_context);
     if max_cache_cap > model_max_context {
         tracing::warn!(
@@ -87,13 +114,6 @@ pub async fn serve(
             model_max_context
         );
     }
-
-    // B1-p2.5: extract ModelMeta inside the async lock guard (serve() runs
-    // in a Tokio runtime; blocking_lock would panic here).
-    let meta = {
-        let guard = model.lock().await;
-        guard.model_meta()
-    };
 
     let scheduler_handle = scheduler_actor::spawn_scheduler_actor(
         model.clone(),
@@ -153,9 +173,12 @@ pub async fn serve(
 
 /// GET /healthz — returns a JSON HealthSnapshot. Reads only Arc atomics;
 /// no lock contention with the model or SchedulerActor. B1-p2.5 G3.
-async fn healthz_handler(
-    axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<health::HealthSnapshot> {
+async fn healthz_handler<M>(
+    axum::extract::State(state): axum::extract::State<AppState<M>>,
+) -> axum::Json<health::HealthSnapshot>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     axum::Json(state.health_collector.snapshot())
 }
 
