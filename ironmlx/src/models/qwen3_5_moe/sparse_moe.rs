@@ -171,21 +171,6 @@ impl SparseMoeBlock {
     /// Stream-targeted. Caller is responsible for passing the correct stream;
     /// `()` selects the MLX default stream.
     pub fn forward_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
-        // P5e A.2 (Cargo feature `p5e-compile`): tried to wrap this body in
-        // mlx::compile(.., Shapeless) for SwiGLU fusion + decode/prefill graph
-        // sharing. Blocked by 4 safe-wrapper gaps; left as 0-impact gate, T4
-        // decides whether to delete:
-        //   1. mlx::compile closure requires `Fn(...) + Send + 'static` — can't
-        //      borrow &self; would need owned weight Arrays via Linear/Mlp accessor.
-        //   2. LinearImpl/MlpImpl fields are non-pub; no public accessor to
-        //      extract weights for owned closure capture.
-        //   3. Linear::forward_on runtime-dispatches on `self_qmm::enabled() &&
-        //      m_total >= 32`; compile would freeze one branch and lose M-aware
-        //      tile selection.
-        //   4. Body uses Rust integer reshape args (`[bs, h]`, `[b, s, h]`);
-        //      Shapeless mode wants MLX scalar Array shape inputs.
-        #[cfg(feature = "p5e-compile")]
-        {}
         let dims = x.shape();
         let dvec = dims.as_slice();
         if dvec.len() != 3 {
@@ -253,25 +238,6 @@ impl SparseMoeBlock {
         let x_in = mlx::ops::shape::expand_dims_on(&flat_x, &[-2_i32, -3_i32][..], target)
             .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")?; // [BS, 1, 1, H]
 
-        // P5e A.1 experiment: dispatch gate and up projections on independent
-        // streams to test whether the Metal command scheduler overlaps their
-        // execution. Default off; T4 decides whether to keep based on measured
-        // wall-clock improvement.
-        #[cfg(feature = "p5e-stream-parallel")]
-        let (stream_gate, stream_up) = {
-            let dev = mlx::Device::gpu(0);
-            (
-                StreamOrDevice::Stream(
-                    mlx::new_stream(dev).context("SparseMoeBlock: new_stream for gate")?,
-                ),
-                StreamOrDevice::Stream(
-                    mlx::new_stream(dev).context("SparseMoeBlock: new_stream for up")?,
-                ),
-            )
-        };
-        #[cfg(not(feature = "p5e-stream-parallel"))]
-        let (stream_gate, stream_up) = (target, target);
-
         let gate_out = mlx::quantization::gather_quantized_matmul_on(
             &x_in,
             &self.routed.gate_weight,
@@ -284,7 +250,7 @@ impl SparseMoeBlock {
             Some(self.routed.bits),
             "affine",
             /* sorted_indices */ false,
-            stream_gate,
+            target,
         )
         .context("SparseMoeBlock: gate_proj gather_qmm")?; // [BS, k, 1, moe_inter]
 
@@ -300,7 +266,7 @@ impl SparseMoeBlock {
             Some(self.routed.bits),
             "affine",
             false,
-            stream_up,
+            target,
         )
         .context("SparseMoeBlock: up_proj gather_qmm")?; // [BS, k, 1, moe_inter]
 
@@ -330,7 +296,6 @@ impl SparseMoeBlock {
         .context("SparseMoeBlock: down_proj gather_qmm")?; // [BS, k, 1, H]
 
         // (6) Weight by renormalized scores and reduce over k.
-        #[cfg(not(feature = "p5e-shape-elim"))]
         let routed_y = {
             // down_out_4d: [BS, k, 1, H] → squeeze(-2) → [BS, k, H].
             let down_out = mlx::ops::shape::squeeze_on(&down_out_4d, &[-2_i32][..], target)
@@ -341,22 +306,6 @@ impl SparseMoeBlock {
             let weighted = &down_out * &scores_unsq; // [BS, k, H]
             mlx::ops::sum_on(&weighted, -2_i32, false, target)
                 .context("SparseMoeBlock: sum across k")?
-        };
-        #[cfg(feature = "p5e-shape-elim")]
-        let routed_y = {
-            // P5e A.3: keep down_proj output at rank 4 [BS, k, 1, H] through the
-            // weighted sum. Saves one squeeze(-2) kernel + one element-wise
-            // multiply on the smaller rank-3 tensor, and collapses both the k
-            // axis and the singleton axis in a single multi-axis sum_on call.
-            // scores [BS, k] → [BS, k, 1, 1] via two-axis expand_dims. Axes are
-            // interpreted after insertion: positions 2, 3 in the rank-4 result
-            // (equivalently -2, -1).
-            let scores_unsq =
-                mlx::ops::shape::expand_dims_on(&scores, &[-2_i32, -1_i32][..], target)
-                    .context("SparseMoeBlock: expand scores → [BS, k, 1, 1]")?;
-            let weighted = &down_out_4d * &scores_unsq; // [BS, k, 1, H]
-            mlx::ops::sum_on(&weighted, &[-3_i32, -2_i32][..], false, target)
-                .context("SparseMoeBlock: sum over (k, singleton)")?
         };
 
         // (7) Shared expert with independent sigmoid gate.
