@@ -1,0 +1,45 @@
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/iron-bench --target 'ironmlx=http://127.0.0.1:8080' --model qwen3.5-moe --model-dir /Users/xin/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/1e20fd8d42056f870933bf98ca6211024744f7ec/ --prompt-len 128,512,2048,4096,8192,16384 --max-tokens 128 --runs 5 --warmup 1 --format json`
+iron-bench v1 (sequential): 1 target(s), prompt_len=[128, 512, 2048, 4096, 8192, 16384], max_tokens=128, runs=5, warmup=1
+[ironmlx] PP=128 TG=128: warmup x1 ...
+[ironmlx] PP=128 TG=128: timed runs x5 ...
+  [ironmlx] run 1/5: TTFT=329.4ms TG=79.6 tok/s prompt=128
+  [ironmlx] run 2/5: TTFT=327.6ms TG=79.6 tok/s prompt=128
+  [ironmlx] run 3/5: TTFT=328.7ms TG=79.8 tok/s prompt=128
+  [ironmlx] run 4/5: TTFT=328.6ms TG=79.9 tok/s prompt=128
+  [ironmlx] run 5/5: TTFT=327.8ms TG=79.1 tok/s prompt=128
+[ironmlx] PP=512 TG=128: warmup x1 ...
+[ironmlx] PP=512 TG=128: timed runs x5 ...
+  [ironmlx] run 1/5: TTFT=1042.5ms TG=78.9 tok/s prompt=512
+  [ironmlx] run 2/5: TTFT=1041.9ms TG=78.0 tok/s prompt=512
+  [ironmlx] run 3/5: TTFT=1043.2ms TG=78.5 tok/s prompt=512
+  [ironmlx] run 4/5: TTFT=1041.4ms TG=78.5 tok/s prompt=512
+  [ironmlx] run 5/5: TTFT=1042.3ms TG=78.6 tok/s prompt=512
+[ironmlx] PP=2048 TG=128: warmup x1 ...
+[ironmlx] PP=2048 TG=128: timed runs x5 ...
+  [ironmlx] run 1/5: TTFT=1111.7ms TG=124.6 tok/s prompt=2048
+  [ironmlx] run 2/5: TTFT=1110.9ms TG=123.7 tok/s prompt=2048
+  [ironmlx] run 3/5: TTFT=1111.8ms TG=123.6 tok/s prompt=2048
+  [ironmlx] run 4/5: TTFT=1111.4ms TG=124.1 tok/s prompt=2048
+  [ironmlx] run 5/5: TTFT=1113.0ms TG=123.5 tok/s prompt=2048
+[ironmlx] PP=4096 TG=128: warmup x1 ...
+[ironmlx] PP=4096 TG=128: timed runs x5 ...
+  [ironmlx] run 1/5: TTFT=2244.3ms TG=121.0 tok/s prompt=4096
+  [ironmlx] run 2/5: TTFT=2274.9ms TG=122.0 tok/s prompt=4096
+  [ironmlx] run 3/5: TTFT=2309.8ms TG=122.1 tok/s prompt=4096
+  [ironmlx] run 4/5: TTFT=2326.3ms TG=116.8 tok/s prompt=4096
+  [ironmlx] run 5/5: TTFT=2329.7ms TG=121.4 tok/s prompt=4096
+[ironmlx] PP=8192 TG=128: warmup x1 ...
+[ironmlx] PP=8192 TG=128: timed runs x5 ...
+  [ironmlx] run 1/5: TTFT=4799.0ms TG=117.6 tok/s prompt=8192
+  [ironmlx] run 2/5: TTFT=4766.0ms TG=118.3 tok/s prompt=8192
+  [ironmlx] run 3/5: TTFT=4748.1ms TG=118.3 tok/s prompt=8192
+  [ironmlx] run 4/5: TTFT=4726.5ms TG=117.4 tok/s prompt=8192
+  [ironmlx] run 5/5: TTFT=4733.8ms TG=118.0 tok/s prompt=8192
+[ironmlx] PP=16384 TG=128: warmup x1 ...
+[ironmlx] PP=16384 TG=128: timed runs x5 ...
+  [ironmlx] run 1/5: TTFT=10236.4ms TG=118.5 tok/s prompt=16384
+  [ironmlx] run 2/5: TTFT=10533.1ms TG=116.9 tok/s prompt=16384
+  [ironmlx] run 3/5: TTFT=10581.1ms TG=112.0 tok/s prompt=16384
+  [ironmlx] run 4/5: TTFT=10678.3ms TG=111.6 tok/s prompt=16384
+  [ironmlx] run 5/5: TTFT=10781.3ms TG=111.3 tok/s prompt=16384
