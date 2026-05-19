@@ -1,7 +1,8 @@
 //! P5e baseline / measurement infrastructure: wall-clock `Model::forward_on`
-//! at PP=128/512/2048 with 1 warmup + 3 measured runs per length. Output is
-//! median wall-clock per length, printed via eprintln! for harvest by
-//! reports/p5e-*.md.
+//! at PP=128/512/2048 with 1 outer-warmup call + 3 measured calls per length.
+//! Each call additionally self-warms with one extra forward to drain prior
+//! lazy graphs (so 8 total forward passes per PP). Output is median wall-clock
+//! per length, printed via eprintln! for harvest by reports/p5e-*.md.
 //!
 //! Run with:
 //!   IRONMLX_MOE_MODEL_DIR=<snap> MLX_DIR=$HOME/.local/mlx \
@@ -53,7 +54,8 @@ fn run_once(model: &Qwen35MoeModel, prompt_len: i32) -> std::time::Duration {
     let cap = prompt_len.max(ironmlx::models::qwen3_5_moe::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
     let mut cache = Model::make_cache(model, 1, cap, Dtype::Bfloat16).expect("make_cache");
 
-    // Force GPU sync before timing (drain any pending lazy ops from prior calls).
+    // Warmup forward + eval to drain pending lazy ops from prior calls and
+    // JIT-prime kernels; result discarded.
     let warmup_logits = Model::forward_on(
         model,
         &input_ids,

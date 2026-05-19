@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Date | 2026-05-19 |
-| Branch HEAD | c4b9c27 (P5e spec commit) |
+| Branch HEAD | c4b9c27 (P5 close-out state; measurements harvested by 96dce61 which only added the measurement infra without changing inference code) |
 | Hardware | M5 Max 128GB |
 | Model | mlx-community/Qwen3.5-35B-A3B-4bit |
 | Method | tests/p5e_baseline.rs Model::forward_on direct call, 1 warmup + 3 measured runs, median |
@@ -23,6 +23,10 @@
 - P5e T0 (Model::forward_on with per-layer eval barriers on M5 Max): PP=2048 ≈ 921 tok/s.
 - This baseline (Model::forward_on with single end-of-forward eval on M5 Max): PP=2048 = 990.6 tok/s.
 
-Discrepancies: per-layer eval barriers in T0 profile add ~75 ms at PP=2048 vs this
-single-barrier baseline; M5 Max vs M1 Pro hardware delta; HTTP / tokenization /
-scheduler path overhead in P5d.
+Discrepancies:
+
+- vs T0 profile (≈921 tok/s on M5 Max): T0 inserts `eval` barriers after every
+  layer to attribute time per-call; that bookkeeping adds ~155 ms wall-clock at
+  PP=2048. This baseline uses a single end-of-forward `eval`.
+- vs P5d T2 (≈996 tok/s on M1 Pro): different hardware (M5 Max here vs M1 Pro
+  there) plus HTTP path overhead in P5d.
