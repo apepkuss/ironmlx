@@ -113,19 +113,6 @@ pub trait DenseVlMethods {
         image_token_id: i32,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array>;
-
-    /// Forward through transformer layers only (no lm_head), returning hidden
-    /// states `[B, S, hidden]`. Used by `admit_mid_chunk` for text-only
-    /// intermediate chunks where logits are not needed (only KV cache update).
-    fn forward_text_hidden(
-        &self,
-        input_ids: &mlx::Array,
-        position_ids: &mlx::Array,
-        per_row_lens: Option<&[i32]>,
-        decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array>;
 }
 
 impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
@@ -191,25 +178,6 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
             cache,
             vision_embeds_slice,
             image_token_id,
-            target,
-        )
-    }
-
-    fn forward_text_hidden(
-        &self,
-        input_ids: &mlx::Array,
-        position_ids: &mlx::Array,
-        per_row_lens: Option<&[i32]>,
-        decode_mask: Option<&mlx::Array>,
-        cache: Option<&mut [crate::nn::LayerCache]>,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array> {
-        self.text().forward_on(
-            input_ids,
-            position_ids,
-            per_row_lens,
-            decode_mask,
-            cache,
             target,
         )
     }

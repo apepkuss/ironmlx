@@ -919,7 +919,12 @@ pub fn slice_vision_embeds_rows(
     .map_err(|e| anyhow!("slice_vision_embeds_rows mlx::ops::slice failed: {e}"))
 }
 
-impl<'m, M: Model + DenseVlMethods> GenerationStream<'m, M> {
+// VL-bearing methods (gated by DenseVlMethods).
+// new() calls model.compute_vision_embeds + model.forward_vl_chunk (only on VL path),
+// but also calls model.forward_text_hidden (which is now Model trait — works for any M).
+// The new() function STILL needs DenseVlMethods because the VL branches
+// (compute_vision_embeds, forward_vl_chunk) are called conditionally in its body.
+impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
     pub fn new(model: &'m M, tokenizer: &'m Tokenizer, request: GenerateRequest) -> Result<Self> {
         if request.prompt_ids.is_empty() {
             return Err(anyhow!("GenerationStream::new: prompt_ids cannot be empty"));
@@ -1145,7 +1150,11 @@ impl<'m, M: Model + DenseVlMethods> GenerationStream<'m, M> {
             })
         }
     }
+}
 
+// Non-VL methods (works for any Model) — decode path and helpers that only
+// call model.forward_on / model.forward_text_hidden (both Model trait methods).
+impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
     /// If a capture was deferred (phase=decode), start it now (lazily, on
     /// first `next_token` call). Idempotent — once started, the pending
     /// path is cleared.

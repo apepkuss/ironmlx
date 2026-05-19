@@ -727,6 +727,25 @@ impl crate::core::model::Model for Qwen35Model {
         )
     }
 
+    fn forward_text_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        self.text().forward_on(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            target,
+        )
+    }
+
     fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
         Qwen35Model::model_meta(self)
     }

@@ -36,6 +36,24 @@ pub trait Model {
         target: StreamOrDevice,
     ) -> Result<Array>;
 
+    /// Forward through embed + transformer + final RmsNorm, returning the
+    /// hidden states (NOT projected to logits). Used by the chunked-prefill
+    /// path for intermediate (non-last) chunks where only KV cache needs to
+    /// be updated and logits are discarded.
+    ///
+    /// Signature matches `forward_on` but the return shape is `[B, S, hidden]`
+    /// post-norm hidden state instead of `[B, 1, vocab]` last-position logits.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_text_hidden(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        target: StreamOrDevice,
+    ) -> Result<Array>;
+
     fn model_meta(&self) -> ModelMeta;
 
     fn num_hidden_layers(&self) -> usize;
