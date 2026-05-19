@@ -35,6 +35,13 @@ use crate::core::Loader;
 use crate::nn::{Linear, Mlp};
 use crate::Result;
 
+/// Minimum (batch_size * num_experts_per_tok) for the sorted-routing path.
+/// MLX's gather_qmm rhs fast path (mlx/backend/metal/quantized.cpp:1484)
+/// requires B >= 16 && B/E >= 4. For E=128 experts that's B >= 512;
+/// below that we'd pay argsort + take_along_axis + take + reshape
+/// overhead with no kernel-level benefit.
+const SORTED_ROUTING_MIN_BS_K: i32 = 512;
+
 /// Stacked-expert quantized weights for the routed SwiGLU.
 ///
 /// Shape convention (4-bit, group_size=64, num_experts=E, hidden=H,
@@ -230,7 +237,7 @@ impl SparseMoeBlock {
         //
         // Two routing strategies are dispatched here based on `bs * k`:
         //
-        //   - Sorted-flat path (BS*k >= 128, P5e T5 B.1): pre-sort tokens by
+        //   - Sorted-flat path (BS*k >= SORTED_ROUTING_MIN_BS_K, P5e T5 B.1): pre-sort tokens by
         //     expert id and pass `sorted_indices=true`. MLX's Metal kernel has
         //     a `gather_qmm_rhs` fast path keyed on `right_sorted_ == true`
         //     (mlx/mlx/backend/metal/quantized.cpp:1484) that triggers only
@@ -245,7 +252,7 @@ impl SparseMoeBlock {
         //     down_proj we invert the permutation to restore original
         //     token/k order before the score-weighted sum.
         //
-        //   - Default broadcast path (BS*k < 128): keep `x` as [BS,1,1,H]
+        //   - Default broadcast path (BS*k < SORTED_ROUTING_MIN_BS_K): keep `x` as [BS,1,1,H]
         //     and let MLX broadcast `lhs_indices` from [BS,1] to [BS,k].
         //     Avoids the argsort/scatter overhead on short decode batches
         //     where the fast path's `B>=16 && B/E>=4` requirements are not
@@ -255,7 +262,7 @@ impl SparseMoeBlock {
         // has rank-r, the input `x` must have rank r+2 (the leading r dims
         // are broadcast against rhs_indices, the trailing 2 are matrix dims).
         let bs_k = bs * k;
-        let use_sorted = bs_k >= 128;
+        let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
 
         let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) = if use_sorted {
             // --- Sorted routing path. ---
@@ -414,9 +421,9 @@ impl SparseMoeBlock {
             // reshape to [BS, k, H]. inv_perm = argsort(sort_perm).
             let inv_perm = argsort_on(&sort_perm, -1_i32, target)
                 .context("SparseMoeBlock: argsort inv permutation")?;
-            // squeeze handles only one axis at a time in MLX; collapse
-            // [BS*k,1,1,H] -> [BS*k,H] via reshape to bypass the per-axis
-            // overhead and avoid two squeeze ops.
+            // Reshape over squeeze: dims are statically known singletons here, so
+            // reshape becomes a graph metadata change with no op-node, cheaper than
+            // invoking squeeze.
             let down_out_2d = mlx::ops::shape::reshape(&down_out_4d, [bs_k, h])
                 .context("SparseMoeBlock: reshape sorted down_out to [BS*k, H]")?;
             let unsorted_2d = take_on(&down_out_2d, &inv_perm, 0_i32, target)
