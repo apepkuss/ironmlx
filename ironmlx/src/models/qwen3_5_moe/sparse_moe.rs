@@ -238,6 +238,25 @@ impl SparseMoeBlock {
         let x_in = mlx::ops::shape::expand_dims_on(&flat_x, &[-2_i32, -3_i32][..], target)
             .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")?; // [BS, 1, 1, H]
 
+        // P5e A.1 experiment: dispatch gate and up projections on independent
+        // streams to test whether the Metal command scheduler overlaps their
+        // execution. Default off; T4 decides whether to keep based on measured
+        // wall-clock improvement.
+        #[cfg(feature = "p5e-stream-parallel")]
+        let (stream_gate, stream_up) = {
+            let dev = mlx::Device::gpu(0);
+            (
+                StreamOrDevice::Stream(
+                    mlx::new_stream(dev).context("SparseMoeBlock: new_stream for gate")?,
+                ),
+                StreamOrDevice::Stream(
+                    mlx::new_stream(dev).context("SparseMoeBlock: new_stream for up")?,
+                ),
+            )
+        };
+        #[cfg(not(feature = "p5e-stream-parallel"))]
+        let (stream_gate, stream_up) = (target, target);
+
         let gate_out = mlx::quantization::gather_quantized_matmul_on(
             &x_in,
             &self.routed.gate_weight,
@@ -250,7 +269,7 @@ impl SparseMoeBlock {
             Some(self.routed.bits),
             "affine",
             /* sorted_indices */ false,
-            target,
+            stream_gate,
         )
         .context("SparseMoeBlock: gate_proj gather_qmm")?; // [BS, k, 1, moe_inter]
 
@@ -266,7 +285,7 @@ impl SparseMoeBlock {
             Some(self.routed.bits),
             "affine",
             false,
-            target,
+            stream_up,
         )
         .context("SparseMoeBlock: up_proj gather_qmm")?; // [BS, k, 1, moe_inter]
 
