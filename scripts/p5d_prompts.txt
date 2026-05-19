@@ -1,0 +1,50 @@
+Once upon a time, in a small village nestled between two mountains,
+The history of the Roman Empire began when Augustus Caesar became
+In the beginning of the universe, a singularity exploded and
+The invention of the printing press by Gutenberg in 1440 changed
+On a cold winter morning, the detective arrived at the crime scene to find
+The Amazon rainforest, often called the lungs of the Earth,
+During the Renaissance period, artists began to focus on
+The deep ocean contains creatures that have never been seen by
+Marie Curie discovered radioactivity and became the first woman to
+The Great Wall of China stretches for thousands of miles and was built
+def fibonacci(n):\n    if n < 2:\n        return n\n    else:
+def binary_search(arr, target):\n    left, right = 0, len(arr) - 1\n    while left <= right:
+def quicksort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[len(arr) // 2]
+def merge_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    mid = len(arr) // 2
+def reverse_linked_list(head):\n    prev = None\n    current = head\n    while current:
+def is_palindrome(s):\n    s = s.lower().replace(' ', '')\n    return s ==
+class Stack:\n    def __init__(self):\n        self.items = []\n    def push(self, item):
+def depth_first_search(graph, start, visited=None):\n    if visited is None:\n        visited = set()
+def count_words(text):\n    words = text.split()\n    freq = {}\n    for word in words:
+class BinaryTree:\n    def __init__(self, value):\n        self.value = value\n        self.left = None
+Compute step-by-step: 17 * 23 =
+If a train travels at 60 mph for 2.5 hours, how far does it travel? Show your work.
+A rectangle has a perimeter of 48 cm. If the length is twice the width, find the area.
+Solve the equation: 3x + 7 = 22. Show each step.
+The sum of three consecutive integers is 45. What are the three integers?
+List three reasons why exercise is important:
+What are the main differences between machine learning and deep learning?
+Explain the concept of supply and demand in economics:
+What causes the seasons on Earth? Please explain clearly:
+Name five countries in South America and their capital cities:
+What is photosynthesis and why is it important for life on Earth?
+How does the internet work? Explain the basic concepts:
+What are the three branches of the United States government?
+Describe the water cycle and its importance to the environment:
+What is the difference between weather and climate?
+Translate to French: Good morning, how are you today?
+Translate to Spanish: The library is open every day from nine to five.
+Translate to German: I would like to order a coffee with milk please.
+Translate to Japanese: Thank you very much for your help.
+Translate to Italian: The weather is beautiful today, let's go for a walk.
+Write a haiku about autumn.
+Write a short poem about the ocean at sunset.
+Describe a futuristic city where cars fly and buildings touch the clouds.
+Write the opening paragraph of a mystery novel set in Victorian London.
+Imagine you are an astronaut looking at Earth from space. Describe what you see.
+Write a dialogue between a robot and a human meeting for the first time.
+Create a short story about a lost puppy finding its way home.
+Describe the feeling of biting into a perfectly ripe mango on a hot summer day.
+Write a letter from a lighthouse keeper to their family far away.
+Imagine a world where music is illegal. Write the first paragraph of that story.
