@@ -5,7 +5,7 @@
 | Date | 2026-05-19 |
 | Hardware | M5 Max 128GB |
 | Model | mlx-community/Qwen3.5-35B-A3B-4bit (35B-A3B-4bit MoE) |
-| Branch HEAD post-Stage-1 | to be filled with `git rev-parse HEAD` after T4 commit |
+| Branch HEAD post-Stage-1 | 06426b07b15942bc8f4049e016ab46248c61d0dc |
 
 ## Per-experiment measurements (wall-clock ms, 3-run median)
 
