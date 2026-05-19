@@ -907,22 +907,19 @@ needs additional source, request specific file dumps.)
 
 ---
 
-## §8 Appendix: raw JSON
+## §8 Appendix: raw run samples
 
-The three iron-bench output JSONs are at:
+The iron-bench output JSONs and per-target stderr logs were generated during
+this sweep but are **not committed** to the repo (re-creatable from the
+procedure in §9; each JSON ≈ 16 KB so persistent storage is unnecessary). All
+canonical numbers needed for analysis are already in §5; the windows below are
+verbatim from the stderr progress logs for spot-checking variance.
 
-- `reports/p5e-three-way-bench/ironmlx.json`
-- `reports/p5e-three-way-bench/mlx_lm.json`
-- `reports/p5e-three-way-bench/omlx.json`
+Each iron-bench JSON would contain `metadata { runs_measured, sampler,
+targets, warmup }` plus a `raw_runs` array of 30 entries (6 PP × 5 timed runs;
+warmup runs are not retained in raw_runs).
 
-Each contains `metadata { runs_measured, sampler, targets, warmup }` plus a
-`raw_runs` array of 36 entries (6 PP × 5 timed runs + 6 PP × 1 warmup; only
-timed entries are reported as raw_runs — total 30 per file).
-
-For the analyst's convenience, here are the per-(target, PP) sample windows
-showing 5 timed runs each, as observed from the stderr logs:
-
-**ironmlx** (logs: `reports/p5e-three-way-bench/ironmlx.log`):
+**ironmlx** (per-target stderr log):
 ```
 PP=128:  TTFT 329.4 / 327.6 / 328.7 / 328.6 / 327.8 ms
          TG    79.6 /  79.6 /  79.8 /  79.9 /  79.1 tok/s
@@ -937,7 +934,7 @@ PP=16384: TTFT 10236.4 / 10533.1 / 10581.1 / 10678.3 / 10781.3 ms
          TG   118.5 / 116.9 / 112.0 / 111.6 / 111.3 tok/s
 ```
 
-**omlx** (logs: `reports/p5e-three-way-bench/omlx.log`):
+**omlx** (per-target stderr log):
 ```
 PP=512:  TTFT [pre-truncated] / 201.1 / 198.8 / 198.2 / 203.5 ms
          TG    [..] / 126.2 / 128.1 / 127.5 / 129.1 tok/s
@@ -946,7 +943,7 @@ PP=16384: TTFT [..] / [..] / 4497.8 / 4469.0 / 4412.4 ms
           TG   [..] / [..] / 101.8 / 114.0 / 102.8 tok/s
 ```
 
-**mlx-lm** (logs: `reports/p5e-three-way-bench/mlx_lm.log`):
+**mlx-lm** (per-target stderr log):
 ```
 PP=512:  TTFT 375.6 / 370.5 / 363.7 / 342.6 / 342.4 ms
          TG    96.7 /  98.4 / 102.6 / 102.6 / 101.5 tok/s
