@@ -156,10 +156,15 @@ impl P5hTraceGuard {
     // The base_parent is the EXPLICIT-CONTEXT span the caller has already opened
     // and is about to delegate sync work into. Examples (per § 2.5a propagation
     // chain below):
-    //   - Lane-A actor: caller opens `model_prefill_forward` via open_p5h_span,
-    //     then enters guard with that span as base_parent before calling
-    //     sched.prefill_admitted(...). Deep substeps inside (embed_lookup,
-    //     decoder_layer_N, etc.) chain under model_prefill_forward via the stack.
+    //   - Lane-A `prefill_admitted_inner` (per Codex v16 P1 + v18 P2 #2 — NOT
+    //     actor scope; actor cannot wedge spans between batched_prefill and
+    //     sample_batch fused in this function): the inner function itself opens
+    //     `model_prefill_forward` via open_p5h_span, enters guard with that
+    //     span as base_parent, calls model.batched_prefill[_vl](...), drops
+    //     guard, closes model_prefill_forward. Deep substeps inside
+    //     (embed_lookup, decoder_layer_N, etc.) chain under
+    //     model_prefill_forward via the stack. The actor itself does NOT enter
+    //     a guard around sched.prefill_admitted(...).
     //   - Lane-B spawn_blocking: caller opens `gs_stream_init_and_chunk_loop`,
     //     then enters guard with that span as base_parent before
     //     GenerationStream::new(...). Deep substeps (gs_kv_cache_alloc,
@@ -264,12 +269,31 @@ fn close_p5h_span(
 
 // RootSpanHandle wraps SpanHandle with the ctx so the closing site (forwarder
 // task / spawn_blocking body) can close root without re-plumbing ctx as a
-// separate value:
+// separate value. Clone is REQUIRED (per Codex review v18 P1) so handler can
+// clone the handle into both Lane-A forwarder spawn AND Lane-B blocking task
+// captures, AND into per-iteration loop bodies that need to access span as
+// parent multiple times before the final close.
+#[derive(Clone)]
 pub struct RootSpanHandle {
     ctx: P5hTraceContext,
     span: SpanHandle,
 }
 impl RootSpanHandle {
+    // crate-private accessors so cross-module emission sites (e.g., openai.rs)
+    // can read fields without exposing private struct members.
+    pub(crate) fn ctx(&self) -> &P5hTraceContext { &self.ctx }
+    pub(crate) fn span(&self) -> &SpanHandle { &self.span }
+
+    // close_at consumes self so each *clone* can close exactly once on its own
+    // thread. To enforce "exactly one close per request across all clones",
+    // use the Option::take pattern at the call site:
+    //   let mut root_to_close = Some(root_handle);  // outside loop
+    //   ...
+    //   if first_non_empty_content {
+    //       root_to_close.take().expect("root closed twice").close_at(end_ns);
+    //   }
+    // T0a tree structural check also asserts exactly one close record per
+    // (request_id, root span_id) — duplicate close = double-close bug, fail.
     fn close_at(self, end_ns: u64);  // calls close_p5h_span(&self.ctx, self.span, end_ns, ..)
 }
 
@@ -301,7 +325,7 @@ fn with_p5h_span_from_current_trace<T>(
 **Authorized `P5hTraceGuard::enter(ctx, base_parent)` sites** (only these — no others permitted; each requires the caller to FIRST open the corresponding top-level span via explicit API, THEN enter the guard with that span as `base_parent`):
 
 - (Lane B prefill, in `spawn_blocking` closure) Caller opens `gs_stream_init_and_chunk_loop` via `open_p5h_span(&ctx, Some(&root_handle.span), ...)`. Then enters guard with that span as `base_parent` and calls `GenerationStream::new(...)`. Deep substeps (`gs_kv_cache_alloc`, `gs_chunk_N`, `gs_first_token_sample_dispatch`) chain under `gs_stream_init_and_chunk_loop` via the stack. On `new()` return: drop guard, close `gs_stream_init_and_chunk_loop`.
-- (Lane A, INSIDE `prefill_admitted_inner` — per Codex v16 P1 — NOT at actor scope, because actor cannot wedge between prefill and sampling) Caller (the inner function itself) opens `model_prefill_forward` via `open_p5h_span(ctx, Some(root_span), ...)`. Then enters guard with `model_prefill_forward` as `base_parent` and calls `model.batched_prefill[_vl](...)`. Deep substeps (`embed_lookup`, `decoder_layer_N`, etc.) chain under `model_prefill_forward`. On return: drop guard, close `model_prefill_forward`. (`first_token_sampling` is opened/closed separately later in the same function — no guard needed unless T4 adds deep sampling spans.)
+- (Lane A, INSIDE `prefill_admitted_inner` — per Codex v16 P1 — NOT at actor scope, because actor cannot wedge between prefill and sampling) Caller (the inner function itself) opens `model_prefill_forward` via `open_p5h_span(&ctx, Some(&root_span), ...)`. Then enters guard with `model_prefill_forward` as `base_parent` and calls `model.batched_prefill[_vl](...)`. Deep substeps (`embed_lookup`, `decoder_layer_N`, etc.) chain under `model_prefill_forward`. On return: drop guard, close `model_prefill_forward`. (`first_token_sampling` is opened/closed separately later in the same function — no guard needed unless T4 adds deep sampling spans.)
 - (Lane A, INSIDE `Scheduler::step` IF that function also fuses model-forward + sample like `prefill_admitted_inner`) Same SINK pattern: open `pre_content_decode_steps` inside `step`, enter guard with that as `base_parent`, run model-forward + sample, drop guard, close span. T0a verifies whether `step` fuses or not; if `step` is purely sync at the actor level with no fused phases, the simpler actor-scope guard (open span at actor, enter guard, call `step`, drop, close) works.
 - (Lane B per-iteration, in `spawn_blocking` closure) For each `stream.next_token()` call inside the `spawn_blocking` body's loop: caller opens the corresponding top-level explicit span (`gs_first_token_materialize_and_predispatch` for the first iteration, `pre_content_decode_steps` if first detok was empty) via explicit API, enters guard with that as `base_parent`, calls `next_token()`, drops guard, closes the span.
 
@@ -371,31 +395,34 @@ The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a
      let (ctx, root_span) = self.cloned_active_row_p5h_trace_and_root()?;
 
      // Span 1: model_prefill_forward — wraps ONLY the model.batched_prefill[_vl] call.
-     let mpf = open_p5h_span(ctx, Some(root_span), "model_prefill_forward");
+     // (per Codex review v18 P2 #1: pass &ctx + Some(&root_span) to match the
+     // ref-taking signatures; passing owned values would move them and they're
+     // needed again below for first_token_sampling.)
+     let mpf = open_p5h_span(&ctx, Some(&root_span), "model_prefill_forward");
      let logits = {
          let _guard = P5hTraceGuard::enter(ctx.clone(), mpf.clone());
          if is_vl { model.batched_prefill_vl(...) } else { model.batched_prefill(...) }?
          // deep substeps (embed_lookup / decoder_layer_N / ... / slice_last_and_project_lm_head)
          // chain under mpf via the seeded stack.
      };
-     close_p5h_span(ctx, mpf, monotonic_ns(), ..);
+     close_p5h_span(&ctx, mpf, monotonic_ns(), ..);
 
      // Span 2: first_token_sampling — wraps the logits reshape + Stage A (sampler refs +
      // histories) + Stage B (sample_batch). NO guard needed for vanilla case (sample_batch
      // currently has no deep instrumentation candidates); if T4 adds deep sampling
      // breakdown later, wrap with a guard using fts as base_parent.
-     let fts = open_p5h_span(ctx, Some(root_span), "first_token_sampling");
+     let fts = open_p5h_span(&ctx, Some(&root_span), "first_token_sampling");
      let logits_bv = logits.reshape(..)?;
      let (row_samplers, row_histories) = collect_sampler_refs_and_histories(..);
      let tokens = sample_batch(&row_samplers, &logits_bv, ..)?;
-     close_p5h_span(ctx, fts, monotonic_ns(), ..);
+     close_p5h_span(&ctx, fts, monotonic_ns(), ..);
 
      // Stage C distribution per row continues as today (not in the top-level tree).
      ```
    - Actor scope keeps zero P5h instrumentation around `sched.prefill_admitted(...)` itself — actor just calls it.
    - `pre_content_decode_steps`: actor opens this explicit span around any `sched.step(...)` calls needed for pre-content decode, but per § 2.5a authorized list, the actor-level guard inside that block opens via the same SINK pattern — actually `step` is simpler since it doesn't fuse prefill + sampling, so an outer guard around `sched.step(...)` with `pre_content_decode_steps` as base_parent works. (Alternative if `step` itself fuses model-forward + sample like `prefill_admitted_inner`, the same SINK pattern applies: open subspans inside `step` rather than at actor scope. T0a verifies which.)
 5. **Lane-A streaming forwarder** (`openai.rs:546` `tokio::spawn` body): handler clones BOTH `ctx` AND `root_handle` into the spawn closure. The closure **never calls `P5hTraceGuard::enter(...)`** — Lane-A forwarder is not on the authorized guard sites list (per Codex review v10 P1 #2 + v11 P1 #2: `tx.send(...).await` is async, a guard around it would have to span the await, which is the v8 unsoundness pattern). All SSE emission uses the explicit-context API:
-   - For `sse_write_role_chunk`: `let h = open_p5h_span(&ctx, Some(&root_handle.span), "sse_write_role_chunk"); format_sse(...); tx.send(...).await; close_p5h_span(&ctx, h, monotonic_ns(), ..);` — span end_ns captured immediately after `.await` returns.
+   - For `sse_write_role_chunk_diagnostic` (per Codex v18 P2 #3 — Lane-A only; emitted as diagnostic, NOT exclusive child): `let h = open_p5h_span(&ctx, Some(&root_handle.span()), "sse_write_role_chunk_diagnostic"); format_sse(...); tx.send(...).await; close_p5h_span(&ctx, h, monotonic_ns(), ..);` — span end_ns captured immediately after `.await` returns. T5 aggregator treats records with `span_name == "sse_write_role_chunk_diagnostic"` as diagnostic-only (not summed into exclusive children).
    - Per content-event iteration: detok + (for the first non-empty content) `let h = open_p5h_span(&ctx, Some(&root_handle.span), "detok_format_first_content_chunk"); format_sse(...); tx.send(...).await; let end_ns = monotonic_ns(); close_p5h_span(&ctx, h, end_ns, ..); root_handle.close_at(end_ns);` All explicit, no guard.
 6. Deep instrumentation sites (GDN entry/exit barriers, GatedAttention substep emit, MoE substep emit, lm_head span) wrap their work via `with_p5h_span_from_current_trace(span_name, fields_fn, body)` which reads `P5H_CURRENT_TRACE` + `P5H_CURRENT_SPAN_STACK` to populate ctx fields + `parent_span_id`. They always run on whatever thread is currently holding the implicit-API guard, because the guard wraps the sync region that contains the instrumented call — for Lane A, the guard wraps the `model.batched_prefill[_vl](...)` call INSIDE `prefill_admitted_inner` (per Codex v16 P1; NOT the actor-scope `sched.prefill_admitted(...)`); for Lane B, the guard wraps the scoped `GenerationStream::new(...)` block. Sampling spans (`first_token_sampling`) are top-level explicit, not deep — they do not use this API in the vanilla case (per Codex v17 P2 #1).
 
@@ -465,7 +492,7 @@ T0a profile gate validates per-PP routing via a `routing_path: "scheduler" | "gs
 **Server-only root** (per Codex review v2 P1 #2 + v3 P1 fact-check; iron-bench TTFT cross-process correlation deferred — would require iron-bench → ironmlx request-id propagation, out of P5h scope):
 
 - **Root span**: `server_request_recv_to_first_content_sse_write` — from server's `axum` request-handler entry to the moment when the **first non-empty `delta.content` SSE chunk** is sent into the body channel. All `[p5h-profile]` records anchor under this server-side root.
-- **Why not "first SSE write" (Codex v3 P1)**: the forwarder task spawned right after `AdmitReply` issues a synthetic role chunk (`delta.role = "assistant"`, `delta.content = ""`) BEFORE the first-batch prefill runs (per `openai.rs:546-564` + `scheduler_actor.rs:276-313`: admit reply is sent before prefill). If root ended at "first SSE write", prefill + first-token sampling would fall **outside** the root, defeating the entire attribution exercise. The role chunk write is itself a small child span (`sse_write_role_chunk`) under the root, not the root's terminal point.
+- **Why not "first SSE write" (Codex v3 P1)**: the forwarder task spawned right after `AdmitReply` issues a synthetic role chunk (`delta.role = "assistant"`, `delta.content = ""`) BEFORE the first-batch prefill runs (per `openai.rs:546-564` + `scheduler_actor.rs:276-313`: admit reply is sent before prefill). If root ended at "first SSE write", prefill + first-token sampling would fall **outside** the root, defeating the entire attribution exercise. The role chunk write is emitted as a diagnostic span (`sse_write_role_chunk_diagnostic` under Lane A — see top-level bucket list + Codex v18 P2 #3 for why Lane-A's is diagnostic not exclusive; `sse_write_role_chunk` under Lane B is a proper exclusive child since Lane-B execution is sequential inside `spawn_blocking`).
 - **Root terminal definition — lane-specific callsites** (per Codex review v9 P2 #2; both lanes share semantics, different code paths):
   - **Lane A (scheduler path)**: `end_ns = monotonic_ns()` captured at the instruction immediately after the first successful `tx.send(Ok(format_sse_data(&chunk)))` in `openai.rs::serve_via_scheduler_stream`'s detok loop (`openai.rs:589` area) where `chunk.choices[0].delta.content` is non-empty.
   - **Lane B (chunked GS path)**: `end_ns = monotonic_ns()` captured at the instruction immediately after the first successful `tx.blocking_send(Ok(format_sse_data(&chunk)))` in `openai.rs::serve_via_gs_stream`'s `spawn_blocking` body loop (`openai.rs:473`) where `chunk.choices[0].delta.content` is non-empty. (Lane B uses `blocking_send` not `send` because the closure is inside `spawn_blocking`.)
@@ -477,7 +504,7 @@ T0a profile gate validates per-PP routing via a `routing_path: "scheduler" | "gs
 
 1. `http_parse_render_tokenize` (server-side request parsing + chat template + tokenizer Encode)
 2. `scheduler_admission` (admit queue + slot allocation + batch construction; ends at `AdmitReply` send)
-3. `sse_write_role_chunk` (forwarder spawn + initial role chunk write; happens before prefill in current `openai.rs` flow)
+3. `sse_write_role_chunk_diagnostic` (Lane A — **diagnostic annotation, NOT a mutually-exclusive child of root**; per Codex review v18 P2 #3): the role chunk is written by the streaming forwarder task (`tokio::spawn` body) on a different thread than the actor running `sched.prefill_admitted(...)`. After the actor sends `AdmitReply` (`scheduler_actor.rs:276`), it immediately proceeds into `sched.prefill_admitted(...)` (`scheduler_actor.rs:302-307`) — at the same time, the handler-side forwarder spawn receives `AdmitReply` and writes the role chunk. The two events can overlap in wall-clock time, so a strict mutually-exclusive sibling structure (which would make `parent.exclusive_us = inclusive - Σ children.inclusive`) would compute negative residual and trip the `exclusive_us ≥ -1µs` hard invariant. v19 demotes Lane-A `sse_write_role_chunk` to a diagnostic record: it IS emitted (so T5 can report role-chunk wall-time as a separate column), but its `inclusive_us` is NOT counted toward the exclusive child sum or coverage_pct. Its time falls under `unattributed_server_root` (which T5 reports + bounds independently). Lane B does NOT have this issue — its `sse_write_role_chunk` is sequential inside `spawn_blocking` after `GenerationStream::new(...)` returns, so it remains a true exclusive child there.
 4. `model_prefill_forward` (the full `model.batched_prefill(...)` call — embed + 40 decoder layers + final norm + `slice_last_and_project` lm_head; per `qwen3_5_moe/model.rs::batched_prefill` lines 240-258, this single call covers everything through producing first-token logits)
 5. `first_token_sampling` (per-row sampler invocation after `batched_prefill` returns; per `scheduler.rs::prefill_admitted_inner` "three-stage dispatch")
 6. `pre_content_decode_steps` (per Codex review v6 P2 #2 — if detok returns `Ok(None)` or empty string for the first prefill token, server does not send a content chunk yet and iron-bench does not record TTFT; scheduler may then run additional `Scheduler::step()` decode forwards + sample + detok until detok yields a non-empty string. This bucket covers all such pre-first-content decode iterations. Expected `inclusive_us == 0` for well-formed benchmark prompts where the first prefill token detokenizes to a visible character; if non-zero, T0a/T5 must surface it.)
@@ -639,7 +666,7 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
   - **Fixture validation** (T0a HARD GATE precondition, per Codex review v10 P2 — first-record-only fixture is insufficient because it would pass even when top-level async spans never emit at all):
     - **Per-record check** (every emitted `[p5h-profile]` record, not just the first): `request_id != ""` AND `prompt_tokens > 0` AND `routing_path ∈ {"scheduler", "gs_chunked"}`. Any field empty/invalid = a guard set/drop site or explicit-context emission site is missing or wrong.
     - **Route-aware schema presence check** (per sweep request):
-      - If `routing_path == "scheduler"` (Lane A): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, scheduler_admission, sse_write_role_chunk, model_prefill_forward, first_token_sampling, detok_format_first_content_chunk}` (plus optional `pre_content_decode_steps`). Missing any required span_name = explicit-context emission site is missing.
+      - If `routing_path == "scheduler"` (Lane A): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, scheduler_admission, sse_write_role_chunk_diagnostic, model_prefill_forward, first_token_sampling, detok_format_first_content_chunk}` (per Codex v18 P2 #3 — Lane-A role chunk is `sse_write_role_chunk_diagnostic` because it can overlap with model_prefill_forward across threads; it's emitted but NOT in the exclusive child sum). Plus optional `pre_content_decode_steps`. Missing any required span_name = explicit-context emission site is missing.
       - If `routing_path == "gs_chunked"` (Lane B): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, gs_stream_init_and_chunk_loop, gs_first_token_sample_dispatch, sse_write_role_chunk, gs_first_token_materialize_and_predispatch, detok_format_first_content_chunk}` (plus optional `pre_content_decode_steps`).
     - **Id-based tree structural checks** (per Codex review v12 P1 + v13 P2 — uses `parent_span_id` not `parent_span` string; the list below is necessary, NOT just closure):
       - **Id uniqueness**: `(request_id, span_id)` is unique across all records (no duplicate span_id within a request — atomic-counter emitter should never collide, but assert defensively)
