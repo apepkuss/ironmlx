@@ -294,7 +294,12 @@ impl RootSpanHandle {
     //   }
     // T0a tree structural check also asserts exactly one close record per
     // (request_id, root span_id) — duplicate close = double-close bug, fail.
-    fn close_at(self, end_ns: u64);  // calls close_p5h_span(&self.ctx, self.span, end_ns, ..)
+    //
+    // close_at is pub(crate) (per Codex review v20 P2) so cross-module call
+    // sites — Lane-A forwarder + Lane-B spawn_blocking body, both in
+    // openai.rs — can invoke it; ctx() / span() are already pub(crate) for
+    // the same reason.
+    pub(crate) fn close_at(self, end_ns: u64);  // calls close_p5h_span(&self.ctx, self.span, end_ns, ..)
 }
 
 // ============================================================================
@@ -807,18 +812,8 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
 ### T5 — Cross-layer attribution synthesis + P5i/P5j candidate ranking + close-out report
 
 - Aggregate T0a (GDN rerun) + T0b (Phase D resolution) + T1-T4 measurements into per-PP exclusive attribution table per § 2.5a span schema
-- Compute `exclusive_us = inclusive_us - sum(children.inclusive_us)` for every span; verify `span.exclusive_us ≥ -1µs` invariant per § 2.5a
-- Sum-to-root identity (`Σ tree_spans' exclusive_us ≡ root.inclusive_us within ±1µs`, per Codex v19 P1 — tree_spans only, diagnostic spans excluded) is a **tree-property sanity check only**, NOT a coverage gate (per Codex review v2 P1 #1 — this identity is trivially true and useless as a quality bar)
-- **Exclusive coverage gate** per § 7.1 (residual-based, single source of truth — DO NOT redefine here):
-
-  ```
-  root_wall_us = root_span("server_request_recv_to_first_content_sse_write").inclusive_us
-  unattributed_total_us = Σ s.inclusive_us  for s in all_spans where s.span_name.startswith("unattributed_")
-  coverage_pct = 1 - (unattributed_total_us / root_wall_us)
-  gate: coverage_pct ≥ 95%  per PP
-  ```
-
-  If a future revision changes the gate, change § 7.1 first and reference it from here — do not duplicate the formula in two places. (Codex review v3 P2 caught duplicate trivial formula in this bullet during the v2 round.)
+- Implement § 2.5a's tree/diagnostic split + exclusive computation per § 2.5a pseudocode (`tree_spans = [s for s in spans if s.span_kind == "tree"]`; all tree-property computation operates on tree_spans only; diagnostic_spans validated separately, reported as columns). DO NOT re-derive the formulas here per Codex review v20 P1 — restating triggered drift in v19 (and previously v3/v4/v6/v7).
+- **Exclusive coverage gate** per § 7.1 (residual-based, single source of truth — DO NOT redefine here). If a future revision changes the gate, change § 7.1 first and reference it from here.
 - Identify per-PP top-3 bottleneck across all measured spans
 - Rank P5i candidates (短 PP focus, +24-74% target) by ROI estimate
 - Rank P5j candidates (长 PP focus, +110-128% target) by ROI estimate + Scope gate trigger (kernel rewrite = trigger Boss approval)
@@ -858,7 +853,7 @@ Profile-gate invariant (must verify per task):
 
 T0a + T0b + T5 额外:
 
-- T0a exclusive span schema validator: assert `sum(child.inclusive) ≤ parent.inclusive` for all parent spans in test fixture; assert sum-to-root identity within ±1µs; assert per-span `exclusive_us ≥ -1µs`
+- T0a exclusive span schema validator (tree spans only per Codex v20 P1; diagnostic spans validated separately per § 2.5a): assert `sum(child.inclusive) ≤ parent.inclusive` for all parent tree spans in test fixture; assert sum-to-root identity within ±1µs over `tree_spans`; assert per-tree-span `exclusive_us ≥ -1µs`
 - T0a GDN rerun: P5h-protocol GDN data emitted under id-based exclusive tree with GDN substeps' `parent_span_id` = enclosing `attention_path` span id (label `parent_span = "attention_path"`, per § 2.5a + Codex v4 P1 + v12 P1); GDN `attention_path` coverage_pct ≥ 95% under § 7.1 residual-based gate (full `decoder_layer_N` coverage gate applies only at T5); UMA cold/warm variance ≤ ±2% per PP; iron-bench↔server `request_id` join rate = 100%
 - **T0a HARD GATE**: T0a's coverage + schema invariants must pass before T0b dispatches (per § 3 T0a). If schema gate fails on GDN rerun, fix schema before any Phase D investigation work.
 - T0b Phase D root cause: 4 hypotheses (H1-H4) resolved per § 2.5 decision tree, OR explicit unresolved-list documented in `reports/p5h-phase-d-root-cause.md`; T2/T3 conditional ablation gates bound per T0b outcome
@@ -893,19 +888,21 @@ P5h 不引入新 numerical correctness 风险 (measure-only, no algorithmic chan
 T5 must produce a per-PP exclusive attribution table built **only** from same-protocol P5h measurements (P5g existing data excluded; see § 2.2 #4 + T0a GDN rerun). Coverage is **residual-based** (Codex review v2 P1 #1 — the naive `Σ exclusive ≡ root.inclusive` formulation is a tree identity, trivially true and useless as a gate). Coverage computed as:
 
 ```
-root_wall_us = root_span("server_request_recv_to_first_content_sse_write").inclusive_us
-unattributed_total_us = Σ s.inclusive_us  for s in all_spans where s.span_name.startswith("unattributed_")
+tree_spans = [s for s in spans if s.span_kind == "tree"]   # per Codex v19 P1 + v20 P1
+root_wall_us = root_span(tree_spans).inclusive_us           # root.span_name == "server_request_recv_to_first_content_sse_write"
+unattributed_total_us = Σ s.inclusive_us  for s in tree_spans
+                        where s.span_name.startswith("unattributed_")
 accountable_us = root_wall_us - unattributed_total_us
 coverage_pct = accountable_us / root_wall_us
             = 1 - (unattributed_total_us / root_wall_us)
 ```
 
-The root is **server-side only** (`server_request_recv_to_first_content_sse_write`, per § 2.5a Codex v2 P1 #2). Client/transport latency is reported as a separate `client_transport_residual_us = iron_bench_ttft_us - root_wall_us` diagnostic column, NOT included in the coverage gate.
+The root is **server-side only** (`server_request_recv_to_first_content_sse_write`, per § 2.5a Codex v2 P1 #2). Client/transport latency is reported as a separate `client_transport_residual_us = iron_bench_ttft_us - root_wall_us` diagnostic column, NOT included in the coverage gate. Diagnostic spans (`span_kind == "diagnostic"`, e.g., Lane-A `sse_write_role_chunk_diagnostic`) are reported as separate diagnostic columns and NEVER enter the coverage_pct numerator or denominator (per Codex v19 P1 + v20 P1).
 
 **Hard invariants** (per § 2.5a):
 - `coverage_pct ≥ 95%` per PP (else identify which `unattributed_<span>` dominates → add instrumentation for that span's children → re-run before close-out)
 - `span.exclusive_us ≥ -1µs` for every emitted **tree** span (per Codex v19 P1 — diagnostic spans have no exclusive_us; negative beyond noise = broken parent_span_id attribution, MUST fix)
-- `Σ all spans' exclusive_us ≡ root_wall_us` within ±1µs (tree identity sanity check; alone INSUFFICIENT as a coverage gate per Codex review v2 P1 #1)
+- `Σ tree_spans' exclusive_us ≡ root_wall_us` within ±1µs (tree identity sanity check; tree_spans only per Codex v19 P1 + v20 P1; alone INSUFFICIENT as a coverage gate per Codex review v2 P1 #1)
 - No bucket can be counted under two different parents (mutually exclusive tree)
 - Every non-leaf span MUST emit an explicit `unattributed_<span_name>` leaf if its residual > 1µs (per § 2.5a "Residual leaves")
 
@@ -925,7 +922,7 @@ This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted ne
 6. **Target feasibility assessment**: honest verdict on "全 PP omlx+10% achievable in P5i+P5j" — if not, partial-target proposal for Boss decision
 7. **Reusable infra delivered**: exclusive span schema infrastructure (per § 2.5a) + UMA hardening protocol (per § 2.4) + GatedAttention 3-layer profile harness (per § 2.2 #5 code-backed taxonomy with `attn_output_gate=true`) + MoE 8-step profile harness (per § 2.2 #6 sorted-routing path + `Qwen35MoeConfig` runtime values) — all usable in P5i+P5j+P5h+1
 8. **Validation gates pass per task** (T0a/T0b/T1-T5 each independently green; per § 4)
-9. **T0a HARD GATE passed** before T0b/T2/T3 dispatched: schema sum-to-root invariant + per-span exclusive_us ≥ -1µs + GDN `attention_path` coverage ≥ 95% (per Codex v4 P1 — `decoder_layer_N` coverage at T0a is meaningless since norms/mlp/residual are not yet instrumented) + UMA cold/warm variance ≤ ±2% per PP + iron-bench↔server `request_id` join rate = 100% all verified on GDN rerun data (per § 3 T0a + § 4)
+9. **T0a HARD GATE passed** before T0b/T2/T3 dispatched: schema sum-to-root invariant (tree_spans only per Codex v20 P1) + per-tree-span exclusive_us ≥ -1µs + GDN `attention_path` coverage ≥ 95% (per Codex v4 P1 — `decoder_layer_N` coverage at T0a is meaningless since norms/mlp/residual are not yet instrumented) + diagnostic spans validated separately per § 2.5a + UMA cold/warm variance ≤ ±2% per PP + iron-bench↔server `request_id` join rate = 100% all verified on GDN rerun data (per § 3 T0a + § 4)
 
 P5h 整体 success = all 9 gates PASS, output (attribution report + P5i/P5j candidate list) is actionable for Boss to authorize P5i and/or P5j.
 
