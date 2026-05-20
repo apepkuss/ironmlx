@@ -83,7 +83,7 @@ Per Boss directive (chatgpt 建议 fully accepted),P5h 覆盖 7 areas:
 | 1 | **HTTP path** | P5f close-out measured baseline; P5e/P5f scheduler 改动后无重测 | iron-bench client-side ttft + server-side request entry/dispatch boundary timing |
 | 2 | **Scheduler / admission** | P5e/P5f admit queue + b_max=1 default; per-request batch construction overhead 未细测 | Per-request admission latency, batch construction cost, slot allocation |
 | 3 | **Tokenization / first-eval** | 短 PP 固定开销 prime suspect, P5e/P5f 未隔离 | Tokenizer Encode 时间, first-eval (JIT compile + kernel warmup) 一次性成本 |
-| 4 | **GDN sub-step** | P5g T0 已测 11-step Layer 2 breakdown (commit `52c39bd`),但 `[p5g-profile]` 旧 schema 缺 § 2.5a server-emitted fields (`request_id / prompt_tokens / seq / layer_idx / span_name / parent_span / start_ns / end_ns / mode`) — **不能直接参与 § 7.1 exclusive coverage tree** | **扩展 P5g harness emit 新 schema (Codex review v2 P2 #1 + v4 P1)** — modest code change: gated_delta_net.rs entry/exit barrier 的 `tracing::info!` format string 加新字段; harness Python aggregator 解析新字段 + substep `parent_span = attention_path` (NOT `decoder_layer_N` per Codex v4 P1)。**仍复用 P5g 已 verified 的 instrumentation 位置 + Phase D 抗污染设计** (Layer1\|Layer2 mode-gate, AblateX barrier-free)。新增 `[p5h-profile]` log line (跟 `[p5g-profile]` 平行 emit, 旧 P5g pipeline 不破)。T0a 实施 + rerun 同 PP set 下 UMA cold/warm pair。Cost ~11 min rerun wall (P5g T0 663s precedent) + ~2-4h code-change wall。P5g existing data 保留作 prior reference but not in P5h coverage gate。Kernel-level per-tile/per-shape timing 是 P5j (kernel rewrite) scope,不是 P5h attribution scope。 |
+| 4 | **GDN sub-step** | P5g T0 已测 11-step Layer 2 breakdown (commit `52c39bd`),但 `[p5g-profile]` 旧 schema 缺 § 2.5a server-emitted fields (`request_id / prompt_tokens / routing_path / seq / layer_idx / span_id / parent_span_id / span_name / parent_span / start_ns / end_ns / mode`) — **不能直接参与 § 7.1 exclusive coverage tree** | **扩展 P5g harness emit 新 schema (Codex review v2 P2 #1 + v4 P1 + v12 P1 + v13 P1)** — modest code change: gated_delta_net.rs entry/exit barrier 改用 § 2.5a 的 `with_p5h_span_from_current_trace(...)` API (内部 push/pop `P5H_CURRENT_SPAN_STACK`,自动产 `span_id` 和 `parent_span_id`);substep 自然挂在 wrapper `attention_path` 下 (label `parent_span = "attention_path"`,id 自动取栈顶)。**仍复用 P5g 已 verified 的 instrumentation 位置 + Phase D 抗污染设计** (Layer1\|Layer2 mode-gate, AblateX barrier-free)。新增 `[p5h-profile]` log line (跟 `[p5g-profile]` 平行 emit, 旧 P5g pipeline 不破)。T0a 实施 + rerun 同 PP set 下 UMA cold/warm pair。Cost ~11 min rerun wall (P5g T0 663s precedent) + ~2-4h code-change wall。P5g existing data 保留作 prior reference but not in P5h coverage gate。Kernel-level per-tile/per-shape timing 是 P5j (kernel rewrite) scope,不是 P5h attribution scope。 |
 | 5 | **GatedAttention** | **P5g 完全未测**; 10/40 layers in `Qwen3.5-35B-A3B-4bit` (config.json `layer_types` "linear,linear,linear,full" × 10), full-attn O(S²), `attn_output_gate=true` 让 `q_proj` 输出含 gate (`Hq × D × 2`), `k_proj`/`v_proj` 用 KV-head dim (num_key_value_heads=2) | New 3-layer profile. Layer 1: entry/exit barrier. **Layer 2: 7-step code-backed taxonomy** (per T2 § 3 — `q_gate_k_v_proj`(`q_proj` with gate + `k_proj` + `v_proj`, separate not fused) / q_split_norm_reshape / mrope_apply / kv_mask_update / fused_sdpa / gate_sigmoid_mul / o_proj; `fused_sdpa` is `mlx::fast::scaled_dot_product_attention_on` and its internals — softmax / value matmul — are NOT separately measurable on production path). Layer 3 ablation: **conditional on T0b Phase D outcome** per § 2.5 / T2 conditional gate. |
 | 6 | **MoE expert dispatch + LinearMLP** | P5g 未测; 40 decoder layers (10 含 full-attention, 30 含 linear-attention/GDN), 每层 SparseMoeBlock 含 `num_experts=256` + `num_experts_per_tok=8` (config.json verified) + 1 shared expert (`shared_expert_intermediate=512`) + gather_qmm routed compute + **sorted-routing pack/unpack 是 P5e shipped optimization, 不能藏在 gather bucket 内** (Codex review v2 P2 #2) | Per-layer 8-step code-backed taxonomy (per T3 § 3 — router_logits_softmax_topk / routing_sort_pack / gather_qmm_gate_up / swiglu_activation / gather_qmm_down / routing_unsort_weighted_reduce / shared_expert / moe_output_sum). **ROI math 必须从 `Qwen35MoeConfig` runtime values 来,不 hardcode** — routed work scales as `BS × num_experts_per_tok = BS × 8`。 |
 | 7 | **lm_head + MLX eval/cache state** | P5e/P5f shipped lm_head fix; MLX eval barrier costs 未细测 | lm_head time + MLX `eval()` barrier latency + KVCache + GatedDeltaCache state-update cost |
@@ -170,24 +170,81 @@ impl Drop for P5hTraceGuard {
 
 The guard MUST only wrap **synchronous, no-`.await` instrumentation regions** — code blocks where the executing thread is pinned for the duration. **Nesting is forbidden** (per Codex review v9 P3): instrumentation helpers and deep model log sites are READ-ONLY against `P5H_CURRENT_TRACE`; they MUST NOT enter their own guard.
 
-**Dual emission API** (per Codex review v10 P1 #1 + P1 #2 — sync-only guard cannot cover the async/cross-task spans in the top-level tree without re-introducing the v8 thread-local-across-await unsoundness):
+**Dual emission API — span lifecycle model** (per Codex review v10 P1 #1 + P1 #2 + v13 P1 — earlier v11/v12 "one-shot emit_p5h_span(record)" model could not produce `parent_span_id` because the parent's `span_id` did not exist yet when nested children were being emitted; v13 adds id fields but kept the one-shot API; v14 redesigns to open/close lifecycle):
 
 ```rust
-// EXPLICIT-CONTEXT API — for async spans, cross-task spans, spans whose
-// start/end live on different threads. Used by: root, http_parse_render_tokenize,
-// scheduler_admission, sse_write_role_chunk, detok_format_first_content_chunk.
-// Caller passes the trace context as a value (plumbed via captures / handles).
-fn emit_p5h_span(ctx: &P5hTraceContext, record: P5hSpanRecord);
+// Returned by open_*; opaque to caller other than passing as parent.
+pub struct SpanHandle {
+    span_id: u64,                 // atomic-counter generated at open
+    span_name: &'static str,
+    parent_span_id: Option<u64>,
+    start_ns: u64,
+}
 
+// Optional per-span annotations supplied at close (e.g., layer_idx, seq, mode).
+pub struct SpanFields { /* layer_idx, seq, mode, etc. */ }
+
+// ============================================================================
+// EXPLICIT-CONTEXT API — for async spans, cross-task spans, spans whose
+// start/end live on different threads or straddle .await points.
+// Used by: root (via RootSpanHandle), http_parse_render_tokenize,
+// scheduler_admission, sse_write_role_chunk, detok_format_first_content_chunk.
+// Caller passes both the trace context AND the parent SpanHandle as values.
+// Never reads P5H_CURRENT_TRACE or P5H_CURRENT_SPAN_STACK.
+// ============================================================================
+fn open_p5h_span(
+    ctx: &P5hTraceContext,
+    parent: Option<&SpanHandle>,  // None only for the root
+    span_name: &'static str,
+) -> SpanHandle;
+fn close_p5h_span(
+    ctx: &P5hTraceContext,
+    handle: SpanHandle,
+    end_ns: u64,
+    fields: SpanFields,
+);
+
+// RootSpanHandle wraps SpanHandle with the ctx so the closing site (forwarder
+// task / spawn_blocking body) can close root without re-plumbing ctx as a
+// separate value:
+pub struct RootSpanHandle {
+    ctx: P5hTraceContext,
+    span: SpanHandle,
+}
+impl RootSpanHandle {
+    fn close_at(self, end_ns: u64);  // calls close_p5h_span(&self.ctx, self.span, end_ns, ..)
+}
+
+// ============================================================================
 // IMPLICIT-GUARD API — for deep, sync, no-`.await` instrumentation that runs
-// inside an authorized guard region (`spawn_blocking` body / `sched.prefill_admitted`
-// / `sched.step` / sync body inside forwarder iteration when used). Used by:
-// GDN entry/exit barriers, GatedAttention substeps, MoE substeps, lm_head span,
-// model_prefill_forward sub-children, gs_stream_init_and_chunk_loop sub-children,
-// gs_first_token_materialize_and_predispatch.
-// Panics if P5H_CURRENT_TRACE is None — the panic IS the guard-set/drop validation.
-fn emit_p5h_span_from_current_trace(record: P5hSpanRecord);
+// inside an authorized P5hTraceGuard region. Used by: GDN entry/exit barriers,
+// GatedAttention substeps, MoE substeps, lm_head span, model_prefill_forward
+// sub-children, gs_stream_init_and_chunk_loop sub-children,
+// gs_first_token_materialize_and_predispatch sub-work.
+// Internally: opens span (parent = top of P5H_CURRENT_SPAN_STACK), pushes
+// handle onto stack, runs `f`, pops handle, closes span. Panics if
+// P5H_CURRENT_TRACE is None (no active guard) — that panic IS the guard-set/
+// drop validation.
+// ============================================================================
+fn with_p5h_span_from_current_trace<T>(
+    span_name: &'static str,
+    fields_fn: impl FnOnce() -> SpanFields,
+    body: impl FnOnce() -> T,
+) -> T;
 ```
+
+**`P5H_CURRENT_SPAN_STACK` lifecycle** (per Codex v13 P1):
+
+```rust
+thread_local! {
+    static P5H_CURRENT_SPAN_STACK: RefCell<Vec<SpanHandle>> = RefCell::new(Vec::new());
+}
+```
+
+- `P5hTraceGuard::enter(ctx)` MUST `assert!(P5H_CURRENT_SPAN_STACK.with(|s| s.borrow().is_empty()), "stack non-empty at guard enter — prior guard leaked")`.
+- `P5hTraceGuard::drop` MUST `assert!(P5H_CURRENT_SPAN_STACK.with(|s| s.borrow().is_empty()), "stack non-empty at guard drop — span open without close")`.
+- `with_p5h_span_from_current_trace` is the ONLY API that pushes/pops the stack. Manual stack manipulation by instrumentation code is forbidden — same fail-fast discipline as guard nesting.
+- Explicit-context spans (root + top-level + SSE) do NOT touch the stack; they plumb parent via the `Option<&SpanHandle>` parameter.
 
 **Authorized `P5hTraceGuard::enter(...)` sites** (only these — no others permitted):
 
@@ -460,10 +517,14 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
     - **Route-aware schema presence check** (per sweep request):
       - If `routing_path == "scheduler"` (Lane A): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, scheduler_admission, sse_write_role_chunk, model_prefill_forward, first_token_sampling, detok_format_first_content_chunk}` (plus optional `pre_content_decode_steps`). Missing any required span_name = explicit-context emission site is missing.
       - If `routing_path == "gs_chunked"` (Lane B): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, gs_stream_init_and_chunk_loop, gs_first_token_sample_dispatch, sse_write_role_chunk, gs_first_token_materialize_and_predispatch, detok_format_first_content_chunk}` (plus optional `pre_content_decode_steps`).
-    - **Parent-child tree closure check** (per Codex review v12 P1 — uses `parent_span_id` not `parent_span` string, because span_name labels like `attention_path`/`mlp_path` repeat across 40 decoder layers and string-based lookup would silently misattribute):
-      - aggregator reconstructs the exclusive tree from `(request_id, span_id)` ↔ `parent_span_id` per request
-      - every non-null `parent_span_id` MUST resolve to an emitted span's `span_id` in the same request (orphan parent_span_id = missing parent emission site)
-      - additionally assert label self-consistency: `(parent_span_id is None) == (parent_span string is null)` AND `parent_span_id resolves to a span whose span_name equals the parent_span label` (mismatch = emitter wrote inconsistent id vs label)
+    - **Id-based tree structural checks** (per Codex review v12 P1 + v13 P2 — uses `parent_span_id` not `parent_span` string; the list below is necessary, NOT just closure):
+      - **Id uniqueness**: `(request_id, span_id)` is unique across all records (no duplicate span_id within a request — atomic-counter emitter should never collide, but assert defensively)
+      - **Exactly one root per request**: exactly one span with `parent_span_id is None` per `request_id`; its `span_name` MUST equal `"server_request_recv_to_first_content_sse_write"`. More than one root = forwarder/blocking task each opened its own root (forgot to clone `RootSpanHandle`); zero root = root open site missing.
+      - **No orphan top-level**: no span other than root has `parent_span_id is None`. A non-root span with null parent = explicit-context emitter forgot to pass parent handle.
+      - **Closure**: every non-null `parent_span_id` resolves to an emitted span's `span_id` within the same request (orphan parent_span_id = missing parent emission site).
+      - **Label self-consistency**: `(parent_span_id is None) == (parent_span string is null)` AND `parent_span_id resolves to a span whose span_name equals the parent_span label` (mismatch = emitter wrote inconsistent id vs label).
+      - **Interval containment**: for every non-root span, `parent.start_ns ≤ child.start_ns ≤ child.end_ns ≤ parent.end_ns`. Violation = child opened before parent or closed after parent (parent_span_id pointing at the wrong ancestor, or guard/handle leaked across requests).
+      - **Reachability + no cycle**: starting from root, DFS over `parent_span_id` → child edges must reach every span in the request exactly once (no cycles, no disconnected subtrees).
     - Any failure = T0a fails before close (do NOT proceed to T0b / T2 / T3 / T4 with a broken schema).
 - **Request-correlation infrastructure** (per § 2.5a "Join key" — single committed path):
   - `openai.rs` (chat-completion response builder): emit `X-Ironmlx-Request-Id: <uuid>` header on streaming + non-streaming responses, gated on `p5h-profile` feature; same uuid used as `GenerateRequest.p5h_trace.request_id` and every `[p5h-profile]` log record's `request_id` field
@@ -472,14 +533,14 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
   - New iron-bench CLI flag `--capture-server-request-id` gates BOTH capture path AND serializer schema (default off, on for P5h sweeps; off-state output is byte-identical to current iron-bench)
 - **UMA hardening protocol** implementation: cold/warm pair measurement + variance check + automatic retry (per § 2.4)
 - **GDN harness code extension** to emit `[p5h-profile]` log lines with new schema (per § 2.2 #4 + Codex review v2 P2 #1) — modest format-string change to existing entry/exit barriers in `gated_delta_net.rs`; `[p5g-profile]` lines kept in parallel for back-compat
-- **GDN rerun** under P5h UMA protocol — same PP set as P5g T0, cold/warm pair per PP, exclusive span tree with `parent_span = attention_path` for GDN substeps (per § 2.5a wrapper-span structure, per Codex review v4 P1 fix; NOT `parent_span = decoder_layer_N` as v3/v4 incorrectly said)
+- **GDN rerun** under P5h UMA protocol — same PP set as P5g T0, cold/warm pair per PP, exclusive span tree where GDN substeps' `parent_span_id = <enclosing attention_path span's span_id>` (label `parent_span = "attention_path"`), per § 2.5a id-based tree (v12 P1) + wrapper structure (v4 P1; NOT `decoder_layer_N`)
 - **Schema validation on GDN rerun** (T0a's hard gate, must pass before T0b starts):
   - Sum-to-root identity holds within ±1µs
   - All `exclusive_us ≥ -1µs`
   - GDN `attention_path` coverage_pct ≥ 95% (per § 7.1; per Codex review v4 P1 — `decoder_layer_N` coverage at T0a stage is meaningless because input_norm/post_attention_norm/mlp_path/residual_overhead are not yet instrumented and would all flow into `unattributed_decoder_layer_N`. Full `decoder_layer_N` coverage gate applies only at T5 after T1-T4 all land.)
   - UMA cold/warm variance ≤ ±2% per PP
   - iron-bench↔server `request_id` join rate = 100% across all sweep cells
-- Output: P5h schema infrastructure, request-correlation infra (server header + iron-bench capture + CSV column), GDN protocol-consistent data under exclusive tree with `parent_span = attention_path`
+- Output: P5h schema infrastructure (incl. span lifecycle API per § 2.5a), request-correlation infra (server header + iron-bench capture + CSV column), GDN protocol-consistent data under id-based exclusive tree (GDN substeps' `parent_span_id` = enclosing `attention_path` span; label `parent_span = "attention_path"`)
 - **GATE**: T0a must close before T0b dispatches. If schema gate fails, fix schema first; do NOT proceed to Phase D investigations until GDN data demonstrates schema works end-to-end.
 - Commit: `feat(p5h-t0a): exclusive span schema + UMA hardening + GDN P5h-protocol rerun`
 
@@ -515,7 +576,7 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
 - Add 3-edit instrumentation pattern (mirror P5g GDN):
   - Edit 1: entry barrier (input + cache materialize) gated on Layer1|Layer2
   - Edit 2: cache update sites use `as_deref_mut()` (preserve borrow)
-  - Edit 3: tail refactor + exit barrier + log emission. Wrapper span `attention_path` is opened by the decoder layer; substep records inside GatedAttention set `parent_span = attention_path` (per § 2.5a + Codex v4 P1, NOT `decoder_layer_N`).
+  - Edit 3: tail refactor + exit barrier + emission. Decoder layer opens the wrapper `attention_path` span (via § 2.5a `with_p5h_span_from_current_trace("attention_path", ..)`); each GatedAttention substep inside that wrapper opens its own span (same API) so substep `parent_span_id` = wrapper span's `span_id` automatically (stack top), label `parent_span = "attention_path"`. Per § 2.5a + Codex v4 P1 + v12 P1.
 - **Layer 2 step breakdown — code-backed taxonomy** (7 sub-steps matching actual `gated_attention.rs:120-276` production path with `attn_output_gate=true` per config; **not** decomposing the fused SDPA internals which are inside `mlx::fast::scaled_dot_product_attention_on`):
   1. `q_gate_k_v_proj` — three separate Linear projections (NOT fused QKV): `q_proj` outputs `Hq × D × 2` (queries concatenated with gate, since `attn_output_gate=true`); `k_proj` outputs `Hkv × D` (KV-head dim, GQA); `v_proj` outputs `Hkv × D` (KV-head dim). Single span covers all three.
   2. `q_split_norm_reshape` — split q output back into queries + gate halves + `q_norm`/`k_norm` (per-head RmsNorm) + reshapes/transposes to SDPA layout
@@ -529,7 +590,7 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
   - **If T0b verifies H2 primary** (substitute self-cost): Layer 3 **skipped** for T2; replace with real-path microbenchmarks (e.g., swap `o_proj` with smaller dim variant compiled separately, measure end-to-end delta against baseline). Layer 1/2 still emitted.
   - **If T0b verifies H3 primary** (cache state divergence): Layer 3 requires cache-state-preserving substitute design — for GatedAttention, KV cache must remain valid across ablation (e.g., `ablate_fused_sdpa` substitute returns shape-preserving zeros but still calls `KVCache::update_and_fetch_on` to keep cache consistent for subsequent forwards).
   - **If T0b verifies H4 primary** (kernel template variance): Layer 3 invalid for any step that touches Metal kernels (especially `fused_sdpa`); skip Layer 3 for steps 4-5 (kv_mask_update + fused_sdpa); Layer 3 OK for pure op-level steps (q_gate_k_v_proj, q_split_norm_reshape, mrope_apply, gate_sigmoid_mul, o_proj).
-- Run sweep + aggregate under exclusive span schema (per § 2.5a): wrapper span `attention_path` is the parent emitted by the decoder layer; the 7 GatedAttention substeps each set `parent_span = attention_path`
+- Run sweep + aggregate under id-based exclusive span schema (per § 2.5a): the decoder layer opens the wrapper `attention_path` span via `with_p5h_span_from_current_trace`; each of the 7 GatedAttention substeps opens its own span inside that wrapper, so each substep's `parent_span_id` = wrapper span's `span_id` (label `parent_span = "attention_path"`)
 - Output: GatedAttention per-PP occupancy table (7-step breakdown), top-3 step ranking, long-PP O(S²) growth verification (PP=128 to PP=16384 step ratios)
 - Commit: `test(p5h-t2): GatedAttention 3-layer profile (code-backed taxonomy + conditional ablation)`
 
@@ -551,7 +612,7 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
   - **H2 primary**: Layer 3 skipped, replace with real-path microbenchmarks (e.g., reduce experts_per_tok from 8 → 4 in a controlled fork, measure delta)
   - **H3 primary**: ablation must preserve routing index validity (don't break downstream attention KV slot allocation); pack/unpack steps must remain consistent (substitute can no-op compute but must still produce shape-correct outputs)
   - **H4 primary**: Layer 3 invalid for `gather_qmm_*` steps + `routing_sort_pack`/`routing_unsort_weighted_reduce` (all kernel-dispatch dependent); skip Layer 3 for steps 2-3 + 5-6; OK for steps 1, 4, 7-8
-- Run sweep + aggregate under exclusive span schema (per § 2.5a): wrapper span `mlp_path` is the parent emitted by the decoder layer; the 8 MoE substeps each set `parent_span = mlp_path` (NOT `decoder_layer_N` per Codex v4 P1)
+- Run sweep + aggregate under id-based exclusive span schema (per § 2.5a): the decoder layer opens the wrapper `mlp_path` span via `with_p5h_span_from_current_trace`; each of the 8 MoE substeps opens its own span inside that wrapper, so each substep's `parent_span_id` = wrapper span's `span_id` (label `parent_span = "mlp_path"`). NOT `decoder_layer_N` per Codex v4 P1.
 - **ROI math source**: derive `num_experts_per_tok = 8`, `moe_intermediate = 512`, `num_experts = 256` from `Qwen35MoeConfig` runtime values, NOT hardcoded constants in spec/report (which could drift if model config changes)
 - Output: MoE per-PP attribution, router top-8 cost ratio, gather_qmm dominance check, shared expert vs routed cost split
 - Commit: `test(p5h-t3): MoE expert + LinearMLP profile (code-backed taxonomy + conditional ablation)`
@@ -623,7 +684,7 @@ Profile-gate invariant (must verify per task):
 T0a + T0b + T5 额外:
 
 - T0a exclusive span schema validator: assert `sum(child.inclusive) ≤ parent.inclusive` for all parent spans in test fixture; assert sum-to-root identity within ±1µs; assert per-span `exclusive_us ≥ -1µs`
-- T0a GDN rerun: P5h-protocol GDN data emitted under exclusive tree with GDN substeps' `parent_span = attention_path` (per § 2.5a + Codex v4 P1); GDN `attention_path` coverage_pct ≥ 95% under § 7.1 residual-based gate (full `decoder_layer_N` coverage gate applies only at T5); UMA cold/warm variance ≤ ±2% per PP; iron-bench↔server `request_id` join rate = 100%
+- T0a GDN rerun: P5h-protocol GDN data emitted under id-based exclusive tree with GDN substeps' `parent_span_id` = enclosing `attention_path` span id (label `parent_span = "attention_path"`, per § 2.5a + Codex v4 P1 + v12 P1); GDN `attention_path` coverage_pct ≥ 95% under § 7.1 residual-based gate (full `decoder_layer_N` coverage gate applies only at T5); UMA cold/warm variance ≤ ±2% per PP; iron-bench↔server `request_id` join rate = 100%
 - **T0a HARD GATE**: T0a's coverage + schema invariants must pass before T0b dispatches (per § 3 T0a). If schema gate fails on GDN rerun, fix schema before any Phase D investigation work.
 - T0b Phase D root cause: 4 hypotheses (H1-H4) resolved per § 2.5 decision tree, OR explicit unresolved-list documented in `reports/p5h-phase-d-root-cause.md`; T2/T3 conditional ablation gates bound per T0b outcome
 - T5 attribution: per § 7.1 residual-based exclusive coverage gate (`coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP, root = `server_request_recv_to_first_content_sse_write`); P5i/P5j candidate ranking emitted with ROI estimate ranges + Scope gate trigger status; `client_transport_residual_us` reported as separate diagnostic column
@@ -679,7 +740,7 @@ This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted ne
 
 1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_content_sse_write`); `exclusive_us ≥ -1µs` for every emitted span; `client_transport_residual_us` reported separately (not part of gate)
 2. **Protocol-consistent data — dual-lane explicit** (per Codex review v7 P2 + § 2.5a "Routing precondition"):
-   - **Lane A** (PP ∈ {128, 512, 2048}, scheduler path): full deep substep attribution — HTTP/scheduler/admission (T1) + GDN (T0a rerun with `parent_span = attention_path`) + GatedAttention (T2, 7 substeps under `attention_path`) + MoE (T3, 8 substeps under `mlp_path`) + lm_head/MLX state (T4) + Phase D resolution (T0b) — all measured under same UMA hardening + exclusive span schema with trace context correlation; § 7.1 residual coverage ≥ 95% per PP.
+   - **Lane A** (PP ∈ {128, 512, 2048}, scheduler path): full deep substep attribution — HTTP/scheduler/admission (T1) + GDN (T0a rerun; substeps' `parent_span_id` = enclosing `attention_path` span) + GatedAttention (T2, 7 substeps under `attention_path` wrapper) + MoE (T3, 8 substeps under `mlp_path` wrapper) + lm_head/MLX state (T4) + Phase D resolution (T0b) — all measured under same UMA hardening + id-based exclusive span schema with trace context correlation; § 7.1 residual coverage ≥ 95% per PP.
    - **Lane B** (PP ∈ {4096, 8192, 16384}, chunked GS path): top-level only per the § 2.5a Lane-B bucket list (single source of truth — DO NOT re-enumerate here per Codex v9 P2 #1; v8 re-enumeration carried over the stale `first_token_sampling` bucket that was removed in v9). Lane-B buckets include `gs_first_token_sample_dispatch` nested inside `gs_stream_init_and_chunk_loop` and a top-level `gs_first_token_materialize_and_predispatch` sibling (NOT a `first_token_sampling` sibling). Deep GDN/GatedAttention/MoE/lm_head substep attribution under chunked path is **explicitly out of scope** (deferred to P5h+1 per § 6); Lane B coverage gate measured only against top-level buckets, still ≥ 95%.
    - P5g existing data remains as prior reference only, excluded from both lanes' coverage gates.
    - P5j long-PP candidate ranking from Lane B carries explicit "bounded by Lane-B granularity" caveat; any P5j candidate requiring per-substep evidence at long PP must defer to P5h+1 chunked deep-attribution before P5j dispatch.
