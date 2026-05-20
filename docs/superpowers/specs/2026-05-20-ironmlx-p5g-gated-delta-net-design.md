@@ -129,9 +129,10 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 
 | 文件 | 修改 |
 |---|---|
-| `ironmlx/src/nn/gated_delta_net.rs` | instrument `GatedDeltaNet::forward_on` 内部 per-step `mlx::transforms::eval` barrier + `std::time::Instant` timing。**Double-gated**: 编译期 feature flag (`p5g-profile`) 只编译 hook 代码；运行期 env var (`IRONMLX_P5G_PROFILE=1`) 才实际启用 barrier。两个 gate 都需要才 profile，否则正常 forward 路径完全无 overhead。这避免 `cargo --all-features` 在 clippy / sweep_full / bench 路径误启 profile mode。 |
-| `ironmlx/tests/p5g_t0_gated_delta_profile.rs` | 新增 profile harness — 必须 `#[test] #[ignore]` (heavy test, load 35B model)，必须读 `IRONMLX_MOE_MODEL_DIR` env var 取 model path，必须 `--test-threads=1` (Metal GPU 串行)。普通 `cargo test` / CI / clippy 不应触发模型加载。 |
-| `reports/p5g-t0-gated-delta-profile.md` | output 报告 |
+| `ironmlx/Cargo.toml` | `[features]` 表加一行 `p5g-profile = []` (空 feature flag, 仅作 cfg gate, 不引入额外依赖)。 |
+| `ironmlx/src/nn/gated_delta_net.rs` | instrument `GatedDeltaNet::forward_on` 内部 per-step `mlx::transforms::eval` barrier + `std::time::Instant` timing；**timing 数据通过 `tracing::info!` 在每次 GatedDeltaNet forward 调用时 emit (per-layer line)**, server log 即 profile 数据来源 (T0.a 走 HTTP path 见下，需要 server 端记录)。**Double-gated**: 编译期 feature flag (`p5g-profile`) 只编译 hook 代码；运行期 env var (`IRONMLX_P5G_PROFILE=1`) 才实际启用 barrier；env var 通过 `OnceLock<bool>` 在 GatedDeltaNet 模块初始化时 cache (避免每次 forward 都 env lookup)。profile-disabled 时无 eval barrier、无 buffer alloc、无 env syscall — 允许一次性 cached flag 检查的不可测算分支成本。 |
+| `ironmlx/tests/p5g_t0_gated_delta_profile.rs` | 新增 profile harness — **HTTP-path profile**: 启动 ironmlx server (with `--features p5g-profile` + `IRONMLX_P5G_PROFILE=1`)，跑 iron-bench HTTP request 触发 forward，server log 由 harness aggregate parse 出 per-layer GatedDeltaNet timing。**与 § 1.1 P5f HTTP baseline (1844 tok/s) 同路径**，profile occupancy 数字可直接对比。必须 `#[test] #[ignore]`，读 `IRONMLX_MOE_MODEL_DIR` env var 取 model path，必须 `--test-threads=1`。普通 `cargo test` / CI / clippy 不触发。**不**用 direct `Model::forward_on` harness 走旁路 (避免跟 HTTP baseline 路径不可比)。 |
+| `reports/p5g-t0-gated-delta-profile.md` | output 报告 (parsed log aggregation + 3-layer tables) |
 
 ### 3.2 Instrument 策略 — 3 层 profile protocol
 
@@ -141,15 +142,23 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 
 **Layer 1 — Baseline mode (entry/exit barrier only)**
 
-Timing 协议 (timer 边界精确):
+Timing 协议 (timer 边界精确, materialization set 完整覆盖 GatedDeltaNet 所有副作用):
 
-```
-1. eval(input)             // drain prior lazy ops to settle settle time
+```text
+1. eval(GDN_input_set: hidden_input, cache.conv_state, cache.recurrent_state, mask?)
+   // drain prior lazy ops + 强制 cache state 物质化, 避免 GDN forward 把
+   // 上游某些 lazy compute 错误归到自己头上
 2. timer.start()           // ←—— timer 启动在 entry drain 完成后
-3. GatedDeltaNet forward   // 包含 8 step + Metal kernel dispatch
-4. eval(output)            // materialize GatedDeltaNet output lazy graph
-5. timer.stop()            // ←—— timer 停止在 output materialized 后
+3. GatedDeltaNet forward   // 包含 8 step + Metal kernel dispatch + cache 更新
+4. eval(GDN_output_set: final_output, updated cache.conv_state, updated cache.recurrent_state)
+   // materialize **所有** GDN produced lazy ops, 包括 Step 2c new_conv_state
+   // slice/take + Step 7e recurrent_state 更新 (若不显式 eval cache 输出,
+   // 它们的 lazy graph 可能未触发, 导致 Layer 1 低估 GDN 真实 forward cost,
+   // 同时让 Layer 2 Step 2c 跟 Layer 1 总耗不可比)
+5. timer.stop()            // ←—— timer 停止在所有 GDN 副作用 materialized 后
 ```
+
+如果某些 cache array 跟 output 来自同一 kernel dispatch，eval set 仍显式列出 — 保证 profile 语义清晰。
 
 - 测当前 HEAD 下 **per-layer GatedDeltaNet 总 wall-clock** + 30-layer 累计 + GatedDeltaNet 占 prefill 总 wall-clock 的 % at PP=2048/4096/8192/16384
 - 这一层数字是 P5g target ceiling 计算的依据 (基于当前 HEAD 实测占比，不外推 P5e 旧数字)
@@ -196,23 +205,24 @@ Timing 协议 (timer 边界精确):
 
 `reports/p5g-t0-gated-delta-profile.md` 含：
 
-1. Methodology (3-layer protocol)
-2. Layer 1: per-layer + 30-layer aggregate GatedDeltaNet wall-clock + % at PP=2048/4096/8192/16384
-3. Layer 2: per-step breakdown table (ms + %) + instrumented/non-instrumented slowdown ratio
-4. Layer 3: top-3 hot points ablation microbench
-5. **更新 P5g performance ceiling 推导** (基于 Layer 1 真实 GatedDeltaNet occupancy)
+1. Methodology (3-layer protocol, **HTTP-path profile via instrumented server + iron-bench**)
+2. Layer 1: per-layer + 30-layer aggregate **boundary-isolated GatedDeltaNet wall-clock estimate** + 占 prefill wall-clock 的 % at PP=2048/4096/8192/16384
+3. Layer 2: per-step breakdown table (ms + %) + **Layer 2 / Layer 1 slowdown ratio**
+4. Layer 3: top-3 hot points shape-preserving cost ablation upper bound
+5. **更新 P5g performance ceiling 推导** (基于 Layer 1 **boundary-isolated GatedDeltaNet occupancy estimate**, 标注 estimate 而非 true occupancy)
 6. P5g T1-T3 候选优化建议 ranking (profile-driven，不抄 omlx.patches)
+7. Annotation: "Layer 1 是 boundary-isolated estimate (含轻 instrumentation overhead)，不等于完全无 instrumentation 下 GatedDeltaNet 真实占比；真实 end-to-end ROI 仍以 T1-T3 实施后 iron-bench benchmark 为准。"
 
 ### 3.4 验证
 
 - profile harness compile + 跑通 PP=2048
-- Layer 1 (entry+exit barrier only) GatedDeltaNet 总耗时 / 非 instrumented PP=2048 总耗时 占比 ≥ 10% 才有 T1-T3 价值 (P5f baseline 1844 tok/s → 1.111s, 10% = 111 ms)
+- Layer 1 boundary-isolated GatedDeltaNet estimate / whole-prefill baseline (无 GDN probe) 占比 ≥ 10% 才有 T1-T3 价值 (P5f baseline 1844 tok/s → 1.111s, 10% = 111 ms)
 - Layer 2 per-step 累计 ≤ Layer 2 GatedDeltaNet 总 wall-clock × 1.2 (sanity)
 - Layer 3 shape-preserving ablation 中至少 1 个 upper-bound cut > 5% Layer 1 baseline 才推进 T1-T3 (否则 P5g 可能 scope 不足，回 Boss 决策)。**注**：upper bound 仅作 T0/T1 优化值得性诊断，不作 ship 依据。
 
 ### 3.5 Feature flag 完整启用命令
 
-启动 profile harness:
+T0.a 走 HTTP-path profile — 启 instrumented server + iron-bench 触发 forward + parse server log。harness 命令:
 
 ```bash
 IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/.../snapshots/<sha>/ \
@@ -222,6 +232,15 @@ cargo test -p ironmlx --release --features p5g-profile \
   --test p5g_t0_gated_delta_profile \
   -- --ignored --test-threads=1 --nocapture
 ```
+
+Harness 内部行为:
+
+1. spawn `ironmlx serve` subprocess with `IRONMLX_P5G_PROFILE=1` + `--features p5g-profile`
+2. 等 healthz ready
+3. 用 `iron-bench` HTTP request 触发 prefill at PP=2048/4096/8192/16384 (1 warmup + 3 measured)
+4. parse server stderr/log 收集 per-call GatedDeltaNet boundary timing (server-side instrumentation 通过 `tracing::info!` 每次 GatedDeltaNet forward 都 emit 一行 `[p5g-profile] layer=N pp=K elapsed_us=...`)
+5. aggregate across 30 layers + 3 runs median, 输出 markdown report
+6. shutdown server
 
 **Profile-disabled 性能要求**:
 
@@ -347,14 +366,20 @@ P5g final target 待锁定前，T1-T3 ship 决策仍按 § 7.3 ship 指标。
 
 ### 7.3 Ship 指标 (T1-T3 promote / revert + P5g 整体 success bar)
 
-Promote (ship) 决策**唯一**指标 — 端到端 iron-bench benchmark。**Promote 必须全部满足**：
+Promote (ship) 决策**唯一**指标 — 端到端 iron-bench benchmark。**Promote 比较基线 = 当前 Tn 开始时的 branch HEAD state** (= prior Tn 完成或 revert 之后的 commit)。即严格 task-local ROI，不允许跨 Tn 累积 (e.g. T1+3% / T2 +3% 不能合并算 +6%，每个 Tn 独立 ≥ 5% geomean 才 promote；想累积请合并为单一 Tn patch set 一次性提交)。
+
+**Promote 必须全部满足** (相对当前 Tn 起点 HEAD):
 
 - **长 prompt prefill geomean**: PP=2048/4096/8192/16384 **geometric mean** prefill tok/s 提升 > 5% (单一聚合指标，非"每个 PP 单点 >5%")
 - **长 prompt 单点 regression**: 每个 long PP 单点 prefill regression < 2% (容许 geomean 增益不均匀，但不容许任何单点显著退步)
 - **短 prompt prefill regression**: PP=128/512 各 < 2%
 - **Decode TG regression**: PP=128/2048/16384 promote smoke 各 < 2%；其中 PP=16384 必须保持 +10.3% over omlx (P5f close-out 已 ship 的优势)
 - **正确性 gates per Tn**: sentinel argmax=11 + batched B=2 row-equiv + http_smoke ALL PASS
-- **正确性 gates at close-out only**: sweep_full 19/19 (PP=16384 全 decode + B=2 batched + 4-way bench)
+
+`sweep_full 19/19` 和 `4-way bench` 是**两个独立 gate**，都仅在 T4 close-out 跑：
+
+- `sweep_full.sh` 19/19 PASS (Qwen3.5-4B-MLX-4bit, 全集成测试套)
+- 4-way bench (ironmlx / mlx-lm / omlx HTTP iron-bench, 6 PP × 5 runs) — 单独执行，**不**包含在 `sweep_full.sh` 内
 
 P5g 整体 success bar: T1-T3 中**至少 1 个**满足以上 ship 指标 promote。否则 P5g close-out 报告标 "no optimization promoted; T0 数据 + Layer 3 upper bound 数据归 P5h scope refresh"。
 
@@ -403,9 +428,13 @@ T0: GatedDeltaNet 独立 per-op profile (3-layer protocol per § 3.2)
     Step T0.c: Layer 3 verification mode — top-3 候选 ablation
                microbench; 估每个候选可达 cut 比例
     Step T0.d: 用 T0.a + T0.c 数据回写 § 7.2 锁定 final target
-    Files: ironmlx/src/nn/gated_delta_net.rs (instrument hook, double-gated
-           by p5g-profile feature + IRONMLX_P5G_PROFILE=1 env var)
-           ironmlx/tests/p5g_t0_gated_delta_profile.rs (#[ignore], heavy)
+    Files: ironmlx/Cargo.toml (add `p5g-profile = []` feature)
+           ironmlx/src/nn/gated_delta_net.rs (instrument hook, double-gated
+           by p5g-profile feature + IRONMLX_P5G_PROFILE=1 env var, OnceLock cached;
+           emit per-call timing via tracing::info!)
+           ironmlx/tests/p5g_t0_gated_delta_profile.rs (#[ignore], heavy;
+           HTTP-path profile: spawns ironmlx serve subprocess + iron-bench HTTP
+           request + parses server log; same path as P5f HTTP baseline)
            reports/p5g-t0-gated-delta-profile.md
     Commit
 
@@ -415,7 +444,8 @@ T1: highest single-ROI optimization (by T0.c ranking)
       short-PP prefill smoke / long-PP prefill sweep /
       decode TG smoke (PP=128/2048/16384) / promote-revert /
       commit
-    Promote 阈值 per § 7.3 ship metrics (单一权威定义，全部满足):
+    Promote 阈值 per § 7.3 ship metrics (单一权威定义，全部满足；
+    比较基线 = 当前 Tn 起点 HEAD = prior Tn promote/revert 后 commit):
       - long-PP=2048/4096/8192/16384 geometric mean prefill > 5% AND
       - long-PP 单点 prefill regression < 2% AND
       - short-PP (128/512) prefill regression < 2% AND
@@ -424,6 +454,7 @@ T1: highest single-ROI optimization (by T0.c ranking)
       - sentinel + batched + http_smoke ALL PASS
     < threshold revert (per P5e/P5f precedent: 失败实验也 commit
     negative ROI doc 进 close-out 报告作记录)
+    注: 单 Tn 不允许累积跨 Tn ROI; 想合并多个微优化请整合为单一 Tn patch set 一次性提交
 
 T2: 2nd highest ROI optimization (same structure as T1)
 T3: 3rd highest ROI optimization (same structure as T1)
