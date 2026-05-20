@@ -116,13 +116,16 @@ P5g T4 暴露: sweep_full Qwen3.5-4B 之后跑 ironmlx serve restart, 3-way benc
 
 **Problem**: P5g 的 boundary-isolated medians per layer 不构成 mutually-exclusive timing tree。HTTP TTFT contains scheduler; scheduler contains forward dispatch; forward contains decoder layers; decoder layers contain GatedAttention/GDN/MoE; lm_head + MLX eval/cache 可能 overlap parent spans。若 T5 简单 sum medians, 要么 double-count (nested spans 重复算) 要么 leave gaps (同级 spans 之间未被 instrument 的边缘)。"95% wall-time accounted" gate 在此 schema 下 trivially mismeasure。
 
-**Solution**: 单一 exclusive parent-child span tree。每个 `[p5h-profile]` record 必须含 schema fields:
+**Solution**: 单一 exclusive parent-child span tree。
+
+Schema fields are split into **server-emitted** (written into each `[p5h-profile]` log line directly by `ironmlx serve`, since server owns this data) vs **aggregator-injected** (added by T5 Python aggregator from the iron-bench client-side sweep CSV, since server has no way to know iron-bench's `--prompt-len` or warmup/measured run index without a metadata channel that v3 P2 explicitly defers out of scope). This split is per Codex review v3 P2 — without it, the server would need iron-bench header propagation, which is out of P5h scope.
+
+**Server-emitted fields** (per `[p5h-profile]` log line, written by ironmlx):
 
 | Field | Type | Semantics |
 |---|---|---|
-| `request_id` | string (uuid or seq#) | 唯一 request 标识, T5 group-by |
-| `run_id` | int | warmup/measured run index within request |
-| `pp` | int | iron-bench `--prompt-len`, T5 group-by |
+| `request_id` | string (uuid) | server-generated per request, T5 group-by key |
+| `prompt_tokens` | int | server-measured (post-chat-template, post-tokenize); proxy for iron-bench `--prompt-len` once correlated |
 | `seq` | int | sequence length at this forward (chunk size or 1 for decode) |
 | `layer_idx` | int | GDN/full-attn layer 0..39 (-1 for non-decoder spans) |
 | `span_name` | string | 'http_request_recv' / 'sched_admit' / 'gda_step_1a_in_proj_qkvz' / etc. |
@@ -131,19 +134,34 @@ P5g T4 暴露: sweep_full Qwen3.5-4B 之后跑 ironmlx serve restart, 3-way benc
 | `end_ns` | u64 | monotonic clock end (ns) |
 | `mode` | string | 'off' / 'layer1' / 'layer2' / 'ablate-X' |
 
-**Server-only root** (per Codex review v2 P1 #2; iron-bench TTFT cross-process correlation deferred — would require iron-bench → ironmlx request-id propagation, out of P5h scope):
+**Aggregator-injected fields** (added by T5 Python aggregator when joining server log records with the iron-bench client sweep CSV):
 
-- **Root span**: `server_request_recv_to_first_sse_write` — from server's `axum` request-handler entry to first SSE chunk write. All `[p5h-profile]` records anchor under this server-side root.
+| Field | Type | Source |
+|---|---|---|
+| `pp` | int | iron-bench `--prompt-len` for the sweep cell that produced this record; joined via `(request_id, sweep_cell_timestamp_window)` ↔ iron-bench request log |
+| `run_id` | int | iron-bench warmup/measured run index within the sweep cell; joined the same way |
+| `bench_session_id` | string | optional T5 group-by for multi-session sweeps |
+
+**Join key**: T5 aggregator correlates server log records with iron-bench client records via `(request_id, server_request_start_wallclock)`. iron-bench writes one client record per request with `request_id` (echoed back from server's response header `X-Ironmlx-Request-Id` if present; falls back to wallclock-window-based join). The aggregator MUST verify 1:1 match before emitting attribution table; mismatched/orphaned records flagged in T5 close-out report.
+
+**v3 P2 caveat**: if server's response header `X-Ironmlx-Request-Id` is not currently populated, T0a must either (a) add it (small, low-risk addition to `openai.rs` response builder, gated on `p5h-profile` feature) OR (b) prove that wallclock-window correlation is robust under per-PP serial sweep (only one request in flight per server window). T0a documents which path is chosen before T5 builds the aggregator.
+
+**Server-only root** (per Codex review v2 P1 #2 + v3 P1 fact-check; iron-bench TTFT cross-process correlation deferred — would require iron-bench → ironmlx request-id propagation, out of P5h scope):
+
+- **Root span**: `server_request_recv_to_first_content_sse_write` — from server's `axum` request-handler entry to the moment when the **first non-empty `delta.content` SSE chunk** is sent into the body channel (`tx.send(Ok(format_sse_data(&content_chunk)))` in `openai.rs::serve_via_scheduler_stream`'s detok loop). All `[p5h-profile]` records anchor under this server-side root.
+- **Why not "first SSE write" (Codex v3 P1)**: the forwarder task spawned right after `AdmitReply` issues a synthetic role chunk (`delta.role = "assistant"`, `delta.content = ""`) BEFORE the first-batch prefill runs (per `openai.rs:546-564` + `scheduler_actor.rs:276-313`: admit reply is sent before prefill). If root ended at "first SSE write", prefill + first-token sampling would fall **outside** the root, defeating the entire attribution exercise. The role chunk write is itself a small child span (`sse_write_role_chunk`) under the root, not the root's terminal point.
+- **Root terminal definition (exact)**: `end_ns = monotonic_ns()` captured at the instruction immediately after the first successful `tx.send(Ok(format_sse_data(&content_chunk)))` where `content_chunk.choices[0].delta.content` is non-empty AND non-finish-reason. Empty-content role/keepalive chunks do NOT close the root.
 - **Client transport residual** is computed as a SEPARATE diagnostic: `client_transport_residual_us = iron_bench_ttft_us - server_root_inclusive_us`. Not part of the exclusive tree; reported alongside in `reports/p5h-attribution.md` as a transport-overhead column.
 
-**Top-level buckets under `server_request_recv_to_first_sse_write`** (mutually exclusive children):
+**Top-level buckets under `server_request_recv_to_first_content_sse_write`** (mutually exclusive children):
 
 1. `http_parse_render_tokenize` (server-side request parsing + chat template + tokenizer Encode)
-2. `scheduler_admission` (admit queue + slot allocation + batch construction)
-3. `model_prefill_forward` (top-level forward call into TextModel)
-4. `final_norm_lm_head_first_token` (post-decoder norm + lm_head Linear + first-token sampling)
-5. `sse_write_first_chunk` (SSE format + body write up through first chunk)
-6. `unattributed_server_root` (explicit residual leaf — see "Residual leaves" below)
+2. `scheduler_admission` (admit queue + slot allocation + batch construction; ends at `AdmitReply` send)
+3. `sse_write_role_chunk` (forwarder spawn + initial role chunk write; happens before prefill in current `openai.rs` flow)
+4. `model_prefill_forward` (top-level forward call into TextModel)
+5. `final_norm_lm_head_first_token` (post-decoder norm + lm_head Linear + first-token sampling)
+6. `detok_format_first_content_chunk` (detok stream step + ChunkResponse serialize + first content SSE write)
+7. `unattributed_server_root` (explicit residual leaf — see "Residual leaves" below)
 
 **`model_prefill_forward` children** (mutually exclusive):
 - `embed_lookup` (token id → hidden_states)
@@ -182,7 +200,7 @@ for span in spans (depth-first, children-first):
     assert span.exclusive_us >= -1.0, f"{span.span_name}: negative exclusive {span.exclusive_us}us — broken parent_span attribution"
 
 # Structural invariant (always true if instrumentation correct — sanity check, NOT coverage gate):
-root = find_root_span(spans)  # server_request_recv_to_first_sse_write
+root = find_root_span(spans)  # server_request_recv_to_first_content_sse_write
 all_exclusive_sum = sum(s.exclusive_us for s in spans)
 assert abs(all_exclusive_sum - root.inclusive_us) < 1.0  # tree identity (Codex P1 #1: this alone is trivial)
 
@@ -328,8 +346,18 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
 ### T5 — Cross-layer attribution synthesis + P5i/P5j candidate ranking + close-out report
 
 - Aggregate T0a (GDN rerun) + T0b (Phase D resolution) + T1-T4 measurements into per-PP exclusive attribution table per § 2.5a span schema
-- Compute `exclusive_us = inclusive_us - sum(children.inclusive_us)` for every span; verify `span.exclusive_us ≥ 0` invariant per § 2.5a; assert sum to root identity
-- **Exclusive coverage gate** per § 7.1: `coverage_pct = Σ span.exclusive_us / root_span.inclusive_us ≥ 95%` per PP (NOT the prior naive "sum medians" gate, which double-counted nested spans per Codex review P1 #1)
+- Compute `exclusive_us = inclusive_us - sum(children.inclusive_us)` for every span; verify `span.exclusive_us ≥ -1µs` invariant per § 2.5a
+- Sum-to-root identity (`Σ all spans' exclusive_us ≡ root.inclusive_us within ±1µs`) is a **tree-property sanity check only**, NOT a coverage gate (per Codex review v2 P1 #1 — this identity is trivially true and useless as a quality bar)
+- **Exclusive coverage gate** per § 7.1 (residual-based, single source of truth — DO NOT redefine here):
+
+  ```
+  root_wall_us = root_span("server_request_recv_to_first_content_sse_write").inclusive_us
+  unattributed_total_us = Σ s.inclusive_us  for s in all_spans where s.span_name.startswith("unattributed_")
+  coverage_pct = 1 - (unattributed_total_us / root_wall_us)
+  gate: coverage_pct ≥ 95%  per PP
+  ```
+
+  If a future revision changes the gate, change § 7.1 first and reference it from here — do not duplicate the formula in two places. (Codex review v3 P2 caught duplicate trivial formula in this bullet during the v2 round.)
 - Identify per-PP top-3 bottleneck across all measured spans
 - Rank P5i candidates (短 PP focus, +24-74% target) by ROI estimate
 - Rank P5j candidates (长 PP focus, +110-128% target) by ROI estimate + Scope gate trigger (kernel rewrite = trigger Boss approval)
@@ -340,7 +368,7 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
 
 ## § 4 Validation gates per task (Tn 共用)
 
-每个 T1-T4 instrumentation task 完成时,严格按 CLAUDE.md "Rust 代码检测"规定执行:
+**任何 task 触碰 Rust 代码** (T0a 必触碰: schema infra + GDN harness extension; T0b 可能触碰: Phase D substitute mode adds; T1-T4 必触碰: 各 layer instrumentation; T5 一般只触碰 Python aggregator + Markdown report, 但若 T5 修 Rust 也适用),都必须严格按 CLAUDE.md "Rust 代码检测"规定执行:
 
 ```bash
 cargo fmt                                                                          # Rust 自动格式化 (CLAUDE.md mandate)
@@ -348,6 +376,10 @@ MLX_DIR=$HOME/.local/mlx cargo +nightly fmt --all -- --check                    
 MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace -- -D warnings  # 0 Rust warnings (mlx-sys C++ warnings ok)
 MLX_DIR=$HOME/.local/mlx cargo build --release                                     # release build PASS
 ```
+
+**Python-only tasks** (T5 aggregator + report build, if no Rust touched): run `ruff check` / `ruff format --check` if a Python lint config exists in repo; markdown link/heading validity verified via repo's standard pre-commit (if configured). No cargo gates required for pure Python/Markdown changes.
+
+**Schema-touching tasks** (T0a, T5 aggregator): T5 aggregator MUST emit a schema-conformance report — every emitted `[p5h-profile]` record validated against § 2.5a server-emitted fields; orphaned (unjoined) records flagged with counts per PP; if orphan rate > 1% per PP, T5 gates FAIL and root-cause before close-out.
 
 Sentinel suite (MoE-A3B-4bit; per § 5):
 
@@ -369,7 +401,7 @@ T0a + T0b + T5 额外:
 - T0a GDN rerun: P5h-protocol GDN data emitted under exclusive tree with `parent_span = decoder_layer_N`; GDN coverage_pct ≥ 95% under § 7.1 residual-based gate; UMA cold/warm variance ≤ ±2% per PP
 - **T0a HARD GATE**: T0a's coverage + schema invariants must pass before T0b dispatches (per § 3 T0a). If schema gate fails on GDN rerun, fix schema before any Phase D investigation work.
 - T0b Phase D root cause: 4 hypotheses (H1-H4) resolved per § 2.5 decision tree, OR explicit unresolved-list documented in `reports/p5h-phase-d-root-cause.md`; T2/T3 conditional ablation gates bound per T0b outcome
-- T5 attribution: per § 7.1 residual-based exclusive coverage gate (`coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP, root = `server_request_recv_to_first_sse_write`); P5i/P5j candidate ranking emitted with ROI estimate ranges + Scope gate trigger status; `client_transport_residual_us` reported as separate diagnostic column
+- T5 attribution: per § 7.1 residual-based exclusive coverage gate (`coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP, root = `server_request_recv_to_first_content_sse_write`); P5i/P5j candidate ranking emitted with ROI estimate ranges + Scope gate trigger status; `client_transport_residual_us` reported as separate diagnostic column
 
 ## § 5 Numerical Safety
 
@@ -398,14 +430,14 @@ P5h 不引入新 numerical correctness 风险 (measure-only, no algorithmic chan
 T5 must produce a per-PP exclusive attribution table built **only** from same-protocol P5h measurements (P5g existing data excluded; see § 2.2 #4 + T0a GDN rerun). Coverage is **residual-based** (Codex review v2 P1 #1 — the naive `Σ exclusive ≡ root.inclusive` formulation is a tree identity, trivially true and useless as a gate). Coverage computed as:
 
 ```
-root_wall_us = root_span("server_request_recv_to_first_sse_write").inclusive_us
+root_wall_us = root_span("server_request_recv_to_first_content_sse_write").inclusive_us
 unattributed_total_us = Σ s.inclusive_us  for s in all_spans where s.span_name.startswith("unattributed_")
 accountable_us = root_wall_us - unattributed_total_us
 coverage_pct = accountable_us / root_wall_us
             = 1 - (unattributed_total_us / root_wall_us)
 ```
 
-The root is **server-side only** (`server_request_recv_to_first_sse_write`, per § 2.5a Codex v2 P1 #2). Client/transport latency is reported as a separate `client_transport_residual_us = iron_bench_ttft_us - root_wall_us` diagnostic column, NOT included in the coverage gate.
+The root is **server-side only** (`server_request_recv_to_first_content_sse_write`, per § 2.5a Codex v2 P1 #2). Client/transport latency is reported as a separate `client_transport_residual_us = iron_bench_ttft_us - root_wall_us` diagnostic column, NOT included in the coverage gate.
 
 **Hard invariants** (per § 2.5a):
 - `coverage_pct ≥ 95%` per PP (else identify which `unattributed_<span>` dominates → add instrumentation for that span's children → re-run before close-out)
@@ -418,7 +450,7 @@ This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted ne
 
 ### 7.2 P5h ship gate (T5 close-out gate)
 
-1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_sse_write`); `exclusive_us ≥ -1µs` for every emitted span; `client_transport_residual_us` reported separately (not part of gate)
+1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_content_sse_write`); `exclusive_us ≥ -1µs` for every emitted span; `client_transport_residual_us` reported separately (not part of gate)
 2. **Protocol-consistent data**: GDN (T0a rerun under P5h protocol with `parent_span = decoder_layer_N`) + Phase D resolution (T0b) + HTTP/scheduler/admission (T1) + GatedAttention (T2) + MoE (T3) + lm_head/MLX state (T4) — all measured under same UMA hardening + exclusive span schema. P5g existing data remains as prior reference only, excluded from coverage gate.
 3. **UMA hardening verified**: cross-repeat (cold/warm pair) measurement variance ≤ ±2% per PP per metric per layer (per § 2.4 protocol)
 4. **Phase D root cause** (T0b output): one of H1-H4 identified primary (mitigation proposed) OR explicit unresolved hypothesis list with proposed next investigation path (per § 2.5 decision tree); T2/T3 Layer 3 conditional ablation gates bound per T0b outcome
@@ -436,5 +468,8 @@ P5h 整体 success = all 9 gates PASS, output (attribution report + P5i/P5j cand
 - P5g findings memory: `/Users/xin/.claude/projects/-Users-xin-workspace-ironmlx-backend/memory/project_p5g_findings.md`
 - P5g design spec: `docs/superpowers/specs/2026-05-20-ironmlx-p5g-gated-delta-net-design.md` (§ 4.1a / § 7.1a / § 7.2 post-T0 amendments)
 - P5g implementation plan: `docs/superpowers/plans/2026-05-20-ironmlx-p5g-gated-delta-net.md`
+- Codex review v1 of this spec: `reports/p5h-all-pp-attribution-design-review.md`
+- Codex review v2 of this spec: `reports/p5h-all-pp-attribution-design-review-v2.md`
+- Codex review v3 of this spec: `reports/p5h-all-pp-attribution-design-review-v3.md`
 - Boss memory: `[feedback_design_rigor]`, `[feedback_serial_perf_experiments]`, `[feedback_no_spec_from_competitors]`, `[feedback_performance_stability_priority]`, `[feedback_design_philosophy]`, `[feedback_task_breakdown_bounded]`, `[feedback_iron_bench_priority]`, `[feedback_no_unnecessary_docs]`
 - Reusable infra from P5g: `ironmlx/tests/p5g_t0_gated_delta_profile.rs` (HTTP-path harness), `ironmlx/src/main.rs` (tracing→stderr fix), `/tmp/p5g-env.sh` pattern
