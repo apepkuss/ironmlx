@@ -97,19 +97,21 @@
                 │                                       │
                 ▼                                       ▼
 ┌──────────────────────────────┐    ┌──────────────────────────────┐
-│ Scheduler path (B=b_max=4)   │    │ GenerationStream path (B=1)  │
+│ Scheduler path (B=b_max)     │    │ GenerationStream path (B=1)  │
 │                              │    │                              │
-│ T1: when active_count==1,    │    │ T2: when KV budget allows,   │
-│     construct [1, T_active]  │    │     single-shot forward      │
-│     instead of [4, T_max]    │    │     instead of chunked       │
+│ T1: CLI default b_max=1      │    │ T2: when KV budget allows,   │
+│  (single-request optimized)  │    │     single-shot forward      │
+│  --b-max N>1 opt-in for      │    │     instead of chunked       │
+│   future multi-request       │    │                              │
 │                              │    │                              │
 │ Affects:                     │    │ Affects:                     │
-│  PP=128/512 (typical case)   │    │  PP=4096/8192/16384          │
+│  PP=128/512 (default route)  │    │  PP=4096/8192/16384          │
 │                              │    │                              │
-│ Sanity-verified ROI:         │    │ Expected ROI:                │
-│  PP=128 prefill 2.44×        │    │  PP=4096 prefill 1.9-2.5×    │
-│  PP=512 prefill 3.21×        │    │  PP=8192 prefill 2.0-2.6×    │
-│  PP=128/512 decode 1.58×     │    │  PP=16384 prefill 1.9-2.5×   │
+│ Sanity-verified ROI          │    │ Expected ROI:                │
+│  (--b-max 1 实测):           │    │  PP=4096 prefill 1.9-2.5×    │
+│  PP=128 prefill 2.44×        │    │  PP=8192 prefill 2.0-2.6×    │
+│  PP=512 prefill 3.21×        │    │  PP=16384 prefill 1.9-2.5×   │
+│  PP=128/512 decode 1.58×     │    │                              │
 └──────────────────────────────┘    └──────────────────────────────┘
                 │                                       │
                 └──────────────────┬────────────────────┘
@@ -122,74 +124,71 @@
                     └──────────────────────────┘
 ```
 
-## § 3 T1 — Scheduler Single-Request Fast Path
+## § 3 T1 — CLI Default b_max = 1
 
-### 3.1 触点
+### 3.1 设计变更 vs 原方案
 
-| 文件 | 函数 | 当前行为 | 新行为 |
-|---|---|---|---|
-| `ironmlx/src/core/scheduler.rs` | `prefill_admitted()` (≈line 815-860) | 总是构造 `[b_max=4, T_max]` padded input_ids；None rows 填 0 | If `active_count() == 1`: 构造 `[1, T_active]`，不 pad |
-| `ironmlx/src/core/scheduler.rs` | `step_inner()` (≈line 1100-1160) | 总是构造 `[b_max, 1]` last_tokens；pad rows 填 0 | If `active_count() == 1`: 构造 `[1, 1]`，不 pad |
-| `ironmlx/src/core/generate.rs` | `build_position_ids_batched()` 与相关 mask helper | 接受 b_max prompt_lens 列表 | 添加 single-row variant 或复用现有 `build_position_ids` |
-| `ironmlx/src/models/qwen3_5_moe/model.rs` | `make_cache(batch, ...)` | 已接受 batch 参数（已支持） | Caller 传 batch=1，无需改 |
+原 brainstorming Q2 选项 (a) "Scheduler 内部 runtime fast path (active_count==1 → [1, T])" 在 spec 写 plan 阶段经源码验证不可行：
 
-### 3.2 算法（伪码）
+- [ironmlx/src/core/cache/kv_cache.rs:131-138](../../../ironmlx/src/core/cache/kv_cache.rs#L131-L138) 强制 `per_row_lens.len() == self.batch as usize`，KVCache batch dim 在 `make_cache(batch, ...)` 时锁定，不可 runtime 改。
+- "active_count==1 时构造 [1, T] 但 cache 仍 [b_max, ...]" 不可行（KVCache 拒绝 batch mismatch）；要做必须 cache rebuild 跨 admit，是 architectural change。
+
+经 Boss 决策（见对话 2026-05-19）改为 **Option 1: CLI default `b_max = 4 → 1`**。`--b-max 1` sanity 已实测验证 2.44-3.21× 收益，本方案直接把这个 launch-time 配置作为 default。
+
+### 3.2 触点
+
+| 文件 | 修改 |
+|---|---|
+| `ironmlx/src/cli/serve.rs:34-35` | `#[arg(long, default_value_t = 4)] pub b_max: usize` → `default_value_t = 1` |
+| `ironmlx/src/cli/serve.rs` | 启动时 INFO log 一行 `"running with b_max={N}; for concurrent batching, use --b-max N > 1"` |
+| README / docs | 一段说明 single-request 默认优化 + multi-request 显式 opt-in 的 rationale |
+
+无 Scheduler / KVCache / forward path 改动。所有现有 b_max>1 code path 保留。
+
+### 3.3 算法
 
 ```rust
-// scheduler.rs::prefill_admitted (current B=4 padded path)
-let b = self.b_max;
-let t = max_len as usize;
-let mut flat: Vec<i32> = vec![0; b * t];
-for (row, slot) in self.slots.iter().enumerate() {
-    if let Some(state) = slot {
-        for (j, &tok) in state.prompt_ids.iter().enumerate() {
-            flat[row * t + j] = tok as i32;
-        }
-    }
-}
-let input_ids: Array = (&flat[..], &[b as i32, max_len][..]).try_into()?;
+// ironmlx/src/cli/serve.rs (current):
+#[arg(long, default_value_t = 4)]
+pub b_max: usize,
 
-// → New (T1)
-let active = self.active_count();
-let (b_effective, input_ids, position_ids, per_row_lens) = if active == 1 {
-    // single-active-row fast path
-    let slot = self.slots.iter().find_map(|s| s.as_ref()).unwrap();
-    let t_active = slot.prompt_ids.len() as i32;
-    let input_ids: Array = (&slot.prompt_ids[..], &[1, t_active][..]).try_into()?;
-    let position_ids = build_position_ids(0, t_active)?;  // 3D layout: [3, 1, T_active]
-    let per_row_lens = vec![t_active];
-    (1, input_ids, position_ids, per_row_lens)
-} else {
-    // existing B=b_max padded path (unchanged)
-    /* ... */
-    (self.b_max, padded_input_ids, padded_position_ids, padded_per_row_lens)
-};
+// → New (T1):
+#[arg(long, default_value_t = 1)]
+pub b_max: usize,
+
+// 启动时 (在 build_scheduler / state 初始化路径中):
+tracing::info!(
+    "ironmlx serve: b_max={} (single-request optimized by default; pass \
+     --b-max N > 1 to enable concurrent batching)",
+    self.b_max,
+);
 ```
 
-### 3.3 兼容性 / 不破坏点
+### 3.4 兼容性 / 不破坏点
 
-- **B=b_max padded path 完全保留**：multi-request 并发场景仍 padding。
-- **admit_mid 路径**：B1-p2.3c chunked-mid-admission 仅在 multi-active 下触发；与 fast path 互斥。
-- **MoE / Linear / GatedDeltaNet / GatedAttention forward path 不变**：仅 dispatch shape 不同（B=1 vs B=4），Model::forward_on 接受任意 batch。
-- **数值期望等价**：B=1 fast path 跑 forward 的 batch 维度从 [4, T_max] 变 [1, T_active]，但 MoE flatten 后 BS=T，与现有 GS 路径 B=1 相同 — 应 bit-level identical 或 ULP 漂移内。
+- **multi-request 用户显式 opt-in**：`ironmlx serve --b-max 4` 完全恢复之前 default 行为。
+- **Scheduler / KVCache / forward 路径完全不变**: 所有 b_max>1 invariants 保留。
+- **数值正确性**: b_max=1 是已有 code path（admit/step/forward 已支持），跟启动 `--b-max 1` 效果完全一致。
+- **multi-request batching feature 不消失**：仅 default 切换；feature 仍存在，需显式启用。
 
-### 3.4 风险与缓解
+### 3.5 风险与缓解
 
 | 风险 | 缓解 |
 |---|---|
-| Helper 函数 (`build_position_ids_batched` 等) 假设 b_max ≥ 1 row 的 invariant | 添加 unit test 验证 active=1 vs active=4 mock 在等价 prompt 下数值一致 |
-| Scheduler 状态机依赖 [b_max, T] shape 的下游 (cache index、generated_tokens 数组等) | T1 实施时严格走 `if active_count() == 1` 分支，所有数据结构 batch 维度匹配新构造的 input_ids |
-| 并发请求场景下 active_count 从 1 跳 2 时切换路径正确性 | 在 prefill_admitted 入口快照 active_count；step 也快照；分支决策不跨函数调用游走 |
+| 用户期望 default 是 batch=4 (基于历史习惯) | INFO log + README 说明，breaking change 在 CHANGELOG / release note 显式标注 |
+| 集成测试 (sweep_full) 中如有暗自依赖 default b_max=4 行为的用例 | T1 实施时显式 grep `b_max` / `b-max` references，确保 sweep_full / smoke / batched / http_smoke 测试 PASS |
+| 未来 P5g/P6 multi-request 启用时遗忘改 default 回 4 | P5g spec / Roadmap 显式记录："multi-request batching 启用后 evaluate 是否调回 default" |
 
-### 3.5 验证
+### 3.6 验证
 
 | Test | Pass criterion |
 |---|---|
-| `p5_qwen35_moe_smoke::p5b_first_token_argmax_regression_sentinel` | argmax = 11（保持） |
+| `p5_qwen35_moe_smoke::p5b_first_token_argmax_regression_sentinel` | argmax = 11 |
 | `p5_qwen35_moe_smoke::p5b_smoke_forward_shape_and_finite` | PASS |
-| `p5_qwen35_moe_batched::p5b_batched_row_equivalence` | B=2 vs B=1 per-row identical |
-| `p5_qwen35_moe_http_smoke::p5b_http_chat_smoke` | PASS |
-| iron-bench validate | PP=128 prefill ≥ 950 tok/s, PP=512 ≥ 1500 tok/s（match sanity） |
+| `p5_qwen35_moe_batched::p5b_batched_row_equivalence` | B=2 vs B=1 per-row identical (测试显式 batched 不受 default 影响) |
+| `p5_qwen35_moe_http_smoke::p5b_http_chat_smoke` | PASS (default b_max=1 下 HTTP 路径正确) |
+| 显式 `--b-max 4` 启动跑同 sentinel | PASS (multi-request path 仍 functional) |
+| iron-bench validate (default 启动) | PP=128 prefill ≥ 950 tok/s, PP=512 ≥ 1500 tok/s (match sanity) |
 
 ## § 4 T2 — GenerationStream Single-Shot When KV Budget Allows
 
@@ -329,12 +328,12 @@ P5f 改动都不动 forward 算法本身，仅改 dispatch / batching 路径。�
 
 P5f 落地的 measurable success criteria（按 prefill PP tok/s 作主代表 metric；decode/e2e 等比要求）：
 
-| PP | Current (HEAD a4249af) | T1 expected | T2 expected | omlx+10% target | P5f 完后 vs target |
+| PP | Current (HEAD a4249af, default b_max=4) | T1 expected (default b_max=1) | T2 expected | omlx+10% target | P5f 完后 vs target |
 |---:|---:|---:|---:|---:|---|
-| 128 | 390 | 950 (b_max=1 sanity) | 950 | 1197 | **79% — 留 P5g 补 26%** |
-| 512 | 491 | 1577 (b_max=1 sanity) | 1577 | 2886 | **55% — 留 P5g 补** |
-| 2048 | 1842 | 1842 (T1 不影响) | 1842 | 4649 | **40% — 留 P5g 补**（GatedDeltaNet/Attention 主战场） |
-| 4096 | 1773 | 1833 (T1 微影响) | 3500-4500 | 4861 | **72-93% — 接近 target** |
+| 128 | 390 | 950 (sanity 验证) | 950 | 1197 | **79% — 留 P5g 补 26%** |
+| 512 | 491 | 1577 (sanity 验证) | 1577 | 2886 | **55% — 留 P5g 补** |
+| 2048 | 1842 | 1842 (default 改不影响 GS 路径) | 1842 | 4649 | **40% — 留 P5g 补**（GatedDeltaNet/Attention 主战场） |
+| 4096 | 1773 | 1833 | 3500-4500 | 4861 | **72-93% — 接近 target** |
 | 8192 | 1725 | 1724 | 3500-4500 | 4687 | **74-96%** |
 | 16384 | 1548 | 1606 | 3000-4000 | 4036 | **74-99%** |
 
@@ -342,7 +341,7 @@ P5f 落地的 measurable success criteria（按 prefill PP tok/s 作主代表 me
 
 **P5f close-out 必须量化 P5g scope**: 报告里明确"剩余 gap 来自 GatedDeltaNet ?% / Attention ?% / Scheduler admission ?% / 其他 ?%"，P5g 拿到这数据后再写 spec。
 
-## § 8 P5g preview（out of P5f scope）
+## § 8 P5g preview / Future phases（out of P5f scope）
 
 P5f close-out 输出会驱动 P5g scope。当前已知候选（实施前 deps：P5f close-out 数据）：
 
@@ -355,15 +354,45 @@ P5f close-out 输出会驱动 P5g scope。当前已知候选（实施前 deps：
 4. **解耦 prefill_chunk_size 三身任**（scheduler chunk vs GS chunk vs 路由阈值）
    - 跟 (3) 一起做更顺手
 
+### Multi-request batching support (P5h / P6+，必须保留)
+
+Boss 决策（2026-05-19 brainstorming）：T1 选 Option 1 (CLI default `b_max=1`) 把 single-request
+做最优作为 default；**multi-request batching feature 不能丢失**，需在未来计划中保留：
+
+- **当前状态**：multi-request batching 已实现于 Scheduler（`--b-max N > 1` 可启用），但 default
+  从 4 → 1 后，"开箱即用"路径走 single-request。
+- **未来 phase 触发条件**：当 ironmlx 进入 multi-user / agent-fleet 场景，concurrent
+  request throughput 成为 primary metric 时，启动以下工作：
+  - 评估 default `b_max` 调整（可能根据硬件 / 模型 size 自适应）
+  - PagedCache 设计 (block-based KV，跨请求灵活分配；P5f scope 外但 P5g 之后可考虑)
+  - Ragged batching (per-token compact MoE dispatch, 跳过 pad row 的 router/topk/gather_qmm)
+  - admit_mid 路径效率 (混合长短 prompt batch 的 chunked admission)
+  - Scheduler runtime dynamic b_max (cache resize lifecycle)
+- **不丢失的承诺**：P5f close-out 报告 + 后续 phase 规划文档中必须显式列出 multi-request
+  batching 是 deferred capability，标注启用 path 与 owner，避免被遗忘。
+
+### Brainstorm process 教训（记录避免重蹈）
+
+P5f spec 经历 brainstorm Q2 提的 (a) "Scheduler 内部 runtime fast path" 在 plan 阶段经 KVCache
+源码验证不可行：`update_and_fetch_on` 强制 `per_row_lens.len() == self.batch`，导致 cache
+runtime batch 切换是 architectural change。Boss 决策回退到 Option 1 (CLI default=1)。
+
+**教训**：未来 brainstorm propose 实现选项前，应先 due-diligence 读关键源码 invariants
+（KVCache / forward_on / cache lifecycle 类）再提选项；不要狭义 framing 选项空间
+（"runtime conditional logic" vs "launch-time default" 都是合法 dimension）。
+
 ## § 9 Out of Scope / Non-Goals
 
-- 不做 PagedCache 化（不对齐 omlx 实现选择，per `feedback_design_philosophy`）
+- 不动 Scheduler / KVCache / forward path 架构（T1 仅改 CLI default 一个常量）
+- 不做 Scheduler runtime active_count==1 fast path（KVCache batch invariant 阻断；详 § 3.1）
+- 不做 router bypass for single-request idle server（条件性留 P5g）
+- 不做 PagedCache 化（不对齐 omlx 实现选择，per `feedback_design_philosophy`；multi-request 未来再评估）
 - 不做 mlx::compile wrap（P5e T2 已验证 4 个 API gap 阻断；留待"compile-everywhere"专项 task）
-- 不做 MoE pad-row skip（ragged batch path，P6 multi-request 时再考虑）
+- 不做 MoE pad-row skip / ragged batch path（multi-request batching feature 一部分，留 P5h/P6+）
 - 不做 sorted-routing 微优化（cache token_idx, put_along_axis — ROI 小 < 2%）
 - 不调整 `SORTED_ROUTING_MIN_BS_K` 阈值（512 已对齐 MLX fast-path floor，无 evidence 要改）
-- 不做 router bypass for single-request idle server（条件性留 P5g）
 - 不做 GatedDeltaNet / GatedAttention 算法优化（P5g 主战场）
+- **不删除 multi-request batching 功能**：`--b-max N > 1` 仍支持；本次仅切 default。
 
 ## § 10 Task decomposition（writing-plans 阶段细化）
 
@@ -372,31 +401,41 @@ P5f 拟拆为 **4 task**（[feedback_task_breakdown_bounded] 5-7 范围内）：
 ```
 T0: Reference baseline 数据点确认
     - 复用 reports/p5e-three-way-bench.md (HEAD a4249af) baseline
-    - 复用本次 b_max=1 sanity 实测数据
+    - 复用 2026-05-19 b_max=1 sanity 实测数据 (PP=128 951 / PP=512 1577 tok/s)
     - 如必要补一次轻量 4-way bench 确认 HEAD 未漂移
     - 输出: reports/p5f-baseline.md (引用现有 + 短 delta note)
 
-T1: Scheduler single-request fast path
-    - 改 scheduler.rs prefill_admitted (active_count==1 → [1, T])
-    - 改 scheduler.rs step_inner (active_count==1 → [1, 1])
-    - 配套 build_position_ids_batched / mask helper 调整
-    - sentinel + batched + http_smoke
-    - iron-bench validate (PP=128 ≥ 950, PP=512 ≥ 1500)
+T1: CLI default b_max = 1
+    - 改 ironmlx/src/cli/serve.rs:34-35 default_value_t = 4 → 1
+    - 启动 INFO log 一行 ("running with b_max=N; for batching use --b-max N > 1")
+    - 检查 sweep_full / 测试中是否有依赖 b_max=4 default 的隐含假设
+      → 如有，给测试显式传 --b-max 4 或测试自己配置 b_max=4
+    - sentinel + batched + http_smoke (验证 default b_max=1 不破坏)
+    - 显式 --b-max 4 跑一遍 sentinel (验证 multi-request path 仍 functional)
+    - iron-bench validate default 启动 (PP=128 ≥ 950, PP=512 ≥ 1500 tok/s)
+    - 更新 README / CHANGELOG 说明 default 切换
     - commit
 
 T2: GenerationStream single-shot when KV budget allows
-    - 添 memory_budget estimate helper
-    - 改 GS prefill loop dispatch (single-shot vs chunked branching)
-    - feasibility check (PP=16384 single-shot 内存峰值 quick verify)
-    - sentinel + new p5f_long_prompt_single_shot test + batched
-    - iron-bench validate (PP=4096+ prefill ≥ sanity estimate)
+    - 添 memory_budget estimate helper:
+        - estimate_prefill_kv_peak_bytes(model_meta, prompt_len, dtype) -> u64
+        - available_kv_budget_bytes() -> u64
+    - 改 generate.rs::GenerationStream::new_text_only prefill loop dispatch:
+        if prompt_len > prefill_chunk_size:
+            if kv_peak <= budget: single-shot forward (新)
+            else: chunked path (保留)
+    - feasibility check (PP=16384 single-shot 内存峰值 quick verify, 无 swap)
+    - sentinel + 新增 p5f_long_prompt_single_shot test (PP=4096 触发 single-shot) + batched
+    - iron-bench validate (PP=4096 prefill ≥ 3500 tok/s, PP=8192/16384 hit estimate)
     - commit
 
 T3: P5f close-out
-    - 跑同 reports/p5e-three-way-bench.md style 4-way bench
+    - 跑同 reports/p5e-three-way-bench.md style 4-way bench (ironmlx / mlx-lm / omlx)
     - 写 reports/p5f-final-results.md（self-contained for chatgpt 分析）
-    - sweep_full 19/19
-    - 量化 P5g scope (per-PP 残余 gap 归因)
+        - 含 P5f vs T0 baseline + omlx target gap table
+        - 量化 P5g scope (per-PP 残余 gap 归因: GatedDeltaNet / Attn / 其他)
+        - 显式记录 multi-request batching 是 deferred capability (P5h/P6+)
+    - sweep_full 19/19 PASS
     - commit
 ```
 
