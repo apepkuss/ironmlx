@@ -168,14 +168,46 @@ impl Drop for P5hTraceGuard {
 }
 ```
 
-The guard MUST only wrap **synchronous, no-`.await` instrumentation regions** — code blocks where the executing thread is pinned for the duration. **Nesting is forbidden** (per Codex review v9 P3): instrumentation helpers and deep model log sites are READ-ONLY against `P5H_CURRENT_TRACE`; they MUST NOT enter their own guard. The only sites that may `P5hTraceGuard::enter(...)` are the task/thread-boundary points enumerated below:
+The guard MUST only wrap **synchronous, no-`.await` instrumentation regions** — code blocks where the executing thread is pinned for the duration. **Nesting is forbidden** (per Codex review v9 P3): instrumentation helpers and deep model log sites are READ-ONLY against `P5H_CURRENT_TRACE`; they MUST NOT enter their own guard.
 
-- Around `GenerationStream::new(...)` body inside the `spawn_blocking` closure (Lane B prefill — `spawn_blocking` runs on a dedicated blocking-pool thread, no awaits inside the closure). One guard for the whole closure body.
-- Around each `sched.prefill_admitted(...)` call (scheduler actor `driver_loop` is a sync OS thread, no awaits). One guard per call.
-- Around each `sched.step(...)` call inside the same actor loop (same reasoning). One guard per call.
-- Around `format_sse(...)` + `tx.send(...)` per-iteration body in the streaming forwarder task (`tokio::spawn` body has `event_rx.recv().await` between iterations; one guard per iteration's sync body, NOT the outer task).
+**Dual emission API** (per Codex review v10 P1 #1 + P1 #2 — sync-only guard cannot cover the async/cross-task spans in the top-level tree without re-introducing the v8 thread-local-across-await unsoundness):
 
-**No other guard sites are permitted.** Deep instrumentation (GDN/GatedAttention/MoE barriers, lm_head span, sampling spans) READ the active context — they NEVER call `enter()`. The `enter()` panic-on-nest is the enforcement mechanism: a wrongly-placed inner guard fails fast at the first sweep request instead of silently clearing the outer context on `drop`.
+```rust
+// EXPLICIT-CONTEXT API — for async spans, cross-task spans, spans whose
+// start/end live on different threads. Used by: root, http_parse_render_tokenize,
+// scheduler_admission, sse_write_role_chunk, detok_format_first_content_chunk.
+// Caller passes the trace context as a value (plumbed via captures / handles).
+fn emit_p5h_span(ctx: &P5hTraceContext, record: P5hSpanRecord);
+
+// IMPLICIT-GUARD API — for deep, sync, no-`.await` instrumentation that runs
+// inside an authorized guard region (`spawn_blocking` body / `sched.prefill_admitted`
+// / `sched.step` / sync body inside forwarder iteration when used). Used by:
+// GDN entry/exit barriers, GatedAttention substeps, MoE substeps, lm_head span,
+// model_prefill_forward sub-children, gs_stream_init_and_chunk_loop sub-children,
+// gs_first_token_materialize_and_predispatch.
+// Panics if P5H_CURRENT_TRACE is None — the panic IS the guard-set/drop validation.
+fn emit_p5h_span_from_current_trace(record: P5hSpanRecord);
+```
+
+**Authorized `P5hTraceGuard::enter(...)` sites** (only these — no others permitted):
+
+- Around `GenerationStream::new(...)` body inside the `spawn_blocking` closure (Lane B prefill — `spawn_blocking` runs on a dedicated blocking-pool thread, no awaits inside this region). One guard for the chunk loop / sample-dispatch sync body.
+- Around each `sched.prefill_admitted(...)` call in the scheduler actor `driver_loop` (sync OS thread). One guard per call.
+- Around each `sched.step(...)` call inside the same actor loop. One guard per call.
+- (Lane B post-prefill) Around the sync `stream.next_token()` call inside the `spawn_blocking` body's loop iteration. One guard per iteration's sync body, NOT the outer loop.
+
+**Spans that MUST use the explicit-context API (do NOT enter a guard)**:
+
+- `server_request_recv_to_first_content_sse_write` (root) — opens in async axum handler, closes in spawned forwarder task / `spawn_blocking` body. Implementation: handler returns a `RootSpanHandle { ctx: P5hTraceContext, start_ns: u64 }`; clones this handle into both Lane-A forwarder spawn AND Lane-B blocking task; whichever path emits first-content SSE calls `root_handle.close_at(end_ns)` via the explicit API.
+- `http_parse_render_tokenize` — runs in async handler, immediately precedes `.await` calls. Uses explicit ctx (already in scope as `request.p5h_trace`).
+- `scheduler_admission` (Lane A) — wraps `cmd_tx.send(...).await + reply_rx.await` from handler to actor; the start_ns is captured in handler before the await, end_ns is captured in handler after the await; both use the same explicit ctx.
+- `sse_write_role_chunk` (Lane A and Lane B) — Lane A's `tx.send(...).await` at `openai.rs:562` is async; Lane B's `tx.blocking_send(...)` at `openai.rs:455` is sync but lives in the `spawn_blocking` body BEFORE any guard is appropriate (the closure's guard is for `GenerationStream::new(...)`, not for role-chunk emission). Use explicit ctx, captured from the spawn closure.
+- `detok_format_first_content_chunk` (Lane A and Lane B) — same reasoning. Lane A's `tx.send(...).await` at `openai.rs:589` is async; Lane B's `tx.blocking_send(...)` at `openai.rs:473` is sync but emits the root close event, which must use explicit ctx so it can be paired with the explicit RootSpanHandle.
+- `first_token_sampling` (Lane A) — happens inside `sched.prefill_admitted_inner`'s post-`batched_prefill` "three-stage dispatch" (per `scheduler.rs:784`). This IS inside the actor's `sched.prefill_admitted(...)` guard, so it CAN use the implicit API — listed here as a special case where either API works; spec recommends implicit for consistency with other actor-internal deep spans.
+
+**Rationale**: `P5H_CURRENT_TRACE` thread-local is a convenience for the bulk of instrumentation (deep model spans that run inside one of the four guard sites). Top-level spans that cross task/await boundaries plumb the context as an explicit value — never read the thread-local. This makes the unsoundness pattern Codex v8 P1 #2 caught (thread-local outliving an `.await`) structurally impossible: code that needs context across an await has no thread-local API to misuse.
+
+The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a wrongly-placed inner guard fails fast at the first sweep request instead of silently clearing the outer context on `drop`. Code that mistakenly uses `emit_p5h_span_from_current_trace` outside a guard region panics with the span name — same fail-fast discipline.
 
 **Propagation chain (explicit, no thread-local across thread/await boundaries):**
 
@@ -188,7 +220,11 @@ The guard MUST only wrap **synchronous, no-`.await` instrumentation regions** �
 
 **Async-safety rationale** (replaces v6/v7 "axum handler → scheduler driver same thread chain" claim, per Codex v8 P1 #2): Tokio worker threads may execute the same async future on different OS threads between `.await` points. `thread_local!` is not request-local OR task-local. The correct discipline is: (a) plumb the context explicitly across thread/task boundaries as a clonable value; (b) only enter the thread-local guard inside synchronous regions where the executing thread is pinned. This mirrors the pattern Tokio's own `tracing` crate uses for span attachment.
 
-**Hard-fail under `p5h-profile` + `--b-max 1`** (per Codex review v7 P3): any instrumented site that attempts to read `P5H_CURRENT_TRACE` and finds `None` MUST `panic!` with the span_name in the message (NOT silently log empty fields). T0a verifies via a logging fixture: first emitted `[p5h-profile]` record per fresh request MUST have **non-empty `request_id` AND `prompt_tokens > 0` AND `routing_path ∈ {"scheduler", "gs_chunked"}`** — if any field is missing, a guard set/drop point is wrong and the harness fails before T0a closes.
+**Hard-fail under `p5h-profile` + `--b-max 1`** (per Codex review v7 P3 + v10 P2):
+
+- Any `emit_p5h_span_from_current_trace(...)` call that reads `P5H_CURRENT_TRACE` and finds `None` MUST `panic!` with the span_name in the message — NOT silently log empty fields. This catches missing/wrong guard set/drop sites on the implicit-API path.
+- Any `emit_p5h_span(ctx, ...)` call with a default-constructed / empty `P5hTraceContext` MUST `panic!` with the span_name. This catches forgotten ctx-plumbing on the explicit-API path.
+- T0a verifies via the route-aware fixture documented in § 3 T0a — per-record field validation, route-aware schema presence check (all required top-level + root spans emitted per lane), and parent-child tree closure check. A first-record-only check is insufficient (v10 P2 — would pass even if top-level async spans never emit).
 
 **Single-active-row hard gate** (per Codex review v5 P1 #2): the design ONLY works if exactly one in-flight row exists during `prefill_admitted_inner` + any pre-content decode steps. P5h harness MUST start the server with `--b-max 1` (production default per `serve.rs:38`; P5h enforces). On `p5h-profile` feature, server panics at startup if `b_max > 1` OR if the scheduler ever observes `active_count() > 1` during a `[p5h-profile]`-emitting forward. Strict serial sweep (per memory `[feedback_serial_perf_experiments]`) also enforces only one in-flight request server-side.
 
@@ -394,7 +430,13 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
   - All guard set/drop sites live in synchronous regions per § 2.5a: `spawn_blocking` closure body (Lane B); around each `sched.prefill_admitted(...)` and `sched.step(...)` in scheduler actor (Lane A); per-iteration sync body of the streaming forwarder task (Lane A)
   - Deep instrumentation sites (GDN/GatedAttention/MoE entry/exit barriers) read `P5H_CURRENT_TRACE.with(|c| c.borrow().clone())` for `request_id` + `prompt_tokens` + `routing_path` fields
   - Server startup panic if `b_max > 1` when `p5h-profile` feature is active (single-active-row invariant)
-  - **Fixture validation** (T0a HARD GATE precondition): first emitted `[p5h-profile]` record per fresh request MUST satisfy `request_id != ""` AND `prompt_tokens > 0` AND `routing_path ∈ {"scheduler", "gs_chunked"}`. Any field empty/invalid = a guard set/drop site is missing or wrong = T0a fails before close.
+  - **Fixture validation** (T0a HARD GATE precondition, per Codex review v10 P2 — first-record-only fixture is insufficient because it would pass even when top-level async spans never emit at all):
+    - **Per-record check** (every emitted `[p5h-profile]` record, not just the first): `request_id != ""` AND `prompt_tokens > 0` AND `routing_path ∈ {"scheduler", "gs_chunked"}`. Any field empty/invalid = a guard set/drop site or explicit-context emission site is missing or wrong.
+    - **Route-aware schema presence check** (per sweep request):
+      - If `routing_path == "scheduler"` (Lane A): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, scheduler_admission, sse_write_role_chunk, model_prefill_forward, first_token_sampling, detok_format_first_content_chunk}` (plus optional `pre_content_decode_steps`). Missing any required span_name = explicit-context emission site is missing.
+      - If `routing_path == "gs_chunked"` (Lane B): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, gs_stream_init_and_chunk_loop, gs_first_token_sample_dispatch, sse_write_role_chunk, gs_first_token_materialize_and_predispatch, detok_format_first_content_chunk}` (plus optional `pre_content_decode_steps`).
+    - **Parent-child tree closure check**: aggregator reconstructs the exclusive tree from `parent_span` field per request; every `parent_span` value (other than `null` for root) MUST resolve to an emitted span_name in the same request. Orphan `parent_span` = a parent emission site is missing.
+    - Any failure = T0a fails before close (do NOT proceed to T0b / T2 / T3 / T4 with a broken schema).
 - **Request-correlation infrastructure** (per § 2.5a "Join key" — single committed path):
   - `openai.rs` (chat-completion response builder): emit `X-Ironmlx-Request-Id: <uuid>` header on streaming + non-streaming responses, gated on `p5h-profile` feature; same uuid used as `GenerateRequest.p5h_trace.request_id` and every `[p5h-profile]` log record's `request_id` field
   - `iron-bench/src/client.rs`: capture `X-Ironmlx-Request-Id` from `resp.headers()` BEFORE entering `bytes_stream()`; add `request_id: Option<String>` to `RequestResult`. Capture path gated on new CLI flag.
