@@ -120,23 +120,36 @@ P5g T4 暴露: sweep_full Qwen3.5-4B 之后跑 ironmlx serve restart, 3-way benc
 
 Schema fields are split into **server-emitted** (written into each `[p5h-profile]` log line directly by `ironmlx serve`, since server owns this data) vs **aggregator-injected** (added by T5 Python aggregator from the iron-bench client-side sweep CSV, since server has no way to know iron-bench's `--prompt-len` or warmup/measured run index without a metadata channel that v3 P2 explicitly defers out of scope). This split is per Codex review v3 P2 — without it, the server would need iron-bench header propagation, which is out of P5h scope.
 
-**`request_id` propagation through call chain** (per Codex review v5 P1 #2 — without this, deep log sites in GDN/GatedAttention/MoE cannot emit `request_id` because HTTP-layer uuid doesn't reach them today):
+**Trace context propagation through call chain** (per Codex review v5 P1 #2 + v6 P2 #3 — without this, deep log sites in GDN/GatedAttention/MoE cannot emit `request_id` or `prompt_tokens` because HTTP-layer state doesn't reach them today):
 
-1. `GenerateRequest` adds field `p5h_request_id: Option<String>` (gated by `p5h-profile` feature; default `None`). HTTP handler in `openai.rs` populates this with the same uuid sent in `X-Ironmlx-Request-Id` header.
-2. `RequestState` (in `scheduler.rs`) adds the same field; `Scheduler::admit` copies it from `GenerateRequest` at admit time.
-3. `prefill_admitted_inner` (in `scheduler.rs`), immediately before calling `model.batched_prefill(...)`, sets a `thread_local!` cell `P5H_CURRENT_REQUEST_ID: Cell<Option<&'static str>>` (or `RefCell<Option<String>>`) with the active row's `p5h_request_id`. Clears the cell on return.
-4. Deep instrumentation sites (GDN entry/exit barriers, GatedAttention substep emit, MoE substep emit) read `P5H_CURRENT_REQUEST_ID` to populate the `request_id` field on `[p5h-profile]` log lines.
+v5 originally proposed a thread-local that carried only `request_id` and was set/cleared only around `model.batched_prefill(...)`. v6 review correctly flagged two problems: (a) `first_token_sampling` + `detok_format_first_content_chunk` + `pre_content_decode_steps` spans live outside `batched_prefill` but still need `request_id` for the schema, and (b) schema also requires `prompt_tokens` per record but a request_id-only thread-local can't carry it. v7 fixes by upgrading to a full trace context:
 
-**Thread-local safety** (memory `[feedback_ffi_runtime_semantics]` caution — MLX `thread_local` encoder gotchas): the thread-local is set/cleared on the caller thread (scheduler driver thread). MLX kernel dispatch + GPU execution happen on different threads, but those threads do NOT read `P5H_CURRENT_REQUEST_ID` — only the CPU-side entry/exit barriers do (same thread as the scheduler caller). MLX `eval()` barriers are caller-side `array::wait()`, which executes back on the caller thread. No cross-thread propagation needed.
+```rust
+#[derive(Clone)]
+struct P5hTraceContext {
+    request_id: String,
+    prompt_tokens: u32,
+    routing_path: &'static str,  // "scheduler" | "gs_chunked"
+}
+thread_local! { static P5H_CURRENT_TRACE: RefCell<Option<P5hTraceContext>> = RefCell::new(None); }
+```
 
-**Single-active-row hard gate** (per Codex review v5 P1 #2): the thread-local design ONLY works if exactly one in-flight row exists during `prefill_admitted_inner`. P5h harness MUST start the server with `--b-max 1` (already P5f default; P5h enforces). On `p5h-profile` feature, server panics at startup if `b_max > 1` OR if the scheduler ever observes `active_count() > 1` during a `[p5h-profile]`-emitting forward. Strict serial sweep (per memory `[feedback_serial_perf_experiments]`) also enforces only one in-flight request server-side.
+1. `GenerateRequest` adds field `p5h_trace: Option<P5hTraceContext>` (gated by `p5h-profile` feature; default `None`). HTTP handler in `openai.rs` populates it (uuid for `request_id`, post-tokenize `prompt_ids.len()` for `prompt_tokens`, routing-decision result for `routing_path`).
+2. `RequestState` (in `scheduler.rs`) carries the same field; `Scheduler::admit` copies it from `GenerateRequest` at admit time.
+3. `P5H_CURRENT_TRACE` is set at the **root span entry** (start of `chat_completion` handler in `openai.rs`) and cleared at the **root span exit** (immediately after first non-empty content SSE write, or on error). Scope covers the ENTIRE root window — not just `batched_prefill`. This way `model_prefill_forward`, `first_token_sampling`, `pre_content_decode_steps`, `detok_format_first_content_chunk`, and any deep substep span all read the same context.
+4. Deep instrumentation sites (GDN entry/exit barriers, GatedAttention substep emit, MoE substep emit) read `P5H_CURRENT_TRACE` to populate `request_id` + `prompt_tokens` + (optionally) `routing_path` on `[p5h-profile]` log lines.
+
+**Thread-local safety** (memory `[feedback_ffi_runtime_semantics]` caution — MLX `thread_local` encoder gotchas): the thread-local is set/cleared on the request-handler thread (axum + scheduler driver). MLX kernel dispatch + GPU execution happen on different threads, but those threads do NOT read `P5H_CURRENT_TRACE` — only the CPU-side entry/exit barriers do, on the same thread chain (axum handler → scheduler driver, which is `block_on`-pinned per request under `--b-max 1`). MLX `eval()` barriers are caller-side `array::wait()`, which executes back on the caller thread. No cross-thread propagation needed. If under `b_max=1` the scheduler driver dispatches work to a different thread (e.g., spawn for streaming forwarder), the thread-local must be cloned and re-set on the new thread before any instrumented span runs — T0a implementation must verify this end-to-end via a logging fixture (first log line under a fresh request → assert context populated; if not, the thread-local crossing point is missing).
+
+**Single-active-row hard gate** (per Codex review v5 P1 #2): the thread-local design ONLY works if exactly one in-flight row exists during `prefill_admitted_inner` + any pre-content decode steps. P5h harness MUST start the server with `--b-max 1` (production default per `serve.rs:38`; P5h enforces). On `p5h-profile` feature, server panics at startup if `b_max > 1` OR if the scheduler ever observes `active_count() > 1` during a `[p5h-profile]`-emitting forward. Strict serial sweep (per memory `[feedback_serial_perf_experiments]`) also enforces only one in-flight request server-side.
 
 **Server-emitted fields** (per `[p5h-profile]` log line, written by ironmlx):
 
 | Field | Type | Semantics |
 |---|---|---|
-| `request_id` | string (uuid) | server-generated per request, T5 group-by key; populated from `P5H_CURRENT_REQUEST_ID` thread-local (see "request_id propagation" above) |
-| `prompt_tokens` | int | server-measured (post-chat-template, post-tokenize); proxy for iron-bench `--prompt-len` once correlated |
+| `request_id` | string (uuid) | server-generated per request, T5 group-by key; populated from `P5H_CURRENT_TRACE.request_id` thread-local (see "Trace context propagation" above) |
+| `routing_path` | string | "scheduler" \| "gs_chunked"; populated from `P5H_CURRENT_TRACE.routing_path` — needed so T5 can partition records into Lane A vs Lane B |
+| `prompt_tokens` | int | server-measured (post-chat-template, post-tokenize); populated from `P5H_CURRENT_TRACE.prompt_tokens`; proxy for iron-bench `--prompt-len` once correlated |
 | `seq` | int | sequence length at this forward (chunk size or 1 for decode) |
 | `layer_idx` | int | GDN/full-attn layer 0..39 (-1 for non-decoder spans) |
 | `span_name` | string | 'http_request_recv' / 'sched_admit' / 'gda_step_1a_in_proj_qkvz' / etc. |
@@ -163,7 +176,16 @@ Schema fields are split into **server-emitted** (written into each `[p5h-profile
 
 **Wallclock fallback explicitly DROPPED**: v4 listed wallclock as fallback. Codex v4 P2 correctly noted server-emitted schema had no `server_request_start_wallclock` field. Rather than add a fragile fallback, v5 makes the header path the only path. Boss memory `[feedback_iron_bench_priority]` cautions against modifying iron-bench casually — the 3 edits above are scoped, behind a new CLI flag, and ship/revert independently.
 
-**Routing precondition** (per Codex review v5 P1 #1): all root/span definitions below assume requests route through `serve_via_scheduler_stream` (per `openai.rs:407`). However `openai.rs:404` routes `prompt_len > prefill_chunk_size` requests to `serve_via_gs_stream` (chunked GenerationStream path) — and default `--prefill-chunk-size = 2048` means PP ∈ {4096, 8192, 16384} (the long-PP segments where P5g measured the largest omlx gap) would silently take the GS path under default server config, producing measurements that do NOT match the schema below. **P5h harness MUST start the server with `--prefill-chunk-size 0` to force ALL sweep PPs through the scheduler path**; T0a profile gate validates per-PP routing (e.g., asserts `serve_via_scheduler_stream` was hit via tracing span). Chunked GS path attribution is **out of scope for P5h** (deferred to P5h+1; would require separate schema with `chunk_idx` since chunked prefill emits the same span name multiple times per request — see § 6).
+**Routing precondition — dual-lane design** (per Codex review v5 P1 #1 + v6 P1 fact-check):
+
+v5 proposed forcing `--prefill-chunk-size 0` to keep all PP on the scheduler path. v6 review correctly flagged this would divorce P5h from the production-default config (P5g actually measured the long-PP gap on the chunked GS path — see `reports/p5g-final-results.md:62`: "PP=4096 → 3 chunks (two 2048 + one 12); PP=16384 → 9 chunks"). Forcing single-shot would test a config production users never hit, and the resulting attribution would not transfer to the default-config gap that motivates P5h.
+
+v7 switches to **dual-lane with production-default server config preserved** (no `--prefill-chunk-size` override):
+
+- **Lane A — Scheduler path, PP ≤ default `prefill_chunk_size` (2048)**: PP ∈ {128, 512, 2048} routes through `serve_via_scheduler_stream` (per `openai.rs:404` — `prompt_len <= prefill_chunk_size` predicate). Full § 2.5a deep substep attribution applies (GDN/GatedAttention/MoE substep breakdown via wrapper spans `attention_path`/`mlp_path`). T0a/T1/T2/T3/T4 deep instrumentation is meaningful on this lane.
+- **Lane B — Chunked GS path, PP > default `prefill_chunk_size`**: PP ∈ {4096, 8192, 16384} routes through `serve_via_gs_stream` (per `openai.rs:408`). Each request emits N chunks (PP=4096 → 3 chunks, PP=16384 → 9 chunks). P5h covers ONLY top-level chunked-path attribution: server-side root + chunk loop wall-time + per-chunk forward total + first-token sampling + sse_write. Deep substep attribution (per-chunk GDN/GatedAttention/MoE breakdown, with `chunk_idx` schema extension) is **out of scope for P5h** (deferred to P5h+1) — would multiply records per request by N and require schema additions.
+
+T0a profile gate validates per-PP routing via a `routing_path: "scheduler" | "gs_chunked"` annotation on the root span; T5 aggregator partitions output into two attribution tables (Lane A deep, Lane B top-level). Long-PP P5j candidate ranking comes with explicit caveat: P5j ROI estimates on PP > 2048 are bounded by Lane-B granularity; if a P5j candidate needs per-substep evidence at long PP, P5h+1 chunked deep-attribution must run first.
 
 **Server-only root** (per Codex review v2 P1 #2 + v3 P1 fact-check; iron-bench TTFT cross-process correlation deferred — would require iron-bench → ironmlx request-id propagation, out of P5h scope):
 
@@ -173,15 +195,30 @@ Schema fields are split into **server-emitted** (written into each `[p5h-profile
 - **Implementation note**: the `detok_format_first_content_chunk` span should still record `finish_reason_present: bool` as an annotation (useful diagnostic), but this annotation does NOT gate root closure.
 - **Client transport residual** is computed as a SEPARATE diagnostic: `client_transport_residual_us = iron_bench_ttft_us - server_root_inclusive_us`. Not part of the exclusive tree; reported alongside in `reports/p5h-attribution.md` as a transport-overhead column.
 
-**Top-level buckets under `server_request_recv_to_first_content_sse_write`** (mutually exclusive children):
+**Top-level buckets under `server_request_recv_to_first_content_sse_write`** (mutually exclusive children; Lane-A scheduler-path schema — Lane-B chunked-GS schema in the dedicated subsection below):
 
 1. `http_parse_render_tokenize` (server-side request parsing + chat template + tokenizer Encode)
 2. `scheduler_admission` (admit queue + slot allocation + batch construction; ends at `AdmitReply` send)
 3. `sse_write_role_chunk` (forwarder spawn + initial role chunk write; happens before prefill in current `openai.rs` flow)
 4. `model_prefill_forward` (the full `model.batched_prefill(...)` call — embed + 40 decoder layers + final norm + `slice_last_and_project` lm_head; per `qwen3_5_moe/model.rs::batched_prefill` lines 240-258, this single call covers everything through producing first-token logits)
 5. `first_token_sampling` (per-row sampler invocation after `batched_prefill` returns; per `scheduler.rs::prefill_admitted_inner` "three-stage dispatch")
-6. `detok_format_first_content_chunk` (detok stream step + ChunkResponse serialize + first content SSE write)
-7. `unattributed_server_root` (explicit residual leaf — see "Residual leaves" below)
+6. `pre_content_decode_steps` (per Codex review v6 P2 #2 — if detok returns `Ok(None)` or empty string for the first prefill token, server does not send a content chunk yet and iron-bench does not record TTFT; scheduler may then run additional `Scheduler::step()` decode forwards + sample + detok until detok yields a non-empty string. This bucket covers all such pre-first-content decode iterations. Expected `inclusive_us == 0` for well-formed benchmark prompts where the first prefill token detokenizes to a visible character; if non-zero, T0a/T5 must surface it.)
+7. `detok_format_first_content_chunk` (detok stream step + ChunkResponse serialize + first content SSE write — for the iteration that actually produces non-empty content, whether that came from prefill or from a pre-content decode step)
+8. `unattributed_server_root` (explicit residual leaf — see "Residual leaves" below)
+
+**Lane-B chunked-GS top-level buckets** (per "Routing precondition" — PP > `prefill_chunk_size`):
+
+Lane-B uses a shallower tree (no deep substep nesting in P5h; deferred to P5h+1). Children of `server_request_recv_to_first_content_sse_write` under Lane B:
+
+1. `http_parse_render_tokenize` (same as Lane A)
+2. `sse_write_role_chunk` (GS path also issues a role chunk; same as Lane A)
+3. `gs_chunk_loop` (the chunked prefill loop in `serve_via_gs_stream`; emits one `gs_chunk_N` child per chunk where each child covers `[forward + cache update + (final chunk: lm_head)]`. Number of chunks = `ceil(prompt_len / prefill_chunk_size)` + tokenizer trailing chunk if any. No deeper attribution emitted in P5h.)
+4. `first_token_sampling` (post-final-chunk sampler invocation)
+5. `pre_content_decode_steps` (same semantics as Lane A bucket 6)
+6. `detok_format_first_content_chunk` (same as Lane A)
+7. `unattributed_server_root` (residual leaf)
+
+**T0a/T5 gate for pre_content_decode_steps**: per Codex review v6 P2 #2, every measured request MUST satisfy `pre_content_decode_steps.inclusive_us < 1ms` (within noise of "first prefill token detokenized to non-empty string"). If any sweep cell shows non-trivial pre-content decode time, T0a flags it before T0b dispatches; T5 close-out reports the count + investigates whether benchmark prompts need adjustment OR whether instrumentation needs to subdivide this bucket.
 
 **`model_prefill_forward` children** (mutually exclusive; matches `batched_prefill` call chain):
 - `embed_lookup` (token id → hidden_states; `text.embed_on(...)`)
@@ -267,14 +304,32 @@ P5g flagged 4 个 hypothesis:
 Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema infra + UMA hardening + 4 Phase D investigations + GDN rerun). **Codex recommends active split into T0a + T0b execution checkpoint**, not passive "sprawl-only-then-split" note. T0a proves trace schema works on a known component (GDN) before any Phase D investigation. If T0a's exclusive coverage gate fails on the GDN rerun alone, the schema is broken and Phase D investigations would emit non-schema records — wasted work.
 
 - Branch verify + Cargo feature `p5h-profile` add (alongside `p5g-profile`, both can be on simultaneously)
-- **Harness server-launch contract** (per Codex review v5 P1 #1): all P5h sweep server processes MUST launch with `--prefill-chunk-size 0 --b-max 1` to (a) route all PP through `serve_via_scheduler_stream` per `openai.rs:404` (default `--prefill-chunk-size=2048` would otherwise silently fall back to GS path for PP > 2048, breaking schema), and (b) ensure single-active-row precondition for thread-local request_id propagation (see § 2.5a). Harness CLI helper exports `IRONMLX_P5H_SERVER_FLAGS="--prefill-chunk-size 0 --b-max 1 --features p5h-profile"` for reuse. T0a profile gate asserts per-PP that `serve_via_scheduler_stream` (NOT `serve_via_gs_stream`) handled the request — emit a `routing_path_validation` annotation; orphan = fail.
+- **Harness server-launch contract** (per Codex review v5 P1 #1 + v6 P1 dual-lane revision + v6 P2 #4 env-var split): all P5h sweep server processes MUST launch with **production-default `--prefill-chunk-size`** (do NOT override to 0 — v6 P1 showed this would divorce P5h from the config production users actually run). Single-active-row precondition is enforced via `--b-max 1` (also production default per `serve.rs:38`). The `p5h-profile` feature is a **Cargo build flag**, not a `serve` runtime flag (per Codex v6 P2 #4 — `serve.rs` has no `--features` arg). Harness exports two distinct env vars:
+
+  ```bash
+  # Cargo build-time features (controls compilation, gates p5h-profile instrumentation)
+  IRONMLX_P5H_CARGO_FEATURES="p5h-profile"
+
+  # Server runtime flags (do NOT include --prefill-chunk-size override; default 2048 is the production lane boundary)
+  IRONMLX_P5H_SERVER_FLAGS="--b-max 1"
+  # Add other production-default flags here only if a sweep needs to vary them (do not change for baseline P5h)
+
+  MLX_DIR=$HOME/.local/mlx cargo run --release \
+      --features "$IRONMLX_P5H_CARGO_FEATURES" \
+      -p ironmlx -- serve $IRONMLX_P5H_SERVER_FLAGS \
+      --model "$IRONMLX_MOE_MODEL_DIR" \
+      --port 8080
+  ```
+
+  T0a profile gate annotates every root span with `routing_path: "scheduler" | "gs_chunked"` so T5 can partition records into Lane A (PP ≤ chunk_size — full deep attribution) vs Lane B (PP > chunk_size — top-level only). Any routing mismatch (e.g., PP=2048 expected scheduler but observed gs_chunked) fails the per-PP gate.
 - **Exclusive span schema infrastructure** per § 2.5a — Rust span tracker + log emission format follows the § 2.5a **server-emitted fields** table (single source of truth; do NOT restate field list here — per Codex review v4 P3, restating drifted in v3/v4). Specifically, server emits `request_id / prompt_tokens / seq / layer_idx / span_name / parent_span / start_ns / end_ns / mode` per record. `pp` and `run_id` are NOT server-emitted — they are aggregator-injected from iron-bench CSV (per § 2.5a aggregator-injected fields table).
 - Python aggregator computes `exclusive_us = inclusive_us - sum(children_us)`; assert sum-to-root invariant + per-span `exclusive_us ≥ -1µs`
-- **request_id propagation infrastructure** (per § 2.5a "request_id propagation through call chain" — required for deep model log sites to emit `request_id`):
-  - `GenerateRequest` (in `core/generate.rs`): add `p5h_request_id: Option<String>`, gated on `p5h-profile` feature
+- **Trace context propagation infrastructure** (per § 2.5a "Trace context propagation through call chain" — required for deep model log sites AND post-prefill spans to emit `request_id` + `prompt_tokens` + `routing_path`):
+  - `GenerateRequest` (in `core/generate.rs`): add `p5h_trace: Option<P5hTraceContext>`, gated on `p5h-profile` feature; struct has `request_id` + `prompt_tokens` + `routing_path`
   - `RequestState` (in `core/scheduler.rs`): add same field; `Scheduler::admit` copies from `GenerateRequest`
-  - `prefill_admitted_inner`: set/clear `P5H_CURRENT_REQUEST_ID` thread-local around the `model.batched_prefill(...)` call
-  - Deep instrumentation sites (GDN/GatedAttention/MoE entry/exit barriers) read the thread-local for `request_id` field on `[p5h-profile]` log lines
+  - `openai.rs` `chat_completion` handler (root span entry): set `P5H_CURRENT_TRACE` thread-local immediately on request entry; clear on root span exit (after first non-empty content SSE write OR on error). Scope covers ENTIRE root window (not just `batched_prefill`) — per v6 P2 #3 fix, this lets `first_token_sampling` / `pre_content_decode_steps` / `detok_format_first_content_chunk` spans also populate the context fields
+  - If root handler dispatches to additional threads (e.g., scheduler driver `block_on`, streaming forwarder spawn), the trace context must be cloned + re-set on the new thread before any instrumented span runs. T0a verifies this via a logging fixture: first emitted `[p5h-profile]` record under a fresh request MUST have non-empty `request_id`; if any record's `request_id` is empty, the cross-thread propagation is missing
+  - Deep instrumentation sites (GDN/GatedAttention/MoE entry/exit barriers) read the thread-local for `request_id` + `prompt_tokens` + `routing_path` fields on `[p5h-profile]` log lines
   - Server startup panic if `b_max > 1` when `p5h-profile` feature is active (single-active-row invariant)
 - **Request-correlation infrastructure** (per § 2.5a "Join key" — single committed path):
   - `openai.rs` (chat-completion response builder): emit `X-Ironmlx-Request-Id: <uuid>` header on streaming + non-streaming responses, gated on `p5h-profile` feature; same uuid used as the `request_id` field in `GenerateRequest.p5h_request_id` + every `[p5h-profile]` log record
@@ -454,8 +509,8 @@ P5h 不引入新 numerical correctness 风险 (measure-only, no algorithmic chan
 - GDN Step 7 `gated_delta_step` Metal kernel rewrite (P5g § 4.1 Scope gate trigger, P5j candidate driver)
 - Step 8 out_proj kernel optimization (same family, P5j companion)
 - Multi-request batching default change (`--b-max 1` 保留 P5f shipped config)
-- **Chunked GS path (`serve_via_gs_stream`) attribution** (per Codex review v5 P1 #1 + § 2.5a routing precondition): P5h forces `--prefill-chunk-size 0` so all PP route through `serve_via_scheduler_stream`. Chunked prefill emits each span multiple times per request (one per chunk), requiring a `chunk_idx` schema field + chunk-tree extension to § 2.5a. Deferred to P5h+1 if production-config chunked-path attribution is needed.
-- **Multi-row in-flight attribution** (per § 2.5a "Single-active-row hard gate"): `P5H_CURRENT_REQUEST_ID` thread-local design assumes exactly one active row. Multi-row attribution would need per-row mlx::Stream / per-row span context; out of P5h scope.
+- **Chunked GS path (`serve_via_gs_stream`) DEEP substep attribution** (per Codex review v6 P1 — v7 keeps production-default `--prefill-chunk-size`, so PP > 2048 routes through GS chunked path as Lane B; Lane B measures top-level only). Per-substep GDN/GatedAttention/MoE breakdown under chunked path requires a `chunk_idx` schema extension (each substep span emits N times per request) plus chunked-tree extension to § 2.5a. Deferred to P5h+1 if Lane B top-level results show a long-PP P5j candidate needs per-substep evidence.
+- **Multi-row in-flight attribution** (per § 2.5a "Single-active-row hard gate"): `P5H_CURRENT_TRACE` thread-local design assumes exactly one active row. Multi-row attribution would need per-row mlx::Stream / per-row span context; out of P5h scope.
 - prefill_chunk_size sweep (becomes P5j candidate if T2 GatedAttention long-PP O(S²) supports it)
 - omlx PagedCache style port (out per memory `[feedback_design_philosophy]`)
 - mlx::compile wrap (still blocked by 4 safe-wrapper API gaps from P5e T2)
