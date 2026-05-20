@@ -1,6 +1,0 @@
-# Raw bench artifacts (re-creatable from source code + procedure in the
-# corresponding *.md report). Markdown reports remain tracked.
-p5d-*.json
-p5d-*.log
-p5d-*/
-p5e-three-way-bench/

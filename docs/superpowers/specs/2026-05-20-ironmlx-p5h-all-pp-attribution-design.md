@@ -468,8 +468,5 @@ P5h 整体 success = all 9 gates PASS, output (attribution report + P5i/P5j cand
 - P5g findings memory: `/Users/xin/.claude/projects/-Users-xin-workspace-ironmlx-backend/memory/project_p5g_findings.md`
 - P5g design spec: `docs/superpowers/specs/2026-05-20-ironmlx-p5g-gated-delta-net-design.md` (§ 4.1a / § 7.1a / § 7.2 post-T0 amendments)
 - P5g implementation plan: `docs/superpowers/plans/2026-05-20-ironmlx-p5g-gated-delta-net.md`
-- Codex review v1 of this spec: `reports/p5h-all-pp-attribution-design-review.md`
-- Codex review v2 of this spec: `reports/p5h-all-pp-attribution-design-review-v2.md`
-- Codex review v3 of this spec: `reports/p5h-all-pp-attribution-design-review-v3.md`
 - Boss memory: `[feedback_design_rigor]`, `[feedback_serial_perf_experiments]`, `[feedback_no_spec_from_competitors]`, `[feedback_performance_stability_priority]`, `[feedback_design_philosophy]`, `[feedback_task_breakdown_bounded]`, `[feedback_iron_bench_priority]`, `[feedback_no_unnecessary_docs]`
 - Reusable infra from P5g: `ironmlx/tests/p5g_t0_gated_delta_profile.rs` (HTTP-path harness), `ironmlx/src/main.rs` (tracing→stderr fix), `/tmp/p5g-env.sh` pattern
