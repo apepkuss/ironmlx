@@ -19,17 +19,25 @@
 **Required at the top of every bash block in this plan:**
 
 ```bash
-set -o pipefail
+set -euo pipefail
 ```
 
-Reason: many validation blocks use `<cmd> 2>&1 | tail -N` to surface only the last few output lines. Without `pipefail`, a failing `<cmd>` whose stderr piped into `tail` returns 0 — silently masking build / clippy / test failures. With `pipefail`, the pipeline returns the first non-zero exit code, so a cargo failure surfaces correctly.
+Three flags, in order:
 
-If a step explicitly does NOT want `pipefail` (none in this plan), say so inline.
+- `-e` — exit on any command failure. A bare `cargo run ... > file.json` that exits non-zero will now halt the block instead of silently rolling into a `kill / sleep / loop` cleanup that masks the failure.
+- `-u` — treat unset variable expansion as a failure. Catches typos like `$REPo` or `$IRONMLX_MOE_DIR` (when the actual name is `$IRONMLX_MOE_MODEL_DIR`) at the line they occur rather than after they cascade.
+- `-o pipefail` — pipeline returns the first non-zero exit. `cargo build ... 2>&1 | tail -3` no longer masks build failures behind `tail`'s exit 0.
+
+**Cleanup invariant:** any cleanup command that is *allowed to fail* (process already gone, port already free, etc.) MUST explicitly suffix with `|| true`. Example: `kill $SERVER_PID 2>/dev/null || true`. Without this, `set -e` will abort the cleanup midway.
+
+**Server processes:** every block that backgrounds a server captures `$PID=$!` and immediately installs `trap 'kill ${PID:-} 2>/dev/null || true' EXIT` on the next line. The trap ensures the server is killed on ANY exit — graceful, error, or signal — not only the explicit `kill` at the end of the block.
+
+If a step explicitly does NOT want `set -e` (none in this plan), say so inline and use `set -uo pipefail` only.
 
 ### Repo + rival paths (capture at session start)
 
 ```bash
-set -o pipefail
+set -euo pipefail
 REPO="$(git -C "$(pwd)" rev-parse --show-toplevel)"
 cd "$REPO"
 RIVALS_DIR="${RIVALS_DIR:-/Users/xin/workspace/iron-rivals}"
@@ -64,7 +72,7 @@ Expected: includes `d864e6e docs(p5g): seventh-round review-driven spec polish` 
 
 Run:
 ```bash
-set -o pipefail
+set -euo pipefail
 MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx 2>&1 | tee /tmp/p5g-preflight-build.log
 tail -3 /tmp/p5g-preflight-build.log
 ```
@@ -74,14 +82,14 @@ Expected: `Finished release profile [optimized] target(s)`, 0 Rust warnings (mlx
 
 Run:
 ```bash
-set -o pipefail
+set -euo pipefail
 ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/ | head -1
 ```
 Expected: outputs `1e20fd8d42056f870933bf98ca6211024744f7ec`.
 
 Capture for the rest of the plan:
 ```bash
-set -o pipefail
+set -euo pipefail
 export IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/ | head -1)
 ```
 
@@ -89,14 +97,14 @@ export IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/models--mlx-community--Qwen3.5-35
 
 Run:
 ```bash
-set -o pipefail
+set -euo pipefail
 ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/ | head -1
 ```
 Expected: outputs `32f3e8ecf65426fc3306969496342d504bfa13f3` or similar.
 
 Capture:
 ```bash
-set -o pipefail
+set -euo pipefail
 export QWEN35_MODEL=~/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/ | head -1)
 ```
 
@@ -142,7 +150,7 @@ p5g-profile = []
 
 - [ ] Apply Edit. Verify:
 ```bash
-set -o pipefail
+set -euo pipefail
 grep -A4 "^\[features\]" "$REPO/ironmlx/Cargo.toml"
 ```
 Expected output includes `p5g-profile = []` line.
@@ -292,14 +300,14 @@ Self {
 
 Run:
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO" && MLX_DIR=$HOME/.local/mlx cargo build --release --features p5g-profile -p ironmlx 2>&1 | tail -5
 ```
 Expected: `Finished release profile`. If "missing field profile_layer_idx" error → re-check Steps 0.4-0.5.
 
 Also confirm default build (no feature) still green:
 ```bash
-set -o pipefail
+set -euo pipefail
 MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx 2>&1 | tail -3
 ```
 Expected: Finished.
@@ -449,7 +457,7 @@ Ok(out)
 - [ ] Apply the three Edits. Build with feature (pipefail set to ensure cargo failures surface):
 
 ```bash
-set -o pipefail
+set -euo pipefail
 MLX_DIR=$HOME/.local/mlx cargo build --release --features p5g-profile -p ironmlx 2>&1 | tee /tmp/p5g-build-step07.log
 tail -10 /tmp/p5g-build-step07.log
 ```
@@ -460,7 +468,7 @@ Expected: `Finished release profile`. On compile error, re-verify line numbers �
 
 Run:
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 cargo fmt
 cargo +nightly fmt --all -- --check 2>&1 | tail -3
@@ -474,7 +482,7 @@ Expected: fmt clean, clippy 0 Rust warnings, release build PASS.
 This confirms profile feature is truly gated — default build behavior unchanged.
 
 ```bash
-set -o pipefail
+set -euo pipefail
 export IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/ | head -1)
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --test p5_qwen35_moe_smoke -- --ignored --test-threads=1 2>&1 | tail -10
@@ -486,7 +494,7 @@ Expected: smoke 2/2 PASS (argmax=11), batched 1/1 PASS, http_smoke 1/1 PASS.
 ### Step 0.10: Commit instrumentation infrastructure
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 git add ironmlx/Cargo.toml ironmlx/src/nn/gated_delta_net.rs
 git commit -m "$(cat <<'EOF'
@@ -561,24 +569,64 @@ let mut _p5g_step_elapsed: Vec<u64> = if matches!(profile_mode(), ProfileMode::L
 };
 ```
 
-At the exit log emit (Step 0.7's exit block), if `mode == Layer2`, also format `step_breakdown=` from `_p5g_step_elapsed`. The same `mode.as_str()` rule applies (no `{mode:?}` — must round-trip with env var):
+**`step_breakdown` MUST be appended to Step 0.7's single-line log as an additional whitespace-separated `key=value` field — NEVER emitted as a separate `tracing::info!` call.** Two separate log lines per layer would force the Step 0.14 harness to pair records by (layer, sequence-number) heuristic, which is fragile under interleaved logging. One line per forward = one record per forward = unambiguous per-PP attribution.
+
+Required Edit to Step 0.7's exit block — extend the existing `tracing::info!(...)` call with a conditional `step_breakdown=` segment. Concrete shape (Layer 1 fields + optional Layer 2 suffix):
 
 ```rust
 #[cfg(feature = "p5g-profile")]
-if matches!(mode, ProfileMode::Layer2) && !_p5g_step_elapsed.is_empty() {
-    let breakdown: Vec<String> = _p5g_step_elapsed.iter().map(|us| us.to_string()).collect();
-    tracing::info!(
-        "[p5g-profile] mode={} layer={} step_breakdown={}",
-        mode.as_str(), layer, breakdown.join(",")
-    );
+{
+    if let Some((mode, start)) = _p5g_timer_start {
+        // ... existing entry/exit eval barriers + offset_before/after captures ...
+
+        // Build the step_breakdown suffix iff mode == Layer2. Empty string in
+        // other modes so the log line is unchanged for Layer 1 / ablate-*.
+        let breakdown_suffix = if matches!(mode, ProfileMode::Layer2) && !_p5g_step_elapsed.is_empty() {
+            let csv: Vec<String> = _p5g_step_elapsed.iter().map(|us| us.to_string()).collect();
+            format!(" step_breakdown={}", csv.join(","))
+        } else {
+            String::new()
+        };
+
+        tracing::info!(
+            "[p5g-profile] mode={} layer={} batch={} seq={} \
+             offset_before={} offset_after={} elapsed_us={}{}",
+            mode.as_str(), layer, batch_dim, seq_dim,
+            offset_before, offset_after, elapsed_us,
+            breakdown_suffix
+        );
+    }
 }
 ```
 
-Preferred: extend Step 0.7's single-line log to include `step_breakdown=` as an additional whitespace-separated `key=value` field when `mode == Layer2`. This keeps the parser logic (Step 0.14 harness) uniform — one record per forward call, all fields on one line — instead of needing to associate paired log lines per layer.
+Result per forward (Layer 1 mode):
+```
+[p5g-profile] mode=layer1 layer=12 batch=1 seq=2048 offset_before=0 offset_after=2048 elapsed_us=15301
+```
+
+Result per forward (Layer 2 mode, all fields preserved + step_breakdown appended):
+```
+[p5g-profile] mode=layer2 layer=12 batch=1 seq=2048 offset_before=0 offset_after=2048 elapsed_us=25103 step_breakdown=1200,3500,500,8200,300,1100,200,4000,200,5200,700
+```
+
+The 11 step labels (matching Step 0.14 harness `STEP_NAMES` and spec § 1.3 order):
+1. `1a_in_proj_qkvz` — Linear projection q/k/v/z
+2. `1b_in_proj_ba` — Linear projection b/a
+3. `2a_concat` — concatenate(conv_state, qkv) along time axis
+4. `2b_conv1d_silu` — depthwise Conv1d + SiLU
+5. `2c_update_conv` — slice last (kernel-1) rows back to cache.conv_state
+6. `3_split` — per-head reshape of q/k/v/z
+7. `4_qk_rmsnorm` — RmsNorm(no weight) + scale on q/k
+8. `5_compute_g` — exp(-exp(a_log) * softplus(a + dt_bias))
+9. `6_beta` — sigmoid(b)
+10. `7_kernel` — gated_delta_step Metal kernel dispatch (covers 7a-7e collectively)
+11. `8_norm_proj` — RmsNormGated(y, z) + reshape + out_proj
+
+`_p5g_step_elapsed.push(...)` must be invoked exactly 11 times in `forward_on` body, in the order above. Tests (Step 0.15) implicitly verify: Phase C aggregator expects `step_breakdown.split(",")` length == 11 and skips records with mismatched length, logging a naming-drift warning.
 
 - [ ] Apply Edits. Identify 8 step boundaries in the existing forward_on body and insert the timer captures. Build:
 ```bash
-set -o pipefail
+set -euo pipefail
 MLX_DIR=$HOME/.local/mlx cargo build --release --features p5g-profile -p ironmlx 2>&1 | tail -3
 ```
 Expected: Finished.
@@ -589,13 +637,37 @@ For each Layer 3 candidate, the substitute must produce a same-shape / same-dtyp
 
 - **ablate-compute-g** (Step 5): instead of `exp(-exp(A_log) * softplus(a + dt_bias))`, return `zeros_like(a)` cast to the right dtype. Output shape `[BS, num_v_heads]` (or whatever Step 5's normal output is).
 - **ablate-conv** (Step 2a-c): instead of `concatenate(conv_state, qkv) → conv1d → silu` chain, return `qkv` directly (shape-preserving — qkv already matches the output shape of conv1d in this path).
-- **ablate-t-arr** (Step 7c): instead of constructing `t_arr` from `(seq,).try_into()`, use a pre-allocated cached const Array (e.g., a `OnceLock<Array>` keyed by chunk_size).
+- **ablate-t-arr** (Step 7c): instead of constructing `t_arr` from `(seq,).try_into()` per call, look up a cached Array keyed by `seq`. `OnceLock<T>` only stores ONE `T`, so the structure must be `OnceLock<Mutex<HashMap<i32, Array>>>` (matches Step 1.2 C4 t_arr promote template — same cache structure, just gated by `ProfileMode::AblateTArr` for the ablation). Concrete shape:
+
+```rust
+// Module-level (gated):
+#[cfg(feature = "p5g-profile")]
+static T_ARR_ABLATION_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, Array>>> =
+    std::sync::OnceLock::new();
+
+// In forward_on Step 7c, branched by mode:
+#[cfg(feature = "p5g-profile")]
+let t_arr = if matches!(profile_mode(), ProfileMode::AblateTArr) {
+    let cache = T_ARR_ABLATION_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    if let Some(arr) = guard.get(&seq) {
+        arr.clone()
+    } else {
+        let arr: Array = ((seq,), ()).try_into()?;
+        guard.insert(seq, arr.clone());
+        arr
+    }
+} else {
+    ((seq,), ()).try_into()?
+};
+```
 
 Each gated by `matches!(profile_mode(), ProfileMode::AblateX)` branches in the appropriate step.
 
 - [ ] Apply Edits. For each candidate, add an `if matches!(profile_mode(), ProfileMode::AblateX)` branch in the matching step that returns the substitute. Build to verify:
 ```bash
-set -o pipefail
+set -euo pipefail
 MLX_DIR=$HOME/.local/mlx cargo build --release --features p5g-profile -p ironmlx 2>&1 | tail -3
 ```
 Expected: Finished.
@@ -603,7 +675,7 @@ Expected: Finished.
 ### Step 0.13: Commit Layer 2 + ablation instrumentation
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 git add ironmlx/src/nn/gated_delta_net.rs
 git commit -m "$(cat <<'EOF'
@@ -620,7 +692,7 @@ Extends p5g-profile instrumentation with:
   - ablate-conv: replace Step 2a-c chain with qkv passthrough
     (shape-preserving; conv kernel skipped).
   - ablate-t-arr: bypass per-call t_arr construction with cached
-    OnceLock<Array> keyed by chunk_size.
+    OnceLock<Mutex<HashMap<i32, Array>>> keyed by seq (chunk size).
 
 Each ablation is shape-preserving (downstream consumers see the
 same Array shape/dtype), giving Layer 3 an upper bound on per-step
@@ -660,9 +732,11 @@ Dependencies already available: `serde_json = "1"` in `ironmlx/Cargo.toml` (regu
 //!   /tmp/p5g-t0-phases.json — full parsed phase data for Step 0.18 report writing.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -673,6 +747,12 @@ const RUNS: usize = 3;
 const PROFILE_PORT: u16 = 18080;
 
 const ABLATION_MODES: [&str; 3] = ["ablate-compute-g", "ablate-conv", "ablate-t-arr"];
+
+/// Time given to the stderr drainer to flush log lines emitted up through the
+/// last iron-bench request before we snapshot per-PP buffer position. 500 ms
+/// is empirically generous — `tracing::info!` flushes on every emit and the
+/// drainer is line-oriented so a single line is sub-ms.
+const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 fn snapshot_dir() -> String {
     std::env::var("IRONMLX_MOE_MODEL_DIR").expect("set IRONMLX_MOE_MODEL_DIR env var")
@@ -770,12 +850,12 @@ fn wait_for_ready(port: u16, max_seconds: u64) {
     }
 }
 
-/// Parse `[p5g-profile]` log lines from server stderr.
+/// Parse `[p5g-profile]` log lines from a stderr byte slice.
 /// Each line example (Layer 1):
 ///   [p5g-profile] mode=layer1 layer=12 batch=1 seq=2048 offset_before=4096 offset_after=6144 elapsed_us=15301
-/// Layer 2 additionally has: step_breakdown=us1,us2,us3,...
+/// Layer 2 additionally has: step_breakdown=us1,us2,us3,...  (single-line append — spec § Step 0.11).
 /// Returns one record (k=v map) per matched line. `mode` value is the env-name
-/// (`layer1` / `layer2`), NOT the Debug form — ProfileMode::as_str() guarantees.
+/// (`layer1` / `layer2`), NOT the Debug form — `ProfileMode::as_str()` guarantees.
 fn parse_profile_log(stderr_bytes: &[u8]) -> Vec<BTreeMap<String, String>> {
     let mut records = Vec::new();
     for line in BufReader::new(stderr_bytes).lines().filter_map(|l| l.ok()) {
@@ -792,53 +872,93 @@ fn parse_profile_log(stderr_bytes: &[u8]) -> Vec<BTreeMap<String, String>> {
     records
 }
 
-/// Sweep across PP_LIST against an already-spawned server, return per-PP median pp_tps.
-fn run_pp_sweep(model_dir: &str, port: u16) -> BTreeMap<i32, f64> {
-    let mut result: BTreeMap<i32, f64> = BTreeMap::new();
+/// Per-PP profile result: median pp_tps + records emitted during that PP's bench window only.
+#[derive(Default, serde::Serialize)]
+struct PpProfile {
+    pp_tps_median: f64,
+    records: Vec<BTreeMap<String, String>>,
+}
+
+/// Spawn a line-by-line stderr drainer thread. Returns the shared buffer + the
+/// thread handle. Drainer terminates only on stderr EOF (server.kill / exit).
+fn spawn_stderr_drainer(server: &mut Child) -> (Arc<Mutex<Vec<u8>>>, JoinHandle<()>) {
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let handle = server.stderr.take().expect("server stderr");
+    let buf_clone = Arc::clone(&stderr_buf);
+    let drainer = std::thread::spawn(move || {
+        let mut rdr = BufReader::new(handle);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match rdr.read_line(&mut line) {
+                Ok(0) => break, // EOF (server exited)
+                Ok(_) => buf_clone.lock().unwrap().extend_from_slice(line.as_bytes()),
+                Err(_) => break,
+            }
+        }
+    });
+    (stderr_buf, drainer)
+}
+
+/// Run a phase: spawn one server, iterate PP_LIST, attribute records per PP by
+/// stderr-buffer position snapshot before / after each iron-bench invocation +
+/// drain grace. Then shutdown server + join drainer.
+///
+/// Per-PP records contain only the [p5g-profile] lines emitted DURING that PP's
+/// bench window (1 warmup + RUNS measured iron-bench requests on the running
+/// server). Phase A (mode=None) returns empty records per PP — server emits no
+/// `[p5g-profile]` lines without `IRONMLX_P5G_PROFILE_MODE`.
+fn run_phase(
+    mode: Option<&str>,
+    model_dir: &str,
+    port: u16,
+) -> BTreeMap<i32, PpProfile> {
+    let mut server = spawn_server(mode, model_dir, port);
+    wait_for_ready(port, 300);
+    let (stderr_buf, drainer) = spawn_stderr_drainer(&mut server);
+
+    let mut per_pp: BTreeMap<i32, PpProfile> = BTreeMap::new();
+
     for &pp in &PP_LIST {
+        let pos_before = stderr_buf.lock().unwrap().len();
         let out = iron_bench_run(port, model_dir, pp);
         if !out.status.success() {
             eprintln!("[p5g-t0] iron-bench failed at PP={pp}: exit={}", out.status);
             eprintln!("stderr: {}", String::from_utf8_lossy(&out.stderr));
+            // shutdown best-effort before panic so we don't leak the server
+            let _ = server.kill();
+            let _ = server.wait();
+            let _ = drainer.join();
             panic!("iron-bench failed at PP={pp}");
         }
         let tps_list = parse_pp_tps_from_bench(&out.stdout);
         let med = median(tps_list).expect("no pp_tps in iron-bench output");
-        eprintln!("[p5g-t0] PP={pp}: pp_tps median = {:.2}", med);
-        result.insert(pp, med);
+
+        // Drain grace: give the line-oriented drainer time to flush all log
+        // lines emitted up through the last iron-bench request.
+        std::thread::sleep(STDERR_DRAIN_GRACE);
+        let pos_after = stderr_buf.lock().unwrap().len();
+        let slice: Vec<u8> = {
+            let buf = stderr_buf.lock().unwrap();
+            buf[pos_before..pos_after].to_vec()
+        };
+        let records = parse_profile_log(&slice);
+        eprintln!(
+            "[p5g-t0] PP={pp} mode={:?}: pp_tps_median={:.2} records={}",
+            mode, med, records.len()
+        );
+        per_pp.insert(pp, PpProfile { pp_tps_median: med, records });
     }
-    result
-}
 
-/// Drain server.stderr into a shared buffer while the sweep runs; parse on shutdown.
-fn run_sweep_capturing_stderr(
-    model_dir: &str,
-    port: u16,
-    server: &mut Child,
-) -> (BTreeMap<i32, f64>, Vec<BTreeMap<String, String>>) {
-    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let stderr_handle = server.stderr.take().expect("server stderr");
-    let buf_clone = std::sync::Arc::clone(&stderr_buf);
-    let stderr_thread = std::thread::spawn(move || {
-        let mut rdr = BufReader::new(stderr_handle);
-        let mut local = Vec::new();
-        let _ = rdr.read_to_end(&mut local);
-        buf_clone.lock().unwrap().extend_from_slice(&local);
-    });
-    let tps_map = run_pp_sweep(model_dir, port);
-    // Sweep done. Server stays alive until shutdown_server() is called by caller.
-    let captured_so_far = stderr_buf.lock().unwrap().clone();
-    let records = parse_profile_log(&captured_so_far);
-    // stderr_thread continues to drain after this point until the server is killed,
-    // but we already captured everything emitted DURING the sweep.
-    drop(stderr_thread); // detach; final lines lost on shutdown but were after sweep ended
-    (tps_map, records)
-}
-
-fn shutdown_server(server: &mut Child) {
+    // Shutdown + join drainer. This guarantees no record loss for the per-PP
+    // slices already captured above (those came from the live buffer during
+    // each PP's drain-grace window).
     let _ = server.kill();
     let _ = server.wait();
+    drainer.join().expect("stderr drainer join");
     std::thread::sleep(Duration::from_secs(3));
+
+    per_pp
 }
 
 #[test]
@@ -855,56 +975,47 @@ fn p5g_t0_gated_delta_profile_4phase() {
 
     // ===== Phase A =====
     eprintln!("[p5g-t0] Phase A: ironmlx serve (NO profile mode) — whole-prefill baseline");
-    let mut server = spawn_server(None, &model_dir, PROFILE_PORT);
-    wait_for_ready(PROFILE_PORT, 300);
-    let phase_a = run_pp_sweep(&model_dir, PROFILE_PORT);
-    shutdown_server(&mut server);
-    out.insert("phase_a_pp_tps".into(), json!(phase_a.iter()
-        .map(|(k, v)| (k.to_string(), *v)).collect::<BTreeMap<_, _>>()));
+    let phase_a = run_phase(None, &model_dir, PROFILE_PORT);
+    out.insert(
+        "phase_a_by_pp".into(),
+        json!(phase_a.iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect::<BTreeMap<_, _>>()),
+    );
 
     // ===== Phase B =====
     eprintln!("[p5g-t0] Phase B: IRONMLX_P5G_PROFILE_MODE=layer1 — boundary-isolated GDN");
-    let mut server = spawn_server(Some("layer1"), &model_dir, PROFILE_PORT);
-    wait_for_ready(PROFILE_PORT, 300);
-    let (phase_b_tps, phase_b_records) =
-        run_sweep_capturing_stderr(&model_dir, PROFILE_PORT, &mut server);
-    shutdown_server(&mut server);
-    out.insert("phase_b_pp_tps".into(), json!(phase_b_tps.iter()
-        .map(|(k, v)| (k.to_string(), *v)).collect::<BTreeMap<_, _>>()));
-    out.insert("phase_b_records".into(), json!(phase_b_records));
-    eprintln!("[p5g-t0] Phase B captured {} profile records", phase_b_records.len());
+    let phase_b = run_phase(Some("layer1"), &model_dir, PROFILE_PORT);
+    out.insert(
+        "phase_b_by_pp".into(),
+        json!(phase_b.iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect::<BTreeMap<_, _>>()),
+    );
 
     // ===== Phase C =====
     eprintln!("[p5g-t0] Phase C: IRONMLX_P5G_PROFILE_MODE=layer2 — per-step breakdown");
-    let mut server = spawn_server(Some("layer2"), &model_dir, PROFILE_PORT);
-    wait_for_ready(PROFILE_PORT, 300);
-    let (phase_c_tps, phase_c_records) =
-        run_sweep_capturing_stderr(&model_dir, PROFILE_PORT, &mut server);
-    shutdown_server(&mut server);
-    out.insert("phase_c_pp_tps".into(), json!(phase_c_tps.iter()
-        .map(|(k, v)| (k.to_string(), *v)).collect::<BTreeMap<_, _>>()));
-    out.insert("phase_c_records".into(), json!(phase_c_records));
-    eprintln!(
-        "[p5g-t0] Phase C captured {} profile records (step_breakdown included)",
-        phase_c_records.len()
+    let phase_c = run_phase(Some("layer2"), &model_dir, PROFILE_PORT);
+    out.insert(
+        "phase_c_by_pp".into(),
+        json!(phase_c.iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect::<BTreeMap<_, _>>()),
     );
 
     // ===== Phase D =====
-    let mut phase_d_results: BTreeMap<String, BTreeMap<i32, f64>> = BTreeMap::new();
+    let mut phase_d: BTreeMap<String, BTreeMap<i32, PpProfile>> = BTreeMap::new();
     for &abl_mode in &ABLATION_MODES {
         eprintln!("[p5g-t0] Phase D[{abl_mode}]: IRONMLX_P5G_PROFILE_MODE={abl_mode}");
-        let mut server = spawn_server(Some(abl_mode), &model_dir, PROFILE_PORT);
-        wait_for_ready(PROFILE_PORT, 300);
-        let tps_map = run_pp_sweep(&model_dir, PROFILE_PORT);
-        shutdown_server(&mut server);
-        phase_d_results.insert(abl_mode.to_string(), tps_map);
+        let per_pp = run_phase(Some(abl_mode), &model_dir, PROFILE_PORT);
+        phase_d.insert(abl_mode.to_string(), per_pp);
     }
     out.insert(
-        "phase_d_pp_tps".into(),
-        json!(phase_d_results.iter()
-            .map(|(mode, tps)| (
+        "phase_d_by_pp".into(),
+        json!(phase_d.iter()
+            .map(|(mode, per_pp)| (
                 mode.clone(),
-                tps.iter().map(|(k, v)| (k.to_string(), *v)).collect::<BTreeMap<_, _>>()
+                per_pp.iter().map(|(k, v)| (k.to_string(), v)).collect::<BTreeMap<_, _>>()
             ))
             .collect::<BTreeMap<_, _>>()),
     );
@@ -921,17 +1032,56 @@ fn p5g_t0_gated_delta_profile_4phase() {
         json_str.len(),
         output_path().display()
     );
-    eprintln!("[p5g-t0] Phase A baselines: {phase_a:?}");
-    eprintln!("[p5g-t0] Phase B Layer 1 baselines: {phase_b_tps:?}");
-    eprintln!("[p5g-t0] Phase C Layer 2 baselines: {phase_c_tps:?}");
-    eprintln!("[p5g-t0] Phase D ablation results: {phase_d_results:?}");
+    let summarize = |label: &str, m: &BTreeMap<i32, PpProfile>| {
+        let tps: BTreeMap<i32, f64> = m.iter().map(|(k, v)| (*k, v.pp_tps_median)).collect();
+        let rec_counts: BTreeMap<i32, usize> = m.iter().map(|(k, v)| (*k, v.records.len())).collect();
+        eprintln!("[p5g-t0] {label} pp_tps_median: {tps:?}");
+        eprintln!("[p5g-t0] {label} records_per_pp: {rec_counts:?}");
+    };
+    summarize("Phase A", &phase_a);
+    summarize("Phase B", &phase_b);
+    summarize("Phase C", &phase_c);
+    for (mode, per_pp) in &phase_d {
+        summarize(&format!("Phase D[{mode}]"), per_pp);
+    }
 }
 ```
+
+JSON output shape (full schema for Step 0.18 report writer):
+
+```json
+{
+  "pp_list": [2048, 4096, 8192, 16384],
+  "warmup": 1, "runs": 3, "model_dir": "...",
+  "phase_a_by_pp": {
+    "2048": { "pp_tps_median": <f64>, "records": [] },
+    "4096": { ... }, "8192": { ... }, "16384": { ... }
+  },
+  "phase_b_by_pp": {
+    "2048": {
+      "pp_tps_median": <f64>,
+      "records": [
+        { "mode": "layer1", "layer": "12", "batch": "1", "seq": "2048",
+          "offset_before": "0", "offset_after": "2048", "elapsed_us": "15301" },
+        ...
+      ]
+    }, ...
+  },
+  "phase_c_by_pp": { ... "records": [ ... step_breakdown=... included ... ] },
+  "phase_d_by_pp": {
+    "ablate-compute-g": { "2048": { ... }, ... },
+    "ablate-conv":      { "2048": { ... }, ... },
+    "ablate-t-arr":     { "2048": { ... }, ... }
+  }
+}
+```
+
+Records still contain warmup + measured request entries inter-mixed. Step 0.18 aggregator uses iron-bench's `--warmup 1` and `--runs 3` knowledge: with 30 GDN layers per forward, expect approximately `(WARMUP + RUNS) * 30 = 120` Layer 1 records per PP per phase (plus any decode-phase forwards depending on iron-bench behavior — measured separately if needed).
 
 - [ ] Create the file with this content. **Hard check**: grep for placeholders / stubs before committing.
 
 ```bash
-set -o pipefail
+set -euo pipefail
 grep -nE "phase_._.*insert\(pp, 0\.0\)|Phase [CD] require manual|TODO|FIXME|placeholder|stub" \
   "$REPO/ironmlx/tests/p5g_t0_gated_delta_profile.rs" && {
     echo "[error] harness contains forbidden placeholder/stub markers — fix before commit" >&2
@@ -942,60 +1092,173 @@ grep -nE "phase_._.*insert\(pp, 0\.0\)|Phase [CD] require manual|TODO|FIXME|plac
 - [ ] Compile test binary:
 
 ```bash
-set -o pipefail
+set -euo pipefail
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --features p5g-profile --test p5g_t0_gated_delta_profile --no-run 2>&1 | tee /tmp/p5g-build-step014.log
 tail -5 /tmp/p5g-build-step014.log
 ```
 
 Expected: `Finished release profile [optimized] target(s)`. No `--no-run` failure.
 
-### Step 0.15: Run T0 profile (Phase A + B)
+### Step 0.15: Run complete T0 4-phase harness
 
-Run the harness:
+The Step 0.14 harness runs Phase A + B + C + Phase D × 3 ablation modes in one test invocation. Total expected runtime: 6 phases × 4 PP × (~10-30 s/PP for Phase A baseline; ~2-3× slower for profile modes due to barriers) ≈ 60-120 min. Phase D's 3 ablation runs add ~30 min each. Plan for ~3-4 hours wall time + ~5 min model-load × 6 spawns.
 
 ```bash
-set -o pipefail
+set -euo pipefail
 export IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/ | head -1)
 
+# Port guard: refuse to auto-kill someone else's server.
+if lsof -ti :18080 > /dev/null 2>&1; then
+  echo "[guard] port 18080 in use; free before T0 run." >&2
+  exit 1
+fi
+
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --features p5g-profile \
   --test p5g_t0_gated_delta_profile \
   -- --ignored --test-threads=1 --nocapture 2>&1 | tee /tmp/p5g-t0-phases.log
 ```
 
-Expected duration: 4 PP × 4 runs × 2 phases × ~10-30s per run = ~20 min. PP=16384 Phase B will take longer due to profile barriers (estimated 2-3× slowdown).
-
-Capture: stderr `[p5g-profile]` lines per layer per PP (Phase B), iron-bench wall-time output per PP (Phase A).
-
-- [ ] Extract Phase A medians (PP=2048/4096/8192/16384 prefill tok/s) into a notebook for the report.
-- [ ] Aggregate Phase B layer-elapsed records: group by `layer` field, sum 30 layers per PP, divide by 30 for per-layer median; total GDN time per PP = sum of all 30 layer times per PP.
-
-### Step 0.16: Extend harness for Phase C + D, run Phase C
-
-Extend the test function to:
-
-1. After Phase B records aggregated, identify which steps dominate (need Phase C to see per-step breakdown).
-2. Spawn `IRONMLX_P5G_PROFILE_MODE=layer2`, run same sweep, parse `step_breakdown=us1,us2,...`, aggregate per-step times across 30 layers.
-3. Rank the 12-ish steps by total time; identify top 3.
+Verify output:
 
 ```bash
-set -o pipefail
-# Re-compile + re-run (Phase C addition)
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --features p5g-profile \
-  --test p5g_t0_gated_delta_profile \
-  -- --ignored --test-threads=1 --nocapture 2>&1 | tee /tmp/p5g-t0-phases.log
+set -euo pipefail
+ls -lh /tmp/p5g-t0-phases.json /tmp/p5g-t0-phases.log
+# Phase A non-empty + Phase B/C records populated:
+python3 - <<'EOF'
+import json
+d = json.load(open("/tmp/p5g-t0-phases.json"))
+for phase in ("phase_a_by_pp", "phase_b_by_pp", "phase_c_by_pp"):
+    assert phase in d, f"missing {phase}"
+    for pp_str, leaf in d[phase].items():
+        tps = leaf["pp_tps_median"]
+        assert tps and tps > 0, f"{phase} PP={pp_str} has bad pp_tps_median={tps}"
+        recs = leaf["records"]
+        if phase == "phase_a_by_pp":
+            assert recs == [], f"{phase} PP={pp_str} should have no records (no profile mode)"
+        else:
+            assert len(recs) > 0, f"{phase} PP={pp_str} has zero records — stderr capture broken"
+print("[ok] T0 phases JSON validates: all PP populated, B/C records present")
+EOF
 ```
 
-- [ ] Run Phase C. Top 3 steps identified.
+If the validation script fails (Phase B/C records empty for any PP), the stderr capture timing in Step 0.14's `run_phase` is broken — STOP and re-investigate before proceeding to Step 0.16.
 
-### Step 0.17: Extend harness for Phase D (per top-3 ablation)
+- [ ] T0 harness ran to completion; `/tmp/p5g-t0-phases.json` exists with the above structure.
+- [ ] Validation script passed (all PP populated, B/C records non-empty).
 
-For each of top-3 steps identified in Phase C, the harness:
+### Step 0.16: Aggregate T0 data + validate top-3 step ranking from Phase C
 
-1. Spawns server with appropriate `IRONMLX_P5G_PROFILE_MODE=ablate-<X>` (per Step 0.12 — extend Step 0.12 with more `AblateX` variants if Phase C's top-3 includes a step not yet covered).
-2. Runs iron-bench sweep, parses Phase A baseline output (whole-prefill tok/s with the ablation).
-3. Computes wall-time delta vs Phase A baseline = **upper bound** of that candidate's reachable optimization.
+The harness already wrote `/tmp/p5g-t0-phases.json` with per-PP records. This step does the OFF-LINE aggregation (no re-run of the harness) needed for Step 0.18 report tables: Phase B 30-layer GDN occupancy estimate, Phase C per-step ranking, Phase D upper-bound cuts.
 
-- [ ] Run Phase D. Each top-3 candidate has an upper-bound cut %.
+```bash
+set -euo pipefail
+python3 - <<'EOF' > /tmp/p5g-t0-aggregated.json
+import json, statistics
+d = json.load(open("/tmp/p5g-t0-phases.json"))
+
+# === Phase B aggregation ===
+# For each PP: per-layer elapsed_us median (30 layers expected per forward).
+# Records are warmup+measured mixed; we trim to the LAST `runs * 30` records
+# per PP to skip the 1 warmup forward (30 records).
+RUNS = d["runs"]
+WARMUP = d["warmup"]
+phase_b_agg = {}
+for pp_str, leaf in d["phase_b_by_pp"].items():
+    recs = leaf["records"]
+    # Trim warmup: 30 records per forward × WARMUP forwards.
+    trimmed = recs[WARMUP * 30:]
+    # Per-layer median elapsed_us:
+    by_layer = {}
+    for r in trimmed:
+        layer = int(r.get("layer", "-1"))
+        eu = float(r.get("elapsed_us", "0"))
+        by_layer.setdefault(layer, []).append(eu)
+    per_layer_med_us = {layer: statistics.median(xs) for layer, xs in by_layer.items()}
+    # Total GDN time per forward (us): sum of per-layer medians.
+    total_gdn_us = sum(per_layer_med_us.values())
+    phase_b_agg[pp_str] = {
+        "per_layer_median_us": per_layer_med_us,
+        "total_gdn_us_per_forward": total_gdn_us,
+        "n_layers_seen": len(per_layer_med_us),
+    }
+
+# === Phase C aggregation ===
+STEP_NAMES = [
+    "1a_in_proj_qkvz","1b_in_proj_ba","2a_concat","2b_conv1d_silu","2c_update_conv",
+    "3_split","4_qk_rmsnorm","5_compute_g","6_beta","7_kernel","8_norm_proj",
+]
+phase_c_agg = {}
+for pp_str, leaf in d["phase_c_by_pp"].items():
+    recs = leaf["records"]
+    trimmed = recs[WARMUP * 30:]
+    step_totals = {name: [] for name in STEP_NAMES}
+    for r in trimmed:
+        sb = r.get("step_breakdown", "")
+        if not sb: continue
+        parts = sb.split(",")
+        if len(parts) != len(STEP_NAMES):
+            # naming drift — log + skip; spec § Step 0.11 says step_breakdown
+            # must be the 11-step breakdown matching STEP_NAMES order.
+            continue
+        for name, us_str in zip(STEP_NAMES, parts):
+            try: step_totals[name].append(float(us_str))
+            except ValueError: pass
+    step_medians = {name: (statistics.median(xs) if xs else 0.0) for name, xs in step_totals.items()}
+    step_total = sum(step_medians.values())
+    ranked = sorted(step_medians.items(), key=lambda kv: -kv[1])
+    phase_c_agg[pp_str] = {
+        "step_median_us": step_medians,
+        "step_total_us": step_total,
+        "ranked_steps": ranked,  # [(name, us), ...] descending
+    }
+
+# === Phase D aggregation === (pp_tps deltas vs phase_a)
+phase_a_tps = {pp: leaf["pp_tps_median"] for pp, leaf in d["phase_a_by_pp"].items()}
+phase_d_agg = {}
+for mode, by_pp in d["phase_d_by_pp"].items():
+    deltas = {}
+    for pp_str, leaf in by_pp.items():
+        a = phase_a_tps.get(pp_str)
+        m = leaf["pp_tps_median"]
+        deltas[pp_str] = {
+            "phase_a": a, "phase_d_mode": m,
+            "delta_pct": ((m - a) / a * 100.0) if a else None,
+        }
+    phase_d_agg[mode] = deltas
+
+print(json.dumps({
+    "phase_b_agg": phase_b_agg,
+    "phase_c_agg": phase_c_agg,
+    "phase_d_agg": phase_d_agg,
+    "phase_a_tps": phase_a_tps,
+}, indent=2))
+EOF
+cat /tmp/p5g-t0-aggregated.json | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('=== Phase B GDN total per forward ===')
+for pp,a in d['phase_b_agg'].items(): print(f'  PP={pp}: {a[\"total_gdn_us_per_forward\"]/1000:.1f} ms ({a[\"n_layers_seen\"]} layers seen)')
+print('=== Phase C top-3 steps (per PP) ===')
+for pp,a in d['phase_c_agg'].items():
+    print(f'  PP={pp}: top-3 = {[(n,f\"{v/1000:.2f}ms\") for n,v in a[\"ranked_steps\"][:3]]}')
+print('=== Phase D ablation deltas vs Phase A ===')
+for mode,deltas in d['phase_d_agg'].items():
+    for pp,dl in deltas.items():
+        print(f'  {mode} PP={pp}: phase_a={dl[\"phase_a\"]:.2f} ablate={dl[\"phase_d_mode\"]:.2f} delta={dl[\"delta_pct\"]:+.2f}%')
+"
+```
+
+- [ ] Run aggregator. Confirm Phase C top-3 across all 4 PPs identifies a step covered by one of the 3 pre-defined ablation modes (`ablate-compute-g` = step `5_compute_g`; `ablate-conv` = steps `2a/2b/2c`; `ablate-t-arr` = no direct step mapping; counts as step 7 helper).
+- [ ] If Phase C top-3 includes a step NOT mapped to any existing ablation (e.g., step `1a_in_proj_qkvz` dominates and there's no `ablate-in-proj` mode), DECIDE between:
+  - (a) Adding a new `AblateX` variant in Step 0.12 + re-running that one Phase D leg, OR
+  - (b) Accepting that the 3 pre-defined ablations cover the highest-yield candidates and proceeding to T1.
+  Document the choice in the T0 report (Step 0.18).
+
+### Step 0.17: (removed — Phase D execution rolled into Step 0.15's harness; per-mode ablation already complete)
+
+T0 Phase D in the previous plan version was a "loop over top-3 candidates" step. The Step 0.14 harness now runs all 3 pre-defined ablation modes unconditionally during Step 0.15. The decision logic of "which ablation maps to Phase C's top step" moved into Step 0.16's aggregator output. Step 0.17 is intentionally a no-op placeholder so the existing numbering (Step 0.18 report, Step 0.19 spec lock, Step 0.20-0.21 hygiene + commit) doesn't shift.
+
+- [ ] No action — Phase D data already in `/tmp/p5g-t0-aggregated.json`.
 
 ### Step 0.18: Write reports/p5g-t0-gated-delta-profile.md
 
@@ -1126,7 +1389,7 @@ Read current spec § 7.2 (which states "TBD by T0.a"). Replace with the locked t
 ### Step 0.20: Hygiene chain + final integration tests with profile feature off
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 cargo fmt
 cargo +nightly fmt --all -- --check
@@ -1142,7 +1405,7 @@ Expected: all clean + PASS. Confirms profile feature is fully gated off in defau
 ### Step 0.21: Commit T0
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 git add ironmlx/tests/p5g_t0_gated_delta_profile.rs \
         reports/p5g-t0-gated-delta-profile.md \
@@ -1208,7 +1471,7 @@ Fill `<X>` placeholders in commit message with actual measured numbers from the 
 T1 promote/revert decision (Step 1.9) compares measured T1 against **T1-start baseline** — not P5f baseline, not T0 phase data. Baseline must be captured against the same harness configuration that Steps 1.6-1.8 will use, on the SAME HEAD that T1 implementation starts from. This avoids attributing day-to-day GPU variance, model-load noise, or PATH/env drift to T1.
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 T1_START_SHA=$(git rev-parse HEAD)
 echo "[t1-baseline] T1-start HEAD = $T1_START_SHA" | tee /tmp/p5g-t1-start.txt
@@ -1231,6 +1494,7 @@ MLX_DIR=$HOME/.local/mlx cargo run --release -p ironmlx -- serve \
   --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 \
   2> /tmp/p5g-t1-start-server.log &
 SERVER_PID=$!
+trap 'kill ${SERVER_PID:-} 2>/dev/null || true' EXIT
 until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/healthz 2>/dev/null | grep -q "^200$"; do sleep 5; done
 
 # Same sweep config used in Steps 1.6 + 1.7 + 1.8 — runs=3, warmup=1, max-tokens=32.
@@ -1255,7 +1519,7 @@ MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
   --prompt-len 128,2048,16384 --max-tokens 32 --runs 3 --warmup 1 \
   --format json > /tmp/p5g-t1-start-decode.json
 
-kill $SERVER_PID 2>/dev/null
+kill $SERVER_PID 2>/dev/null || true
 wait $SERVER_PID 2>/dev/null || true
 for _retry in 1 2 3 4 5; do
   lsof -ti :8080 > /dev/null 2>&1 || break
@@ -1343,7 +1607,7 @@ let g = inner.exp()?;
 ### Step 1.3: Build + hygiene chain
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx 2>&1 | tail -3
 cargo fmt
@@ -1355,7 +1619,7 @@ Expected: Finished + clean + 0 warnings.
 ### Step 1.4: Sentinel (argmax=11)
 
 ```bash
-set -o pipefail
+set -euo pipefail
 export IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/ | head -1)
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --test p5_qwen35_moe_smoke -- --ignored --test-threads=1 2>&1 | tail -10
 ```
@@ -1366,130 +1630,160 @@ If argmax shifts: Investigate logit margin. If logit margin large → accept new
 ### Step 1.5: Batched + http_smoke
 
 ```bash
-set -o pipefail
+set -euo pipefail
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --test p5_qwen35_moe_batched -- --ignored --test-threads=1 2>&1 | tail -10
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --test p5_qwen35_moe_http_smoke -- --ignored --test-threads=1 2>&1 | tail -10
 ```
 Expected: 1/1 + 1/1 PASS.
 
-### Step 1.6: iron-bench short-PP prefill smoke
+### Step 1.6-1.8: T1 measured sweep (one server, three iron-bench invocations, JSON output)
+
+Same harness configuration as Step 1.0 baseline capture so direct comparison is apples-to-apples. **Single ironmlx server**, three iron-bench sweeps. All outputs JSON (`--format json` not `markdown`) so Step 1.9's promote/revert table can be machine-generated from `/tmp/p5g-t1-measured-medians.json` against `/tmp/p5g-t1-start-medians.json`.
 
 ```bash
-set -o pipefail
-# Verify port 8080 free before starting (port-targeted, not name-pattern;
-# never auto-kill someone else's process on a shared host).
+set -euo pipefail
+# Verify port 8080 free before starting (port-targeted, refuse auto-kill).
 if lsof -ti :8080 > /dev/null 2>&1; then
   echo "[guard] port 8080 already bound by:" >&2
   lsof -i :8080 >&2
-  echo "[guard] free it before re-running Step 1.6; refusing to auto-kill." >&2
+  echo "[guard] free it before re-running; refusing to auto-kill." >&2
   exit 1
 fi
 
 MLX_DIR=$HOME/.local/mlx cargo run --release -p ironmlx -- serve \
-  --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 &
+  --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 \
+  2> /tmp/p5g-t1-measured-server.log &
 SERVER_PID=$!
+trap 'kill ${SERVER_PID:-} 2>/dev/null || true' EXIT
 until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/healthz 2>/dev/null | grep -q "^200$"; do sleep 5; done
 
+# Step 1.6 — short PP prefill smoke
 MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
   --target p5g_t1=http://127.0.0.1:8080 \
   --model qwen3.5-moe --model-dir "$IRONMLX_MOE_MODEL_DIR" \
   --prompt-len 128,512 --max-tokens 32 --runs 3 --warmup 1 \
-  --format markdown 2>&1 | tail -20
+  --format json > /tmp/p5g-t1-measured-short.json
 
-kill $SERVER_PID 2>/dev/null
-wait $SERVER_PID 2>/dev/null || true
-# Confirm port 8080 is released (port-targeted, not name-pattern based).
-for _retry in 1 2 3 4 5; do
-  lsof -ti :8080 > /dev/null 2>&1 || break
-  sleep 2
-done
-```
-
-Capture PP=128 + PP=512 prefill medians. Compare to Tn-start baseline (committed HEAD before T1) — should be within ±2% (no regression).
-
-### Step 1.7: iron-bench long-PP prefill sweep
-
-```bash
-set -o pipefail
-MLX_DIR=$HOME/.local/mlx cargo run --release -p ironmlx -- serve \
-  --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 &
-SERVER_PID=$!
-until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/healthz 2>/dev/null | grep -q "^200$"; do sleep 5; done
-
+# Step 1.7 — long PP prefill sweep
 MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
   --target p5g_t1=http://127.0.0.1:8080 \
   --model qwen3.5-moe --model-dir "$IRONMLX_MOE_MODEL_DIR" \
   --prompt-len 2048,4096,8192,16384 --max-tokens 32 --runs 3 --warmup 1 \
-  --format markdown 2>&1 | tail -20
+  --format json > /tmp/p5g-t1-measured-long.json
 
-kill $SERVER_PID 2>/dev/null
-wait $SERVER_PID 2>/dev/null || true
-# Confirm port 8080 is released (port-targeted, not name-pattern based).
-for _retry in 1 2 3 4 5; do
-  lsof -ti :8080 > /dev/null 2>&1 || break
-  sleep 2
-done
-```
-
-Capture PP=2048/4096/8192/16384 prefill medians. Compute **geometric mean** of these 4 numbers vs T1-start baseline geomean.
-
-### Step 1.8: iron-bench decode TG smoke
-
-```bash
-set -o pipefail
-MLX_DIR=$HOME/.local/mlx cargo run --release -p ironmlx -- serve \
-  --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 &
-SERVER_PID=$!
-until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/healthz 2>/dev/null | grep -q "^200$"; do sleep 5; done
-
+# Step 1.8 — decode TG smoke
 MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
   --target p5g_t1=http://127.0.0.1:8080 \
   --model qwen3.5-moe --model-dir "$IRONMLX_MOE_MODEL_DIR" \
   --prompt-len 128,2048,16384 --max-tokens 32 --runs 3 --warmup 1 \
-  --format markdown 2>&1 | tail -20
+  --format json > /tmp/p5g-t1-measured-decode.json
 
-kill $SERVER_PID 2>/dev/null
+kill $SERVER_PID 2>/dev/null || true
 wait $SERVER_PID 2>/dev/null || true
-# Confirm port 8080 is released (port-targeted, not name-pattern based).
 for _retry in 1 2 3 4 5; do
   lsof -ti :8080 > /dev/null 2>&1 || break
   sleep 2
 done
+
+# Aggregate measured medians (mirror Step 1.0 schema).
+python3 <<EOF > /tmp/p5g-t1-measured-medians.json
+import json, statistics
+def med(xs): return statistics.median(xs) if xs else None
+def extract(path, field):
+    with open(path) as f: d = json.load(f)
+    out = {}
+    for r in d.get("raw_runs", []):
+        pp = r["pp_target"]
+        out.setdefault(pp, []).append(r.get(field))
+    return {pp: med([v for v in vs if v is not None]) for pp, vs in out.items()}
+print(json.dumps({
+    "t1_measured_sha": "$(git rev-parse HEAD)",
+    "short_pp_tps": extract("/tmp/p5g-t1-measured-short.json", "pp_tps"),
+    "long_pp_tps":  extract("/tmp/p5g-t1-measured-long.json",  "pp_tps"),
+    "decode_tg_tps": extract("/tmp/p5g-t1-measured-decode.json", "tg_tps"),
+}, indent=2))
+EOF
+cat /tmp/p5g-t1-measured-medians.json
 ```
 
-Capture PP=128/2048/16384 decode TG (tg_tps) medians. Compare to T1-start baseline:
-- PP=128/2048: regression < 2% required
-- PP=16384: must keep +10.3% over omlx (P5f shipped advantage); regression < 2% from T1-start required
+- [ ] Confirm `/tmp/p5g-t1-measured-medians.json` populated for all 6 PP × 3 metrics.
 
-### Step 1.9: Promote / revert decision
+### Step 1.9: Promote / revert decision — machine-generated from JSON
 
-Compile all measurements per § 7.3. **T1-start baseline column populated from `/tmp/p5g-t1-start-medians.json` (Step 1.0).** T1 measured column from Steps 1.6/1.7/1.8 medians.
+Generate the promote/revert table mechanically from baseline + measured JSON. NO manual fill. Run:
 
-| Metric | T1-start baseline | T1 measured | Delta | Threshold | Status |
-|---|---|---|---|---|---|
-| Long-PP prefill geomean | `<long_pp_tps geomean of 2048/4096/8192/16384 from /tmp/p5g-t1-start-medians.json>` | `<Step 1.7 geomean>` | <%>  | > +5% | <PASS/FAIL> |
-| PP=2048 single | `<long_pp_tps[2048]>` | `<Step 1.7 PP=2048>` | <%> | < 2% regression | <PASS/FAIL> |
-| PP=4096 single | `<long_pp_tps[4096]>` | `<Step 1.7 PP=4096>` | <%> | < 2% regression | <PASS/FAIL> |
-| PP=8192 single | `<long_pp_tps[8192]>` | `<Step 1.7 PP=8192>` | <%> | < 2% regression | <PASS/FAIL> |
-| PP=16384 single | `<long_pp_tps[16384]>` | `<Step 1.7 PP=16384>` | <%> | < 2% regression | <PASS/FAIL> |
-| PP=128 prefill | `<short_pp_tps[128]>` | `<Step 1.6 PP=128>` | <%> | < 2% regression | <PASS/FAIL> |
-| PP=512 prefill | `<short_pp_tps[512]>` | `<Step 1.6 PP=512>` | <%> | < 2% regression | <PASS/FAIL> |
-| PP=128 decode TG | `<decode_tg_tps[128]>` | `<Step 1.8 PP=128>` | <%> | < 2% regression | <PASS/FAIL> |
-| PP=2048 decode TG | `<decode_tg_tps[2048]>` | `<Step 1.8 PP=2048>` | <%> | < 2% regression | <PASS/FAIL> |
-| PP=16384 decode TG | `<decode_tg_tps[16384]>` | `<Step 1.8 PP=16384>` | <%> | < 2% regression | <PASS/FAIL> |
-| sentinel + batched + http_smoke | PASS | <PASS/FAIL> | | ALL PASS | <PASS/FAIL> |
+```bash
+set -euo pipefail
+python3 <<'EOF' | tee /tmp/p5g-t1-gate.md
+import json, math, sys
 
-If ALL **promote** rows PASS:
-- T1 promotes. Commit per Step 1.10.
+baseline = json.load(open("/tmp/p5g-t1-start-medians.json"))
+measured = json.load(open("/tmp/p5g-t1-measured-medians.json"))
 
-If ANY row FAILS:
-- T1 reverts. Revert `gated_delta_net.rs` to pre-T1 state via Edit (NOT `git checkout --` — preserve T0 instrument). Commit revert with negative ROI documentation.
+def geomean(xs):
+    if not xs or any(x is None or x <= 0 for x in xs): return None
+    return math.exp(sum(math.log(x) for x in xs) / len(xs))
+
+def delta_pct(b, m):
+    if b is None or m is None: return None
+    return (m - b) / b * 100.0
+
+def fmt(x, suffix=""):
+    return ("%.2f%s" % (x, suffix)) if isinstance(x, float) else str(x)
+
+rows = []
+
+# Long-PP geomean
+b_geo = geomean([baseline["long_pp_tps"].get(str(pp)) for pp in [2048,4096,8192,16384]])
+m_geo = geomean([measured["long_pp_tps"].get(str(pp)) for pp in [2048,4096,8192,16384]])
+d_geo = delta_pct(b_geo, m_geo)
+rows.append(("Long-PP prefill geomean", b_geo, m_geo, d_geo, ">+5%", "PASS" if (d_geo is not None and d_geo > 5.0) else "FAIL"))
+
+# Per-PP long prefill (regression < 2%)
+for pp in [2048,4096,8192,16384]:
+    b = baseline["long_pp_tps"].get(str(pp))
+    m = measured["long_pp_tps"].get(str(pp))
+    d = delta_pct(b, m)
+    rows.append((f"PP={pp} prefill", b, m, d, "<-2% regression", "PASS" if (d is not None and d > -2.0) else "FAIL"))
+
+# Short prefill
+for pp in [128, 512]:
+    b = baseline["short_pp_tps"].get(str(pp))
+    m = measured["short_pp_tps"].get(str(pp))
+    d = delta_pct(b, m)
+    rows.append((f"PP={pp} prefill", b, m, d, "<-2% regression", "PASS" if (d is not None and d > -2.0) else "FAIL"))
+
+# Decode TG
+for pp in [128, 2048, 16384]:
+    b = baseline["decode_tg_tps"].get(str(pp))
+    m = measured["decode_tg_tps"].get(str(pp))
+    d = delta_pct(b, m)
+    rows.append((f"PP={pp} decode TG", b, m, d, "<-2% regression", "PASS" if (d is not None and d > -2.0) else "FAIL"))
+
+print("| Metric | T1-start baseline | T1 measured | Delta | Threshold | Status |")
+print("|---|---:|---:|---:|---|---|")
+for name, b, m, d, thr, status in rows:
+    print(f"| {name} | {fmt(b)} | {fmt(m)} | {fmt(d, '%')} | {thr} | {status} |")
+
+# Add correctness gate row (filled manually based on sentinel/batched/http_smoke results).
+print("| sentinel + batched + http_smoke | PASS | (run Steps 1.4-1.5) | — | ALL PASS | (fill) |")
+
+n_fail = sum(1 for r in rows if r[5] == "FAIL")
+print(f"\n**Verdict: {'PROMOTE' if n_fail == 0 else 'REVERT'}** ({n_fail} FAIL rows)", file=sys.stderr)
+EOF
+```
+
+- [ ] `/tmp/p5g-t1-gate.md` written; stderr verdict is PROMOTE or REVERT.
+
+Decision:
+- All numeric rows PASS → **PROMOTE**. Confirm Step 1.4-1.5 (sentinel + batched + http_smoke) also PASS, then commit per Step 1.10 promote template.
+- Any numeric row FAIL → **REVERT**. Revert `gated_delta_net.rs` to T1-start via Edit (NOT `git checkout --` — preserve T0 instrument). Commit revert per Step 1.10 revert template.
 
 ### Step 1.10: Commit T1 (promote) or T1-revert
 
 For promote:
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 git add ironmlx/src/nn/gated_delta_net.rs
 git commit -m "$(cat <<'EOF'
@@ -1524,7 +1818,7 @@ EOF
 
 For revert (T1 failed promote):
 ```bash
-set -o pipefail
+set -euo pipefail
 # Apply Edit to revert gated_delta_net.rs to pre-T1 state (KEEP T0 instrument).
 # Then:
 git add ironmlx/src/nn/gated_delta_net.rs
@@ -1563,7 +1857,7 @@ EOF
 Same template as Step 1.0, but baselines saved to `/tmp/p5g-t2-start-*.json` / `/tmp/p5g-t2-start-medians.json`, and `$T2_START_SHA=$(git rev-parse HEAD)` captured. T2-start HEAD is the branch HEAD AFTER T1 promote/revert lands (Step 1.10) — NOT a re-use of Step 1.0 data. Same sweep config (port 8080, PP same lists, runs=3, warmup=1, max-tokens=32, same harness JSON output).
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 T2_START_SHA=$(git rev-parse HEAD)
 echo "[t2-baseline] T2-start HEAD = $T2_START_SHA" | tee /tmp/p5g-t2-start.txt
@@ -1583,6 +1877,7 @@ MLX_DIR=$HOME/.local/mlx cargo run --release -p ironmlx -- serve \
   --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 \
   2> /tmp/p5g-t2-start-server.log &
 SERVER_PID=$!
+trap 'kill ${SERVER_PID:-} 2>/dev/null || true' EXIT
 until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/healthz 2>/dev/null | grep -q "^200$"; do sleep 5; done
 
 for sweep in "short:128,512:pp_tps" "long:2048,4096,8192,16384:pp_tps" "decode:128,2048,16384:tg_tps"; do
@@ -1595,7 +1890,7 @@ for sweep in "short:128,512:pp_tps" "long:2048,4096,8192,16384:pp_tps" "decode:1
     --format json > "/tmp/p5g-t2-start-$label.json"
 done
 
-kill $SERVER_PID 2>/dev/null
+kill $SERVER_PID 2>/dev/null || true
 wait $SERVER_PID 2>/dev/null || true
 for _retry in 1 2 3 4 5; do
   lsof -ti :8080 > /dev/null 2>&1 || break
@@ -1644,7 +1939,7 @@ Likely T2 candidates (depending on T0 ranking and what T1 took):
 ### Step 2.3: Build + hygiene + tests (same template as Task 1 Steps 1.3-1.8)
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx 2>&1 | tail -3
 cargo fmt
@@ -1658,15 +1953,103 @@ MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --test p5_qwen35_moe_ht
 ```
 Expected: all green, argmax=11.
 
-### Step 2.4: iron-bench validation (same as Task 1 Step 1.6-1.8)
+### Step 2.4: T2 measured sweep (one server, three iron-bench, JSON output)
 
-Run short-PP prefill smoke (PP=128/512), long-PP prefill sweep (PP=2048/4096/8192/16384), decode TG smoke (PP=128/2048/16384). Compare measurements to **T2-start HEAD baseline** (current branch HEAD at start of T2, not P5f baseline).
+Identical to Step 1.6-1.8 but `--target p5g_t2`, JSON outputs to `/tmp/p5g-t2-measured-{short,long,decode}.json`. Aggregate to `/tmp/p5g-t2-measured-medians.json`. Apply this template:
 
-Repeat server-spawn / iron-bench commands from Step 1.6-1.8 (substituting `--target p5g_t2`).
+```bash
+set -euo pipefail
+if lsof -ti :8080 > /dev/null 2>&1; then
+  echo "[guard] port 8080 in use; abort." >&2; exit 1
+fi
 
-### Step 2.5: Promote / revert decision per § 7.3 (same template as Step 1.9)
+MLX_DIR=$HOME/.local/mlx cargo run --release -p ironmlx -- serve \
+  --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 \
+  2> /tmp/p5g-t2-measured-server.log &
+SERVER_PID=$!
+trap 'kill ${SERVER_PID:-} 2>/dev/null || true' EXIT
+until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/healthz 2>/dev/null | grep -q "^200$"; do sleep 5; done
 
-Compile the same metric table as Step 1.9, but baseline column reads from `/tmp/p5g-t2-start-medians.json` (NOT t1-start, NOT P5f). Threshold identical: long-PP geomean > +5% vs T2-start, per-PP regression < 2%, decode TG regression < 2%.
+for sweep in "short:128,512:pp_tps" "long:2048,4096,8192,16384:pp_tps" "decode:128,2048,16384:tg_tps"; do
+  label=$(echo "$sweep" | cut -d: -f1)
+  pps=$(echo "$sweep" | cut -d: -f2)
+  MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
+    --target p5g_t2=http://127.0.0.1:8080 \
+    --model qwen3.5-moe --model-dir "$IRONMLX_MOE_MODEL_DIR" \
+    --prompt-len "$pps" --max-tokens 32 --runs 3 --warmup 1 \
+    --format json > "/tmp/p5g-t2-measured-$label.json"
+done
+
+kill $SERVER_PID 2>/dev/null || true
+wait $SERVER_PID 2>/dev/null || true
+for _retry in 1 2 3 4 5; do
+  lsof -ti :8080 > /dev/null 2>&1 || break
+  sleep 2
+done
+
+python3 <<EOF > /tmp/p5g-t2-measured-medians.json
+import json, statistics
+def med(xs): return statistics.median(xs) if xs else None
+def extract(path, field):
+    with open(path) as f: d = json.load(f)
+    out = {}
+    for r in d.get("raw_runs", []):
+        pp = r["pp_target"]
+        out.setdefault(pp, []).append(r.get(field))
+    return {pp: med([v for v in vs if v is not None]) for pp, vs in out.items()}
+print(json.dumps({
+    "t2_measured_sha": "$(git rev-parse HEAD)",
+    "short_pp_tps": extract("/tmp/p5g-t2-measured-short.json", "pp_tps"),
+    "long_pp_tps":  extract("/tmp/p5g-t2-measured-long.json",  "pp_tps"),
+    "decode_tg_tps": extract("/tmp/p5g-t2-measured-decode.json", "tg_tps"),
+}, indent=2))
+EOF
+cat /tmp/p5g-t2-measured-medians.json
+```
+
+### Step 2.5: Promote / revert decision — machine-generated from JSON
+
+Run the same gate-generator script as Step 1.9 with baseline=`/tmp/p5g-t2-start-medians.json` and measured=`/tmp/p5g-t2-measured-medians.json`. Output to `/tmp/p5g-t2-gate.md`. Identical thresholds (long-PP geomean > +5% vs T2-start, per-PP regression < 2%, decode TG regression < 2%).
+
+```bash
+set -euo pipefail
+python3 <<'EOF' | tee /tmp/p5g-t2-gate.md
+import json, math, sys
+baseline = json.load(open("/tmp/p5g-t2-start-medians.json"))
+measured = json.load(open("/tmp/p5g-t2-measured-medians.json"))
+def geomean(xs):
+    if not xs or any(x is None or x <= 0 for x in xs): return None
+    return math.exp(sum(math.log(x) for x in xs) / len(xs))
+def delta_pct(b, m):
+    if b is None or m is None: return None
+    return (m - b) / b * 100.0
+def fmt(x, suffix=""):
+    return ("%.2f%s" % (x, suffix)) if isinstance(x, float) else str(x)
+rows = []
+b_geo = geomean([baseline["long_pp_tps"].get(str(pp)) for pp in [2048,4096,8192,16384]])
+m_geo = geomean([measured["long_pp_tps"].get(str(pp)) for pp in [2048,4096,8192,16384]])
+d_geo = delta_pct(b_geo, m_geo)
+rows.append(("Long-PP prefill geomean", b_geo, m_geo, d_geo, ">+5%", "PASS" if (d_geo is not None and d_geo > 5.0) else "FAIL"))
+for pp in [2048,4096,8192,16384]:
+    b=baseline["long_pp_tps"].get(str(pp)); m=measured["long_pp_tps"].get(str(pp)); d=delta_pct(b,m)
+    rows.append((f"PP={pp} prefill", b, m, d, "<-2%", "PASS" if (d is not None and d > -2.0) else "FAIL"))
+for pp in [128, 512]:
+    b=baseline["short_pp_tps"].get(str(pp)); m=measured["short_pp_tps"].get(str(pp)); d=delta_pct(b,m)
+    rows.append((f"PP={pp} prefill", b, m, d, "<-2%", "PASS" if (d is not None and d > -2.0) else "FAIL"))
+for pp in [128, 2048, 16384]:
+    b=baseline["decode_tg_tps"].get(str(pp)); m=measured["decode_tg_tps"].get(str(pp)); d=delta_pct(b,m)
+    rows.append((f"PP={pp} decode TG", b, m, d, "<-2%", "PASS" if (d is not None and d > -2.0) else "FAIL"))
+print("| Metric | T2-start baseline | T2 measured | Delta | Threshold | Status |")
+print("|---|---:|---:|---:|---|---|")
+for name, b, m, d, thr, status in rows:
+    print(f"| {name} | {fmt(b)} | {fmt(m)} | {fmt(d, '%')} | {thr} | {status} |")
+print("| sentinel + batched + http_smoke | PASS | (run Step 2.3) | — | ALL PASS | (fill) |")
+n_fail = sum(1 for r in rows if r[5] == "FAIL")
+print(f"\n**Verdict: {'PROMOTE' if n_fail == 0 else 'REVERT'}** ({n_fail} FAIL rows)", file=sys.stderr)
+EOF
+```
+
+- [ ] `/tmp/p5g-t2-gate.md` written. PROMOTE → Step 2.6 promote commit. REVERT → Step 2.6 revert commit (preserve T0 + T1 commits if T1 promoted, only revert T2 changes).
 
 ### Step 2.6: Commit T2 (promote or revert)
 
@@ -1686,7 +2069,7 @@ Use the same template as Step 1.10 with `feat(p5g-t2):` or `chore(p5g-t2):` pref
 Same template as Step 2.0, with baselines saved to `/tmp/p5g-t3-start-*.json` / `/tmp/p5g-t3-start-medians.json`, and `$T3_START_SHA=$(git rev-parse HEAD)` captured. T3-start HEAD is the branch HEAD AFTER T2 promote/revert lands. Identical sweep configuration (PP=128,512 / 2048,4096,8192,16384 / 128,2048,16384; runs=3; warmup=1; max-tokens=32). Substitute `t2` → `t3` throughout Step 2.0 shell block.
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 T3_START_SHA=$(git rev-parse HEAD)
 echo "[t3-baseline] T3-start HEAD = $T3_START_SHA" | tee /tmp/p5g-t3-start.txt
@@ -1706,6 +2089,7 @@ MLX_DIR=$HOME/.local/mlx cargo run --release -p ironmlx -- serve \
   --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 \
   2> /tmp/p5g-t3-start-server.log &
 SERVER_PID=$!
+trap 'kill ${SERVER_PID:-} 2>/dev/null || true' EXIT
 until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/healthz 2>/dev/null | grep -q "^200$"; do sleep 5; done
 
 for sweep in "short:128,512:pp_tps" "long:2048,4096,8192,16384:pp_tps" "decode:128,2048,16384:tg_tps"; do
@@ -1718,7 +2102,7 @@ for sweep in "short:128,512:pp_tps" "long:2048,4096,8192,16384:pp_tps" "decode:1
     --format json > "/tmp/p5g-t3-start-$label.json"
 done
 
-kill $SERVER_PID 2>/dev/null
+kill $SERVER_PID 2>/dev/null || true
 wait $SERVER_PID 2>/dev/null || true
 for _retry in 1 2 3 4 5; do
   lsof -ti :8080 > /dev/null 2>&1 || break
@@ -1749,7 +2133,15 @@ cat /tmp/p5g-t3-start-medians.json
 
 ### Step 3.1-3.6: Same template as Task 2 Steps 2.1-2.6
 
-Substitute T3 candidate (T0 ranking #3), `feat(p5g-t3):` / `chore(p5g-t3):` commit prefix, `/tmp/p5g-t3-start-medians.json` as the baseline-column source for Step 3.5 promote/revert table.
+Substitute throughout:
+- T3 candidate (T0 ranking #3)
+- `feat(p5g-t3):` / `chore(p5g-t3):` commit prefix
+- Measured JSON paths: `/tmp/p5g-t3-measured-{short,long,decode}.json`
+- Measured medians: `/tmp/p5g-t3-measured-medians.json`
+- Baseline (Step 3.0 output): `/tmp/p5g-t3-start-medians.json`
+- iron-bench `--target p5g_t3=http://127.0.0.1:8080`
+- Gate output: `/tmp/p5g-t3-gate.md` (mechanically generated from baseline + measured by identical Python script as Step 1.9 / Step 2.5)
+- Same thresholds: long-PP geomean > +5% vs T3-start, per-PP regression < 2%, decode TG regression < 2%.
 
 ---
 
@@ -1763,7 +2155,7 @@ Substitute T3 candidate (T0 ranking #3), `feat(p5g-t3):` / `chore(p5g-t3):` comm
 ### Step 4.1: Hygiene chain (sanity)
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 cargo fmt
 cargo +nightly fmt --all -- --check 2>&1 | tail -3
@@ -1775,7 +2167,7 @@ Expected: all clean.
 ### Step 4.2: Full integration tests
 
 ```bash
-set -o pipefail
+set -euo pipefail
 export IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/ | head -1)
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --test p5_qwen35_moe_smoke -- --ignored --test-threads=1 2>&1 | tail -10
@@ -1787,7 +2179,7 @@ Expected: all PASS, argmax=11.
 ### Step 4.3: sweep_full regression gate
 
 ```bash
-set -o pipefail
+set -euo pipefail
 export QWEN35_MODEL=~/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/ | head -1)
 MLX_DIR=$HOME/.local/mlx ./scripts/sweep/sweep_full.sh 2>&1 | tail -10
 ```
@@ -1800,7 +2192,7 @@ This is the same procedure as P5f T3 close-out. 3 separate sweeps, one server up
 **4.4.a — ironmlx sweep**:
 
 ```bash
-set -o pipefail
+set -euo pipefail
 # Pre-flight port guard (port-targeted, not name-pattern). Refuse to auto-kill
 # someone else's process on the same host.
 for port in 8080 8081 8082; do
@@ -1815,6 +2207,7 @@ done
 MLX_DIR=$HOME/.local/mlx cargo run --release -p ironmlx -- serve \
   --model "$IRONMLX_MOE_MODEL_DIR" --port 8080 --host 127.0.0.1 2> /tmp/p5g-ironmlx-server.log &
 IRONMLX_PID=$!
+trap 'kill ${IRONMLX_PID:-} 2>/dev/null || true' EXIT
 until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/healthz 2>/dev/null | grep -q "^200$"; do sleep 5; done
 
 MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
@@ -1824,7 +2217,7 @@ MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
   --format json > /tmp/p5g-ironmlx.json 2> /tmp/p5g-ironmlx.log
 echo "[p5g-ironmlx sweep done]"; tail -3 /tmp/p5g-ironmlx.log
 
-kill $IRONMLX_PID 2>/dev/null
+kill $IRONMLX_PID 2>/dev/null || true
 wait $IRONMLX_PID 2>/dev/null || true
 for _retry in 1 2 3 4 5; do
   lsof -ti :8080 > /dev/null 2>&1 || break
@@ -1835,11 +2228,12 @@ done
 **4.4.b — omlx sweep**:
 
 ```bash
-set -o pipefail
+set -euo pipefail
 SNAP_SHA=$(basename "$IRONMLX_MOE_MODEL_DIR")
 ( cd "$RIVALS_DIR/omlx" && \
   uv run omlx serve --model-dir "$IRONMLX_MOE_MODEL_DIR" --host 127.0.0.1 --port 8081 ) &
 OMLX_PID=$!
+trap 'kill ${OMLX_PID:-} 2>/dev/null || true' EXIT
 until curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8081/v1/models 2>/dev/null | grep -qE "^(200|404)$"; do sleep 5; done
 
 MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
@@ -1848,7 +2242,7 @@ MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
   --prompt-len 128,512,2048,4096,8192,16384 --max-tokens 128 --runs 5 --warmup 1 \
   --format json > /tmp/p5g-omlx.json 2> /tmp/p5g-omlx.log
 
-kill $OMLX_PID 2>/dev/null
+kill $OMLX_PID 2>/dev/null || true
 wait $OMLX_PID 2>/dev/null || true
 for _retry in 1 2 3 4 5; do
   lsof -ti :8081 > /dev/null 2>&1 || break
@@ -1859,10 +2253,11 @@ done
 **4.4.c — mlx-lm sweep**:
 
 ```bash
-set -o pipefail
+set -euo pipefail
 ( cd "$REPO/scripts/bench-venvs/mlx-lm" && \
   uv run mlx_lm.server --model "$IRONMLX_MOE_MODEL_DIR" --host 127.0.0.1 --port 8082 --log-level INFO ) &
 MLXLM_PID=$!
+trap 'kill ${MLXLM_PID:-} 2>/dev/null || true' EXIT
 until curl -s -X POST http://127.0.0.1:8082/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"default_model","messages":[{"role":"user","content":"hi"}],"max_tokens":2,"temperature":0}' 2>/dev/null | grep -q "choices"; do sleep 5; done
@@ -1873,7 +2268,7 @@ MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
   --prompt-len 128,512,2048,4096,8192,16384 --max-tokens 128 --runs 5 --warmup 1 \
   --format json > /tmp/p5g-mlx_lm.json 2> /tmp/p5g-mlx_lm.log
 
-kill $MLXLM_PID 2>/dev/null
+kill $MLXLM_PID 2>/dev/null || true
 wait $MLXLM_PID 2>/dev/null || true
 for _retry in 1 2 3 4 5; do
   lsof -ti :8082 > /dev/null 2>&1 || break
@@ -1884,7 +2279,7 @@ done
 ### Step 4.5: Aggregate medians + p95
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO" && python3 <<'EOF' > /tmp/p5g-aggregate.md
 import json, statistics
 
@@ -2039,7 +2434,7 @@ Fill all `<fill>` placeholders with actual numbers from §5 aggregate (`/tmp/p5g
 
 - [ ] Create + fill the file. Verify no `<fill>` remaining:
 ```bash
-set -o pipefail
+set -euo pipefail
 grep "<fill" "$REPO/reports/p5g-final-results.md"
 ```
 Expected: empty.
@@ -2047,7 +2442,7 @@ Expected: empty.
 ### Step 4.7: Commit T4 close-out
 
 ```bash
-set -o pipefail
+set -euo pipefail
 cd "$REPO"
 git add reports/p5g-final-results.md
 git commit -m "$(cat <<'EOF'
@@ -2102,7 +2497,7 @@ Fill `<X>` / `<%>` / `<fill>` with actual measured numbers.
 ### Step 4.8: Verify branch state
 
 ```bash
-set -o pipefail
+set -euo pipefail
 git -C "$REPO" log --oneline d864e6e..HEAD
 git -C "$REPO" status --short
 ```
