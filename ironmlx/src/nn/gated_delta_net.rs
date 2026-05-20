@@ -444,21 +444,19 @@ impl GatedDeltaNet {
                     eval_set.push(m);
                 }
                 mlx::transforms::eval(&eval_set[..])?;
-                Some((mode, std::time::Instant::now()))
+                // Capture offset_before inside the Layer1/Layer2 arm — AblateX
+                // modes never use it (exit barrier is gated on _p5g_timer_start).
+                // HTTP-path B=1 invariant: offsets() always has at least one
+                // element when cache exists.
+                let offset_before: i32 = cache
+                    .as_deref()
+                    .and_then(|c| c.offsets().first().copied())
+                    .unwrap_or(0);
+                Some((mode, std::time::Instant::now(), offset_before))
             } else {
                 None
             }
         };
-
-        // Capture offset_before BEFORE any cache-modifying op in Steps 2c / 7e.
-        // Only relevant for Layer1/Layer2 (the modes that actually emit logs); for
-        // AblateX modes this is computed but unused. HTTP-path B=1 invariant:
-        // offsets() always has at least one element when cache exists.
-        #[cfg(feature = "p5g-profile")]
-        let _p5g_offset_before: i32 = cache
-            .as_deref()
-            .and_then(|c| c.offsets().first().copied())
-            .unwrap_or(0);
 
         // Layer 2 per-step elapsed accumulator.
         #[cfg(feature = "p5g-profile")]
@@ -640,14 +638,15 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        // ablate-conv: skip conv_state update (conv was not executed; conv_state
-        // would receive stale data from the bypassed conv_input path).
-        #[cfg(feature = "p5g-profile")]
-        let _p5g_skip_conv_state_update = matches!(profile_mode(), ProfileMode::AblateConv);
-        #[cfg(not(feature = "p5g-profile"))]
-        let _p5g_skip_conv_state_update = false;
-        if !_p5g_skip_conv_state_update {
-            if let Some(c) = cache.as_deref_mut() {
+        if let Some(c) = cache.as_deref_mut() {
+            // ablate-conv: conv was replaced with qkv passthrough, so conv_state
+            // would receive stale data. Skip the update entirely.
+            #[cfg(feature = "p5g-profile")]
+            let ablate_conv = matches!(profile_mode(), ProfileMode::AblateConv);
+            #[cfg(not(feature = "p5g-profile"))]
+            let ablate_conv = false;
+
+            if !ablate_conv {
                 let n_keep = self.cfg.conv_kernel_size - 1;
                 let conv_input_dims = conv_input.shape();
                 let total_len = conv_input_dims.as_slice()[1];
@@ -702,8 +701,8 @@ impl GatedDeltaNet {
                 };
                 c.update_conv(new_conv_state);
             }
-        } // end if !_p5g_skip_conv_state_update
-          // Step 2c elapsed push
+        }
+        // Step 2c elapsed push
         #[cfg(feature = "p5g-profile")]
         {
             if let Some(start) = _p5g_step_start_2c {
@@ -976,7 +975,7 @@ impl GatedDeltaNet {
 
         #[cfg(feature = "p5g-profile")]
         {
-            if let Some((mode, start)) = _p5g_timer_start {
+            if let Some((mode, start, offset_before)) = _p5g_timer_start {
                 // This block runs ONLY for Layer1 / Layer2 (entry barrier set
                 // _p5g_timer_start to Some only in those modes). AblateX skips this
                 // entirely — no exit eval barrier, no log emission.
@@ -995,7 +994,6 @@ impl GatedDeltaNet {
                     .as_deref()
                     .and_then(|c| c.offsets().first().copied())
                     .unwrap_or(0);
-                let offset_before = _p5g_offset_before;
 
                 // Build the step_breakdown suffix iff mode == Layer2. Empty string for
                 // Layer 1 so the log line is unchanged.
