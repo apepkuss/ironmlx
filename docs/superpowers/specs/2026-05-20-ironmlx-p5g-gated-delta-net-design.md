@@ -326,6 +326,48 @@ Harness 内部按 Phase A/B/C/D 串行 spawn subprocess，每个 phase 独立 se
 
 Promote 决策见 § 7.3 (端到端 benchmark, ship 指标)。Layer 3 upper-bound cut 仅用于决定该候选是否值得实施 T1-T3，不作 ship 依据。
 
+### 4.1a 候选 — Post-T0 v2 实测更新 (2026-05-20)
+
+T0 v2 实测后 (HEAD `52c39bd` + `5e35ab2` tracing→stderr fix; harness 663s wall):
+
+**Phase B 实测 GDN occupancy**: 38.3% (PP=16384) — 45.6% (PP=4096). 远超 § 7.1 假设 15-30% 区间。GDN 实际占 prefill 时间是 spec § 1.3 prior 估算 ~20% 的两倍。
+
+**Phase C 实测 top-3 step ranking** (跨 PP=2048/4096/8192/16384 cross-consistent):
+
+| Rank | Step | % of GDN | 对应 § 4.1 prior 候选? |
+|---|---|---:|---|
+| **1** | **1a_in_proj_qkvz** | **44-46%** | **未列** (Linear quantized matmul, GDN 内最大开销) |
+| 2 | 8_norm_proj (RmsNormGated + reshape + out_proj) | 20-21% | 未列 |
+| 3 | 7_kernel (gated_delta_step MetalKernel) | 16-17% | C4 t_arr 是 kernel 辅助输入 |
+
+C1 (compute_g) / C2 (stateful conv) / C3 (conv1d+silu) 都不在 top-3。Step 5 compute_g 实测 ~3-5%；Step 2 conv stack 合计 ~8-10%；Step 7c t_arr 构造 ~1%。
+
+**Phase D 实测 ablation deltas** (vs Phase A pp_tps_median):
+
+| Mode | PP=2048 | PP=4096 | PP=8192 | PP=16384 |
+|---|---:|---:|---:|---:|
+| ablate-compute-g (~C1) | -8.55% | -8.04% | -6.24% | -2.89% |
+| ablate-conv (~C2/C3) | -7.81% | -7.54% | -4.97% | -1.36% |
+| ablate-t-arr (~C4) | -10.59% | -7.74% | -7.83% | -4.38% |
+
+**全部 negative** — 所有 ablation 都比 Phase A 慢。Plan § 7.1 "Phase D = clean ablation reading / candidate upper-bound cut" 的假设**被实测推翻**。可能根因 (待 P5h 优先级，不阻塞 T1): (a) GPU thermal drift across 24 spawns; (b) substitute 自身有成本 (`zeros_like+astype`、`HashMap+Mutex`、`qkv.clone()` 不必比原 op 便宜); (c) cache state divergence (AblateConv 不更新 conv_state 让下游 kernel 走 slow path); (d) kernel template variance。
+
+**结论**:
+- **§ 4.1 C1-C4 prior ranking retired** — 不能基于 Phase D upper-bound 给 C1-C4 排序 / 作 T1 选择依据。C1-C4 实际 attack 面合计约 16-20% of GDN (按 Phase C 实测)，远小于 #1 in_proj_qkvz 的 44-46%。
+- **新候选 C5 = Fused Input Projection** 作为 T1 primary。
+
+| 候选 | 源码 | 优化思路 |
+|---|---|---|
+| **C5 Fused input projection** | `forward_on` Step 1a (in_proj_qkvz) + Step 1b (in_proj_ba) | 合并 `in_proj_qkvz`(hidden→2×key_dim+2×value_dim) + `in_proj_ba`(hidden→b_dim+a_dim) 为单一 Linear (hidden→2×key_dim+2×value_dim+b_dim+a_dim)，forward 后 slice 切回。Op-level (不触发 Scope gate)。理论 saving 源: (a) 一次 input `x` load vs 两次; (b) 一次 4-bit quantized GEMM dispatch vs 两次; (c) 大 matmul GPU occupancy 通常优于两个小 matmul。Profiling schema 从 11 字段 (含独立 `1a_in_proj_qkvz` / `1b_in_proj_ba`) 改为 10 字段 (合并为 `1_input_proj_qkvzba`)。融合权重需沿 output axis 0 拼接 packed `weight` + `scales` + `biases`，slice 顺序固定 `[qkvz \| b \| a]`，eager `mlx::transforms::eval` 防 lazy stream-tagged Array 跨线程进 model fields。 |
+
+**实测收益解读 (chatgpt v1 review):** C5 saving 来源**不是**消除 Step 1a 44% 的 matmul 成本本身 (T1 仍执行 q/k/v/z/b/a 所有量化 matmul 计算)，而是**减少两个原本独立 matmul 之间的 dispatch + input load + GEMM occupancy 浪费**。预期端到端 geomean prefill saving 1-3%，**可能不达 § 7.3 promote threshold +5%** → T1 可能 revert。即便 revert，也是 valuable signal — 锁死 "GDN Linear 已 saturated"，T2/T3 转向 Step 8 (out_proj) 或 Step 7 (kernel，可能触发 Scope gate)。
+
+**T2/T3 候选** (待 T1 outcome):
+
+- 若 T1 promote: T2 探索 Step 8 `8_norm_proj` (其中 out_proj 是另一个 Linear quantized matmul, ~10-15% of GDN; RmsNormGated 已用 mlx::fast)
+- 若 T1 revert: T2 重新评估 — 候选 Step 8 out_proj，或 reconsider Phase D 根因 (phase order randomized sanity)
+- T3 候选: Step 7 kernel 优化 (可能触发 Scope gate; 待 Boss 决策)
+
 ### 4.2 单 task 实施模板（每个 Tn 同结构）
 
 ```text
@@ -393,7 +435,17 @@ P5g 新增（若 T0 / T1-T3 涉及 Metal kernel 改动时）：
 
 ## § 7 Acceptance Criteria
 
-### 7.1 Performance target ceiling 推导 (假设示例，不作 final target)
+### 7.1a Amendment — Post-T0 v2 (2026-05-20)
+
+T0 v2 实测后此节的 ablation-based ceiling 公式失效。Phase D 实测全部 negative (见 § 4.1a)，**不能**用 "ablation = cut 比例" 套 § 7.1 表推导 P5g target。修订:
+
+- **Phase B GDN occupancy 实测**: PP=2048 = 40.8%, PP=4096 = 45.6%, PP=8192 = 43.8%, PP=16384 = 38.3%. **远超 § 7.1 假设 15-30% 区间** + § 7.1 sanity gate ≥ 10%。
+- **Ceiling 数学结构改用 Phase C 实测 step ranking** 替代 Phase D 上界估算 — T1-T3 端到端 ROI 仍以 § 7.3 ship 指标为准 (this section 不预设具体 cut)。
+- **Provisional target 暂保留 § 7.2 TBD** — 等 T1 outcome 后更新。如 T1 fused input projection promote 1-3% (预期下限)，P5g 整体目标缩水到 +3-5% prefill geomean (vs spec § 1.1 omlx+10%)；如 T1 revert，P5g 整体目标无法靠 GDN 内优化达成，需重排候选或转 P5h。
+
+§ 7.1 prior table (假设性 occupancy × cut) 保留作历史 reference，**T1 决策不再基于此表**。
+
+### 7.1 Performance target ceiling 推导 (假设示例，不作 final target) ⚠️ 已被 § 7.1a Amendment 取代 — 仅作历史
 
 P5g 只优化 GatedDeltaNet — 物理上的 end-to-end wall-time 减少上限由 GatedDeltaNet 在 prefill 总 wall-time 的占比 × GatedDeltaNet 内部优化的 cut 比例共同决定。
 

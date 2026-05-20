@@ -2011,77 +2011,98 @@ cat /tmp/p5g-t1-start-medians.json
 
 - [ ] Confirm `/tmp/p5g-t1-start-medians.json` exists with non-null values for all 9 entries: `short_pp_tps[128,512]`, `long_pp_tps[2048,4096,8192,16384]`, `decode_tg_tps[128,2048,16384]`. This file is the ONLY authoritative T1-start reference for Step 1.9.
 
-### Step 1.1: Identify candidate from T0 report
+### Step 1.1: Identify candidate from T0 report (Post-T0 v2: spec § 4.1a)
 
-Read `reports/p5g-t0-gated-delta-profile.md` § 6 ranking. T1 implements the rank-1 (highest single-ROI) candidate.
+**T1 candidate is fixed by spec § 4.1a "Post-T0 v2 候选更新" (2026-05-20 amendment)**: `C5 Fused Input Projection` — merge `in_proj_qkvz` (hidden→2×key_dim+2×value_dim) + `in_proj_ba` (hidden→b_dim+a_dim) into a single Linear (hidden→2×key_dim+2×value_dim+b_dim+a_dim), forward + slice back.
 
-- [ ] Confirm T1 candidate name (e.g. C1 compute_g chain cache, C4 t_arr cache, etc.). Read the corresponding source line range in `ironmlx/src/nn/gated_delta_net.rs` per spec § 4.1 (line refs).
-- [ ] Confirm Scope gate per § 4.1: candidate is op-level (Rust/MLX op rearrangement / `mlx::fast` reuse / constant cache / graph shape). If T1 requires new Metal kernel → **STOP and report DONE_WITH_CONCERNS** with the specific scope gate trigger; do not proceed without Boss decision.
+Rationale (per spec § 4.1a): Phase C top-3 实测 `1a_in_proj_qkvz`(44-46%) + `1b_in_proj_ba`(2-3%) + `8_norm_proj`(20-21%) + `7_kernel`(16-17%). Spec § 4.1 prior C1-C4 候选 retire — Phase D 实测全 negative (推翻 ablation upper-bound 假设). C5 是唯一 op-level (Scope gate 不触发) attacking Phase C #1 + #1b combined ~47-48% time slot.
 
-### Step 1.2: Implement T1 optimization
+**Expected saving** (chatgpt v1 review):
+- 不是消除 Step 1a 44% matmul 本身 (T1 仍执行 q/k/v/z/b/a 所有量化 matmul 计算)
+- 而是省两个 Linear 之间的 input load + dispatch overhead + GEMM occupancy 浪费
+- 端到端 geomean prefill saving 预期 1-3%，**可能不达 § 7.3 promote threshold +5%**
+- 若 revert 也是 valuable signal — 锁死 "GDN Linear 已 saturated"，T2/T3 转 Step 8 (out_proj) 或 Step 7 (kernel; 可能触发 Scope gate)
 
-Apply the specific Edit to `gated_delta_net.rs` per the T1 candidate. For example, if T1 = "C4 t_arr cache" — replace the construction at line 621 (`let t_arr: Array = (&[seq][..], ()).try_into()?;`) with a lookup-or-construct against a module-level cache, using the SAME construction form as the original code:
+- [ ] Confirm Scope gate per § 4.1: C5 is op-level (Rust/MLX op rearrangement + weight tensor concat + slice). No new Metal kernel needed → **Scope gate 不触发**.
+- [ ] Read `ironmlx/src/nn/gated_delta_net.rs` Steps 1a + 1b (around lines 471-498) and `from_loader` (around lines 138-260) to identify weight load + Linear construction sites.
+
+### Step 1.2: Implement T1 — fused input projection (C5)
+
+The fusion lives in BOTH default and feature builds (it's a promoted optimization). Plan:
+
+**Part A — `from_loader`: merge weight + scales + biases sources, eagerly eval, store single Linear**.
+
+`Linear::from_loader(prefix, hidden_in, hidden_out)` currently loads `weight`, `scales`, `biases` (optional) tensors from the safetensors file rooted at `prefix`. For C5, we need to:
+
+1. Load `in_proj_qkvz`'s packed quantized `weight`, `scales`, `biases` (existing `Linear::from_loader(in_proj_qkvz_prefix, ...)`).
+2. Load `in_proj_ba`'s packed quantized `weight`, `scales`, `biases` (existing `Linear::from_loader(in_proj_ba_prefix, ...)`).
+3. Concat along output axis 0 (the per-output-channel dim):
+   - `fused_weight = concat([qkvz_weight, ba_weight], axis=0)` — both are `[out_features, in_features/group_size, packed_bytes_per_group]`-shape quantized tensors.
+   - `fused_scales = concat([qkvz_scales, ba_scales], axis=0)` — per-group scales shape `[out_features, in_features/group_size]`.
+   - `fused_biases` (optional): same axis-0 concat if BOTH have biases; if only one has biases, this is a fail-fast error (mismatched bias semantics).
+4. Constraint: `qmeta.group_size` and `qmeta.bits` MUST match between `in_proj_qkvz` and `in_proj_ba`. Verify at load time (assert).
+5. EAGERLY `mlx::transforms::eval(&[&fused_weight, &fused_scales, &fused_biases.unwrap_or(...)])?` before storing in the struct — prevents lazy stream-tagged Arrays from crossing thread boundaries into `GatedDeltaNet` fields.
+6. Construct ONE `Linear` from the fused tensors. Replace the struct's `in_proj_qkvz: Linear` + `in_proj_ba: Linear` fields with a single `in_proj_qkvzba: Linear`.
+
+**Part B — `forward_on`: single Linear forward + slice into qkvz / b / a segments**.
+
+Replace existing Steps 1a + 1b:
 
 ```rust
-// At top of gated_delta_net.rs (module level — NOT gated by p5g-profile;
-// this is a promoted optimization, lives in the default build):
-static T_ARR_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, Array>>> =
-    std::sync::OnceLock::new();
+// OLD (Step 1a + Step 1b, two separate Linear forwards on same input x):
+let qkvz = self.in_proj_qkvz.forward_on(x, target)?;
+// ... step 1a elapsed push ...
+let ba = self.in_proj_ba.forward_on(x, target)?;
+// ... step 1b elapsed push ...
 
-// In forward_on, replace the line 621 construction with:
-let t_arr: Array = {
-    let cache = T_ARR_CACHE
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let mut guard = cache.lock().unwrap();
-    if let Some(arr) = guard.get(&seq) {
-        arr.clone()
-    } else {
-        let arr: Array = (&[seq][..], ()).try_into()?;
-        guard.insert(seq, arr.clone());
-        arr
-    }
-};
-```
-
-(Mutex is fine here — only contended on first call per `seq` chunk size; subsequent calls hit the warm map.)
-
-If T1 = "C1 compute_g chain cache":
-
-**Constraint:** `GatedDeltaNet::from_components(...) -> Self` (line 297) is NOT `Result<Self>`, so it cannot use `?`. Changing its signature cascades through every constructor caller (incl. existing unit tests). Avoid that scope explosion by storing the constant in a per-instance `OnceLock<Array>` and initializing lazily on first `forward_on` call. The OnceLock is populated exactly once (same Array reused across all subsequent forwards) and the fallible `?` operations live inside `forward_on`'s `-> Result<Array>` body.
-
-```rust
-// In GatedDeltaNet struct (default-build field, not feature-gated):
-neg_exp_a_log_f32: std::sync::OnceLock<Array>,
-
-// In both from_loader (Result<Self>) and from_components (Self) — initialize
-// the OnceLock empty. NO compute, NO `?` needed:
-neg_exp_a_log_f32: std::sync::OnceLock::new(),
-
-// In forward_on Step 5, replace the per-call compute with a get-or-init lookup
-// against the OnceLock. The first call into this layer's forward_on populates
-// the constant; subsequent calls reuse it.
-let neg_exp_a_log_f32 = if let Some(arr) = self.neg_exp_a_log_f32.get() {
-    arr
+// NEW (single fused Linear forward + slice):
+// Step 1 (was 1a + 1b): fused input projection
+#[cfg(feature = "p5g-profile")]
+let _p5g_step_start_1 = if matches!(_p5g_mode, ProfileMode::Layer2) {
+    Some(std::time::Instant::now())
 } else {
-    let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
-    let exp_alog = a_log_f32.exp()?;
-    let neg = mlx::ops::binary::negative(&exp_alog)?;
-    mlx::transforms::eval(&[&neg])?; // freeze it so subsequent reads are zero-cost
-    // get_or_init can't return Result, so do the init outside and set() here.
-    // Race-free: OnceLock::set returns Err if already set, which we ignore —
-    // any concurrent thread that won the race produced the same value.
-    let _ = self.neg_exp_a_log_f32.set(neg);
-    self.neg_exp_a_log_f32.get().expect("just set")
+    None
 };
-let inner = neg_exp_a_log_f32 * &sp;
-let g = inner.exp()?;
+let qkvz_ba = self.in_proj_qkvzba.forward_on(x, target)?;
+// Slice into qkvz (first 2*key_dim+2*value_dim cols), b (next b_dim cols), a (last a_dim cols).
+// Slice order MUST be [qkvz | b | a] — matches `concat([qkvz_weight, ba_weight], axis=0)` order.
+let qkvz_dim = 2 * self.cfg.key_dim() + 2 * self.cfg.value_dim();
+let ba_split = vec![qkvz_dim, qkvz_dim + self.cfg.b_dim()]; // split at [qkvz_dim, qkvz_dim+b_dim]
+let parts = mlx::ops::shape::split_at_on(&qkvz_ba, &ba_split, -1, target)?;
+let qkvz = &parts[0]; // existing downstream uses
+let b = &parts[1];
+let a = &parts[2];
+#[cfg(feature = "p5g-profile")]
+{
+    if let Some(start) = _p5g_step_start_1 {
+        mlx::transforms::eval(&[qkvz, b, a])?;
+        _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+    }
+}
 ```
 
-(`OnceLock` is in `std::sync` — same module already used for `kernel_no_mask` / `kernel_masked` per current struct definition, so no new dependency.)
+(Adjust to actual `cfg` field names: `cfg.key_dim()` / `cfg.value_dim()` / `cfg.b_dim()` / `cfg.a_dim()`. Verify by reading `GatedDeltaNetConfig` struct definition first.)
 
-(Spec § 4.1 C1 specifies this pattern.)
+The downstream `ba` split (which produced `b` and `a` separately) is now handled by the unified slice — verify the downstream `b` and `a` uses match the new bindings.
 
-- [ ] Apply the Edit. Build verifies the change compiles.
+**Equivalence test (required before commit)**:
+
+Add a unit test in `ironmlx/src/nn/gated_delta_net.rs` `#[cfg(test)]` block that constructs a `GatedDeltaNet` with synthetic small dims, runs `forward_on` once with random input, AND a parallel separate-Linear path (build two Linears from the original sub-tensors, call them separately), assert outputs are equal (or within FP composition tolerance for bf16 → 1e-3 relative error). This guards against weight-concat orientation mistakes.
+
+**Profiling schema update (Step 0.11 / 0.16 alignment)**:
+
+Post-T1 schema collapses 1a + 1b into a single `1_input_proj_qkvzba` step. New schema = **10 fields** (was 11):
+
+```
+["1_input_proj_qkvzba", "2a_concat", "2b_conv1d_silu", "2c_update_conv",
+ "3_split", "4_qk_rmsnorm", "5_compute_g", "6_beta", "7_kernel", "8_norm_proj"]
+```
+
+- Update Step 0.11 instrumentation: only ONE `_p5g_step_start_1` + push (NOT separate `_1a` + `_1b`).
+- Update Step 0.16 aggregator's `STEP_NAMES` constant — `assert len(parts) == 10` (was 11).
+- The T0 v2 data (`/tmp/p5g-t0-phases.json`) keeps the old 11-field schema; the T0 close-out report (Step 0.18) reports against the old schema. Future re-runs of T0 (if T2/T3 need updated ranking) use the new 10-field schema.
+
+- [ ] Apply Part A (`from_loader` weight merge) + Part B (`forward_on` single Linear + slice) + schema update. Build verifies the change compiles.
 
 ### Step 1.3: Build + hygiene chain
 
