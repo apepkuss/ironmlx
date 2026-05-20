@@ -140,7 +140,7 @@ Per-PP attribution of residual gap after P5f T1 only (use canonical T0 profile `
 Ranked by expected impact:
 
 1. **GatedDeltaNet independent profile + optimization** (linear attn, 30/40 layers, T0 profile 20% at PP=2048)
-   - Read current `ironmlx/src/models/qwen3_5/gated_delta_net.rs`; profile per-op
+   - Read current `ironmlx/src/nn/gated_delta_net.rs`; profile per-op
    - Independent design improvement (NO copy from omlx.patches per [feedback_no_spec_from_competitors])
 
 2. **GatedAttention optimization + memory-pressure mitigation** (full attn, 10/40 layers, super-linear scaling)

@@ -33,8 +33,9 @@ pub struct ServeArgs {
     /// Requests beyond this limit go to the admission queue. Default `1`
     /// optimizes single-request prefill / decode by avoiding [B,T_max]-padded
     /// MoE compute when only one slot is occupied; pass `--b-max N > 1` to
-    /// enable concurrent multi-request batching.
-    #[arg(long, default_value_t = 1)]
+    /// enable concurrent multi-request batching. `0` rejected at startup
+    /// because Scheduler with zero slots cannot admit any request.
+    #[arg(long, default_value_t = 1, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     pub b_max: usize,
 
     /// Admission-window deadline in milliseconds. After the first
@@ -70,11 +71,18 @@ where
     // Surface b_max at boot so operators can confirm whether single-request
     // optimized mode (default) or multi-request batching is active without
     // having to inspect process args.
-    tracing::info!(
-        "ironmlx serve: b_max={} (single-request optimized by default; \
-         pass --b-max N > 1 to enable concurrent multi-request batching)",
-        args.b_max,
-    );
+    if args.b_max == 1 {
+        tracing::info!(
+            "ironmlx serve: b_max=1 (single-request optimized mode; \
+             pass --b-max N > 1 to enable concurrent multi-request batching)"
+        );
+    } else {
+        tracing::info!(
+            "ironmlx serve: b_max={} (multi-request batching enabled; \
+             pass --b-max 1 to switch to single-request optimized mode)",
+            args.b_max,
+        );
+    }
 
     let model_id = args.model.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
