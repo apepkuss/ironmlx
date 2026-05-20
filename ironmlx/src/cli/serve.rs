@@ -30,8 +30,11 @@ pub struct ServeArgs {
     pub prefill_chunk_size: usize,
 
     /// Maximum concurrent in-flight requests (Scheduler slot count).
-    /// Requests beyond this limit go to the admission queue.
-    #[arg(long, default_value_t = 4)]
+    /// Requests beyond this limit go to the admission queue. Default `1`
+    /// optimizes single-request prefill / decode by avoiding [B,T_max]-padded
+    /// MoE compute when only one slot is occupied; pass `--b-max N > 1` to
+    /// enable concurrent multi-request batching.
+    #[arg(long, default_value_t = 1)]
     pub b_max: usize,
 
     /// Admission-window deadline in milliseconds. After the first
@@ -64,6 +67,15 @@ fn serve_with_model<M>(model: M, tokenizer: Tokenizer, args: &ServeArgs) -> Resu
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    // Surface b_max at boot so operators can confirm whether single-request
+    // optimized mode (default) or multi-request batching is active without
+    // having to inspect process args.
+    tracing::info!(
+        "ironmlx serve: b_max={} (single-request optimized by default; \
+         pass --b-max N > 1 to enable concurrent multi-request batching)",
+        args.b_max,
+    );
+
     let model_id = args.model.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
