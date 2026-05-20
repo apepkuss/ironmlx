@@ -11,7 +11,7 @@
 | 验证模型 | `mlx-community/Qwen3.5-35B-A3B-4bit`（PP=128/512/2048/4096/8192/16384） |
 | 验收 | profile-driven 优化项至少 1 个 ship（>5% per-PP improvement）；全 PP 段无 prefill/decode regression；sentinel + batched + sweep_full 全 PASS。 |
 | 显式 out-of-scope | GatedAttention 优化（留 P5h）；long-prompt chunk-size sweep（P5h）；router bypass（P5h 条件性）；multi-request batching（P5h/P6+ per Boss 2026-05-19 directive）；Metal kernel rewrite（优先 op-level，profile 不够再 expand）。 |
-| 性能目标 | P5g 单 phase 目标 PP=2048 prefill ≥ 2500 tok/s (+35%)，PP=4096-16384 +28-31%；最低 success bar T1-T3 至少 1 个优化 promote (>5%)。P5f+P5g+P5h 联合追"全 PP 段 omlx+10%" ultimate target，P5g 单 phase 不强求达成。 |
+| 性能目标 | **Provisional**, 待 T0a 实测当前 HEAD GatedDeltaNet 真实占比后由 § 7 ceiling 推导锁定。当前推导 (假设 occupancy 仍 ~20% + 优化 cut 50%): PP=2048 prefill 1844 → ~2057 tok/s (+11.5%)。最低 success bar: T1-T3 至少 1 个优化 promote (>5% per-PP improvement) 且全 PP 无 prefill/decode regression。 P5f+P5g+P5h+ 联合追"全 PP 段 omlx+10%" ultimate target，P5g 单 phase 不强求达成。 |
 
 ## § 1 调研依据与决策摘要
 
@@ -47,36 +47,41 @@ GatedDeltaNet **per-layer wall-clock = 15.3 ms** at PP=2048, × 30 layers = 459 
 
 ### 1.3 GatedDeltaNet 算法步骤（from `ironmlx/src/nn/gated_delta_net.rs:1-1026`）
 
-8 个主要 step（per forward call, B=1 single-request 默认场景）：
+主要 step（per forward call, B=1 single-request 默认场景）— op 名跟实际代码 align：
 
 ```
-Step 1: in_proj_qkv → 拆 Q/K/V/a/b
+Step 1a: in_proj_qkvz → slice [q | k | v | z]
+Step 1b: in_proj_ba   → slice [b | a]
 Step 2a: prepend conv_state via concatenate(&[conv_state, qkv], 1)
-Step 2b: conv1d + sigmoid + mul（element-wise gating）
-Step 2c: update conv_state cache（取 last n_keep tokens）
-Step 3: split Q/K/V → per-head shape
-Step 4: q/k rms_norm + scale (× inv_scale, × inv_scale²)
-Step 5: compute_g = exp(-exp(A_log) * softplus(a + dt_bias))
-        elementwise chain: zeros / logaddexp / where / astype(f32) / exp /
-        negative / mul / exp
-Step 6: beta = sigmoid(b)
-Step 7a: build/get gated_delta_step Metal kernel (mask/no-mask 2 variants)
-Step 7b: state_in from cache OR fresh zeros
-Step 7c: t_arr = ((seq,), ()) 0-dim int32 (每次重建)
+         (conv_state already = [B, kernel_size-1, conv_dim] — trimmed window
+          not full history; kernel_size=4 → conv_state holds 3 tokens)
+Step 2b: conv1d + sigmoid + mul (silu activation gating)
+Step 2c: update conv_state cache (取 last n_keep tokens of conv_input)
+Step 3:  split q_per_head / k_per_head / v_per_head per-head shape
+Step 4:  q/k rms_norm_on + scale (× inv_scale, × inv_scale²)
+Step 5:  compute_g = exp(-exp(A_log) * softplus(a + dt_bias))
+         elementwise chain: try_into twenty / zeros_like / logaddexp / greater /
+         where / astype(f32) / exp / negative / mul / exp
+Step 6:  beta = sigmoid_on(b)
+Step 7a: build/get gated_delta_step Metal kernel (mask/no-mask 2 variants
+         via OnceLock)
+Step 7b: state_in from cache.recurrent_state().clone() OR fresh f32 zeros
+Step 7c: t_arr = ((seq,), ()).try_into()  0-dim int32 (每次重建)
 Step 7d: kernel dispatch
-Step 8: ... (rest of file, 1026 lines)
+Step 8+: y output + final rms_norm_gated + out_proj (rest of forward_on)
 ```
 
-ChatGPT review (2026-05-20, `p5f-code-review-for-claude.md` Boss 本地) 给的 4 个候选 hot points：
+External review (2026-05-20, internal review notes; not committed to repo per
+[no-unnecessary-docs]) 给出 4 个候选 hot points 作 T0 verification 清单：
 
-| ChatGPT 候选 | 源码位置 | 性质 |
+| 候选 | 源码位置 | 性质 |
 |---|---|---|
-| `concatenate(&[conv_state, qkv], 1)` | line 412-423 | 每次 forward 全段 concat |
-| `conv1d + sigmoid + mul` | line 425-428 | 独立图节点序列 |
-| `compute_g` elementwise chain | line 527-539 | 多 op 链（zeros/logaddexp/where/astype/exp/neg/mul/exp） |
-| `t_arr` 0-dim Array 重建 | line 570-571 | 每次新建 |
+| `concatenate(&[conv_state, qkv], 1)` | line 412-423 (Step 2a) | 每次 forward 全段 concat (conv_state 已是 trimmed 3-token window, 不是 full history) |
+| `conv1d + sigmoid + mul` | line 425-428 (Step 2b) | 独立图节点序列 (silu gating) |
+| `compute_g` elementwise chain | line 527-539 (Step 5) | 多 op 链（try_into / zeros_like / logaddexp / where / astype / exp / neg / mul / exp） |
+| `t_arr` 0-dim Array 重建 | line 570-571 (Step 7c) | 每次新建，可能可缓存 |
 
-P5g profile-first 决策 (§ 2) 要求 **measurement 验证** ChatGPT static-code 假设是否真瓶颈。
+P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设是否真瓶颈 (P5e T1 stream-parallel + P5f T2 single-shot 两次实测推翻 spec assumption 的教训)。
 
 ### 1.4 Boss 决策记录（2026-05-20 brainstorming）
 
@@ -123,48 +128,85 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** ChatGPT static-cod
 
 | 文件 | 修改 |
 |---|---|
-| `ironmlx/src/nn/gated_delta_net.rs` | instrument `GatedDeltaNet::forward_on` 内部 per-step `mlx::transforms::eval` barrier + `std::time::Instant` timing。通过 feature flag 或环境变量启用（避免 production 永久 overhead）。 |
-| `ironmlx/tests/p5g_t0_gated_delta_profile.rs` | 新增 profile harness — 加载 35B-A3B-4bit, 直接调用 `Model::forward_on(PP=2048/4096/8192/16384)`, 收集 8 step timing aggregated across 30 layers, 输出 per-step total / per-call ms + ChatGPT 4 hot points 验证 |
+| `ironmlx/src/nn/gated_delta_net.rs` | instrument `GatedDeltaNet::forward_on` 内部 per-step `mlx::transforms::eval` barrier + `std::time::Instant` timing。**Double-gated**: 编译期 feature flag (`p5g-profile`) 只编译 hook 代码；运行期 env var (`IRONMLX_P5G_PROFILE=1`) 才实际启用 barrier。两个 gate 都需要才 profile，否则正常 forward 路径完全无 overhead。这避免 `cargo --all-features` 在 clippy / sweep_full / bench 路径误启 profile mode。 |
+| `ironmlx/tests/p5g_t0_gated_delta_profile.rs` | 新增 profile harness — 必须 `#[test] #[ignore]` (heavy test, load 35B model)，必须读 `IRONMLX_MOE_MODEL_DIR` env var 取 model path，必须 `--test-threads=1` (Metal GPU 串行)。普通 `cargo test` / CI / clippy 不应触发模型加载。 |
 | `reports/p5g-t0-gated-delta-profile.md` | output 报告 |
 
-### 3.2 Instrument 策略
+### 3.2 Instrument 策略 — 3 层 profile protocol
 
-每个 step 间插入 `mlx::transforms::eval(&[&result])` barrier，记录 `Instant::elapsed()`。与 P5e T0 同样的 instrumented profile 方法（per memory `reports/p5e-t0-profile.md`）。
+按外部 review 建议，单纯 per-op eval barrier 会改变 MLX lazy execution 的 op fusion 边界 / 中间 tensor materialization / 调度顺序 / 临时内存生命周期 / kernel launch pattern。per-step 相对占比可能被截断到 fusion-free 量级，不能直接当作优化优先级唯一依据。
 
-eval barrier 开销 ~0.1-0.5 ms per call，30 layers × 8 step = 240 barriers per forward；PP=2048 forward 内 barrier overhead ~24-120 ms。**绝对值会被 inflated 但 step-by-step 相对占比可靠**（P5e T0 同性质）。
+3 层 protocol：
 
-Feature flag 命名: `cargo --features p5g-profile`（避免污染 release build）。
+**Layer 1 — Baseline mode (no per-op barrier)**
+- 仅在 `GatedDeltaNet::forward_on` 入口 + 出口加 eval barrier
+- 测当前 HEAD 下 **per-layer GatedDeltaNet 总 wall-clock** + 30-layer 累计 + GatedDeltaNet 占 prefill 总 wall-clock 的 % at PP=2048/4096/8192/16384
+- 这一层数字是 P5g target ceiling 计算的依据 (避免重复 P5e T0 旧数字, P5f 已 ship 后 GatedDeltaNet 占比可能已变化)
+
+**Layer 2 — Breakdown mode (per-step barrier)**
+- 在 Step 1a / 1b / 2a / 2b / 2c / 3 / 4 / 5 / 6 / 7a-d / 8 各处加 eval barrier
+- 测每 step 相对占比 — **作热点定位参考，不是直接优化优先级依据**
+- 报告里 explicit acknowledge "barrier 改变 fusion 边界，相对占比 indicative only"
+
+**Layer 3 — Verification mode (ablation / microbench)**
+- 对 Layer 2 top-3 ranked 候选热点，单独 microbench 验证：手动 disable / no-op 该 step 看 end-to-end 是否真减 wall time
+- 这是 T1-T3 promote 决策的最终依据
+
+报告内容必须同时含：
+
+- non-instrumented GatedDeltaNet 总耗时 (Layer 1)
+- instrumented GatedDeltaNet 总耗时 (Layer 2, 含 barrier overhead)
+- per-step breakdown (Layer 2)
+- instrumented / non-instrumented slowdown ratio
+- top-3 候选 ablation 结果 (Layer 3)
 
 ### 3.3 输出内容
 
 `reports/p5g-t0-gated-delta-profile.md` 含：
 
-1. Methodology
-2. Per-step wall-clock 累计（30 layers × 8 steps, ms + %）at PP=2048/4096/8192/16384
-3. ChatGPT 4 hot points 验证表：每个 hot point 实测占 GatedDeltaNet wall-clock 多少 %
-4. Hot point ranking（按降序 top 3-5）
-5. P5g T1-T3 候选优化建议（profile-driven，不抄 omlx.patches）
+1. Methodology (3-layer protocol)
+2. Layer 1: per-layer + 30-layer aggregate GatedDeltaNet wall-clock + % at PP=2048/4096/8192/16384
+3. Layer 2: per-step breakdown table (ms + %) + instrumented/non-instrumented slowdown ratio
+4. Layer 3: top-3 hot points ablation microbench
+5. **更新 P5g performance ceiling 推导** (基于 Layer 1 真实 GatedDeltaNet occupancy)
+6. P5g T1-T3 候选优化建议 ranking (profile-driven，不抄 omlx.patches)
 
 ### 3.4 验证
 
 - profile harness compile + 跑通 PP=2048
-- per-step 累计 ≤ GatedDeltaNet 总 wall-clock × 1.2（误差可接受范围）
-- 至少 1 个 hot point 占 > 5% 才有 T1-T3 价值（否则 P5g 可能 scope 不足，回 Boss 决策）
+- Layer 1 (entry+exit barrier only) GatedDeltaNet 总耗时 - 非 instrumented PP=2048 总耗时 占比 ≥ 10% 才有 T1-T3 价值 (P5f baseline 1844 tok/s → 1.111s, 10% = 111 ms)
+- Layer 2 per-step 累计 ≤ Layer 2 GatedDeltaNet 总 wall-clock × 1.2 (sanity)
+- Layer 3 top-3 ablation 中至少 1 个 cut > 5% Layer 1 baseline 才推进 T1-T3 (否则 P5g 可能 scope 不足，回 Boss 决策)
+
+### 3.5 Feature flag 完整启用命令
+
+启动 profile harness:
+
+```bash
+IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/.../snapshots/<sha>/ \
+IRONMLX_P5G_PROFILE=1 \
+MLX_DIR=$HOME/.local/mlx \
+cargo test -p ironmlx --release --features p5g-profile \
+  --test p5g_t0_gated_delta_profile \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+正常 release build / clippy / sweep_full / bench 不带 `IRONMLX_P5G_PROFILE` env var，即使 `--features p5g-profile` 编译进 hook 也走 normal forward 路径，0 overhead。
 
 ## § 4 T1-T3 — Profile-Driven Optimizations
 
 ### 4.1 候选优化项（pending T0 ranking）
 
-按 ChatGPT review 候选 + 我自己读代码后的补充，预备清单：
+外部 review 4 个候选 + 我读代码后补充。注意 conv_state 在 ironmlx 已经是 `[B, kernel_size-1, conv_dim]` trimmed window (kernel=4 → 3 tokens, 不是 full history)，所以 C2 优化思路只针对 stateful conv path 重设计，**不是**缩短 concat 长度。
 
 | 候选 | 源码 | 优化思路 |
 |---|---|---|
-| **C1 compute_g 链** | line 527-539 (Step 5) | (a) token-invariant 常量预计算缓存（`-exp(a_log)` cast to f32 + neg 只算一次跨多 forward）; (b) softplus stabilised 链 fuse（logaddexp / where / mul / exp 合并） |
-| **C2 concatenate(conv_state, qkv)** | line 412-423 (Step 2a) | (a) stateful causal depthwise conv（避免每次 concat fresh array）; (b) 缩短 concat 路径（只 concat 实际需要的 n_keep tokens 而不是整段 conv_state） |
-| **C3 conv1d + silu fusion** | line 425-428 (Step 2b) | 把 conv1d + sigmoid + mul 三 op 合并成 fused conv-with-silu (如果 mlx 有 fused 算子或可写 fast op) |
+| **C1 compute_g 链** | line 527-539 (Step 5) | (a) token-invariant 常量预计算缓存（`-exp(a_log)` cast to f32 + neg 只算一次跨多 forward）; (b) softplus stabilised 链 fuse（logaddexp / where / mul / exp 合并）；(c) 可能 `mlx::fast` 已有 softplus / silu fused op 可直接复用 |
+| **C2 stateful causal depthwise conv** | line 412-423 (Step 2a) + `core/cache/gated_delta.rs:48` | 避免 `concatenate(conv_state, qkv)` 本身。设计 stateful causal depthwise conv path: conv kernel 在 step-stream 上滚动，conv_state 不作显式 concat 输入。需评估 Metal/kernel-level fused conv 可行性。**不**做"只 concat n_keep tokens" — conv_state 已是 trimmed 3-token window |
+| **C3 conv1d + silu fusion** | line 425-428 (Step 2b) | 把 conv1d + sigmoid + mul 三 op 合并成 fused conv-with-silu (检查 `mlx::fast` 或可写 fast op) |
 | **C4 t_arr 重建消除** | line 570-571 (Step 7c) | 把 0-dim int32 `t_arr = ((seq,), ()).try_into()` 预计算并缓存（按 seq 长度组 keyed lookup），或者改 Metal kernel 接受 const argument |
 
-T0 profile 数据决定哪些进 T1-T3。每个 Tn ≥ 5% per-PP improvement 才 promote；< 5% revert。
+T0 profile (Layer 3 ablation) 数据决定哪些进 T1-T3。每个 Tn ≥ 5% per-PP improvement (Layer 1 baseline) 才 promote；< 5% revert。
 
 ### 4.2 单 task 实施模板（每个 Tn 同结构）
 
@@ -174,9 +216,13 @@ Step Tn.2: 实施优化（修改 gated_delta_net.rs）
 Step Tn.3: cargo build + fmt + clippy 全 clean
 Step Tn.4: p5_qwen35_moe_smoke 跑 (argmax=11 sentinel)
 Step Tn.5: p5_qwen35_moe_batched 跑 (B=2 row-equiv)
-Step Tn.6: iron-bench PP=2048/4096/8192/16384 quick sweep（runs=3 warmup=1）
-Step Tn.7: 决策 promote / revert based on > 5% threshold per PP
-Step Tn.8: commit（promote 时含实测 numbers；revert 时含负 ROI 数据 + 归因）
+Step Tn.6: PP=128 + PP=512 quick smoke (iron-bench runs=3 warmup=1, 验证短 prompt
+           prefill 无 regression — 防止仅看长 prompt 优化漏检 short-PP 退化)
+Step Tn.7: PP=2048/4096/8192/16384 quick sweep (runs=3 warmup=1)
+Step Tn.8: Decode TG smoke (PP=128/2048 max-tokens=32, 验证 decode TG 不 regression)
+Step Tn.9: 决策 promote / revert based on > 5% threshold per PP for long prompt
+           AND no regression on PP=128/512 AND no decode TG regression
+Step Tn.10: commit (promote 时含实测 numbers; revert 时含负 ROI + 归因)
 ```
 
 ### 4.3 数值稳定性 sensitivity
@@ -215,20 +261,43 @@ P5g 新增（若 T0 / T1-T3 涉及 Metal kernel 改动时）：
 
 ## § 7 Acceptance Criteria
 
-P5g 落地的 measurable success criteria（按 prefill PP tok/s 主代表 metric）：
+### 7.1 Performance target ceiling 推导
 
-| PP | Current P5f shipped | P5g target | Stretch (omlx+10%) | P5g 完后 vs stretch |
+P5g 只优化 GatedDeltaNet — 物理上的 end-to-end wall-time 减少上限由 GatedDeltaNet 在 prefill 总 wall-time 的占比 × GatedDeltaNet 内部优化的 cut 比例共同决定。
+
+以 PP=2048 为例 (P5f baseline 1844 tok/s = 1.111s):
+
+| GatedDeltaNet 占比 (待 T0a 实测) | GatedDeltaNet 内部 cut 30% | cut 50% | cut 70% |
+|---:|---:|---:|---:|
+| 假设 20% (P5e T0 旧数据外推) | 1965 tok/s (+6.6%) | 2057 tok/s (+11.5%) | 2155 tok/s (+16.9%) |
+| 假设 25% (cut 比 ~P5f 前略大) | 1996 tok/s (+8.2%) | 2104 tok/s (+14.1%) | 2220 tok/s (+20.4%) |
+| 假设 30% | 2027 tok/s (+9.9%) | 2154 tok/s (+16.8%) | 2293 tok/s (+24.3%) |
+
+P5e T0 profile 报 GatedDeltaNet ~20% at PP=2048 (P5e baseline 921 tok/s 时), P5f 已 ship 但只动 Scheduler padding (不影响 GS 路径)，所以 PP=2048 GS 路径 GatedDeltaNet 占比应仍接近 20%。**最 realistic P5g target ≈ +10-15% PP=2048 (1844 → ~2000-2100 tok/s)**, 不是原 +35%。
+
+### 7.2 Provisional target (待 T0a 锁定)
+
+| PP | Current P5f shipped | P5g provisional target | Stretch (omlx+10%) | P5g 完后 vs stretch |
 |---:|---:|---:|---:|---|
-| 128 | 953 | persists (≥950, no regression) | 1197 | 79% (P5h 补) |
-| 512 | 1577 | persists (≥1570) | 2886 | 55% (P5h 补) |
-| 2048 | 1844 | **≥ 2500 (+35%)** | 4649 | 54% (P5h 补) |
-| 4096 | 1827 | ≥ 2400 (+31%) | 4861 | 49% (P5h 补) |
-| 8192 | 1723 | ≥ 2200 (+28%) | 4687 | 47% (P5h 补) |
-| 16384 | 1598 | ≥ 2050 (+28%) | 4036 | 51% (P5h 补) |
+| 128 | 953 | persists (≥950, no regression) | 1197 | 79% (留 P5h) |
+| 512 | 1577 | persists (≥1570, no regression) | 2886 | 55% (留 P5h) |
+| 2048 | 1844 | **≥ 2050 (+11%)** | 4649 | 44% (留 P5h) |
+| 4096 | 1827 | ≥ 2030 (+11%) | 4861 | 42% (留 P5h) |
+| 8192 | 1723 | ≥ 1910 (+11%) | 4687 | 41% (留 P5h) |
+| 16384 | 1598 | ≥ 1770 (+11%) | 4036 | 44% (留 P5h) |
 
-**最低 success bar**: T1-T3 至少 1 个 promote (>5%)，全 PP 无 prefill/decode regression。
+**T0a 完成后必须做的事**: 用 Layer 1 实测的 GatedDeltaNet 真实占比 + T0c ablation 估的可达 cut 比例，回写本表锁定 final target。如果 GatedDeltaNet 占比 < 15% (P5e 后续优化使其下降)，则需 Boss 决策是否调整 P5g scope 或合并到 P5h。
 
-**P5g close-out 必须**: quantify P5h scope drivers — 报告里明确"剩余 gap 来自 GatedAttention 长 prompt O(S²) / 其他"。
+### 7.3 最低 success bar
+
+- T1-T3 至少 1 个 optimization promote (>5% per-PP improvement on long-prompt PP=2048-16384)
+- 全 PP 段 (含 PP=128/512) 无 prefill regression > 2%
+- Decode TG 无 regression > 2% (PP=16384 decode +10.3% over omlx 必须保持)
+- sentinel + batched + http_smoke + sweep_full 全 PASS
+
+### 7.4 P5g close-out 必须
+
+quantify P5h scope drivers — 报告里明确 "剩余 gap 来自 GatedAttention 长 prompt O(S²) / chunk-size 调优空间 / Scheduler admission overhead 残余 / 其他"。
 
 ## § 8 P5h preview / Future phases（out of P5g scope）
 
@@ -260,29 +329,39 @@ P5g close-out 输出会驱动 P5h scope。当前已知候选：
 P5g 拟拆为 **5 task**（[feedback_task_breakdown_bounded] 5-7 范围内）：
 
 ```
-T0: GatedDeltaNet 独立 per-op profile
-    - instrument gated_delta_net.rs forward_on per-step
-    - feature flag (--features p5g-profile)
-    - tests/p5g_t0_gated_delta_profile.rs harness
-    - 输出 reports/p5g-t0-gated-delta-profile.md
-    - 验证 ChatGPT 4 candidate hot points 真实占比 + ranking
-    - commit
+T0: GatedDeltaNet 独立 per-op profile (3-layer protocol per § 3.2)
+    Step T0.a: Layer 1 baseline mode — entry+exit barrier only;
+               测当前 HEAD GatedDeltaNet 总耗时 + 占 prefill %
+               at PP=2048/4096/8192/16384
+    Step T0.b: Layer 2 breakdown mode — per-step barrier;
+               输出 per-step ms + %; 报告 slowdown ratio
+    Step T0.c: Layer 3 verification mode — top-3 候选 ablation
+               microbench; 估每个候选可达 cut 比例
+    Step T0.d: 用 T0.a + T0.c 数据回写 § 7.2 锁定 final target
+    Files: ironmlx/src/nn/gated_delta_net.rs (instrument hook, double-gated
+           by p5g-profile feature + IRONMLX_P5G_PROFILE=1 env var)
+           ironmlx/tests/p5g_t0_gated_delta_profile.rs (#[ignore], heavy)
+           reports/p5g-t0-gated-delta-profile.md
+    Commit
 
-T1: highest single-ROI optimization (by T0 ranking)
-    - implement specific op change in gated_delta_net.rs
-    - sentinel + batched + http_smoke
-    - iron-bench PP=2048-16384 validate
-    - >5% per-PP promote / <5% revert
-    - commit (promote 含 numbers / revert 含 negative ROI doc)
+T1: highest single-ROI optimization (by T0.c ranking)
+    Steps per § 4.2 implementation template (1-10):
+      build / fmt / clippy / smoke / batched / short-PP smoke /
+      long-PP quick sweep / decode TG smoke / promote-revert decision /
+      commit
+    Promote 阈值: >5% on long-prompt PP (2048-16384) AND
+                  no >2% regression on PP=128/512 AND
+                  no >2% decode TG regression
+    < threshold revert (per P5e/P5f precedent: 失败实验也 commit
+    negative ROI doc 进 close-out 报告作记录)
 
-T2: 2nd highest ROI optimization
-T3: 3rd highest ROI optimization
-    (T2/T3 同 T1 结构)
+T2: 2nd highest ROI optimization (same structure as T1)
+T3: 3rd highest ROI optimization (same structure as T1)
 
 T4: P5g close-out
     - 跑同 reports/p5f-final-results.md style 4-way bench
-    - 写 reports/p5g-final-results.md（self-contained for chatgpt 分析）
-    - sweep_full 19/19
+    - 写 reports/p5g-final-results.md (self-contained for offline analysis)
+    - sweep_full 19/19 (Qwen3.5-4B-MLX-4bit)
     - quantify P5h scope drivers
     - commit
 ```
@@ -292,7 +371,7 @@ T4: P5g close-out
 - [reports/p5f-final-results.md](../../../reports/p5f-final-results.md) — P5f close-out (baseline for P5g)
 - [reports/p5e-t0-profile.md](../../../reports/p5e-t0-profile.md) — GatedDeltaNet 20% T0 占比依据
 - [docs/superpowers/specs/2026-05-19-ironmlx-p5f-known-path-perf-design.md](2026-05-19-ironmlx-p5f-known-path-perf-design.md) — P5f spec（process precedent）
-- `p5f-code-review-for-claude.md`（Boss 本地，不入 repo） — ChatGPT review 给的 4 个 hot points 作 T0 verification 清单
+- External review notes (not committed to repo per [feedback_no_unnecessary_docs]; substance internalized to § 1.3 candidates + § 4.1 优化思路)
 - `memory[no-spec-from-competitors]` — 实现独立
 - `memory[design-philosophy]` — 不对齐 omlx
 - `memory[task-breakdown-bounded]` — 单 plan 5-7 task
