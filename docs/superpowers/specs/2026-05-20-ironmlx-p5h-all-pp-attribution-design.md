@@ -324,7 +324,7 @@ fn with_p5h_span_from_current_trace<T>(
 
 **Authorized `P5hTraceGuard::enter(ctx, base_parent)` sites** (only these — no others permitted; each requires the caller to FIRST open the corresponding top-level span via explicit API, THEN enter the guard with that span as `base_parent`):
 
-- (Lane B prefill, in `spawn_blocking` closure) Caller opens `gs_stream_init_and_chunk_loop` via `open_p5h_span(&ctx, Some(&root_handle.span), ...)`. Then enters guard with that span as `base_parent` and calls `GenerationStream::new(...)`. Deep substeps (`gs_kv_cache_alloc`, `gs_chunk_N`, `gs_first_token_sample_dispatch`) chain under `gs_stream_init_and_chunk_loop` via the stack. On `new()` return: drop guard, close `gs_stream_init_and_chunk_loop`.
+- (Lane B prefill, in `spawn_blocking` closure) Caller opens `gs_stream_init_and_chunk_loop` via `open_p5h_span(&ctx, Some(root_handle.span()), ...)`. Then enters guard with that span as `base_parent` and calls `GenerationStream::new(...)`. Deep substeps (`gs_kv_cache_alloc`, `gs_chunk_N`, `gs_first_token_sample_dispatch`) chain under `gs_stream_init_and_chunk_loop` via the stack. On `new()` return: drop guard, close `gs_stream_init_and_chunk_loop`.
 - (Lane A, INSIDE `prefill_admitted_inner` — per Codex v16 P1 — NOT at actor scope, because actor cannot wedge between prefill and sampling) Caller (the inner function itself) opens `model_prefill_forward` via `open_p5h_span(&ctx, Some(&root_span), ...)`. Then enters guard with `model_prefill_forward` as `base_parent` and calls `model.batched_prefill[_vl](...)`. Deep substeps (`embed_lookup`, `decoder_layer_N`, etc.) chain under `model_prefill_forward`. On return: drop guard, close `model_prefill_forward`. (`first_token_sampling` is opened/closed separately later in the same function — no guard needed unless T4 adds deep sampling spans.)
 - (Lane A, INSIDE `Scheduler::step` IF that function also fuses model-forward + sample like `prefill_admitted_inner`) Same SINK pattern: open `pre_content_decode_steps` inside `step`, enter guard with that as `base_parent`, run model-forward + sample, drop guard, close span. T0a verifies whether `step` fuses or not; if `step` is purely sync at the actor level with no fused phases, the simpler actor-scope guard (open span at actor, enter guard, call `step`, drop, close) works.
 - (Lane B per-iteration, in `spawn_blocking` closure) For each `stream.next_token()` call inside the `spawn_blocking` body's loop: caller opens the corresponding top-level explicit span (`gs_first_token_materialize_and_predispatch` for the first iteration, `pre_content_decode_steps` if first detok was empty) via explicit API, enters guard with that as `base_parent`, calls `next_token()`, drops guard, closes the span.
@@ -333,7 +333,7 @@ This pattern ensures every deep span has a non-null `parent_span_id` chain reach
 
 **Spans that MUST use the explicit-context API (do NOT enter a guard)**:
 
-- `server_request_recv_to_first_content_sse_write` (root) — opens in async axum handler, closes in spawned forwarder task / `spawn_blocking` body. Implementation: handler captures `root_start_ns` at entry, opens the span via `open_p5h_span_at(&ctx, None, "server_request_recv_to_first_content_sse_write", root_start_ns)` once `ctx` is complete, and wraps the returned `SpanHandle` in `RootSpanHandle { ctx, span }`; clones this handle into both Lane-A forwarder spawn AND Lane-B blocking task; whichever path emits first-content SSE calls `root_handle.close_at(end_ns)` (which internally calls `close_p5h_span(&self.ctx, self.span, end_ns, ..)`).
+- `server_request_recv_to_first_content_sse_write` (root) — opens in async axum handler, closes in spawned forwarder task / `spawn_blocking` body. Implementation: handler captures `root_start_ns` at entry, opens the span via `open_p5h_span_at(&ctx, None, "server_request_recv_to_first_content_sse_write", root_start_ns)` once `ctx` is complete, and wraps the returned `SpanHandle` in `RootSpanHandle { ctx, span }`; clones this handle into both Lane-A forwarder spawn AND Lane-B blocking task. Each spawn body holds its clone as `let mut root_to_close: Option<RootSpanHandle> = Some(root_handle_clone);`; the iteration that emits first-content SSE calls `root_to_close.take().expect("root closed twice").close_at(end_ns)` (per Codex review v18 P1 once-close pattern). `close_at` internally calls `close_p5h_span(&self.ctx, self.span, end_ns, ..)`. T0a tree structural check asserts exactly one close record per (request_id, root span_id) to catch double-close bugs.
 - `http_parse_render_tokenize` — runs in async handler. Per Codex review v12 P2 #2, the full `P5hTraceContext` cannot exist at span start (because `prompt_tokens` comes from `prompt_ids.len()` produced by `render_and_encode(...)`, and `routing_path` comes from the `use_scheduler` predicate at `openai.rs:404` which needs `prompt_len`). Required handler ordering:
   1. Handler entry: generate `request_id` uuid; capture `root_start_ns = monotonic_ns()` and `http_parse_render_tokenize.start_ns = monotonic_ns()`. Both timestamps captured BEFORE any parse/render/tokenize work begins.
   2. Run request parse + `render_chat_template(...)` + `tokenizer.encode(...)` to produce `prompt_ids`.
@@ -358,10 +358,10 @@ The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a
    Both gated by `p5h-profile` feature; default `None`. HTTP handler populates them per the § 2.5a "Server-only root" handler ordering (steps 1-6).
 2. `RequestState` (in `scheduler.rs`) carries both fields; `Scheduler::admit` copies them from `GenerateRequest` at admit time. `Scheduler::prefill_admitted_inner` (NOT the actor; per Codex review v16 P1 + v17 P2 #1) reads them via the `cloned_active_row_p5h_trace_and_root` helper to open `model_prefill_forward` + `first_token_sampling` inside the function. `Scheduler::step` does the same for `pre_content_decode_steps` if T0a confirms `step` similarly fuses model-forward + sample (otherwise actor-scope wrap suffices for `step`).
 3. **Lane-B `spawn_blocking`** body (`openai.rs::serve_via_gs_stream`): the closure captures **both** `ctx: P5hTraceContext` (clone of `request.p5h_trace`) AND `root_handle: RootSpanHandle` (clone of the handle the handler opened) — Rust move/borrow rules force both into the closure. Inside the closure (per Codex v15 P1 — every guard now needs a base_parent SpanHandle so deep spans chain back to root):
-   - `sse_write_role_chunk` for the `tx.blocking_send` at `openai.rs:455` is opened/closed via `let h = open_p5h_span(&ctx, Some(&root_handle.span), "sse_write_role_chunk"); tx.blocking_send(...); close_p5h_span(&ctx, h, monotonic_ns(), ..);` — explicit API, no guard.
+   - `sse_write_role_chunk` for the `tx.blocking_send` at `openai.rs:455` is opened/closed via `let h = open_p5h_span(&ctx, Some(root_handle.span()), "sse_write_role_chunk"); tx.blocking_send(...); close_p5h_span(&ctx, h, monotonic_ns(), ..);` — explicit API, no guard.
    - Open top-level explicit span first, THEN enter guard with that span as base_parent:
      ```
-     let gs_top = open_p5h_span(&ctx, Some(&root_handle.span), "gs_stream_init_and_chunk_loop");
+     let gs_top = open_p5h_span(&ctx, Some(root_handle.span()), "gs_stream_init_and_chunk_loop");
      {
          let _guard = P5hTraceGuard::enter(ctx.clone(), gs_top.clone());
          let stream = GenerationStream::new(...);  // deep substeps chain under gs_top
@@ -372,13 +372,13 @@ The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a
    - The post-prefill loop opens a per-iteration top-level explicit span, enters guard with it as base_parent, calls `stream.next_token()`, exits guard, closes the top-level span, then handles SSE emission:
      ```
      loop {
-         let top = open_p5h_span(&ctx, Some(&root_handle.span), span_name_for_this_iteration);
+         let top = open_p5h_span(&ctx, Some(root_handle.span()), span_name_for_this_iteration);
          let ev = {
              let _guard = P5hTraceGuard::enter(ctx.clone(), top.clone());
              stream.next_token()
          };  // _guard drops
          close_p5h_span(&ctx, top, monotonic_ns(), ..);
-         // ... SSE emission via open_p5h_span(&ctx, Some(&root_handle.span), "detok_format_first_content_chunk") + close + root_handle.close_at(end_ns)
+         // ... SSE emission via open_p5h_span(&ctx, Some(root_handle.span()), "detok_format_first_content_chunk") + close + root_to_close.take().expect("root closed twice").close_at(end_ns)
      }
      ```
      `span_name_for_this_iteration` is `gs_first_token_materialize_and_predispatch` for the first iteration; `pre_content_decode_steps` if the first detok was empty and we're looping for non-empty content.
@@ -422,8 +422,8 @@ The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a
    - Actor scope keeps zero P5h instrumentation around `sched.prefill_admitted(...)` itself — actor just calls it.
    - `pre_content_decode_steps`: actor opens this explicit span around any `sched.step(...)` calls needed for pre-content decode, but per § 2.5a authorized list, the actor-level guard inside that block opens via the same SINK pattern — actually `step` is simpler since it doesn't fuse prefill + sampling, so an outer guard around `sched.step(...)` with `pre_content_decode_steps` as base_parent works. (Alternative if `step` itself fuses model-forward + sample like `prefill_admitted_inner`, the same SINK pattern applies: open subspans inside `step` rather than at actor scope. T0a verifies which.)
 5. **Lane-A streaming forwarder** (`openai.rs:546` `tokio::spawn` body): handler clones BOTH `ctx` AND `root_handle` into the spawn closure. The closure **never calls `P5hTraceGuard::enter(...)`** — Lane-A forwarder is not on the authorized guard sites list (per Codex review v10 P1 #2 + v11 P1 #2: `tx.send(...).await` is async, a guard around it would have to span the await, which is the v8 unsoundness pattern). All SSE emission uses the explicit-context API:
-   - For `sse_write_role_chunk_diagnostic` (per Codex v18 P2 #3 — Lane-A only; emitted as diagnostic, NOT exclusive child): `let h = open_p5h_span(&ctx, Some(&root_handle.span()), "sse_write_role_chunk_diagnostic"); format_sse(...); tx.send(...).await; close_p5h_span(&ctx, h, monotonic_ns(), ..);` — span end_ns captured immediately after `.await` returns. T5 aggregator treats records with `span_name == "sse_write_role_chunk_diagnostic"` as diagnostic-only (not summed into exclusive children).
-   - Per content-event iteration: detok + (for the first non-empty content) `let h = open_p5h_span(&ctx, Some(&root_handle.span), "detok_format_first_content_chunk"); format_sse(...); tx.send(...).await; let end_ns = monotonic_ns(); close_p5h_span(&ctx, h, end_ns, ..); root_handle.close_at(end_ns);` All explicit, no guard.
+   - For `sse_write_role_chunk_diagnostic` (per Codex v18 P2 #3 + v19 P1 — Lane-A only; emitted with `span_kind="diagnostic"`, NOT in exclusive tree): `let h = open_p5h_span(&ctx, Some(root_handle.span()), "sse_write_role_chunk_diagnostic"); format_sse(...); tx.send(...).await; close_p5h_span(&ctx, h, monotonic_ns(), ..);` — span end_ns captured immediately after `.await` returns. Emitter sets `span_kind = "diagnostic"` per § 2.5a server-emitted fields table (fixed set of diagnostic span_names).
+   - Per content-event iteration: detok + (for the first non-empty content; outer scope holds `let mut root_to_close: Option<RootSpanHandle> = Some(root_handle_clone);`) `let h = open_p5h_span(&ctx, Some(root_handle.span()), "detok_format_first_content_chunk"); format_sse(...); tx.send(...).await; let end_ns = monotonic_ns(); close_p5h_span(&ctx, h, end_ns, ..); root_to_close.take().expect("root closed twice").close_at(end_ns);` All explicit, no guard. (per Codex v18 P1 once-close pattern)
 6. Deep instrumentation sites (GDN entry/exit barriers, GatedAttention substep emit, MoE substep emit, lm_head span) wrap their work via `with_p5h_span_from_current_trace(span_name, fields_fn, body)` which reads `P5H_CURRENT_TRACE` + `P5H_CURRENT_SPAN_STACK` to populate ctx fields + `parent_span_id`. They always run on whatever thread is currently holding the implicit-API guard, because the guard wraps the sync region that contains the instrumented call — for Lane A, the guard wraps the `model.batched_prefill[_vl](...)` call INSIDE `prefill_admitted_inner` (per Codex v16 P1; NOT the actor-scope `sched.prefill_admitted(...)`); for Lane B, the guard wraps the scoped `GenerationStream::new(...)` block. Sampling spans (`first_token_sampling`) are top-level explicit, not deep — they do not use this API in the vanilla case (per Codex v17 P2 #1).
 
 **Async-safety rationale** (replaces v6/v7 "axum handler → scheduler driver same thread chain" claim, per Codex v8 P1 #2): Tokio worker threads may execute the same async future on different OS threads between `.await` points. `thread_local!` is not request-local OR task-local. The correct discipline is: (a) plumb the context explicitly across thread/task boundaries as a clonable value; (b) only enter the thread-local guard inside synchronous regions where the executing thread is pinned. This mirrors the pattern Tokio's own `tracing` crate uses for span attachment.
@@ -459,6 +459,7 @@ The underlying value is identical in both cases (`GenerateRequest.p5h_trace` is 
 | `start_ns` | u64 | monotonic clock start (ns) |
 | `end_ns` | u64 | monotonic clock end (ns) |
 | `mode` | string | 'off' / 'layer1' / 'layer2' / 'ablate-X' |
+| `span_kind` | string | `"tree"` (default, participates in exclusive parent-child tree + coverage gate + structural checks) \| `"diagnostic"` (per Codex review v19 P1 — emitted as a recorded interval for T5 reporting but **excluded** from tree build, exclusive_us computation, sum-to-root invariant, coverage_pct, reachability/cycle checks, and unattributed_server_root residual. Used for spans whose execution overlaps a tree span across threads/tasks, e.g., Lane-A `sse_write_role_chunk_diagnostic` overlapping `model_prefill_forward` on different threads.) The set of `span_kind="diagnostic"` span_names is fixed and enumerated in § 2.5a per-lane bucket lists. Any other span_name MUST emit `span_kind="tree"`. |
 
 **Aggregator-injected fields** (added by T5 Python aggregator when joining server log records with the iron-bench client sweep CSV):
 
@@ -504,7 +505,7 @@ T0a profile gate validates per-PP routing via a `routing_path: "scheduler" | "gs
 
 1. `http_parse_render_tokenize` (server-side request parsing + chat template + tokenizer Encode)
 2. `scheduler_admission` (admit queue + slot allocation + batch construction; ends at `AdmitReply` send)
-3. `sse_write_role_chunk_diagnostic` (Lane A — **diagnostic annotation, NOT a mutually-exclusive child of root**; per Codex review v18 P2 #3): the role chunk is written by the streaming forwarder task (`tokio::spawn` body) on a different thread than the actor running `sched.prefill_admitted(...)`. After the actor sends `AdmitReply` (`scheduler_actor.rs:276`), it immediately proceeds into `sched.prefill_admitted(...)` (`scheduler_actor.rs:302-307`) — at the same time, the handler-side forwarder spawn receives `AdmitReply` and writes the role chunk. The two events can overlap in wall-clock time, so a strict mutually-exclusive sibling structure (which would make `parent.exclusive_us = inclusive - Σ children.inclusive`) would compute negative residual and trip the `exclusive_us ≥ -1µs` hard invariant. v19 demotes Lane-A `sse_write_role_chunk` to a diagnostic record: it IS emitted (so T5 can report role-chunk wall-time as a separate column), but its `inclusive_us` is NOT counted toward the exclusive child sum or coverage_pct. Its time falls under `unattributed_server_root` (which T5 reports + bounds independently). Lane B does NOT have this issue — its `sse_write_role_chunk` is sequential inside `spawn_blocking` after `GenerationStream::new(...)` returns, so it remains a true exclusive child there.
+3. `sse_write_role_chunk_diagnostic` (Lane A — **diagnostic span, `span_kind="diagnostic"`, NOT in the exclusive tree**; per Codex review v18 P2 #3 + v19 P1): the role chunk is written by the streaming forwarder task (`tokio::spawn` body) on a different thread than the actor running `sched.prefill_admitted(...)`. After the actor sends `AdmitReply` (`scheduler_actor.rs:276`), it immediately proceeds into `sched.prefill_admitted(...)` (`scheduler_actor.rs:302-307`) — at the same time, the handler-side forwarder spawn receives `AdmitReply` and writes the role chunk. The two events can overlap in wall-clock time, so a mutually-exclusive sibling structure would compute negative residual and trip the `exclusive_us ≥ -1µs` hard invariant. v19 emits Lane-A role chunk with `span_kind="diagnostic"`: T5 aggregator filters it out of `tree_spans` before any exclusive_us / sum-to-root / coverage_pct / reachability / interval-containment computation per § 2.5a pseudocode. It is reported as a separate `role_chunk_diagnostic_us` column in T5 output. Its time does NOT fall under `unattributed_server_root` (which is computed from tree_spans only — v19 corrected an earlier wording that said otherwise). Lane B does NOT have this issue — its `sse_write_role_chunk` runs sequentially inside `spawn_blocking` after `GenerationStream::new(...)` returns, so it remains a true `span_kind="tree"` exclusive child there.
 4. `model_prefill_forward` (the full `model.batched_prefill(...)` call — embed + 40 decoder layers + final norm + `slice_last_and_project` lm_head; per `qwen3_5_moe/model.rs::batched_prefill` lines 240-258, this single call covers everything through producing first-token logits)
 5. `first_token_sampling` (per-row sampler invocation after `batched_prefill` returns; per `scheduler.rs::prefill_admitted_inner` "three-stage dispatch")
 6. `pre_content_decode_steps` (per Codex review v6 P2 #2 — if detok returns `Ok(None)` or empty string for the first prefill token, server does not send a content chunk yet and iron-bench does not record TTFT; scheduler may then run additional `Scheduler::step()` decode forwards + sample + detok until detok yields a non-empty string. This bucket covers all such pre-first-content decode iterations. Expected `inclusive_us == 0` for well-formed benchmark prompts where the first prefill token detokenizes to a visible character; if non-zero, T0a/T5 must surface it.)
@@ -573,29 +574,47 @@ This explicit-residual pattern is what makes the coverage gate non-trivial:
 **Exclusive time computation** (T5 aggregator):
 
 ```python
-# Pseudocode:
+# Pseudocode (per Codex review v19 P1 — diagnostic spans are EXCLUDED from
+# every tree-property computation; they are reported as separate columns only):
+tree_spans = [s for s in spans if s.span_kind == "tree"]
+diagnostic_spans = [s for s in spans if s.span_kind == "diagnostic"]
+
+# 1. Compute inclusive on ALL spans (cheap; same formula).
 for span in spans:
     span.inclusive_us = (span.end_ns - span.start_ns) / 1000
-for span in spans (depth-first, children-first):
+
+# 2. Exclusive + structural invariants run on tree_spans ONLY.
+build_tree(tree_spans)  # uses (span_id, parent_span_id), NOT span_name strings
+for span in tree_spans (depth-first, children-first):
     span.exclusive_us = span.inclusive_us - sum(child.inclusive_us for child in span.children)
     assert span.exclusive_us >= -1.0, f"{span.span_name}: negative exclusive {span.exclusive_us}us — broken parent_span attribution"
 
-# Structural invariant (always true if instrumentation correct — sanity check, NOT coverage gate):
-root = find_root_span(spans)  # server_request_recv_to_first_content_sse_write
-all_exclusive_sum = sum(s.exclusive_us for s in spans)
-assert abs(all_exclusive_sum - root.inclusive_us) < 1.0  # tree identity (Codex P1 #1: this alone is trivial)
+# 3. Structural invariant (always true if instrumentation correct — sanity check, NOT coverage gate):
+root = find_root_span(tree_spans)  # server_request_recv_to_first_content_sse_write
+tree_exclusive_sum = sum(s.exclusive_us for s in tree_spans)
+assert abs(tree_exclusive_sum - root.inclusive_us) < 1.0  # tree identity (Codex P1 #1: this alone is trivial)
 
-# Real coverage gate per § 7.1: only NON-residual leaf time counts as "accountable":
-unattributed_total = sum(s.inclusive_us for s in spans if s.span_name.startswith("unattributed_"))
+# 4. Real coverage gate per § 7.1: only NON-residual leaf time counts as "accountable":
+unattributed_total = sum(s.inclusive_us for s in tree_spans if s.span_name.startswith("unattributed_"))
 accountable_total = root.inclusive_us - unattributed_total
 coverage_pct = accountable_total / root.inclusive_us
-assert coverage_pct >= 0.95, f"coverage {coverage_pct:.1%} < 95% — instrumentation gaps in {[s.span_name for s in spans if s.span_name.startswith('unattributed_') and s.inclusive_us / root.inclusive_us > 0.01]}"
+assert coverage_pct >= 0.95, f"coverage {coverage_pct:.1%} < 95% — instrumentation gaps in {[s.span_name for s in tree_spans if s.span_name.startswith('unattributed_') and s.inclusive_us / root.inclusive_us > 0.01]}"
+
+# 5. Diagnostic spans validated separately — same request_id/routing_path checks
+#    as tree_spans, optional root-interval-containment for diagnostics that should
+#    happen within the root window (e.g., sse_write_role_chunk_diagnostic), but
+#    NO containment check vs tree siblings (they're explicitly allowed to overlap).
+#    Reported as separate T5 columns (e.g., role_chunk_diagnostic_us). Do NOT
+#    add their inclusive_us to coverage_pct or unattributed_total.
+for d in diagnostic_spans:
+    assert d.request_id != "" and d.routing_path in {"scheduler", "gs_chunked"}
+    # Optional containment per diagnostic semantics; T5 emits as report column.
 ```
 
-**Hard invariants**:
-- `Σ all exclusive_us ≡ root inclusive_us` (tree identity — sanity check, alone insufficient per Codex P1 #1).
-- `span.exclusive_us ≥ -1µs` for every span (negative = broken parent_span attribution).
-- `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` is the real gate.
+**Hard invariants** (per Codex review v19 P1 — explicitly tree-only):
+- `Σ tree_spans' exclusive_us ≡ root.inclusive_us` (tree identity — sanity check, alone insufficient per Codex P1 #1). Diagnostic spans NOT in the sum.
+- `span.exclusive_us ≥ -1µs` for every **tree** span (negative = broken parent_span_id attribution). Diagnostic spans have no exclusive_us field.
+- `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` is the real gate (residual `unattributed_*` is computed from tree spans only; diagnostic durations do NOT contribute to or shrink unattributed).
 - Every non-leaf span MUST emit explicit `unattributed_<span_name>` if its residual > 1µs.
 
 **Out of scope (P5h+1 if needed)**:
@@ -668,15 +687,20 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
     - **Route-aware schema presence check** (per sweep request):
       - If `routing_path == "scheduler"` (Lane A): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, scheduler_admission, sse_write_role_chunk_diagnostic, model_prefill_forward, first_token_sampling, detok_format_first_content_chunk}` (per Codex v18 P2 #3 — Lane-A role chunk is `sse_write_role_chunk_diagnostic` because it can overlap with model_prefill_forward across threads; it's emitted but NOT in the exclusive child sum). Plus optional `pre_content_decode_steps`. Missing any required span_name = explicit-context emission site is missing.
       - If `routing_path == "gs_chunked"` (Lane B): assert presence of records with span_names ⊇ `{server_request_recv_to_first_content_sse_write, http_parse_render_tokenize, gs_stream_init_and_chunk_loop, gs_first_token_sample_dispatch, sse_write_role_chunk, gs_first_token_materialize_and_predispatch, detok_format_first_content_chunk}` (plus optional `pre_content_decode_steps`).
-    - **Id-based tree structural checks** (per Codex review v12 P1 + v13 P2 — uses `parent_span_id` not `parent_span` string; the list below is necessary, NOT just closure):
+    - **Id-based tree structural checks** (per Codex review v12 P1 + v13 P2 + v19 P1 — **all checks below operate on `tree_spans = [s for s in spans if s.span_kind == "tree"]` ONLY**; diagnostic spans validated separately, see "Diagnostic span checks" below):
       - **Id uniqueness**: `(request_id, span_id)` is unique across all records (no duplicate span_id within a request — atomic-counter emitter should never collide, but assert defensively)
       - **Exactly one root per request**: exactly one span with `parent_span_id is None` per `request_id`; its `span_name` MUST equal `"server_request_recv_to_first_content_sse_write"`. More than one root = forwarder/blocking task each opened its own root (forgot to clone `RootSpanHandle`); zero root = root open site missing.
       - **No orphan top-level**: no span other than root has `parent_span_id is None`. A non-root span with null parent = explicit-context emitter forgot to pass parent handle.
       - **Closure**: every non-null `parent_span_id` resolves to an emitted span's `span_id` within the same request (orphan parent_span_id = missing parent emission site).
       - **Label self-consistency**: `(parent_span_id is None) == (parent_span string is null)` AND `parent_span_id resolves to a span whose span_name equals the parent_span label` (mismatch = emitter wrote inconsistent id vs label).
       - **Interval containment**: for every non-root span, `parent.start_ns ≤ child.start_ns ≤ child.end_ns ≤ parent.end_ns`. Violation = child opened before parent or closed after parent (parent_span_id pointing at the wrong ancestor, or guard/handle leaked across requests).
-      - **Reachability + no cycle**: starting from root, DFS over `parent_span_id` → child edges must reach every span in the request exactly once (no cycles, no disconnected subtrees).
-    - Any failure = T0a fails before close (do NOT proceed to T0b / T2 / T3 / T4 with a broken schema).
+      - **Reachability + no cycle**: starting from root, DFS over `parent_span_id` → child edges must reach every span in `tree_spans` exactly once (no cycles, no disconnected subtrees). Diagnostic spans NOT required to be reachable from root.
+    - **Diagnostic span checks** (per Codex review v19 P1 — operate on `diagnostic_spans = [s for s in spans if s.span_kind == "diagnostic"]`):
+      - Per-record field validity: same as tree (request_id != "", prompt_tokens > 0, routing_path ∈ {"scheduler", "gs_chunked"}).
+      - The `span_name` MUST be in the closed set enumerated in § 2.5a per-lane bucket lists (currently only `sse_write_role_chunk_diagnostic` under Lane A). Any other `span_name` with `span_kind="diagnostic"` is an emitter bug = fail.
+      - `parent_span_id` for diagnostic spans MUST point at root's span_id (annotates the request scope) OR be null (loose diagnostic). Either is acceptable; do NOT include in the tree DFS.
+      - NO interval containment check vs tree siblings (diagnostic spans explicitly ALLOWED to overlap tree spans across threads; that overlap is the entire reason `span_kind="diagnostic"` exists).
+    - Any failure (tree or diagnostic) = T0a fails before close (do NOT proceed to T0b / T2 / T3 / T4 with a broken schema).
 - **Request-correlation infrastructure** (per § 2.5a "Join key" — single committed path):
   - `openai.rs` (chat-completion response builder): emit `X-Ironmlx-Request-Id: <uuid>` header on streaming + non-streaming responses, gated on `p5h-profile` feature; same uuid used as `GenerateRequest.p5h_trace.request_id` and every `[p5h-profile]` log record's `request_id` field
   - `iron-bench/src/client.rs`: capture `X-Ironmlx-Request-Id` from `resp.headers()` BEFORE entering `bytes_stream()`; add `request_id: Option<String>` to `RequestResult`. Capture path gated on new CLI flag.
@@ -784,7 +808,7 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
 
 - Aggregate T0a (GDN rerun) + T0b (Phase D resolution) + T1-T4 measurements into per-PP exclusive attribution table per § 2.5a span schema
 - Compute `exclusive_us = inclusive_us - sum(children.inclusive_us)` for every span; verify `span.exclusive_us ≥ -1µs` invariant per § 2.5a
-- Sum-to-root identity (`Σ all spans' exclusive_us ≡ root.inclusive_us within ±1µs`) is a **tree-property sanity check only**, NOT a coverage gate (per Codex review v2 P1 #1 — this identity is trivially true and useless as a quality bar)
+- Sum-to-root identity (`Σ tree_spans' exclusive_us ≡ root.inclusive_us within ±1µs`, per Codex v19 P1 — tree_spans only, diagnostic spans excluded) is a **tree-property sanity check only**, NOT a coverage gate (per Codex review v2 P1 #1 — this identity is trivially true and useless as a quality bar)
 - **Exclusive coverage gate** per § 7.1 (residual-based, single source of truth — DO NOT redefine here):
 
   ```
@@ -880,7 +904,7 @@ The root is **server-side only** (`server_request_recv_to_first_content_sse_writ
 
 **Hard invariants** (per § 2.5a):
 - `coverage_pct ≥ 95%` per PP (else identify which `unattributed_<span>` dominates → add instrumentation for that span's children → re-run before close-out)
-- `span.exclusive_us ≥ -1µs` for every emitted span (negative beyond noise = broken parent_span attribution, MUST fix)
+- `span.exclusive_us ≥ -1µs` for every emitted **tree** span (per Codex v19 P1 — diagnostic spans have no exclusive_us; negative beyond noise = broken parent_span_id attribution, MUST fix)
 - `Σ all spans' exclusive_us ≡ root_wall_us` within ±1µs (tree identity sanity check; alone INSUFFICIENT as a coverage gate per Codex review v2 P1 #1)
 - No bucket can be counted under two different parents (mutually exclusive tree)
 - Every non-leaf span MUST emit an explicit `unattributed_<span_name>` leaf if its residual > 1µs (per § 2.5a "Residual leaves")
@@ -889,7 +913,7 @@ This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted ne
 
 ### 7.2 P5h ship gate (T5 close-out gate)
 
-1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_content_sse_write`); `exclusive_us ≥ -1µs` for every emitted span; `client_transport_residual_us` reported separately (not part of gate)
+1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_content_sse_write`; `tree_spans` only per Codex v19 P1); `exclusive_us ≥ -1µs` for every emitted tree span; diagnostic spans validated separately and reported as columns (e.g., `role_chunk_diagnostic_us`); `client_transport_residual_us` reported separately (not part of gate)
 2. **Protocol-consistent data — dual-lane explicit** (per Codex review v7 P2 + § 2.5a "Routing precondition"):
    - **Lane A** (PP ∈ {128, 512, 2048}, scheduler path): full deep substep attribution — HTTP/scheduler/admission (T1) + GDN (T0a rerun; substeps' `parent_span_id` = enclosing `attention_path` span) + GatedAttention (T2, 7 substeps under `attention_path` wrapper) + MoE (T3, 8 substeps under `mlp_path` wrapper) + lm_head/MLX state (T4) + Phase D resolution (T0b) — all measured under same UMA hardening + id-based exclusive span schema with trace context correlation; § 7.1 residual coverage ≥ 95% per PP.
    - **Lane B** (PP ∈ {4096, 8192, 16384}, chunked GS path): top-level only per the § 2.5a Lane-B bucket list (single source of truth — DO NOT re-enumerate here per Codex v9 P2 #1; v8 re-enumeration carried over the stale `first_token_sampling` bucket that was removed in v9). Lane-B buckets include `gs_first_token_sample_dispatch` nested inside `gs_stream_init_and_chunk_loop` and a top-level `gs_first_token_materialize_and_predispatch` sibling (NOT a `first_token_sampling` sibling). Deep GDN/GatedAttention/MoE/lm_head substep attribution under chunked path is **explicitly out of scope** (deferred to P5h+1 per § 6); Lane B coverage gate measured only against top-level buckets, still ≥ 95%.
