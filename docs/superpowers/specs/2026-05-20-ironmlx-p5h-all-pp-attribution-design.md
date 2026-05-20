@@ -145,7 +145,19 @@ thread_local! { static P5H_CURRENT_TRACE: RefCell<Option<P5hTraceContext>> = Ref
 struct P5hTraceGuard;
 impl P5hTraceGuard {
     fn enter(ctx: P5hTraceContext) -> Self {
-        P5H_CURRENT_TRACE.with(|c| *c.borrow_mut() = Some(ctx));
+        // Codex v9 P3: nesting prohibited. If a guard is already active on
+        // this thread, panic — the outer guard's owner failed to set up the
+        // task/thread-boundary contract correctly.
+        P5H_CURRENT_TRACE.with(|c| {
+            let mut slot = c.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "P5hTraceGuard::enter while another guard is active — nested guards are forbidden \
+                 (helpers must READ via P5H_CURRENT_TRACE, not enter their own guard); \
+                 fix the guard set/drop sites in the calling task/thread"
+            );
+            *slot = Some(ctx);
+        });
         P5hTraceGuard
     }
 }
@@ -156,13 +168,14 @@ impl Drop for P5hTraceGuard {
 }
 ```
 
-The guard MUST only wrap **synchronous, no-`.await` instrumentation regions** — code blocks where the executing thread is pinned for the duration. Guard use sites:
+The guard MUST only wrap **synchronous, no-`.await` instrumentation regions** — code blocks where the executing thread is pinned for the duration. **Nesting is forbidden** (per Codex review v9 P3): instrumentation helpers and deep model log sites are READ-ONLY against `P5H_CURRENT_TRACE`; they MUST NOT enter their own guard. The only sites that may `P5hTraceGuard::enter(...)` are the task/thread-boundary points enumerated below:
 
-- Around `GenerationStream::new(...)` body inside the `spawn_blocking` closure (Lane B prefill — `spawn_blocking` runs on a dedicated blocking-pool thread, no awaits inside the closure)
-- Around each `sched.prefill_admitted(...)` call (scheduler actor `driver_loop` is a sync OS thread, no awaits)
-- Around each `sched.step(...)` call inside the same actor loop (same reasoning)
-- Around `format_sse(...)` + `tx.send(...)` per-iteration body in the streaming forwarder task (`tokio::spawn` body has `event_rx.recv().await` between iterations; the guard wraps each iteration's sync body, NOT the outer task)
-- Around any sync helper that emits `[p5h-profile]` log lines
+- Around `GenerationStream::new(...)` body inside the `spawn_blocking` closure (Lane B prefill — `spawn_blocking` runs on a dedicated blocking-pool thread, no awaits inside the closure). One guard for the whole closure body.
+- Around each `sched.prefill_admitted(...)` call (scheduler actor `driver_loop` is a sync OS thread, no awaits). One guard per call.
+- Around each `sched.step(...)` call inside the same actor loop (same reasoning). One guard per call.
+- Around `format_sse(...)` + `tx.send(...)` per-iteration body in the streaming forwarder task (`tokio::spawn` body has `event_rx.recv().await` between iterations; one guard per iteration's sync body, NOT the outer task).
+
+**No other guard sites are permitted.** Deep instrumentation (GDN/GatedAttention/MoE barriers, lm_head span, sampling spans) READ the active context — they NEVER call `enter()`. The `enter()` panic-on-nest is the enforcement mechanism: a wrongly-placed inner guard fails fast at the first sweep request instead of silently clearing the outer context on `drop`.
 
 **Propagation chain (explicit, no thread-local across thread/await boundaries):**
 
@@ -225,9 +238,12 @@ T0a profile gate validates per-PP routing via a `routing_path: "scheduler" | "gs
 
 **Server-only root** (per Codex review v2 P1 #2 + v3 P1 fact-check; iron-bench TTFT cross-process correlation deferred — would require iron-bench → ironmlx request-id propagation, out of P5h scope):
 
-- **Root span**: `server_request_recv_to_first_content_sse_write` — from server's `axum` request-handler entry to the moment when the **first non-empty `delta.content` SSE chunk** is sent into the body channel (`tx.send(Ok(format_sse_data(&content_chunk)))` in `openai.rs::serve_via_scheduler_stream`'s detok loop). All `[p5h-profile]` records anchor under this server-side root.
+- **Root span**: `server_request_recv_to_first_content_sse_write` — from server's `axum` request-handler entry to the moment when the **first non-empty `delta.content` SSE chunk** is sent into the body channel. All `[p5h-profile]` records anchor under this server-side root.
 - **Why not "first SSE write" (Codex v3 P1)**: the forwarder task spawned right after `AdmitReply` issues a synthetic role chunk (`delta.role = "assistant"`, `delta.content = ""`) BEFORE the first-batch prefill runs (per `openai.rs:546-564` + `scheduler_actor.rs:276-313`: admit reply is sent before prefill). If root ended at "first SSE write", prefill + first-token sampling would fall **outside** the root, defeating the entire attribution exercise. The role chunk write is itself a small child span (`sse_write_role_chunk`) under the root, not the root's terminal point.
-- **Root terminal definition (exact)**: `end_ns = monotonic_ns()` captured at the instruction immediately after the first successful `tx.send(Ok(format_sse_data(&content_chunk)))` where `content_chunk.choices[0].delta.content` is non-empty. **`finish_reason` is irrelevant** — if the model's first token simultaneously carries a stop/length finish reason (e.g., `max_tokens=1` request, or first-token sentinel), the chunk still closes the root, because iron-bench TTFT counts that same chunk (per `iron-bench/src/client.rs:106-116` — TTFT only inspects `delta.content` non-empty, not `finish_reason`). Excluding finish-reason chunks would create a server-side root that is wider than client-side TTFT — wrong direction. Empty-content role/keepalive chunks still do NOT close the root.
+- **Root terminal definition — lane-specific callsites** (per Codex review v9 P2 #2; both lanes share semantics, different code paths):
+  - **Lane A (scheduler path)**: `end_ns = monotonic_ns()` captured at the instruction immediately after the first successful `tx.send(Ok(format_sse_data(&chunk)))` in `openai.rs::serve_via_scheduler_stream`'s detok loop (`openai.rs:589` area) where `chunk.choices[0].delta.content` is non-empty.
+  - **Lane B (chunked GS path)**: `end_ns = monotonic_ns()` captured at the instruction immediately after the first successful `tx.blocking_send(Ok(format_sse_data(&chunk)))` in `openai.rs::serve_via_gs_stream`'s `spawn_blocking` body loop (`openai.rs:473`) where `chunk.choices[0].delta.content` is non-empty. (Lane B uses `blocking_send` not `send` because the closure is inside `spawn_blocking`.)
+- **`finish_reason` is irrelevant** (both lanes): if the model's first token simultaneously carries a stop/length finish reason (e.g., `max_tokens=1` request, or first-token sentinel), the chunk still closes the root, because iron-bench TTFT counts that same chunk (per `iron-bench/src/client.rs:106-116` — TTFT only inspects `delta.content` non-empty, not `finish_reason`). Excluding finish-reason chunks would create a server-side root that is wider than client-side TTFT — wrong direction. Empty-content role/keepalive chunks still do NOT close the root.
 - **Implementation note**: the `detok_format_first_content_chunk` span should still record `finish_reason_present: bool` as an annotation (useful diagnostic), but this annotation does NOT gate root closure.
 - **Client transport residual** is computed as a SEPARATE diagnostic: `client_transport_residual_us = iron_bench_ttft_us - server_root_inclusive_us`. Not part of the exclusive tree; reported alongside in `reports/p5h-attribution.md` as a transport-overhead column.
 
@@ -473,13 +489,13 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
 ### T4 — lm_head + MLX eval/cache state + tokenization/first-eval profile
 
 - `slice_last_and_project_lm_head` Linear quantized matmul timing (this is the `slice_last_and_project` child of `model_prefill_forward` per § 2.5a, NOT a sibling — model_prefill_forward boundary fix per Codex v4 P2 #4; single Linear not split)
-- `first_token_sampling` per-row sampler invocation timing (sibling of `model_prefill_forward` under root, per § 2.5a top-level buckets)
+- **Lane A** `first_token_sampling` per-row sampler invocation timing (sibling of `model_prefill_forward` under root, per § 2.5a Lane-A top-level buckets); **Lane B** does NOT emit this bucket — sample dispatch lives inside `gs_stream_init_and_chunk_loop` as `gs_first_token_sample_dispatch`, and the post-`new()` work is `gs_first_token_materialize_and_predispatch` (per § 2.5a Lane-B bucket list)
 - MLX `eval()` barrier latency at major sync points
 - KVCache + GatedDeltaCache state-update cost (per-forward)
 - Tokenization: tokenizer Encode time per prompt length (subspan of `http_parse_render_tokenize`)
 - First-eval (JIT compile + kernel warmup) one-shot cost per (model, prompt_shape) pair
 - Run sweep, aggregate
-- Output: `slice_last_and_project_lm_head` occupancy, `first_token_sampling` cost, first-eval amortization (短 PP suspect), tokenization fixed cost
+- Output: `slice_last_and_project_lm_head` occupancy (Lane A) / `gs_first_token_sample_dispatch` cost (Lane B), `first_token_sampling` (Lane A) / `gs_first_token_materialize_and_predispatch` (Lane B) cost, first-eval amortization (短 PP suspect), tokenization fixed cost
 - Commit: `test(p5h-t4): lm_head + tokenization + MLX state profile`
 
 ### T5 — Cross-layer attribution synthesis + P5i/P5j candidate ranking + close-out report
@@ -594,7 +610,7 @@ This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted ne
 1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_content_sse_write`); `exclusive_us ≥ -1µs` for every emitted span; `client_transport_residual_us` reported separately (not part of gate)
 2. **Protocol-consistent data — dual-lane explicit** (per Codex review v7 P2 + § 2.5a "Routing precondition"):
    - **Lane A** (PP ∈ {128, 512, 2048}, scheduler path): full deep substep attribution — HTTP/scheduler/admission (T1) + GDN (T0a rerun with `parent_span = attention_path`) + GatedAttention (T2, 7 substeps under `attention_path`) + MoE (T3, 8 substeps under `mlp_path`) + lm_head/MLX state (T4) + Phase D resolution (T0b) — all measured under same UMA hardening + exclusive span schema with trace context correlation; § 7.1 residual coverage ≥ 95% per PP.
-   - **Lane B** (PP ∈ {4096, 8192, 16384}, chunked GS path): top-level only per § 2.5a Lane-B bucket list — server root + `gs_stream_init_and_chunk_loop` (with per-`gs_chunk_N` timing) + `sse_write_role_chunk` + `first_token_sampling` + `pre_content_decode_steps` + `detok_format_first_content_chunk`. Deep GDN/GatedAttention/MoE/lm_head substep attribution under chunked path is **explicitly out of scope** (deferred to P5h+1 per § 6); Lane B coverage gate measured only against top-level buckets, still ≥ 95%.
+   - **Lane B** (PP ∈ {4096, 8192, 16384}, chunked GS path): top-level only per the § 2.5a Lane-B bucket list (single source of truth — DO NOT re-enumerate here per Codex v9 P2 #1; v8 re-enumeration carried over the stale `first_token_sampling` bucket that was removed in v9). Lane-B buckets include `gs_first_token_sample_dispatch` nested inside `gs_stream_init_and_chunk_loop` and a top-level `gs_first_token_materialize_and_predispatch` sibling (NOT a `first_token_sampling` sibling). Deep GDN/GatedAttention/MoE/lm_head substep attribution under chunked path is **explicitly out of scope** (deferred to P5h+1 per § 6); Lane B coverage gate measured only against top-level buckets, still ≥ 95%.
    - P5g existing data remains as prior reference only, excluded from both lanes' coverage gates.
    - P5j long-PP candidate ranking from Lane B carries explicit "bounded by Lane-B granularity" caveat; any P5j candidate requiring per-substep evidence at long PP must defer to P5h+1 chunked deep-attribution before P5j dispatch.
 3. **UMA hardening verified**: cross-repeat (cold/warm pair) measurement variance ≤ ±2% per PP per metric per layer (per § 2.4 protocol)
