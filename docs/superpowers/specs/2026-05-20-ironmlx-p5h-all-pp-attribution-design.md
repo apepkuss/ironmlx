@@ -83,9 +83,9 @@ Per Boss directive (chatgpt 建议 fully accepted),P5h 覆盖 7 areas:
 | 1 | **HTTP path** | P5f close-out measured baseline; P5e/P5f scheduler 改动后无重测 | iron-bench client-side ttft + server-side request entry/dispatch boundary timing |
 | 2 | **Scheduler / admission** | P5e/P5f admit queue + b_max=1 default; per-request batch construction overhead 未细测 | Per-request admission latency, batch construction cost, slot allocation |
 | 3 | **Tokenization / first-eval** | 短 PP 固定开销 prime suspect, P5e/P5f 未隔离 | Tokenizer Encode 时间, first-eval (JIT compile + kernel warmup) 一次性成本 |
-| 4 | **GDN sub-step** | P5g T0 已测 11-step Layer 2 breakdown + per-step eval barriers (commit `52c39bd`); Step 7 kernel dispatch + Step 2c cache update 已 eagerly evaluated。**但 P5g data 测于 no-UMA-hardening protocol,不能直接放入 P5h 95% coverage gate (per § 7.1)** | **复用 P5g harness (instrumentation code, `p5g-profile` feature) 但 P5h protocol 下 rerun** — 同 PP set, UMA cold/warm pair, exclusive span schema (`parent_span = decoder_layer_N`)。Code 不动 (P5g 已 ship),只 rerun + 重新 aggregate。Cost ~11 min wall (P5g T0 663s precedent)。**Output**: GDN sub-step under P5h protocol, comparable with other layers in T5 attribution. P5g existing data 保留作 prior reference but not in coverage gate。Kernel-level per-tile/per-shape timing 是 P5j (kernel rewrite) scope,不是 P5h attribution scope。 |
-| 5 | **GatedAttention** | **P5g 完全未测**; 10/40 layers in `Qwen3.5-35B-A3B-4bit` (config.json `layer_types` "linear,linear,linear,full" × 10), full-attn O(S²), `attn_output_gate=true` | New 3-layer profile. Layer 1: entry/exit barrier. **Layer 2: 7-step code-backed taxonomy** (see T2 § 3 for full list — qkv_proj / q_split_norm_reshape / mrope_apply / kv_mask_update / fused_sdpa / gate_sigmoid_mul / o_proj; `fused_sdpa` is `mlx::fast::scaled_dot_product_attention_on` and its internals — softmax / value matmul — are NOT separately measurable on production path). Layer 3 ablation: **conditional on T0 Phase D outcome** per § 2.3 / T2 conditional gate. |
-| 6 | **MoE expert dispatch + LinearMLP** | P5g 未测; 40 decoder layers (10 含 full-attention, 30 含 linear-attention/GDN), 每层 SparseMoeBlock 含 `num_experts=256` + `num_experts_per_tok=8` (config.json verified) + 1 shared expert (`shared_expert_intermediate=512`) + gather_qmm routed compute | Per-layer router top-8 selection cost + gather_qmm routed matmul + shared expert LinearMLP + final combine. **ROI math 必须从 `Qwen35MoeConfig` runtime values 来,不 hardcode** — routed work scales as `BS × num_experts_per_tok = BS × 8`, 不是 prior memory 误记的 `BS × 4`。 |
+| 4 | **GDN sub-step** | P5g T0 已测 11-step Layer 2 breakdown (commit `52c39bd`),但 `[p5g-profile]` 旧 schema 只有 `mode/layer/batch/seq/offset_before/offset_after/elapsed_us/(step_breakdown)`,缺 § 2.5a 要求的 `request_id/run_id/parent_span/start_ns/end_ns` — **不能直接参与 § 7.1 exclusive coverage tree** | **扩展 P5g harness emit 新 schema (Codex review v2 P2 #1)** — modest code change: gated_delta_net.rs entry/exit barrier 的 `tracing::info!` format string 加新字段; harness Python aggregator 解析新字段 + 建 parent_span = `decoder_layer_N`。**仍复用 P5g 已 verified 的 instrumentation 位置 + Phase D 抗污染设计** (Layer1\|Layer2 mode-gate, AblateX barrier-free)。新增 `[p5h-profile]` log line (跟 `[p5g-profile]` 平行 emit, 旧 P5g pipeline 不破)。T0a 实施 + rerun 同 PP set 下 UMA cold/warm pair。Cost ~11 min rerun wall (P5g T0 663s precedent) + ~2-4h code-change wall。P5g existing data 保留作 prior reference but not in P5h coverage gate。Kernel-level per-tile/per-shape timing 是 P5j (kernel rewrite) scope,不是 P5h attribution scope。 |
+| 5 | **GatedAttention** | **P5g 完全未测**; 10/40 layers in `Qwen3.5-35B-A3B-4bit` (config.json `layer_types` "linear,linear,linear,full" × 10), full-attn O(S²), `attn_output_gate=true` 让 `q_proj` 输出含 gate (`Hq × D × 2`), `k_proj`/`v_proj` 用 KV-head dim (num_key_value_heads=2) | New 3-layer profile. Layer 1: entry/exit barrier. **Layer 2: 7-step code-backed taxonomy** (per T2 § 3 — `q_gate_k_v_proj`(`q_proj` with gate + `k_proj` + `v_proj`, separate not fused) / q_split_norm_reshape / mrope_apply / kv_mask_update / fused_sdpa / gate_sigmoid_mul / o_proj; `fused_sdpa` is `mlx::fast::scaled_dot_product_attention_on` and its internals — softmax / value matmul — are NOT separately measurable on production path). Layer 3 ablation: **conditional on T0b Phase D outcome** per § 2.5 / T2 conditional gate. |
+| 6 | **MoE expert dispatch + LinearMLP** | P5g 未测; 40 decoder layers (10 含 full-attention, 30 含 linear-attention/GDN), 每层 SparseMoeBlock 含 `num_experts=256` + `num_experts_per_tok=8` (config.json verified) + 1 shared expert (`shared_expert_intermediate=512`) + gather_qmm routed compute + **sorted-routing pack/unpack 是 P5e shipped optimization, 不能藏在 gather bucket 内** (Codex review v2 P2 #2) | Per-layer 8-step code-backed taxonomy (per T3 § 3 — router_logits_softmax_topk / routing_sort_pack / gather_qmm_gate_up / swiglu_activation / gather_qmm_down / routing_unsort_weighted_reduce / shared_expert / moe_output_sum). **ROI math 必须从 `Qwen35MoeConfig` runtime values 来,不 hardcode** — routed work scales as `BS × num_experts_per_tok = BS × 8`。 |
 | 7 | **lm_head + MLX eval/cache state** | P5e/P5f shipped lm_head fix; MLX eval barrier costs 未细测 | lm_head time + MLX `eval()` barrier latency + KVCache + GatedDeltaCache state-update cost |
 
 ### 2.3 3-layer profile protocol per layer (复用 P5g pattern + extend)
@@ -94,9 +94,9 @@ Per Boss directive (chatgpt 建议 fully accepted),P5h 覆盖 7 areas:
 
 - **Layer 1 (boundary-isolated)**: entry barrier + exit barrier + emit `[p5h-profile] layer=<name> ...elapsed_us=N`. 估算该 layer 总占比。
 - **Layer 2 (per-step breakdown)**: 每个 sub-op 用 `mlx::transforms::eval(&[&intermediate])?` materialize + timer push。append step_breakdown CSV 到 Layer 1 log line。
-- **Layer 3 (shape-preserving ablation)**: 每个 sub-step 提 substitute (e.g., GatedDeltaNet step 5 compute_g substitute = zeros_like passthrough; GatedAttention `o_proj` substitute = identity-on-gated-output if scope permits). Mode-gated entry barriers off for AblateX (per P5g § 4.1a barrier-free invariant). **Layer 3 ablation 是 conditional on T0 Phase D root cause outcome** — per § 2.5 decision tree + T2/T3 conditional gates; H2/H4 verified primary 时 Layer 3 skip or replace with real-path microbenchmarks。**特别注意**: `fused_sdpa` (`mlx::fast::scaled_dot_product_attention_on`) 的 softmax/value matmul internals 是 fused MLX call,**不能在 production path 上单独 ablation**;只能 ablate 整个 `fused_sdpa` 步骤 (用 e.g. zeros tensor 替换其输出)。
+- **Layer 3 (shape-preserving ablation)**: 每个 sub-step 提 substitute (e.g., GatedDeltaNet step 5 compute_g substitute = zeros_like passthrough; GatedAttention `o_proj` substitute = identity-on-gated-output if scope permits). Mode-gated entry barriers off for AblateX (per P5g § 4.1a barrier-free invariant). **Layer 3 ablation 是 conditional on T0b Phase D root cause outcome** — per § 2.5 decision tree + T2/T3 conditional gates; H2/H4 verified primary 时 Layer 3 skip or replace with real-path microbenchmarks。**特别注意**: `fused_sdpa` (`mlx::fast::scaled_dot_product_attention_on`) 的 softmax/value matmul internals 是 fused MLX call,**不能在 production path 上单独 ablation**;只能 ablate 整个 `fused_sdpa` 步骤 (用 e.g. zeros tensor 替换其输出)。
 
-**Critical**: Phase D ablation 在 P5g 全 negative (反常)。P5h T0 必须先 investigate root cause —— substitute self-cost / cache divergence / kernel template variance / phase order thermal —— 否则 P5h 任何 ablation reading 也会被同样 anomaly 污染。
+**Critical**: Phase D ablation 在 P5g 全 negative (反常)。P5h T0b 必须先 investigate root cause —— substitute self-cost / cache divergence / kernel template variance / phase order thermal —— 否则 P5h 任何 ablation reading 也会被同样 anomaly 污染。
 
 ### 2.4 UMA cache state hardening protocol
 
@@ -108,7 +108,7 @@ P5g T4 暴露: sweep_full Qwen3.5-4B 之后跑 ironmlx serve restart, 3-way benc
 
 1. **Phase-isolated spawn**: 不同 model 的 inference (e.g., sweep_full Qwen3.5-4B vs MoE-A3B bench) 不能背靠背跑;之间 cool ≥ 5 min。
 2. **Cold-start baseline + warm reading 双值报告**: 每 bench iteration 跑 2 次,第 1 次 "cold" (cache 可能不最优), 第 2 次 "warm"。Report 标 both。Variance > ±2% 触发 cool-then-retry。
-3. **UMA pressure probe**: T0 加一个 sanity check — 测 ironmlx PP=2048 在 cold-start vs warm-reading,确认 ≤ ±2%。否则 abort + investigate。
+3. **UMA pressure probe**: T0a 加一个 sanity check — 测 ironmlx PP=2048 在 cold-start vs warm-reading,确认 ≤ ±2%。否则 abort + investigate。
 4. **Strict serial 跨 server** (per `feedback_serial_perf_experiments`): 一次只起一个 server, 完全 kill + cool ≥ 30s + lsof port-free 再起下一个。
 5. **Document in spec**: 任何后续 phase / report 引用 measurement, must annotate cold/warm state + hardening protocol applied。
 
@@ -131,18 +131,25 @@ P5g T4 暴露: sweep_full Qwen3.5-4B 之后跑 ironmlx serve restart, 3-way benc
 | `end_ns` | u64 | monotonic clock end (ns) |
 | `mode` | string | 'off' / 'layer1' / 'layer2' / 'ablate-X' |
 
-**Top-level span buckets** (mutually exclusive, sum = end-to-end wall time):
-1. `client_network` (iron-bench client side — TTFT measurement boundary outside ironmlx)
-2. `http_parse_render_tokenize` (server-side request parsing + chat template + tokenizer Encode)
-3. `scheduler_admission` (admit queue + slot allocation + batch construction)
-4. `model_prefill_forward` (top-level forward call into TextModel)
-5. `final_norm_lm_head_first_token` (post-decoder norm + lm_head Linear + first-token sampling)
-6. `response_serialization` (SSE format + body write)
+**Server-only root** (per Codex review v2 P1 #2; iron-bench TTFT cross-process correlation deferred — would require iron-bench → ironmlx request-id propagation, out of P5h scope):
 
-**`model_prefill_forward` children** (mutually exclusive, sum = forward time):
+- **Root span**: `server_request_recv_to_first_sse_write` — from server's `axum` request-handler entry to first SSE chunk write. All `[p5h-profile]` records anchor under this server-side root.
+- **Client transport residual** is computed as a SEPARATE diagnostic: `client_transport_residual_us = iron_bench_ttft_us - server_root_inclusive_us`. Not part of the exclusive tree; reported alongside in `reports/p5h-attribution.md` as a transport-overhead column.
+
+**Top-level buckets under `server_request_recv_to_first_sse_write`** (mutually exclusive children):
+
+1. `http_parse_render_tokenize` (server-side request parsing + chat template + tokenizer Encode)
+2. `scheduler_admission` (admit queue + slot allocation + batch construction)
+3. `model_prefill_forward` (top-level forward call into TextModel)
+4. `final_norm_lm_head_first_token` (post-decoder norm + lm_head Linear + first-token sampling)
+5. `sse_write_first_chunk` (SSE format + body write up through first chunk)
+6. `unattributed_server_root` (explicit residual leaf — see "Residual leaves" below)
+
+**`model_prefill_forward` children** (mutually exclusive):
 - `embed_lookup` (token id → hidden_states)
 - `decoder_layer_{0..39}` × 40 (one span per decoder layer)
 - `final_norm_in_text_model` (the model-level RMSNorm before lm_head, if any)
+- `unattributed_model_prefill_forward` (explicit residual leaf)
 
 **`decoder_layer_N` children** (mutually exclusive):
 - `input_norm` (pre-attention RmsNorm)
@@ -150,10 +157,19 @@ P5g T4 暴露: sweep_full Qwen3.5-4B 之后跑 ironmlx serve restart, 3-way benc
 - `post_attention_norm` (post-attention RmsNorm)
 - `mlp_path` — SparseMoeBlock OR shared LinearMLP (per config `mlp_only_layers`)
 - `residual_overhead` (the two residual adds + any layout shuffle around them)
+- `unattributed_decoder_layer_N` (explicit residual leaf, only emitted if non-zero)
 
 **`attention_path` (GatedAttention) children** (per § 2.2 #5 code-backed taxonomy below).
-**`attention_path` (GatedDeltaNet) children** = P5g T0 11-step breakdown (复用 schema).
+**`attention_path` (GatedDeltaNet) children** = P5g T0 11-step breakdown — but P5g instrumentation must be **extended** to emit P5h span-schema fields (`request_id`, `parent_span = decoder_layer_N`, `start_ns/end_ns`); cannot reuse P5g log format verbatim (see Codex review v2 P2 #1, § 2.2 #4 + T0a).
 **`mlp_path` (SparseMoeBlock) children** (per § 2.2 #6 code-backed taxonomy below).
+
+**Residual leaves**:
+
+Every non-leaf span MUST emit at most one `unattributed_<span_name>` child whose `inclusive_us = parent.inclusive_us - Σ accountable_children.inclusive_us`. If the residual is `0` (within ±1 µs noise), emission is OPTIONAL. The residual leaf is itself a leaf (no further children), and counts as **NOT-accountable** in the coverage gate (see § 7.1).
+
+This explicit-residual pattern is what makes the coverage gate non-trivial:
+- Without it: `Σ exclusive_us = root.inclusive_us` by tree identity (Codex P1 #1 — trivially passes even when no useful attribution emitted).
+- With it: `coverage_gate = 1 - (Σ unattributed_*.inclusive_us / root.inclusive_us) ≥ 95%`. If instrumentation only emits the root, all of root's time becomes `unattributed_server_root.inclusive_us`, coverage = 0%, gate FAILS loudly.
 
 **Exclusive time computation** (T5 aggregator):
 
@@ -163,21 +179,30 @@ for span in spans:
     span.inclusive_us = (span.end_ns - span.start_ns) / 1000
 for span in spans (depth-first, children-first):
     span.exclusive_us = span.inclusive_us - sum(child.inclusive_us for child in span.children)
-# T5 95% gate:
-total_wall_us = root_span.inclusive_us
-sum_buckets = sum(span.exclusive_us for span in spans)
-assert abs(total_wall_us - sum_buckets) / total_wall_us < 0.05  # ≥95% coverage
+    assert span.exclusive_us >= -1.0, f"{span.span_name}: negative exclusive {span.exclusive_us}us — broken parent_span attribution"
+
+# Structural invariant (always true if instrumentation correct — sanity check, NOT coverage gate):
+root = find_root_span(spans)  # server_request_recv_to_first_sse_write
+all_exclusive_sum = sum(s.exclusive_us for s in spans)
+assert abs(all_exclusive_sum - root.inclusive_us) < 1.0  # tree identity (Codex P1 #1: this alone is trivial)
+
+# Real coverage gate per § 7.1: only NON-residual leaf time counts as "accountable":
+unattributed_total = sum(s.inclusive_us for s in spans if s.span_name.startswith("unattributed_"))
+accountable_total = root.inclusive_us - unattributed_total
+coverage_pct = accountable_total / root.inclusive_us
+assert coverage_pct >= 0.95, f"coverage {coverage_pct:.1%} < 95% — instrumentation gaps in {[s.span_name for s in spans if s.span_name.startswith('unattributed_') and s.inclusive_us / root.inclusive_us > 0.01]}"
 ```
 
 **Hard invariants**:
-- Sum of all exclusive_us ≡ root inclusive_us (mathematical identity if instrumentation is correct).
-- Any span's exclusive_us ≥ 0 (negative = child span exceeded parent, indicates broken parent_span attribution).
-- 95% gate is therefore not "≥95% of buckets emitted records" but "≥95% of root wall-time covered by sub-buckets that share root as ancestor".
+- `Σ all exclusive_us ≡ root inclusive_us` (tree identity — sanity check, alone insufficient per Codex P1 #1).
+- `span.exclusive_us ≥ -1µs` for every span (negative = broken parent_span attribution).
+- `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` is the real gate.
+- Every non-leaf span MUST emit explicit `unattributed_<span_name>` if its residual > 1µs.
 
 **Out of scope (P5h+1 if needed)**:
 - Per-MLX-kernel internal timing (e.g. softmax inside SDPA). Production-path can't expose this without changing production code; document as P5h+1 MLX-kernel investigation if T5 attribution shows attention `fused_sdpa` as unattributable hotspot.
 
-### 2.5 Phase D root cause investigation (T0 of P5h)
+### 2.5 Phase D root cause investigation (T0b of P5h)
 
 P5g flagged 4 个 hypothesis:
 
@@ -194,20 +219,44 @@ P5g flagged 4 个 hypothesis:
 - H3 verified → cache state must be carefully preserved across ablation; substitute design 需新 guard pattern。
 - H4 verified → ablation invalid for kernel-dispatch-time hotspots; must use real candidate impl benchmark instead。
 
-**Out-of-scope**: P5h T0 只 identify root cause + propose mitigation. Actual substitute redesign 在 P5h T1+ 各 layer profile 应用。
+**Out-of-scope**: P5h T0b 只 identify root cause + propose mitigation. Actual substitute redesign 在 P5h T1+ 各 layer profile 应用。
 
-## § 3 Tasks decomposition (6 tasks per writing-plans guideline)
+## § 3 Tasks decomposition (7 tasks, T0 split into T0a+T0b per Codex review v2 residual risk)
 
-### T0 — Pre-flight + exclusive span schema + UMA hardening protocol + Phase D root cause investigation + GDN rerun under P5h protocol
+### T0a — Foundation: exclusive span schema + UMA hardening + GDN rerun (HARD GATE before T0b/T2/T3)
+
+Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema infra + UMA hardening + 4 Phase D investigations + GDN rerun). **Codex recommends active split into T0a + T0b execution checkpoint**, not passive "sprawl-only-then-split" note. T0a proves trace schema works on a known component (GDN) before any Phase D investigation. If T0a's exclusive coverage gate fails on the GDN rerun alone, the schema is broken and Phase D investigations would emit non-schema records — wasted work.
 
 - Branch verify + Cargo feature `p5h-profile` add (alongside `p5g-profile`, both can be on simultaneously)
-- **Exclusive span schema infrastructure** per § 2.5a — Rust span tracker + log emission format (`request_id` / `run_id` / `parent_span` / `start_ns` / `end_ns`); Python aggregator computes `exclusive_us = inclusive_us - sum(children_us)`; assert sum to root invariant
-- UMA hardening protocol implementation: cold/warm pair measurement + variance check + automatic retry (per § 2.4 protocol)
-- Phase D root cause: 4 investigation sub-tasks (H1 randomized order / H2 substitute self-cost / H3 cache divergence / H4 kernel template variance per § 2.5 decision tree)
-- **GDN rerun**: rerun P5g GDN T0 sweep (复用 commit `52c39bd` instrumentation, `p5g-profile` feature) **under P5h UMA protocol + exclusive span schema** so GDN data is comparable with other layers in T5 attribution gate. P5g existing data 保留作 prior reference but excluded from coverage gate. Cost ~11 min (P5g T0 663s precedent).
-- Output: hardening protocol spec, Phase D root-cause report (`reports/p5h-phase-d-root-cause.md`), GDN protocol-consistent data, reusable infra in test harness
-- **T0 sprawl risk note** (per Codex review residual risk): T0 combines schema infra + UMA retry + 4 Phase D investigations + GDN rerun. If subagent execution shows sprawl (e.g. > 8 hours wall, or > 800 lines of new instrument code), split into T0a (schema + UMA + GDN rerun) + T0b (Phase D root cause) before touching T2/T3 GatedAttention/MoE instrumentation.
-- Commit: `feat(p5h-t0): exclusive span schema + UMA hardening + Phase D root cause + GDN P5h-protocol rerun`
+- **Exclusive span schema infrastructure** per § 2.5a — Rust span tracker + log emission format (`request_id` / `run_id` / `parent_span` / `start_ns` / `end_ns`); Python aggregator computes `exclusive_us = inclusive_us - sum(children_us)`; assert sum-to-root invariant + per-span `exclusive_us ≥ -1µs`
+- **UMA hardening protocol** implementation: cold/warm pair measurement + variance check + automatic retry (per § 2.4)
+- **GDN harness code extension** to emit `[p5h-profile]` log lines with new schema (per § 2.2 #4 + Codex review v2 P2 #1) — modest format-string change to existing entry/exit barriers in `gated_delta_net.rs`; `[p5g-profile]` lines kept in parallel for back-compat
+- **GDN rerun** under P5h UMA protocol — same PP set as P5g T0, cold/warm pair per PP, exclusive span tree with `parent_span = decoder_layer_N`
+- **Schema validation on GDN rerun** (T0a's hard gate, must pass before T0b starts):
+  - Sum-to-root identity holds within ±1µs
+  - All `exclusive_us ≥ -1µs`
+  - GDN decoder-layer coverage_pct ≥ 95% (per § 7.1)
+  - UMA cold/warm variance ≤ ±2% per PP
+- Output: P5h schema infrastructure, GDN protocol-consistent data under exclusive tree (parent_span = `decoder_layer_N`)
+- **GATE**: T0a must close before T0b dispatches. If schema gate fails, fix schema first; do NOT proceed to Phase D investigations until GDN data demonstrates schema works end-to-end.
+- Commit: `feat(p5h-t0a): exclusive span schema + UMA hardening + GDN P5h-protocol rerun`
+
+### T0b — Phase D root cause investigation (4 hypotheses, depends on T0a)
+
+T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the now-validated schema infrastructure to emit Phase D records consistent with later T2/T3 ablation work.
+
+- Phase D root cause investigation (4 hypotheses per § 2.5 decision tree):
+  - H1 (thermal drift): phase-order randomized rerun (Phase D first, then A/B/C); compare values across orderings
+  - H2 (substitute self-cost): run Phase A with `IRONMLX_P5G_PROFILE_MODE=ablate-X` enabled, directly compare substitute path vs original path
+  - H3 (cache state divergence): add `ablate-conv-with-manual-cache-update` variant; isolate cache-divergence effect from substitute effect
+  - H4 (kernel template variance): kernel-dispatch-only timing under AblateComputeG vs Phase A; exclude pre/post processing
+- Decision-tree mapping (per § 2.5):
+  - H1 primary → P5h all phases adopt randomized order + cool gates
+  - H2 primary → discard ablation upper-bound; use Layer 2 ranking only for candidate priority
+  - H3 primary → ablation requires cache-state-preserving substitute design (new guard pattern)
+  - H4 primary → ablation invalid for kernel-dispatch-time hotspots; use real candidate impl benchmark instead
+- Output: `reports/p5h-phase-d-root-cause.md` documenting primary root cause + mitigation + decision-tree binding for T2/T3 conditional gates
+- Commit: `feat(p5h-t0b): Phase D root cause investigation + decision-tree resolution`
 
 ### T1 — HTTP path + scheduler/admission profile
 
@@ -225,19 +274,19 @@ P5g flagged 4 个 hypothesis:
   - Edit 1: entry barrier (input + cache materialize) gated on Layer1|Layer2
   - Edit 2: cache update sites use `as_deref_mut()` (preserve borrow)
   - Edit 3: tail refactor + exit barrier + log emission, `parent_span = decoder_layer_N`
-- **Layer 2 step breakdown — code-backed taxonomy** (7 sub-steps matching actual `gated_attention.rs:120-276` production path; **not** decomposing the fused SDPA internals which are inside `mlx::fast::scaled_dot_product_attention_on`):
-  1. `qkv_proj` — Linear(hidden→3 × num_heads × head_dim) projection split into q/k/v
-  2. `q_split_norm_reshape` — split + `q_norm`/`k_norm` (per-head RmsNorm) + reshapes/transposes to SDPA layout
+- **Layer 2 step breakdown — code-backed taxonomy** (7 sub-steps matching actual `gated_attention.rs:120-276` production path with `attn_output_gate=true` per config; **not** decomposing the fused SDPA internals which are inside `mlx::fast::scaled_dot_product_attention_on`):
+  1. `q_gate_k_v_proj` — three separate Linear projections (NOT fused QKV): `q_proj` outputs `Hq × D × 2` (queries concatenated with gate, since `attn_output_gate=true`); `k_proj` outputs `Hkv × D` (KV-head dim, GQA); `v_proj` outputs `Hkv × D` (KV-head dim). Single span covers all three.
+  2. `q_split_norm_reshape` — split q output back into queries + gate halves + `q_norm`/`k_norm` (per-head RmsNorm) + reshapes/transposes to SDPA layout
   3. `mrope_apply` — `mrope.apply(&queries, &k, cos, sin)` rotary
   4. `kv_mask_update` — KV validity mask construction + `KVCache::update_and_fetch_on(k, v, lens, target)`
   5. `fused_sdpa` — `mlx::fast::scaled_dot_product_attention_on(...)` (fused MLX op; **softmax/value matmul internals inside, not separately measurable on production path** — if T5 shows this as unattributable hotspot, P5h+1 may investigate MLX-kernel-level)
-  6. `gate_sigmoid_mul` — `attn_output_gate=true` per config → gate sigmoid + elementwise multiply on SDPA output
+  6. `gate_sigmoid_mul` — gate sigmoid + elementwise multiply on SDPA output (gate tensor came from `q_proj` second half)
   7. `o_proj` — `Linear::forward_on(&gated, target)` output projection
-- **Layer 3 ablations — conditional on T0 Phase D outcome** (per § 2.5 decision tree):
-  - **If T0 verifies H1 primary** (thermal drift): ablations OK, T2 runs Layer 3 with randomized phase order + cool gates。
-  - **If T0 verifies H2 primary** (substitute self-cost): Layer 3 **skipped** for T2; replace with real-path microbenchmarks (e.g., swap `o_proj` with smaller dim variant compiled separately, measure end-to-end delta against baseline). Layer 1/2 still emitted.
-  - **If T0 verifies H3 primary** (cache state divergence): Layer 3 requires cache-state-preserving substitute design — for GatedAttention, KV cache must remain valid across ablation (e.g., `ablate_fused_sdpa` substitute returns shape-preserving zeros but still calls `KVCache::update_and_fetch_on` to keep cache consistent for subsequent forwards).
-  - **If T0 verifies H4 primary** (kernel template variance): Layer 3 invalid for any step that touches Metal kernels (especially `fused_sdpa`); skip Layer 3 for steps 4-5 (kv_mask_update + fused_sdpa); Layer 3 OK for pure op-level steps (qkv_proj, q_split_norm_reshape, mrope_apply, gate_sigmoid_mul, o_proj).
+- **Layer 3 ablations — conditional on T0b Phase D outcome** (per § 2.5 decision tree):
+  - **If T0b verifies H1 primary** (thermal drift): ablations OK, T2 runs Layer 3 with randomized phase order + cool gates。
+  - **If T0b verifies H2 primary** (substitute self-cost): Layer 3 **skipped** for T2; replace with real-path microbenchmarks (e.g., swap `o_proj` with smaller dim variant compiled separately, measure end-to-end delta against baseline). Layer 1/2 still emitted.
+  - **If T0b verifies H3 primary** (cache state divergence): Layer 3 requires cache-state-preserving substitute design — for GatedAttention, KV cache must remain valid across ablation (e.g., `ablate_fused_sdpa` substitute returns shape-preserving zeros but still calls `KVCache::update_and_fetch_on` to keep cache consistent for subsequent forwards).
+  - **If T0b verifies H4 primary** (kernel template variance): Layer 3 invalid for any step that touches Metal kernels (especially `fused_sdpa`); skip Layer 3 for steps 4-5 (kv_mask_update + fused_sdpa); Layer 3 OK for pure op-level steps (q_gate_k_v_proj, q_split_norm_reshape, mrope_apply, gate_sigmoid_mul, o_proj).
 - Run sweep + aggregate under exclusive span schema (per § 2.5a) with `parent_span = decoder_layer_N`
 - Output: GatedAttention per-PP occupancy table (7-step breakdown), top-3 step ranking, long-PP O(S²) growth verification (PP=128 to PP=16384 step ratios)
 - Commit: `test(p5h-t2): GatedAttention 3-layer profile (code-backed taxonomy + conditional ablation)`
@@ -246,18 +295,20 @@ P5g flagged 4 个 hypothesis:
 
 - Read `ironmlx/src/nn/sparse_moe.rs` (or equivalent SparseMoeBlock module) — 40 decoder layers each contain MoE (`num_experts=256`, `num_experts_per_tok=8`, `moe_intermediate=512`, `shared_expert_intermediate=512` per config.json verified)
 - Add 3-edit instrumentation pattern (mirror P5g GDN + T2 GatedAttention)
-- **Layer 2 step breakdown — code-backed taxonomy**:
-  1. `router_topk` — gating linear + softmax + top-8 selection (`BS × 256 → BS × 8` indices + weights)
-  2. `gather_qmm_gate_up` — gather + quantized matmul gate/up projections for routed tokens (`BS × 8 × moe_intermediate`)
-  3. `gather_qmm_down` — gather + quantized matmul down projection (`BS × 8 × hidden`)
-  4. `expert_combine` — scatter-add by routing indices + weight
-  5. `shared_expert` — separate LinearMLP for the shared expert (`BS × shared_expert_intermediate × 2 + BS × hidden`)
-  6. `moe_output_sum` — final residual combining routed + shared outputs
-- **Layer 3 ablations — conditional on T0 Phase D outcome** (same gating logic as T2):
+- **Layer 2 step breakdown — code-backed taxonomy** (8 sub-steps reflecting sorted-routing path shipped in P5e; verify against current `sparse_moe.rs` at instrumentation time, exclusive parent = `mlp_path`):
+  1. `router_logits_softmax_topk` — gating linear (`hidden → num_experts`) + softmax + top-`num_experts_per_tok` index/weight selection
+  2. `routing_sort_pack` — sorted-routing pack (P5e shipped): sort tokens by expert id, gather token-features into per-expert contiguous slabs. Step exists only on the sorted path; if T0a observes `sparse_moe.rs` falls into a non-sorted branch for some sequence length, emit `routing_sort_pack` with `inclusive_us = 0` and document the branch in T3 close-out.
+  3. `gather_qmm_gate_up` — quantized matmul gate + up projections for packed token slabs (`packed_tokens × moe_intermediate × 2`)
+  4. `swiglu_activation` — SwiGLU elementwise (gate · silu(up) or equivalent fused op) on the gate/up output
+  5. `gather_qmm_down` — quantized matmul down projection (`packed_tokens × hidden`)
+  6. `routing_unsort_weighted_reduce` — unpack from per-expert slabs back to original token order + weight by routing probability + scatter-reduce contributions across the `num_experts_per_tok` experts of each token
+  7. `shared_expert` — separate LinearMLP for the shared expert (`BS × shared_expert_intermediate × 2 + BS × hidden`)
+  8. `moe_output_sum` — final residual combining routed + shared outputs into the layer's MLP output tensor
+- **Layer 3 ablations — conditional on T0b Phase D outcome** (same gating logic as T2):
   - **H1 primary**: ablations OK with randomized order + cool gates
   - **H2 primary**: Layer 3 skipped, replace with real-path microbenchmarks (e.g., reduce experts_per_tok from 8 → 4 in a controlled fork, measure delta)
-  - **H3 primary**: ablation must preserve routing index validity (don't break downstream attention KV slot allocation)
-  - **H4 primary**: Layer 3 invalid for `gather_qmm_*` steps (kernel-dispatch dependent); skip Layer 3 for steps 2-3; OK for steps 1, 4-6
+  - **H3 primary**: ablation must preserve routing index validity (don't break downstream attention KV slot allocation); pack/unpack steps must remain consistent (substitute can no-op compute but must still produce shape-correct outputs)
+  - **H4 primary**: Layer 3 invalid for `gather_qmm_*` steps + `routing_sort_pack`/`routing_unsort_weighted_reduce` (all kernel-dispatch dependent); skip Layer 3 for steps 2-3 + 5-6; OK for steps 1, 4, 7-8
 - Run sweep + aggregate under exclusive span schema (per § 2.5a) with `parent_span = decoder_layer_N` (sub-parent `mlp_path`)
 - **ROI math source**: derive `num_experts_per_tok = 8`, `moe_intermediate = 512`, `num_experts = 256` from `Qwen35MoeConfig` runtime values, NOT hardcoded constants in spec/report (which could drift if model config changes)
 - Output: MoE per-PP attribution, router top-8 cost ratio, gather_qmm dominance check, shared expert vs routed cost split
@@ -276,7 +327,7 @@ P5g flagged 4 个 hypothesis:
 
 ### T5 — Cross-layer attribution synthesis + P5i/P5j candidate ranking + close-out report
 
-- Aggregate T0 (GDN rerun) + T1-T4 measurements into per-PP exclusive attribution table per § 2.5a span schema
+- Aggregate T0a (GDN rerun) + T0b (Phase D resolution) + T1-T4 measurements into per-PP exclusive attribution table per § 2.5a span schema
 - Compute `exclusive_us = inclusive_us - sum(children.inclusive_us)` for every span; verify `span.exclusive_us ≥ 0` invariant per § 2.5a; assert sum to root identity
 - **Exclusive coverage gate** per § 7.1: `coverage_pct = Σ span.exclusive_us / root_span.inclusive_us ≥ 95%` per PP (NOT the prior naive "sum medians" gate, which double-counted nested spans per Codex review P1 #1)
 - Identify per-PP top-3 bottleneck across all measured spans
@@ -312,12 +363,13 @@ Profile-gate invariant (must verify per task):
 - Default build (no `--features p5h-profile`): 0 `[p5h-profile]` log lines emitted by `ironmlx serve` under any sweep (byte-for-byte identity with P5f baseline)
 - Feature build (`--features p5h-profile`): instrumentation active, exclusive span schema records emitted per § 2.5a, UMA cold/warm pair variance ≤ ±2% on the layer's sweep
 
-T0 + T5 额外:
+T0a + T0b + T5 额外:
 
-- T0 Phase D root cause: 4 hypotheses (H1-H4) resolved per § 2.5 decision tree, OR explicit unresolved-list documented in `reports/p5h-phase-d-root-cause.md`
-- T0 exclusive span schema validator: assert `sum(child.inclusive) ≤ parent.inclusive` for all parent spans in test fixture; assert sum-to-root identity within 5% tolerance
-- T0 GDN rerun: P5h-protocol GDN data emitted to `/tmp/p5h-gdn-rerun.json` with `parent_span = decoder_layer_N`
-- T5 attribution: per § 7.1 exclusive coverage gate, P5i/P5j candidate ranking emitted with ROI estimate ranges + Scope gate trigger status
+- T0a exclusive span schema validator: assert `sum(child.inclusive) ≤ parent.inclusive` for all parent spans in test fixture; assert sum-to-root identity within ±1µs; assert per-span `exclusive_us ≥ -1µs`
+- T0a GDN rerun: P5h-protocol GDN data emitted under exclusive tree with `parent_span = decoder_layer_N`; GDN coverage_pct ≥ 95% under § 7.1 residual-based gate; UMA cold/warm variance ≤ ±2% per PP
+- **T0a HARD GATE**: T0a's coverage + schema invariants must pass before T0b dispatches (per § 3 T0a). If schema gate fails on GDN rerun, fix schema before any Phase D investigation work.
+- T0b Phase D root cause: 4 hypotheses (H1-H4) resolved per § 2.5 decision tree, OR explicit unresolved-list documented in `reports/p5h-phase-d-root-cause.md`; T2/T3 conditional ablation gates bound per T0b outcome
+- T5 attribution: per § 7.1 residual-based exclusive coverage gate (`coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP, root = `server_request_recv_to_first_sse_write`); P5i/P5j candidate ranking emitted with ROI estimate ranges + Scope gate trigger status; `client_transport_residual_us` reported as separate diagnostic column
 
 ## § 5 Numerical Safety
 
@@ -341,35 +393,42 @@ P5h 不引入新 numerical correctness 风险 (measure-only, no algorithmic chan
 
 ## § 7 Success Criteria
 
-### 7.1 Exclusive attribution coverage gate (P1-fix from Codex review)
+### 7.1 Exclusive attribution coverage gate (P1-fix from Codex review v1 + v2)
 
-T5 must produce a per-PP exclusive attribution table built **only** from same-protocol P5h measurements (P5g existing data excluded; see § 2.2 #4 + T0 GDN rerun). Coverage computed as:
+T5 must produce a per-PP exclusive attribution table built **only** from same-protocol P5h measurements (P5g existing data excluded; see § 2.2 #4 + T0a GDN rerun). Coverage is **residual-based** (Codex review v2 P1 #1 — the naive `Σ exclusive ≡ root.inclusive` formulation is a tree identity, trivially true and useless as a gate). Coverage computed as:
 
 ```
-total_wall_us = root_span("client_to_response").inclusive_us
-sum_exclusive = Σ span.exclusive_us  for span in all_emitted_spans
-coverage_pct = sum_exclusive / total_wall_us
+root_wall_us = root_span("server_request_recv_to_first_sse_write").inclusive_us
+unattributed_total_us = Σ s.inclusive_us  for s in all_spans where s.span_name.startswith("unattributed_")
+accountable_us = root_wall_us - unattributed_total_us
+coverage_pct = accountable_us / root_wall_us
+            = 1 - (unattributed_total_us / root_wall_us)
 ```
+
+The root is **server-side only** (`server_request_recv_to_first_sse_write`, per § 2.5a Codex v2 P1 #2). Client/transport latency is reported as a separate `client_transport_residual_us = iron_bench_ttft_us - root_wall_us` diagnostic column, NOT included in the coverage gate.
 
 **Hard invariants** (per § 2.5a):
-- `coverage_pct ≥ 95%` per PP (else report unaccounted residual + investigate before close-out)
-- `span.exclusive_us ≥ 0` for every emitted span (negative = broken parent_span attribution, MUST fix)
+- `coverage_pct ≥ 95%` per PP (else identify which `unattributed_<span>` dominates → add instrumentation for that span's children → re-run before close-out)
+- `span.exclusive_us ≥ -1µs` for every emitted span (negative beyond noise = broken parent_span attribution, MUST fix)
+- `Σ all spans' exclusive_us ≡ root_wall_us` within ±1µs (tree identity sanity check; alone INSUFFICIENT as a coverage gate per Codex review v2 P1 #1)
 - No bucket can be counted under two different parents (mutually exclusive tree)
+- Every non-leaf span MUST emit an explicit `unattributed_<span_name>` leaf if its residual > 1µs (per § 2.5a "Residual leaves")
 
-This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted nested spans (Codex review P1 #1).
+This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted nested spans (Codex review v1 P1 #1) and the equally-naive "`Σ exclusive_us / root.inclusive_us`" formulation (Codex review v2 P1 #1, which is a tree identity).
 
 ### 7.2 P5h ship gate (T5 close-out gate)
 
-1. **Exclusive attribution coverage** per § 7.1: ≥ 95% per PP, exclusive_us ≥ 0 for all spans
-2. **Protocol-consistent data**: GDN (T0 rerun under P5h protocol) + HTTP/scheduler/admission (T1) + GatedAttention (T2) + MoE (T3) + lm_head/MLX state (T4) — all measured under same UMA hardening + exclusive span schema. P5g existing data remains as prior reference only, excluded from coverage gate.
+1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_sse_write`); `exclusive_us ≥ -1µs` for every emitted span; `client_transport_residual_us` reported separately (not part of gate)
+2. **Protocol-consistent data**: GDN (T0a rerun under P5h protocol with `parent_span = decoder_layer_N`) + Phase D resolution (T0b) + HTTP/scheduler/admission (T1) + GatedAttention (T2) + MoE (T3) + lm_head/MLX state (T4) — all measured under same UMA hardening + exclusive span schema. P5g existing data remains as prior reference only, excluded from coverage gate.
 3. **UMA hardening verified**: cross-repeat (cold/warm pair) measurement variance ≤ ±2% per PP per metric per layer (per § 2.4 protocol)
-4. **Phase D root cause**: one of H1-H4 identified primary (mitigation proposed) OR explicit unresolved hypothesis list with proposed next investigation path (per § 2.5 decision tree)
+4. **Phase D root cause** (T0b output): one of H1-H4 identified primary (mitigation proposed) OR explicit unresolved hypothesis list with proposed next investigation path (per § 2.5 decision tree); T2/T3 Layer 3 conditional ablation gates bound per T0b outcome
 5. **P5i + P5j candidate ranking**: each candidate has expected ROI range (number-anchored), Scope gate trigger status, 实施优先级
 6. **Target feasibility assessment**: honest verdict on "全 PP omlx+10% achievable in P5i+P5j" — if not, partial-target proposal for Boss decision
-7. **Reusable infra delivered**: GatedAttention 3-layer profile harness (per § 2.2 #5 code-backed taxonomy), MoE profile extension (per § 2.2 #6 + `Qwen35MoeConfig` runtime values), UMA hardening protocol, exclusive span schema infra — all usable in P5i+P5j+P5h+1
-8. **Validation gates pass per task** (T0-T5 each independently green; per § 4)
+7. **Reusable infra delivered**: exclusive span schema infrastructure (per § 2.5a) + UMA hardening protocol (per § 2.4) + GatedAttention 3-layer profile harness (per § 2.2 #5 code-backed taxonomy with `attn_output_gate=true`) + MoE 8-step profile harness (per § 2.2 #6 sorted-routing path + `Qwen35MoeConfig` runtime values) — all usable in P5i+P5j+P5h+1
+8. **Validation gates pass per task** (T0a/T0b/T1-T5 each independently green; per § 4)
+9. **T0a HARD GATE passed** before T0b/T2/T3 dispatched: schema sum-to-root invariant + per-span exclusive_us ≥ -1µs + GDN coverage ≥ 95% + UMA cold/warm variance ≤ ±2% all verified on GDN rerun data (per § 3 T0a + § 4)
 
-P5h 整体 success = all 8 gates PASS, output (attribution report + P5i/P5j candidate list) is actionable for Boss to authorize P5i and/or P5j.
+P5h 整体 success = all 9 gates PASS, output (attribution report + P5i/P5j candidate list) is actionable for Boss to authorize P5i and/or P5j.
 
 ## § 8 References
 
