@@ -20,6 +20,66 @@ use crate::core::Loader;
 use crate::nn::{Conv1d, Conv1dConfig, Linear, RmsNormGated};
 use crate::Result;
 
+// P5g T0: profile mode (compile-time gated by `p5g-profile` feature).
+//
+// Runtime mode selected by `IRONMLX_P5G_PROFILE_MODE` env var, cached once
+// via OnceLock to avoid per-forward env lookup. Disabled (Mode::Off) path
+// must produce zero measurable overhead beyond a single cached-flag check.
+//
+// `as_str()` is the single source of truth for mode names — env parser
+// matches the same strings the log emits, so `IRONMLX_P5G_PROFILE_MODE=layer1`
+// round-trips identically to the log line `mode=layer1`. Never log
+// `{mode:?}` (would emit Debug names `Layer1` / `AblateComputeG` and
+// break Phase B/C/D aggregation by env-string match).
+#[cfg(feature = "p5g-profile")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfileMode {
+    Off,
+    Layer1,
+    Layer2,
+    AblateComputeG,
+    AblateConv,
+    AblateTArr,
+}
+
+#[cfg(feature = "p5g-profile")]
+impl ProfileMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ProfileMode::Off => "off",
+            ProfileMode::Layer1 => "layer1",
+            ProfileMode::Layer2 => "layer2",
+            ProfileMode::AblateComputeG => "ablate-compute-g",
+            ProfileMode::AblateConv => "ablate-conv",
+            ProfileMode::AblateTArr => "ablate-t-arr",
+        }
+    }
+}
+
+#[cfg(feature = "p5g-profile")]
+static PROFILE_MODE: std::sync::OnceLock<ProfileMode> = std::sync::OnceLock::new();
+
+#[cfg(feature = "p5g-profile")]
+pub(crate) fn profile_mode() -> ProfileMode {
+    *PROFILE_MODE.get_or_init(
+        || match std::env::var("IRONMLX_P5G_PROFILE_MODE").as_deref() {
+            Ok(s) if s == ProfileMode::Layer1.as_str() => ProfileMode::Layer1,
+            Ok(s) if s == ProfileMode::Layer2.as_str() => ProfileMode::Layer2,
+            Ok(s) if s == ProfileMode::AblateComputeG.as_str() => ProfileMode::AblateComputeG,
+            Ok(s) if s == ProfileMode::AblateConv.as_str() => ProfileMode::AblateConv,
+            Ok(s) if s == ProfileMode::AblateTArr.as_str() => ProfileMode::AblateTArr,
+            _ => ProfileMode::Off,
+        },
+    )
+}
+
+#[cfg(feature = "p5g-profile")]
+fn parse_layer_idx_from_prefix(prefix: &str) -> Option<i32> {
+    // Expects `model.layers.{N}.linear_attn` shape. Returns Some(N) on
+    // parse success, None on naming drift (treated as "unknown layer").
+    prefix.split('.').nth(2).and_then(|s| s.parse::<i32>().ok())
+}
+
 /// Configuration for [`GatedDeltaNet`].
 #[derive(Debug, Clone, Copy)]
 pub struct GatedDeltaNetConfig {
@@ -83,6 +143,11 @@ pub struct GatedDeltaNet {
     cfg: GatedDeltaNetConfig,
     kernel_no_mask: OnceLock<MetalKernel>,
     kernel_masked: OnceLock<MetalKernel>,
+    /// Layer index for profile log. Some(N) if parsed from `model.layers.{N}.linear_attn`
+    /// prefix at `from_loader`; None for `from_components` (unit-test path) or prefix
+    /// parse failure. Profile-only field (zero footprint without `p5g-profile`).
+    #[cfg(feature = "p5g-profile")]
+    profile_layer_idx: Option<i32>,
 }
 
 impl GatedDeltaNet {
@@ -231,6 +296,8 @@ impl GatedDeltaNet {
             cfg,
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
+            #[cfg(feature = "p5g-profile")]
+            profile_layer_idx: parse_layer_idx_from_prefix(prefix),
         })
     }
 
@@ -267,6 +334,8 @@ impl GatedDeltaNet {
             cfg,
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
+            #[cfg(feature = "p5g-profile")]
+            profile_layer_idx: None,
         }
     }
 
@@ -343,9 +412,89 @@ impl GatedDeltaNet {
         let batch = dims[0];
         let seq = dims[1];
 
+        // P5g T0 Layer 1 entry: materialize input + cache states before timer starts.
+        // Drains prior lazy ops so they're not attributed to GatedDeltaNet's forward
+        // cost; also forces cache.conv_state + cache.recurrent_state to be tangible
+        // so Step 2c/7e cache updates produced inside this forward are the only
+        // cache-related materialization captured by the exit barrier.
+        //
+        // IMPORTANT: timing/logging barriers run ONLY for Layer1 and Layer2 modes.
+        // AblateX modes (Phase D) must NOT trigger barriers — Phase D's "wall-time
+        // vs Phase A" delta would otherwise be contaminated by barrier overhead,
+        // understating the achievable upper-bound cut and possibly misranking
+        // candidates. AblateX still flows through the substitute branches in their
+        // respective steps (Step 0.12), which are pure shape-preserving replacements.
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_timer_start = {
+            let mode = profile_mode();
+            if matches!(mode, ProfileMode::Layer1 | ProfileMode::Layer2) {
+                let mut eval_set: Vec<&Array> = vec![x];
+                if let Some(c) = cache.as_deref() {
+                    eval_set.push(c.conv_state());
+                    eval_set.push(c.recurrent_state());
+                }
+                if let Some(m) = mask {
+                    eval_set.push(m);
+                }
+                mlx::transforms::eval(&eval_set[..])?;
+                Some((mode, std::time::Instant::now()))
+            } else {
+                None
+            }
+        };
+
+        // Capture offset_before BEFORE any cache-modifying op in Steps 2c / 7e.
+        // Only relevant for Layer1/Layer2 (the modes that actually emit logs); for
+        // AblateX modes this is computed but unused. HTTP-path B=1 invariant:
+        // offsets() always has at least one element when cache exists.
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_offset_before: i32 = cache
+            .as_deref()
+            .and_then(|c| c.offsets().first().copied())
+            .unwrap_or(0);
+
+        // Layer 2 per-step elapsed accumulator.
+        #[cfg(feature = "p5g-profile")]
+        let mut _p5g_step_elapsed: Vec<u64> = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Vec::with_capacity(12)
+        } else {
+            Vec::new()
+        };
+
         // Step 1: fused projections + slice (was 4 quantized matmuls; now 2).
+        // Step 1a: in_proj_qkvz
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_1a = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let qkvz = self.in_proj_qkvz.forward_on(x, target)?;
+        // Step 1a elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_1a {
+                mlx::transforms::eval(&[&qkvz])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
+
+        // Step 1b: in_proj_ba
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_1b = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let ba = self.in_proj_ba.forward_on(x, target)?;
+        // Step 1b elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_1b {
+                mlx::transforms::eval(&[&ba])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
         let conv_dim = self.cfg.conv_dim();
         let value_dim = self.cfg.value_dim();
@@ -410,6 +559,12 @@ impl GatedDeltaNet {
         )?;
 
         // Step 2a: prepend conv_state
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_2a = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let conv_input = match cache.as_deref_mut() {
             Some(c) => concatenate(&[c.conv_state(), &qkv], 1)?,
             None => {
@@ -421,11 +576,33 @@ impl GatedDeltaNet {
                 concatenate(&[&zeros, &qkv], 1)?
             }
         };
+        // Step 2a elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_2a {
+                mlx::transforms::eval(&[&conv_input])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
         // Step 2b: conv1d + silu
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_2b = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let conv_out = self.conv1d.forward_on(&conv_input, target)?;
         let conv_sig = conv_out.sigmoid()?;
         let conv_out = &conv_out * &conv_sig;
+        // Step 2b elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_2b {
+                mlx::transforms::eval(&[&conv_out])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
         // Step 2c: update conv_state cache.
         //
@@ -441,6 +618,12 @@ impl GatedDeltaNet {
         //
         // When `per_row_lens` is `None` (single-stream / non-batched), we
         // fall back to the simple "last n_keep positions" slice.
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_2c = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = self.cfg.conv_kernel_size - 1;
             let conv_input_dims = conv_input.shape();
@@ -494,10 +677,25 @@ impl GatedDeltaNet {
             };
             c.update_conv(new_conv_state);
         }
+        // Step 2c elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_2c {
+                // conv_state update is lazy; just record time taken to compute
+                // the new_conv_state expression (already done above).
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
         // Step 3: split + reshape per-head
         // conv_out shape: [B, S, conv_dim] = [B, S, key_dim*2 + value_dim]
         // Split at [key_dim, 2*key_dim] → 3 segments [B, S, key_dim], [B, S, key_dim], [B, S, value_dim]
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_3 = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let split_at = vec![self.cfg.key_dim(), 2 * self.cfg.key_dim()];
         let parts = mlx::ops::shape::split_at_on(&conv_out, &split_at, -1, target)?;
         let q_flat = &parts[0]; // [B, S, num_k_heads * head_k_dim]
@@ -516,16 +714,44 @@ impl GatedDeltaNet {
             (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
             target,
         )?;
+        // Step 3 elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_3 {
+                mlx::transforms::eval(&[&q_per_head, &k_per_head, &v_per_head])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
         // Step 4: q/k rms_norm (no weight)
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_4 = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
         let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
         let q_scaled = &q_normed * (inv_scale * inv_scale); // panic-on-err, no `?`
         let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
         let k_scaled = &k_normed * inv_scale; // panic-on-err, no `?`
+                                              // Step 4 elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_4 {
+                mlx::transforms::eval(&[&q_scaled, &k_scaled])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
         // Step 5: compute_g = exp(-exp(A_log) * softplus(a + dt_bias))
         // softplus stabilised: where(x > 20, x, log(1 + exp(x)))
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_5 = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let x = &a + &self.dt_bias;
         let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
         let zeros = a.zeros_like()?;
@@ -537,9 +763,39 @@ impl GatedDeltaNet {
         let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
         let inner = &neg_exp_alog * &sp;
         let g = inner.exp()?;
+        // Step 5 elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_5 {
+                mlx::transforms::eval(&[&g])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
         // Step 6: beta = sigmoid(b)
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_6 = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let beta = b.sigmoid_on(target)?;
+        // Step 6 elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_6 {
+                mlx::transforms::eval(&[&beta])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
+
+        // Step 7 timer: covers 7a (kernel select) through 7e (cache.advance).
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_7 = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
 
         // Step 7a: build/get the appropriate kernel
         let kernel = if mask.is_some() {
@@ -614,7 +870,7 @@ impl GatedDeltaNet {
         let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
 
         // Step 7e: update cache recurrent_state, advance offset
-        if let Some(c) = cache {
+        if let Some(c) = cache.as_deref_mut() {
             c.update_recurrent(new_state);
             let lens_owned: Vec<i32>;
             let lens_ref: &[i32] = match per_row_lens {
@@ -627,6 +883,22 @@ impl GatedDeltaNet {
             };
             c.advance(lens_ref)?;
         }
+        // Step 7 elapsed push (after 7e c.advance; kernel + cache.advance already force materialization)
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_7 {
+                // No additional eval — kernel dispatch + cache.advance already force materialization.
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
+
+        // Step 8 timer: covers RmsNormGated + reshape + out_proj
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_8 = if matches!(profile_mode(), ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
 
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
         let z_per_head = z.reshape_on(
@@ -635,7 +907,72 @@ impl GatedDeltaNet {
         )?;
         let normed = self.norm.forward_on(&y, Some(&z_per_head), target)?;
         let normed_flat = normed.reshape_on((batch, seq, self.cfg.value_dim()), target)?;
-        self.out_proj.forward_on(&normed_flat, target)
+        let out = self.out_proj.forward_on(&normed_flat, target)?;
+        // Step 8 elapsed push
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_8 {
+                mlx::transforms::eval(&[&out])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
+
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some((mode, start)) = _p5g_timer_start {
+                // This block runs ONLY for Layer1 / Layer2 (entry barrier set
+                // _p5g_timer_start to Some only in those modes). AblateX skips this
+                // entirely — no exit eval barrier, no log emission.
+
+                // Materialize all GDN produced outputs INCLUDING updated cache states.
+                let mut eval_out: Vec<&Array> = vec![&out];
+                if let Some(c) = cache.as_deref() {
+                    eval_out.push(c.conv_state());
+                    eval_out.push(c.recurrent_state());
+                }
+                mlx::transforms::eval(&eval_out[..])?;
+                let elapsed_us = start.elapsed().as_micros() as u64;
+
+                // offset_after read AFTER cache.advance() in Step 7e has executed.
+                let offset_after: i32 = cache
+                    .as_deref()
+                    .and_then(|c| c.offsets().first().copied())
+                    .unwrap_or(0);
+                let offset_before = _p5g_offset_before;
+
+                // Build the step_breakdown suffix iff mode == Layer2. Empty string for
+                // Layer 1 so the log line is unchanged.
+                let breakdown_suffix =
+                    if matches!(mode, ProfileMode::Layer2) && !_p5g_step_elapsed.is_empty() {
+                        let csv: Vec<String> =
+                            _p5g_step_elapsed.iter().map(|us| us.to_string()).collect();
+                        format!(" step_breakdown={}", csv.join(","))
+                    } else {
+                        String::new()
+                    };
+
+                // tracing::info! placed strictly AFTER timer-related work — no log
+                // calls inside the measured window. Uses mode.as_str() for
+                // env-name / log-name consistency (defined in Step 0.2).
+                // Note: `batch` and `seq` are i32 locals extracted from the input
+                // dims at the top of forward_on (before `x` was shadowed by Step 5).
+                let layer = self.profile_layer_idx.unwrap_or(-1);
+                tracing::info!(
+                    "[p5g-profile] mode={} layer={} batch={} seq={} \
+                     offset_before={} offset_after={} elapsed_us={}{}",
+                    mode.as_str(),
+                    layer,
+                    batch,
+                    seq,
+                    offset_before,
+                    offset_after,
+                    elapsed_us,
+                    breakdown_suffix
+                );
+            }
+        }
+
+        Ok(out)
     }
 }
 
