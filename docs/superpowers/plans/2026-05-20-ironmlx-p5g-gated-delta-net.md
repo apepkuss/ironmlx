@@ -4,7 +4,7 @@
 
 **Goal:** Profile GatedDeltaNet (`ironmlx/src/nn/gated_delta_net.rs`) per § 3.2 3-layer protocol via HTTP-path harness, then promote ≥ 1 profile-driven op-level optimization via § 7.3 ship metrics (long-prompt geomean prefill +5% AND per-PP regression < 2% AND decode TG regression < 2%) without changing GatedDeltaNet public API or touching dense / MTP / GatedAttention / SparseMoeBlock paths.
 
-**Architecture:** Profile-first. T0 instruments GatedDeltaNet (prefix-parsed layer_idx, mode-gated by `IRONMLX_P5G_PROFILE_MODE`, `OnceLock<ProfileMode>` cached) and runs 4-phase HTTP harness (Phase A whole-prefill baseline + B Layer 1 boundary-isolated + C Layer 2 per-step breakdown + D Layer 3 shape-preserving cost ablation). T0.d locks § 7.2 target. T1-T3 implement op-level candidates by T0.c ranking, each independently ship-or-revert by § 7.3 metrics relative to its starting HEAD. T4 closes-out with 4-way bench + sweep_full + report + P5h scope quantification. Scope gate: if T0/T1 requires Metal kernel rewrite → pause for Boss decision.
+**Architecture:** Profile-first. T0 instruments GatedDeltaNet (prefix-parsed layer_idx, mode-gated by `IRONMLX_P5G_PROFILE_MODE`, `OnceLock<ProfileMode>` cached) and runs 4-phase HTTP harness (Phase A whole-prefill baseline + B Layer 1 boundary-isolated + C Layer 2 per-step breakdown + D Layer 3 shape-preserving cost ablation). T0.d locks § 7.2 target. T1-T3 implement op-level candidates by T0.c ranking, each independently ship-or-revert by § 7.3 metrics relative to its starting HEAD. T4 closes-out with 3-way bench + sweep_full + report + P5h scope quantification. Scope gate: if T0/T1 requires Metal kernel rewrite → pause for Boss decision.
 
 **Tech Stack:** Rust 1.94 / cxx-mlx Rust/C++ FFI / Apple Silicon Metal (M5 Max 128 GB) / Qwen3.5-35B-A3B-4bit MoE. iron-bench Rust HTTP harness for ship validation.
 
@@ -90,7 +90,10 @@ wait_ready_or_fail() {
       return 1
     fi
     if [ "$predicate_cmd" = "default" ]; then
-      if curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null | grep -qE "^(200|404)$"; then
+      # Default = strict 200. ironmlx /healthz returns 200 only when fully
+      # ready (route registered + model loaded); 404 means route absent =
+      # NOT ready. Callers needing 200|404 (omlx /v1/models) MUST override.
+      if curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null | grep -qE "^200$"; then
         return 0
       fi
     else
@@ -104,7 +107,10 @@ wait_ready_or_fail() {
   tail -80 "$log" 2>/dev/null || echo "(no log file)" >&2
   return 1
 }
-export -f wait_ready_or_fail
+# NOTE: do NOT `export -f wait_ready_or_fail`. Bash exports functions to child
+# processes via that flag, but zsh interprets it differently (prints function
+# definition, returns 0). The function is defined in the current shell via
+# `source`; that's sufficient — no subshell consumers in this plan.
 EOF
 
 # Substitute the placeholders with captured values. Using sed avoids quote /
@@ -206,7 +212,7 @@ source /tmp/p5g-env.sh
 export QWEN35_MODEL=~/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/ | head -1)
 ```
 
-### Step P-6: Confirm mlx-lm bench venv (for T4 4-way bench)
+### Step P-6: Confirm mlx-lm bench venv (for T4 3-way bench)
 
 ```bash
 set -euo pipefail
@@ -216,7 +222,7 @@ ls "$REPO/scripts/bench-venvs/mlx-lm/.venv/bin/mlx_lm.server"
 
 Expected: prints the path. If missing, follow `scripts/bench-venvs/mlx-lm/README.md` to set up the venv before proceeding.
 
-### Step P-7: Confirm omlx repo (for T4 4-way bench)
+### Step P-7: Confirm omlx repo (for T4 3-way bench)
 
 ```bash
 set -euo pipefail
@@ -1711,7 +1717,7 @@ Create the report:
 | Hardware | M5 Max 128 GB |
 | Model | mlx-community/Qwen3.5-35B-A3B-4bit |
 | Branch | ironmlx-p5g-perf |
-| HEAD | <fill from `git rev-parse HEAD` after T0 commit> |
+| Measured HEAD | <fill from `git rev-parse HEAD` AT THE TIME T0 harness ran — this is the HEAD containing the instrumentation code being measured, captured BEFORE the report-writing commit> |
 | Methodology | 3-layer protocol per spec § 3.2; HTTP-path via instrumented server + iron-bench; per-PP server spawn; `--prompt-len 2048,4096,8192,16384`; `--max-tokens 1` (T0 prefill-only profile); `--warmup 1 --runs 3`; prefill records filtered by `seq > 1`; records grouped by composite marker `offset_before==0 AND layer==L_MIN` |
 
 ## §1 Phase A — whole-prefill baseline (no profile mode)
@@ -2003,7 +2009,7 @@ EOF
 cat /tmp/p5g-t1-start-medians.json
 ```
 
-- [ ] Confirm `/tmp/p5g-t1-start-medians.json` exists with non-null values for all 6 PP × 3 metrics. This file is the ONLY authoritative T1-start reference for Step 1.9.
+- [ ] Confirm `/tmp/p5g-t1-start-medians.json` exists with non-null values for all 9 entries: `short_pp_tps[128,512]`, `long_pp_tps[2048,4096,8192,16384]`, `decode_tg_tps[128,2048,16384]`. This file is the ONLY authoritative T1-start reference for Step 1.9.
 
 ### Step 1.1: Identify candidate from T0 report
 
@@ -2185,7 +2191,7 @@ EOF
 cat /tmp/p5g-t1-measured-medians.json
 ```
 
-- [ ] Confirm `/tmp/p5g-t1-measured-medians.json` populated for all 6 PP × 3 metrics.
+- [ ] Confirm `/tmp/p5g-t1-measured-medians.json` populated for all 9 entries: `short_pp_tps[128,512]`, `long_pp_tps[2048,4096,8192,16384]`, `decode_tg_tps[128,2048,16384]`.
 
 ### Step 1.9: Promote / revert decision — machine-generated from JSON
 
@@ -2402,7 +2408,7 @@ EOF
 cat /tmp/p5g-t2-start-medians.json
 ```
 
-- [ ] Confirm `/tmp/p5g-t2-start-medians.json` exists with non-null values for all 6 PP × 3 metrics. Step 2.5 promote/revert table reads ONLY from this file.
+- [ ] Confirm `/tmp/p5g-t2-start-medians.json` exists with non-null values for all 9 entries: `short_pp_tps[128,512]`, `long_pp_tps[2048,4096,8192,16384]`, `decode_tg_tps[128,2048,16384]`. Step 2.5 promote/revert table reads ONLY from this file.
 
 ### Step 2.1: Identify candidate
 
@@ -2640,7 +2646,7 @@ Substitute throughout:
 
 ## Task 4: P5g Close-Out
 
-**Goal:** Run full validation (sweep_full 19/19 + 4-way bench + clippy + fmt + integration tests), write self-contained `reports/p5g-final-results.md`, quantify P5h scope drivers, commit.
+**Goal:** Run full validation (sweep_full 19/19 + 3-way bench + clippy + fmt + integration tests), write self-contained `reports/p5g-final-results.md`, quantify P5h scope drivers, commit.
 
 **Files:**
 - Create: `reports/p5g-final-results.md`
@@ -2681,7 +2687,7 @@ MLX_DIR=$HOME/.local/mlx ./scripts/sweep/sweep_full.sh 2>&1 | tail -10
 ```
 Expected: 19/19 PASS in ~140-160s. If a single transient flake (e.g. `b1_p2_3c_plus_chunked_admit_mid`), retry once. If second run also fails → STOP, report BLOCKED.
 
-### Step 4.4: 4-way bench (ironmlx / mlx-lm / omlx, strict serial per [feedback_serial_perf_experiments])
+### Step 4.4: 3-way bench (ironmlx / mlx-lm / omlx, strict serial per [feedback_serial_perf_experiments])
 
 This is the same procedure as P5f T3 close-out. 3 separate sweeps, one server up at a time.
 
@@ -2735,7 +2741,13 @@ SNAP_SHA=$(basename "$IRONMLX_MOE_MODEL_DIR")
   ) 2> /tmp/p5g-omlx-server.log &
 OMLX_PID=$!
 trap 'kill ${OMLX_PID:-} 2>/dev/null || true' EXIT
-wait_ready_or_fail "$OMLX_PID" "http://127.0.0.1:8081/v1/models" "/tmp/p5g-omlx-server.log"
+# omlx serves /v1/models BEFORE the model is fully loaded (returns 200 with
+# empty list during init). It may also briefly 404 while the route is being
+# registered. Accept either as "ready enough" — once the bench dispatches its
+# first /v1/chat/completions request, the server has to be model-ready or it
+# returns a clear error iron-bench will surface.
+wait_ready_or_fail "$OMLX_PID" "http://127.0.0.1:8081/v1/models" "/tmp/p5g-omlx-server.log" 120 \
+  'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8081/v1/models 2>/dev/null | grep -qE "^(200|404)$"'
 
 MLX_DIR=$HOME/.local/mlx cargo run --release -p iron-bench -- \
   --target omlx=http://127.0.0.1:8081 \
@@ -2849,7 +2861,7 @@ Create the report (template):
 | Hardware | M5 Max 128 GB |
 | Model | mlx-community/Qwen3.5-35B-A3B-4bit |
 | Branch | ironmlx-p5g-perf |
-| HEAD | <fill via git log after this commit lands> |
+| Measured HEAD | <fill from `git rev-parse HEAD` AT THE TIME the 3-way bench ran — this is the HEAD containing the T1/T2/T3 promote/revert state being benchmarked, captured BEFORE the close-out commit> |
 | Spec | docs/superpowers/specs/2026-05-20-ironmlx-p5g-gated-delta-net-design.md |
 | Plan | docs/superpowers/plans/2026-05-20-ironmlx-p5g-gated-delta-net.md |
 | Harness | iron-bench (Rust HTTP) |
@@ -2986,7 +2998,7 @@ Validation:
   - 4 MoE integration tests (smoke + sentinel argmax=11 + batched +
     http_smoke + p5g harness profile-disabled) PASS
   - sweep_full 19/19 PASS in <X>s
-  - 4-way bench (ironmlx / mlx-lm / omlx) per
+  - 3-way bench (ironmlx / mlx-lm / omlx) per
     reports/p5g-final-results.md
   - clippy + fmt + release build: clean
 
