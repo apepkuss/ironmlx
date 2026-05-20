@@ -192,11 +192,27 @@ pub struct SpanFields { /* layer_idx, seq, mode, etc. */ }
 // Caller passes both the trace context AND the parent SpanHandle as values.
 // Never reads P5H_CURRENT_TRACE or P5H_CURRENT_SPAN_STACK.
 // ============================================================================
+// open at "now" (start_ns = monotonic_ns()). Use when the span start coincides
+// with the call site.
 fn open_p5h_span(
     ctx: &P5hTraceContext,
     parent: Option<&SpanHandle>,  // None only for the root
     span_name: &'static str,
 ) -> SpanHandle;
+
+// open at an explicitly captured timestamp. Required (per Codex review v14 P1)
+// for spans whose true start_ns is captured BEFORE the full ctx exists — root
+// and `http_parse_render_tokenize` both fall in this category: handler entry
+// must capture root_start_ns + http_parse_start_ns immediately, but ctx is
+// only complete after tokenize + routing decision produce prompt_tokens and
+// routing_path. Caller passes the earlier-captured timestamp.
+fn open_p5h_span_at(
+    ctx: &P5hTraceContext,
+    parent: Option<&SpanHandle>,
+    span_name: &'static str,
+    start_ns: u64,
+) -> SpanHandle;
+
 fn close_p5h_span(
     ctx: &P5hTraceContext,
     handle: SpanHandle,
@@ -255,13 +271,13 @@ thread_local! {
 
 **Spans that MUST use the explicit-context API (do NOT enter a guard)**:
 
-- `server_request_recv_to_first_content_sse_write` (root) — opens in async axum handler, closes in spawned forwarder task / `spawn_blocking` body. Implementation: handler returns a `RootSpanHandle { ctx: P5hTraceContext, start_ns: u64 }`; clones this handle into both Lane-A forwarder spawn AND Lane-B blocking task; whichever path emits first-content SSE calls `root_handle.close_at(end_ns)` via the explicit API.
+- `server_request_recv_to_first_content_sse_write` (root) — opens in async axum handler, closes in spawned forwarder task / `spawn_blocking` body. Implementation: handler captures `root_start_ns` at entry, opens the span via `open_p5h_span_at(&ctx, None, "server_request_recv_to_first_content_sse_write", root_start_ns)` once `ctx` is complete, and wraps the returned `SpanHandle` in `RootSpanHandle { ctx, span }`; clones this handle into both Lane-A forwarder spawn AND Lane-B blocking task; whichever path emits first-content SSE calls `root_handle.close_at(end_ns)` (which internally calls `close_p5h_span(&self.ctx, self.span, end_ns, ..)`).
 - `http_parse_render_tokenize` — runs in async handler. Per Codex review v12 P2 #2, the full `P5hTraceContext` cannot exist at span start (because `prompt_tokens` comes from `prompt_ids.len()` produced by `render_and_encode(...)`, and `routing_path` comes from the `use_scheduler` predicate at `openai.rs:404` which needs `prompt_len`). Required handler ordering:
   1. Handler entry: generate `request_id` uuid; capture `root_start_ns = monotonic_ns()` and `http_parse_render_tokenize.start_ns = monotonic_ns()`. Both timestamps captured BEFORE any parse/render/tokenize work begins.
   2. Run request parse + `render_chat_template(...)` + `tokenizer.encode(...)` to produce `prompt_ids`.
   3. Compute `prompt_tokens = prompt_ids.len() as u32` and evaluate `use_scheduler = state.prefill_chunk_size == 0 || prompt_ids.len() <= state.prefill_chunk_size` per `openai.rs:404`; set `routing_path = if use_scheduler { "scheduler" } else { "gs_chunked" }`.
-  4. Construct full `ctx = P5hTraceContext { request_id, prompt_tokens, routing_path }`. Open `RootSpanHandle { ctx: ctx.clone(), start_ns: root_start_ns }`.
-  5. Call `emit_p5h_span(&ctx, P5hSpanRecord { span_name: "http_parse_render_tokenize", start_ns: <step 1 value>, end_ns: monotonic_ns(), parent_span_id: Some(root.span_id), .. })` — span uses the start_ns captured in step 1 (the real beginning) and the current time as end_ns (immediately after ctx construction).
+  4. Construct full `ctx = P5hTraceContext { request_id, prompt_tokens, routing_path }`. Open root via `let root_span = open_p5h_span_at(&ctx, None, "server_request_recv_to_first_content_sse_write", root_start_ns);` and wrap as `let root_handle = RootSpanHandle { ctx: ctx.clone(), span: root_span.clone() };` (per Codex v14 P1 — `open_p5h_span_at` is the API that preserves the early-captured `root_start_ns`; `open_p5h_span` would use `monotonic_ns()` at call time, missing the parse/tokenize cost).
+  5. Open + close the `http_parse_render_tokenize` span at its captured start: `let http_span = open_p5h_span_at(&ctx, Some(&root_span), "http_parse_render_tokenize", http_parse_start_ns); close_p5h_span(&ctx, http_span, monotonic_ns(), SpanFields::default());` — span uses the start_ns captured in step 1 (the real beginning) and the current time as end_ns (immediately after ctx construction).
   6. Write `ctx` into `request.p5h_trace = Some(ctx.clone())` for plumbing into `RequestState`/`spawn_blocking`/forwarder closure captures.
 - `scheduler_admission` (Lane A) — wraps `cmd_tx.send(...).await + reply_rx.await` from handler to actor; the start_ns is captured in handler before the await, end_ns is captured in handler after the await; both use the same explicit ctx.
 - `sse_write_role_chunk` (Lane A and Lane B) — Lane A's `tx.send(...).await` at `openai.rs:562` is async; Lane B's `tx.blocking_send(...)` at `openai.rs:455` is sync but lives in the `spawn_blocking` body BEFORE any guard is appropriate (the closure's guard is for `GenerationStream::new(...)`, not for role-chunk emission). Use explicit ctx, captured from the spawn closure.
@@ -270,28 +286,28 @@ thread_local! {
 
 **Rationale**: `P5H_CURRENT_TRACE` thread-local is a convenience for the bulk of instrumentation (deep model spans that run inside one of the four guard sites). Top-level spans that cross task/await boundaries plumb the context as an explicit value — never read the thread-local. This makes the unsoundness pattern Codex v8 P1 #2 caught (thread-local outliving an `.await`) structurally impossible: code that needs context across an await has no thread-local API to misuse.
 
-The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a wrongly-placed inner guard fails fast at the first sweep request instead of silently clearing the outer context on `drop`. Code that mistakenly uses `emit_p5h_span_from_current_trace` outside a guard region panics with the span name — same fail-fast discipline.
+The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a wrongly-placed inner guard fails fast at the first sweep request instead of silently clearing the outer context on `drop`. Code that mistakenly calls `with_p5h_span_from_current_trace(...)` outside a guard region panics with the span name — same fail-fast discipline.
 
 **Propagation chain (explicit, no thread-local across thread/await boundaries):**
 
 1. `GenerateRequest` adds field `p5h_trace: Option<P5hTraceContext>` (gated by `p5h-profile` feature; default `None`). HTTP handler in `openai.rs` populates it (uuid for `request_id`, post-tokenize `prompt_ids.len()` for `prompt_tokens`, routing-decision result for `routing_path`). The handler only needs to **populate the value**; it does NOT enter a guard at handler entry.
 2. `RequestState` (in `scheduler.rs`) carries the same field; `Scheduler::admit` copies it from `GenerateRequest` at admit time.
 3. **Lane-B `spawn_blocking`** body (`openai.rs::serve_via_gs_stream`): the closure captures **both** `ctx: P5hTraceContext` (clone of `request.p5h_trace`) AND `root_handle: RootSpanHandle` (clone of the handle the handler opened) — Rust move/borrow rules force both into the closure. Inside the closure:
-   - `emit_p5h_span(&ctx, ...)` records `sse_write_role_chunk` for the `tx.blocking_send` at `openai.rs:455` — explicit API, no guard.
-   - A scoped `let _guard = P5hTraceGuard::enter(ctx.clone()); GenerationStream::new(...); drop(_guard);` block wraps ONLY the `GenerationStream::new(...)` call — guard drops immediately after `new()` returns. This is the authorized guard site for `gs_stream_init_and_chunk_loop` + `gs_first_token_sample_dispatch` (deep sync spans inside `new()`).
-   - The post-prefill `loop { stream.next_token() ... tx.blocking_send(...) }` does NOT keep the guard alive. Each iteration uses its own scoped guard wrapping ONLY the sync `stream.next_token()` call (so `gs_first_token_materialize_and_predispatch` and `pre_content_decode_steps` deep spans get implicit-API context). The subsequent `tx.blocking_send(...)` for the first-content event uses `emit_p5h_span(&ctx, ...)` for `detok_format_first_content_chunk` and `root_handle.close_at(end_ns)` for the root — explicit API, NO guard wrapping the send.
+   - `sse_write_role_chunk` for the `tx.blocking_send` at `openai.rs:455` is opened/closed via `let h = open_p5h_span(&ctx, Some(&root_handle.span), "sse_write_role_chunk"); tx.blocking_send(...); close_p5h_span(&ctx, h, monotonic_ns(), ..);` — explicit API, no guard.
+   - A scoped `let _guard = P5hTraceGuard::enter(ctx.clone()); GenerationStream::new(...); drop(_guard);` block wraps ONLY the `GenerationStream::new(...)` call — guard drops immediately after `new()` returns. This is the authorized guard site for `gs_stream_init_and_chunk_loop` + `gs_first_token_sample_dispatch` (deep sync spans inside `new()`, opened via `with_p5h_span_from_current_trace`).
+   - The post-prefill `loop { stream.next_token() ... tx.blocking_send(...) }` does NOT keep the guard alive. Each iteration uses its own scoped guard wrapping ONLY the sync `stream.next_token()` call (so `gs_first_token_materialize_and_predispatch` and `pre_content_decode_steps` deep spans get implicit-API context via `with_p5h_span_from_current_trace`). The subsequent `tx.blocking_send(...)` for the first-content event opens `detok_format_first_content_chunk` via `open_p5h_span(&ctx, Some(&root_handle.span), ...)` + `close_p5h_span(...)`, then calls `root_handle.close_at(end_ns)` — all explicit, NO guard wrapping the send.
 4. **Lane-A scheduler actor `driver_loop`** (long-lived OS thread, one per `SchedulerActor`, processes many requests in sequence): T0a adds explicit `let _guard = P5hTraceGuard::enter(state.p5h_trace.as_ref().expect(...).clone());` immediately before each `sched.prefill_admitted(&model_lock)` and each `sched.step(...)` call where the actor knows which single row is active (per `--b-max 1` invariant). Guard drops at the end of that block, before the next iteration that might process a different request.
 5. **Lane-A streaming forwarder** (`openai.rs:546` `tokio::spawn` body): handler clones BOTH `ctx` AND `root_handle` into the spawn closure. The closure **never calls `P5hTraceGuard::enter(...)`** — Lane-A forwarder is not on the authorized guard sites list (per Codex review v10 P1 #2 + v11 P1 #2: `tx.send(...).await` is async, a guard around it would have to span the await, which is the v8 unsoundness pattern). All SSE emission uses the explicit-context API:
-   - `emit_p5h_span(&ctx, ...)` for `sse_write_role_chunk` (wraps `format_sse + tx.send(...).await` at `openai.rs:562` as the same logical span — span end_ns captured immediately after `.await` returns).
-   - Per content-event iteration: detok + `emit_p5h_span(&ctx, ...)` for `detok_format_first_content_chunk` (wraps `format_sse + tx.send(...).await` at `openai.rs:589`) + `root_handle.close_at(end_ns)` on the first non-empty content iteration. All explicit, no guard.
-6. Deep instrumentation sites (GDN entry/exit barriers, GatedAttention substep emit, MoE substep emit, lm_head span, sampling spans) call `emit_p5h_span_from_current_trace(record)` which reads `P5H_CURRENT_TRACE`. They always run on whatever thread is currently holding the implicit-API guard, because the guard wraps the sync region that contains the instrumented call (`sched.prefill_admitted` for Lane-A deep spans, scoped `GenerationStream::new` block for Lane-B deep spans).
+   - For `sse_write_role_chunk`: `let h = open_p5h_span(&ctx, Some(&root_handle.span), "sse_write_role_chunk"); format_sse(...); tx.send(...).await; close_p5h_span(&ctx, h, monotonic_ns(), ..);` — span end_ns captured immediately after `.await` returns.
+   - Per content-event iteration: detok + (for the first non-empty content) `let h = open_p5h_span(&ctx, Some(&root_handle.span), "detok_format_first_content_chunk"); format_sse(...); tx.send(...).await; let end_ns = monotonic_ns(); close_p5h_span(&ctx, h, end_ns, ..); root_handle.close_at(end_ns);` All explicit, no guard.
+6. Deep instrumentation sites (GDN entry/exit barriers, GatedAttention substep emit, MoE substep emit, lm_head span, sampling spans) wrap their work via `with_p5h_span_from_current_trace(span_name, fields_fn, body)` which reads `P5H_CURRENT_TRACE` + `P5H_CURRENT_SPAN_STACK` to populate ctx fields + `parent_span_id`. They always run on whatever thread is currently holding the implicit-API guard, because the guard wraps the sync region that contains the instrumented call (`sched.prefill_admitted` for Lane-A deep spans, scoped `GenerationStream::new` block for Lane-B deep spans).
 
 **Async-safety rationale** (replaces v6/v7 "axum handler → scheduler driver same thread chain" claim, per Codex v8 P1 #2): Tokio worker threads may execute the same async future on different OS threads between `.await` points. `thread_local!` is not request-local OR task-local. The correct discipline is: (a) plumb the context explicitly across thread/task boundaries as a clonable value; (b) only enter the thread-local guard inside synchronous regions where the executing thread is pinned. This mirrors the pattern Tokio's own `tracing` crate uses for span attachment.
 
 **Hard-fail under `p5h-profile` + `--b-max 1`** (per Codex review v7 P3 + v10 P2):
 
-- Any `emit_p5h_span_from_current_trace(...)` call that reads `P5H_CURRENT_TRACE` and finds `None` MUST `panic!` with the span_name in the message — NOT silently log empty fields. This catches missing/wrong guard set/drop sites on the implicit-API path.
-- Any `emit_p5h_span(ctx, ...)` call with a default-constructed / empty `P5hTraceContext` MUST `panic!` with the span_name. This catches forgotten ctx-plumbing on the explicit-API path.
+- Any `with_p5h_span_from_current_trace(...)` call that reads `P5H_CURRENT_TRACE` and finds `None` MUST `panic!` with the span_name in the message — NOT silently log empty fields. This catches missing/wrong guard set/drop sites on the implicit-API path. Likewise, an unbalanced `P5H_CURRENT_SPAN_STACK` at any open/close transition (stack would underflow on pop, or parent on stack doesn't match the expected enclosing context) MUST panic.
+- Any `open_p5h_span[_at](...)` call with a default-constructed / empty `P5hTraceContext` MUST `panic!` with the span_name. Likewise `close_p5h_span(...)` MUST panic if the passed `SpanHandle.span_id` does not match the open record (catches handle reuse / cross-request leakage). This catches forgotten ctx-plumbing and handle misuse on the explicit-API path.
 - T0a verifies via the route-aware fixture documented in § 3 T0a — per-record field validation, route-aware schema presence check (all required top-level + root spans emitted per lane), and parent-child tree closure check. A first-record-only check is insufficient (v10 P2 — would pass even if top-level async spans never emit).
 
 **Single-active-row hard gate** (per Codex review v5 P1 #2): the design ONLY works if exactly one in-flight row exists during `prefill_admitted_inner` + any pre-content decode steps. P5h harness MUST start the server with `--b-max 1` (production default per `serve.rs:38`; P5h enforces). On `p5h-profile` feature, server panics at startup if `b_max > 1` OR if the scheduler ever observes `active_count() > 1` during a `[p5h-profile]`-emitting forward. Strict serial sweep (per memory `[feedback_serial_perf_experiments]`) also enforces only one in-flight request server-side.
@@ -300,8 +316,8 @@ The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a
 
 **Field source per emission API** (per Codex review v11 P2): every record's `request_id` / `routing_path` / `prompt_tokens` come from the **active `P5hTraceContext`**, but how that context reaches the emitter depends on the API:
 
-- `emit_p5h_span(&ctx, ...)` (explicit-context API — root + http_parse_render_tokenize + scheduler_admission + sse_write_role_chunk + detok_format_first_content_chunk): reads fields directly from the `&ctx` argument. **Never reads `P5H_CURRENT_TRACE`.**
-- `emit_p5h_span_from_current_trace(...)` (implicit-guard API — deep sync spans inside an authorized guard region): reads fields from `P5H_CURRENT_TRACE` thread-local (populated by the active `P5hTraceGuard`).
+- `open_p5h_span[_at](&ctx, ...)` + `close_p5h_span(&ctx, ...)` (explicit-context API — root + http_parse_render_tokenize + scheduler_admission + sse_write_role_chunk + detok_format_first_content_chunk): reads fields directly from the `&ctx` argument. **Never reads `P5H_CURRENT_TRACE`.**
+- `with_p5h_span_from_current_trace(...)` (implicit-guard API — deep sync spans inside an authorized guard region): reads fields from `P5H_CURRENT_TRACE` thread-local (populated by the active `P5hTraceGuard`) and parent from `P5H_CURRENT_SPAN_STACK` top.
 
 The underlying value is identical in both cases (`GenerateRequest.p5h_trace` is the canonical source, plumbed via explicit clone to handler ctx and via `P5hTraceGuard::enter(ctx.clone())` to thread-local).
 
@@ -504,9 +520,10 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
   T0a delivers these concrete artifacts (deliverables list, not semantics restatement):
   - `P5hTraceContext` struct in `core/generate.rs` (fields per § 2.5a)
   - `P5hTraceGuard` RAII type with panic-on-nest (per § 2.5a)
-  - `RootSpanHandle` type with `close_at(end_ns)` method
-  - `emit_p5h_span(&ctx, record)` explicit-context API
-  - `emit_p5h_span_from_current_trace(record)` implicit-guard API (panics if `P5H_CURRENT_TRACE` is None)
+  - `SpanHandle { span_id, span_name, parent_span_id, start_ns }` value type
+  - `RootSpanHandle { ctx, span }` value type with `close_at(end_ns)` method (per Codex review v14 P2 — earlier `{ ctx, start_ns }` shape was stale, never matched § 2.5a code block)
+  - Explicit-context lifecycle API: `open_p5h_span(&ctx, parent, span_name) -> SpanHandle` + `open_p5h_span_at(&ctx, parent, span_name, start_ns) -> SpanHandle` (the `_at` variant is required for root + http_parse_render_tokenize per Codex v14 P1, since their true start_ns is captured before `ctx` is complete) + `close_p5h_span(&ctx, handle, end_ns, fields)`
+  - Implicit-guard API: `with_p5h_span_from_current_trace(span_name, fields_fn, body) -> T` (handles open + push `P5H_CURRENT_SPAN_STACK` + run body + pop + close; panics if `P5H_CURRENT_TRACE` is None or stack inconsistent)
   - Per-thread `P5H_CURRENT_SPAN_STACK: RefCell<Vec<SpanHandle>>` for `parent_span_id` propagation (per § 2.5a v13 P1 fix)
   - `GenerateRequest.p5h_trace: Option<P5hTraceContext>` field (gated on `p5h-profile`)
   - `RequestState.p5h_trace` field + `Scheduler::admit` copies it from `GenerateRequest`
