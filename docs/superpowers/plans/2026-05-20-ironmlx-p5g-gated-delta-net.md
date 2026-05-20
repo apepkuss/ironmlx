@@ -72,19 +72,32 @@ Expected:
 
 ### Step P-1: Confirm branch + clean state
 
-- [ ] On `ironmlx-p5g-perf`
-
-Run: `git -C "$REPO" branch --show-current`
-Expected: `ironmlx-p5g-perf`
-
-- [ ] Working tree clean
-
-Run: `git -C "$REPO" status --short`
-Expected: empty
+```bash
+set -euo pipefail
+source /tmp/p5g-env.sh
+branch="$(git -C "$REPO" branch --show-current)"
+echo "branch=$branch"
+[ "$branch" = "ironmlx-p5g-perf" ] || { echo "[error] not on ironmlx-p5g-perf" >&2; exit 1; }
+dirty="$(git -C "$REPO" status --short)"
+if [ -n "$dirty" ]; then
+  echo "[error] working tree not clean:" >&2
+  echo "$dirty" >&2
+  exit 1
+fi
+echo "[ok] on ironmlx-p5g-perf, working tree clean"
+```
 
 ### Step P-2: Confirm spec history present
 
-Run: `git -C "$REPO" log --oneline -10`
+```bash
+set -euo pipefail
+source /tmp/p5g-env.sh
+git -C "$REPO" log --oneline -10 | tee /tmp/p5g-preflight-log.txt
+grep -q "d864e6e docs(p5g): seventh-round" /tmp/p5g-preflight-log.txt \
+  || { echo "[error] missing spec history (d864e6e seventh-round polish)" >&2; exit 1; }
+echo "[ok] spec history present"
+```
+
 Expected: includes `d864e6e docs(p5g): seventh-round review-driven spec polish` and 6 earlier `docs(p5g):` commits all the way to `eacf8b6 docs(p5g): GatedDeltaNet deep refactor design spec`.
 
 ### Step P-3: Baseline build verifies
@@ -136,13 +149,23 @@ export QWEN35_MODEL=~/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit
 
 ### Step P-6: Confirm mlx-lm bench venv (for T4 4-way bench)
 
-Run: `ls "$REPO/scripts/bench-venvs/mlx-lm/.venv/bin/mlx_lm.server" 2>&1`
-Expected: prints path.
+```bash
+set -euo pipefail
+source /tmp/p5g-env.sh
+ls "$REPO/scripts/bench-venvs/mlx-lm/.venv/bin/mlx_lm.server"
+```
+
+Expected: prints the path. If missing, follow `scripts/bench-venvs/mlx-lm/README.md` to set up the venv before proceeding.
 
 ### Step P-7: Confirm omlx repo (for T4 4-way bench)
 
-Run: `ls "$RIVALS_DIR/omlx/pyproject.toml"`
-Expected: prints path.
+```bash
+set -euo pipefail
+source /tmp/p5g-env.sh
+ls "$RIVALS_DIR/omlx/pyproject.toml"
+```
+
+Expected: prints the path. If missing, clone `https://github.com/...omlx` into `$RIVALS_DIR/omlx` before proceeding.
 
 ---
 
@@ -360,10 +383,17 @@ Apply three Edits to `forward_on`:
 // cost; also forces cache.conv_state + cache.recurrent_state to be tangible
 // so Step 2c/7e cache updates produced inside this forward are the only
 // cache-related materialization captured by the exit barrier.
+//
+// IMPORTANT: timing/logging barriers run ONLY for Layer1 and Layer2 modes.
+// AblateX modes (Phase D) must NOT trigger barriers — Phase D's "wall-time
+// vs Phase A" delta would otherwise be contaminated by barrier overhead,
+// understating the achievable upper-bound cut and possibly misranking
+// candidates. AblateX still flows through the substitute branches in their
+// respective steps (Step 0.12), which are pure shape-preserving replacements.
 #[cfg(feature = "p5g-profile")]
 let _p5g_timer_start = {
     let mode = profile_mode();
-    if mode != ProfileMode::Off {
+    if matches!(mode, ProfileMode::Layer1 | ProfileMode::Layer2) {
         let mut eval_set: Vec<&Array> = vec![x];
         if let Some(c) = cache.as_deref() {
             eval_set.push(c.conv_state());
@@ -380,8 +410,9 @@ let _p5g_timer_start = {
 };
 
 // Capture offset_before BEFORE any cache-modifying op in Steps 2c / 7e.
-// HTTP-path B=1 invariant: offsets() always has at least one element when
-// cache exists. unwrap_or(0) only fires for the cache.is_none() branch.
+// Only relevant for Layer1/Layer2 (the modes that actually emit logs); for
+// AblateX modes this is computed but unused. HTTP-path B=1 invariant:
+// offsets() always has at least one element when cache exists.
 #[cfg(feature = "p5g-profile")]
 let _p5g_offset_before: i32 = cache
     .as_deref()
@@ -602,18 +633,24 @@ let mut _p5g_step_elapsed: Vec<u64> = if matches!(profile_mode(), ProfileMode::L
 };
 ```
 
+**Mode gating reminder:** the `_p5g_step_start` capture and the `_p5g_step_elapsed.push(...)` calls above are already Layer2-only via `matches!(profile_mode(), ProfileMode::Layer2)`. AblateX modes skip these per-step barriers entirely — combined with the Layer1/Layer2-only gate on `_p5g_timer_start` from Step 0.7 (Edit 1), AblateX runs with ZERO eval barriers and emits ZERO `[p5g-profile]` log lines. Phase D wall-time vs Phase A is therefore a clean ablation delta with no instrumentation contamination.
+
 **`step_breakdown` MUST be appended to Step 0.7's single-line log as an additional whitespace-separated `key=value` field — NEVER emitted as a separate `tracing::info!` call.** Two separate log lines per layer would force the Step 0.14 harness to pair records by (layer, sequence-number) heuristic, which is fragile under interleaved logging. One line per forward = one record per forward = unambiguous per-PP attribution.
 
-Required Edit to Step 0.7's exit block — extend the existing `tracing::info!(...)` call with a conditional `step_breakdown=` segment. Concrete shape (Layer 1 fields + optional Layer 2 suffix):
+Required Edit to Step 0.7's exit block — extend the existing `tracing::info!(...)` call with a conditional `step_breakdown=` segment. Note that the outer `if let Some((mode, start)) = _p5g_timer_start { ... }` automatically gates the entire exit barrier + log emission to Layer1/Layer2 only — AblateX modes (where `_p5g_timer_start` is `None`) skip this whole block. Concrete shape (Layer 1 fields + optional Layer 2 suffix):
 
 ```rust
 #[cfg(feature = "p5g-profile")]
 {
     if let Some((mode, start)) = _p5g_timer_start {
+        // This block runs ONLY for Layer1 / Layer2 (entry barrier set
+        // _p5g_timer_start to Some only in those modes). AblateX skips this
+        // entirely — no exit eval barrier, no log emission.
+
         // ... existing entry/exit eval barriers + offset_before/after captures ...
 
-        // Build the step_breakdown suffix iff mode == Layer2. Empty string in
-        // other modes so the log line is unchanged for Layer 1 / ablate-*.
+        // Build the step_breakdown suffix iff mode == Layer2. Empty string for
+        // Layer 1 so the log line is unchanged.
         let breakdown_suffix = if matches!(mode, ProfileMode::Layer2) && !_p5g_step_elapsed.is_empty() {
             let csv: Vec<String> = _p5g_step_elapsed.iter().map(|us| us.to_string()).collect();
             format!(" step_breakdown={}", csv.join(","))
@@ -834,10 +871,12 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 
 /// Spawn `cargo run -p iron-bench` (cross-package, can't use env!("CARGO_BIN_EXE_iron-bench")).
 ///
-/// `max-tokens=1` keeps profile records dominated by prefill forwards — each
-/// request still emits one decode forward (seq=1) after prefill, which the
-/// aggregator filters out by `seq > 1`. T0 target is prefill profile only;
-/// ship-validation T1/T2/T3 (Steps 1.6-1.8 etc.) continue using max-tokens=32.
+/// `max-tokens=1` minimizes decode work per request. Whether the server still
+/// dispatches one decode forward (seq=1) depends on `GenerationStream` internal
+/// behavior under `max_new_tokens=1`; the aggregator defensively filters any
+/// `seq==1` records via `seq > 1` so the outcome is the same either way. T0
+/// target is prefill profile only; ship-validation T1/T2/T3 (Steps 1.6-1.8
+/// etc.) continue using max-tokens=32 for end-to-end ship metrics.
 fn iron_bench_run(port: u16, model_dir: &str, prompt_len: i32) -> std::process::Output {
     Command::new("cargo")
         .args([
@@ -1204,29 +1243,51 @@ for phase_key in ("phase_a_by_pp", "phase_b_by_pp", "phase_c_by_pp"):
 
         # Phase B/C: assert prefill records exist (seq > 1) AND that we can
         # identify exactly WARMUP + RUNS measured prefill requests via the
-        # offset_before == 0 boundary marker.
+        # composite marker (offset_before == 0 AND layer == L_MIN).
+        #
+        # Why composite: each Request emits 30 prefill records per chunk, one
+        # per GDN layer. All 30 records of a request's FIRST chunk have
+        # offset_before=0 (each GDN layer has its own GatedDeltaCache that
+        # starts fresh). offset_before=0 alone marks 30 layers, not 1 request.
+        # L_MIN = min layer index seen in this PP's records — only one such
+        # record per chunk, only the first chunk per request has it with
+        # offset_before=0.
         prefill_recs = [r for r in recs if int(r.get("seq", "0")) > 1]
         assert len(prefill_recs) > 0, \
             f"{phase_key} PP={pp_str} has 0 records with seq>1 — instrumentation broken (only decode forwards captured?)"
 
+        layers_seen = {int(r.get("layer", "-999")) for r in prefill_recs}
+        assert -1 not in layers_seen, \
+            f"{phase_key} PP={pp_str}: records have layer=-1 — profile_layer_idx parse failed in from_loader (Step 0.4); fix prefix parser before retrying"
+        l_min = min(layers_seen)
+
         request_starts = [
             i for i, r in enumerate(prefill_recs)
             if int(r.get("offset_before", "1")) == 0
+            and int(r.get("layer", "-999")) == l_min
         ]
         n_requests = len(request_starts)
         expected = WARMUP + RUNS
         assert n_requests == expected, \
-            f"{phase_key} PP={pp_str}: expected {expected} requests (WARMUP+RUNS), got {n_requests}"
+            f"{phase_key} PP={pp_str}: expected {expected} requests (WARMUP+RUNS), got {n_requests} (L_MIN={l_min}, layers_seen={sorted(layers_seen)})"
 
         # Layer 1 / Layer 2 sanity: each chunk forward emits N_LAYERS records.
-        # Check first measured request has a multiple of N_LAYERS records.
-        first_measured = request_starts[WARMUP] if len(request_starts) > WARMUP else None
+        # Check first measured request has a multiple of N_LAYERS records, AND
+        # that within each chunk the layer set is exactly the GDN layer set.
+        first_measured = request_starts[WARMUP]
         next_start = request_starts[WARMUP + 1] if len(request_starts) > WARMUP + 1 else len(prefill_recs)
         request_size = next_start - first_measured
         assert request_size % N_LAYERS == 0, \
             f"{phase_key} PP={pp_str}: first measured request has {request_size} records, not a multiple of {N_LAYERS}"
         n_chunks = request_size // N_LAYERS
-        print(f"  [ok] {phase_key} PP={pp_str}: {n_requests} requests, first measured has {n_chunks} chunks × {N_LAYERS} layers = {request_size} records")
+        # Each chunk must have N_LAYERS distinct layer values.
+        for chunk_idx in range(n_chunks):
+            chunk = prefill_recs[first_measured + chunk_idx * N_LAYERS:
+                                 first_measured + (chunk_idx + 1) * N_LAYERS]
+            chunk_layers = {int(r["layer"]) for r in chunk}
+            assert len(chunk_layers) == N_LAYERS, \
+                f"{phase_key} PP={pp_str} chunk {chunk_idx}: expected {N_LAYERS} unique layers, got {len(chunk_layers)}: {sorted(chunk_layers)}"
+        print(f"  [ok] {phase_key} PP={pp_str}: L_MIN={l_min}, {n_requests} requests, first measured has {n_chunks} chunks × {N_LAYERS} layers = {request_size} records")
 
 print("[ok] T0 phases JSON validates: all PP populated, prefill records present, request boundaries align")
 EOF
@@ -1234,8 +1295,9 @@ EOF
 
 If the validation script fails:
 - `0 records with seq>1` → instrumentation broken (only decode emitted; check Step 0.7 entry barrier triggers on prefill forward).
-- `expected N requests, got M` → stderr drainer dropped records OR boundary detection broken (no `offset_before=0` markers — check Step 0.7 offset capture).
-- `not a multiple of N_LAYERS` → some layer's forward_on bypassed instrumentation (check Step 0.4 `from_loader` field init).
+- `layer=-1` → `profile_layer_idx` parsing failed in `from_loader` (Step 0.4 prefix parser); fix BEFORE retrying — all numeric output downstream depends on correct layer attribution.
+- `expected N requests, got M` → stderr drainer dropped records OR boundary detection broken (check Step 0.7 offset capture + the composite marker logic).
+- `not a multiple of N_LAYERS` / `expected N_LAYERS unique layers` → some GDN layer's forward_on bypassed instrumentation (check Step 0.4 `from_loader` field init).
 
 STOP and re-investigate before proceeding to Step 0.16. Do NOT plough through with bad data.
 
@@ -1244,12 +1306,13 @@ STOP and re-investigate before proceeding to Step 0.16. Do NOT plough through wi
 
 ### Step 0.16: Aggregate T0 data + validate top-3 step ranking from Phase C
 
-Off-line aggregator over `/tmp/p5g-t0-phases.json` — no harness re-run. Critical correctness requirements (review v3 P1):
+Off-line aggregator over `/tmp/p5g-t0-phases.json` — no harness re-run. Critical correctness requirements:
 
-1. **Filter prefill records only** (`seq > 1`). `iron-bench --max-tokens 1` still triggers one decode forward (`seq == 1`) per request — those records would otherwise pollute the per-layer / per-step medians.
-2. **Group records by REQUEST** using `offset_before == 0` as the request-start marker (fresh cache state). Drop the leading `WARMUP` requests, aggregate over the remaining `RUNS` measured requests.
-3. **Per-request total** = sum of ALL records' `elapsed_us` within that request (across all chunks × 30 layers per chunk — long PP > chunk_size produces multiple chunks per request).
+1. **Filter prefill records only** (`seq > 1`). `iron-bench --max-tokens 1` minimizes decode work; any `seq==1` records that do appear are filtered out here.
+2. **Group records by REQUEST** using the **composite marker** `offset_before == 0 AND layer == L_MIN`. `offset_before==0` alone identifies 30 records (each GDN layer's own fresh cache at request start), not 1 request — pairing with `layer==L_MIN` (the smallest GDN layer index observed) narrows to one marker per request. Drop the leading `WARMUP` request-groups, aggregate over the remaining `RUNS` measured groups.
+3. **Per-request total** = sum of ALL records' `elapsed_us` within that request (across all chunks × 30 GDN layers per chunk — long PP > chunk_size produces multiple chunks per request).
 4. Median across measured requests (not across raw records).
+5. **Fail fast** if `layer == -1` is seen (prefix parser broken) OR if any measured Phase C record has a missing / wrong-length `step_breakdown` (instrumentation incomplete). Do not silently produce zero-padded rankings.
 
 ```bash
 set -euo pipefail
@@ -1266,15 +1329,35 @@ STEP_NAMES = [
 ]
 
 def group_by_request(records):
-    """Filter to prefill (seq > 1), then split on offset_before == 0 markers.
-    Returns list of request-groups (each is a list of records).
-    Drops the leading WARMUP groups; remaining must equal RUNS."""
+    """Filter to prefill (seq > 1), then split on the composite marker
+    `offset_before == 0 AND layer == L_MIN`. L_MIN = min layer index seen in
+    this PP. Returns list of request-groups (each is a list of records).
+    Drops the leading WARMUP groups; remaining must equal RUNS.
+
+    `offset_before==0` alone marks every layer's first-chunk record (30 per
+    request); pairing with `layer==L_MIN` narrows to 1 marker per request.
+
+    Fails fast on:
+      - any `layer == -1` (profile_layer_idx parsing broken)
+      - fewer groups than WARMUP+RUNS
+    """
     prefill = [r for r in records if int(r.get("seq", "0")) > 1]
+    if not prefill:
+        raise RuntimeError("no prefill records (seq>1) — instrumentation broken")
+    layers = {int(r.get("layer", "-999")) for r in prefill}
+    if -1 in layers:
+        raise RuntimeError(
+            "records contain layer=-1 — profile_layer_idx parse failed in from_loader; "
+            "fix Step 0.4 prefix parser before re-running aggregation"
+        )
+    l_min = min(layers)
     groups = []
     current = []
     for r in prefill:
         ob = int(r.get("offset_before", "1"))
-        if ob == 0 and current:
+        layer = int(r.get("layer", "-999"))
+        is_start = (ob == 0 and layer == l_min)
+        if is_start and current:
             groups.append(current)
             current = [r]
         else:
@@ -1283,8 +1366,8 @@ def group_by_request(records):
         groups.append(current)
     if len(groups) < WARMUP + RUNS:
         raise RuntimeError(
-            f"expected ≥{WARMUP+RUNS} request groups, got {len(groups)} — "
-            "validation in Step 0.15 should have caught this"
+            f"expected ≥{WARMUP+RUNS} request groups, got {len(groups)} "
+            f"(L_MIN={l_min}); Step 0.15 validation should have caught this"
         )
     return groups[WARMUP:WARMUP+RUNS]  # measured only
 
@@ -1322,38 +1405,51 @@ for pp_str, leaf in d["phase_b_by_pp"].items():
 
 # === Phase C aggregation ===
 # Per-step time per request = sum of step_breakdown[i] across all chunks × layers.
+# FAIL FAST on any record with missing or wrong-length step_breakdown — silent
+# zero-padding would produce plausible-looking but incorrect rankings.
 phase_c_agg = {}
 for pp_str, leaf in d["phase_c_by_pp"].items():
     measured = group_by_request(leaf["records"])
     per_step_per_request_us = {name: [] for name in STEP_NAMES}
-    n_drift = 0
-    for group in measured:
+    for req_idx, group in enumerate(measured):
         per_step_totals = {name: 0.0 for name in STEP_NAMES}
-        for r in group:
-            sb = r.get("step_breakdown", "")
+        for rec_idx, r in enumerate(group):
+            sb = r.get("step_breakdown")
             if not sb:
-                continue
+                raise RuntimeError(
+                    f"PP={pp_str} measured request {req_idx} record {rec_idx} "
+                    f"missing step_breakdown — Step 0.11 instrumentation incomplete; "
+                    f"fix the step_breakdown append in Step 0.7 before retrying aggregation"
+                )
             parts = sb.split(",")
             if len(parts) != len(STEP_NAMES):
-                n_drift += 1
-                continue
+                raise RuntimeError(
+                    f"PP={pp_str} measured request {req_idx} record {rec_idx}: "
+                    f"step_breakdown has {len(parts)} fields, expected {len(STEP_NAMES)} "
+                    f"({','.join(STEP_NAMES)}). Either Step 0.11 emits a different "
+                    f"count, or STEP_NAMES in this aggregator is out of sync with the code."
+                )
             for name, us_str in zip(STEP_NAMES, parts):
                 try:
                     per_step_totals[name] += float(us_str)
-                except ValueError:
-                    pass
+                except ValueError as e:
+                    raise RuntimeError(
+                        f"PP={pp_str} measured request {req_idx} record {rec_idx} "
+                        f"step={name}: cannot parse '{us_str}' as float ({e})"
+                    )
         for name, t in per_step_totals.items():
             per_step_per_request_us[name].append(t)
-    if n_drift:
-        print(f"  [warn] PP={pp_str}: {n_drift} records had step_breakdown length != {len(STEP_NAMES)}", file=__import__('sys').stderr)
+    # All measured records validated — medians cannot collapse to 0 by silent skip.
     step_medians = {
-        name: (statistics.median(xs) if xs else 0.0)
+        name: statistics.median(xs)
         for name, xs in per_step_per_request_us.items()
     }
     step_total = sum(step_medians.values())
     ranked = sorted(step_medians.items(), key=lambda kv: -kv[1])
+    n_chunks_observed = len(measured[0]) // N_LAYERS if measured else 0
     phase_c_agg[pp_str] = {
         "n_measured_requests": len(measured),
+        "n_chunks_per_request": n_chunks_observed,
         "step_median_us_per_request": step_medians,
         "step_total_us_per_request": step_total,
         "ranked_steps": ranked,
@@ -1456,25 +1552,29 @@ Create the report:
 | 8192 | <fill> | <fill> |
 | 16384 | <fill> | <fill> |
 
-## §2 Phase B — Layer 1 boundary-isolated GDN estimate
+## §2 Phase B — Layer 1 boundary-isolated GDN estimate (per-request, all chunks)
 
-Per-layer GatedDeltaNet wall-time (boundary-isolated, includes Layer 1 instrumentation overhead). 30 GDN layers per forward; aggregate sum below.
+Each measured request runs `chunks/request` prefill chunks (PP ÷ `prefill_chunk_size=2048`, rounded up). Each chunk emits 30 GDN-layer records. The aggregator sums `elapsed_us` across ALL chunks × 30 layers per request, takes median across `RUNS` measured requests, and divides by the Phase A wall-time (= PP / pp_tps × 1e6 µs) to estimate GDN occupancy.
 
-| PP | Per-layer GDN median (ms) | 30-layer total (ms) | Whole-prefill total (ms, from Phase A) | GDN occupancy estimate (%) |
-|---:|---:|---:|---:|---:|
-| 2048 | <fill> | <fill> | <fill> | <fill>% |
-| 4096 | <fill> | <fill> | <fill> | <fill>% |
-| 8192 | <fill> | <fill> | <fill> | <fill>% |
-| 16384 | <fill> | <fill> | <fill> | <fill>% |
+Columns sourced from `/tmp/p5g-t0-aggregated.json` keys: `n_chunks_per_request`, `per_layer_us_per_request_median` (median across layers), `total_gdn_us_per_request_median`, `phase_b_occupancy_estimate.{request_wall_us_from_phase_a, occupancy_pct}`.
+
+| PP | Chunks/request | Per-layer per-request median (ms) | GDN total per request, all chunks (ms) | Whole-prefill wall-time (ms, from Phase A) | GDN occupancy (%) |
+|---:|---:|---:|---:|---:|---:|
+| 2048 | <fill> | <fill> | <fill> | <fill> | <fill>% |
+| 4096 | <fill> | <fill> | <fill> | <fill> | <fill>% |
+| 8192 | <fill> | <fill> | <fill> | <fill> | <fill>% |
+| 16384 | <fill> | <fill> | <fill> | <fill> | <fill>% |
 
 **Annotation**: Layer 1 is boundary-isolated estimate (含 entry/exit eval barrier
 引入的轻 instrumentation overhead), 不等于完全无 instrumentation 下 GatedDeltaNet
 的 ground-truth 占比 — 后者在 lazy MLX 下不可直接测；端到端 ROI 仍以 T1-T3
 实施后 iron-bench benchmark 为准。
 
-## §3 Phase C — Layer 2 per-step breakdown
+## §3 Phase C — Layer 2 per-step breakdown (per-request, all chunks × 30 layers)
 
-| Step | Mean elapsed_us (across 30 layers × 4 PP) | % of GDN total (Layer 2) |
+Per-step time = sum of `step_breakdown[i]` across all chunks × 30 layers per request; median across `RUNS` measured requests. Source: `phase_c_agg[pp].step_median_us_per_request`.
+
+| Step | Per-request median (ms, summed across chunks × layers) | % of GDN total per request (Layer 2) |
 |---|---:|---:|
 | 1a in_proj_qkvz | <fill> | <fill>% |
 | 1b in_proj_ba | <fill> | <fill>% |
@@ -1488,25 +1588,21 @@ Per-layer GatedDeltaNet wall-time (boundary-isolated, includes Layer 1 instrumen
 | 7a-d kernel dispatch | <fill> | <fill>% |
 | 8 RmsNormGated + out_proj | <fill> | <fill>% |
 
-**Layer 2 / Layer 1 slowdown ratio**: <fill>× (e.g. 1.4-1.8× typical for per-op
-barrier instrumentation per P5e T0 precedent).
+(Reproduce the table once per PP, or pick one canonical PP and footnote variations.)
 
-**Top 3 ranked candidates**: <fill from this table>. Per-step relative % is
-**indicative only** (barrier 改变 fusion 边界); promote decisions use end-to-end
-benchmark (§ 7.3).
+**Layer 2 / Layer 1 slowdown ratio**: <fill>× (Layer 2 phase pp_tps_median ÷ Layer 1 phase pp_tps_median, both from harness; 1.4-1.8× typical for per-op barrier instrumentation per P5e T0 precedent).
 
-## §4 Phase D — Layer 3 shape-preserving cost ablation (upper bound)
+**Top 3 ranked candidates**: <fill from this table>. Per-step relative % is **indicative only** (barrier 改变 fusion 边界); promote decisions use end-to-end benchmark (§ 7.3).
 
-For each top-3 candidate identified in §3, the harness runs ironmlx with
-`IRONMLX_P5G_PROFILE_MODE=ablate-<candidate>` (shape-preserving substitute
-maintaining output shape/dtype/downstream consumption). Wall-time delta vs
-Phase A = upper bound of reachable optimization.
+## §4 Phase D — Layer 3 shape-preserving cost ablation (upper bound, barrier-free)
 
-| Candidate | Ablation substitute | PP=2048 prefill delta vs Phase A | PP=16384 delta | Upper bound cut (geomean %) |
-|---|---|---:|---:|---:|
-| <top1> | <substitute description> | <fill> | <fill> | <fill>% |
-| <top2> | <substitute description> | <fill> | <fill> | <fill>% |
-| <top3> | <substitute description> | <fill> | <fill> | <fill>% |
+Phase D runs ironmlx with `IRONMLX_P5G_PROFILE_MODE=ablate-<candidate>`. The ablation substitute replaces one step's compute with a shape-preserving no-op; the mode-gate in Step 0.7 means AblateX modes **skip** the Layer1 entry/exit eval barrier + log emission. Phase D's `pp_tps_median` is therefore a clean ablation reading — its wall-time delta vs Phase A's no-profile baseline is the achievable upper-bound cut for that candidate.
+
+| Ablation mode | Candidate step | PP=2048 phase_d_mode | PP=2048 delta vs Phase A | PP=16384 delta vs Phase A | Upper bound (geomean across PPs) |
+|---|---|---:|---:|---:|---:|
+| ablate-compute-g | 5 compute_g | <fill> | <fill>% | <fill>% | <fill>% |
+| ablate-conv | 2a/2b/2c chain | <fill> | <fill>% | <fill>% | <fill>% |
+| ablate-t-arr | 7 kernel input (t_arr) | <fill> | <fill>% | <fill>% | <fill>% |
 
 **Note**: upper bound 仅作 T0/T1 优化值得性诊断, 不作 ship 依据 (per § 3.2 + § 4.2).
 端到端 ROI 仍以 T1-T3 实现后 iron-bench benchmark 为准 (§ 7.3 ship metrics).
