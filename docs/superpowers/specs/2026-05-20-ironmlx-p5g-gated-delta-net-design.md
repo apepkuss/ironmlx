@@ -86,7 +86,7 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 ### 1.4 Boss 决策记录（2026-05-20 brainstorming）
 
 - **Scope（Q1）**：聚焦 GatedDeltaNet only；GatedAttention / chunk sweep / router bypass 留 P5h
-- **Process（Q2）**：Profile-first — P5g T0 instrument per-op timing 验证 hot points 真实占比；T1-T3 优化项由 profile 数据决定，不预设
+- **Process（Q2）**：Profile-first — P5g T0 instrument per-op timing 验证 hot points 估计占比；T1-T3 优化项由 profile 数据决定，不预设
 - **Branch（Q3）**：新开 `ironmlx-p5g-perf` 从 `d74c405` 分叉
 
 ## § 2 Architecture
@@ -99,7 +99,7 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 │   ├─ instrument gated_delta_net.rs 8 steps                 │
 │   ├─ mlx::eval barrier per-op                              │
 │   ├─ PP=2048 主战场 + PP=4096/8192/16384 趋势               │
-│   └─ verify ChatGPT 4 hot points 真实占比                   │
+│   └─ verify ChatGPT 4 hot points 估计占比                   │
 │                                                            │
 │         ↓ T0 ranked hot points                             │
 │                                                            │
@@ -130,8 +130,10 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 | 文件 | 修改 |
 |---|---|
 | `ironmlx/Cargo.toml` | `[features]` 表加一行 `p5g-profile = []` (空 feature flag, 仅作 cfg gate, 不引入额外依赖)。 |
-| `ironmlx/src/nn/gated_delta_net.rs` | instrument `GatedDeltaNet::forward_on` 内部 per-step `mlx::transforms::eval` barrier + `std::time::Instant` timing。GatedDeltaNet struct 加 `profile_layer_idx: Option<i32>` 字段 (从 decoder_layer.rs 构造时传入)，用于 log layer 标识。**timing 数据通过 `tracing::info!` 在 `timer.stop()` + elapsed 计算完成之后** emit，**严禁 tracing::info!() 出现在 measured timer window 内** (string formatting + subscriber filter + stderr write 会污染测量)。Layer 2 per-step 数据缓存到 forward 末尾批量 emit 单行。**Double-gated**: 编译期 feature flag (`p5g-profile`) 只编译 hook 代码；运行期由 `IRONMLX_P5G_PROFILE_MODE` env var 控制 (见下)，通过 `OnceLock<ProfileMode>` 在 GatedDeltaNet 模块初始化时 cache (避免每次 forward 都 env lookup)。profile-disabled 时无 eval barrier、无 buffer alloc、无 env syscall — 允许一次性 cached flag 检查的不可测算分支成本。 |
-| `ironmlx/tests/p5g_t0_gated_delta_profile.rs` | 新增 profile harness — **HTTP-path profile**: 启动 ironmlx server (with `--features p5g-profile` + `IRONMLX_P5G_PROFILE=1`)，跑 iron-bench HTTP request 触发 forward，server log 由 harness aggregate parse 出 per-layer GatedDeltaNet timing。**与 § 1.1 P5f HTTP baseline (1844 tok/s) 同路径**，profile occupancy 数字可直接对比。必须 `#[test] #[ignore]`，读 `IRONMLX_MOE_MODEL_DIR` env var 取 model path，必须 `--test-threads=1`。普通 `cargo test` / CI / clippy 不触发。**不**用 direct `Model::forward_on` harness 走旁路 (避免跟 HTTP baseline 路径不可比)。 |
+| `ironmlx/src/models/qwen3_5_moe/text_model.rs` | 修改 layer 循环把 `i: i32` layer index 传入 `DecoderLayerMoe::from_loader`。 |
+| `ironmlx/src/models/qwen3_5_moe/decoder_layer.rs` | `DecoderLayerMoe::from_loader` 增加 `layer_idx: i32` 参数，下传给 `GatedDeltaNet::from_loader`。 |
+| `ironmlx/src/nn/gated_delta_net.rs` | `GatedDeltaNet::from_loader` 增加 `layer_idx: i32` 参数；struct 增加 `profile_layer_idx: Option<i32>` 字段 (仅 `#[cfg(feature = "p5g-profile")]` 编入)，用于 log layer 标识。instrument `GatedDeltaNet::forward_on` 内部 per-step `mlx::transforms::eval` barrier + `std::time::Instant` timing。**timing 数据通过 `tracing::info!` 在 `timer.stop()` + elapsed 计算完成之后** emit，**严禁 tracing::info!() 出现在 measured timer window 内** (string formatting + subscriber filter + stderr write 会污染测量)。Layer 2 per-step 数据缓存到 forward 末尾批量 emit 单行。**Double-gated**: 编译期 feature flag (`p5g-profile`) 只编译 hook 代码；运行期由 `IRONMLX_P5G_PROFILE_MODE` env var 控制 (见下)，通过 `OnceLock<ProfileMode>` 在 GatedDeltaNet 模块初始化时 cache (避免每次 forward 都 env lookup)。profile-disabled 时无 eval barrier、无 buffer alloc、无 env syscall — 允许一次性 cached flag 检查的不可测算分支成本。 |
+| `ironmlx/tests/p5g_t0_gated_delta_profile.rs` | 新增 profile harness — **HTTP-path profile**: 启动 ironmlx server (with `--features p5g-profile` + 适当 `IRONMLX_P5G_PROFILE_MODE`)，跑 iron-bench HTTP request 触发 forward，server log 由 harness aggregate parse 出 per-layer GatedDeltaNet timing。**与 § 1.1 P5f HTTP baseline (1844 tok/s) 同路径**，profile occupancy 数字可直接对比。必须 `#[test] #[ignore]`，读 `IRONMLX_MOE_MODEL_DIR` env var 取 model path，必须 `--test-threads=1`。普通 `cargo test` / CI / clippy 不触发。**不**用 direct `Model::forward_on` harness 走旁路 (避免跟 HTTP baseline 路径不可比)。 |
 | `reports/p5g-t0-gated-delta-profile.md` | output 报告 (parsed log aggregation + 3-layer tables) |
 
 ### 3.2 Instrument 策略 — 3 层 profile protocol
@@ -199,7 +201,7 @@ Timing 协议 (timer 边界精确, materialization set 完整覆盖 GatedDeltaNe
 - Layer 2 / Layer 1 slowdown ratio
 - Layer 3 top-3 候选 shape-preserving cost ablation results (标记 **upper bound**)
 - 每个 PP 1 warmup + 3 measured runs median
-- 显式 annotate: "Layer 1 是 boundary-isolated estimate, 不等于完全无 instrumentation 下 GatedDeltaNet 真实占比；真实 end-to-end ROI 仍以 T1-T3 实现后 iron-bench benchmark 为准"
+- 显式 annotate: "Layer 1 是 boundary-isolated estimate, 不等于完全无 instrumentation 下 GatedDeltaNet 实际占比；端到端 ROI 仍以 T1-T3 实现后 iron-bench benchmark 为准"
 
 ### 3.3 输出内容
 
@@ -211,7 +213,7 @@ Timing 协议 (timer 边界精确, materialization set 完整覆盖 GatedDeltaNe
 4. Layer 3: top-3 hot points shape-preserving cost ablation upper bound
 5. **更新 P5g performance ceiling 推导** (基于 Layer 1 **boundary-isolated GatedDeltaNet occupancy estimate**, 标注 estimate 而非 true occupancy)
 6. P5g T1-T3 候选优化建议 ranking (profile-driven，不抄 omlx.patches)
-7. Annotation: "Layer 1 是 boundary-isolated estimate (含轻 instrumentation overhead)，不等于完全无 instrumentation 下 GatedDeltaNet 真实占比；真实 end-to-end ROI 仍以 T1-T3 实施后 iron-bench benchmark 为准。"
+7. Annotation: "Layer 1 是 boundary-isolated estimate (含轻 instrumentation overhead)，不等于完全无 instrumentation 下 GatedDeltaNet 实际占比；端到端 ROI 仍以 T1-T3 实施后 iron-bench benchmark 为准。"
 
 ### 3.4 验证
 
@@ -283,8 +285,8 @@ Phase D — Layer 3 ablation (per top-3 candidate from B/C):
 
 **Subprocess binary 来源** (避免误用 PATH 上旧 binary):
 
-- server: harness 用 `env!("CARGO_BIN_EXE_ironmlx")` 拿当前 `cargo test -p ironmlx --features p5g-profile` 构建的 binary path 启动；不走 PATH。
-- iron-bench: 同样 `env!("CARGO_BIN_EXE_iron-bench")` (iron-bench 自己单独 build, harness 启 subprocess 调用)。
+- **server**: harness 用 `env!("CARGO_BIN_EXE_ironmlx")` 拿当前 `cargo test -p ironmlx --features p5g-profile` 构建的 binary path 启动；不走 PATH。
+- **iron-bench**: 跨 package — `CARGO_BIN_EXE_<name>` 只在 binary 跟 test 同 package 时注入；`iron-bench` 是 workspace 另一个 package, `CARGO_BIN_EXE_iron-bench` 在 ironmlx 的 integration test 中**未定义**, 直接 `env!()` 会编译失败。改用 `std::process::Command::new("cargo")` 子进程: `cargo run -p iron-bench --release --` (cargo 会处理 build + 缓存)。或者 harness 启动时先 `Command::new("cargo").args(["build", "-p", "iron-bench", "--release"]).status()`，然后通过相对 `target/release/iron-bench` 直接启动 subprocess。两种都不依赖 PATH。
 
 Harness top-level 调用命令:
 
@@ -305,7 +307,7 @@ Harness 内部按 Phase A/B/C/D 串行 spawn subprocess，每个 phase 独立 se
 - runtime flag (env var 解析) 应在启动时由 `OnceLock<bool>` (或类似一次性 cache 机制) 锁定 — **不要每次 forward 都 env lookup**
 - 目标: profile-disabled 时 normal forward 路径无可测量 overhead (per-call CPU branch 跳转可接受，env syscall 不可接受)
 
-正常 release build / clippy / sweep_full / bench 不带 `IRONMLX_P5G_PROFILE` env var，即使 `--features p5g-profile` 编译进 hook，按以上要求实现也走 normal forward 路径。
+正常 release build / clippy / sweep_full / bench 不带 `IRONMLX_P5G_PROFILE_MODE` env var (或设为 `off`)，即使 `--features p5g-profile` 编译进 hook，按以上要求实现也走 normal forward 路径。
 
 ## § 4 T1-T3 — Profile-Driven Optimizations
 
@@ -490,16 +492,23 @@ T0: GatedDeltaNet 独立 per-op profile (3-layer protocol per § 3.2,
     Step T0.d: 用 Phase A baseline + T0.a Layer 1 + T0.c ablation 数据
                回写 § 7.2 锁定 final target
     Files: ironmlx/Cargo.toml (add `p5g-profile = []` feature)
-           ironmlx/src/nn/gated_delta_net.rs (instrument hook, double-gated
-           by p5g-profile feature + IRONMLX_P5G_PROFILE_MODE env var
-           with OnceLock<ProfileMode> cached; profile_layer_idx field;
-           tracing::info! AFTER timer.stop() ONLY, Layer 2 batched at
-           forward end)
-           ironmlx/src/models/qwen3_5_moe/decoder_layer.rs (pass layer
-           index into GatedDeltaNet constructor for profile_layer_idx)
+           ironmlx/src/models/qwen3_5_moe/text_model.rs (loop body 把
+           layer index `i` 传入 DecoderLayerMoe::from_loader)
+           ironmlx/src/models/qwen3_5_moe/decoder_layer.rs
+           (DecoderLayerMoe::from_loader 增加 `layer_idx: i32` 参数,
+           下传给 GatedDeltaNet::from_loader)
+           ironmlx/src/nn/gated_delta_net.rs (GatedDeltaNet::from_loader
+           增加 `layer_idx: i32` 参数; struct 加 #[cfg(feature="p5g-profile")]
+           profile_layer_idx 字段; instrument hook, double-gated by
+           p5g-profile feature + IRONMLX_P5G_PROFILE_MODE env var with
+           OnceLock<ProfileMode> cached; tracing::info! AFTER timer.stop()
+           ONLY, Layer 2 batched at forward end)
            ironmlx/tests/p5g_t0_gated_delta_profile.rs (#[ignore], heavy;
-           HTTP-path harness using env!("CARGO_BIN_EXE_ironmlx") and
-           env!("CARGO_BIN_EXE_iron-bench") — NO PATH dependency;
+           HTTP-path harness; server via env!("CARGO_BIN_EXE_ironmlx");
+           iron-bench via std::process::Command "cargo run -p iron-bench"
+           or pre-built target/release/iron-bench — cross-package
+           CARGO_BIN_EXE_iron-bench is NOT injected in ironmlx tests,
+           DO NOT use env!() for iron-bench; NO PATH dependency;
            4-phase execution per § 3.5)
            reports/p5g-t0-gated-delta-profile.md
     Commit
