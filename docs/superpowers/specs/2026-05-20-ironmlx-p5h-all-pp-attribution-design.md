@@ -120,11 +120,22 @@ P5g T4 暴露: sweep_full Qwen3.5-4B 之后跑 ironmlx serve restart, 3-way benc
 
 Schema fields are split into **server-emitted** (written into each `[p5h-profile]` log line directly by `ironmlx serve`, since server owns this data) vs **aggregator-injected** (added by T5 Python aggregator from the iron-bench client-side sweep CSV, since server has no way to know iron-bench's `--prompt-len` or warmup/measured run index without a metadata channel that v3 P2 explicitly defers out of scope). This split is per Codex review v3 P2 — without it, the server would need iron-bench header propagation, which is out of P5h scope.
 
+**`request_id` propagation through call chain** (per Codex review v5 P1 #2 — without this, deep log sites in GDN/GatedAttention/MoE cannot emit `request_id` because HTTP-layer uuid doesn't reach them today):
+
+1. `GenerateRequest` adds field `p5h_request_id: Option<String>` (gated by `p5h-profile` feature; default `None`). HTTP handler in `openai.rs` populates this with the same uuid sent in `X-Ironmlx-Request-Id` header.
+2. `RequestState` (in `scheduler.rs`) adds the same field; `Scheduler::admit` copies it from `GenerateRequest` at admit time.
+3. `prefill_admitted_inner` (in `scheduler.rs`), immediately before calling `model.batched_prefill(...)`, sets a `thread_local!` cell `P5H_CURRENT_REQUEST_ID: Cell<Option<&'static str>>` (or `RefCell<Option<String>>`) with the active row's `p5h_request_id`. Clears the cell on return.
+4. Deep instrumentation sites (GDN entry/exit barriers, GatedAttention substep emit, MoE substep emit) read `P5H_CURRENT_REQUEST_ID` to populate the `request_id` field on `[p5h-profile]` log lines.
+
+**Thread-local safety** (memory `[feedback_ffi_runtime_semantics]` caution — MLX `thread_local` encoder gotchas): the thread-local is set/cleared on the caller thread (scheduler driver thread). MLX kernel dispatch + GPU execution happen on different threads, but those threads do NOT read `P5H_CURRENT_REQUEST_ID` — only the CPU-side entry/exit barriers do (same thread as the scheduler caller). MLX `eval()` barriers are caller-side `array::wait()`, which executes back on the caller thread. No cross-thread propagation needed.
+
+**Single-active-row hard gate** (per Codex review v5 P1 #2): the thread-local design ONLY works if exactly one in-flight row exists during `prefill_admitted_inner`. P5h harness MUST start the server with `--b-max 1` (already P5f default; P5h enforces). On `p5h-profile` feature, server panics at startup if `b_max > 1` OR if the scheduler ever observes `active_count() > 1` during a `[p5h-profile]`-emitting forward. Strict serial sweep (per memory `[feedback_serial_perf_experiments]`) also enforces only one in-flight request server-side.
+
 **Server-emitted fields** (per `[p5h-profile]` log line, written by ironmlx):
 
 | Field | Type | Semantics |
 |---|---|---|
-| `request_id` | string (uuid) | server-generated per request, T5 group-by key |
+| `request_id` | string (uuid) | server-generated per request, T5 group-by key; populated from `P5H_CURRENT_REQUEST_ID` thread-local (see "request_id propagation" above) |
 | `prompt_tokens` | int | server-measured (post-chat-template, post-tokenize); proxy for iron-bench `--prompt-len` once correlated |
 | `seq` | int | sequence length at this forward (chunk size or 1 for decode) |
 | `layer_idx` | int | GDN/full-attn layer 0..39 (-1 for non-decoder spans) |
@@ -145,10 +156,14 @@ Schema fields are split into **server-emitted** (written into each `[p5h-profile
 **Join key — single committed path (per Codex review v4 P2)**: prior v4 wording left "header OR wallclock fallback" as implementer choice. Both paths were under-specified (header path didn't actually exist end-to-end; wallclock path required a `server_request_start_wallclock` field that wasn't in the server-emitted schema). v5 commits to ONE concrete path; T0a delivers all three edits below or T0a does not close:
 
 1. **server emit** (`openai.rs`, gated on `p5h-profile` feature): chat-completion response builder MUST set response header `X-Ironmlx-Request-Id: <uuid>` (same uuid that anchors every `[p5h-profile]` log record's `request_id` field). Streaming and non-streaming paths both set it. Small addition (~5 lines) to `serve_via_scheduler_stream`'s response construction.
-2. **iron-bench capture** (`iron-bench/src/client.rs`): `run_chat_completion` MUST capture `X-Ironmlx-Request-Id` from `resp.headers()` BEFORE entering `resp.bytes_stream()`. Add field `request_id: Option<String>` to `RequestResult`. CSV/JSON serializer (`iron-bench/src/report.rs`) writes a new `request_id` column. Iron-bench change is gated on a new `--capture-server-request-id` CLI flag (default off, on for P5h sweeps) so non-P5h iron-bench runs are byte-identical.
+2. **iron-bench capture** (`iron-bench/src/client.rs` + `iron-bench/src/report.rs`): both capture AND serializer schema gated on new `--capture-server-request-id` CLI flag (default off):
+   - **Flag off** (default, non-P5h runs): `RequestResult.request_id` not set; `report.rs` CSV/JSON header + body emit zero `request_id`-related bytes; output is **byte-identical** to current iron-bench (per Codex review v5 P2 #3 — earlier wording was contradictory because it claimed byte-identical while always adding a column).
+   - **Flag on** (P5h sweeps): `run_chat_completion` captures `X-Ironmlx-Request-Id` from `resp.headers()` BEFORE entering `resp.bytes_stream()`, populates `RequestResult.request_id: Option<String>`; serializer adds `request_id` column to CSV header + JSON object (appended after existing `finish_reason` to keep prior-column byte ordering intact for tools that read by name).
 3. **aggregator join** (T5 Python): `(request_id)` is the sole join key — no wallclock fallback. T5 aggregator hard-fails if any P5h sweep cell shows < 100% 1:1 server↔client request_id match. Orphan rate > 0% per PP fails T5 gate (the gate threshold was "< 1%" in v4 — v5 tightens to "= 0%" since deterministic header propagation should never lose records under per-PP serial sweep).
 
 **Wallclock fallback explicitly DROPPED**: v4 listed wallclock as fallback. Codex v4 P2 correctly noted server-emitted schema had no `server_request_start_wallclock` field. Rather than add a fragile fallback, v5 makes the header path the only path. Boss memory `[feedback_iron_bench_priority]` cautions against modifying iron-bench casually — the 3 edits above are scoped, behind a new CLI flag, and ship/revert independently.
+
+**Routing precondition** (per Codex review v5 P1 #1): all root/span definitions below assume requests route through `serve_via_scheduler_stream` (per `openai.rs:407`). However `openai.rs:404` routes `prompt_len > prefill_chunk_size` requests to `serve_via_gs_stream` (chunked GenerationStream path) — and default `--prefill-chunk-size = 2048` means PP ∈ {4096, 8192, 16384} (the long-PP segments where P5g measured the largest omlx gap) would silently take the GS path under default server config, producing measurements that do NOT match the schema below. **P5h harness MUST start the server with `--prefill-chunk-size 0` to force ALL sweep PPs through the scheduler path**; T0a profile gate validates per-PP routing (e.g., asserts `serve_via_scheduler_stream` was hit via tracing span). Chunked GS path attribution is **out of scope for P5h** (deferred to P5h+1; would require separate schema with `chunk_idx` since chunked prefill emits the same span name multiple times per request — see § 6).
 
 **Server-only root** (per Codex review v2 P1 #2 + v3 P1 fact-check; iron-bench TTFT cross-process correlation deferred — would require iron-bench → ironmlx request-id propagation, out of P5h scope):
 
@@ -252,13 +267,20 @@ P5g flagged 4 个 hypothesis:
 Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema infra + UMA hardening + 4 Phase D investigations + GDN rerun). **Codex recommends active split into T0a + T0b execution checkpoint**, not passive "sprawl-only-then-split" note. T0a proves trace schema works on a known component (GDN) before any Phase D investigation. If T0a's exclusive coverage gate fails on the GDN rerun alone, the schema is broken and Phase D investigations would emit non-schema records — wasted work.
 
 - Branch verify + Cargo feature `p5h-profile` add (alongside `p5g-profile`, both can be on simultaneously)
+- **Harness server-launch contract** (per Codex review v5 P1 #1): all P5h sweep server processes MUST launch with `--prefill-chunk-size 0 --b-max 1` to (a) route all PP through `serve_via_scheduler_stream` per `openai.rs:404` (default `--prefill-chunk-size=2048` would otherwise silently fall back to GS path for PP > 2048, breaking schema), and (b) ensure single-active-row precondition for thread-local request_id propagation (see § 2.5a). Harness CLI helper exports `IRONMLX_P5H_SERVER_FLAGS="--prefill-chunk-size 0 --b-max 1 --features p5h-profile"` for reuse. T0a profile gate asserts per-PP that `serve_via_scheduler_stream` (NOT `serve_via_gs_stream`) handled the request — emit a `routing_path_validation` annotation; orphan = fail.
 - **Exclusive span schema infrastructure** per § 2.5a — Rust span tracker + log emission format follows the § 2.5a **server-emitted fields** table (single source of truth; do NOT restate field list here — per Codex review v4 P3, restating drifted in v3/v4). Specifically, server emits `request_id / prompt_tokens / seq / layer_idx / span_name / parent_span / start_ns / end_ns / mode` per record. `pp` and `run_id` are NOT server-emitted — they are aggregator-injected from iron-bench CSV (per § 2.5a aggregator-injected fields table).
 - Python aggregator computes `exclusive_us = inclusive_us - sum(children_us)`; assert sum-to-root invariant + per-span `exclusive_us ≥ -1µs`
+- **request_id propagation infrastructure** (per § 2.5a "request_id propagation through call chain" — required for deep model log sites to emit `request_id`):
+  - `GenerateRequest` (in `core/generate.rs`): add `p5h_request_id: Option<String>`, gated on `p5h-profile` feature
+  - `RequestState` (in `core/scheduler.rs`): add same field; `Scheduler::admit` copies from `GenerateRequest`
+  - `prefill_admitted_inner`: set/clear `P5H_CURRENT_REQUEST_ID` thread-local around the `model.batched_prefill(...)` call
+  - Deep instrumentation sites (GDN/GatedAttention/MoE entry/exit barriers) read the thread-local for `request_id` field on `[p5h-profile]` log lines
+  - Server startup panic if `b_max > 1` when `p5h-profile` feature is active (single-active-row invariant)
 - **Request-correlation infrastructure** (per § 2.5a "Join key" — single committed path):
-  - `openai.rs` (chat-completion response builder): emit `X-Ironmlx-Request-Id: <uuid>` header on streaming + non-streaming responses, gated on `p5h-profile` feature; same uuid used as the `request_id` field in every `[p5h-profile]` log record
-  - `iron-bench/src/client.rs`: capture `X-Ironmlx-Request-Id` from `resp.headers()` BEFORE entering `bytes_stream()`; add `request_id: Option<String>` to `RequestResult`
-  - `iron-bench/src/report.rs`: CSV/JSON serializer writes new `request_id` column
-  - New iron-bench CLI flag `--capture-server-request-id` (default off, on for P5h sweeps) so non-P5h iron-bench runs are byte-identical
+  - `openai.rs` (chat-completion response builder): emit `X-Ironmlx-Request-Id: <uuid>` header on streaming + non-streaming responses, gated on `p5h-profile` feature; same uuid used as the `request_id` field in `GenerateRequest.p5h_request_id` + every `[p5h-profile]` log record
+  - `iron-bench/src/client.rs`: capture `X-Ironmlx-Request-Id` from `resp.headers()` BEFORE entering `bytes_stream()`; add `request_id: Option<String>` to `RequestResult`. Capture path gated on new CLI flag.
+  - `iron-bench/src/report.rs`: CSV/JSON serializer writes new `request_id` column **only when flag is on** (per § 2.5a P2 #3 fix — flag off keeps schema byte-identical to current; column appended after existing `finish_reason`)
+  - New iron-bench CLI flag `--capture-server-request-id` gates BOTH capture path AND serializer schema (default off, on for P5h sweeps; off-state output is byte-identical to current iron-bench)
 - **UMA hardening protocol** implementation: cold/warm pair measurement + variance check + automatic retry (per § 2.4)
 - **GDN harness code extension** to emit `[p5h-profile]` log lines with new schema (per § 2.2 #4 + Codex review v2 P2 #1) — modest format-string change to existing entry/exit barriers in `gated_delta_net.rs`; `[p5g-profile]` lines kept in parallel for back-compat
 - **GDN rerun** under P5h UMA protocol — same PP set as P5g T0, cold/warm pair per PP, exclusive span tree with `parent_span = attention_path` for GDN substeps (per § 2.5a wrapper-span structure, per Codex review v4 P1 fix; NOT `parent_span = decoder_layer_N` as v3/v4 incorrectly said)
@@ -393,7 +415,7 @@ MLX_DIR=$HOME/.local/mlx cargo build --release                                  
 
 **Python-only tasks** (T5 aggregator + report build, if no Rust touched): run `ruff check` / `ruff format --check` if a Python lint config exists in repo; markdown link/heading validity verified via repo's standard pre-commit (if configured). No cargo gates required for pure Python/Markdown changes.
 
-**Schema-touching tasks** (T0a, T5 aggregator): T5 aggregator MUST emit a schema-conformance report — every emitted `[p5h-profile]` record validated against § 2.5a server-emitted fields; orphaned (unjoined) records flagged with counts per PP; if orphan rate > 1% per PP, T5 gates FAIL and root-cause before close-out.
+**Schema-touching tasks** (T0a, T5 aggregator): T5 aggregator MUST emit a schema-conformance report — every emitted `[p5h-profile]` record validated against § 2.5a server-emitted fields. **iron-bench↔server `request_id` join rate must = 100% per PP (orphan rate = 0%)** — per Codex review v5 P2 #4, this matches T0a hard gate + § 2.5a deterministic header join (wallclock fallback was dropped in v5, so any orphan == broken header propagation == fix-before-close-out). The earlier "orphan rate > 1% fails" threshold (v4) is superseded.
 
 Sentinel suite (MoE-A3B-4bit; per § 5):
 
@@ -432,6 +454,8 @@ P5h 不引入新 numerical correctness 风险 (measure-only, no algorithmic chan
 - GDN Step 7 `gated_delta_step` Metal kernel rewrite (P5g § 4.1 Scope gate trigger, P5j candidate driver)
 - Step 8 out_proj kernel optimization (same family, P5j companion)
 - Multi-request batching default change (`--b-max 1` 保留 P5f shipped config)
+- **Chunked GS path (`serve_via_gs_stream`) attribution** (per Codex review v5 P1 #1 + § 2.5a routing precondition): P5h forces `--prefill-chunk-size 0` so all PP route through `serve_via_scheduler_stream`. Chunked prefill emits each span multiple times per request (one per chunk), requiring a `chunk_idx` schema field + chunk-tree extension to § 2.5a. Deferred to P5h+1 if production-config chunked-path attribution is needed.
+- **Multi-row in-flight attribution** (per § 2.5a "Single-active-row hard gate"): `P5H_CURRENT_REQUEST_ID` thread-local design assumes exactly one active row. Multi-row attribution would need per-row mlx::Stream / per-row span context; out of P5h scope.
 - prefill_chunk_size sweep (becomes P5j candidate if T2 GatedAttention long-PP O(S²) supports it)
 - omlx PagedCache style port (out per memory `[feedback_design_philosophy]`)
 - mlx::compile wrap (still blocked by 4 safe-wrapper API gaps from P5e T2)
