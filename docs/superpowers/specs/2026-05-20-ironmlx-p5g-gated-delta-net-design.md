@@ -460,19 +460,27 @@ P5g 只优化 GatedDeltaNet — 物理上的 end-to-end wall-time 减少上限�
 
 **重要**: 本表仅作 P5g target 数学结构的示例。**不外推**当前 HEAD GatedDeltaNet 占比 — P5e T0 profile 20% 是 P5e baseline 921 tok/s + per-op instrumented direct call 路径的占比, P5f baseline 1844 tok/s 是 HTTP path no-instrument, 两组数据测量路径 / instrumentation 状态 / 基线均不同, **不能直接外推**。Final target 必须由 T0.a 实测当前 HEAD GatedDeltaNet 占比锁定。
 
-### 7.2 Provisional target (TBD by T0.a)
+### 7.2 Final target — locked post-T0 v2 + T1 revert (2026-05-20)
 
-P5g final target 待 T0.a 实测 + T0.c ablation 后 lock in。当前 spec 阶段不预设 P5g target 数字，避免基于不可靠外推。
+P5g 整体 outcome: **no GDN-internal optimization promoted**. T1 (C5 fused input projection) revert per § 7.3 (geomean +0.5% threshold + PP=16384 < 2% regression bound; T1 实测 -0.12% geomean + -2.15% PP=16384). T2/T3 跳过，转 T4 close-out per § 7.3 success bar:
 
-T0.a 完成后必须做的事：
+> "P5g 整体 success bar: T1-T3 中至少 1 个满足以上 ship 指标 promote。否则 P5g close-out 报告标 'no optimization promoted; T0 数据 + Layer 3 upper bound 数据归 P5h scope refresh'。"
 
-1. 用 Layer 1 实测的当前 HEAD GatedDeltaNet **boundary-isolated occupancy estimate** (PP=2048/4096/8192/16384 各档)
-2. 用 Layer 3 shape-preserving cost ablation 估每个候选可达 upper-bound cut 比例
-3. 套 § 7.1 数学结构推导每档 PP 的 P5g realistic target
-4. 写回本节 § 7.2 锁定 final target table
-5. 如果 GatedDeltaNet 占比 < 10% (即 P5e/P5f 后续优化使其相对下降到 § 3.4 sanity 阈值之下), 需 Boss 决策是否调整 P5g scope 或合并到 P5h
+**P5g final target lock**: P5g ship state = P5f baseline (no regression, no promotion). 3-way bench (ironmlx / omlx / mlx-lm) 在 T4 close-out 验证 P5g 仍跟 P5f baseline 一致 (± 2% noise floor)。详细数据见 `reports/p5g-final-results.md`。
 
-P5g final target 待锁定前，T1-T3 ship 决策仍按 § 7.3 ship 指标。
+**P5h scope drivers** (T0 v2 + T1 attempt 锁出的方向, per § 7.4):
+
+1. **Step 7 Metal kernel rewrite** (gated_delta_step kernel; spec § 4.1 Scope gate trigger) — 16-17% of GDN 时间未被任何 op-level 改造覆盖。P5g op-level 已尝试 Step 1 (Linear fuse — saturated) + Step 5 / 2 / 7c (Phase D 反常无 ROI 信号),剩下唯一未触碰的高占比 sub-step。Kernel rewrite 需独立 phase scope。
+2. **Step 8 out_proj** (Linear quantized matmul, ~10-15% of GDN) — 与 in_proj_qkvz 同 family (4-bit quant), T1 已证 Linear-family saturated at op-level。若要继续 attack out_proj,只能走 kernel-level (同 driver #1)。
+3. **Phase D ablation 反常根因** — 三个 ablation 全 negative (vs Phase A pp_tps)，不符合 plan § 7.1 "ablation = upper-bound cut" 假设。可能 cause: GPU thermal drift across 24 spawns, substitute 自身成本超过原 op, cache state divergence, kernel template variance。Investigation 优先级 P5h: phase order randomized sanity → 看 ablation 是否回到 positive。
+4. **GDN 占比的真实数学结构** — T0 v2 实测 38-46% (vs spec § 1.3 prior 20%) — GDN 是 prefill primary cost slot。这数字本身有用作 P5h prioritization input。
+
+§ 7.1 prior table (假设性 occupancy × cut) 完全 invalidated by T0 v2 measurement —— 保留作历史 reference,P5h 不基于此推导 target。
+
+**Aborted T1-T3 fuel for P5h**:
+- C5 fused input projection 完整实施 + measured + reverted (audit trail in commit `68545b2`).
+- T0 v2 raw data + aggregator output (committed to git as part of T4 close-out report `/reports/p5g-final-results.md`).
+- 3-way bench data 在 T4 close-out 显示 P5g state vs omlx vs mlx-lm (验证 ship state == P5f baseline)。
 
 ### 7.3 Ship 指标 (T1-T3 promote / revert + P5g 整体 success bar)
 
