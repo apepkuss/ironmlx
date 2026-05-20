@@ -137,6 +137,18 @@ thread_local! { static P5H_CURRENT_TRACE: RefCell<Option<P5hTraceContext>> = Ref
 1. `GenerateRequest` adds field `p5h_trace: Option<P5hTraceContext>` (gated by `p5h-profile` feature; default `None`). HTTP handler in `openai.rs` populates it (uuid for `request_id`, post-tokenize `prompt_ids.len()` for `prompt_tokens`, routing-decision result for `routing_path`).
 2. `RequestState` (in `scheduler.rs`) carries the same field; `Scheduler::admit` copies it from `GenerateRequest` at admit time.
 3. `P5H_CURRENT_TRACE` is set at the **root span entry** (start of `chat_completion` handler in `openai.rs`) and cleared at the **root span exit** (immediately after first non-empty content SSE write, or on error). Scope covers the ENTIRE root window — not just `batched_prefill`. This way `model_prefill_forward`, `first_token_sampling`, `pre_content_decode_steps`, `detok_format_first_content_chunk`, and any deep substep span all read the same context.
+
+   **Per-thread set/clear contract** (per Codex review v7 P3 — the axum handler does not directly call deep model code; instrumentation runs on multiple threads):
+
+   - **axum handler thread** (root start/end): sets `P5H_CURRENT_TRACE` at `chat_completion` entry; clears at root close. Used by `http_parse_render_tokenize` + (Lane A) the `AdmitReply` send timestamp inside `scheduler_admission`.
+   - **`spawn_blocking` thread** (Lane B): `serve_via_gs_stream` body runs inside `tokio::task::spawn_blocking`. The handler MUST clone the trace context and `P5H_CURRENT_TRACE.set(cloned)` as the FIRST statement of the `spawn_blocking` closure, BEFORE `GenerationStream::new(...)`. Cleared as the LAST statement of the closure. Covers `gs_stream_init_and_chunk_loop` (including all `gs_chunk_N` + any deep substep inside the chunked prefill — though deep substeps are out of scope for Lane B, the context still propagates for any T5 sanity check).
+   - **scheduler actor `driver_loop` thread** (Lane A): the actor thread is long-lived (one per `SchedulerActor`), not per-request. T0a MUST add explicit set/clear around each per-request operation that the actor performs:
+     - Around `sched.prefill_admitted(&model_lock)` in `scheduler_actor::driver_loop` (currently `scheduler_actor.rs:304-307`): read the lone active row's `RequestState.p5h_trace`, set `P5H_CURRENT_TRACE`, run `prefill_admitted`, route events, then clear. This is the set/clear point that v7 left implicit.
+     - Around every `sched.step(...)` call that contributes to `pre_content_decode_steps` (the same actor loop iteration set, before the step, cleared after event routing).
+     - On `handle_admit_mid_*` calls (mid-batch admit): not P5h-relevant under `--b-max 1` but if any code path reaches them while `p5h-profile` is active, hard-fail (multi-row invariant violated).
+   - **streaming forwarder thread** (Lane A `tokio::spawn` after `AdmitReply`): the forwarder reads `event_rx`, formats SSE chunks, writes via `tx.send`. It owns `sse_write_role_chunk` + `detok_format_first_content_chunk`. The axum handler MUST clone the trace context into the spawned task before spawn, and the spawn body sets `P5H_CURRENT_TRACE.set(cloned)` as its first statement (clears on task return).
+
+   **Hard-fail under `p5h-profile` + `--b-max 1`** (per Codex review v7 P3): any instrumented site that attempts to read `P5H_CURRENT_TRACE` and finds `None` MUST `panic!` with the span_name in the message (NOT silently log empty fields). T0a verifies via a logging fixture: first emitted `[p5h-profile]` record per fresh request MUST have non-empty `request_id` AND `prompt_tokens > 0`; if either is missing, a cross-thread set/clear point is wrong and the harness fails before T0a closes.
 4. Deep instrumentation sites (GDN entry/exit barriers, GatedAttention substep emit, MoE substep emit) read `P5H_CURRENT_TRACE` to populate `request_id` + `prompt_tokens` + (optionally) `routing_path` on `[p5h-profile]` log lines.
 
 **Thread-local safety** (memory `[feedback_ffi_runtime_semantics]` caution — MLX `thread_local` encoder gotchas): the thread-local is set/cleared on the request-handler thread (axum + scheduler driver). MLX kernel dispatch + GPU execution happen on different threads, but those threads do NOT read `P5H_CURRENT_TRACE` — only the CPU-side entry/exit barriers do, on the same thread chain (axum handler → scheduler driver, which is `block_on`-pinned per request under `--b-max 1`). MLX `eval()` barriers are caller-side `array::wait()`, which executes back on the caller thread. No cross-thread propagation needed. If under `b_max=1` the scheduler driver dispatches work to a different thread (e.g., spawn for streaming forwarder), the thread-local must be cloned and re-set on the new thread before any instrumented span runs — T0a implementation must verify this end-to-end via a logging fixture (first log line under a fresh request → assert context populated; if not, the thread-local crossing point is missing).
@@ -208,15 +220,22 @@ T0a profile gate validates per-PP routing via a `routing_path: "scheduler" | "gs
 
 **Lane-B chunked-GS top-level buckets** (per "Routing precondition" — PP > `prefill_chunk_size`):
 
-Lane-B uses a shallower tree (no deep substep nesting in P5h; deferred to P5h+1). Children of `server_request_recv_to_first_content_sse_write` under Lane B:
+Lane-B uses a shallower tree (no deep substep nesting in P5h; deferred to P5h+1). **Bucket ordering MUST match actual `serve_via_gs_stream` flow** (per `openai.rs:416-470` + `generate.rs:945-1055` — per Codex review v7 P1): the chunked prefill loop lives inside `GenerationStream::new()`, which runs BEFORE the role chunk SSE is sent. The Lane-B order differs from Lane A here (Lane A's role chunk happens before prefill via the scheduler `AdmitReply` forwarder spawn; Lane B's role chunk happens after the whole prefill loop finishes because `GenerationStream::new()` is synchronous inside `spawn_blocking`). Carrying the Lane-A order over to Lane B (as v7 spec did, now fixed in v8) would leak the entire chunked prefill into `unattributed_server_root` and break long-PP attribution — the exact opposite of what P5h needs.
 
-1. `http_parse_render_tokenize` (same as Lane A)
-2. `sse_write_role_chunk` (GS path also issues a role chunk; same as Lane A)
-3. `gs_chunk_loop` (the chunked prefill loop in `serve_via_gs_stream`; emits one `gs_chunk_N` child per chunk where each child covers `[forward + cache update + (final chunk: lm_head)]`. Number of chunks = `ceil(prompt_len / prefill_chunk_size)` + tokenizer trailing chunk if any. No deeper attribution emitted in P5h.)
-4. `first_token_sampling` (post-final-chunk sampler invocation)
-5. `pre_content_decode_steps` (same semantics as Lane A bucket 6)
-6. `detok_format_first_content_chunk` (same as Lane A)
+Children of `server_request_recv_to_first_content_sse_write` under Lane B, in actual wall-clock order:
+
+1. `http_parse_render_tokenize` (same as Lane A — runs in the axum handler before `spawn_blocking`)
+2. `gs_stream_init_and_chunk_loop` (the entire `GenerationStream::new(...)` call inside `spawn_blocking` — covers KV cache allocation + chunked prefill loop body + final chunk's full forward producing first-token logits). Children of this bucket:
+   - `gs_kv_cache_alloc` (`model.make_cache(...)` call)
+   - `gs_chunk_N` × ceil(prompt_len / prefill_chunk_size) (each chunk covers `[forward_text_hidden + cache update + eval]`; the final chunk covers `[batched_prefill-equivalent forward + lm_head]` producing first-token logits)
+   - `unattributed_gs_stream_init_and_chunk_loop` (residual leaf)
+3. `sse_write_role_chunk` (post-`GenerationStream::new` role chunk send — `openai.rs:441-457`. v7 had this before the chunk loop; v8 fix places it after)
+4. `first_token_sampling` (first `stream.next_token()` call — runs sampler on the logits the final chunk produced)
+5. `pre_content_decode_steps` (same semantics as Lane A bucket 6 — additional `stream.next_token()` iterations if first-token detok was empty)
+6. `detok_format_first_content_chunk` (the `stream.next_token()` iteration that yields non-empty content + ChunkResponse serialize + SSE write — same as Lane A)
 7. `unattributed_server_root` (residual leaf)
+
+**Lane-B root closure invariant** (per Codex review v7 P1): the root span MUST cover the entire `GenerationStream::new(...)` wall-time. Root start = axum handler entry; root end = first non-empty content SSE write (per "Root terminal definition" above). Implementation MUST NOT close the root on role chunk send under Lane B, or `gs_stream_init_and_chunk_loop` falls outside the tree.
 
 **T0a/T5 gate for pre_content_decode_steps**: per Codex review v6 P2 #2, every measured request MUST satisfy `pre_content_decode_steps.inclusive_us < 1ms` (within noise of "first prefill token detokenized to non-empty string"). If any sweep cell shows non-trivial pre-content decode time, T0a flags it before T0b dispatches; T5 close-out reports the count + investigates whether benchmark prompts need adjustment OR whether instrumentation needs to subdivide this bucket.
 
@@ -322,7 +341,7 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
   ```
 
   T0a profile gate annotates every root span with `routing_path: "scheduler" | "gs_chunked"` so T5 can partition records into Lane A (PP ≤ chunk_size — full deep attribution) vs Lane B (PP > chunk_size — top-level only). Any routing mismatch (e.g., PP=2048 expected scheduler but observed gs_chunked) fails the per-PP gate.
-- **Exclusive span schema infrastructure** per § 2.5a — Rust span tracker + log emission format follows the § 2.5a **server-emitted fields** table (single source of truth; do NOT restate field list here — per Codex review v4 P3, restating drifted in v3/v4). Specifically, server emits `request_id / prompt_tokens / seq / layer_idx / span_name / parent_span / start_ns / end_ns / mode` per record. `pp` and `run_id` are NOT server-emitted — they are aggregator-injected from iron-bench CSV (per § 2.5a aggregator-injected fields table).
+- **Exclusive span schema infrastructure** per § 2.5a — Rust span tracker + log emission format follows the § 2.5a **server-emitted fields** table as the single source of truth (per Codex review v4 P3 + v7 P2: do NOT restate the field list here — v3/v4 restated, then drifted; v5 restated again and immediately drifted in v6 by missing `routing_path` which v7 added to the table). `pp` and `run_id` are NOT server-emitted — they are aggregator-injected from iron-bench CSV per the § 2.5a aggregator-injected fields table.
 - Python aggregator computes `exclusive_us = inclusive_us - sum(children_us)`; assert sum-to-root invariant + per-span `exclusive_us ≥ -1µs`
 - **Trace context propagation infrastructure** (per § 2.5a "Trace context propagation through call chain" — required for deep model log sites AND post-prefill spans to emit `request_id` + `prompt_tokens` + `routing_path`):
   - `GenerateRequest` (in `core/generate.rs`): add `p5h_trace: Option<P5hTraceContext>`, gated on `p5h-profile` feature; struct has `request_id` + `prompt_tokens` + `routing_path`
@@ -544,7 +563,11 @@ This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted ne
 ### 7.2 P5h ship gate (T5 close-out gate)
 
 1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_content_sse_write`); `exclusive_us ≥ -1µs` for every emitted span; `client_transport_residual_us` reported separately (not part of gate)
-2. **Protocol-consistent data**: GDN (T0a rerun under P5h protocol; GDN substeps `parent_span = attention_path` per § 2.5a wrapper structure) + Phase D resolution (T0b) + HTTP/scheduler/admission (T1) + GatedAttention (T2) + MoE (T3) + lm_head/MLX state (T4) — all measured under same UMA hardening + exclusive span schema with request_id correlation. P5g existing data remains as prior reference only, excluded from coverage gate.
+2. **Protocol-consistent data — dual-lane explicit** (per Codex review v7 P2 + § 2.5a "Routing precondition"):
+   - **Lane A** (PP ∈ {128, 512, 2048}, scheduler path): full deep substep attribution — HTTP/scheduler/admission (T1) + GDN (T0a rerun with `parent_span = attention_path`) + GatedAttention (T2, 7 substeps under `attention_path`) + MoE (T3, 8 substeps under `mlp_path`) + lm_head/MLX state (T4) + Phase D resolution (T0b) — all measured under same UMA hardening + exclusive span schema with trace context correlation; § 7.1 residual coverage ≥ 95% per PP.
+   - **Lane B** (PP ∈ {4096, 8192, 16384}, chunked GS path): top-level only per § 2.5a Lane-B bucket list — server root + `gs_stream_init_and_chunk_loop` (with per-`gs_chunk_N` timing) + `sse_write_role_chunk` + `first_token_sampling` + `pre_content_decode_steps` + `detok_format_first_content_chunk`. Deep GDN/GatedAttention/MoE/lm_head substep attribution under chunked path is **explicitly out of scope** (deferred to P5h+1 per § 6); Lane B coverage gate measured only against top-level buckets, still ≥ 95%.
+   - P5g existing data remains as prior reference only, excluded from both lanes' coverage gates.
+   - P5j long-PP candidate ranking from Lane B carries explicit "bounded by Lane-B granularity" caveat; any P5j candidate requiring per-substep evidence at long PP must defer to P5h+1 chunked deep-attribution before P5j dispatch.
 3. **UMA hardening verified**: cross-repeat (cold/warm pair) measurement variance ≤ ±2% per PP per metric per layer (per § 2.4 protocol)
 4. **Phase D root cause** (T0b output): one of H1-H4 identified primary (mitigation proposed) OR explicit unresolved hypothesis list with proposed next investigation path (per § 2.5 decision tree); T2/T3 Layer 3 conditional ablation gates bound per T0b outcome
 5. **P5i + P5j candidate ranking**: each candidate has expected ROI range (number-anchored), Scope gate trigger status, 实施优先级
