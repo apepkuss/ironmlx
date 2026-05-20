@@ -293,10 +293,10 @@ fn with_p5h_span_from_current_trace<T>(
 
 **Authorized `P5hTraceGuard::enter(ctx, base_parent)` sites** (only these — no others permitted; each requires the caller to FIRST open the corresponding top-level span via explicit API, THEN enter the guard with that span as `base_parent`):
 
-- (Lane B prefill) Caller opens `gs_stream_init_and_chunk_loop` via `open_p5h_span(&ctx, Some(&root_handle.span), ...)`. Then enters guard with that span as `base_parent` and calls `GenerationStream::new(...)`. Deep substeps (`gs_kv_cache_alloc`, `gs_chunk_N`, `gs_first_token_sample_dispatch`) chain under `gs_stream_init_and_chunk_loop` via the stack. On `new()` return: drop guard, close `gs_stream_init_and_chunk_loop`.
-- (Lane A actor) Caller opens `model_prefill_forward` via `open_p5h_span(&ctx, Some(&root_handle.span), ...)`. Then enters guard with that span as `base_parent` and calls `sched.prefill_admitted(...)`. Deep substeps (`embed_lookup`, `decoder_layer_N`, etc.) chain under `model_prefill_forward`. On return: drop guard, close `model_prefill_forward`.
-- (Lane A actor pre-content decode) Caller opens `pre_content_decode_steps` (if any pre-content decode iterations are needed) via explicit API; enters guard with that as `base_parent`; calls one or more `sched.step(...)`; drops guard; closes `pre_content_decode_steps`.
-- (Lane B per-iteration) For each `stream.next_token()` call inside the `spawn_blocking` body's loop: caller opens the corresponding top-level explicit span (`gs_first_token_materialize_and_predispatch` for the first iteration, `pre_content_decode_steps` if first detok was empty) via explicit API, enters guard with that as `base_parent`, calls `next_token()`, drops guard, closes the span.
+- (Lane B prefill, in `spawn_blocking` closure) Caller opens `gs_stream_init_and_chunk_loop` via `open_p5h_span(&ctx, Some(&root_handle.span), ...)`. Then enters guard with that span as `base_parent` and calls `GenerationStream::new(...)`. Deep substeps (`gs_kv_cache_alloc`, `gs_chunk_N`, `gs_first_token_sample_dispatch`) chain under `gs_stream_init_and_chunk_loop` via the stack. On `new()` return: drop guard, close `gs_stream_init_and_chunk_loop`.
+- (Lane A, INSIDE `prefill_admitted_inner` — per Codex v16 P1 — NOT at actor scope, because actor cannot wedge between prefill and sampling) Caller (the inner function itself) opens `model_prefill_forward` via `open_p5h_span(ctx, Some(root_span), ...)`. Then enters guard with `model_prefill_forward` as `base_parent` and calls `model.batched_prefill[_vl](...)`. Deep substeps (`embed_lookup`, `decoder_layer_N`, etc.) chain under `model_prefill_forward`. On return: drop guard, close `model_prefill_forward`. (`first_token_sampling` is opened/closed separately later in the same function — no guard needed unless T4 adds deep sampling spans.)
+- (Lane A, INSIDE `Scheduler::step` IF that function also fuses model-forward + sample like `prefill_admitted_inner`) Same SINK pattern: open `pre_content_decode_steps` inside `step`, enter guard with that as `base_parent`, run model-forward + sample, drop guard, close span. T0a verifies whether `step` fuses or not; if `step` is purely sync at the actor level with no fused phases, the simpler actor-scope guard (open span at actor, enter guard, call `step`, drop, close) works.
+- (Lane B per-iteration, in `spawn_blocking` closure) For each `stream.next_token()` call inside the `spawn_blocking` body's loop: caller opens the corresponding top-level explicit span (`gs_first_token_materialize_and_predispatch` for the first iteration, `pre_content_decode_steps` if first detok was empty) via explicit API, enters guard with that as `base_parent`, calls `next_token()`, drops guard, closes the span.
 
 This pattern ensures every deep span has a non-null `parent_span_id` chain reaching back to the root, so T0a's id-based structural checks (single-root, no-orphan-top-level, reachability) hold.
 
@@ -351,19 +351,39 @@ The `enter()` panic-on-nest is the enforcement mechanism for the implicit API: a
      }
      ```
      `span_name_for_this_iteration` is `gs_first_token_materialize_and_predispatch` for the first iteration; `pre_content_decode_steps` if the first detok was empty and we're looping for non-empty content.
-4. **Lane-A scheduler actor `driver_loop`** (long-lived OS thread, one per `SchedulerActor`, processes many requests in sequence; per Codex v15 P1 — actor MUST open the top-level explicit span and pass it as base_parent before entering guard):
-   - Actor reads `state.p5h_trace` AND `state.p5h_root_span` (the root SpanHandle handler attached to the request; see step 1+2 below for plumbing). Under `--b-max 1` invariant, exactly one active row.
-   - Around `sched.prefill_admitted(&model_lock)`:
+4. **Lane-A scheduler — span sites SINK into `prefill_admitted_inner`** (per Codex review v16 P1 — actor-level wrapping is wrong because `prefill_admitted_inner` runs `model.batched_prefill[_vl](...)` AND `sample_batch(...)` in one function call, with no boundary the actor can wedge a span close + new open into):
+   - **Wrong (v15/v16 pre-fix design)**: actor opens `model_prefill_forward` around the whole `sched.prefill_admitted(...)` call, then opens `first_token_sampling` after return. Problem: `prefill_admitted_inner` (per `scheduler.rs:959-1025`) runs prefill at lines 973-981 then immediately runs sampler reshape + Stage A/B at lines 996-1025, all before returning to actor. Actor-level `model_prefill_forward` would silently absorb sampling cost; `first_token_sampling` opened after return would be zero-width.
+   - **Correct design**: the open/close of both spans happens INSIDE `prefill_admitted_inner`, not at actor scope. Concretely (T0a code change inside `scheduler.rs::prefill_admitted_inner`):
      ```
+     // Read the lone active row's p5h_trace + p5h_root_span (under --b-max 1
+     // exactly one row is active; if multiple, p5h-profile already panics at
+     // startup per § 2.5a single-active-row invariant).
+     let (ctx, root_span) = self.active_row_p5h_trace_and_root()?;
+
+     // Span 1: model_prefill_forward — wraps ONLY the model.batched_prefill[_vl] call.
      let mpf = open_p5h_span(ctx, Some(root_span), "model_prefill_forward");
-     {
+     let logits = {
          let _guard = P5hTraceGuard::enter(ctx.clone(), mpf.clone());
-         sched.prefill_admitted(&model_lock);  // embed_lookup / decoder_layer_N / ... chain under mpf
-     }
+         if is_vl { model.batched_prefill_vl(...) } else { model.batched_prefill(...) }?
+         // deep substeps (embed_lookup / decoder_layer_N / ... / slice_last_and_project_lm_head)
+         // chain under mpf via the seeded stack.
+     };
      close_p5h_span(ctx, mpf, monotonic_ns(), ..);
+
+     // Span 2: first_token_sampling — wraps the logits reshape + Stage A (sampler refs +
+     // histories) + Stage B (sample_batch). NO guard needed for vanilla case (sample_batch
+     // currently has no deep instrumentation candidates); if T4 adds deep sampling
+     // breakdown later, wrap with a guard using fts as base_parent.
+     let fts = open_p5h_span(ctx, Some(root_span), "first_token_sampling");
+     let logits_bv = logits.reshape(..)?;
+     let (row_samplers, row_histories) = collect_sampler_refs_and_histories(..);
+     let tokens = sample_batch(&row_samplers, &logits_bv, ..)?;
+     close_p5h_span(ctx, fts, monotonic_ns(), ..);
+
+     // Stage C distribution per row continues as today (not in the top-level tree).
      ```
-   - Around each `sched.step(...)` contributing to `pre_content_decode_steps`: same pattern with `span_name = "pre_content_decode_steps"`.
-   - Lane-A `first_token_sampling` happens inside `sched.prefill_admitted_inner`'s post-batched_prefill three-stage dispatch — it can either (a) use `with_p5h_span_from_current_trace("first_token_sampling", ..)` which will chain under whichever top-level span is currently the base_parent (i.e., `model_prefill_forward`), OR (b) be opened explicitly by the actor as a sibling top-level. Per the § 2.5a top-level bucket list, `first_token_sampling` IS a top-level sibling of `model_prefill_forward`, so option (b) is required: actor closes `model_prefill_forward` before opening `first_token_sampling` explicitly via `open_p5h_span(ctx, Some(root_span), "first_token_sampling")` (no guard needed — it has no deep children in scope).
+   - Actor scope keeps zero P5h instrumentation around `sched.prefill_admitted(...)` itself — actor just calls it.
+   - `pre_content_decode_steps`: actor opens this explicit span around any `sched.step(...)` calls needed for pre-content decode, but per § 2.5a authorized list, the actor-level guard inside that block opens via the same SINK pattern — actually `step` is simpler since it doesn't fuse prefill + sampling, so an outer guard around `sched.step(...)` with `pre_content_decode_steps` as base_parent works. (Alternative if `step` itself fuses model-forward + sample like `prefill_admitted_inner`, the same SINK pattern applies: open subspans inside `step` rather than at actor scope. T0a verifies which.)
 5. **Lane-A streaming forwarder** (`openai.rs:546` `tokio::spawn` body): handler clones BOTH `ctx` AND `root_handle` into the spawn closure. The closure **never calls `P5hTraceGuard::enter(...)`** — Lane-A forwarder is not on the authorized guard sites list (per Codex review v10 P1 #2 + v11 P1 #2: `tx.send(...).await` is async, a guard around it would have to span the await, which is the v8 unsoundness pattern). All SSE emission uses the explicit-context API:
    - For `sse_write_role_chunk`: `let h = open_p5h_span(&ctx, Some(&root_handle.span), "sse_write_role_chunk"); format_sse(...); tx.send(...).await; close_p5h_span(&ctx, h, monotonic_ns(), ..);` — span end_ns captured immediately after `.await` returns.
    - Per content-event iteration: detok + (for the first non-empty content) `let h = open_p5h_span(&ctx, Some(&root_handle.span), "detok_format_first_content_chunk"); format_sse(...); tx.send(...).await; let end_ns = monotonic_ns(); close_p5h_span(&ctx, h, end_ns, ..); root_handle.close_at(end_ns);` All explicit, no guard.
@@ -594,6 +614,8 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
   - Per-thread `P5H_CURRENT_SPAN_STACK: RefCell<Vec<SpanHandle>>` for `parent_span_id` propagation (per § 2.5a v13 P1 fix)
   - `GenerateRequest.p5h_trace: Option<P5hTraceContext>` + `GenerateRequest.p5h_root_span: Option<SpanHandle>` fields (gated on `p5h-profile`; per Codex v15 P1 — the root SpanHandle MUST flow to the actor so the guard's `base_parent` can be set, otherwise deep spans orphan as second roots)
   - `RequestState.p5h_trace` + `RequestState.p5h_root_span` fields + `Scheduler::admit` copies both from `GenerateRequest`
+  - Helper `Scheduler::active_row_p5h_trace_and_root() -> Result<(&P5hTraceContext, &SpanHandle)>` (under `--b-max 1` reads from the lone active `RequestState`; panics if zero or multiple active rows when `p5h-profile` is on)
+  - Per Codex v16 P1 — `prefill_admitted_inner` code change (`scheduler.rs:794-1025` area): open `model_prefill_forward` + enter guard around the `model.batched_prefill[_vl](...)` call; close mpf; then open `first_token_sampling` + (no guard for vanilla case) around the logits reshape + Stage A + `sample_batch(...)` interval; close `first_token_sampling`. Stage C distribution stays untouched.
   - Guard `enter()` call sites — EXACTLY the authorized list in § 2.5a, nothing more
   - Server startup panic when `p5h-profile` is active AND `b_max > 1` (single-active-row invariant)
   - **Fixture validation** (T0a HARD GATE precondition, per Codex review v10 P2 — first-record-only fixture is insufficient because it would pass even when top-level async spans never emit at all):
