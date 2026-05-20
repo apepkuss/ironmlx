@@ -11,7 +11,7 @@
 | 验证模型 | `mlx-community/Qwen3.5-35B-A3B-4bit`（PP=128/512/2048/4096/8192/16384） |
 | 验收 | profile-driven 优化项至少 1 个 ship（>5% per-PP improvement）；全 PP 段无 prefill/decode regression；sentinel + batched + sweep_full 全 PASS。 |
 | 显式 out-of-scope | GatedAttention 优化（留 P5h）；long-prompt chunk-size sweep（P5h）；router bypass（P5h 条件性）；multi-request batching（P5h/P6+ per Boss 2026-05-19 directive）；Metal kernel rewrite（优先 op-level，profile 不够再 expand）。 |
-| 性能目标 | **Provisional**, 待 T0a 实测当前 HEAD GatedDeltaNet 真实占比后由 § 7 ceiling 推导锁定。当前推导 (假设 occupancy 仍 ~20% + 优化 cut 50%): PP=2048 prefill 1844 → ~2057 tok/s (+11.5%)。最低 success bar: T1-T3 至少 1 个优化 promote (>5% per-PP improvement) 且全 PP 无 prefill/decode regression。 P5f+P5g+P5h+ 联合追"全 PP 段 omlx+10%" ultimate target，P5g 单 phase 不强求达成。 |
+| 性能目标 | **TBD by T0.a** — final target 待 T0.a 实测当前 HEAD GatedDeltaNet 真实占比 + T0.c shape-preserving ablation upper bound 后由 § 7.2 锁定。**不外推 P5e 旧数据**（P5e T0 instrumented direct call + 921 tok/s 基线跟 P5f HTTP 1844 tok/s baseline 测量路径不同）。Ship 决策按 § 7.3 端到端 iron-bench benchmark：长 prompt geometric mean prefill > 5% AND 各档 regression < 2%。P5f+P5g+P5h+ 联合追"全 PP 段 omlx+10%" ultimate target，P5g 单 phase 不强求达成。 |
 
 ## § 1 调研依据与决策摘要
 
@@ -138,27 +138,51 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 
 3 层 protocol：
 
-**Layer 1 — Baseline mode (no per-op barrier)**
-- 仅在 `GatedDeltaNet::forward_on` 入口 + 出口加 eval barrier
+**Layer 1 — Baseline mode (entry/exit barrier only)**
+
+Timing 协议 (timer 边界精确):
+
+```
+1. eval(input)             // drain prior lazy ops to settle settle time
+2. timer.start()           // ←—— timer 启动在 entry drain 完成后
+3. GatedDeltaNet forward   // 包含 8 step + Metal kernel dispatch
+4. eval(output)            // materialize GatedDeltaNet output lazy graph
+5. timer.stop()            // ←—— timer 停止在 output materialized 后
+```
+
 - 测当前 HEAD 下 **per-layer GatedDeltaNet 总 wall-clock** + 30-layer 累计 + GatedDeltaNet 占 prefill 总 wall-clock 的 % at PP=2048/4096/8192/16384
-- 这一层数字是 P5g target ceiling 计算的依据 (避免重复 P5e T0 旧数字, P5f 已 ship 后 GatedDeltaNet 占比可能已变化)
+- 这一层数字是 P5g target ceiling 计算的依据 (基于当前 HEAD 实测占比，不外推 P5e 旧数字)
+- Warmup + 测量协议：每个 PP **1 次 warmup run (丢弃) + 至少 3 次 measured run, 报 median**。warmup 覆盖 `OnceLock` kernel build / Metal first dispatch JIT / lazy graph init / buffer allocator init
 
 **Layer 2 — Breakdown mode (per-step barrier)**
+
 - 在 Step 1a / 1b / 2a / 2b / 2c / 3 / 4 / 5 / 6 / 7a-d / 8 各处加 eval barrier
 - 测每 step 相对占比 — **作热点定位参考，不是直接优化优先级依据**
 - 报告里 explicit acknowledge "barrier 改变 fusion 边界，相对占比 indicative only"
+- Warmup + median 协议同 Layer 1
 
-**Layer 3 — Verification mode (ablation / microbench)**
-- 对 Layer 2 top-3 ranked 候选热点，单独 microbench 验证：手动 disable / no-op 该 step 看 end-to-end 是否真减 wall time
-- 这是 T1-T3 promote 决策的最终依据
+**Layer 3 — Shape-preserving cost ablation**
+
+不是简单 disable/no-op (会破坏 cache state / downstream consumption / lazy graph，且 MLX 可能 deferred 删除后续计算，假 ROI)。
+
+正确做法 — **shape-preserving substitute**:
+
+- 对 Layer 2 top-3 ranked 候选热点，单独 microbench 验证
+- 用 **cheap shape-preserving proxy op 替换重 op** (e.g., 复杂 elementwise chain 替成单 `zeros_like(output)` cast / 重 reshape 替成 `identity` style no-effect op)
+- 保持 output shape / dtype / downstream consumption 不变
+- 测得的 wall-time 减少 = **该 step 在端到端中可减的上限**
+- **upper bound 语义 only — 不作为 T1-T3 promote 决策依据**
+- Promote 决策见 § 7.3 ship 指标 (端到端 benchmark)
 
 报告内容必须同时含：
 
-- non-instrumented GatedDeltaNet 总耗时 (Layer 1)
-- instrumented GatedDeltaNet 总耗时 (Layer 2, 含 barrier overhead)
-- per-step breakdown (Layer 2)
-- instrumented / non-instrumented slowdown ratio
-- top-3 候选 ablation 结果 (Layer 3)
+- non-instrumented GatedDeltaNet 总耗时 (entry/exit eval only, no per-step barrier)
+- Layer 1 instrumented GatedDeltaNet 总耗时
+- Layer 2 instrumented GatedDeltaNet 总耗时 (含 per-step barrier)
+- Layer 2 per-step breakdown
+- Layer 2 / non-instrumented slowdown ratio
+- Layer 3 top-3 候选 shape-preserving cost ablation results (标记 **upper bound**)
+- 每个 PP 1 warmup + 3 measured runs median
 
 ### 3.3 输出内容
 
@@ -174,9 +198,9 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 ### 3.4 验证
 
 - profile harness compile + 跑通 PP=2048
-- Layer 1 (entry+exit barrier only) GatedDeltaNet 总耗时 - 非 instrumented PP=2048 总耗时 占比 ≥ 10% 才有 T1-T3 价值 (P5f baseline 1844 tok/s → 1.111s, 10% = 111 ms)
+- Layer 1 (entry+exit barrier only) GatedDeltaNet 总耗时 / 非 instrumented PP=2048 总耗时 占比 ≥ 10% 才有 T1-T3 价值 (P5f baseline 1844 tok/s → 1.111s, 10% = 111 ms)
 - Layer 2 per-step 累计 ≤ Layer 2 GatedDeltaNet 总 wall-clock × 1.2 (sanity)
-- Layer 3 top-3 ablation 中至少 1 个 cut > 5% Layer 1 baseline 才推进 T1-T3 (否则 P5g 可能 scope 不足，回 Boss 决策)
+- Layer 3 shape-preserving ablation 中至少 1 个 upper-bound cut > 5% Layer 1 baseline 才推进 T1-T3 (否则 P5g 可能 scope 不足，回 Boss 决策)。**注**：upper bound 仅作 T0/T1 优化值得性诊断，不作 ship 依据。
 
 ### 3.5 Feature flag 完整启用命令
 
@@ -199,31 +223,42 @@ cargo test -p ironmlx --release --features p5g-profile \
 
 外部 review 4 个候选 + 我读代码后补充。注意 conv_state 在 ironmlx 已经是 `[B, kernel_size-1, conv_dim]` trimmed window (kernel=4 → 3 tokens, 不是 full history)，所以 C2 优化思路只针对 stateful conv path 重设计，**不是**缩短 concat 长度。
 
-| 候选 | 源码 | 优化思路 |
+| 候选 | 源码 | 优化思路 (op-level only, 见 scope gate 下) |
 |---|---|---|
 | **C1 compute_g 链** | line 527-539 (Step 5) | (a) token-invariant 常量预计算缓存（`-exp(a_log)` cast to f32 + neg 只算一次跨多 forward）; (b) softplus stabilised 链 fuse（logaddexp / where / mul / exp 合并）；(c) 可能 `mlx::fast` 已有 softplus / silu fused op 可直接复用 |
-| **C2 stateful causal depthwise conv** | line 412-423 (Step 2a) + `core/cache/gated_delta.rs:48` | 避免 `concatenate(conv_state, qkv)` 本身。设计 stateful causal depthwise conv path: conv kernel 在 step-stream 上滚动，conv_state 不作显式 concat 输入。需评估 Metal/kernel-level fused conv 可行性。**不**做"只 concat n_keep tokens" — conv_state 已是 trimmed 3-token window |
-| **C3 conv1d + silu fusion** | line 425-428 (Step 2b) | 把 conv1d + sigmoid + mul 三 op 合并成 fused conv-with-silu (检查 `mlx::fast` 或可写 fast op) |
-| **C4 t_arr 重建消除** | line 570-571 (Step 7c) | 把 0-dim int32 `t_arr = ((seq,), ()).try_into()` 预计算并缓存（按 seq 长度组 keyed lookup），或者改 Metal kernel 接受 const argument |
+| **C2 stateful causal depthwise conv** | line 412-423 (Step 2a) + `core/cache/gated_delta.rs:48` | 避免 `concatenate(conv_state, qkv)` 本身。设计 stateful causal depthwise conv path: conv kernel 在 step-stream 上滚动，conv_state 不作显式 concat 输入。**注**：理想 path 涉及 conv kernel rewrite — 触发 Scope gate (见下) |
+| **C3 conv1d + silu fusion** | line 425-428 (Step 2b) | 优先：检查 `mlx::fast` 是否已有 fused conv-with-silu / silu 等 op 直接复用 (op-level)。若需写新 fast op 或新 Metal kernel — 触发 Scope gate |
+| **C4 t_arr 重建消除** | line 570-571 (Step 7c) | 把 0-dim int32 `t_arr = ((seq,), ()).try_into()` 预计算并缓存（按 seq 长度组 keyed lookup）— 纯 Rust/op level，不触发 gate。若改 Metal kernel signature 接受 const argument — 触发 Scope gate |
 
-T0 profile (Layer 3 ablation) 数据决定哪些进 T1-T3。每个 Tn ≥ 5% per-PP improvement (Layer 1 baseline) 才 promote；< 5% revert。
+**Scope gate (Boss 决策门)**: P5g 默认只动 Rust/MLX op-level / 常量缓存 / 已有 `mlx::fast` op 复用 / graph shape 调整。**若 T0 / T1 实施过程中证明必须新增或重写 Metal kernel 才能拿到主要 ROI，必须暂停 P5g 实施 + 找 Boss 决策**（是否扩 P5g scope 到 kernel-level，或推到独立 phase）。这防止从 op-level refactor 不知觉扩展到 kernel rewrite。
+
+Promote 决策见 § 7.3 (端到端 benchmark, ship 指标)。Layer 3 upper-bound cut 仅用于决定该候选是否值得实施 T1-T3，不作 ship 依据。
 
 ### 4.2 单 task 实施模板（每个 Tn 同结构）
 
-```
+```text
 Step Tn.1: 读源码确认 op 序列（per T0 profile 指向）
 Step Tn.2: 实施优化（修改 gated_delta_net.rs）
 Step Tn.3: cargo build + fmt + clippy 全 clean
 Step Tn.4: p5_qwen35_moe_smoke 跑 (argmax=11 sentinel)
 Step Tn.5: p5_qwen35_moe_batched 跑 (B=2 row-equiv)
-Step Tn.6: PP=128 + PP=512 quick smoke (iron-bench runs=3 warmup=1, 验证短 prompt
-           prefill 无 regression — 防止仅看长 prompt 优化漏检 short-PP 退化)
-Step Tn.7: PP=2048/4096/8192/16384 quick sweep (runs=3 warmup=1)
-Step Tn.8: Decode TG smoke (PP=128/2048 max-tokens=32, 验证 decode TG 不 regression)
-Step Tn.9: 决策 promote / revert based on > 5% threshold per PP for long prompt
-           AND no regression on PP=128/512 AND no decode TG regression
-Step Tn.10: commit (promote 时含实测 numbers; revert 时含负 ROI + 归因)
+Step Tn.6: iron-bench PP=128 + PP=512 prefill smoke (runs=3 warmup=1)
+Step Tn.7: iron-bench PP=2048/4096/8192/16384 prefill sweep (runs=3 warmup=1)
+Step Tn.8: iron-bench Decode TG smoke (PP=128/2048 max-tokens=32)
+Step Tn.9: Promote decision per § 7.3 ship metrics (端到端 benchmark only):
+           - long-prompt PP=2048/4096/8192/16384 geometric-mean prefill > 5%
+           - 每个 long PP 单点 regression < 2%
+           - PP=128/512 prefill regression < 2%
+           - decode TG regression < 2%
+           - sentinel + batched + http_smoke + sweep_full ALL PASS
+           - 否则 revert
+Step Tn.10: commit (promote: 含实测 numbers per metric; revert: 含负 ROI + 归因)
 ```
+
+**指标 namespace 区分** (避免歧义):
+
+- **诊断指标** (用于 T0/T1 优化值得性判断): GatedDeltaNet 内部 wall-time cut 比例 (Layer 1 baseline 对比 / Layer 3 upper bound)。**不**作为 ship 依据。
+- **Promote (ship) 指标** (用于 T1-T3 promote / revert 决策): § 7.3 端到端 iron-bench benchmark。**唯一** ship 依据。
 
 ### 4.3 数值稳定性 sensitivity
 
@@ -261,43 +296,50 @@ P5g 新增（若 T0 / T1-T3 涉及 Metal kernel 改动时）：
 
 ## § 7 Acceptance Criteria
 
-### 7.1 Performance target ceiling 推导
+### 7.1 Performance target ceiling 推导 (假设示例，不作 final target)
 
 P5g 只优化 GatedDeltaNet — 物理上的 end-to-end wall-time 减少上限由 GatedDeltaNet 在 prefill 总 wall-time 的占比 × GatedDeltaNet 内部优化的 cut 比例共同决定。
 
-以 PP=2048 为例 (P5f baseline 1844 tok/s = 1.111s):
+以 PP=2048 为例 (P5f baseline 1844 tok/s = 1.111s) 假设性 ceiling 表：
 
-| GatedDeltaNet 占比 (待 T0a 实测) | GatedDeltaNet 内部 cut 30% | cut 50% | cut 70% |
+| GatedDeltaNet 占比 (待 T0a 实测) | cut 30% | cut 50% | cut 70% |
 |---:|---:|---:|---:|
-| 假设 20% (P5e T0 旧数据外推) | 1965 tok/s (+6.6%) | 2057 tok/s (+11.5%) | 2155 tok/s (+16.9%) |
-| 假设 25% (cut 比 ~P5f 前略大) | 1996 tok/s (+8.2%) | 2104 tok/s (+14.1%) | 2220 tok/s (+20.4%) |
+| 假设 15% | 1934 tok/s (+4.9%) | 1992 tok/s (+8.0%) | 2055 tok/s (+11.4%) |
+| 假设 20% | 1965 tok/s (+6.6%) | 2057 tok/s (+11.5%) | 2155 tok/s (+16.9%) |
+| 假设 25% | 1996 tok/s (+8.2%) | 2104 tok/s (+14.1%) | 2220 tok/s (+20.4%) |
 | 假设 30% | 2027 tok/s (+9.9%) | 2154 tok/s (+16.8%) | 2293 tok/s (+24.3%) |
 
-P5e T0 profile 报 GatedDeltaNet ~20% at PP=2048 (P5e baseline 921 tok/s 时), P5f 已 ship 但只动 Scheduler padding (不影响 GS 路径)，所以 PP=2048 GS 路径 GatedDeltaNet 占比应仍接近 20%。**最 realistic P5g target ≈ +10-15% PP=2048 (1844 → ~2000-2100 tok/s)**, 不是原 +35%。
+**重要**: 本表仅作 P5g target 数学结构的示例。**不外推**当前 HEAD GatedDeltaNet 占比 — P5e T0 profile 20% 是 P5e baseline 921 tok/s + per-op instrumented direct call 路径的占比, P5f baseline 1844 tok/s 是 HTTP path no-instrument, 两组数据测量路径 / instrumentation 状态 / 基线均不同, **不能直接外推**。Final target 必须由 T0.a 实测当前 HEAD GatedDeltaNet 占比锁定。
 
-### 7.2 Provisional target (待 T0a 锁定)
+### 7.2 Provisional target (TBD by T0.a)
 
-| PP | Current P5f shipped | P5g provisional target | Stretch (omlx+10%) | P5g 完后 vs stretch |
-|---:|---:|---:|---:|---|
-| 128 | 953 | persists (≥950, no regression) | 1197 | 79% (留 P5h) |
-| 512 | 1577 | persists (≥1570, no regression) | 2886 | 55% (留 P5h) |
-| 2048 | 1844 | **≥ 2050 (+11%)** | 4649 | 44% (留 P5h) |
-| 4096 | 1827 | ≥ 2030 (+11%) | 4861 | 42% (留 P5h) |
-| 8192 | 1723 | ≥ 1910 (+11%) | 4687 | 41% (留 P5h) |
-| 16384 | 1598 | ≥ 1770 (+11%) | 4036 | 44% (留 P5h) |
+P5g final target 待 T0.a 实测 + T0.c ablation 后 lock in。当前 spec 阶段不预设 P5g target 数字，避免基于不可靠外推。
 
-**T0a 完成后必须做的事**: 用 Layer 1 实测的 GatedDeltaNet 真实占比 + T0c ablation 估的可达 cut 比例，回写本表锁定 final target。如果 GatedDeltaNet 占比 < 15% (P5e 后续优化使其下降)，则需 Boss 决策是否调整 P5g scope 或合并到 P5h。
+T0.a 完成后必须做的事：
 
-### 7.3 最低 success bar
+1. 用 Layer 1 实测的当前 HEAD GatedDeltaNet 真实占比 (PP=2048/4096/8192/16384 各档)
+2. 用 Layer 3 shape-preserving cost ablation 估每个候选可达 upper-bound cut 比例
+3. 套 § 7.1 数学结构推导每档 PP 的 P5g realistic target
+4. 写回本节 § 7.2 锁定 final target table
+5. 如果 GatedDeltaNet 占比 < 10% (即 P5e/P5f 后续优化使其相对下降到 § 3.4 sanity 阈值之下), 需 Boss 决策是否调整 P5g scope 或合并到 P5h
 
-- T1-T3 至少 1 个 optimization promote (>5% per-PP improvement on long-prompt PP=2048-16384)
-- 全 PP 段 (含 PP=128/512) 无 prefill regression > 2%
-- Decode TG 无 regression > 2% (PP=16384 decode +10.3% over omlx 必须保持)
-- sentinel + batched + http_smoke + sweep_full 全 PASS
+P5g final target 待锁定前，T1-T3 ship 决策仍按 § 7.3 ship 指标。
+
+### 7.3 Ship 指标 (T1-T3 promote / revert + P5g 整体 success bar)
+
+Promote (ship) 决策**唯一**指标 — 端到端 iron-bench benchmark:
+
+- **长 prompt prefill** PP=2048/4096/8192/16384 **geometric mean** prefill tok/s 提升 > 5%
+- **长 prompt 单点**: 每个 long PP 单 PP regression < 2%
+- **短 prompt prefill** PP=128/512: regression < 2%
+- **Decode TG**: 任何 PP decode TG regression < 2% (PP=16384 decode +10.3% over omlx 必须保持)
+- **正确性 gates**: sentinel argmax=11 + batched B=2 row-equiv + http_smoke + sweep_full 19/19 ALL PASS
+
+P5g 整体 success bar: T1-T3 中**至少 1 个**满足以上 ship 指标 promote。否则 P5g close-out 报告标 "no optimization promoted; T0 数据 + Layer 3 upper bound 数据归 P5h scope refresh"。
 
 ### 7.4 P5g close-out 必须
 
-quantify P5h scope drivers — 报告里明确 "剩余 gap 来自 GatedAttention 长 prompt O(S²) / chunk-size 调优空间 / Scheduler admission overhead 残余 / 其他"。
+Quantify P5h scope drivers — 报告里明确 "剩余 gap 来自 GatedAttention 长 prompt O(S²) / chunk-size 调优空间 / Scheduler admission overhead 残余 / 其他"。包含数据：T0.a 实测的当前 HEAD GatedDeltaNet 占比、T0.c ablation 估的可达 cut、T1-T3 实际 promote 的 end-to-end ROI。
 
 ## § 8 P5h preview / Future phases（out of P5g scope）
 
