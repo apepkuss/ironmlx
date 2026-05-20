@@ -4,12 +4,12 @@
 |---|---|
 | 日期 | 2026-05-20 |
 | 状态 | Brainstorming approved，准备 writing-plans |
-| 范围 | `ironmlx/src/nn/gated_delta_net.rs` 内部 op-level 优化（profile-driven）。聚焦 GatedDeltaNet (linear-attn, 30/40 layers, T0 profile 20% at PP=2048)。 |
+| 范围 | `ironmlx/src/nn/gated_delta_net.rs` 内部 op-level 优化（profile-driven）。聚焦 GatedDeltaNet (linear-attn, 30/40 layers; historical P5e T0 profile showed ~20% at PP=2048 with direct-call instrumented baseline — current HEAD occupancy must be re-measured by T0.a)。 |
 | 工作分支 | `ironmlx-p5g-perf`（新开，base HEAD `d74c405` = P5f close-out polish） |
 | 上游分支 | 待定（P5g close-out 时 Boss 决定，可能跟 P5f 合并后再 merge 到 `ironmlx-p5-moe`） |
 | 硬件 | M5 Max + 128 GB unified |
 | 验证模型 | `mlx-community/Qwen3.5-35B-A3B-4bit`（PP=128/512/2048/4096/8192/16384） |
-| 验收 | profile-driven 优化项至少 1 个 ship（>5% per-PP improvement）；全 PP 段无 prefill/decode regression；sentinel + batched + sweep_full 全 PASS。 |
+| 验收 | profile-driven 优化项至少 1 个 ship 满足 § 7.3 端到端 ship 指标（**geometric mean prefill > 5% on PP=2048/4096/8192/16384 AND 各档单点 regression < 2%**）；全 PP 段无 prefill/decode regression > 2%；sentinel + batched + http_smoke + sweep_full 全 PASS。 |
 | 显式 out-of-scope | GatedAttention 优化（留 P5h）；long-prompt chunk-size sweep（P5h）；router bypass（P5h 条件性）；multi-request batching（P5h/P6+ per Boss 2026-05-19 directive）；Metal kernel rewrite（优先 op-level，profile 不够再 expand）。 |
 | 性能目标 | **TBD by T0.a** — final target 待 T0.a 实测当前 HEAD GatedDeltaNet 真实占比 + T0.c shape-preserving ablation upper bound 后由 § 7.2 锁定。**不外推 P5e 旧数据**（P5e T0 instrumented direct call + 921 tok/s 基线跟 P5f HTTP 1844 tok/s baseline 测量路径不同）。Ship 决策按 § 7.3 端到端 iron-bench benchmark：长 prompt geometric mean prefill > 5% AND 各档 regression < 2%。P5f+P5g+P5h+ 联合追"全 PP 段 omlx+10%" ultimate target，P5g 单 phase 不强求达成。 |
 
@@ -17,22 +17,22 @@
 
 ### 1.1 P5f close-out 数据（baseline，HEAD `d74c405`）
 
-来源：`reports/p5f-final-results.md`（commit `8666798` + polish `d74c405`），M5 Max 128 GB，iron-bench HTTP path。
+来源：`reports/p5f-final-results.md` § 2 (commit `8666798` + polish `d74c405`)，M5 Max 128 GB，iron-bench HTTP path。**数字与 `reports/p5f-final-results.md` 严格同步**（P5g 是 P5f close-out 之上推进，必须用 P5f close-out 重测的 omlx 数字而非 P5e three-way bench 旧数字）。
 
 P5f 已 ship T1 (CLI default `b_max=4 → 1`)：
 
 | PP | P5e baseline | P5f shipped (b_max=1) | omlx | omlx+10% target | P5f vs target |
 |---:|---:|---:|---:|---:|---|
-| 128 | 390 | 953 (2.44×) | 1088 | 1197 | 79% |
-| 512 | 491 | 1577 (3.21×) | 2623 | 2886 | 55% |
-| 2048 | 1842 | 1844 | 4227 | 4649 | **40%** |
-| 4096 | 1773 | 1827 | 4419 | 4861 | **38%** |
-| 8192 | 1725 | 1723 | 4261 | 4687 | **37%** |
-| 16384 | 1548 | 1598 | 3669 | 4036 | **40%** |
+| 128 | 390 | 953 (2.44×) | 1078 | 1186 | −19.6% |
+| 512 | 491 | 1577 (3.21×) | 2635 | 2898 | −45.6% |
+| 2048 | 1842 | 1844 | 4230 | 4653 | **−60.4%** |
+| 4096 | 1773 | 1827 | 4413 | 4855 | **−62.4%** |
+| 8192 | 1725 | 1723 | 4347 | 4782 | **−64.0%** |
+| 16384 | 1548 | 1598 | 3865 | 4252 | **−62.4%** |
 
-**关键**：PP=2048-16384 prefill 距 omlx+10% target 仍 60-63% gap；P5f T1 (Scheduler padding 消除) 不影响 GS path (PP=2048+ 走 GS B=1)，gap 全部来自 **model forward 自身**。
+**关键**：PP=2048-16384 prefill 距 omlx+10% target 仍 60-64% gap；P5f T1 (Scheduler padding 消除) 不影响 GS path (PP=2048+ 走 GS B=1)，gap 全部来自 **model forward 自身**。
 
-PP=16384 decode TG 已超 omlx +10.3% (112.18 vs 101.67)，P5g 不动 decode 主路径（除非 profile 显示 GatedDeltaNet 也是 decode 瓶颈）。
+PP=16384 decode TG 已超 omlx +10.3% (`reports/p5f-final-results.md` § 3 报 112.18 vs 101.67)，P5g 不动 decode 主路径（除非 profile 显示 GatedDeltaNet 也是 decode 瓶颈）。
 
 ### 1.2 T0 profile data（`reports/p5e-t0-profile.md` commit `f47d471`）
 
@@ -110,7 +110,8 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 │   ├─ implement specific op change                          │
 │   ├─ sentinel + batched + http_smoke                       │
 │   ├─ iron-bench validate (PP=2048+ delta)                  │
-│   └─ commit OR revert (per >5% per-PP threshold)           │
+│   └─ commit OR revert (per § 7.3 ship metric: geomean >5%   │
+│                          + per-PP regression < 2%)          │
 │                                                            │
 │         ↓                                                  │
 │                                                            │
@@ -174,15 +175,22 @@ Timing 协议 (timer 边界精确):
 - **upper bound 语义 only — 不作为 T1-T3 promote 决策依据**
 - Promote 决策见 § 7.3 ship 指标 (端到端 benchmark)
 
+**重要命名澄清**: "Layer 1" 本身就是 instrumentation (entry/exit barrier), 不是真正 non-instrumented。严格说无法在完全无 instrumentation 下测单独 GatedDeltaNet wall time — 后者只能测整层 prefill 总 wall time。报告里区分三个量:
+
+- `whole-prefill baseline` — 整层 forward (无 GatedDeltaNet probe) 的完整 prefill wall time
+- `Layer 1 boundary-isolated GatedDeltaNet time` — entry drain + output eval 包夹的 GatedDeltaNet 边界计时 (estimate, 含轻 instrumentation overhead)
+- `Layer 2 per-step barrier time` — per-step breakdown (含较重 barrier overhead, 相对占比 indicative only)
+
 报告内容必须同时含：
 
-- non-instrumented GatedDeltaNet 总耗时 (entry/exit eval only, no per-step barrier)
-- Layer 1 instrumented GatedDeltaNet 总耗时
-- Layer 2 instrumented GatedDeltaNet 总耗时 (含 per-step barrier)
+- `whole-prefill baseline` wall-time (无 GatedDeltaNet probe)
+- `Layer 1 boundary-isolated` GatedDeltaNet 总耗时
+- `Layer 2 per-step barrier` GatedDeltaNet 总耗时
 - Layer 2 per-step breakdown
-- Layer 2 / non-instrumented slowdown ratio
+- Layer 2 / Layer 1 slowdown ratio
 - Layer 3 top-3 候选 shape-preserving cost ablation results (标记 **upper bound**)
 - 每个 PP 1 warmup + 3 measured runs median
+- 显式 annotate: "Layer 1 是 boundary-isolated estimate, 不等于完全无 instrumentation 下 GatedDeltaNet 真实占比；真实 end-to-end ROI 仍以 T1-T3 实现后 iron-bench benchmark 为准"
 
 ### 3.3 输出内容
 
@@ -215,7 +223,14 @@ cargo test -p ironmlx --release --features p5g-profile \
   -- --ignored --test-threads=1 --nocapture
 ```
 
-正常 release build / clippy / sweep_full / bench 不带 `IRONMLX_P5G_PROFILE` env var，即使 `--features p5g-profile` 编译进 hook 也走 normal forward 路径，0 overhead。
+**Profile-disabled 性能要求**:
+
+- 不插入 eval barrier
+- 不分配 profile buffer
+- runtime flag (env var 解析) 应在启动时由 `OnceLock<bool>` (或类似一次性 cache 机制) 锁定 — **不要每次 forward 都 env lookup**
+- 目标: profile-disabled 时 normal forward 路径无可测量 overhead (per-call CPU branch 跳转可接受，env syscall 不可接受)
+
+正常 release build / clippy / sweep_full / bench 不带 `IRONMLX_P5G_PROFILE` env var，即使 `--features p5g-profile` 编译进 hook，按以上要求实现也走 normal forward 路径。
 
 ## § 4 T1-T3 — Profile-Driven Optimizations
 
@@ -242,18 +257,23 @@ Step Tn.2: 实施优化（修改 gated_delta_net.rs）
 Step Tn.3: cargo build + fmt + clippy 全 clean
 Step Tn.4: p5_qwen35_moe_smoke 跑 (argmax=11 sentinel)
 Step Tn.5: p5_qwen35_moe_batched 跑 (B=2 row-equiv)
-Step Tn.6: iron-bench PP=128 + PP=512 prefill smoke (runs=3 warmup=1)
-Step Tn.7: iron-bench PP=2048/4096/8192/16384 prefill sweep (runs=3 warmup=1)
-Step Tn.8: iron-bench Decode TG smoke (PP=128/2048 max-tokens=32)
-Step Tn.9: Promote decision per § 7.3 ship metrics (端到端 benchmark only):
-           - long-prompt PP=2048/4096/8192/16384 geometric-mean prefill > 5%
-           - 每个 long PP 单点 regression < 2%
-           - PP=128/512 prefill regression < 2%
-           - decode TG regression < 2%
-           - sentinel + batched + http_smoke + sweep_full ALL PASS
-           - 否则 revert
-Step Tn.10: commit (promote: 含实测 numbers per metric; revert: 含负 ROI + 归因)
+Step Tn.6: p5_qwen35_moe_http_smoke 跑
+Step Tn.7: iron-bench PP=128 + PP=512 prefill smoke (runs=3 warmup=1)
+Step Tn.8: iron-bench PP=2048/4096/8192/16384 prefill sweep (runs=3 warmup=1)
+Step Tn.9: iron-bench Decode TG smoke (PP=128/2048/16384 max-tokens=32)
+           ↑ PP=16384 关键: § 7.3 要求 "any PP decode TG regression < 2%"
+             并保持 +10.3% over omlx at PP=16384
+Step Tn.10: Promote decision per § 7.3 ship metrics (端到端 benchmark only):
+            - long-prompt PP=2048/4096/8192/16384 geometric-mean prefill > 5% AND
+            - 每个 long PP 单点 regression < 2% AND
+            - PP=128/512 prefill regression < 2% AND
+            - decode TG regression < 2% on PP=128/2048/16384 AND
+            - sentinel + batched + http_smoke ALL PASS (sweep_full at T4 close-out)
+            - 否则 revert
+Step Tn.11: commit (promote: 含实测 numbers per metric; revert: 含负 ROI + 归因)
 ```
+
+**Sweep_full per-Tn vs close-out only**: sweep_full 19/19 (~140-160s 每次, Qwen3.5-4B-MLX-4bit) 留 T4 close-out 跑一次，不在每 Tn 跑（per P5e/P5f precedent）。Tn 用 sentinel + batched + http_smoke 三个 MoE 集成测试覆盖正确性 gate。
 
 **指标 namespace 区分** (避免歧义):
 
@@ -327,15 +347,18 @@ P5g final target 待锁定前，T1-T3 ship 决策仍按 § 7.3 ship 指标。
 
 ### 7.3 Ship 指标 (T1-T3 promote / revert + P5g 整体 success bar)
 
-Promote (ship) 决策**唯一**指标 — 端到端 iron-bench benchmark:
+Promote (ship) 决策**唯一**指标 — 端到端 iron-bench benchmark。**Promote 必须全部满足**：
 
-- **长 prompt prefill** PP=2048/4096/8192/16384 **geometric mean** prefill tok/s 提升 > 5%
-- **长 prompt 单点**: 每个 long PP 单 PP regression < 2%
-- **短 prompt prefill** PP=128/512: regression < 2%
-- **Decode TG**: 任何 PP decode TG regression < 2% (PP=16384 decode +10.3% over omlx 必须保持)
-- **正确性 gates**: sentinel argmax=11 + batched B=2 row-equiv + http_smoke + sweep_full 19/19 ALL PASS
+- **长 prompt prefill geomean**: PP=2048/4096/8192/16384 **geometric mean** prefill tok/s 提升 > 5% (单一聚合指标，非"每个 PP 单点 >5%")
+- **长 prompt 单点 regression**: 每个 long PP 单点 prefill regression < 2% (容许 geomean 增益不均匀，但不容许任何单点显著退步)
+- **短 prompt prefill regression**: PP=128/512 各 < 2%
+- **Decode TG regression**: PP=128/2048/16384 promote smoke 各 < 2%；其中 PP=16384 必须保持 +10.3% over omlx (P5f close-out 已 ship 的优势)
+- **正确性 gates per Tn**: sentinel argmax=11 + batched B=2 row-equiv + http_smoke ALL PASS
+- **正确性 gates at close-out only**: sweep_full 19/19 (PP=16384 全 decode + B=2 batched + 4-way bench)
 
 P5g 整体 success bar: T1-T3 中**至少 1 个**满足以上 ship 指标 promote。否则 P5g close-out 报告标 "no optimization promoted; T0 数据 + Layer 3 upper bound 数据归 P5h scope refresh"。
+
+T4 close-out 额外补 full-PP decode TG sweep (含 PP=512/4096/8192) 验证 ship 指标 "any PP decode regression < 2%" 在全 PP 范围确认。
 
 ### 7.4 P5g close-out 必须
 
@@ -387,13 +410,18 @@ T0: GatedDeltaNet 独立 per-op profile (3-layer protocol per § 3.2)
     Commit
 
 T1: highest single-ROI optimization (by T0.c ranking)
-    Steps per § 4.2 implementation template (1-10):
-      build / fmt / clippy / smoke / batched / short-PP smoke /
-      long-PP quick sweep / decode TG smoke / promote-revert decision /
+    Steps per § 4.2 implementation template (Tn.1-Tn.11):
+      build / fmt / clippy / smoke / batched / http_smoke /
+      short-PP prefill smoke / long-PP prefill sweep /
+      decode TG smoke (PP=128/2048/16384) / promote-revert /
       commit
-    Promote 阈值: >5% on long-prompt PP (2048-16384) AND
-                  no >2% regression on PP=128/512 AND
-                  no >2% decode TG regression
+    Promote 阈值 per § 7.3 ship metrics (单一权威定义，全部满足):
+      - long-PP=2048/4096/8192/16384 geometric mean prefill > 5% AND
+      - long-PP 单点 prefill regression < 2% AND
+      - short-PP (128/512) prefill regression < 2% AND
+      - decode TG on PP=128/2048/16384 regression < 2% (16384 keep
+        +10.3% over omlx) AND
+      - sentinel + batched + http_smoke ALL PASS
     < threshold revert (per P5e/P5f precedent: 失败实验也 commit
     negative ROI doc 进 close-out 报告作记录)
 
@@ -402,16 +430,18 @@ T3: 3rd highest ROI optimization (same structure as T1)
 
 T4: P5g close-out
     - 跑同 reports/p5f-final-results.md style 4-way bench
+    - 跑 full-PP decode TG sweep (含 PP=512/4096/8192 补全 Tn promote
+      没覆盖的 PP, 验证 § 7.3 "any PP decode regression < 2%")
     - 写 reports/p5g-final-results.md (self-contained for offline analysis)
     - sweep_full 19/19 (Qwen3.5-4B-MLX-4bit)
-    - quantify P5h scope drivers
+    - quantify P5h scope drivers (per § 7.4)
     - commit
 ```
 
 ## § 11 References
 
 - [reports/p5f-final-results.md](../../../reports/p5f-final-results.md) — P5f close-out (baseline for P5g)
-- [reports/p5e-t0-profile.md](../../../reports/p5e-t0-profile.md) — GatedDeltaNet 20% T0 占比依据
+- [reports/p5e-t0-profile.md](../../../reports/p5e-t0-profile.md) — Historical P5e T0 profile (~20% GatedDeltaNet at PP=2048 on direct-call instrumented 921 tok/s baseline). **Not** used for P5g target extrapolation; T0.a must re-measure current HEAD occupancy on P5f HTTP path 1844 tok/s baseline.
 - [docs/superpowers/specs/2026-05-19-ironmlx-p5f-known-path-perf-design.md](2026-05-19-ironmlx-p5f-known-path-perf-design.md) — P5f spec（process precedent）
 - External review notes (not committed to repo per [feedback_no_unnecessary_docs]; substance internalized to § 1.3 candidates + § 4.1 优化思路)
 - `memory[no-spec-from-competitors]` — 实现独立
