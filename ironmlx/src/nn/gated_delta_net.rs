@@ -80,6 +80,13 @@ fn parse_layer_idx_from_prefix(prefix: &str) -> Option<i32> {
     prefix.split('.').nth(2).and_then(|s| s.parse::<i32>().ok())
 }
 
+// Module-level cache for ablate-t-arr mode: avoids per-call t_arr construction
+// by keying on `seq` (chunk size). Only compiled when p5g-profile feature is on.
+#[cfg(feature = "p5g-profile")]
+static T_ARR_ABLATION_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<i32, Array>>,
+> = std::sync::OnceLock::new();
+
 /// Configuration for [`GatedDeltaNet`].
 #[derive(Debug, Clone, Copy)]
 pub struct GatedDeltaNetConfig {
@@ -595,6 +602,15 @@ impl GatedDeltaNet {
         let conv_out = self.conv1d.forward_on(&conv_input, target)?;
         let conv_sig = conv_out.sigmoid()?;
         let conv_out = &conv_out * &conv_sig;
+        // ablate-conv: replace conv_out with qkv passthrough (shape-preserving).
+        // qkv is [B, S, conv_dim] matching conv_out's shape exactly. Cache
+        // conv_state is NOT updated (Step 2c skips update below). Diagnostic only.
+        #[cfg(feature = "p5g-profile")]
+        let conv_out = if matches!(profile_mode(), ProfileMode::AblateConv) {
+            qkv.clone()
+        } else {
+            conv_out
+        };
         // Step 2b elapsed push
         #[cfg(feature = "p5g-profile")]
         {
@@ -624,60 +640,70 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        if let Some(c) = cache.as_deref_mut() {
-            let n_keep = self.cfg.conv_kernel_size - 1;
-            let conv_input_dims = conv_input.shape();
-            let total_len = conv_input_dims.as_slice()[1];
-            let conv_dim = self.cfg.conv_dim();
-            let new_conv_state = match per_row_lens {
-                Some(lens) if batch > 1 && !lens.iter().all(|&l| l + n_keep == total_len) => {
-                    // Per-row real-tail window starts at position `lens[i]`
-                    // in conv_input and spans `n_keep` rows. Express as a
-                    // single `take_along_axis` over axis 1 with index tensor
-                    // `[B, n_keep, 1]` (broadcasts to [B, n_keep, conv_dim]).
-                    // This collapses the previous per-row
-                    // `slice_strided_on + concatenate_on` (B+1 graph nodes
-                    // per layer per call) into one fusable op — the
-                    // per-row loop blocked downstream JIT fusion and
-                    // caused a 3.45x decode slowdown.
-                    //
-                    // The match guard `!lens.iter().all(|&l| l + n_keep == total_len)`
-                    // routes uniform-length batches to the seq-wide slice
-                    // fast path (the `_` arm), so this arm only fires when
-                    // at least one row has a true ragged tail.
-                    if lens.len() as i32 != batch {
-                        return Err(anyhow!(
-                            "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
-                            lens.len(),
-                            batch
-                        ));
-                    }
-                    // Bound check: l in [0, max_len] (= [0, total_len - n_keep]),
-                    // so l + j in [0, total_len) for j in [0, n_keep). Always
-                    // holds when prefill_admitted set lens[i] = prompt_lens[i]
-                    // with prompt_lens[i] <= max_len = seq.
-                    let mut idx_flat: Vec<u32> = Vec::with_capacity((batch * n_keep) as usize);
-                    for &l in lens {
-                        for j in 0..n_keep {
-                            idx_flat.push((l + j) as u32);
+        // ablate-conv: skip conv_state update (conv was not executed; conv_state
+        // would receive stale data from the bypassed conv_input path).
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_skip_conv_state_update = matches!(profile_mode(), ProfileMode::AblateConv);
+        #[cfg(not(feature = "p5g-profile"))]
+        let _p5g_skip_conv_state_update = false;
+        if !_p5g_skip_conv_state_update {
+            if let Some(c) = cache.as_deref_mut() {
+                let n_keep = self.cfg.conv_kernel_size - 1;
+                let conv_input_dims = conv_input.shape();
+                let total_len = conv_input_dims.as_slice()[1];
+                let conv_dim = self.cfg.conv_dim();
+                let new_conv_state = match per_row_lens {
+                    Some(lens) if batch > 1 && !lens.iter().all(|&l| l + n_keep == total_len) => {
+                        // Per-row real-tail window starts at position `lens[i]`
+                        // in conv_input and spans `n_keep` rows. Express as a
+                        // single `take_along_axis` over axis 1 with index tensor
+                        // `[B, n_keep, 1]` (broadcasts to [B, n_keep, conv_dim]).
+                        // This collapses the previous per-row
+                        // `slice_strided_on + concatenate_on` (B+1 graph nodes
+                        // per layer per call) into one fusable op — the
+                        // per-row loop blocked downstream JIT fusion and
+                        // caused a 3.45x decode slowdown.
+                        //
+                        // The match guard `!lens.iter().all(|&l| l + n_keep == total_len)`
+                        // routes uniform-length batches to the seq-wide slice
+                        // fast path (the `_` arm), so this arm only fires when
+                        // at least one row has a true ragged tail.
+                        if lens.len() as i32 != batch {
+                            return Err(anyhow!(
+                                "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
+                                lens.len(),
+                                batch
+                            ));
                         }
+                        // Bound check: l in [0, max_len] (= [0, total_len - n_keep]),
+                        // so l + j in [0, total_len) for j in [0, n_keep). Always
+                        // holds when prefill_admitted set lens[i] = prompt_lens[i]
+                        // with prompt_lens[i] <= max_len = seq.
+                        let mut idx_flat: Vec<u32> = Vec::with_capacity((batch * n_keep) as usize);
+                        for &l in lens {
+                            for j in 0..n_keep {
+                                idx_flat.push((l + j) as u32);
+                            }
+                        }
+                        let idx: Array = (&idx_flat[..], &[batch, n_keep, 1_i32][..])
+                            .try_into()
+                            .map_err(|e| {
+                                anyhow!(
+                                    "GatedDeltaNet::forward_on: idx try_into Array failed: {e:?}"
+                                )
+                            })?;
+                        mlx::ops::indexing::take_along_axis_on(&conv_input, &idx, 1, target)?
                     }
-                    let idx: Array = (&idx_flat[..], &[batch, n_keep, 1_i32][..])
-                        .try_into()
-                        .map_err(|e| {
-                            anyhow!("GatedDeltaNet::forward_on: idx try_into Array failed: {e:?}")
-                        })?;
-                    mlx::ops::indexing::take_along_axis_on(&conv_input, &idx, 1, target)?
-                }
-                _ => mlx::ops::indexing::slice(
-                    &conv_input,
-                    vec![0_i32, total_len - n_keep, 0].as_slice(),
-                    vec![batch, total_len, conv_dim].as_slice(),
-                )?,
-            };
-            c.update_conv(new_conv_state);
-        }
-        // Step 2c elapsed push
+                    _ => mlx::ops::indexing::slice(
+                        &conv_input,
+                        vec![0_i32, total_len - n_keep, 0].as_slice(),
+                        vec![batch, total_len, conv_dim].as_slice(),
+                    )?,
+                };
+                c.update_conv(new_conv_state);
+            }
+        } // end if !_p5g_skip_conv_state_update
+          // Step 2c elapsed push
         #[cfg(feature = "p5g-profile")]
         {
             if let Some(start) = _p5g_step_start_2c {
@@ -763,6 +789,16 @@ impl GatedDeltaNet {
         let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
         let inner = &neg_exp_alog * &sp;
         let g = inner.exp()?;
+        // ablate-compute-g: replace g with zeros_like(a) cast to Float32.
+        // Shape-preserving: g is [B, S, num_v_heads] same as a. Downstream
+        // kernel still receives a valid same-shape Array; numerics are invalid
+        // (diagnostic only).
+        #[cfg(feature = "p5g-profile")]
+        let g = if matches!(profile_mode(), ProfileMode::AblateComputeG) {
+            mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?
+        } else {
+            g
+        };
         // Step 5 elapsed push
         #[cfg(feature = "p5g-profile")]
         {
@@ -823,7 +859,28 @@ impl GatedDeltaNet {
             )?,
         };
 
-        // Step 7c: T as 0-dim int32 array
+        // Step 7c: T as 0-dim int32 array.
+        // ablate-t-arr: cache the Array keyed by seq to avoid per-call
+        // construction overhead. Uses OnceLock<Mutex<HashMap<i32, Array>>>
+        // so the same cached value is shared across all layers/calls with the
+        // same chunk size.
+        #[cfg(feature = "p5g-profile")]
+        let t_arr: Array = if matches!(profile_mode(), ProfileMode::AblateTArr) {
+            let cache = T_ARR_ABLATION_CACHE
+                .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+            let mut guard = cache.lock().unwrap();
+            if let Some(arr) = guard.get(&seq) {
+                arr.clone()
+            } else {
+                let arr: Array = (&[seq][..], ()).try_into()?;
+                guard.insert(seq, arr.clone());
+                arr
+            }
+        } else {
+            (&[seq][..], ()).try_into()?
+        };
+
+        #[cfg(not(feature = "p5g-profile"))]
         let t_arr: Array = (&[seq][..], ()).try_into()?;
 
         let in_dtype = x.dtype();
