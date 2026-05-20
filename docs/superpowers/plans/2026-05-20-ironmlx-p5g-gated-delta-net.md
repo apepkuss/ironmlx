@@ -534,7 +534,7 @@ source /tmp/p5g-env.sh
 cd "$REPO"
 cargo fmt
 cargo +nightly fmt --all -- --check 2>&1 | tail -3
-MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace --release -- -D warnings 2>&1 | tail -5
+MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace -- -D warnings 2>&1 | tail -5
 MLX_DIR=$HOME/.local/mlx cargo build --release 2>&1 | tail -3
 ```
 Expected: fmt clean, clippy 0 Rust warnings, release build PASS.
@@ -692,9 +692,9 @@ The 11 step labels (matching Step 0.14 harness `STEP_NAMES` and spec § 1.3 orde
 10. `7_kernel` — gated_delta_step Metal kernel dispatch (covers 7a-7e collectively)
 11. `8_norm_proj` — RmsNormGated(y, z) + reshape + out_proj
 
-`_p5g_step_elapsed.push(...)` must be invoked exactly 11 times in `forward_on` body, in the order above. Tests (Step 0.15) implicitly verify: Phase C aggregator expects `step_breakdown.split(",")` length == 11 and skips records with mismatched length, logging a naming-drift warning.
+`_p5g_step_elapsed.push(...)` must be invoked exactly 11 times in `forward_on` body, in the order above. Phase C aggregator (Step 0.16) requires `step_breakdown.split(",")` length == 11; missing or wrong-length step_breakdown is **fail-fast** (`raise RuntimeError` with PP / request_idx / record_idx context), not a warning. If the spec § 1.3 decomposition changes (e.g. fuses Steps 2a-2c into one or splits Step 7 into 7a/7b/7c/7d/7e), bump `STEP_NAMES` in the aggregator AND keep this list of 11 in sync.
 
-- [ ] Apply Edits. Identify 8 step boundaries in the existing forward_on body and insert the timer captures. Build:
+- [ ] Apply Edits. Insert 11 step timing captures at the boundaries listed above (1a / 1b / 2a / 2b / 2c / 3 / 4 / 5 / 6 / 7 / 8). Build:
 ```bash
 set -euo pipefail
 source /tmp/p5g-env.sh
@@ -930,7 +930,20 @@ fn spawn_server(profile_mode: Option<&str>, model_dir: &str, port: u16) -> Child
     cmd.spawn().expect("ironmlx serve spawn")
 }
 
-fn wait_for_ready(port: u16, max_seconds: u64) {
+/// Hard port-free check. Returns Err if the port is already bound — refuses
+/// to auto-kill, refuses to silently re-use a stale server's healthz. Done as
+/// a TCP bind (not just `lsof`) to test the OS-visible bind constraint that
+/// `cargo run ... serve` will see.
+fn assert_port_free(port: u16) -> std::io::Result<()> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    drop(listener); // release immediately so the server can bind next
+    Ok(())
+}
+
+/// Healthz poll with Result return so the caller can run shutdown + drainer
+/// join on failure instead of leaking the Child on panic. Caller must invoke
+/// shutdown_and_join on Err.
+fn wait_for_ready(port: u16, max_seconds: u64) -> Result<(), String> {
     let url = format!("http://127.0.0.1:{port}/healthz");
     let deadline = std::time::Instant::now() + Duration::from_secs(max_seconds);
     loop {
@@ -939,14 +952,24 @@ fn wait_for_ready(port: u16, max_seconds: u64) {
             .output()
         {
             if String::from_utf8_lossy(&out.stdout).trim() == "200" {
-                return;
+                return Ok(());
             }
         }
         if std::time::Instant::now() > deadline {
-            panic!("ironmlx serve did not become ready within {max_seconds}s");
+            return Err(format!(
+                "ironmlx serve did not become ready within {max_seconds}s at {url}"
+            ));
         }
         std::thread::sleep(Duration::from_secs(3));
     }
+}
+
+/// Best-effort shutdown helper for the failure paths: kill, wait, join drainer.
+/// Ignores errors — used right before a panic so we don't leak the Child.
+fn shutdown_and_join(mut server: Child, drainer: JoinHandle<()>) {
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = drainer.join();
 }
 
 /// Parse `[p5g-profile]` log lines from a stderr byte slice.
@@ -1016,9 +1039,43 @@ fn run_phase(
 
     for &pp in &PP_LIST {
         eprintln!("[p5g-t0] spawning fresh server for mode={mode:?} PP={pp}");
+
+        // Port pre-check — refuse to run against a stale server that might
+        // still be bound from a prior failed iteration. Auto-killing would
+        // be wrong (might be Boss's manual session); fail loud instead.
+        assert_port_free(port).unwrap_or_else(|e| {
+            panic!("port {port} not free before spawn for PP={pp}: {e}");
+        });
+
         let mut server = spawn_server(mode, model_dir, port);
-        wait_for_ready(port, 300);
+
+        // CRITICAL: start the stderr drainer BEFORE wait_for_ready. Server
+        // startup (model load + MLX init + cargo metadata) can emit enough
+        // log output to fill the default 64KB pipe buffer; without an active
+        // drainer the server blocks on write, healthz never goes up, and
+        // wait_for_ready times out. Order: spawn → drainer → wait → bench.
         let (stderr_buf, drainer) = spawn_stderr_drainer(&mut server);
+
+        // wait_for_ready may time out (Err). Caller path: cleanup + panic.
+        if let Err(e) = wait_for_ready(port, 300) {
+            shutdown_and_join(server, drainer);
+            panic!("[p5g-t0] PP={pp}: {e}");
+        }
+
+        // Detect server that exited before healthz came up (spawn failed, model
+        // not found, etc.). Without this check, wait_for_ready could time out
+        // on a dead server and the failure would look like a startup hang.
+        match server.try_wait() {
+            Ok(Some(status)) => {
+                let _ = drainer.join();
+                panic!("[p5g-t0] PP={pp}: ironmlx serve exited before bench with {status}");
+            }
+            Ok(None) => {} // still running — normal
+            Err(e) => {
+                shutdown_and_join(server, drainer);
+                panic!("[p5g-t0] PP={pp}: try_wait failed: {e}");
+            }
+        }
 
         let out = iron_bench_run(port, model_dir, pp);
         let bench_ok = out.status.success();
@@ -1171,7 +1228,7 @@ JSON output shape (full schema for Step 0.18 report writer):
 }
 ```
 
-Records still contain warmup + measured request entries inter-mixed. Step 0.18 aggregator uses iron-bench's `--warmup 1` and `--runs 3` knowledge: with 30 GDN layers per forward, expect approximately `(WARMUP + RUNS) * 30 = 120` Layer 1 records per PP per phase (plus any decode-phase forwards depending on iron-bench behavior — measured separately if needed).
+Records contain warmup + measured request entries inter-mixed. T0 uses `--max-tokens 1` so any `seq==1` decode records are minimized (and filtered in Step 0.16 via `seq > 1`). Per-PP record count is `(WARMUP + RUNS) × chunks_per_request × N_LAYERS`, where `chunks_per_request = ceil(PP / prefill_chunk_size)`. For the default `prefill_chunk_size=2048` and PP=2048/4096/8192/16384, chunks_per_request = 1/2/4/8, so a Phase B/C per-PP record count is 1×4×30 / 2×4×30 / 4×4×30 / 8×4×30 = 120 / 240 / 480 / 960. Step 0.15 validation + Step 0.16 aggregator both group records by the composite request-start marker; do not key on raw record count.
 
 - [ ] Create the file with this content. **Hard check**: grep for placeholders / stubs before committing.
 
@@ -1229,6 +1286,29 @@ d = json.load(open("/tmp/p5g-t0-phases.json"))
 RUNS = d["runs"]
 WARMUP = d["warmup"]
 N_LAYERS = 30  # spec § 1.0: 30 GDN layers / 40 total
+ABLATION_MODES = {"ablate-compute-g", "ablate-conv", "ablate-t-arr"}
+
+
+def validate_request_group(phase_key, pp_str, group_idx, group):
+    """Each measured request must have len % N_LAYERS == 0 and each chunk
+    (N_LAYERS records) must cover exactly N_LAYERS distinct layer values."""
+    request_size = len(group)
+    if request_size % N_LAYERS != 0:
+        raise AssertionError(
+            f"{phase_key} PP={pp_str} measured request {group_idx}: "
+            f"{request_size} records, not a multiple of {N_LAYERS}"
+        )
+    n_chunks = request_size // N_LAYERS
+    for chunk_idx in range(n_chunks):
+        chunk = group[chunk_idx * N_LAYERS : (chunk_idx + 1) * N_LAYERS]
+        chunk_layers = {int(r["layer"]) for r in chunk}
+        if len(chunk_layers) != N_LAYERS:
+            raise AssertionError(
+                f"{phase_key} PP={pp_str} measured request {group_idx} chunk {chunk_idx}: "
+                f"expected {N_LAYERS} unique layers, got {len(chunk_layers)}: {sorted(chunk_layers)}"
+            )
+    return n_chunks
+
 
 for phase_key in ("phase_a_by_pp", "phase_b_by_pp", "phase_c_by_pp"):
     assert phase_key in d, f"missing {phase_key}"
@@ -1271,25 +1351,46 @@ for phase_key in ("phase_a_by_pp", "phase_b_by_pp", "phase_c_by_pp"):
         assert n_requests == expected, \
             f"{phase_key} PP={pp_str}: expected {expected} requests (WARMUP+RUNS), got {n_requests} (L_MIN={l_min}, layers_seen={sorted(layers_seen)})"
 
-        # Layer 1 / Layer 2 sanity: each chunk forward emits N_LAYERS records.
-        # Check first measured request has a multiple of N_LAYERS records, AND
-        # that within each chunk the layer set is exactly the GDN layer set.
-        first_measured = request_starts[WARMUP]
-        next_start = request_starts[WARMUP + 1] if len(request_starts) > WARMUP + 1 else len(prefill_recs)
-        request_size = next_start - first_measured
-        assert request_size % N_LAYERS == 0, \
-            f"{phase_key} PP={pp_str}: first measured request has {request_size} records, not a multiple of {N_LAYERS}"
-        n_chunks = request_size // N_LAYERS
-        # Each chunk must have N_LAYERS distinct layer values.
-        for chunk_idx in range(n_chunks):
-            chunk = prefill_recs[first_measured + chunk_idx * N_LAYERS:
-                                 first_measured + (chunk_idx + 1) * N_LAYERS]
-            chunk_layers = {int(r["layer"]) for r in chunk}
-            assert len(chunk_layers) == N_LAYERS, \
-                f"{phase_key} PP={pp_str} chunk {chunk_idx}: expected {N_LAYERS} unique layers, got {len(chunk_layers)}: {sorted(chunk_layers)}"
-        print(f"  [ok] {phase_key} PP={pp_str}: L_MIN={l_min}, {n_requests} requests, first measured has {n_chunks} chunks × {N_LAYERS} layers = {request_size} records")
+        # Validate ALL measured request groups (not just the first) — a partial
+        # record drop in run #2/#3/etc would otherwise slip through.
+        request_boundaries = request_starts + [len(prefill_recs)]
+        n_chunks_first = None
+        for i in range(WARMUP, WARMUP + RUNS):
+            group = prefill_recs[request_boundaries[i] : request_boundaries[i + 1]]
+            n_chunks = validate_request_group(phase_key, pp_str, i - WARMUP, group)
+            if n_chunks_first is None:
+                n_chunks_first = n_chunks
+            elif n_chunks != n_chunks_first:
+                # Chunked PP must produce identical chunk counts per request.
+                raise AssertionError(
+                    f"{phase_key} PP={pp_str}: measured request {i-WARMUP} has {n_chunks} chunks, "
+                    f"first measured had {n_chunks_first} — inconsistent chunking"
+                )
+        print(f"  [ok] {phase_key} PP={pp_str}: L_MIN={l_min}, {n_requests} requests, "
+              f"all {RUNS} measured requests have {n_chunks_first} chunks × {N_LAYERS} layers")
 
-print("[ok] T0 phases JSON validates: all PP populated, prefill records present, request boundaries align")
+# Phase D: invariant per Step 0.7 mode-gate — `ablate-*` modes skip entry/exit
+# eval barriers AND skip tracing::info!. Records MUST be empty. If non-empty,
+# the AblateX implementation accidentally inherited Layer1/Layer2 instrumentation,
+# Phase D delta vs Phase A is contaminated, and the entire upper-bound ranking
+# is suspect — fail fast.
+assert "phase_d_by_pp" in d, "missing phase_d_by_pp"
+phase_d_modes = set(d["phase_d_by_pp"].keys())
+assert phase_d_modes == ABLATION_MODES, \
+    f"phase_d_by_pp modes={sorted(phase_d_modes)}, expected={sorted(ABLATION_MODES)}"
+for mode, by_pp in d["phase_d_by_pp"].items():
+    for pp_str, leaf in by_pp.items():
+        tps = leaf["pp_tps_median"]
+        assert tps and tps > 0, f"phase_d {mode} PP={pp_str}: bad pp_tps_median={tps}"
+        recs = leaf["records"]
+        assert recs == [], (
+            f"phase_d {mode} PP={pp_str}: emitted {len(recs)} profile records; "
+            f"AblateX modes must be barrier-free / log-free (Step 0.7 mode-gate broken). "
+            f"Phase D upper-bound is contaminated — do NOT trust the ranking."
+        )
+print(f"[ok] Phase D barrier-free invariant holds across {len(phase_d_modes)} modes × {len(d['phase_d_by_pp'][next(iter(phase_d_modes))])} PPs")
+
+print("[ok] T0 phases JSON validates: A/B/C populated, prefill records present, request boundaries align, D barrier-free")
 EOF
 ```
 
@@ -1297,7 +1398,9 @@ If the validation script fails:
 - `0 records with seq>1` → instrumentation broken (only decode emitted; check Step 0.7 entry barrier triggers on prefill forward).
 - `layer=-1` → `profile_layer_idx` parsing failed in `from_loader` (Step 0.4 prefix parser); fix BEFORE retrying — all numeric output downstream depends on correct layer attribution.
 - `expected N requests, got M` → stderr drainer dropped records OR boundary detection broken (check Step 0.7 offset capture + the composite marker logic).
+- `measured request N has K chunks, first measured had M` → mid-run record loss; investigate stderr drainer + iron-bench request determinism.
 - `not a multiple of N_LAYERS` / `expected N_LAYERS unique layers` → some GDN layer's forward_on bypassed instrumentation (check Step 0.4 `from_loader` field init).
+- `phase_d ... emitted N profile records; AblateX modes must be barrier-free` → Step 0.7 mode-gate accidentally still triggers for AblateX. Re-check `matches!(mode, ProfileMode::Layer1 | ProfileMode::Layer2)` is correct in both entry barrier AND any subordinate code (`_p5g_step_start`, exit log call) before retrying.
 
 STOP and re-investigate before proceeding to Step 0.16. Do NOT plough through with bad data.
 
@@ -1661,7 +1764,7 @@ source /tmp/p5g-env.sh
 cd "$REPO"
 cargo fmt
 cargo +nightly fmt --all -- --check
-MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace --release -- -D warnings 2>&1 | tail -5
+MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace -- -D warnings 2>&1 | tail -5
 MLX_DIR=$HOME/.local/mlx cargo build --release 2>&1 | tail -3
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --test p5_qwen35_moe_smoke -- --ignored --test-threads=1 2>&1 | tail -5
@@ -1684,19 +1787,27 @@ git status --short
 git commit -m "$(cat <<'EOF'
 test(p5g-t0): 4-phase GatedDeltaNet profile harness + report + spec § 7.2 lock
 
-Adds tests/p5g_t0_gated_delta_profile.rs — HTTP-path harness that:
-  Phase A: spawns ironmlx serve (no profile mode), runs iron-bench
-           PP=2048/4096/8192/16384 (1 warmup + 3 measured median),
-           captures whole-prefill baseline tok/s
-  Phase B: spawns server with IRONMLX_P5G_PROFILE_MODE=layer1,
-           parses [p5g-profile] log lines, aggregates 30-layer GDN
-           per-PP total + per-layer median
-  Phase C: spawns server with IRONMLX_P5G_PROFILE_MODE=layer2,
-           parses step_breakdown=, aggregates per-step time across
-           all GDN forward calls, computes Layer 2/Layer 1 slowdown
-  Phase D: per top-3 candidates from C, spawns server with
-           IRONMLX_P5G_PROFILE_MODE=ablate-<X>, records wall-time
-           delta vs Phase A baseline (= upper bound)
+Adds tests/p5g_t0_gated_delta_profile.rs — HTTP-path harness that
+per-PP spawns a fresh server (4 PP × 6 phases = 24 spawns total) and:
+  Phase A: NO profile mode, --max-tokens 1, iron-bench
+           PP=2048/4096/8192/16384 (1 warmup + 3 measured), captures
+           whole-prefill baseline tok/s with zero instrumentation
+           overhead
+  Phase B: IRONMLX_P5G_PROFILE_MODE=layer1, parses [p5g-profile] log
+           lines via post-shutdown drainer join, aggregates per-request
+           GDN total (sum across all chunks × 30 layers, median across
+           RUNS measured requests) + per-layer per-request median +
+           occupancy estimate vs Phase A wall-time
+  Phase C: IRONMLX_P5G_PROFILE_MODE=layer2, parses 11-field
+           step_breakdown= appended to the single-line log per forward;
+           per-step time = sum across chunks × layers per request;
+           median across RUNS; fail-fast on missing/wrong-length
+           step_breakdown
+  Phase D: 3 pre-defined ablation modes (ablate-compute-g / -conv /
+           -t-arr), BARRIER-FREE (Step 0.7 mode-gate restricts
+           barriers+log to Layer1|Layer2); pp_tps_median delta vs
+           Phase A = clean upper-bound cut. Phase D records MUST be
+           empty (Step 0.15 hard asserts).
 
 server binary: env!("CARGO_BIN_EXE_ironmlx") (same package).
 iron-bench: std::process::Command "cargo run -p iron-bench"
@@ -1887,7 +1998,7 @@ cd "$REPO"
 MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx 2>&1 | tail -3
 cargo fmt
 cargo +nightly fmt --all -- --check 2>&1 | tail -3
-MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace --release -- -D warnings 2>&1 | tail -5
+MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace -- -D warnings 2>&1 | tail -5
 ```
 Expected: Finished + clean + 0 warnings.
 
@@ -2231,7 +2342,7 @@ cd "$REPO"
 MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx 2>&1 | tail -3
 cargo fmt
 cargo +nightly fmt --all -- --check 2>&1 | tail -3
-MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace --release -- -D warnings 2>&1 | tail -5
+MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace -- -D warnings 2>&1 | tail -5
 
 export IRONMLX_MOE_MODEL_DIR=~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/$(ls ~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/ | head -1)
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --test p5_qwen35_moe_smoke -- --ignored --test-threads=1 2>&1 | tail -5
@@ -2454,7 +2565,7 @@ source /tmp/p5g-env.sh
 cd "$REPO"
 cargo fmt
 cargo +nightly fmt --all -- --check 2>&1 | tail -3
-MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace --release -- -D warnings 2>&1 | tail -5
+MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace -- -D warnings 2>&1 | tail -5
 MLX_DIR=$HOME/.local/mlx cargo build --release 2>&1 | tail -3
 ```
 Expected: all clean.
@@ -2825,7 +2936,7 @@ All of the following must be true at HEAD:
 
 - [ ] `MLX_DIR=$HOME/.local/mlx cargo build --release`: PASS
 - [ ] `cargo +nightly fmt --all -- --check`: clean
-- [ ] `MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace --release -- -D warnings`: 0 Rust warnings
+- [ ] `MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace -- -D warnings`: 0 Rust warnings
 - [ ] `IRONMLX_MOE_MODEL_DIR=<snap> cargo test -p ironmlx --release --test p5_qwen35_moe_smoke -- --ignored`: PASS, argmax=11
 - [ ] `IRONMLX_MOE_MODEL_DIR=<snap> cargo test -p ironmlx --release --test p5_qwen35_moe_batched -- --ignored`: PASS
 - [ ] `IRONMLX_MOE_MODEL_DIR=<snap> cargo test -p ironmlx --release --test p5_qwen35_moe_http_smoke -- --ignored`: PASS
