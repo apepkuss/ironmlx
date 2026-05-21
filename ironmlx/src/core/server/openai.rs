@@ -316,6 +316,28 @@ where
 {
     // Extract fields we need after consuming req.messages.
     let stream = req.stream;
+
+    // P5h root + http_parse_render_tokenize start capture (per spec § 2.5a step 1).
+    // Both timestamps captured at handler entry BEFORE any parse/tokenize work,
+    // because the http_parse_render_tokenize span's true start is the entry point,
+    // and the root span needs the same anchor.
+    // Per Codex plan review v16 P1 #2 + v17 P1 #1: only capture timestamps if the
+    // request will be served by a streaming path — non-streaming has no root
+    // terminal. Reuse the existing `let stream = req.stream;` local; do NOT
+    // introduce a parallel `p5h_stream_enabled` derivation.
+    #[cfg(feature = "p5h-profile")]
+    let (p5h_request_id, p5h_root_start_ns, p5h_http_start_ns) = if stream {
+        (
+            uuid::Uuid::new_v4().to_string(),
+            crate::core::p5h::monotonic_ns_public(),
+            crate::core::p5h::monotonic_ns_public(),
+        )
+    } else {
+        // Sentinel: empty request_id signals "no P5h state for this request".
+        // Step 3 + Step 4 below conditionally skip when this is empty.
+        (String::new(), 0, 0)
+    };
+
     let max_tokens = req.max_tokens;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let sampler = build_sampler(&req);
@@ -389,27 +411,6 @@ where
     // via Scheduler::admit/admit_mid + batched_prefill_vl.
     // COMPAT(3b-2): long-prompt fallback to GS sunsets in 3c+ chunked-prefill phase.
     let use_scheduler = state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size;
-
-    // P5h root + http_parse_render_tokenize start capture (per spec § 2.5a step 1).
-    // Both timestamps captured at handler entry BEFORE any parse/tokenize work,
-    // because the http_parse_render_tokenize span's true start is the entry point,
-    // and the root span needs the same anchor.
-    // Per Codex plan review v16 P1 #2 + v17 P1 #1: only capture timestamps if the
-    // request will be served by a streaming path — non-streaming has no root
-    // terminal. Reuse the existing `let stream = req.stream;` local; do NOT
-    // introduce a parallel `p5h_stream_enabled` derivation.
-    #[cfg(feature = "p5h-profile")]
-    let (p5h_request_id, p5h_root_start_ns, p5h_http_start_ns) = if stream {
-        (
-            uuid::Uuid::new_v4().to_string(),
-            crate::core::p5h::monotonic_ns_public(),
-            crate::core::p5h::monotonic_ns_public(),
-        )
-    } else {
-        // Sentinel: empty request_id signals "no P5h state for this request".
-        // Step 3 + Step 4 below conditionally skip when this is empty.
-        (String::new(), 0, 0)
-    };
 
     // Per Codex plan review v16 P1 #2 + v17 P1 #1 + v18 P1 #1: p5h state ONLY
     // for streaming requests. Reuse the existing `stream` local from Step 2
