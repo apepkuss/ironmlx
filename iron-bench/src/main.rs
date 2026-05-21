@@ -74,6 +74,13 @@ struct Args {
     /// HTTP request timeout (seconds).
     #[arg(long, default_value_t = 300)]
     timeout: u64,
+
+    /// Capture X-Ironmlx-Request-Id response header from each request and
+    /// add a request_id column to CSV output. Default off — flag-off state
+    /// is byte-identical to non-P5h iron-bench output (per P5h spec § 2.5a
+    /// Join key). Markdown + JSON outputs are unaffected by this flag.
+    #[arg(long, default_value_t = false)]
+    pub capture_server_request_id: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -92,6 +99,41 @@ fn parse_target(s: &str) -> std::result::Result<(String, String), String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.capture_server_request_id {
+        // Per Codex plan review v21 P2 #2: reject concurrent mode entirely.
+        // The concurrent CSV path (render_csv_concurrent) has a different
+        // header schema with no request_id column, and P5h sweeps are
+        // serial-only per memory [feedback_serial_perf_experiments].
+        if args.concurrent.is_some() {
+            anyhow::bail!(
+                "--capture-server-request-id is incompatible with --concurrent \
+                 (per P5h plan v21 P2 #2): concurrent CSV has a different header \
+                 schema with no request_id column, and P5h sweeps are serial-only. \
+                 Drop --concurrent for P5h sweeps."
+            );
+        }
+        // Per Codex plan review v20 P1 #2: reject nonzero sequential warmup.
+        if args.warmup != 0 {
+            anyhow::bail!(
+                "--capture-server-request-id is incompatible with --warmup > 0 \
+                 (per P5h plan v20 P1 #2): warmup RequestResults are discarded \
+                 by runner.rs, but the server still emits [p5h-profile] log \
+                 lines + X-Ironmlx-Request-Id headers for warmup requests, so \
+                 warmup request_ids will be server-side orphans and the \
+                 aggregator's 100% join gate will hard-fail. Use --warmup 0."
+            );
+        }
+        // Defense-in-depth — redundant given the concurrent gate above, but
+        // kept in case the concurrent gate is ever relaxed.
+        if args.concurrent.is_some() && args.warmup_duration != 0 {
+            anyhow::bail!(
+                "--capture-server-request-id is incompatible with --warmup-duration > 0 \
+                 (per P5h plan v20 P1 #2)."
+            );
+        }
+    }
+
     match args.concurrent {
         None => eprintln!(
             "iron-bench v1 (sequential): {} target(s), prompt_len={:?}, max_tokens={}, runs={}, warmup={}",
@@ -150,6 +192,7 @@ async fn main() -> Result<()> {
                         args.max_tokens,
                         args.warmup,
                         args.runs,
+                        args.capture_server_request_id,
                         &tokenizer,
                     )
                     .await?;
@@ -173,6 +216,7 @@ async fn main() -> Result<()> {
                         std::time::Duration::from_secs(args.warmup_duration),
                         std::time::Duration::from_secs(args.duration),
                         concurrent,
+                        args.capture_server_request_id,
                         tokenizer_arc.clone(),
                     )
                     .await?;
@@ -198,7 +242,7 @@ async fn main() -> Result<()> {
                 OutputFormat::Markdown => {
                     report::render_markdown(&seq_cells, &args.target, args.warmup)
                 }
-                OutputFormat::Csv => report::render_csv(&seq_cells),
+                OutputFormat::Csv => report::render_csv(&seq_cells, args.capture_server_request_id),
                 OutputFormat::Json => report::render_json(&seq_cells, &args.target, args.warmup),
             }
         }

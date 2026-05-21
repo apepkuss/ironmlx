@@ -50,6 +50,10 @@ pub struct RequestResult {
     pub finish_reason: String,
     #[allow(dead_code)]
     pub content_chars: usize,
+    /// Server-emitted X-Ironmlx-Request-Id header value (P5h correlation).
+    /// `None` when `--capture-server-request-id` flag is off OR the server
+    /// did not emit the header (e.g., legacy server build).
+    pub request_id: Option<String>,
 }
 
 /// Parse-state mutated by `process_event`. Owned by the request loop.
@@ -161,6 +165,7 @@ pub async fn run_chat_completion(
     model: &str,
     prompt: &str,
     max_tokens: usize,
+    capture_request_id: bool,
 ) -> Result<RequestResult> {
     let body = ChatRequest {
         model,
@@ -192,6 +197,15 @@ pub async fn run_chat_completion(
         let body_txt = resp.text().await.unwrap_or_default();
         bail!("{target_url}: HTTP {status} — {body_txt}");
     }
+
+    let request_id = if capture_request_id {
+        resp.headers()
+            .get("X-Ironmlx-Request-Id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+    } else {
+        None
+    };
 
     let mut state = ParseState::default();
     let mut buffer = String::new();
@@ -233,6 +247,7 @@ pub async fn run_chat_completion(
         chunk_count: state.chunk_count,
         finish_reason: state.finish_reason.unwrap_or_else(|| "unknown".into()),
         content_chars: state.content_chars,
+        request_id,
     })
 }
 
