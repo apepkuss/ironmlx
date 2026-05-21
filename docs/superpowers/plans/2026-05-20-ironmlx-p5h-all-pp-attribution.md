@@ -153,11 +153,22 @@ pub struct P5hTraceContext {
     pub routing_path: &'static str, // "scheduler" | "gs_chunked"
 }
 
-#[derive(Clone, Debug)]
+/// Span handle returned by `open_p5h_span[_at]` and pushed onto the
+/// per-thread `P5H_CURRENT_SPAN_STACK` by `with_p5h_span_from_current_trace`.
+///
+/// Fields are `pub(crate)` (NOT `pub`) per Codex plan review v5 P2: callers
+/// outside this module cannot mutate fields directly. The crate-internal
+/// `pub(crate)` access is required by `emit_log_line`, `close_p5h_span`,
+/// `with_p5h_span_from_current_trace`, and `RootSpanHandle::span()`
+/// accessor. Even crate-internal callers SHOULD treat the handle as opaque
+/// (read via accessors below or pass-through); the close-time tamper-detection
+/// check in `registry_remove_or_panic` catches any field mutation between
+/// open and close.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpanHandle {
-    pub span_id: u64,
-    pub span_name: &'static str,
-    pub parent_span_id: Option<u64>,
+    pub(crate) span_id: u64,
+    pub(crate) span_name: &'static str,
+    pub(crate) parent_span_id: Option<u64>,
     /// Human-readable parent label retained for log readability + label
     /// self-consistency check (per spec § 2.5a structural checks: "parent_span_id
     /// resolves to a span whose span_name equals the parent_span label").
@@ -165,8 +176,13 @@ pub struct SpanHandle {
     /// Per Codex plan review v1 P1 #1: do NOT hard-code "explicit_parent" —
     /// emitter MUST carry the real parent label to match T0a fixture
     /// `label self-consistency` assertion in § 2.5a.
-    pub parent_span: Option<&'static str>,
-    pub start_ns: u64,
+    pub(crate) parent_span: Option<&'static str>,
+    pub(crate) start_ns: u64,
+}
+
+impl SpanHandle {
+    pub(crate) fn span_id(&self) -> u64 { self.span_id }
+    pub(crate) fn span_name(&self) -> &'static str { self.span_name }
 }
 
 #[derive(Default, Debug)]
@@ -436,6 +452,19 @@ Append to the `#[cfg(test)] mod tests` block:
     }
 
     #[test]
+    #[should_panic(expected = "handle field tamper detected")]
+    fn close_panics_on_tampered_handle_field() {
+        // Per Codex plan review v5 P2: SpanHandle fields are pub(crate);
+        // tests in the same module can mutate them. Production callers
+        // outside this module CANNOT (no pub fields). Either way, the
+        // close-side snapshot check catches a mutated clone.
+        let ctx = dummy_ctx();
+        let mut handle = open_p5h_span_at(&ctx, None, "test_root", 0);
+        handle.span_name = "tampered_name"; // mutate the clone
+        close_p5h_span(&ctx, handle, 1, SpanFields::default());
+    }
+
+    #[test]
     #[should_panic(expected = "ctx mismatch")]
     fn close_panics_on_wrong_ctx() {
         // Per Codex plan review v3 P2 #3: closing a span with a different
@@ -479,7 +508,7 @@ Run:
 cargo test -p ironmlx --features p5h-profile core::p5h::tests
 ```
 
-Expected: 7 failures (missing `open_p5h_span`, `open_p5h_span_at`, `close_p5h_span`, `with_p5h_span_from_current_trace`, registry insert/remove panics, wrong-ctx close panic).
+Expected: 8 failures (missing `open_p5h_span`, `open_p5h_span_at`, `close_p5h_span`, `with_p5h_span_from_current_trace`, registry insert/remove panics, wrong-ctx close panic, tampered-handle close panic).
 
 - [ ] **Step 3: Implement the dual API + log line formatter**
 
@@ -492,43 +521,111 @@ use std::sync::Mutex;
 
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Tracks each open span's request_id (per Codex plan review v3 P2 #3 —
-/// upgraded from HashSet<u64> so close_p5h_span can also detect wrong-ctx
-/// close, not just unknown / double-close). Only enabled in p5h-profile
-/// builds (no runtime cost in default builds since the whole module is
-/// `#[cfg(feature = "p5h-profile")]`).
+/// Records the full state captured at open. close_* verifies the incoming
+/// SpanHandle matches this record on every field (per Codex plan review v5
+/// P2 — `SpanHandle` fields are `pub(crate)` and `Clone`, so a caller could
+/// mutate `span_name` / `parent_span_id` / `parent_span` / `start_ns` on a
+/// clone and emit an inconsistent log line; close-side tamper detection
+/// catches it). request_id is the ctx-mismatch check (v3 P2 #3).
 #[derive(Clone, Debug)]
 struct OpenSpanRecord {
-    span_name: &'static str,
     request_id: String,
+    /// Snapshot of every SpanHandle field at open time; close compares
+    /// against the incoming handle. Any mutation between open and close
+    /// triggers tamper-detection panic.
+    handle_snapshot: SpanHandle,
 }
 
 static OPEN_SPAN_REGISTRY: Mutex<Option<HashMap<u64, OpenSpanRecord>>> = Mutex::new(None);
 
-fn registry_insert(span_id: u64, record: OpenSpanRecord) {
-    let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
-    let reg = guard.get_or_insert_with(HashMap::new);
-    let prev = reg.insert(span_id, record);
-    assert!(prev.is_none(), "open_p5h_span issued duplicate span_id={} — atomic counter race or registry corruption", span_id);
+/// Registry op outcomes. Per Codex plan review v5 P1: collect errors as
+/// values inside the Mutex critical section, then panic OUTSIDE the guard
+/// scope. Panicking while holding the guard poisons the mutex; subsequent
+/// expected-panic tests in `cargo test` would fail with `p5h registry
+/// poisoned` (especially under default parallel execution).
+#[derive(Debug)]
+enum RegistryRemoveError {
+    NeverOpened,
+    Unknown { span_id: u64, span_name: &'static str },
 }
 
-fn registry_remove_or_panic(span_id: u64, span_name: &'static str, expected_request_id: &str) {
+/// Insert a fresh open record. Returns Err if the span_id is already
+/// present (atomic-counter race or registry corruption; never expected
+/// under correct usage). Caller panics outside the lock.
+fn registry_try_insert(span_id: u64, record: OpenSpanRecord) -> Result<(), u64> {
+    // Lock scope confined to this block; guard drops at `}`.
     let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
-    let reg = guard.as_mut().expect("close_p5h_span called before any open");
-    let record = reg.remove(&span_id).unwrap_or_else(|| {
+    let reg = guard.get_or_insert_with(HashMap::new);
+    if reg.contains_key(&span_id) {
+        return Err(span_id);
+    }
+    reg.insert(span_id, record);
+    Ok(())
+}
+
+fn registry_insert(span_id: u64, record: OpenSpanRecord) {
+    // Per Codex plan review v5 P1: panic happens OUTSIDE the Mutex guard.
+    if let Err(duplicate_id) = registry_try_insert(span_id, record) {
         panic!(
+            "open_p5h_span issued duplicate span_id={} — atomic counter race or registry corruption",
+            duplicate_id,
+        );
+    }
+}
+
+/// Remove the open record for `span_id`. Returns the record on success,
+/// or an error variant carrying enough context for the caller to panic
+/// with a useful message OUTSIDE the guard scope.
+fn registry_try_remove(span_id: u64, span_name: &'static str) -> Result<OpenSpanRecord, RegistryRemoveError> {
+    let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
+    let reg = guard.as_mut().ok_or(RegistryRemoveError::NeverOpened)?;
+    reg.remove(&span_id).ok_or(RegistryRemoveError::Unknown { span_id, span_name })
+}
+
+/// Verify `handle` matches the record stored at open; panic if mismatched.
+/// Panic happens AFTER the Mutex guard is released (per Codex plan review
+/// v5 P1) — registry_try_remove returns the owned record, we inspect it
+/// outside any lock.
+fn registry_remove_or_panic(handle: &SpanHandle, expected_request_id: &str) {
+    let record = match registry_try_remove(handle.span_id, handle.span_name) {
+        Ok(r) => r,
+        Err(RegistryRemoveError::NeverOpened) => panic!(
+            "close_p5h_span(span_name={}, span_id={}) called before any open_p5h_span — registry empty",
+            handle.span_name, handle.span_id,
+        ),
+        Err(RegistryRemoveError::Unknown { span_id, span_name }) => panic!(
             "close_p5h_span(span_name={}, span_id={}) — span_id is not in open registry. \
              Causes: (a) handle reused after close (double-close), (b) handle leaked from a different request, \
              (c) handle never opened. Per § 2.5a explicit-API hard-fail.",
             span_name, span_id,
+        ),
+    };
+    // ctx mismatch (per Codex v3 P2 #3)
+    if record.request_id != expected_request_id {
+        panic!(
+            "close_p5h_span(span_name={}, span_id={}) — ctx mismatch: opened with request_id={}, closing with request_id={}. \
+             Cross-request handle leakage. Per Codex plan review v3 P2 #3 + § 2.5a explicit-API hard-fail.",
+            handle.span_name, handle.span_id, record.request_id, expected_request_id,
         );
-    });
-    assert!(
-        record.request_id == expected_request_id,
-        "close_p5h_span(span_name={}, span_id={}) — ctx mismatch: opened with request_id={}, closing with request_id={}. \
-         Cross-request handle leakage. Per Codex plan review v3 P2 #3 + § 2.5a explicit-API hard-fail.",
-        span_name, span_id, record.request_id, expected_request_id,
-    );
+    }
+    // Tamper detection (per Codex v5 P2): every SpanHandle field MUST equal
+    // the snapshot recorded at open. Mutating clone before close is a bug.
+    let snap = &record.handle_snapshot;
+    if handle.span_name != snap.span_name
+        || handle.parent_span_id != snap.parent_span_id
+        || handle.parent_span != snap.parent_span
+        || handle.start_ns != snap.start_ns
+    {
+        panic!(
+            "close_p5h_span(span_id={}) — handle field tamper detected.\n  \
+              opened: span_name={}, parent_span_id={:?}, parent_span={:?}, start_ns={}\n  \
+              closing: span_name={}, parent_span_id={:?}, parent_span={:?}, start_ns={}\n\
+             Per Codex plan review v5 P2 + § 2.5a explicit-API hard-fail.",
+            handle.span_id,
+            snap.span_name, snap.parent_span_id, snap.parent_span, snap.start_ns,
+            handle.span_name, handle.parent_span_id, handle.parent_span, handle.start_ns,
+        );
+    }
 }
 
 fn monotonic_ns() -> u64 {
@@ -599,11 +696,7 @@ pub fn open_p5h_span_at(
         span_name,
     );
     let span_id = next_span_id();
-    registry_insert(span_id, OpenSpanRecord {
-        span_name,
-        request_id: ctx.request_id.clone(),
-    });
-    SpanHandle {
+    let handle = SpanHandle {
         span_id,
         span_name,
         parent_span_id: parent.map(|p| p.span_id),
@@ -613,21 +706,28 @@ pub fn open_p5h_span_at(
         // equals this label.
         parent_span: parent.map(|p| p.span_name),
         start_ns,
-    }
+    };
+    // Snapshot the full handle so close-side tamper detection can catch any
+    // mid-flight mutation (per Codex plan review v5 P2).
+    registry_insert(span_id, OpenSpanRecord {
+        request_id: ctx.request_id.clone(),
+        handle_snapshot: handle.clone(),
+    });
+    handle
 }
 
 /// Close an explicit-context tree span. Emits the `[p5h-profile]` log line.
-/// Per Codex plan review v1 P2 #5 + v3 P2 #3: hard-fail if span_id is not in
-/// the open registry OR if ctx.request_id doesn't match the record stored at
-/// open (catches handle reuse / cross-request leakage / double-close /
-/// wrong-ctx close).
+/// Per Codex plan review v1 P2 #5 + v3 P2 #3 + v5 P2: hard-fail if span_id
+/// is not in the open registry, ctx.request_id doesn't match, OR any
+/// SpanHandle field was mutated since open (catches handle reuse /
+/// cross-request leakage / double-close / wrong-ctx close / field tamper).
 pub fn close_p5h_span(
     ctx: &P5hTraceContext,
     handle: SpanHandle,
     end_ns: u64,
     fields: SpanFields,
 ) {
-    registry_remove_or_panic(handle.span_id, handle.span_name, &ctx.request_id);
+    registry_remove_or_panic(&handle, &ctx.request_id);
     emit_log_line(ctx, &handle, end_ns, &fields, "tree");
 }
 
@@ -639,7 +739,7 @@ pub fn close_p5h_span_diagnostic(
     end_ns: u64,
     fields: SpanFields,
 ) {
-    registry_remove_or_panic(handle.span_id, handle.span_name, &ctx.request_id);
+    registry_remove_or_panic(&handle, &ctx.request_id);
     emit_log_line(ctx, &handle, end_ns, &fields, "diagnostic");
 }
 
@@ -673,10 +773,6 @@ pub fn with_p5h_span_from_current_trace<T>(
         (top.span_id, top.span_name)
     });
     let span_id = next_span_id();
-    registry_insert(span_id, OpenSpanRecord {
-        span_name,
-        request_id: request_id_at_open.clone(),
-    });
     let handle = SpanHandle {
         span_id,
         span_name,
@@ -686,6 +782,10 @@ pub fn with_p5h_span_from_current_trace<T>(
         parent_span: Some(parent_label),
         start_ns,
     };
+    registry_insert(span_id, OpenSpanRecord {
+        request_id: request_id_at_open.clone(),
+        handle_snapshot: handle.clone(),
+    });
     P5H_CURRENT_SPAN_STACK.with(|s| s.borrow_mut().push(handle.clone()));
     let result = body();
     let popped = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow_mut().pop().unwrap_or_else(|| panic!(
@@ -695,7 +795,7 @@ pub fn with_p5h_span_from_current_trace<T>(
     assert_eq!(popped.span_id, handle.span_id, "stack imbalance: popped a different span ({}) than the one opened ({})", popped.span_name, handle.span_name);
     let end_ns = monotonic_ns();
     let fields = fields_fn();
-    registry_remove_or_panic(handle.span_id, handle.span_name, &request_id_at_open);
+    registry_remove_or_panic(&handle, &request_id_at_open);
     P5H_CURRENT_TRACE.with(|c| {
         let ctx_ref = c.borrow();
         let ctx = ctx_ref.as_ref().unwrap_or_else(|| panic!(
@@ -737,7 +837,7 @@ Run:
 cargo test -p ironmlx --features p5h-profile core::p5h::tests
 ```
 
-Expected: all 9 tests PASS (6 prior + close_panics_on_double_close + close_panics_on_unknown_handle + close_panics_on_wrong_ctx).
+Expected: all 10 tests PASS (6 prior + close_panics_on_double_close + close_panics_on_unknown_handle + close_panics_on_wrong_ctx + close_panics_on_tampered_handle_field).
 
 - [ ] **Step 5: Verify default build emits zero `[p5h-profile]` lines**
 
