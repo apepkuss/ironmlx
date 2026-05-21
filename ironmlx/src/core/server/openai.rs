@@ -732,7 +732,21 @@ where
     let model_id_for_task = model_id.clone();
     let tokenizer = state.tokenizer.clone();
 
+    // p5h_ctx_for_admission + p5h_root_handle_for_forwarder are already in
+    // scope from T0a.6 Step 4.5. For the forwarder we want self-documenting
+    // aliases at the spawn site; .clone() is cheap (P5hTraceContext +
+    // RootSpanHandle both derive Clone). Both types are PLAIN (not Option)
+    // per Codex plan review v11 P1 #1.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_ctx: crate::core::p5h::P5hTraceContext = p5h_ctx_for_admission.clone();
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_handle_forwarder: crate::core::p5h::RootSpanHandle =
+        p5h_root_handle_for_forwarder.clone();
+
     tokio::spawn(async move {
+        #[cfg(feature = "p5h-profile")]
+        let mut root_guard = crate::core::p5h::P5hRootCloseGuard::new(p5h_root_handle_forwarder);
+
         // First chunk: role.
         let role_chunk = ChunkResponse {
             id: id_for_task.clone(),
@@ -748,12 +762,44 @@ where
                 finish_reason: None,
             }],
         };
-        if tx.send(Ok(format_sse_data(&role_chunk))).await.is_err() {
+
+        #[cfg(feature = "p5h-profile")]
+        let role_span = crate::core::p5h::open_p5h_span(
+            &p5h_ctx,
+            Some(root_guard.span()),
+            "sse_write_role_chunk_diagnostic",
+        );
+
+        let role_send_result = tx.send(Ok(format_sse_data(&role_chunk))).await;
+
+        // Close diagnostic span on BOTH success and error paths (per Codex
+        // plan review v10 P2 #4) — if the receiver dropped, we still need
+        // to close the open span before the closure returns, otherwise
+        // OPEN_SPAN_REGISTRY leaks the span_id and the next close with
+        // that id panics "duplicate".
+        #[cfg(feature = "p5h-profile")]
+        let role_close_end_ns = crate::core::p5h::monotonic_ns_public();
+        #[cfg(feature = "p5h-profile")]
+        crate::core::p5h::close_p5h_span_diagnostic(
+            &p5h_ctx,
+            role_span,
+            role_close_end_ns,
+            crate::core::p5h::SpanFields::default(),
+        );
+
+        if role_send_result.is_err() {
+            // Per Codex plan review v12 P2 #6 + v13 P1 #1 + v14 P1 #1: the
+            // `P5hRootCloseGuard` declared at the top of the forwarder
+            // closure fires on drop when the root is still open, so no
+            // explicit `close_at_aborted` is needed here. Just `return;`.
             return;
         }
 
         let mut detok = tokenizer.decode_stream(/* skip_special */ true);
         while let Some(ev) = event_rx.recv().await {
+            #[cfg(feature = "p5h-profile")]
+            let detok_start_ns = crate::core::p5h::monotonic_ns_public();
+
             let text = match detok.step(ev.token) {
                 Ok(Some(s)) => s,
                 Ok(None) => String::new(),
@@ -764,6 +810,22 @@ where
                     break;
                 }
             };
+
+            #[cfg(feature = "p5h-profile")]
+            let is_first_non_empty_content = !text.is_empty() && root_guard.is_open();
+
+            #[cfg(feature = "p5h-profile")]
+            let content_span = if is_first_non_empty_content {
+                Some(crate::core::p5h::open_p5h_span_at(
+                    &p5h_ctx,
+                    Some(root_guard.span()),
+                    "detok_format_first_content_chunk",
+                    detok_start_ns,
+                ))
+            } else {
+                None
+            };
+
             let chunk = ChunkResponse {
                 id: id_for_task.clone(),
                 object: "chat.completion.chunk",
@@ -775,7 +837,28 @@ where
                     finish_reason: ev.finish_reason,
                 }],
             };
-            if tx.send(Ok(format_sse_data(&chunk))).await.is_err() {
+            let content_send_result = tx.send(Ok(format_sse_data(&chunk))).await;
+            #[cfg(feature = "p5h-profile")]
+            let content_send_end_ns = crate::core::p5h::monotonic_ns_public();
+
+            // Close content span + root on BOTH send success and error
+            // paths (per Codex plan review v10 P2 #4). Closing first
+            // prevents registry leaks.
+            #[cfg(feature = "p5h-profile")]
+            if let Some(handle) = content_span {
+                crate::core::p5h::close_p5h_span(
+                    &p5h_ctx,
+                    handle,
+                    content_send_end_ns,
+                    crate::core::p5h::SpanFields::default(),
+                );
+                // close_success enforces once-close discipline; panics if
+                // called twice (state-machine bug —
+                // is_first_non_empty_content stayed true across iterations).
+                root_guard.close_success(content_send_end_ns);
+            }
+
+            if content_send_result.is_err() {
                 break;
             }
             if ev.finish_reason.is_some() {
@@ -804,9 +887,6 @@ where
         );
         resp
     };
-    // suppress unused-variable warning for p5h_root_handle_for_forwarder (used in T0a.7)
-    #[cfg(feature = "p5h-profile")]
-    let _ = p5h_root_handle_for_forwarder;
     response
 }
 
