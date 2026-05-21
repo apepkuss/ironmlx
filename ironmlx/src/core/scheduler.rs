@@ -834,6 +834,15 @@ impl<M: Model> Scheduler<M> {
             return Err(anyhow!("prefill_admitted: no admitted requests to prefill"));
         }
 
+        // T0a.9: read trace ctx + root span from the (singleton) active row.
+        // Placed AFTER the 0-active-row check so the existing error path is
+        // unchanged in feature-on builds. Some(...) — openai.rs handler path
+        // (T0a.6 populates both fields). None — any other entry path
+        // (anthropic.rs / CLI / tests / scheduler_actor internals); SINK
+        // quietly no-ops so non-openai code under `p5h-profile` still works.
+        #[cfg(feature = "p5h-profile")]
+        let p5h_trace = self.cloned_active_row_p5h_trace_and_root()?;
+
         // Build per-row prompt-length vector in slot order. None slots get
         // a synthetic length=1 so that build_position_ids_batched and the
         // mask builders accept the input (they assert > 0). The row stays
@@ -922,76 +931,111 @@ impl<M: Model> Scheduler<M> {
         // Run batched prefill. Capture [B, 1, vocab] logits (sequence axis
         // already collapsed via slice_last_and_project) for first-token
         // sampling.
-        let logits = if any_vl {
-            // Collect per-row prompt_ids (i32 conversion) + per-row vision args + tokenizer consts.
-            let per_row_ids_i32: Vec<Vec<i32>> = self
-                .slots
-                .iter()
-                .map(|s| match s {
-                    Some(r) => r.prompt_ids.iter().map(|&t| t as i32).collect(),
-                    None => vec![0_i32], // synthetic length-1 zero row (matches prompt_lens fallback)
-                })
-                .collect();
-            let per_row_ids_refs: Vec<&[i32]> =
-                per_row_ids_i32.iter().map(|v| v.as_slice()).collect();
-            let per_row_grids_owned: Vec<Option<Vec<(i32, i32, i32)>>> = self
-                .slots
-                .iter()
-                .map(|s| s.as_ref().and_then(|r| r.image_grid_thw.clone()))
-                .collect();
-            let per_row_grids: Vec<GridThwSlice<'_>> = per_row_grids_owned
-                .iter()
-                .map(|opt| opt.as_deref())
-                .collect();
-            let per_row_pv: Vec<Option<&Array>> = self
-                .slots
-                .iter()
-                .map(|s| s.as_ref().and_then(|r| r.pixel_values.as_ref()))
-                .collect();
+        //
+        // T0a.9: wrap in `model_prefill_forward` span. Pattern (per Codex v11
+        // P2 #5): capture Result without `?`, close span, then `?` the result
+        // so the span closes on both Ok and Err paths. IIFE preserves the
+        // existing block shape so default builds stay byte-identical.
+        #[cfg(feature = "p5h-profile")]
+        let mpf_span = p5h_trace.as_ref().map(|(ctx, root_span)| {
+            crate::core::p5h::open_p5h_span(ctx, Some(root_span), "model_prefill_forward")
+        });
 
-            // Tokenizer-defined constants from the first VL slot.
-            let (img_token_id, merge_size) = self
-                .slots
-                .iter()
-                .find_map(|s| {
-                    s.as_ref()
-                        .filter(|r| r.pixel_values.is_some())
-                        .map(|r| (r.image_token_id, r.image_spatial_merge_size))
-                })
-                .expect("any_vl == true implies at least one VL slot");
+        let logits_result: anyhow::Result<Array> = (|| -> anyhow::Result<Array> {
+            #[cfg(feature = "p5h-profile")]
+            let _mpf_guard = match (p5h_trace.as_ref(), mpf_span.as_ref()) {
+                (Some((ctx, _)), Some(mpf)) => Some(crate::core::p5h::P5hTraceGuard::enter(
+                    ctx.clone(),
+                    mpf.clone(),
+                )),
+                _ => None,
+            };
+            let logits = if any_vl {
+                // Collect per-row prompt_ids (i32 conversion) + per-row vision args + tokenizer consts.
+                let per_row_ids_i32: Vec<Vec<i32>> = self
+                    .slots
+                    .iter()
+                    .map(|s| match s {
+                        Some(r) => r.prompt_ids.iter().map(|&t| t as i32).collect(),
+                        None => vec![0_i32], // synthetic length-1 zero row (matches prompt_lens fallback)
+                    })
+                    .collect();
+                let per_row_ids_refs: Vec<&[i32]> =
+                    per_row_ids_i32.iter().map(|v| v.as_slice()).collect();
+                let per_row_grids_owned: Vec<Option<Vec<(i32, i32, i32)>>> = self
+                    .slots
+                    .iter()
+                    .map(|s| s.as_ref().and_then(|r| r.image_grid_thw.clone()))
+                    .collect();
+                let per_row_grids: Vec<GridThwSlice<'_>> = per_row_grids_owned
+                    .iter()
+                    .map(|opt| opt.as_deref())
+                    .collect();
+                let per_row_pv: Vec<Option<&Array>> = self
+                    .slots
+                    .iter()
+                    .map(|s| s.as_ref().and_then(|r| r.pixel_values.as_ref()))
+                    .collect();
 
-            let position_ids = build_position_ids_vl_batched(
-                &per_row_ids_refs,
-                &per_row_grids,
-                img_token_id,
-                merge_size,
-                max_len,
-            )?;
+                // Tokenizer-defined constants from the first VL slot.
+                let (img_token_id, merge_size) = self
+                    .slots
+                    .iter()
+                    .find_map(|s| {
+                        s.as_ref()
+                            .filter(|r| r.pixel_values.is_some())
+                            .map(|r| (r.image_token_id, r.image_spatial_merge_size))
+                    })
+                    .expect("any_vl == true implies at least one VL slot");
 
-            model.batched_prefill_vl(
-                &input_ids,
-                &position_ids,
-                &attention_mask,
-                &linear_attention_mask,
-                &prompt_lens,
-                &per_row_pv,
-                &per_row_grids,
-                img_token_id,
-                Some(cache_ref),
-                mlx::StreamOrDevice::default(),
-            )?
-        } else {
-            let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
-            model.batched_prefill(
-                &input_ids,
-                &position_ids,
-                &attention_mask,
-                &linear_attention_mask,
-                &prompt_lens,
-                Some(cache_ref),
-                mlx::StreamOrDevice::default(),
-            )?
-        };
+                let position_ids = build_position_ids_vl_batched(
+                    &per_row_ids_refs,
+                    &per_row_grids,
+                    img_token_id,
+                    merge_size,
+                    max_len,
+                )?;
+
+                model.batched_prefill_vl(
+                    &input_ids,
+                    &position_ids,
+                    &attention_mask,
+                    &linear_attention_mask,
+                    &prompt_lens,
+                    &per_row_pv,
+                    &per_row_grids,
+                    img_token_id,
+                    Some(cache_ref),
+                    mlx::StreamOrDevice::default(),
+                )?
+            } else {
+                let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
+                model.batched_prefill(
+                    &input_ids,
+                    &position_ids,
+                    &attention_mask,
+                    &linear_attention_mask,
+                    &prompt_lens,
+                    Some(cache_ref),
+                    mlx::StreamOrDevice::default(),
+                )?
+            };
+            Ok(logits)
+            // _mpf_guard drops here (end of IIFE scope) BEFORE close_p5h_span
+            // below — stack-empty invariant required by P5hTraceGuard::drop.
+        })();
+
+        #[cfg(feature = "p5h-profile")]
+        if let (Some((ctx, _)), Some(mpf)) = (p5h_trace.as_ref(), mpf_span) {
+            crate::core::p5h::close_p5h_span(
+                ctx,
+                mpf,
+                crate::core::p5h::monotonic_ns_public(),
+                crate::core::p5h::SpanFields::default(),
+            );
+        }
+
+        let logits = logits_result?;
 
         // After per-row prefill, row i's cache is filled up to position
         // prompt_lens[i] - 1. The first decode step must use position
@@ -1005,36 +1049,61 @@ impl<M: Model> Scheduler<M> {
         // Sample first token per occupied row from logits[:, 0, :].
         // batched_prefill returns [B, 1, vocab]. Reshape to [B, vocab] for
         // sample_batch, then dispatch once to coalesce all-greedy batches.
-        let logits_shape = logits.shape();
-        let vocab = logits_shape.as_slice()[2];
-        let logits_bv = logits.reshape(&[b as i32, vocab][..]).map_err(|e| {
-            anyhow!("prefill_admitted: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}")
-        })?;
+        //
+        // T0a.9: wrap reshape + Stage A + Stage B in `first_token_sampling`
+        // span. No `P5hTraceGuard` here — body has no deep substep call sites
+        // that use `try_with_p5h_span_from_current_trace`, so no guard
+        // required. Stage C (distribute + termination) stays OUTSIDE the span.
+        #[cfg(feature = "p5h-profile")]
+        let fts_span = p5h_trace.as_ref().map(|(ctx, root_span)| {
+            crate::core::p5h::open_p5h_span(ctx, Some(root_span), "first_token_sampling")
+        });
 
-        // Stage A — collect per-row sampler refs + histories in slot order.
-        // Sentinel covers None / pad rows; their tokens are discarded.
-        let sentinel = Sampler::greedy();
-        let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
-        let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
-        for b_idx in 0..b {
-            if let Some(state) = self.slots[b_idx].as_ref() {
-                row_samplers.push(&state.sampler);
-                row_histories.push(state.prompt_ids.clone());
-            } else {
-                row_samplers.push(&sentinel);
-                row_histories.push(Vec::new());
+        let tokens_result: anyhow::Result<Vec<u32>> = (|| -> anyhow::Result<Vec<u32>> {
+            let logits_shape = logits.shape();
+            let vocab = logits_shape.as_slice()[2];
+            let logits_bv = logits.reshape(&[b as i32, vocab][..]).map_err(|e| {
+                anyhow!("prefill_admitted: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}")
+            })?;
+
+            // Stage A — collect per-row sampler refs + histories in slot order.
+            // Sentinel covers None / pad rows; their tokens are discarded.
+            let sentinel = Sampler::greedy();
+            let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
+            let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
+            for b_idx in 0..b {
+                if let Some(state) = self.slots[b_idx].as_ref() {
+                    row_samplers.push(&state.sampler);
+                    row_histories.push(state.prompt_ids.clone());
+                } else {
+                    row_samplers.push(&sentinel);
+                    row_histories.push(Vec::new());
+                }
             }
+
+            // Stage B — dispatch sample_batch once over [B, vocab].
+            let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
+            let tokens = crate::core::sampler::sample_batch(
+                &row_samplers,
+                &logits_bv,
+                &history_refs,
+                &mut self.prng_state,
+            )
+            .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"))?;
+            Ok(tokens)
+        })();
+
+        #[cfg(feature = "p5h-profile")]
+        if let (Some((ctx, _)), Some(fts)) = (p5h_trace.as_ref(), fts_span) {
+            crate::core::p5h::close_p5h_span(
+                ctx,
+                fts,
+                crate::core::p5h::monotonic_ns_public(),
+                crate::core::p5h::SpanFields::default(),
+            );
         }
 
-        // Stage B — dispatch sample_batch once over [B, vocab].
-        let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
-        let tokens = crate::core::sampler::sample_batch(
-            &row_samplers,
-            &logits_bv,
-            &history_refs,
-            &mut self.prng_state,
-        )
-        .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"))?;
+        let tokens = tokens_result?;
 
         // Stage C — distribute tokens + termination per occupied row.
         let mut events: Vec<StepEvent> = Vec::new();
@@ -1843,7 +1912,7 @@ impl<M: Model> Scheduler<M> {
 
 #[cfg(feature = "p5h-profile")]
 impl<M: crate::core::model::Model> Scheduler<M> {
-    #[allow(dead_code)] // called by T0a.9 prefill_admitted_inner; not yet wired
+    #[allow(dead_code)] // used by prefill_admitted_inner SINK; allow kept so future cfg-gated changes that drop the call site stay clippy-clean
     pub(crate) fn cloned_active_row_p5h_trace_and_root(
         &self,
     ) -> anyhow::Result<
