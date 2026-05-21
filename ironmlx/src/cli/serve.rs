@@ -68,6 +68,16 @@ fn serve_with_model<M>(model: M, tokenizer: Tokenizer, args: &ServeArgs) -> Resu
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    #[cfg(feature = "p5h-profile")]
+    {
+        assert_eq!(
+            args.b_max, 1,
+            "p5h-profile feature requires --b-max 1 (single-active-row invariant per § 2.5a). \
+             Got --b-max {}. Rebuild without --features p5h-profile to use multi-row batching.",
+            args.b_max,
+        );
+    }
+
     // Surface b_max at boot so operators can confirm whether single-request
     // optimized mode (default) or multi-request batching is active without
     // having to inspect process args.
