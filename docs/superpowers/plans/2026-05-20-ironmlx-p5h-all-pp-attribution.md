@@ -158,6 +158,14 @@ pub struct SpanHandle {
     pub span_id: u64,
     pub span_name: &'static str,
     pub parent_span_id: Option<u64>,
+    /// Human-readable parent label retained for log readability + label
+    /// self-consistency check (per spec § 2.5a structural checks: "parent_span_id
+    /// resolves to a span whose span_name equals the parent_span label").
+    /// Set at open from the parent's `span_name`; None for root.
+    /// Per Codex plan review v1 P1 #1: do NOT hard-code "explicit_parent" —
+    /// emitter MUST carry the real parent label to match T0a fixture
+    /// `label self-consistency` assertion in § 2.5a.
+    pub parent_span: Option<&'static str>,
     pub start_ns: u64,
 }
 
@@ -231,6 +239,7 @@ mod tests {
             span_id: id,
             span_name: "test_root",
             parent_span_id: None,
+            parent_span: None,
             start_ns: 1_000_000_000,
         }
     }
@@ -347,15 +356,43 @@ Append to the `#[cfg(test)] mod tests` block:
     #[test]
     fn open_close_explicit_records_log_line() {
         let ctx = dummy_ctx();
-        // Drain any prior buffer state (test isolation; the formatter writes to tracing::info)
         let root = open_p5h_span_at(&ctx, None, "server_request_recv_to_first_content_sse_write", 1_000_000_000);
         assert!(root.parent_span_id.is_none());
+        assert!(root.parent_span.is_none());
         assert_eq!(root.span_name, "server_request_recv_to_first_content_sse_write");
         assert!(root.span_id != 0);
         let child = open_p5h_span(&ctx, Some(&root), "http_parse_render_tokenize");
         assert_eq!(child.parent_span_id, Some(root.span_id));
+        // Per Codex plan review v1 P1 #1: child.parent_span must be the real
+        // parent label, NOT a hard-coded "explicit_parent".
+        assert_eq!(child.parent_span, Some("server_request_recv_to_first_content_sse_write"));
         close_p5h_span(&ctx, child, 1_000_500_000, SpanFields::default());
         close_p5h_span(&ctx, root, 1_001_000_000, SpanFields::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "is not in open registry")]
+    fn close_panics_on_double_close() {
+        let ctx = dummy_ctx();
+        let root = open_p5h_span_at(&ctx, None, "test_root", 0);
+        let clone_for_first_close = root.clone();
+        close_p5h_span(&ctx, root, 1, SpanFields::default());
+        // Second close with the cloned handle must panic.
+        close_p5h_span(&ctx, clone_for_first_close, 2, SpanFields::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "is not in open registry")]
+    fn close_panics_on_unknown_handle() {
+        let ctx = dummy_ctx();
+        let bogus = SpanHandle {
+            span_id: 9_999_999_999,
+            span_name: "never_opened",
+            parent_span_id: None,
+            parent_span: None,
+            start_ns: 0,
+        };
+        close_p5h_span(&ctx, bogus, 1, SpanFields::default());
     }
 
     #[test]
@@ -407,25 +444,51 @@ Run:
 cargo test -p ironmlx --features p5h-profile core::p5h::tests
 ```
 
-Expected: 4 failures (missing `open_p5h_span`, `open_p5h_span_at`, `close_p5h_span`, `with_p5h_span_from_current_trace`).
+Expected: 6 failures (missing `open_p5h_span`, `open_p5h_span_at`, `close_p5h_span`, `with_p5h_span_from_current_trace`, registry insert/remove panics).
 
 - [ ] **Step 3: Implement the dual API + log line formatter**
 
 In `ironmlx/src/core/p5h.rs`, append (or place between the type defs and tests):
 
 ```rust
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
-fn monotonic_ns() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // For real instrumentation, use Instant-based monotonic; this fallback
-    // is fine for the formatter (records the captured timestamp, doesn't
-    // re-derive). Callers are responsible for capturing real monotonic
-    // start_ns/end_ns before calling these APIs.
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+/// Per Codex plan review v1 P2 #5: track open span_ids so close_p5h_span can
+/// hard-fail on handle reuse / cross-request leakage / unknown span_id.
+/// Only enabled in p5h-profile builds (no runtime cost in default builds).
+static OPEN_SPAN_REGISTRY: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
+
+fn registry_insert(span_id: u64) {
+    let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
+    let reg = guard.get_or_insert_with(HashSet::new);
+    let inserted = reg.insert(span_id);
+    assert!(inserted, "open_p5h_span issued duplicate span_id={} — atomic counter race or registry corruption", span_id);
 }
+
+fn registry_remove_or_panic(span_id: u64, span_name: &'static str) {
+    let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
+    let reg = guard.as_mut().expect("close_p5h_span called before any open");
+    assert!(
+        reg.remove(&span_id),
+        "close_p5h_span(span_name={}, span_id={}) — span_id is not in open registry. \
+         Causes: (a) handle reused after close (double-close), (b) handle leaked from a different request, \
+         (c) handle never opened. Per § 2.5a explicit-API hard-fail.",
+        span_name,
+        span_id,
+    );
+}
+
+fn monotonic_ns() -> u64 {
+    use std::time::Instant;
+    static ANCHOR: once_cell::sync::Lazy<Instant> = once_cell::sync::Lazy::new(Instant::now);
+    ANCHOR.elapsed().as_nanos() as u64
+}
+
+pub(crate) fn monotonic_ns_public() -> u64 { monotonic_ns() }
 
 fn next_span_id() -> u64 {
     NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
@@ -437,10 +500,11 @@ fn emit_log_line(
     end_ns: u64,
     fields: &SpanFields,
     span_kind: &'static str,
-    parent_span_label: Option<&'static str>,
 ) {
     // Schema fields match § 2.5a server-emitted fields table. Order is
-    // stable for the Python aggregator parser.
+    // stable for the Python aggregator parser. `parent_span` label comes
+    // from the SpanHandle (set at open from the parent's span_name per
+    // Codex plan review v1 P1 #1 — do NOT hard-code "explicit_parent").
     tracing::info!(
         "[p5h-profile] request_id={} routing_path={} prompt_tokens={} seq={} layer_idx={} \
          span_id={} parent_span_id={} span_name={} parent_span={} \
@@ -453,7 +517,7 @@ fn emit_log_line(
         span.span_id,
         span.parent_span_id.map(|id| id.to_string()).unwrap_or_else(|| "null".to_string()),
         span.span_name,
-        parent_span_label.unwrap_or("null"),
+        span.parent_span.unwrap_or("null"),
         span.start_ns,
         end_ns,
         fields.mode.unwrap_or("off"),
@@ -485,26 +549,32 @@ pub fn open_p5h_span_at(
         "open_p5h_span[_at]({}) called with empty P5hTraceContext.request_id — context not populated",
         span_name,
     );
+    let span_id = next_span_id();
+    registry_insert(span_id);
     SpanHandle {
-        span_id: next_span_id(),
+        span_id,
         span_name,
         parent_span_id: parent.map(|p| p.span_id),
+        // Per Codex plan review v1 P1 #1: carry real parent label, NOT
+        // "explicit_parent" placeholder. Label self-consistency check in T0a
+        // fixture asserts parent_span_id resolves to a span whose span_name
+        // equals this label.
+        parent_span: parent.map(|p| p.span_name),
         start_ns,
     }
 }
 
-/// Close an explicit-context span. Emits the `[p5h-profile]` log line.
-/// Per § 2.5a, callers picking the diagnostic class pass span_name from
-/// the closed set; we default to "tree" and have `close_p5h_span_diagnostic`
-/// below for the diagnostic case.
+/// Close an explicit-context tree span. Emits the `[p5h-profile]` log line.
+/// Per Codex plan review v1 P2 #5: hard-fail if span_id is not in the open
+/// registry (catches handle reuse / cross-request leakage / double-close).
 pub fn close_p5h_span(
     ctx: &P5hTraceContext,
     handle: SpanHandle,
     end_ns: u64,
     fields: SpanFields,
 ) {
-    let parent_label = if handle.parent_span_id.is_none() { None } else { Some("explicit_parent") };
-    emit_log_line(ctx, &handle, end_ns, &fields, "tree", parent_label);
+    registry_remove_or_panic(handle.span_id, handle.span_name);
+    emit_log_line(ctx, &handle, end_ns, &fields, "tree");
 }
 
 /// Close a diagnostic span (e.g., Lane-A `sse_write_role_chunk_diagnostic`).
@@ -515,8 +585,8 @@ pub fn close_p5h_span_diagnostic(
     end_ns: u64,
     fields: SpanFields,
 ) {
-    let parent_label = if handle.parent_span_id.is_none() { None } else { Some("explicit_parent") };
-    emit_log_line(ctx, &handle, end_ns, &fields, "diagnostic", parent_label);
+    registry_remove_or_panic(handle.span_id, handle.span_name);
+    emit_log_line(ctx, &handle, end_ns, &fields, "diagnostic");
 }
 
 /// Implicit-guard API. Internally opens span (parent = stack top), pushes,
@@ -527,17 +597,21 @@ pub fn with_p5h_span_from_current_trace<T>(
     body: impl FnOnce() -> T,
 ) -> T {
     let start_ns = monotonic_ns();
-    let parent_id = P5H_CURRENT_SPAN_STACK.with(|s| {
-        s.borrow().last().map(|h| h.span_id)
-            .expect("with_p5h_span_from_current_trace called with no active P5H_CURRENT_TRACE (empty span stack)")
+    let (parent_id, parent_label) = P5H_CURRENT_SPAN_STACK.with(|s| {
+        let stack = s.borrow();
+        let top = stack.last()
+            .expect("with_p5h_span_from_current_trace called with no active P5H_CURRENT_TRACE (empty span stack)");
+        (top.span_id, top.span_name)
     });
-    let parent_label = P5H_CURRENT_SPAN_STACK.with(|s| {
-        s.borrow().last().map(|h| h.span_name).unwrap_or("null")
-    });
+    let span_id = next_span_id();
+    registry_insert(span_id);
     let handle = SpanHandle {
-        span_id: next_span_id(),
+        span_id,
         span_name,
         parent_span_id: Some(parent_id),
+        // Per Codex plan review v1 P1 #1: carry real parent label for T0a
+        // label self-consistency assertion.
+        parent_span: Some(parent_label),
         start_ns,
     };
     P5H_CURRENT_SPAN_STACK.with(|s| s.borrow_mut().push(handle.clone()));
@@ -546,10 +620,11 @@ pub fn with_p5h_span_from_current_trace<T>(
     assert_eq!(popped.span_id, handle.span_id, "stack imbalance: popped a different span than the one opened");
     let end_ns = monotonic_ns();
     let fields = fields_fn();
+    registry_remove_or_panic(handle.span_id, handle.span_name);
     P5H_CURRENT_TRACE.with(|c| {
         let ctx_ref = c.borrow();
         let ctx = ctx_ref.as_ref().expect("with_p5h_span_from_current_trace called with no active P5H_CURRENT_TRACE");
-        emit_log_line(ctx, &handle, end_ns, &fields, "tree", Some(parent_label));
+        emit_log_line(ctx, &handle, end_ns, &fields, "tree");
     });
     result
 }
@@ -584,7 +659,7 @@ Run:
 cargo test -p ironmlx --features p5h-profile core::p5h::tests
 ```
 
-Expected: all 6 tests PASS.
+Expected: all 8 tests PASS (6 prior + close_panics_on_double_close + close_panics_on_unknown_handle).
 
 - [ ] **Step 5: Verify default build emits zero `[p5h-profile]` lines**
 
@@ -1533,17 +1608,24 @@ P5H_LOG_RE = re.compile(
     r"span_kind=(?P<span_kind>\S+)"
 )
 
-LANE_A_REQUIRED = {
+# Per Codex plan review v1 P1 #2: split required sets by span_kind so the
+# presence check doesn't fail on Lane-A diagnostic spans being absent from
+# tree_spans. Each lane's required set is split into a tree subset and a
+# diagnostic subset, checked against the corresponding span_kind partition.
+
+LANE_A_REQUIRED_TREE = {
     "server_request_recv_to_first_content_sse_write",
     "http_parse_render_tokenize",
     "scheduler_admission",
-    "sse_write_role_chunk_diagnostic",
     "model_prefill_forward",
     "first_token_sampling",
     "detok_format_first_content_chunk",
 }
+LANE_A_REQUIRED_DIAGNOSTIC = {
+    "sse_write_role_chunk_diagnostic",
+}
 
-LANE_B_REQUIRED = {
+LANE_B_REQUIRED_TREE = {
     "server_request_recv_to_first_content_sse_write",
     "http_parse_render_tokenize",
     "gs_stream_init_and_chunk_loop",
@@ -1552,6 +1634,7 @@ LANE_B_REQUIRED = {
     "gs_first_token_materialize_and_predispatch",
     "detok_format_first_content_chunk",
 }
+LANE_B_REQUIRED_DIAGNOSTIC: set[str] = set()  # no Lane-B diagnostic spans currently
 
 DIAGNOSTIC_ALLOWED_NAMES = {"sse_write_role_chunk_diagnostic"}
 
@@ -1697,17 +1780,35 @@ def validate_request(spans: list[Span]) -> ValidationReport:
         if unreachable:
             report.fail(f"unreachable tree spans from root: {[by_id[i].span_name for i in unreachable]}")
 
-    # Route-aware required span_names
-    names = {s.span_name for s in tree}
-    required = LANE_A_REQUIRED if routing == "scheduler" else LANE_B_REQUIRED
-    missing = required - names
-    if missing:
-        report.fail(f"missing required tree spans for {routing}: {missing}")
+    # Route-aware required span_names (per Codex plan review v1 P1 #2 — check
+    # tree subset against tree_spans, diagnostic subset against diagnostic_spans).
+    tree_names = {s.span_name for s in tree}
+    diag_names = {s.span_name for s in diag}
+    if routing == "scheduler":
+        required_tree = LANE_A_REQUIRED_TREE
+        required_diag = LANE_A_REQUIRED_DIAGNOSTIC
+    else:
+        required_tree = LANE_B_REQUIRED_TREE
+        required_diag = LANE_B_REQUIRED_DIAGNOSTIC
+    missing_tree = required_tree - tree_names
+    missing_diag = required_diag - diag_names
+    if missing_tree:
+        report.fail(f"missing required tree spans for {routing}: {missing_tree}")
+    if missing_diag:
+        report.fail(f"missing required diagnostic spans for {routing}: {missing_diag}")
 
-    # Diagnostic checks
+    # Diagnostic checks (per § 2.5a + Codex plan review v1 P2 #4)
+    root_span_id = roots[0].span_id if len(roots) == 1 else None
     for d in diag:
         if d.span_name not in DIAGNOSTIC_ALLOWED_NAMES:
             report.fail(f"unexpected diagnostic span_name: {d.span_name}")
+        # Per § 2.5a "Diagnostic span checks": parent_span_id MUST be None OR
+        # point at root.span_id. Anything else = emitter bug.
+        if d.parent_span_id is not None and d.parent_span_id != root_span_id:
+            report.fail(
+                f"diagnostic span {d.span_name} parent_span_id={d.parent_span_id} — "
+                f"must be null or root's span_id ({root_span_id})"
+            )
 
     # pre_content_decode_steps hard gate (per § 2.5a)
     pcds_count = sum(1 for s in tree if s.span_name == "pre_content_decode_steps")
@@ -1816,9 +1917,48 @@ def main():
     with args.bench_csv.open() as f:
         reader = csv.DictReader(f)
         for row in reader:
-            bench_by_req[row["request_id"]] = row
+            rid = row.get("request_id", "").strip()
+            if rid:
+                bench_by_req[rid] = row
 
     grouped = group_by_request(spans)
+
+    # Per Codex plan review v1 P1 #3 + § 2.5a Join key:
+    # iron-bench↔server request_id join MUST be 100%. Any orphan = broken
+    # header propagation = hard-fail before any downstream computation.
+    server_req_ids = set(grouped.keys())
+    bench_req_ids = set(bench_by_req.keys())
+    server_orphans = server_req_ids - bench_req_ids  # server log has spans for a request bench CSV doesn't know
+    bench_orphans = bench_req_ids - server_req_ids   # bench CSV has a request server log has no spans for
+
+    if server_orphans or bench_orphans:
+        print("JOIN HARD-FAIL: per § 2.5a Join key, request_id join rate must = 100% (orphan rate = 0%)", file=sys.stderr)
+        if server_orphans:
+            print(f"  server log has {len(server_orphans)} request_id(s) absent from iron-bench CSV:", file=sys.stderr)
+            for r in sorted(server_orphans)[:10]:
+                print(f"    {r}", file=sys.stderr)
+            if len(server_orphans) > 10:
+                print(f"    ... +{len(server_orphans) - 10} more", file=sys.stderr)
+        if bench_orphans:
+            print(f"  iron-bench CSV has {len(bench_orphans)} request_id(s) absent from server log:", file=sys.stderr)
+            for r in sorted(bench_orphans)[:10]:
+                print(f"    {r}", file=sys.stderr)
+            if len(bench_orphans) > 10:
+                print(f"    ... +{len(bench_orphans) - 10} more", file=sys.stderr)
+        print("Likely causes: server not built with --features p5h-profile; iron-bench --capture-server-request-id flag off; header propagation bug.", file=sys.stderr)
+        sys.exit(4)
+
+    # Per-PP join rate breakdown (informational; total join rate already
+    # validated above as 100%).
+    pp_join_rates: dict[str, tuple[int, int]] = {}
+    for rid in server_req_ids:
+        pp = bench_by_req.get(rid, {}).get("pp_target", "?")
+        matched, total = pp_join_rates.get(pp, (0, 0))
+        pp_join_rates[pp] = (matched + 1, total + 1)
+    for pp in sorted(pp_join_rates, key=lambda x: int(x) if x.isdigit() else -1):
+        matched, total = pp_join_rates[pp]
+        print(f"  PP={pp}: join_rate={matched}/{total} (100.0%)", file=sys.stderr)
+
     failures = []
     for req_id, request_spans in grouped.items():
         rep = validate_request(request_spans)
@@ -1842,7 +1982,7 @@ def main():
             for s in request_spans:
                 w.writerow([req_id, pp, s.span_name, f"{s.inclusive_us:.2f}"])
 
-    print(f"OK: {len(grouped)} requests, {len(spans)} spans, written to {args.out}")
+    print(f"OK: {len(grouped)} requests, {len(spans)} spans, join rate 100%, written to {args.out}")
 
 
 if __name__ == "__main__":
@@ -1985,29 +2125,69 @@ uv run python -m tools.p5h_aggregator.aggregator \
 
 Expected: exits 0. All structural checks pass.
 
-- [ ] **Step 3: Verify hard-gate invariants**
+- [ ] **Step 3: Verify hard-gate invariants (per Codex plan review v1 P1 #3)**
 
-Run the validator standalone on the captured log to print a pass report:
+Per § 2.5a + § 4 + § 7.2 #9, T0a HARD GATE has three independent components:
+1. **Per-PP iron-bench↔server `request_id` join rate = 100%** (orphan rate = 0%) — verified by the aggregator hard-fail in Step 2 above (exit code 4 if any orphan).
+2. **Per-request structural checks PASS** — verified via the standalone validator script below.
+3. **Per-PP UMA cold/warm variance ≤ ±2%** — verified by the harness in T0a.13.
+
+Run the validator standalone on the captured log to print a per-PP pass report:
 
 ```bash
 uv run python -c "
+import csv
 from pathlib import Path
 from tools.p5h_aggregator.schema_validator import parse_line, group_by_request, validate_request
+
+# Parse server log
 spans = []
 for line in Path('/tmp/p5h-t0a-server.log').open():
     s = parse_line(line)
     if s: spans.append(s)
 groups = group_by_request(spans)
-print(f'total requests: {len(groups)}, total spans: {len(spans)}')
-fails = 0
+
+# Parse iron-bench CSV for join + per-PP grouping
+bench_by_req = {}
+with Path('/tmp/p5h-t0a-bench.csv').open() as f:
+    for row in csv.DictReader(f):
+        rid = row.get('request_id', '').strip()
+        if rid:
+            bench_by_req[rid] = row
+
+# Per-PP join rate + structural-check breakdown
+per_pp: dict[str, dict] = {}
 for req_id, group_spans in groups.items():
+    bench_row = bench_by_req.get(req_id, {})
+    pp = bench_row.get('pp_target', '?')
+    rec = per_pp.setdefault(pp, {'total': 0, 'pass': 0, 'fail': 0, 'joined': 0})
+    rec['total'] += 1
+    if req_id in bench_by_req:
+        rec['joined'] += 1
     rep = validate_request(group_spans)
-    if not rep.ok:
-        fails += 1
-        print(f'  {req_id}: {rep.failures[0]}')
-print(f'PASS: {len(groups) - fails}, FAIL: {fails}')
-assert fails == 0, 'T0a HARD GATE FAILED'
-print('T0a HARD GATE: PASS')
+    if rep.ok:
+        rec['pass'] += 1
+    else:
+        rec['fail'] += 1
+        print(f'  {req_id} (PP={pp}): {rep.failures[0]}')
+
+print(f'Total requests: {len(groups)}, total spans: {len(spans)}')
+gate_pass = True
+for pp in sorted(per_pp, key=lambda x: int(x) if x.isdigit() else -1):
+    r = per_pp[pp]
+    join_rate = 100.0 * r['joined'] / r['total'] if r['total'] else 0.0
+    pass_rate = 100.0 * r['pass'] / r['total'] if r['total'] else 0.0
+    print(f'PP={pp}: total={r[\"total\"]} joined={r[\"joined\"]} ({join_rate:.1f}%) pass={r[\"pass\"]} fail={r[\"fail\"]} ({pass_rate:.1f}%)')
+    if join_rate < 100.0:
+        print(f'  HARD GATE FAIL: PP={pp} join rate {join_rate:.1f}% < 100% (per Codex plan review v1 P1 #3 + § 2.5a Join key)')
+        gate_pass = False
+    if r['fail'] > 0:
+        print(f'  HARD GATE FAIL: PP={pp} {r[\"fail\"]} structural-check failures')
+        gate_pass = False
+
+if not gate_pass:
+    raise SystemExit('T0a HARD GATE FAILED')
+print('T0a HARD GATE: PASS (per-PP join rate = 100%, per-request structural checks PASS)')
 "
 ```
 
