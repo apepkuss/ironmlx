@@ -346,7 +346,22 @@ git commit -m "feat(p5h-t0a): P5hTraceGuard RAII + nesting/stack-empty assertion
 ### T0a.3 — Dual emission API (open/close/with_span) + log line formatter
 
 **Files:**
+- Modify: `ironmlx/Cargo.toml`
 - Modify: `ironmlx/src/core/p5h.rs`
+
+- [ ] **Step 0: Add `once_cell` dependency (used by `monotonic_ns()` below)**
+
+Per Codex plan review v3 P1 #2: the `once_cell::sync::Lazy<Instant>` anchor in `monotonic_ns()` requires the `once_cell` crate. Add to `ironmlx/Cargo.toml` `[dependencies]` BEFORE writing any code that uses it (T0a.6 originally listed this step but T0a.3 is the first user). If `once_cell` is already a dependency in `ironmlx/Cargo.toml`, skip this step.
+
+```toml
+once_cell = "1"
+```
+
+Verify:
+
+```bash
+grep -q "once_cell" ironmlx/Cargo.toml && echo "OK" || echo "MISSING"
+```
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -410,13 +425,33 @@ Append to the `#[cfg(test)] mod tests` block:
     }
 
     #[test]
-    #[should_panic(expected = "with_p5h_span_from_current_trace called with no active P5H_CURRENT_TRACE")]
+    #[should_panic(expected = "called with no active P5H_CURRENT_TRACE")]
     fn with_span_panics_outside_guard() {
+        // Panic message includes span_name per Codex plan review v3 P3 #7.
         let _ = with_p5h_span_from_current_trace::<u32>(
             "deep_span",
             SpanFields::default,
             || 42,
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "ctx mismatch")]
+    fn close_panics_on_wrong_ctx() {
+        // Per Codex plan review v3 P2 #3: closing a span with a different
+        // request_id than was active at open MUST panic.
+        let ctx_a = P5hTraceContext {
+            request_id: "req-A".to_string(),
+            prompt_tokens: 128,
+            routing_path: "scheduler",
+        };
+        let ctx_b = P5hTraceContext {
+            request_id: "req-B".to_string(),
+            prompt_tokens: 128,
+            routing_path: "scheduler",
+        };
+        let span = open_p5h_span_at(&ctx_a, None, "test_root", 0);
+        close_p5h_span(&ctx_b, span, 1, SpanFields::default());
     }
 
     #[test]
@@ -444,41 +479,55 @@ Run:
 cargo test -p ironmlx --features p5h-profile core::p5h::tests
 ```
 
-Expected: 6 failures (missing `open_p5h_span`, `open_p5h_span_at`, `close_p5h_span`, `with_p5h_span_from_current_trace`, registry insert/remove panics).
+Expected: 7 failures (missing `open_p5h_span`, `open_p5h_span_at`, `close_p5h_span`, `with_p5h_span_from_current_trace`, registry insert/remove panics, wrong-ctx close panic).
 
 - [ ] **Step 3: Implement the dual API + log line formatter**
 
 In `ironmlx/src/core/p5h.rs`, append (or place between the type defs and tests):
 
 ```rust
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Per Codex plan review v1 P2 #5: track open span_ids so close_p5h_span can
-/// hard-fail on handle reuse / cross-request leakage / unknown span_id.
-/// Only enabled in p5h-profile builds (no runtime cost in default builds).
-static OPEN_SPAN_REGISTRY: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
-
-fn registry_insert(span_id: u64) {
-    let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
-    let reg = guard.get_or_insert_with(HashSet::new);
-    let inserted = reg.insert(span_id);
-    assert!(inserted, "open_p5h_span issued duplicate span_id={} — atomic counter race or registry corruption", span_id);
+/// Tracks each open span's request_id (per Codex plan review v3 P2 #3 —
+/// upgraded from HashSet<u64> so close_p5h_span can also detect wrong-ctx
+/// close, not just unknown / double-close). Only enabled in p5h-profile
+/// builds (no runtime cost in default builds since the whole module is
+/// `#[cfg(feature = "p5h-profile")]`).
+#[derive(Clone, Debug)]
+struct OpenSpanRecord {
+    span_name: &'static str,
+    request_id: String,
 }
 
-fn registry_remove_or_panic(span_id: u64, span_name: &'static str) {
+static OPEN_SPAN_REGISTRY: Mutex<Option<HashMap<u64, OpenSpanRecord>>> = Mutex::new(None);
+
+fn registry_insert(span_id: u64, record: OpenSpanRecord) {
+    let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
+    let reg = guard.get_or_insert_with(HashMap::new);
+    let prev = reg.insert(span_id, record);
+    assert!(prev.is_none(), "open_p5h_span issued duplicate span_id={} — atomic counter race or registry corruption", span_id);
+}
+
+fn registry_remove_or_panic(span_id: u64, span_name: &'static str, expected_request_id: &str) {
     let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
     let reg = guard.as_mut().expect("close_p5h_span called before any open");
+    let record = reg.remove(&span_id).unwrap_or_else(|| {
+        panic!(
+            "close_p5h_span(span_name={}, span_id={}) — span_id is not in open registry. \
+             Causes: (a) handle reused after close (double-close), (b) handle leaked from a different request, \
+             (c) handle never opened. Per § 2.5a explicit-API hard-fail.",
+            span_name, span_id,
+        );
+    });
     assert!(
-        reg.remove(&span_id),
-        "close_p5h_span(span_name={}, span_id={}) — span_id is not in open registry. \
-         Causes: (a) handle reused after close (double-close), (b) handle leaked from a different request, \
-         (c) handle never opened. Per § 2.5a explicit-API hard-fail.",
-        span_name,
-        span_id,
+        record.request_id == expected_request_id,
+        "close_p5h_span(span_name={}, span_id={}) — ctx mismatch: opened with request_id={}, closing with request_id={}. \
+         Cross-request handle leakage. Per Codex plan review v3 P2 #3 + § 2.5a explicit-API hard-fail.",
+        span_name, span_id, record.request_id, expected_request_id,
     );
 }
 
@@ -550,7 +599,10 @@ pub fn open_p5h_span_at(
         span_name,
     );
     let span_id = next_span_id();
-    registry_insert(span_id);
+    registry_insert(span_id, OpenSpanRecord {
+        span_name,
+        request_id: ctx.request_id.clone(),
+    });
     SpanHandle {
         span_id,
         span_name,
@@ -565,15 +617,17 @@ pub fn open_p5h_span_at(
 }
 
 /// Close an explicit-context tree span. Emits the `[p5h-profile]` log line.
-/// Per Codex plan review v1 P2 #5: hard-fail if span_id is not in the open
-/// registry (catches handle reuse / cross-request leakage / double-close).
+/// Per Codex plan review v1 P2 #5 + v3 P2 #3: hard-fail if span_id is not in
+/// the open registry OR if ctx.request_id doesn't match the record stored at
+/// open (catches handle reuse / cross-request leakage / double-close /
+/// wrong-ctx close).
 pub fn close_p5h_span(
     ctx: &P5hTraceContext,
     handle: SpanHandle,
     end_ns: u64,
     fields: SpanFields,
 ) {
-    registry_remove_or_panic(handle.span_id, handle.span_name);
+    registry_remove_or_panic(handle.span_id, handle.span_name, &ctx.request_id);
     emit_log_line(ctx, &handle, end_ns, &fields, "tree");
 }
 
@@ -585,7 +639,7 @@ pub fn close_p5h_span_diagnostic(
     end_ns: u64,
     fields: SpanFields,
 ) {
-    registry_remove_or_panic(handle.span_id, handle.span_name);
+    registry_remove_or_panic(handle.span_id, handle.span_name, &ctx.request_id);
     emit_log_line(ctx, &handle, end_ns, &fields, "diagnostic");
 }
 
@@ -597,14 +651,32 @@ pub fn with_p5h_span_from_current_trace<T>(
     body: impl FnOnce() -> T,
 ) -> T {
     let start_ns = monotonic_ns();
+    // Read trace ctx once at the start (per Codex plan review v3 P3 #7 —
+    // include span_name in the no-guard panic message; v2 panic message was
+    // a bare static string that hid which instrumentation site triggered it).
+    let request_id_at_open: String = P5H_CURRENT_TRACE.with(|c| {
+        c.borrow().as_ref()
+            .unwrap_or_else(|| panic!(
+                "with_p5h_span_from_current_trace(span_name={}) called with no active P5H_CURRENT_TRACE — \
+                 site is not inside an authorized P5hTraceGuard region (per § 2.5a Authorized guard sites)",
+                span_name,
+            ))
+            .request_id.clone()
+    });
     let (parent_id, parent_label) = P5H_CURRENT_SPAN_STACK.with(|s| {
         let stack = s.borrow();
-        let top = stack.last()
-            .expect("with_p5h_span_from_current_trace called with no active P5H_CURRENT_TRACE (empty span stack)");
+        let top = stack.last().unwrap_or_else(|| panic!(
+            "with_p5h_span_from_current_trace(span_name={}) called with empty span stack — \
+             guard active but stack not seeded (base_parent missing)",
+            span_name,
+        ));
         (top.span_id, top.span_name)
     });
     let span_id = next_span_id();
-    registry_insert(span_id);
+    registry_insert(span_id, OpenSpanRecord {
+        span_name,
+        request_id: request_id_at_open.clone(),
+    });
     let handle = SpanHandle {
         span_id,
         span_name,
@@ -616,14 +688,20 @@ pub fn with_p5h_span_from_current_trace<T>(
     };
     P5H_CURRENT_SPAN_STACK.with(|s| s.borrow_mut().push(handle.clone()));
     let result = body();
-    let popped = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow_mut().pop().expect("stack underflow in with_p5h_span_from_current_trace"));
-    assert_eq!(popped.span_id, handle.span_id, "stack imbalance: popped a different span than the one opened");
+    let popped = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow_mut().pop().unwrap_or_else(|| panic!(
+        "stack underflow in with_p5h_span_from_current_trace(span_name={})",
+        span_name,
+    )));
+    assert_eq!(popped.span_id, handle.span_id, "stack imbalance: popped a different span ({}) than the one opened ({})", popped.span_name, handle.span_name);
     let end_ns = monotonic_ns();
     let fields = fields_fn();
-    registry_remove_or_panic(handle.span_id, handle.span_name);
+    registry_remove_or_panic(handle.span_id, handle.span_name, &request_id_at_open);
     P5H_CURRENT_TRACE.with(|c| {
         let ctx_ref = c.borrow();
-        let ctx = ctx_ref.as_ref().expect("with_p5h_span_from_current_trace called with no active P5H_CURRENT_TRACE");
+        let ctx = ctx_ref.as_ref().unwrap_or_else(|| panic!(
+            "with_p5h_span_from_current_trace(span_name={}) lost P5H_CURRENT_TRACE mid-body — guard dropped concurrently",
+            span_name,
+        ));
         emit_log_line(ctx, &handle, end_ns, &fields, "tree");
     });
     result
@@ -659,7 +737,7 @@ Run:
 cargo test -p ironmlx --features p5h-profile core::p5h::tests
 ```
 
-Expected: all 8 tests PASS (6 prior + close_panics_on_double_close + close_panics_on_unknown_handle).
+Expected: all 9 tests PASS (6 prior + close_panics_on_double_close + close_panics_on_unknown_handle + close_panics_on_wrong_ctx).
 
 - [ ] **Step 5: Verify default build emits zero `[p5h-profile]` lines**
 
@@ -838,38 +916,22 @@ uuid = { version = "1", features = ["v4"] }
 
 - [ ] **Step 2: Modify `chat_completions` handler — entry block**
 
-Edit `ironmlx/src/core/server/openai.rs:310-410`. At the very start of the `pub async fn chat_completions<M>(...) -> Response` body, before any work, add:
+Edit `ironmlx/src/core/server/openai.rs:310-410`. At the very start of the `pub async fn chat_completions<M>(...) -> Response` body, before any work, add (per Codex plan review v3 P2 #5 — keep this snippet clippy-clean: no unused `Instant` / `now` bindings, use the `monotonic_ns_public()` helper added in T0a.3):
 
 ```rust
     // P5h root + http_parse_render_tokenize start capture (per spec § 2.5a step 1).
+    // Both timestamps captured at handler entry BEFORE any parse/tokenize work,
+    // because the http_parse_render_tokenize span's true start is the entry point,
+    // and the root span needs the same anchor.
     #[cfg(feature = "p5h-profile")]
-    let (p5h_request_id, p5h_root_start_ns, p5h_http_start_ns) = {
-        use std::time::Instant;
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = Instant::now().elapsed().as_nanos() as u64;
-        // Use std::time::Instant via a static anchor to get monotonic nanos.
-        // Simpler: use crate::core::p5h's helper monotonic_ns equivalent.
-        (id, crate::core::p5h::monotonic_ns_public(), crate::core::p5h::monotonic_ns_public())
-    };
+    let (p5h_request_id, p5h_root_start_ns, p5h_http_start_ns) = (
+        uuid::Uuid::new_v4().to_string(),
+        crate::core::p5h::monotonic_ns_public(),
+        crate::core::p5h::monotonic_ns_public(),
+    );
 ```
 
-Expose `monotonic_ns` in `core/p5h.rs` by changing its signature from private to `pub(crate)` and adding a public wrapper:
-
-```rust
-pub(crate) fn monotonic_ns_public() -> u64 { monotonic_ns() }
-```
-
-Then change `monotonic_ns` internal to use `std::time::Instant` consistently:
-
-```rust
-fn monotonic_ns() -> u64 {
-    use std::time::Instant;
-    static ANCHOR: once_cell::sync::Lazy<Instant> = once_cell::sync::Lazy::new(Instant::now);
-    ANCHOR.elapsed().as_nanos() as u64
-}
-```
-
-(Add `once_cell = "1"` to `ironmlx/Cargo.toml` if not already present.)
+The helper `monotonic_ns_public` (and the underlying `monotonic_ns` with `once_cell::sync::Lazy<Instant>` anchor) was already implemented in T0a.3 — no additional plumbing here.
 
 - [ ] **Step 3: After tokenize, before admit — construct ctx + open root + open/close http_parse**
 
@@ -1864,6 +1926,129 @@ def test_duplicate_span_id_fails():
     rep = validate_request([a, b])
     assert not rep.ok
     assert any("duplicate" in f for f in rep.failures)
+
+# --- Hard-path fixtures per Codex plan review v3 P2 #4 ---
+
+def _build_line(
+    *,
+    request_id="abc",
+    routing_path="scheduler",
+    prompt_tokens=128,
+    span_id,
+    parent_span_id="null",
+    span_name,
+    parent_span="null",
+    start_ns=1_000_000,
+    end_ns=2_000_000,
+    mode="off",
+    span_kind="tree",
+):
+    """Build a synthetic [p5h-profile] log line with field overrides."""
+    return (
+        f"  2026-05-21T03:00:00Z  INFO ironmlx::core::p5h: "
+        f"[p5h-profile] request_id={request_id} routing_path={routing_path} "
+        f"prompt_tokens={prompt_tokens} seq=128 layer_idx=-1 "
+        f"span_id={span_id} parent_span_id={parent_span_id} "
+        f"span_name={span_name} parent_span={parent_span} "
+        f"start_ns={start_ns} end_ns={end_ns} mode={mode} span_kind={span_kind}"
+    )
+
+def _lane_a_pass_fixture() -> list:
+    """Minimal Lane-A request: root + all 6 required tree spans + 1 required diagnostic."""
+    spans = []
+    # Root: contains all children in [0, 100_000_000]
+    spans.append(parse_line(_build_line(
+        span_id=1, parent_span_id="null",
+        span_name="server_request_recv_to_first_content_sse_write",
+        parent_span="null",
+        start_ns=0, end_ns=100_000_000,
+    )))
+    # Required tree children
+    for sid, name in enumerate([
+        "http_parse_render_tokenize",
+        "scheduler_admission",
+        "model_prefill_forward",
+        "first_token_sampling",
+        "detok_format_first_content_chunk",
+    ], start=2):
+        spans.append(parse_line(_build_line(
+            span_id=sid, parent_span_id="1",
+            span_name=name, parent_span="server_request_recv_to_first_content_sse_write",
+            start_ns=1_000 * sid, end_ns=1_000 * sid + 500,
+        )))
+    # Required diagnostic (under root span_id=1, but span_kind=diagnostic)
+    spans.append(parse_line(_build_line(
+        span_id=100, parent_span_id="1",
+        span_name="sse_write_role_chunk_diagnostic",
+        parent_span="server_request_recv_to_first_content_sse_write",
+        start_ns=10_000, end_ns=10_500, span_kind="diagnostic",
+    )))
+    return spans
+
+def test_lane_a_full_fixture_passes():
+    """Per Codex plan review v3 P2 #4: a well-formed Lane-A request must
+    PASS all structural checks, including the diagnostic presence subset."""
+    spans = _lane_a_pass_fixture()
+    rep = validate_request(spans)
+    assert rep.ok, f"unexpected failures: {rep.failures}"
+
+def test_lane_a_missing_diagnostic_fails():
+    """Drop the diagnostic span; presence check on LANE_A_REQUIRED_DIAGNOSTIC must fail."""
+    spans = [s for s in _lane_a_pass_fixture() if s.span_kind != "diagnostic"]
+    rep = validate_request(spans)
+    assert not rep.ok
+    assert any("missing required diagnostic spans" in f for f in rep.failures), rep.failures
+
+def test_diagnostic_parent_not_root_fails():
+    """Diagnostic span with parent_span_id != root.span_id and not None must fail
+    (per § 2.5a Diagnostic span checks)."""
+    spans = _lane_a_pass_fixture()
+    # Mutate diagnostic span's parent_span_id to a non-root id (id=2 is http_parse).
+    for i, s in enumerate(spans):
+        if s.span_kind == "diagnostic":
+            spans[i] = parse_line(_build_line(
+                span_id=100, parent_span_id="2",
+                span_name="sse_write_role_chunk_diagnostic",
+                parent_span="http_parse_render_tokenize",  # not root
+                start_ns=10_000, end_ns=10_500, span_kind="diagnostic",
+            ))
+            break
+    rep = validate_request(spans)
+    assert not rep.ok
+    assert any("parent_span_id" in f and "must be null or root" in f for f in rep.failures), rep.failures
+
+def test_join_orphan_aggregator_hard_fail(tmp_path):
+    """Per Codex plan review v3 P2 #4 + § 2.5a Join key: aggregator MUST exit
+    non-zero when server log has a request_id absent from iron-bench CSV.
+    This test invokes the aggregator entry point with a curated input.
+    """
+    import subprocess
+    import sys
+    # Server log with a request_id "abc"
+    server_log = tmp_path / "server.log"
+    server_log.write_text("\n".join(
+        _build_line(span_id=sid, parent_span_id=("null" if sid == 1 else "1"),
+                    span_name=name,
+                    parent_span=("null" if sid == 1 else "server_request_recv_to_first_content_sse_write"),
+                    start_ns=1_000 * sid, end_ns=1_000 * sid + 500)
+        for sid, name in [
+            (1, "server_request_recv_to_first_content_sse_write"),
+            (2, "http_parse_render_tokenize"),
+        ]
+    ) + "\n")
+    # Bench CSV with a DIFFERENT request_id "xyz" — server "abc" is orphan
+    bench_csv = tmp_path / "bench.csv"
+    bench_csv.write_text("request_id,pp_target\nxyz,128\n")
+    out = tmp_path / "out.csv"
+    result = subprocess.run(
+        [sys.executable, "-m", "tools.p5h_aggregator.aggregator",
+         "--server-log", str(server_log),
+         "--bench-csv", str(bench_csv),
+         "--out", str(out)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 4, f"expected exit 4 (JOIN HARD-FAIL), got {result.returncode}\nstderr:\n{result.stderr}"
+    assert "JOIN HARD-FAIL" in result.stderr
 ```
 
 - [ ] **Step 4: Run validator tests**
@@ -1873,7 +2058,7 @@ cd /Users/xin/workspace/ironmlx-backend
 uv run pytest tools/p5h_aggregator/tests/test_validator.py -v
 ```
 
-Expected: all 3 tests PASS.
+Expected: all 7 tests PASS (3 prior + lane_a_full_fixture_passes + lane_a_missing_diagnostic_fails + diagnostic_parent_not_root_fails + join_orphan_aggregator_hard_fail).
 
 - [ ] **Step 5: Implement aggregator entry point**
 
@@ -2562,10 +2747,20 @@ Create `tools/p5h_aggregator/roi_ranking.py`:
 from __future__ import annotations
 from dataclasses import dataclass
 
-P5I_PP_SET = {128, 512, 2048}  # short PP, scheduler path (Lane A)
-P5J_PP_SET = {4096, 8192, 16384}  # long PP, GS chunked path (Lane B)
-P5I_TARGET_GAIN_RANGE = (0.24, 0.74)  # +24-74% needed per spec § 1.2
-P5J_TARGET_GAIN_RANGE = (1.10, 1.28)  # +110-128% needed per spec § 1.2
+# Separate "measurement lane" partition from "optimization target" partition
+# (per Codex plan review v3 P1 #1). Lane A/B describes WHICH code path the
+# request traverses (scheduler vs chunked GS); P5i/P5j describes which
+# optimization phase targets a given PP. Spec § 1.2 gap table: PP=128 needs
+# +24%, PP=512 needs +74%, PP=2048 needs +110%, PP=4096 needs +115%,
+# PP=8192 needs +124%, PP=16384 needs +126%. So PP=2048 belongs in the
+# long-gap (+110-128%) bracket = P5J target, NOT P5I.
+LANE_A_PP_SET = {128, 512, 2048}      # scheduler path; full deep substep attribution
+LANE_B_PP_SET = {4096, 8192, 16384}    # chunked GS path; top-level only (Lane B granularity)
+
+P5I_TARGET_PP_SET = {128, 512}                  # short-PP optimization phase (+24-74%)
+P5J_TARGET_PP_SET = {2048, 4096, 8192, 16384}   # long-PP optimization phase (+110-128%)
+P5I_TARGET_GAIN_RANGE = (0.24, 0.74)            # per spec § 1.2
+P5J_TARGET_GAIN_RANGE = (1.10, 1.28)            # per spec § 1.2
 
 @dataclass
 class Candidate:
@@ -2577,11 +2772,17 @@ class Candidate:
     notes: str
 
 def rank_p5i(attribution_table) -> list[Candidate]:
-    """Short-PP candidates: span_name × pp with highest estimated gain ≤ target."""
+    """P5i candidates: top span_name × pp combos for PP ∈ P5I_TARGET_PP_SET
+    ({128, 512}) — measurements come from Lane A (scheduler path, full deep
+    attribution), target gain +24-74%."""
     ...
 
 def rank_p5j(attribution_table) -> list[Candidate]:
-    """Long-PP candidates: same, plus 'bounded by Lane-B granularity' caveat."""
+    """P5j candidates: top span_name × pp combos for PP ∈ P5J_TARGET_PP_SET
+    ({2048, 4096, 8192, 16384}). Note PP=2048 measurements come from Lane A
+    (full deep attribution); PP=4096+ measurements come from Lane B
+    (top-level only — apply 'bounded by Lane-B granularity' caveat to
+    candidates derived from those PP). Target gain +110-128%."""
     ...
 ```
 
@@ -2698,7 +2899,7 @@ All spec requirements covered.
 ### Type consistency
 
 - `P5hTraceContext` fields = `{request_id: String, prompt_tokens: u32, routing_path: &'static str}` — used consistently across T0a.1-T0a.9.
-- `SpanHandle` fields = `{span_id, span_name, parent_span_id, start_ns}` — consistent.
+- `SpanHandle` fields = `{span_id, span_name, parent_span_id, parent_span, start_ns}` (with `parent_span: Option<&'static str>` added per Codex plan review v1 P1 #1 + v3 P3 #6 for T0a fixture label self-consistency check) — consistent across all uses.
 - `RootSpanHandle { ctx, span }` — consistent (NOT `{ctx, start_ns}`, which was a v17 stale form per Codex review).
 - `cloned_active_row_p5h_trace_and_root` returns `(P5hTraceContext, SpanHandle)` (owned) — consistent.
 
