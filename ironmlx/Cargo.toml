@@ -40,6 +40,7 @@ reqwest.workspace = true
 default = []
 vision-dump = []
 p5g-profile = []
+p5h-profile = []
 
 [dev-dependencies]
 approx = "0.5"

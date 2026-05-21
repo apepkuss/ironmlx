@@ -11,6 +11,9 @@ pub mod scheduler;
 pub mod server;
 pub mod tokenizer;
 
+#[cfg(feature = "p5h-profile")]
+pub(crate) mod p5h;
+
 pub use cache::KVCache;
 pub use chat_template::{ChatTemplate, Message};
 pub use generate::{build_position_ids, GenerateEvent, GenerateRequest, GenerationStream};
