@@ -917,14 +917,22 @@ In `ironmlx/src/core/scheduler.rs`, add after `Scheduler::admit` (or in an `#[cf
 ```rust
 #[cfg(feature = "p5h-profile")]
 impl<M> Scheduler<M> {
-    /// Return owned clones of the lone active row's trace context + root span.
+    /// Return owned clones of the lone active row's trace context + root span
+    /// IF the request came in through the openai.rs handler (which populates
+    /// `p5h_trace` + `p5h_root_span`). Returns `Ok(None)` if the active
+    /// row did NOT populate trace context — e.g., the request came in via
+    /// anthropic.rs / CLI / tests / scheduler_actor internal helpers, which
+    /// all keep both fields at `None` (per Codex plan review v10 P1 #2 —
+    /// hard-failing on None would break every non-OpenAI scheduler-using
+    /// path under `--features p5h-profile`).
+    ///
     /// Per § 2.5a + Codex v17 P1: returns owned values (NOT references) because
     /// `prefill_admitted_inner` needs &mut self.cache / &mut self.slots /
     /// &mut self.prng_state after this call, which would conflict with refs
     /// borrowed from self.slots.
     pub(crate) fn cloned_active_row_p5h_trace_and_root(
         &self,
-    ) -> anyhow::Result<(crate::core::p5h::P5hTraceContext, crate::core::p5h::SpanHandle)> {
+    ) -> anyhow::Result<Option<(crate::core::p5h::P5hTraceContext, crate::core::p5h::SpanHandle)>> {
         let active: Vec<&RequestState> = self.slots.iter().filter_map(|s| s.as_ref()).collect();
         anyhow::ensure!(
             active.len() == 1,
@@ -932,13 +940,21 @@ impl<M> Scheduler<M> {
             active.len(),
         );
         let state = active[0];
-        let ctx = state.p5h_trace.clone().ok_or_else(|| anyhow::anyhow!(
-            "p5h-profile invariant: active RequestState.p5h_trace is None — request not populated by handler"
-        ))?;
-        let root_span = state.p5h_root_span.clone().ok_or_else(|| anyhow::anyhow!(
-            "p5h-profile invariant: active RequestState.p5h_root_span is None — request not populated by handler"
-        ))?;
-        Ok((ctx, root_span))
+        // Per Codex plan review v10 P1 #2: both fields populated together (via
+        // openai.rs handler) OR both None (every other entry point). Mixed state
+        // is a bug — the openai.rs handler is the only path that sets either field.
+        match (state.p5h_trace.clone(), state.p5h_root_span.clone()) {
+            (Some(ctx), Some(root_span)) => Ok(Some((ctx, root_span))),
+            (None, None) => Ok(None),
+            (Some(_), None) => anyhow::bail!(
+                "p5h-profile invariant: active RequestState has p5h_trace but no p5h_root_span — \
+                 mixed-state bug (only openai.rs handler sets either field, and it sets both)"
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "p5h-profile invariant: active RequestState has p5h_root_span but no p5h_trace — \
+                 mixed-state bug (only openai.rs handler sets either field, and it sets both)"
+            ),
+        }
     }
 }
 ```
@@ -954,7 +970,7 @@ Adding cfg-gated fields to `GenerateRequest` breaks every existing literal under
             p5h_root_span: None,
 ```
 
-The one exception is `chat_completions` in `openai.rs`, which is updated to `Some(p5h_ctx.clone())` / `Some(p5h_root_span.clone())` in T0a.6 Step 4. **Do NOT update `chat_completions` here** — it gets the real values, not `None`. All other literals (including server-side handlers like `anthropic.rs` and CLI / test helpers) populate `None` because P5h instrumentation only fires from the `openai.rs` HTTP entry path.
+**Include `chat_completions` in this sweep** (per Codex plan review v10 P1 #1 — earlier wording instructed to skip it, but T0a.4 Step 6 runs the feature build and would fail on the missing-field error in chat_completions before T0a.6 ever runs). Populate `chat_completions` with `None, None` for now; T0a.6 Step 4 will overwrite those `None`s with `Some(p5h_ctx.clone())` / `Some(p5h_root_span.clone())` once those locals exist. All non-`openai.rs` server handlers (e.g., `anthropic.rs`), CLI, and test helpers stay as `None` permanently because P5h instrumentation only fires from the `openai.rs` HTTP entry path.
 
 Files with literals (run `rg "GenerateRequest \{" --type rust -l | sort` to regenerate the list):
 
@@ -1116,8 +1132,14 @@ Locate the code in `chat_completions` that finishes tokenization and computes `p
         p5h_root_start_ns,
     );
 
-    #[cfg(feature = "p5h-profile")]
-    let p5h_root_handle = crate::core::p5h::RootSpanHandle::new(p5h_ctx.clone(), p5h_root_span.clone());
+    // Per Codex plan review v10 P1 #3: `RootSpanHandle::new(...)` was here
+    // in earlier drafts but `chat_completions` itself never used it — each
+    // `serve_via_*` constructs its own RootSpanHandle from
+    // `request.p5h_root_span` after dispatch (T0a.6 Step 4.5 pre-move clone).
+    // Constructing a handle here would be unused → `clippy -D warnings`
+    // rejects. Just keep `p5h_ctx` + `p5h_root_span` as plain values for use
+    // by the http_parse_render_tokenize emission below + the GenerateRequest
+    // population in Step 4.
 
     #[cfg(feature = "p5h-profile")]
     {
@@ -1287,9 +1309,9 @@ Per Codex plan review v8 P1 #2: T0a.6 Step 4.5 already materialized `p5h_ctx_for
 
 Move `p5h_ctx` + `p5h_root_handle_for_forwarder` into the spawn closure capture list (`async move { let mut root_to_close = p5h_root_handle_for_forwarder; ... }`).
 
-- [ ] **Step 3: Wrap role-chunk send with `sse_write_role_chunk_diagnostic` span**
+- [ ] **Step 3: Wrap role-chunk send with `sse_write_role_chunk_diagnostic` span (with send-error close per Codex plan review v10 P2 #4)**
 
-Inside the forwarder closure, the role chunk is sent around line 562. Wrap it:
+Inside the forwarder closure, the role chunk is sent around line 562. The existing code returns on send error; we MUST close the diagnostic span BEFORE the early return so the open registry doesn't leak:
 
 ```rust
     #[cfg(feature = "p5h-profile")]
@@ -1298,8 +1320,12 @@ Inside the forwarder closure, the role chunk is sent around line 562. Wrap it:
         root.map(|root_span| crate::core::p5h::open_p5h_span(ctx, Some(&root_span), "sse_write_role_chunk_diagnostic"))
     } else { None };
 
-    // ... existing tx.send(Ok(...)).await for role chunk ...
+    let role_send_result = tx.send(Ok(format_sse_data(&role_chunk))).await;
 
+    // Close diagnostic span on BOTH success and error paths (per Codex plan
+    // review v10 P2 #4) — if the receiver dropped, we still need to close
+    // the open span before the closure returns, otherwise OPEN_SPAN_REGISTRY
+    // leaks the span_id and the next close with that id panics "duplicate".
     #[cfg(feature = "p5h-profile")]
     if let (Some(ctx), Some(handle)) = (p5h_ctx.as_ref(), role_span) {
         crate::core::p5h::close_p5h_span_diagnostic(
@@ -1309,9 +1335,13 @@ Inside the forwarder closure, the role chunk is sent around line 562. Wrap it:
             crate::core::p5h::SpanFields::default(),
         );
     }
+
+    if role_send_result.is_err() {
+        return;
+    }
 ```
 
-- [ ] **Step 4: Wrap first-content chunk send with `detok_format_first_content_chunk` + close root**
+- [ ] **Step 4: Wrap first-content chunk send with `detok_format_first_content_chunk` + close root (with send-error close per Codex plan review v10 P2 #4)**
 
 Locate the per-event loop in the forwarder (around line 589 area). On the first iteration where `delta.content` is non-empty, wrap:
 
@@ -1323,24 +1353,35 @@ Locate the per-event loop in the forwarder (around line 589 area). On the first 
         })
     } else { None };
 
-    // ... existing format_sse + tx.send(...).await ...
+    let content_send_result = tx.send(Ok(format_sse_data(&content_chunk))).await;
+    #[cfg(feature = "p5h-profile")]
+    let content_send_end_ns = crate::core::p5h::monotonic_ns_public();
 
+    // Close content span + root on BOTH send success and error paths (per
+    // Codex plan review v10 P2 #4). Even if the receiver dropped, the
+    // server-side wall-time for "we tried to write first content" is still
+    // a valid measurement; closing first prevents registry leaks.
     #[cfg(feature = "p5h-profile")]
     if let (Some(ctx), Some(handle)) = (p5h_ctx.as_ref(), content_span) {
-        let end_ns = crate::core::p5h::monotonic_ns_public();
         crate::core::p5h::close_p5h_span(
             ctx,
             handle,
-            end_ns,
+            content_send_end_ns,
             crate::core::p5h::SpanFields::default(),
         );
         if first_non_empty_content {
             if let Some(root_handle) = root_to_close.take() {
-                root_handle.close_at(end_ns);
+                root_handle.close_at(content_send_end_ns);
             } else {
                 panic!("p5h: root closed twice in Lane-A forwarder");
             }
         }
+    }
+
+    if content_send_result.is_err() {
+        // existing receiver-dropped handling (break / continue / log per
+        // existing source) AFTER the spans are closed.
+        break;
     }
 ```
 
@@ -1544,22 +1585,24 @@ Back in `serve_via_gs_stream` (`openai.rs:459` loop area), wrap each iteration:
         }
 ```
 
-- [ ] **Step 5: Wrap role-chunk send + first-content send + root close**
+- [ ] **Step 5: Wrap role-chunk send + first-content send + root close (with send-error close per Codex plan review v10 P2 #4)**
 
-The role-chunk send at line 455 is sequential inside `spawn_blocking` so it's a true `span_kind="tree"` `sse_write_role_chunk` (unlike Lane-A's diagnostic):
+The role-chunk send at line 455 is sequential inside `spawn_blocking` so it's a true `span_kind="tree"` `sse_write_role_chunk` (unlike Lane-A's diagnostic). Both spans must close BEFORE any early-exit on send failure, otherwise OPEN_SPAN_REGISTRY leaks the span_id:
 
 ```rust
         #[cfg(feature = "p5h-profile")]
         let role_span = p5h_ctx.as_ref().zip(p5h_root_handle_for_gs.as_ref())
             .map(|(ctx, root)| crate::core::p5h::open_p5h_span(ctx, Some(root.span()), "sse_write_role_chunk"));
 
-        if tx.blocking_send(Ok(format_sse_data(&role_chunk))).is_err() {
-            return;
-        }
+        let role_send_result = tx.blocking_send(Ok(format_sse_data(&role_chunk)));
 
         #[cfg(feature = "p5h-profile")]
         if let (Some(ctx), Some(handle)) = (p5h_ctx.as_ref(), role_span) {
             crate::core::p5h::close_p5h_span(ctx, handle, crate::core::p5h::monotonic_ns_public(), crate::core::p5h::SpanFields::default());
+        }
+
+        if role_send_result.is_err() {
+            return;
         }
 ```
 
@@ -1577,21 +1620,28 @@ For first non-empty content (around line 473), wrap content send + close root:
                 .map(|(ctx, root)| crate::core::p5h::open_p5h_span(ctx, Some(root.span()), "detok_format_first_content_chunk"))
         } else { None };
 
-        if tx.blocking_send(Ok(format_sse_data(&chunk))).is_err() {
-            break;
-        }
+        let content_send_result = tx.blocking_send(Ok(format_sse_data(&chunk)));
+        #[cfg(feature = "p5h-profile")]
+        let content_send_end_ns = crate::core::p5h::monotonic_ns_public();
 
+        // Close content span + root on BOTH success and error paths (per
+        // Codex plan review v10 P2 #4). Even if the receiver dropped, we
+        // must close the open spans before the spawn_blocking closure
+        // breaks out of the loop.
         #[cfg(feature = "p5h-profile")]
         if let (Some(ctx), Some(handle)) = (p5h_ctx.as_ref(), content_span) {
-            let end_ns = crate::core::p5h::monotonic_ns_public();
-            crate::core::p5h::close_p5h_span(ctx, handle, end_ns, crate::core::p5h::SpanFields::default());
+            crate::core::p5h::close_p5h_span(ctx, handle, content_send_end_ns, crate::core::p5h::SpanFields::default());
             if first_non_empty_content {
                 if let Some(root_handle) = root_to_close.take() {
-                    root_handle.close_at(end_ns);
+                    root_handle.close_at(content_send_end_ns);
                 } else {
                     panic!("p5h: root closed twice in Lane-B spawn_blocking");
                 }
             }
+        }
+
+        if content_send_result.is_err() {
+            break;
         }
 ```
 
@@ -1617,43 +1667,60 @@ git commit -m "feat(p5h-t0a): Lane-B spawn_blocking spans (gs_stream_init_and_ch
 **Files:**
 - Modify: `ironmlx/src/core/scheduler.rs:808-1025` (`prefill_admitted_inner`)
 
-- [ ] **Step 1: Apply the SINK pattern**
+- [ ] **Step 1: Apply the SINK pattern (with None-tolerant trace context per Codex plan review v10 P1 #2)**
 
-At the top of `prefill_admitted_inner` body (just before the existing prefill setup), add:
+At the top of `prefill_admitted_inner` body (just before the existing prefill setup), read the trace context:
 
 ```rust
         #[cfg(feature = "p5h-profile")]
-        let (p5h_ctx, p5h_root_span) = self.cloned_active_row_p5h_trace_and_root()?;
+        let p5h_trace = self.cloned_active_row_p5h_trace_and_root()?;
+        // p5h_trace: Option<(P5hTraceContext, SpanHandle)>
+        // - Some(...) — request came in through openai.rs handler (T0a.6
+        //   populates both fields); SINK spans + guard fire below.
+        // - None — request came in through any other path (anthropic.rs,
+        //   CLI, tests, scheduler_actor internals); SINK quietly no-ops so
+        //   non-openai code under --features p5h-profile still works.
 ```
 
-Wrap the existing `model.batched_prefill(...)` / `batched_prefill_vl(...)` call (lines 959-981 area):
+Wrap the existing `model.batched_prefill(...)` / `batched_prefill_vl(...)` call (lines 959-981 area). Both spans + the guard are conditional on `p5h_trace.is_some()`:
 
 ```rust
         #[cfg(feature = "p5h-profile")]
-        let mpf_span = crate::core::p5h::open_p5h_span(&p5h_ctx, Some(&p5h_root_span), "model_prefill_forward");
+        let mpf_span = p5h_trace.as_ref().map(|(ctx, root_span)| {
+            crate::core::p5h::open_p5h_span(ctx, Some(root_span), "model_prefill_forward")
+        });
 
         let logits = {
             #[cfg(feature = "p5h-profile")]
-            let _mpf_guard = crate::core::p5h::P5hTraceGuard::enter(p5h_ctx.clone(), mpf_span.clone());
+            let _mpf_guard = match (p5h_trace.as_ref(), mpf_span.as_ref()) {
+                (Some((ctx, _)), Some(mpf)) => Some(
+                    crate::core::p5h::P5hTraceGuard::enter(ctx.clone(), mpf.clone())
+                ),
+                _ => None,
+            };
 
             // existing if is_vl { batched_prefill_vl(...) } else { batched_prefill(...) }
             /* unchanged body */
         };
 
         #[cfg(feature = "p5h-profile")]
-        crate::core::p5h::close_p5h_span(
-            &p5h_ctx,
-            mpf_span,
-            crate::core::p5h::monotonic_ns_public(),
-            crate::core::p5h::SpanFields::default(),
-        );
+        if let (Some((ctx, _)), Some(mpf)) = (p5h_trace.as_ref(), mpf_span) {
+            crate::core::p5h::close_p5h_span(
+                ctx,
+                mpf,
+                crate::core::p5h::monotonic_ns_public(),
+                crate::core::p5h::SpanFields::default(),
+            );
+        }
 ```
 
 Wrap the post-prefill reshape + Stage A + `sample_batch` block (lines 996-1025):
 
 ```rust
         #[cfg(feature = "p5h-profile")]
-        let fts_span = crate::core::p5h::open_p5h_span(&p5h_ctx, Some(&p5h_root_span), "first_token_sampling");
+        let fts_span = p5h_trace.as_ref().map(|(ctx, root_span)| {
+            crate::core::p5h::open_p5h_span(ctx, Some(root_span), "first_token_sampling")
+        });
 
         // existing reshape + collect sampler refs + sample_batch
         let logits_shape = logits.shape();
@@ -1661,12 +1728,14 @@ Wrap the post-prefill reshape + Stage A + `sample_batch` block (lines 996-1025):
         let tokens = sample_batch(/* ... */)?;
 
         #[cfg(feature = "p5h-profile")]
-        crate::core::p5h::close_p5h_span(
-            &p5h_ctx,
-            fts_span,
-            crate::core::p5h::monotonic_ns_public(),
-            crate::core::p5h::SpanFields::default(),
-        );
+        if let (Some((ctx, _)), Some(fts)) = (p5h_trace.as_ref(), fts_span) {
+            crate::core::p5h::close_p5h_span(
+                ctx,
+                fts,
+                crate::core::p5h::monotonic_ns_public(),
+                crate::core::p5h::SpanFields::default(),
+            );
+        }
 ```
 
 Stage C distribution stays untouched.
