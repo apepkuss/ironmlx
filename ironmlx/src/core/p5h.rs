@@ -245,11 +245,11 @@ fn registry_try_remove(span_id: u64) -> Option<OpenSpanRecord> {
 /// v5 P1) — registry_try_remove returns the owned record, we inspect it
 /// outside any lock.
 fn registry_remove_or_panic(handle: &SpanHandle, expected_request_id: &str) {
-    let record = registry_try_remove(handle.span_id()).unwrap_or_else(|| panic!(
+    let record = registry_try_remove(handle.span_id).unwrap_or_else(|| panic!(
         "close_p5h_span(span_name={}, span_id={}) — span_id is not in open registry. \
          Causes: (a) handle reused after close (double-close), (b) handle leaked from a different request, \
          (c) handle never opened. Per § 2.5a explicit-API hard-fail.",
-        handle.span_name(), handle.span_id(),
+        handle.span_name, handle.span_id,
     ));
     // ctx mismatch (per Codex v3 P2 #3)
     if record.request_id != expected_request_id {
@@ -404,6 +404,26 @@ pub fn close_p5h_span_diagnostic(
 
 /// Implicit-guard API. Internally opens span (parent = stack top), pushes,
 /// runs body, pops, closes. Panics if no active guard. Per § 2.5a.
+///
+/// **Panic-during-body semantics (per spec § 2.5a Hard-fail under p5h-profile + `--b-max 1`):**
+///
+/// If `body()` panics, this function does NOT execute the post-body pop +
+/// `registry_remove_or_panic` + `emit_log_line` block. On unwind:
+///   1. `OPEN_SPAN_REGISTRY` retains the open record (logical leak)
+///   2. `P5H_CURRENT_SPAN_STACK` retains the pushed handle (length 2)
+///   3. When the enclosing `P5hTraceGuard` drops, its `assert_eq!(stack.len(), 1, ...)`
+///      fires a SECOND panic during stack unwind → Rust aborts the process.
+///
+/// This is **intentional** under the P5h fail-fast contract: P5h instrumentation
+/// runs under `--b-max 1` in single-request serial sweeps; a panic inside
+/// instrumented model code is a real bug that MUST stop the process so the
+/// operator notices. Silent recovery would mask the bug AND leave inconsistent
+/// state for any subsequent request. The "registry leak" only materializes if a
+/// caller wraps the panic in `catch_unwind` and continues running — which P5h
+/// does not do anywhere in the authorized guard sites (§ 2.5a). If a future
+/// authorized site needs catch-unwind semantics, that site must add its own
+/// scope-exit cleanup; do NOT add panic-safe pop/remove inside this helper —
+/// it would hide bugs the spec wants to surface.
 pub fn with_p5h_span_from_current_trace<T>(
     span_name: &'static str,
     fields_fn: impl FnOnce() -> SpanFields,
