@@ -943,7 +943,55 @@ impl<M> Scheduler<M> {
 }
 ```
 
-- [ ] **Step 5: Build check both feature states**
+- [ ] **Step 5: Update all `GenerateRequest { ... }` literals across the repo (per Codex plan review v8 P1 #1)**
+
+Adding cfg-gated fields to `GenerateRequest` breaks every existing literal under `--features p5h-profile` (default build is unaffected because the fields are conditionally compiled out). Survey via `rg "GenerateRequest \{" --type rust` shows 22 files with ~58 literals — 5 source files + 17 test files. For each literal, append before the closing `}`:
+
+```rust
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
+```
+
+The one exception is `chat_completions` in `openai.rs`, which is updated to `Some(p5h_ctx.clone())` / `Some(p5h_root_span.clone())` in T0a.6 Step 4. **Do NOT update `chat_completions` here** — it gets the real values, not `None`. All other literals (including server-side handlers like `anthropic.rs` and CLI / test helpers) populate `None` because P5h instrumentation only fires from the `openai.rs` HTTP entry path.
+
+Files with literals (run `rg "GenerateRequest \{" --type rust -l | sort` to regenerate the list):
+
+```
+ironmlx/src/cli/generate.rs              (1 literal)
+ironmlx/src/core/generate.rs             (2 literals — internal helpers)
+ironmlx/src/core/scheduler.rs            (6 literals)
+ironmlx/src/core/server/anthropic.rs     (1 literal)
+ironmlx/src/core/server/openai.rs        (1 literal — `chat_completions`, T0a.6 updates separately)
+ironmlx/src/core/server/scheduler_actor.rs (4 literals)
+ironmlx/tests/b1_p2_3a_scheduler_skeleton.rs    (2)
+ironmlx/tests/b1_p2_3b_1_scheduler_step.rs      (7)
+ironmlx/tests/b1_p2_3b_2_scheduler_actor.rs     (3)
+ironmlx/tests/b1_p2_3b_3_admission_window.rs    (2)
+ironmlx/tests/b1_p2_3b_4_anthropic_actor.rs     (3)
+ironmlx/tests/b1_p2_3c_1_per_row_offset.rs      (2)
+ironmlx/tests/b1_p2_3c_2_scheduler_decode_mask.rs (2)
+ironmlx/tests/b1_p2_3c_3_continuous_batching.rs (2)
+ironmlx/tests/b1_p2_3c_plus_chunked_admit_mid.rs (2)
+ironmlx/tests/b1_p2_3d_admission_queue.rs       (3)
+ironmlx/tests/b1_p2_3e_1a_vectorize_greedy.rs   (2)
+ironmlx/tests/b1_p2_3e_1b_configured_sampler.rs (2)
+ironmlx/tests/b1_p2_3f_cache_cap.rs             (1)
+ironmlx/tests/b1_p2_4_batched_vl.rs             (10)
+ironmlx/tests/b1_p2_5_production_hardening.rs   (1)
+ironmlx/tests/p6_7_chunked_prefill.rs           (1)
+```
+
+Driver: build the feature target and iterate on errors — `rustc` flags each missing field with a precise line range.
+
+```bash
+MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --features p5h-profile 2>&1 | tee /tmp/p5h_t0a5_build.log
+# For each "missing field" error, add the two cfg-gated lines before the closing `}`
+# of the named struct literal. Re-run until the build is clean.
+```
+
+- [ ] **Step 6: Build check both feature states**
 
 ```bash
 cargo build --release -p ironmlx
@@ -952,11 +1000,14 @@ cargo build --release -p ironmlx --features p5h-profile
 
 Both must succeed.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add ironmlx/src/core/generate.rs ironmlx/src/core/scheduler.rs
-git commit -m "feat(p5h-t0a): add p5h_trace + p5h_root_span to GenerateRequest/RequestState + cloned_active_row helper"
+git add ironmlx/src/core/generate.rs ironmlx/src/core/scheduler.rs \
+        ironmlx/src/cli/generate.rs ironmlx/src/core/server/anthropic.rs \
+        ironmlx/src/core/server/scheduler_actor.rs \
+        ironmlx/tests/
+git commit -m "feat(p5h-t0a): add p5h_trace + p5h_root_span to GenerateRequest/RequestState + cloned_active_row helper + populate cfg-gated None on existing literals"
 ```
 
 ### T0a.5 — Server startup panic on `b_max > 1` under `p5h-profile`
@@ -1087,11 +1138,7 @@ Locate the code in `chat_completions` that finishes tokenization and computes `p
 
 - [ ] **Step 4: Populate the `GenerateRequest`**
 
-After the existing `GenerateRequest { ... }` construction in `chat_completions`, the fields `p5h_trace` and `p5h_root_span` will not be present by default. Either:
-- Use struct update syntax: `..GenerateRequest::default_for_p5h(...)`, OR
-- Add the two fields explicitly inside the struct literal:
-
-Locate the `GenerateRequest { ... }` literal in `chat_completions` and add at the end:
+Locate the `GenerateRequest { ... }` literal in `chat_completions` and add at the end (replacing the cfg-gated `None` populated in T0a.4 Step 5 for this specific literal — `chat_completions` is the entry point that produces real p5h state):
 
 ```rust
             #[cfg(feature = "p5h-profile")]
@@ -1100,9 +1147,62 @@ Locate the `GenerateRequest { ... }` literal in `chat_completions` and add at th
             p5h_root_span: Some(p5h_root_span.clone()),
 ```
 
+- [ ] **Step 4.5: Pre-move clone of P5h locals before `request` move (per Codex plan review v8 P1 #2)**
+
+The four dispatch branches in `chat_completions` move `request` into `serve_via_*` inner functions. Each `serve_via_*` then ALSO moves `request` into either `SchedulerCommand::Admit { request, .. }` (Lane A) or the `tokio::task::spawn_blocking(move || { ... GenerationStream::new(.., request) .. })` closure (Lane B). After those moves, `request.p5h_trace` / `request.p5h_root_span` are inaccessible.
+
+Steps 5-6 below + T0a.7-T0a.8 read p5h state AFTER the move, which would not compile (borrow-after-move). Fix: at the top of EACH `serve_via_*` body, BEFORE any move of `request`, materialize the locals needed by downstream sites:
+
+In `serve_via_scheduler_stream` (above the existing `cmd_tx.send(...)` block at openai.rs:513 area):
+
+```rust
+    // Pre-move clones (per Codex plan review v8 P1 #2). After this block we
+    // can read p5h state via these locals even after `request` is moved into
+    // SchedulerCommand::Admit.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_ctx_for_admission = request.p5h_trace.clone()
+        .expect("p5h-profile: GenerateRequest.p5h_trace not populated by handler");
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_span_for_admission = request.p5h_root_span.clone()
+        .expect("p5h-profile: GenerateRequest.p5h_root_span not populated by handler");
+    #[cfg(feature = "p5h-profile")]
+    let p5h_response_request_id = p5h_ctx_for_admission.request_id.clone();
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_handle_for_forwarder = crate::core::p5h::RootSpanHandle::new(
+        p5h_ctx_for_admission.clone(),
+        p5h_root_span_for_admission.clone(),
+    );
+```
+
+In `serve_via_gs_stream` (above the `spawn_blocking` move at openai.rs:429):
+
+```rust
+    #[cfg(feature = "p5h-profile")]
+    let p5h_ctx_for_closure = request.p5h_trace.clone()
+        .expect("p5h-profile: GenerateRequest.p5h_trace not populated by handler");
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_handle_for_closure = crate::core::p5h::RootSpanHandle::new(
+        p5h_ctx_for_closure.clone(),
+        request.p5h_root_span.clone()
+            .expect("p5h-profile: GenerateRequest.p5h_root_span not populated by handler"),
+    );
+    #[cfg(feature = "p5h-profile")]
+    let p5h_response_request_id = p5h_ctx_for_closure.request_id.clone();
+```
+
+In `serve_via_scheduler_unary` and `serve_via_gs_unary`, materialize ONLY `p5h_response_request_id` (these paths don't need ctx/root_handle for forwarders since they're non-streaming):
+
+```rust
+    #[cfg(feature = "p5h-profile")]
+    let p5h_response_request_id = request.p5h_trace.as_ref()
+        .expect("p5h-profile: GenerateRequest.p5h_trace not populated by handler")
+        .request_id
+        .clone();
+```
+
 - [ ] **Step 5: Add `X-Ironmlx-Request-Id` response header on streaming + non-streaming paths**
 
-In each of the 4 dispatch branches (`(true, true)`, `(true, false)`, `(false, true)`, `(false, false)`), the inner function builds a `Response`. Find each response construction (search for `Response::builder()` or `.into_response()` in `serve_via_*` functions). Before the response is returned, add the header. For streaming paths the easiest place is at the `Response::builder().header(...)` call. Modify each of the 4 functions to add (under `#[cfg(feature = "p5h-profile")]`):
+In each of the 4 dispatch branches, the inner function builds a `Response`. Find each response construction (search for `Response::builder()` or `.into_response()` in `serve_via_*` functions). Before the response is returned, add the header — using the **pre-move clone** `p5h_response_request_id` (per Codex plan review v8 P1 #2; NOT `request.p5h_trace.as_ref()` which would borrow-after-move):
 
 ```rust
     #[cfg(feature = "p5h-profile")]
@@ -1110,7 +1210,7 @@ In each of the 4 dispatch branches (`(true, true)`, `(true, false)`, `(false, tr
         let mut resp = response;
         resp.headers_mut().insert(
             "X-Ironmlx-Request-Id",
-            request.p5h_trace.as_ref().expect("p5h-profile: ctx not populated").request_id.parse().unwrap(),
+            p5h_response_request_id.parse().expect("p5h request_id is a valid HTTP header value (UUID)"),
         );
         resp
     };
@@ -1120,28 +1220,26 @@ Place this just before `response` is returned in each of `serve_via_scheduler_st
 
 - [ ] **Step 6: Add `scheduler_admission` explicit span in `serve_via_scheduler_stream`**
 
-Edit `ironmlx/src/core/server/openai.rs:501-560` area. The admit-command-send site is around lines 513-517 per the codebase survey. Wrap that block:
+Edit `ironmlx/src/core/server/openai.rs:501-560` area. The admit-command-send site is around lines 513-517 per the codebase survey. Use the pre-move locals from Step 4.5 (NOT `request.p5h_trace`, which is moved into the `Admit` command):
 
 ```rust
     #[cfg(feature = "p5h-profile")]
-    let admission_span_handle = {
-        let ctx = request.p5h_trace.as_ref().expect("p5h-profile: ctx not populated");
-        let root = request.p5h_root_span.as_ref().expect("p5h-profile: root_span not populated");
-        crate::core::p5h::open_p5h_span(ctx, Some(root), "scheduler_admission")
-    };
+    let admission_span_handle = crate::core::p5h::open_p5h_span(
+        &p5h_ctx_for_admission,
+        Some(&p5h_root_span_for_admission),
+        "scheduler_admission",
+    );
 
-    // ... existing cmd_tx.send(...).await + reply_rx.await ...
+    // ... existing cmd_tx.send(SchedulerCommand::Admit { request, reply_tx }).await? ...
+    // ... existing let admit_reply = reply_rx.await? ...
 
     #[cfg(feature = "p5h-profile")]
-    {
-        let ctx = request.p5h_trace.as_ref().expect("p5h-profile: ctx not populated");
-        crate::core::p5h::close_p5h_span(
-            ctx,
-            admission_span_handle,
-            crate::core::p5h::monotonic_ns_public(),
-            crate::core::p5h::SpanFields::default(),
-        );
-    }
+    crate::core::p5h::close_p5h_span(
+        &p5h_ctx_for_admission,
+        admission_span_handle,
+        crate::core::p5h::monotonic_ns_public(),
+        crate::core::p5h::SpanFields::default(),
+    );
 ```
 
 - [ ] **Step 7: Build and run sentinel suite**
@@ -1171,19 +1269,23 @@ git commit -m "feat(p5h-t0a): handler ordering + root/http_parse/scheduler_admis
 
 Locate the `tokio::spawn(async move { ... })` at line 546 area inside `serve_via_scheduler_stream`. The closure currently captures `event_rx`, `tx`, `tokenizer`, `id`, `model_id`, etc.
 
-- [ ] **Step 2: Capture `ctx` + `root_handle` clones into the closure**
+- [ ] **Step 2: Reuse the pre-move clones from T0a.6 Step 4.5**
 
-Before the `tokio::spawn`, clone the p5h state out of `request`:
+Per Codex plan review v8 P1 #2: T0a.6 Step 4.5 already materialized `p5h_ctx_for_admission` + `p5h_root_handle_for_forwarder` at the top of `serve_via_scheduler_stream` BEFORE the `cmd_tx.send(SchedulerCommand::Admit { request, .. })` move. Those locals are still in scope at the forwarder spawn site (lines around 546). Move them into the spawn closure capture list:
 
 ```rust
+    // p5h_ctx_for_admission + p5h_root_handle_for_forwarder are already in
+    // scope from T0a.6 Step 4.5 (declared above the admit cmd send).
+    // For the forwarder we want a separate alias to make the captures self-
+    // documenting at the spawn site; .clone() is cheap (P5hTraceContext +
+    // RootSpanHandle both derive Clone).
     #[cfg(feature = "p5h-profile")]
-    let p5h_ctx = request.p5h_trace.clone();
+    let p5h_ctx = p5h_ctx_for_admission.clone();
     #[cfg(feature = "p5h-profile")]
-    let p5h_root_handle_for_forwarder = request.p5h_trace.as_ref().zip(request.p5h_root_span.as_ref())
-        .map(|(ctx, span)| crate::core::p5h::RootSpanHandle::new(ctx.clone(), span.clone()));
+    let p5h_root_handle_for_forwarder = Some(p5h_root_handle_for_forwarder.clone());
 ```
 
-Move these into the spawn closure capture list (`async move { let mut root_to_close = p5h_root_handle_for_forwarder; ... }`).
+Move `p5h_ctx` + `p5h_root_handle_for_forwarder` into the spawn closure capture list (`async move { let mut root_to_close = p5h_root_handle_for_forwarder; ... }`).
 
 - [ ] **Step 3: Wrap role-chunk send with `sse_write_role_chunk_diagnostic` span**
 
@@ -1272,26 +1374,35 @@ git commit -m "feat(p5h-t0a): Lane-A forwarder role-diagnostic + first-content +
 - Modify: `ironmlx/src/core/server/openai.rs:416-475` (`serve_via_gs_stream`)
 - Modify: `ironmlx/src/core/generate.rs:928-967+` (`GenerationStream::new` — add deep spans for chunks + kv_cache_alloc + sample_dispatch)
 
-- [ ] **Step 1: Capture ctx + root_handle into the spawn_blocking closure**
+- [ ] **Step 1: Reuse the pre-move clones from T0a.6 Step 4.5**
 
-Just like Lane-A but with `spawn_blocking`:
+Per Codex plan review v8 P1 #2: T0a.6 Step 4.5 already materialized `p5h_ctx_for_closure` + `p5h_root_handle_for_closure` at the top of `serve_via_gs_stream` BEFORE the `spawn_blocking(move || ... GenerationStream::new(.., request) ...)` move. Move them into the closure capture list (rename for clarity within the closure):
 
 ```rust
+    // p5h_ctx_for_closure + p5h_root_handle_for_closure are in scope from
+    // T0a.6 Step 4.5 (declared at function top, before any `request` move).
     #[cfg(feature = "p5h-profile")]
-    let p5h_ctx = request.p5h_trace.clone();
+    let p5h_ctx = p5h_ctx_for_closure.clone();
     #[cfg(feature = "p5h-profile")]
-    let p5h_root_handle_for_gs = request.p5h_trace.as_ref().zip(request.p5h_root_span.as_ref())
-        .map(|(ctx, span)| crate::core::p5h::RootSpanHandle::new(ctx.clone(), span.clone()));
+    let p5h_root_handle_for_gs = Some(p5h_root_handle_for_closure.clone());
 ```
 
-Move these into the `tokio::task::spawn_blocking(move || { ... })` closure.
+Move `p5h_ctx` + `p5h_root_handle_for_gs` into the `tokio::task::spawn_blocking(move || { ... })` closure capture list.
 
-- [ ] **Step 2: Wrap `GenerationStream::new(...)` with `gs_stream_init_and_chunk_loop` + scoped guard**
+- [ ] **Step 2: Wrap `GenerationStream::new(...)` with `gs_stream_init_and_chunk_loop` + scoped guard (with Err-arm close per Codex plan review v8 P2 #3)**
 
-Edit `ironmlx/src/core/server/openai.rs:432` area (the `GenerationStream::new` call). Replace:
+Edit `ironmlx/src/core/server/openai.rs:432` area (the `GenerationStream::new` call). Per Codex plan review v8 P2 #3: BOTH the Ok and Err arms must drop the guard + close `gs_stream_init_and_chunk_loop`, otherwise the Err path leaks an open record in OPEN_SPAN_REGISTRY and emits no log line for the span. Restructure to capture the result first, then drop guard + close span unconditionally, then match:
+
+Replace:
 
 ```rust
         let mut stream = match GenerationStream::new(&*model_guard, tokenizer, request) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.blocking_send(Ok(format_sse_error(&e)));
+                return;
+            }
+        };
 ```
 
 with:
@@ -1308,21 +1419,35 @@ with:
             _ => None,
         };
 
-        let mut stream = match GenerationStream::new(&*model_guard, tokenizer, request) {
-```
+        let stream_result = GenerationStream::new(&*model_guard, tokenizer, request);
 
-After the match block (after `Ok(s) => s` is bound), drop the guard and close the span:
+        // Close gs_stream_init_and_chunk_loop on BOTH branches (per Codex
+        // plan review v8 P2 #3). Drop the guard first so the deep substep
+        // stack is empty; then close the wrapper span.
+        #[cfg(feature = "p5h-profile")]
+        drop(_gs_guard);
+        #[cfg(feature = "p5h-profile")]
+        if let (Some(ctx), Some(handle)) = (p5h_ctx.as_ref(), gs_top_span) {
+            crate::core::p5h::close_p5h_span(
+                ctx,
+                handle,
+                crate::core::p5h::monotonic_ns_public(),
+                crate::core::p5h::SpanFields::default(),
+            );
+        }
 
-```rust
-            Ok(s) => {
-                #[cfg(feature = "p5h-profile")]
-                drop(_gs_guard);
-                #[cfg(feature = "p5h-profile")]
-                if let (Some(ctx), Some(handle)) = (p5h_ctx.as_ref(), gs_top_span) {
-                    crate::core::p5h::close_p5h_span(ctx, handle, crate::core::p5h::monotonic_ns_public(), crate::core::p5h::SpanFields::default());
-                }
-                s
+        let mut stream = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.blocking_send(Ok(format_sse_error(&e)));
+                return;
             }
+        };
+
+        // (The prior `Ok(s) => { drop guard + close span + return s }`
+        // pattern is OBSOLETE per Codex plan review v8 P2 #3 — guard/close
+        // now run unconditionally above the match. Keep the match free of
+        // p5h logic.)
 ```
 
 - [ ] **Step 3: Add deep spans inside `GenerationStream::new`**
