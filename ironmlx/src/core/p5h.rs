@@ -100,4 +100,95 @@ impl RootSpanHandle {
     }
 }
 
-pub struct P5hTraceGuard;
+pub struct P5hTraceGuard {
+    // private field forces use of enter() constructor
+    _marker: std::marker::PhantomData<()>,
+}
+
+impl P5hTraceGuard {
+    /// Per § 2.5a: enter takes a `base_parent` SpanHandle that seeds the span
+    /// stack. The base_parent is the explicit top-level span the caller has
+    /// already opened. Authorized call sites are enumerated in § 2.5a
+    /// "Authorized P5hTraceGuard::enter sites" — DO NOT add new ones.
+    pub fn enter(ctx: P5hTraceContext, base_parent: SpanHandle) -> Self {
+        P5H_CURRENT_TRACE.with(|c| {
+            let mut slot = c.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "P5hTraceGuard::enter while another guard is active — nested guards are forbidden \
+                 (helpers must READ via P5H_CURRENT_TRACE, not enter their own guard); \
+                 fix the guard set/drop sites in the calling task/thread"
+            );
+            *slot = Some(ctx);
+        });
+        P5H_CURRENT_SPAN_STACK.with(|s| {
+            let mut stack = s.borrow_mut();
+            assert!(
+                stack.is_empty(),
+                "P5hTraceGuard::enter with non-empty span stack — prior guard leaked"
+            );
+            stack.push(base_parent);
+        });
+        P5hTraceGuard {
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for P5hTraceGuard {
+    fn drop(&mut self) {
+        P5H_CURRENT_SPAN_STACK.with(|s| {
+            let mut stack = s.borrow_mut();
+            assert_eq!(
+                stack.len(),
+                1,
+                "P5hTraceGuard::drop with span stack length {} — expected 1 (only base_parent sentinel). \
+                 Either an inner span was opened without close, or close was called more times than open.",
+                stack.len(),
+            );
+            stack.clear();
+        });
+        P5H_CURRENT_TRACE.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_ctx() -> P5hTraceContext {
+        P5hTraceContext {
+            request_id: "test-req-0001".to_string(),
+            prompt_tokens: 128,
+            routing_path: "scheduler",
+        }
+    }
+
+    fn dummy_span(id: u64) -> SpanHandle {
+        SpanHandle {
+            span_id: id,
+            span_name: "test_root",
+            parent_span_id: None,
+            parent_span: None,
+            start_ns: 1_000_000_000,
+        }
+    }
+
+    #[test]
+    fn guard_enter_drop_clears_thread_locals() {
+        {
+            let _g = P5hTraceGuard::enter(dummy_ctx(), dummy_span(1));
+            P5H_CURRENT_TRACE.with(|c| assert!(c.borrow().is_some()));
+            P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
+        }
+        P5H_CURRENT_TRACE.with(|c| assert!(c.borrow().is_none()));
+        P5H_CURRENT_SPAN_STACK.with(|s| assert!(s.borrow().is_empty()));
+    }
+
+    #[test]
+    #[should_panic(expected = "nested guards are forbidden")]
+    fn guard_nesting_panics() {
+        let _g1 = P5hTraceGuard::enter(dummy_ctx(), dummy_span(1));
+        let _g2 = P5hTraceGuard::enter(dummy_ctx(), dummy_span(2));
+    }
+}
