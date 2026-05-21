@@ -88,15 +88,38 @@ pub struct RootSpanHandle {
 }
 
 impl RootSpanHandle {
+    pub(crate) fn new(ctx: P5hTraceContext, span: SpanHandle) -> Self {
+        RootSpanHandle { ctx, span }
+    }
+
     pub(crate) fn ctx(&self) -> &P5hTraceContext {
         &self.ctx
     }
     pub(crate) fn span(&self) -> &SpanHandle {
         &self.span
     }
-    pub(crate) fn close_at(self, _end_ns: u64) {
-        // T0a.3 fills this in
-        unimplemented!("filled in T0a.3");
+
+    pub(crate) fn close_at(self, end_ns: u64) {
+        close_p5h_span(&self.ctx, self.span, end_ns, SpanFields::default());
+    }
+
+    /// Per Codex plan review v12 P2 #6 — close the root span on a
+    /// pre-first-content abort path (Lane-A role-send failure, Lane-B
+    /// `GenerationStream::new` Err, Lane-B role-send failure).
+    ///
+    /// Same registry + log-line emission as `close_at`, but writes
+    /// `mode = "aborted"` via `SpanFields { mode: Some("aborted"), .. }` so
+    /// the T5 aggregator can exclude this request from coverage gates (first
+    /// content was never sent, so the tree intentionally lacks
+    /// `detok_format_first_content_chunk` and may lack later spans). The
+    /// `mode` field already exists on `SpanFields` from T0a.1; the aggregator
+    /// + validator just need to recognize the new "aborted" value.
+    pub(crate) fn close_at_aborted(self, end_ns: u64) {
+        let fields = SpanFields {
+            mode: Some("aborted"),
+            ..SpanFields::default()
+        };
+        close_p5h_span(&self.ctx, self.span, end_ns, fields);
     }
 }
 
@@ -152,6 +175,453 @@ impl Drop for P5hTraceGuard {
     }
 }
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Records the full state captured at open. close_* verifies the incoming
+/// SpanHandle matches this record on every field (per Codex plan review v5
+/// P2 + v6 P2 — `SpanHandle` fields are truly private + Clone, so production
+/// callers outside `core::p5h` cannot construct or mutate handles directly,
+/// but defense-in-depth catches any in-module mistake or future regression.
+/// A sub-module test in this file mutates `span_name` / `parent_span_id` /
+/// `parent_span` / `start_ns` on a
+/// clone and emit an inconsistent log line; close-side tamper detection
+/// catches it). request_id is the ctx-mismatch check (v3 P2 #3).
+#[derive(Clone, Debug)]
+struct OpenSpanRecord {
+    request_id: String,
+    /// Snapshot of every SpanHandle field at open time; close compares
+    /// against the incoming handle. Any mutation between open and close
+    /// triggers tamper-detection panic.
+    handle_snapshot: SpanHandle,
+}
+
+/// Per Codex plan review v6 P1 + v7 P1: registry is a single eagerly-constructed
+/// HashMap state — no `Option<HashMap<...>>` (v5 design) and no two-branch
+/// "NeverOpened/Unknown" failure mode. `Mutex::new(HashMap::new())` is NOT
+/// usable as a `static` initializer because `HashMap::new` is not `const fn`
+/// (E0015 on rustc 1.95.0), so we wrap in `once_cell::sync::Lazy` which is
+/// already a dependency (added in T0a.3 Step 0 for `monotonic_ns()`).
+static OPEN_SPAN_REGISTRY: once_cell::sync::Lazy<Mutex<HashMap<u64, OpenSpanRecord>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Insert a fresh open record. Returns Err if the span_id is already
+/// present (atomic-counter race or registry corruption; never expected
+/// under correct usage). Caller panics outside the lock — per Codex plan
+/// review v5 P1, panicking while holding the Mutex guard poisons it and
+/// breaks subsequent #[should_panic] tests.
+fn registry_try_insert(span_id: u64, record: OpenSpanRecord) -> Result<(), u64> {
+    let mut reg = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
+    if reg.contains_key(&span_id) {
+        return Err(span_id);
+    }
+    reg.insert(span_id, record);
+    Ok(())
+}
+
+fn registry_insert(span_id: u64, record: OpenSpanRecord) {
+    if let Err(duplicate_id) = registry_try_insert(span_id, record) {
+        panic!(
+            "open_p5h_span issued duplicate span_id={} — atomic counter race or registry corruption",
+            duplicate_id,
+        );
+    }
+}
+
+/// Remove the open record for `span_id`. Returns None if the id is absent.
+/// Single error condition: "is not in open registry" (covers both
+/// double-close and never-opened — distinguishing them was dead-code
+/// branching per Codex v6 P1).
+fn registry_try_remove(span_id: u64) -> Option<OpenSpanRecord> {
+    let mut reg = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
+    reg.remove(&span_id)
+}
+
+/// Verify `handle` matches the record stored at open; panic if mismatched.
+/// Panic happens AFTER the Mutex guard is released (per Codex plan review
+/// v5 P1) — registry_try_remove returns the owned record, we inspect it
+/// outside any lock.
+fn registry_remove_or_panic(handle: &SpanHandle, expected_request_id: &str) {
+    let record = registry_try_remove(handle.span_id()).unwrap_or_else(|| panic!(
+        "close_p5h_span(span_name={}, span_id={}) — span_id is not in open registry. \
+         Causes: (a) handle reused after close (double-close), (b) handle leaked from a different request, \
+         (c) handle never opened. Per § 2.5a explicit-API hard-fail.",
+        handle.span_name(), handle.span_id(),
+    ));
+    // ctx mismatch (per Codex v3 P2 #3)
+    if record.request_id != expected_request_id {
+        panic!(
+            "close_p5h_span(span_name={}, span_id={}) — ctx mismatch: opened with request_id={}, closing with request_id={}. \
+             Cross-request handle leakage. Per Codex plan review v3 P2 #3 + § 2.5a explicit-API hard-fail.",
+            handle.span_name, handle.span_id, record.request_id, expected_request_id,
+        );
+    }
+    // Tamper detection (per Codex v5 P2): every SpanHandle field MUST equal
+    // the snapshot recorded at open. Mutating clone before close is a bug.
+    let snap = &record.handle_snapshot;
+    if handle.span_name != snap.span_name
+        || handle.parent_span_id != snap.parent_span_id
+        || handle.parent_span != snap.parent_span
+        || handle.start_ns != snap.start_ns
+    {
+        panic!(
+            "close_p5h_span(span_id={}) — handle field tamper detected.\n  \
+              opened: span_name={}, parent_span_id={:?}, parent_span={:?}, start_ns={}\n  \
+              closing: span_name={}, parent_span_id={:?}, parent_span={:?}, start_ns={}\n\
+             Per Codex plan review v5 P2 + § 2.5a explicit-API hard-fail.",
+            handle.span_id,
+            snap.span_name,
+            snap.parent_span_id,
+            snap.parent_span,
+            snap.start_ns,
+            handle.span_name,
+            handle.parent_span_id,
+            handle.parent_span,
+            handle.start_ns,
+        );
+    }
+}
+
+fn monotonic_ns() -> u64 {
+    use std::time::Instant;
+    static ANCHOR: once_cell::sync::Lazy<Instant> = once_cell::sync::Lazy::new(Instant::now);
+    ANCHOR.elapsed().as_nanos() as u64
+}
+
+pub(crate) fn monotonic_ns_public() -> u64 {
+    monotonic_ns()
+}
+
+fn next_span_id() -> u64 {
+    NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn emit_log_line(
+    ctx: &P5hTraceContext,
+    span: &SpanHandle,
+    end_ns: u64,
+    fields: &SpanFields,
+    span_kind: &'static str,
+) {
+    // Schema fields match § 2.5a server-emitted fields table. Order is
+    // stable for the Python aggregator parser. `parent_span` label comes
+    // from the SpanHandle (set at open from the parent's span_name per
+    // Codex plan review v1 P1 #1 — do NOT hard-code "explicit_parent").
+    tracing::info!(
+        "[p5h-profile] request_id={} routing_path={} prompt_tokens={} seq={} layer_idx={} \
+         span_id={} parent_span_id={} span_name={} parent_span={} \
+         start_ns={} end_ns={} mode={} span_kind={}",
+        ctx.request_id,
+        ctx.routing_path,
+        ctx.prompt_tokens,
+        fields.seq.unwrap_or(0),
+        fields.layer_idx.unwrap_or(-1),
+        span.span_id,
+        span.parent_span_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        span.span_name,
+        span.parent_span.unwrap_or("null"),
+        span.start_ns,
+        end_ns,
+        fields.mode.unwrap_or("off"),
+        span_kind,
+    );
+}
+
+/// Open at the current monotonic time. Use when span start coincides with
+/// the call site. Per § 2.5a explicit-context API.
+pub fn open_p5h_span(
+    ctx: &P5hTraceContext,
+    parent: Option<&SpanHandle>,
+    span_name: &'static str,
+) -> SpanHandle {
+    open_p5h_span_at(ctx, parent, span_name, monotonic_ns())
+}
+
+/// Open at an explicit start_ns. Required for root + http_parse_render_tokenize
+/// per § 2.5a (start captured before ctx is complete).
+pub fn open_p5h_span_at(
+    ctx: &P5hTraceContext,
+    parent: Option<&SpanHandle>,
+    span_name: &'static str,
+    start_ns: u64,
+) -> SpanHandle {
+    // Hard-fail on empty ctx (catches forgotten plumbing per § 2.5a hard-fail rules).
+    assert!(
+        !ctx.request_id.is_empty(),
+        "open_p5h_span[_at]({}) called with empty P5hTraceContext.request_id — context not populated",
+        span_name,
+    );
+    let span_id = next_span_id();
+    let handle = SpanHandle {
+        span_id,
+        span_name,
+        parent_span_id: parent.map(|p| p.span_id),
+        // Per Codex plan review v1 P1 #1: carry real parent label, NOT
+        // "explicit_parent" placeholder. Label self-consistency check in T0a
+        // fixture asserts parent_span_id resolves to a span whose span_name
+        // equals this label.
+        parent_span: parent.map(|p| p.span_name),
+        start_ns,
+    };
+    // Snapshot the full handle so close-side tamper detection can catch any
+    // mid-flight mutation (per Codex plan review v5 P2).
+    registry_insert(
+        span_id,
+        OpenSpanRecord {
+            request_id: ctx.request_id.clone(),
+            handle_snapshot: handle.clone(),
+        },
+    );
+    handle
+}
+
+/// Close an explicit-context tree span. Emits the `[p5h-profile]` log line.
+/// Per Codex plan review v1 P2 #5 + v3 P2 #3 + v5 P2: hard-fail if span_id
+/// is not in the open registry, ctx.request_id doesn't match, OR any
+/// SpanHandle field was mutated since open (catches handle reuse /
+/// cross-request leakage / double-close / wrong-ctx close / field tamper).
+pub fn close_p5h_span(ctx: &P5hTraceContext, handle: SpanHandle, end_ns: u64, fields: SpanFields) {
+    registry_remove_or_panic(&handle, &ctx.request_id);
+    emit_log_line(ctx, &handle, end_ns, &fields, "tree");
+}
+
+/// Close a diagnostic span (e.g., Lane-A `sse_write_role_chunk_diagnostic`).
+/// Per § 2.5a v19 P1: diagnostic spans are NOT in the exclusive tree.
+pub fn close_p5h_span_diagnostic(
+    ctx: &P5hTraceContext,
+    handle: SpanHandle,
+    end_ns: u64,
+    fields: SpanFields,
+) {
+    registry_remove_or_panic(&handle, &ctx.request_id);
+    emit_log_line(ctx, &handle, end_ns, &fields, "diagnostic");
+}
+
+/// Implicit-guard API. Internally opens span (parent = stack top), pushes,
+/// runs body, pops, closes. Panics if no active guard. Per § 2.5a.
+pub fn with_p5h_span_from_current_trace<T>(
+    span_name: &'static str,
+    fields_fn: impl FnOnce() -> SpanFields,
+    body: impl FnOnce() -> T,
+) -> T {
+    let start_ns = monotonic_ns();
+    // Read trace ctx once at the start (per Codex plan review v3 P3 #7 —
+    // include span_name in the no-guard panic message; v2 panic message was
+    // a bare static string that hid which instrumentation site triggered it).
+    let request_id_at_open: String = P5H_CURRENT_TRACE.with(|c| {
+        c.borrow().as_ref()
+            .unwrap_or_else(|| panic!(
+                "with_p5h_span_from_current_trace(span_name={}) called with no active P5H_CURRENT_TRACE — \
+                 site is not inside an authorized P5hTraceGuard region (per § 2.5a Authorized guard sites)",
+                span_name,
+            ))
+            .request_id.clone()
+    });
+    let (parent_id, parent_label) = P5H_CURRENT_SPAN_STACK.with(|s| {
+        let stack = s.borrow();
+        let top = stack.last().unwrap_or_else(|| {
+            panic!(
+                "with_p5h_span_from_current_trace(span_name={}) called with empty span stack — \
+             guard active but stack not seeded (base_parent missing)",
+                span_name,
+            )
+        });
+        (top.span_id, top.span_name)
+    });
+    let span_id = next_span_id();
+    let handle = SpanHandle {
+        span_id,
+        span_name,
+        parent_span_id: Some(parent_id),
+        // Per Codex plan review v1 P1 #1: carry real parent label for T0a
+        // label self-consistency assertion.
+        parent_span: Some(parent_label),
+        start_ns,
+    };
+    registry_insert(
+        span_id,
+        OpenSpanRecord {
+            request_id: request_id_at_open.clone(),
+            handle_snapshot: handle.clone(),
+        },
+    );
+    P5H_CURRENT_SPAN_STACK.with(|s| s.borrow_mut().push(handle.clone()));
+    let result = body();
+    let popped = P5H_CURRENT_SPAN_STACK.with(|s| {
+        s.borrow_mut().pop().unwrap_or_else(|| {
+            panic!(
+                "stack underflow in with_p5h_span_from_current_trace(span_name={})",
+                span_name,
+            )
+        })
+    });
+    assert_eq!(
+        popped.span_id, handle.span_id,
+        "stack imbalance: popped a different span ({}) than the one opened ({})",
+        popped.span_name, handle.span_name
+    );
+    let end_ns = monotonic_ns();
+    let fields = fields_fn();
+    registry_remove_or_panic(&handle, &request_id_at_open);
+    P5H_CURRENT_TRACE.with(|c| {
+        let ctx_ref = c.borrow();
+        let ctx = ctx_ref.as_ref().unwrap_or_else(|| panic!(
+            "with_p5h_span_from_current_trace(span_name={}) lost P5H_CURRENT_TRACE mid-body — guard dropped concurrently",
+            span_name,
+        ));
+        emit_log_line(ctx, &handle, end_ns, &fields, "tree");
+    });
+    result
+}
+
+/// Per Codex plan review v12 P1 #1 — non-OpenAI entry paths (anthropic.rs / CLI / tests
+/// / scheduler_actor internals) keep `GenerateRequest.p5h_trace` + `.p5h_root_span` at
+/// `None`, so `cloned_active_row_p5h_trace_and_root()` returns `Ok(None)` and the SINK
+/// in `prefill_admitted_inner` skips opening `model_prefill_forward` (no guard entered,
+/// `P5H_CURRENT_TRACE` stays None). But `model.batched_prefill[_vl](...)` still runs and
+/// flows through `DecoderLayerMoe::forward_on` → GDN/full-attn substeps; if those deep
+/// sites unconditionally called `with_p5h_span_from_current_trace(...)`, the strict
+/// helper above would panic on missing `P5H_CURRENT_TRACE` and break every non-OpenAI
+/// caller under `--features p5h-profile`.
+///
+/// Codex recommended fix (option A): keep the strict helper's fail-fast contract intact;
+/// deep instrumentation sites use this `try_` variant that no-ops when no active trace.
+/// All deep callers (T0a.11 decoder layer + GDN substeps; T2 GatedAttention substeps;
+/// T3 MoE substeps; T4 lm_head) MUST use `try_with_p5h_span_from_current_trace`. The
+/// strict variant is reserved for sites where ctx is provably populated — currently
+/// none in P5h Phase 1, but we keep it for future fail-fast diagnostics (e.g., a span
+/// that should only be opened inside a known-OpenAI guarded region).
+///
+/// Per Codex plan review v20 P1 #1 — Lane-B (`routing_path == "gs_chunked"`) is
+/// declared TOP-LEVEL-ONLY in P5h (per spec § 5 Lane B scope). Deep decoder /
+/// GDN / GatedAttention / MoE / lm_head substep emission under chunked GS would
+/// (a) violate that scope, (b) multiply records per request by N chunks without
+/// a `chunk_idx` schema field to disambiguate, and (c) make the T0a.14 hard
+/// gate enforce GDN attention_path coverage on a lane that intentionally lacks
+/// deep instrumentation. The fix is centralized here: when the active ctx is
+/// Lane-B, this helper additionally checks `span_name` against an allow-list
+/// of top-level Lane-B emission names. Names NOT on the allow-list no-op
+/// even though `P5H_CURRENT_TRACE` is Some — i.e. decoder / GDN / etc deep
+/// `try_` calls inside `GenerationStream::new` and `stream.next_token()` will
+/// run body directly with no span emission on Lane-B. Top-level Lane-B spans
+/// (`gs_kv_cache_alloc`, `gs_chunk_N`, `gs_first_token_sample_dispatch`) stay
+/// on the allow-list and continue to emit, chaining under the
+/// `gs_stream_init_and_chunk_loop` parent via `P5H_CURRENT_SPAN_STACK`.
+const LANE_B_ALLOWED_TRY_SPAN_NAMES: &[&str] = &[
+    "gs_kv_cache_alloc",
+    "gs_chunk_N",
+    "gs_first_token_sample_dispatch",
+];
+
+pub fn try_with_p5h_span_from_current_trace<T>(
+    span_name: &'static str,
+    fields_fn: impl FnOnce() -> SpanFields,
+    body: impl FnOnce() -> T,
+) -> T {
+    let routing: Option<&'static str> =
+        P5H_CURRENT_TRACE.with(|c| c.borrow().as_ref().map(|ctx| ctx.routing_path));
+    match routing {
+        // Non-OpenAI path under --features p5h-profile: no active trace, run body
+        // directly with no span open/close. Symmetric to default-build behavior
+        // (cfg!(feature = "p5h-profile") = false → wrapper compiled out entirely).
+        None => body(),
+        // Lane-A: full deep emission via the strict helper.
+        Some("scheduler") => with_p5h_span_from_current_trace(span_name, fields_fn, body),
+        // Lane-B: top-level-only per Codex v20 P1 #1. Only allow-listed span
+        // names emit; everything else no-ops.
+        Some("gs_chunked") => {
+            if LANE_B_ALLOWED_TRY_SPAN_NAMES.contains(&span_name) {
+                with_p5h_span_from_current_trace(span_name, fields_fn, body)
+            } else {
+                body()
+            }
+        }
+        // Unknown routing_path: emitter bug. Panic on the canonical fail-fast
+        // discipline of this module (consistent with `with_p5h_span_*` panics
+        // on missing ctx). The only legal values are the two enumerated in
+        // `P5hTraceContext.routing_path` and validated in § 2.5a.
+        Some(other) => panic!(
+            "try_with_p5h_span_from_current_trace: unknown routing_path={:?} \
+             on active P5H_CURRENT_TRACE (only 'scheduler' or 'gs_chunked' \
+             permitted per spec § 2.5a) — span_name={}",
+            other, span_name,
+        ),
+    }
+}
+
+/// Per Codex plan review v14 P1 #1 — RAII guard that OWNS the optional
+/// `RootSpanHandle` and exposes accessor + once-close methods. Earlier v13
+/// design held `&'a mut Option<RootSpanHandle>` borrowed from an outer
+/// variable, which made the outer variable unusable for the rest of the
+/// scope (borrow checker rejected `root_to_close.as_ref()` / `.take()` at
+/// every subsequent callsite — happy-path content_chunk parent lookup AND
+/// root close BOTH inaccessible). The owning-Option pattern lets callers
+/// hold `let mut root_guard = P5hRootCloseGuard::new(root)` for the entire
+/// closure body and call `.span()` + `.close_success(end_ns)` without
+/// fighting borrow rules; Drop still runs `close_at_aborted` on any
+/// pre-first-content terminal path (panic, early return, async cancel).
+pub struct P5hRootCloseGuard {
+    root: Option<RootSpanHandle>,
+}
+
+impl P5hRootCloseGuard {
+    /// Wrap the root for once-close + RAII abort cleanup.
+    pub(crate) fn new(root: RootSpanHandle) -> Self {
+        Self { root: Some(root) }
+    }
+
+    /// True iff the root is still open (no success close + no abort close yet).
+    /// Use this in per-iteration loops to gate "open another child span under
+    /// root" — once `close_success` has fired, root is closed and later
+    /// children would orphan / panic on a closed parent.
+    pub(crate) fn is_open(&self) -> bool {
+        self.root.is_some()
+    }
+
+    /// Borrow root's `SpanHandle` to set as `parent` on child spans. Panics
+    /// if root has already been closed (caller bug: gating on `is_open()` was
+    /// missed). Borrow is short-lived (just to read parent metadata at open
+    /// time), so no borrow checker conflict with subsequent `close_success`.
+    pub(crate) fn span(&self) -> &SpanHandle {
+        self.root
+            .as_ref()
+            .expect("P5hRootCloseGuard::span called after root closed")
+            .span()
+    }
+
+    /// Happy-path close: success first-content sent at `end_ns`. Takes the
+    /// root out of the guard so Drop becomes a no-op. Panics if called twice
+    /// — that means the caller advanced `first_non_empty_content` state
+    /// twice without resetting.
+    pub(crate) fn close_success(&mut self, end_ns: u64) {
+        let root = self
+            .root
+            .take()
+            .expect("P5hRootCloseGuard::close_success called twice");
+        root.close_at(end_ns);
+    }
+}
+
+impl Drop for P5hRootCloseGuard {
+    fn drop(&mut self) {
+        // Pre-first-content terminal path: root still open at drop time
+        // (no close_success call ever fired). Emit close_at_aborted with
+        // current monotonic_ns — covers ALL Lane-A early returns (role-send
+        // err, detok err, event_rx end, async cancel) AND all Lane-B
+        // closure exits (GS init err, role-send err, stream.next_token err,
+        // Ok(None) before content, empty content + finish_reason break,
+        // panic in spawn_blocking).
+        if let Some(root) = self.root.take() {
+            root.close_at_aborted(monotonic_ns());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +660,274 @@ mod tests {
     fn guard_nesting_panics() {
         let _g1 = P5hTraceGuard::enter(dummy_ctx(), dummy_span(1));
         let _g2 = P5hTraceGuard::enter(dummy_ctx(), dummy_span(2));
+    }
+
+    #[test]
+    fn open_close_explicit_records_log_line() {
+        let ctx = dummy_ctx();
+        let root = open_p5h_span_at(
+            &ctx,
+            None,
+            "server_request_recv_to_first_content_sse_write",
+            1_000_000_000,
+        );
+        assert!(root.parent_span_id.is_none());
+        assert!(root.parent_span.is_none());
+        assert_eq!(
+            root.span_name,
+            "server_request_recv_to_first_content_sse_write"
+        );
+        assert!(root.span_id != 0);
+        let child = open_p5h_span(&ctx, Some(&root), "http_parse_render_tokenize");
+        assert_eq!(child.parent_span_id, Some(root.span_id));
+        // Per Codex plan review v1 P1 #1: child.parent_span must be the real
+        // parent label, NOT a hard-coded "explicit_parent".
+        assert_eq!(
+            child.parent_span,
+            Some("server_request_recv_to_first_content_sse_write")
+        );
+        close_p5h_span(&ctx, child, 1_000_500_000, SpanFields::default());
+        close_p5h_span(&ctx, root, 1_001_000_000, SpanFields::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "is not in open registry")]
+    fn close_panics_on_double_close() {
+        let ctx = dummy_ctx();
+        let root = open_p5h_span_at(&ctx, None, "test_root", 0);
+        let clone_for_first_close = root.clone();
+        close_p5h_span(&ctx, root, 1, SpanFields::default());
+        // Second close with the cloned handle must panic.
+        close_p5h_span(&ctx, clone_for_first_close, 2, SpanFields::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "is not in open registry")]
+    fn close_panics_on_unknown_handle() {
+        let ctx = dummy_ctx();
+        let bogus = SpanHandle {
+            span_id: 9_999_999_999,
+            span_name: "never_opened",
+            parent_span_id: None,
+            parent_span: None,
+            start_ns: 0,
+        };
+        close_p5h_span(&ctx, bogus, 1, SpanFields::default());
+    }
+
+    #[test]
+    fn open_close_id_uniqueness() {
+        let ctx = dummy_ctx();
+        let a = open_p5h_span(&ctx, None, "a");
+        let b = open_p5h_span(&ctx, None, "b");
+        let c = open_p5h_span(&ctx, None, "c");
+        assert_ne!(a.span_id, b.span_id);
+        assert_ne!(b.span_id, c.span_id);
+        assert_ne!(a.span_id, c.span_id);
+        close_p5h_span(&ctx, a, 0, SpanFields::default());
+        close_p5h_span(&ctx, b, 0, SpanFields::default());
+        close_p5h_span(&ctx, c, 0, SpanFields::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "called with no active P5H_CURRENT_TRACE")]
+    fn with_span_panics_outside_guard() {
+        // Panic message includes span_name per Codex plan review v3 P3 #7.
+        let _ = with_p5h_span_from_current_trace::<u32>("deep_span", SpanFields::default, || 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "handle field tamper detected")]
+    fn close_panics_on_tampered_handle_field() {
+        // Per Codex plan review v5 P2 + v6 P2: SpanHandle fields are TRULY
+        // PRIVATE (not pub(crate)). This test sits in a child module of
+        // `core::p5h` and per Rust's child-module visibility rule can still
+        // see the parent module's private fields — that's the only way to
+        // synthesize the "mutated clone" scenario. Production callers in
+        // other modules (openai.rs / scheduler.rs / generate.rs) cannot
+        // reach this path: they have neither field access nor a mutating
+        // method. The close-side snapshot check serves as defense in depth
+        // even for accidental in-module mutation.
+        let ctx = dummy_ctx();
+        let mut handle = open_p5h_span_at(&ctx, None, "test_root", 0);
+        handle.span_name = "tampered_name"; // mutate the clone (only possible from same-module path)
+        close_p5h_span(&ctx, handle, 1, SpanFields::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "ctx mismatch")]
+    fn close_panics_on_wrong_ctx() {
+        // Per Codex plan review v3 P2 #3: closing a span with a different
+        // request_id than was active at open MUST panic.
+        let ctx_a = P5hTraceContext {
+            request_id: "req-A".to_string(),
+            prompt_tokens: 128,
+            routing_path: "scheduler",
+        };
+        let ctx_b = P5hTraceContext {
+            request_id: "req-B".to_string(),
+            prompt_tokens: 128,
+            routing_path: "scheduler",
+        };
+        let span = open_p5h_span_at(&ctx_a, None, "test_root", 0);
+        close_p5h_span(&ctx_b, span, 1, SpanFields::default());
+    }
+
+    #[test]
+    fn with_span_inside_guard_chains_parent() {
+        let ctx = dummy_ctx();
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        // Inside the guard region; with_span should chain under root.
+        let result = with_p5h_span_from_current_trace("deep_span", SpanFields::default, || 7u32);
+        assert_eq!(result, 7);
+        // Stack returned to just base_parent after body.
+        P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
+    }
+
+    #[test]
+    fn try_with_span_outside_guard_no_ops_returns_body_value() {
+        // Per Codex plan review v12 P1 #1: non-OpenAI entry paths leave
+        // P5H_CURRENT_TRACE = None; the try_ variant must run body directly
+        // (no span open/close, no panic) and return its value.
+        // Confirm we are NOT inside a guard before the call.
+        P5H_CURRENT_TRACE.with(|c| assert!(c.borrow().is_none()));
+        let result =
+            try_with_p5h_span_from_current_trace("deep_span_no_trace", SpanFields::default, || {
+                13u32
+            });
+        assert_eq!(result, 13);
+        // No span emitted: stack still empty.
+        P5H_CURRENT_SPAN_STACK.with(|s| assert!(s.borrow().is_empty()));
+    }
+
+    #[test]
+    fn try_with_span_inside_guard_emits_span_same_as_strict() {
+        // Per Codex plan review v12 P1 #1: when ctx IS active (Lane-A in
+        // particular — `routing_path = "scheduler"`), try_ forwards to strict
+        // — emits a span exactly like with_p5h_span_from_current_trace.
+        // dummy_ctx() returns routing_path = "scheduler" so this covers the
+        // Lane-A allow-everything path.
+        let ctx = dummy_ctx();
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        let result = try_with_p5h_span_from_current_trace(
+            "deep_span_with_trace",
+            SpanFields::default,
+            || 11u32,
+        );
+        assert_eq!(result, 11);
+        P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
+    }
+
+    fn lane_b_ctx() -> P5hTraceContext {
+        // Helper: Lane-B ctx (routing_path = "gs_chunked").
+        P5hTraceContext {
+            request_id: "test-lane-b".to_string(),
+            prompt_tokens: 4096,
+            routing_path: "gs_chunked",
+        }
+    }
+
+    #[test]
+    fn try_with_span_lane_b_allowlist_emits_for_top_level_names() {
+        // Per Codex plan review v20 P1 #1 + v21 P1: under Lane-B
+        // (routing_path = "gs_chunked"), try_ must emit ONLY for the
+        // top-level allow-listed names. `gs_chunk_N` is on the allow-list.
+        // v21 P1 strengthens this test: prove a span ACTUALLY emitted (not
+        // just that stack length returned to base) by capturing the
+        // next-span-id BEFORE the call and verifying NEXT_SPAN_ID advanced
+        // by exactly 1 — which only happens when `with_p5h_span_from_current_trace`
+        // ran the open path. (Stack length restored is necessary but not
+        // sufficient: a Lane-B SUPPRESSED call also leaves the stack
+        // unchanged, so the prior assertion accepted both correct and
+        // incorrect behavior.)
+        let ctx = lane_b_ctx();
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+        let result =
+            try_with_p5h_span_from_current_trace("gs_chunk_N", SpanFields::default, || 13u32);
+        let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(result, 13);
+        // Span DID emit → atomic counter advanced by exactly 1.
+        assert_eq!(
+            id_after, id_before + 1,
+            "Lane-B allow-listed span_name MUST emit (advance NEXT_SPAN_ID by 1); got id_before={id_before}, id_after={id_after}",
+        );
+        // And stack returned to base_parent after body.
+        P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
+    }
+
+    #[test]
+    fn try_with_span_lane_b_other_allowlisted_names_emit_too() {
+        // Per Codex v21 P1: the OTHER two allow-listed names must also emit.
+        // Without this test, an implementation regression that allow-lists
+        // only one name would still pass `try_with_span_lane_b_allowlist_emits_for_top_level_names`.
+        let ctx = lane_b_ctx();
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        for name in ["gs_kv_cache_alloc", "gs_first_token_sample_dispatch"] {
+            let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = try_with_p5h_span_from_current_trace(name, SpanFields::default, || ());
+            let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                id_after,
+                id_before + 1,
+                "Lane-B allow-listed span_name `{name}` MUST emit",
+            );
+        }
+    }
+
+    #[test]
+    fn try_with_span_lane_b_suppresses_deep_decoder_names() {
+        // Per Codex plan review v20 P1 #1: deep span names (decoder_layer_N,
+        // gda_step_*, q_gate_k_v_proj, router_logits_*, etc) must NO-OP under
+        // Lane-B even though the guard is active. Per Codex plan review v22
+        // P1: prove NO span emitted, not merely that the stack returned to
+        // base after a push/pop. A buggy implementation that forwards Lane-B
+        // deep names to strict would push, emit, pop, and leave stack length
+        // unchanged, so NEXT_SPAN_ID must also remain unchanged.
+        let ctx = lane_b_ctx();
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        for name in [
+            "decoder_layer_N",
+            "gda_step_1a_in_proj_qkvz",
+            "slice_last_and_project_lm_head",
+        ] {
+            let before_len = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow().len());
+            let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            let result = try_with_p5h_span_from_current_trace(name, SpanFields::default, || 17u32);
+            let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(result, 17);
+            // Suppressed: no span id allocated and no push/pop happened.
+            assert_eq!(
+                id_after, id_before,
+                "Lane-B deep span_name `{name}` MUST NOT emit; NEXT_SPAN_ID changed from {id_before} to {id_after}",
+            );
+            let after_len = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow().len());
+            assert_eq!(
+                after_len, before_len,
+                "Lane-B suppression must NOT touch the span stack"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown routing_path")]
+    fn try_with_span_unknown_routing_path_panics() {
+        // Per Codex plan review v20 P1 #1: routing_path values outside
+        // {"scheduler", "gs_chunked"} are emitter bugs and must panic at
+        // the helper call site so the bad value never silently emits or
+        // silently suppresses.
+        let ctx = P5hTraceContext {
+            request_id: "bad-routing".to_string(),
+            prompt_tokens: 128,
+            routing_path: "totally_made_up",
+        };
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        let _ = try_with_p5h_span_from_current_trace("any_span_name", SpanFields::default, || 0u32);
     }
 }
