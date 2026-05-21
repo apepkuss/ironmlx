@@ -619,6 +619,11 @@ impl GatedDeltaNet {
         let ablate_conv = false;
 
         // Step 2a: prepend conv_state
+        //
+        // ablate-conv early path: skip concat entirely; conv_input is unused.
+        // Bind conv_input to a dummy `qkv.clone()` so the type is consistent;
+        // Step 2b's cfg-on/cfg-off both skip their body when ablate_conv is on
+        // and conv_input is never referenced downstream.
         #[cfg(feature = "p5g-profile")]
         let _p5g_step_start_2a = if matches!(_p5g_mode, ProfileMode::Layer2) {
             Some(std::time::Instant::now())
@@ -753,6 +758,9 @@ impl GatedDeltaNet {
         } else {
             None
         };
+        // See the cfg-off arm below for the per-row real-tail window rationale
+        // (3.45x decode slowdown root cause, take_along_axis fusable fast path,
+        // bounds-check argument, and ablate-conv stale-data skip).
         {
             #[cfg(feature = "p5h-profile")]
             {
@@ -818,6 +826,9 @@ impl GatedDeltaNet {
             }
             #[cfg(not(feature = "p5h-profile"))]
             {
+                // ablate-conv: conv was replaced with qkv passthrough, so conv_state
+                // would receive stale data. Skip the update entirely.
+                // (ablate_conv is defined above at Step 2a entry; no re-check needed.)
                 if let Some(c) = cache.as_deref_mut() {
                     if !ablate_conv {
                         let n_keep = self.cfg.conv_kernel_size - 1;
@@ -828,6 +839,20 @@ impl GatedDeltaNet {
                             Some(lens)
                                 if batch > 1 && !lens.iter().all(|&l| l + n_keep == total_len) =>
                             {
+                                // Per-row real-tail window starts at position `lens[i]`
+                                // in conv_input and spans `n_keep` rows. Express as a
+                                // single `take_along_axis` over axis 1 with index tensor
+                                // `[B, n_keep, 1]` (broadcasts to [B, n_keep, conv_dim]).
+                                // This collapses the previous per-row
+                                // `slice_strided_on + concatenate_on` (B+1 graph nodes
+                                // per layer per call) into one fusable op — the
+                                // per-row loop blocked downstream JIT fusion and
+                                // caused a 3.45x decode slowdown.
+                                //
+                                // The match guard `!lens.iter().all(|&l| l + n_keep == total_len)`
+                                // routes uniform-length batches to the seq-wide slice
+                                // fast path (the `_` arm), so this arm only fires when
+                                // at least one row has a true ragged tail.
                                 if lens.len() as i32 != batch {
                                     return Err(anyhow!(
                                         "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
@@ -835,6 +860,10 @@ impl GatedDeltaNet {
                                         batch
                                     ));
                                 }
+                                // Bound check: l in [0, max_len] (= [0, total_len - n_keep]),
+                                // so l + j in [0, total_len) for j in [0, n_keep). Always
+                                // holds when prefill_admitted set lens[i] = prompt_lens[i]
+                                // with prompt_lens[i] <= max_len = seq.
                                 let mut idx_flat: Vec<u32> =
                                     Vec::with_capacity((batch * n_keep) as usize);
                                 for &l in lens {
@@ -1029,6 +1058,7 @@ impl GatedDeltaNet {
                     },
                     || -> Result<Array> {
                         if ablate_compute_g {
+                            // see cfg-off arm below for design rationale
                             Ok(mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?)
                         } else {
                             let x_sp = &a + &self.dt_bias;
@@ -1143,6 +1173,7 @@ impl GatedDeltaNet {
                         };
 
                         // Step 7b: get state_in from cache (or fresh zeros).
+                        // see cfg-off arm below for Arc-share / cache-slot rationale
                         let state_in = match cache.as_deref() {
                             Some(c) => c.recurrent_state().clone(),
                             None => Array::zeros(
@@ -1157,6 +1188,7 @@ impl GatedDeltaNet {
                         };
 
                         // Step 7c: T as 0-dim int32 array.
+                        // see cfg-off arm below for ablate-t-arr cache rationale
                         #[cfg(feature = "p5g-profile")]
                         let t_arr: Array = if matches!(_p5g_mode, ProfileMode::AblateTArr) {
                             let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
@@ -1231,6 +1263,8 @@ impl GatedDeltaNet {
                             let lens_ref: &[i32] = match per_row_lens {
                                 Some(l) => l,
                                 None => {
+                                    // Non-batched single-stream caller:
+                                    // lockstep-equivalent uniform.
                                     lens_owned = vec![seq; batch as usize];
                                     &lens_owned
                                 }
