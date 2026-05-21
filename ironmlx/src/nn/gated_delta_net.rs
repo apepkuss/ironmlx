@@ -357,7 +357,8 @@ impl GatedDeltaNet {
         mask: Option<&Array>,
         cache: Option<&mut GatedDeltaCache>,
     ) -> Result<Array> {
-        self.forward_on(x, mask, None, cache, ())
+        // Non-decoder callers (CLI / standalone tests) — pass -1 per spec § 2.5a.
+        self.forward_on(x, mask, None, cache, (), -1)
     }
 
     /// Stream-targeted forward — Qwen3-Next gated delta net algorithm.
@@ -379,8 +380,15 @@ impl GatedDeltaNet {
         per_row_lens: Option<&[i32]>,
         mut cache: Option<&mut GatedDeltaCache>,
         target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
     ) -> Result<Array> {
         let target = target.into();
+        // `layer_idx` is consumed by P5h SpanFields constructions in the
+        // p5h-profile feature path (each of the 11 substeps below). In the
+        // default build the parameter is unused at body level — silence the
+        // unused-variable warning.
+        #[cfg(not(feature = "p5h-profile"))]
+        let _ = layer_idx;
 
         // Pre-flight validation. Match P3b1 Mrope's "explicit bounds > trust caller"
         // pattern — surface common misuses at the source rather than as a downstream
@@ -479,7 +487,23 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        let qkvz = self.in_proj_qkvz.forward_on(x, target)?;
+        let qkvz = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_1a_in_proj_qkvz",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || self.in_proj_qkvz.forward_on(x, target),
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                self.in_proj_qkvz.forward_on(x, target)?
+            }
+        };
         // Step 1a elapsed push
         #[cfg(feature = "p5g-profile")]
         {
@@ -496,7 +520,23 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        let ba = self.in_proj_ba.forward_on(x, target)?;
+        let ba = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_1b_in_proj_ba",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || self.in_proj_ba.forward_on(x, target),
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                self.in_proj_ba.forward_on(x, target)?
+            }
+        };
         // Step 1b elapsed push
         #[cfg(feature = "p5g-profile")]
         {
@@ -585,21 +625,49 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        let conv_input = if ablate_conv {
-            // ablate-conv early path: skip concat entirely; conv_input is unused.
-            // Bind to a dummy value so the type is consistent; Step 2b will also
-            // skip its body and conv_input is never referenced downstream.
-            qkv.clone()
-        } else {
-            match cache.as_deref_mut() {
-                Some(c) => concatenate(&[c.conv_state(), &qkv], 1)?,
-                None => {
-                    // Synthesize a fresh zero conv_state of shape [B, kernel_size-1, conv_dim].
-                    let zeros = Array::zeros(
-                        (batch, self.cfg.conv_kernel_size - 1, self.cfg.conv_dim()),
-                        qkv.dtype(),
-                    )?;
-                    concatenate(&[&zeros, &qkv], 1)?
+        let conv_input = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_2a_prepend_conv_state",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<Array> {
+                        if ablate_conv {
+                            // ablate-conv early path: skip concat entirely; conv_input is unused.
+                            Ok(qkv.clone())
+                        } else {
+                            match cache.as_deref_mut() {
+                                Some(c) => Ok(concatenate(&[c.conv_state(), &qkv], 1)?),
+                                None => {
+                                    let zeros = Array::zeros(
+                                        (batch, self.cfg.conv_kernel_size - 1, self.cfg.conv_dim()),
+                                        qkv.dtype(),
+                                    )?;
+                                    Ok(concatenate(&[&zeros, &qkv], 1)?)
+                                }
+                            }
+                        }
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                if ablate_conv {
+                    qkv.clone()
+                } else {
+                    match cache.as_deref_mut() {
+                        Some(c) => concatenate(&[c.conv_state(), &qkv], 1)?,
+                        None => {
+                            let zeros = Array::zeros(
+                                (batch, self.cfg.conv_kernel_size - 1, self.cfg.conv_dim()),
+                                qkv.dtype(),
+                            )?;
+                            concatenate(&[&zeros, &qkv], 1)?
+                        }
+                    }
                 }
             }
         };
@@ -623,12 +691,36 @@ impl GatedDeltaNet {
         };
         // ablate-conv early path: bypass conv1d + silu entirely; conv_out = qkv passthrough.
         // conv_state is NOT updated (Step 2c skips update below). Diagnostic only.
-        let conv_out = if ablate_conv {
-            qkv.clone()
-        } else {
-            let conv_out = self.conv1d.forward_on(&conv_input, target)?;
-            let conv_sig = conv_out.sigmoid()?;
-            &conv_out * &conv_sig
+        let conv_out = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_2b_conv1d_silu",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<Array> {
+                        if ablate_conv {
+                            Ok(qkv.clone())
+                        } else {
+                            let conv_out = self.conv1d.forward_on(&conv_input, target)?;
+                            let conv_sig = conv_out.sigmoid()?;
+                            Ok(&conv_out * &conv_sig)
+                        }
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                if ablate_conv {
+                    qkv.clone()
+                } else {
+                    let conv_out = self.conv1d.forward_on(&conv_input, target)?;
+                    let conv_sig = conv_out.sigmoid()?;
+                    &conv_out * &conv_sig
+                }
+            }
         };
         // Step 2b elapsed push
         #[cfg(feature = "p5g-profile")]
@@ -661,64 +753,118 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        if let Some(c) = cache.as_deref_mut() {
-            // ablate-conv: conv was replaced with qkv passthrough, so conv_state
-            // would receive stale data. Skip the update entirely.
-            // (ablate_conv is defined above at Step 2a entry; no re-check needed.)
-            if !ablate_conv {
-                let n_keep = self.cfg.conv_kernel_size - 1;
-                let conv_input_dims = conv_input.shape();
-                let total_len = conv_input_dims.as_slice()[1];
-                let conv_dim = self.cfg.conv_dim();
-                let new_conv_state = match per_row_lens {
-                    Some(lens) if batch > 1 && !lens.iter().all(|&l| l + n_keep == total_len) => {
-                        // Per-row real-tail window starts at position `lens[i]`
-                        // in conv_input and spans `n_keep` rows. Express as a
-                        // single `take_along_axis` over axis 1 with index tensor
-                        // `[B, n_keep, 1]` (broadcasts to [B, n_keep, conv_dim]).
-                        // This collapses the previous per-row
-                        // `slice_strided_on + concatenate_on` (B+1 graph nodes
-                        // per layer per call) into one fusable op — the
-                        // per-row loop blocked downstream JIT fusion and
-                        // caused a 3.45x decode slowdown.
-                        //
-                        // The match guard `!lens.iter().all(|&l| l + n_keep == total_len)`
-                        // routes uniform-length batches to the seq-wide slice
-                        // fast path (the `_` arm), so this arm only fires when
-                        // at least one row has a true ragged tail.
-                        if lens.len() as i32 != batch {
-                            return Err(anyhow!(
-                                "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
-                                lens.len(),
-                                batch
-                            ));
-                        }
-                        // Bound check: l in [0, max_len] (= [0, total_len - n_keep]),
-                        // so l + j in [0, total_len) for j in [0, n_keep). Always
-                        // holds when prefill_admitted set lens[i] = prompt_lens[i]
-                        // with prompt_lens[i] <= max_len = seq.
-                        let mut idx_flat: Vec<u32> = Vec::with_capacity((batch * n_keep) as usize);
-                        for &l in lens {
-                            for j in 0..n_keep {
-                                idx_flat.push((l + j) as u32);
+        {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_2c_update_conv_state",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<()> {
+                        if let Some(c) = cache.as_deref_mut() {
+                            if !ablate_conv {
+                                let n_keep = self.cfg.conv_kernel_size - 1;
+                                let conv_input_dims = conv_input.shape();
+                                let total_len = conv_input_dims.as_slice()[1];
+                                let conv_dim = self.cfg.conv_dim();
+                                let new_conv_state = match per_row_lens {
+                                    Some(lens)
+                                        if batch > 1
+                                            && !lens.iter().all(|&l| l + n_keep == total_len) =>
+                                    {
+                                        if lens.len() as i32 != batch {
+                                            return Err(anyhow!(
+                                                "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
+                                                lens.len(),
+                                                batch
+                                            ));
+                                        }
+                                        let mut idx_flat: Vec<u32> =
+                                            Vec::with_capacity((batch * n_keep) as usize);
+                                        for &l in lens {
+                                            for j in 0..n_keep {
+                                                idx_flat.push((l + j) as u32);
+                                            }
+                                        }
+                                        let idx: Array =
+                                            (&idx_flat[..], &[batch, n_keep, 1_i32][..])
+                                                .try_into()
+                                                .map_err(|e| {
+                                                    anyhow!(
+                                                "GatedDeltaNet::forward_on: idx try_into Array failed: {e:?}"
+                                            )
+                                                })?;
+                                        mlx::ops::indexing::take_along_axis_on(
+                                            &conv_input,
+                                            &idx,
+                                            1,
+                                            target,
+                                        )?
+                                    }
+                                    _ => mlx::ops::indexing::slice(
+                                        &conv_input,
+                                        vec![0_i32, total_len - n_keep, 0].as_slice(),
+                                        vec![batch, total_len, conv_dim].as_slice(),
+                                    )?,
+                                };
+                                c.update_conv(new_conv_state);
                             }
                         }
-                        let idx: Array = (&idx_flat[..], &[batch, n_keep, 1_i32][..])
-                            .try_into()
-                            .map_err(|e| {
-                                anyhow!(
-                                    "GatedDeltaNet::forward_on: idx try_into Array failed: {e:?}"
-                                )
-                            })?;
-                        mlx::ops::indexing::take_along_axis_on(&conv_input, &idx, 1, target)?
+                        Ok(())
+                    },
+                )?;
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                if let Some(c) = cache.as_deref_mut() {
+                    if !ablate_conv {
+                        let n_keep = self.cfg.conv_kernel_size - 1;
+                        let conv_input_dims = conv_input.shape();
+                        let total_len = conv_input_dims.as_slice()[1];
+                        let conv_dim = self.cfg.conv_dim();
+                        let new_conv_state = match per_row_lens {
+                            Some(lens)
+                                if batch > 1 && !lens.iter().all(|&l| l + n_keep == total_len) =>
+                            {
+                                if lens.len() as i32 != batch {
+                                    return Err(anyhow!(
+                                        "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
+                                        lens.len(),
+                                        batch
+                                    ));
+                                }
+                                let mut idx_flat: Vec<u32> =
+                                    Vec::with_capacity((batch * n_keep) as usize);
+                                for &l in lens {
+                                    for j in 0..n_keep {
+                                        idx_flat.push((l + j) as u32);
+                                    }
+                                }
+                                let idx: Array = (&idx_flat[..], &[batch, n_keep, 1_i32][..])
+                                    .try_into()
+                                    .map_err(|e| {
+                                        anyhow!(
+                                            "GatedDeltaNet::forward_on: idx try_into Array failed: {e:?}"
+                                        )
+                                    })?;
+                                mlx::ops::indexing::take_along_axis_on(
+                                    &conv_input,
+                                    &idx,
+                                    1,
+                                    target,
+                                )?
+                            }
+                            _ => mlx::ops::indexing::slice(
+                                &conv_input,
+                                vec![0_i32, total_len - n_keep, 0].as_slice(),
+                                vec![batch, total_len, conv_dim].as_slice(),
+                            )?,
+                        };
+                        c.update_conv(new_conv_state);
                     }
-                    _ => mlx::ops::indexing::slice(
-                        &conv_input,
-                        vec![0_i32, total_len - n_keep, 0].as_slice(),
-                        vec![batch, total_len, conv_dim].as_slice(),
-                    )?,
-                };
-                c.update_conv(new_conv_state);
+                }
             }
         }
         // Step 2c elapsed push
@@ -746,24 +892,60 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        let split_at = vec![self.cfg.key_dim(), 2 * self.cfg.key_dim()];
-        let parts = mlx::ops::shape::split_at_on(&conv_out, &split_at, -1, target)?;
-        let q_flat = &parts[0]; // [B, S, num_k_heads * head_k_dim]
-        let k_flat = &parts[1]; // [B, S, num_k_heads * head_k_dim]
-        let v_flat = &parts[2]; // [B, S, num_v_heads * head_v_dim]
+        let (q_per_head, k_per_head, v_per_head) = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_3_split_reshape_per_head",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<(Array, Array, Array)> {
+                        let split_at = vec![self.cfg.key_dim(), 2 * self.cfg.key_dim()];
+                        let parts = mlx::ops::shape::split_at_on(&conv_out, &split_at, -1, target)?;
+                        let q_flat = &parts[0];
+                        let k_flat = &parts[1];
+                        let v_flat = &parts[2];
+                        let q_per_head = q_flat.reshape_on(
+                            (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
+                            target,
+                        )?;
+                        let k_per_head = k_flat.reshape_on(
+                            (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
+                            target,
+                        )?;
+                        let v_per_head = v_flat.reshape_on(
+                            (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
+                            target,
+                        )?;
+                        Ok((q_per_head, k_per_head, v_per_head))
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                let split_at = vec![self.cfg.key_dim(), 2 * self.cfg.key_dim()];
+                let parts = mlx::ops::shape::split_at_on(&conv_out, &split_at, -1, target)?;
+                let q_flat = &parts[0]; // [B, S, num_k_heads * head_k_dim]
+                let k_flat = &parts[1]; // [B, S, num_k_heads * head_k_dim]
+                let v_flat = &parts[2]; // [B, S, num_v_heads * head_v_dim]
 
-        let q_per_head = q_flat.reshape_on(
-            (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
-            target,
-        )?;
-        let k_per_head = k_flat.reshape_on(
-            (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
-            target,
-        )?;
-        let v_per_head = v_flat.reshape_on(
-            (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
-            target,
-        )?;
+                let q_per_head = q_flat.reshape_on(
+                    (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
+                    target,
+                )?;
+                let k_per_head = k_flat.reshape_on(
+                    (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
+                    target,
+                )?;
+                let v_per_head = v_flat.reshape_on(
+                    (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
+                    target,
+                )?;
+                (q_per_head, k_per_head, v_per_head)
+            }
+        };
         // Step 3 elapsed push
         #[cfg(feature = "p5g-profile")]
         {
@@ -780,12 +962,36 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
-        let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
-        let q_scaled = &q_normed * (inv_scale * inv_scale); // panic-on-err, no `?`
-        let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
-        let k_scaled = &k_normed * inv_scale; // panic-on-err, no `?`
-                                              // Step 4 elapsed push
+        let (q_scaled, k_scaled) = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_4_qk_rmsnorm",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<(Array, Array)> {
+                        let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
+                        let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
+                        let q_scaled = &q_normed * (inv_scale * inv_scale);
+                        let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
+                        let k_scaled = &k_normed * inv_scale;
+                        Ok((q_scaled, k_scaled))
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
+                let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
+                let q_scaled = &q_normed * (inv_scale * inv_scale); // panic-on-err, no `?`
+                let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
+                let k_scaled = &k_normed * inv_scale; // panic-on-err, no `?`
+                (q_scaled, k_scaled)
+            }
+        };
+        // Step 4 elapsed push
         #[cfg(feature = "p5g-profile")]
         {
             if let Some(start) = _p5g_step_start_4 {
@@ -812,24 +1018,56 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        let g = if ablate_compute_g {
-            // ablate-compute-g early path: bypass softplus/exp/mul/exp chain.
-            // g is f32 zeros with shape matching `a` ([B, S, num_v_heads]).
-            // Downstream kernel still receives a valid same-shape Array;
-            // numerics are invalid (diagnostic only).
-            mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?
-        } else {
-            let x_sp = &a + &self.dt_bias;
-            let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
-            let zeros = a.zeros_like()?;
-            let safe = zeros.logaddexp(&x_sp)?;
-            let cond = x_sp.greater(&twenty)?;
-            let sp = cond.where_(&x_sp, &safe)?;
-            let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
-            let exp_alog = a_log_f32.exp()?;
-            let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
-            let inner = &neg_exp_alog * &sp;
-            inner.exp()?
+        let g = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_5_compute_g",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<Array> {
+                        if ablate_compute_g {
+                            Ok(mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?)
+                        } else {
+                            let x_sp = &a + &self.dt_bias;
+                            let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
+                            let zeros = a.zeros_like()?;
+                            let safe = zeros.logaddexp(&x_sp)?;
+                            let cond = x_sp.greater(&twenty)?;
+                            let sp = cond.where_(&x_sp, &safe)?;
+                            let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
+                            let exp_alog = a_log_f32.exp()?;
+                            let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
+                            let inner = &neg_exp_alog * &sp;
+                            Ok(inner.exp()?)
+                        }
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                if ablate_compute_g {
+                    // ablate-compute-g early path: bypass softplus/exp/mul/exp chain.
+                    // g is f32 zeros with shape matching `a` ([B, S, num_v_heads]).
+                    // Downstream kernel still receives a valid same-shape Array;
+                    // numerics are invalid (diagnostic only).
+                    mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?
+                } else {
+                    let x_sp = &a + &self.dt_bias;
+                    let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
+                    let zeros = a.zeros_like()?;
+                    let safe = zeros.logaddexp(&x_sp)?;
+                    let cond = x_sp.greater(&twenty)?;
+                    let sp = cond.where_(&x_sp, &safe)?;
+                    let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
+                    let exp_alog = a_log_f32.exp()?;
+                    let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
+                    let inner = &neg_exp_alog * &sp;
+                    inner.exp()?
+                }
+            }
         };
         // Step 5 elapsed push
         #[cfg(feature = "p5g-profile")]
@@ -849,7 +1087,23 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        let beta = b.sigmoid_on(target)?;
+        let beta = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_6_sigmoid_beta",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || b.sigmoid_on(target),
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                b.sigmoid_on(target)?
+            }
+        };
         // Step 6 elapsed push
         #[cfg(feature = "p5g-profile")]
         {
@@ -867,113 +1121,241 @@ impl GatedDeltaNet {
             None
         };
 
-        // Step 7a: build/get the appropriate kernel
-        let kernel = if mask.is_some() {
-            self.kernel_masked
-                .get_or_init(|| build_gated_delta_kernel(true).expect("build masked kernel"))
-        } else {
-            self.kernel_no_mask
-                .get_or_init(|| build_gated_delta_kernel(false).expect("build no-mask kernel"))
-        };
+        let y = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_7_kernel_and_cache_update",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<Array> {
+                        // Step 7a: build/get the appropriate kernel
+                        let kernel = if mask.is_some() {
+                            self.kernel_masked.get_or_init(|| {
+                                build_gated_delta_kernel(true).expect("build masked kernel")
+                            })
+                        } else {
+                            self.kernel_no_mask.get_or_init(|| {
+                                build_gated_delta_kernel(false).expect("build no-mask kernel")
+                            })
+                        };
 
-        // Step 7b: get state_in from cache (or fresh zeros).
-        // Note: `Array::clone()` is cheap (Arc-share refcount inc on `array_desc_`,
-        // not a deep memory copy); the kernel dispatch needs an `&Array`, and
-        // the cache must keep its slot for `update_recurrent` later.
-        let state_in = match cache.as_deref() {
-            Some(c) => c.recurrent_state().clone(),
-            None => Array::zeros(
-                (
+                        // Step 7b: get state_in from cache (or fresh zeros).
+                        let state_in = match cache.as_deref() {
+                            Some(c) => c.recurrent_state().clone(),
+                            None => Array::zeros(
+                                (
+                                    batch,
+                                    self.cfg.num_v_heads,
+                                    self.cfg.head_v_dim,
+                                    self.cfg.head_k_dim,
+                                ),
+                                Dtype::Float32,
+                            )?,
+                        };
+
+                        // Step 7c: T as 0-dim int32 array.
+                        #[cfg(feature = "p5g-profile")]
+                        let t_arr: Array = if matches!(_p5g_mode, ProfileMode::AblateTArr) {
+                            let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
+                                std::sync::Mutex::new(std::collections::HashMap::new())
+                            });
+                            let mut guard = cache.lock().unwrap();
+                            if let Some(arr) = guard.get(&seq) {
+                                arr.clone()
+                            } else {
+                                let arr: Array = (&[seq][..], ()).try_into()?;
+                                guard.insert(seq, arr.clone());
+                                arr
+                            }
+                        } else {
+                            (&[seq][..], ()).try_into()?
+                        };
+                        #[cfg(not(feature = "p5g-profile"))]
+                        let t_arr: Array = (&[seq][..], ()).try_into()?;
+
+                        let in_dtype = x.dtype();
+                        let st_dtype = Dtype::Float32;
+                        let y_shape = Shape::from(vec![
+                            batch,
+                            seq,
+                            self.cfg.num_v_heads,
+                            self.cfg.head_v_dim,
+                        ]);
+                        let state_shape = Shape::from(vec![
+                            batch,
+                            self.cfg.num_v_heads,
+                            self.cfg.head_v_dim,
+                            self.cfg.head_k_dim,
+                        ]);
+
+                        // Step 7d: dispatch
+                        let mut kernel_inputs: Vec<&Array> = vec![
+                            &q_scaled,
+                            &k_scaled,
+                            &v_per_head,
+                            &g,
+                            &beta,
+                            &state_in,
+                            &t_arr,
+                        ];
+                        if let Some(m) = mask {
+                            kernel_inputs.push(m);
+                        }
+
+                        let mut outputs = kernel
+                            .dispatch_builder()
+                            .inputs(&kernel_inputs)
+                            .output_shapes(&[y_shape, state_shape])
+                            .output_dtypes(&[in_dtype, st_dtype])
+                            .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+                            .threadgroup(32, 4, 1)
+                            .template_int("Dk", self.cfg.head_k_dim)
+                            .template_int("Dv", self.cfg.head_v_dim)
+                            .template_int("Hk", self.cfg.num_k_heads)
+                            .template_int("Hv", self.cfg.num_v_heads)
+                            .template_dtype("InT", in_dtype)
+                            .template_dtype("StT", st_dtype)
+                            .stream(target)
+                            .dispatch()?;
+
+                        let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
+                        let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
+
+                        // Step 7e: update cache recurrent_state, advance offset
+                        if let Some(c) = cache.as_deref_mut() {
+                            c.update_recurrent(new_state);
+                            let lens_owned: Vec<i32>;
+                            let lens_ref: &[i32] = match per_row_lens {
+                                Some(l) => l,
+                                None => {
+                                    lens_owned = vec![seq; batch as usize];
+                                    &lens_owned
+                                }
+                            };
+                            c.advance(lens_ref)?;
+                        }
+                        Ok(y)
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                // Step 7a: build/get the appropriate kernel
+                let kernel = if mask.is_some() {
+                    self.kernel_masked.get_or_init(|| {
+                        build_gated_delta_kernel(true).expect("build masked kernel")
+                    })
+                } else {
+                    self.kernel_no_mask.get_or_init(|| {
+                        build_gated_delta_kernel(false).expect("build no-mask kernel")
+                    })
+                };
+
+                // Step 7b: get state_in from cache (or fresh zeros).
+                // Note: `Array::clone()` is cheap (Arc-share refcount inc on `array_desc_`,
+                // not a deep memory copy); the kernel dispatch needs an `&Array`, and
+                // the cache must keep its slot for `update_recurrent` later.
+                let state_in = match cache.as_deref() {
+                    Some(c) => c.recurrent_state().clone(),
+                    None => Array::zeros(
+                        (
+                            batch,
+                            self.cfg.num_v_heads,
+                            self.cfg.head_v_dim,
+                            self.cfg.head_k_dim,
+                        ),
+                        Dtype::Float32,
+                    )?,
+                };
+
+                // Step 7c: T as 0-dim int32 array.
+                // ablate-t-arr: cache the Array keyed by seq to avoid per-call
+                // construction overhead. Uses OnceLock<Mutex<HashMap<i32, Array>>>
+                // so the same cached value is shared across all layers/calls with the
+                // same chunk size.
+                #[cfg(feature = "p5g-profile")]
+                let t_arr: Array = if matches!(_p5g_mode, ProfileMode::AblateTArr) {
+                    let cache = T_ARR_ABLATION_CACHE
+                        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                    let mut guard = cache.lock().unwrap();
+                    if let Some(arr) = guard.get(&seq) {
+                        arr.clone()
+                    } else {
+                        let arr: Array = (&[seq][..], ()).try_into()?;
+                        guard.insert(seq, arr.clone());
+                        arr
+                    }
+                } else {
+                    (&[seq][..], ()).try_into()?
+                };
+
+                #[cfg(not(feature = "p5g-profile"))]
+                let t_arr: Array = (&[seq][..], ()).try_into()?;
+
+                let in_dtype = x.dtype();
+                let st_dtype = Dtype::Float32;
+                let y_shape =
+                    Shape::from(vec![batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim]);
+                let state_shape = Shape::from(vec![
                     batch,
                     self.cfg.num_v_heads,
                     self.cfg.head_v_dim,
                     self.cfg.head_k_dim,
-                ),
-                Dtype::Float32,
-            )?,
-        };
+                ]);
 
-        // Step 7c: T as 0-dim int32 array.
-        // ablate-t-arr: cache the Array keyed by seq to avoid per-call
-        // construction overhead. Uses OnceLock<Mutex<HashMap<i32, Array>>>
-        // so the same cached value is shared across all layers/calls with the
-        // same chunk size.
-        #[cfg(feature = "p5g-profile")]
-        let t_arr: Array = if matches!(_p5g_mode, ProfileMode::AblateTArr) {
-            let cache = T_ARR_ABLATION_CACHE
-                .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-            let mut guard = cache.lock().unwrap();
-            if let Some(arr) = guard.get(&seq) {
-                arr.clone()
-            } else {
-                let arr: Array = (&[seq][..], ()).try_into()?;
-                guard.insert(seq, arr.clone());
-                arr
-            }
-        } else {
-            (&[seq][..], ()).try_into()?
-        };
-
-        #[cfg(not(feature = "p5g-profile"))]
-        let t_arr: Array = (&[seq][..], ()).try_into()?;
-
-        let in_dtype = x.dtype();
-        let st_dtype = Dtype::Float32;
-        let y_shape = Shape::from(vec![batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim]);
-        let state_shape = Shape::from(vec![
-            batch,
-            self.cfg.num_v_heads,
-            self.cfg.head_v_dim,
-            self.cfg.head_k_dim,
-        ]);
-
-        // Step 7d: dispatch
-        let mut kernel_inputs: Vec<&Array> = vec![
-            &q_scaled,
-            &k_scaled,
-            &v_per_head,
-            &g,
-            &beta,
-            &state_in,
-            &t_arr,
-        ];
-        if let Some(m) = mask {
-            kernel_inputs.push(m);
-        }
-
-        let mut outputs = kernel
-            .dispatch_builder()
-            .inputs(&kernel_inputs)
-            .output_shapes(&[y_shape, state_shape])
-            .output_dtypes(&[in_dtype, st_dtype])
-            .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
-            .threadgroup(32, 4, 1)
-            .template_int("Dk", self.cfg.head_k_dim)
-            .template_int("Dv", self.cfg.head_v_dim)
-            .template_int("Hk", self.cfg.num_k_heads)
-            .template_int("Hv", self.cfg.num_v_heads)
-            .template_dtype("InT", in_dtype)
-            .template_dtype("StT", st_dtype)
-            .stream(target)
-            .dispatch()?;
-
-        let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
-        let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
-
-        // Step 7e: update cache recurrent_state, advance offset
-        if let Some(c) = cache.as_deref_mut() {
-            c.update_recurrent(new_state);
-            let lens_owned: Vec<i32>;
-            let lens_ref: &[i32] = match per_row_lens {
-                Some(l) => l,
-                None => {
-                    // Non-batched single-stream caller: lockstep-equivalent uniform.
-                    lens_owned = vec![seq; batch as usize];
-                    &lens_owned
+                // Step 7d: dispatch
+                let mut kernel_inputs: Vec<&Array> = vec![
+                    &q_scaled,
+                    &k_scaled,
+                    &v_per_head,
+                    &g,
+                    &beta,
+                    &state_in,
+                    &t_arr,
+                ];
+                if let Some(m) = mask {
+                    kernel_inputs.push(m);
                 }
-            };
-            c.advance(lens_ref)?;
-        }
+
+                let mut outputs = kernel
+                    .dispatch_builder()
+                    .inputs(&kernel_inputs)
+                    .output_shapes(&[y_shape, state_shape])
+                    .output_dtypes(&[in_dtype, st_dtype])
+                    .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+                    .threadgroup(32, 4, 1)
+                    .template_int("Dk", self.cfg.head_k_dim)
+                    .template_int("Dv", self.cfg.head_v_dim)
+                    .template_int("Hk", self.cfg.num_k_heads)
+                    .template_int("Hv", self.cfg.num_v_heads)
+                    .template_dtype("InT", in_dtype)
+                    .template_dtype("StT", st_dtype)
+                    .stream(target)
+                    .dispatch()?;
+
+                let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
+                let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
+
+                // Step 7e: update cache recurrent_state, advance offset
+                if let Some(c) = cache.as_deref_mut() {
+                    c.update_recurrent(new_state);
+                    let lens_owned: Vec<i32>;
+                    let lens_ref: &[i32] = match per_row_lens {
+                        Some(l) => l,
+                        None => {
+                            // Non-batched single-stream caller: lockstep-equivalent uniform.
+                            lens_owned = vec![seq; batch as usize];
+                            &lens_owned
+                        }
+                    };
+                    c.advance(lens_ref)?;
+                }
+                y
+            }
+        };
         // Step 7 elapsed push (after 7e c.advance).
         #[cfg(feature = "p5g-profile")]
         {
@@ -1007,13 +1389,38 @@ impl GatedDeltaNet {
         };
 
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
-        let z_per_head = z.reshape_on(
-            (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
-            target,
-        )?;
-        let normed = self.norm.forward_on(&y, Some(&z_per_head), target)?;
-        let normed_flat = normed.reshape_on((batch, seq, self.cfg.value_dim()), target)?;
-        let out = self.out_proj.forward_on(&normed_flat, target)?;
+        let out = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_8_norm_proj",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<Array> {
+                        let z_per_head = z.reshape_on(
+                            (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
+                            target,
+                        )?;
+                        let normed = self.norm.forward_on(&y, Some(&z_per_head), target)?;
+                        let normed_flat =
+                            normed.reshape_on((batch, seq, self.cfg.value_dim()), target)?;
+                        self.out_proj.forward_on(&normed_flat, target)
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                let z_per_head = z.reshape_on(
+                    (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
+                    target,
+                )?;
+                let normed = self.norm.forward_on(&y, Some(&z_per_head), target)?;
+                let normed_flat = normed.reshape_on((batch, seq, self.cfg.value_dim()), target)?;
+                self.out_proj.forward_on(&normed_flat, target)?
+            }
+        };
         // Step 8 elapsed push
         #[cfg(feature = "p5g-profile")]
         {

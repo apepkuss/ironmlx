@@ -177,7 +177,12 @@ impl SparseMoeBlock {
     ///
     /// Stream-targeted. Caller is responsible for passing the correct stream;
     /// `()` selects the MLX default stream.
-    pub fn forward_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
+    ///
+    /// `layer_idx` — index of the enclosing decoder block (signature-only
+    /// plumbing at T0a; T3 will consume it for MoE substep P5h spans).
+    pub fn forward_on(&self, x: &Array, target: StreamOrDevice, layer_idx: i32) -> Result<Array> {
+        // T0a: signature-only plumbing. T3 will fill the 8 MoE substep spans.
+        let _ = layer_idx;
         let dims = x.shape();
         let dvec = dims.as_slice();
         if dvec.len() != 3 {

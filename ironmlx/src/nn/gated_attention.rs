@@ -125,7 +125,8 @@ impl GatedAttention {
         mask: Option<&Array>,
         cache: Option<&mut KVCache>,
     ) -> Result<Array> {
-        self.forward_on(x, mrope, cos, sin, mask, None, None, cache, ())
+        // Non-decoder callers (CLI / standalone tests) — pass -1 per spec § 2.5a.
+        self.forward_on(x, mrope, cos, sin, mask, None, None, cache, (), -1)
     }
 
     /// Stream-targeted forward.
@@ -162,8 +163,13 @@ impl GatedAttention {
         per_row_lens: Option<&[i32]>,
         cache: Option<&mut KVCache>,
         target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
     ) -> Result<Array> {
         let target = target.into();
+        // `layer_idx` is signature-only plumbing at T0a — T2 fills the
+        // full-attn substep instrumentation that will consume it. Silence the
+        // unused-variable warning for now.
+        let _ = layer_idx;
 
         // Two-step bind: x.shape() returns an owned Shape; we bind it to extend
         // its lifetime past .as_slice(), since the slice borrows from the Shape.
