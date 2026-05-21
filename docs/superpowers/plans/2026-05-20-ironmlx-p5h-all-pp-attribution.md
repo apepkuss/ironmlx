@@ -156,19 +156,25 @@ pub struct P5hTraceContext {
 /// Span handle returned by `open_p5h_span[_at]` and pushed onto the
 /// per-thread `P5H_CURRENT_SPAN_STACK` by `with_p5h_span_from_current_trace`.
 ///
-/// Fields are `pub(crate)` (NOT `pub`) per Codex plan review v5 P2: callers
-/// outside this module cannot mutate fields directly. The crate-internal
-/// `pub(crate)` access is required by `emit_log_line`, `close_p5h_span`,
-/// `with_p5h_span_from_current_trace`, and `RootSpanHandle::span()`
-/// accessor. Even crate-internal callers SHOULD treat the handle as opaque
-/// (read via accessors below or pass-through); the close-time tamper-detection
-/// check in `registry_remove_or_panic` catches any field mutation between
-/// open and close.
+/// Fields are **truly private** (per Codex plan review v6 P2 — `pub(crate)`
+/// in v4 only restricted construction outside the crate, but ALL ironmlx
+/// modules including `openai.rs` / `scheduler.rs` could still mutate or
+/// construct ad-hoc instances). Construction is gated through
+/// `open_p5h_span[_at]` + `with_p5h_span_from_current_trace`; cross-module
+/// reads use the `pub(crate)` accessors below; mutation is impossible from
+/// outside `core::p5h` because no `pub(crate)` mutating method exists.
+///
+/// Sub-modules of `core::p5h` (notably `#[cfg(test)] mod tests`) DO see the
+/// private fields per Rust's child-module visibility rule — this is required
+/// so the tamper-detection test can synthesize a "mutated clone" scenario
+/// that production code outside the module physically cannot reach. The
+/// close-side `handle_snapshot` check inside `registry_remove_or_panic`
+/// remains as defense in depth.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpanHandle {
-    pub(crate) span_id: u64,
-    pub(crate) span_name: &'static str,
-    pub(crate) parent_span_id: Option<u64>,
+    span_id: u64,
+    span_name: &'static str,
+    parent_span_id: Option<u64>,
     /// Human-readable parent label retained for log readability + label
     /// self-consistency check (per spec § 2.5a structural checks: "parent_span_id
     /// resolves to a span whose span_name equals the parent_span label").
@@ -176,13 +182,16 @@ pub struct SpanHandle {
     /// Per Codex plan review v1 P1 #1: do NOT hard-code "explicit_parent" —
     /// emitter MUST carry the real parent label to match T0a fixture
     /// `label self-consistency` assertion in § 2.5a.
-    pub(crate) parent_span: Option<&'static str>,
-    pub(crate) start_ns: u64,
+    parent_span: Option<&'static str>,
+    start_ns: u64,
 }
 
 impl SpanHandle {
     pub(crate) fn span_id(&self) -> u64 { self.span_id }
     pub(crate) fn span_name(&self) -> &'static str { self.span_name }
+    pub(crate) fn parent_span_id(&self) -> Option<u64> { self.parent_span_id }
+    pub(crate) fn parent_span(&self) -> Option<&'static str> { self.parent_span }
+    pub(crate) fn start_ns(&self) -> u64 { self.start_ns }
 }
 
 #[derive(Default, Debug)]
@@ -536,26 +545,21 @@ struct OpenSpanRecord {
     handle_snapshot: SpanHandle,
 }
 
-static OPEN_SPAN_REGISTRY: Mutex<Option<HashMap<u64, OpenSpanRecord>>> = Mutex::new(None);
-
-/// Registry op outcomes. Per Codex plan review v5 P1: collect errors as
-/// values inside the Mutex critical section, then panic OUTSIDE the guard
-/// scope. Panicking while holding the guard poisons the mutex; subsequent
-/// expected-panic tests in `cargo test` would fail with `p5h registry
-/// poisoned` (especially under default parallel execution).
-#[derive(Debug)]
-enum RegistryRemoveError {
-    NeverOpened,
-    Unknown { span_id: u64, span_name: &'static str },
-}
+/// Per Codex plan review v6 P1: registry is initialized eagerly to a single
+/// HashMap state. Earlier `Mutex<Option<HashMap<...>>>` had two failure modes
+/// (NeverOpened + Unknown); the unknown-handle test could match either depending
+/// on whether some prior test had already lazily inserted, making outcomes
+/// order-dependent under `cargo test`'s default parallel execution. Single
+/// panic path now: "is not in open registry".
+static OPEN_SPAN_REGISTRY: Mutex<HashMap<u64, OpenSpanRecord>> = Mutex::new(HashMap::new());
 
 /// Insert a fresh open record. Returns Err if the span_id is already
 /// present (atomic-counter race or registry corruption; never expected
-/// under correct usage). Caller panics outside the lock.
+/// under correct usage). Caller panics outside the lock — per Codex plan
+/// review v5 P1, panicking while holding the Mutex guard poisons it and
+/// breaks subsequent #[should_panic] tests.
 fn registry_try_insert(span_id: u64, record: OpenSpanRecord) -> Result<(), u64> {
-    // Lock scope confined to this block; guard drops at `}`.
-    let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
-    let reg = guard.get_or_insert_with(HashMap::new);
+    let mut reg = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
     if reg.contains_key(&span_id) {
         return Err(span_id);
     }
@@ -564,7 +568,6 @@ fn registry_try_insert(span_id: u64, record: OpenSpanRecord) -> Result<(), u64> 
 }
 
 fn registry_insert(span_id: u64, record: OpenSpanRecord) {
-    // Per Codex plan review v5 P1: panic happens OUTSIDE the Mutex guard.
     if let Err(duplicate_id) = registry_try_insert(span_id, record) {
         panic!(
             "open_p5h_span issued duplicate span_id={} — atomic counter race or registry corruption",
@@ -573,13 +576,13 @@ fn registry_insert(span_id: u64, record: OpenSpanRecord) {
     }
 }
 
-/// Remove the open record for `span_id`. Returns the record on success,
-/// or an error variant carrying enough context for the caller to panic
-/// with a useful message OUTSIDE the guard scope.
-fn registry_try_remove(span_id: u64, span_name: &'static str) -> Result<OpenSpanRecord, RegistryRemoveError> {
-    let mut guard = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
-    let reg = guard.as_mut().ok_or(RegistryRemoveError::NeverOpened)?;
-    reg.remove(&span_id).ok_or(RegistryRemoveError::Unknown { span_id, span_name })
+/// Remove the open record for `span_id`. Returns None if the id is absent.
+/// Single error condition: "is not in open registry" (covers both
+/// double-close and never-opened — distinguishing them was dead-code
+/// branching per Codex v6 P1).
+fn registry_try_remove(span_id: u64) -> Option<OpenSpanRecord> {
+    let mut reg = OPEN_SPAN_REGISTRY.lock().expect("p5h registry poisoned");
+    reg.remove(&span_id)
 }
 
 /// Verify `handle` matches the record stored at open; panic if mismatched.
@@ -587,19 +590,12 @@ fn registry_try_remove(span_id: u64, span_name: &'static str) -> Result<OpenSpan
 /// v5 P1) — registry_try_remove returns the owned record, we inspect it
 /// outside any lock.
 fn registry_remove_or_panic(handle: &SpanHandle, expected_request_id: &str) {
-    let record = match registry_try_remove(handle.span_id, handle.span_name) {
-        Ok(r) => r,
-        Err(RegistryRemoveError::NeverOpened) => panic!(
-            "close_p5h_span(span_name={}, span_id={}) called before any open_p5h_span — registry empty",
-            handle.span_name, handle.span_id,
-        ),
-        Err(RegistryRemoveError::Unknown { span_id, span_name }) => panic!(
-            "close_p5h_span(span_name={}, span_id={}) — span_id is not in open registry. \
-             Causes: (a) handle reused after close (double-close), (b) handle leaked from a different request, \
-             (c) handle never opened. Per § 2.5a explicit-API hard-fail.",
-            span_name, span_id,
-        ),
-    };
+    let record = registry_try_remove(handle.span_id()).unwrap_or_else(|| panic!(
+        "close_p5h_span(span_name={}, span_id={}) — span_id is not in open registry. \
+         Causes: (a) handle reused after close (double-close), (b) handle leaked from a different request, \
+         (c) handle never opened. Per § 2.5a explicit-API hard-fail.",
+        handle.span_name(), handle.span_id(),
+    ));
     // ctx mismatch (per Codex v3 P2 #3)
     if record.request_id != expected_request_id {
         panic!(
