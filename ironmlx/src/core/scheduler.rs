@@ -382,6 +382,14 @@ pub struct RequestState {
     /// KV cache bytes charged to budget at admit time. Released on
     /// row completion / eviction. B1-p2.5.
     pub kv_bytes_admitted: usize,
+
+    #[cfg(feature = "p5h-profile")]
+    #[allow(dead_code)] // read by cloned_active_row_p5h_trace_and_root; set by T0a.6 handler
+    pub(crate) p5h_trace: Option<crate::core::p5h::P5hTraceContext>,
+
+    #[cfg(feature = "p5h-profile")]
+    #[allow(dead_code)] // read by cloned_active_row_p5h_trace_and_root; set by T0a.6 handler
+    pub(crate) p5h_root_span: Option<crate::core::p5h::SpanHandle>,
 }
 
 /// Read pre-write per-row offsets from the first Full-attention layer's
@@ -641,6 +649,10 @@ impl<M: Model> Scheduler<M> {
             image_token_id: req.image_token_id,
             prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(512).max(1),
             kv_bytes_admitted: requested_bytes,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: req.p5h_trace.clone(),
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: req.p5h_root_span.clone(),
         };
         let seed = state.sampler.seed;
         self.slots[row_idx] = Some(state);
@@ -1829,6 +1841,39 @@ impl<M: Model> Scheduler<M> {
     }
 }
 
+#[cfg(feature = "p5h-profile")]
+impl<M: crate::core::model::Model> Scheduler<M> {
+    #[allow(dead_code)] // called by T0a.9 prefill_admitted_inner; not yet wired
+    pub(crate) fn cloned_active_row_p5h_trace_and_root(
+        &self,
+    ) -> anyhow::Result<
+        Option<(
+            crate::core::p5h::P5hTraceContext,
+            crate::core::p5h::SpanHandle,
+        )>,
+    > {
+        let active: Vec<&RequestState> = self.slots.iter().filter_map(|s| s.as_ref()).collect();
+        anyhow::ensure!(
+            active.len() == 1,
+            "p5h-profile invariant: expected exactly 1 active row, found {} (--b-max 1 required)",
+            active.len(),
+        );
+        let state = active[0];
+        match (state.p5h_trace.clone(), state.p5h_root_span.clone()) {
+            (Some(ctx), Some(root_span)) => Ok(Some((ctx, root_span))),
+            (None, None) => Ok(None),
+            (Some(_), None) => anyhow::bail!(
+                "p5h-profile invariant: active RequestState has p5h_trace but no p5h_root_span — \
+                 mixed-state bug (only openai.rs handler sets either field, and it sets both)"
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "p5h-profile invariant: active RequestState has p5h_root_span but no p5h_trace — \
+                 mixed-state bug (only openai.rs handler sets either field, and it sets both)"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1850,6 +1895,10 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: 248056,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
         }
     }
 
@@ -2305,6 +2354,10 @@ mod tests {
             image_grid_thw: Some(grids.clone()),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
         };
 
         let id = sched.admit(req).expect("admit");
@@ -2338,6 +2391,10 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
         };
         let _id = s.admit(req).expect("admit");
         s.force_phase(Phase::Decoding);
@@ -2375,6 +2432,10 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
         };
 
         let result = s.admit(oversize_req);
@@ -2424,6 +2485,10 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
         };
 
         // Case A: slots_max well above the floor; cap_max does not bind.

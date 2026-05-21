@@ -81,6 +81,10 @@ fn run_generation_with_model<M: Model>(
         // CLI is text-only; both values unused when image_grid_thw is None.
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
+        #[cfg(feature = "p5h-profile")]
+        p5h_trace: None,
+        #[cfg(feature = "p5h-profile")]
+        p5h_root_span: None,
     };
 
     let mut stream = GenerationStream::new_text_only(model, tokenizer, request)?;

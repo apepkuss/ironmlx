@@ -392,6 +392,10 @@ where
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size: spatial_merge_size,
         image_token_id,
+        #[cfg(feature = "p5h-profile")]
+        p5h_trace: None,
+        #[cfg(feature = "p5h-profile")]
+        p5h_root_span: None,
     };
 
     let prompt_tokens = request.prompt_ids.len() as u32;

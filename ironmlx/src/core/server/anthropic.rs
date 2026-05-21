@@ -241,6 +241,10 @@ where
         // when image_grid_thw is None.
         image_spatial_merge_size: 2,
         image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+        #[cfg(feature = "p5h-profile")]
+        p5h_trace: None,
+        #[cfg(feature = "p5h-profile")]
+        p5h_root_span: None,
     };
 
     // COMPAT(3b-2/3b-4): long-prompt fallback to GS sunsets in 3c+

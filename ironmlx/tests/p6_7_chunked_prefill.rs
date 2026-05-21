@@ -104,6 +104,10 @@ fn p6_7_chunked_prefill_matrix() {
             image_grid_thw: Some(grids.clone()),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
         };
 
         let mut stream = GenerationStream::new(&model, &tokenizer, request).expect("stream::new");

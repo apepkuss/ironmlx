@@ -53,6 +53,18 @@ pub struct GenerateRequest {
     /// (`248056` for Qwen3.5-VL). Sibling VL models with a different image-pad
     /// id must set this from `Tokenizer::token_to_id("<|image_pad|>")`.
     pub image_token_id: i32,
+
+    /// P5h trace context (gated on `p5h-profile` feature). Populated by the
+    /// HTTP handler before admit; copied into RequestState. None on default
+    /// builds. See spec § 2.5a "Propagation chain".
+    #[cfg(feature = "p5h-profile")]
+    pub p5h_trace: Option<crate::core::p5h::P5hTraceContext>,
+
+    /// P5h root SpanHandle (gated on `p5h-profile` feature). Populated alongside
+    /// `p5h_trace`. Used by `Scheduler::prefill_admitted_inner` to open
+    /// `model_prefill_forward` + `first_token_sampling` with the correct parent.
+    #[cfg(feature = "p5h-profile")]
+    pub p5h_root_span: Option<crate::core::p5h::SpanHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -1551,6 +1563,10 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
         };
         assert!(req.pixel_values.is_none());
         assert!(req.image_grid_thw.is_none());
