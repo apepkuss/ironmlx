@@ -463,13 +463,18 @@ Append to the `#[cfg(test)] mod tests` block:
     #[test]
     #[should_panic(expected = "handle field tamper detected")]
     fn close_panics_on_tampered_handle_field() {
-        // Per Codex plan review v5 P2: SpanHandle fields are pub(crate);
-        // tests in the same module can mutate them. Production callers
-        // outside this module CANNOT (no pub fields). Either way, the
-        // close-side snapshot check catches a mutated clone.
+        // Per Codex plan review v5 P2 + v6 P2: SpanHandle fields are TRULY
+        // PRIVATE (not pub(crate)). This test sits in a child module of
+        // `core::p5h` and per Rust's child-module visibility rule can still
+        // see the parent module's private fields — that's the only way to
+        // synthesize the "mutated clone" scenario. Production callers in
+        // other modules (openai.rs / scheduler.rs / generate.rs) cannot
+        // reach this path: they have neither field access nor a mutating
+        // method. The close-side snapshot check serves as defense in depth
+        // even for accidental in-module mutation.
         let ctx = dummy_ctx();
         let mut handle = open_p5h_span_at(&ctx, None, "test_root", 0);
-        handle.span_name = "tampered_name"; // mutate the clone
+        handle.span_name = "tampered_name"; // mutate the clone (only possible from same-module path)
         close_p5h_span(&ctx, handle, 1, SpanFields::default());
     }
 
@@ -532,8 +537,11 @@ static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Records the full state captured at open. close_* verifies the incoming
 /// SpanHandle matches this record on every field (per Codex plan review v5
-/// P2 — `SpanHandle` fields are `pub(crate)` and `Clone`, so a caller could
-/// mutate `span_name` / `parent_span_id` / `parent_span` / `start_ns` on a
+/// P2 + v6 P2 — `SpanHandle` fields are truly private + Clone, so production
+/// callers outside `core::p5h` cannot construct or mutate handles directly,
+/// but defense-in-depth catches any in-module mistake or future regression.
+/// A sub-module test in this file mutates `span_name` / `parent_span_id` /
+/// `parent_span` / `start_ns` on a
 /// clone and emit an inconsistent log line; close-side tamper detection
 /// catches it). request_id is the ctx-mismatch check (v3 P2 #3).
 #[derive(Clone, Debug)]
@@ -545,13 +553,14 @@ struct OpenSpanRecord {
     handle_snapshot: SpanHandle,
 }
 
-/// Per Codex plan review v6 P1: registry is initialized eagerly to a single
-/// HashMap state. Earlier `Mutex<Option<HashMap<...>>>` had two failure modes
-/// (NeverOpened + Unknown); the unknown-handle test could match either depending
-/// on whether some prior test had already lazily inserted, making outcomes
-/// order-dependent under `cargo test`'s default parallel execution. Single
-/// panic path now: "is not in open registry".
-static OPEN_SPAN_REGISTRY: Mutex<HashMap<u64, OpenSpanRecord>> = Mutex::new(HashMap::new());
+/// Per Codex plan review v6 P1 + v7 P1: registry is a single eagerly-constructed
+/// HashMap state — no `Option<HashMap<...>>` (v5 design) and no two-branch
+/// "NeverOpened/Unknown" failure mode. `Mutex::new(HashMap::new())` is NOT
+/// usable as a `static` initializer because `HashMap::new` is not `const fn`
+/// (E0015 on rustc 1.95.0), so we wrap in `once_cell::sync::Lazy` which is
+/// already a dependency (added in T0a.3 Step 0 for `monotonic_ns()`).
+static OPEN_SPAN_REGISTRY: once_cell::sync::Lazy<Mutex<HashMap<u64, OpenSpanRecord>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Insert a fresh open record. Returns Err if the span_id is already
 /// present (atomic-counter race or registry corruption; never expected
