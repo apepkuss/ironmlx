@@ -57,11 +57,21 @@ pub struct SpanHandle {
 }
 
 impl SpanHandle {
-    pub(crate) fn span_id(&self) -> u64 { self.span_id }
-    pub(crate) fn span_name(&self) -> &'static str { self.span_name }
-    pub(crate) fn parent_span_id(&self) -> Option<u64> { self.parent_span_id }
-    pub(crate) fn parent_span(&self) -> Option<&'static str> { self.parent_span }
-    pub(crate) fn start_ns(&self) -> u64 { self.start_ns }
+    pub(crate) fn span_id(&self) -> u64 {
+        self.span_id
+    }
+    pub(crate) fn span_name(&self) -> &'static str {
+        self.span_name
+    }
+    pub(crate) fn parent_span_id(&self) -> Option<u64> {
+        self.parent_span_id
+    }
+    pub(crate) fn parent_span(&self) -> Option<&'static str> {
+        self.parent_span
+    }
+    pub(crate) fn start_ns(&self) -> u64 {
+        self.start_ns
+    }
 }
 
 #[derive(Default, Debug)]
@@ -78,8 +88,12 @@ pub struct RootSpanHandle {
 }
 
 impl RootSpanHandle {
-    pub(crate) fn ctx(&self) -> &P5hTraceContext { &self.ctx }
-    pub(crate) fn span(&self) -> &SpanHandle { &self.span }
+    pub(crate) fn ctx(&self) -> &P5hTraceContext {
+        &self.ctx
+    }
+    pub(crate) fn span(&self) -> &SpanHandle {
+        &self.span
+    }
     pub(crate) fn close_at(self, _end_ns: u64) {
         // T0a.3 fills this in
         unimplemented!("filled in T0a.3");
