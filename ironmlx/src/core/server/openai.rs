@@ -532,10 +532,50 @@ where
     let id_for_task = id.clone();
     let model_id_for_task = model_id.clone();
 
+    // T0a.8 Step 1: aliases consumed by the spawn_blocking closure. These are
+    // clones of the pre-move locals above; the originals stay on the async
+    // task so the response header builder can still read p5h_response_request_id.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_ctx: crate::core::p5h::P5hTraceContext = p5h_ctx_for_closure.clone();
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_handle_gs: crate::core::p5h::RootSpanHandle = p5h_root_handle_for_closure.clone();
+
     tokio::task::spawn_blocking(move || {
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
-        let mut stream = match GenerationStream::new(&*model_guard, tokenizer, request) {
+
+        #[cfg(feature = "p5h-profile")]
+        let mut root_guard = crate::core::p5h::P5hRootCloseGuard::new(p5h_root_handle_gs);
+
+        // T0a.8 Step 2: wrap GenerationStream::new in gs_stream_init_and_chunk_loop
+        // so deep spans inside (gs_kv_cache_alloc / gs_chunk_N /
+        // gs_first_token_sample_dispatch) chain under it via the trace guard.
+        #[cfg(feature = "p5h-profile")]
+        let gs_top_span = crate::core::p5h::open_p5h_span(
+            &p5h_ctx,
+            Some(root_guard.span()),
+            "gs_stream_init_and_chunk_loop",
+        );
+
+        #[cfg(feature = "p5h-profile")]
+        let _gs_guard =
+            crate::core::p5h::P5hTraceGuard::enter(p5h_ctx.clone(), gs_top_span.clone());
+
+        let stream_result = GenerationStream::new(&*model_guard, tokenizer, request);
+
+        #[cfg(feature = "p5h-profile")]
+        drop(_gs_guard);
+        #[cfg(feature = "p5h-profile")]
+        let gs_close_end_ns = crate::core::p5h::monotonic_ns_public();
+        #[cfg(feature = "p5h-profile")]
+        crate::core::p5h::close_p5h_span(
+            &p5h_ctx,
+            gs_top_span,
+            gs_close_end_ns,
+            crate::core::p5h::SpanFields::default(),
+        );
+
+        let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx.blocking_send(Ok(format_sse_error(&e)));
@@ -558,12 +598,80 @@ where
                 finish_reason: None,
             }],
         };
-        if tx.blocking_send(Ok(format_sse_data(&role_chunk))).is_err() {
+
+        // T0a.8 Step 5 (role): wrap the role-chunk send in sse_write_role_chunk.
+        #[cfg(feature = "p5h-profile")]
+        let role_span = crate::core::p5h::open_p5h_span(
+            &p5h_ctx,
+            Some(root_guard.span()),
+            "sse_write_role_chunk",
+        );
+
+        let role_send_result = tx.blocking_send(Ok(format_sse_data(&role_chunk)));
+
+        #[cfg(feature = "p5h-profile")]
+        let role_close_end_ns = crate::core::p5h::monotonic_ns_public();
+        #[cfg(feature = "p5h-profile")]
+        crate::core::p5h::close_p5h_span(
+            &p5h_ctx,
+            role_span,
+            role_close_end_ns,
+            crate::core::p5h::SpanFields::default(),
+        );
+
+        if role_send_result.is_err() {
             return;
         }
 
+        // T0a.8 Step 4: per-iteration span. First iteration emits
+        // `gs_first_token_materialize_and_predispatch`; subsequent (while
+        // root is still open) emit `pre_content_decode_steps`. Once the
+        // first non-empty content is sent and the root closes, the
+        // remainder of the loop runs with no P5h emission.
+        #[cfg(feature = "p5h-profile")]
+        let mut p5h_first_iter = true;
         loop {
-            match stream.next_token() {
+            #[cfg(feature = "p5h-profile")]
+            let iter_top_span = if root_guard.is_open() {
+                let name: &'static str = if p5h_first_iter {
+                    "gs_first_token_materialize_and_predispatch"
+                } else {
+                    "pre_content_decode_steps"
+                };
+                Some(crate::core::p5h::open_p5h_span(
+                    &p5h_ctx,
+                    Some(root_guard.span()),
+                    name,
+                ))
+            } else {
+                None
+            };
+
+            #[cfg(feature = "p5h-profile")]
+            let _iter_guard = iter_top_span
+                .as_ref()
+                .map(|s| crate::core::p5h::P5hTraceGuard::enter(p5h_ctx.clone(), s.clone()));
+
+            let ev_result = stream.next_token();
+
+            #[cfg(feature = "p5h-profile")]
+            drop(_iter_guard);
+            #[cfg(feature = "p5h-profile")]
+            if let Some(span) = iter_top_span {
+                crate::core::p5h::close_p5h_span(
+                    &p5h_ctx,
+                    span,
+                    crate::core::p5h::monotonic_ns_public(),
+                    crate::core::p5h::SpanFields::default(),
+                );
+            }
+
+            #[cfg(feature = "p5h-profile")]
+            {
+                p5h_first_iter = false;
+            }
+
+            match ev_result {
                 Ok(Some(ev)) => {
                     let chunk = ChunkResponse {
                         id: id_for_task.clone(),
@@ -576,7 +684,38 @@ where
                             finish_reason: ev.finish_reason,
                         }],
                     };
-                    if tx.blocking_send(Ok(format_sse_data(&chunk))).is_err() {
+
+                    // T0a.8 Step 5 (content): wrap first non-empty content send
+                    // in detok_format_first_content_chunk + close root after.
+                    #[cfg(feature = "p5h-profile")]
+                    let is_first_non_empty_content = !ev.text.is_empty() && root_guard.is_open();
+                    #[cfg(feature = "p5h-profile")]
+                    let content_span = if is_first_non_empty_content {
+                        Some(crate::core::p5h::open_p5h_span(
+                            &p5h_ctx,
+                            Some(root_guard.span()),
+                            "detok_format_first_content_chunk",
+                        ))
+                    } else {
+                        None
+                    };
+
+                    let content_send_result = tx.blocking_send(Ok(format_sse_data(&chunk)));
+                    #[cfg(feature = "p5h-profile")]
+                    let content_send_end_ns = crate::core::p5h::monotonic_ns_public();
+
+                    #[cfg(feature = "p5h-profile")]
+                    if let Some(handle) = content_span {
+                        crate::core::p5h::close_p5h_span(
+                            &p5h_ctx,
+                            handle,
+                            content_send_end_ns,
+                            crate::core::p5h::SpanFields::default(),
+                        );
+                        root_guard.close_success(content_send_end_ns);
+                    }
+
+                    if content_send_result.is_err() {
                         break;
                     }
                     if ev.finish_reason.is_some() {
@@ -612,9 +751,6 @@ where
         );
         resp
     };
-    // suppress unused-variable warning for p5h_root_handle_for_closure (used in T0a.7)
-    #[cfg(feature = "p5h-profile")]
-    let _ = p5h_root_handle_for_closure;
     response
 }
 
