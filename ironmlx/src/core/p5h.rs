@@ -299,7 +299,7 @@ fn next_span_id() -> u64 {
     NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-fn emit_log_line(
+fn emit_log_line_with_end_ns(
     ctx: &P5hTraceContext,
     span: &SpanHandle,
     end_ns: u64,
@@ -330,6 +330,28 @@ fn emit_log_line(
         fields.mode.unwrap_or("off"),
         span_kind,
     );
+}
+
+/// Per Option E (T0a coverage gap fix): emit a log line where `end_ns` is
+/// captured AS LATE AS POSSIBLE — immediately before `tracing::info!` fires.
+/// This pulls the cost of the caller's post-body infrastructure
+/// (`fields_fn` evaluation + `registry_remove_or_panic` + format pre-work)
+/// INTO `inclusive_us = end_ns - start_ns`, instead of leaving it as
+/// invisible gap between sibling substeps. Without this, ~3-5us per span of
+/// hidden cost capped GDN coverage at ~50%. Used by
+/// `with_p5h_span_from_current_trace`; explicit-context closers
+/// (`close_p5h_span` / `close_p5h_span_diagnostic`) still take a
+/// caller-provided `end_ns` via `emit_log_line_with_end_ns` because the
+/// caller controls the semantic moment of close (e.g., root span at
+/// handler exit, Lane-A/B forwarder boundaries).
+fn emit_log_line_capture_end_ns(
+    ctx: &P5hTraceContext,
+    span: &SpanHandle,
+    fields: &SpanFields,
+    span_kind: &'static str,
+) {
+    let end_ns = monotonic_ns();
+    emit_log_line_with_end_ns(ctx, span, end_ns, fields, span_kind);
 }
 
 /// Open at the current monotonic time. Use when span start coincides with
@@ -387,7 +409,7 @@ pub fn open_p5h_span_at(
 /// cross-request leakage / double-close / wrong-ctx close / field tamper).
 pub fn close_p5h_span(ctx: &P5hTraceContext, handle: SpanHandle, end_ns: u64, fields: SpanFields) {
     registry_remove_or_panic(&handle, &ctx.request_id);
-    emit_log_line(ctx, &handle, end_ns, &fields, "tree");
+    emit_log_line_with_end_ns(ctx, &handle, end_ns, &fields, "tree");
 }
 
 /// Close a diagnostic span (e.g., Lane-A `sse_write_role_chunk_diagnostic`).
@@ -399,7 +421,7 @@ pub fn close_p5h_span_diagnostic(
     fields: SpanFields,
 ) {
     registry_remove_or_panic(&handle, &ctx.request_id);
-    emit_log_line(ctx, &handle, end_ns, &fields, "diagnostic");
+    emit_log_line_with_end_ns(ctx, &handle, end_ns, &fields, "diagnostic");
 }
 
 /// Implicit-guard API. Internally opens span (parent = stack top), pushes,
@@ -485,7 +507,13 @@ pub fn with_p5h_span_from_current_trace<T>(
         "stack imbalance: popped a different span ({}) than the one opened ({})",
         popped.span_name, handle.span_name
     );
-    let end_ns = monotonic_ns();
+    // Per Option E (T0a coverage gap fix): do NOT capture `end_ns` here. The
+    // post-body cost of `fields_fn()` + `registry_remove_or_panic()` +
+    // `tracing::info!` format pre-work (~3-5us per span) must be INCLUDED in
+    // `inclusive_us = end_ns - start_ns`, otherwise it surfaces as invisible
+    // gap between sibling substeps and caps GDN coverage at ~50%. The actual
+    // `let end_ns = monotonic_ns()` lives in `emit_log_line_capture_end_ns`
+    // immediately before `tracing::info!` fires.
     let fields = fields_fn();
     registry_remove_or_panic(&handle, &request_id_at_open);
     P5H_CURRENT_TRACE.with(|c| {
@@ -494,7 +522,7 @@ pub fn with_p5h_span_from_current_trace<T>(
             "with_p5h_span_from_current_trace(span_name={}) lost P5H_CURRENT_TRACE mid-body — guard dropped concurrently",
             span_name,
         ));
-        emit_log_line(ctx, &handle, end_ns, &fields, "tree");
+        emit_log_line_capture_end_ns(ctx, &handle, &fields, "tree");
     });
     result
 }
