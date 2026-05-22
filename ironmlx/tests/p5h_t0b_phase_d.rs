@@ -51,6 +51,7 @@ const INTER_PP_COOLDOWN: Duration = Duration::from_secs(3);
 const H1_OUTPUT_PATH: &str = "/tmp/p5h-t0b-h1.json";
 const H2_OUTPUT_PATH: &str = "/tmp/p5h-t0b-h2.json";
 const H3_OUTPUT_PATH: &str = "/tmp/p5h-t0b-h3.json";
+const H4_OUTPUT_PATH: &str = "/tmp/p5h-t0b-h4.json";
 
 // Preheat: drive GPU into thermal saturation by running PP_LIST × RUNS=3
 // throwaway Phase A iron-bench iterations. Results discarded. Boss's option C
@@ -1233,6 +1234,328 @@ fn t0b_h3_cache_state_divergence() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ===== T0b.4 H4 kernel materialization variance harness =====
+//
+// Hypothesis (per design memo § 2.5 H4 + plan T0b.4): the per-forward
+// Step 7d kernel dispatch+take+eval wall time differs systematically between
+// Phase A (full pipeline) and an ablate-compute-g substitute, suggesting the
+// upstream substitution changes the kernel's materialization cost (input
+// shape/layout, fusion, or batched dispatch behavior) — not just the
+// upstream op cost.
+//
+// Method:
+//   * run server in `h4-measure-phase-a` mode at each PP — emits per-forward
+//     [p5h-t0b-h4] step=step_7d_dispatch_materialize records with elapsed_us
+//   * run server in `h4-measure-ablate-compute-g` mode at each PP — same
+//     records but compute_g is replaced
+//   * per (mode, PP): trimmed_median of all elapsed_us values across all
+//     forwards (drops min+max — single-sample outliers are common at the
+//     forward-by-forward grain so trim-by-2 stabilizes the median)
+//   * kernel_drift_pct = (kernel_us_ablate - kernel_us_phase_a) / kernel_us_phase_a
+//
+// Verdict thresholds (per design memo § 3 T0b.4):
+//   * VERIFIED:    kernel_drift_pct > 5% in ≥2 PP buckets
+//   * REJECTED:    max kernel_drift_pct < 2% across all PPs
+//   * INCONCLUSIVE: otherwise
+
+#[derive(Debug, Clone)]
+struct H4Record {
+    mode: String,
+    layer: i32,
+    batch: i32,
+    seq: i32,
+    elapsed_us: u64,
+}
+
+/// Parse `[p5h-t0b-h4]` records from captured server stderr bytes. Same
+/// strategy as parse_h2_records: filter by substring, split-on-whitespace
+/// the tail, parse each key=value token. Note field is `elapsed_us` (not
+/// `timer_d_us` — the rename landed in commit 1af0d52). Panics on a tagged
+/// line with malformed fields (failure-fast).
+fn parse_h4_records(stderr_bytes: &[u8]) -> Vec<H4Record> {
+    let s = String::from_utf8_lossy(stderr_bytes);
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let Some(start) = line.find("[p5h-t0b-h4]") else {
+            continue;
+        };
+        let tail = &line[start..];
+        let mut mode: Option<String> = None;
+        let mut layer: Option<i32> = None;
+        let mut batch: Option<i32> = None;
+        let mut seq: Option<i32> = None;
+        let mut elapsed_us: Option<u64> = None;
+        for tok in tail.split_whitespace() {
+            let Some((k, v)) = tok.split_once('=') else {
+                continue;
+            };
+            match k {
+                "mode" => mode = Some(v.to_string()),
+                "layer" => {
+                    layer = Some(
+                        v.parse::<i32>()
+                            .unwrap_or_else(|e| panic!("[p5h-t0b-h4] bad layer={v}: {e}")),
+                    )
+                }
+                "batch" => {
+                    batch = Some(
+                        v.parse::<i32>()
+                            .unwrap_or_else(|e| panic!("[p5h-t0b-h4] bad batch={v}: {e}")),
+                    )
+                }
+                "seq" => {
+                    seq = Some(
+                        v.parse::<i32>()
+                            .unwrap_or_else(|e| panic!("[p5h-t0b-h4] bad seq={v}: {e}")),
+                    )
+                }
+                "elapsed_us" => {
+                    elapsed_us = Some(
+                        v.parse::<u64>()
+                            .unwrap_or_else(|e| panic!("[p5h-t0b-h4] bad elapsed_us={v}: {e}")),
+                    )
+                }
+                _ => {}
+            }
+        }
+        let mode = mode.unwrap_or_else(|| panic!("[p5h-t0b-h4] line missing mode: {line}"));
+        let layer = layer.unwrap_or_else(|| panic!("[p5h-t0b-h4] line missing layer: {line}"));
+        let batch = batch.unwrap_or_else(|| panic!("[p5h-t0b-h4] line missing batch: {line}"));
+        let seq = seq.unwrap_or_else(|| panic!("[p5h-t0b-h4] line missing seq: {line}"));
+        let elapsed_us =
+            elapsed_us.unwrap_or_else(|| panic!("[p5h-t0b-h4] line missing elapsed_us: {line}"));
+        out.push(H4Record {
+            mode,
+            layer,
+            batch,
+            seq,
+            elapsed_us,
+        });
+    }
+    out
+}
+
+#[derive(Debug, serde::Serialize)]
+struct H4CellPerMode {
+    pp: i32,
+    record_count: usize,
+    trimmed_median_kernel_us: f64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct H4Cell {
+    pp: i32,
+    phase_a_record_count: usize,
+    ablate_compute_g_record_count: usize,
+    phase_a_kernel_us: f64,
+    ablate_compute_g_kernel_us: f64,
+    kernel_drift_pct: f64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct H4Verdict {
+    verdict: String,
+    rationale: String,
+    cells: Vec<H4Cell>,
+    phase_a_per_mode_cells: Vec<H4CellPerMode>,
+    ablate_compute_g_per_mode_cells: Vec<H4CellPerMode>,
+    initial_cool_protocol: String,
+    preheat_protocol: String,
+}
+
+/// Run a single H4 mode per-PP, capture stderr per PP, parse, and aggregate
+/// trimmed-median kernel_us per PP. Failure paths go through shutdown_and_join.
+fn run_h4_mode_collect(
+    mode: &str,
+    model_dir: &str,
+    port: u16,
+) -> anyhow::Result<BTreeMap<i32, Vec<H4Record>>> {
+    let mut per_pp: BTreeMap<i32, Vec<H4Record>> = BTreeMap::new();
+    for &pp in &PP_LIST {
+        assert_port_free(port).map_err(|e| anyhow::anyhow!("port {port} not free: {e}"))?;
+        let mut server = spawn_server(Some(mode), model_dir, port);
+        let (stderr_buf, drainer) = spawn_stderr_drainer(&mut server);
+
+        if let Err(e) = wait_for_ready(port, 300) {
+            shutdown_and_join(server, drainer);
+            anyhow::bail!("PP={pp} mode={mode}: server not ready: {e}");
+        }
+        match server.try_wait() {
+            Ok(Some(status)) => {
+                let _ = drainer.join();
+                anyhow::bail!("PP={pp} mode={mode}: ironmlx serve exited before bench: {status}");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                shutdown_and_join(server, drainer);
+                anyhow::bail!("PP={pp} mode={mode}: try_wait failed: {e}");
+            }
+        }
+
+        let out = match iron_bench_run(port, model_dir, pp) {
+            Ok(o) => o,
+            Err(e) => {
+                shutdown_and_join(server, drainer);
+                anyhow::bail!("PP={pp} mode={mode}: iron-bench spawn failed: {e}");
+            }
+        };
+
+        let _ = server.kill();
+        let _ = server.wait();
+        let _ = drainer.join();
+
+        if !out.status.success() {
+            anyhow::bail!(
+                "PP={pp} mode={mode}: iron-bench non-success: stdout={}, stderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+
+        let captured = drain_stderr_into_buf(&stderr_buf);
+        let records = parse_h4_records(&captured);
+        eprintln!(
+            "[p5h-t0b-h4] mode={mode} PP={pp}: captured {} [p5h-t0b-h4] records ({} stderr bytes)",
+            records.len(),
+            captured.len()
+        );
+        per_pp.insert(pp, records);
+        std::thread::sleep(INTER_PP_COOLDOWN);
+    }
+    Ok(per_pp)
+}
+
+fn aggregate_h4_per_pp(per_pp: &BTreeMap<i32, Vec<H4Record>>) -> Vec<H4CellPerMode> {
+    let mut cells: Vec<H4CellPerMode> = Vec::new();
+    for (&pp, recs) in per_pp {
+        let us: Vec<f64> = recs.iter().map(|r| r.elapsed_us as f64).collect();
+        let count = us.len();
+        let median = trimmed_median(us).unwrap_or(0.0);
+        cells.push(H4CellPerMode {
+            pp,
+            record_count: count,
+            trimmed_median_kernel_us: median,
+        });
+    }
+    cells
+}
+
+fn compute_h4_verdict(
+    phase_a: &BTreeMap<i32, Vec<H4Record>>,
+    ablate: &BTreeMap<i32, Vec<H4Record>>,
+) -> H4Verdict {
+    let phase_a_cells = aggregate_h4_per_pp(phase_a);
+    let ablate_cells = aggregate_h4_per_pp(ablate);
+
+    let phase_a_by_pp: BTreeMap<i32, &H4CellPerMode> =
+        phase_a_cells.iter().map(|c| (c.pp, c)).collect();
+    let ablate_by_pp: BTreeMap<i32, &H4CellPerMode> =
+        ablate_cells.iter().map(|c| (c.pp, c)).collect();
+
+    let mut cells: Vec<H4Cell> = Vec::new();
+    for &pp in &PP_LIST {
+        let Some(a) = phase_a_by_pp.get(&pp) else {
+            continue;
+        };
+        let Some(b) = ablate_by_pp.get(&pp) else {
+            continue;
+        };
+        let drift_pct = if a.trimmed_median_kernel_us > 0.0 {
+            (b.trimmed_median_kernel_us - a.trimmed_median_kernel_us) / a.trimmed_median_kernel_us
+        } else {
+            0.0
+        };
+        cells.push(H4Cell {
+            pp,
+            phase_a_record_count: a.record_count,
+            ablate_compute_g_record_count: b.record_count,
+            phase_a_kernel_us: a.trimmed_median_kernel_us,
+            ablate_compute_g_kernel_us: b.trimmed_median_kernel_us,
+            kernel_drift_pct: drift_pct,
+        });
+    }
+
+    let pp_over_5pct = cells.iter().filter(|c| c.kernel_drift_pct > 0.05).count();
+    let max_drift = cells
+        .iter()
+        .map(|c| c.kernel_drift_pct)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let verdict = if pp_over_5pct >= 2 {
+        "verified"
+    } else if max_drift.is_finite() && max_drift < 0.02 {
+        "rejected"
+    } else {
+        "inconclusive"
+    };
+    let max_str = if max_drift.is_finite() {
+        format!("{max_drift:.4}")
+    } else {
+        "N/A".to_string()
+    };
+    let rationale = format!(
+        "H4 {verdict}: PPs_with_drift>5%={pp_over_5pct}/{}, max_drift_pct={max_str} \
+         (thresholds: verified if drift>5% in >=2 PPs; rejected if max_drift<2%)",
+        cells.len()
+    );
+    H4Verdict {
+        verdict: verdict.to_string(),
+        rationale,
+        cells,
+        phase_a_per_mode_cells: phase_a_cells,
+        ablate_compute_g_per_mode_cells: ablate_cells,
+        initial_cool_protocol:
+            "INTER_PP_COOLDOWN=3s; no inter-phase cool (per-test-entry preheat is the \
+             thermal-saturation mechanism instead — Boss option C decision)"
+                .to_string(),
+        preheat_protocol: PREHEAT_PROTOCOL_DESC.to_string(),
+    }
+}
+
+#[test]
+#[ignore = "p5h-t0b H4 kernel materialization variance — Step 7d forced-eval timing per PP (~45-60min GPU)"]
+fn t0b_h4_kernel_materialization_variance() -> anyhow::Result<()> {
+    let model_dir = snapshot_dir();
+    let _mlx_dir = std::env::var("MLX_DIR")
+        .expect("set MLX_DIR env var pointing to MLX install prefix (e.g. $HOME/.local/mlx)");
+    eprintln!("[p5h-t0b-h4] starting; model={model_dir}");
+
+    eprintln!("[p5h-t0b-h4] preheat phase");
+    preheat_to_saturation(&model_dir, PROFILE_PORT)?;
+
+    eprintln!("[p5h-t0b-h4] measurement phase: mode=h4-measure-phase-a");
+    let phase_a = run_h4_mode_collect("h4-measure-phase-a", &model_dir, PROFILE_PORT)?;
+
+    eprintln!("[p5h-t0b-h4] measurement phase: mode=h4-measure-ablate-compute-g");
+    let ablate = run_h4_mode_collect("h4-measure-ablate-compute-g", &model_dir, PROFILE_PORT)?;
+
+    let verdict = compute_h4_verdict(&phase_a, &ablate);
+    eprintln!("[p5h-t0b-h4] {}", verdict.rationale);
+
+    let out_json = serde_json::json!({
+        "pp_list": PP_LIST,
+        "runs": RUNS,
+        "warmup": WARMUP,
+        "inter_pp_cooldown_secs": INTER_PP_COOLDOWN.as_secs(),
+        "modes_evaluated": ["h4-measure-phase-a", "h4-measure-ablate-compute-g"],
+        "cells": verdict.cells,
+        "phase_a_per_pp": verdict.phase_a_per_mode_cells,
+        "ablate_compute_g_per_pp": verdict.ablate_compute_g_per_mode_cells,
+        "verdict": verdict.verdict,
+        "rationale": verdict.rationale,
+        "preheat_protocol": verdict.preheat_protocol,
+        "initial_cool_protocol": verdict.initial_cool_protocol,
+    });
+    let json_str = serde_json::to_string_pretty(&out_json)?;
+    eprintln!("[p5h-t0b-h4] JSON payload (preserved in case file-write fails):\n{json_str}");
+    std::fs::write(H4_OUTPUT_PATH, &json_str)?;
+    eprintln!(
+        "[p5h-t0b-h4] wrote {} bytes to {H4_OUTPUT_PATH}",
+        json_str.len()
+    );
+
+    Ok(())
+}
+
 // ===== Parser self-test: hand-crafted stderr sample =====
 //
 // Detect parser regressions (silently dropped records, key/value mismatches,
@@ -1275,5 +1598,30 @@ some unrelated line that should be ignored\n\
         assert_eq!(recs[2].seq, 16384);
         assert_eq!(recs[2].real_us, 8888);
         assert_eq!(recs[2].substitute_us, 12345);
+    }
+
+    #[test]
+    fn h4_parser_extracts_all_fields_with_tracing_prefix() {
+        // H4 emission carries `mode` + `elapsed_us` (no real/substitute pair).
+        // Verify parser handles the rename from earlier `timer_d_us` and
+        // tolerates tracing-prefixed lines.
+        let stderr = b"\
+2026-05-22T12:34:56.789012Z  INFO ironmlx::nn::gated_delta_net: [p5h-t0b-h4] mode=h4-measure-phase-a step=step_7d_dispatch_materialize layer=0 batch=1 seq=2048 elapsed_us=4242\n\
+some unrelated line\n\
+2026-05-22T12:34:56.890123Z  INFO ironmlx::nn::gated_delta_net: [p5h-t0b-h4] mode=h4-measure-ablate-compute-g step=step_7d_dispatch_materialize layer=15 batch=1 seq=16384 elapsed_us=99999\n\
+";
+        let recs = parse_h4_records(stderr);
+        assert_eq!(recs.len(), 2, "expected 2 H4 records, got {}", recs.len());
+
+        assert_eq!(recs[0].mode, "h4-measure-phase-a");
+        assert_eq!(recs[0].layer, 0);
+        assert_eq!(recs[0].batch, 1);
+        assert_eq!(recs[0].seq, 2048);
+        assert_eq!(recs[0].elapsed_us, 4242);
+
+        assert_eq!(recs[1].mode, "h4-measure-ablate-compute-g");
+        assert_eq!(recs[1].layer, 15);
+        assert_eq!(recs[1].seq, 16384);
+        assert_eq!(recs[1].elapsed_us, 99999);
     }
 }
