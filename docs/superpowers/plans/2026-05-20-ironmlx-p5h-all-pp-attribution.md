@@ -4754,14 +4754,37 @@ Add `compute_exclusive` function that:
 
 For every non-leaf raw tree span, compute `unattributed_<span_name>` residual = `span.inclusive_us - sum(span.children.inclusive_us)`. If > 1µs, emit as a synthesized leaf row in the output. These rows are NOT raw server `[p5h-profile]` records and must not be fed back into T0a/T5 structural validation or Lane-B closed-set checks.
 
-- [ ] **Step 3: Test aggregator on T0a captured log**
+- [ ] **Step 3: Test aggregator on T5 raw-capture sweep output**
+
+Per Codex T5 review Q-T5-1: T5 aggregator consumes a **new T5-only**
+raw-capture sweep (`ironmlx/tests/p5h_t5_attribution_capture.rs`), NOT
+the T0a UMA-hardening artifacts. T0a's server log only carries Lane-A
+GDN substep + outer wrapper spans (T0a predates T1-T4 deep
+instrumentation) and its iron-bench JSON path lacks the `request_id`
+column needed for the § 2.5a 100% join gate. The T5 capture harness
+runs iron-bench with `--capture-server-request-id --format csv
+--warmup 0` over the full PP target set
+`[128, 512, 2048, 4096, 8192, 16384]` and persists BOTH `[p5h-profile]`
+server stderr AND iron-bench CSV (with `request_id` column) to disk;
+preheat output is discarded so only measurement records reach the
+aggregator.
 
 ```bash
+# 1. Run the T5 raw-capture sweep — writes:
+#      /tmp/p5h-t5-server.log  ([p5h-profile] records, measurement only)
+#      /tmp/p5h-t5-bench.csv   (iron-bench CSV with request_id column)
+IRONMLX_MOE_MODEL_DIR=<snap> MLX_DIR=$HOME/.local/mlx \
+  cargo test -p ironmlx --release --features p5h-profile \
+  --test p5h_t5_attribution_capture -- --ignored --test-threads=1 --nocapture
+
+# 2. Run the aggregator over the captured raw data
 uv run python -m tools.p5h_aggregator.aggregator \
-    --server-log /tmp/p5h-t0a-server.log \
-    --bench-csv /tmp/p5h-t0a-bench.csv \
+    --server-log /tmp/p5h-t5-server.log \
+    --bench-csv /tmp/p5h-t5-bench.csv \
     --out /tmp/p5h-attribution-full.csv
 ```
+
+Stderr + CSV BOTH persisted; preheat output discarded per Codex T5 review.
 
 Verify `coverage_pct ≥ 95%` per PP in the output.
 
