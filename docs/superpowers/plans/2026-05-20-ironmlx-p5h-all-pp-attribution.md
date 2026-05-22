@@ -4356,42 +4356,59 @@ git commit --allow-empty -m "chore(p5h-t0a): HARD GATE PASSED — schema validat
 
 ## Task T0b: Phase D Root Cause Investigation (4 Hypotheses)
 
-T0b only starts after T0a closes (HARD GATE passed). T0b reuses T0a's validated schema infrastructure. Per spec § 2.5 decision tree, T0b identifies which of H1-H4 is primary and binds T2/T3 conditional ablation gates.
+T0b only starts after T0a closes (HARD GATE passed). T0a remains the sequencing gate, but T0b Phase D root-cause measurement intentionally uses the lower-overhead P5g profiling path (`p5g-profile` ON, `p5h-profile` OFF). Do not emit P5h schema records in T0b; P5h per-span logging overhead would contaminate substitute and kernel timing. Per spec § 2.5 decision tree, T0b identifies verified H1-H4 hypotheses, ranks the primary cause for explanation, and binds T2/T3 conditional ablation gates.
 
-### T0b.1 — H1 thermal drift investigation (phase-order randomized)
+### T0b.1 — H1 thermal drift investigation (phase-order comparison)
 
 **Files:**
 - Create: `ironmlx/tests/p5h_t0b_phase_d.rs`
 
-- [ ] **Step 1: Implement randomized phase-order test**
+- [ ] **Step 1: Implement phase-order comparison test**
 
-Create `ironmlx/tests/p5h_t0b_phase_d.rs` with a test that runs Phase D before Phase A/B/C (reverse of P5g order). Compare Phase D values across orderings.
+Create `ironmlx/tests/p5h_t0b_phase_d.rs` with a test that compares Phase D values across two orderings using the SAME cooldown policy:
+- normal: A → B → C → D[3 modes]
+- reversed: D[3 modes] → C → B → A
+
+Default H1 protocol:
+- start from a clean/cool baseline and record the initial cool/restart protocol in `/tmp/p5h-t0b-h1.json`;
+- use identical per-PP and inter-phase cooldowns in both orderings; recommended default is P5g-compatible minimal cooling (`INTER_PP_COOLDOWN=3s`, no extra inter-phase cool) so the original "D runs late" mechanism can reproduce;
+- if H1 verifies, run one mitigation-confirmation pass for affected Phase D cells with the proposed 5min pre-phase cool gate. This pass validates mitigation and is not part of the H1 order-vs-order verdict.
 
 ```rust
 //! T0b Phase D root cause investigation harness.
-#![cfg(feature = "p5h-profile")]
+#![cfg(feature = "p5g-profile")]
 
 use std::process::Command;
 
+// Placeholder aliases; implementer should use the concrete harness structs that
+// store Phase D pp_tps by ablate_mode and PP.
+type PhaseDByModeAndPp = serde_json::Value;
+#[derive(Debug)]
+struct H1Verdict;
+
 #[test]
-#[ignore = "p5h-t0b H1 thermal drift — phase-order randomized rerun"]
-fn t0b_h1_phase_order_randomized() -> anyhow::Result<()> {
+#[ignore = "p5h-t0b H1 thermal drift — phase-order comparison"]
+fn t0b_h1_phase_order_comparison() -> anyhow::Result<()> {
     let normal_phase_d = run_phases_then_d()?;
     let reversed_phase_d = run_d_then_phases()?;
-    let drift = (normal_phase_d - reversed_phase_d).abs() / normal_phase_d;
-    println!("H1 verdict: normal_phase_d={}, reversed_phase_d={}, drift={}", normal_phase_d, reversed_phase_d, drift);
+    let verdict = compare_phase_d_cells(&normal_phase_d, &reversed_phase_d)?;
+    println!("H1 verdict: {verdict:?}");
     // Output verdict to /tmp/p5h-t0b-h1.json
     Ok(())
 }
 
-fn run_phases_then_d() -> anyhow::Result<f64> { todo!() }
-fn run_d_then_phases() -> anyhow::Result<f64> { todo!() }
+fn run_phases_then_d() -> anyhow::Result<PhaseDByModeAndPp> { todo!() }
+fn run_d_then_phases() -> anyhow::Result<PhaseDByModeAndPp> { todo!() }
+fn compare_phase_d_cells(
+    normal: &PhaseDByModeAndPp,
+    reversed: &PhaseDByModeAndPp,
+) -> anyhow::Result<H1Verdict> { todo!() }
 ```
 
 - [ ] **Step 2: Run H1 test**
 
 ```bash
-MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --features p5h-profile --test p5h_t0b_phase_d t0b_h1 -- --ignored --test-threads=1
+MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --release --features p5g-profile --test p5h_t0b_phase_d t0b_h1 -- --ignored --test-threads=1 --nocapture
 ```
 
 - [ ] **Step 3: Commit H1 result**
@@ -4403,39 +4420,64 @@ git commit -m "test(p5h-t0b): H1 thermal drift investigation"
 
 ### T0b.2 — H2 substitute self-cost investigation
 
-- [ ] **Step 1: Add H2 test that runs Phase A WITH `IRONMLX_P5G_PROFILE_MODE=ablate-X` enabled, comparing substitute path vs original path**
+- [ ] **Step 1: Add in-place real/substitute timing windows under `p5g-profile`**
 
-Append to `p5h_t0b_phase_d.rs`:
+Do NOT use a pure Phase-A-with-ablate-X pp_tps comparison as proof of H2. Add matching real/substitute timing windows in `gated_delta_net.rs` and emit aggregate H2 timing records once per GDN forward after the measured interval:
+- Step 5 `compute_g`: real body vs `zeros_like(a).astype(Float32)`, with matching eval semantics.
+- Step 2b `conv1d+silu`: real body vs `qkv.clone()`. If clone has no materialization cost, record CPU elapsed as-is and expect H2 to reject for this substitute.
+- Step 7c `t_arr`: add a real `(&[seq]).try_into()` timer and a substitute `HashMap+Mutex` lookup timer. Do not compare the substitute to the full Step 7 kernel-and-cache bucket.
+
+Append the H2 test to `p5h_t0b_phase_d.rs`:
 
 ```rust
 #[test]
 #[ignore]
 fn t0b_h2_substitute_self_cost() -> anyhow::Result<()> {
-    let original = run_phase_a_no_ablate()?;
-    let substitute = run_phase_a_with_ablate_x()?;
-    let self_cost = substitute - original;
-    println!("H2 verdict: original={}, substitute={}, self_cost={}", original, substitute, self_cost);
+    let ratios = run_h2_real_and_substitute_windows()?;
+    write_h2_json("/tmp/p5h-t0b-h2.json", &ratios)?;
     Ok(())
 }
 ```
 
-- [ ] **Step 2-3: Run + commit**
+- [ ] **Step 2: Apply verdict thresholds**
+
+H2 verified if any substitute has median `substitute_real_ratio > 1.05` in at least two PP buckets OR max per-PP median `> 1.10`. H2 rejected if all measured substitutes have median ratio `<= 1.00` across all PP buckets. Otherwise H2 is inconclusive and follows T0b.5 inconclusive handling.
+
+- [ ] **Step 3: Run + commit**
 
 ### T0b.3 — H3 cache state divergence
 
 - [ ] **Step 1: Add `ablate-conv-with-manual-cache-update` ablation variant in `gated_delta_net.rs`**
 
-In `gated_delta_net.rs`, find the existing `AblateConv` mode. Add a parallel mode that calls the substitute AND explicitly updates `conv_state` (mirroring AblateNone's update). Gate on `IRONMLX_P5G_PROFILE_MODE=ablate-conv-with-manual-cache-update`.
+In `gated_delta_net.rs`, find the existing `AblateConv` mode. Add a diagnostic-only parallel mode gated on `IRONMLX_P5G_PROFILE_MODE=ablate-conv-with-manual-cache-update`:
+- Step 2b still uses the `qkv` passthrough substitute.
+- Step 2a still builds the real `conv_input`.
+- Step 2c runs the exact real conv_state update logic from the `conv_input` tail. Do NOT update from `conv_out` or from the substitute output.
 
 - [ ] **Step 2: Run H3 comparison**
 
+Compare Phase A, `ablate-conv`, and `ablate-conv-with-manual-cache-update`. Compute:
+
+```text
+recovery_pct = (with_manual.pp_tps - without_manual.pp_tps) / (phase_a.pp_tps - without_manual.pp_tps)
+```
+
+If `phase_a.pp_tps <= without_manual.pp_tps`, mark that cell N/A for H3 recovery.
+
 - [ ] **Step 3: Commit**
 
-### T0b.4 — H4 kernel template variance
+### T0b.4 — H4 kernel materialization / dispatch-path variance
 
-- [ ] **Step 1: Add kernel-dispatch-only timing under AblateComputeG vs Phase A**
+- [ ] **Step 1: Add Step 7d forced-eval timing under AblateComputeG vs Phase A**
 
-In `gated_delta_net.rs`, add per-step kernel-dispatch elapsed timer that excludes pre/post processing.
+In `gated_delta_net.rs`, add a tight Step 7d timer that measures actual kernel-output materialization, not just lazy dispatch-node creation:
+- build `kernel_inputs`;
+- start timer;
+- call `kernel.dispatch_builder()...dispatch()?`;
+- take both outputs (`y`, `new_state`);
+- force `mlx::transforms::eval(&[&y, &new_state])?`;
+- stop timer;
+- only then update recurrent cache and advance offsets outside the timer.
 
 - [ ] **Step 2: Run H4 comparison**
 
@@ -4450,8 +4492,15 @@ In `gated_delta_net.rs`, add per-step kernel-dispatch elapsed timer that exclude
 
 Create `reports/p5h-phase-d-root-cause.md` documenting:
 - H1/H2/H3/H4 verdicts (numerical data from /tmp/p5h-t0b-*.json)
-- Primary root cause identified
-- T2/T3 conditional ablation gate binding (e.g., "H2 primary → T2/T3 Layer 3 skipped, real-path microbenchmarks instead")
+- Primary/ranked causes identified
+- All verified mitigations that affect T2/T3 validity
+- T2/T3 conditional ablation gate binding (e.g., "H2 verified → T2/T3 Layer 3 skipped, real-path microbenchmarks instead")
+
+Inconclusive handling:
+- rerun affected cells once with the same protocol;
+- if still inconclusive, do not bind T2/T3 gates from that hypothesis;
+- mark the hypothesis unresolved and escalate to Boss with numeric data;
+- never silently treat inconclusive as rejected.
 
 - [ ] **Step 2: Commit T0b close-out**
 
@@ -4461,9 +4510,9 @@ git commit --allow-empty -m "feat(p5h-t0b): Phase D root cause investigation + d
 H1 thermal drift: <verdict>
 H2 substitute self-cost: <verdict>
 H3 cache state divergence: <verdict>
-H4 kernel template variance: <verdict>
+H4 kernel materialization / dispatch-path variance: <verdict>
 
-Primary: <Hn> — <mitigation>
+Primary/ranked causes: <Hn...> — <mitigation summary>
 T2/T3 Layer 3 binding: <skip|run|substitute-redesign>
 
 Report: reports/p5h-phase-d-root-cause.md (working tree only, not in git per .gitignore)"
@@ -4566,19 +4615,21 @@ git commit -m "test(p5h-t2): GatedAttention 7-step per-PP occupancy sweep (Lane 
 
 - [ ] **Step 1: Read T0b output**
 
-Determine which of H1/H2/H3/H4 is primary from `reports/p5h-phase-d-root-cause.md`.
+Read primary cause, verified secondary causes, and unresolved hypotheses from `reports/p5h-phase-d-root-cause.md`.
 
 - [ ] **Step 2: Apply binding per spec § 3 T2 conditional table**
 
-- H1 primary → run Layer 3 with randomized phase order + cool gates
-- H2 primary → skip Layer 3, replace with real-path microbenchmarks
-- H3 primary → cache-state-preserving substitute design
-- H4 primary → skip Layer 3 for kernel-dispatch steps (4-5); OK for op-level (1-3, 6-7)
+- H1 verified → run Layer 3 with randomized phase order + cool gates
+- H2 verified → skip Layer 3, replace with real-path microbenchmarks
+- H3 verified → cache-state-preserving substitute design
+- H4 verified → skip Layer 3 for kernel-dispatch steps (4-5); OK for op-level (1-3, 6-7)
+- Multiple verified hypotheses → apply every verified mitigation that affects validity; ranking is for reporting only
+- Any unresolved/inconclusive hypothesis that affects a planned Layer-3 reading → escalate to Boss before dispatching that Layer-3 run
 
 - [ ] **Step 3: Commit Layer 3 outcome**
 
 ```bash
-git commit --allow-empty -m "test(p5h-t2): Layer 3 conditional ablation bound per T0b outcome (<H1|H2|H3|H4>)"
+git commit --allow-empty -m "test(p5h-t2): Layer 3 conditional ablation bound per T0b outcome"
 ```
 
 ---

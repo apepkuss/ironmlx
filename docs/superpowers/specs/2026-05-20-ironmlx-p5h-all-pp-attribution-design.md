@@ -94,9 +94,9 @@ Per Boss directive (chatgpt 建议 fully accepted),P5h 覆盖 7 areas:
 
 - **Layer 1 (boundary-isolated)**: entry barrier + exit barrier + emit `[p5h-profile] layer=<name> ...elapsed_us=N`. 估算该 layer 总占比。
 - **Layer 2 (per-step breakdown)**: 每个 sub-op 用 `mlx::transforms::eval(&[&intermediate])?` materialize + timer push。append step_breakdown CSV 到 Layer 1 log line。
-- **Layer 3 (shape-preserving ablation)**: 每个 sub-step 提 substitute (e.g., GatedDeltaNet step 5 compute_g substitute = zeros_like passthrough; GatedAttention `o_proj` substitute = identity-on-gated-output if scope permits). Mode-gated entry barriers off for AblateX (per P5g § 4.1a barrier-free invariant). **Layer 3 ablation 是 conditional on T0b Phase D root cause outcome** — per § 2.5 decision tree + T2/T3 conditional gates; H2/H4 verified primary 时 Layer 3 skip or replace with real-path microbenchmarks。**特别注意**: `fused_sdpa` (`mlx::fast::scaled_dot_product_attention_on`) 的 softmax/value matmul internals 是 fused MLX call,**不能在 production path 上单独 ablation**;只能 ablate 整个 `fused_sdpa` 步骤 (用 e.g. zeros tensor 替换其输出)。
+- **Layer 3 (shape-preserving ablation)**: 每个 sub-step 提 substitute (e.g., GatedDeltaNet step 5 compute_g substitute = zeros_like passthrough; GatedAttention `o_proj` substitute = identity-on-gated-output if scope permits). Mode-gated entry barriers off for AblateX (per P5g § 4.1a barrier-free invariant). **Layer 3 ablation 是 conditional on T0b Phase D root cause outcome** — per § 2.5 decision tree + T2/T3 conditional gates; H2/H4 verified 时 Layer 3 skip or replace with real-path microbenchmarks，multi-primary 时应用所有 verified mitigations。**特别注意**: `fused_sdpa` (`mlx::fast::scaled_dot_product_attention_on`) 的 softmax/value matmul internals 是 fused MLX call,**不能在 production path 上单独 ablation**;只能 ablate 整个 `fused_sdpa` 步骤 (用 e.g. zeros tensor 替换其输出)。
 
-**Critical**: Phase D ablation 在 P5g 全 negative (反常)。P5h T0b 必须先 investigate root cause —— substitute self-cost / cache divergence / kernel template variance / phase order thermal —— 否则 P5h 任何 ablation reading 也会被同样 anomaly 污染。
+**Critical**: Phase D ablation 在 P5g 全 negative (反常)。P5h T0b 必须先 investigate root cause —— substitute self-cost / cache divergence / kernel materialization-dispatch variance / phase order thermal —— 否则 P5h 任何 ablation reading 也会被同样 anomaly 污染。
 
 ### 2.4 UMA cache state hardening protocol
 
@@ -726,16 +726,17 @@ P5g flagged 4 个 hypothesis:
 
 | # | Hypothesis | P5h investigation method |
 |---|---|---|
-| H1 | GPU thermal drift across 24 spawns | Phase order randomized rerun: Phase D first, then A/B/C. Compare Phase D values across orderings. |
-| H2 | Substitute 自身有成本 | Substitute self-cost: 跑 Phase A (no profile) WITH `IRONMLX_P5G_PROFILE_MODE=ablate-X` enabled — measure substitute path vs original path direct comparison。 |
-| H3 | Cache state divergence (AblateConv 不更新 conv_state) | Add new ablation variant: AblateConv + manual conv_state update (same as AblateNone but with substitute on Step 2b). Isolate cache-divergence effect from substitute effect. |
-| H4 | Kernel template variance (g=0 input 触发 slow path) | Compare kernel dispatch under AblateComputeG (g=zeros) vs Phase A (g=normal) — measure kernel-dispatch elapsed time only, exclude pre/post processing. |
+| H1 | GPU thermal drift across 24 spawns | Phase order rerun with identical cooldown policy: compare Phase D cells in A→B→C→D vs D→C→B→A. If H1 verifies, confirm the proposed randomized-order + cool-gate mitigation separately. |
+| H2 | Substitute 自身有成本 | Use `p5g-profile` in-place timing with matching real/substitute windows. Do not use a pure Phase-A-with-ablate-X pp_tps comparison as proof. Step 7c `t_arr` requires its own real timer or is excluded from the H2 ratio gate. |
+| H3 | Cache state divergence (AblateConv 不更新 conv_state) | Add diagnostic-only `ablate-conv-with-manual-cache-update`: keep qkv passthrough for Step 2b, but still build real Step 2a `conv_input` and run the real Step 2c conv_state update from the `conv_input` tail. |
+| H4 | Kernel materialization / dispatch-path variance | Compare Step 7d forced-eval output materialization under AblateComputeG (g=zeros) vs Phase A (g=normal). Timer includes dispatch + taking both outputs + `eval(&[y, new_state])`, and excludes pre/post processing/cache mutation. |
 
 **Decision tree**:
 - H1 verified → P5h all phases adopt randomized order + cool gates between phases.
 - H2 verified → discard ablation upper-bound concept; use Phase B/C ranking only for candidate priority.
 - H3 verified → cache state must be carefully preserved across ablation; substitute design 需新 guard pattern。
 - H4 verified → ablation invalid for kernel-dispatch-time hotspots; must use real candidate impl benchmark instead。
+- If 2+ hypotheses verify, apply every verified mitigation that affects T2/T3 validity; ranking is for explanation only. If a hypothesis remains inconclusive after one same-protocol rerun, mark it unresolved and escalate to Boss rather than silently treating it as rejected.
 
 **Out-of-scope**: P5h T0b 只 identify root cause + propose mitigation. Actual substitute redesign 在 P5h T1+ 各 layer profile 应用。
 
@@ -827,19 +828,21 @@ Per Codex review v2 residual: T0 was sprawling 4 distinct work-streams (schema i
 
 ### T0b — Phase D root cause investigation (4 hypotheses, depends on T0a)
 
-T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the now-validated schema infrastructure to emit Phase D records consistent with later T2/T3 ablation work.
+T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0a remains the sequencing gate, but T0b Phase D root-cause measurement intentionally uses the lower-overhead existing P5g profiling path (`p5g-profile` ON, `p5h-profile` OFF) rather than emitting P5h schema records; otherwise per-span P5h logging overhead would contaminate substitute and kernel timing.
 
 - Phase D root cause investigation (4 hypotheses per § 2.5 decision tree):
-  - H1 (thermal drift): phase-order randomized rerun (Phase D first, then A/B/C); compare values across orderings
-  - H2 (substitute self-cost): run Phase A with `IRONMLX_P5G_PROFILE_MODE=ablate-X` enabled, directly compare substitute path vs original path
-  - H3 (cache state divergence): add `ablate-conv-with-manual-cache-update` variant; isolate cache-divergence effect from substitute effect
-  - H4 (kernel template variance): kernel-dispatch-only timing under AblateComputeG vs Phase A; exclude pre/post processing
+  - H1 (thermal drift): phase-order rerun with identical cooldown policy; compare Phase D values across A→B→C→D vs D→C→B→A orderings
+  - H2 (substitute self-cost): in-place `p5g-profile` timers with matching real/substitute timing windows; Step 7c `t_arr` needs its own real timer or is excluded from H2 ratio gating
+  - H3 (cache state divergence): add `ablate-conv-with-manual-cache-update` variant; isolate cache-divergence effect from substitute effect by preserving the real Step 2c `conv_input`-tail cache update
+  - H4 (kernel materialization / dispatch-path variance): Step 7d forced-eval timing under AblateComputeG vs Phase A; include dispatch outputs' `eval`, exclude pre/post processing and cache mutation
 - Decision-tree mapping (per § 2.5):
-  - H1 primary → P5h all phases adopt randomized order + cool gates
-  - H2 primary → discard ablation upper-bound; use Layer 2 ranking only for candidate priority
-  - H3 primary → ablation requires cache-state-preserving substitute design (new guard pattern)
-  - H4 primary → ablation invalid for kernel-dispatch-time hotspots; use real candidate impl benchmark instead
-- Output: `reports/p5h-phase-d-root-cause.md` documenting primary root cause + mitigation + decision-tree binding for T2/T3 conditional gates
+  - H1 verified → P5h all phases adopt randomized order + cool gates
+  - H2 verified → discard ablation upper-bound; use Layer 2 ranking only for candidate priority
+  - H3 verified → ablation requires cache-state-preserving substitute design (new guard pattern)
+  - H4 verified → ablation invalid for kernel-dispatch-time hotspots; use real candidate impl benchmark instead
+  - Multi-primary → apply every verified mitigation that affects T2/T3 validity; rank causes only for reporting
+  - Inconclusive after one same-protocol rerun → mark unresolved and escalate to Boss with numeric data
+- Output: `reports/p5h-phase-d-root-cause.md` documenting verified root-cause hypotheses, ranked primary cause, applied mitigations, unresolved hypotheses if any, and decision-tree binding for T2/T3 conditional gates
 - Commit: `feat(p5h-t0b): Phase D root cause investigation + decision-tree resolution`
 
 ### T1 — HTTP path + scheduler/admission profile
@@ -867,10 +870,11 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
   6. `gate_sigmoid_mul` — gate sigmoid + elementwise multiply on SDPA output (gate tensor came from `q_proj` second half)
   7. `o_proj` — `Linear::forward_on(&gated, target)` output projection
 - **Layer 3 ablations — conditional on T0b Phase D outcome** (per § 2.5 decision tree):
-  - **If T0b verifies H1 primary** (thermal drift): ablations OK, T2 runs Layer 3 with randomized phase order + cool gates。
-  - **If T0b verifies H2 primary** (substitute self-cost): Layer 3 **skipped** for T2; replace with real-path microbenchmarks (e.g., swap `o_proj` with smaller dim variant compiled separately, measure end-to-end delta against baseline). Layer 1/2 still emitted.
-  - **If T0b verifies H3 primary** (cache state divergence): Layer 3 requires cache-state-preserving substitute design — for GatedAttention, KV cache must remain valid across ablation (e.g., `ablate_fused_sdpa` substitute returns shape-preserving zeros but still calls `KVCache::update_and_fetch_on` to keep cache consistent for subsequent forwards).
-  - **If T0b verifies H4 primary** (kernel template variance): Layer 3 invalid for any step that touches Metal kernels (especially `fused_sdpa`); skip Layer 3 for steps 4-5 (kv_mask_update + fused_sdpa); Layer 3 OK for pure op-level steps (q_gate_k_v_proj, q_split_norm_reshape, mrope_apply, gate_sigmoid_mul, o_proj).
+  - **If T0b verifies H1** (thermal drift): ablations OK, T2 runs Layer 3 with randomized phase order + cool gates。
+  - **If T0b verifies H2** (substitute self-cost): Layer 3 **skipped** for T2; replace with real-path microbenchmarks (e.g., swap `o_proj` with smaller dim variant compiled separately, measure end-to-end delta against baseline). Layer 1/2 still emitted.
+  - **If T0b verifies H3** (cache state divergence): Layer 3 requires cache-state-preserving substitute design — for GatedAttention, KV cache must remain valid across ablation (e.g., `ablate_fused_sdpa` substitute returns shape-preserving zeros but still calls `KVCache::update_and_fetch_on` to keep cache consistent for subsequent forwards).
+  - **If T0b verifies H4** (kernel materialization / dispatch-path variance): Layer 3 invalid for any step that touches Metal kernels (especially `fused_sdpa`); skip Layer 3 for steps 4-5 (kv_mask_update + fused_sdpa); Layer 3 OK for pure op-level steps (q_gate_k_v_proj, q_split_norm_reshape, mrope_apply, gate_sigmoid_mul, o_proj).
+  - **If multiple hypotheses verify**: apply every verified mitigation that affects validity; ranking is for reporting only.
 - Run sweep + aggregate under id-based exclusive span schema (per § 2.5a): `decoder_layer.rs::DecoderLayerMoe::forward_on` opens the wrapper `attention_path` span via `try_with_p5h_span_from_current_trace` (None-tolerant per Codex v12 P1 #1); each of the 7 GatedAttention substeps in `gated_attention.rs::forward_on` opens its own span inside that wrapper using the same `try_` API, so each substep's `parent_span_id` = wrapper span's `span_id` (label `parent_span = "attention_path"`). Substep `SpanFields.layer_idx` is set from the new `layer_idx: i32` parameter (per Codex v13 P1 #2). Wrapper site is `decoder_layer.rs`, NOT `text_model.rs` (per Codex v12 P2 #4).
 - Output: GatedAttention per-PP occupancy table (7-step breakdown), top-3 step ranking, long-PP O(S²) growth verification (PP=128 to PP=16384 step ratios)
 - Commit: `test(p5h-t2): GatedAttention 3-layer profile (code-backed taxonomy + conditional ablation)`
@@ -889,10 +893,11 @@ T0b only starts AFTER T0a closes (schema proven on GDN rerun). T0b reuses the no
   7. `shared_expert` — separate LinearMLP for the shared expert (`BS × shared_expert_intermediate × 2 + BS × hidden`)
   8. `moe_output_sum` — final residual combining routed + shared outputs into the layer's MLP output tensor
 - **Layer 3 ablations — conditional on T0b Phase D outcome** (same gating logic as T2):
-  - **H1 primary**: ablations OK with randomized order + cool gates
-  - **H2 primary**: Layer 3 skipped, replace with real-path microbenchmarks (e.g., reduce experts_per_tok from 8 → 4 in a controlled fork, measure delta)
-  - **H3 primary**: ablation must preserve routing index validity (don't break downstream attention KV slot allocation); pack/unpack steps must remain consistent (substitute can no-op compute but must still produce shape-correct outputs)
-  - **H4 primary**: Layer 3 invalid for `gather_qmm_*` steps + `routing_sort_pack`/`routing_unsort_weighted_reduce` (all kernel-dispatch dependent); skip Layer 3 for steps 2-3 + 5-6; OK for steps 1, 4, 7-8
+  - **H1 verified**: ablations OK with randomized order + cool gates
+  - **H2 verified**: Layer 3 skipped, replace with real-path microbenchmarks (e.g., reduce experts_per_tok from 8 → 4 in a controlled fork, measure delta)
+  - **H3 verified**: ablation must preserve routing index validity (don't break downstream attention KV slot allocation); pack/unpack steps must remain consistent (substitute can no-op compute but must still produce shape-correct outputs)
+  - **H4 verified**: Layer 3 invalid for `gather_qmm_*` steps + `routing_sort_pack`/`routing_unsort_weighted_reduce` (all kernel-dispatch dependent); skip Layer 3 for steps 2-3 + 5-6; OK for steps 1, 4, 7-8
+  - **Multiple verified hypotheses**: apply every verified mitigation that affects validity; ranking is for reporting only.
 - Run sweep + aggregate under id-based exclusive span schema (per § 2.5a): `decoder_layer.rs::DecoderLayerMoe::forward_on` opens the wrapper `mlp_path` span via `try_with_p5h_span_from_current_trace` (None-tolerant per Codex v12 P1 #1); each of the 8 MoE substeps in `sparse_moe.rs::SparseMoeBlock::forward_on` opens its own span inside that wrapper using the same `try_` API, so each substep's `parent_span_id` = wrapper span's `span_id` (label `parent_span = "mlp_path"`). NOT `decoder_layer_N` per Codex v4 P1. Substep `SpanFields.layer_idx` is set from the new `layer_idx: i32` parameter (per Codex v13 P1 #2). Wrapper site is `decoder_layer.rs`, NOT `text_model.rs` (per Codex v12 P2 #4).
 - **ROI math source**: derive `num_experts_per_tok = 8`, `moe_intermediate = 512`, `num_experts = 256` from `Qwen35MoeConfig` runtime values, NOT hardcoded constants in spec/report (which could drift if model config changes)
 - Output: MoE per-PP attribution, router top-8 cost ratio, gather_qmm dominance check, shared expert vs routed cost split
@@ -1014,12 +1019,12 @@ This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted ne
 
 1. **Exclusive attribution coverage** per § 7.1: `coverage_pct = 1 - Σ synthesized_unattributed_*.inclusive_us / root.inclusive_us ≥ 95%` per PP (residual-based; root = `server_request_recv_to_first_content_sse_write`; raw `tree_spans` only per Codex v19 P1; residual rows synthesized by T5 after structural validation); `exclusive_us ≥ -1µs` for every emitted tree span; diagnostic spans validated separately and reported as columns (e.g., `role_chunk_diagnostic_us`); `client_transport_residual_us` reported separately (not part of gate)
 2. **Protocol-consistent data — dual-lane explicit** (per Codex review v7 P2 + § 2.5a "Routing precondition"):
-   - **Lane A** (PP ∈ {128, 512, 2048}, scheduler path): full deep substep attribution — HTTP/scheduler/admission (T1) + GDN (T0a rerun; substeps' `parent_span_id` = enclosing `attention_path` span) + GatedAttention (T2, 7 substeps under `attention_path` wrapper) + MoE (T3, 8 substeps under `mlp_path` wrapper) + lm_head/MLX state (T4) + Phase D resolution (T0b) — all measured under same UMA hardening + id-based exclusive span schema with trace context correlation; § 7.1 residual coverage ≥ 95% per PP.
+   - **Lane A** (PP ∈ {128, 512, 2048}, scheduler path): full deep substep attribution — HTTP/scheduler/admission (T1) + GDN (T0a rerun; substeps' `parent_span_id` = enclosing `attention_path` span) + GatedAttention (T2, 7 substeps under `attention_path` wrapper) + MoE (T3, 8 substeps under `mlp_path` wrapper) + lm_head/MLX state (T4) — all measured under same UMA hardening + id-based exclusive span schema with trace context correlation; § 7.1 residual coverage ≥ 95% per PP. Phase D resolution (T0b) is a separate `p5g-profile` root-cause decision input that binds Layer-3 ablation validity; it is not included as a raw P5h coverage-tree data source.
    - **Lane B** (PP ∈ {4096, 8192, 16384}, chunked GS path): top-level only per the § 2.5a Lane-B bucket list (single source of truth — DO NOT re-enumerate here per Codex v9 P2 #1; v8 re-enumeration carried over the stale `first_token_sampling` bucket that was removed in v9). Lane-B buckets include `gs_first_token_sample_dispatch` nested inside `gs_stream_init_and_chunk_loop` and a top-level `gs_first_token_materialize_and_predispatch` sibling (NOT a `first_token_sampling` sibling). Deep GDN/GatedAttention/MoE/lm_head substep attribution under chunked path is **explicitly out of scope** (deferred to P5h+1 per § 6); Lane B coverage gate measured only against top-level buckets, still ≥ 95%.
    - P5g existing data remains as prior reference only, excluded from both lanes' coverage gates.
    - P5j long-PP candidate ranking from Lane B carries explicit "bounded by Lane-B granularity" caveat; any P5j candidate requiring per-substep evidence at long PP must defer to P5h+1 chunked deep-attribution before P5j dispatch.
 3. **UMA hardening verified**: cross-repeat (cold/warm pair) measurement variance per-PP threshold (default ±2%, **PP=16384 ±4%** per § 2.4 + T0a.14 thermal observation: 7-run warm batch at PP=16384 ~70s of continuous GPU dispatch outpaces 5min intra-PP cool gate's recovery on M5 Max)
-4. **Phase D root cause** (T0b output): one of H1-H4 identified primary (mitigation proposed) OR explicit unresolved hypothesis list with proposed next investigation path (per § 2.5 decision tree); T2/T3 Layer 3 conditional ablation gates bound per T0b outcome
+4. **Phase D root cause** (T0b output): H1-H4 verdicts documented, verified hypotheses' mitigations applied, primary cause ranked for explanation, OR explicit unresolved hypothesis list with proposed next investigation path (per § 2.5 decision tree); T2/T3 Layer 3 conditional ablation gates bound per T0b outcome
 5. **P5i + P5j candidate ranking**: each candidate has expected ROI range (number-anchored), Scope gate trigger status, 实施优先级
 6. **Target feasibility assessment**: honest verdict on "全 PP omlx+10% achievable in P5i+P5j" — if not, partial-target proposal for Boss decision
 7. **Reusable infra delivered**: exclusive span schema infrastructure (per § 2.5a) + UMA hardening protocol (per § 2.4) + GatedAttention 3-layer profile harness (per § 2.2 #5 code-backed taxonomy with `attn_output_gate=true`) + MoE 8-step profile harness (per § 2.2 #6 sorted-routing path + `Qwen35MoeConfig` runtime values) — all usable in P5i+P5j+P5h+1
