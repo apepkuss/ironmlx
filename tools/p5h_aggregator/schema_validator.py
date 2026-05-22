@@ -30,6 +30,17 @@ P5H_LOG_RE = re.compile(
 # presence check doesn't fail on Lane-A diagnostic spans being absent from
 # tree_spans. Each lane's required set is split into a tree subset and a
 # diagnostic subset, checked against the corresponding span_kind partition.
+#
+# Per Codex T4 review (P1.1 + P1.2): the validator must also expose a wider
+# ALLOWED set distinct from REQUIRED:
+#   * REQUIRED → presence-checked (every non-aborted request MUST emit each).
+#   * ALLOWED  → closed-set rejection (any emitted span not in ALLOWED fails).
+# `tokenizer_encode` (T4.4) fires on both lanes in the HTTP handler pre-
+# routing — must be ALLOWED on Lane-B (not REQUIRED, since presence is
+# already covered by Lane-A's tree set and Lane-B fixture doesn't enforce it).
+# `first_eval_amortized_cost` (T4.5) is a static OnceLock diagnostic that
+# fires at most ONCE per process via close_p5h_span_diagnostic — cannot be
+# REQUIRED per-request, but MUST be ALLOWED on Lane-A.
 
 LANE_A_REQUIRED_TREE = {
     "server_request_recv_to_first_content_sse_write",
@@ -41,6 +52,11 @@ LANE_A_REQUIRED_TREE = {
 }
 LANE_A_REQUIRED_DIAGNOSTIC = {
     "sse_write_role_chunk_diagnostic",
+}
+LANE_A_ALLOWED_DIAGNOSTIC = LANE_A_REQUIRED_DIAGNOSTIC | {
+    # T4.5 retroactive: static OnceLock fires once per process via
+    # close_p5h_span_diagnostic at p5h.rs; allowed on Lane-A but not required.
+    "first_eval_amortized_cost",
 }
 
 LANE_B_REQUIRED_TREE = {
@@ -54,7 +70,14 @@ LANE_B_REQUIRED_TREE = {
     "gs_first_token_materialize_and_predispatch",
     "detok_format_first_content_chunk",
 }
+LANE_B_ALLOWED_TREE = LANE_B_REQUIRED_TREE | {
+    # T4.4 retroactive subspan of http_parse_render_tokenize; fires on both
+    # lanes because handler entry is pre-routing. Allowed on Lane-B but not
+    # required (Lane-B presence not enforced for tokenizer_encode).
+    "tokenizer_encode",
+}
 LANE_B_REQUIRED_DIAGNOSTIC: set[str] = set()  # no Lane-B diagnostic spans currently
+LANE_B_ALLOWED_DIAGNOSTIC: set[str] = set()    # no Lane-B diagnostic spans currently
 
 def required_sets_for_routing(routing: str) -> tuple[set[str], set[str]]:
     if routing == "scheduler":
@@ -62,6 +85,16 @@ def required_sets_for_routing(routing: str) -> tuple[set[str], set[str]]:
     if routing == "gs_chunked":
         return LANE_B_REQUIRED_TREE, LANE_B_REQUIRED_DIAGNOSTIC
     return set(), set()
+
+def allowed_diagnostic_for_routing(routing: str) -> set[str]:
+    """Closed allow-set for diagnostic span_names. Superset of REQUIRED to
+    accommodate one-shot diagnostics (e.g. first_eval_amortized_cost) that
+    cannot be presence-checked per-request."""
+    if routing == "scheduler":
+        return LANE_A_ALLOWED_DIAGNOSTIC
+    if routing == "gs_chunked":
+        return LANE_B_ALLOWED_DIAGNOSTIC
+    return set()
 
 @dataclass
 class Span:
@@ -251,17 +284,20 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
         # Lane-B tree span whose name is outside the allowed top-level set
         # (with repeated `gs_chunk_N` represented once in the set).
         if routing == "gs_chunked":
-            unexpected_tree = tree_names - LANE_B_REQUIRED_TREE
+            # Reject against LANE_B_ALLOWED_TREE (REQUIRED + retroactive
+            # additions like `tokenizer_encode` per Codex T4 P1.1 review).
+            unexpected_tree = tree_names - LANE_B_ALLOWED_TREE
             if unexpected_tree:
                 report.fail(
                     f"unexpected Lane-B tree spans (deep emission forbidden in P5h): {unexpected_tree}"
                 )
 
-    # Diagnostic checks (per § 2.5a + Codex plan review v1 P2 #4 + v23 P3):
-    # diagnostic span names are route-specific closed sets. Lane A currently
-    # allows only `sse_write_role_chunk_diagnostic`; Lane B allows none.
+    # Diagnostic checks (per § 2.5a + Codex plan review v1 P2 #4 + v23 P3 +
+    # T4 P1.2): diagnostic span names are route-specific closed sets. Lane A
+    # allows `sse_write_role_chunk_diagnostic` + `first_eval_amortized_cost`;
+    # Lane B allows none.
     root_span_id = roots[0].span_id if len(roots) == 1 else None
-    _, allowed_diag = required_sets_for_routing(routing)
+    allowed_diag = allowed_diagnostic_for_routing(routing)
     for d in diag:
         if d.span_name not in allowed_diag:
             report.fail(f"unexpected diagnostic span_name for {routing}: {d.span_name}")

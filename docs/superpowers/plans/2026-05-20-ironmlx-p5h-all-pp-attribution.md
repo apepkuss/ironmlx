@@ -4707,6 +4707,8 @@ Most T4 spans (`slice_last_and_project_lm_head`, `first_token_sampling`, `gs_fir
 
 - [ ] **Step 3: Commit**
 
+**T4.2 status note (per Codex T4 review P1.3)**: The two wraps currently live inside `admit_mid_chunk`, which has no `P5hTraceGuard` on its caller stack — so the spans no-op via the None-tolerant `try_` helper. Verification of actual emission is deferred to **[p5h+1_mid_admit_p5h_ctx_plumbing]**. The T4 harness `mlx_eval_barrier` cell sets `expected_to_emit=false` / `lane="inert"` to reflect this; record_count=0 is the PASS state, not a missing-span failure. See spec § 3 T4 acceptance criteria.
+
 ### T4.3 — KVCache + GatedDeltaCache state-update per-forward cost
 
 - [ ] **Step 1: Wrap state-update sites (`update_and_fetch_on(...)`)**
