@@ -1695,6 +1695,21 @@ impl<M: Model> Scheduler<M> {
             if is_last {
                 Some(logits)
             } else {
+                // T4.2 (Codex Option A): wrap the EXISTING explicit per-chunk
+                // sync barrier in `mlx_eval_barrier` tree span. Parent context
+                // is the active P5h trace stack top when one is active; the
+                // centralized `try_with_p5h_span_from_current_trace` no-ops
+                // when no trace is active (today the mid-admit chunked path
+                // does not enter a `P5hTraceGuard`, so this site is inert
+                // until / unless that plumbing is added in a future task).
+                // No new eval is added — we wrap the existing call only.
+                #[cfg(feature = "p5h-profile")]
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "mlx_eval_barrier",
+                    crate::core::p5h::SpanFields::default,
+                    || mlx::transforms::eval(&[&logits]).map_err(anyhow::Error::from),
+                )?;
+                #[cfg(not(feature = "p5h-profile"))]
                 mlx::transforms::eval(&[&logits])?;
                 None
             }
@@ -1718,6 +1733,17 @@ impl<M: Model> Scheduler<M> {
                 Some(&mut handle.temp_cache),
                 mlx::StreamOrDevice::default(),
             )?;
+            // T4.2 (Codex Option A): same `mlx_eval_barrier` wrap as the VL
+            // non-last branch above — see that comment for rationale (existing
+            // explicit per-chunk sync; no new eval added; no-ops without an
+            // active P5h trace).
+            #[cfg(feature = "p5h-profile")]
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "mlx_eval_barrier",
+                crate::core::p5h::SpanFields::default,
+                || mlx::transforms::eval(&[&hidden]).map_err(anyhow::Error::from),
+            )?;
+            #[cfg(not(feature = "p5h-profile"))]
             mlx::transforms::eval(&[&hidden])?;
             None
         };
