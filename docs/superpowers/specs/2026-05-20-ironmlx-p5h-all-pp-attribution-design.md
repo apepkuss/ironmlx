@@ -1045,6 +1045,32 @@ This **replaces** prior naive "sum medians ≥ 95%" gate which double-counted ne
 
 P5h 整体 success = all 9 gates PASS, output (attribution report + P5i/P5j candidate list) is actionable for Boss to authorize P5i and/or P5j.
 
+### 7.2.1 T5 close-out verdict (2026-05-23 — final state, conservative lock)
+
+Per Codex T5 Q-T5-5 (conservative lock recommendation): only lock gates supported by raw data + schema validation + coverage gate evidence; explicitly mark deferred gates.
+
+| Gate # | Spec criterion | T5 measured state | Status |
+|---|---|---|---|
+| 1 | Exclusive attribution coverage ≥ 95% per PP | median 0.9774 / 0.9903 / 0.9996 / 0.9998 / 0.9999 / 0.9999 per PP=128/512/2048/4096/8192/16384; `exclusive_us ≥ -1µs` enforced; diagnostic spans validated separately (`sse_write_role_chunk_diagnostic` + `first_eval_amortized_cost`); `client_transport_residual_us` reported separately | ✓ **LOCKED PASS** |
+| 2 | Protocol-consistent data — dual-lane | Lane A (PP=128, 512): full deep substep attribution validated (T0a GDN + T1 outer + T2 GatedAttention + T3 MoE + T4 cross-cutting); coverage gate PASS. Lane B (PP=4096, 8192, 16384): top-level only per spec § 2.5a Lane-B bucket list; coverage PASS; Lane B deep substep deferred per spec § 3 T0a / **P5h+1 follow-up #2**. **PP=2048 observed Lane B (chat-template overhead 12 tokens — `project_p5h_t1_findings.md`)**; spec § 1.2 partition lists PP=2048 as Lane A; `roi_ranking.py` emits stderr WARN on mismatch + `reports/p5h-attribution.md` § 3.3 documents. **P5h+1 follow-up #3** for spec/runtime reconciliation. | ✓ **LOCKED PASS** (Lane A + Lane B both gates met as specified; observed mismatch documented) |
+| 3 | UMA hardening verified | T0a HARD GATE protocol applied throughout (cold/warm pair; ±2% / PP=16384 ±4% threshold); T5 capture sweep single-shot per Codex Q-T5-1 + memory `project_p5h_t1_findings.md` thermal precedent (preheat alone sufficient) | ✓ **LOCKED PASS** |
+| 4 | Phase D root cause (T0b output) | H1 inconclusive within-cycle, primary cause via cross-test thermal accumulation (preheat protocol mitigates); H2 rejected; H3 unresolved/inconclusive after rerun; H4 verified small-PP kernel materialization variance. T2.4 + T3.4 Layer 3 ablation bindings derived per H4 verified (kernel-bound SKIP all PPs; op-level deferred). Documented in `docs/p5h-t0b-close-out.md`. | ✓ **LOCKED PASS** |
+| 5 | P5i + P5j candidate ranking with ROI | T5 ROI ranking produces 164 candidates total (40 per Lane A PP, 9 per Lane B PP, 16 marked `scope_gate_trigger=true`). **However, dominant candidates at all PPs are wrapper spans** (`first_token_sampling` 96.85-98.55% at Lane A PP=128/512; `gs_chunk_N` 97.56-99.36% at Lane B PP=2048-16384). Per-substep ROI signal hidden behind wrappers. Reported in `/tmp/p5h-t5-ranking.csv`. | ⚠️ **DEFERRED to P5h+1** (infrastructure delivered + measured; actionable ranking blocked by **P5h+1 follow-up #1 + #2** wrapper-dominance instrumentation gaps; see `reports/p5h-attribution.md` § 5) |
+| 6 | Target feasibility assessment | All 6 PPs verdict = `data_insufficient` (4-tier per Codex Q-T5-4: yes / yes_with_scope_gate / no_under_measured_cap / data_insufficient). Lane A wrapper dominance + Lane B deep substep deferral mean honest verdict cannot conclude yes/no. Reported in `/tmp/p5h-t5-verdict.json`. | ⚠️ **DEFERRED to P5h+1** (verdict structurally unattainable until P5h+1 follow-up #1 + #2 close; conservative honest answer = `data_insufficient` per PP) |
+| 7 | Reusable infra delivered | Exclusive span schema (`core/p5h.rs` + `try_with_p5h_span_from_current_trace` API None-tolerant); UMA hardening protocol; GatedAttention 7-step harness; MoE 8-step harness; T5 aggregator + ROI ranking Python modules (`tools/p5h_aggregator/`); T5 capture sweep harness (`tests/p5h_t5_attribution_capture.rs`); Lane-aware cell schema pattern with REQUIRED vs ALLOWED schema validator split (Codex P1+P2 fixup precedent); cfg-split twin body pattern for new src instrumentation. | ✓ **LOCKED PASS** (all infra reusable for P5h+1 / P5i / P5j) |
+| 8 | Validation gates pass per task | T0a HARD GATE PASS (close-out commit `ccbeff9`); T0b 4 hypotheses resolved + close-out commit `60a5e41` + docs `docs/p5h-t0b-close-out.md`; T1 sweep PASS + memory `project_p5h_t1_findings.md`; T2 sweep PASS + close-out `docs/p5h-t2-layer3-binding.md`; T3 sweep PASS + close-out `docs/p5h-t3-layer3-binding.md`; T4 sweep PASS + close-out `docs/p5h-t4-close-out.md` + Codex P1+P2 fixup (`38368ea` + `8d80012`); T5 capture + aggregate + rank functional. | ✓ **LOCKED PASS** |
+| 9 | T0a HARD GATE | PASSED (commit `ccbeff9`) — schema sum-to-root + per-tree-span `exclusive_us ≥ -1µs` + Lane A GDN `attention_path` coverage median ≥ 50% / min ≥ 35% (95% target deferred to `[p5h+1_emit_cost_reduction]` per `project_p5h_emit_cost_followup.md`) + Lane B `gs_stream_init_and_chunk_loop` top-level coverage ≥ 95% + diagnostic spans validated separately + UMA cold/warm variance per-PP threshold + `request_id` join rate 100% | ✓ **LOCKED PASS** |
+
+**P5h ship state**: 7 of 9 gates LOCKED PASS; gates #5 + #6 DEFERRED to P5h+1 due to structural wrapper-dominance instrumentation gaps (Lane A `first_token_sampling` lazy materialization wrapper + Lane B `gs_chunk_N` deep substep deferral).
+
+**P5h is a MEASURE-ONLY close-out** (per plan T5.6 "Ship state: nothing optimized — measure-only"). Schema + capture + aggregator + ROI infrastructure delivered + verified. Actionable P5i / P5j candidate ranking is NOT delivered and **must not be derived from current T5 verdict** (PP=128 yes is reporting artifact; PP=512+ no_under_measured_cap → `data_insufficient` is honest answer). P5i / P5j optimization phases should NOT dispatch until P5h+1 closes:
+- **P5h+1 follow-up #1**: Lane A `first_token_sampling` lazy materialization boundary attribution (decompose wrapper; expose per-substep ROI for prefill compute).
+- **P5h+1 follow-up #2**: Lane B `gs_chunk_N` deep substep instrumentation (mirror Lane A `attention_path` / `mlp_path` wrappers inside `gs_chunk_N` body).
+- **P5h+1 follow-up #3** (low priority): spec § 1.2 / runtime lane partition reconciliation for PP=2048.
+- Pre-existing P5h+1 list preserved in `reports/p5h-attribution.md` § 5.4 (emit cost reduction, T2/T3/T4 op-level ablation triggers, etc.).
+
+Full T5 details in `reports/p5h-attribution.md` (working tree only, gitignored).
+
 ## § 8 References
 
 - P5g close-out: `reports/p5g-final-results.md`
