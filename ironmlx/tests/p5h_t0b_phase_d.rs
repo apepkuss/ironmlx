@@ -50,6 +50,7 @@ const INTER_PP_COOLDOWN: Duration = Duration::from_secs(3);
 
 const H1_OUTPUT_PATH: &str = "/tmp/p5h-t0b-h1.json";
 const H2_OUTPUT_PATH: &str = "/tmp/p5h-t0b-h2.json";
+const H3_OUTPUT_PATH: &str = "/tmp/p5h-t0b-h3.json";
 
 // Preheat: drive GPU into thermal saturation by running PP_LIST × RUNS=3
 // throwaway Phase A iron-bench iterations. Results discarded. Boss's option C
@@ -1041,6 +1042,191 @@ fn t0b_h2_substitute_self_cost() -> anyhow::Result<()> {
     std::fs::write(H2_OUTPUT_PATH, &json_str)?;
     eprintln!(
         "[p5h-t0b-h2] wrote {} bytes to {H2_OUTPUT_PATH}",
+        json_str.len()
+    );
+
+    Ok(())
+}
+
+// ===== T0b.3 H3 cache state divergence harness =====
+//
+// Hypothesis (per design memo § 2.5 H3 + plan T0b.3): the AblateConv mode's
+// observed cost-recovery may be caused by the absence of conv_state cache
+// update inside Step 2c, which leaves a stale cache that downstream Steps
+// (gather, materialize) cannot consume correctly — i.e. cache state
+// divergence between the captured-in-record forward and the real forward.
+//
+// Method: run three modes and compare their pp_tps at each PP:
+//   * None                                — Phase A baseline (full pipeline)
+//   * ablate-conv                         — Step 2b passthrough + Step 2c skip
+//   * ablate-conv-with-manual-cache-update — same Step 2b passthrough but Step
+//                                            2c manually updates the conv
+//                                            cache (no conv1d compute)
+//
+// Recovery percentage per PP (signed):
+//   recovery_pct = (with_manual.pp_tps - without_manual.pp_tps)
+//                  / (phase_a.pp_tps  - without_manual.pp_tps)
+//
+//   * 1.0 → manual cache update recovers Phase A throughput entirely
+//   * 0.0 → manual cache update gives no benefit
+//   * <0 → manual cache update makes things worse than ablate-conv
+//
+// Verdict thresholds (per design memo § 3 T0b.3):
+//   * VERIFIED:    recovery_pct > 50% in ≥2 PP buckets
+//   * REJECTED:    max recovery_pct < 20% across all PP buckets
+//   * INCONCLUSIVE: otherwise (including all-cells-N/A)
+
+#[derive(Debug, serde::Serialize)]
+struct H3Cell {
+    pp: i32,
+    phase_a_pp_tps: f64,
+    ablate_conv_pp_tps: f64,
+    ablate_conv_with_manual_pp_tps: f64,
+    /// None when phase_a <= ablate_conv (denominator non-positive → recovery_pct
+    /// undefined; cell counts as N/A in verdict aggregation).
+    recovery_pct: Option<f64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct H3Verdict {
+    verdict: String,
+    rationale: String,
+    cells: Vec<H3Cell>,
+    initial_cool_protocol: String,
+    preheat_protocol: String,
+}
+
+fn compute_h3_verdict(cells: Vec<H3Cell>) -> H3Verdict {
+    let mut pp_over_50: usize = 0;
+    let mut max_recovery: f64 = f64::NEG_INFINITY;
+    let mut n_a: usize = 0;
+    for c in &cells {
+        match c.recovery_pct {
+            Some(p) => {
+                if p > max_recovery {
+                    max_recovery = p;
+                }
+                if p > 0.50 {
+                    pp_over_50 += 1;
+                }
+            }
+            None => n_a += 1,
+        }
+    }
+    let verdict = if pp_over_50 >= 2 {
+        "verified"
+    } else if max_recovery.is_finite() && max_recovery < 0.20 && n_a == 0 {
+        "rejected"
+    } else {
+        "inconclusive"
+    };
+    let max_str = if max_recovery.is_finite() {
+        format!("{max_recovery:.4}")
+    } else {
+        "N/A".to_string()
+    };
+    let rationale = format!(
+        "H3 {verdict}: PPs_with_recovery>50%={pp_over_50}/{}, max_recovery_pct={max_str}, \
+         N/A_cells={n_a} (thresholds: verified if >=2 PPs with recovery>50%; rejected if \
+         max_recovery<20% AND no N/A cells)",
+        cells.len()
+    );
+    H3Verdict {
+        verdict: verdict.to_string(),
+        rationale,
+        cells,
+        initial_cool_protocol:
+            "INTER_PP_COOLDOWN=3s; no inter-phase cool (per-test-entry preheat is the \
+             thermal-saturation mechanism instead — Boss option C decision)"
+                .to_string(),
+        preheat_protocol: PREHEAT_PROTOCOL_DESC.to_string(),
+    }
+}
+
+#[test]
+#[ignore = "p5h-t0b H3 cache state divergence — recovery_pct per PP across 3 modes (~45-60min GPU)"]
+fn t0b_h3_cache_state_divergence() -> anyhow::Result<()> {
+    let model_dir = snapshot_dir();
+    let _mlx_dir = std::env::var("MLX_DIR")
+        .expect("set MLX_DIR env var pointing to MLX install prefix (e.g. $HOME/.local/mlx)");
+    eprintln!("[p5h-t0b-h3] starting; model={model_dir}");
+
+    eprintln!("[p5h-t0b-h3] preheat phase");
+    preheat_to_saturation(&model_dir, PROFILE_PORT)?;
+
+    eprintln!("[p5h-t0b-h3] measurement phase: mode None (Phase A)");
+    let mut phase_a: BTreeMap<i32, f64> = BTreeMap::new();
+    for &pp in &PP_LIST {
+        phase_a.insert(pp, run_one_pp_one_mode(None, &model_dir, PROFILE_PORT, pp)?);
+    }
+
+    eprintln!("[p5h-t0b-h3] measurement phase: mode ablate-conv");
+    let mut ablate_conv: BTreeMap<i32, f64> = BTreeMap::new();
+    for &pp in &PP_LIST {
+        ablate_conv.insert(
+            pp,
+            run_one_pp_one_mode(Some("ablate-conv"), &model_dir, PROFILE_PORT, pp)?,
+        );
+    }
+
+    eprintln!("[p5h-t0b-h3] measurement phase: mode ablate-conv-with-manual-cache-update");
+    let mut ablate_conv_manual: BTreeMap<i32, f64> = BTreeMap::new();
+    for &pp in &PP_LIST {
+        ablate_conv_manual.insert(
+            pp,
+            run_one_pp_one_mode(
+                Some("ablate-conv-with-manual-cache-update"),
+                &model_dir,
+                PROFILE_PORT,
+                pp,
+            )?,
+        );
+    }
+
+    let mut cells: Vec<H3Cell> = Vec::new();
+    for &pp in &PP_LIST {
+        let a = *phase_a
+            .get(&pp)
+            .ok_or_else(|| anyhow::anyhow!("phase_a missing PP={pp}"))?;
+        let w = *ablate_conv
+            .get(&pp)
+            .ok_or_else(|| anyhow::anyhow!("ablate_conv missing PP={pp}"))?;
+        let m = *ablate_conv_manual
+            .get(&pp)
+            .ok_or_else(|| anyhow::anyhow!("ablate_conv_manual missing PP={pp}"))?;
+        // denominator is (phase_a - without_manual); if <= 0 the recovery is
+        // mathematically undefined (ablate_conv is already at/above Phase A).
+        // Mark cell N/A and let downstream verdict counting handle it.
+        let recovery_pct = if a > w { Some((m - w) / (a - w)) } else { None };
+        cells.push(H3Cell {
+            pp,
+            phase_a_pp_tps: a,
+            ablate_conv_pp_tps: w,
+            ablate_conv_with_manual_pp_tps: m,
+            recovery_pct,
+        });
+    }
+
+    let verdict = compute_h3_verdict(cells);
+    eprintln!("[p5h-t0b-h3] {}", verdict.rationale);
+
+    let out_json = serde_json::json!({
+        "pp_list": PP_LIST,
+        "runs": RUNS,
+        "warmup": WARMUP,
+        "inter_pp_cooldown_secs": INTER_PP_COOLDOWN.as_secs(),
+        "modes_evaluated": ["none", "ablate-conv", "ablate-conv-with-manual-cache-update"],
+        "cells": verdict.cells,
+        "verdict": verdict.verdict,
+        "rationale": verdict.rationale,
+        "preheat_protocol": verdict.preheat_protocol,
+        "initial_cool_protocol": verdict.initial_cool_protocol,
+    });
+    let json_str = serde_json::to_string_pretty(&out_json)?;
+    eprintln!("[p5h-t0b-h3] JSON payload (preserved in case file-write fails):\n{json_str}");
+    std::fs::write(H3_OUTPUT_PATH, &json_str)?;
+    eprintln!(
+        "[p5h-t0b-h3] wrote {} bytes to {H3_OUTPUT_PATH}",
         json_str.len()
     );
 
