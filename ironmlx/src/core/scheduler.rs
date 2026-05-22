@@ -68,6 +68,22 @@ use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::nn::LayerCache;
 
+/// T4.5: process-wide once-only guard for the first-eval diagnostic span.
+///
+/// On the FIRST `prefill_admitted` call with an active P5h trace, the
+/// `model_prefill_forward` body incurs cold-start cost from MLX JIT
+/// compilation + Metal pipeline cache population that subsequent calls
+/// amortize away. We emit a parallel `first_eval_amortized_cost`
+/// diagnostic span (parent = root span, span_kind = "diagnostic") so the
+/// T5 aggregator can report this cold-start cost as a separate column
+/// without contaminating the exclusive parent-child tree (sum-to-root
+/// invariants exclude diagnostic spans per spec § 2.5a).
+///
+/// `OnceLock::set(())` returns `Ok(())` on the first caller; concurrent
+/// racers see `Err(())` and skip — race-safe single emission per process.
+#[cfg(feature = "p5h-profile")]
+static FIRST_EVAL_AMORTIZED_COST_FIRED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
 type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
 
@@ -941,6 +957,36 @@ impl<M: Model> Scheduler<M> {
             crate::core::p5h::open_p5h_span(ctx, Some(root_span), "model_prefill_forward")
         });
 
+        // T4.5 (Codex Option S): open a `first_eval_amortized_cost` DIAGNOSTIC
+        // span exactly once per process, wrapping the same MPF body. The
+        // span_kind = "diagnostic" classification keeps it out of the T5
+        // exclusive-tree sum invariants (per spec § 2.5a); T5 will report it
+        // as a separate cold-start column. `OnceLock::set(()).is_ok()` wins
+        // for the first caller only (race-safe). Only fires when the request
+        // carries a P5h trace — non-OpenAI / non-streaming callers skip and
+        // the OnceLock stays unset until a traced request arrives.
+        //
+        // NOTE for T5 aggregator: this adds `first_eval_amortized_cost` to
+        // the closed set of permitted diagnostic span_names for routing_path
+        // == "scheduler" (currently only `sse_write_role_chunk_diagnostic`).
+        // Spec § 2.5a `diagnostic_allowed_by_routing` and the per-lane bucket
+        // lists need to be extended accordingly.
+        #[cfg(feature = "p5h-profile")]
+        let first_eval_span = p5h_trace.as_ref().and_then(|(ctx, root_span)| {
+            if FIRST_EVAL_AMORTIZED_COST_FIRED.set(()).is_ok() {
+                Some((
+                    ctx.clone(),
+                    crate::core::p5h::open_p5h_span(
+                        ctx,
+                        Some(root_span),
+                        "first_eval_amortized_cost",
+                    ),
+                ))
+            } else {
+                None
+            }
+        });
+
         let logits_result: anyhow::Result<Array> = (|| -> anyhow::Result<Array> {
             #[cfg(feature = "p5h-profile")]
             let _mpf_guard = match (p5h_trace.as_ref(), mpf_span.as_ref()) {
@@ -1030,6 +1076,20 @@ impl<M: Model> Scheduler<M> {
             crate::core::p5h::close_p5h_span(
                 ctx,
                 mpf,
+                crate::core::p5h::monotonic_ns_public(),
+                crate::core::p5h::SpanFields::default(),
+            );
+        }
+
+        // T4.5: close the once-per-process `first_eval_amortized_cost`
+        // diagnostic span (if it opened on this call). Closed AFTER MPF
+        // close so the diagnostic interval covers the MPF body end-to-end.
+        // Uses `close_p5h_span_diagnostic` to emit span_kind="diagnostic".
+        #[cfg(feature = "p5h-profile")]
+        if let Some((ctx, span)) = first_eval_span {
+            crate::core::p5h::close_p5h_span_diagnostic(
+                &ctx,
+                span,
                 crate::core::p5h::monotonic_ns_public(),
                 crate::core::p5h::SpanFields::default(),
             );
