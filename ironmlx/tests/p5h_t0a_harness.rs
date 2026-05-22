@@ -277,11 +277,24 @@ fn t0a_uma_hardening_sweep() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(BENCH_CSV_PATH);
 
     let mut overall_first = true;
-    for &pp in PP_LIST {
+    for (i, &pp) in PP_LIST.iter().enumerate() {
+        // Per T0a.14 first-sweep diagnosis + T0a.13 reviewer I1: insert an
+        // inter-PP cool gate before each PP except the first, so the GPU is
+        // genuinely cooled between PPs. Without this, large-PP "cold"
+        // measurements are contaminated by GPU heat accumulated from prior
+        // PPs (the first sweep saw PP=16384 cold/warm variance 2.6% > 2%
+        // threshold because warm was faster than cold — GPU was hotter on
+        // "cold" than after the intra-PP cool gate).
+        if i > 0 {
+            eprintln!("[p5h-t0a] inter-PP cool gate before PP={pp}");
+            cool_gate(Duration::from_millis(COOL_DURATION_MS));
+        }
+
         eprintln!("[p5h-t0a] PP={pp}: cold run");
         let cold = run_one_pp(pp, overall_first)?;
         overall_first = false;
 
+        eprintln!("[p5h-t0a] PP={pp}: intra-PP cool gate (cold → warm)");
         cool_gate(Duration::from_millis(COOL_DURATION_MS));
 
         eprintln!("[p5h-t0a] PP={pp}: warm run");
