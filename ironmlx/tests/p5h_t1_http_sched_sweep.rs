@@ -1,17 +1,56 @@
 //! P5h T1 — HTTP + Scheduler + Admission per-PP attribution sweep.
 //!
-//! Verifies that the 4 Lane-A top-level spans emit on every measured request
+//! Verifies that the per-lane top-level spans emit on every measured request
 //! and reports trimmed_median(inclusive_us) per (span_name, PP):
-//!   - http_parse_render_tokenize
-//!   - scheduler_admission
-//!   - sse_write_role_chunk_diagnostic
-//!   - detok_format_first_content_chunk
+//!
+//!   Shared (BOTH lanes — fire on every PP):
+//!     - http_parse_render_tokenize             (handler entry, before routing)
+//!     - detok_format_first_content_chunk       (both Lane A + Lane B detok path)
+//!
+//!   Lane A only (`serve_via_scheduler_stream`):
+//!     - scheduler_admission
+//!     - sse_write_role_chunk_diagnostic
+//!
+//!   Lane B only (`serve_via_gs_stream`):
+//!     - gs_first_token_sample_dispatch
+//!     - gs_first_token_materialize_and_predispatch
 //!
 //! Output: /tmp/p5h-t1.json
 //!
-//! Per spec § 3 T1 + plan T1.1.
+//! Per spec § 3 T1 + plan T1.1 (PP=2048 boundary correction + Lane B addition).
 //!
-//! Sweep PP ∈ {128, 512, 2048} (Lane A: PP ≤ default prefill_chunk_size).
+//! ## Why PP=2047 (not 2048) and why PP=4096 was added
+//!
+//! `openai.rs:413`:
+//!   `let use_scheduler = state.prefill_chunk_size == 0
+//!                        || prompt_len <= state.prefill_chunk_size;`
+//!
+//! With the default `prefill_chunk_size=2048` the boundary is
+//! `prompt_len ≤ 2048 → Lane A` and `prompt_len > 2048 → Lane B`.
+//! `iron-bench --prompt-len N` does NOT request exactly N input tokens; the
+//! chat-template render adds ~1 token of overhead, so `--prompt-len 2048`
+//! reaches `prompt_len=2049` at the predicate and routes to Lane B
+//! (the original T1 sweep at HEAD `fa1f6f6` therefore saw 0 records on the
+//! 4 Lane-A spans for PP=2048 and verdict was `missing_spans`).
+//!
+//! Fix: PP=2047 keeps the Lane-A boundary measurement intact under
+//! chat-template overhead, and PP=4096 is added to also exercise Lane B
+//! (`serve_via_gs_stream`) so the Lane-B top-level spans get coverage in
+//! the same harness.
+//!
+//! ## Verdict cell selection (lane intersection)
+//!
+//! For each PP, the verdict requires records for:
+//!   * BOTH-lane spans (always — they fire on every request regardless of lane)
+//!   * Lane-A spans  iff `lane_for_pp(pp) == "lane_a"`
+//!   * Lane-B spans  iff `lane_for_pp(pp) == "lane_b"`
+//!
+//! With `T1_PP_LIST = [128, 512, 2047, 4096]` this yields 16 cells:
+//!   - PP=128  (lane_a): 2 both + 2 lane_a = 4
+//!   - PP=512  (lane_a): 2 both + 2 lane_a = 4
+//!   - PP=2047 (lane_a): 2 both + 2 lane_a = 4
+//!   - PP=4096 (lane_b): 2 both + 2 lane_b = 4
+//!
 //! Server gate: --features p5h-profile (verifying [p5h-profile] schema itself,
 //! not ProfileMode ablation). 5min preheat at entry per T0b binding.
 //!
@@ -27,27 +66,58 @@ use p5h_common::*;
 
 use std::collections::BTreeMap;
 
-const T1_PP_LIST: [i32; 3] = [128, 512, 2048];
+const T1_PP_LIST: [i32; 4] = [128, 512, 2047, 4096];
 const T1_OUTPUT_PATH: &str = "/tmp/p5h-t1.json";
-/// Lane-A top-level spans verified by this sweep. Names MUST match exactly
-/// the `span_name` values emitted in `[p5h-profile]` log lines from
-/// `ironmlx/src/core/p5h.rs:313` (see § 2.5a span schema).
-const T1_SPAN_NAMES: [&str; 4] = [
+
+/// Spans that emit ONLY on Lane A (`serve_via_scheduler_stream`).
+/// Verified per PP whose lane resolves to "lane_a".
+/// Names MUST match exactly the `span_name` values emitted in
+/// `[p5h-profile]` log lines (see `ironmlx/src/core/server/openai.rs` Lane-A
+/// path + `ironmlx/src/core/p5h.rs` span schema § 2.5a).
+const T1_LANE_A_SPAN_NAMES: [&str; 2] = ["scheduler_admission", "sse_write_role_chunk_diagnostic"];
+
+/// Spans that emit ONLY on Lane B (`serve_via_gs_stream`).
+/// Verified per PP whose lane resolves to "lane_b".
+const T1_LANE_B_SPAN_NAMES: [&str; 2] = [
+    "gs_first_token_sample_dispatch",
+    "gs_first_token_materialize_and_predispatch",
+];
+
+/// Spans that fire on BOTH lanes. Verdict requires ≥1 record at every PP
+/// (regardless of lane) because the handler entry / first-chunk-detok path
+/// runs unconditionally for every request.
+const T1_BOTH_LANE_SPAN_NAMES: [&str; 2] = [
     "http_parse_render_tokenize",
-    "scheduler_admission",
-    "sse_write_role_chunk_diagnostic",
     "detok_format_first_content_chunk",
 ];
 
+/// Default `prefill_chunk_size` in `ironmlx serve` — the threshold used by
+/// the openai.rs:413 lane-routing predicate (`prompt_len <= prefill_chunk_size`
+/// → Lane A). The chat-template render adds ~1 token of overhead in practice,
+/// so the effective boundary in iron-bench `--prompt-len` terms is
+/// `PP < 2048` for Lane A (PP=2047 fits, PP=2048 does not).
+const PREFILL_CHUNK_SIZE_DEFAULT: i32 = 2048;
+
 const PREHEAT_PROTOCOL_DESC: &str =
     "5min preheat per T0b binding: T1_PP_LIST × PREHEAT_RUNS=3 throwaway Phase A \
-     iron-bench runs with spawn-kill per PP (using T1_PP_LIST=[128,512,2048]); \
+     iron-bench runs with spawn-kill per PP (using T1_PP_LIST=[128,512,2047,4096]); \
      results discarded; runs BEFORE first measurement spawn to drive GPU into \
      thermal saturation";
 
 const INITIAL_COOL_PROTOCOL_DESC: &str =
     "INTER_PP_COOLDOWN=3s; per-PP spawn-kill so each PP starts from server cold-restart \
      (T0a/T0b precedent — no inter-phase cool gate, preheat handles thermal saturation)";
+
+/// Resolve a request's lane based on PP. Mirrors the openai.rs:413 predicate,
+/// adjusted for chat-template overhead (~1 token), so the effective boundary
+/// is `PP < PREFILL_CHUNK_SIZE_DEFAULT`, not `<=`.
+fn lane_for_pp(pp: i32) -> &'static str {
+    if pp < PREFILL_CHUNK_SIZE_DEFAULT {
+        "lane_a"
+    } else {
+        "lane_b"
+    }
+}
 
 #[derive(Debug, serde::Serialize, Clone)]
 struct P5hRecord {
@@ -127,6 +197,11 @@ fn parse_p5h_records(stderr_bytes: &[u8]) -> Vec<P5hRecord> {
 struct T1Cell {
     pp: i32,
     span_name: String,
+    /// Lane attribution for this cell:
+    ///   "lane_a" — span only emits on `serve_via_scheduler_stream`
+    ///   "lane_b" — span only emits on `serve_via_gs_stream`
+    ///   "both"   — span fires on both lanes (handler entry / shared detok)
+    lane: &'static str,
     /// Number of `[p5h-profile]` records matching `(span_name, pp)`.
     record_count: usize,
     /// Trimmed median of `(end_ns - start_ns) / 1000` across all matching
@@ -139,8 +214,8 @@ struct T1Verdict {
     verdict: String,
     rationale: String,
     cells: Vec<T1Cell>,
-    /// (PP, span_name) pairs that produced 0 records or only non-positive
-    /// inclusive_us samples. Empty in the happy path.
+    /// (PP, lane, span_name) tuples that produced 0 records or only
+    /// non-positive inclusive_us samples. Empty in the happy path.
     missing_or_invalid: Vec<String>,
     preheat_protocol: String,
     initial_cool_protocol: String,
@@ -160,8 +235,8 @@ fn run_t1_collect_records(
     let mut per_pp: BTreeMap<i32, Vec<P5hRecord>> = BTreeMap::new();
     for &pp in &T1_PP_LIST {
         assert_port_free(port).map_err(|e| anyhow::anyhow!("port {port} not free: {e}"))?;
-        // T1 does not set IRONMLX_P5G_PROFILE_MODE — Lane-A spans emit
-        // unconditionally under --features p5h-profile.
+        // T1 does not set IRONMLX_P5G_PROFILE_MODE — Lane-A + Lane-B + shared
+        // spans all emit unconditionally under --features p5h-profile.
         let mut server = spawn_server(None, model_dir, port);
         let (stderr_buf, drainer) = spawn_stderr_drainer(&mut server);
 
@@ -205,7 +280,8 @@ fn run_t1_collect_records(
         let captured = drain_stderr_into_buf(&stderr_buf);
         let records = parse_p5h_records(&captured);
         eprintln!(
-            "[p5h-t1] PP={pp}: captured {} [p5h-profile] records ({} stderr bytes)",
+            "[p5h-t1] PP={pp} lane={}: captured {} [p5h-profile] records ({} stderr bytes)",
+            lane_for_pp(pp),
             records.len(),
             captured.len()
         );
@@ -215,48 +291,90 @@ fn run_t1_collect_records(
     Ok(per_pp)
 }
 
-/// Aggregate per-PP records into (PP, span_name) cells, computing
+/// Build the (pp, span_name, lane) tuple list that the verdict will check.
+/// Filters Lane-A / Lane-B spans by the PP's resolved lane while always
+/// including BOTH-lane spans for every PP.
+fn t1_expected_cells() -> Vec<(i32, &'static str, &'static str)> {
+    let mut out: Vec<(i32, &'static str, &'static str)> = Vec::new();
+    for &pp in &T1_PP_LIST {
+        let lane = lane_for_pp(pp);
+        for &span in &T1_BOTH_LANE_SPAN_NAMES {
+            out.push((pp, span, "both"));
+        }
+        match lane {
+            "lane_a" => {
+                for &span in &T1_LANE_A_SPAN_NAMES {
+                    out.push((pp, span, "lane_a"));
+                }
+            }
+            "lane_b" => {
+                for &span in &T1_LANE_B_SPAN_NAMES {
+                    out.push((pp, span, "lane_b"));
+                }
+            }
+            other => panic!("unexpected lane attribution {other:?} for PP={pp}"),
+        }
+    }
+    out
+}
+
+/// Aggregate per-PP records into (PP, span_name, lane) cells, computing
 /// trimmed_median(inclusive_us) per cell.
 ///
-/// PASS criterion (per Boss decision 2): every (PP, span_name) cell must
-/// have ≥1 record with `end_ns > start_ns`. Cells failing that produce a
-/// "missing_spans" verdict with a diagnostic message listing which cells failed.
+/// PASS criterion: every expected cell (per `t1_expected_cells`) must have
+/// ≥1 record with `end_ns > start_ns`. Lane intersection is enforced by the
+/// expected-cell generator so we never check Lane-B spans on a Lane-A PP
+/// (those records are guaranteed-zero by construction, not a bug).
 fn compute_t1_verdict(per_pp: &BTreeMap<i32, Vec<P5hRecord>>) -> T1Verdict {
     let mut cells: Vec<T1Cell> = Vec::new();
     let mut missing_or_invalid: Vec<String> = Vec::new();
 
-    for &pp in &T1_PP_LIST {
+    for (pp, span_name, lane) in t1_expected_cells() {
         let recs = per_pp.get(&pp);
-        for &span_name in &T1_SPAN_NAMES {
-            // Collect inclusive_us samples for this (pp, span_name) cell.
-            let filtered: Vec<&P5hRecord> = recs
-                .map(|v| {
-                    v.iter()
-                        .filter(|r| r.span_name == span_name && r.end_ns > r.start_ns)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let count = filtered.len();
-            let median = if count == 0 {
-                None
-            } else {
-                let us: Vec<f64> = filtered
-                    .iter()
-                    .map(|r| (r.end_ns - r.start_ns) as f64 / 1000.0)
-                    .collect();
-                trimmed_median(us)
-            };
-            if count == 0 {
-                missing_or_invalid.push(format!("PP={pp} span={span_name}: 0 valid records"));
-            }
-            cells.push(T1Cell {
-                pp,
-                span_name: span_name.to_string(),
-                record_count: count,
-                median_inclusive_us: median,
-            });
+        let filtered: Vec<&P5hRecord> = recs
+            .map(|v| {
+                v.iter()
+                    .filter(|r| r.span_name == span_name && r.end_ns > r.start_ns)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let count = filtered.len();
+        let median = if count == 0 {
+            None
+        } else {
+            let us: Vec<f64> = filtered
+                .iter()
+                .map(|r| (r.end_ns - r.start_ns) as f64 / 1000.0)
+                .collect();
+            trimmed_median(us)
+        };
+        if count == 0 {
+            missing_or_invalid.push(format!(
+                "PP={pp} lane={lane} span={span_name}: 0 valid records"
+            ));
         }
+        cells.push(T1Cell {
+            pp,
+            span_name: span_name.to_string(),
+            lane,
+            record_count: count,
+            median_inclusive_us: median,
+        });
     }
+
+    let lane_a_pps: Vec<i32> = T1_PP_LIST
+        .iter()
+        .copied()
+        .filter(|&p| lane_for_pp(p) == "lane_a")
+        .collect();
+    let lane_b_pps: Vec<i32> = T1_PP_LIST
+        .iter()
+        .copied()
+        .filter(|&p| lane_for_pp(p) == "lane_b")
+        .collect();
+    let both_cells = T1_BOTH_LANE_SPAN_NAMES.len() * T1_PP_LIST.len();
+    let lane_a_cells = T1_LANE_A_SPAN_NAMES.len() * lane_a_pps.len();
+    let lane_b_cells = T1_LANE_B_SPAN_NAMES.len() * lane_b_pps.len();
 
     let verdict = if missing_or_invalid.is_empty() {
         "pass"
@@ -265,15 +383,27 @@ fn compute_t1_verdict(per_pp: &BTreeMap<i32, Vec<P5hRecord>>) -> T1Verdict {
     };
     let rationale = if missing_or_invalid.is_empty() {
         format!(
-            "T1 pass: every (PP, span_name) cell has >=1 valid record (4 spans x {} PPs = {} cells)",
-            T1_PP_LIST.len(),
+            "T1 pass: every (PP, lane, span_name) cell has >=1 valid record. \
+             PP_LIST={:?} lane_a + {:?} lane_b; cells={} (both={} + lane_a={} + lane_b={})",
+            lane_a_pps,
+            lane_b_pps,
             cells.len(),
+            both_cells,
+            lane_a_cells,
+            lane_b_cells,
         )
     } else {
         format!(
             "T1 missing_spans: {} cells failed PASS criterion (>=1 record with end_ns>start_ns). \
+             PP_LIST={:?} lane_a + {:?} lane_b; expected cells={} (both={} + lane_a={} + lane_b={}). \
              Failed cells: {}",
             missing_or_invalid.len(),
+            lane_a_pps,
+            lane_b_pps,
+            cells.len(),
+            both_cells,
+            lane_a_cells,
+            lane_b_cells,
             missing_or_invalid.join("; "),
         )
     };
@@ -307,9 +437,30 @@ fn t1_http_sched_admission_sweep() -> anyhow::Result<()> {
     // Record per-PP record counts (across all span_names) for diagnostic visibility.
     let per_pp_counts: BTreeMap<i32, usize> = per_pp.iter().map(|(k, v)| (*k, v.len())).collect();
 
+    // Lane-attributed PP + span listings for the JSON consumer. The old flat
+    // `pp_list` + `span_names` fields are retained below for back-compat with
+    // downstream tooling that still greps for them.
+    let mut pp_list_by_lane: BTreeMap<&'static str, Vec<i32>> = BTreeMap::new();
+    for &pp in &T1_PP_LIST {
+        pp_list_by_lane.entry(lane_for_pp(pp)).or_default().push(pp);
+    }
+    let mut span_names_by_lane: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
+    span_names_by_lane.insert("lane_a", T1_LANE_A_SPAN_NAMES.to_vec());
+    span_names_by_lane.insert("lane_b", T1_LANE_B_SPAN_NAMES.to_vec());
+    span_names_by_lane.insert("both", T1_BOTH_LANE_SPAN_NAMES.to_vec());
+
+    // Flat union of all expected span names (any lane) — back-compat field for
+    // downstream consumers that grep `span_names` without lane awareness.
+    let mut span_names_union: Vec<&'static str> = Vec::new();
+    span_names_union.extend(T1_BOTH_LANE_SPAN_NAMES.iter().copied());
+    span_names_union.extend(T1_LANE_A_SPAN_NAMES.iter().copied());
+    span_names_union.extend(T1_LANE_B_SPAN_NAMES.iter().copied());
+
     let out_json = serde_json::json!({
         "pp_list": T1_PP_LIST,
-        "span_names": T1_SPAN_NAMES,
+        "span_names": span_names_union,
+        "pp_list_by_lane": pp_list_by_lane,
+        "span_names_by_lane": span_names_by_lane,
         "runs": RUNS,
         "warmup": WARMUP,
         "inter_pp_cooldown_secs": INTER_PP_COOLDOWN.as_secs(),
@@ -399,5 +550,66 @@ some unrelated line that should be ignored\n\
         assert_eq!(recs[0].span_name, "scheduler_admission");
         assert_eq!(recs[0].start_ns, 10);
         assert_eq!(recs[0].end_ns, 20);
+    }
+
+    #[test]
+    fn lane_for_pp_matches_openai_predicate() {
+        // Boundary cases: PP=2047 in Lane A, PP=2048 in Lane B (chat-template
+        // overhead shifts the effective boundary by 1).
+        assert_eq!(lane_for_pp(128), "lane_a");
+        assert_eq!(lane_for_pp(512), "lane_a");
+        assert_eq!(lane_for_pp(2047), "lane_a");
+        assert_eq!(lane_for_pp(2048), "lane_b");
+        assert_eq!(lane_for_pp(4096), "lane_b");
+    }
+
+    #[test]
+    fn t1_expected_cells_lane_intersection() {
+        let cells = t1_expected_cells();
+        // 16 cells: 4 PPs × (2 both + 2 lane-specific) = 16.
+        assert_eq!(cells.len(), 16, "expected 16 cells, got {}", cells.len());
+
+        // Lane-A PPs must not produce any lane_b cells, and vice versa.
+        for &(pp, span, lane) in &cells {
+            match lane {
+                "both" => {
+                    assert!(
+                        T1_BOTH_LANE_SPAN_NAMES.contains(&span),
+                        "PP={pp} span={span} marked 'both' but not in T1_BOTH_LANE_SPAN_NAMES"
+                    );
+                }
+                "lane_a" => {
+                    assert_eq!(
+                        lane_for_pp(pp),
+                        "lane_a",
+                        "lane_a cell at PP={pp} which resolves to {}",
+                        lane_for_pp(pp),
+                    );
+                    assert!(
+                        T1_LANE_A_SPAN_NAMES.contains(&span),
+                        "PP={pp} span={span} marked 'lane_a' but not in T1_LANE_A_SPAN_NAMES"
+                    );
+                }
+                "lane_b" => {
+                    assert_eq!(
+                        lane_for_pp(pp),
+                        "lane_b",
+                        "lane_b cell at PP={pp} which resolves to {}",
+                        lane_for_pp(pp),
+                    );
+                    assert!(
+                        T1_LANE_B_SPAN_NAMES.contains(&span),
+                        "PP={pp} span={span} marked 'lane_b' but not in T1_LANE_B_SPAN_NAMES"
+                    );
+                }
+                other => panic!("unexpected lane tag {other:?} at PP={pp} span={span}"),
+            }
+        }
+
+        // Each PP contributes exactly 4 cells (2 both + 2 lane-specific).
+        for &pp in &T1_PP_LIST {
+            let n = cells.iter().filter(|(p, _, _)| *p == pp).count();
+            assert_eq!(n, 4, "PP={pp} produced {n} cells, expected 4");
+        }
     }
 }
