@@ -576,7 +576,6 @@ fn t0b_h1_phase_order_comparison() -> anyhow::Result<()> {
 /// the iron-bench parser will still expect `runs` pp_tps samples — the
 /// server's stderr emissions are SEPARATE from iron-bench's pp_tps output, so
 /// the iron-bench JSON shape is independent of the profile mode.
-#[allow(dead_code)]
 fn run_one_pp_one_mode_with_runs(
     mode: Option<&str>,
     model_dir: &str,
@@ -841,6 +840,7 @@ struct H2Cell {
 struct H2Verdict {
     verdict: String,
     rationale: String,
+    total_records: u64,
     cells: Vec<H2Cell>,
     initial_cool_protocol: String,
     preheat_protocol: String,
@@ -915,6 +915,7 @@ fn compute_h2_verdict(per_pp: &BTreeMap<i32, Vec<H2Record>>) -> H2Verdict {
     // (substitute_us / real_us) ratio. The per-record ratio is the
     // measurement the design memo cites — guards against asymmetric
     // distributions where median(sub)/median(real) ≠ median(sub/real).
+    let total_records: u64 = per_pp.values().map(|v| v.len() as u64).sum();
     let mut cells: Vec<H2Cell> = Vec::new();
     // Collect distinct steps seen across all PPs.
     let mut all_steps: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -978,23 +979,34 @@ fn compute_h2_verdict(per_pp: &BTreeMap<i32, Vec<H2Record>>) -> H2Verdict {
     let all_rejected =
         !cells.is_empty() && cells.iter().all(|c| c.median_substitute_real_ratio <= 1.00);
 
-    let verdict = if any_step_verified {
+    let verdict = if total_records == 0 {
+        "no_data"
+    } else if any_step_verified {
         "verified"
     } else if all_rejected {
         "rejected"
     } else {
         "inconclusive"
     };
-    let rationale = format!(
-        "H2 {verdict}: per-step hot-PP-buckets (>1.05 ratio)={step_pp_over_105:?}, \
-         per-step max median ratio={step_max_median_ratio:?} (thresholds: verified if any \
-         step has ≥2 PPs with median_ratio>1.05 OR max per-PP median>1.10; rejected if \
-         all cells have median_ratio≤1.00)"
-    );
+    let rationale = if verdict == "no_data" {
+        "H2 no_data: total_records=0 — parser found zero [p5h-t0b-h2] emissions \
+         across all PPs. Verify IRONMLX_P5G_PROFILE_MODE=h2-measure was set on \
+         the server and that the ProfileMode::from_env arm recognizes the literal."
+            .to_string()
+    } else {
+        format!(
+            "H2 {verdict}: total_records={total_records}, per-step hot-PP-buckets \
+             (>1.05 ratio)={step_pp_over_105:?}, per-step max median \
+             ratio={step_max_median_ratio:?} (thresholds: verified if any step has \
+             ≥2 PPs with median_ratio>1.05 OR max per-PP median>1.10; rejected if \
+             all cells have median_ratio≤1.00)"
+        )
+    };
 
     H2Verdict {
         verdict: verdict.to_string(),
         rationale,
+        total_records,
         cells,
         initial_cool_protocol:
             "INTER_PP_COOLDOWN=3s; no inter-phase cool (per-test-entry preheat is the \
@@ -1035,6 +1047,7 @@ fn t0b_h2_substitute_self_cost() -> anyhow::Result<()> {
         "cells": verdict.cells,
         "verdict": verdict.verdict,
         "rationale": verdict.rationale,
+        "total_records": verdict.total_records,
         "preheat_protocol": verdict.preheat_protocol,
         "initial_cool_protocol": verdict.initial_cool_protocol,
     });
@@ -1356,6 +1369,7 @@ struct H4Cell {
 struct H4Verdict {
     verdict: String,
     rationale: String,
+    total_records: u64,
     cells: Vec<H4Cell>,
     phase_a_per_mode_cells: Vec<H4CellPerMode>,
     ablate_compute_g_per_mode_cells: Vec<H4CellPerMode>,
@@ -1444,6 +1458,8 @@ fn compute_h4_verdict(
     phase_a: &BTreeMap<i32, Vec<H4Record>>,
     ablate: &BTreeMap<i32, Vec<H4Record>>,
 ) -> H4Verdict {
+    let total_records: u64 = phase_a.values().map(|v| v.len() as u64).sum::<u64>()
+        + ablate.values().map(|v| v.len() as u64).sum::<u64>();
     let phase_a_cells = aggregate_h4_per_pp(phase_a);
     let ablate_cells = aggregate_h4_per_pp(ablate);
 
@@ -1480,7 +1496,9 @@ fn compute_h4_verdict(
         .iter()
         .map(|c| c.kernel_drift_pct)
         .fold(f64::NEG_INFINITY, f64::max);
-    let verdict = if pp_over_5pct >= 2 {
+    let verdict = if total_records == 0 {
+        "no_data"
+    } else if pp_over_5pct >= 2 {
         "verified"
     } else if max_drift.is_finite() && max_drift < 0.02 {
         "rejected"
@@ -1492,14 +1510,24 @@ fn compute_h4_verdict(
     } else {
         "N/A".to_string()
     };
-    let rationale = format!(
-        "H4 {verdict}: PPs_with_drift>5%={pp_over_5pct}/{}, max_drift_pct={max_str} \
-         (thresholds: verified if drift>5% in >=2 PPs; rejected if max_drift<2%)",
-        cells.len()
-    );
+    let rationale = if verdict == "no_data" {
+        "H4 no_data: total_records=0 — parser found zero [p5h-t0b-h4] emissions \
+         across all PPs for both modes (h4-measure-phase-a + \
+         h4-measure-ablate-compute-g). Verify IRONMLX_P5G_PROFILE_MODE was set on \
+         the server and that the ProfileMode::from_env arms recognize both literals."
+            .to_string()
+    } else {
+        format!(
+            "H4 {verdict}: total_records={total_records}, \
+             PPs_with_drift>5%={pp_over_5pct}/{}, max_drift_pct={max_str} \
+             (thresholds: verified if drift>5% in >=2 PPs; rejected if max_drift<2%)",
+            cells.len()
+        )
+    };
     H4Verdict {
         verdict: verdict.to_string(),
         rationale,
+        total_records,
         cells,
         phase_a_per_mode_cells: phase_a_cells,
         ablate_compute_g_per_mode_cells: ablate_cells,
@@ -1542,6 +1570,7 @@ fn t0b_h4_kernel_materialization_variance() -> anyhow::Result<()> {
         "ablate_compute_g_per_pp": verdict.ablate_compute_g_per_mode_cells,
         "verdict": verdict.verdict,
         "rationale": verdict.rationale,
+        "total_records": verdict.total_records,
         "preheat_protocol": verdict.preheat_protocol,
         "initial_cool_protocol": verdict.initial_cool_protocol,
     });
