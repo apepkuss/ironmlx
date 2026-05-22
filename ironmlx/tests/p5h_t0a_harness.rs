@@ -24,7 +24,7 @@ use std::time::Duration;
 const PP_LIST: &[u32] = &[128, 512, 2048, 4096, 8192, 16384];
 const COOL_DURATION_MS: u64 = 5 * 60 * 1000;
 const VARIANCE_THRESHOLD: f64 = 0.02;
-const RUNS: usize = 5;
+const RUNS: usize = 7;
 // P5h sweeps timed-only — per Codex plan review v20 P1 #2:
 //  `--capture-server-request-id` requires `--warmup 0` because warmup
 //  RequestResults are discarded by `iron-bench/src/runner.rs:72-75`
@@ -174,11 +174,25 @@ fn parse_pp_tps_median_from_csv(stdout_bytes: &[u8]) -> Option<f64> {
         return None;
     }
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = vals.len();
+    // Per T0a.14 rerun #1 diagnosis: single environmental outliers (GC pause, MLX
+    // kernel recompile, scheduler glitch) can hit one of 5 runs and pull the
+    // median 12%+. Drop the lowest and highest before taking median, leaving the
+    // middle (RUNS - 2) values. With RUNS=7 this gives a 5-sample trimmed median.
+    if vals.len() < 3 {
+        // Fewer than 3 — can't trim; just return median.
+        let n = vals.len();
+        return Some(if n % 2 == 1 {
+            vals[n / 2]
+        } else {
+            (vals[n / 2 - 1] + vals[n / 2]) / 2.0
+        });
+    }
+    let trimmed = &vals[1..vals.len() - 1];
+    let n = trimmed.len();
     Some(if n % 2 == 1 {
-        vals[n / 2]
+        trimmed[n / 2]
     } else {
-        (vals[n / 2 - 1] + vals[n / 2]) / 2.0
+        (trimmed[n / 2 - 1] + trimmed[n / 2]) / 2.0
     })
 }
 
