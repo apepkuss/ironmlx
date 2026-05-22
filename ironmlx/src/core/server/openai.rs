@@ -706,13 +706,26 @@ where
 
                     #[cfg(feature = "p5h-profile")]
                     if let Some(handle) = content_span {
+                        // Close the content_span on BOTH send success and error
+                        // paths (prevents OPEN_SPAN_REGISTRY leak — per Codex
+                        // plan review v10 P2 #4).
                         crate::core::p5h::close_p5h_span(
                             &p5h_ctx,
                             handle,
                             content_send_end_ns,
                             crate::core::p5h::SpanFields::default(),
                         );
-                        root_guard.close_success(content_send_end_ns);
+                        // Per Codex T0a.14 review: root closes as success ONLY
+                        // when first content was actually delivered. When
+                        // tx.send fails (receiver/client disconnected before
+                        // first content arrived), leave root_guard open so
+                        // P5hRootCloseGuard::Drop runs close_at_aborted with
+                        // mode="aborted" — required by spec § 2.5a (design.md
+                        // line 576) for T0a/T5 structural validation +
+                        // coverage gate correctness.
+                        if content_send_result.is_ok() {
+                            root_guard.close_success(content_send_end_ns);
+                        }
                     }
 
                     if content_send_result.is_err() {
@@ -977,9 +990,9 @@ where
             #[cfg(feature = "p5h-profile")]
             let content_send_end_ns = crate::core::p5h::monotonic_ns_public();
 
-            // Close content span + root on BOTH send success and error
-            // paths (per Codex plan review v10 P2 #4). Closing first
-            // prevents registry leaks.
+            // Close the content_span on BOTH send success and error
+            // paths (prevents OPEN_SPAN_REGISTRY leak — per Codex plan
+            // review v10 P2 #4).
             #[cfg(feature = "p5h-profile")]
             if let Some(handle) = content_span {
                 crate::core::p5h::close_p5h_span(
@@ -988,10 +1001,20 @@ where
                     content_send_end_ns,
                     crate::core::p5h::SpanFields::default(),
                 );
-                // close_success enforces once-close discipline; panics if
-                // called twice (state-machine bug —
-                // is_first_non_empty_content stayed true across iterations).
-                root_guard.close_success(content_send_end_ns);
+                // Per Codex T0a.14 review: root closes as success ONLY
+                // when first content was actually delivered. When
+                // tx.send fails (receiver/client disconnected before
+                // first content arrived), leave root_guard open so
+                // P5hRootCloseGuard::Drop runs close_at_aborted with
+                // mode="aborted" — required by spec § 2.5a (design.md
+                // line 576) for T0a/T5 structural validation + coverage
+                // gate correctness. close_success enforces once-close
+                // discipline; panics if called twice (state-machine bug
+                // — is_first_non_empty_content stayed true across
+                // iterations).
+                if content_send_result.is_ok() {
+                    root_guard.close_success(content_send_end_ns);
+                }
             }
 
             if content_send_result.is_err() {
