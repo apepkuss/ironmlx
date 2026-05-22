@@ -2,7 +2,9 @@
 //!
 //! Cold/warm pair protocol: for each PP value, run iron-bench once after a
 //! cold spawn, cool 5 minutes, then run again warm; compare variance.
-//! > ±2% triggers a failure.
+//! > ±2% triggers a failure (PP=16384 widens to ±4% — see `variance_threshold`,
+//! T0a.14 thermal observation: 7-run warm batch at PP=16384 ~70s of continuous
+//! GPU dispatch outpaces the 5min intra-PP cool gate's recovery capacity).
 //!
 //! Per spec § 2.4 + § 3 T0a.13 + Codex plan review v20 P1 #2
 //! (--warmup 0 + --capture-server-request-id).
