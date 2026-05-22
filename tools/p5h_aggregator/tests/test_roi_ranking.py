@@ -24,6 +24,8 @@ from tools.p5h_aggregator.roi_ranking import (
     KERNEL_REWRITE_REALISTIC_HIGH,
     OP_LEVEL_REALISTIC_HIGH,
     PP_TARGET_GAINS,
+    SPEC_LANE_A_PP_SET,
+    SPEC_LANE_B_PP_SET,
     Candidate,
     FeasibilityVerdict,
     PerPpAggregate,
@@ -31,9 +33,12 @@ from tools.p5h_aggregator.roi_ranking import (
     compute_gap_weight,
     feasibility_verdict,
     is_kernel_bound,
+    observed_lane_for_pp,
     rank_p5i,
     rank_p5j,
     rank_top3_bottlenecks,
+    warn_lane_divergence,
+    wrapper_dominated_verdict_explanation,
     write_ranking_csv,
     write_verdict_json,
 )
@@ -176,7 +181,10 @@ def test_aggregate_per_pp_excludes_root_self_from_candidates():
     )
 
 
-def test_aggregate_per_pp_includes_synthesized_rows():
+def test_aggregate_per_pp_excludes_synthesized_rows():
+    """Fix C: ``unattributed_<span>`` synthesized residual rows are EXCLUDED
+    from the ROI candidate pool. They are not actionable optimization targets
+    and double-count the parent's exclusive_us (which already = residual)."""
     rows = [
         _root_row(pp=128, rid="r1", inclusive_us="1000.00"),
         _attribution_row(
@@ -191,8 +199,69 @@ def test_aggregate_per_pp_includes_synthesized_rows():
     agg = aggregate_per_pp(rows)
     assert (
         "unattributed_server_request_recv_to_first_content_sse_write"
-        in agg[128].by_span_exclusive_us
+        not in agg[128].by_span_exclusive_us
     )
+
+
+def test_aggregate_per_pp_excludes_all_unattributed_residuals():
+    """Fix C: every synthesized residual must be excluded regardless of parent."""
+    rows = [
+        _root_row(pp=128, rid="r1", inclusive_us="1000.00"),
+        _attribution_row(
+            pp=128,
+            request_id="r1",
+            span_name="real_op",
+            inclusive_us="100.00",
+            exclusive_us="100.00",
+        ),
+        _attribution_row(
+            pp=128,
+            request_id="r1",
+            span_name="unattributed_real_op",
+            span_kind="synthesized",
+            inclusive_us="50.00",
+            exclusive_us="50.00",
+        ),
+        _attribution_row(
+            pp=128,
+            request_id="r1",
+            span_name="unattributed_http_parse_render_tokenize",
+            span_kind="synthesized",
+            inclusive_us="42.00",
+            exclusive_us="42.00",
+        ),
+    ]
+    agg = aggregate_per_pp(rows)
+    assert "real_op" in agg[128].by_span_exclusive_us
+    for name in agg[128].by_span_exclusive_us:
+        assert not name.startswith("unattributed_"), (
+            f"synthesized residual {name} should not appear in ROI candidates"
+        )
+
+
+def test_aggregate_per_pp_sums_multi_emit_span_per_request():
+    """Fix A: multi-emit spans (gs_chunk_N, decoder_layer_N) are summed PER
+    REQUEST before median across requests, NOT per-record median."""
+    # Two requests at PP=8192, each emits gs_chunk_N 5 times of 100us each.
+    # Per-request total = 500us; root = 1000us; share = 0.5.
+    # WRONG (per-record median): 100us → share 0.1.
+    # RIGHT (per-request total median): 500us → share 0.5.
+    rows: list[dict] = []
+    for rid in ("r1", "r2"):
+        rows.append(_root_row(pp=8192, rid=rid, inclusive_us="1000.00"))
+        for _ in range(5):
+            rows.append(
+                _attribution_row(
+                    pp=8192,
+                    request_id=rid,
+                    span_name="gs_chunk_N",
+                    inclusive_us="100.00",
+                    exclusive_us="100.00",
+                )
+            )
+    agg = aggregate_per_pp(rows)
+    assert agg[8192].by_span_exclusive_us["gs_chunk_N"] == pytest.approx(500.0)
+    assert agg[8192].by_span["gs_chunk_N"] == pytest.approx(0.5)
 
 
 # --- rank_top3_bottlenecks ---
@@ -258,6 +327,8 @@ def test_rank_p5j_includes_pp_2048_through_16384():
 
 
 def test_rank_p5j_lane_b_caveat_in_notes():
+    """Fix B: lane comes from OBSERVED routing_path (gs_chunked → 'B'), not
+    spec partition. Caller must pass observed_lane dict."""
     per_pp = {
         4096: PerPpAggregate(
             pp=4096,
@@ -265,12 +336,27 @@ def test_rank_p5j_lane_b_caveat_in_notes():
             by_span_exclusive_us={"op_x": 100.0},
         )
     }
-    p5j = rank_p5j(per_pp)
+    p5j = rank_p5j(per_pp, observed_lane={4096: "B"})
     assert all(c.lane == "B" for c in p5j)
     assert any("lane_b_top_level_only" in c.notes for c in p5j)
 
 
 def test_rank_p5i_lane_a_no_caveat():
+    """Fix B: scheduler routing → 'A'."""
+    per_pp = {
+        128: PerPpAggregate(
+            pp=128,
+            root_inclusive_us_median=1000.0,
+            by_span_exclusive_us={"op_x": 100.0},
+        )
+    }
+    p5i = rank_p5i(per_pp, observed_lane={128: "A"})
+    assert all(c.lane == "A" for c in p5i)
+    assert not any("lane_b_top_level_only" in c.notes for c in p5i)
+
+
+def test_rank_p5i_unknown_observed_lane_marks_question():
+    """When no observed_lane supplied, lane defaults to '?'."""
     per_pp = {
         128: PerPpAggregate(
             pp=128,
@@ -279,8 +365,7 @@ def test_rank_p5i_lane_a_no_caveat():
         )
     }
     p5i = rank_p5i(per_pp)
-    assert all(c.lane == "A" for c in p5i)
-    assert not any("lane_b_top_level_only" in c.notes for c in p5i)
+    assert all(c.lane == "?" for c in p5i)
 
 
 def test_kernel_bound_candidate_gets_scope_gate_flag_and_higher_realistic():
@@ -294,7 +379,7 @@ def test_kernel_bound_candidate_gets_scope_gate_flag_and_higher_realistic():
             },
         )
     }
-    p5i = rank_p5i(per_pp)
+    p5i = rank_p5i(per_pp, observed_lane={128: "A"})
     kernel = next(c for c in p5i if c.span_name == "fused_sdpa")
     non_kernel = next(c for c in p5i if c.span_name == "scheduler_admission")
     assert kernel.scope_gate_trigger
@@ -437,14 +522,161 @@ def test_write_verdict_json_structure(tmp_path: Path):
             by_span_exclusive_us={"op_a": 300.0},
         )
     }
-    p5i = rank_p5i(per_pp)
+    obs = {128: "A"}
+    p5i = rank_p5i(per_pp, observed_lane=obs)
     out = tmp_path / "verdict.json"
-    verdict = write_verdict_json(per_pp, p5i, [], out)
+    verdict = write_verdict_json(per_pp, p5i, [], out, observed_lane=obs)
     payload = json.loads(out.read_text())
     assert payload["128"]["target_gain_pct"] == 0.24
-    assert payload["128"]["lane"] == "A"
+    # Fix B: per-PP entry carries spec_lane (partition) + observed_lane.
+    assert payload["128"]["spec_lane"] == "A"
+    assert payload["128"]["observed_lane"] == "A"
+    assert payload["128"]["lane"] == "A"  # backward-compat alias
     assert payload["128"]["verdict"] in {v.value for v in FeasibilityVerdict}
     assert verdict["128"]["candidate_count"] == 1
+
+
+# --- Fix B: observed_lane_for_pp + warn_lane_divergence ---
+
+
+def test_observed_lane_for_pp_scheduler_only():
+    rows = [
+        _root_row(pp=128, rid="r1", routing_path="scheduler"),
+        _attribution_row(
+            pp=128,
+            request_id="r1",
+            span_name="op_a",
+            routing_path="scheduler",
+        ),
+    ]
+    obs = observed_lane_for_pp(rows)
+    assert obs == {128: "A"}
+
+
+def test_observed_lane_for_pp_gs_chunked_at_lane_a_pp():
+    """Fix B canonical case: PP=2048 spec partition Lane A, but chat-template
+    overhead pushes prompt > prefill_chunk_size → observed gs_chunked = Lane B."""
+    rows = [
+        _root_row(pp=2048, rid="r1", routing_path="gs_chunked"),
+        _attribution_row(
+            pp=2048,
+            request_id="r1",
+            span_name="gs_chunk_N",
+            routing_path="gs_chunked",
+        ),
+    ]
+    obs = observed_lane_for_pp(rows)
+    assert obs == {2048: "B"}
+
+
+def test_observed_lane_for_pp_mixed():
+    rows = [
+        _root_row(pp=2048, rid="r1", routing_path="scheduler"),
+        _root_row(pp=2048, rid="r2", routing_path="gs_chunked"),
+    ]
+    obs = observed_lane_for_pp(rows)
+    assert obs == {2048: "mixed"}
+
+
+def test_warn_lane_divergence_emits_for_pp_2048():
+    """PP=2048 spec Lane A; observed Lane B → must warn."""
+    import io
+
+    buf = io.StringIO()
+    warn_lane_divergence({2048: "B"}, stream=buf)
+    out = buf.getvalue()
+    assert "PP=2048" in out
+    assert "observed_lane=B" in out
+    assert "spec partition lane=A" in out
+
+
+def test_warn_lane_divergence_silent_when_match():
+    import io
+
+    buf = io.StringIO()
+    warn_lane_divergence({128: "A", 4096: "B"}, stream=buf)
+    assert buf.getvalue() == ""
+
+
+def test_spec_lane_partitions_distinct():
+    """Sanity: SPEC_LANE_A / SPEC_LANE_B together cover the 6 measurement PPs."""
+    assert SPEC_LANE_A_PP_SET == {128, 512, 2048}
+    assert SPEC_LANE_B_PP_SET == {4096, 8192, 16384}
+    assert SPEC_LANE_A_PP_SET.isdisjoint(SPEC_LANE_B_PP_SET)
+
+
+# --- Fix D: wrapper-dominance verdict ---
+
+
+def test_wrapper_dominance_lane_b_gs_chunk_n_returns_explanation():
+    """Fix D: gs_chunk_N > 50% of root on Lane B → explanation populated."""
+    agg = PerPpAggregate(
+        pp=8192,
+        root_inclusive_us_median=1000.0,
+        by_span_exclusive_us={"gs_chunk_N": 900.0},
+    )
+    agg.by_span = {"gs_chunk_N": 0.90}
+    explanation = wrapper_dominated_verdict_explanation(8192, "B", agg)
+    assert explanation is not None
+    assert "gs_chunk_N" in explanation
+    assert "P5h+1" in explanation
+
+
+def test_wrapper_dominance_lane_a_first_token_sampling_returns_explanation():
+    """Fix D: first_token_sampling > 50% on Lane A → MLX lazy materialization
+    wrapper explanation."""
+    agg = PerPpAggregate(
+        pp=128,
+        root_inclusive_us_median=1000.0,
+        by_span_exclusive_us={"first_token_sampling": 968.0},
+    )
+    agg.by_span = {"first_token_sampling": 0.968}
+    explanation = wrapper_dominated_verdict_explanation(128, "A", agg)
+    assert explanation is not None
+    assert "first_token_sampling" in explanation
+    assert "lazy materialization" in explanation
+
+
+def test_wrapper_dominance_below_threshold_no_explanation():
+    agg = PerPpAggregate(
+        pp=128,
+        root_inclusive_us_median=1000.0,
+        by_span_exclusive_us={"first_token_sampling": 400.0},
+    )
+    agg.by_span = {"first_token_sampling": 0.40}
+    explanation = wrapper_dominated_verdict_explanation(128, "A", agg)
+    assert explanation is None
+
+
+def test_feasibility_verdict_wrapper_dominance_returns_data_insufficient():
+    """Fix D: when gs_chunk_N dominates Lane B PP, verdict = data_insufficient
+    even if candidates exist (no actionable target inside the wrapper)."""
+    agg = PerPpAggregate(
+        pp=8192,
+        root_inclusive_us_median=1000.0,
+        by_span_exclusive_us={"gs_chunk_N": 900.0},
+    )
+    agg.by_span = {"gs_chunk_N": 0.90}
+    cands = [_candidate("gs_chunk_N", 8192, 0.90, scope_gate=False)]
+    v = feasibility_verdict([], cands, pp=8192, per_pp_agg=agg, observed_lane="B")
+    assert v == FeasibilityVerdict.DATA_INSUFFICIENT
+
+
+def test_feasibility_verdict_no_wrapper_uses_existing_4_tier_logic():
+    """Without wrapper dominance, the 4-tier logic still applies."""
+    agg = PerPpAggregate(
+        pp=128,
+        root_inclusive_us_median=1000.0,
+        by_span_exclusive_us={"op_a": 300.0, "op_b": 300.0},
+    )
+    agg.by_span = {"op_a": 0.30, "op_b": 0.30}
+    cands = [
+        _candidate("op_a", 128, 0.30, scope_gate=False),
+        _candidate("op_b", 128, 0.30, scope_gate=False),
+    ]
+    v = feasibility_verdict(cands, [], pp=128, per_pp_agg=agg, observed_lane="A")
+    # Same as test_feasibility_verdict_yes_when_op_only_meets_target.
+    assert v == FeasibilityVerdict.YES
 
 
 # --- end-to-end CLI ---

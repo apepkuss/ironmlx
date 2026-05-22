@@ -369,6 +369,74 @@ def test_write_summary_csv_top3_ordering(tmp_path: Path):
     assert float(row["top1_share"]) > 0.9
 
 
+def test_top3_bottlenecks_sums_multi_emit_span_per_request(tmp_path: Path):
+    """Fix A: multi-emit spans (e.g. gs_chunk_N with N records/request) must
+    be summed per-request BEFORE median across requests, otherwise the per-
+    record median drastically under-reports per-request cost.
+
+    Fixture: root [0, 100us]. 2 children of same span_name 'multi_emit' each
+    20us → per-request total exclusive = 40us → share = 0.40.
+    WRONG (per-record median): single child = 20us → share = 0.20.
+    """
+    rid = "rid_multi"
+    spans = [
+        parse_line(
+            _build_line(
+                request_id=rid,
+                span_id=1,
+                parent_span_id="null",
+                span_name="server_request_recv_to_first_content_sse_write",
+                parent_span="null",
+                start_ns=0,
+                end_ns=100_000,
+            )
+        ),
+        # Two children of same name, each 20us = 40us total exclusive.
+        parse_line(
+            _build_line(
+                request_id=rid,
+                span_id=10,
+                parent_span_id="1",
+                span_name="multi_emit",
+                parent_span="server_request_recv_to_first_content_sse_write",
+                start_ns=10_000,
+                end_ns=30_000,
+            )
+        ),
+        parse_line(
+            _build_line(
+                request_id=rid,
+                span_id=11,
+                parent_span_id="1",
+                span_name="multi_emit",
+                parent_span="server_request_recv_to_first_content_sse_write",
+                start_ns=40_000,
+                end_ns=60_000,
+            )
+        ),
+    ]
+    attr = build_attribution(spans, pp="2048")
+    out = tmp_path / "summary.csv"
+    write_summary_csv([attr], out)
+    rows = list(csv.DictReader(out.open()))
+    assert len(rows) == 1
+    row = rows[0]
+    # Top-1 must be 'unattributed_root' (~0.6 share) — but 'multi_emit' must
+    # report PER-REQUEST total share = 0.40 (= 40us / 100us), NOT 0.20.
+    # Walk all top columns to find 'multi_emit'.
+    multi_share = None
+    for i in (1, 2, 3):
+        if row[f"top{i}_span_name"] == "multi_emit":
+            multi_share = float(row[f"top{i}_share"])
+    assert multi_share is not None, (
+        "multi_emit span should appear in top-3; "
+        f"row keys: {dict((k, row[k]) for k in row if 'top' in k)}"
+    )
+    assert multi_share == pytest.approx(0.40, abs=0.01), (
+        f"per-request sum aggregation expected share=0.40, got {multi_share}"
+    )
+
+
 # --- end-to-end aggregator CLI: coverage gate exit ---
 
 

@@ -297,23 +297,45 @@ def _top3_bottlenecks_for_pp(
     attributions_for_pp: list[RequestAttribution],
 ) -> list[tuple[str, float]]:
     """Per spec § 1.2 ROI gate: rank by exclusive_us / root.inclusive_us share,
-    averaged across requests at this PP.
+    median across requests at this PP.
+
+    Fix A (Codex T5-R review): multi-emit spans like ``gs_chunk_N``,
+    ``decoder_layer_N``, GDN/MoE substeps emit MULTIPLE tree records per request
+    (one per chunk / per layer / per substep iteration). The correct per-PP
+    median is over the PER-REQUEST TOTAL (sum across same-name records within
+    one request), NOT over individual records. Taking median across individual
+    records underreports the per-request cost by a factor equal to the per-
+    request emit count (e.g. PP=2048 gs_chunk_N: 2 records/request × 7 requests
+    = 14 records; per-record median ≈ 1/2 of per-request total).
 
     Uses tree exclusive + synthesized residual leaves (avoids double-counting
     inclusive_us up the parent chain). Returns top-3 ``[(span_name, share), ...]``.
     """
-    share_acc: dict[str, list[float]] = defaultdict(list)
+    # First: build per-(request, span_name) sums of exclusive_us (tree) +
+    # inclusive_us (synthesized residual leaves). One sum per request per name.
+    per_req_totals: dict[str, dict[str, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    root_us_by_req: dict[str, float] = {}
     for attr in attributions_for_pp:
-        root_us = attr.root.inclusive_us
-        if root_us <= 0:
+        if attr.root.inclusive_us <= 0:
             continue
+        root_us_by_req[attr.request_id] = attr.root.inclusive_us
         for s in attr.tree_spans:
             if s.parent_span_id is None:
-                continue  # skip root itself; its exclusive is unattributed already covered
+                continue  # skip root itself
             ex = attr.exclusive_us.get(s.span_id, 0.0)
-            share_acc[s.span_name].append(ex / root_us)
+            per_req_totals[attr.request_id][s.span_name] += ex
         for r in attr.residuals:
-            share_acc[r.span_name].append(r.inclusive_us / root_us)
+            per_req_totals[attr.request_id][r.span_name] += r.inclusive_us
+
+    # Second: per-PP per-span share series = per-request total / per-request
+    # root, then median across requests.
+    share_acc: dict[str, list[float]] = defaultdict(list)
+    for rid, names in per_req_totals.items():
+        root_us = root_us_by_req[rid]
+        for name, total in names.items():
+            share_acc[name].append(total / root_us)
 
     avg = [
         (name, statistics.median(shares))
