@@ -427,6 +427,15 @@ impl GatedDeltaNet {
         let batch = dims[0];
         let seq = dims[1];
 
+        // Hoist commonly-used dim accessors to forward-scope so Step 1a/1b's
+        // expanded wraps (qkv/z and b/a slicing inside the substep closures)
+        // can reference them. Same constants are also consumed by Step 2a/2c
+        // (conv_dim) and Step 3+ downstream — single source of truth avoids
+        // re-evaluating `self.cfg.*()` at multiple sites.
+        let conv_dim = self.cfg.conv_dim();
+        let value_dim = self.cfg.value_dim();
+        let num_v_heads = self.cfg.num_v_heads;
+
         // P5g T0 Layer 1 entry: materialize input + cache states before timer starts.
         // Drains prior lazy ops so they're not attributed to GatedDeltaNet's forward
         // cost; also forces cache.conv_state + cache.recurrent_state to be tangible
@@ -480,91 +489,15 @@ impl GatedDeltaNet {
         };
 
         // Step 1: fused projections + slice (was 4 quantized matmuls; now 2).
-        // Step 1a: in_proj_qkvz
-        #[cfg(feature = "p5g-profile")]
-        let _p5g_step_start_1a = if matches!(_p5g_mode, ProfileMode::Layer2) {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        let qkvz = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_1a_in_proj_qkvz",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || self.in_proj_qkvz.forward_on(x, target),
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
-            {
-                self.in_proj_qkvz.forward_on(x, target)?
-            }
-        };
-        // Step 1a elapsed push
-        #[cfg(feature = "p5g-profile")]
-        {
-            if let Some(start) = _p5g_step_start_1a {
-                mlx::transforms::eval(&[&qkvz])?;
-                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
-            }
-        }
-
-        // Step 1b: in_proj_ba
-        #[cfg(feature = "p5g-profile")]
-        let _p5g_step_start_1b = if matches!(_p5g_mode, ProfileMode::Layer2) {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        let ba = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_1b_in_proj_ba",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || self.in_proj_ba.forward_on(x, target),
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
-            {
-                self.in_proj_ba.forward_on(x, target)?
-            }
-        };
-        // Step 1b elapsed push
-        #[cfg(feature = "p5g-profile")]
-        {
-            if let Some(start) = _p5g_step_start_1b {
-                mlx::transforms::eval(&[&ba])?;
-                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
-            }
-        }
-
-        let conv_dim = self.cfg.conv_dim();
-        let value_dim = self.cfg.value_dim();
-        let num_v_heads = self.cfg.num_v_heads;
-
-        let qkv = mlx::ops::indexing::slice_strided(
-            &qkvz,
-            &[0_i32, 0, 0][..],
-            &[batch, seq, conv_dim][..],
-            &[1_i32, 1, 1][..],
-        )?;
-        let z = mlx::ops::indexing::slice_strided(
-            &qkvz,
-            &[0_i32, 0, conv_dim][..],
-            &[batch, seq, conv_dim + value_dim][..],
-            &[1_i32, 1, 1][..],
-        )?;
-
-        // Step 1b: zero out qkv at pad positions before conv1d.
+        // Step 1a: in_proj_qkvz → split qkvz into (qkv, z), then mask-zero qkv
+        // at pad positions. The slicing + mask multiply are bundled into this
+        // wrap (rather than living as standalone code after Step 1b) because
+        // they are the immediate downstream consumers of qkvz; under the P5h
+        // T0a coverage gate the previously-orphaned transition code surfaced
+        // as a ~20 us/layer attention_path gap. Expanding the wrap to cover
+        // {forward + qkv/z slice + mask multiply} closes that gap.
         //
+        // Mask-zero rationale (preserved from the prior standalone block):
         // The conv1d is temporal — its output at real-token position t uses
         // input positions `t-(k-1)..t` as history. Under right-padded batched
         // prefill, real qkv occupies positions `[0, L_i)` and the trailing
@@ -587,26 +520,145 @@ impl GatedDeltaNet {
         // however, `z` is only consumed at REAL positions (gated_delta_step
         // emits zero at pad positions), so pad-position `z` values are
         // discarded anyway. We zero `qkv` only.
-        let qkv = if let Some(m) = mask {
-            let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
-            let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
-            &qkv * &m_broadcast
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_1a = if matches!(_p5g_mode, ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
         } else {
-            qkv
+            None
         };
+        let (qkv, z) = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_1a_in_proj_qkvz",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<(Array, Array)> {
+                        let qkvz = self.in_proj_qkvz.forward_on(x, target)?;
+                        let qkv = mlx::ops::indexing::slice_strided(
+                            &qkvz,
+                            &[0_i32, 0, 0][..],
+                            &[batch, seq, conv_dim][..],
+                            &[1_i32, 1, 1][..],
+                        )?;
+                        let z = mlx::ops::indexing::slice_strided(
+                            &qkvz,
+                            &[0_i32, 0, conv_dim][..],
+                            &[batch, seq, conv_dim + value_dim][..],
+                            &[1_i32, 1, 1][..],
+                        )?;
+                        let qkv = if let Some(m) = mask {
+                            let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
+                            let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
+                            &qkv * &m_broadcast
+                        } else {
+                            qkv
+                        };
+                        Ok((qkv, z))
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                let qkvz = self.in_proj_qkvz.forward_on(x, target)?;
+                let qkv = mlx::ops::indexing::slice_strided(
+                    &qkvz,
+                    &[0_i32, 0, 0][..],
+                    &[batch, seq, conv_dim][..],
+                    &[1_i32, 1, 1][..],
+                )?;
+                let z = mlx::ops::indexing::slice_strided(
+                    &qkvz,
+                    &[0_i32, 0, conv_dim][..],
+                    &[batch, seq, conv_dim + value_dim][..],
+                    &[1_i32, 1, 1][..],
+                )?;
+                let qkv = if let Some(m) = mask {
+                    let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
+                    let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
+                    &qkv * &m_broadcast
+                } else {
+                    qkv
+                };
+                (qkv, z)
+            }
+        };
+        // Step 1a elapsed push: eval the actual outputs of the expanded wrap
+        // (qkv post-mask + z) so the timer captures the same work the span
+        // covers.
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_1a {
+                mlx::transforms::eval(&[&qkv, &z])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
-        let b = mlx::ops::indexing::slice_strided(
-            &ba,
-            &[0_i32, 0, 0][..],
-            &[batch, seq, num_v_heads][..],
-            &[1_i32, 1, 1][..],
-        )?;
-        let a = mlx::ops::indexing::slice_strided(
-            &ba,
-            &[0_i32, 0, num_v_heads][..],
-            &[batch, seq, num_v_heads + num_v_heads][..],
-            &[1_i32, 1, 1][..],
-        )?;
+        // Step 1b: in_proj_ba → split ba into (b, a). Same coverage-gap
+        // motivation as Step 1a: slicing is bundled into the wrap so the
+        // immediate downstream consumer of ba is included in the substep
+        // timing/attribution.
+        #[cfg(feature = "p5g-profile")]
+        let _p5g_step_start_1b = if matches!(_p5g_mode, ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let (b, a) = {
+            #[cfg(feature = "p5h-profile")]
+            {
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gda_step_1b_in_proj_ba",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<(Array, Array)> {
+                        let ba = self.in_proj_ba.forward_on(x, target)?;
+                        let b = mlx::ops::indexing::slice_strided(
+                            &ba,
+                            &[0_i32, 0, 0][..],
+                            &[batch, seq, num_v_heads][..],
+                            &[1_i32, 1, 1][..],
+                        )?;
+                        let a = mlx::ops::indexing::slice_strided(
+                            &ba,
+                            &[0_i32, 0, num_v_heads][..],
+                            &[batch, seq, num_v_heads + num_v_heads][..],
+                            &[1_i32, 1, 1][..],
+                        )?;
+                        Ok((b, a))
+                    },
+                )?
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                let ba = self.in_proj_ba.forward_on(x, target)?;
+                let b = mlx::ops::indexing::slice_strided(
+                    &ba,
+                    &[0_i32, 0, 0][..],
+                    &[batch, seq, num_v_heads][..],
+                    &[1_i32, 1, 1][..],
+                )?;
+                let a = mlx::ops::indexing::slice_strided(
+                    &ba,
+                    &[0_i32, 0, num_v_heads][..],
+                    &[batch, seq, num_v_heads + num_v_heads][..],
+                    &[1_i32, 1, 1][..],
+                )?;
+                (b, a)
+            }
+        };
+        // Step 1b elapsed push: eval the wrap's actual outputs (b, a).
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start) = _p5g_step_start_1b {
+                mlx::transforms::eval(&[&b, &a])?;
+                _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
 
         // P1 fix: detect ablate-conv BEFORE Steps 2a/2b so the full concat+conv1d+silu
         // graph is never constructed. The substitute (qkv.clone()) is shape-preserving:
