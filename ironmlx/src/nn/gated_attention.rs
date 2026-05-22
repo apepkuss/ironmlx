@@ -279,7 +279,19 @@ impl GatedAttention {
                                     &lens_owned
                                 }
                             };
-                            c.update_and_fetch_on(&k, &v, lens_ref, target)?
+                            // T4.3: wrap KVCache::update_and_fetch_on in a
+                            // `cache_state_update` tree span. Parent: the
+                            // enclosing `kv_mask_update` substep span. Caller-
+                            // site wrap so `layer_idx` is available for
+                            // SpanFields.
+                            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                                "cache_state_update",
+                                || crate::core::p5h::SpanFields {
+                                    layer_idx: Some(layer_idx),
+                                    ..Default::default()
+                                },
+                                || c.update_and_fetch_on(&k, &v, lens_ref, target),
+                            )?
                         }
                         None => (k, v),
                     };

@@ -960,7 +960,24 @@ impl GatedDeltaNet {
                                         vec![batch, total_len, conv_dim].as_slice(),
                                     )?,
                                 };
-                                c.update_conv(new_conv_state);
+                                // T4.3: wrap GatedDeltaCache::update_conv field
+                                // assignment in `cache_state_update` child span
+                                // (parent: `gda_step_2c_update_conv_state`).
+                                // The assignment itself is ~0us (Arc share); the
+                                // span exists to attribute the mutation cost
+                                // explicitly in the T5 tree so the substep's
+                                // residual reflects only the new_conv_state
+                                // build (slice / take_along_axis).
+                                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                                    "cache_state_update",
+                                    || crate::core::p5h::SpanFields {
+                                        layer_idx: Some(layer_idx),
+                                        ..Default::default()
+                                    },
+                                    || {
+                                        c.update_conv(new_conv_state);
+                                    },
+                                );
                             }
                         }
                         Ok(())
@@ -1480,20 +1497,38 @@ impl GatedDeltaNet {
                             }
                         }
 
-                        // Step 7e: update cache recurrent_state, advance offset
+                        // Step 7e: update cache recurrent_state, advance offset.
+                        // T4.3: wrap the GatedDeltaCache::update_recurrent +
+                        // advance pair in a `cache_state_update` child span
+                        // (parent: `gda_step_7_kernel_and_cache_update`).
+                        // Both operations are CPU-only (Arc share / per-row
+                        // offset increment); the span exists to attribute the
+                        // mutation cost explicitly in the T5 tree, separating
+                        // it from the kernel dispatch + state construction
+                        // cost that dominates the Step 7 substep.
                         if let Some(c) = cache.as_deref_mut() {
-                            c.update_recurrent(new_state);
-                            let lens_owned: Vec<i32>;
-                            let lens_ref: &[i32] = match per_row_lens {
-                                Some(l) => l,
-                                None => {
-                                    // Non-batched single-stream caller:
-                                    // lockstep-equivalent uniform.
-                                    lens_owned = vec![seq; batch as usize];
-                                    &lens_owned
-                                }
-                            };
-                            c.advance(lens_ref)?;
+                            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                                "cache_state_update",
+                                || crate::core::p5h::SpanFields {
+                                    layer_idx: Some(layer_idx),
+                                    ..Default::default()
+                                },
+                                || -> Result<()> {
+                                    c.update_recurrent(new_state);
+                                    let lens_owned: Vec<i32>;
+                                    let lens_ref: &[i32] = match per_row_lens {
+                                        Some(l) => l,
+                                        None => {
+                                            // Non-batched single-stream caller:
+                                            // lockstep-equivalent uniform.
+                                            lens_owned = vec![seq; batch as usize];
+                                            &lens_owned
+                                        }
+                                    };
+                                    c.advance(lens_ref)?;
+                                    Ok(())
+                                },
+                            )?;
                         }
                         Ok(y)
                     },
