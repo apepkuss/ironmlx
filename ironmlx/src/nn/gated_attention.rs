@@ -166,10 +166,6 @@ impl GatedAttention {
         layer_idx: i32,
     ) -> Result<Array> {
         let target = target.into();
-        // `layer_idx` is signature-only plumbing at T0a — T2 fills the
-        // full-attn substep instrumentation that will consume it. Silence the
-        // unused-variable warning for now.
-        let _ = layer_idx;
 
         // Two-step bind: x.shape() returns an owned Shape; we bind it to extend
         // its lifetime past .as_slice(), since the slice borrows from the Shape.
@@ -181,105 +177,280 @@ impl GatedAttention {
         let h_kv = self.cfg.num_kv_heads;
         let d = self.cfg.head_dim;
 
-        // Step 1: project Q (2x), K, V.
-        let q_full = self.q_proj.forward_on(x, target)?; // [B, S, Hq*D*2]
-        let k = self.k_proj.forward_on(x, target)?; // [B, S, Hkv*D]
-        let v = self.v_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+        #[cfg(feature = "p5h-profile")]
+        {
+            // T2.2: 7-substep instrumentation, all under the `attention_path`
+            // wrapper opened by DecoderLayerMoe::forward_on (T0a.11 step 1).
+            // Substep boundaries verified against this file's pre-T2 source
+            // (lines 184-282 at HEAD 9e746bc) per spec § 2.2 #5.
+            //
+            // The `try_` variant no-ops when no active P5H_CURRENT_TRACE
+            // (CLI / standalone tests path) per Codex v12 P1 #1.
 
-        // Step 2: per-head reshape Q to [B, S, Hq, D*2], then split last axis into
-        // (queries [B,S,Hq,D], gate [B,S,Hq,D]). Per-head reshape BEFORE split is
-        // critical: it matches q_proj weight matrix row layout in mlx-lm.
-        let q_per_head = q_full.reshape_on((batch, seq, h_q, d * 2), target)?;
-        let mut parts = mlx::ops::shape::split_n_on(&q_per_head, 2, -1, target)?;
-        // split_n_on returns Vec<Array>; index 0 = queries, index 1 = gate.
-        // Pop in reverse to avoid index-shift surprises (P3b1 polish convention).
-        let gate_per_head = parts.pop().expect("split_n_on returned <2 elements");
-        let queries = parts.pop().expect("split_n_on returned <2 elements");
+            // Substep 1: q_gate_k_v_proj — 3 Linear forwards (not fused).
+            let (q_full, k, v) = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "q_gate_k_v_proj",
+                || crate::core::p5h::SpanFields {
+                    layer_idx: Some(layer_idx),
+                    ..Default::default()
+                },
+                || -> Result<(Array, Array, Array)> {
+                    let q_full = self.q_proj.forward_on(x, target)?; // [B, S, Hq*D*2]
+                    let k = self.k_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+                    let v = self.v_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+                    Ok((q_full, k, v))
+                },
+            )?;
 
-        // Gate is fed flat to sigmoid + element-wise mul later: [B, S, Hq*D].
-        let gate_flat = gate_per_head.reshape_on((batch, seq, h_q * d), target)?;
+            // Substep 2: q_split_norm_reshape — per-head reshape Q, split into
+            // (queries, gate); gate_flat reshape; q_norm + transpose to SDPA
+            // layout; k reshape + k_norm + transpose; v reshape + transpose.
+            // Per-head reshape BEFORE split matches q_proj weight row layout in
+            // mlx-lm. mlx-lm applies q_norm/k_norm BEFORE transpose; either
+            // order is mathematically identical (RMSNorm is on last axis = D).
+            let (queries, k, v, gate_flat) =
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "q_split_norm_reshape",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<(Array, Array, Array, Array)> {
+                        let q_per_head = q_full.reshape_on((batch, seq, h_q, d * 2), target)?;
+                        let mut parts = mlx::ops::shape::split_n_on(&q_per_head, 2, -1, target)?;
+                        // split_n_on returns Vec<Array>; index 0 = queries, index 1 = gate.
+                        // Pop in reverse to avoid index-shift surprises (P3b1 polish convention).
+                        let gate_per_head = parts.pop().expect("split_n_on returned <2 elements");
+                        let queries = parts.pop().expect("split_n_on returned <2 elements");
+                        // Gate is fed flat to sigmoid + element-wise mul later: [B, S, Hq*D].
+                        let gate_flat = gate_per_head.reshape_on((batch, seq, h_q * d), target)?;
+                        let queries = self.q_norm.forward_on(&queries, target)?;
+                        let queries = queries.transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+                        let k = k.reshape_on((batch, seq, h_kv, d), target)?;
+                        let k = self.k_norm.forward_on(&k, target)?;
+                        let k = k.transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+                        let v = v
+                            .reshape_on((batch, seq, h_kv, d), target)?
+                            .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+                        Ok((queries, k, v, gate_flat))
+                    },
+                )?;
 
-        // Step 3: q_norm on per-head queries (last axis = D), then transpose to SDPA
-        // layout [B, Hq, S, D]. mlx-lm applies q_norm BEFORE transpose; either order
-        // is mathematically identical (RMSNorm is on last axis = D) — match mlx-lm.
-        let queries = self.q_norm.forward_on(&queries, target)?;
-        let queries = queries.transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+            // Substep 3: mrope_apply — fused MetalKernel rotates Q + K (P3b1).
+            let (queries, k) = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "mrope_apply",
+                || crate::core::p5h::SpanFields {
+                    layer_idx: Some(layer_idx),
+                    ..Default::default()
+                },
+                || -> Result<(Array, Array)> { mrope.apply(&queries, &k, cos, sin) },
+            )?;
 
-        // Step 4: reshape K to per-head, k_norm, transpose. Same for V (no norm).
-        let k = k.reshape_on((batch, seq, h_kv, d), target)?;
-        let k = self.k_norm.forward_on(&k, target)?;
-        let k = k.transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+            // Substep 4: kv_mask_update — (a) zero out K, V at pad positions via
+            // the batched-prefill validity mask (broadcasts [B, T] -> [B, 1, T, 1])
+            // so decode-time cache reads see zero contribution at pad slots;
+            // (b) cache.update_and_fetch_on returns (k_full, v_full).
+            let (k_full, v_full) = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "kv_mask_update",
+                || crate::core::p5h::SpanFields {
+                    layer_idx: Some(layer_idx),
+                    ..Default::default()
+                },
+                || -> Result<(Array, Array)> {
+                    let (k, v) = if let Some(vm) = kv_validity_mask {
+                        let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
+                        let vm_broadcast =
+                            vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
+                        let k_masked = &k * &vm_broadcast;
+                        let v_masked = &v * &vm_broadcast;
+                        (k_masked, v_masked)
+                    } else {
+                        (k, v)
+                    };
+                    let out = match cache {
+                        Some(c) => {
+                            let lens_owned: Vec<i32>;
+                            let lens_ref: &[i32] = match per_row_lens {
+                                Some(l) => l,
+                                None => {
+                                    // Non-batched single-stream caller (e.g., GenerationStream):
+                                    // construct lockstep-equivalent uniform lens from K seq dim.
+                                    lens_owned = vec![seq; batch as usize];
+                                    &lens_owned
+                                }
+                            };
+                            c.update_and_fetch_on(&k, &v, lens_ref, target)?
+                        }
+                        None => (k, v),
+                    };
+                    Ok(out)
+                },
+            )?;
 
-        let v = v
-            .reshape_on((batch, seq, h_kv, d), target)?
-            .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+            // Substep 5: fused_sdpa — explicit array mask (batched prefill)
+            // routes via mask_mode="" + mask_arr=Some; otherwise "causal"
+            // (lower-right alignment) for single-stream + decode (T_q=1).
+            let attn_out = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "fused_sdpa",
+                || crate::core::p5h::SpanFields {
+                    layer_idx: Some(layer_idx),
+                    ..Default::default()
+                },
+                || -> Result<Array> {
+                    let out = match mask {
+                        None => mlx::fast::scaled_dot_product_attention_on(
+                            &queries, &k_full, &v_full, self.scale, "causal", None, None, target,
+                        )?,
+                        Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                            &queries,
+                            &k_full,
+                            &v_full,
+                            self.scale,
+                            "",
+                            Some(m),
+                            None,
+                            target,
+                        )?,
+                    };
+                    Ok(out)
+                },
+            )?;
 
-        // Step 5: rotate Q + K via fused MetalKernel (P3b1).
-        let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+            // Substep 6: gate_sigmoid_mul — reshape attn out [B, Hq, S, D] ->
+            // [B, S, Hq*D], apply sigmoid gate, element-wise multiply.
+            let gated = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "gate_sigmoid_mul",
+                || crate::core::p5h::SpanFields {
+                    layer_idx: Some(layer_idx),
+                    ..Default::default()
+                },
+                || -> Result<Array> {
+                    let attn_out = attn_out
+                        .transpose_axes_on(&[0, 2, 1, 3][..], target)?
+                        .reshape_on((batch, seq, h_q * d), target)?;
+                    let gate_sig = gate_flat.sigmoid_on(target)?;
+                    // &Array * &Array returns Array (panic-on-err overload), not Result<Array>.
+                    Ok(&attn_out * &gate_sig)
+                },
+            )?;
 
-        // Step 5b (batched prefill): zero out K, V at pad positions before
-        // writing to the cache. The [B, T] boolean validity mask broadcasts
-        // to [B, num_kv_heads=1 dim, T, head_dim=1 dim] for the multiply.
-        // Decode-time reads of the cache then see zero K, V at pad slots →
-        // zero attention contribution → no contamination of real outputs.
-        let (k, v) = if let Some(vm) = kv_validity_mask {
-            let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
-            let vm_broadcast = vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
-            let k_masked = &k * &vm_broadcast;
-            let v_masked = &v * &vm_broadcast;
-            (k_masked, v_masked)
-        } else {
-            (k, v)
-        };
+            // Substep 7: o_proj — final Linear projection.
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "o_proj",
+                || crate::core::p5h::SpanFields {
+                    layer_idx: Some(layer_idx),
+                    ..Default::default()
+                },
+                || self.o_proj.forward_on(&gated, target),
+            )
+        }
 
-        // Step 6: KV cache route + SDPA. The explicit array mask (when
-        // provided by the batched-prefill caller) routes via mask_mode=""
-        // + mask_arr=Some; otherwise the kernel runs in "causal" mode
-        // (lower-right alignment) which is correct for the single-stream
-        // path and for decode-time (T_q=1) calls.
-        let (k_full, v_full) = match cache {
-            Some(c) => {
-                let lens_owned: Vec<i32>;
-                let lens_ref: &[i32] = match per_row_lens {
-                    Some(l) => l,
-                    None => {
-                        // Non-batched single-stream caller (e.g., GenerationStream):
-                        // construct lockstep-equivalent uniform lens from the K seq dim.
-                        lens_owned = vec![seq; batch as usize];
-                        &lens_owned
-                    }
-                };
-                c.update_and_fetch_on(&k, &v, lens_ref, target)?
-            }
-            None => (k, v),
-        };
-        let attn_out = match mask {
-            None => mlx::fast::scaled_dot_product_attention_on(
-                &queries, &k_full, &v_full, self.scale, "causal", None, None, target,
-            )?,
-            Some(m) => mlx::fast::scaled_dot_product_attention_on(
-                &queries,
-                &k_full,
-                &v_full,
-                self.scale,
-                "",
-                Some(m),
-                None,
-                target,
-            )?,
-        };
+        #[cfg(not(feature = "p5h-profile"))]
+        {
+            // Production build: layer_idx is signature-only plumbing (consumed
+            // only by the p5h-profile substep spans above).
+            let _ = layer_idx;
 
-        // Step 7: reshape attn out [B, Hq, S, D] -> [B, S, Hq*D], apply sigmoid gate,
-        // o_proj.
-        let attn_out = attn_out
-            .transpose_axes_on(&[0, 2, 1, 3][..], target)?
-            .reshape_on((batch, seq, h_q * d), target)?;
+            // Step 1: project Q (2x), K, V.
+            let q_full = self.q_proj.forward_on(x, target)?; // [B, S, Hq*D*2]
+            let k = self.k_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+            let v = self.v_proj.forward_on(x, target)?; // [B, S, Hkv*D]
 
-        let gate_sig = gate_flat.sigmoid_on(target)?;
-        // &Array * &Array returns Array (panic-on-err overload), not Result<Array>.
-        let gated = &attn_out * &gate_sig;
+            // Step 2: per-head reshape Q to [B, S, Hq, D*2], then split last axis into
+            // (queries [B,S,Hq,D], gate [B,S,Hq,D]). Per-head reshape BEFORE split is
+            // critical: it matches q_proj weight matrix row layout in mlx-lm.
+            let q_per_head = q_full.reshape_on((batch, seq, h_q, d * 2), target)?;
+            let mut parts = mlx::ops::shape::split_n_on(&q_per_head, 2, -1, target)?;
+            // split_n_on returns Vec<Array>; index 0 = queries, index 1 = gate.
+            // Pop in reverse to avoid index-shift surprises (P3b1 polish convention).
+            let gate_per_head = parts.pop().expect("split_n_on returned <2 elements");
+            let queries = parts.pop().expect("split_n_on returned <2 elements");
 
-        self.o_proj.forward_on(&gated, target)
+            // Gate is fed flat to sigmoid + element-wise mul later: [B, S, Hq*D].
+            let gate_flat = gate_per_head.reshape_on((batch, seq, h_q * d), target)?;
+
+            // Step 3: q_norm on per-head queries (last axis = D), then transpose to SDPA
+            // layout [B, Hq, S, D]. mlx-lm applies q_norm BEFORE transpose; either order
+            // is mathematically identical (RMSNorm is on last axis = D) — match mlx-lm.
+            let queries = self.q_norm.forward_on(&queries, target)?;
+            let queries = queries.transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+
+            // Step 4: reshape K to per-head, k_norm, transpose. Same for V (no norm).
+            let k = k.reshape_on((batch, seq, h_kv, d), target)?;
+            let k = self.k_norm.forward_on(&k, target)?;
+            let k = k.transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+
+            let v = v
+                .reshape_on((batch, seq, h_kv, d), target)?
+                .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+
+            // Step 5: rotate Q + K via fused MetalKernel (P3b1).
+            let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+
+            // Step 5b (batched prefill): zero out K, V at pad positions before
+            // writing to the cache. The [B, T] boolean validity mask broadcasts
+            // to [B, num_kv_heads=1 dim, T, head_dim=1 dim] for the multiply.
+            // Decode-time reads of the cache then see zero K, V at pad slots →
+            // zero attention contribution → no contamination of real outputs.
+            let (k, v) = if let Some(vm) = kv_validity_mask {
+                let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
+                let vm_broadcast = vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
+                let k_masked = &k * &vm_broadcast;
+                let v_masked = &v * &vm_broadcast;
+                (k_masked, v_masked)
+            } else {
+                (k, v)
+            };
+
+            // Step 6: KV cache route + SDPA. The explicit array mask (when
+            // provided by the batched-prefill caller) routes via mask_mode=""
+            // + mask_arr=Some; otherwise the kernel runs in "causal" mode
+            // (lower-right alignment) which is correct for the single-stream
+            // path and for decode-time (T_q=1) calls.
+            let (k_full, v_full) = match cache {
+                Some(c) => {
+                    let lens_owned: Vec<i32>;
+                    let lens_ref: &[i32] = match per_row_lens {
+                        Some(l) => l,
+                        None => {
+                            // Non-batched single-stream caller (e.g., GenerationStream):
+                            // construct lockstep-equivalent uniform lens from the K seq dim.
+                            lens_owned = vec![seq; batch as usize];
+                            &lens_owned
+                        }
+                    };
+                    c.update_and_fetch_on(&k, &v, lens_ref, target)?
+                }
+                None => (k, v),
+            };
+            let attn_out = match mask {
+                None => mlx::fast::scaled_dot_product_attention_on(
+                    &queries, &k_full, &v_full, self.scale, "causal", None, None, target,
+                )?,
+                Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                    &queries,
+                    &k_full,
+                    &v_full,
+                    self.scale,
+                    "",
+                    Some(m),
+                    None,
+                    target,
+                )?,
+            };
+
+            // Step 7: reshape attn out [B, Hq, S, D] -> [B, S, Hq*D], apply sigmoid gate,
+            // o_proj.
+            let attn_out = attn_out
+                .transpose_axes_on(&[0, 2, 1, 3][..], target)?
+                .reshape_on((batch, seq, h_q * d), target)?;
+
+            let gate_sig = gate_flat.sigmoid_on(target)?;
+            // &Array * &Array returns Array (panic-on-err overload), not Result<Array>.
+            let gated = &attn_out * &gate_sig;
+
+            self.o_proj.forward_on(&gated, target)
+        }
     }
 }
 
