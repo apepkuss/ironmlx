@@ -26,7 +26,9 @@ use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
-use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
+#[cfg(not(feature = "p5h-profile"))]
+use crate::core::server::chat_format::render_and_encode;
+use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::models::qwen3_5::image_processor;
 
@@ -389,6 +391,28 @@ where
         Some(image_grid_thw)
     };
 
+    // T4.4: under p5h-profile, capture encode start/end timestamps so the
+    // openai handler can retroactively open a `tokenizer_encode` child span
+    // under `http_parse_render_tokenize` (which itself was opened at the
+    // handler-entry timestamp captured before the ctx existed). The non-
+    // profile path uses the original `render_and_encode` signature.
+    #[cfg(feature = "p5h-profile")]
+    let (prompt_ids, p5h_encode_start_ns, p5h_encode_end_ns) =
+        match crate::core::server::chat_format::render_and_encode_with_encode_timing(
+            &state.tokenizer,
+            &flat_messages,
+            chat_template_kwargs.as_ref(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("chat template / tokenize: {e}"),
+                )
+                    .into_response();
+            }
+        };
+    #[cfg(not(feature = "p5h-profile"))]
     let prompt_ids = match render_and_encode(
         &state.tokenizer,
         &flat_messages,
@@ -460,6 +484,29 @@ where
             "http_parse_render_tokenize",
             p5h_http_start_ns,
         );
+
+        // T4.4: retroactively open + close a `tokenizer_encode` child span
+        // under `http_parse_render_tokenize`. Encode start/end timestamps
+        // were captured inside `render_and_encode_with_encode_timing` above
+        // — at that point the `P5hTraceContext` did not yet exist (it's
+        // built from `prompt_len`, which is the encode result), so the
+        // child span has to be opened/closed retroactively here using the
+        // captured timestamps. Pattern matches the
+        // `detok_format_first_content_chunk` retroactive open at the
+        // streaming SSE first-content site (openai.rs:968).
+        let encode_span = crate::core::p5h::open_p5h_span_at(
+            &p5h_ctx,
+            Some(&http_span),
+            "tokenizer_encode",
+            p5h_encode_start_ns,
+        );
+        crate::core::p5h::close_p5h_span(
+            &p5h_ctx,
+            encode_span,
+            p5h_encode_end_ns,
+            crate::core::p5h::SpanFields::default(),
+        );
+
         crate::core::p5h::close_p5h_span(
             &p5h_ctx,
             http_span,
