@@ -40,6 +40,23 @@ pub(crate) enum ProfileMode {
     AblateComputeG,
     AblateConv,
     AblateTArr,
+    // P5h T0b H2: in-place real vs substitute timing for Steps 2b/5/7c.
+    // Forward path produces the real outputs (no behavior change); per step
+    // the real output and a freshly-built substitute are each independently
+    // eval-timed and emitted as paired records.
+    H2Measure,
+    // P5h T0b H3: same Step 2b passthrough as AblateConv, but Step 2c still
+    // performs the real cache update from conv_input tail. Tests whether
+    // skipping conv_state update accounts for AblateConv's downstream cost.
+    AblateConvWithManualCacheUpdate,
+    // P5h T0b H4: tight Step 7d kernel materialization timer on top of the
+    // production (real compute_g) path. Cache update stays outside the inner
+    // timer but inside Step 7's outer block.
+    H4MeasurePhaseA,
+    // P5h T0b H4: tight Step 7d timer on top of the AblateComputeG path
+    // (g substituted by zeros). Combined with H4MeasurePhaseA isolates
+    // kernel-output variance attributable to g's input value pattern.
+    H4MeasureAblateComputeG,
 }
 
 #[cfg(feature = "p5g-profile")]
@@ -52,6 +69,10 @@ impl ProfileMode {
             ProfileMode::AblateComputeG => "ablate-compute-g",
             ProfileMode::AblateConv => "ablate-conv",
             ProfileMode::AblateTArr => "ablate-t-arr",
+            ProfileMode::H2Measure => "h2-measure",
+            ProfileMode::AblateConvWithManualCacheUpdate => "ablate-conv-with-manual-cache-update",
+            ProfileMode::H4MeasurePhaseA => "h4-measure-phase-a",
+            ProfileMode::H4MeasureAblateComputeG => "h4-measure-ablate-compute-g",
         }
     }
 }
@@ -68,6 +89,14 @@ pub(crate) fn profile_mode() -> ProfileMode {
             Ok(s) if s == ProfileMode::AblateComputeG.as_str() => ProfileMode::AblateComputeG,
             Ok(s) if s == ProfileMode::AblateConv.as_str() => ProfileMode::AblateConv,
             Ok(s) if s == ProfileMode::AblateTArr.as_str() => ProfileMode::AblateTArr,
+            Ok(s) if s == ProfileMode::H2Measure.as_str() => ProfileMode::H2Measure,
+            Ok(s) if s == ProfileMode::AblateConvWithManualCacheUpdate.as_str() => {
+                ProfileMode::AblateConvWithManualCacheUpdate
+            }
+            Ok(s) if s == ProfileMode::H4MeasurePhaseA.as_str() => ProfileMode::H4MeasurePhaseA,
+            Ok(s) if s == ProfileMode::H4MeasureAblateComputeG.as_str() => {
+                ProfileMode::H4MeasureAblateComputeG
+            }
             _ => ProfileMode::Off,
         },
     )
@@ -488,6 +517,22 @@ impl GatedDeltaNet {
             Vec::new()
         };
 
+        // P5h T0b H2 per-step (real_us, substitute_us) pairs for Steps 2b/5/7c.
+        // None outside H2Measure mode — gate exit emission on Option::is_some().
+        // Each pair is filled in the corresponding step body when in H2Measure mode.
+        #[cfg(feature = "p5g-profile")]
+        let mut _p5h_t0b_h2_step_2b: Option<(u64, u64)> = None;
+        #[cfg(feature = "p5g-profile")]
+        let mut _p5h_t0b_h2_step_5: Option<(u64, u64)> = None;
+        #[cfg(feature = "p5g-profile")]
+        let mut _p5h_t0b_h2_step_7c: Option<(u64, u64)> = None;
+
+        // P5h T0b H4 Step 7d tight kernel-materialization timer (us). Fires
+        // under H4MeasurePhaseA or H4MeasureAblateComputeG only. Cache update
+        // (c.update_recurrent + c.advance) is excluded from this timer.
+        #[cfg(feature = "p5g-profile")]
+        let mut _p5h_t0b_h4_step_7d: Option<u64> = None;
+
         // Step 1: fused projections + slice (was 4 quantized matmuls; now 2).
         // Step 1a: in_proj_qkvz → split qkvz into (qkv, z), then mask-zero qkv
         // at pad positions. The slicing + mask multiply are bundled into this
@@ -665,10 +710,26 @@ impl GatedDeltaNet {
         // qkv is [B, S, conv_dim] == conv_out's shape. Step 2c cache update is still
         // gated on ablate_conv below. Step 2a + 2b Layer 2 timers still fire to record
         // the no-op pass-through cost.
+        //
+        // P5h T0b H3: split into two booleans so AblateConvWithManualCacheUpdate
+        // can take the Step 2b passthrough while still running the real Step 2c
+        // cache update.
+        //   * ablate_conv_step_2b — true under {AblateConv, AblateConvWithManualCacheUpdate}.
+        //     Bypasses concat + conv1d + silu (Steps 2a/2b body); conv_out = qkv.clone().
+        //   * ablate_conv_step_2c — true ONLY under AblateConv. Skips update_conv.
+        // Existing AblateConv behavior is preserved (both flags true).
         #[cfg(feature = "p5g-profile")]
-        let ablate_conv = matches!(_p5g_mode, ProfileMode::AblateConv);
+        let ablate_conv_step_2b = matches!(
+            _p5g_mode,
+            ProfileMode::AblateConv | ProfileMode::AblateConvWithManualCacheUpdate
+        );
         #[cfg(not(feature = "p5g-profile"))]
-        let ablate_conv = false;
+        let ablate_conv_step_2b = false;
+
+        #[cfg(feature = "p5g-profile")]
+        let ablate_conv_step_2c = matches!(_p5g_mode, ProfileMode::AblateConv);
+        #[cfg(not(feature = "p5g-profile"))]
+        let ablate_conv_step_2c = false;
 
         // Step 2a: prepend conv_state
         //
@@ -683,6 +744,10 @@ impl GatedDeltaNet {
             None
         };
         let conv_input = {
+            // Step 2a is skipped only when Step 2c is ALSO skipped (i.e. nothing
+            // reads conv_input downstream). Under AblateConvWithManualCacheUpdate
+            // Step 2c needs the real concatenated conv_input, so we run the real
+            // concat even though Step 2b bypasses conv1d.
             #[cfg(feature = "p5h-profile")]
             {
                 crate::core::p5h::try_with_p5h_span_from_current_trace(
@@ -692,7 +757,7 @@ impl GatedDeltaNet {
                         ..Default::default()
                     },
                     || -> Result<Array> {
-                        if ablate_conv {
+                        if ablate_conv_step_2c {
                             // ablate-conv early path: skip concat entirely; conv_input is unused.
                             Ok(qkv.clone())
                         } else {
@@ -712,7 +777,7 @@ impl GatedDeltaNet {
             }
             #[cfg(not(feature = "p5h-profile"))]
             {
-                if ablate_conv {
+                if ablate_conv_step_2c {
                     qkv.clone()
                 } else {
                     match cache.as_deref_mut() {
@@ -732,7 +797,7 @@ impl GatedDeltaNet {
         #[cfg(feature = "p5g-profile")]
         {
             if let Some(start) = _p5g_step_start_2a {
-                if !ablate_conv {
+                if !ablate_conv_step_2c {
                     mlx::transforms::eval(&[&conv_input])?;
                 }
                 _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
@@ -746,8 +811,19 @@ impl GatedDeltaNet {
         } else {
             None
         };
+        // P5h T0b H2: separate timer for the real-body wall time. Started here
+        // BEFORE the body so the timer captures construction + eval (apples to
+        // apples with the substitute timer below which also covers construction).
+        #[cfg(feature = "p5g-profile")]
+        let _p5h_t0b_h2_start_2b_real = if matches!(_p5g_mode, ProfileMode::H2Measure) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         // ablate-conv early path: bypass conv1d + silu entirely; conv_out = qkv passthrough.
-        // conv_state is NOT updated (Step 2c skips update below). Diagnostic only.
+        // Under AblateConv, conv_state is NOT updated (Step 2c skips update below).
+        // Under AblateConvWithManualCacheUpdate, the bypass is the SAME but Step 2c
+        // still runs the real cache update from conv_input tail. Diagnostic only.
         let conv_out = {
             #[cfg(feature = "p5h-profile")]
             {
@@ -758,7 +834,7 @@ impl GatedDeltaNet {
                         ..Default::default()
                     },
                     || -> Result<Array> {
-                        if ablate_conv {
+                        if ablate_conv_step_2b {
                             Ok(qkv.clone())
                         } else {
                             let conv_out = self.conv1d.forward_on(&conv_input, target)?;
@@ -770,7 +846,7 @@ impl GatedDeltaNet {
             }
             #[cfg(not(feature = "p5h-profile"))]
             {
-                if ablate_conv {
+                if ablate_conv_step_2b {
                     qkv.clone()
                 } else {
                     let conv_out = self.conv1d.forward_on(&conv_input, target)?;
@@ -783,10 +859,25 @@ impl GatedDeltaNet {
         #[cfg(feature = "p5g-profile")]
         {
             if let Some(start) = _p5g_step_start_2b {
-                if !ablate_conv {
+                if !ablate_conv_step_2b {
                     mlx::transforms::eval(&[&conv_out])?;
                 }
                 _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
+        // P5h T0b H2: under H2Measure, eval the real conv_out and capture its
+        // wall time, then build the substitute (qkv.clone()) and eval it. The
+        // substitute is discarded; forward continues using the real conv_out.
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start_real) = _p5h_t0b_h2_start_2b_real {
+                mlx::transforms::eval(&[&conv_out])?;
+                let real_us = start_real.elapsed().as_micros() as u64;
+                let start_sub = std::time::Instant::now();
+                let substitute = qkv.clone();
+                mlx::transforms::eval(&[&substitute])?;
+                let substitute_us = start_sub.elapsed().as_micros() as u64;
+                _p5h_t0b_h2_step_2b = Some((real_us, substitute_us));
             }
         }
 
@@ -824,7 +915,7 @@ impl GatedDeltaNet {
                     },
                     || -> Result<()> {
                         if let Some(c) = cache.as_deref_mut() {
-                            if !ablate_conv {
+                            if !ablate_conv_step_2c {
                                 let n_keep = self.cfg.conv_kernel_size - 1;
                                 let conv_input_dims = conv_input.shape();
                                 let total_len = conv_input_dims.as_slice()[1];
@@ -880,9 +971,12 @@ impl GatedDeltaNet {
             {
                 // ablate-conv: conv was replaced with qkv passthrough, so conv_state
                 // would receive stale data. Skip the update entirely.
-                // (ablate_conv is defined above at Step 2a entry; no re-check needed.)
+                // AblateConvWithManualCacheUpdate (H3): keep the real update so we
+                // can isolate cache-staleness cost from the passthrough body cost.
+                // (ablate_conv_step_2c is defined above at Step 2a entry; no
+                // re-check needed.)
                 if let Some(c) = cache.as_deref_mut() {
-                    if !ablate_conv {
+                    if !ablate_conv_step_2c {
                         let n_keep = self.cfg.conv_kernel_size - 1;
                         let conv_input_dims = conv_input.shape();
                         let total_len = conv_input_dims.as_slice()[1];
@@ -957,6 +1051,8 @@ impl GatedDeltaNet {
                 // construction and the real cost was mis-attributed to downstream steps.
                 // Under AblateConv the cache block was skipped, so conv_state() still
                 // holds the old (already-materialized) value — eval is a no-op there.
+                // Under AblateConvWithManualCacheUpdate (H3) the update DID run, so
+                // eval here forces materialization of the manually-restored cache state.
                 if let Some(c) = cache.as_deref() {
                     mlx::transforms::eval(&[c.conv_state()])?;
                 }
@@ -1089,12 +1185,22 @@ impl GatedDeltaNet {
         // dtype (inner.exp() is f32) and shape ([B, S, num_v_heads]).
         // Step 5 Layer 2 timer still fires to record the no-op pass-through cost.
         #[cfg(feature = "p5g-profile")]
-        let ablate_compute_g = matches!(_p5g_mode, ProfileMode::AblateComputeG);
+        let ablate_compute_g = matches!(
+            _p5g_mode,
+            ProfileMode::AblateComputeG | ProfileMode::H4MeasureAblateComputeG
+        );
         #[cfg(not(feature = "p5g-profile"))]
         let ablate_compute_g = false;
 
         #[cfg(feature = "p5g-profile")]
         let _p5g_step_start_5 = if matches!(_p5g_mode, ProfileMode::Layer2) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        // P5h T0b H2: real-body timer for Step 5 (compute_g chain).
+        #[cfg(feature = "p5g-profile")]
+        let _p5h_t0b_h2_start_5_real = if matches!(_p5g_mode, ProfileMode::H2Measure) {
             Some(std::time::Instant::now())
         } else {
             None
@@ -1159,6 +1265,21 @@ impl GatedDeltaNet {
                     mlx::transforms::eval(&[&g])?;
                 }
                 _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
+            }
+        }
+        // P5h T0b H2: under H2Measure, eval the real g (real compute_g chain)
+        // and capture its wall time, then build the substitute
+        // (zeros_like(a) cast to Float32) and eval it. Substitute discarded.
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(start_real) = _p5h_t0b_h2_start_5_real {
+                mlx::transforms::eval(&[&g])?;
+                let real_us = start_real.elapsed().as_micros() as u64;
+                let start_sub = std::time::Instant::now();
+                let substitute = mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?;
+                mlx::transforms::eval(&[&substitute])?;
+                let substitute_us = start_sub.elapsed().as_micros() as u64;
+                _p5h_t0b_h2_step_5 = Some((real_us, substitute_us));
             }
         }
 
@@ -1254,6 +1375,32 @@ impl GatedDeltaNet {
                                 guard.insert(seq, arr.clone());
                                 arr
                             }
+                        } else if matches!(_p5g_mode, ProfileMode::H2Measure) {
+                            // P5h T0b H2: time real construct, then time substitute
+                            // (T_ARR_ABLATION_CACHE Mutex lookup pattern). The Mutex
+                            // lock is itself a wall-time signal that's being measured.
+                            // Forward continues using the real t_arr.
+                            let start_real = std::time::Instant::now();
+                            let real_t_arr: Array = (&[seq][..], ()).try_into()?;
+                            mlx::transforms::eval(&[&real_t_arr])?;
+                            let real_us = start_real.elapsed().as_micros() as u64;
+                            let start_sub = std::time::Instant::now();
+                            let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
+                                std::sync::Mutex::new(std::collections::HashMap::new())
+                            });
+                            let mut guard = cache.lock().unwrap();
+                            let substitute: Array = if let Some(arr) = guard.get(&seq) {
+                                arr.clone()
+                            } else {
+                                let arr: Array = (&[seq][..], ()).try_into()?;
+                                guard.insert(seq, arr.clone());
+                                arr
+                            };
+                            drop(guard);
+                            mlx::transforms::eval(&[&substitute])?;
+                            let substitute_us = start_sub.elapsed().as_micros() as u64;
+                            _p5h_t0b_h2_step_7c = Some((real_us, substitute_us));
+                            real_t_arr
                         } else {
                             (&[seq][..], ()).try_into()?
                         };
@@ -1289,6 +1436,20 @@ impl GatedDeltaNet {
                             kernel_inputs.push(m);
                         }
 
+                        // P5h T0b H4: tight Step 7d timer fires under
+                        // H4MeasurePhaseA / H4MeasureAblateComputeG. Covers
+                        // dispatch_builder...dispatch + take_at(0)x2 + eval. Cache
+                        // update (Step 7e) stays OUTSIDE this timer.
+                        #[cfg(feature = "p5g-profile")]
+                        let _p5h_t0b_h4_start_7d = if matches!(
+                            _p5g_mode,
+                            ProfileMode::H4MeasurePhaseA | ProfileMode::H4MeasureAblateComputeG
+                        ) {
+                            Some(std::time::Instant::now())
+                        } else {
+                            None
+                        };
+
                         let mut outputs = kernel
                             .dispatch_builder()
                             .inputs(&kernel_inputs)
@@ -1307,6 +1468,17 @@ impl GatedDeltaNet {
 
                         let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
                         let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
+
+                        // P5h T0b H4: force-eval both kernel outputs to
+                        // materialize before capturing elapsed; without this the
+                        // timer measures only graph construction.
+                        #[cfg(feature = "p5g-profile")]
+                        {
+                            if let Some(start) = _p5h_t0b_h4_start_7d {
+                                mlx::transforms::eval(&[&y, &new_state])?;
+                                _p5h_t0b_h4_step_7d = Some(start.elapsed().as_micros() as u64);
+                            }
+                        }
 
                         // Step 7e: update cache recurrent_state, advance offset
                         if let Some(c) = cache.as_deref_mut() {
@@ -1374,6 +1546,31 @@ impl GatedDeltaNet {
                         guard.insert(seq, arr.clone());
                         arr
                     }
+                } else if matches!(_p5g_mode, ProfileMode::H2Measure) {
+                    // P5h T0b H2: time real construct, then time substitute
+                    // (T_ARR_ABLATION_CACHE Mutex lookup pattern). The Mutex
+                    // lock is itself a wall-time signal that's being measured.
+                    // Forward continues using the real t_arr.
+                    let start_real = std::time::Instant::now();
+                    let real_t_arr: Array = (&[seq][..], ()).try_into()?;
+                    mlx::transforms::eval(&[&real_t_arr])?;
+                    let real_us = start_real.elapsed().as_micros() as u64;
+                    let start_sub = std::time::Instant::now();
+                    let cache = T_ARR_ABLATION_CACHE
+                        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                    let mut guard = cache.lock().unwrap();
+                    let substitute: Array = if let Some(arr) = guard.get(&seq) {
+                        arr.clone()
+                    } else {
+                        let arr: Array = (&[seq][..], ()).try_into()?;
+                        guard.insert(seq, arr.clone());
+                        arr
+                    };
+                    drop(guard);
+                    mlx::transforms::eval(&[&substitute])?;
+                    let substitute_us = start_sub.elapsed().as_micros() as u64;
+                    _p5h_t0b_h2_step_7c = Some((real_us, substitute_us));
+                    real_t_arr
                 } else {
                     (&[seq][..], ()).try_into()?
                 };
@@ -1406,6 +1603,19 @@ impl GatedDeltaNet {
                     kernel_inputs.push(m);
                 }
 
+                // P5h T0b H4: tight Step 7d timer fires under H4MeasurePhaseA /
+                // H4MeasureAblateComputeG. Covers dispatch_builder...dispatch +
+                // take_at(0)x2 + eval. Cache update (Step 7e) stays OUTSIDE.
+                #[cfg(feature = "p5g-profile")]
+                let _p5h_t0b_h4_start_7d = if matches!(
+                    _p5g_mode,
+                    ProfileMode::H4MeasurePhaseA | ProfileMode::H4MeasureAblateComputeG
+                ) {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+
                 let mut outputs = kernel
                     .dispatch_builder()
                     .inputs(&kernel_inputs)
@@ -1424,6 +1634,16 @@ impl GatedDeltaNet {
 
                 let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
                 let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
+
+                // P5h T0b H4: force-eval both kernel outputs to materialize
+                // before capturing elapsed.
+                #[cfg(feature = "p5g-profile")]
+                {
+                    if let Some(start) = _p5h_t0b_h4_start_7d {
+                        mlx::transforms::eval(&[&y, &new_state])?;
+                        _p5h_t0b_h4_step_7d = Some(start.elapsed().as_micros() as u64);
+                    }
+                }
 
                 // Step 7e: update cache recurrent_state, advance offset
                 if let Some(c) = cache.as_deref_mut() {
@@ -1567,6 +1787,70 @@ impl GatedDeltaNet {
                     offset_after,
                     elapsed_us,
                     breakdown_suffix
+                );
+            }
+        }
+
+        // P5h T0b H2 emission: one record per step (2b, 5, 7c) with the paired
+        // (real_us, substitute_us) measurements. Only fires when the
+        // corresponding step actually captured a pair (i.e. _p5g_mode ==
+        // H2Measure). Field names + order match the harness parser exactly.
+        #[cfg(feature = "p5g-profile")]
+        {
+            let layer = self.profile_layer_idx.unwrap_or(-1);
+            if let Some((r2b, s2b)) = _p5h_t0b_h2_step_2b {
+                tracing::info!(
+                    "[p5h-t0b-h2] mode={} step=step_2b layer={} batch={} \
+                     seq={} real_us={} substitute_us={}",
+                    _p5g_mode.as_str(),
+                    layer,
+                    batch,
+                    seq,
+                    r2b,
+                    s2b
+                );
+            }
+            if let Some((r5, s5)) = _p5h_t0b_h2_step_5 {
+                tracing::info!(
+                    "[p5h-t0b-h2] mode={} step=step_5_compute_g layer={} \
+                     batch={} seq={} real_us={} substitute_us={}",
+                    _p5g_mode.as_str(),
+                    layer,
+                    batch,
+                    seq,
+                    r5,
+                    s5
+                );
+            }
+            if let Some((r7c, s7c)) = _p5h_t0b_h2_step_7c {
+                tracing::info!(
+                    "[p5h-t0b-h2] mode={} step=step_7c_t_arr layer={} \
+                     batch={} seq={} real_us={} substitute_us={}",
+                    _p5g_mode.as_str(),
+                    layer,
+                    batch,
+                    seq,
+                    r7c,
+                    s7c
+                );
+            }
+        }
+
+        // P5h T0b H4 emission: one record per forward with the tight Step 7d
+        // dispatch+take+eval wall time. Only fires under H4MeasurePhaseA /
+        // H4MeasureAblateComputeG (the only modes that set _p5h_t0b_h4_step_7d).
+        #[cfg(feature = "p5g-profile")]
+        {
+            if let Some(t7d) = _p5h_t0b_h4_step_7d {
+                let layer = self.profile_layer_idx.unwrap_or(-1);
+                tracing::info!(
+                    "[p5h-t0b-h4] mode={} step=step_7d_dispatch_materialize layer={} \
+                     batch={} seq={} elapsed_us={}",
+                    _p5g_mode.as_str(),
+                    layer,
+                    batch,
+                    seq,
+                    t7d
                 );
             }
         }
