@@ -519,13 +519,25 @@ fn compute_t4_verdict(per_pp: &BTreeMap<i32, Vec<P5hProfileRecord>>) -> T4Verdic
         for span in T4_SPAN_NAMES {
             let meta = t4_span_meta(span);
             let cell_expected = expected_to_emit(meta.lane, actual_lane_observed);
+            // Per Codex T4 review P2: enforce span_kind alignment with the
+            // span's expected emission kind. A record carrying the right
+            // `span_name` but wrong `span_kind` (e.g., `first_eval_amortized_cost`
+            // mis-emitted as `tree` instead of `diagnostic`) is an emitter bug;
+            // the harness must NOT mask it by counting such records as valid.
+            let expected_span_kind: &'static str = if meta.is_diagnostic {
+                "diagnostic"
+            } else {
+                "tree"
+            };
 
             // Record filter: cache_state_update accepts inclusive_us == 0
             // (GDN cache ops are CPU-only Arc-share ~0us); other spans
-            // require end_ns > start_ns to count.
+            // require end_ns > start_ns to count. Wrong-span_kind records
+            // are excluded so they cannot satisfy expected_to_emit cells.
             let filtered: Vec<&P5hProfileRecord> = recs
                 .iter()
                 .filter(|r| r.span_name == span)
+                .filter(|r| r.span_kind == expected_span_kind)
                 .filter(|r| {
                     if meta.accept_zero_inclusive_us {
                         r.end_ns >= r.start_ns
@@ -1235,5 +1247,81 @@ mod parser_tests {
         // pick a default lane.
         let empty: Vec<&P5hProfileRecord> = Vec::new();
         let _ = request_actual_lane("req-empty", &empty);
+    }
+
+    #[test]
+    fn verdict_excludes_wrong_span_kind_records() {
+        // Per Codex T4 review P2: the verdict filter must enforce
+        // r.span_kind == expected_span_kind so an emitter bug that flips
+        // `first_eval_amortized_cost` from "diagnostic" to "tree" is
+        // surfaced rather than counted as a valid record.
+        //
+        // Build a Lane-A request whose `first_eval_amortized_cost` record
+        // is INCORRECTLY emitted with span_kind="tree". The other 3
+        // Lane-A-expected spans (tokenizer_encode, slice_last, cache_state)
+        // are emitted correctly. The verdict must FAIL with
+        // first_eval_amortized_cost in missing_or_invalid because the
+        // wrong-kind record is filtered out, leaving record_count=0.
+        let stderr = build_stderr(
+            "req-A",
+            ROUTING_PATH_LANE_A,
+            128,
+            &[
+                (
+                    "tokenizer_encode",
+                    "http_parse_render_tokenize",
+                    "tree",
+                    10,
+                    30,
+                ),
+                (
+                    "slice_last_and_project_lm_head",
+                    "model_prefill_forward",
+                    "tree",
+                    100,
+                    200,
+                ),
+                ("cache_state_update", "kv_mask_update", "tree", 300, 350),
+                // BUG: emitted with span_kind="tree" instead of "diagnostic".
+                (
+                    "first_eval_amortized_cost",
+                    "prefill_admitted",
+                    "tree",
+                    400,
+                    900,
+                ),
+            ],
+        );
+        let recs = parse_p5h_records(&stderr);
+        let mut per_pp = BTreeMap::new();
+        per_pp.insert(128, recs);
+        let verdict = compute_t4_verdict(&per_pp);
+        assert_eq!(
+            verdict.verdict, "missing_spans",
+            "wrong-kind first_eval_amortized_cost must NOT count as a valid record; \
+             rationale={}",
+            verdict.rationale
+        );
+        let diag_cell = verdict
+            .cells
+            .iter()
+            .find(|c| c.span_name == "first_eval_amortized_cost")
+            .expect("first_eval_amortized_cost cell must exist");
+        assert_eq!(
+            diag_cell.record_count, 0,
+            "wrong-kind record (span_kind=tree but expected diagnostic) must be excluded"
+        );
+        assert_eq!(
+            diag_cell.span_kind, "diagnostic",
+            "cell span_kind reflects expected kind from meta, not the observed-wrong record"
+        );
+        assert!(
+            verdict
+                .missing_or_invalid
+                .iter()
+                .any(|m| m.contains("first_eval_amortized_cost")),
+            "expected first_eval_amortized_cost in missing_or_invalid; got {:?}",
+            verdict.missing_or_invalid
+        );
     }
 }
