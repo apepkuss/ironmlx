@@ -82,8 +82,14 @@ KERNEL_REWRITE_REALISTIC_HIGH = 0.70
 # Kernel-bound spans (per T0b H4 + T2.4 + T3.4 bindings — kernel rewrite is
 # scope gate trigger per Codex Q-T5-3).
 KERNEL_BOUND_SPANS: set[str] = {
-    # GDN kernel-bound (T0b H4)
-    "gda_step_7_kernel_and_cache_update",
+    # GDN kernel-bound (T0b H4).
+    # P5h+1 T1.5 (Codex B-lite): `gda_step_7_kernel_and_cache_update` is
+    # NOT in this set — after the T1.5 sub-span split it is a thin wrapper
+    # (parent of `gda_step_7_kernel_dispatch_and_materialize` +
+    # `cache_state_update`) and the kernel work it formerly owned now lives
+    # in the new sub-span. The wrapper itself is not a kernel-rewrite
+    # target; flagging it would mis-trigger Scope gate at the aggregator.
+    "gda_step_7_kernel_dispatch_and_materialize",
     "gda_step_8_out_proj",
     "gda_step_8_norm_proj",  # T0a emitter name (norm_proj == out_proj per emitter rename)
     # GatedAttention kernel-bound (T2.4)

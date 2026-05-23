@@ -112,6 +112,13 @@ LANE_B_REQUIRED_TREE = {
     "gda_step_5_compute_g",
     "gda_step_6_sigmoid_beta",
     "gda_step_7_kernel_and_cache_update",
+    # P5h+1 T1.5 (Codex B-lite): child of
+    # `gda_step_7_kernel_and_cache_update` that owns the kernel
+    # select/build/state_in/t_arr/dispatch/take_at/materialize-eval work
+    # (everything except the cache mutation). Required on Lane-B so the
+    # parent's self-time is fully attributed and stops being synthesized
+    # as `unattributed_gda_step_7_kernel_and_cache_update`.
+    "gda_step_7_kernel_dispatch_and_materialize",
     "gda_step_8_norm_proj",
     # Cache + lm_head emitted once per chunk:
     "cache_state_update",

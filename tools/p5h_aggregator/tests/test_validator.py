@@ -450,6 +450,9 @@ def _lane_b_pass_fixture(*, prompt_tokens=4096, chunk_size=2048) -> list:
             "gda_step_5_compute_g",
             "gda_step_6_sigmoid_beta",
             "gda_step_7_kernel_and_cache_update",
+            # P5h+1 T1.5 (Codex B-lite): required Lane-B child of
+            # gda_step_7_kernel_and_cache_update.
+            "gda_step_7_kernel_dispatch_and_materialize",
             "gda_step_8_norm_proj",
             "cache_state_update",
             "slice_last_and_project_lm_head",
@@ -874,6 +877,15 @@ def test_lane_b_required_tree_includes_all_11_gda_steps():
         "gda_step_8_norm_proj",
     ):
         assert name in LANE_B_REQUIRED_TREE, name
+
+
+def test_lane_b_required_tree_includes_gda_step_7_kernel_dispatch_and_materialize():
+    """P5h+1 T1.5 (Codex B-lite): the new sub-span MUST be a required Lane-B
+    tree span so the close-gate validator enforces emission. Without this
+    presence-check the aggregator would silently fall back to synthesizing
+    `unattributed_gda_step_7_kernel_and_cache_update` whenever the sub-span
+    fails to emit, masking emitter regressions."""
+    assert "gda_step_7_kernel_dispatch_and_materialize" in LANE_B_REQUIRED_TREE
 
 
 def test_lane_b_required_tree_includes_cache_and_lm_head():

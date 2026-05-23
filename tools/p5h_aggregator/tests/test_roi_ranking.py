@@ -72,8 +72,22 @@ def test_compute_gap_weight_unknown_pp_returns_0():
 
 
 def test_is_kernel_bound_covers_t0b_h4():
-    assert is_kernel_bound("gda_step_7_kernel_and_cache_update")
+    # P5h+1 T1.5 (Codex B-lite): the kernel-cost-owning span split out of
+    # `gda_step_7_kernel_and_cache_update` is the new kernel-rewrite target.
+    # The parent wrapper itself is excluded from the kernel set (see
+    # `test_is_kernel_bound_excludes_step_7_wrapper_after_t1_5_split`).
+    assert is_kernel_bound("gda_step_7_kernel_dispatch_and_materialize")
     assert is_kernel_bound("gda_step_8_out_proj")
+
+
+def test_is_kernel_bound_excludes_step_7_wrapper_after_t1_5_split():
+    """P5h+1 T1.5 (Codex B-lite): once the kernel work moves into
+    `gda_step_7_kernel_dispatch_and_materialize`, the parent
+    `gda_step_7_kernel_and_cache_update` is a thin wrapper (its two leaf
+    children are the new sub-span + `cache_state_update`). It must NOT be
+    flagged kernel-bound — that would mis-trigger Scope gate on a span
+    whose self-time is glue cost, not kernel cost."""
+    assert not is_kernel_bound("gda_step_7_kernel_and_cache_update")
 
 
 def test_is_kernel_bound_covers_gated_attention_t2_4():
@@ -752,9 +766,15 @@ def test_roi_ranking_cli_runs(tmp_path: Path):
 
 
 def test_kernel_bound_spans_set_is_documented():
-    """Smoke check: spec-declared kernel-bound spans are in the set."""
+    """Smoke check: spec-declared kernel-bound spans are in the set.
+
+    P5h+1 T1.5 (Codex B-lite): `gda_step_7_kernel_and_cache_update` (parent
+    wrapper) is removed; `gda_step_7_kernel_dispatch_and_materialize` (new
+    sub-span that owns the kernel dispatch + materialize work) takes its
+    place as the kernel-rewrite candidate.
+    """
     expected_min = {
-        "gda_step_7_kernel_and_cache_update",
+        "gda_step_7_kernel_dispatch_and_materialize",
         "gda_step_8_out_proj",
         "kv_mask_update",
         "fused_sdpa",
@@ -764,3 +784,5 @@ def test_kernel_bound_spans_set_is_documented():
         "routing_unsort_weighted_reduce",
     }
     assert expected_min <= KERNEL_BOUND_SPANS
+    # Parent wrapper must NOT be in the set after T1.5.
+    assert "gda_step_7_kernel_and_cache_update" not in KERNEL_BOUND_SPANS

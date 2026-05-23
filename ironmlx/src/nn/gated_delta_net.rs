@@ -1389,151 +1389,206 @@ impl GatedDeltaNet {
                         ..Default::default()
                     },
                     || -> Result<Array> {
-                        // Step 7a: build/get the appropriate kernel
-                        let kernel = if mask.is_some() {
-                            self.kernel_masked.get_or_init(|| {
-                                build_gated_delta_kernel(true).expect("build masked kernel")
-                            })
-                        } else {
-                            self.kernel_no_mask.get_or_init(|| {
-                                build_gated_delta_kernel(false).expect("build no-mask kernel")
-                            })
-                        };
+                        // P5h+1 T1.5 (Codex B-lite): the kernel-dispatch +
+                        // materialize work (Steps 7a-7d) moves into a dedicated
+                        // child span so the parent `gda_step_7_kernel_and_cache_
+                        // update` becomes a thin wrapper with only two leaf
+                        // children (kernel_dispatch_and_materialize +
+                        // cache_state_update). Prior to this split the kernel
+                        // self-time accumulated inside the parent and was
+                        // synthesized as an `unattributed_*` residual leaf in
+                        // the aggregator — accounting for 88-98% of total
+                        // unattributed time per PP and pushing coverage_pct to
+                        // 0.92-0.94 (below the 0.95 close-gate threshold).
+                        let (y, new_state) =
+                            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                                "gda_step_7_kernel_dispatch_and_materialize",
+                                || crate::core::p5h::SpanFields {
+                                    layer_idx: Some(layer_idx),
+                                    ..Default::default()
+                                },
+                                || -> Result<(Array, Array)> {
+                                    // Step 7a: build/get the appropriate kernel
+                                    let kernel = if mask.is_some() {
+                                        self.kernel_masked.get_or_init(|| {
+                                            build_gated_delta_kernel(true)
+                                                .expect("build masked kernel")
+                                        })
+                                    } else {
+                                        self.kernel_no_mask.get_or_init(|| {
+                                            build_gated_delta_kernel(false)
+                                                .expect("build no-mask kernel")
+                                        })
+                                    };
 
-                        // Step 7b: get state_in from cache (or fresh zeros).
-                        // see cfg-off arm below for Arc-share / cache-slot rationale
-                        let state_in = match cache.as_deref() {
-                            Some(c) => c.recurrent_state().clone(),
-                            None => Array::zeros(
-                                (
-                                    batch,
-                                    self.cfg.num_v_heads,
-                                    self.cfg.head_v_dim,
-                                    self.cfg.head_k_dim,
-                                ),
-                                Dtype::Float32,
-                            )?,
-                        };
+                                    // Step 7b: get state_in from cache (or
+                                    // fresh zeros). see cfg-off arm below for
+                                    // Arc-share / cache-slot rationale.
+                                    let state_in = match cache.as_deref() {
+                                        Some(c) => c.recurrent_state().clone(),
+                                        None => Array::zeros(
+                                            (
+                                                batch,
+                                                self.cfg.num_v_heads,
+                                                self.cfg.head_v_dim,
+                                                self.cfg.head_k_dim,
+                                            ),
+                                            Dtype::Float32,
+                                        )?,
+                                    };
 
-                        // Step 7c: T as 0-dim int32 array.
-                        // see cfg-off arm below for ablate-t-arr cache rationale
-                        #[cfg(feature = "p5g-profile")]
-                        let t_arr: Array = if matches!(_p5g_mode, ProfileMode::AblateTArr) {
-                            let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
-                                std::sync::Mutex::new(std::collections::HashMap::new())
-                            });
-                            let mut guard = cache.lock().unwrap();
-                            if let Some(arr) = guard.get(&seq) {
-                                arr.clone()
-                            } else {
-                                let arr: Array = (&[seq][..], ()).try_into()?;
-                                guard.insert(seq, arr.clone());
-                                arr
-                            }
-                        } else if matches!(_p5g_mode, ProfileMode::H2Measure) {
-                            // P5h T0b H2: time real construct, then time substitute
-                            // (T_ARR_ABLATION_CACHE Mutex lookup pattern). The Mutex
-                            // lock is itself a wall-time signal that's being measured.
-                            // Forward continues using the real t_arr.
-                            let start_real = std::time::Instant::now();
-                            let real_t_arr: Array = (&[seq][..], ()).try_into()?;
-                            mlx::transforms::eval(&[&real_t_arr])?;
-                            let real_us = start_real.elapsed().as_micros() as u64;
-                            let start_sub = std::time::Instant::now();
-                            let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
-                                std::sync::Mutex::new(std::collections::HashMap::new())
-                            });
-                            let mut guard = cache.lock().unwrap();
-                            let substitute: Array = if let Some(arr) = guard.get(&seq) {
-                                arr.clone()
-                            } else {
-                                let arr: Array = (&[seq][..], ()).try_into()?;
-                                guard.insert(seq, arr.clone());
-                                arr
-                            };
-                            drop(guard);
-                            mlx::transforms::eval(&[&substitute])?;
-                            let substitute_us = start_sub.elapsed().as_micros() as u64;
-                            _p5h_t0b_h2_step_7c = Some((real_us, substitute_us));
-                            real_t_arr
-                        } else {
-                            (&[seq][..], ()).try_into()?
-                        };
-                        #[cfg(not(feature = "p5g-profile"))]
-                        let t_arr: Array = (&[seq][..], ()).try_into()?;
+                                    // Step 7c: T as 0-dim int32 array.
+                                    // see cfg-off arm below for ablate-t-arr
+                                    // cache rationale.
+                                    #[cfg(feature = "p5g-profile")]
+                                    let t_arr: Array =
+                                        if matches!(_p5g_mode, ProfileMode::AblateTArr) {
+                                            let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
+                                                std::sync::Mutex::new(
+                                                    std::collections::HashMap::new(),
+                                                )
+                                            });
+                                            let mut guard = cache.lock().unwrap();
+                                            if let Some(arr) = guard.get(&seq) {
+                                                arr.clone()
+                                            } else {
+                                                let arr: Array = (&[seq][..], ()).try_into()?;
+                                                guard.insert(seq, arr.clone());
+                                                arr
+                                            }
+                                        } else if matches!(_p5g_mode, ProfileMode::H2Measure) {
+                                            // P5h T0b H2: time real construct,
+                                            // then time substitute
+                                            // (T_ARR_ABLATION_CACHE Mutex lookup
+                                            // pattern). The Mutex lock is itself a
+                                            // wall-time signal that's being
+                                            // measured. Forward continues using
+                                            // the real t_arr.
+                                            let start_real = std::time::Instant::now();
+                                            let real_t_arr: Array = (&[seq][..], ()).try_into()?;
+                                            mlx::transforms::eval(&[&real_t_arr])?;
+                                            let real_us = start_real.elapsed().as_micros() as u64;
+                                            let start_sub = std::time::Instant::now();
+                                            let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
+                                                std::sync::Mutex::new(
+                                                    std::collections::HashMap::new(),
+                                                )
+                                            });
+                                            let mut guard = cache.lock().unwrap();
+                                            let substitute: Array =
+                                                if let Some(arr) = guard.get(&seq) {
+                                                    arr.clone()
+                                                } else {
+                                                    let arr: Array = (&[seq][..], ()).try_into()?;
+                                                    guard.insert(seq, arr.clone());
+                                                    arr
+                                                };
+                                            drop(guard);
+                                            mlx::transforms::eval(&[&substitute])?;
+                                            let substitute_us =
+                                                start_sub.elapsed().as_micros() as u64;
+                                            _p5h_t0b_h2_step_7c = Some((real_us, substitute_us));
+                                            real_t_arr
+                                        } else {
+                                            (&[seq][..], ()).try_into()?
+                                        };
+                                    #[cfg(not(feature = "p5g-profile"))]
+                                    let t_arr: Array = (&[seq][..], ()).try_into()?;
 
-                        let in_dtype = x.dtype();
-                        let st_dtype = Dtype::Float32;
-                        let y_shape = Shape::from(vec![
-                            batch,
-                            seq,
-                            self.cfg.num_v_heads,
-                            self.cfg.head_v_dim,
-                        ]);
-                        let state_shape = Shape::from(vec![
-                            batch,
-                            self.cfg.num_v_heads,
-                            self.cfg.head_v_dim,
-                            self.cfg.head_k_dim,
-                        ]);
+                                    let in_dtype = x.dtype();
+                                    let st_dtype = Dtype::Float32;
+                                    let y_shape = Shape::from(vec![
+                                        batch,
+                                        seq,
+                                        self.cfg.num_v_heads,
+                                        self.cfg.head_v_dim,
+                                    ]);
+                                    let state_shape = Shape::from(vec![
+                                        batch,
+                                        self.cfg.num_v_heads,
+                                        self.cfg.head_v_dim,
+                                        self.cfg.head_k_dim,
+                                    ]);
 
-                        // Step 7d: dispatch
-                        let mut kernel_inputs: Vec<&Array> = vec![
-                            &q_scaled,
-                            &k_scaled,
-                            &v_per_head,
-                            &g,
-                            &beta,
-                            &state_in,
-                            &t_arr,
-                        ];
-                        if let Some(m) = mask {
-                            kernel_inputs.push(m);
-                        }
+                                    // Step 7d: dispatch
+                                    let mut kernel_inputs: Vec<&Array> = vec![
+                                        &q_scaled,
+                                        &k_scaled,
+                                        &v_per_head,
+                                        &g,
+                                        &beta,
+                                        &state_in,
+                                        &t_arr,
+                                    ];
+                                    if let Some(m) = mask {
+                                        kernel_inputs.push(m);
+                                    }
 
-                        // P5h T0b H4: tight Step 7d timer fires under
-                        // H4MeasurePhaseA / H4MeasureAblateComputeG. Covers
-                        // dispatch_builder...dispatch + take_at(0)x2 + eval. Cache
-                        // update (Step 7e) stays OUTSIDE this timer.
-                        #[cfg(feature = "p5g-profile")]
-                        let _p5h_t0b_h4_start_7d = if matches!(
-                            _p5g_mode,
-                            ProfileMode::H4MeasurePhaseA | ProfileMode::H4MeasureAblateComputeG
-                        ) {
-                            Some(std::time::Instant::now())
-                        } else {
-                            None
-                        };
+                                    // P5h T0b H4: tight Step 7d timer fires
+                                    // under H4MeasurePhaseA /
+                                    // H4MeasureAblateComputeG. Covers
+                                    // dispatch_builder...dispatch + take_at(0)
+                                    // x2 + eval. Cache update (Step 7e) stays
+                                    // OUTSIDE this timer (and OUTSIDE this
+                                    // sub-span).
+                                    #[cfg(feature = "p5g-profile")]
+                                    let _p5h_t0b_h4_start_7d = if matches!(
+                                        _p5g_mode,
+                                        ProfileMode::H4MeasurePhaseA
+                                            | ProfileMode::H4MeasureAblateComputeG
+                                    ) {
+                                        Some(std::time::Instant::now())
+                                    } else {
+                                        None
+                                    };
 
-                        let mut outputs = kernel
-                            .dispatch_builder()
-                            .inputs(&kernel_inputs)
-                            .output_shapes(&[y_shape, state_shape])
-                            .output_dtypes(&[in_dtype, st_dtype])
-                            .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
-                            .threadgroup(32, 4, 1)
-                            .template_int("Dk", self.cfg.head_k_dim)
-                            .template_int("Dv", self.cfg.head_v_dim)
-                            .template_int("Hk", self.cfg.num_k_heads)
-                            .template_int("Hv", self.cfg.num_v_heads)
-                            .template_dtype("InT", in_dtype)
-                            .template_dtype("StT", st_dtype)
-                            .stream(target)
-                            .dispatch()?;
+                                    let mut outputs = kernel
+                                        .dispatch_builder()
+                                        .inputs(&kernel_inputs)
+                                        .output_shapes(&[y_shape, state_shape])
+                                        .output_dtypes(&[in_dtype, st_dtype])
+                                        .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+                                        .threadgroup(32, 4, 1)
+                                        .template_int("Dk", self.cfg.head_k_dim)
+                                        .template_int("Dv", self.cfg.head_v_dim)
+                                        .template_int("Hk", self.cfg.num_k_heads)
+                                        .template_int("Hv", self.cfg.num_v_heads)
+                                        .template_dtype("InT", in_dtype)
+                                        .template_dtype("StT", st_dtype)
+                                        .stream(target)
+                                        .dispatch()?;
 
-                        let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
-                        let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
+                                    let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
+                                    let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
 
-                        // P5h T0b H4: force-eval both kernel outputs to
-                        // materialize before capturing elapsed; without this the
-                        // timer measures only graph construction.
-                        #[cfg(feature = "p5g-profile")]
-                        {
-                            if let Some(start) = _p5h_t0b_h4_start_7d {
-                                mlx::transforms::eval(&[&y, &new_state])?;
-                                _p5h_t0b_h4_step_7d = Some(start.elapsed().as_micros() as u64);
-                            }
-                        }
+                                    // P5h T0b H4: force-eval both kernel
+                                    // outputs to materialize before capturing
+                                    // elapsed; without this the timer
+                                    // measures only graph construction.
+                                    #[cfg(feature = "p5g-profile")]
+                                    {
+                                        if let Some(start) = _p5h_t0b_h4_start_7d {
+                                            mlx::transforms::eval(&[&y, &new_state])?;
+                                            _p5h_t0b_h4_step_7d =
+                                                Some(start.elapsed().as_micros() as u64);
+                                        }
+                                    }
+
+                                    // P5h+1 T1: measurement-eval probe for
+                                    // BOTH kernel outputs. T1.5 (Codex B-lite)
+                                    // eval(&[&y, &new_state]) — eval'ing
+                                    // `new_state` here (rather than letting it
+                                    // materialize lazily in the subsequent
+                                    // cache_state_update child) keeps the
+                                    // dispatch+take_at materialization cost
+                                    // attributed to THIS sub-span instead of
+                                    // bleeding into cache_state_update.
+                                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                                        mlx::transforms::eval(&[&y, &new_state])?;
+                                    }
+                                    Ok((y, new_state))
+                                },
+                            )?;
 
                         // Step 7e: update cache recurrent_state, advance offset.
                         // T4.3: wrap the GatedDeltaCache::update_recurrent +
@@ -1543,7 +1598,9 @@ impl GatedDeltaNet {
                         // offset increment); the span exists to attribute the
                         // mutation cost explicitly in the T5 tree, separating
                         // it from the kernel dispatch + state construction
-                        // cost that dominates the Step 7 substep.
+                        // cost (now owned by the sibling
+                        // `gda_step_7_kernel_dispatch_and_materialize`
+                        // sub-span per P5h+1 T1.5).
                         if let Some(c) = cache.as_deref_mut() {
                             crate::core::p5h::try_with_p5h_span_from_current_trace(
                                 "cache_state_update",
@@ -1567,12 +1624,6 @@ impl GatedDeltaNet {
                                     Ok(())
                                 },
                             )?;
-                        }
-                        // P5h+1 T1: measurement-eval probe for the kernel
-                        // output `y` (state update is side-effect; eval `y`
-                        // captures the dispatch+take_at materialization cost).
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&y])?;
                         }
                         Ok(y)
                     },

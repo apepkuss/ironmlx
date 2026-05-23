@@ -718,6 +718,14 @@ const LANE_B_ALLOWED_TRY_SPAN_NAMES: &[&str] = &[
     "gda_step_5_compute_g",
     "gda_step_6_sigmoid_beta",
     "gda_step_7_kernel_and_cache_update",
+    // P5h+1 T1.5 (Codex B-lite): child of
+    // `gda_step_7_kernel_and_cache_update` that owns the kernel select/build
+    // + state_in + t_arr + dispatch + take_at + materialize-eval work. Split
+    // out so the parent becomes a thin wrapper (only two leaf children:
+    // this + `cache_state_update`); pre-T1.5 the parent's self-time was
+    // synthesized as an `unattributed_*` residual and pushed close-gate
+    // coverage_pct below the 0.95 threshold.
+    "gda_step_7_kernel_dispatch_and_materialize",
     "gda_step_8_norm_proj",
 ];
 
