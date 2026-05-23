@@ -1,7 +1,7 @@
 # P5h+2.a — PP=512 Measurement Protocol Fix Design (2026-05-23)
 
 **Status:** Spec — ready for plan writing.
-**Branch:** new branch `ironmlx-p5h+2-a-pp512-measurement` (fork from `ironmlx-p5i-a-gather-qmm-feasibility` HEAD `6e3b40e`).
+**Branch:** new branch `ironmlx-p5h+2-a-pp512-measurement` (fork from `ironmlx-p5i-a-gather-qmm-feasibility` HEAD `a90a85c`).
 **Predecessor:** P5i.a closed Feasibility PASS 2026-05-23; Codex round-3 directive specifies "P5h+2.a PP=512 measurement protocol fix; 目标 ±2% 或重定义可接受噪声带"; P5i.a T4 found 20-25% per-run variance + 7-run median ±5-10% standard error → current protocol cannot reliably detect ±2% effects at PP=512.
 
 **Source docs:**
@@ -127,16 +127,16 @@ Spec § 7.2 noise band stays at ±2% (unchanged); only the protocol parameters (
 **Goal**: spec the chosen protocol or redefined band in `docs/`.
 
 **Path A** (T1 hit ±2%):
-- Create `docs/p5h+2-a-pp512-protocol.md` committed:
+- Draft `docs/p5h+2-a-pp512-protocol.md` in T3 and commit it only after T4 validation:
   - Selected (RUNS, cooldown, preheat) values
   - Required independent repeat count (minimum 3) and whether the protocol is validated for ironmlx-only pre/post decisions or ironmlx-vs-omlx external target decisions
   - Empirical SE achieved
-  - Rationale for selection (lowest wall × final_CI meeting target)
+  - Rationale for selection (lowest wall × final uncertainty envelope meeting target)
   - Reproducibility command (iron-bench invocation)
-- Update `tools/p5i_a_baseline_aggregate.py` (and any downstream aggregator) `EXPECTED_RUNS_PER_PP` to support per-PP / per-target override if RUNS differs between PP=128 (still 7) and PP=512 (new value), and to emit CI fields when repeat/sweep data is available
+- Update `tools/p5i_a_baseline_aggregate.py` (and any downstream aggregator) `EXPECTED_RUNS_PER_PP` to support per-PP expectation if RUNS differs between PP=128 (still 7) and PP=512 (new value), enforce that expectation independently for each backend input, and emit CI fields when repeat/sweep data is available
 - Update any spec § 7.x sub-references that cite RUNS=7
 
-**Path B** (T1+T2 both failed; Approach C fallback):
+**Path C** (T1+T2 both failed; band redefinition fallback):
 - Create `docs/p5h+2-a-pp512-protocol.md` documenting:
   - Empirical max-achievable SE at PP=512 (e.g. ±5%)
   - Root cause or quantified ambiguity from T2 (cite powermetrics if available / TTFT drift / request-state determinism result)
@@ -144,9 +144,9 @@ Spec § 7.2 noise band stays at ±2% (unchanged); only the protocol parameters (
   - Recommended new spec § 7.2 noise band for PP=512 (e.g. ±5%)
 - Edit `docs/superpowers/specs/2026-05-20-ironmlx-p5h-all-pp-attribution-design.md` § 7.2: add subsection `§ 7.2.2 PP=512 noise band amendment (post-P5h+2.a)` documenting the redefined band + cross-reference to root cause
 - Update `tools/p5i_a_baseline_aggregate.py` to emit per-PP 95% CI in `summary.json` output (computed via bootstrap on actual sweep data; new field e.g. `ironmlx_pp_tps_ci95_half_width_pct`)
-- Any downstream consumer of summary.json (P5i.c PP=512 land conditions) inherits the new band + uses CI for decisions
+- Any downstream consumer of summary.json (P5i.c PP=512 land conditions) inherits the new band + uses CI/noise envelope for decisions
 
-**Acceptance**: T3 closes with `docs/p5h+2-a-pp512-protocol.md` committed + aggregator updates landed (Path A: per-PP/per-target RUNS override + CI emission when data is available; Path B: per-PP CI emission + amended band)
+**Acceptance**: T3/T4 closes with `docs/p5h+2-a-pp512-protocol.md` committed after validation + aggregator updates landed (Path A: per-PP RUNS expectation enforced independently for each backend input + CI emission when data is available; Path C: per-PP CI emission + amended band)
 
 **Expected wall**: 1-2 day write-up + small Python edits
 
@@ -156,12 +156,12 @@ Spec § 7.2 noise band stays at ±2% (unchanged); only the protocol parameters (
 
 **Approach**:
 - Fresh ironmlx spawn + preheat + measurement sweep at PP=512 using the new (RUNS, cooldown, preheat) values
-- For Path A: run at least 3 independent ironmlx spawn+sweep repeats and confirm combined within-sweep + between-sweep CI ≤ ±2%
+- For Path A: run at least 3 independent ironmlx spawn+sweep repeats and confirm final uncertainty envelope (max of within-sweep bootstrap CI and between-sweep median half-range) ≤ ±2%
 - If the protocol will be used for ironmlx-vs-omlx target decisions, also run omlx PP=512 with the same selected protocol and emit omlx CI; otherwise explicitly mark external-target decisions as still blocked
-- For Path B: confirm empirical SE matches T0+T1 prediction (within reason; not a tight gate since the band is redefined)
+- For Path C: confirm empirical uncertainty matches T0+T1 prediction (within reason; not a tight gate since the band is redefined)
 - Save validation data to `/tmp/p5h-2a-t4-validate.csv` + run aggregator with new CI emission
 
-**Acceptance**: T4 closes when validation repeat sweeps run + SE/CI computed + matches T3 commit's stated band and comparison scope (ironmlx-only vs ironmlx-vs-omlx) is explicit
+**Acceptance**: T4 closes when validation repeat sweeps run + CI/half-range envelope computed + matches the stated band and comparison scope (ironmlx-only vs ironmlx-vs-omlx) is explicit; the protocol/band commit is made only after this acceptance passes
 
 **Expected wall**: 3+ spawn cycles for ironmlx-only validation; add omlx repeats if external target decisions are in scope + analysis (~10min)
 
@@ -170,9 +170,9 @@ Spec § 7.2 noise band stays at ±2% (unchanged); only the protocol parameters (
 **Goal**: P5h+2.a close-out doc + memory + commit per `[feedback_no_empty_commits]`.
 
 **Approach**: write `docs/p5h+2-a-close-out.md` (committed) with:
-- Status (Full PASS Path A / Feasibility PASS Path B / Blocked) + date + branch + commit chain
-- § 1 Close Gate result (cite per-RUNS SE measurements; Path A: chosen config + comparison scope; Path B: redefined band + root cause or quantified ambiguity)
-- § 2 What landed (T3 docs/protocol committed; aggregator updates)
+- Status (Full PASS Path A / Feasibility PASS Path C / Blocked) + date + branch + commit chain
+- § 1 Close Gate result (cite per-RUNS SE measurements; Path A: chosen config + comparison scope; Path C: redefined band + root cause or quantified ambiguity)
+- § 2 What landed (validated protocol/band doc committed in T4; aggregator updates)
 - § 3 P5i.c PP=512 arm unblocked status — explicitly state whether the new protocol supports ironmlx-only pre/post decisions, ironmlx-vs-omlx target decisions, or both
 - § 4 Follow-up items (e.g. P5h+3 iron-bench tool enhancement for new metrics; Approach C from brainstorming originally)
 - § 5 Memory update — extend `project_p5h_findings.md` with P5h+2.a closure section
@@ -197,18 +197,18 @@ For each candidate RUNS value N ∈ {7, 15, 21, 30} (T0) and each alternate conf
 5. Compare to ±2% target as a **screening metric only**
 6. For candidate protocols, combine within-sweep bootstrap with independent repeat medians:
    - compute each repeat's median
-   - compute repeat-median range and/or bootstrap over repeat medians
-   - final CI half-width is the conservative max of within-sweep CI and between-sweep CI
-   - Outcome (a) requires this final CI ≤ ±2%
+   - compute repeat-median half-range (or bootstrap over repeat medians if enough repeats exist)
+   - final uncertainty envelope is the conservative max of within-sweep bootstrap CI and between-sweep median half-range
+   - Outcome (a) requires this final uncertainty envelope ≤ ±2%
 
 ### 5.2 Selection rule
 
-Cost function: `wall_time(config) × final_CI(config)`
+Cost function: `wall_time(config) × final_uncertainty(config)`
 
 - `wall_time(config)` = repeat_count × (preheat seconds + RUNS × per-run seconds + cooldown seconds)
-- `final_CI(config)` = max(within-sweep bootstrap CI, between-sweep repeat CI), as fraction of median
+- `final_uncertainty(config)` = max(within-sweep bootstrap CI, between-sweep median half-range), as fraction of median
 
-Pick config with **lowest wall_time × final_CI** that meets ±2% target. If multiple meet target, prefer lower wall_time. If none meet target → trigger T2 Approach B.
+Pick config with **lowest wall_time × final_uncertainty** that meets ±2% target. If multiple meet target, prefer lower wall_time. If none meet target → trigger T2 Approach B.
 
 ### 5.3 Reference: per-PP RUNS asymmetry rationale
 
@@ -261,7 +261,7 @@ T2 produces a markdown note in `reports/p5h+2-a-bench-log.md` (gitignored) summa
 
 ---
 
-## § 7 Approach C fallback details (T3 Path B; if A + B both fail)
+## § 7 Approach C fallback details (T3/T4 Path C; if Approach A + B both fail)
 
 ### 7.1 Spec § 7.2 amendment
 
@@ -309,7 +309,7 @@ Any downstream code that imports summary.json (P5i.c PP=512 land conditions; fut
 
 - **§ 9.1 No production ironmlx src changes** — only `tools/p5i_a_baseline_aggregate.py` + new `tools/p5h_2a_se_analysis.py` + new `tests/test_p5h_2a_se_analysis.py` + docs. No `ironmlx/src/...` files touched.
 - **§ 9.2 Statistical rigor** — bootstrap methodology + independent repeat validation documented in spec § 5 + reproducible script committed; results not just point estimates but with CI and explicit comparison scope
-- **§ 9.3 Reproducibility** — protocol parameters in docs/ committed; aggregator validation enforces per-PP/per-target RUNS expectation and emits per-PP CI when data is available
+- **§ 9.3 Reproducibility** — protocol parameters in docs/ committed after validation; aggregator validation enforces per-PP RUNS expectation independently for each backend input and emits per-PP CI when data is available
 - **§ 9.4 Production parity not impacted** — P5h+2.a is measurement-only work; flag-OFF production ironmlx pp_tps must not regress (verify smoke `p5_qwen35_moe_smoke` PASS unchanged after any aggregator/test changes)
 - **§ 9.5 Serial GPU per `[feedback_serial_perf_experiments]`** — all sweeps run serially; never concurrent with P5i.c sweeps on same machine
 - **§ 9.6 Python hygiene** — `uv run --with ruff ruff check` + `ruff format --check` on all new/modified Python files; pytest pass on new tests
@@ -319,7 +319,7 @@ Any downstream code that imports summary.json (P5i.c PP=512 land conditions; fut
 
 ## § 10 Branch + sequencing — parallel with P5i.c Phase 0
 
-- **New branch** `ironmlx-p5h+2-a-pp512-measurement` (fork from `ironmlx-p5i-a-gather-qmm-feasibility` HEAD `6e3b40e`)
+- **New branch** `ironmlx-p5h+2-a-pp512-measurement` (fork from `ironmlx-p5i-a-gather-qmm-feasibility` HEAD `a90a85c`)
 - **Parallel with P5i.c Phase 0** (separate branch; spec/plan/dispatch independent; GPU sweeps serialize via `[feedback_serial_perf_experiments]`)
 - **P5i.c PP=512 arm WAITS** for P5h+2.a close (only P5i.c PP=128 arm runs in parallel during P5h+2.a)
 - **Estimated wall**: 3-5 days total
