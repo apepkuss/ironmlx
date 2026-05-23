@@ -1010,6 +1010,13 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         let prompt_len_i32 = prompt_len as i32;
         let mut pos: i32 = 0;
         let mut image_pad_consumed: usize = 0;
+        // P5h+1 T2: per-iteration chunk index plumbed into gs_chunk_N
+        // SpanFields + RAII chunk-context guard so every descendant span
+        // emitted inside the chunk body inherits chunk_idx via the
+        // P5H_CURRENT_CHUNK_STACK thread-local fallback. Zero-based;
+        // incremented after each successful chunk and BEFORE `pos += n`.
+        #[cfg(feature = "p5h-profile")]
+        let mut chunk_idx: u32 = 0;
         let last_logits = loop {
             let remaining = prompt_len_i32 - pos;
             let n = if chunk_size == 0 {
@@ -1021,15 +1028,25 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
             // T0a.8 Step 3b: wrap chunk body in gs_chunk_N. The closure
             // captures cache (mut), image_pad_consumed (mut), and the
             // request/model/position_ids_full/vision_embeds_full refs.
+            //
+            // P5h+1 T2: SpanFields { chunk_idx: Some(chunk_idx), ... } emits
+            // chunk_idx on the gs_chunk_N row; the inner RAII guard
+            // (`_chunk_guard`) pushes chunk_idx onto P5H_CURRENT_CHUNK_STACK
+            // so every descendant span emitted inside the closure body
+            // inherits the same chunk_idx via the emit fallback. The guard
+            // Drop pops on every exit path including `?`-early-return from
+            // the closure body — no manual cleanup required.
             #[cfg(feature = "p5h-profile")]
             let chunk_result: Result<Option<Array>> =
                 crate::core::p5h::try_with_p5h_span_from_current_trace(
                     "gs_chunk_N",
                     || crate::core::p5h::SpanFields {
                         seq: Some(chunk_size as u32),
+                        chunk_idx: Some(chunk_idx),
                         ..Default::default()
                     },
                     || -> Result<Option<Array>> {
+                        let _chunk_guard = crate::core::p5h::enter_chunk_context(chunk_idx);
                         let chunk_ids =
                             &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
                         let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
@@ -1165,6 +1182,15 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
             if let Some(logits) = chunk_result? {
                 let vocab = logits.shape().as_slice()[2];
                 break logits.reshape((vocab,))?;
+            }
+            // P5h+1 T2: bump chunk_idx after a successful intermediate chunk
+            // and BEFORE `pos += n` so the next iteration's gs_chunk_N opens
+            // with the next zero-based index. Final (is_last) chunk breaks
+            // out via the Some(logits) branch above; incrementing there is
+            // unnecessary because the loop terminates.
+            #[cfg(feature = "p5h-profile")]
+            {
+                chunk_idx += 1;
             }
             pos += n;
         };

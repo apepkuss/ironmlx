@@ -14,6 +14,56 @@ use std::cell::RefCell;
 thread_local! {
     pub(crate) static P5H_CURRENT_TRACE: RefCell<Option<P5hTraceContext>> = const { RefCell::new(None) };
     pub(crate) static P5H_CURRENT_SPAN_STACK: RefCell<Vec<SpanHandle>> = const { RefCell::new(Vec::new()) };
+    /// P5h+1 T2 Lane-B chunk context stack. Entered via the
+    /// `P5hChunkContextGuard` RAII (`enter_chunk_context`); read by
+    /// `emit_log_line_*` to populate the `chunk_idx` field on every span
+    /// emitted while a `gs_chunk_N` ancestor is active. The stack supports
+    /// nesting in case a future site nests chunks (current Lane-B
+    /// `GenerationStream::new` loop opens one chunk at a time, so depth is
+    /// effectively 1, but the stack semantics keep the helper symmetric with
+    /// `P5H_CURRENT_SPAN_STACK`).
+    pub(crate) static P5H_CURRENT_CHUNK_STACK: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// RAII guard that owns the top of `P5H_CURRENT_CHUNK_STACK`. Created by
+/// `enter_chunk_context`; the caller MUST bind it to a local
+/// (`let _chunk_guard = enter_chunk_context(idx)`) so the guard lives for the
+/// chunk body's scope and Drop fires on every exit path (including `?`
+/// early-returns from the closure body).
+///
+/// Manual push/pop is intentionally NOT exposed: an early `?` return between
+/// a push and a manual pop would leak the chunk_idx on the stack and
+/// contaminate the next chunk's span emission with a stale ancestor id.
+pub(crate) struct P5hChunkContextGuard {
+    chunk_idx: u32,
+    active: bool,
+}
+
+pub(crate) fn enter_chunk_context(chunk_idx: u32) -> P5hChunkContextGuard {
+    P5H_CURRENT_CHUNK_STACK.with(|s| s.borrow_mut().push(chunk_idx));
+    P5hChunkContextGuard {
+        chunk_idx,
+        active: true,
+    }
+}
+
+fn current_chunk_idx() -> Option<u32> {
+    P5H_CURRENT_CHUNK_STACK.with(|s| s.borrow().last().copied())
+}
+
+impl Drop for P5hChunkContextGuard {
+    fn drop(&mut self) {
+        if self.active {
+            P5H_CURRENT_CHUNK_STACK.with(|s| {
+                let popped = s.borrow_mut().pop();
+                assert_eq!(
+                    popped,
+                    Some(self.chunk_idx),
+                    "P5hChunkContextGuard dropped out of order"
+                );
+            });
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +127,14 @@ impl SpanHandle {
 #[derive(Default, Debug)]
 pub struct SpanFields {
     pub layer_idx: Option<i32>,
+    /// Lane-B chunk index (zero-based). Explicit value set by `gs_chunk_N`
+    /// open; inherited automatically by all descendant spans via the
+    /// `P5H_CURRENT_CHUNK_STACK` thread-local fallback inside
+    /// `emit_log_line_*`. Stays `None` (rendered as `null` on the wire) for
+    /// all spans emitted outside a Lane-B chunk body (Lane-A entirely; Lane-B
+    /// pre-loop sites such as `gs_kv_cache_alloc`; Lane-B post-loop sites
+    /// such as `gs_first_token_sample_dispatch`).
+    pub chunk_idx: Option<u32>,
     pub seq: Option<u32>,
     pub mode: Option<&'static str>,
 }
@@ -345,15 +403,25 @@ fn emit_log_line_with_end_ns(
     // stable for the Python aggregator parser. `parent_span` label comes
     // from the SpanHandle (set at open from the parent's span_name per
     // Codex plan review v1 P1 #1 — do NOT hard-code "explicit_parent").
+    //
+    // P5h+1 T2: `chunk_idx` is inserted between `layer_idx` and `span_id`.
+    // Explicit `fields.chunk_idx` wins; otherwise inherit from
+    // `P5H_CURRENT_CHUNK_STACK` top (set by the RAII guard at chunk-body
+    // entry). `None` renders as `null` per other Option fields.
+    let chunk_idx = fields.chunk_idx.or_else(current_chunk_idx);
+    let chunk_idx_str = chunk_idx
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "null".to_string());
     tracing::info!(
         "[p5h-profile] request_id={} routing_path={} prompt_tokens={} seq={} layer_idx={} \
-         span_id={} parent_span_id={} span_name={} parent_span={} \
+         chunk_idx={} span_id={} parent_span_id={} span_name={} parent_span={} \
          start_ns={} end_ns={} mode={} span_kind={}",
         ctx.request_id,
         ctx.routing_path,
         ctx.prompt_tokens,
         fields.seq.unwrap_or(0),
         fields.layer_idx.unwrap_or(-1),
+        chunk_idx_str,
         span.span_id,
         span.parent_span_id
             .map(|id| id.to_string())
@@ -580,25 +648,77 @@ pub fn with_p5h_span_from_current_trace<T>(
 /// none in P5h Phase 1, but we keep it for future fail-fast diagnostics (e.g., a span
 /// that should only be opened inside a known-OpenAI guarded region).
 ///
-/// Per Codex plan review v20 P1 #1 — Lane-B (`routing_path == "gs_chunked"`) is
-/// declared TOP-LEVEL-ONLY in P5h (per spec § 5 Lane B scope). Deep decoder /
-/// GDN / GatedAttention / MoE / lm_head substep emission under chunked GS would
-/// (a) violate that scope, (b) multiply records per request by N chunks without
-/// a `chunk_idx` schema field to disambiguate, and (c) make the T0a.14 hard
-/// gate enforce GDN attention_path coverage on a lane that intentionally lacks
-/// deep instrumentation. The fix is centralized here: when the active ctx is
-/// Lane-B, this helper additionally checks `span_name` against an allow-list
-/// of top-level Lane-B emission names. Names NOT on the allow-list no-op
-/// even though `P5H_CURRENT_TRACE` is Some — i.e. decoder / GDN / etc deep
-/// `try_` calls inside `GenerationStream::new` and `stream.next_token()` will
-/// run body directly with no span emission on Lane-B. Top-level Lane-B spans
-/// (`gs_kv_cache_alloc`, `gs_chunk_N`, `gs_first_token_sample_dispatch`) stay
-/// on the allow-list and continue to emit, chaining under the
-/// `gs_stream_init_and_chunk_loop` parent via `P5H_CURRENT_SPAN_STACK`.
+/// Per Codex plan review v20 P1 #1 + P5h+1 T2 — Lane-B (`routing_path ==
+/// "gs_chunked"`) emission allow-list. Original P5h scope was TOP-LEVEL-ONLY
+/// because (a) deep emission under chunked GS would multiply records per
+/// request by N chunks without a `chunk_idx` schema field to disambiguate
+/// and (b) the T0a.14 hard gate would have enforced GDN coverage on a lane
+/// that lacked deep instrumentation. P5h+1 T2 lifts both blockers:
+///
+///   * Schema: `SpanFields.chunk_idx: Option<u32>` is now emitted on every
+///     span; `P5H_CURRENT_CHUNK_STACK` populates the field automatically
+///     for any span emitted under a `gs_chunk_N` ancestor (via the RAII
+///     `P5hChunkContextGuard` in `core::generate::GenerationStream::new`).
+///   * Coverage gates: P5h+1 closes the Lane-B `gs_chunk_N` wrapper
+///     dominance (97-99% of root_inclusive) by opening the full decoder
+///     hierarchy here so T1's per-substep eval probes light up on Lane B.
+///
+/// When the active ctx is Lane-B, this helper checks `span_name` against
+/// this allow-list; names NOT on it no-op even though `P5H_CURRENT_TRACE`
+/// is Some (defense in depth against accidental Lane-A names leaking into
+/// Lane-B emission). The list now spans the full decoder hierarchy:
+///   * Lane-B top-level: `gs_kv_cache_alloc`, `gs_chunk_N`,
+///     `gs_first_token_sample_dispatch`.
+///   * Decoder wrappers + per-step substeps: `decoder_layer_N`,
+///     `input_norm`, `attention_path`, `residual_overhead`,
+///     `post_attention_norm`, `mlp_path`.
+///   * T2 GatedAttention substeps under `attention_path`.
+///   * T3 MoE substeps under `mlp_path` (incl. shared expert + routing).
+///   * GDN 11 substeps under `attention_path` for hybrid models.
+///   * Cache + lm_head: `cache_state_update`,
+///     `slice_last_and_project_lm_head`.
+///
+/// Names retain Lane-A emission semantics — they are accepted on Lane-A
+/// unconditionally by the strict `"scheduler"` branch. Only Lane-B is
+/// allow-list-gated.
 const LANE_B_ALLOWED_TRY_SPAN_NAMES: &[&str] = &[
     "gs_kv_cache_alloc",
     "gs_chunk_N",
     "gs_first_token_sample_dispatch",
+    "decoder_layer_N",
+    "input_norm",
+    "attention_path",
+    "residual_overhead",
+    "post_attention_norm",
+    "mlp_path",
+    "q_gate_k_v_proj",
+    "q_split_norm_reshape",
+    "mrope_apply",
+    "kv_mask_update",
+    "fused_sdpa",
+    "gate_sigmoid_mul",
+    "o_proj",
+    "router_logits_softmax_topk",
+    "routing_sort_pack",
+    "gather_qmm_gate_up",
+    "swiglu_activation",
+    "gather_qmm_down",
+    "routing_unsort_weighted_reduce",
+    "shared_expert",
+    "moe_output_sum",
+    "cache_state_update",
+    "slice_last_and_project_lm_head",
+    "gda_step_1a_in_proj_qkvz",
+    "gda_step_1b_in_proj_ba",
+    "gda_step_2a_prepend_conv_state",
+    "gda_step_2b_conv1d_silu",
+    "gda_step_2c_update_conv_state",
+    "gda_step_3_split_reshape_per_head",
+    "gda_step_4_qk_rmsnorm",
+    "gda_step_5_compute_g",
+    "gda_step_6_sigmoid_beta",
+    "gda_step_7_kernel_and_cache_update",
+    "gda_step_8_norm_proj",
 ];
 
 pub fn try_with_p5h_span_from_current_trace<T>(
@@ -963,14 +1083,15 @@ mod tests {
     }
 
     #[test]
-    fn try_with_span_lane_b_suppresses_deep_decoder_names() {
-        // Per Codex plan review v20 P1 #1: deep span names (decoder_layer_N,
-        // gda_step_*, q_gate_k_v_proj, router_logits_*, etc) must NO-OP under
-        // Lane-B even though the guard is active. Per Codex plan review v22
-        // P1: prove NO span emitted, not merely that the stack returned to
-        // base after a push/pop. A buggy implementation that forwards Lane-B
-        // deep names to strict would push, emit, pop, and leave stack length
-        // unchanged, so NEXT_SPAN_ID must also remain unchanged.
+    fn try_with_span_lane_b_emits_deep_decoder_names_in_p5h_plus_1() {
+        // P5h+1 T2 reverses P5h's top-level-only Lane-B policy. The deep
+        // decoder hierarchy (decoder_layer_N, gda_step_*, attention substeps,
+        // MoE substeps, slice_last_and_project_lm_head, ...) is now on
+        // `LANE_B_ALLOWED_TRY_SPAN_NAMES` and MUST emit on Lane-B so T1's
+        // per-substep eval probes can close the gs_chunk_N wrapper-dominance
+        // gap. (Original P5h v20 P1 #1 test asserted suppression; v22 P1
+        // strengthened it to also check NEXT_SPAN_ID; both assertions are
+        // inverted here because the semantic policy itself changed.)
         let ctx = lane_b_ctx();
         let root = dummy_span(99);
         let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
@@ -978,16 +1099,42 @@ mod tests {
             "decoder_layer_N",
             "gda_step_1a_in_proj_qkvz",
             "slice_last_and_project_lm_head",
+            "q_gate_k_v_proj",
+            "router_logits_softmax_topk",
+            "cache_state_update",
         ] {
+            let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            let result = try_with_p5h_span_from_current_trace(name, SpanFields::default, || 17u32);
+            let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(result, 17);
+            assert_eq!(
+                id_after,
+                id_before + 1,
+                "P5h+1 T2 Lane-B deep span_name `{name}` MUST emit (advance NEXT_SPAN_ID by 1); got id_before={id_before}, id_after={id_after}",
+            );
+            // Stack returned to base_parent after body.
+            P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
+        }
+    }
+
+    #[test]
+    fn try_with_span_lane_b_suppresses_unknown_names() {
+        // Defense in depth (per LANE_B_ALLOWED_TRY_SPAN_NAMES doc comment):
+        // even after the P5h+1 T2 allow-list expansion, names NOT on the
+        // list must still no-op on Lane-B so a typo or accidental Lane-A
+        // name leaking into deep instrumentation does not silently emit.
+        let ctx = lane_b_ctx();
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        for name in ["totally_unknown_span", "made_up_op_name"] {
             let before_len = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow().len());
             let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
             let result = try_with_p5h_span_from_current_trace(name, SpanFields::default, || 17u32);
             let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
             assert_eq!(result, 17);
-            // Suppressed: no span id allocated and no push/pop happened.
             assert_eq!(
                 id_after, id_before,
-                "Lane-B deep span_name `{name}` MUST NOT emit; NEXT_SPAN_ID changed from {id_before} to {id_after}",
+                "Lane-B unknown span_name `{name}` MUST NOT emit; NEXT_SPAN_ID changed from {id_before} to {id_after}",
             );
             let after_len = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow().len());
             assert_eq!(

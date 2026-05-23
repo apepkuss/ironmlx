@@ -47,12 +47,17 @@ class ResidualLeaf:
 
     Per spec § 2.5a step 4: T5 aggregator MUST synthesize these post-validation
     (server emitters never produce ``unattributed_*`` rows directly).
+
+    P5h+1 T2: ``chunk_idx`` is inherited from the parent tree span so the
+    attribution CSV column stays consistent for descendant residuals under
+    a ``gs_chunk_N`` ancestor.
     """
 
     span_name: str
     inclusive_us: float
     parent_span_id: int
     parent_span_name: str
+    chunk_idx: int | None
     span_kind: str = "synthesized"
 
 
@@ -135,6 +140,7 @@ def synthesize_residual_leaves(spans: list[Span]) -> list[ResidualLeaf]:
                     inclusive_us=residual_us,
                     parent_span_id=span.span_id,
                     parent_span_name=span.span_name,
+                    chunk_idx=span.chunk_idx,
                 )
             )
     return residuals
@@ -223,7 +229,7 @@ def write_attribution_csv(
 ) -> None:
     """Per-request per-span attribution table.
 
-    Columns: ``pp, request_id, routing_path, span_name, span_kind,
+    Columns: ``pp, request_id, routing_path, chunk_idx, span_name, span_kind,
     parent_span_id, span_id, inclusive_us, exclusive_us``.
 
     * Tree rows carry numeric ``exclusive_us`` (may be 0.0 for leaves).
@@ -231,6 +237,11 @@ def write_attribution_csv(
       ``exclusive_us=inclusive_us`` (residual leaves have no children).
     * Diagnostic rows carry ``span_kind="diagnostic"``, ``exclusive_us=""``
       (empty — diagnostic spans are NOT in the exclusive tree per § 2.5a).
+
+    P5h+1 T2: ``chunk_idx`` is inserted immediately after ``routing_path``
+    and is empty for spans outside a Lane-B ``gs_chunk_N`` ancestor
+    (Lane-A entirely; Lane-B pre/post-loop sites). Residual rows inherit
+    ``chunk_idx`` from the parent tree span via ``ResidualLeaf.chunk_idx``.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="") as f:
@@ -240,6 +251,7 @@ def write_attribution_csv(
                 "pp",
                 "request_id",
                 "routing_path",
+                "chunk_idx",
                 "span_name",
                 "span_kind",
                 "parent_span_id",
@@ -255,6 +267,7 @@ def write_attribution_csv(
                         attr.pp,
                         attr.request_id,
                         attr.routing_path,
+                        "" if s.chunk_idx is None else s.chunk_idx,
                         s.span_name,
                         s.span_kind,
                         "" if s.parent_span_id is None else s.parent_span_id,
@@ -269,6 +282,7 @@ def write_attribution_csv(
                         attr.pp,
                         attr.request_id,
                         attr.routing_path,
+                        "" if r.chunk_idx is None else r.chunk_idx,
                         r.span_name,
                         r.span_kind,
                         r.parent_span_id,
@@ -283,6 +297,7 @@ def write_attribution_csv(
                         attr.pp,
                         attr.request_id,
                         attr.routing_path,
+                        "" if d.chunk_idx is None else d.chunk_idx,
                         d.span_name,
                         d.span_kind,
                         "" if d.parent_span_id is None else d.parent_span_id,

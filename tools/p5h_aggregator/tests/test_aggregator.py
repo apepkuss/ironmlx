@@ -45,11 +45,12 @@ def _build_line(
     end_ns=1_000,
     mode="off",
     span_kind="tree",
+    chunk_idx="null",
 ):
     return (
         "  2026-05-22T03:00:00Z  INFO ironmlx::core::p5h: "
         f"[p5h-profile] request_id={request_id} routing_path={routing_path} "
-        f"prompt_tokens={prompt_tokens} seq=128 layer_idx=-1 "
+        f"prompt_tokens={prompt_tokens} seq=128 layer_idx=-1 chunk_idx={chunk_idx} "
         f"span_id={span_id} parent_span_id={parent_span_id} "
         f"span_name={span_name} parent_span={parent_span} "
         f"start_ns={start_ns} end_ns={end_ns} mode={mode} span_kind={span_kind}"
@@ -282,6 +283,7 @@ def test_coverage_pct_residual_half_returns_half():
         inclusive_us=5.0,  # 50% of 10us
         parent_span_id=1,
         parent_span_name="server_request_recv_to_first_content_sse_write",
+        chunk_idx=None,
     )
     assert coverage_pct(spans[0], [residual]) == pytest.approx(0.5)
 
@@ -464,6 +466,7 @@ def _write_log(path: Path, spans: list) -> None:
                 end_ns=s.end_ns,
                 mode=s.mode,
                 span_kind=s.span_kind,
+                chunk_idx=("null" if s.chunk_idx is None else str(s.chunk_idx)),
             )
         )
     path.write_text("\n".join(lines) + "\n")
@@ -673,3 +676,119 @@ def test_aggregator_cli_aborted_request_skipped(tmp_path: Path):
         f"stderr:\n{result.stderr}"
     )
     assert "zero non-aborted requests" in result.stderr
+
+
+# --- P5h+1 T2: chunk_idx column in attribution CSV ---
+
+
+def test_attribution_csv_has_chunk_idx_column_after_routing_path(tmp_path: Path):
+    """write_attribution_csv inserts `chunk_idx` immediately after
+    `routing_path`. No existing columns reordered or removed.
+    """
+    spans = _lane_a_full_fixture()
+    attr = build_attribution(spans, pp="128")
+    out = tmp_path / "attribution.csv"
+    write_attribution_csv([attr], out)
+
+    with out.open() as f:
+        header = f.readline().strip().split(",")
+    expected = [
+        "pp",
+        "request_id",
+        "routing_path",
+        "chunk_idx",
+        "span_name",
+        "span_kind",
+        "parent_span_id",
+        "span_id",
+        "inclusive_us",
+        "exclusive_us",
+    ]
+    assert header == expected, f"expected {expected}, got {header}"
+
+
+def test_attribution_csv_preserves_tree_and_diagnostic_chunk_idx(tmp_path: Path):
+    """Tree + diagnostic rows must round-trip the parsed `chunk_idx`. The
+    Lane-A fixture's rows are all chunk_idx=null → empty string in CSV."""
+    spans = _lane_a_full_fixture()
+    attr = build_attribution(spans, pp="128")
+    out = tmp_path / "attribution.csv"
+    write_attribution_csv([attr], out)
+
+    rows = list(csv.DictReader(out.open()))
+    for r in rows:
+        if r["span_kind"] in ("tree", "diagnostic"):
+            # Lane-A → all chunk_idx=null → empty cell.
+            assert r["chunk_idx"] == "", (
+                f"Lane-A tree/diagnostic row chunk_idx must be empty, "
+                f"got {r['chunk_idx']!r} on span {r['span_name']}"
+            )
+
+
+def test_attribution_csv_synthesized_inherits_chunk_idx(tmp_path: Path):
+    """ResidualLeaf rows inherit `chunk_idx` from the parent tree span.
+    Build a Lane-B-style fixture where a non-leaf span carries chunk_idx=3
+    and emits a residual leaf — the CSV row for the residual must carry "3".
+    """
+    rid = "rid_synth"
+    # Root [0, 100us]. Parent span (`gs_chunk_N` with chunk_idx=3) inside
+    # root; ONE narrow child of that parent → residual under gs_chunk_N
+    # inherits chunk_idx=3.
+    spans = [
+        parse_line(
+            _build_line(
+                request_id=rid,
+                routing_path="gs_chunked",
+                prompt_tokens=4096,
+                span_id=1,
+                parent_span_id="null",
+                span_name="server_request_recv_to_first_content_sse_write",
+                parent_span="null",
+                start_ns=0,
+                end_ns=100_000,
+            )
+        ),
+        parse_line(
+            _build_line(
+                request_id=rid,
+                routing_path="gs_chunked",
+                prompt_tokens=4096,
+                span_id=10,
+                parent_span_id="1",
+                span_name="gs_chunk_N",
+                parent_span="server_request_recv_to_first_content_sse_write",
+                start_ns=10_000,
+                end_ns=90_000,  # 80us window
+                chunk_idx="3",
+            )
+        ),
+        # Narrow child under gs_chunk_N (5us) — residual = 80-5 = 75us,
+        # synthesized as unattributed_gs_chunk_N.
+        parse_line(
+            _build_line(
+                request_id=rid,
+                routing_path="gs_chunked",
+                prompt_tokens=4096,
+                span_id=11,
+                parent_span_id="10",
+                span_name="decoder_layer_N",
+                parent_span="gs_chunk_N",
+                start_ns=11_000,
+                end_ns=16_000,
+                chunk_idx="3",
+            )
+        ),
+    ]
+    attr = build_attribution(spans, pp="2048")
+    out = tmp_path / "attribution.csv"
+    write_attribution_csv([attr], out)
+
+    rows = list(csv.DictReader(out.open()))
+    synth_rows = [r for r in rows if r["span_kind"] == "synthesized"]
+    assert synth_rows, "expected at least one synthesized residual row"
+    # The synthesized row under gs_chunk_N (id=10) must inherit chunk_idx="3".
+    matching = [r for r in synth_rows if r["span_name"] == "unattributed_gs_chunk_N"]
+    assert matching, f"expected unattributed_gs_chunk_N row, got rows: {synth_rows}"
+    assert matching[0]["chunk_idx"] == "3", (
+        f"synthesized chunk_idx must inherit parent (3), got {matching[0]['chunk_idx']!r}"
+    )

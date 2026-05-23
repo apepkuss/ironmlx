@@ -3,6 +3,7 @@
 Single source of truth: docs/superpowers/specs/2026-05-20-ironmlx-p5h-all-pp-attribution-design.md § 2.5a.
 DO NOT re-derive semantics here.
 """
+
 from __future__ import annotations
 
 import re
@@ -16,6 +17,7 @@ P5H_LOG_RE = re.compile(
     r"prompt_tokens=(?P<prompt_tokens>\d+) "
     r"seq=(?P<seq>\d+) "
     r"layer_idx=(?P<layer_idx>-?\d+) "
+    r"chunk_idx=(?P<chunk_idx>null|\d+) "
     r"span_id=(?P<span_id>\d+) "
     r"parent_span_id=(?P<parent_span_id>\S+) "
     r"span_name=(?P<span_name>\S+) "
@@ -64,21 +66,67 @@ LANE_B_REQUIRED_TREE = {
     "server_request_recv_to_first_content_sse_write",
     "http_parse_render_tokenize",
     "gs_stream_init_and_chunk_loop",
-    "gs_kv_cache_alloc",            # per Codex plan review v21 P1 — children of
-    "gs_chunk_N",                   # gs_stream_init_and_chunk_loop on Lane-B,
-    "gs_first_token_sample_dispatch", # all three were allow-listed for emission
-    "sse_write_role_chunk",           # in v20 but only the third was required.
+    "gs_kv_cache_alloc",  # per Codex plan review v21 P1 — children of
+    "gs_chunk_N",  # gs_stream_init_and_chunk_loop on Lane-B,
+    "gs_first_token_sample_dispatch",  # all three were allow-listed for emission
+    "sse_write_role_chunk",  # in v20 but only the third was required.
     "gs_first_token_materialize_and_predispatch",
     "detok_format_first_content_chunk",
+    # P5h+1 T2: Lane-B is no longer top-level-only. The full decoder
+    # hierarchy emits under `gs_chunk_N` ancestors (Rust try-helper
+    # allow-list `LANE_B_ALLOWED_TRY_SPAN_NAMES` extended in lockstep).
+    # Required-presence enforces that the chunked-prefill loop actually
+    # opened the wrappers so T1's per-substep eval probes light up.
+    # Decoder wrappers (children of gs_chunk_N → input transitions):
+    "decoder_layer_N",
+    "input_norm",
+    "attention_path",
+    "residual_overhead",
+    "post_attention_norm",
+    "mlp_path",
+    # T2 GatedAttention substeps under `attention_path`:
+    "q_gate_k_v_proj",
+    "q_split_norm_reshape",
+    "mrope_apply",
+    "kv_mask_update",
+    "fused_sdpa",
+    "gate_sigmoid_mul",
+    "o_proj",
+    # T3 MoE substeps under `mlp_path` (incl. shared expert + routing):
+    "router_logits_softmax_topk",
+    "routing_sort_pack",
+    "gather_qmm_gate_up",
+    "swiglu_activation",
+    "gather_qmm_down",
+    "routing_unsort_weighted_reduce",
+    "shared_expert",
+    "moe_output_sum",
+    # GDN 11 substeps under `attention_path` (hybrid model):
+    "gda_step_1a_in_proj_qkvz",
+    "gda_step_1b_in_proj_ba",
+    "gda_step_2a_prepend_conv_state",
+    "gda_step_2b_conv1d_silu",
+    "gda_step_2c_update_conv_state",
+    "gda_step_3_split_reshape_per_head",
+    "gda_step_4_qk_rmsnorm",
+    "gda_step_5_compute_g",
+    "gda_step_6_sigmoid_beta",
+    "gda_step_7_kernel_and_cache_update",
+    "gda_step_8_norm_proj",
+    # Cache + lm_head emitted once per chunk:
+    "cache_state_update",
+    "slice_last_and_project_lm_head",
 }
 LANE_B_ALLOWED_TREE = LANE_B_REQUIRED_TREE | {
     # T4.4 retroactive subspan of http_parse_render_tokenize; fires on both
     # lanes because handler entry is pre-routing. Allowed on Lane-B but not
-    # required (Lane-B presence not enforced for tokenizer_encode).
+    # required (Lane-B presence not enforced for tokenizer_encode), so it
+    # stays in ALLOWED but not REQUIRED.
     "tokenizer_encode",
 }
 LANE_B_REQUIRED_DIAGNOSTIC: set[str] = set()  # no Lane-B diagnostic spans currently
-LANE_B_ALLOWED_DIAGNOSTIC: set[str] = set()    # no Lane-B diagnostic spans currently
+LANE_B_ALLOWED_DIAGNOSTIC: set[str] = set()  # no Lane-B diagnostic spans currently
+
 
 def required_sets_for_routing(routing: str) -> tuple[set[str], set[str]]:
     if routing == "scheduler":
@@ -86,6 +134,7 @@ def required_sets_for_routing(routing: str) -> tuple[set[str], set[str]]:
     if routing == "gs_chunked":
         return LANE_B_REQUIRED_TREE, LANE_B_REQUIRED_DIAGNOSTIC
     return set(), set()
+
 
 def allowed_diagnostic_for_routing(routing: str) -> set[str]:
     """Closed allow-set for diagnostic span_names. Superset of REQUIRED to
@@ -97,6 +146,7 @@ def allowed_diagnostic_for_routing(routing: str) -> set[str]:
         return LANE_B_ALLOWED_DIAGNOSTIC
     return set()
 
+
 @dataclass
 class Span:
     request_id: str
@@ -104,6 +154,9 @@ class Span:
     prompt_tokens: int
     seq: int
     layer_idx: int
+    # P5h+1 T2: Lane-B chunk index (zero-based). Non-null only for spans
+    # emitted inside a `gs_chunk_N` ancestor (see validate_chunk_ancestry).
+    chunk_idx: int | None
     span_id: int
     parent_span_id: int | None
     span_name: str
@@ -125,12 +178,14 @@ def parse_line(line: str) -> Span | None:
         return None
     g = m.groupdict()
     pid = g["parent_span_id"]
+    chunk_idx_raw = g["chunk_idx"]
     return Span(
         request_id=g["request_id"],
         routing_path=g["routing_path"],
         prompt_tokens=int(g["prompt_tokens"]),
         seq=int(g["seq"]),
         layer_idx=int(g["layer_idx"]),
+        chunk_idx=None if chunk_idx_raw == "null" else int(chunk_idx_raw),
         span_id=int(g["span_id"]),
         parent_span_id=None if pid == "null" else int(pid),
         span_name=g["span_name"],
@@ -161,7 +216,9 @@ class ValidationReport:
         return not self.failures
 
 
-def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> ValidationReport:
+def validate_request(
+    spans: list[Span], *, prefill_chunk_size: int = 2048
+) -> ValidationReport:
     """Run § 2.5a structural checks on one request's worth of spans."""
     report = ValidationReport(request_count=1)
     tree = [s for s in spans if s.span_kind == "tree"]
@@ -200,7 +257,9 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
     if len(roots) != 1:
         report.fail(f"expected exactly 1 root, found {len(roots)}")
     elif roots[0].span_name != "server_request_recv_to_first_content_sse_write":
-        report.fail(f"root span_name is {roots[0].span_name}, expected server_request_recv_to_first_content_sse_write")
+        report.fail(
+            f"root span_name is {roots[0].span_name}, expected server_request_recv_to_first_content_sse_write"
+        )
 
     # Per-request identity consistency (per Codex review v24 P3): root is the
     # source of truth for routing. Root is emitted at close time, so `tree[0]`
@@ -220,7 +279,10 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
 
     # No orphan top-level (non-root tree span with null parent)
     for s in tree:
-        if s.parent_span_id is None and s.span_name != "server_request_recv_to_first_content_sse_write":
+        if (
+            s.parent_span_id is None
+            and s.span_name != "server_request_recv_to_first_content_sse_write"
+        ):
             report.fail(f"orphan top-level tree span: {s.span_name}")
 
     # Closure: every non-null parent_span_id resolves
@@ -232,17 +294,23 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
     # Label self-consistency
     for s in tree:
         if (s.parent_span_id is None) != (s.parent_span is None):
-            report.fail(f"label inconsistency on {s.span_name}: parent_span_id={s.parent_span_id}, parent_span={s.parent_span}")
+            report.fail(
+                f"label inconsistency on {s.span_name}: parent_span_id={s.parent_span_id}, parent_span={s.parent_span}"
+            )
         if s.parent_span_id is not None and s.parent_span_id in by_id:
             if by_id[s.parent_span_id].span_name != s.parent_span:
-                report.fail(f"parent_span label mismatch on {s.span_name}: parent_span_id resolves to {by_id[s.parent_span_id].span_name} but parent_span={s.parent_span}")
+                report.fail(
+                    f"parent_span label mismatch on {s.span_name}: parent_span_id resolves to {by_id[s.parent_span_id].span_name} but parent_span={s.parent_span}"
+                )
 
     # Interval containment
     for s in tree:
         if s.parent_span_id is not None and s.parent_span_id in by_id:
             p = by_id[s.parent_span_id]
             if not (p.start_ns <= s.start_ns and s.end_ns <= p.end_ns):
-                report.fail(f"interval not contained on {s.span_name}: parent [{p.start_ns}, {p.end_ns}], child [{s.start_ns}, {s.end_ns}]")
+                report.fail(
+                    f"interval not contained on {s.span_name}: parent [{p.start_ns}, {p.end_ns}], child [{s.start_ns}, {s.end_ns}]"
+                )
 
     # Reachability + no cycle
     if len(roots) == 1:
@@ -255,14 +323,18 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
         while stack:
             cur = stack.pop()
             if cur.span_id in visited:
-                report.fail(f"cycle detected at span {cur.span_name} (id={cur.span_id})")
+                report.fail(
+                    f"cycle detected at span {cur.span_name} (id={cur.span_id})"
+                )
                 break
             visited.add(cur.span_id)
             for c in children_by_parent.get(cur.span_id, []):
                 stack.append(c)
         unreachable = set(by_id.keys()) - visited
         if unreachable:
-            report.fail(f"unreachable tree spans from root: {[by_id[i].span_name for i in unreachable]}")
+            report.fail(
+                f"unreachable tree spans from root: {[by_id[i].span_name for i in unreachable]}"
+            )
 
     # Route-aware required span_names (per Codex plan review v1 P1 #2 — check
     # tree subset against tree_spans, diagnostic subset against diagnostic_spans).
@@ -277,7 +349,9 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
         if missing_tree:
             report.fail(f"missing required tree spans for {routing}: {missing_tree}")
         if missing_diag:
-            report.fail(f"missing required diagnostic spans for {routing}: {missing_diag}")
+            report.fail(
+                f"missing required diagnostic spans for {routing}: {missing_diag}"
+            )
         # Per Codex plan review v22 P1: Lane-B is top-level-only in P5h.
         # Presence checks alone are insufficient: a buggy route-aware `try_`
         # helper could emit deep Lane-A names under chunked GS while still
@@ -319,6 +393,7 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
     # (their tree may be partially populated).
     if not aborted:
         by_id = {s.span_id: s for s in tree}
+
         def under_decoder_layer(span):
             cur = span
             while cur.parent_span_id is not None and cur.parent_span_id in by_id:
@@ -326,10 +401,13 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
                 if cur.span_name == "decoder_layer_N":
                     return True
             return False
+
         for s in tree:
             if s.span_name == "decoder_layer_N":
                 if s.layer_idx < 0:
-                    report.fail(f"decoder_layer_N has layer_idx={s.layer_idx} (must be 0..num_layers-1)")
+                    report.fail(
+                        f"decoder_layer_N has layer_idx={s.layer_idx} (must be 0..num_layers-1)"
+                    )
                 continue
             if under_decoder_layer(s) and s.layer_idx < 0:
                 report.fail(
@@ -347,7 +425,9 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
     if not aborted:
         pcds_count = sum(1 for s in tree if s.span_name == "pre_content_decode_steps")
         if pcds_count > 0:
-            report.fail(f"pre_content_decode_steps count={pcds_count} > 0 — first prefill token did not detokenize non-empty; adjust benchmark prompts")
+            report.fail(
+                f"pre_content_decode_steps count={pcds_count} > 0 — first prefill token did not detokenize non-empty; adjust benchmark prompts"
+            )
 
     # Lane-B chunk-count check (per Codex plan review v21 P1):
     # `gs_chunk_N` is REPEATED — emitted once per chunk inside the
@@ -380,7 +460,9 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
             # server default per `serve.rs`). The T0a.14 harness reads the
             # actual `--prefill-chunk-size` from the spawn args and passes it
             # in; the standalone validator tests use the 2048 default.
-            expected_chunks = (prompt_tokens + prefill_chunk_size - 1) // prefill_chunk_size
+            expected_chunks = (
+                prompt_tokens + prefill_chunk_size - 1
+            ) // prefill_chunk_size
             if expected_chunks > 0 and chunk_count != expected_chunks:
                 report.fail(
                     f"Lane-B gs_chunk_N count mismatch: got {chunk_count}, "
@@ -391,7 +473,69 @@ def validate_request(spans: list[Span], *, prefill_chunk_size: int = 2048) -> Va
                     f"`validate_request(spans, prefill_chunk_size=...)`."
                 )
 
+    # P5h+1 T2: chunk_idx propagation under gs_chunk_N ancestors. Run on every
+    # request (including aborted) because a malformed chunk_idx implies a
+    # schema bug, not a happy-path coverage gap.
+    for failure in validate_chunk_ancestry(spans):
+        report.fail(failure)
+
     return report
+
+
+def validate_chunk_ancestry(spans: list[Span]) -> list[str]:
+    """P5h+1 T2 structural rule for chunk_idx propagation.
+
+    Every span emitted under a `gs_chunk_N` ancestor MUST carry the same
+    non-null `chunk_idx` as the ancestor (set by the Rust RAII
+    `P5hChunkContextGuard` in `core::generate::GenerationStream::new`).
+    Spans emitted outside any `gs_chunk_N` ancestor (Lane-A entirely;
+    Lane-B pre/post-loop sites such as `gs_kv_cache_alloc` and
+    `gs_first_token_sample_dispatch`) MUST carry `chunk_idx=null` (which
+    parses to Python `None`).
+
+    Returns a list of human-readable failure messages; empty list = pass.
+    """
+    by_id = {s.span_id: s for s in spans}
+    failures: list[str] = []
+
+    for span in spans:
+        if span.span_name == "gs_chunk_N" and span.chunk_idx is None:
+            failures.append(f"gs_chunk_N span_id={span.span_id} has null chunk_idx")
+            continue
+
+        ancestor = (
+            by_id.get(span.parent_span_id) if span.parent_span_id is not None else None
+        )
+        chunk_ancestor: Span | None = None
+        while ancestor is not None:
+            if ancestor.span_name == "gs_chunk_N":
+                chunk_ancestor = ancestor
+                break
+            ancestor = (
+                by_id.get(ancestor.parent_span_id)
+                if ancestor.parent_span_id is not None
+                else None
+            )
+
+        if chunk_ancestor is None:
+            if span.span_name != "gs_chunk_N" and span.chunk_idx is not None:
+                failures.append(
+                    f"span_id={span.span_id} ({span.span_name}) is outside gs_chunk_N "
+                    f"but has chunk_idx={span.chunk_idx}"
+                )
+            continue
+
+        if chunk_ancestor.chunk_idx is None:
+            failures.append(
+                f"gs_chunk_N ancestor span_id={chunk_ancestor.span_id} has null chunk_idx"
+            )
+        elif span.chunk_idx != chunk_ancestor.chunk_idx:
+            failures.append(
+                f"span_id={span.span_id} ({span.span_name}) has chunk_idx={span.chunk_idx} "
+                f"but gs_chunk_N ancestor span_id={chunk_ancestor.span_id} has chunk_idx={chunk_ancestor.chunk_idx}"
+            )
+
+    return failures
 
 
 def group_by_request(spans: Iterable[Span]) -> dict[str, list[Span]]:
