@@ -10,16 +10,37 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import statistics
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+# Local import — tools/ is the package root for this script.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from p5h_2a_se_analysis import bootstrap_median_ci  # noqa: E402
+
 EXPECTED_PPS = (128, 512)
-EXPECTED_RUNS_PER_PP = 7
-# Per-PP run_idx set must exactly match this. iron-bench emits one row per
-# (pp_target, run_idx) with run_idx in [0, runs); spec § 7 sweeps run with
-# --runs 7 so the expected set is {0..6}.
-EXPECTED_RUN_IDX_SET = frozenset(range(EXPECTED_RUNS_PER_PP))
+# Per-PP expected RUNS (iron-bench --runs argument). PP=512 bumped to 15 per
+# P5h+2.a T1 to absorb fresh-spawn JIT/cache fill-in variance that RUNS=7 left
+# at ~6.85% final envelope; RUNS=15 brings the final uncertainty envelope to
+# 1.94% (within the ±2% spec § 7.2 noise band). See
+# docs/p5h+2-a-pp512-protocol.md.
+EXPECTED_RUNS_PER_PP: dict[int, int] = {
+    128: 7,
+    512: 15,  # P5h+2.a T1: bumped from 7 to absorb fresh-spawn JIT variance
+}
+
+
+def expected_runs_for_pp(pp: int) -> int:
+    try:
+        return EXPECTED_RUNS_PER_PP[pp]
+    except KeyError as exc:
+        raise SystemExit(f"unexpected pp_target={pp}; expected {EXPECTED_PPS}") from exc
+
+
+def expected_run_idx_set_for_pp(pp: int) -> frozenset[int]:
+    return frozenset(range(expected_runs_for_pp(pp)))
 
 
 def load_pp_tps_by_pp(csv_path: Path) -> dict[int, list[float]]:
@@ -78,15 +99,16 @@ def load_pp_tps_by_pp(csv_path: Path) -> dict[int, list[float]]:
                     f"{csv_path}: line {line_no}: non-positive pp_tps={pp_tps} for pp={pp}"
                 )
             by_pp_runs[pp].append((run_idx, pp_tps))
-    # Per-PP validation: exact row count + run_idx set must match EXPECTED_RUN_IDX_SET
-    # (no duplicates, no gaps, no extras).
+    # Per-PP validation: exact row count + run_idx set must match the per-PP
+    # expected set (no duplicates, no gaps, no extras).
     by_pp: dict[int, list[float]] = {}
     for pp in EXPECTED_PPS:
         rows = by_pp_runs.get(pp, [])
         got = len(rows)
-        if got != EXPECTED_RUNS_PER_PP:
+        expected_runs = expected_runs_for_pp(pp)
+        if got != expected_runs:
             raise SystemExit(
-                f"{csv_path}: expected {EXPECTED_RUNS_PER_PP} measured rows for PP={pp}, got {got}"
+                f"{csv_path}: expected {expected_runs} measured rows for PP={pp}, got {got}"
             )
         run_idxs = [r for r, _ in rows]
         observed_set = set(run_idxs)
@@ -96,10 +118,11 @@ def load_pp_tps_by_pp(csv_path: Path) -> dict[int, list[float]]:
             raise SystemExit(
                 f"{csv_path}: PP={pp} has duplicate run_idx values: {dupes}; observed={sorted(run_idxs)}"
             )
-        if observed_set != EXPECTED_RUN_IDX_SET:
+        expected_set = expected_run_idx_set_for_pp(pp)
+        if observed_set != expected_set:
             raise SystemExit(
                 f"{csv_path}: PP={pp} run_idx set was {sorted(observed_set)} "
-                f"but expected {sorted(EXPECTED_RUN_IDX_SET)}"
+                f"but expected {sorted(expected_set)}"
             )
         by_pp[pp] = [tps for _, tps in rows]
     return by_pp
@@ -116,6 +139,11 @@ def main():
     omlx = load_pp_tps_by_pp(args.omlx_csv)
 
     summary = {"per_pp": {}}
+    # Fixed seed so the per-PP bootstrap CI is reproducible across runs on the
+    # same inputs (P5h+2.a T3). Bootstrap-resample is a SCREENING metric (see
+    # p5h_2a_se_analysis docstring); caller must still pair it with the
+    # between-sweep half-range when deciding final uncertainty envelope.
+    rng = random.Random(42)
     for pp in EXPECTED_PPS:
         i_tps = ironmlx[pp]
         o_tps = omlx[pp]
@@ -123,6 +151,12 @@ def main():
         o_med = statistics.median(o_tps)
         delta_pct = (i_med - o_med) / o_med * 100.0
         passes_plus10 = (delta_pct is not None) and (delta_pct >= 10.0)
+        i_ci = bootstrap_median_ci(
+            i_tps, subset_size=len(i_tps), iterations=1000, rng=rng
+        )
+        o_ci = bootstrap_median_ci(
+            o_tps, subset_size=len(o_tps), iterations=1000, rng=rng
+        )
         summary["per_pp"][str(pp)] = {
             "ironmlx_runs": len(i_tps),
             "omlx_runs": len(o_tps),
@@ -130,6 +164,12 @@ def main():
             "omlx_pp_tps_median": o_med,
             "delta_pct": delta_pct,
             "passes_plus10_target": passes_plus10,
+            "ironmlx_pp_tps_ci95_low": i_ci["ci95_low"],
+            "ironmlx_pp_tps_ci95_high": i_ci["ci95_high"],
+            "ironmlx_pp_tps_ci95_half_width_pct": i_ci["ci95_half_width_pct"],
+            "omlx_pp_tps_ci95_low": o_ci["ci95_low"],
+            "omlx_pp_tps_ci95_high": o_ci["ci95_high"],
+            "omlx_pp_tps_ci95_half_width_pct": o_ci["ci95_half_width_pct"],
         }
 
     args.out_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -141,7 +181,12 @@ def main():
             row["delta_pct"],
         )
         flag = "PASS" if row["passes_plus10_target"] else "MISS"
-        print(f"  PP={pp}: ironmlx={i:.2f} omlx={o:.2f} delta={d:+.2f}% {flag}")
+        i_hw = row["ironmlx_pp_tps_ci95_half_width_pct"]
+        o_hw = row["omlx_pp_tps_ci95_half_width_pct"]
+        print(
+            f"  PP={pp}: ironmlx={i:.2f} (±{i_hw:.2f}%) "
+            f"omlx={o:.2f} (±{o_hw:.2f}%) delta={d:+.2f}% {flag}"
+        )
 
 
 if __name__ == "__main__":
