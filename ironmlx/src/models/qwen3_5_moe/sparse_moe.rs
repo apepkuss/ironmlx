@@ -204,32 +204,42 @@ impl RoutedExperts {
     /// is later sliced into (gate_out, up_out) along the last dim before
     /// SwiGLU.
     ///
-    /// On successful first build the legacy source `Option` is taken and
-    /// dropped, releasing the original gate/up Array refs (avoids doubling
-    /// MoE weight footprint by ~16 GB on the 35B model).
+    /// On successful first build the legacy source `Option` is taken,
+    /// the fused tensors are explicitly materialized via `mlx::transforms::eval`
+    /// (so the lazy MLX graph no longer references the source arrays), and
+    /// then `source` is dropped, releasing the original gate/up Array refs
+    /// (avoids doubling MoE weight footprint by ~16 GB on the 35B model).
+    ///
+    /// Concurrency model: the OnceLock provides a lock-free fast path once
+    /// the fused weights are built. The mutex covers the ENTIRE
+    /// take+build+eval+set window so concurrent callers either (a) observe
+    /// the OnceLock already populated on the fast path, or (b) block on the
+    /// mutex until the first builder finishes — then re-check the OnceLock
+    /// inside the lock and return the populated value. There is no
+    /// "raced + lost source" failure mode.
     fn fused_gate_up(&self, target: StreamOrDevice) -> Result<&FusedGateUp> {
+        // Fast path: already built — no lock needed.
         if let Some(fused) = self.fused_gate_up.get() {
             return Ok(fused);
         }
-        // Take the legacy source under the mutex so a second concurrent
-        // caller observes None and falls through to OnceLock retry.
-        let source = {
-            let mut guard = self
-                .legacy_source
-                .lock()
-                .map_err(|e| anyhow!("RoutedExperts: legacy_source mutex poisoned: {e}"))?;
-            guard.take()
-        };
-        let Some(source) = source else {
-            // Another thread is mid-build; spin-wait for OnceLock fill.
-            // In practice the scheduler driver is single-threaded so this
-            // branch is only hit on a panic-after-take + retry, which
-            // RoutedExperts cannot recover from regardless.
-            return self
-                .fused_gate_up
-                .get()
-                .ok_or_else(|| anyhow!("RoutedExperts: fused_gate_up build raced + lost source"));
-        };
+        // Slow path: hold the mutex across the entire build+set window so a
+        // concurrent second caller blocks here until the first builder
+        // finishes, then sees the populated OnceLock on the inner re-check.
+        let mut guard = self
+            .legacy_source
+            .lock()
+            .map_err(|e| anyhow!("RoutedExperts: legacy_source mutex poisoned: {e}"))?;
+        // Inner re-check: another caller may have raced through the slow
+        // path while we were waiting on the mutex.
+        if let Some(fused) = self.fused_gate_up.get() {
+            return Ok(fused);
+        }
+        let source = guard.take().ok_or_else(|| {
+            anyhow!(
+                "RoutedExperts: legacy_source already taken but fused_gate_up never set; \
+                 likely a prior panic mid-build that this struct cannot recover from"
+            )
+        })?;
         let weight = concatenate_on(&[&source.gate_weight, &source.up_weight], 1, target)
             .context("RoutedExperts::fused_gate_up: concatenate weights")?;
         let scales = concatenate_on(&[&source.gate_scales, &source.up_scales], 1, target)
@@ -242,20 +252,41 @@ impl RoutedExperts {
             (None, None) => None,
             _ => unreachable!("biases symmetry validated in from_loader"),
         };
-        // `source` drops here, releasing the original gate/up Array refs.
+        // P5i.a Codex P2 #2: `concatenate_on` returns a lazy MLX graph that
+        // still references the source `gate_*` / `up_*` arrays. Dropping
+        // `source` here without first materializing the fused tensors would
+        // leave the source arrays alive (held by the lazy graph) and the
+        // ~16 GB MoE weight doubling would NOT be avoided. Eval forces MLX
+        // to compute and store the concatenated buffers, severing the
+        // dependency on the source arrays so the subsequent `drop(source)`
+        // can actually release them.
+        //
+        // This eval runs on the worker thread (same thread that built the
+        // graph via lazy first-forward dispatch), so the Metal stream
+        // binding matches the build site — no cross-thread stream issue.
+        let mut to_eval: Vec<&Array> = vec![&weight, &scales];
+        if let Some(b) = biases.as_ref() {
+            to_eval.push(b);
+        }
+        mlx::transforms::eval(&to_eval)
+            .context("RoutedExperts::fused_gate_up: eval fused tensors before releasing source")?;
+        // Now safe to drop source — fused tensors are materialized and the
+        // lazy graph no longer holds refs into source arrays.
         drop(source);
         let fused = FusedGateUp {
             weight,
             scales,
             biases,
         };
-        match self.fused_gate_up.set(fused) {
-            Ok(()) => Ok(self.fused_gate_up.get().expect("just set")),
-            Err(_) => Ok(self
-                .fused_gate_up
-                .get()
-                .expect("set failed only when already initialized")),
-        }
+        // We hold the mutex AND OnceLock is empty (re-checked above), so
+        // `set` cannot fail under correct usage.
+        self.fused_gate_up
+            .set(fused)
+            .map_err(|_| anyhow!("RoutedExperts: fused_gate_up OnceLock set raced under mutex"))?;
+        Ok(self
+            .fused_gate_up
+            .get()
+            .expect("just set under mutex; OnceLock is now populated"))
     }
 }
 
