@@ -688,11 +688,13 @@ impl SparseMoeBlock {
 
                 // sorted_topk: the actual expert id per sorted slot. This is
                 // what gets passed as rhs_indices so right_sorted_ is true.
-                let sorted_topk_1d = take_along_axis_on(&flat_topk, &sort_perm, -1_i32, target)
+                // P5i.a T1 C1: keep rank-1 (no [BS*k,1] reshape). Paired with
+                // sorted_x rank-3 below so the default lhs_indices (x.shape()[..-2]
+                // = [BS*k]) matches rhs_indices shape exactly; broadcast/copy is a
+                // no-op. fast-path entry condition x.size()/x.shape(-2)/x.shape(-1)
+                // == indices.size() ⇒ BS*k == BS*k preserved.
+                let sorted_topk = take_along_axis_on(&flat_topk, &sort_perm, -1_i32, target)
                     .context("SparseMoeBlock: take_along_axis sort flat_topk")?;
-                // gather_qmm expects rhs_indices rank-2 to match x rank-4 (r+2).
-                let sorted_topk_2d = mlx::ops::shape::reshape(&sorted_topk_1d, [bs_k, 1_i32])
-                    .context("SparseMoeBlock: reshape sorted_topk to [BS*k, 1]")?;
 
                 // token_idx[i] = i / k — the original token index for sorted
                 // slot i. Built Rust-side then uploaded; for PP=2048 this is
@@ -717,18 +719,24 @@ impl SparseMoeBlock {
                 // flat_x: [BS, H], sorted_token_idx: [BS*k] -> [BS*k, H].
                 let sorted_x_2d = take_on(&flat_x, &sorted_token_idx, 0_i32, target)
                     .context("SparseMoeBlock: take flat_x by sorted_token_idx")?;
-                // Promote to rank-4 [BS*k, 1, 1, H] for gather_qmm (r+2 with r=2).
-                let sorted_x_4d =
-                    mlx::ops::shape::expand_dims_on(&sorted_x_2d, &[-2_i32, -3_i32][..], target)
-                        .context("SparseMoeBlock: expand_dims sorted_x → [BS*k,1,1,H]")?;
+                // P5i.a T1 C1: promote to rank-3 [BS*k, 1, H] for gather_qmm
+                // (r+2 with r=1 instead of r=2). MLX gather_qmm_rhs fast path
+                // still triggers: x.shape(-2)=1 ⇒ M=1; B = out.size()/M/N =
+                // BS*k. Default lhs_indices shape becomes x.shape()[..-2]=[BS*k]
+                // which broadcasts trivially against rhs_indices [BS*k] (also
+                // rank-1, see C1 above), so x.size()/x.shape(-2)/x.shape(-1)
+                // == BS*k == indices.size() — no broadcast/copy needed.
+                // Replaces double expand_dims (was [-2,-3]) with single -2 axis.
+                let sorted_x_3d = mlx::ops::shape::expand_dims_on(&sorted_x_2d, -2_i32, target)
+                    .context("SparseMoeBlock: expand_dims sorted_x → [BS*k,1,H]")?;
 
                 let gate_out = mlx::quantization::gather_quantized_matmul_on(
-                    &sorted_x_4d,
+                    &sorted_x_3d,
                     &self.routed.gate_weight,
                     &self.routed.gate_scales,
                     self.routed.gate_biases.as_ref(),
                     None,
-                    Some(&sorted_topk_2d),
+                    Some(&sorted_topk),
                     true,
                     Some(self.routed.group_size),
                     Some(self.routed.bits),
@@ -738,12 +746,12 @@ impl SparseMoeBlock {
                 )
                 .context("SparseMoeBlock: gate_proj gather_qmm (sorted)")?;
                 let up_out = mlx::quantization::gather_quantized_matmul_on(
-                    &sorted_x_4d,
+                    &sorted_x_3d,
                     &self.routed.up_weight,
                     &self.routed.up_scales,
                     self.routed.up_biases.as_ref(),
                     None,
-                    Some(&sorted_topk_2d),
+                    Some(&sorted_topk),
                     true,
                     Some(self.routed.group_size),
                     Some(self.routed.bits),
@@ -752,7 +760,7 @@ impl SparseMoeBlock {
                     target,
                 )
                 .context("SparseMoeBlock: up_proj gather_qmm (sorted)")?;
-                (gate_out, up_out, sorted_topk_2d, true, Some(sort_perm))
+                (gate_out, up_out, sorted_topk, true, Some(sort_perm))
             } else {
                 // --- Default broadcast path (Stage 1 final). ---
                 let x_in = mlx::ops::shape::expand_dims_on(&flat_x, &[-2_i32, -3_i32][..], target)
@@ -803,7 +811,7 @@ impl SparseMoeBlock {
             let gate_silu = &gate_out * &gate_sig;
             let act = &gate_silu * &up_out;
 
-            let down_out_4d = mlx::quantization::gather_quantized_matmul_on(
+            let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
                 &act,
                 &self.routed.down_weight,
                 &self.routed.down_scales,
@@ -818,16 +826,16 @@ impl SparseMoeBlock {
                 target,
             )
             .context("SparseMoeBlock: down_proj gather_qmm")?;
-            // down_out_4d shape:
-            //   sorted path:  [BS*k, 1, 1, H]  (in sorted order)
-            //   default path: [BS, k, 1, H]    (in original order)
+            // down_out_raw shape (post-T1 C1 rank-3 sorted simplification):
+            //   sorted path:  [BS*k, 1, H]      (in sorted order)
+            //   default path: [BS, k, 1, H]     (in original order, unchanged)
 
             // (6) Weight by renormalized scores and reduce over k.
             //
             // Both branches converge on `down_out: [BS, k, H]` so the score
             // weighting + reduce is shared.
             let down_out = if let Some(sort_perm) = sort_perm_opt {
-                // Sorted path: squeeze [BS*k, 1, 1, H] -> [BS*k, H], then invert
+                // Sorted path: squeeze [BS*k, 1, H] -> [BS*k, H], then invert
                 // the permutation to restore original token/k order before
                 // reshape to [BS, k, H]. inv_perm = argsort(sort_perm).
                 let inv_perm = argsort_on(&sort_perm, -1_i32, target)
@@ -835,14 +843,14 @@ impl SparseMoeBlock {
                 // Reshape over squeeze: dims are statically known singletons here, so
                 // reshape becomes a graph metadata change with no op-node, cheaper than
                 // invoking squeeze.
-                let down_out_2d = mlx::ops::shape::reshape(&down_out_4d, [bs_k, h])
+                let down_out_2d = mlx::ops::shape::reshape(&down_out_raw, [bs_k, h])
                     .context("SparseMoeBlock: reshape sorted down_out to [BS*k, H]")?;
                 let unsorted_2d = take_on(&down_out_2d, &inv_perm, 0_i32, target)
                     .context("SparseMoeBlock: take inv_perm to restore order")?;
                 mlx::ops::shape::reshape(&unsorted_2d, [bs, k, h])
                     .context("SparseMoeBlock: reshape unsorted to [BS, k, H]")?
             } else {
-                mlx::ops::shape::squeeze_on(&down_out_4d, &[-2_i32][..], target)
+                mlx::ops::shape::squeeze_on(&down_out_raw, &[-2_i32][..], target)
                     .context("SparseMoeBlock: squeeze down_proj dim -2")?
             };
 
