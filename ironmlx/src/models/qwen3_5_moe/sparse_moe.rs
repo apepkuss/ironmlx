@@ -27,7 +27,8 @@
 //!   7. out = routed_y + shared_gated  → reshape [B, S, H]
 
 use anyhow::{anyhow, Context};
-use mlx::ops::indexing::{take_along_axis_on, take_on};
+use mlx::ops::indexing::{slice_on, take_along_axis_on, take_on};
+use mlx::ops::shape::concatenate_on;
 use mlx::ops::sort::{argpartition_on, argsort_on};
 use mlx::{Array, StreamOrDevice};
 
@@ -42,19 +43,64 @@ use crate::Result;
 /// overhead with no kernel-level benefit.
 const SORTED_ROUTING_MIN_BS_K: i32 = 512;
 
+/// Source legacy gate + up weights, consumed once during lazy fused-weight
+/// build then dropped to release the 2 × (E × I × H/8) buffer per layer.
+struct LazyGateUpSource {
+    gate_weight: Array,
+    gate_scales: Array,
+    gate_biases: Option<Array>,
+    up_weight: Array,
+    up_scales: Array,
+    up_biases: Option<Array>,
+}
+
+/// Container for the fused gate+up quantized weights, lazily built on the
+/// first forward thread (so the MLX Array allocation is bound to the
+/// worker thread's Metal stream, not the loader thread's — see
+/// scheduler_actor.rs:163 "B1-p2.5 P0 fix v2" notes).
+struct FusedGateUp {
+    weight: Array,
+    scales: Array,
+    biases: Option<Array>,
+}
+
 /// Stacked-expert quantized weights for the routed SwiGLU.
 ///
 /// Shape convention (4-bit, group_size=64, num_experts=E, hidden=H,
 /// moe_intermediate=I):
-///   gate/up: weight `[E, I, H/8]`, scales `[E, I, H/64]`, biases `[E, I, H/64]`
-///   down:    weight `[E, H, I/8]`, scales `[E, H, I/64]`, biases `[E, H, I/64]`
+///   gate/up (legacy source, dropped after fused build):
+///                weight `[E, I, H/8]`, scales/biases `[E, I, H/64]`
+///   gate_up (fused, lazy): weight `[E, 2I, H/8]`, scales/biases `[E, 2I, H/64]`
+///   down:    weight `[E, H, I/8]`, scales/biases `[E, H, I/64]`
+///
+/// P5i.a T2: gate_proj + up_proj weights are concatenated along the
+/// intermediate axis (axis=1) on the first forward call so a single
+/// `gather_qmm` call replaces the prior two-call (gate then up). The fused
+/// output is sliced along the last dim into gate_out / up_out before
+/// SwiGLU. 4-bit affine quantization is per-row along intermediate (groups
+/// are along K=last); stacking along intermediate preserves all per-row
+/// scales/biases.
+///
+/// Lazy build is required to keep MLX Array allocations on the worker
+/// thread's Metal stream — building eagerly in `from_loader` (which runs
+/// on the CLI / main thread) and then evaluating in the scheduler worker
+/// thread fails with "no Stream(gpu, N) in current thread" per the same
+/// failure mode documented at scheduler_actor.rs:163-169 (B1-p2.5 P0 fix
+/// v2). The legacy source is held in `Mutex<Option<...>>` so it can be
+/// consumed and dropped once the fused build succeeds (avoids doubling
+/// MoE weight footprint by ~16 GB on the 35B model).
 pub struct RoutedExperts {
-    pub gate_weight: Array,
-    pub gate_scales: Array,
-    pub gate_biases: Option<Array>,
-    pub up_weight: Array,
-    pub up_scales: Array,
-    pub up_biases: Option<Array>,
+    /// Legacy source weights, consumed on first forward call. After
+    /// lazy fused build the inner `Option` is `take()`-d to `None`,
+    /// releasing the original Array refs back to MLX.
+    legacy_source: std::sync::Mutex<Option<LazyGateUpSource>>,
+    /// Lazy-built fused weights. Initialized on the first forward call so
+    /// the resulting MLX Arrays are bound to the worker thread's Metal
+    /// stream. See struct doc for failure-mode rationale.
+    fused_gate_up: std::sync::OnceLock<FusedGateUp>,
+    /// Per-projection intermediate size I (= gate_weight.shape(1)).
+    /// Cached at load time to avoid recomputing in the hot forward path.
+    pub moe_intermediate: i32,
     pub down_weight: Array,
     pub down_scales: Array,
     pub down_biases: Option<Array>,
@@ -108,14 +154,33 @@ impl RoutedExperts {
             .cloned();
 
         let num_experts = gate_weight.shape().as_slice()[0];
+        let moe_intermediate = gate_weight.shape().as_slice()[1];
 
-        Ok(Self {
+        // Validate biases presence symmetry upfront (cheap, no MLX op).
+        match (gate_biases.as_ref(), up_biases.as_ref()) {
+            (Some(_), Some(_)) | (None, None) => {}
+            (gb, ub) => {
+                return Err(anyhow!(
+                    "RoutedExperts: gate/up biases presence mismatch (gate={}, up={}); affine quantization requires both or neither",
+                    gb.is_some(),
+                    ub.is_some()
+                ));
+            }
+        }
+
+        let legacy_source = LazyGateUpSource {
             gate_weight,
             gate_scales,
             gate_biases,
             up_weight,
             up_scales,
             up_biases,
+        };
+
+        Ok(Self {
+            legacy_source: std::sync::Mutex::new(Some(legacy_source)),
+            fused_gate_up: std::sync::OnceLock::new(),
+            moe_intermediate,
             down_weight,
             down_scales,
             down_biases,
@@ -123,6 +188,74 @@ impl RoutedExperts {
             bits: qmeta.bits,
             num_experts,
         })
+    }
+
+    /// Returns the fused gate+up weights, lazily building them on first
+    /// call. Must be called from the forward thread (MLX worker) so the
+    /// underlying MLX Arrays are bound to that thread's Metal stream.
+    /// `target` propagates the caller's stream-or-device selection to the
+    /// underlying `concatenate_on` calls — typically
+    /// `StreamOrDevice::default()` from the scheduler driver thread.
+    ///
+    /// P5i.a T2: 4-bit affine quantization stores per-(expert,row) scale +
+    /// bias with groups along the K=last axis only; stacking along the
+    /// intermediate axis is a mathematically exact row-wise rearrangement
+    /// that preserves every per-row scale/bias. Single gather_qmm output
+    /// is later sliced into (gate_out, up_out) along the last dim before
+    /// SwiGLU.
+    ///
+    /// On successful first build the legacy source `Option` is taken and
+    /// dropped, releasing the original gate/up Array refs (avoids doubling
+    /// MoE weight footprint by ~16 GB on the 35B model).
+    fn fused_gate_up(&self, target: StreamOrDevice) -> Result<&FusedGateUp> {
+        if let Some(fused) = self.fused_gate_up.get() {
+            return Ok(fused);
+        }
+        // Take the legacy source under the mutex so a second concurrent
+        // caller observes None and falls through to OnceLock retry.
+        let source = {
+            let mut guard = self
+                .legacy_source
+                .lock()
+                .map_err(|e| anyhow!("RoutedExperts: legacy_source mutex poisoned: {e}"))?;
+            guard.take()
+        };
+        let Some(source) = source else {
+            // Another thread is mid-build; spin-wait for OnceLock fill.
+            // In practice the scheduler driver is single-threaded so this
+            // branch is only hit on a panic-after-take + retry, which
+            // RoutedExperts cannot recover from regardless.
+            return self
+                .fused_gate_up
+                .get()
+                .ok_or_else(|| anyhow!("RoutedExperts: fused_gate_up build raced + lost source"));
+        };
+        let weight = concatenate_on(&[&source.gate_weight, &source.up_weight], 1, target)
+            .context("RoutedExperts::fused_gate_up: concatenate weights")?;
+        let scales = concatenate_on(&[&source.gate_scales, &source.up_scales], 1, target)
+            .context("RoutedExperts::fused_gate_up: concatenate scales")?;
+        let biases = match (source.gate_biases.as_ref(), source.up_biases.as_ref()) {
+            (Some(gb), Some(ub)) => Some(
+                concatenate_on(&[gb, ub], 1, target)
+                    .context("RoutedExperts::fused_gate_up: concatenate biases")?,
+            ),
+            (None, None) => None,
+            _ => unreachable!("biases symmetry validated in from_loader"),
+        };
+        // `source` drops here, releasing the original gate/up Array refs.
+        drop(source);
+        let fused = FusedGateUp {
+            weight,
+            scales,
+            biases,
+        };
+        match self.fused_gate_up.set(fused) {
+            Ok(()) => Ok(self.fused_gate_up.get().expect("just set")),
+            Err(_) => Ok(self
+                .fused_gate_up
+                .get()
+                .expect("set failed only when already initialized")),
+        }
     }
 }
 
@@ -360,12 +493,18 @@ impl SparseMoeBlock {
                         ..Default::default()
                     },
                     || -> Result<(Array, Array, Array, bool, Option<Array>)> {
+                        // P5i.a T2: single fused gate+up gather_qmm + slice.
+                        // Fused weights lazily built on first forward (worker
+                        // thread) for correct Metal stream binding.
+                        let i = self.routed.moe_intermediate;
+                        let fused = self.routed.fused_gate_up(target)?;
                         if let Some((sorted_x_4d, sorted_topk_2d, sort_perm)) = sort_pack_state {
-                            let gate_out = mlx::quantization::gather_quantized_matmul_on(
+                            let bs_k_local = sorted_topk_2d.shape().as_slice()[0];
+                            let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
                                 &sorted_x_4d,
-                                &self.routed.gate_weight,
-                                &self.routed.gate_scales,
-                                self.routed.gate_biases.as_ref(),
+                                &fused.weight,
+                                &fused.scales,
+                                fused.biases.as_ref(),
                                 None,
                                 Some(&sorted_topk_2d),
                                 true,
@@ -375,22 +514,25 @@ impl SparseMoeBlock {
                                 /* sorted_indices */ true,
                                 target,
                             )
-                            .context("SparseMoeBlock: gate_proj gather_qmm (sorted)")?;
-                            let up_out = mlx::quantization::gather_quantized_matmul_on(
-                                &sorted_x_4d,
-                                &self.routed.up_weight,
-                                &self.routed.up_scales,
-                                self.routed.up_biases.as_ref(),
-                                None,
-                                Some(&sorted_topk_2d),
-                                true,
-                                Some(self.routed.group_size),
-                                Some(self.routed.bits),
-                                "affine",
-                                true,
+                            .context("SparseMoeBlock: gate_up gather_qmm (sorted, p5h-profile)")?;
+                            // sorted-profile branch promotes sorted_x to rank-4
+                            // [BS*k,1,1,H]; gather_qmm output is rank-4
+                            // [BS*k,1,1,2*I] (lhs_indices broadcast shape +
+                            // [M=1, N=2*I]). Slice along axis=-1.
+                            let gate_out = slice_on(
+                                &gate_up_out,
+                                [0_i32, 0, 0, 0],
+                                [bs_k_local, 1, 1, i],
                                 target,
                             )
-                            .context("SparseMoeBlock: up_proj gather_qmm (sorted)")?;
+                            .context("SparseMoeBlock: slice gate_out (sorted, p5h-profile)")?;
+                            let up_out = slice_on(
+                                &gate_up_out,
+                                [0_i32, 0, 0, i],
+                                [bs_k_local, 1, 1, 2 * i],
+                                target,
+                            )
+                            .context("SparseMoeBlock: slice up_out (sorted, p5h-profile)")?;
                             // P5h+1 T1: measurement-eval probe (sorted branch).
                             if crate::core::p5h::is_measurement_eval_probes_active() {
                                 mlx::transforms::eval(&[
@@ -409,11 +551,11 @@ impl SparseMoeBlock {
                                 target,
                             )
                             .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")?;
-                            let gate_out = mlx::quantization::gather_quantized_matmul_on(
+                            let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
                                 &x_in,
-                                &self.routed.gate_weight,
-                                &self.routed.gate_scales,
-                                self.routed.gate_biases.as_ref(),
+                                &fused.weight,
+                                &fused.scales,
+                                fused.biases.as_ref(),
                                 None,
                                 Some(&inds_u32),
                                 true,
@@ -423,23 +565,18 @@ impl SparseMoeBlock {
                                 false,
                                 target,
                             )
-                            .context("SparseMoeBlock: gate_proj gather_qmm")?; // [BS, k, 1, moe_inter]
-                            let up_out = mlx::quantization::gather_quantized_matmul_on(
-                                &x_in,
-                                &self.routed.up_weight,
-                                &self.routed.up_scales,
-                                self.routed.up_biases.as_ref(),
-                                None,
-                                Some(&inds_u32),
-                                true,
-                                Some(self.routed.group_size),
-                                Some(self.routed.bits),
-                                "affine",
-                                false,
-                                target,
-                            )
-                            .context("SparseMoeBlock: up_proj gather_qmm")?; // [BS, k, 1, moe_inter]
-                                                                             // P5h+1 T1: measurement-eval probe (default branch).
+                            .context("SparseMoeBlock: gate_up gather_qmm (default, p5h-profile)")?;
+                            let gate_out =
+                                slice_on(&gate_up_out, [0_i32, 0, 0, 0], [bs, k, 1, i], target)
+                                    .context(
+                                        "SparseMoeBlock: slice gate_out (default, p5h-profile)",
+                                    )?;
+                            let up_out =
+                                slice_on(&gate_up_out, [0_i32, 0, 0, i], [bs, k, 1, 2 * i], target)
+                                    .context(
+                                        "SparseMoeBlock: slice up_out (default, p5h-profile)",
+                                    )?;
+                            // P5h+1 T1: measurement-eval probe (default branch).
                             if crate::core::p5h::is_measurement_eval_probes_active() {
                                 mlx::transforms::eval(&[&gate_out, &up_out, &inds_u32])?;
                             }
@@ -730,11 +867,15 @@ impl SparseMoeBlock {
                 let sorted_x_3d = mlx::ops::shape::expand_dims_on(&sorted_x_2d, -2_i32, target)
                     .context("SparseMoeBlock: expand_dims sorted_x → [BS*k,1,H]")?;
 
-                let gate_out = mlx::quantization::gather_quantized_matmul_on(
+                // P5i.a T2: single fused gate+up gather_qmm + slice.
+                // Output shape: [BS*k, 1, 2*I]; slice along axis=-1 into
+                // gate_out [BS*k, 1, I] and up_out [BS*k, 1, I].
+                let fused = self.routed.fused_gate_up(target)?;
+                let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
                     &sorted_x_3d,
-                    &self.routed.gate_weight,
-                    &self.routed.gate_scales,
-                    self.routed.gate_biases.as_ref(),
+                    &fused.weight,
+                    &fused.scales,
+                    fused.biases.as_ref(),
                     None,
                     Some(&sorted_topk),
                     true,
@@ -744,33 +885,28 @@ impl SparseMoeBlock {
                     /* sorted_indices */ true,
                     target,
                 )
-                .context("SparseMoeBlock: gate_proj gather_qmm (sorted)")?;
-                let up_out = mlx::quantization::gather_quantized_matmul_on(
-                    &sorted_x_3d,
-                    &self.routed.up_weight,
-                    &self.routed.up_scales,
-                    self.routed.up_biases.as_ref(),
-                    None,
-                    Some(&sorted_topk),
-                    true,
-                    Some(self.routed.group_size),
-                    Some(self.routed.bits),
-                    "affine",
-                    true,
-                    target,
-                )
-                .context("SparseMoeBlock: up_proj gather_qmm (sorted)")?;
+                .context("SparseMoeBlock: gate_up gather_qmm (sorted)")?;
+                let i = self.routed.moe_intermediate;
+                let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0], [bs_k, 1, i], target)
+                    .context("SparseMoeBlock: slice gate_out from gate_up (sorted)")?;
+                let up_out = slice_on(&gate_up_out, [0_i32, 0, i], [bs_k, 1, 2 * i], target)
+                    .context("SparseMoeBlock: slice up_out from gate_up (sorted)")?;
+
                 (gate_out, up_out, sorted_topk, true, Some(sort_perm))
             } else {
                 // --- Default broadcast path (Stage 1 final). ---
                 let x_in = mlx::ops::shape::expand_dims_on(&flat_x, &[-2_i32, -3_i32][..], target)
                     .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")?; // [BS, 1, 1, H]
 
-                let gate_out = mlx::quantization::gather_quantized_matmul_on(
+                // P5i.a T2: single fused gate+up gather_qmm + slice.
+                // Output shape: [BS, k, 1, 2*I]; slice along axis=-1 into
+                // gate_out [BS, k, 1, I] and up_out [BS, k, 1, I].
+                let fused = self.routed.fused_gate_up(target)?;
+                let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
                     &x_in,
-                    &self.routed.gate_weight,
-                    &self.routed.gate_scales,
-                    self.routed.gate_biases.as_ref(),
+                    &fused.weight,
+                    &fused.scales,
+                    fused.biases.as_ref(),
                     None,
                     Some(&inds_u32),
                     true,
@@ -780,23 +916,13 @@ impl SparseMoeBlock {
                     false,
                     target,
                 )
-                .context("SparseMoeBlock: gate_proj gather_qmm")?; // [BS, k, 1, moe_inter]
+                .context("SparseMoeBlock: gate_up gather_qmm")?; // [BS, k, 1, 2*I]
+                let i = self.routed.moe_intermediate;
+                let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0, 0], [bs, k, 1, i], target)
+                    .context("SparseMoeBlock: slice gate_out from gate_up (default)")?;
+                let up_out = slice_on(&gate_up_out, [0_i32, 0, 0, i], [bs, k, 1, 2 * i], target)
+                    .context("SparseMoeBlock: slice up_out from gate_up (default)")?;
 
-                let up_out = mlx::quantization::gather_quantized_matmul_on(
-                    &x_in,
-                    &self.routed.up_weight,
-                    &self.routed.up_scales,
-                    self.routed.up_biases.as_ref(),
-                    None,
-                    Some(&inds_u32),
-                    true,
-                    Some(self.routed.group_size),
-                    Some(self.routed.bits),
-                    "affine",
-                    false,
-                    target,
-                )
-                .context("SparseMoeBlock: up_proj gather_qmm")?; // [BS, k, 1, moe_inter]
                 (gate_out, up_out, inds_u32, false, None)
             };
 
