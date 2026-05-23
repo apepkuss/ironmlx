@@ -1,5 +1,6 @@
 import pytest
 from tools.p5h_aggregator.schema_validator import (
+    LANE_A_REQUIRED_TREE,
     parse_line,
     validate_request,
     group_by_request,
@@ -60,7 +61,11 @@ def _build_line(
     )
 
 def _lane_a_pass_fixture() -> list:
-    """Minimal Lane-A request: root + all 6 required tree spans + 1 required diagnostic."""
+    """Minimal Lane-A request: root + all required tree spans + 1 required diagnostic.
+
+    P5h+1 T1: `first_token_sampling` was split into sibling pair
+    `first_token_sampling_prepare` + `first_token_sampling_materialize_and_sample`.
+    """
     spans = []
     # Root: contains all children in [0, 100_000_000]
     spans.append(parse_line(_build_line(
@@ -74,7 +79,8 @@ def _lane_a_pass_fixture() -> list:
         "http_parse_render_tokenize",
         "scheduler_admission",
         "model_prefill_forward",
-        "first_token_sampling",
+        "first_token_sampling_prepare",
+        "first_token_sampling_materialize_and_sample",
         "detok_format_first_content_chunk",
     ], start=2):
         spans.append(parse_line(_build_line(
@@ -420,3 +426,18 @@ def test_join_orphan_aggregator_hard_fail(tmp_path):
     )
     assert result.returncode == 4, f"expected exit 4 (JOIN HARD-FAIL), got {result.returncode}\nstderr:\n{result.stderr}"
     assert "JOIN HARD-FAIL" in result.stderr
+
+
+# --- P5h+1 T1: Lane-A `first_token_sampling` split into sibling pair ---
+
+
+def test_lane_a_required_tree_excludes_first_token_sampling():
+    assert "first_token_sampling" not in LANE_A_REQUIRED_TREE
+
+
+def test_lane_a_required_tree_includes_first_token_sampling_prepare():
+    assert "first_token_sampling_prepare" in LANE_A_REQUIRED_TREE
+
+
+def test_lane_a_required_tree_includes_first_token_sampling_materialize_and_sample():
+    assert "first_token_sampling_materialize_and_sample" in LANE_A_REQUIRED_TREE

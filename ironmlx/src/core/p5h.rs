@@ -176,10 +176,45 @@ impl Drop for P5hTraceGuard {
 }
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// P5h+1 T1 measurement-probe global. When `true`, selected ROI substep
+/// closures call `mlx::transforms::eval` on their returned `Array` value(s)
+/// before the span closes so each substep accrues the incremental MLX
+/// materialization cost it caused (closes the wrapper-dominance gap reported
+/// by P5h T5: lazy MLX graph defers ~96-99% of root_inclusive_us to the
+/// outermost `.to_vec()` materialization site).
+///
+/// Production default OFF preserves lazy-graph semantics — only flipped on by
+/// the `--p5h-measurement-eval-probes` CLI flag (which is itself gated by the
+/// `p5h-profile` feature). Feature-off builds never set this flag and read it
+/// via the inline always-`false` fallback in `is_measurement_eval_probes_active`.
+#[cfg(feature = "p5h-profile")]
+static MEASUREMENT_EVAL_PROBES_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Set the global measurement-eval-probes flag. Called once at server boot
+/// from `server::serve` based on the `--p5h-measurement-eval-probes` CLI flag.
+#[cfg(feature = "p5h-profile")]
+pub fn set_measurement_eval_probes_active(active: bool) {
+    MEASUREMENT_EVAL_PROBES_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+/// Read the global measurement-eval-probes flag. Always available; returns
+/// `false` in feature-off builds via the inline branch (no atomic load).
+#[inline]
+pub fn is_measurement_eval_probes_active() -> bool {
+    #[cfg(feature = "p5h-profile")]
+    {
+        MEASUREMENT_EVAL_PROBES_ACTIVE.load(Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "p5h-profile"))]
+    {
+        false
+    }
+}
 
 /// Records the full state captured at open. close_* verifies the incoming
 /// SpanHandle matches this record on every field (per Codex plan review v5

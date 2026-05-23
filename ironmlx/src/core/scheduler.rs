@@ -1110,60 +1110,106 @@ impl<M: Model> Scheduler<M> {
         // batched_prefill returns [B, 1, vocab]. Reshape to [B, vocab] for
         // sample_batch, then dispatch once to coalesce all-greedy batches.
         //
-        // T0a.9: wrap reshape + Stage A + Stage B in `first_token_sampling`
-        // span. No `P5hTraceGuard` here — body has no deep substep call sites
-        // that use `try_with_p5h_span_from_current_trace`, so no guard
-        // required. Stage C (distribute + termination) stays OUTSIDE the span.
+        // P5h+1 T1: split the legacy `first_token_sampling` span into two
+        // siblings under root so the wrapper-dominance gap is closed.
+        //   * `first_token_sampling_prepare` — logits reshape + per-row
+        //     sampler refs + per-row history construction (CPU-bound; no
+        //     MLX materialization on its own).
+        //   * `first_token_sampling_materialize_and_sample` — wraps
+        //     `sample_batch(...)` which calls `.to_vec()` internally and
+        //     therefore forces the full prefill graph to materialize. With
+        //     the split, the materialize span's inclusive_us now reflects
+        //     the real lazy-graph cost previously hidden inside one wrapper.
+        // Explicit-API discipline: no `?` while a manual span is open;
+        // close-on-error branches forward the original error after the
+        // span has been closed.
         #[cfg(feature = "p5h-profile")]
-        let fts_span = p5h_trace.as_ref().map(|(ctx, root_span)| {
-            crate::core::p5h::open_p5h_span(ctx, Some(root_span), "first_token_sampling")
+        let mut prepare_span = p5h_trace.as_ref().map(|(ctx, root_span)| {
+            crate::core::p5h::open_p5h_span(ctx, Some(root_span), "first_token_sampling_prepare")
         });
 
-        let tokens_result: anyhow::Result<Vec<u32>> = (|| -> anyhow::Result<Vec<u32>> {
-            let logits_shape = logits.shape();
-            let vocab = logits_shape.as_slice()[2];
-            let logits_bv = logits.reshape(&[b as i32, vocab][..]).map_err(|e| {
-                anyhow!("prefill_admitted: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}")
-            })?;
+        let logits_shape = logits.shape();
+        let vocab = logits_shape.as_slice()[2];
+        let logits_bv_result = logits.reshape(&[b as i32, vocab][..]).map_err(|e| {
+            anyhow!("prefill_admitted: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}")
+        });
 
-            // Stage A — collect per-row sampler refs + histories in slot order.
-            // Sentinel covers None / pad rows; their tokens are discarded.
-            let sentinel = Sampler::greedy();
-            let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
-            let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
-            for b_idx in 0..b {
-                if let Some(state) = self.slots[b_idx].as_ref() {
-                    row_samplers.push(&state.sampler);
-                    row_histories.push(state.prompt_ids.clone());
-                } else {
-                    row_samplers.push(&sentinel);
-                    row_histories.push(Vec::new());
+        let logits_bv = match logits_bv_result {
+            Ok(value) => value,
+            Err(err) => {
+                #[cfg(feature = "p5h-profile")]
+                if let (Some((ctx, _)), Some(span)) = (p5h_trace.as_ref(), prepare_span.take()) {
+                    crate::core::p5h::close_p5h_span(
+                        ctx,
+                        span,
+                        crate::core::p5h::monotonic_ns_public(),
+                        crate::core::p5h::SpanFields::default(),
+                    );
                 }
+                return Err(err);
             }
+        };
 
-            // Stage B — dispatch sample_batch once over [B, vocab].
-            let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
-            let tokens = crate::core::sampler::sample_batch(
-                &row_samplers,
-                &logits_bv,
-                &history_refs,
-                &mut self.prng_state,
-            )
-            .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"))?;
-            Ok(tokens)
-        })();
+        // Stage A — collect per-row sampler refs + histories in slot order.
+        // Sentinel covers None / pad rows; their tokens are discarded.
+        let sentinel = Sampler::greedy();
+        let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
+        let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
+        for b_idx in 0..b {
+            if let Some(state) = self.slots[b_idx].as_ref() {
+                row_samplers.push(&state.sampler);
+                row_histories.push(state.prompt_ids.clone());
+            } else {
+                row_samplers.push(&sentinel);
+                row_histories.push(Vec::new());
+            }
+        }
 
+        // Close the prepare span BEFORE opening the materialize sibling so
+        // both intervals stay strictly contained under root and disjoint
+        // from each other (per § 2.5a interval containment).
         #[cfg(feature = "p5h-profile")]
-        if let (Some((ctx, _)), Some(fts)) = (p5h_trace.as_ref(), fts_span) {
+        if let (Some((ctx, _)), Some(span)) = (p5h_trace.as_ref(), prepare_span.take()) {
             crate::core::p5h::close_p5h_span(
                 ctx,
-                fts,
+                span,
                 crate::core::p5h::monotonic_ns_public(),
                 crate::core::p5h::SpanFields::default(),
             );
         }
 
-        let tokens = tokens_result?;
+        #[cfg(feature = "p5h-profile")]
+        let materialize_span = p5h_trace.as_ref().map(|(ctx, root_span)| {
+            crate::core::p5h::open_p5h_span(
+                ctx,
+                Some(root_span),
+                "first_token_sampling_materialize_and_sample",
+            )
+        });
+
+        // Stage B — dispatch sample_batch once over [B, vocab]. `sample_batch`
+        // internally calls `.to_vec()` which forces the entire prefill graph
+        // to materialize; this wrapper makes that cost attributable.
+        let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
+        let sample_result = crate::core::sampler::sample_batch(
+            &row_samplers,
+            &logits_bv,
+            &history_refs,
+            &mut self.prng_state,
+        )
+        .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"));
+
+        #[cfg(feature = "p5h-profile")]
+        if let (Some((ctx, _)), Some(span)) = (p5h_trace.as_ref(), materialize_span) {
+            crate::core::p5h::close_p5h_span(
+                ctx,
+                span,
+                crate::core::p5h::monotonic_ns_public(),
+                crate::core::p5h::SpanFields::default(),
+            );
+        }
+
+        let tokens = sample_result?;
 
         // Stage C — distribute tokens + termination per occupied row.
         let mut events: Vec<StepEvent> = Vec::new();

@@ -47,7 +47,8 @@ LANE_A_REQUIRED_TREE = {
     "http_parse_render_tokenize",
     "scheduler_admission",
     "model_prefill_forward",
-    "first_token_sampling",
+    "first_token_sampling_prepare",
+    "first_token_sampling_materialize_and_sample",
     "detok_format_first_content_chunk",
 }
 LANE_A_REQUIRED_DIAGNOSTIC = {

@@ -258,6 +258,10 @@ impl SparseMoeBlock {
                     let scores = &scores_raw / &scores_sum; // [BS, k]
                     let inds_u32 = mlx::ops::cast::astype_on(&inds, mlx::Dtype::Uint32, target)
                         .context("SparseMoeBlock: cast indices to Uint32")?; // [BS, k]
+                                                                             // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&scores, &inds_u32])?;
+                    }
                     Ok((scores, inds_u32))
                 },
             )?;
@@ -289,7 +293,8 @@ impl SparseMoeBlock {
                 || -> Result<Option<(Array, Array, Array)>> {
                     if !use_sorted {
                         // Default broadcast branch: no sort/pack work happens
-                        // here. Zero-cost span emit per hard-rule #9.
+                        // here. Zero-cost span emit per hard-rule #9. No
+                        // arrays produced -> nothing to eval probe.
                         return Ok(None);
                     }
                     // --- Sorted routing path. ---
@@ -330,6 +335,11 @@ impl SparseMoeBlock {
                         target,
                     )
                     .context("SparseMoeBlock: expand_dims sorted_x → [BS*k,1,1,H]")?;
+                    // P5h+1 T1: measurement-eval probe (sorted branch only;
+                    // default broadcast branch already returned None above).
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&sorted_x_4d, &sorted_topk_2d, &sort_perm])?;
+                    }
                     Ok(Some((sorted_x_4d, sorted_topk_2d, sort_perm)))
                 },
             )?;
@@ -381,6 +391,15 @@ impl SparseMoeBlock {
                                 target,
                             )
                             .context("SparseMoeBlock: up_proj gather_qmm (sorted)")?;
+                            // P5h+1 T1: measurement-eval probe (sorted branch).
+                            if crate::core::p5h::is_measurement_eval_probes_active() {
+                                mlx::transforms::eval(&[
+                                    &gate_out,
+                                    &up_out,
+                                    &sorted_topk_2d,
+                                    &sort_perm,
+                                ])?;
+                            }
                             Ok((gate_out, up_out, sorted_topk_2d, true, Some(sort_perm)))
                         } else {
                             // --- Default broadcast path. ---
@@ -420,6 +439,10 @@ impl SparseMoeBlock {
                                 target,
                             )
                             .context("SparseMoeBlock: up_proj gather_qmm")?; // [BS, k, 1, moe_inter]
+                                                                             // P5h+1 T1: measurement-eval probe (default branch).
+                            if crate::core::p5h::is_measurement_eval_probes_active() {
+                                mlx::transforms::eval(&[&gate_out, &up_out, &inds_u32])?;
+                            }
                             Ok((gate_out, up_out, inds_u32, false, None))
                         }
                     },
@@ -441,7 +464,12 @@ impl SparseMoeBlock {
                         .sigmoid_on(target)
                         .context("SparseMoeBlock: gate sigmoid")?;
                     let gate_silu = &gate_out * &gate_sig;
-                    Ok(&gate_silu * &up_out)
+                    let act = &gate_silu * &up_out;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&act])?;
+                    }
+                    Ok(act)
                 },
             )?;
 
@@ -456,7 +484,7 @@ impl SparseMoeBlock {
                     ..Default::default()
                 },
                 || -> Result<Array> {
-                    mlx::quantization::gather_quantized_matmul_on(
+                    let down_out = mlx::quantization::gather_quantized_matmul_on(
                         &act,
                         &self.routed.down_weight,
                         &self.routed.down_scales,
@@ -470,7 +498,12 @@ impl SparseMoeBlock {
                         sorted_flag,
                         target,
                     )
-                    .context("SparseMoeBlock: down_proj gather_qmm")
+                    .context("SparseMoeBlock: down_proj gather_qmm")?;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&down_out])?;
+                    }
+                    Ok(down_out)
                 },
             )?;
 
@@ -507,8 +540,13 @@ impl SparseMoeBlock {
                     let scores_unsq = mlx::ops::shape::expand_dims_on(&scores, -1_i32, target)
                         .context("SparseMoeBlock: expand scores dim")?; // [BS, k, 1]
                     let weighted = &down_out * &scores_unsq; // [BS, k, H]
-                    mlx::ops::sum_on(&weighted, -2_i32, false, target)
-                        .context("SparseMoeBlock: sum across k")
+                    let routed_y = mlx::ops::sum_on(&weighted, -2_i32, false, target)
+                        .context("SparseMoeBlock: sum across k")?;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&routed_y])?;
+                    }
+                    Ok(routed_y)
                 },
             )?;
 
@@ -532,7 +570,12 @@ impl SparseMoeBlock {
                     let gate_sig2 = gate_logit
                         .sigmoid_on(target)
                         .context("SparseMoeBlock: shared gate sigmoid")?; // [BS, 1]
-                    Ok(&shared_y * &gate_sig2) // [BS, H]
+                    let shared_gated = &shared_y * &gate_sig2; // [BS, H]
+                                                               // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&shared_gated])?;
+                    }
+                    Ok(shared_gated)
                 },
             )?;
 
@@ -546,8 +589,13 @@ impl SparseMoeBlock {
                 },
                 || -> Result<Array> {
                     let out_flat = &routed_y + &shared_gated; // [BS, H]
-                    mlx::ops::shape::reshape(&out_flat, [b, s, h])
-                        .context("SparseMoeBlock: reshape [BS,H] → [B,S,H]")
+                    let out = mlx::ops::shape::reshape(&out_flat, [b, s, h])
+                        .context("SparseMoeBlock: reshape [BS,H] → [B,S,H]")?;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&out])?;
+                    }
+                    Ok(out)
                 },
             )
         }

@@ -170,7 +170,14 @@ impl Qwen35MoeModel {
             crate::core::p5h::try_with_p5h_span_from_current_trace(
                 "slice_last_and_project_lm_head",
                 crate::core::p5h::SpanFields::default,
-                || self.lm_head.forward_on(&last_hidden, target),
+                || {
+                    let logits = self.lm_head.forward_on(&last_hidden, target)?;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&logits])?;
+                    }
+                    Ok(logits)
+                },
             )
         }
         #[cfg(not(feature = "p5h-profile"))]

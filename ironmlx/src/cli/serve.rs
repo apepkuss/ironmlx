@@ -55,6 +55,17 @@ pub struct ServeArgs {
     /// Requests beyond this return HTTP 413 Payload Too Large. B1-p2.3f.
     #[arg(long, default_value_t = 32768)]
     pub max_cache_cap: usize,
+
+    /// P5h+1 T1 measurement probe: force selected span bodies (Lane A
+    /// `first_token_sampling_materialize_and_sample` + the ROI substep
+    /// closures under GatedAttention / GatedDeltaNet / SparseMoeBlock +
+    /// `slice_last_and_project_lm_head` + `cache_state_update`) to call
+    /// `mlx::transforms::eval` on returned `Array` value(s) before the
+    /// span closes. Measurement-only: defaults OFF so production lazy-graph
+    /// semantics are preserved. Use ONLY for P5h+1 attribution sweeps.
+    #[cfg(feature = "p5h-profile")]
+    #[arg(long, default_value_t = false)]
+    pub p5h_measurement_eval_probes: bool,
 }
 
 /// Generic serve helper — shared by all model types that satisfy the
@@ -99,6 +110,13 @@ where
         .enable_all()
         .build()
         .context("tokio::Runtime::new")?;
+    // P5h+1 T1: derive measurement-eval-probes flag (feature-gated CLI arg);
+    // feature-off builds always pass `false` so the receiver-side `set_*`
+    // call site can remain unconditional in signature.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_measurement_eval_probes = args.p5h_measurement_eval_probes;
+    #[cfg(not(feature = "p5h-profile"))]
+    let p5h_measurement_eval_probes = false;
     runtime.block_on(server::serve(
         model,
         tokenizer,
@@ -110,6 +128,7 @@ where
         args.admission_deadline_ms,
         args.admission_queue_max,
         args.max_cache_cap,
+        p5h_measurement_eval_probes,
     ))
 }
 

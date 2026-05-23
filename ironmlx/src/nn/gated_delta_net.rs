@@ -601,6 +601,10 @@ impl GatedDeltaNet {
                         } else {
                             qkv
                         };
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&qkv, &z])?;
+                        }
                         Ok((qkv, z))
                     },
                 )?
@@ -674,6 +678,10 @@ impl GatedDeltaNet {
                             &[batch, seq, num_v_heads + num_v_heads][..],
                             &[1_i32, 1, 1][..],
                         )?;
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&b, &a])?;
+                        }
                         Ok((b, a))
                     },
                 )?
@@ -757,21 +765,26 @@ impl GatedDeltaNet {
                         ..Default::default()
                     },
                     || -> Result<Array> {
-                        if ablate_conv_step_2c {
+                        let out = if ablate_conv_step_2c {
                             // ablate-conv early path: skip concat entirely; conv_input is unused.
-                            Ok(qkv.clone())
+                            qkv.clone()
                         } else {
                             match cache.as_deref_mut() {
-                                Some(c) => Ok(concatenate(&[c.conv_state(), &qkv], 1)?),
+                                Some(c) => concatenate(&[c.conv_state(), &qkv], 1)?,
                                 None => {
                                     let zeros = Array::zeros(
                                         (batch, self.cfg.conv_kernel_size - 1, self.cfg.conv_dim()),
                                         qkv.dtype(),
                                     )?;
-                                    Ok(concatenate(&[&zeros, &qkv], 1)?)
+                                    concatenate(&[&zeros, &qkv], 1)?
                                 }
                             }
+                        };
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&out])?;
                         }
+                        Ok(out)
                     },
                 )?
             }
@@ -834,13 +847,18 @@ impl GatedDeltaNet {
                         ..Default::default()
                     },
                     || -> Result<Array> {
-                        if ablate_conv_step_2b {
-                            Ok(qkv.clone())
+                        let out = if ablate_conv_step_2b {
+                            qkv.clone()
                         } else {
                             let conv_out = self.conv1d.forward_on(&conv_input, target)?;
                             let conv_sig = conv_out.sigmoid()?;
-                            Ok(&conv_out * &conv_sig)
+                            &conv_out * &conv_sig
+                        };
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&out])?;
                         }
+                        Ok(out)
                     },
                 )?
             }
@@ -1113,6 +1131,10 @@ impl GatedDeltaNet {
                             (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
                             target,
                         )?;
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&q_per_head, &k_per_head, &v_per_head])?;
+                        }
                         Ok((q_per_head, k_per_head, v_per_head))
                     },
                 )?
@@ -1171,6 +1193,10 @@ impl GatedDeltaNet {
                         let q_scaled = &q_normed * (inv_scale * inv_scale);
                         let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
                         let k_scaled = &k_normed * inv_scale;
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&q_scaled, &k_scaled])?;
+                        }
                         Ok((q_scaled, k_scaled))
                     },
                 )?
@@ -1232,9 +1258,9 @@ impl GatedDeltaNet {
                         ..Default::default()
                     },
                     || -> Result<Array> {
-                        if ablate_compute_g {
+                        let g = if ablate_compute_g {
                             // see cfg-off arm below for design rationale
-                            Ok(mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?)
+                            mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?
                         } else {
                             let x_sp = &a + &self.dt_bias;
                             let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
@@ -1246,8 +1272,13 @@ impl GatedDeltaNet {
                             let exp_alog = a_log_f32.exp()?;
                             let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
                             let inner = &neg_exp_alog * &sp;
-                            Ok(inner.exp()?)
+                            inner.exp()?
+                        };
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&g])?;
                         }
+                        Ok(g)
                     },
                 )?
             }
@@ -1316,7 +1347,14 @@ impl GatedDeltaNet {
                         layer_idx: Some(layer_idx),
                         ..Default::default()
                     },
-                    || b.sigmoid_on(target),
+                    || -> Result<Array> {
+                        let beta = b.sigmoid_on(target)?;
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&beta])?;
+                        }
+                        Ok(beta)
+                    },
                 )?
             }
             #[cfg(not(feature = "p5h-profile"))]
@@ -1529,6 +1567,12 @@ impl GatedDeltaNet {
                                     Ok(())
                                 },
                             )?;
+                        }
+                        // P5h+1 T1: measurement-eval probe for the kernel
+                        // output `y` (state update is side-effect; eval `y`
+                        // captures the dispatch+take_at materialization cost).
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&y])?;
                         }
                         Ok(y)
                     },
@@ -1747,7 +1791,12 @@ impl GatedDeltaNet {
                         let normed = self.norm.forward_on(&y, Some(&z_per_head), target)?;
                         let normed_flat =
                             normed.reshape_on((batch, seq, self.cfg.value_dim()), target)?;
-                        self.out_proj.forward_on(&normed_flat, target)
+                        let out = self.out_proj.forward_on(&normed_flat, target)?;
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&out])?;
+                        }
+                        Ok(out)
                     },
                 )?
             }

@@ -198,6 +198,12 @@ impl GatedAttention {
                     let q_full = self.q_proj.forward_on(x, target)?; // [B, S, Hq*D*2]
                     let k = self.k_proj.forward_on(x, target)?; // [B, S, Hkv*D]
                     let v = self.v_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+                                                                // P5h+1 T1: measurement-eval probe (defaults OFF in
+                                                                // production). Forces lazy graph to materialize within
+                                                                // this substep so inclusive_us reflects true cost.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&q_full, &k, &v])?;
+                    }
                     Ok((q_full, k, v))
                 },
             )?;
@@ -232,6 +238,10 @@ impl GatedAttention {
                         let v = v
                             .reshape_on((batch, seq, h_kv, d), target)?
                             .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&queries, &k, &v, &gate_flat])?;
+                        }
                         Ok((queries, k, v, gate_flat))
                     },
                 )?;
@@ -243,7 +253,14 @@ impl GatedAttention {
                     layer_idx: Some(layer_idx),
                     ..Default::default()
                 },
-                || -> Result<(Array, Array)> { mrope.apply(&queries, &k, cos, sin) },
+                || -> Result<(Array, Array)> {
+                    let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&queries, &k])?;
+                    }
+                    Ok((queries, k))
+                },
             )?;
 
             // Substep 4: kv_mask_update — (a) zero out K, V at pad positions via
@@ -290,11 +307,26 @@ impl GatedAttention {
                                     layer_idx: Some(layer_idx),
                                     ..Default::default()
                                 },
-                                || c.update_and_fetch_on(&k, &v, lens_ref, target),
+                                || -> Result<(Array, Array)> {
+                                    let (k_full, v_full) =
+                                        c.update_and_fetch_on(&k, &v, lens_ref, target)?;
+                                    // P5h+1 T1: measurement-eval probe.
+                                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                                        mlx::transforms::eval(&[&k_full, &v_full])?;
+                                    }
+                                    Ok((k_full, v_full))
+                                },
                             )?
                         }
                         None => (k, v),
                     };
+                    // P5h+1 T1: measurement-eval probe for the kv_mask_update
+                    // substep itself (separate from the nested cache_state_update
+                    // probe above; this captures the masked k/v tensors as
+                    // returned to the SDPA caller).
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&out.0, &out.1])?;
+                    }
                     Ok(out)
                 },
             )?;
@@ -324,6 +356,10 @@ impl GatedAttention {
                             target,
                         )?,
                     };
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&out])?;
+                    }
                     Ok(out)
                 },
             )?;
@@ -342,7 +378,12 @@ impl GatedAttention {
                         .reshape_on((batch, seq, h_q * d), target)?;
                     let gate_sig = gate_flat.sigmoid_on(target)?;
                     // &Array * &Array returns Array (panic-on-err overload), not Result<Array>.
-                    Ok(&attn_out * &gate_sig)
+                    let gated = &attn_out * &gate_sig;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&gated])?;
+                    }
+                    Ok(gated)
                 },
             )?;
 
@@ -353,7 +394,14 @@ impl GatedAttention {
                     layer_idx: Some(layer_idx),
                     ..Default::default()
                 },
-                || self.o_proj.forward_on(&gated, target),
+                || -> Result<Array> {
+                    let out = self.o_proj.forward_on(&gated, target)?;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&out])?;
+                    }
+                    Ok(out)
+                },
             )
         }
 

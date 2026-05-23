@@ -78,13 +78,16 @@ def _lane_a_full_fixture(rid="rid", end_root=100_000) -> list:
             )
         )
     )
-    # 5 required tree children at distinct windows, each 500ns wide.
+    # 6 required tree children at distinct windows, each 500ns wide.
+    # P5h+1 T1: `first_token_sampling` is now split into two siblings
+    # (`_prepare` + `_materialize_and_sample`).
     for sid, name in enumerate(
         [
             "http_parse_render_tokenize",
             "scheduler_admission",
             "model_prefill_forward",
-            "first_token_sampling",
+            "first_token_sampling_prepare",
+            "first_token_sampling_materialize_and_sample",
             "detok_format_first_content_chunk",
         ],
         start=2,
@@ -145,11 +148,11 @@ def test_compute_exclusive_single_root_no_children():
 def test_compute_exclusive_parent_minus_children():
     spans = _lane_a_full_fixture()
     excl = compute_exclusive(spans)
-    # Root has 5 children with inclusive_us=0.5 each (500ns / 1000). Root
-    # inclusive = 100us; exclusive = 100 - 5*0.5 = 97.5us.
-    assert excl[1] == pytest.approx(100.0 - 5 * 0.5, abs=0.01)
+    # Root has 6 children with inclusive_us=0.5 each (500ns / 1000). Root
+    # inclusive = 100us; exclusive = 100 - 6*0.5 = 97.0us.
+    assert excl[1] == pytest.approx(100.0 - 6 * 0.5, abs=0.01)
     # Each child has no children, exclusive = inclusive.
-    for sid in (2, 3, 4, 5, 6):
+    for sid in (2, 3, 4, 5, 6, 7):
         assert excl[sid] == pytest.approx(0.5, abs=0.01)
     # Diagnostic span (id=100) is NOT in the exclusive tree.
     assert 100 not in excl
@@ -190,14 +193,14 @@ def test_compute_exclusive_negative_exclusive_raises():
 def test_synthesize_residual_leaves_emits_unattributed_when_gap_exceeds_threshold():
     spans = _lane_a_full_fixture()
     residuals = synthesize_residual_leaves(spans)
-    # Root: 100us - 5*0.5us = 97.5us residual under root.
+    # Root: 100us - 6*0.5us = 97.0us residual under root.
     root_residuals = [r for r in residuals if r.parent_span_id == 1]
     assert len(root_residuals) == 1
     assert (
         root_residuals[0].span_name
         == "unattributed_server_request_recv_to_first_content_sse_write"
     )
-    assert root_residuals[0].inclusive_us == pytest.approx(97.5, abs=0.01)
+    assert root_residuals[0].inclusive_us == pytest.approx(97.0, abs=0.01)
     assert root_residuals[0].span_kind == "synthesized"
 
 
@@ -284,13 +287,13 @@ def test_coverage_pct_residual_half_returns_half():
 
 
 def test_coverage_pct_lane_a_full_fixture_below_gate():
-    """Lane-A fixture has 97.5% residual → coverage 2.5%, far below 95% gate."""
+    """Lane-A fixture has 97.0% residual → coverage 3.0%, far below 95% gate."""
     spans = _lane_a_full_fixture()
     root = next(s for s in spans if s.span_id == 1)
     residuals = synthesize_residual_leaves(spans)
     cov = coverage_pct(root, residuals)
     assert cov < COVERAGE_GATE_PCT
-    assert cov == pytest.approx(0.025, abs=0.01)
+    assert cov == pytest.approx(0.030, abs=0.01)
 
 
 # --- diagnostic_columns ---
@@ -315,7 +318,7 @@ def test_build_attribution_returns_full_request_state():
     assert attr.pp == "128"
     assert attr.routing_path == "scheduler"
     assert attr.root.span_id == 1
-    assert len(attr.tree_spans) == 6  # root + 5 children
+    assert len(attr.tree_spans) == 7  # root + 6 children
     assert len(attr.diagnostics) == 1
     # Residual under root
     assert any(r.parent_span_id == 1 for r in attr.residuals)
@@ -355,7 +358,7 @@ def test_write_summary_csv_top3_ordering(tmp_path: Path):
     out = tmp_path / "summary.csv"
     median_cov = write_summary_csv([attr], out)
     assert "128" in median_cov
-    # Below 95% gate (fixture has 97.5% residual).
+    # Below 95% gate (fixture has 97.0% residual).
     assert median_cov["128"] < COVERAGE_GATE_PCT
 
     rows = list(csv.DictReader(out.open()))
@@ -363,7 +366,7 @@ def test_write_summary_csv_top3_ordering(tmp_path: Path):
     row = rows[0]
     assert row["pp"] == "128"
     assert int(row["request_count"]) == 1
-    # Top-1 in this fixture should be the residual unattributed root (97.5%
+    # Top-1 in this fixture should be the residual unattributed root (97.0%
     # share) since every other child is 0.5%.
     assert row["top1_span_name"].startswith("unattributed_")
     assert float(row["top1_share"]) > 0.9
@@ -467,7 +470,7 @@ def _write_log(path: Path, spans: list) -> None:
 
 
 def test_aggregator_cli_coverage_gate_failure_exits_7(tmp_path: Path):
-    """Lane-A fixture has ~97.5% residual under root → coverage_pct ~2.5% →
+    """Lane-A fixture has ~97.0% residual under root → coverage_pct ~3.0% →
     aggregator must exit 7 (COVERAGE GATE FAILURE)."""
     server_log = tmp_path / "server.log"
     bench_csv = tmp_path / "bench.csv"
@@ -528,18 +531,31 @@ def test_aggregator_cli_coverage_gate_pass_exits_0(tmp_path: Path):
             )
         )
     ]
-    # 5 required children, each 19_000ns wide (sum 95_000ns).
+    # 6 required children. P5h+1 T1: `first_token_sampling` is split into
+    # `_prepare` + `_materialize_and_sample` siblings; the original 19_000ns
+    # budget for `first_token_sampling` is split evenly (9_500ns each) so
+    # the children inclusive_us sum is unchanged at 95_000ns → coverage 95%.
+    widths = {
+        "http_parse_render_tokenize": 19_000,
+        "scheduler_admission": 19_000,
+        "model_prefill_forward": 19_000,
+        "first_token_sampling_prepare": 9_500,
+        "first_token_sampling_materialize_and_sample": 9_500,
+        "detok_format_first_content_chunk": 19_000,
+    }
+    cursor = 1_000
     for sid, name in enumerate(
         [
             "http_parse_render_tokenize",
             "scheduler_admission",
             "model_prefill_forward",
-            "first_token_sampling",
+            "first_token_sampling_prepare",
+            "first_token_sampling_materialize_and_sample",
             "detok_format_first_content_chunk",
         ],
         start=2,
     ):
-        start = 1_000 + 19_500 * (sid - 2)
+        width = widths[name]
         spans.append(
             parse_line(
                 _build_line(
@@ -548,11 +564,12 @@ def test_aggregator_cli_coverage_gate_pass_exits_0(tmp_path: Path):
                     parent_span_id="1",
                     span_name=name,
                     parent_span="server_request_recv_to_first_content_sse_write",
-                    start_ns=start,
-                    end_ns=start + 19_000,
+                    start_ns=cursor,
+                    end_ns=cursor + width,
                 )
             )
         )
+        cursor += width + 500
     # Required diagnostic
     spans.append(
         parse_line(
