@@ -23,6 +23,13 @@ RUNS=15 envelope 1.94% meets but is tight against ±2% target. See "Caveat" belo
 
 Per-repeat medians (RUNS=15): 1366.18 / 1349.34 / 1401.82 pp_tps (mean 1372.45).
 
+T4 fresh-spawn validation (3 independent repeats, monolithic 395s preheat per M5 Max calibration):
+- within-sweep CI95 max: 1.570% (per-repeat: 1.438% / 1.502% / 1.570%)
+- between-sweep half-range: 1.522% (medians: 1399.2 / 1362.6 / 1357.4 pp_tps)
+- **final uncertainty envelope: 1.570%** (verdict: OUTCOME_A_PASS; meets ≤±2.0% target)
+
+T4 envelope 1.570% is slightly tighter than T1's 1.940% (likely due to M5 Max preheat calibration: T1 used `--runs 800` ~269s wall which may have permitted some residual thermal drift; T4 used `--runs 1100` ~395s wall reaching steady-state). The Caveat section's tight-margin concern remains relevant for future hardware/build/MLX-version changes.
+
 ## Comparison scope (CRITICAL — read before using protocol)
 
 This protocol is validated for: **(i) ironmlx-only pre/post regression decisions** — only ironmlx repeats were collected in T1.
@@ -66,11 +73,11 @@ for i in $(seq 1 60); do
   sleep 5
 done
 
-# 3. 5-min preheat (CRITICAL — default --runs 20 is insufficient on M5 Max)
+# 3. 5-min preheat (CRITICAL — must be MONOLITHIC, not split; default --runs 20 is insufficient. M5 Max needs --runs 1100 to reach ≥300s wall; other hardware may differ — calibrate empirically)
 cargo run --release -p iron-bench -- \
   --target ironmlx_preheat=http://127.0.0.1:18099 \
   --model qwen3.5-moe --model-dir "$SNAP" \
-  --prompt-len 512 --max-tokens 1 --runs 800 --warmup 0 --format csv > /tmp/preheat.log 2>&1
+  --prompt-len 512 --max-tokens 1 --runs 1100 --warmup 0 --format csv > /tmp/preheat.log 2>&1
 # Verify preheat wall ≥300s before proceeding
 
 # 4a. PP=128 measurement sweep (RUNS=7, warmup=1)
@@ -98,6 +105,23 @@ kill $IRONMLX_PID; wait $IRONMLX_PID 2>/dev/null; sleep 3
 # 7. Aggregate via tools/p5i_a_baseline_aggregate.py — emits per-PP 95% CI in summary.json
 # 8. Verify final uncertainty envelope = MAX(within-sweep CI max, between-sweep half-range) ≤ ±2%
 ```
+
+## Calibration notes (per hardware)
+
+### M5 Max (128GB unified)
+
+- `iron-bench --prompt-len 512 --runs 1100 --warmup 0` reaches ~395s preheat wall (verified P5h+2.a T4).
+- `--runs 800` is INSUFFICIENT on M5 Max (~269s wall — below 300s target).
+
+### Monolithic preheat (CRITICAL)
+
+The 300s preheat MUST be a single `iron-bench` invocation. Splitting into multiple shorter invocations (e.g., 269s + 72s) does NOT produce the same thermal-steady-state behavior. P5h+2.a T4 repeat 1 attempted a split preheat and the resulting median was ~8% elevated (1471 vs 1362/1357 tok/s for monolithic-preheat repeats), causing the envelope to FAIL at 4.09%. After redo with monolithic 396s preheat, the same repeat's median dropped to 1399 tok/s and the envelope PASSED at 1.570%.
+
+Mechanism (hypothesis): each fresh `iron-bench` invocation incurs JIT/cache warmup which masks the GPU's actual thermal-throttle steady state. Only a single sustained sweep reaches it.
+
+### Other hardware
+
+Untested. Calibrate empirically by measuring per-run wall time at `--runs 800` and adjusting upward until wall ≥300s.
 
 ## Caveat — tight margin against ±2% ceiling
 
