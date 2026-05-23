@@ -75,6 +75,7 @@ fn spawn_server_to_log(model_dir: &str, port: u16) -> std::io::Result<Child> {
         &port.to_string(),
         "--host",
         "127.0.0.1",
+        "--p5h-measurement-eval-probes",
     ]);
     // Defensive: never inherit a stray profile mode from caller shell.
     cmd.env_remove("IRONMLX_P5G_PROFILE_MODE");
