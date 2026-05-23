@@ -66,13 +66,15 @@ pub async fn run_cell(
     tg: usize,
     warmup: usize,
     runs: usize,
+    capture_request_id: bool,
     tokenizer: &Tokenizer,
 ) -> Result<CellResult> {
     eprintln!("[{target_name}] PP={pp} TG={tg}: warmup x{warmup} ...");
     for w in 0..warmup {
         let nonce = nonce_seed() ^ (w as u64);
         let (prompt, _) = synthesize_prompt(tokenizer, pp, nonce)?;
-        let _ = run_chat_completion(client, target_url, model, &prompt, tg).await?;
+        let _ =
+            run_chat_completion(client, target_url, model, &prompt, tg, capture_request_id).await?;
     }
 
     eprintln!("[{target_name}] PP={pp} TG={tg}: timed runs x{runs} ...");
@@ -80,7 +82,8 @@ pub async fn run_cell(
     for i in 0..runs {
         let nonce = nonce_seed() ^ ((i as u64) << 8);
         let (prompt, prompt_tokens_local) = synthesize_prompt(tokenizer, pp, nonce)?;
-        let result = run_chat_completion(client, target_url, model, &prompt, tg).await?;
+        let result =
+            run_chat_completion(client, target_url, model, &prompt, tg, capture_request_id).await?;
 
         let ttft_ms = result.timings.ttft().as_secs_f64() * 1000.0;
         let gen_secs = result.timings.gen_duration().as_secs_f64().max(1e-9);
@@ -130,6 +133,7 @@ pub async fn run_cell_concurrent(
     warmup_duration: std::time::Duration,
     duration: std::time::Duration,
     concurrent: usize,
+    capture_request_id: bool,
     tokenizer: std::sync::Arc<Tokenizer>,
 ) -> Result<ConcurrentCellResult> {
     use std::time::Instant;
@@ -151,9 +155,15 @@ pub async fn run_cell_concurrent(
                 let mut nonce = nonce_seed() ^ ((worker_id as u64) << 48);
                 while Instant::now() < warmup_deadline {
                     let (prompt, _) = crate::prompt::synthesize_prompt(&tokenizer_w, pp, nonce)?;
-                    let _ =
-                        crate::client::run_chat_completion(&client_w, &url, &model_w, &prompt, tg)
-                            .await?;
+                    let _ = crate::client::run_chat_completion(
+                        &client_w,
+                        &url,
+                        &model_w,
+                        &prompt,
+                        tg,
+                        capture_request_id,
+                    )
+                    .await?;
                     nonce = nonce.wrapping_add(1);
                 }
                 Ok::<(), anyhow::Error>(())
@@ -184,9 +194,15 @@ pub async fn run_cell_concurrent(
             while Instant::now() < timed_deadline {
                 let (prompt, prompt_local) =
                     crate::prompt::synthesize_prompt(&tokenizer_w, pp, nonce)?;
-                let result =
-                    crate::client::run_chat_completion(&client_w, &url, &model_w, &prompt, tg)
-                        .await?;
+                let result = crate::client::run_chat_completion(
+                    &client_w,
+                    &url,
+                    &model_w,
+                    &prompt,
+                    tg,
+                    capture_request_id,
+                )
+                .await?;
                 outcomes.push(RequestOutcome {
                     worker_id,
                     prompt_tokens_local: prompt_local,

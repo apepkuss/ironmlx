@@ -88,11 +88,21 @@ pub async fn serve<M>(
     b_max: usize,
     admission_deadline_ms: u64,
     admission_queue_max: usize,
-    max_cache_cap: usize, // 3f
+    max_cache_cap: usize,              // 3f
+    p5h_measurement_eval_probes: bool, // P5h+1 T1
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    // P5h+1 T1: install the measurement-eval-probes flag in the global
+    // BEFORE the SchedulerActor / GenerationStream code paths run. Setter
+    // is feature-gated; feature-off builds discard the boolean to keep the
+    // CLI plumbing uniform without requiring `#[cfg]` at the call site.
+    #[cfg(feature = "p5h-profile")]
+    crate::core::p5h::set_measurement_eval_probes_active(p5h_measurement_eval_probes);
+    #[cfg(not(feature = "p5h-profile"))]
+    let _ = p5h_measurement_eval_probes;
+
     let model = Arc::new(Mutex::new(model));
     let admission_deadline = std::time::Duration::from_millis(admission_deadline_ms);
 

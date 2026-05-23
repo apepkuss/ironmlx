@@ -159,7 +159,31 @@ impl Qwen35MoeModel {
             }
             _ => hidden.clone(),
         };
-        self.lm_head.forward_on(&last_hidden, target)
+        // T4.1: wrap lm_head projection in a `slice_last_and_project_lm_head`
+        // span. Lane-A (`routing_path = "scheduler"`) emits; Lane-B no-ops via
+        // the centralized `try_with_p5h_span_from_current_trace` allow-list
+        // (gs_chunked top-level-only). `layer_idx` is not meaningful here
+        // (lm_head sits at the top of the model, outside decoder layers) →
+        // SpanFields uses defaults.
+        #[cfg(feature = "p5h-profile")]
+        {
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "slice_last_and_project_lm_head",
+                crate::core::p5h::SpanFields::default,
+                || {
+                    let logits = self.lm_head.forward_on(&last_hidden, target)?;
+                    // P5h+1 T1: measurement-eval probe.
+                    if crate::core::p5h::is_measurement_eval_probes_active() {
+                        mlx::transforms::eval(&[&logits])?;
+                    }
+                    Ok(logits)
+                },
+            )
+        }
+        #[cfg(not(feature = "p5h-profile"))]
+        {
+            self.lm_head.forward_on(&last_hidden, target)
+        }
     }
 
     /// Construct per-layer cache list matching this model's hybrid topology.

@@ -477,14 +477,26 @@ pub fn render_markdown_concurrent(
 }
 
 /// CSV output: one row per timed run. Stable column order.
-pub fn render_csv(cells: &[CellResult]) -> String {
+///
+/// When `capture_request_id` is true, an extra `request_id` column is appended
+/// to both the header and each row (empty string if the per-row
+/// `RequestResult.request_id` is `None`). Flag-off output is byte-identical to
+/// the pre-P5h schema.
+pub fn render_csv(cells: &[CellResult], capture_request_id: bool) -> String {
     let mut out = String::new();
-    out.push_str(
-        "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason\n",
-    );
+    let header = if capture_request_id {
+        "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason,request_id\n"
+    } else {
+        "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason\n"
+    };
+    out.push_str(header);
     for c in cells {
         for outcome in &c.runs {
             out.push_str(&csv_row(c, outcome));
+            if capture_request_id {
+                out.push(',');
+                out.push_str(outcome.result.request_id.as_deref().unwrap_or(""));
+            }
             out.push('\n');
         }
     }
@@ -764,6 +776,7 @@ mod tests {
                 chunk_count: completion_tokens,
                 finish_reason: "stop".into(),
                 content_chars: completion_tokens as usize * 4,
+                request_id: None, // default-off mirrors production default
             },
         }
     }
@@ -809,7 +822,7 @@ mod tests {
             tg_target: 64,
             runs: vec![fake_outcome(0, 50.0, 500.0, 64)],
         };
-        let csv = render_csv(&[cell]);
+        let csv = render_csv(&[cell], false);
         let header = csv.lines().next().expect("header line");
         assert_eq!(
             header,
@@ -823,6 +836,61 @@ mod tests {
         assert!(
             body.ends_with(",stop"),
             "expected to end with finish_reason=stop, got: {body}"
+        );
+    }
+
+    #[test]
+    fn csv_columns_stable_default_off() {
+        let cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 128,
+            tg_target: 64,
+            runs: vec![fake_outcome(0, 50.0, 500.0, 64)],
+        };
+        let csv = render_csv(&[cell], false);
+
+        // GOLDEN: deterministic full-string match. fake_outcome uses fixed
+        // Instant deltas so every numeric column is reproducible.
+        let expected = "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason\nironmlx,128,64,0,50.000,128.000,7.937,2560.000,0.550000,128,128,64,0,stop\n";
+        assert_eq!(
+            csv, expected,
+            "default-off CSV must be byte-identical to the pre-flag golden \
+             — drift in any column/value/order fails this gate"
+        );
+    }
+
+    #[test]
+    fn csv_columns_stable_capture_on() {
+        let mut cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 128,
+            tg_target: 64,
+            runs: vec![fake_outcome(0, 50.0, 500.0, 64)],
+        };
+        cell.runs[0].result.request_id = Some("deadbeef-1234".into());
+
+        let csv = render_csv(&[cell], true);
+
+        let expected = "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason,request_id\nironmlx,128,64,0,50.000,128.000,7.937,2560.000,0.550000,128,128,64,0,stop,deadbeef-1234\n";
+        assert_eq!(csv, expected, "capture-on CSV byte-identity check");
+    }
+
+    #[test]
+    fn csv_capture_on_with_none_request_id() {
+        let cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 128,
+            tg_target: 64,
+            runs: vec![fake_outcome(0, 50.0, 500.0, 64)], // request_id = None
+        };
+        let csv = render_csv(&[cell], true);
+        let body = csv.lines().nth(1).expect("data line");
+        assert!(
+            body.ends_with(",stop,"),
+            "capture-on row with None request_id must end with `,stop,` (empty trailing field), got: {body}"
         );
     }
 
@@ -910,6 +978,7 @@ mod tests {
                     chunk_count: 5,
                     finish_reason: "stop".to_string(),
                     content_chars: 0,
+                    request_id: None,
                 };
                 outcomes.push(RequestOutcome {
                     worker_id,

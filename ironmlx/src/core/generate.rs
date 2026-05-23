@@ -53,6 +53,18 @@ pub struct GenerateRequest {
     /// (`248056` for Qwen3.5-VL). Sibling VL models with a different image-pad
     /// id must set this from `Tokenizer::token_to_id("<|image_pad|>")`.
     pub image_token_id: i32,
+
+    /// P5h trace context (gated on `p5h-profile` feature). Populated by the
+    /// HTTP handler before admit; copied into RequestState. None on default
+    /// builds. See spec § 2.5a "Propagation chain".
+    #[cfg(feature = "p5h-profile")]
+    pub p5h_trace: Option<crate::core::p5h::P5hTraceContext>,
+
+    /// P5h root SpanHandle (gated on `p5h-profile` feature). Populated alongside
+    /// `p5h_trace`. Used by `Scheduler::prefill_admitted_inner` to open
+    /// `model_prefill_forward` + `first_token_sampling` with the correct parent.
+    #[cfg(feature = "p5h-profile")]
+    pub p5h_root_span: Option<crate::core::p5h::SpanHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -946,6 +958,13 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         let cap = ((prompt_len + request.max_new_tokens) as i32)
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = Dtype::Bfloat16;
+        #[cfg(feature = "p5h-profile")]
+        let mut cache = crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "gs_kv_cache_alloc",
+            crate::core::p5h::SpanFields::default,
+            || model.make_cache(/* batch */ 1, cap, dtype),
+        )?;
+        #[cfg(not(feature = "p5h-profile"))]
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
 
         // Prefill: chunked when `prefill_chunk_size > 0` and the prompt exceeds
@@ -991,6 +1010,13 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         let prompt_len_i32 = prompt_len as i32;
         let mut pos: i32 = 0;
         let mut image_pad_consumed: usize = 0;
+        // P5h+1 T2: per-iteration chunk index plumbed into gs_chunk_N
+        // SpanFields + RAII chunk-context guard so every descendant span
+        // emitted inside the chunk body inherits chunk_idx via the
+        // P5H_CURRENT_CHUNK_STACK thread-local fallback. Zero-based;
+        // incremented after each successful chunk and BEFORE `pos += n`.
+        #[cfg(feature = "p5h-profile")]
+        let mut chunk_idx: u32 = 0;
         let last_logits = loop {
             let remaining = prompt_len_i32 - pos;
             let n = if chunk_size == 0 {
@@ -998,75 +1024,173 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
             } else {
                 remaining.min(chunk_size as i32)
             };
-            let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
-            let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
 
-            // VL chunk: slice pre-computed position_ids by chunk range.
-            // Text chunk: use the simpler single-stream builder.
-            let chunk_pos_ids = if let Some(pos_full) = position_ids_full.as_ref() {
-                slice_pos_ids_axis2(pos_full, pos, pos + n)?
-            } else {
-                build_position_ids(pos, n)?
-            };
+            // T0a.8 Step 3b: wrap chunk body in gs_chunk_N. The closure
+            // captures cache (mut), image_pad_consumed (mut), and the
+            // request/model/position_ids_full/vision_embeds_full refs.
+            //
+            // P5h+1 T2: SpanFields { chunk_idx: Some(chunk_idx), ... } emits
+            // chunk_idx on the gs_chunk_N row; the inner RAII guard
+            // (`_chunk_guard`) pushes chunk_idx onto P5H_CURRENT_CHUNK_STACK
+            // so every descendant span emitted inside the closure body
+            // inherits the same chunk_idx via the emit fallback. The guard
+            // Drop pops on every exit path including `?`-early-return from
+            // the closure body — no manual cleanup required.
+            #[cfg(feature = "p5h-profile")]
+            let chunk_result: Result<Option<Array>> =
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "gs_chunk_N",
+                    || crate::core::p5h::SpanFields {
+                        seq: Some(chunk_size as u32),
+                        chunk_idx: Some(chunk_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<Option<Array>> {
+                        let _chunk_guard = crate::core::p5h::enter_chunk_context(chunk_idx);
+                        let chunk_ids =
+                            &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
+                        let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
 
-            // VL chunk: count image_pad tokens, slice the matching rows
-            // out of vision_embeds_full, advance the consumed counter.
-            let ve_slice = if let Some(ve_full) = vision_embeds_full.as_ref() {
-                let k_i = count_image_pad(chunk_ids, request.image_token_id);
-                if k_i > 0 {
-                    let start = image_pad_consumed;
-                    let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
-                    image_pad_consumed += k_i;
-                    Some(slice)
+                        let chunk_pos_ids = if let Some(pos_full) = position_ids_full.as_ref() {
+                            slice_pos_ids_axis2(pos_full, pos, pos + n)?
+                        } else {
+                            build_position_ids(pos, n)?
+                        };
+
+                        let ve_slice = if let Some(ve_full) = vision_embeds_full.as_ref() {
+                            let k_i = count_image_pad(chunk_ids, request.image_token_id);
+                            if k_i > 0 {
+                                let start = image_pad_consumed;
+                                let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
+                                image_pad_consumed += k_i;
+                                Some(slice)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        let is_last = pos + n == prompt_len_i32;
+                        let logits_or_hidden = if vision_embeds_full.is_some() {
+                            let logits = model.forward_vl_chunk(
+                                &chunk_arr,
+                                &chunk_pos_ids,
+                                None, // per_row_lens
+                                None, // decode_mask
+                                Some(&mut cache),
+                                ve_slice.as_ref(),
+                                request.image_token_id,
+                                ().into(),
+                            )?;
+                            if is_last {
+                                Some(logits)
+                            } else {
+                                None
+                            }
+                        } else if is_last {
+                            Some(model.forward_on(
+                                &chunk_arr,
+                                &chunk_pos_ids,
+                                None, // per_row_lens
+                                None, // decode_mask
+                                Some(&mut cache),
+                                ().into(),
+                            )?)
+                        } else {
+                            let hidden = model.forward_text_hidden(
+                                &chunk_arr,
+                                &chunk_pos_ids,
+                                None, // per_row_lens
+                                None, // decode_mask
+                                Some(&mut cache),
+                                ().into(),
+                            )?;
+                            mlx::transforms::eval(&[&hidden])?;
+                            None
+                        };
+                        Ok(logits_or_hidden)
+                    },
+                );
+
+            #[cfg(not(feature = "p5h-profile"))]
+            let chunk_result: Result<Option<Array>> = (|| -> Result<Option<Array>> {
+                let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
+                let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
+
+                let chunk_pos_ids = if let Some(pos_full) = position_ids_full.as_ref() {
+                    slice_pos_ids_axis2(pos_full, pos, pos + n)?
+                } else {
+                    build_position_ids(pos, n)?
+                };
+
+                let ve_slice = if let Some(ve_full) = vision_embeds_full.as_ref() {
+                    let k_i = count_image_pad(chunk_ids, request.image_token_id);
+                    if k_i > 0 {
+                        let start = image_pad_consumed;
+                        let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
+                        image_pad_consumed += k_i;
+                        Some(slice)
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            let is_last = pos + n == prompt_len_i32;
-            let logits_or_hidden = if vision_embeds_full.is_some() {
-                let logits = model.forward_vl_chunk(
-                    &chunk_arr,
-                    &chunk_pos_ids,
-                    None, // per_row_lens
-                    None, // decode_mask
-                    Some(&mut cache),
-                    ve_slice.as_ref(),
-                    request.image_token_id,
-                    ().into(),
-                )?;
-                if is_last {
-                    Some(logits)
+                let is_last = pos + n == prompt_len_i32;
+                let logits_or_hidden = if vision_embeds_full.is_some() {
+                    let logits = model.forward_vl_chunk(
+                        &chunk_arr,
+                        &chunk_pos_ids,
+                        None, // per_row_lens
+                        None, // decode_mask
+                        Some(&mut cache),
+                        ve_slice.as_ref(),
+                        request.image_token_id,
+                        ().into(),
+                    )?;
+                    if is_last {
+                        Some(logits)
+                    } else {
+                        None
+                    }
+                } else if is_last {
+                    Some(model.forward_on(
+                        &chunk_arr,
+                        &chunk_pos_ids,
+                        None, // per_row_lens
+                        None, // decode_mask
+                        Some(&mut cache),
+                        ().into(),
+                    )?)
                 } else {
+                    let hidden = model.forward_text_hidden(
+                        &chunk_arr,
+                        &chunk_pos_ids,
+                        None, // per_row_lens
+                        None, // decode_mask
+                        Some(&mut cache),
+                        ().into(),
+                    )?;
+                    mlx::transforms::eval(&[&hidden])?;
                     None
-                }
-            } else if is_last {
-                Some(model.forward_on(
-                    &chunk_arr,
-                    &chunk_pos_ids,
-                    None, // per_row_lens
-                    None, // decode_mask
-                    Some(&mut cache),
-                    ().into(),
-                )?)
-            } else {
-                let hidden = model.forward_text_hidden(
-                    &chunk_arr,
-                    &chunk_pos_ids,
-                    None, // per_row_lens
-                    None, // decode_mask
-                    Some(&mut cache),
-                    ().into(),
-                )?;
-                mlx::transforms::eval(&[&hidden])?;
-                None
-            };
+                };
+                Ok(logits_or_hidden)
+            })();
 
-            if let Some(logits) = logits_or_hidden {
+            if let Some(logits) = chunk_result? {
                 let vocab = logits.shape().as_slice()[2];
                 break logits.reshape((vocab,))?;
+            }
+            // P5h+1 T2: bump chunk_idx after a successful intermediate chunk
+            // and BEFORE `pos += n` so the next iteration's gs_chunk_N opens
+            // with the next zero-based index. Final (is_last) chunk breaks
+            // out via the Some(logits) branch above; incrementing there is
+            // unnecessary because the loop terminates.
+            #[cfg(feature = "p5h-profile")]
+            {
+                chunk_idx += 1;
             }
             pos += n;
         };
@@ -1094,8 +1218,26 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
             // Pipelined path: pending_token_arr starts as the prefill's argmax,
             // pre-dispatched via async_eval so the GPU is already working on
             // it by the time the first next_token() call materialises it.
-            let pending = request.sampler.sample_async_greedy(&last_logits)?;
-            mlx::transforms::async_eval(&[&pending])?;
+            //
+            // T0a.8 Step 3c (minimal): wrap the sampler dispatch
+            // (sample_async_greedy + async_eval) in gs_first_token_sample_dispatch.
+            // Detok stream construction stays outside the span — not sample work.
+            #[cfg(feature = "p5h-profile")]
+            let pending = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "gs_first_token_sample_dispatch",
+                crate::core::p5h::SpanFields::default,
+                || -> Result<Array> {
+                    let pending = request.sampler.sample_async_greedy(&last_logits)?;
+                    mlx::transforms::async_eval(&[&pending])?;
+                    Ok(pending)
+                },
+            )?;
+            #[cfg(not(feature = "p5h-profile"))]
+            let pending = {
+                let pending = request.sampler.sample_async_greedy(&last_logits)?;
+                mlx::transforms::async_eval(&[&pending])?;
+                pending
+            };
             let detok = tokenizer.decode_stream(/* skip_special */ true);
 
             Ok(Self {
@@ -1120,6 +1262,21 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
             // Sync path: existing pre-P8a behavior. First token sampled
             // synchronously here; pushed into history; initial text snapshot
             // captured for incremental diff.
+            //
+            // T0a.8 Step 3c (minimal): wrap the sampler call in
+            // gs_first_token_sample_dispatch. History push + tokenizer decode
+            // stay outside the span — not sample work.
+            #[cfg(feature = "p5h-profile")]
+            let first_token = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "gs_first_token_sample_dispatch",
+                crate::core::p5h::SpanFields::default,
+                || {
+                    request
+                        .sampler
+                        .sample(&last_logits, &history, &mut prng_state)
+                },
+            )?;
+            #[cfg(not(feature = "p5h-profile"))]
             let first_token = request
                 .sampler
                 .sample(&last_logits, &history, &mut prng_state)?;
@@ -1551,6 +1708,10 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
         };
         assert!(req.pixel_values.is_none());
         assert!(req.image_grid_thw.is_none());

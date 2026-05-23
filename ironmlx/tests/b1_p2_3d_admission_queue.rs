@@ -72,6 +72,10 @@ fn make_req_with_stop(
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
+        #[cfg(feature = "p5h-profile")]
+        p5h_trace: None,
+        #[cfg(feature = "p5h-profile")]
+        p5h_root_span: None,
     }
 }
 
@@ -385,6 +389,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             5,     // admission_deadline_ms
             32,    // admission_queue_max
             32768, // max_cache_cap (3f default)
+            false, // p5h_measurement_eval_probes (P5h+1 T1)
         )
         .await
     });

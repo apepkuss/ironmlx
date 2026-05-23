@@ -227,6 +227,9 @@ impl DecoderLayer {
         // semantics are identical to what linear attention uses; reusing it
         // avoids defining a third mask. See `attention::forward_on` for
         // details.
+        // Dense `DecoderLayer` is not yet on the P5h decoder-layer instrumentation
+        // path (T0a wraps only `DecoderLayerMoe`); pass `layer_idx = -1` to
+        // satisfy the unconditional callee signatures per spec § 2.5a.
         let attn = match (&self.attn, cache) {
             (AttnPath::Full(a), Some(LayerCache::Full(kv))) => a.forward_on(
                 &normed_in,
@@ -238,6 +241,7 @@ impl DecoderLayer {
                 per_row_lens,
                 Some(kv),
                 target,
+                -1,
             )?,
             (AttnPath::Full(a), None) => a.forward_on(
                 &normed_in,
@@ -249,6 +253,7 @@ impl DecoderLayer {
                 per_row_lens,
                 None,
                 target,
+                -1,
             )?,
             (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => a.forward_on(
                 &normed_in,
@@ -256,9 +261,10 @@ impl DecoderLayer {
                 per_row_lens,
                 Some(gdc),
                 target,
+                -1,
             )?,
             (AttnPath::Linear(a), None) => {
-                a.forward_on(&normed_in, linear_attn_mask, per_row_lens, None, target)?
+                a.forward_on(&normed_in, linear_attn_mask, per_row_lens, None, target, -1)?
             }
             (AttnPath::Full(_), Some(LayerCache::Linear(_))) => {
                 return Err(anyhow!(
@@ -365,9 +371,9 @@ impl DecoderLayer {
 
         let normed_in = self.input_layernorm.forward_on(x, target)?;
         let attn_out = match &self.attn {
-            AttnPath::Full(a) => {
-                a.forward_on(&normed_in, mrope, cos, sin, mask, None, None, cache, target)?
-            }
+            AttnPath::Full(a) => a.forward_on(
+                &normed_in, mrope, cos, sin, mask, None, None, cache, target, -1,
+            )?,
             AttnPath::Linear(_) => {
                 return Err(anyhow!(
                     "DecoderLayer::forward_on_full_kv: called on Linear layer (MTP requires Full)"

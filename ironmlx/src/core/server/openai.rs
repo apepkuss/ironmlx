@@ -26,7 +26,9 @@ use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
-use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
+#[cfg(not(feature = "p5h-profile"))]
+use crate::core::server::chat_format::render_and_encode;
+use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::models::qwen3_5::image_processor;
 
@@ -316,6 +318,28 @@ where
 {
     // Extract fields we need after consuming req.messages.
     let stream = req.stream;
+
+    // P5h root + http_parse_render_tokenize start capture (per spec § 2.5a step 1).
+    // Both timestamps captured at handler entry BEFORE any parse/tokenize work,
+    // because the http_parse_render_tokenize span's true start is the entry point,
+    // and the root span needs the same anchor.
+    // Per Codex plan review v16 P1 #2 + v17 P1 #1: only capture timestamps if the
+    // request will be served by a streaming path — non-streaming has no root
+    // terminal. Reuse the existing `let stream = req.stream;` local; do NOT
+    // introduce a parallel `p5h_stream_enabled` derivation.
+    #[cfg(feature = "p5h-profile")]
+    let (p5h_request_id, p5h_root_start_ns, p5h_http_start_ns) = if stream {
+        (
+            uuid::Uuid::new_v4().to_string(),
+            crate::core::p5h::monotonic_ns_public(),
+            crate::core::p5h::monotonic_ns_public(),
+        )
+    } else {
+        // Sentinel: empty request_id signals "no P5h state for this request".
+        // Step 3 + Step 4 below conditionally skip when this is empty.
+        (String::new(), 0, 0)
+    };
+
     let max_tokens = req.max_tokens;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let sampler = build_sampler(&req);
@@ -367,6 +391,28 @@ where
         Some(image_grid_thw)
     };
 
+    // T4.4: under p5h-profile, capture encode start/end timestamps so the
+    // openai handler can retroactively open a `tokenizer_encode` child span
+    // under `http_parse_render_tokenize` (which itself was opened at the
+    // handler-entry timestamp captured before the ctx existed). The non-
+    // profile path uses the original `render_and_encode` signature.
+    #[cfg(feature = "p5h-profile")]
+    let (prompt_ids, p5h_encode_start_ns, p5h_encode_end_ns) =
+        match crate::core::server::chat_format::render_and_encode_with_encode_timing(
+            &state.tokenizer,
+            &flat_messages,
+            chat_template_kwargs.as_ref(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("chat template / tokenize: {e}"),
+                )
+                    .into_response();
+            }
+        };
+    #[cfg(not(feature = "p5h-profile"))]
     let prompt_ids = match render_and_encode(
         &state.tokenizer,
         &flat_messages,
@@ -381,7 +427,100 @@ where
                 .into_response();
         }
     };
+
+    let prompt_len = prompt_ids.len();
+
+    // Routing: short-prompt → SchedulerActor; long-prompt → GenerationStream.
+    // B1-p2.4: VL fallback removed — VL requests now route through Scheduler
+    // via Scheduler::admit/admit_mid + batched_prefill_vl.
+    // COMPAT(3b-2): long-prompt fallback to GS sunsets in 3c+ chunked-prefill phase.
+    let use_scheduler = state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size;
+
+    // Per Codex plan review v16 P1 #2 + v17 P1 #1 + v18 P1 #1: p5h state ONLY
+    // for streaming requests. Reuse the existing `stream` local from Step 2
+    // (which comes from the handler's `let stream = req.stream;` extraction
+    // around `openai.rs:318`) — do NOT introduce a parallel
+    // `p5h_stream_enabled`. Wrap the entire state-building block in
+    // `Option<(P5hTraceContext, SpanHandle)>` so the p5h_trace/p5h_root_span
+    // fields of GenerateRequest in Step 4 can be populated unconditionally
+    // (Some(...) for streaming, None for unary), and the
+    // http_parse_render_tokenize emission only fires on the streaming branch.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_state: Option<(
+        crate::core::p5h::P5hTraceContext,
+        crate::core::p5h::SpanHandle,
+    )> = if stream {
+        let p5h_routing_path: &'static str = if use_scheduler {
+            "scheduler"
+        } else {
+            "gs_chunked"
+        };
+
+        let p5h_ctx = crate::core::p5h::P5hTraceContext {
+            request_id: p5h_request_id.clone(),
+            prompt_tokens: prompt_len as u32,
+            routing_path: p5h_routing_path,
+        };
+
+        let p5h_root_span = crate::core::p5h::open_p5h_span_at(
+            &p5h_ctx,
+            None,
+            "server_request_recv_to_first_content_sse_write",
+            p5h_root_start_ns,
+        );
+
+        // Per Codex plan review v10 P1 #3: `RootSpanHandle::new(...)` was here
+        // in earlier drafts but `chat_completions` itself never used it — each
+        // `serve_via_*` constructs its own RootSpanHandle from
+        // `request.p5h_root_span` after dispatch (T0a.6 Step 4.5 pre-move clone).
+        // Constructing a handle here would be unused → `clippy -D warnings`
+        // rejects. Just keep `p5h_ctx` + `p5h_root_span` as plain values for use
+        // by the http_parse_render_tokenize emission below + the GenerateRequest
+        // population in Step 4.
+
+        let http_span = crate::core::p5h::open_p5h_span_at(
+            &p5h_ctx,
+            Some(&p5h_root_span),
+            "http_parse_render_tokenize",
+            p5h_http_start_ns,
+        );
+
+        // T4.4: retroactively open + close a `tokenizer_encode` child span
+        // under `http_parse_render_tokenize`. Encode start/end timestamps
+        // were captured inside `render_and_encode_with_encode_timing` above
+        // — at that point the `P5hTraceContext` did not yet exist (it's
+        // built from `prompt_len`, which is the encode result), so the
+        // child span has to be opened/closed retroactively here using the
+        // captured timestamps. Pattern matches the
+        // `detok_format_first_content_chunk` retroactive open at the
+        // streaming SSE first-content site (openai.rs:968).
+        let encode_span = crate::core::p5h::open_p5h_span_at(
+            &p5h_ctx,
+            Some(&http_span),
+            "tokenizer_encode",
+            p5h_encode_start_ns,
+        );
+        crate::core::p5h::close_p5h_span(
+            &p5h_ctx,
+            encode_span,
+            p5h_encode_end_ns,
+            crate::core::p5h::SpanFields::default(),
+        );
+
+        crate::core::p5h::close_p5h_span(
+            &p5h_ctx,
+            http_span,
+            crate::core::p5h::monotonic_ns_public(),
+            crate::core::p5h::SpanFields::default(),
+        );
+
+        Some((p5h_ctx, p5h_root_span))
+    } else {
+        None
+    };
+
     let stop_token_ids = state.tokenizer.eos_token_ids().to_vec();
+    let prompt_tokens = prompt_len as u32;
     let request = GenerateRequest {
         prompt_ids,
         max_new_tokens: max_tokens,
@@ -392,16 +531,11 @@ where
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size: spatial_merge_size,
         image_token_id,
+        #[cfg(feature = "p5h-profile")]
+        p5h_trace: p5h_state.as_ref().map(|(ctx, _)| ctx.clone()),
+        #[cfg(feature = "p5h-profile")]
+        p5h_root_span: p5h_state.as_ref().map(|(_, span)| span.clone()),
     };
-
-    let prompt_tokens = request.prompt_ids.len() as u32;
-
-    // Routing: short-prompt → SchedulerActor; long-prompt → GenerationStream.
-    // B1-p2.4: VL fallback removed — VL requests now route through Scheduler
-    // via Scheduler::admit/admit_mid + batched_prefill_vl.
-    // COMPAT(3b-2): long-prompt fallback to GS sunsets in 3c+ chunked-prefill phase.
-    let prompt_len = request.prompt_ids.len();
-    let use_scheduler = state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size;
 
     match (stream, use_scheduler) {
         (true, true) => serve_via_scheduler_stream(state, request, model_label).await,
@@ -421,15 +555,74 @@ async fn serve_via_gs_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    // Pre-move clones (per Codex plan review v8 P1 #2). After this block we
+    // can read p5h state via these locals even after `request` is moved into
+    // spawn_blocking.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_ctx_for_closure = request
+        .p5h_trace
+        .clone()
+        .expect("p5h-profile: GenerateRequest.p5h_trace not populated by handler");
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_handle_for_closure = crate::core::p5h::RootSpanHandle::new(
+        p5h_ctx_for_closure.clone(),
+        request
+            .p5h_root_span
+            .clone()
+            .expect("p5h-profile: GenerateRequest.p5h_root_span not populated by handler"),
+    );
+    #[cfg(feature = "p5h-profile")]
+    let p5h_response_request_id = p5h_ctx_for_closure.request_id.clone();
+
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let id = gen_id();
     let id_for_task = id.clone();
     let model_id_for_task = model_id.clone();
 
+    // T0a.8 Step 1: aliases consumed by the spawn_blocking closure. These are
+    // clones of the pre-move locals above; the originals stay on the async
+    // task so the response header builder can still read p5h_response_request_id.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_ctx: crate::core::p5h::P5hTraceContext = p5h_ctx_for_closure.clone();
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_handle_gs: crate::core::p5h::RootSpanHandle = p5h_root_handle_for_closure.clone();
+
     tokio::task::spawn_blocking(move || {
         let model_guard = state.model.blocking_lock();
         let tokenizer = &*state.tokenizer;
-        let mut stream = match GenerationStream::new(&*model_guard, tokenizer, request) {
+
+        #[cfg(feature = "p5h-profile")]
+        let mut root_guard = crate::core::p5h::P5hRootCloseGuard::new(p5h_root_handle_gs);
+
+        // T0a.8 Step 2: wrap GenerationStream::new in gs_stream_init_and_chunk_loop
+        // so deep spans inside (gs_kv_cache_alloc / gs_chunk_N /
+        // gs_first_token_sample_dispatch) chain under it via the trace guard.
+        #[cfg(feature = "p5h-profile")]
+        let gs_top_span = crate::core::p5h::open_p5h_span(
+            &p5h_ctx,
+            Some(root_guard.span()),
+            "gs_stream_init_and_chunk_loop",
+        );
+
+        #[cfg(feature = "p5h-profile")]
+        let _gs_guard =
+            crate::core::p5h::P5hTraceGuard::enter(p5h_ctx.clone(), gs_top_span.clone());
+
+        let stream_result = GenerationStream::new(&*model_guard, tokenizer, request);
+
+        #[cfg(feature = "p5h-profile")]
+        drop(_gs_guard);
+        #[cfg(feature = "p5h-profile")]
+        let gs_close_end_ns = crate::core::p5h::monotonic_ns_public();
+        #[cfg(feature = "p5h-profile")]
+        crate::core::p5h::close_p5h_span(
+            &p5h_ctx,
+            gs_top_span,
+            gs_close_end_ns,
+            crate::core::p5h::SpanFields::default(),
+        );
+
+        let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx.blocking_send(Ok(format_sse_error(&e)));
@@ -452,12 +645,80 @@ where
                 finish_reason: None,
             }],
         };
-        if tx.blocking_send(Ok(format_sse_data(&role_chunk))).is_err() {
+
+        // T0a.8 Step 5 (role): wrap the role-chunk send in sse_write_role_chunk.
+        #[cfg(feature = "p5h-profile")]
+        let role_span = crate::core::p5h::open_p5h_span(
+            &p5h_ctx,
+            Some(root_guard.span()),
+            "sse_write_role_chunk",
+        );
+
+        let role_send_result = tx.blocking_send(Ok(format_sse_data(&role_chunk)));
+
+        #[cfg(feature = "p5h-profile")]
+        let role_close_end_ns = crate::core::p5h::monotonic_ns_public();
+        #[cfg(feature = "p5h-profile")]
+        crate::core::p5h::close_p5h_span(
+            &p5h_ctx,
+            role_span,
+            role_close_end_ns,
+            crate::core::p5h::SpanFields::default(),
+        );
+
+        if role_send_result.is_err() {
             return;
         }
 
+        // T0a.8 Step 4: per-iteration span. First iteration emits
+        // `gs_first_token_materialize_and_predispatch`; subsequent (while
+        // root is still open) emit `pre_content_decode_steps`. Once the
+        // first non-empty content is sent and the root closes, the
+        // remainder of the loop runs with no P5h emission.
+        #[cfg(feature = "p5h-profile")]
+        let mut p5h_first_iter = true;
         loop {
-            match stream.next_token() {
+            #[cfg(feature = "p5h-profile")]
+            let iter_top_span = if root_guard.is_open() {
+                let name: &'static str = if p5h_first_iter {
+                    "gs_first_token_materialize_and_predispatch"
+                } else {
+                    "pre_content_decode_steps"
+                };
+                Some(crate::core::p5h::open_p5h_span(
+                    &p5h_ctx,
+                    Some(root_guard.span()),
+                    name,
+                ))
+            } else {
+                None
+            };
+
+            #[cfg(feature = "p5h-profile")]
+            let _iter_guard = iter_top_span
+                .as_ref()
+                .map(|s| crate::core::p5h::P5hTraceGuard::enter(p5h_ctx.clone(), s.clone()));
+
+            let ev_result = stream.next_token();
+
+            #[cfg(feature = "p5h-profile")]
+            drop(_iter_guard);
+            #[cfg(feature = "p5h-profile")]
+            if let Some(span) = iter_top_span {
+                crate::core::p5h::close_p5h_span(
+                    &p5h_ctx,
+                    span,
+                    crate::core::p5h::monotonic_ns_public(),
+                    crate::core::p5h::SpanFields::default(),
+                );
+            }
+
+            #[cfg(feature = "p5h-profile")]
+            {
+                p5h_first_iter = false;
+            }
+
+            match ev_result {
                 Ok(Some(ev)) => {
                     let chunk = ChunkResponse {
                         id: id_for_task.clone(),
@@ -470,7 +731,51 @@ where
                             finish_reason: ev.finish_reason,
                         }],
                     };
-                    if tx.blocking_send(Ok(format_sse_data(&chunk))).is_err() {
+
+                    // T0a.8 Step 5 (content): wrap first non-empty content send
+                    // in detok_format_first_content_chunk + close root after.
+                    #[cfg(feature = "p5h-profile")]
+                    let is_first_non_empty_content = !ev.text.is_empty() && root_guard.is_open();
+                    #[cfg(feature = "p5h-profile")]
+                    let content_span = if is_first_non_empty_content {
+                        Some(crate::core::p5h::open_p5h_span(
+                            &p5h_ctx,
+                            Some(root_guard.span()),
+                            "detok_format_first_content_chunk",
+                        ))
+                    } else {
+                        None
+                    };
+
+                    let content_send_result = tx.blocking_send(Ok(format_sse_data(&chunk)));
+                    #[cfg(feature = "p5h-profile")]
+                    let content_send_end_ns = crate::core::p5h::monotonic_ns_public();
+
+                    #[cfg(feature = "p5h-profile")]
+                    if let Some(handle) = content_span {
+                        // Close the content_span on BOTH send success and error
+                        // paths (prevents OPEN_SPAN_REGISTRY leak — per Codex
+                        // plan review v10 P2 #4).
+                        crate::core::p5h::close_p5h_span(
+                            &p5h_ctx,
+                            handle,
+                            content_send_end_ns,
+                            crate::core::p5h::SpanFields::default(),
+                        );
+                        // Per Codex T0a.14 review: root closes as success ONLY
+                        // when first content was actually delivered. When
+                        // tx.send fails (receiver/client disconnected before
+                        // first content arrived), leave root_guard open so
+                        // P5hRootCloseGuard::Drop runs close_at_aborted with
+                        // mode="aborted" — required by spec § 2.5a (design.md
+                        // line 576) for T0a/T5 structural validation +
+                        // coverage gate correctness.
+                        if content_send_result.is_ok() {
+                            root_guard.close_success(content_send_end_ns);
+                        }
+                    }
+
+                    if content_send_result.is_err() {
                         break;
                     }
                     if ev.finish_reason.is_some() {
@@ -489,12 +794,24 @@ where
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
-    Response::builder()
+    let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(body)
-        .unwrap()
+        .unwrap();
+    #[cfg(feature = "p5h-profile")]
+    let response = {
+        let mut resp = response;
+        resp.headers_mut().insert(
+            "X-Ironmlx-Request-Id",
+            p5h_response_request_id
+                .parse()
+                .expect("p5h request_id is a valid HTTP header value (UUID)"),
+        );
+        resp
+    };
+    response
 }
 
 /// Text-only short-prompt SSE path via SchedulerActor (3b-2 swap-in).
@@ -506,35 +823,103 @@ async fn serve_via_scheduler_stream<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    // Pre-move clones (per Codex plan review v8 P1 #2). After this block we
+    // can read p5h state via these locals even after `request` is moved into
+    // SchedulerCommand::Admit.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_ctx_for_admission = request
+        .p5h_trace
+        .clone()
+        .expect("p5h-profile: GenerateRequest.p5h_trace not populated by handler");
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_span_for_admission = request
+        .p5h_root_span
+        .clone()
+        .expect("p5h-profile: GenerateRequest.p5h_root_span not populated by handler");
+    #[cfg(feature = "p5h-profile")]
+    let p5h_response_request_id = p5h_ctx_for_admission.request_id.clone();
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_handle_for_forwarder = crate::core::p5h::RootSpanHandle::new(
+        p5h_ctx_for_admission.clone(),
+        p5h_root_span_for_admission.clone(),
+    );
+
     let id = gen_id();
 
     // 1. Admit request to the actor.
     let (reply_tx, reply_rx) = oneshot::channel();
-    if state
-        .scheduler_handle
-        .cmd_tx
-        .send(SchedulerCommand::Admit { request, reply_tx })
-        .await
-        .is_err()
-    {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "scheduler actor unavailable",
-        )
-            .into_response();
+
+    #[cfg(feature = "p5h-profile")]
+    let admission_span_handle = crate::core::p5h::open_p5h_span(
+        &p5h_ctx_for_admission,
+        Some(&p5h_root_span_for_admission),
+        "scheduler_admission",
+    );
+
+    // Capture-result: collect send + reply_rx.await + inner-Result match into
+    // Result<AdmitReply, Response>. On success we preserve AdmitReply so the
+    // forwarder can recover event_rx; on error we already have the Response
+    // shape the function returns. Per Codex v17 P1 #2.
+    let admission_result: std::result::Result<AdmitReply, Response> = async {
+        if state
+            .scheduler_handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit { request, reply_tx })
+            .await
+            .is_err()
+        {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "scheduler actor unavailable",
+            )
+                .into_response());
+        }
+        match reply_rx.await {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(e)) => Err(admit_err_to_response(e)),
+            Err(_) => {
+                Err((StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response())
+            }
+        }
     }
+    .await;
+
+    #[cfg(feature = "p5h-profile")]
+    let admission_close_end_ns = crate::core::p5h::monotonic_ns_public();
+    #[cfg(feature = "p5h-profile")]
+    crate::core::p5h::close_p5h_span(
+        &p5h_ctx_for_admission,
+        admission_span_handle,
+        admission_close_end_ns,
+        crate::core::p5h::SpanFields::default(),
+    );
+
     let AdmitReply {
         request_id: _,
         mut event_rx,
-    } = match reply_rx.await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            return admit_err_to_response(e);
-        }
-        Err(_) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "scheduler reply lost").into_response();
+    } = match admission_result {
+        Ok(reply) => reply,
+        Err(resp) => {
+            // Per Codex plan review v16 P1 #2 + v17 P1 #2: admission failed →
+            // forwarder never spawned → no `P5hRootCloseGuard` exists to
+            // abort-close root on drop. Close root explicitly via
+            // `close_at_aborted` so OPEN_SPAN_REGISTRY does not leak the root
+            // span_id. Reconstruct `RootSpanHandle` from the pre-move locals
+            // (Step 4.5 already cloned ctx + root span).
+            #[cfg(feature = "p5h-profile")]
+            crate::core::p5h::RootSpanHandle::new(
+                p5h_ctx_for_admission.clone(),
+                p5h_root_span_for_admission.clone(),
+            )
+            .close_at_aborted(admission_close_end_ns);
+
+            return resp;
         }
     };
+
+    // Successful admission — proceed to spawn the forwarder using `event_rx`.
+    // The forwarder's own `P5hRootCloseGuard::new(p5h_root_handle_for_forwarder)`
+    // (T0a.7 Step 2) takes over once-close + abort-cleanup ownership from here.
 
     // 2. Stream events as SSE. Spawn a forwarder task that detokenizes
     // per-event and pushes formatted SSE chunks to a bounded channel.
@@ -543,7 +928,21 @@ where
     let model_id_for_task = model_id.clone();
     let tokenizer = state.tokenizer.clone();
 
+    // p5h_ctx_for_admission + p5h_root_handle_for_forwarder are already in
+    // scope from T0a.6 Step 4.5. For the forwarder we want self-documenting
+    // aliases at the spawn site; .clone() is cheap (P5hTraceContext +
+    // RootSpanHandle both derive Clone). Both types are PLAIN (not Option)
+    // per Codex plan review v11 P1 #1.
+    #[cfg(feature = "p5h-profile")]
+    let p5h_ctx: crate::core::p5h::P5hTraceContext = p5h_ctx_for_admission.clone();
+    #[cfg(feature = "p5h-profile")]
+    let p5h_root_handle_forwarder: crate::core::p5h::RootSpanHandle =
+        p5h_root_handle_for_forwarder.clone();
+
     tokio::spawn(async move {
+        #[cfg(feature = "p5h-profile")]
+        let mut root_guard = crate::core::p5h::P5hRootCloseGuard::new(p5h_root_handle_forwarder);
+
         // First chunk: role.
         let role_chunk = ChunkResponse {
             id: id_for_task.clone(),
@@ -559,12 +958,44 @@ where
                 finish_reason: None,
             }],
         };
-        if tx.send(Ok(format_sse_data(&role_chunk))).await.is_err() {
+
+        #[cfg(feature = "p5h-profile")]
+        let role_span = crate::core::p5h::open_p5h_span(
+            &p5h_ctx,
+            Some(root_guard.span()),
+            "sse_write_role_chunk_diagnostic",
+        );
+
+        let role_send_result = tx.send(Ok(format_sse_data(&role_chunk))).await;
+
+        // Close diagnostic span on BOTH success and error paths (per Codex
+        // plan review v10 P2 #4) — if the receiver dropped, we still need
+        // to close the open span before the closure returns, otherwise
+        // OPEN_SPAN_REGISTRY leaks the span_id and the next close with
+        // that id panics "duplicate".
+        #[cfg(feature = "p5h-profile")]
+        let role_close_end_ns = crate::core::p5h::monotonic_ns_public();
+        #[cfg(feature = "p5h-profile")]
+        crate::core::p5h::close_p5h_span_diagnostic(
+            &p5h_ctx,
+            role_span,
+            role_close_end_ns,
+            crate::core::p5h::SpanFields::default(),
+        );
+
+        if role_send_result.is_err() {
+            // Per Codex plan review v12 P2 #6 + v13 P1 #1 + v14 P1 #1: the
+            // `P5hRootCloseGuard` declared at the top of the forwarder
+            // closure fires on drop when the root is still open, so no
+            // explicit `close_at_aborted` is needed here. Just `return;`.
             return;
         }
 
         let mut detok = tokenizer.decode_stream(/* skip_special */ true);
         while let Some(ev) = event_rx.recv().await {
+            #[cfg(feature = "p5h-profile")]
+            let detok_start_ns = crate::core::p5h::monotonic_ns_public();
+
             let text = match detok.step(ev.token) {
                 Ok(Some(s)) => s,
                 Ok(None) => String::new(),
@@ -575,6 +1006,22 @@ where
                     break;
                 }
             };
+
+            #[cfg(feature = "p5h-profile")]
+            let is_first_non_empty_content = !text.is_empty() && root_guard.is_open();
+
+            #[cfg(feature = "p5h-profile")]
+            let content_span = if is_first_non_empty_content {
+                Some(crate::core::p5h::open_p5h_span_at(
+                    &p5h_ctx,
+                    Some(root_guard.span()),
+                    "detok_format_first_content_chunk",
+                    detok_start_ns,
+                ))
+            } else {
+                None
+            };
+
             let chunk = ChunkResponse {
                 id: id_for_task.clone(),
                 object: "chat.completion.chunk",
@@ -586,7 +1033,38 @@ where
                     finish_reason: ev.finish_reason,
                 }],
             };
-            if tx.send(Ok(format_sse_data(&chunk))).await.is_err() {
+            let content_send_result = tx.send(Ok(format_sse_data(&chunk))).await;
+            #[cfg(feature = "p5h-profile")]
+            let content_send_end_ns = crate::core::p5h::monotonic_ns_public();
+
+            // Close the content_span on BOTH send success and error
+            // paths (prevents OPEN_SPAN_REGISTRY leak — per Codex plan
+            // review v10 P2 #4).
+            #[cfg(feature = "p5h-profile")]
+            if let Some(handle) = content_span {
+                crate::core::p5h::close_p5h_span(
+                    &p5h_ctx,
+                    handle,
+                    content_send_end_ns,
+                    crate::core::p5h::SpanFields::default(),
+                );
+                // Per Codex T0a.14 review: root closes as success ONLY
+                // when first content was actually delivered. When
+                // tx.send fails (receiver/client disconnected before
+                // first content arrived), leave root_guard open so
+                // P5hRootCloseGuard::Drop runs close_at_aborted with
+                // mode="aborted" — required by spec § 2.5a (design.md
+                // line 576) for T0a/T5 structural validation + coverage
+                // gate correctness. close_success enforces once-close
+                // discipline; panics if called twice (state-machine bug
+                // — is_first_non_empty_content stayed true across
+                // iterations).
+                if content_send_result.is_ok() {
+                    root_guard.close_success(content_send_end_ns);
+                }
+            }
+
+            if content_send_result.is_err() {
                 break;
             }
             if ev.finish_reason.is_some() {
@@ -598,12 +1076,24 @@ where
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
-    Response::builder()
+    let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(body)
-        .unwrap()
+        .unwrap();
+    #[cfg(feature = "p5h-profile")]
+    let response = {
+        let mut resp = response;
+        resp.headers_mut().insert(
+            "X-Ironmlx-Request-Id",
+            p5h_response_request_id
+                .parse()
+                .expect("p5h request_id is a valid HTTP header value (UUID)"),
+        );
+        resp
+    };
+    response
 }
 
 async fn serve_via_gs_unary<M>(

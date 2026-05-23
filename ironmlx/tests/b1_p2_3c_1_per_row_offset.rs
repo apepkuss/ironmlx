@@ -59,6 +59,10 @@ fn make_request(prompt_ids: Vec<u32>, max_new_tokens: usize, stop: Vec<u32>) -> 
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: 248056,
+        #[cfg(feature = "p5h-profile")]
+        p5h_trace: None,
+        #[cfg(feature = "p5h-profile")]
+        p5h_root_span: None,
     }
 }
 

@@ -52,6 +52,7 @@ struct PendingAdmit {
 /// Event yielded by the rolling decode loop's biased select. Either a
 /// new admit command arrived (mid-batch admit), the always-ready step
 /// branch fired, or the cmd_rx channel was closed (shutdown).
+#[allow(clippy::large_enum_variant)] // Admit(SchedulerCommand) intentionally large; boxing would add allocation on hot path
 enum RollingEvent {
     Admit(SchedulerCommand),
     Step,
@@ -992,6 +993,10 @@ mod tests {
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
+                #[cfg(feature = "p5h-profile")]
+                p5h_trace: None,
+                #[cfg(feature = "p5h-profile")]
+                p5h_root_span: None,
             }
         };
 
@@ -1099,6 +1104,10 @@ mod tests {
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
+                #[cfg(feature = "p5h-profile")]
+                p5h_trace: None,
+                #[cfg(feature = "p5h-profile")]
+                p5h_root_span: None,
             }
         };
 
