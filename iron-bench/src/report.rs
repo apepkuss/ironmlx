@@ -480,22 +480,47 @@ pub fn render_markdown_concurrent(
 ///
 /// When `capture_request_id` is true, an extra `request_id` column is appended
 /// to both the header and each row (empty string if the per-row
-/// `RequestResult.request_id` is `None`). Flag-off output is byte-identical to
-/// the pre-P5h schema.
-pub fn render_csv(cells: &[CellResult], capture_request_id: bool) -> String {
+/// `RequestResult.request_id` is `None`).
+///
+/// When `capture_run_timestamps` is true, `run_start_unix_ns` and
+/// `run_end_unix_ns` columns are appended (empty string when None). Both
+/// flags compose: when both are on, `request_id` precedes the timestamp
+/// columns. Downstream parsers MUST use header names (csv.DictReader), not
+/// fixed positions. Flag-off-both output is byte-identical to the pre-P5h
+/// schema.
+pub fn render_csv(
+    cells: &[CellResult],
+    capture_request_id: bool,
+    capture_run_timestamps: bool,
+) -> String {
     let mut out = String::new();
-    let header = if capture_request_id {
-        "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason,request_id\n"
-    } else {
-        "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason\n"
-    };
-    out.push_str(header);
+    let mut header = String::from(
+        "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason",
+    );
+    if capture_request_id {
+        header.push_str(",request_id");
+    }
+    if capture_run_timestamps {
+        header.push_str(",run_start_unix_ns,run_end_unix_ns");
+    }
+    header.push('\n');
+    out.push_str(&header);
     for c in cells {
         for outcome in &c.runs {
             out.push_str(&csv_row(c, outcome));
             if capture_request_id {
                 out.push(',');
                 out.push_str(outcome.result.request_id.as_deref().unwrap_or(""));
+            }
+            if capture_run_timestamps {
+                out.push(',');
+                if let Some(v) = outcome.run_start_unix_ns {
+                    out.push_str(&v.to_string());
+                }
+                out.push(',');
+                if let Some(v) = outcome.run_end_unix_ns {
+                    out.push_str(&v.to_string());
+                }
             }
             out.push('\n');
         }
@@ -778,6 +803,8 @@ mod tests {
                 content_chars: completion_tokens as usize * 4,
                 request_id: None, // default-off mirrors production default
             },
+            run_start_unix_ns: None,
+            run_end_unix_ns: None,
         }
     }
 
@@ -822,7 +849,7 @@ mod tests {
             tg_target: 64,
             runs: vec![fake_outcome(0, 50.0, 500.0, 64)],
         };
-        let csv = render_csv(&[cell], false);
+        let csv = render_csv(&[cell], false, false);
         let header = csv.lines().next().expect("header line");
         assert_eq!(
             header,
@@ -848,7 +875,7 @@ mod tests {
             tg_target: 64,
             runs: vec![fake_outcome(0, 50.0, 500.0, 64)],
         };
-        let csv = render_csv(&[cell], false);
+        let csv = render_csv(&[cell], false, false);
 
         // GOLDEN: deterministic full-string match. fake_outcome uses fixed
         // Instant deltas so every numeric column is reproducible.
@@ -871,7 +898,7 @@ mod tests {
         };
         cell.runs[0].result.request_id = Some("deadbeef-1234".into());
 
-        let csv = render_csv(&[cell], true);
+        let csv = render_csv(&[cell], true, false);
 
         let expected = "target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason,request_id\nironmlx,128,64,0,50.000,128.000,7.937,2560.000,0.550000,128,128,64,0,stop,deadbeef-1234\n";
         assert_eq!(csv, expected, "capture-on CSV byte-identity check");
@@ -886,11 +913,76 @@ mod tests {
             tg_target: 64,
             runs: vec![fake_outcome(0, 50.0, 500.0, 64)], // request_id = None
         };
-        let csv = render_csv(&[cell], true);
+        let csv = render_csv(&[cell], true, false);
         let body = csv.lines().nth(1).expect("data line");
         assert!(
             body.ends_with(",stop,"),
             "capture-on row with None request_id must end with `,stop,` (empty trailing field), got: {body}"
+        );
+    }
+
+    #[test]
+    fn csv_includes_run_timestamps_when_enabled() {
+        let mut cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 128,
+            tg_target: 64,
+            runs: vec![fake_outcome(0, 50.0, 500.0, 64)],
+        };
+        cell.runs[0].run_start_unix_ns = Some(1_000);
+        cell.runs[0].run_end_unix_ns = Some(2_000);
+        let csv = render_csv(&[cell], false, true);
+        let header = csv.lines().next().expect("header line");
+        assert!(
+            header.ends_with(",run_start_unix_ns,run_end_unix_ns"),
+            "header should end with timestamp columns, got: {header}"
+        );
+        assert!(
+            csv.contains(",1000,2000\n"),
+            "row should embed timestamp values, got: {csv}"
+        );
+    }
+
+    #[test]
+    fn csv_includes_both_when_request_id_and_timestamps_enabled() {
+        let mut cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 128,
+            tg_target: 64,
+            runs: vec![fake_outcome(0, 50.0, 500.0, 64)],
+        };
+        cell.runs[0].result.request_id = Some("deadbeef".into());
+        cell.runs[0].run_start_unix_ns = Some(1_000);
+        cell.runs[0].run_end_unix_ns = Some(2_000);
+        let csv = render_csv(&[cell], true, true);
+        let header = csv.lines().next().expect("header line");
+        assert!(
+            header.ends_with(",request_id,run_start_unix_ns,run_end_unix_ns"),
+            "header should append request_id before timestamp columns, got: {header}"
+        );
+        let row = csv.lines().nth(1).expect("data line");
+        assert!(
+            row.ends_with(",deadbeef,1000,2000"),
+            "row should end with request_id then timestamps, got: {row}"
+        );
+    }
+
+    #[test]
+    fn csv_timestamps_empty_when_none() {
+        let cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 128,
+            tg_target: 64,
+            runs: vec![fake_outcome(0, 50.0, 500.0, 64)], // both timestamps = None
+        };
+        let csv = render_csv(&[cell], false, true);
+        let row = csv.lines().nth(1).expect("data line");
+        assert!(
+            row.ends_with(",stop,,"),
+            "row with None timestamps should end `,stop,,` (two empty trailing fields), got: {row}"
         );
     }
 

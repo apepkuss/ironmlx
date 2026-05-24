@@ -26,7 +26,7 @@
 | 1 | coverage_pct ≥ 0.95 per PP per repeat | ✓ PASS | aggregator runs all 6 probe cells without coverage error |
 | 2 | `first_token_sampling_materialize_and_sample` ∉ top-5 | ✓ PASS | both PPs |
 | 3 | verdict ≠ data_insufficient | ✓ PASS | both PPs (R1 triggered) |
-| 4 | ironmlx production pp_tps envelope ≤ ±2% per PP | **✗ FAIL/DEFERRED** | PP=128 11.98% (r1+r4 trailing outliers); PP=512 11.88% (r1+r4 fast cluster vs r2+r3 slow) — **deferred to P5h+2.b per Codex round-2 § 13** |
+| 4 | ironmlx production pp_tps envelope ≤ ±2% per PP | **✗ FAIL/DEFERRED** | PP=128 11.98% (r1+r4 trailing outliers); PP=512 11.88% (r1+r4 fast cluster vs r2+r3 slow) — **deferred to P5h+2.b per Codex round-2 § 13** (P5h+2.b FAIL; see `docs/p5h+2-b-close-out.md`) |
 | 5 | substep CI surfaced (not over-gated) | ✓ PASS | per-substep CI95 half-widths sub-percent both PPs |
 | 6 | 4-category coverage status | ✓ PASS | scheduler measured / kv_cache proxy-only / attention measured / moe measured |
 | 7 | tied-tier honesty | ✓ PASS | output is list-of-lists; tied tiers at lower ranks documented |
@@ -135,6 +135,8 @@ P5h+2.b spec MUST include:
 5. **Phase 0 backfill**: P5h+2.b outcome explicitly backfills `docs/p5i-c-phase-0-close-out.md` § 1 criterion #4 + `docs/p5i-c-phase-0-ranking-snapshot.md` envelope numbers.
 6. **Per Codex round-2 Q11 instrumentation**: P5h+2.b must record per-run time series, run order within sweep, server lifecycle (spawn/kill timestamps), preheat placement (which spawn, which PP), and whether each PP shares the same server spawn or has its own. Likely protocol state-machine issue, not pure thermal noise — capture data accordingly.
 7. **No PP-unification assumption**: PP=128 trailing outliers and PP=512 fast/slow cluster may be DIFFERENT mechanisms; P5h+2.b must not force them into one explanation.
+
+**Status: ATTEMPTED FAIL** — see `docs/p5h+2-b-close-out.md`. Scheduler ERROR path root cause identified; requires production scheduler fix before re-attempt.
 
 ---
 

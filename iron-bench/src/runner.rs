@@ -28,6 +28,12 @@ pub struct RunOutcome {
     pub run_idx: usize,
     pub prompt_tokens_local: usize,
     pub result: RequestResult,
+    /// Unix-ns wall-clock at request-send start. `Some` iff
+    /// `--capture-run-timestamps` was passed (P5h+2.b spec § 6).
+    pub run_start_unix_ns: Option<u64>,
+    /// Unix-ns wall-clock at response-complete. `Some` iff
+    /// `--capture-run-timestamps` was passed (P5h+2.b spec § 6).
+    pub run_end_unix_ns: Option<u64>,
 }
 
 /// (v2 concurrent mode) One worker iteration's outcome.
@@ -67,6 +73,7 @@ pub async fn run_cell(
     warmup: usize,
     runs: usize,
     capture_request_id: bool,
+    capture_run_timestamps: bool,
     tokenizer: &Tokenizer,
 ) -> Result<CellResult> {
     eprintln!("[{target_name}] PP={pp} TG={tg}: warmup x{warmup} ...");
@@ -82,8 +89,18 @@ pub async fn run_cell(
     for i in 0..runs {
         let nonce = nonce_seed() ^ ((i as u64) << 8);
         let (prompt, prompt_tokens_local) = synthesize_prompt(tokenizer, pp, nonce)?;
+        let run_start_unix_ns = if capture_run_timestamps {
+            Some(now_unix_ns())
+        } else {
+            None
+        };
         let result =
             run_chat_completion(client, target_url, model, &prompt, tg, capture_request_id).await?;
+        let run_end_unix_ns = if capture_run_timestamps {
+            Some(now_unix_ns())
+        } else {
+            None
+        };
 
         let ttft_ms = result.timings.ttft().as_secs_f64() * 1000.0;
         let gen_secs = result.timings.gen_duration().as_secs_f64().max(1e-9);
@@ -101,6 +118,8 @@ pub async fn run_cell(
             run_idx: i,
             prompt_tokens_local,
             result,
+            run_start_unix_ns,
+            run_end_unix_ns,
         });
     }
 
@@ -245,6 +264,16 @@ pub async fn run_cell_concurrent(
 }
 
 fn nonce_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// Unix-ns wall-clock for `--capture-run-timestamps`. Fail-soft to 0 on clock
+/// failure (matching `nonce_seed` policy); downstream parsers treat 0 as
+/// "missing" since real timestamps are always > 0.
+fn now_unix_ns() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)

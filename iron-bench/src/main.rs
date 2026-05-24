@@ -81,6 +81,14 @@ struct Args {
     /// Join key). Markdown + JSON outputs are unaffected by this flag.
     #[arg(long, default_value_t = false)]
     pub capture_server_request_id: bool,
+
+    /// Append `run_start_unix_ns` and `run_end_unix_ns` columns to CSV
+    /// output. When off, CSV is byte-identical to current output. When
+    /// combined with `--capture-server-request-id`, both column families
+    /// appear; downstream parsers MUST use header names (csv::DictReader),
+    /// not fixed positions. Per P5h+2.b spec § 6.
+    #[arg(long, default_value_t = false)]
+    pub capture_run_timestamps: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -99,6 +107,16 @@ fn parse_target(s: &str) -> std::result::Result<(String, String), String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.capture_run_timestamps && args.concurrent.is_some() {
+        // Concurrent CSV (render_csv_concurrent) has a different header schema
+        // with no run_start/run_end columns. P5h+2.b timestamp capture targets
+        // sequential mode only (per spec § 6 + memory [feedback_serial_perf_experiments]).
+        anyhow::bail!(
+            "--capture-run-timestamps is incompatible with --concurrent: \
+             run_start_unix_ns/run_end_unix_ns are defined only for v1 sequential CSV rows."
+        );
+    }
 
     if args.capture_server_request_id {
         // Per Codex plan review v21 P2 #2: reject concurrent mode entirely.
@@ -193,6 +211,7 @@ async fn main() -> Result<()> {
                         args.warmup,
                         args.runs,
                         args.capture_server_request_id,
+                        args.capture_run_timestamps,
                         &tokenizer,
                     )
                     .await?;
@@ -242,7 +261,11 @@ async fn main() -> Result<()> {
                 OutputFormat::Markdown => {
                     report::render_markdown(&seq_cells, &args.target, args.warmup)
                 }
-                OutputFormat::Csv => report::render_csv(&seq_cells, args.capture_server_request_id),
+                OutputFormat::Csv => report::render_csv(
+                    &seq_cells,
+                    args.capture_server_request_id,
+                    args.capture_run_timestamps,
+                ),
                 OutputFormat::Json => report::render_json(&seq_cells, &args.target, args.warmup),
             }
         }

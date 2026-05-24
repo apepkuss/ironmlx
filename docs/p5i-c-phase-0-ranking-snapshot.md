@@ -1,6 +1,6 @@
 # P5i.c Phase 0 Ranking Snapshot
 
-**Status:** measure-only close (γ-lite) per Codex round-2 — ranking PASS, production envelope FAIL/DEFERRED, Phase 1 acceptance blocked by P5h+2.b. See `docs/p5i-c-phase-0-close-out.md` for the close-out framing + P5h+2.b dependency.
+**Status:** measure-only close (γ-lite) per Codex round-2 — ranking PASS, production envelope FAIL/DEFERRED, Phase 1 acceptance blocked by P5h+2.b. See `docs/p5i-c-phase-0-close-out.md` for the close-out framing + P5h+2.b dependency; P5h+2.b attempted resolution FAILED; envelope still deferred.
 
 **Date:** 2026-05-24
 
