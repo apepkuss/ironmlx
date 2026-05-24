@@ -59,6 +59,43 @@ enum RollingEvent {
     Shutdown,
 }
 
+/// P5h+2.c regression counter: incremented every time the actor's Step
+/// branch observes an `Err` whose Debug output contains
+/// `step illegal in Finished phase`. The integration test
+/// `ironmlx/tests/p5h_2c_scheduler_finished_smoke.rs` resets this counter
+/// at test start, runs 3× `max_new_tokens=1` admit cmds, and asserts it
+/// stays at 0 (proving the pre-event finalization hook eliminated the
+/// bug surface).
+///
+/// Gated under `cfg(feature = "p5h-profile")` so default release builds
+/// pay zero cost. `cfg(test)` items are not visible to `ironmlx/tests/*`
+/// integration targets (library compiles as a dependency), which is why
+/// the feature flag is required instead of `cfg(test)`.
+#[cfg(feature = "p5h-profile")]
+#[doc(hidden)]
+pub static STEP_ILLEGAL_FINISHED_PHASE_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Result returned by [`drive_empty_scheduler_handoff`] encoding what the
+/// caller's rolling loop should do next. Matches the existing `continue
+/// 'rolling` / `break 'rolling` / `continue 'outer` / `return` patterns
+/// without exposing label control to the helper.
+///
+/// Added by P5h+2.c to make the empty-batch handoff path reusable from
+/// (a) the existing post-step empty-handoff site and (b) the new
+/// pre-event Finished-batch finalization at the rolling-loop top.
+enum RollingControl {
+    /// Re-enter the rolling loop (a new batch was admitted + prefilled).
+    ContinueRolling,
+    /// Exit the rolling loop into the outer-loop tail cleanup (no
+    /// queued or pending admits; outer will block on `cmd_rx.recv()`).
+    BreakRolling,
+    /// `continue 'outer` — outer loop body resumes from its top
+    /// (e.g., poisoned-state recovery).
+    ContinueOuter,
+    /// `return` from the actor (cmd_rx disconnected; all senders dropped).
+    ReturnActor,
+}
+
 /// Reply payload for [`SchedulerCommand::Admit`]. Carries the assigned
 /// [`RequestId`] and the per-request event receiver.
 pub struct AdmitReply {
@@ -267,6 +304,23 @@ fn driver_loop<M>(
     let rt = tokio::runtime::Handle::current();
 
     'outer: loop {
+        // P5h+2.c defensive: ensure scheduler is in Phase::Idle before
+        // blocking on next admit. Most error paths already call evict_all,
+        // but this guards any future code path that leaves phase=Finished.
+        // If finalize fails, the actor cannot safely admit more requests
+        // (the scheduler would be in an unrecoverable state); terminate
+        // cleanly rather than emit ERROR per request.
+        if sched.phase() == Phase::Finished {
+            if let Err(e) = finalize_finished_batch_if_any(&mut sched, &mut event_txs) {
+                tracing::error!(
+                    "[SchedulerActor] outer-loop finalize failed: {e:?}; \
+                     actor cannot reset Finished batch safely — terminating"
+                );
+                event_txs.clear();
+                return;
+            }
+        }
+
         // ===== Outer Idle: block waiting for first admit (or shutdown). =====
         // Outer Idle is reached only after evict_all clears all slots; the
         // admission queue is invariantly empty here (any queue elements were
@@ -335,6 +389,40 @@ fn driver_loop<M>(
 
         // ===== Rolling decode loop with biased mid-batch admit + queue drain. =====
         'rolling: loop {
+            // P5h+2.c: pre-event Finished-batch finalization + handoff. If
+            // previous iteration's prefill_admitted/step left phase=Finished
+            // (e.g. max_tokens=1 workload), handle the completed batch BEFORE
+            // dispatching another event. Per Codex Q6: biased select may pick
+            // Admit over Step, so this must run before the event pick — or the
+            // actor could call admit_mid_begin() in Phase::Finished.
+            //
+            // `drive_empty_scheduler_handoff` itself calls
+            // `finalize_finished_batch_if_any`; do not duplicate finalization
+            // here. This avoids two divergent finalize/error paths.
+            if sched.phase() == Phase::Finished {
+                match drive_empty_scheduler_handoff(
+                    &mut sched,
+                    &mut cmd_rx,
+                    &mut event_txs,
+                    &mut admission_queue,
+                    &model,
+                    &admit_count,
+                    &saturate_triggered,
+                    &queue_depth_peak,
+                    &queue_rejected,
+                    &batch_count,
+                    b_max,
+                    admission_queue_max,
+                    admission_deadline,
+                    &rt,
+                ) {
+                    RollingControl::ContinueRolling => continue 'rolling,
+                    RollingControl::BreakRolling => break 'rolling,
+                    RollingControl::ContinueOuter => continue 'outer,
+                    RollingControl::ReturnActor => return,
+                }
+            }
+
             let evt: RollingEvent = rt.block_on(async {
                 tokio::select! {
                     biased;
@@ -403,6 +491,11 @@ fn driver_loop<M>(
                         }
                         Err(e) => {
                             tracing::error!("[SchedulerActor] step error: {e:?}");
+                            #[cfg(feature = "p5h-profile")]
+                            if format!("{e:?}").contains("step illegal in Finished phase") {
+                                STEP_ILLEGAL_FINISHED_PHASE_HIT_COUNT
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
                             if let Err(evict_err) = sched.evict_all() {
                                 tracing::warn!(
                                     "[SchedulerActor] evict_all after step error also failed: \
@@ -432,174 +525,33 @@ fn driver_loop<M>(
             // Idle, then admit from queue + drain_window + prefill_admitted
             // inline (mirrors the existing post-empty path but pulls the
             // first admit from the queue instead of cmd_rx).
+            //
+            // P5h+2.c: extracted into `drive_empty_scheduler_handoff` so the
+            // same logic backs the pre-event Finished-batch finalization hook
+            // at the rolling-loop top. The helper finalizes any leftover
+            // `Phase::Finished` state first, then performs the queued-admit
+            // / try_recv / break handoff.
             if sched.active_count() == 0 {
-                if !admission_queue.is_empty() {
-                    // Reset to Idle for fresh batch.
-                    if let Err(evict_err) = sched.evict_all() {
-                        tracing::warn!(
-                            "[SchedulerActor] evict_all between batches (queue drain) failed: \
-                             {evict_err:?}; rejecting queued admits"
-                        );
-                        while let Some(pending) = admission_queue.pop_front() {
-                            let _ = pending
-                                .reply_tx
-                                .send(Err(anyhow::anyhow!("scheduler evict_all failed")));
-                        }
-                        event_txs.clear();
-                        continue 'outer;
-                    }
-                    event_txs.clear();
-                    // Pop first queued admit as the new batch's first admit.
-                    let pending = admission_queue
-                        .pop_front()
-                        .expect("queue non-empty checked");
-                    handle_admit(
-                        SchedulerCommand::Admit {
-                            request: pending.request,
-                            reply_tx: pending.reply_tx,
-                        },
-                        &mut sched,
-                        &mut event_txs,
-                        &admit_count,
-                    );
-                    if sched.active_count() == 0 {
-                        // Admit failed; loop to drain more queue (or exit).
-                        continue 'rolling;
-                    }
-                    if sched.active_count() < b_max {
-                        // Drain queue head-by-head into the new batch (no
-                        // deadline — these are already-queued admits, not
-                        // racing-in cmd_rx). Then optionally drain_window
-                        // for fresh cmd_rx admits.
-                        while sched.active_count() < b_max {
-                            let Some(p) = admission_queue.pop_front() else {
-                                break;
-                            };
-                            handle_admit(
-                                SchedulerCommand::Admit {
-                                    request: p.request,
-                                    reply_tx: p.reply_tx,
-                                },
-                                &mut sched,
-                                &mut event_txs,
-                                &admit_count,
-                            );
-                        }
-                        // Optionally absorb cmd_rx admits arriving right now.
-                        if sched.active_count() < b_max {
-                            rt.block_on(drain_window(
-                                &mut cmd_rx,
-                                &mut sched,
-                                &mut event_txs,
-                                &mut admission_queue,
-                                &admit_count,
-                                &saturate_triggered,
-                                &queue_depth_peak,
-                                &queue_rejected,
-                                b_max,
-                                admission_queue_max,
-                                admission_deadline,
-                            ));
-                        }
-                    }
-                    batch_count.fetch_add(1, Ordering::Relaxed);
-                    let prefill_result = {
-                        let model_lock = model.blocking_lock();
-                        sched.prefill_admitted(&model_lock)
-                    };
-                    match prefill_result {
-                        Ok(events) => {
-                            for ev in events {
-                                route_event(ev, &event_txs);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "[SchedulerActor] re-prefill (queue drain) error: {e:?}"
-                            );
-                            if let Err(evict_err) = sched.evict_all() {
-                                tracing::warn!(
-                                    "[SchedulerActor] evict_all after re-prefill error also \
-                                     failed: {evict_err:?}; rejecting remaining queued admits"
-                                );
-                            }
-                            event_txs.clear();
-                            while let Some(p) = admission_queue.pop_front() {
-                                let _ = p.reply_tx.send(Err(anyhow::anyhow!(
-                                    "scheduler poisoned after re-prefill error"
-                                )));
-                            }
-                            continue 'outer;
-                        }
-                    }
-                    continue 'rolling;
-                }
-                // Queue empty + no active rows — same logic as pre-3d.
-                match cmd_rx.try_recv() {
-                    Ok(cmd) => {
-                        if let Err(evict_err) = sched.evict_all() {
-                            tracing::warn!(
-                                "[SchedulerActor] evict_all between batches failed: \
-                                 {evict_err:?}; rejecting incoming admit"
-                            );
-                            let SchedulerCommand::Admit { reply_tx, .. } = cmd;
-                            let _ = reply_tx.send(Err(evict_err));
-                            event_txs.clear();
-                            continue 'outer;
-                        }
-                        event_txs.clear();
-                        handle_admit(cmd, &mut sched, &mut event_txs, &admit_count);
-                        if sched.active_count() == 0 {
-                            break 'rolling;
-                        }
-                        if sched.active_count() < b_max {
-                            rt.block_on(drain_window(
-                                &mut cmd_rx,
-                                &mut sched,
-                                &mut event_txs,
-                                &mut admission_queue,
-                                &admit_count,
-                                &saturate_triggered,
-                                &queue_depth_peak,
-                                &queue_rejected,
-                                b_max,
-                                admission_queue_max,
-                                admission_deadline,
-                            ));
-                        }
-                        batch_count.fetch_add(1, Ordering::Relaxed);
-                        let prefill_result = {
-                            let model_lock = model.blocking_lock();
-                            sched.prefill_admitted(&model_lock)
-                        };
-                        match prefill_result {
-                            Ok(events) => {
-                                for ev in events {
-                                    route_event(ev, &event_txs);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("[SchedulerActor] re-prefill error: {e:?}");
-                                if let Err(evict_err) = sched.evict_all() {
-                                    tracing::warn!(
-                                        "[SchedulerActor] evict_all after re-prefill error \
-                                         also failed: {evict_err:?}; relying on 3b-1 poison \
-                                         flag to reject subsequent admits"
-                                    );
-                                }
-                                event_txs.clear();
-                                continue 'outer;
-                            }
-                        }
-                        continue 'rolling;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                        break 'rolling;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        event_txs.clear();
-                        return;
-                    }
+                match drive_empty_scheduler_handoff(
+                    &mut sched,
+                    &mut cmd_rx,
+                    &mut event_txs,
+                    &mut admission_queue,
+                    &model,
+                    &admit_count,
+                    &saturate_triggered,
+                    &queue_depth_peak,
+                    &queue_rejected,
+                    &batch_count,
+                    b_max,
+                    admission_queue_max,
+                    admission_deadline,
+                    &rt,
+                ) {
+                    RollingControl::ContinueRolling => continue 'rolling,
+                    RollingControl::BreakRolling => break 'rolling,
+                    RollingControl::ContinueOuter => continue 'outer,
+                    RollingControl::ReturnActor => return,
                 }
             }
         }
@@ -895,6 +847,277 @@ fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSend
         // (handler abandoned). That's fine; the entry naturally clears
         // at the next `event_txs.clear()` in driver_loop.
         let _ = tx.send(ev);
+    }
+}
+
+/// Finalize a `Phase::Finished` batch: evict slots + release budget +
+/// reset to `Phase::Idle`, then close per-request event channels.
+///
+/// Returns `Ok(true)` if finalization happened (caller MUST go to the
+/// empty-scheduler handoff path, NOT continue the normal event pick;
+/// per spec § 4.2.1 hard binding).
+/// This binding applies in the rolling-loop context; the outer-loop hook calls this directly because admission_queue is invariantly empty at that point.
+/// Returns `Ok(false)` if `phase != Finished` (no-op; safe to continue).
+/// Returns `Err` if `evict_all` failed (caller should reject queued
+/// admits + `continue 'outer` per existing pattern).
+///
+/// Added by P5h+2.c. The `Phase::Finished` state arises naturally when
+/// `prefill_admitted` completes a batch where every request has
+/// `max_new_tokens=1` (the prefill samples first+last token in one
+/// pass), which is the standard `iron-bench --max-tokens 1` perf
+/// measurement workload.
+fn finalize_finished_batch_if_any<M: Model>(
+    sched: &mut Scheduler<M>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+) -> Result<bool> {
+    if sched.phase() != Phase::Finished {
+        return Ok(false);
+    }
+    match sched.evict_all() {
+        Ok(()) => {
+            event_txs.clear();
+            Ok(true)
+        }
+        Err(e) => {
+            tracing::warn!("[SchedulerActor] finalize_finished_batch: evict_all failed: {e:?}");
+            Err(e)
+        }
+    }
+}
+
+/// Finalize a just-finished batch if needed, then drain queued admits
+/// (or a single pending `cmd_rx.try_recv` admit) into a fresh batch, run
+/// `prefill_admitted`, and return how the caller's rolling loop should
+/// proceed. Lifts the existing empty-batch transition logic at the
+/// rolling-loop tail so it can also be invoked from the new pre-event
+/// Finished-batch finalization at the rolling-loop top.
+///
+/// This helper is the single empty-batch handoff path. It first calls
+/// [`finalize_finished_batch_if_any`], so callers must not separately
+/// finalize before invoking it. After that call the scheduler is either
+/// `Phase::Idle` or `Phase::Decoding` (the legacy post-step empty-handoff
+/// path used to encounter `Phase::Finished`; the new pre-event hook now
+/// shoulders that case via finalize). The helper preserves the current
+/// reset semantics for `Decoding`-with-zero-active-rows before starting
+/// the next batch but never calls `evict_all` in `Idle` (which is itself
+/// an error per scheduler.rs:775-780).
+///
+/// Behavior per branch:
+/// - Queued admit present → pop head, fresh batch via `handle_admit` +
+///   `drain_window` + `prefill_admitted`; returns `ContinueRolling`.
+/// - Queue empty + `cmd_rx.try_recv()` returns `Ok(cmd)` → fresh batch
+///   via the same path; returns `ContinueRolling`.
+/// - Queue empty + `try_recv` returns `Empty` → returns `BreakRolling`.
+/// - Queue empty + `try_recv` returns `Disconnected` → clear `event_txs`,
+///   returns `ReturnActor`.
+/// - Any `finalize`, legacy reset, or `prefill_admitted` failure →
+///   reject queued admits, clear `event_txs`, returns `ContinueOuter`.
+///
+/// Added by P5h+2.c. Replaces the existing `if sched.active_count() == 0
+/// { ... }` block at rolling-loop tail to avoid divergent copies.
+#[allow(clippy::too_many_arguments)]
+fn drive_empty_scheduler_handoff<M>(
+    sched: &mut Scheduler<M>,
+    cmd_rx: &mut mpsc::Receiver<SchedulerCommand>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    admission_queue: &mut VecDeque<PendingAdmit>,
+    model: &Arc<Mutex<M>>,
+    admit_count: &Arc<AtomicU64>,
+    saturate_triggered: &Arc<AtomicU64>,
+    queue_depth_peak: &Arc<AtomicUsize>,
+    queue_rejected: &Arc<AtomicU64>,
+    batch_count: &Arc<AtomicU64>,
+    b_max: usize,
+    admission_queue_max: usize,
+    admission_deadline: Duration,
+    rt: &tokio::runtime::Handle,
+) -> RollingControl
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    // P5h+2.c: finalize any Finished batch BEFORE re-admitting. After
+    // this, phase is one of {Idle, Decoding}; never Finished. Callers
+    // must not separately finalize.
+    match finalize_finished_batch_if_any(sched, event_txs) {
+        Ok(_) => {}
+        Err(_e) => {
+            while let Some(pending) = admission_queue.pop_front() {
+                let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                    "scheduler poisoned during Finished-batch finalize"
+                )));
+            }
+            event_txs.clear();
+            return RollingControl::ContinueOuter;
+        }
+    }
+
+    if !admission_queue.is_empty() {
+        // Reset Decoding-with-zero-active-rows to Idle for fresh batch.
+        // (Finished was already handled by finalize above; Idle would
+        // itself be an error for `evict_all`.)
+        if sched.phase() == Phase::Decoding {
+            if let Err(evict_err) = sched.evict_all() {
+                tracing::warn!(
+                    "[SchedulerActor] evict_all between batches (queue drain) failed: \
+                     {evict_err:?}; rejecting queued admits"
+                );
+                while let Some(pending) = admission_queue.pop_front() {
+                    let _ = pending
+                        .reply_tx
+                        .send(Err(anyhow::anyhow!("scheduler evict_all failed")));
+                }
+                event_txs.clear();
+                return RollingControl::ContinueOuter;
+            }
+            event_txs.clear();
+        }
+        // Pop first queued admit as the new batch's first admit.
+        let pending = admission_queue
+            .pop_front()
+            .expect("queue non-empty checked");
+        handle_admit(
+            SchedulerCommand::Admit {
+                request: pending.request,
+                reply_tx: pending.reply_tx,
+            },
+            sched,
+            event_txs,
+            admit_count,
+        );
+        if sched.active_count() == 0 {
+            // Admit failed; loop to drain more queue (or exit).
+            return RollingControl::ContinueRolling;
+        }
+        if sched.active_count() < b_max {
+            // Drain queue head-by-head into the new batch (no deadline —
+            // these are already-queued admits, not racing-in cmd_rx).
+            // Then optionally drain_window for fresh cmd_rx admits.
+            while sched.active_count() < b_max {
+                let Some(p) = admission_queue.pop_front() else {
+                    break;
+                };
+                handle_admit(
+                    SchedulerCommand::Admit {
+                        request: p.request,
+                        reply_tx: p.reply_tx,
+                    },
+                    sched,
+                    event_txs,
+                    admit_count,
+                );
+            }
+            // Optionally absorb cmd_rx admits arriving right now.
+            if sched.active_count() < b_max {
+                rt.block_on(drain_window(
+                    cmd_rx,
+                    sched,
+                    event_txs,
+                    admission_queue,
+                    admit_count,
+                    saturate_triggered,
+                    queue_depth_peak,
+                    queue_rejected,
+                    b_max,
+                    admission_queue_max,
+                    admission_deadline,
+                ));
+            }
+        }
+        batch_count.fetch_add(1, Ordering::Relaxed);
+        let prefill_result = {
+            let model_lock = model.blocking_lock();
+            sched.prefill_admitted(&model_lock)
+        };
+        match prefill_result {
+            Ok(events) => {
+                for ev in events {
+                    route_event(ev, event_txs);
+                }
+            }
+            Err(e) => {
+                tracing::error!("[SchedulerActor] re-prefill (queue drain) error: {e:?}");
+                if let Err(evict_err) = sched.evict_all() {
+                    tracing::warn!(
+                        "[SchedulerActor] evict_all after re-prefill error also failed: \
+                         {evict_err:?}; rejecting remaining queued admits"
+                    );
+                }
+                event_txs.clear();
+                while let Some(p) = admission_queue.pop_front() {
+                    let _ = p.reply_tx.send(Err(anyhow::anyhow!(
+                        "scheduler poisoned after re-prefill error"
+                    )));
+                }
+                return RollingControl::ContinueOuter;
+            }
+        }
+        return RollingControl::ContinueRolling;
+    }
+    // Queue empty + no active rows — same logic as pre-3d.
+    match cmd_rx.try_recv() {
+        Ok(cmd) => {
+            if sched.phase() == Phase::Decoding {
+                if let Err(evict_err) = sched.evict_all() {
+                    tracing::warn!(
+                        "[SchedulerActor] evict_all between batches failed: \
+                         {evict_err:?}; rejecting incoming admit"
+                    );
+                    let SchedulerCommand::Admit { reply_tx, .. } = cmd;
+                    let _ = reply_tx.send(Err(evict_err));
+                    event_txs.clear();
+                    return RollingControl::ContinueOuter;
+                }
+                event_txs.clear();
+            }
+            handle_admit(cmd, sched, event_txs, admit_count);
+            if sched.active_count() == 0 {
+                return RollingControl::BreakRolling;
+            }
+            if sched.active_count() < b_max {
+                rt.block_on(drain_window(
+                    cmd_rx,
+                    sched,
+                    event_txs,
+                    admission_queue,
+                    admit_count,
+                    saturate_triggered,
+                    queue_depth_peak,
+                    queue_rejected,
+                    b_max,
+                    admission_queue_max,
+                    admission_deadline,
+                ));
+            }
+            batch_count.fetch_add(1, Ordering::Relaxed);
+            let prefill_result = {
+                let model_lock = model.blocking_lock();
+                sched.prefill_admitted(&model_lock)
+            };
+            match prefill_result {
+                Ok(events) => {
+                    for ev in events {
+                        route_event(ev, event_txs);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("[SchedulerActor] re-prefill error: {e:?}");
+                    if let Err(evict_err) = sched.evict_all() {
+                        tracing::warn!(
+                            "[SchedulerActor] evict_all after re-prefill error also failed: \
+                             {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
+                        );
+                    }
+                    event_txs.clear();
+                    return RollingControl::ContinueOuter;
+                }
+            }
+            RollingControl::ContinueRolling
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => RollingControl::BreakRolling,
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+            event_txs.clear();
+            RollingControl::ReturnActor
+        }
     }
 }
 

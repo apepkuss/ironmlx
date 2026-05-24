@@ -44,6 +44,32 @@ TOOLS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOLS_DIR.parent
 
 
+def check_no_scheduler_errors(server_log_path: Path, allow_server_errors: bool) -> None:
+    """Acceptance precondition per Codex round-3 design question #3.
+
+    Inspects server.log for `step illegal in <phase> phase` ERROR lines
+    (production scheduler phase-guard violations). Default-deny: any
+    such ERROR aborts the sweep + preserves the artifact directory.
+    Diagnostic experiments wanting to allow these ERRORs explicitly set
+    --allow-server-errors.
+    """
+    if allow_server_errors:
+        return
+    if not server_log_path.exists():
+        return  # missing log handled by caller's downstream check
+    count = 0
+    with server_log_path.open() as f:
+        for line in f:
+            if "step illegal in" in line and "phase" in line:
+                count += 1
+    if count > 0:
+        raise SystemExit(
+            f"{server_log_path}: {count} `step illegal in <phase>` ERROR lines detected. "
+            "Acceptance precondition VIOLATED (Codex round-3 design question #3). "
+            "Re-run with --allow-server-errors to override for diagnostic experiments."
+        )
+
+
 def run_one_repeat(args: argparse.Namespace, repeat: int) -> dict[str, Path]:
     """Invoke harness for one repeat; return mapping {pp -> per-cell out dir}."""
     env = os.environ.copy()
@@ -98,6 +124,7 @@ def run_one_repeat(args: argparse.Namespace, repeat: int) -> dict[str, Path]:
         if dst.exists():
             shutil.rmtree(dst)
         shutil.move(str(src), str(dst))
+        check_no_scheduler_errors(dst / "server.log", args.allow_server_errors)
         cell_map[pp] = dst
     return cell_map
 
@@ -161,6 +188,13 @@ def main() -> None:
         "--skip-envelope",
         action="store_true",
         help="skip envelope computation for diagnostic captures with <3 repeats",
+    )
+    p.add_argument(
+        "--allow-server-errors",
+        action="store_true",
+        default=False,
+        help="Allow `step illegal in <phase>` server ERROR lines (default: abort sweep). "
+        "Use for diagnostic experiments where scheduler errors are expected.",
     )
     args = p.parse_args()
 
