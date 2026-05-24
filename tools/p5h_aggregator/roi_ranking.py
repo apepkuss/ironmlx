@@ -726,5 +726,226 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+# --- P5i.c Phase 0 extensions (spec § 4.2.4) ---
+
+
+def identify_tied_tiers(
+    ranking: list[tuple[str, float]],
+    ci95_by_name: dict[str, tuple[float, float]],
+) -> list[list[str]]:
+    """Adjacent-overlap chain: if prev CI95-low <= curr CI95-high, join current tier.
+
+    Per spec § 8 tied-tier methodology. `ranking` MUST be sorted descending by
+    median share. Returns tiers in rank order (tier-1 first).
+
+    Edge cases:
+    - Empty ranking → empty list.
+    - Missing CI95 entry → treated as (0, 0) so it cannot merge with the
+      previous tier unless previous tier's low is <= 0.
+    """
+    if not ranking:
+        return []
+    tiers: list[list[str]] = [[ranking[0][0]]]
+    for i in range(1, len(ranking)):
+        prev_name = ranking[i - 1][0]
+        curr_name = ranking[i][0]
+        prev_low, _prev_high = ci95_by_name.get(prev_name, (0.0, 0.0))
+        _curr_low, curr_high = ci95_by_name.get(curr_name, (0.0, 0.0))
+        if prev_low <= curr_high:
+            tiers[-1].append(curr_name)
+        else:
+            tiers.append([curr_name])
+    return tiers
+
+
+# Category mapping (spec § 4.2.4) — span_name → category.
+SCHEDULER_CATEGORY_SPANS: set[str] = {
+    "scheduler_admission",  # already in LANE_A_REQUIRED_TREE; P5i.c T0 audit
+    "model_prefill_forward",
+    "first_token_sampling_prepare",
+    "first_token_sampling_materialize_and_sample",
+    "gs_first_token_sample_dispatch",
+    "gs_kv_cache_alloc",
+    "http_parse_render_tokenize",
+}
+KV_CACHE_CATEGORY_SPANS: set[str] = {
+    "cache_state_update",
+    "kv_mask_update",
+}
+ATTENTION_CATEGORY_SPANS: set[str] = {
+    "fused_sdpa",
+    "gda_step_1a_in_proj_qkvz",
+    "gda_step_1b_in_proj_ba",
+    "gda_step_2a_prepend_conv_state",
+    "gda_step_2b_conv1d_silu",
+    "gda_step_2c_update_conv_state",
+    "gda_step_3_split_reshape_per_head",
+    "gda_step_4_qk_rmsnorm",
+    "gda_step_5_compute_g",
+    "gda_step_6_sigmoid_beta",
+    "gda_step_7_kernel_dispatch_and_materialize",
+    "gda_step_8_norm_proj",
+    "q_gate_k_v_proj",
+    "q_split_norm_reshape",
+    "mrope_apply",
+    "o_proj",
+    "post_attention_norm",
+    "attention_path",
+    "input_norm",
+}
+MOE_CATEGORY_SPANS: set[str] = {
+    "gather_qmm_gate_up",
+    "gather_qmm_down",
+    "router_logits_softmax_topk",
+    "routing_sort_pack",
+    "routing_unsort_weighted_reduce",
+    "shared_expert",
+    "moe_output_sum",
+    "mlp_path",
+    "swiglu_activation",
+    "gate_sigmoid_mul",
+}
+PHASE_0_CATEGORIES: dict[str, set[str]] = {
+    "scheduler": SCHEDULER_CATEGORY_SPANS,
+    "kv_cache": KV_CACHE_CATEGORY_SPANS,
+    "attention": ATTENTION_CATEGORY_SPANS,
+    "moe": MOE_CATEGORY_SPANS,
+}
+
+
+def emit_category_coverage(
+    audit_result: dict[str, str],
+    measured_spans: set[str],
+) -> dict[str, str]:
+    """Combine T0 audit declaration with actual ranking presence.
+
+    Returns status per category:
+    - declared `measured` → "measured" (schema-level coverage; not contingent on
+      ranking presence — a span below MIN_SHARE_PCT can still be measured)
+    - declared `proxy-only` → "proxy-only" preserved as limitation (per spec § 3.2)
+    - declared `unmeasured` → "unmeasured"
+
+    Per Codex round-2: "measured" means the span exists in
+    `LANE_A_REQUIRED_TREE` (schema validator) and emits per request. Whether
+    it ranks high is a separate fact recorded in ranking output, NOT a
+    re-classification of coverage.
+    """
+    result: dict[str, str] = {}
+    for cat, declared in audit_result.items():
+        if declared == "measured":
+            result[cat] = "measured"
+        elif declared == "proxy-only":
+            result[cat] = "proxy-only"
+        else:
+            result[cat] = "unmeasured"
+    return result
+
+
+def emit_phase_1_default_rule(
+    ranking_per_pp: dict[int, list[tuple[str, float]]],
+    tiers_per_pp: dict[int, list[list[str]]],
+    coverage: dict[str, str],
+) -> dict:
+    """Evaluate R1 / R2 / R3 / data_insufficient per spec § 9.
+
+    R1: cross-PP tier-1 identical AND each tier-1 is single-candidate
+    R2: PP=128 tier-1 != PP=512 tier-1 AND each tier-1 single-candidate
+    R3: any tier-1 has > 1 candidate (tied tier)
+    data_insufficient: empty rankings or no tier-1 at any PP
+    """
+    if not ranking_per_pp:
+        return {
+            "triggered_rule": "data_insufficient",
+            "suggested_phase_1_candidates": [],
+            "rationale": "no rankings supplied",
+        }
+    pps = sorted(ranking_per_pp.keys())
+    tier_1_per_pp = {
+        pp: tiers_per_pp[pp][0] if tiers_per_pp.get(pp) else [] for pp in pps
+    }
+    if any(not t for t in tier_1_per_pp.values()):
+        return {
+            "triggered_rule": "data_insufficient",
+            "suggested_phase_1_candidates": [],
+            "rationale": "tier-1 empty for at least one PP",
+        }
+
+    all_single = all(len(t) == 1 for t in tier_1_per_pp.values())
+    all_same = len({tuple(t) for t in tier_1_per_pp.values()}) == 1
+
+    if all_single and all_same:
+        triggered = "R1"
+        suggested = list(tier_1_per_pp[pps[0]])
+        rationale = f"cross-PP tier-1 identical: {suggested[0]}"
+    elif all_single and not all_same:
+        triggered = "R2"
+        suggested = sorted({c for t in tier_1_per_pp.values() for c in t})
+        rationale = (
+            "PP divergence — "
+            + ", ".join(f"PP={pp} tier-1={tier_1_per_pp[pp]}" for pp in pps)
+            + "; split Phase 1a/1b candidate per PP"
+        )
+    else:
+        triggered = "R3"
+        suggested = sorted({c for t in tier_1_per_pp.values() for c in t})
+        rationale = (
+            f"tied tier-1 detected; candidates: {suggested}; "
+            "rank by composite ROI x success / risk per spec § 9 R3"
+        )
+
+    return {
+        "triggered_rule": triggered,
+        "suggested_phase_1_candidates": suggested,
+        "rationale": rationale,
+        "tier_1_per_pp": {str(pp): t for pp, t in tier_1_per_pp.items()},
+        "category_coverage": coverage,
+    }
+
+
+def evaluate_dense_diagnostic_trigger(
+    tiers_per_pp: dict[int, list[list[str]]],
+    per_substep_medians: dict[int, dict[str, float]],
+) -> dict:
+    """Spec § 10 conditional Dense diagnostic trigger.
+
+    trigger-A: tier-1 contains a non-MoE candidate AND that candidate's
+               median share >= 15%
+    trigger-B: tier-1 contains BOTH MoE and non-MoE candidates (mixed tier)
+
+    Returns {"triggered": bool, "reason": str}.
+    """
+    moe = MOE_CATEGORY_SPANS
+    for pp, tiers in tiers_per_pp.items():
+        if not tiers:
+            continue
+        tier_1 = tiers[0]
+        non_moe_in_tier1 = [s for s in tier_1 if s not in moe]
+        moe_in_tier1 = [s for s in tier_1 if s in moe]
+        if non_moe_in_tier1:
+            max_share = max(
+                per_substep_medians.get(pp, {}).get(s, 0.0) for s in non_moe_in_tier1
+            )
+            if max_share >= 15.0:
+                return {
+                    "triggered": True,
+                    "reason": (
+                        f"trigger-A: non-MoE candidate(s) {non_moe_in_tier1} "
+                        f"in PP={pp} tier-1 with share {max_share:.2f}% >= 15%"
+                    ),
+                }
+        if non_moe_in_tier1 and moe_in_tier1:
+            return {
+                "triggered": True,
+                "reason": (
+                    f"trigger-B: PP={pp} tier-1 mixes MoE {moe_in_tier1} "
+                    f"+ non-MoE {non_moe_in_tier1}"
+                ),
+            }
+    return {
+        "triggered": False,
+        "reason": "tier-1 dominated by MoE candidates per current ranking",
+    }
+
+
 if __name__ == "__main__":
     sys.exit(main())
