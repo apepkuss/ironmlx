@@ -66,19 +66,18 @@ Per Codex Q2: `prefill_admitted` is called from THREE actor sites — initial pr
 ```mermaid
 graph TD
     A["rolling loop iter start"] --> B{"phase == Finished?"}
-    B -- "yes" --> C["finalize_finished_batch_if_any"]
-    C --> D["drive_empty_scheduler_handoff"]
-    D --> D1["queued admit or try_recv admit -> prefill"]
-    D --> D2["no queued/pending admit -> break rolling"]
-    D --> D3["channel disconnected -> return actor"]
-    D1 --> A
+    B -- "yes" --> C["drive_empty_scheduler_handoff (finalizes first)"]
+    C --> C1["queued admit or try_recv admit -> prefill"]
+    C --> C2["no queued/pending admit -> break rolling"]
+    C --> C3["channel disconnected -> return actor"]
+    C1 --> A
     B -- "no" --> E["tokio::select event pick"]
     E -->|Admit| F["handle_admit_mid_chunked or enqueue"]
     E -->|Step| G["sched.step + gc_finished_rows"]
     E -->|Shutdown| Z["exit actor"]
     F --> H{"active_count == 0?"}
     G --> H
-    H -- "yes" --> D
+    H -- "yes" --> C
     H -- "no" --> A
 ```
 
@@ -245,7 +244,7 @@ Hook into driver per-cell flow. Add `--allow-server-errors` CLI flag (default of
 **Steps**:
 1. Add `finalize_finished_batch_if_any` private fn per § 4.2.1
 2. Extract the existing empty-scheduler transition block into `drive_empty_scheduler_handoff` per § 4.2.2
-3. Add rolling-loop-top hook per § 4.2.3; if finalization occurs, jump into `drive_empty_scheduler_handoff` instead of falling through to `tokio::select`
+3. Add rolling-loop-top hook per § 4.2.3; when `phase == Finished`, call `drive_empty_scheduler_handoff` before falling through to `tokio::select` because the helper performs finalization first
 4. Add outer-loop-top defensive hook per § 4.2.4
 5. Audit queue-drain re-prefill + try_recv re-prefill inner paths (§ 4.2.5); add per-site guard if any path bypasses rolling loop top
 6. Add driver guard + `--allow-server-errors` flag per § 4.2.6
@@ -276,9 +275,9 @@ Hook into driver per-cell flow. Add `--allow-server-errors` CLI flag (default of
 3. After all 3 complete, assert NO `step illegal in Finished phase` ERROR was emitted
 4. Verify each request gets its first token event + completion
 
-The test must prove the ERROR branch was not hit, not merely that requests complete (the current buggy path still completes requests after logging ERROR + `evict_all`). Preferred proof is captured tracing/stderr. If tracing capture is not reliable in the existing test harness, add a narrow cfg(test)-only counter around the specific `step error` branch and assert it remains zero.
+The test must prove the ERROR branch was not hit, not merely that requests complete (the current buggy path still completes requests after logging ERROR + `evict_all`). Preferred proof is captured tracing/stderr. If tracing capture is not reliable in the existing test harness, add a narrow `#[cfg(feature = "p5h-profile")]` doc-hidden counter around the specific `step error` branch and assert it remains zero from the integration test. Do not use a `#[cfg(test)]`-only counter for this file-level integration test: `ironmlx/tests/*` compiles `ironmlx` as a dependency, so library `cfg(test)` items are not exported to the test target.
 
-**Acceptance criterion**: 0 `step illegal in Finished phase` hits across the 3-request smoke, proven by captured tracing/stderr or by the narrow cfg(test)-only counter.
+**Acceptance criterion**: 0 `step illegal in Finished phase` hits across the 3-request smoke, proven by captured tracing/stderr or by the narrow `p5h-profile` counter.
 
 **No commit**.
 
@@ -306,7 +305,7 @@ After T3 commit lands, implementer may optionally re-run a subset of P5h+2.b T2 
 
 P5h+2.c close requires ALL of:
 
-1. **Bug surface eliminated**: integration test (T2) PASSES — 3 sequential `max_new_tokens=1` requests via SchedulerActor emit ZERO `step illegal in Finished phase` hits, proven by captured tracing/stderr or cfg(test)-only counter.
+1. **Bug surface eliminated**: integration test (T2) PASSES — 3 sequential `max_new_tokens=1` requests via SchedulerActor emit ZERO `step illegal in Finished phase` hits, proven by captured tracing/stderr or the narrow `p5h-profile` counter.
 2. **Scheduler fail-fast preserved**: unit test (T1) PASSES — `Scheduler::step(Phase::Finished)` still returns `Err`.
 3. **No regression**: full `cargo test --release` PASSES (existing 18+ iron-bench tests + ironmlx-suite scheduler tests).
 4. **Rust gate**: `cargo fmt` + `cargo +nightly fmt --all -- --check` + `cargo +nightly clippy --all-features --workspace -- -D warnings` + `cargo build --release` ALL CLEAN.
@@ -319,7 +318,7 @@ P5h+2.c close requires ALL of:
 | Risk | Mitigation |
 |---|---|
 | Pre-event finalize at rolling-loop-top breaks legitimate transition (e.g. `Phase::Decoding` → midway-finished but next event is queued Admit) | Helper checks ONLY `Phase::Finished`; Decoding state untouched; mid-Decoding admit goes through normal mid-batch admit path |
-| Finalize resets scheduler to `Idle`, then always-ready Step branch fires and produces `step illegal in Idle phase` | If finalization returns `true`, rolling loop MUST skip `tokio::select` and run `drive_empty_scheduler_handoff`; diagram + tasks make this mandatory |
+| Finalize resets scheduler to `Idle`, then always-ready Step branch fires and produces `step illegal in Idle phase` | Rolling loop MUST call `drive_empty_scheduler_handoff` before `tokio::select`; that helper finalizes first and immediately performs queued-admit / try_recv / break handoff |
 | `evict_all` in finalize helper fails (rare) | Helper returns Err → caller logs ERROR + clears `event_txs`; rolling-loop caller rejects queued admits and continues outer, outer-loop defensive caller returns because retrying would spin |
 | Queue-drain inner re-prefill path bypasses rolling-loop-top hook | T0 step 5 audit + add per-site guard if needed |
 | Existing scheduler unit/integration tests break due to phase behavior shift | Scheduler core unchanged; phase semantics identical; tests should pass without modification |
