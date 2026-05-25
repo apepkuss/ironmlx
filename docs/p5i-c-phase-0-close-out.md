@@ -26,7 +26,7 @@
 | 1 | coverage_pct ≥ 0.95 per PP per repeat | ✓ PASS | aggregator runs all 6 probe cells without coverage error |
 | 2 | `first_token_sampling_materialize_and_sample` ∉ top-5 | ✓ PASS | both PPs |
 | 3 | verdict ≠ data_insufficient | ✓ PASS | both PPs (R1 triggered) |
-| 4 | ironmlx production pp_tps envelope ≤ ±2% per PP | **✗ FAIL/DEFERRED** | PP=128 11.98% (r1+r4 trailing outliers); PP=512 11.88% (r1+r4 fast cluster vs r2+r3 slow) — **deferred to P5h+2.b per Codex round-2 § 13** (P5h+2.b FAIL; see `docs/p5h+2-b-close-out.md`). **2026-05-25 update:** P5h+2.b re-attempt (post-P5h+2.c scheduler fix) closed FAIL/DEFERRED with substantial improvement: PP=128 envelope 4.78%, PP=512 envelope 5.06% (PP=512 between half-range collapsed 9.79%→2.16%, 76% reduction; counter==0 confirmed). β (gate relaxation to ±3%) explicitly rejected — PP=512 within-CI 5.06% still FAILS. Criterion #4 STILL FAIL/DEFERRED; **P5h+2.d thermal investigation phase** to investigate residual mechanism (see `docs/p5h+2-b-close-out.md` § 9-10). |
+| 4 | ironmlx production pp_tps envelope ≤ ±2% per PP | **✗ FAIL/DEFERRED** | PP=128 11.98% (r1+r4 trailing outliers); PP=512 11.88% (r1+r4 fast cluster vs r2+r3 slow) — **deferred to P5h+2.b per Codex round-2 § 13** (P5h+2.b FAIL; see `docs/p5h+2-b-close-out.md`). **2026-05-25 update:** P5h+2.b re-attempt (post-P5h+2.c scheduler fix) closed FAIL/DEFERRED with substantial improvement: PP=128 envelope 4.78%, PP=512 envelope 5.06% (PP=512 between half-range collapsed 9.79%→2.16%, 76% reduction; counter==0 confirmed). β (gate relaxation to ±3%) explicitly rejected — PP=512 within-CI 5.06% still FAILS. Criterion #4 STILL FAIL/DEFERRED; **P5h+2.d thermal investigation phase** to investigate residual mechanism (see `docs/p5h+2-b-close-out.md` § 9-10). **2026-05-25 P5h+2.d update:** Mechanism gate PASS (`strong_yes`; BEST cooldown=120s reduces trailing/fast-start residual ≥64% for both PPs); Acceptance PP=512 PASS (cd=120s envelope 0.91%) / PP=128 FAIL (cd=120s envelope 4.71% — within-sweep CI stuck regardless of cooldown level); Phase 0 production envelope **NOT** backfilled; PP=128-specific follow-up required (P5h+2.e candidate). See `docs/p5h+2-d-close-out.md`. |
 | 5 | substep CI surfaced (not over-gated) | ✓ PASS | per-substep CI95 half-widths sub-percent both PPs |
 | 6 | 4-category coverage status | ✓ PASS | scheduler measured / kv_cache proxy-only / attention measured / moe measured |
 | 7 | tied-tier honesty | ✓ PASS | output is list-of-lists; tied tiers at lower ranks documented |
@@ -136,7 +136,7 @@ P5h+2.b spec MUST include:
 6. **Per Codex round-2 Q11 instrumentation**: P5h+2.b must record per-run time series, run order within sweep, server lifecycle (spawn/kill timestamps), preheat placement (which spawn, which PP), and whether each PP shares the same server spawn or has its own. Likely protocol state-machine issue, not pure thermal noise — capture data accordingly.
 7. **No PP-unification assumption**: PP=128 trailing outliers and PP=512 fast/slow cluster may be DIFFERENT mechanisms; P5h+2.b must not force them into one explanation.
 
-**Status: ATTEMPTED FAIL → re-attempted POST-FIX: STILL FAIL/DEFERRED with partial progress** — see `docs/p5h+2-b-close-out.md` § 9-10. P5h+2.c scheduler ERROR fix shipped (counter==0 confirmed at production scale); re-attempt envelope PP=128 4.78% / PP=512 5.06% — residual variance NOT scheduler-caused. Next phase: **P5h+2.d thermal investigation** with two-stage entry (non-sudo protocol probe first, sudo powermetrics second) per Codex round-4 Option α.
+**Status: ATTEMPTED FAIL → re-attempted POST-FIX: STILL FAIL/DEFERRED with partial progress → P5h+2.d Mechanism-only outcome (Mechanism PASS, Acceptance PP=512 PASS / PP=128 FAIL)** — see `docs/p5h+2-b-close-out.md` § 9-10 and `docs/p5h+2-d-close-out.md`. P5h+2.c scheduler ERROR fix shipped + verified solid at production scale during P5h+2.d Stage 1 (0 ERROR across 18 cells on MoE 35B). P5h+2.d Mechanism gate `strong_yes` confirms cooldown-sensitive (H1-family-consistent) thermal mechanism is real and PP=512 is restored by cd=120s; PP=128 within-sweep CI residual 4.7% is NOT thermal at sweep-boundary scale and survives cooldown. Next phase: **P5h+2.e candidate** investigating PP=128-specific small-batch / preheat-topology residual (Codex round-1 ranked H1.c preheat-topology > H_small_batch > H2 MLX-state-decay).
 
 ---
 
@@ -155,12 +155,13 @@ Extends MEMORY.md with new entry `project_p5i_c_phase_0_findings.md` documenting
 ## § 9 Next phase
 
 1. ~~**P5h+2.b brainstorm** — Boss + Codex review questions doc → spec → plan → execute → close-out envelope at PASS.~~ **CLOSED FAIL/DEFERRED** (initial attempt + post-P5h+2.c re-attempt both fail ≤±2% gate; see `docs/p5h+2-b-close-out.md` § 9-10).
-2. **P5h+2.d thermal investigation** — per Codex round-4 Option α: Stage 1 non-sudo protocol probe (cooldown / PP order / interval matrix) → Stage 2 sudo powermetrics (Boss-approved rule required) → second-tier omlx control comparison. Predeclared success criteria (strong/weak/escalate) defined in P5h+2.b close-out § 10.3.
-3. **Phase 1 brainstorm (parallel allowed; γ-lite)** — design Phase 1 around `gather_qmm_gate_up` candidate; implementation/acceptance still gated on envelope PASS.
-4. After P5h+2.d PASS (envelope ≤ ±2% restored):
-   - Re-run Phase 0 ironmlx production cells with fixed protocol; recompute envelope; backfill § 1 criterion #4 PASS
+2. ~~**P5h+2.d thermal investigation** — per Codex round-4 Option α: Stage 1 non-sudo protocol probe → Stage 2 sudo powermetrics → second-tier omlx control comparison.~~ **CLOSED Mechanism-only** (Mechanism gate `strong_yes`; PP=512 envelope PASS at cd=120s; PP=128 envelope FAIL at cd=120s — within-CI 4.7% residual is NOT thermal at sweep-boundary scale). Stage 2 sudo powermetrics + full T4 omlx control deviated to **δ T4 PP=128-only diagnostic** per Codex round-1 of Stage 1 review. See `docs/p5h+2-d-close-out.md`.
+3. **Phase 1 brainstorm γ-lite** — design committed at `241d476` (`docs/superpowers/specs/2026-05-25-ironmlx-p5i-c-phase-1-gather-qmm-gate-up-design.md`). Phase 1 implementation **REMAINS BLOCKED**: cannot start performance verification, cannot claim `ironmlx >= 1.10 * omlx`, cannot substitute PP=512 PASS for PP=128 FAIL.
+4. **P5h+2.e candidate (next phase)** — PP=128-specific small-batch / preheat-topology investigation. Codex round-1 priority: H1.c preheat topology mismatch (add PP=128 same-shape preheat) > H_small_batch + prompt/routing variance (pin nonce, surface routing/expert occupancy stats) > H2 MLX-state-decay (fresh-spawn-per-run control). Future observations REQUIRED: PP=128 same-shape preheat, fresh-spawn-per-run, fixed/reproducible prompt nonce, routing/expert occupancy stats, post-trim plateau jitter. **Do NOT add post-hoc exclusion rules to make PP=128 pass the gate.**
+5. After P5h+2.e PASS (envelope ≤ ±2% restored for BOTH PPs):
+   - Re-run Phase 0 ironmlx production cells with the resolved protocol; recompute envelope; backfill § 1 criterion #4 PASS
    - Recompute vs-omlx delta with confidence
-   - Phase 1 implementation may proceed
+   - Phase 1 implementation may proceed per spec § 6 G1-G4
 
 ---
 

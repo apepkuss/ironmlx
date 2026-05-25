@@ -31,6 +31,8 @@
 //!     "same_spawn_per_pp"`, default `"phase0_current"`
 //!   * `P5I_C_LOGGING_MODE` — `"default_profile"|"quiet_acceptance"|
 //!     "buffered_profile"`, default `"default_profile"`
+//!   * `P5I_C_INTER_RUN_COOLDOWN_SECS` — iron-bench `--inter-run-cooldown-secs N`
+//!     for measured cells only (NOT applied to preheat), default `"0"`.
 //!
 //! Run example (one cell, legacy behavior preserved with defaults):
 //!   P5I_C_REPEAT_INDEX=1 P5I_C_MODE=probe \
@@ -464,6 +466,11 @@ fn build_iron_args(model_dir: &str, pp: i32, runs: usize, mode: &str) -> Vec<Str
     ];
     if mode == "probe" {
         iron_args.push("--capture-server-request-id".into());
+    }
+    let cooldown = env_or("P5I_C_INTER_RUN_COOLDOWN_SECS", "0");
+    if cooldown != "0" {
+        iron_args.push("--inter-run-cooldown-secs".into());
+        iron_args.push(cooldown);
     }
     iron_args
 }

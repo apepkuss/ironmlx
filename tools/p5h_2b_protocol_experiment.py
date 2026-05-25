@@ -34,6 +34,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -44,30 +45,76 @@ TOOLS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOLS_DIR.parent
 
 
-def check_no_scheduler_errors(server_log_path: Path, allow_server_errors: bool) -> None:
-    """Acceptance precondition per Codex round-3 design question #3.
+# Allow-list per P5h+2.d spec § 7.1. The substrings reflect *anticipated*
+# benign WARN classes; the ironmlx server's current `warn!()` callers (scheduler
+# evict/step, metal capture, self_qmm tile fallback, preheat wall underrun) do
+# NOT yet match any of these substrings. T2 implementer must surface and
+# triage the non-allow-listed WARN lines (written to server_log_scan.json) and
+# extend this list with substrings of the actual benign WARNs observed before
+# treating them as expected.
+ALLOWLISTED_WARN_SUBSTRINGS = (
+    "[tracing]",
+    "KVCache",
+    "buffer-resize",
+    "mlx::eval",
+)
 
-    Inspects server.log for `step illegal in <phase> phase` ERROR lines
-    (production scheduler phase-guard violations). Default-deny: any
-    such ERROR aborts the sweep + preserves the artifact directory.
-    Diagnostic experiments wanting to allow these ERRORs explicitly set
-    --allow-server-errors.
+
+def _classify_level(line: str) -> str | None:
+    """Extract the tracing-format level token from a server.log line.
+
+    Tracing default format: `<ISO timestamp> <SPACES> <LEVEL> <target>: <message>`
+    where LEVEL is one of TRACE / DEBUG / INFO / WARN / ERROR.
+
+    Returns the level token if it is one of the known levels; otherwise None.
     """
-    if allow_server_errors:
-        return
+    parts = line.split(maxsplit=3)
+    if len(parts) < 2:
+        return None
+    candidate = parts[1]
+    if candidate in ("TRACE", "DEBUG", "INFO", "WARN", "ERROR"):
+        return candidate
+    return None
+
+
+def scan_server_log(server_log_path: Path, allow_server_errors: bool) -> dict:
+    """P5h+2.d Rule D server-log scan.
+
+    Any ERROR line hard-fails by default. WARN lines are split into
+    allow-listed vs non-allow-listed; non-allow-listed WARNs are surfaced for
+    human review but do not auto-drop the cell.
+    """
+    scan = {
+        "path": str(server_log_path),
+        "error_count": 0,
+        "error_lines": [],
+        "allowlisted_warn_count": 0,
+        "non_allowlisted_warn_count": 0,
+        "non_allowlisted_warn_lines": [],
+    }
     if not server_log_path.exists():
-        return  # missing log handled by caller's downstream check
-    count = 0
-    with server_log_path.open() as f:
-        for line in f:
-            if "step illegal in" in line and "phase" in line:
-                count += 1
-    if count > 0:
+        scan["missing"] = True
+        return scan
+    with server_log_path.open(errors="replace") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.rstrip("\n")
+            level = _classify_level(line)
+            if level == "ERROR":
+                scan["error_count"] += 1
+                scan["error_lines"].append(f"{line_no}: {line}")
+            elif level == "WARN":
+                if any(token in line for token in ALLOWLISTED_WARN_SUBSTRINGS):
+                    scan["allowlisted_warn_count"] += 1
+                else:
+                    scan["non_allowlisted_warn_count"] += 1
+                    scan["non_allowlisted_warn_lines"].append(f"{line_no}: {line}")
+    if scan["error_count"] > 0 and not allow_server_errors:
+        preview = "\n".join(scan["error_lines"][:5])
         raise SystemExit(
-            f"{server_log_path}: {count} `step illegal in <phase>` ERROR lines detected. "
-            "Acceptance precondition VIOLATED (Codex round-3 design question #3). "
-            "Re-run with --allow-server-errors to override for diagnostic experiments."
+            f"{server_log_path}: {scan['error_count']} ERROR lines detected. "
+            f"Rule D hard-fail. First lines:\n{preview}"
         )
+    return scan
 
 
 def run_one_repeat(args: argparse.Namespace, repeat: int) -> dict[str, Path]:
@@ -87,6 +134,8 @@ def run_one_repeat(args: argparse.Namespace, repeat: int) -> dict[str, Path]:
             "P5I_C_PREHEAT_RUNS": str(args.preheat_runs),
         }
     )
+    if args.inter_run_cooldown_secs > 0:
+        env["P5I_C_INTER_RUN_COOLDOWN_SECS"] = str(args.inter_run_cooldown_secs)
     cmd = [
         "cargo",
         "test",
@@ -124,7 +173,13 @@ def run_one_repeat(args: argparse.Namespace, repeat: int) -> dict[str, Path]:
         if dst.exists():
             shutil.rmtree(dst)
         shutil.move(str(src), str(dst))
-        check_no_scheduler_errors(dst / "server.log", args.allow_server_errors)
+        scan = scan_server_log(dst / "server.log", args.allow_server_errors)
+        (dst / "server_log_scan.json").write_text(json.dumps(scan, indent=2))
+        if scan["non_allowlisted_warn_count"] > 0:
+            print(
+                f"  WARN review required for {dst}: "
+                f"{scan['non_allowlisted_warn_count']} non-allow-listed WARN lines"
+            )
         cell_map[pp] = dst
     return cell_map
 
@@ -138,12 +193,36 @@ def run_envelope(
         return
     if args.repeats < 3:
         raise SystemExit("--repeats must be >=3 unless --skip-envelope is set")
+    # Parse runs-per-pp string ("128:15,512:15" -> {128:15, 512:15})
+    runs_map: dict[int, int] = {}
+    for entry in args.runs_per_pp.split(","):
+        if ":" not in entry:
+            raise SystemExit(
+                f"--runs-per-pp entry {entry!r} is missing ':' separator "
+                "(expected format: '128:15,512:15')"
+            )
+        pp_s, n_s = entry.split(":", 1)
+        try:
+            runs_map[int(pp_s.strip())] = int(n_s.strip())
+        except ValueError as exc:
+            raise SystemExit(
+                f"--runs-per-pp entry {entry!r} has non-integer field: {exc} "
+                "(expected format: '128:15,512:15')"
+            ) from exc
+
     for pp in args.pps.split(","):
         repeat_csvs = [
             str(cell_map_per_repeat[r - 1][pp] / "bench.csv")
             for r in range(1, args.repeats + 1)
         ]
         out_json = Path(f"{args.out_base}-{args.exp_id}-pp{pp}-envelope.json")
+        try:
+            expected_runs_for_pp = runs_map[int(pp)]
+        except KeyError as exc:
+            raise SystemExit(
+                f"PP={pp} appears in --pps but not in --runs-per-pp {args.runs_per_pp!r} "
+                "(every PP must have an explicit runs count)"
+            ) from exc
         cmd = [
             sys.executable,
             str(TOOLS_DIR / "p5i_c_pp_tps_envelope.py"),
@@ -151,6 +230,8 @@ def run_envelope(
             pp,
             "--out-json",
             str(out_json),
+            "--expected-runs",
+            str(expected_runs_for_pp),
         ]
         for csv_path in repeat_csvs:
             cmd.extend(["--repeat-csv", csv_path])
@@ -193,8 +274,15 @@ def main() -> None:
         "--allow-server-errors",
         action="store_true",
         default=False,
-        help="Allow `step illegal in <phase>` server ERROR lines (default: abort sweep). "
-        "Use for diagnostic experiments where scheduler errors are expected.",
+        help="Allow server ERROR lines (default: abort sweep). "
+        "Use for diagnostic experiments where server errors are expected.",
+    )
+    p.add_argument(
+        "--inter-run-cooldown-secs",
+        type=int,
+        default=0,
+        help="iron-bench --inter-run-cooldown-secs N for measured cells only "
+        "(NOT applied to preheat). Default 0. Per P5h+2.d spec § 3.1.",
     )
     args = p.parse_args()
 

@@ -74,6 +74,7 @@ pub async fn run_cell(
     runs: usize,
     capture_request_id: bool,
     capture_run_timestamps: bool,
+    inter_run_cooldown_secs: u64,
     tokenizer: &Tokenizer,
 ) -> Result<CellResult> {
     eprintln!("[{target_name}] PP={pp} TG={tg}: warmup x{warmup} ...");
@@ -121,6 +122,10 @@ pub async fn run_cell(
             run_start_unix_ns,
             run_end_unix_ns,
         });
+
+        if inter_run_cooldown_secs > 0 && i + 1 < runs {
+            tokio::time::sleep(std::time::Duration::from_secs(inter_run_cooldown_secs)).await;
+        }
     }
 
     Ok(CellResult {

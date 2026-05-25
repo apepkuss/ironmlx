@@ -30,17 +30,17 @@ from statistics import median
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from p5h_2a_se_analysis import bootstrap_median_ci  # noqa: E402
 
-EXPECTED_RUNS: dict[int, int] = {128: 7, 512: 15}
+# Legacy default; can be overridden via --expected-runs at call sites
+# (P5h+2.d uses 15 for both PPs).
+DEFAULT_EXPECTED_RUNS: dict[int, int] = {128: 7, 512: 15}
 
 
-def load_pp_tps(csv_path: Path, pp: int) -> list[float]:
+def load_pp_tps(csv_path: Path, pp: int, expected_runs: int) -> list[float]:
     """Read pp_tps column from iron-bench CSV; hard-fail on shape mismatch.
 
     Validates: pp_target == pp on every row, pp_tps is finite-float, row count
-    matches EXPECTED_RUNS[pp].
+    matches expected_runs.
     """
-    if pp not in EXPECTED_RUNS:
-        raise SystemExit(f"unexpected pp={pp}; expected {sorted(EXPECTED_RUNS)}")
     if not csv_path.exists():
         raise SystemExit(f"{csv_path}: not found")
     rows: list[float] = []
@@ -66,15 +66,16 @@ def load_pp_tps(csv_path: Path, pp: int) -> list[float]:
             if tps <= 0:
                 raise SystemExit(f"{csv_path}:{line_no}: non-positive pp_tps={tps}")
             rows.append(tps)
-    expected = EXPECTED_RUNS[pp]
-    if len(rows) != expected:
+    if len(rows) != expected_runs:
         raise SystemExit(
-            f"{csv_path}: expected {expected} rows for PP={pp}, got {len(rows)}"
+            f"{csv_path}: expected {expected_runs} rows for PP={pp}, got {len(rows)}"
         )
     return rows
 
 
-def compute_pp_tps_envelope(repeat_csvs: list[Path], pp: int) -> dict:
+def compute_pp_tps_envelope(
+    repeat_csvs: list[Path], pp: int, expected_runs: int
+) -> dict:
     """Per-repeat medians + within bootstrap CI95 + between-sweep half-range.
 
     Final envelope = MAX(within CI95 half-width max, between half-range pct).
@@ -84,10 +85,27 @@ def compute_pp_tps_envelope(repeat_csvs: list[Path], pp: int) -> dict:
         raise SystemExit("need >=3 repeat-csv inputs for between-sweep envelope")
     per_repeat = []
     for path in repeat_csvs:
-        tps = load_pp_tps(path, pp)
+        tps = load_pp_tps(path, pp, expected_runs)
         med = median(tps)
         rng = random.Random(42)
         ci = bootstrap_median_ci(tps, subset_size=len(tps), iterations=1000, rng=rng)
+        # P5h+2.d spec § 4.1: per-repeat diagnostic fields (no gate logic).
+        # NOTE: when len(tps) == 3, first_3 and last_3 are identical,
+        # so trailing_slowdown_pct is always 0% and fast_start_drop_pct
+        # reduces to (max(tps) / median(tps) - 1) * 100. Diagnostic fields
+        # are most meaningful when len(tps) >= 6.
+        if len(tps) >= 3:
+            first_3 = tps[:3]
+            last_3 = tps[-3:]
+            first_3_med = median(first_3)
+            last_3_med = median(last_3)
+            trailing_slowdown_pct = (last_3_med / first_3_med - 1) * 100
+            fast_start_drop_pct = (max(first_3) / last_3_med - 1) * 100
+        else:
+            first_3_med = None
+            last_3_med = None
+            trailing_slowdown_pct = None
+            fast_start_drop_pct = None
         per_repeat.append(
             {
                 "path": str(path),
@@ -96,6 +114,10 @@ def compute_pp_tps_envelope(repeat_csvs: list[Path], pp: int) -> dict:
                 "ci95_low": ci["ci95_low"],
                 "ci95_high": ci["ci95_high"],
                 "ci95_half_width_pct": ci["ci95_half_width_pct"],
+                "first_3_runs_median_pp_tps": first_3_med,
+                "last_3_runs_median_pp_tps": last_3_med,
+                "trailing_slowdown_pct": trailing_slowdown_pct,
+                "fast_start_drop_pct": fast_start_drop_pct,
             }
         )
 
@@ -163,11 +185,29 @@ def main() -> None:
     )
     p.add_argument("--pp", type=int, required=True)
     p.add_argument("--out-json", type=Path, required=True)
+    p.add_argument(
+        "--expected-runs",
+        type=int,
+        default=None,
+        help="Per-PP expected row count (overrides DEFAULT_EXPECTED_RUNS). "
+        "Required when PP not in default map (e.g., P5h+2.d uses 15 for both).",
+    )
     args = p.parse_args()
-    ironmlx = compute_pp_tps_envelope(args.repeat_csv, args.pp)
+    expected = (
+        args.expected_runs
+        if args.expected_runs is not None
+        else DEFAULT_EXPECTED_RUNS.get(args.pp)
+    )
+    if expected is None:
+        raise SystemExit(
+            f"--expected-runs required for pp={args.pp} (no default registered)"
+        )
+    ironmlx = compute_pp_tps_envelope(args.repeat_csv, args.pp, expected)
     result: dict = {"ironmlx": ironmlx}
     if args.compare_repeat_csv:
-        comparator = compute_pp_tps_envelope(args.compare_repeat_csv, args.pp)
+        comparator = compute_pp_tps_envelope(
+            args.compare_repeat_csv, args.pp, expected
+        )
         result["comparator"] = comparator
         result["delta_vs_comparator"] = compute_vs_omlx_delta(
             ironmlx, comparator, args.pp

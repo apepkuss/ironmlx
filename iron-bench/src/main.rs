@@ -89,6 +89,14 @@ struct Args {
     /// not fixed positions. Per P5h+2.b spec § 6.
     #[arg(long, default_value_t = false)]
     pub capture_run_timestamps: bool,
+
+    /// Sleep N seconds between measured runs in sequential (v1) mode.
+    /// Does NOT sleep during preheat or warmup; does NOT sleep after the
+    /// final measured run. Default 0 (no behavior change).
+    /// Per P5h+2.d spec § 3.1 — production-grade flag for any sweep where
+    /// thermal isolation between consecutive measured runs matters.
+    #[arg(long, default_value_t = 0u64)]
+    pub inter_run_cooldown_secs: u64,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -152,6 +160,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    if args.concurrent.is_some() && args.inter_run_cooldown_secs != 0 {
+        anyhow::bail!(
+            "--inter-run-cooldown-secs is incompatible with concurrent (v2) mode \
+             (per P5h+2.d spec § 3.1): cooldown semantics are defined only for \
+             the sequential measured-run loop. Set --inter-run-cooldown-secs 0 \
+             when using --concurrent."
+        );
+    }
+
     match args.concurrent {
         None => eprintln!(
             "iron-bench v1 (sequential): {} target(s), prompt_len={:?}, max_tokens={}, runs={}, warmup={}",
@@ -212,6 +229,7 @@ async fn main() -> Result<()> {
                         args.runs,
                         args.capture_server_request_id,
                         args.capture_run_timestamps,
+                        args.inter_run_cooldown_secs,
                         &tokenizer,
                     )
                     .await?;
