@@ -1,6 +1,6 @@
 # P5i.c Phase 0 Ranking Snapshot
 
-**Status:** measure-only close (γ-lite) per Codex round-2 — ranking PASS, production envelope FAIL/DEFERRED, Phase 1 acceptance blocked by P5h+2.b. See `docs/p5i-c-phase-0-close-out.md` for the close-out framing + P5h+2.b dependency; P5h+2.b attempted resolution FAILED; envelope still deferred.
+**Status:** measure-only close (γ-lite) per Codex round-2 — ranking PASS, production envelope FAIL/DEFERRED, Phase 1 acceptance still blocked. See `docs/p5i-c-phase-0-close-out.md` for the close-out framing + dependency chain. **2026-05-25 update:** P5h+2.b re-attempt (post-P5h+2.c scheduler fix) closed FAIL/DEFERRED with substantial improvement (counter==0 confirmed; PP=512 between-half-range 9.79%→2.16%); envelope still > ±2% gate. Next phase: **P5h+2.d thermal investigation** per Codex round-4 Option α. Ranking section below unchanged (Phase 0 probe ranking is not affected by production envelope status).
 
 **Date:** 2026-05-24
 
