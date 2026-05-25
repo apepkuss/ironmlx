@@ -73,11 +73,11 @@ These gates are evaluated separately. "Pattern eliminated" does not automaticall
 | Code | Name | Stage 1 / Stage 2 signal |
 |---|---|---|
 | H1.a | GPU thermal soak (absolute temperature rise) | Stage 2 `gpu_temp` correlates with within-sweep pp_tps drop |
-| H1.b | **Fan hysteresis / governor lag** (NEW) | Stage 2 `fan_rpm` lags pp_tps drop + Stage 1 cooldown removes pattern |
+| H1.b | **Fan hysteresis / governor lag** (NEW) | Stage 2 fan/RPM fields, if present, lag pp_tps drop + Stage 1 cooldown removes pattern; otherwise H1.b remains indeterminate |
 | H1.c | **Preheat topology mismatch** (NEW) — preheat brings PP=512 to steady state but PP=128 measured loop still in transient | Stage 1 cooldown removes pattern but only for PP=128 |
 | H2 | MLX state-decay (allocator / JIT GC) | Stage 1 cooldown ineffective; would need fresh-spawn-per-run control (NOT in P5h+2.d scope) |
 
-Stage 1 does NOT attempt H1/H2 disambiguation. Stage 2 powermetrics provides causal H1 evidence (temperature + fan time series). If H1 family is rejected after Stage 2, escalate to re-brainstorm — no P5h+2.e is predeclared (Codex round-5 Q9).
+Stage 1 does NOT attempt H1/H2 disambiguation. Stage 2 powermetrics provides causal H1 evidence (temperature + optional fan/RPM time series, depending on local plist schema). If H1 family is rejected after Stage 2, escalate to re-brainstorm — no P5h+2.e is predeclared (Codex round-5 Q9).
 
 ### § 2.3 Stage 1 driver
 
@@ -118,7 +118,7 @@ Pre-declared thresholds locked at start of Stage 1; no post-hoc adjustment (Code
 - Reject non-zero value in concurrent (v2) mode (same pattern as `--capture-server-request-id` incompatibility checks at `iron-bench/src/main.rs:134`)
 - Use async sleep in the sequential measured-run loop after each measured run except the final measured run.
 - Keep the change local to `main.rs` validation/wiring and the measured-run loop; no production runtime/model code changes.
-- Pass-through driver hook + tests: 1 iron-bench validation/timing test proving two measured runs with `N=1` include one cooldown interval; 1 driver smoke pytest in `tools/test_p5h_2b_protocol_experiment.py`.
+- Pass-through driver hook + tests: 1 iron-bench validation/timing test proving two measured runs with `N=1` include one cooldown interval; driver smoke pytest in `tools/p5h_aggregator/tests/test_p5h_2b_protocol_experiment.py`.
 
 ### § 3.3 Production-quality discipline (Codex round-5 Q12 binding)
 
@@ -153,7 +153,7 @@ Boss adds sudo rule **NOW** (before Stage 1) so Stage 2 can launch instantly whe
 
 ```
 # /etc/sudoers.d/ironmlx-powermetrics (NEW)
-xin ALL=(root) NOPASSWD: /usr/bin/powermetrics --samplers smc,gpu_power,thermal --format json -i 500 -o /tmp/p5h+2-d-*
+xin ALL=(root) NOPASSWD: /usr/bin/powermetrics --samplers gpu_power,thermal --format plist -i 500 -o /tmp/p5h+2-d-*
 ```
 
 Boss applies via `sudo visudo -f /etc/sudoers.d/ironmlx-powermetrics`. Read-only powermetrics command; low risk surface.
@@ -165,11 +165,11 @@ Stage 2 runs ONLY if Stage 1 Mechanism gate = strong/weak yes (per § 2.4). If S
 ### § 5.3 Protocol
 
 For each {PP, PP-specific BEST cooldown} cell:
-1. Launch powermetrics sidecar: `sudo powermetrics --samplers smc,gpu_power,thermal --format json -i 500 -o /tmp/p5h+2-d-stage2-pm-r${R}-pp${PP}.json &`
+1. Launch powermetrics sidecar: `sudo /usr/bin/powermetrics --samplers gpu_power,thermal --format plist -i 500 -o /tmp/p5h+2-d-stage2-pm-r${R}-pp${PP}.plist &`
 2. Spawn ironmlx server + warmup
 3. Run measured sweep (RUNS=15 with cooldown applied)
-4. Shut down ironmlx; stop powermetrics by captured PID and preserve partial JSON on failure
-5. Join via `tools/p5h_2b_thermal_overlay.py` (reuse — already tested with 4 pytests)
+4. Shut down ironmlx; stop powermetrics by captured PID and preserve partial plist on failure
+5. Join via `tools/p5h_2b_thermal_overlay.py` (reuse existing overlay; extend parser for plist output if needed)
 6. Repeat × 3 fresh-spawn repeats
 
 = 2 PPs × 3 repeats = 6 cells.
@@ -179,7 +179,7 @@ For each {PP, PP-specific BEST cooldown} cell:
 | Sub-hypothesis | Stage 2 signal |
 |---|---|
 | H1.a thermal soak | within-sweep `gpu_temp` rises monotonically; cooldown-60s recovers temp by sweep start; pp_tps drop correlates with temp threshold |
-| H1.b fan hysteresis | within-sweep `fan_rpm` lags `gpu_temp` by N seconds; pp_tps drop coincides with low-RPM window |
+| H1.b fan hysteresis | if local powermetrics plist exposes fan/RPM fields, within-sweep `fan_rpm` lags thermal rise by N seconds; if fan/RPM is absent, H1.b is recorded as indeterminate rather than failed |
 | H1.c preheat topology | preheat `gpu_temp` plateau differs from measured PP=128 vs PP=512; cooldown effect asymmetric |
 
 Pre-arranged sudo rule wording is in § 10 for Boss to apply before Stage 1 begins.
@@ -304,7 +304,7 @@ Matches P5h+2.b/c precedent.
 ```
 # /etc/sudoers.d/ironmlx-powermetrics
 # Allows passwordless powermetrics for P5h+2.d Stage 2 sudo thermal probe (read-only).
-xin ALL=(root) NOPASSWD: /usr/bin/powermetrics --samplers smc,gpu_power,thermal --format json -i 500 -o /tmp/p5h+2-d-*
+xin ALL=(root) NOPASSWD: /usr/bin/powermetrics --samplers gpu_power,thermal --format plist -i 500 -o /tmp/p5h+2-d-*
 ```
 
 Apply via `sudo visudo -f /etc/sudoers.d/ironmlx-powermetrics`. The command form is intentionally exact: Stage 2 must invoke powermetrics with the same argument order and write only to `/tmp/p5h+2-d-*`.
@@ -334,7 +334,7 @@ Phase 1 brainstorm γ-lite parallel-start:
   - `docs/p5i-c-phase-0-close-out.md` § 1 #4 (FAIL/DEFERRED awaiting this phase)
 - Reusable infra:
   - `tools/p5h_2b_protocol_experiment.py` (extend for Stage 1)
-  - `tools/p5h_2b_thermal_overlay.py` + 4 pytests (Stage 2; already tested)
+  - `tools/p5h_2b_thermal_overlay.py` (Stage 2; existing pytests plus plist parser coverage)
   - `tools/p5i_c_pp_tps_envelope.py` (extend for diagnostic fields)
   - `iron-bench` Args + runner (add cooldown flag)
 - Memory: `[project-p5h-2b-findings]` (re-attempt section; Stage 1 thermal hypothesis context), `[project-p5h-2c-findings]`, `[project-p5h-2a-findings]` (preheat protocol)
