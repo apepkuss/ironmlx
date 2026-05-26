@@ -3,8 +3,10 @@
 | Field | Value |
 | --- | --- |
 | Date | 2026-05-26 |
+| Latest smoke validation | 2026-05-27 |
 | Worktree | `/Users/xin/workspace/ironmlx-backend-moe-vl` |
 | Branch | `ironmlx-p6-moe-vl` |
+| Commit | `593d3ee feat(p6): add qwen3.5 moe vl support` |
 | Checkpoint | `~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/1e20fd8d42056f870933bf98ca6211024744f7ec` |
 
 ## Scope
@@ -27,42 +29,46 @@ numerical parity against mlx-vlm.
 
 ## Smoke Evidence
 
-All smoke commands used:
+Final smoke command:
 
 ```bash
-MLX_DIR=$HOME/.local/mlx
-MODEL=$HOME/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/1e20fd8d42056f870933bf98ca6211024744f7ec
+MLX_DIR=$HOME/.local/mlx ./scripts/p6_moe_vl_smoke.sh
 ```
 
-Observed results:
+Observed on 2026-05-27 against:
+
+- Model: `~/.ironmlx/models/models--mlx-community--Qwen3.5-35B-A3B-4bit/snapshots/1e20fd8d42056f870933bf98ca6211024744f7ec`
+- Output directory: `/tmp/ironmlx-p6-moe-vl-smoke`
+- Summary: `/tmp/ironmlx-p6-moe-vl-smoke/summary.jsonl`
+
+Smoke matrix:
 
 | Area | Result |
 | --- | --- |
 | checkpoint discovery | `mlx-community/Qwen3.5-35B-A3B-4bit` is `image-text-to-text`; config has `vision_config`; index has `vision_tower.*` |
 | real checkpoint load | `loads_qwen35_moe_vision_tower_from_real_checkpoint ... ok` |
-| single-image unary OpenAI request | HTTP 200, `finish=stop`, non-empty image description |
-| single-image SSE request | HTTP 200, 22 content chunks, non-empty image description |
-| GS chunked unary | `--prefill-chunk-size 256`, HTTP 200, non-empty output |
-| GS chunked SSE | `--prefill-chunk-size 256`, HTTP 200, 25 content chunks |
-| two-image unary request | HTTP 200, non-empty two-image description |
-| `--b-max 2` mixed concurrency | concurrent `VL + VL + text-only`, all HTTP 200 |
+| single-image unary OpenAI request | HTTP 200, `finish=stop`, `prompt_tokens=322`, `completion_tokens=22`, non-empty cat image description |
+| single-image SSE request | HTTP 200, `finish=stop`, 22 content chunks, non-empty cat image description |
+| multi-image unary request | HTTP 200, `finish=length`, `prompt_tokens=545`, `completion_tokens=48`, non-empty multi-image description |
+| GS chunked SSE | `--prefill-chunk-size 256`, HTTP 200, `finish=length`, 25 content chunks |
+| `--b-max 2` mixed concurrency | concurrent `text-only + VL cats + VL kitchen`, all HTTP 200 |
+| concurrent text-only request | HTTP 200, `finish=stop`, response `Reliable systems work well.` |
+| concurrent VL cats request | HTTP 200, `finish=stop`, non-empty cat image description |
+| concurrent VL kitchen request | HTTP 200, `finish=stop`, non-empty kitchen image description |
 | 2-image semantic script | `p6_6_semantic_check.py --n-images 2`: PASS |
 | 3-image semantic script | `p6_6_semantic_check.py --n-images 3`: PASS |
 
 Semantic script reports were written during validation to:
 
-- `/tmp/ironmlx_moe_vl_p6_6_semantic_report.md`
-- `/tmp/ironmlx_moe_vl_p6_6_n3_semantic_report.md`
+- `/tmp/ironmlx-p6-moe-vl-smoke/p6_6_semantic_n2.md`
+- `/tmp/ironmlx-p6-moe-vl-smoke/p6_6_semantic_n3.md`
 
-The final repeatable smoke command also passed after the review-fix update
-that removed global process killing from the semantic script:
+Semantic details:
 
-```bash
-SKIP_BUILD=1 BASE_PORT=18600 OUT_DIR=/tmp/ironmlx-p6-moe-vl-smoke-after-review-fix \
-  ./scripts/p6_moe_vl_smoke.sh
-```
-
-Summary output: `/tmp/ironmlx-p6-moe-vl-smoke-after-review-fix/summary.jsonl`.
+| Report | Verdict | Keys matched |
+| --- | --- | --- |
+| N=2 | PASS | image 0: kitchen/pot/person; image 1: street/construction/person |
+| N=3 | PASS | image 0: kitchen/pot/person; image 1: street/construction/person; image 2: forest/bench/person |
 
 ## Rust Verification
 
@@ -118,7 +124,7 @@ so they do not get confused with MoE VL regressions.
 
 | Command | Failure | Classification |
 | --- | --- | --- |
-| `MLX_DIR=$HOME/.local/mlx cargo test --workspace` | `mlx` crate test `p2c_io` link failure due missing `gguf_*` symbols | dependency/environment link issue |
+| `MLX_DIR=$HOME/.local/mlx cargo test --workspace` | `mlx` crate test `p2c_io` link failure due missing `gguf_*` symbols; reproduced on clean `ironmlx-p5h+2-e-pp128-investigation` baseline | dependency/environment link issue |
 | `MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx` | `tests/p3b1_mrope.rs` has 3 fixture shape failures (`expected [1,8,32]`, got `[1,8,64]`) | documented existing HEAD baseline issue in `docs/p5h+2-c-close-out.md` |
 | `item3_semantic_check.py` | not run because `/tmp/p6vl_test_imgs` fixture directory is absent | missing external fixture |
 
