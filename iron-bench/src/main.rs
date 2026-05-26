@@ -81,6 +81,29 @@ struct Args {
     /// Join key). Markdown + JSON outputs are unaffected by this flag.
     #[arg(long, default_value_t = false)]
     pub capture_server_request_id: bool,
+
+    /// Append `run_start_unix_ns` and `run_end_unix_ns` columns to CSV
+    /// output. When off, CSV is byte-identical to current output. When
+    /// combined with `--capture-server-request-id`, both column families
+    /// appear; downstream parsers MUST use header names (csv::DictReader),
+    /// not fixed positions. Per P5h+2.b spec § 6.
+    #[arg(long, default_value_t = false)]
+    pub capture_run_timestamps: bool,
+
+    /// Sleep N seconds between measured runs in sequential (v1) mode.
+    /// Does NOT sleep during preheat or warmup; does NOT sleep after the
+    /// final measured run. Default 0 (no behavior change).
+    /// Per P5h+2.d spec § 3.1 — production-grade flag for any sweep where
+    /// thermal isolation between consecutive measured runs matters.
+    #[arg(long, default_value_t = 0u64)]
+    pub inter_run_cooldown_secs: u64,
+
+    /// Override the synthetic-prompt nonce seed in sequential mode. When
+    /// unset, nonce generation remains time-based. Used by P5h+2.e T2.A to
+    /// make measured prompt sequences reproducible across repeats while still
+    /// varying nonce by warmup/run index.
+    #[arg(long)]
+    pub nonce_seed: Option<u64>,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -99,6 +122,16 @@ fn parse_target(s: &str) -> std::result::Result<(String, String), String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.capture_run_timestamps && args.concurrent.is_some() {
+        // Concurrent CSV (render_csv_concurrent) has a different header schema
+        // with no run_start/run_end columns. P5h+2.b timestamp capture targets
+        // sequential mode only (per spec § 6 + memory [feedback_serial_perf_experiments]).
+        anyhow::bail!(
+            "--capture-run-timestamps is incompatible with --concurrent: \
+             run_start_unix_ns/run_end_unix_ns are defined only for v1 sequential CSV rows."
+        );
+    }
 
     if args.capture_server_request_id {
         // Per Codex plan review v21 P2 #2: reject concurrent mode entirely.
@@ -132,6 +165,22 @@ async fn main() -> Result<()> {
                  (per P5h plan v20 P1 #2)."
             );
         }
+    }
+
+    if args.concurrent.is_some() && args.inter_run_cooldown_secs != 0 {
+        anyhow::bail!(
+            "--inter-run-cooldown-secs is incompatible with concurrent (v2) mode \
+             (per P5h+2.d spec § 3.1): cooldown semantics are defined only for \
+             the sequential measured-run loop. Set --inter-run-cooldown-secs 0 \
+             when using --concurrent."
+        );
+    }
+
+    if args.concurrent.is_some() && args.nonce_seed.is_some() {
+        anyhow::bail!(
+            "--nonce-seed is incompatible with concurrent (v2) mode: fixed nonce \
+             sequence semantics are defined only for v1 sequential warmup/measured runs."
+        );
     }
 
     match args.concurrent {
@@ -193,6 +242,9 @@ async fn main() -> Result<()> {
                         args.warmup,
                         args.runs,
                         args.capture_server_request_id,
+                        args.capture_run_timestamps,
+                        args.inter_run_cooldown_secs,
+                        args.nonce_seed,
                         &tokenizer,
                     )
                     .await?;
@@ -242,7 +294,11 @@ async fn main() -> Result<()> {
                 OutputFormat::Markdown => {
                     report::render_markdown(&seq_cells, &args.target, args.warmup)
                 }
-                OutputFormat::Csv => report::render_csv(&seq_cells, args.capture_server_request_id),
+                OutputFormat::Csv => report::render_csv(
+                    &seq_cells,
+                    args.capture_server_request_id,
+                    args.capture_run_timestamps,
+                ),
                 OutputFormat::Json => report::render_json(&seq_cells, &args.target, args.warmup),
             }
         }

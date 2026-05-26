@@ -43,6 +43,17 @@ use crate::Result;
 /// overhead with no kernel-level benefit.
 const SORTED_ROUTING_MIN_BS_K: i32 = 512;
 
+#[cfg(feature = "p5h-profile")]
+fn expert_occupancy_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IRONMLX_EXPERT_OCCUPANCY_LOG")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
 /// Source legacy gate + up weights, consumed once during lazy fused-weight
 /// build then dropped to release the 2 × (E × I × H/8) buffer per layer.
 struct LazyGateUpSource {
@@ -503,6 +514,70 @@ impl SparseMoeBlock {
                     // default broadcast branch already returned None above).
                     if crate::core::p5h::is_measurement_eval_probes_active() {
                         mlx::transforms::eval(&[&sorted_x_4d, &sorted_topk_2d, &sort_perm])?;
+                    }
+                    if expert_occupancy_log_enabled() {
+                        let expert_ids = sorted_topk_2d
+                            .to_vec::<u32>()
+                            .context("SparseMoeBlock: expert occupancy to_vec")?;
+                        let num_experts_usize = usize::try_from(num_experts)
+                            .context("SparseMoeBlock: num_experts usize conversion")?;
+                        let mut counts = vec![0_usize; num_experts_usize];
+                        for expert_id in expert_ids {
+                            let expert = expert_id as usize;
+                            if expert >= counts.len() {
+                                return Err(anyhow!(
+                                    "SparseMoeBlock: expert occupancy id {expert} out of range \
+                                     0..{}",
+                                    counts.len()
+                                ));
+                            }
+                            counts[expert] += 1;
+                        }
+                        let nonempty_experts = counts.iter().filter(|count| **count > 0).count();
+                        let max_tokens_per_expert = counts.iter().copied().max().unwrap_or(0);
+                        let mut nonempty_counts: Vec<usize> =
+                            counts.iter().copied().filter(|count| *count > 0).collect();
+                        nonempty_counts.sort_unstable();
+                        let p95_tokens_per_expert = if nonempty_counts.is_empty() {
+                            0
+                        } else {
+                            let idx = ((nonempty_counts.len() * 95).saturating_sub(1)) / 100;
+                            nonempty_counts[idx]
+                        };
+                        let total_routes = counts.iter().sum::<usize>() as f64;
+                        let entropy_bits = if total_routes > 0.0 {
+                            counts
+                                .iter()
+                                .filter(|count| **count > 0)
+                                .map(|count| {
+                                    let p = *count as f64 / total_routes;
+                                    -p * p.log2()
+                                })
+                                .sum::<f64>()
+                        } else {
+                            0.0
+                        };
+                        let mut top5: Vec<(usize, usize)> = counts
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(expert, count)| (*count > 0).then_some((expert, *count)))
+                            .collect();
+                        top5.sort_by(|left, right| {
+                            right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+                        });
+                        top5.truncate(5);
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        std::hash::Hash::hash(&top5, &mut hasher);
+                        let top5_hash = std::hash::Hasher::finish(&hasher);
+                        tracing::info!(
+                            target: "moe_expert_occupancy",
+                            "[p5h+2-e moe_occupancy] layer={layer_idx} bs={bs} k={k} \
+                             bs_k={bs_k} nonempty_experts={nonempty_experts} \
+                             max_tokens_per_expert={max_tokens_per_expert} \
+                             p95_tokens_per_expert={p95_tokens_per_expert} \
+                             entropy_bits={entropy_bits:.6} top5_hash={top5_hash:016x} \
+                             top5={top5:?}"
+                        );
                     }
                     Ok(Some((sorted_x_4d, sorted_topk_2d, sort_perm)))
                 },

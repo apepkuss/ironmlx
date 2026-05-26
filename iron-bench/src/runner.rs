@@ -28,6 +28,12 @@ pub struct RunOutcome {
     pub run_idx: usize,
     pub prompt_tokens_local: usize,
     pub result: RequestResult,
+    /// Unix-ns wall-clock at request-send start. `Some` iff
+    /// `--capture-run-timestamps` was passed (P5h+2.b spec § 6).
+    pub run_start_unix_ns: Option<u64>,
+    /// Unix-ns wall-clock at response-complete. `Some` iff
+    /// `--capture-run-timestamps` was passed (P5h+2.b spec § 6).
+    pub run_end_unix_ns: Option<u64>,
 }
 
 /// (v2 concurrent mode) One worker iteration's outcome.
@@ -67,11 +73,14 @@ pub async fn run_cell(
     warmup: usize,
     runs: usize,
     capture_request_id: bool,
+    capture_run_timestamps: bool,
+    inter_run_cooldown_secs: u64,
+    nonce_seed_override: Option<u64>,
     tokenizer: &Tokenizer,
 ) -> Result<CellResult> {
     eprintln!("[{target_name}] PP={pp} TG={tg}: warmup x{warmup} ...");
     for w in 0..warmup {
-        let nonce = nonce_seed() ^ (w as u64);
+        let nonce = warmup_nonce(nonce_seed_override, w);
         let (prompt, _) = synthesize_prompt(tokenizer, pp, nonce)?;
         let _ =
             run_chat_completion(client, target_url, model, &prompt, tg, capture_request_id).await?;
@@ -80,10 +89,20 @@ pub async fn run_cell(
     eprintln!("[{target_name}] PP={pp} TG={tg}: timed runs x{runs} ...");
     let mut outcomes = Vec::with_capacity(runs);
     for i in 0..runs {
-        let nonce = nonce_seed() ^ ((i as u64) << 8);
+        let nonce = measured_nonce(nonce_seed_override, i);
         let (prompt, prompt_tokens_local) = synthesize_prompt(tokenizer, pp, nonce)?;
+        let run_start_unix_ns = if capture_run_timestamps {
+            Some(now_unix_ns())
+        } else {
+            None
+        };
         let result =
             run_chat_completion(client, target_url, model, &prompt, tg, capture_request_id).await?;
+        let run_end_unix_ns = if capture_run_timestamps {
+            Some(now_unix_ns())
+        } else {
+            None
+        };
 
         let ttft_ms = result.timings.ttft().as_secs_f64() * 1000.0;
         let gen_secs = result.timings.gen_duration().as_secs_f64().max(1e-9);
@@ -101,7 +120,13 @@ pub async fn run_cell(
             run_idx: i,
             prompt_tokens_local,
             result,
+            run_start_unix_ns,
+            run_end_unix_ns,
         });
+
+        if inter_run_cooldown_secs > 0 && i + 1 < runs {
+            tokio::time::sleep(std::time::Duration::from_secs(inter_run_cooldown_secs)).await;
+        }
     }
 
     Ok(CellResult {
@@ -249,4 +274,43 @@ fn nonce_seed() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+fn warmup_nonce(nonce_seed_override: Option<u64>, warmup_idx: usize) -> u64 {
+    nonce_seed_override.unwrap_or_else(nonce_seed) ^ (warmup_idx as u64)
+}
+
+fn measured_nonce(nonce_seed_override: Option<u64>, run_idx: usize) -> u64 {
+    nonce_seed_override.unwrap_or_else(nonce_seed) ^ ((run_idx as u64) << 8)
+}
+
+/// Unix-ns wall-clock for `--capture-run-timestamps`. Fail-soft to 0 on clock
+/// failure (matching `nonce_seed` policy); downstream parsers treat 0 as
+/// "missing" since real timestamps are always > 0.
+fn now_unix_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests_nonce_seed {
+    use super::{measured_nonce, warmup_nonce};
+
+    #[test]
+    fn fixed_seed_measured_nonce_sequence_keeps_run_variation() {
+        let seed = Some(20260526_u64);
+        assert_eq!(measured_nonce(seed, 0), 20260526);
+        assert_eq!(measured_nonce(seed, 1), 20260526 ^ (1_u64 << 8));
+        assert_eq!(measured_nonce(seed, 14), 20260526 ^ (14_u64 << 8));
+    }
+
+    #[test]
+    fn fixed_seed_warmup_nonce_sequence_uses_warmup_index() {
+        let seed = Some(42_u64);
+        assert_eq!(warmup_nonce(seed, 0), 42);
+        assert_eq!(warmup_nonce(seed, 1), 43);
+        assert_eq!(warmup_nonce(seed, 7), 45);
+    }
 }

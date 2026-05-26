@@ -2103,6 +2103,120 @@ mod tests {
         }
     }
 
+    /// Minimal fake model for P5h+2.c scheduler unit tests.  Implements
+    /// `Model` + `DenseVlMethods` without requiring a real Qwen35 weight
+    /// file.  `batched_prefill` returns synthetic logits that always argmax
+    /// to token 3; all other forward paths are unreachable from unit tests.
+    struct P5h2cFakeModel;
+
+    impl crate::core::model::Model for P5h2cFakeModel {
+        fn make_cache(
+            &self,
+            _batch: i32,
+            _cap: i32,
+            _dtype: mlx::Dtype,
+        ) -> crate::Result<Vec<crate::nn::LayerCache>> {
+            Ok(Vec::new())
+        }
+
+        fn forward_on(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("P5h+2.c unit tests never call decode forward")
+        }
+
+        fn batched_prefill(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _attention_mask: &mlx::Array,
+            _linear_attention_mask: &mlx::Array,
+            _per_row_lens: &[i32],
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            let b = input_ids.shape().as_slice()[0] as usize;
+            let vocab = 8_usize;
+            let mut flat = vec![0.0_f32; b * vocab];
+            for row in 0..b {
+                flat[row * vocab + 3] = 100.0;
+            }
+            let logits_bv: mlx::Array = (&flat[..], &[b as i32, vocab as i32][..])
+                .try_into()
+                .expect("fake logits [B,V]");
+            logits_bv
+                .reshape(&[b as i32, 1, vocab as i32][..])
+                .map_err(|e| anyhow::anyhow!("fake logits reshape failed: {e:?}"))
+        }
+
+        fn forward_text_hidden(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("P5h+2.c unit tests never call chunk hidden forward")
+        }
+
+        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+            crate::core::memory_budget::test_meta_qwen35()
+        }
+
+        fn num_hidden_layers(&self) -> usize {
+            0
+        }
+    }
+
+    impl DenseVlMethods for P5h2cFakeModel {
+        fn batched_prefill_vl(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _attention_mask: &mlx::Array,
+            _linear_attention_mask: &mlx::Array,
+            _per_row_lens: &[i32],
+            _per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+            _image_token_id: i32,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("P5h+2.c unit tests are text-only")
+        }
+
+        fn compute_vision_embeds(
+            &self,
+            _pixel_values: &mlx::Array,
+            _grid_thw: &[(i32, i32, i32)],
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("P5h+2.c unit tests are text-only")
+        }
+
+        fn forward_vl_chunk(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _vision_embeds_slice: Option<&mlx::Array>,
+            _image_token_id: i32,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("P5h+2.c unit tests are text-only")
+        }
+    }
+
     #[test]
     fn scheduler_new_empty() {
         let s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
@@ -2818,6 +2932,65 @@ mod tests {
         assert!(
             !super::vl_image_pad_crosses_chunk_boundary(&ids2, 42, 256),
             "run [200..256] ends exactly at boundary — fits in chunk 0"
+        );
+    }
+
+    /// P5h+2.c regression: `max_new_tokens=1` requests must transition
+    /// scheduler to `Phase::Finished` after `prefill_admitted` (the first
+    /// sampled token is also the last token → request finished → no
+    /// `any_unfinished` → phase = Finished per scheduler.rs:1247-1250).
+    ///
+    /// This locks the spec invariant that the actor's
+    /// `finalize_finished_batch_if_any` helper relies on.
+    #[test]
+    fn test_max_new_tokens_1_transitions_to_finished_after_prefill() {
+        let model = P5h2cFakeModel;
+        let mut s = Scheduler::<P5h2cFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+
+        let mut req = mk_req(vec![1, 2, 3, 4]);
+        req.max_new_tokens = 1;
+        req.stop_token_ids = vec![];
+
+        let id = s.admit(req).expect("admit OK");
+        assert!(matches!(s.phase(), Phase::Admitting | Phase::Idle));
+        let events = s.prefill_admitted(&model).expect("prefill OK");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, id);
+        assert_eq!(events[0].finish_reason, Some("length"));
+        assert_eq!(
+            s.phase(),
+            Phase::Finished,
+            "max_new_tokens=1 should transition to Finished after prefill"
+        );
+    }
+
+    /// P5h+2.c regression: `step` MUST still raise an Err in
+    /// `Phase::Finished` to preserve fail-fast discipline. The actor-side
+    /// fix in P5h+2.c works AROUND this guard (via pre-event finalization)
+    /// rather than relaxing it. If this test ever passes by returning Ok,
+    /// the scheduler core semantics were silently changed.
+    #[test]
+    fn test_step_finished_phase_still_returns_err() {
+        let model = P5h2cFakeModel;
+        let mut s = Scheduler::<P5h2cFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        // Force scheduler into Finished phase (use existing test seam).
+        s.force_phase(Phase::Finished);
+        let result = s.step(&model);
+        assert!(result.is_err(), "step in Phase::Finished must return Err");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("step illegal in Finished phase"),
+            "expected `step illegal in Finished phase` in error, got: {err_msg}"
         );
     }
 }

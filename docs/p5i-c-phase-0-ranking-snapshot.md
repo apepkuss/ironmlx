@@ -1,6 +1,6 @@
 # P5i.c Phase 0 Ranking Snapshot
 
-**Status:** measure-only close (γ-lite) per Codex round-2 — ranking PASS, production envelope FAIL/DEFERRED, Phase 1 acceptance blocked by P5h+2.b. See `docs/p5i-c-phase-0-close-out.md` for the close-out framing + P5h+2.b dependency.
+**Status:** measure-only close (γ-lite) per Codex round-2 — ranking PASS; production envelope was later backfilled PASS by P5h+2.e. See `docs/p5i-c-phase-0-close-out.md` for the close-out framing + dependency chain. **2026-05-25 update:** P5h+2.b re-attempt (post-P5h+2.c scheduler fix) closed FAIL/DEFERRED with substantial improvement (counter==0 confirmed; PP=512 between-half-range 9.79%→2.16%); envelope still > ±2% gate. Next phase was **P5h+2.d thermal investigation** per Codex round-4 Option α. **2026-05-25 P5h+2.d update:** Closed **Mechanism-only** (Mechanism gate `strong_yes`; BEST cooldown=120s; PP=512 envelope PASS 0.91% / PP=128 envelope FAIL 4.71% — within-CI residual NOT thermal at sweep-boundary scale). **2026-05-26 P5h+2.e update:** Closed **Strong PASS** after small-PP acceptance threshold reconciliation; resolved protocol is equal-budget same-shape preheat plus cd=120s. PP=128 envelope 2.0099% <= 2.5% small-PP threshold; PP=512 envelope 0.3293% <= 2.0% standard threshold. See `docs/p5h+2-e-close-out.md`. Ranking section below unchanged (Phase 0 probe ranking not affected by production envelope status).
 
 **Date:** 2026-05-24
 
@@ -84,4 +84,3 @@
 |---|---|---|---|---|---|
 | 128 | 964.31 | 1053.71 | -8.48% | ±11.98% | ±3.47% |
 | 512 | 1377.46 | 2199.53 | -37.37% | ±11.88% | ±5.07% |
-
