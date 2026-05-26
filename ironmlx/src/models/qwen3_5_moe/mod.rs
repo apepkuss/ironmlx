@@ -1,7 +1,6 @@
-//! Qwen3.5 MoE model (text-only path). See spec
+//! Qwen3.5 MoE model with text and VL runtime paths. See the original text
+//! bring-up spec:
 //! `docs/superpowers/specs/2026-05-18-ironmlx-p5-qwen35-moe-design.md`.
-//!
-//! P5 D2: text-only LM path. VL + MTP intentionally out of scope.
 
 pub mod config;
 pub mod decoder_layer;

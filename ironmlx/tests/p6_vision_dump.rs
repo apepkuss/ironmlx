@@ -20,8 +20,8 @@
 use std::path::Path;
 
 use ironmlx::core::Loader;
-use ironmlx::models::qwen3_5::vision::VisionTower;
 use ironmlx::models::qwen3_5::Qwen35Config;
+use ironmlx::models::vision::VisionTower;
 
 #[test]
 #[ignore] // requires QWEN35_MODEL + PIXEL_VALUES_PATH + IRONMLX_VISION_DUMP_DIR

@@ -62,9 +62,9 @@ Runs all 15 (or 16 if `b1_p2_3c_plus_chunked_admit_mid.rs` exists) suites; logs 
 | `admit_mid`, `AdmitMidHandle` | `b1_p2_4_batched_vl::mid_admit_vl_during_text_decode` | scheduler |
 | `core/server/(openai\|anthropic\|chat_format\|mod).rs`, `cli/serve` | `p4_http_smoke` | http |
 | `core/generate.rs`, `GenerationStream` | `b1_p2_2_batched_decode` | decode |
-| `models/qwen3_5/(vision\|cross_modal\|image_processor)` | `p6_qwen35_vl_logits_match` | vl |
+| `models/(vision\|qwen3_5/(cross_modal\|image_processor)\|qwen3_5_moe)` | `p6_qwen35_vl_logits_match`, MoE-VL smoke script | vl |
 | `core/cache/` | `b1_p2_1_batched_prefill` | decode |
-| `models/qwen3_5/(model\|text_model\|config).rs` | `b1_p2_2_batched_decode`, `b1_p2_4_batched_vl::batched_vl_b2_full_vl_bit_id` | decode |
+| `models/qwen3_5/(model\|text_model\|config).rs`, `models/qwen3_5_moe/(model\|text_model\|config).rs` | `b1_p2_2_batched_decode`, `b1_p2_4_batched_vl::batched_vl_b2_full_vl_bit_id` | decode |
 
 Add new patterns by editing the `PATTERNS` table inside each script.
 

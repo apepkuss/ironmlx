@@ -74,6 +74,25 @@ impl Qwen35MoeTextModel {
         })
     }
 
+    /// Test seam — accept pre-built building blocks.
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub fn from_components(
+        embed_tokens: Embedding,
+        layers: Vec<DecoderLayerMoe>,
+        norm: RmsNorm,
+        mrope: Mrope,
+        cfg: Qwen35MoeConfig,
+    ) -> Self {
+        Self {
+            embed_tokens,
+            layers,
+            norm,
+            mrope,
+            cfg,
+        }
+    }
+
     pub fn config(&self) -> &Qwen35MoeConfig {
         &self.cfg
     }

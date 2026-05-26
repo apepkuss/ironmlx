@@ -85,9 +85,9 @@ SUITES_ALL=(
 
 declare -A PATTERNS=(
   [scheduler]='core/scheduler\.rs|core/server/scheduler_actor|admit_mid|AdmitMidHandle'
-  [vl]='models/qwen3_5/(vision|cross_modal|image_processor)|batched_vl'
+  [vl]='models/(vision|qwen3_5/(cross_modal|image_processor)|qwen3_5_moe)|batched_vl'
   [http]='core/server/(openai|anthropic|chat_format|mod)\.rs|cli/serve'
-  [decode]='core/generate\.rs|GenerationStream|core/cache/|models/qwen3_5/(model|text_model)\.rs'
+  [decode]='core/generate\.rs|GenerationStream|core/cache/|models/(qwen3_5|qwen3_5_moe)/(model|text_model)\.rs'
 )
 
 declare -A AREA_TO_SUITES_VAR=(

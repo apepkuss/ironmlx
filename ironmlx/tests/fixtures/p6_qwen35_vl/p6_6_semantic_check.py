@@ -12,7 +12,7 @@ Usage:
     MLX_DIR=$HOME/.local/mlx \\
     QWEN35_MODEL=/path/to/model \\
     ~/.venvs/mlxvlm-ref/bin/python p6_6_semantic_check.py \\
-        --out /path/to/p6_6_semantic_report.md [--n-images 3]
+        --out /path/to/p6_6_semantic_report.md [--n-images 3] [--model-name qwen3_5]
 """
 from __future__ import annotations
 
@@ -55,14 +55,20 @@ KEYS_PER_IMAGE = {
 MIN_KEYS_PER_IMAGE = 2  # >= 2 / 3 per image
 
 
+def port_in_use(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2):
+            return True
+    except (ConnectionRefusedError, OSError):
+        return False
+
+
 def wait_for_port(port: int, timeout_s: int = 180) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=2):
-                return True
-        except (ConnectionRefusedError, OSError):
-            time.sleep(2)
+        if port_in_use(port):
+            return True
+        time.sleep(2)
     return False
 
 
@@ -97,6 +103,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--port", type=int, default=8082)
+    parser.add_argument("--model-name", default="qwen3_5",
+                        help="OpenAI payload model field; use qwen3_5_moe for MoE checkpoints")
     parser.add_argument("--n-images", type=int, default=2,
                         help="N images: reads image_0.jpg .. image_{N-1}.jpg from multi_image/")
     args = parser.parse_args()
@@ -118,8 +126,10 @@ def main() -> int:
         print("ERROR: set MLX_DIR and QWEN35_MODEL", file=sys.stderr)
         return 1
 
-    subprocess.run(["pkill", "-KILL", "-f", "ironmlx serve"], check=False)
-    time.sleep(2)
+    if port_in_use(args.port):
+        print(f"ERROR: port {args.port} is already in use; choose a free --port",
+              file=sys.stderr)
+        return 2
 
     log_path = Path("/tmp/p6_6_server.log")
     server_log = log_path.open("w")
@@ -151,7 +161,7 @@ def main() -> int:
             })
 
         payload = {
-            "model": "qwen3_5",
+            "model": args.model_name,
             "messages": [{"role": "user", "content": content_parts}],
             "max_tokens": 800,
             "temperature": 0.0,
@@ -191,11 +201,12 @@ def main() -> int:
         print(f"[p6_6_semantic_check] {'PASS' if passed else 'FAIL'}; report -> {args.out}")
         return 0 if passed else 1
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server.kill()
+        if server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
         server_log.close()
 
 

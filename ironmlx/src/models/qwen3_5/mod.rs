@@ -1,4 +1,4 @@
-//! Qwen3.5 Dense model (text-only path).
+//! Qwen3.5 dense model with text and VL runtime paths.
 //!
 //! Hybrid 32-layer model alternating gated-full-attention (`AttnKind::Full`)
 //! and gated-delta-net linear attention (`AttnKind::Linear`) by
@@ -10,7 +10,6 @@ mod text_model;
 
 pub mod cross_modal;
 pub mod image_processor;
-pub mod vision;
 
 pub use config::{Qwen35Config, RopeParams, VisionConfig};
 pub use model::{Qwen35Model, MIN_KV_CACHE_CAP_FOR_GPU_PERF};

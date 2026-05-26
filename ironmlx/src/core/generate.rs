@@ -1,7 +1,8 @@
 //! Single-request generation driver: prefill + decode + sampler + EOS termination.
 //!
-//! Borrows a [`Qwen35Model`] and [`Tokenizer`] for the lifetime of the stream;
-//! owns the per-call cache vector and accumulating token history.
+//! Borrows a concrete [`Model`] implementation and [`Tokenizer`] for the
+//! lifetime of the stream; owns the per-call cache vector and accumulating
+//! token history.
 
 use std::sync::OnceLock;
 
@@ -1312,11 +1313,10 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
 // Non-VL methods (works for any Model) — decode path and helpers that only
 // call model.forward_on / model.forward_text_hidden (both Model trait methods).
 impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
-    /// Text-only constructor: works for any `M: Model`, including MoE models
-    /// that do not implement `DenseVlMethods`.
+    /// Text-only constructor: works for any `M: Model`.
     ///
     /// Asserts `request.pixel_values.is_none()` — returns `Err` if called with
-    /// image inputs. For VL (dense) models use `GenerationStream::new` instead.
+    /// image inputs. For VL requests use `GenerationStream::new` instead.
     pub fn new_text_only(
         model: &'m M,
         tokenizer: &'m Tokenizer,
