@@ -19,7 +19,7 @@ Design exploration of `gather_qmm_gate_up` optimization candidate (Phase 0 R1 de
 **This phase explicitly does NOT commit to:**
 - Implementation timing (gated on stricter conditions, § 6)
 - Project-level +10% target (gated on Phase 1 + Phase 2+ combined, § 2)
-- Any acceptance criteria depending on Phase 0 envelope status currently FAIL/DEFERRED
+- Any project-level acceptance criteria depending on the stable vs-omlx delta, which remains separate from the Phase 1 local gate
 
 ## § 1 Phase 0 evidence + Amdahl analysis
 
@@ -63,7 +63,7 @@ Project target `ironmlx >= 1.10 * omlx` is a multi-phase aggregate, evaluated AF
 
 ### § 2.3 Measurement protocol binding
 
-All Phase 1 measurements MUST use the accepted production protocol lineage: Phase 0 production-mode capture harness (`P5I_C_MODE=production`), `same_spawn_per_pp` lifecycle, `quiet_acceptance` logging, and the final P5h+2.e-resolved protocol once P5h+2.e closes. Until P5h+2.e backfills Phase 0 § 7 #4 PASS, Phase 1 implementation and measurement remain blocked. Mismatched protocol (e.g., bench-kernel isolated micro-benchmark) MUST NOT be used as primary evidence — only as secondary diagnostic.
+All Phase 1 measurements MUST use the accepted production protocol lineage: Phase 0 production-mode capture harness (`P5I_C_MODE=production`), `same_spawn_per_pp` lifecycle, `quiet_acceptance` logging, plus the P5h+2.e-resolved protocol from `docs/p5h+2-e-close-out.md`: cooldown `120s`, equal-budget same-shape preheat (`P5I_C_PREHEAT_PP_LIST="512,{pp}"`, `P5I_C_PREHEAT_RUNS=550`), and `tools/p5i_c_pp_tps_envelope.py` per-PP acceptance targets (`small_pp_acceptance_threshold` for PP=128; `standard_acceptance_threshold` otherwise). Mismatched protocol (e.g., bench-kernel isolated micro-benchmark or legacy single-shape 1100-run preheat) MUST NOT be used as primary evidence — only as secondary diagnostic.
 
 ## § 3 Hypothesis set — why `gate_up` is 23% (Codex round-1 Q18 binding)
 
@@ -138,7 +138,7 @@ Phase 1 implementation MAY start ONLY when ALL hold:
 
 | # | Condition |
 |---|---|
-| G1 | P5h+2.e close-out doc EXPLICITLY backfills Phase 0 § 7 #4 PASS and allows Phase 1 implementation to proceed to Boss approval |
+| G1 | P5h+2.e close-out doc (`docs/p5h+2-e-close-out.md`) EXPLICITLY backfills Phase 0 § 7 #4 PASS and allows Phase 1 implementation to proceed to Boss approval. **Satisfied by commit `9a35ae17`.** |
 | G2 | Boss explicitly approves Phase 1 implementation kick-off |
 | G3 | Phase 1 design spec (this doc) committed + Boss-approved |
 | G4 | New branch `ironmlx-p5i-c-phase-1` forked from a P5h+2.e Acceptance-passed HEAD |
@@ -146,9 +146,9 @@ Phase 1 implementation MAY start ONLY when ALL hold:
 **NOT acceptable** as sole conditions:
 - ~~P5h+2.d Stage 1 Mechanism gate = strong/weak yes alone~~ (per Codex binding; Mechanism gate is intermediate signal, not unblock authority)
 - ~~P5h+2.d Acceptance gate intermediate progress~~ (must be superseded by CLOSED P5h+2.e + Phase 0 backfilled, not in-progress)
-- ~~P5h+2.e in-progress envelope numbers without close-out~~ (must wait for the active P5h+2.e run to finish and publish final evidence)
+- ~~P5h+2.e in-progress envelope numbers without close-out~~ (satisfied only after `docs/p5h+2-e-close-out.md` exists with final evidence)
 
-During γ-lite (now until G1-G4): NO benchmarks, NO kernel changes, NO production-runtime code touched.
+During γ-lite (until G1-G4 all hold): NO benchmarks, NO kernel changes, NO production-runtime code touched.
 
 ## § 7 Sister-extension interface (Codex round-1 Q1(d) binding)
 
@@ -205,7 +205,7 @@ This spec is the primary tracked output of Phase 1 γ-lite.
 - Predecessor specs / plans:
   - `docs/superpowers/specs/2026-05-25-ironmlx-p5h+2-d-thermal-investigation-design.md` § 11 (binding parent)
   - `docs/p5i-c-phase-0-ranking-snapshot.md` (Phase 0 R1 candidate evidence)
-  - `docs/p5i-c-phase-0-close-out.md` § 1 #4 (Acceptance gate FAIL/DEFERRED awaiting P5h+2.d)
+  - `docs/p5i-c-phase-0-close-out.md` § 1 #4 (Acceptance gate backfilled PASS by P5h+2.e)
 - Current implementation surface: `ironmlx/src/models/qwen3_5_moe/sparse_moe.rs` profile path `gather_qmm_gate_up` span plus default production path; both use P5i.a T2 fused gate+up weight, but sorted-shape rank differs by build path.
 - Reference observations (NOT specifications per `[feedback-no-spec-from-competitors]`):
   - llama.cpp `ggml_metal_mul_mat_id_q4_k_f32` (gather Q4_K kernel structure)

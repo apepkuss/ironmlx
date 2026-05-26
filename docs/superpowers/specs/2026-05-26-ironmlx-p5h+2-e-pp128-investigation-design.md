@@ -1,6 +1,6 @@
 # P5h+2.e — PP=128 ironmlx-specific within-CI Residual Investigation: Design Spec
 
-**Status:** Active/in progress. Small-PP acceptance threshold reconciliation is integrated, but final close-out must wait for the active P5h+2.e run to finish.
+**Status:** Closed by `docs/p5h+2-e-close-out.md` after small-PP acceptance threshold reconciliation.
 
 **Date:** 2026-05-26.
 
@@ -10,8 +10,8 @@
 - P5h+2.d close-out (binding parent): `docs/p5h+2-d-close-out.md` § 6 (P5h+2.e direction)
 - Codex round-1 of P5h+2.d Stage 1: `reports/p5h+2-d-stage1-codex-review.md`
 - P5h+2.e brainstorm consultation (gitignored): `reports/p5h+2-e-brainstorm-codex-questions.md`
-- Phase 0 close-out: `docs/p5i-c-phase-0-close-out.md` § 1 #4 (STILL FAIL/DEFERRED)
-- Phase 1 γ-lite spec (downstream): `docs/superpowers/specs/2026-05-25-ironmlx-p5i-c-phase-1-gather-qmm-gate-up-design.md` § 2.3 (will be backfilled per § 11)
+- Phase 0 close-out: `docs/p5i-c-phase-0-close-out.md` § 1 #4 (backfilled PASS by P5h+2.e)
+- Phase 1 γ-lite spec (downstream): `docs/superpowers/specs/2026-05-25-ironmlx-p5i-c-phase-1-gather-qmm-gate-up-design.md` § 2.3 (updated per § 9)
 
 ---
 
@@ -217,7 +217,7 @@ If T2 PASSES after T1 weak/FAIL, close-out language MUST additionally identify i
 - omlx cd=120s half-speed anomaly (P5h+2.d δ observation; benchmark-protocol artifact for omlx; NOT actionable for ironmlx; documented in P5h+2.d close-out § 3.2)
 - Deep root-cause "why ironmlx needs same-shape preheat" — deferred per § 10
 - Cross-device tuning (per `[project-cross-device-tuning-deferred]`)
-- Phase 1 implementation (`gather_qmm_gate_up` optimization) — REMAINS BLOCKED until P5h+2.e closes PASS and Phase 1 spec § 6 G1-G4 satisfied
+- Phase 1 implementation (`gather_qmm_gate_up` optimization) — out of scope for this phase; P5h+2.e satisfies the envelope prerequisite, while Phase 1 still requires Boss approval and its own spec/branch gates
 
 ## § 12 Risks
 

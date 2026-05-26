@@ -2,7 +2,7 @@
 
 **Status:** **Strong PASS** per spec § 3.2 outcome matrix after small-PP acceptance threshold reconciliation. Phase 0 § 7 #4 production envelope **backfilled PASS**. Phase 1 implementation **UNBLOCKED** per spec § 9 G1.
 **Date:** 2026-05-26.
-**Branch:** `ironmlx-p5h+2-e-pp128-investigation` HEAD `<T3 commit SHA>` off `110a181`.
+**Branch:** `ironmlx-p5h+2-e-pp128-investigation` close-out commit `9a35ae17` off `110a181`.
 **Predecessor close-outs:** `docs/p5h+2-d-close-out.md` § 6 (P5h+2.e direction binding); `docs/p5i-c-phase-0-close-out.md` § 1 #4 (now backfilled).
 
 ---
@@ -49,7 +49,7 @@ Spec § 3.1 (updated 2026-05-26): PP=128 uses a small-PP acceptance threshold of
 
 `docs/p5i-c-phase-0-close-out.md` § 1 #4 row updated per spec § 8 binding:
 
-> **2026-05-26 P5h+2.e update**: PASS — restored via equal-budget same-shape preheat (`P5I_C_PREHEAT_PP_LIST="512,{pp}"`, `P5I_C_PREHEAT_RUNS=550`) plus cd=120s. PP=128 envelope 2.0099% vs small-PP acceptance threshold 2.5%; PP=512 envelope 0.545% vs standard threshold 2.0% (≥3 fresh-spawn repeats). Criterion #4 PASS.
+> **2026-05-26 P5h+2.e update**: PASS — restored via equal-budget same-shape preheat (`P5I_C_PREHEAT_PP_LIST="512,{pp}"`, `P5I_C_PREHEAT_RUNS=550`) plus cd=120s. PP=128 envelope 2.0099% vs small-PP acceptance threshold 2.5%; PP=512 envelope 0.3293% vs standard threshold 2.0% (≥3 fresh-spawn repeats). Criterion #4 PASS.
 
 `docs/p5i-c-phase-0-ranking-snapshot.md` preamble updated with same closure pointer + actual envelope numbers.
 
@@ -57,7 +57,7 @@ Spec § 3.1 (updated 2026-05-26): PP=128 uses a small-PP acceptance threshold of
 
 `docs/superpowers/specs/2026-05-25-ironmlx-p5i-c-phase-1-gather-qmm-gate-up-design.md` § 2.3 updated to reference P5h+2.e-resolved protocol:
 
-> All Phase 1 measurements MUST use the accepted production protocol lineage: Phase 0 production-mode capture harness (`P5I_C_MODE=production`), `same_spawn_per_pp` lifecycle, `quiet_acceptance` logging, and the final P5h+2.e-resolved protocol once P5h+2.e closes. Until P5h+2.e backfills Phase 0 § 7 #4 PASS, Phase 1 implementation and measurement remain blocked. Mismatched protocol (e.g., bench-kernel isolated micro-benchmark) MUST NOT be used as primary evidence — only as secondary diagnostic.
+> All Phase 1 measurements MUST use the accepted production protocol lineage: Phase 0 production-mode capture harness (`P5I_C_MODE=production`), `same_spawn_per_pp` lifecycle, `quiet_acceptance` logging, plus the P5h+2.e-resolved protocol from `docs/p5h+2-e-close-out.md`: cooldown `120s`, equal-budget same-shape preheat (`P5I_C_PREHEAT_PP_LIST="512,{pp}"`, `P5I_C_PREHEAT_RUNS=550`), and `tools/p5i_c_pp_tps_envelope.py` per-PP acceptance targets (`small_pp_acceptance_threshold` for PP=128; `standard_acceptance_threshold` otherwise). Mismatched protocol (e.g., bench-kernel isolated micro-benchmark or legacy single-shape 1100-run preheat) MUST NOT be used as primary evidence — only as secondary diagnostic.
 
 Phase 1 spec § 6 G1 satisfied; Phase 1 implementation may proceed.
 
@@ -65,7 +65,7 @@ Phase 1 spec § 6 G1 satisfied; Phase 1 implementation may proceed.
 
 Spec § 3.2 originally listed T2 H_small_batch (nonce-pinning + occupancy diagnostic) as conditional on T1 weak/FAIL + Boss approval. T1 first showed envelope `verdict: FAIL` under the strict 2.0% gate at 2.0099%; controller initiated T2.A acceptance sweep dispatch. **Boss intervened to retract T2.A** per first-principles reasoning ([[feedback-first-principles-no-redundant-sweep]]):
 
-- PP=512 already cleanly PASSES at 0.545% → protocol VALIDATED for non-small-batch shapes
+- PP=512 already cleanly PASSES at 0.3293% → protocol VALIDATED for non-small-batch shapes
 - PP=128 2.0099% is 0.01pp over the strict 2.0% gate — well within the small-batch noise floor predicted by first-principles
 - T2.A nonce-pinning can at best reduce per-run jitter by ~10-20% — not fundamentally change the picture
 - Spending ~4hr GPU re-confirming what first-principles already predicted = waste
