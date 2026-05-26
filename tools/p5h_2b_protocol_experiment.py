@@ -136,6 +136,10 @@ def run_one_repeat(args: argparse.Namespace, repeat: int) -> dict[str, Path]:
     )
     if args.inter_run_cooldown_secs > 0:
         env["P5I_C_INTER_RUN_COOLDOWN_SECS"] = str(args.inter_run_cooldown_secs)
+    if args.preheat_pp_list is not None:
+        env["P5I_C_PREHEAT_PP_LIST"] = args.preheat_pp_list
+    if args.nonce_seed is not None:
+        env["P5I_C_NONCE_SEED"] = str(args.nonce_seed)
     cmd = [
         "cargo",
         "test",
@@ -262,6 +266,15 @@ def main() -> None:
     p.add_argument("--runs-per-pp", required=True, help="e.g. 128:7,512:15")
     p.add_argument("--preheat-seconds", type=int, default=300)
     p.add_argument("--preheat-runs", type=int, default=1100)
+    p.add_argument(
+        "--preheat-pp-list",
+        type=str,
+        default=None,
+        help="Comma-separated PP list for monolithic preheat with '{pp}' token "
+        "substituted to the measured PP per cell. Default unset = harness uses "
+        "DEFAULT_PREHEAT_PP_LIST. P5h+2.e T1 sets '512,{pp}' for equal-budget "
+        "same-shape preheat. Per P5h+2.e spec § 2.2.",
+    )
     p.add_argument("--model-dir", required=True)
     p.add_argument("--mlx-dir", required=True)
     p.add_argument("--out-base", required=True, help="e.g. /tmp/p5h+2-b-t1")
@@ -283,6 +296,14 @@ def main() -> None:
         default=0,
         help="iron-bench --inter-run-cooldown-secs N for measured cells only "
         "(NOT applied to preheat). Default 0. Per P5h+2.d spec § 3.1.",
+    )
+    p.add_argument(
+        "--nonce-seed",
+        type=int,
+        default=None,
+        help="iron-bench --nonce-seed N for reproducible synthetic prompt nonce "
+        "sequences. Default unset keeps legacy time-based nonce generation. "
+        "Used by P5h+2.e T2.A acceptance sweeps.",
     )
     args = p.parse_args()
 

@@ -139,3 +139,107 @@ def test_scan_server_log_does_not_false_positive_on_message_body(tmp_path: Path)
         f"{scan['non_allowlisted_warn_count']} non-allowlisted + "
         f"{scan['allowlisted_warn_count']} allowlisted"
     )
+
+
+def test_preheat_pp_list_env_var_propagated_when_flag_set():
+    """--preheat-pp-list 'CSV' propagates to P5I_C_PREHEAT_PP_LIST env var
+    passed to the cargo test subprocess."""
+    captured_env: dict[str, str] = {}
+
+    def fake_run(cmd, cwd, env, stdout, stderr, check):  # noqa: ARG001
+        captured_env.update(env)
+        result = MagicMock()
+        result.returncode = 1  # force run_one_repeat to raise before relocate
+        return result
+
+    argv = _base_argv() + ["--preheat-pp-list", "512,{pp}"]
+    with patch.object(sys, "argv", argv), patch.object(
+        drv.subprocess, "run", side_effect=fake_run
+    ), patch("builtins.open"):
+        try:
+            drv.main()
+        except SystemExit:
+            pass
+
+    assert captured_env.get("P5I_C_PREHEAT_PP_LIST") == "512,{pp}", (
+        f"expected env P5I_C_PREHEAT_PP_LIST='512,{{pp}}'; "
+        f"got {captured_env.get('P5I_C_PREHEAT_PP_LIST')!r}"
+    )
+
+
+def test_preheat_pp_list_env_var_absent_when_flag_not_set():
+    """Default (no --preheat-pp-list): env MUST NOT have P5I_C_PREHEAT_PP_LIST
+    (preserves harness baseline behavior for legacy invocations)."""
+    captured_env: dict[str, str] = {}
+
+    def fake_run(cmd, cwd, env, stdout, stderr, check):  # noqa: ARG001
+        captured_env.update(env)
+        result = MagicMock()
+        result.returncode = 1
+        return result
+
+    argv = _base_argv()
+    with patch.object(sys, "argv", argv), patch.object(
+        drv.subprocess, "run", side_effect=fake_run
+    ), patch("builtins.open"):
+        try:
+            drv.main()
+        except SystemExit:
+            pass
+
+    assert "P5I_C_PREHEAT_PP_LIST" not in captured_env, (
+        f"expected no P5I_C_PREHEAT_PP_LIST env when flag absent; "
+        f"got {captured_env.get('P5I_C_PREHEAT_PP_LIST')!r}"
+    )
+
+
+def test_nonce_seed_env_var_propagated_when_flag_set():
+    """--nonce-seed N propagates to P5I_C_NONCE_SEED for reproducible
+    iron-bench prompt nonce sequences in T2.A acceptance sweeps."""
+    captured_env: dict[str, str] = {}
+
+    def fake_run(cmd, cwd, env, stdout, stderr, check):  # noqa: ARG001
+        captured_env.update(env)
+        result = MagicMock()
+        result.returncode = 1
+        return result
+
+    argv = _base_argv() + ["--nonce-seed", "20260526"]
+    with patch.object(sys, "argv", argv), patch.object(
+        drv.subprocess, "run", side_effect=fake_run
+    ), patch("builtins.open"):
+        try:
+            drv.main()
+        except SystemExit:
+            pass
+
+    assert captured_env.get("P5I_C_NONCE_SEED") == "20260526", (
+        f"expected env P5I_C_NONCE_SEED=20260526; "
+        f"got {captured_env.get('P5I_C_NONCE_SEED')!r}"
+    )
+
+
+def test_nonce_seed_env_var_absent_when_flag_not_set():
+    """Default unset nonce seed: env must NOT have P5I_C_NONCE_SEED so legacy
+    time-based nonce generation remains the default behavior."""
+    captured_env: dict[str, str] = {}
+
+    def fake_run(cmd, cwd, env, stdout, stderr, check):  # noqa: ARG001
+        captured_env.update(env)
+        result = MagicMock()
+        result.returncode = 1
+        return result
+
+    argv = _base_argv()
+    with patch.object(sys, "argv", argv), patch.object(
+        drv.subprocess, "run", side_effect=fake_run
+    ), patch("builtins.open"):
+        try:
+            drv.main()
+        except SystemExit:
+            pass
+
+    assert "P5I_C_NONCE_SEED" not in captured_env, (
+        f"expected no P5I_C_NONCE_SEED env when flag absent; "
+        f"got {captured_env.get('P5I_C_NONCE_SEED')!r}"
+    )

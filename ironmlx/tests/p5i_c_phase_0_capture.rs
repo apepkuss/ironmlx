@@ -33,6 +33,13 @@
 //!     "buffered_profile"`, default `"default_profile"`
 //!   * `P5I_C_INTER_RUN_COOLDOWN_SECS` — iron-bench `--inter-run-cooldown-secs N`
 //!     for measured cells only (NOT applied to preheat), default `"0"`.
+//!   * `P5I_C_PREHEAT_PP_LIST` — comma-separated PP list for monolithic
+//!     preheat with `{pp}` token substituted to the measured PP per cell.
+//!     Default `"512"` (legacy single-shape behavior; backward-compatible).
+//!     P5h+2.e T1 sets `"512,{pp}"` for equal-budget same-shape preheat.
+//!   * `P5I_C_NONCE_SEED` — iron-bench `--nonce-seed N` for reproducible
+//!     nonce sequences in T2.A acceptance sweeps. Default unset = legacy
+//!     time-based nonce.
 //!
 //! Run example (one cell, legacy behavior preserved with defaults):
 //!   P5I_C_REPEAT_INDEX=1 P5I_C_MODE=probe \
@@ -54,6 +61,7 @@ const DEFAULT_PP_ORDER: &str = "128,512";
 const DEFAULT_RUNS_PER_PP: &str = "128:7,512:15";
 const DEFAULT_PREHEAT_SECONDS: &str = "300";
 const DEFAULT_PREHEAT_RUNS: &str = "1100";
+const DEFAULT_PREHEAT_PP_LIST: &str = "512";
 const DEFAULT_MODEL: &str = "qwen3.5-moe";
 const DEFAULT_SERVER_LIFECYCLE: &str = "phase0_current";
 const DEFAULT_LOGGING_MODE: &str = "default_profile";
@@ -61,6 +69,52 @@ const PORT: u16 = 18099;
 
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
+/// Parse the `P5I_C_PREHEAT_PP_LIST` template into a concrete PP list for
+/// the given `measured_pp`. Substitutes the literal `{pp}` token (case-
+/// sensitive) with the measured PP integer.
+///
+/// Defensive validation per P5h+2.e spec § 2.2: rejects empty input,
+/// empty entries, non-positive PPs, and any unresolved `{pp}` token
+/// (only the exact literal `{pp}` is substituted; any other brace-form
+/// is a typo and we fail loudly).
+fn parse_preheat_pp_list(template: &str, measured_pp: i32) -> Vec<i32> {
+    let raw = template.trim();
+    if raw.is_empty() {
+        panic!("P5I_C_PREHEAT_PP_LIST is empty");
+    }
+    let mut out: Vec<i32> = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            panic!("P5I_C_PREHEAT_PP_LIST contains an empty entry: {raw:?}");
+        }
+        let resolved: String = if entry == "{pp}" {
+            measured_pp.to_string()
+        } else {
+            // Reject any other brace-form so typos like `{Pp}` or `${pp}`
+            // fail loudly instead of silently producing garbage.
+            if entry.contains('{') || entry.contains('}') {
+                panic!(
+                    "P5I_C_PREHEAT_PP_LIST entry {entry:?} contains an unresolved \
+                     brace token; only the literal `{{pp}}` is substituted"
+                );
+            }
+            entry.to_string()
+        };
+        let pp: i32 = resolved
+            .parse()
+            .unwrap_or_else(|e| panic!("P5I_C_PREHEAT_PP_LIST entry {resolved:?} parse: {e}"));
+        if pp <= 0 {
+            panic!("P5I_C_PREHEAT_PP_LIST entry {pp} must be > 0");
+        }
+        out.push(pp);
+    }
+    if out.is_empty() {
+        panic!("P5I_C_PREHEAT_PP_LIST parsed to zero entries: {raw:?}");
+    }
+    out
 }
 
 fn parse_pp_order() -> Vec<i32> {
@@ -325,33 +379,48 @@ fn monolithic_preheat(
     model_dir: &str,
     preheat_seconds: u64,
     preheat_runs: usize,
+    preheat_pp_list: &[i32],
 ) -> std::io::Result<u64> {
+    if preheat_pp_list.is_empty() {
+        return Err(std::io::Error::other(
+            "monolithic_preheat: preheat_pp_list is empty (defensive guard)",
+        ));
+    }
     let start = Instant::now();
-    let out = Command::new("cargo")
-        .args([
-            "run",
-            "--release",
-            "-p",
-            "iron-bench",
-            "--",
-            "--target",
-            &format!("preheat=http://127.0.0.1:{PORT}"),
-            "--model",
-            &iron_bench_model_token(),
-            "--model-dir",
-            model_dir,
-            "--prompt-len",
-            "512",
-            "--max-tokens",
-            "1",
-            "--runs",
-            &preheat_runs.to_string(),
-            "--warmup",
-            "0",
-            "--format",
-            "csv",
-        ])
-        .output()?;
+    let pp_list_csv = preheat_pp_list
+        .iter()
+        .map(|pp| pp.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut preheat_args: Vec<String> = vec![
+        "run".into(),
+        "--release".into(),
+        "-p".into(),
+        "iron-bench".into(),
+        "--".into(),
+        "--target".into(),
+        format!("preheat=http://127.0.0.1:{PORT}"),
+        "--model".into(),
+        iron_bench_model_token(),
+        "--model-dir".into(),
+        model_dir.into(),
+        "--prompt-len".into(),
+        pp_list_csv.clone(),
+        "--max-tokens".into(),
+        "1".into(),
+        "--runs".into(),
+        preheat_runs.to_string(),
+        "--warmup".into(),
+        "0".into(),
+        "--format".into(),
+        "csv".into(),
+    ];
+    let nonce_seed = env_or("P5I_C_NONCE_SEED", "");
+    if !nonce_seed.is_empty() {
+        preheat_args.push("--nonce-seed".into());
+        preheat_args.push(nonce_seed);
+    }
+    let out = Command::new("cargo").args(preheat_args).output()?;
     let wall_s = start.elapsed().as_secs();
     if !out.status.success() {
         return Err(std::io::Error::other(format!(
@@ -362,7 +431,8 @@ fn monolithic_preheat(
     if wall_s < preheat_seconds {
         eprintln!(
             "[p5i-c WARN] preheat wall {wall_s}s < target {preheat_seconds}s; \
-             consider bumping P5I_C_PREHEAT_RUNS (current {preheat_runs})"
+             consider bumping P5I_C_PREHEAT_RUNS (current {preheat_runs} per PP, \
+             PP list: {pp_list_csv})"
         );
     }
     Ok(wall_s)
@@ -395,6 +465,8 @@ fn write_cell_meta(
     server_lifecycle: ServerLifecycle,
     pp_order: &[i32],
     logging_mode: LoggingMode,
+    preheat_pp_list: &[i32],
+    preheat_runs: usize,
     ts: CellTimestamps,
 ) -> std::io::Result<()> {
     let lifecycle_s = lifecycle_str(server_lifecycle);
@@ -404,6 +476,15 @@ fn write_cell_meta(
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
         .join(",");
+    let preheat_pp_list_json = format!(
+        "[{}]",
+        preheat_pp_list
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let preheat_total_runs_effective = preheat_runs * preheat_pp_list.len();
     let json = format!(
         "{{\n  \"repeat\": {repeat},\n  \"pp\": {pp},\n  \"runs\": {runs},\n  \
          \"mode\": \"{mode}\",\n  \"warmup_count\": {warmup_count},\n  \
@@ -411,6 +492,9 @@ fn write_cell_meta(
          \"server_lifecycle\": \"{lifecycle_s}\",\n  \
          \"pp_order\": \"{pp_order_s}\",\n  \
          \"logging_mode\": \"{logging_s}\",\n  \
+         \"preheat_pp_list_effective\": {preheat_pp_list_json},\n  \
+         \"preheat_runs_per_shape\": {preheat_runs},\n  \
+         \"preheat_total_runs_effective\": {preheat_total_runs_effective},\n  \
          \"server_spawn_unix_ns\": {server_spawn},\n  \
          \"server_healthy_unix_ns\": {server_healthy},\n  \
          \"preheat_start_unix_ns\": {preheat_start},\n  \
@@ -472,6 +556,11 @@ fn build_iron_args(model_dir: &str, pp: i32, runs: usize, mode: &str) -> Vec<Str
         iron_args.push("--inter-run-cooldown-secs".into());
         iron_args.push(cooldown);
     }
+    let nonce_seed = env_or("P5I_C_NONCE_SEED", "");
+    if !nonce_seed.is_empty() {
+        iron_args.push("--nonce-seed".into());
+        iron_args.push(nonce_seed);
+    }
     iron_args
 }
 
@@ -522,6 +611,7 @@ fn run_phase0_current(
     runs_map: &HashMap<i32, usize>,
     preheat_seconds: u64,
     preheat_runs: usize,
+    preheat_pp_list_template: &str,
     lifecycle: ServerLifecycle,
     logging_mode: LoggingMode,
     warmup: usize,
@@ -542,14 +632,18 @@ fn run_phase0_current(
     }
     let _preheat_healthy_ns = now_unix_ns();
 
+    let measured_pp_for_substitution = pp_order.first().copied().unwrap_or(512);
+    let preheat_pp_list =
+        parse_preheat_pp_list(preheat_pp_list_template, measured_pp_for_substitution);
     let preheat_start_ns = now_unix_ns();
-    let preheat_wall = match monolithic_preheat(model_dir, preheat_seconds, preheat_runs) {
-        Ok(w) => w,
-        Err(e) => {
-            kill_and_wait(preheat_server);
-            anyhow::bail!("preheat: {e}");
-        }
-    };
+    let preheat_wall =
+        match monolithic_preheat(model_dir, preheat_seconds, preheat_runs, &preheat_pp_list) {
+            Ok(w) => w,
+            Err(e) => {
+                kill_and_wait(preheat_server);
+                anyhow::bail!("preheat: {e}");
+            }
+        };
     let preheat_end_ns = now_unix_ns();
     eprintln!("[p5i-c] preheat_wall={preheat_wall}s (target ≥ {preheat_seconds}s)");
     kill_and_wait(preheat_server);
@@ -606,6 +700,8 @@ fn run_phase0_current(
             lifecycle,
             pp_order,
             logging_mode,
+            &preheat_pp_list,
+            preheat_runs,
             ts,
         )?;
         eprintln!("[p5i-c] PP={pp} mode={mode} repeat={repeat} → {bench_csv}");
@@ -622,6 +718,7 @@ fn run_same_spawn_cross_pp(
     runs_map: &HashMap<i32, usize>,
     preheat_seconds: u64,
     preheat_runs: usize,
+    preheat_pp_list_template: &str,
     lifecycle: ServerLifecycle,
     logging_mode: LoggingMode,
     warmup: usize,
@@ -651,13 +748,17 @@ fn run_same_spawn_cross_pp(
     let healthy_ns = now_unix_ns();
 
     let preheat_start_ns = now_unix_ns();
-    let preheat_wall = match monolithic_preheat(model_dir, preheat_seconds, preheat_runs) {
-        Ok(w) => w,
-        Err(e) => {
-            kill_and_wait(server);
-            anyhow::bail!("preheat: {e}");
-        }
-    };
+    let measured_pp_for_substitution = pp_order.first().copied().unwrap_or(512);
+    let preheat_pp_list =
+        parse_preheat_pp_list(preheat_pp_list_template, measured_pp_for_substitution);
+    let preheat_wall =
+        match monolithic_preheat(model_dir, preheat_seconds, preheat_runs, &preheat_pp_list) {
+            Ok(w) => w,
+            Err(e) => {
+                kill_and_wait(server);
+                anyhow::bail!("preheat: {e}");
+            }
+        };
     let preheat_end_ns = now_unix_ns();
     eprintln!("[p5i-c] preheat_wall={preheat_wall}s (target ≥ {preheat_seconds}s)");
 
@@ -725,6 +826,8 @@ fn run_same_spawn_cross_pp(
             lifecycle,
             pp_order,
             logging_mode,
+            &preheat_pp_list,
+            preheat_runs,
             ts,
         )?;
         eprintln!("[p5i-c] PP={pp} mode={mode} repeat={repeat} → {bench_csv} (shared spawn)");
@@ -741,6 +844,7 @@ fn run_same_spawn_per_pp(
     runs_map: &HashMap<i32, usize>,
     preheat_seconds: u64,
     preheat_runs: usize,
+    preheat_pp_list_template: &str,
     lifecycle: ServerLifecycle,
     logging_mode: LoggingMode,
     warmup: usize,
@@ -770,13 +874,15 @@ fn run_same_spawn_per_pp(
         let healthy_ns = now_unix_ns();
 
         let preheat_start_ns = now_unix_ns();
-        let preheat_wall = match monolithic_preheat(model_dir, preheat_seconds, preheat_runs) {
-            Ok(w) => w,
-            Err(e) => {
-                kill_and_wait(server);
-                anyhow::bail!("PP={pp} preheat: {e}");
-            }
-        };
+        let preheat_pp_list = parse_preheat_pp_list(preheat_pp_list_template, pp);
+        let preheat_wall =
+            match monolithic_preheat(model_dir, preheat_seconds, preheat_runs, &preheat_pp_list) {
+                Ok(w) => w,
+                Err(e) => {
+                    kill_and_wait(server);
+                    anyhow::bail!("PP={pp} preheat: {e}");
+                }
+            };
         let preheat_end_ns = now_unix_ns();
         eprintln!("[p5i-c] PP={pp} preheat_wall={preheat_wall}s (target ≥ {preheat_seconds}s)");
 
@@ -806,11 +912,46 @@ fn run_same_spawn_per_pp(
             lifecycle,
             pp_order,
             logging_mode,
+            &preheat_pp_list,
+            preheat_runs,
             ts,
         )?;
         eprintln!("[p5i-c] PP={pp} mode={mode} repeat={repeat} → {bench_csv} (per-PP spawn)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests_preheat_pp_list {
+    use super::parse_preheat_pp_list;
+
+    #[test]
+    fn substitutes_pp_token() {
+        assert_eq!(parse_preheat_pp_list("512,{pp}", 128), vec![512, 128]);
+        assert_eq!(parse_preheat_pp_list("512,{pp}", 512), vec![512, 512]);
+    }
+
+    #[test]
+    fn parses_pure_static_list() {
+        assert_eq!(parse_preheat_pp_list("512", 128), vec![512]);
+        assert_eq!(
+            parse_preheat_pp_list("128,256,512", 128),
+            vec![128, 256, 512]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "empty")]
+    fn rejects_empty_template() {
+        let _ = parse_preheat_pp_list("", 128);
+    }
+
+    #[test]
+    #[should_panic(expected = "unresolved brace token")]
+    fn rejects_unrecognized_brace_token() {
+        // `{Pp}` is a typo; only literal `{pp}` is substituted
+        let _ = parse_preheat_pp_list("512,{Pp}", 128);
+    }
 }
 
 #[test]
@@ -827,6 +968,7 @@ fn p5i_c_phase_0_capture_one_repeat() -> anyhow::Result<()> {
     let preheat_runs: usize = env_or("P5I_C_PREHEAT_RUNS", DEFAULT_PREHEAT_RUNS)
         .parse()
         .expect("P5I_C_PREHEAT_RUNS must be usize");
+    let preheat_pp_list_template = env_or("P5I_C_PREHEAT_PP_LIST", DEFAULT_PREHEAT_PP_LIST);
     let lifecycle = parse_server_lifecycle();
     let logging_mode = parse_logging_mode();
     let warmup = if mode == "probe" { 0_usize } else { 1_usize };
@@ -846,6 +988,7 @@ fn p5i_c_phase_0_capture_one_repeat() -> anyhow::Result<()> {
             &runs_map,
             preheat_seconds,
             preheat_runs,
+            &preheat_pp_list_template,
             lifecycle,
             logging_mode,
             warmup,
@@ -858,6 +1001,7 @@ fn p5i_c_phase_0_capture_one_repeat() -> anyhow::Result<()> {
             &runs_map,
             preheat_seconds,
             preheat_runs,
+            &preheat_pp_list_template,
             lifecycle,
             logging_mode,
             warmup,
@@ -870,6 +1014,7 @@ fn p5i_c_phase_0_capture_one_repeat() -> anyhow::Result<()> {
             &runs_map,
             preheat_seconds,
             preheat_runs,
+            &preheat_pp_list_template,
             lifecycle,
             logging_mode,
             warmup,

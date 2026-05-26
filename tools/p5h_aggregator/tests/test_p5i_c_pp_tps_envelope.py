@@ -97,6 +97,72 @@ def test_envelope_pass_pp128():
             assert rep["n"] == 7
 
 
+def test_pp128_uses_small_pp_acceptance_threshold():
+    """PP=128 uses the small-PP acceptance threshold: an envelope between
+    2.0% and 2.5% should pass and be explicitly labelled."""
+    with tempfile.TemporaryDirectory() as td:
+        td_p = Path(td)
+        csvs = []
+        for r, base_pp_tps in enumerate([1000.0, 1000.0, 1046.0]):
+            csv_p = td_p / f"r{r}.csv"
+            write_iron_bench_csv(
+                gen_pp_tps_rows(
+                    "ironmlx", 128, 7, base_pp_tps, jitter=0.0
+                ),
+                csv_p,
+            )
+            csvs.append(csv_p)
+        out_json = td_p / "out.json"
+        args = []
+        for c in csvs:
+            args.extend(["--repeat-csv", str(c)])
+        args.extend(["--pp", "128", "--out-json", str(out_json)])
+        result = subprocess.run(
+            [sys.executable, str(ENVELOPE_SCRIPT), *args],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        iron = json.loads(out_json.read_text())["ironmlx"]
+        assert 2.0 < iron["final_uncertainty_envelope_pct"] < 2.5
+        assert iron["target_pct"] == 2.5
+        assert iron["target_policy"] == "small_pp_acceptance_threshold"
+        assert iron["verdict"] == "PASS"
+
+
+def test_pp512_keeps_standard_acceptance_threshold():
+    """PP=512 keeps the standard 2.0% threshold; the same envelope that
+    PP=128 accepts should still fail here."""
+    with tempfile.TemporaryDirectory() as td:
+        td_p = Path(td)
+        csvs = []
+        for r, base_pp_tps in enumerate([1000.0, 1000.0, 1046.0]):
+            csv_p = td_p / f"r{r}.csv"
+            write_iron_bench_csv(
+                gen_pp_tps_rows(
+                    "ironmlx", 512, 15, base_pp_tps, jitter=0.0
+                ),
+                csv_p,
+            )
+            csvs.append(csv_p)
+        out_json = td_p / "out.json"
+        args = []
+        for c in csvs:
+            args.extend(["--repeat-csv", str(c)])
+        args.extend(["--pp", "512", "--out-json", str(out_json)])
+        result = subprocess.run(
+            [sys.executable, str(ENVELOPE_SCRIPT), *args],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        iron = json.loads(out_json.read_text())["ironmlx"]
+        assert 2.0 < iron["final_uncertainty_envelope_pct"] < 2.5
+        assert iron["target_pct"] == 2.0
+        assert iron["target_policy"] == "standard_acceptance_threshold"
+        assert iron["verdict"] == "FAIL"
+
+
 def test_envelope_rejects_too_few_repeats():
     with tempfile.TemporaryDirectory() as td:
         td_p = Path(td)

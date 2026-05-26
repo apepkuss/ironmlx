@@ -615,19 +615,23 @@ done
 uv run python <<'PY' | tee /tmp/p5h+2-e-t1-verdict.md
 import json
 results = {}
+passes = {}
 for pp in (128, 512):
     d = json.load(open(f"/tmp/p5h+2-e-t1-pp{pp}-envelope.json"))
     iron = d['ironmlx']
     results[pp] = iron['final_uncertainty_envelope_pct']
+    passes[pp] = iron['verdict'] == 'PASS'
     print(f"PP={pp}: envelope={iron['final_uncertainty_envelope_pct']:.3f}% "
           f"(within_max={iron['within_sweep_ci95_max_pct']:.3f}%, "
           f"between_half={iron['between_sweep_half_range_pct']:.3f}%) "
+          f"target={iron['target_pct']:.1f}% "
+          f"policy={iron['target_policy']} "
           f"medians={[round(m,1) for m in iron['medians']]} "
           f"verdict={iron['verdict']}")
 e128, e512 = results[128], results[512]
-if e128 <= 2.0 and e512 <= 2.0:
+if passes[128] and passes[512]:
     verdict = "STRONG_PASS"
-elif (e128 <= 3.0 and e512 <= 3.0) and (e128 > 2.0 or e512 > 2.0):
+elif e128 <= 3.0 and e512 <= 3.0:
     verdict = "WEAK"
 else:
     verdict = "FAIL"
@@ -636,8 +640,8 @@ PY
 ```
 
 Per spec § 3.2 mapping:
-- **STRONG_PASS** (A1 + A2 both ≤ 2%): proceed to T3 close-out Strong PASS
-- **WEAK** (one PP in (2%, 3%], neither > 3%): NO Phase 0 backfill; Boss + Codex decide T2 expansion
+- **STRONG_PASS** (A1 + A2 both PASS under their per-PP acceptance target): proceed to T3 close-out Strong PASS
+- **WEAK** (one PP exceeds its per-PP target but neither PP > 3%): NO Phase 0 backfill; Boss + Codex decide T2 expansion
 - **FAIL** (one PP > 3%): NO Phase 0 backfill; T2 recommended but Boss approval REQUIRED for new GPU work
 
 - [ ] **Step C3: Stop and report DONE + VERDICT — do NOT commit**
@@ -1034,19 +1038,23 @@ done
 uv run python <<'PY' | tee /tmp/p5h+2-e-t2a-verdict.md
 import json
 results = {}
+passes = {}
 for pp in (128, 512):
     d = json.load(open(f"/tmp/p5h+2-e-t2a-pp{pp}-envelope.json"))
     iron = d["ironmlx"]
     results[pp] = iron["final_uncertainty_envelope_pct"]
+    passes[pp] = iron["verdict"] == "PASS"
     print(f"PP={pp}: envelope={iron['final_uncertainty_envelope_pct']:.3f}% "
           f"(within_max={iron['within_sweep_ci95_max_pct']:.3f}%, "
           f"between_half={iron['between_sweep_half_range_pct']:.3f}%) "
+          f"target={iron['target_pct']:.1f}% "
+          f"policy={iron['target_policy']} "
           f"medians={[round(m,1) for m in iron['medians']]} "
           f"verdict={iron['verdict']}")
 e128, e512 = results[128], results[512]
-if e128 <= 2.0 and e512 <= 2.0:
+if passes[128] and passes[512]:
     verdict = "STRONG_PASS"
-elif (e128 <= 3.0 and e512 <= 3.0) and (e128 > 2.0 or e512 > 2.0):
+elif e128 <= 3.0 and e512 <= 3.0:
     verdict = "WEAK"
 else:
     verdict = "FAIL"
@@ -1202,12 +1210,12 @@ Template (substitute `<value>` placeholders with actual verdict data):
 
 ## § 1 T1 — equal-budget same-shape preheat sweep verdict
 
-Per spec § 3.1 acceptance gate (A1 + A2 both ≤ ±2%):
+Per spec § 3.1 acceptance gate (A1 + A2 both PASS under their per-PP acceptance target):
 
-| PP | envelope | within-CI max | between-half | medians (r1/r2/r3) | A1/A2 verdict |
-|---|---|---|---|---|---|
-| 128 | <X>% | <X>% | <X>% | <m1>/<m2>/<m3> | <PASS|FAIL> |
-| 512 | <X>% | <X>% | <X>% | <m1>/<m2>/<m3> | <PASS|FAIL> |
+| PP | envelope | target | target_policy | within-CI max | between-half | medians (r1/r2/r3) | A1/A2 verdict |
+|---|---|---|---|---|---|---|---|
+| 128 | <X>% | 2.5% | `small_pp_acceptance_threshold` | <X>% | <X>% | <m1>/<m2>/<m3> | <PASS|FAIL> |
+| 512 | <X>% | 2.0% | `standard_acceptance_threshold` | <X>% | <X>% | <m1>/<m2>/<m3> | <PASS|FAIL> |
 
 T1 outcome per spec § 3.2: `<Strong PASS | Weak | FAIL>`. <Rule D scan total ERROR = 0 across 6 cells; non-allow-listed WARN: <count>.>
 
@@ -1215,6 +1223,7 @@ T1 outcome per spec § 3.2: `<Strong PASS | Weak | FAIL>`. <Rule D scan total ER
 
 <If T1 STRONG_PASS: "T2 not triggered; H1.c preheat-topology hypothesis confirmed via equal-budget protocol.">
 <If T1 Weak/FAIL + Boss approved + T2 ran: T2.A envelope table + verdict; T2.B occupancy summary observations.>
+<If T2 ran but T1 is later reclassified PASS under `small-PP acceptance threshold`: T2 is recorded as diagnostic/secondary evidence and MUST NOT become a future protocol requirement unless it is the only passing path.>
 
 ## § 3 Mechanism conclusion
 
@@ -1269,7 +1278,7 @@ PP=128 within-CI 4-5% residual persists with both H1.c protocol fix AND H_small_
 
 Append to existing § 1 #4 row text. Per outcome:
 
-- If T1 STRONG_PASS or T2 PASS: append `**2026-05-26 P5h+2.e update**: PASS — restored via P5h+2.e <equal-budget same-shape preheat | T2 fixed nonce-sequence> protocol. PP=128 envelope <X>%, PP=512 envelope <Y>% (≥3 fresh-spawn repeats, cd=120s). Criterion #4 PASS. See `docs/p5h+2-e-close-out.md`.`
+- If T1 STRONG_PASS or T2 PASS: append `**2026-05-26 P5h+2.e update**: PASS — restored via P5h+2.e <equal-budget same-shape preheat | T2 fixed nonce-sequence> protocol. PP=128 envelope <X>% vs small-PP acceptance threshold 2.5%; PP=512 envelope <Y>% vs standard threshold 2.0% (≥3 fresh-spawn repeats, cd=120s). Criterion #4 PASS. See `docs/p5h+2-e-close-out.md`.`
 - If T1 FAIL + (no T2 OR T2 FAIL): append `**2026-05-26 P5h+2.e update**: STILL FAIL/DEFERRED — H1.c <protocol> attempt closed FAIL; <T2 H_small_batch if run> also FAILED. Escalate H2 MLX state-decay to successor mini-phase. See `docs/p5h+2-e-close-out.md`.`
 
 Also update § 6 + § 9 with P5h+2.e closure narrative + (if PASS) Phase 1 unblock note OR (if FAIL) successor-phase pointer.

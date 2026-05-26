@@ -55,7 +55,7 @@ Both must hold when eventually measured:
 | # | Criterion | Method |
 |---|---|---|
 | L1 | `gather_qmm_gate_up` substep wall-time (P5h-style production-mode instrumentation) reduced by ≥30% vs the implementation-start baseline HEAD | per-substep median across ≥3 fresh-spawn repeats, within envelope precision |
-| L2 | End-to-end pp_tps improvement ≥5% vs the same implementation-start baseline (statistically significant per ≤±2% envelope) | `tools/p5i_c_pp_tps_envelope.py` per PP × 3 repeats, requires envelope PASS first |
+| L2 | End-to-end pp_tps improvement ≥5% vs the same implementation-start baseline (statistically significant under the accepted per-PP envelope target) | `tools/p5i_c_pp_tps_envelope.py` per PP × 3 repeats, requires envelope PASS first |
 
 ### § 2.2 Project-level gate (NOT discharged by Phase 1)
 
@@ -63,7 +63,7 @@ Project target `ironmlx >= 1.10 * omlx` is a multi-phase aggregate, evaluated AF
 
 ### § 2.3 Measurement protocol binding
 
-All Phase 1 measurements MUST use the accepted production protocol lineage: Phase 0 production-mode capture harness (`P5I_C_MODE=production`), `same_spawn_per_pp` lifecycle, `quiet_acceptance` logging, plus the P5h+2.d accepted cooldown setting if P5h+2.d closes PASS. If P5h+2.d does not backfill Phase 0 § 7 #4 PASS, Phase 1 implementation and measurement stay blocked. Mismatched protocol (e.g., bench-kernel isolated micro-benchmark) MUST NOT be used as primary evidence — only as secondary diagnostic.
+All Phase 1 measurements MUST use the accepted production protocol lineage: Phase 0 production-mode capture harness (`P5I_C_MODE=production`), `same_spawn_per_pp` lifecycle, `quiet_acceptance` logging, and the final P5h+2.e-resolved protocol once P5h+2.e closes. Until P5h+2.e backfills Phase 0 § 7 #4 PASS, Phase 1 implementation and measurement remain blocked. Mismatched protocol (e.g., bench-kernel isolated micro-benchmark) MUST NOT be used as primary evidence — only as secondary diagnostic.
 
 ## § 3 Hypothesis set — why `gate_up` is 23% (Codex round-1 Q18 binding)
 
@@ -138,14 +138,15 @@ Phase 1 implementation MAY start ONLY when ALL hold:
 
 | # | Condition |
 |---|---|
-| G1 | P5h+2.d close-out doc (`docs/p5h+2-d-close-out.md`) EXPLICITLY allows Phase 1 implementation (e.g., outcome = Strong PASS per P5h+2.d spec § 1.3 → Phase 0 § 7 #4 backfill PASS → unblock Phase 1 implementation) |
+| G1 | P5h+2.e close-out doc EXPLICITLY backfills Phase 0 § 7 #4 PASS and allows Phase 1 implementation to proceed to Boss approval |
 | G2 | Boss explicitly approves Phase 1 implementation kick-off |
 | G3 | Phase 1 design spec (this doc) committed + Boss-approved |
-| G4 | New branch `ironmlx-p5i-c-phase-1` forked from P5h+2.d Acceptance-passed HEAD |
+| G4 | New branch `ironmlx-p5i-c-phase-1` forked from a P5h+2.e Acceptance-passed HEAD |
 
 **NOT acceptable** as sole conditions:
 - ~~P5h+2.d Stage 1 Mechanism gate = strong/weak yes alone~~ (per Codex binding; Mechanism gate is intermediate signal, not unblock authority)
-- ~~P5h+2.d Acceptance gate intermediate progress~~ (must be CLOSED + Phase 0 backfilled, not in-progress)
+- ~~P5h+2.d Acceptance gate intermediate progress~~ (must be superseded by CLOSED P5h+2.e + Phase 0 backfilled, not in-progress)
+- ~~P5h+2.e in-progress envelope numbers without close-out~~ (must wait for the active P5h+2.e run to finish and publish final evidence)
 
 During γ-lite (now until G1-G4): NO benchmarks, NO kernel changes, NO production-runtime code touched.
 

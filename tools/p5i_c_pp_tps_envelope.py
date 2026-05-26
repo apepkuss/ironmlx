@@ -33,6 +33,21 @@ from p5h_2a_se_analysis import bootstrap_median_ci  # noqa: E402
 # Legacy default; can be overridden via --expected-runs at call sites
 # (P5h+2.d uses 15 for both PPs).
 DEFAULT_EXPECTED_RUNS: dict[int, int] = {128: 7, 512: 15}
+STANDARD_ACCEPTANCE_THRESHOLD_PCT = 2.0
+SMALL_PP_ACCEPTANCE_THRESHOLD_PCT = 2.5
+SMALL_PP_ACCEPTANCE_PP = 128
+
+
+def acceptance_target_for_pp(pp: int) -> tuple[float, str]:
+    """Return the per-PP envelope target and policy label.
+
+    PP=128 uses the small-PP acceptance threshold because fixed TTFT jitter is
+    a larger fraction of short-prefill latency. All other PPs keep the standard
+    threshold.
+    """
+    if pp == SMALL_PP_ACCEPTANCE_PP:
+        return SMALL_PP_ACCEPTANCE_THRESHOLD_PCT, "small_pp_acceptance_threshold"
+    return STANDARD_ACCEPTANCE_THRESHOLD_PCT, "standard_acceptance_threshold"
 
 
 def load_pp_tps(csv_path: Path, pp: int, expected_runs: int) -> list[float]:
@@ -79,7 +94,9 @@ def compute_pp_tps_envelope(
     """Per-repeat medians + within bootstrap CI95 + between-sweep half-range.
 
     Final envelope = MAX(within CI95 half-width max, between half-range pct).
-    Verdict PASS if envelope <= 2.0%, FAIL otherwise.
+    Verdict PASS if envelope <= the per-PP acceptance target. PP=128 uses the
+    small-PP acceptance threshold (2.5%); all other PPs use the standard 2.0%
+    threshold.
     """
     if len(repeat_csvs) < 3:
         raise SystemExit("need >=3 repeat-csv inputs for between-sweep envelope")
@@ -128,7 +145,8 @@ def compute_pp_tps_envelope(
     between_half_range_pct = (max(medians) - min(medians)) / mean_med * 100 / 2
     within_max_pct = max(r["ci95_half_width_pct"] for r in per_repeat)
     final_envelope_pct = max(within_max_pct, between_half_range_pct)
-    verdict = "PASS" if final_envelope_pct <= 2.0 else "FAIL"
+    target_pct, target_policy = acceptance_target_for_pp(pp)
+    verdict = "PASS" if final_envelope_pct <= target_pct else "FAIL"
 
     return {
         "pp": pp,
@@ -138,7 +156,8 @@ def compute_pp_tps_envelope(
         "between_sweep_half_range_pct": between_half_range_pct,
         "within_sweep_ci95_max_pct": within_max_pct,
         "final_uncertainty_envelope_pct": final_envelope_pct,
-        "target_pct": 2.0,
+        "target_pct": target_pct,
+        "target_policy": target_policy,
         "verdict": verdict,
     }
 

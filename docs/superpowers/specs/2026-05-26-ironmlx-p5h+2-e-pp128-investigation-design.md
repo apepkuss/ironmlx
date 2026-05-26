@@ -1,10 +1,10 @@
 # P5h+2.e — PP=128 ironmlx-specific within-CI Residual Investigation: Design Spec
 
-**Status:** Draft (Codex round-1 brainstorm integrated; awaiting Boss approval). DO NOT commit until Boss approves per `[feedback-review-spec-before-commit]`.
+**Status:** Active/in progress. Small-PP acceptance threshold reconciliation is integrated, but final close-out must wait for the active P5h+2.e run to finish.
 
 **Date:** 2026-05-26.
 
-**Branch (proposed):** `ironmlx-p5h+2-e-pp128-investigation` off `110a181` (P5h+2.d Mechanism-only close).
+**Branch:** `ironmlx-p5h+2-e-pp128-investigation`.
 
 **Predecessor docs:**
 - P5h+2.d close-out (binding parent): `docs/p5h+2-d-close-out.md` § 6 (P5h+2.e direction)
@@ -24,7 +24,7 @@ Investigate the PP=128 ironmlx-specific within-CI 4-5% residual confirmed IRONML
 - production sweep + acceptance verification
 - conditional MoE expert occupancy instrumentation if T2 is approved
 
-**Primary success path**: PP=128 envelope ≤ ±2% via measurement protocol stabilization (NOT ironmlx runtime bug fix per Codex Q9 wording binding). Phase 0 § 7 #4 backfill PASS requires actual P5h+2.e envelope numbers as evidence. If the gate does not pass, close-out keeps Phase 0 § 7 #4 FAIL/DEFERRED and escalates per § 3.2.
+**Primary success path**: PP=128 envelope within the `small-PP acceptance threshold` (2.5%) and PP=512 within the standard acceptance threshold (2.0%) via measurement protocol stabilization (NOT ironmlx runtime bug fix per Codex Q9 wording binding). Phase 0 § 7 #4 backfill PASS requires actual P5h+2.e envelope numbers as evidence. If the gate does not pass, close-out keeps Phase 0 § 7 #4 FAIL/DEFERRED and escalates per § 3.2.
 
 ## § 1 Predecessor evidence + hypothesis matrix
 
@@ -79,13 +79,14 @@ T1 PASS requires BOTH:
 
 | # | Criterion | Method |
 |---|---|---|
-| A1 | PP=128 envelope ≤ ±2% under new equal-budget same-shape preheat protocol, ≥3 fresh-spawn repeats, cd=120s | `tools/p5i_c_pp_tps_envelope.py` per spec § 8 binding |
-| A2 | PP=512 envelope ≤ ±2% under same protocol (re-verify no regression vs P5h+2.d PASS at 0.91%) | same tool |
+| A1 | PP=128 envelope ≤ small-PP acceptance threshold (2.5%) under new equal-budget same-shape preheat protocol, ≥3 fresh-spawn repeats, cd=120s | `tools/p5i_c_pp_tps_envelope.py` per spec § 8 binding; JSON must emit `target_policy=small_pp_acceptance_threshold` |
+| A2 | PP=512 envelope ≤ standard acceptance threshold (2.0%) under same protocol (re-verify no regression vs P5h+2.d PASS at 0.91%) | same tool; JSON must emit `target_policy=standard_acceptance_threshold` |
 
 T1/T2 acceptance uses the same all-runs envelope behavior as P5h+2.d by default. If the implementation plan decides to enable Rule B trimming, it MUST be implemented as a tested tool option before any sweep starts, applied uniformly to all cells, and recorded in both envelope JSON and cell metadata. Manual trimming is forbidden.
 
-**Gate relaxation EXPLICITLY rejected** (Codex round-1 Q8 + Q2 binding):
-- No ±3% accept
+**Gate relaxation boundary** (Codex round-1 Q8 + Q2 binding, updated by 2026-05-26 threshold reconciliation):
+- No generic ±3% accept
+- The only accepted threshold expansion is PP=128's named `small-PP acceptance threshold` at 2.5%, emitted by the envelope tool as `target_policy=small_pp_acceptance_threshold`
 - No post-hoc Rule C-style trim to make data fit
 - No new exclusion rules added after seeing data
 
@@ -95,8 +96,8 @@ T1 outcomes determine T2 trigger:
 
 | T1 outcome | Definition | Action |
 |---|---|---|
-| **Strong PASS** | A1 + A2 both ≤ ±2% | STOP. Close P5h+2.e Strong PASS. Backfill Phase 0 § 7 #4 PASS with P5h+2.e envelope numbers as evidence. |
-| **Weak** | No PP > 3%, and at least one PP in (2%, 3%] range | NO Phase 0 backfill. Document. Boss + Codex decide whether to expand to T2 OR close P5h+2.e weak-evidence. |
+| **Strong PASS** | A1 + A2 both PASS under their per-PP acceptance target | STOP. Close P5h+2.e Strong PASS. Backfill Phase 0 § 7 #4 PASS with P5h+2.e envelope numbers as evidence. |
+| **Weak** | No PP > 3%, and at least one PP exceeds its per-PP target but remains ≤ 3% | NO Phase 0 backfill. Document. Boss + Codex decide whether to expand to T2 OR close P5h+2.e weak-evidence. |
 | **FAIL** | A1 OR A2 > 3% | NO Phase 0 backfill. T2 becomes the recommended next step, but T2 execution still requires Boss approval because it adds new diagnostic code + extra GPU budget. |
 
 T2 outcomes (if triggered) similarly: PASS → close-out; FAIL → H2 escalation in a separate successor mini-phase, NOT this spec.
@@ -223,7 +224,7 @@ If T2 PASSES after T1 weak/FAIL, close-out language MUST additionally identify i
 | Code | Risk | Mitigation |
 |---|---|---|
 | R1 | **H1.c rejected** — PP=128 within-CI 4-5% persists even with equal-budget same-shape preheat | T2 H_small_batch trigger (predeclared per § 3.2) |
-| R2 | **PP=512 regression** — same-shape preheat changes break PP=512 PASS | § 3.1 A2 binding; T1 sweep re-verifies PP=512 ≤ ±2% |
+| R2 | **PP=512 regression** — same-shape preheat changes break PP=512 PASS | § 3.1 A2 binding; T1 sweep re-verifies PP=512 ≤ standard acceptance threshold (2.0%) |
 | R3 | **PASS but root cause unknown** — H1.c PASSES but we don't understand WHY ironmlx needs same-shape preheat | Codex round-1 Q17 binding: protocol-fix PASS is acceptable for Phase 0 backfill; deeper investigation deferred per § 10 |
 | R4 | **Pre-existing `[tracing]`/KVCache WARN allow-list mismatch** (inherited from P5h+2.d) | Rule D scan output reviewed per-cell; non-allow-listed WARN marked for human triage; do NOT auto-drop |
 | R5 | **8 hr GPU cap under-estimated** (M5 Max + 35B MoE actually slower than assumed) | T1 single-PP-pair narrower than P5h+2.d 18-cell; safer estimate. If T1 alone overruns, Boss approval needed before T2 |

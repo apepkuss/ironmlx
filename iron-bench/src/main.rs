@@ -97,6 +97,13 @@ struct Args {
     /// thermal isolation between consecutive measured runs matters.
     #[arg(long, default_value_t = 0u64)]
     pub inter_run_cooldown_secs: u64,
+
+    /// Override the synthetic-prompt nonce seed in sequential mode. When
+    /// unset, nonce generation remains time-based. Used by P5h+2.e T2.A to
+    /// make measured prompt sequences reproducible across repeats while still
+    /// varying nonce by warmup/run index.
+    #[arg(long)]
+    pub nonce_seed: Option<u64>,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -169,6 +176,13 @@ async fn main() -> Result<()> {
         );
     }
 
+    if args.concurrent.is_some() && args.nonce_seed.is_some() {
+        anyhow::bail!(
+            "--nonce-seed is incompatible with concurrent (v2) mode: fixed nonce \
+             sequence semantics are defined only for v1 sequential warmup/measured runs."
+        );
+    }
+
     match args.concurrent {
         None => eprintln!(
             "iron-bench v1 (sequential): {} target(s), prompt_len={:?}, max_tokens={}, runs={}, warmup={}",
@@ -230,6 +244,7 @@ async fn main() -> Result<()> {
                         args.capture_server_request_id,
                         args.capture_run_timestamps,
                         args.inter_run_cooldown_secs,
+                        args.nonce_seed,
                         &tokenizer,
                     )
                     .await?;
