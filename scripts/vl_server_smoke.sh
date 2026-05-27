@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OpenAI server single-image VL smoke for Gemma4 and Qwen3.5.
+# OpenAI server VL smoke for Gemma4 and Qwen3.5.
 #
 # Defaults discover local checkpoints under ~/.ironmlx/models and use the
 # checked-in P6 image fixture. Override paths and ports with env vars.
@@ -7,6 +7,7 @@
 # Usage:
 #   ./scripts/vl_server_smoke.sh
 #   ./scripts/vl_server_smoke.sh --case gemma4
+#   ./scripts/vl_server_smoke.sh --case gemma4-multi
 #   ./scripts/vl_server_smoke.sh --case qwen
 #   ./scripts/vl_server_smoke.sh --build
 #
@@ -17,6 +18,7 @@
 #   GEMMA4_MODEL=<snapshot-dir>
 #   QWEN35_MODEL=<snapshot-dir>
 #   GEMMA4_IMAGE=<image-path>
+#   GEMMA4_IMAGE_2=<image-path>
 #   QWEN35_IMAGE=<image-path>
 #   GEMMA4_PORT=18178
 #   QWEN35_PORT=18179
@@ -53,10 +55,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SMOKE_CASE" in
-    all|gemma4|qwen)
+    all|gemma4|gemma4-multi|qwen)
         ;;
     *)
-        echo "[vl-smoke] --case must be one of: all, gemma4, qwen" >&2
+        echo "[vl-smoke] --case must be one of: all, gemma4, gemma4-multi, qwen" >&2
         exit 2
         ;;
 esac
@@ -98,6 +100,7 @@ QWEN35_MODEL="${QWEN35_MODEL:-$(ls -d "$HOME"/.ironmlx/models/models--mlx-commun
 
 FIXTURE_IMAGE="$REPO_ROOT/ironmlx/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
 GEMMA4_IMAGE="${GEMMA4_IMAGE:-$FIXTURE_IMAGE}"
+GEMMA4_IMAGE_2="${GEMMA4_IMAGE_2:-$GEMMA4_IMAGE}"
 QWEN35_IMAGE="${QWEN35_IMAGE:-$FIXTURE_IMAGE}"
 
 GEMMA4_PORT="${GEMMA4_PORT:-18178}"
@@ -108,6 +111,7 @@ MAX_CACHE_CAP="${MAX_CACHE_CAP:-4096}"
 READY_TIMEOUT_SECS="${READY_TIMEOUT_SECS:-180}"
 COOLDOWN_SECS="${COOLDOWN_SECS:-3}"
 PROMPT="${PROMPT:-Describe this image in one short sentence.}"
+MULTI_PROMPT="${MULTI_PROMPT:-Describe the two images in one short sentence.}"
 
 STAMP="$(date +%Y-%m-%d-%H%M%S)"
 REPORT_DIR="$REPO_ROOT/reports/vl-server-smoke/$STAMP"
@@ -149,6 +153,7 @@ run_smoke() {
     local model_dir="$2"
     local image="$3"
     local port="$4"
+    local image2="${5:-}"
 
     if [[ -z "$model_dir" || ! -d "$model_dir" ]]; then
         echo "[vl-smoke] ERROR: $name model dir not found: $model_dir" >&2
@@ -156,6 +161,10 @@ run_smoke() {
     fi
     if [[ ! -f "$image" ]]; then
         echo "[vl-smoke] ERROR: $name image not found: $image" >&2
+        exit 2
+    fi
+    if [[ -n "$image2" && ! -f "$image2" ]]; then
+        echo "[vl-smoke] ERROR: $name second image not found: $image2" >&2
         exit 2
     fi
     if lsof -ti "tcp:$port" >/dev/null 2>&1; then
@@ -170,6 +179,9 @@ run_smoke() {
     log "=== $name ==="
     log "  model: $model_dir"
     log "  image: $image"
+    if [[ -n "$image2" ]]; then
+        log "  image2: $image2"
+    fi
     log "  port:  $port"
 
     MLX_DIR="$MLX_DIR" "$IRONMLX_BIN" serve \
@@ -189,23 +201,48 @@ run_smoke() {
     b64="$(base64 -i "$image" | tr -d '\n')"
 
     local body
-    body="$(jq -nc \
-        --arg model "$name-smoke" \
-        --arg prompt "$PROMPT" \
-        --arg image_url "data:image/jpeg;base64,$b64" \
-        --argjson max_tokens "$MAX_TOKENS" \
-        '{
-            model:$model,
-            messages:[{
-                role:"user",
-                content:[
-                    {type:"text", text:$prompt},
-                    {type:"image_url", image_url:{url:$image_url}}
-                ]
-            }],
-            max_tokens:$max_tokens,
-            stream:false
-        }')"
+    if [[ -n "$image2" ]]; then
+        local b64_2
+        b64_2="$(base64 -i "$image2" | tr -d '\n')"
+        body="$(jq -nc \
+            --arg model "$name-smoke" \
+            --arg prompt "$MULTI_PROMPT" \
+            --arg image_url "data:image/jpeg;base64,$b64" \
+            --arg image_url_2 "data:image/jpeg;base64,$b64_2" \
+            --argjson max_tokens "$MAX_TOKENS" \
+            '{
+                model:$model,
+                messages:[{
+                    role:"user",
+                    content:[
+                        {type:"text", text:$prompt},
+                        {type:"image_url", image_url:{url:$image_url}},
+                        {type:"text", text:" Second image:"},
+                        {type:"image_url", image_url:{url:$image_url_2}}
+                    ]
+                }],
+                max_tokens:$max_tokens,
+                stream:false
+            }')"
+    else
+        body="$(jq -nc \
+            --arg model "$name-smoke" \
+            --arg prompt "$PROMPT" \
+            --arg image_url "data:image/jpeg;base64,$b64" \
+            --argjson max_tokens "$MAX_TOKENS" \
+            '{
+                model:$model,
+                messages:[{
+                    role:"user",
+                    content:[
+                        {type:"text", text:$prompt},
+                        {type:"image_url", image_url:{url:$image_url}}
+                    ]
+                }],
+                max_tokens:$max_tokens,
+                stream:false
+            }')"
+    fi
 
     curl -fsS \
         -X POST "http://127.0.0.1:$port/v1/chat/completions" \
@@ -246,6 +283,11 @@ log ""
 
 if [[ "$SMOKE_CASE" == "all" || "$SMOKE_CASE" == "gemma4" ]]; then
     run_smoke "gemma4" "$GEMMA4_MODEL" "$GEMMA4_IMAGE" "$GEMMA4_PORT"
+    log ""
+fi
+
+if [[ "$SMOKE_CASE" == "all" || "$SMOKE_CASE" == "gemma4-multi" ]]; then
+    run_smoke "gemma4-multi" "$GEMMA4_MODEL" "$GEMMA4_IMAGE" "$GEMMA4_PORT" "$GEMMA4_IMAGE_2"
     log ""
 fi
 

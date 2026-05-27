@@ -86,6 +86,7 @@ static FIRST_EVAL_AMORTIZED_COST_FIRED: std::sync::OnceLock<()> = std::sync::Onc
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
 type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
+type PixelValuesSlice<'a> = Option<&'a [Array]>;
 
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
 /// (per P5 spec §3.1 — VL methods stay inherent / extension-trait-only).
@@ -102,7 +103,7 @@ pub trait DenseVlMethods {
         attention_mask: &mlx::Array,
         linear_attention_mask: &mlx::Array,
         per_row_lens: &[i32],
-        per_row_pixel_values: &[Option<&mlx::Array>],
+        per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
         cache: Option<&mut [crate::nn::LayerCache]>,
@@ -111,7 +112,7 @@ pub trait DenseVlMethods {
 
     fn compute_vision_embeds(
         &self,
-        pixel_values: &mlx::Array,
+        pixel_values: &[mlx::Array],
         grid_thw: &[(i32, i32, i32)],
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array>;
@@ -151,7 +152,7 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
         attention_mask: &mlx::Array,
         linear_attention_mask: &mlx::Array,
         per_row_lens: &[i32],
-        per_row_pixel_values: &[Option<&mlx::Array>],
+        per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
         cache: Option<&mut [crate::nn::LayerCache]>,
@@ -174,7 +175,7 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
 
     fn compute_vision_embeds(
         &self,
-        pixel_values: &mlx::Array,
+        pixel_values: &[mlx::Array],
         grid_thw: &[(i32, i32, i32)],
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
@@ -413,9 +414,9 @@ pub struct RequestState {
     pub finish_reason: Option<&'static str>,
 
     // ─── B1-p2.4: VL fields, carried from GenerateRequest at admit ───
-    /// Vision input. `None` for text-only rows. `Array` clone is mlx
-    /// reference-counted — cheap. Lives until evict.
-    pub pixel_values: Option<Array>,
+    /// Vision inputs in image order. `None` for text-only rows. `Array`
+    /// clone is mlx reference-counted — cheap. Lives until evict.
+    pub pixel_values: Option<Vec<Array>>,
     /// Per-image `(temporal, height, width)` grid sizes; same len as image
     /// count for this row. `None` ⇔ `pixel_values.is_none()`.
     pub image_grid_thw: Option<Vec<(i32, i32, i32)>>,
@@ -1274,14 +1275,14 @@ impl<M: Model> Scheduler<M> {
                     .iter()
                     .map(|opt| opt.as_deref())
                     .collect();
-                let per_row_pv: Vec<Option<&Array>> = prefill_rows
+                let per_row_pv: Vec<PixelValuesSlice<'_>> = prefill_rows
                     .iter()
                     .map(|&row| {
                         self.slots[row]
                             .as_ref()
                             .expect("prefill_rows contain only occupied slots")
                             .pixel_values
-                            .as_ref()
+                            .as_deref()
                     })
                     .collect();
 
@@ -2042,7 +2043,7 @@ impl<M: Model> Scheduler<M> {
         // running offset via `image_pad_consumed`.
         let vision_embeds_full = if is_vl {
             let pv = pixel_values
-                .as_ref()
+                .as_deref()
                 .expect("is_vl implies pixel_values is Some");
             let grids = image_grid_thw
                 .as_deref()
@@ -2515,7 +2516,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
             _cache: Option<&mut [crate::nn::LayerCache]>,
@@ -2526,7 +2527,7 @@ mod tests {
 
         fn compute_vision_embeds(
             &self,
-            _pixel_values: &mlx::Array,
+            _pixel_values: &[mlx::Array],
             _grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
@@ -3708,7 +3709,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
-            pixel_values: Some(pv_bf16),
+            pixel_values: Some(vec![pv_bf16]),
             image_grid_thw: Some(grids.clone()),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,

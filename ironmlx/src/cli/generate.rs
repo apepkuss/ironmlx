@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context};
 use clap::Args;
-use mlx::ops::shape::concatenate;
 use mlx::Array;
 
 use crate::core::generate::{GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
@@ -59,7 +58,7 @@ pub struct GenerateArgs {
 }
 
 struct PreparedImages {
-    pixel_values: Option<Array>,
+    pixel_values: Option<Vec<Array>>,
     image_grid_thw: Option<Vec<(i32, i32, i32)>>,
     placeholders: Vec<String>,
     image_spatial_merge_size: i32,
@@ -210,12 +209,8 @@ fn prepare_images(
         )
     };
 
-    let refs: Vec<&Array> = all_pixel_values.iter().collect();
-    let pixel_values = concatenate(&refs, 0).context("concatenating CLI image pixel_values")?;
-    mlx::transforms::eval(&[&pixel_values]).context("evaluating CLI image pixel_values")?;
-
     Ok(PreparedImages {
-        pixel_values: Some(pixel_values),
+        pixel_values: Some(all_pixel_values),
         image_grid_thw: Some(grids),
         placeholders,
         image_spatial_merge_size: spatial_merge_size,

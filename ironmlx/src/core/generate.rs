@@ -39,9 +39,14 @@ pub struct GenerateRequest {
     /// chunks; intermediate chunks update the cache only (no lm_head), the
     /// last chunk runs the full forward + lm_head.
     pub prefill_chunk_size: usize,
-    /// Image patches `[N_patches, 2, 3, 16, 16]` from preprocess. `None` = text-only.
-    pub pixel_values: Option<Array>,
-    /// Per-image `(T, H, W)` grids — must match `pixel_values` patch count.
+    /// Per-image preprocessed vision inputs in prompt order. `None` = text-only.
+    ///
+    /// Qwen images are fixed-size patch sequences and can be concatenated by
+    /// the model implementation. Gemma4 images keep their original resized
+    /// `[1, 3, H, W]` tensor per image because different images can have
+    /// different `H/W`.
+    pub pixel_values: Option<Vec<Array>>,
+    /// Per-image `(T, H, W)` grids in the same order as `pixel_values`.
     pub image_grid_thw: Option<Vec<(i32, i32, i32)>>,
     /// `VisionConfig.spatial_merge_size` for this model. Used to compute the
     /// MRoPE VL position-id strides; only consulted when `image_grid_thw` is
@@ -991,7 +996,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         // own range, ensuring the chunked path is numerically equivalent
         // to single-chunk forward_vl.
         let (vision_embeds_full, position_ids_full) = if let (Some(pv), Some(grids)) = (
-            request.pixel_values.as_ref(),
+            request.pixel_values.as_deref(),
             request.image_grid_thw.as_deref(),
         ) {
             let ve = model.compute_vision_embeds(pv, grids, ().into())?;
@@ -1728,6 +1733,31 @@ mod tests {
         assert!(req.pixel_values.is_none());
         assert!(req.image_grid_thw.is_none());
         assert_eq!(req.prompt_ids.len(), 3);
+    }
+
+    #[test]
+    fn position_ids_vl_single_stream_two_images_preserves_order() {
+        let image_token_id = 258880_i32;
+        let merge_size = 3_i32;
+        let input_ids: Vec<i32> = vec![
+            10,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            11,
+            image_token_id,
+            12,
+        ];
+        let grids = vec![(1_i32, 6_i32, 6_i32), (1_i32, 3_i32, 3_i32)];
+
+        let pos = build_position_ids_vl(&input_ids, &grids, image_token_id, merge_size)
+            .expect("position ids");
+        assert_eq!(pos.shape().as_slice(), &[3_i32, 1_i32, 8_i32]);
+        let flat: Vec<i32> = pos.to_vec().expect("to_vec");
+        assert_eq!(&flat[0..8], &[0, 1, 1, 1, 1, 3, 4, 5]);
+        assert_eq!(&flat[8..16], &[0, 1, 1, 2, 2, 3, 4, 5]);
+        assert_eq!(&flat[16..24], &[0, 1, 2, 1, 2, 3, 4, 5]);
     }
 
     #[test]

@@ -375,7 +375,7 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         _attention_mask: &Array,
         _linear_attention_mask: &Array,
         per_row_lens: &[i32],
-        per_row_pixel_values: &[Option<&Array>],
+        per_row_pixel_values: &[Option<&[Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
         cache: Option<&mut [LayerCache]>,
@@ -461,16 +461,28 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
 
     fn compute_vision_embeds(
         &self,
-        pixel_values: &Array,
+        pixel_values: &[Array],
         grid_thw: &[(i32, i32, i32)],
         target: StreamOrDevice,
     ) -> Result<Array> {
         let target: StreamOrDevice = target;
         let profile = vl_profile_enabled();
         let total_t0 = Instant::now();
+        if pixel_values.is_empty() {
+            return Err(anyhow!(
+                "Gemma4Model::compute_vision_embeds: pixel_values cannot be empty"
+            ));
+        }
         if grid_thw.is_empty() {
             return Err(anyhow!(
                 "Gemma4Model::compute_vision_embeds: grid_thw cannot be empty"
+            ));
+        }
+        if pixel_values.len() != grid_thw.len() {
+            return Err(anyhow!(
+                "Gemma4Model::compute_vision_embeds: pixel_values.len()={} must equal grid_thw.len()={}",
+                pixel_values.len(),
+                grid_thw.len()
             ));
         }
         let vision = self.vision.as_ref().ok_or_else(|| {
@@ -480,46 +492,54 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             .embed_vision
             .as_ref()
             .ok_or_else(|| anyhow!("Gemma4Model has no embed_vision projection"))?;
-        let t0 = Instant::now();
-        let features = vision.forward_on(pixel_values, target)?;
-        vl_profile_eval("compute_vision_tower", &[&features], t0, profile)?;
-        let t0 = Instant::now();
-        let projected = embed_vision.forward_on(&features, target)?;
-        vl_profile_eval(
-            "compute_embed_vision_projection",
-            &[&projected],
-            t0,
-            profile,
-        )?;
-        let shape = projected.shape();
-        let dims = shape.as_slice();
-        if dims.len() != 3 || dims[0] != 1 {
-            return Err(anyhow!(
-                "Gemma4Model::compute_vision_embeds expected [1,N,H], got {dims:?}"
-            ));
+        let pool = self
+            .vision_config
+            .as_ref()
+            .map(|vc| vc.pooling_kernel_size)
+            .unwrap_or(3);
+        let mut per_image: Vec<Array> = Vec::with_capacity(pixel_values.len());
+        for (idx, (pv, &(t, gh, gw))) in pixel_values.iter().zip(grid_thw.iter()).enumerate() {
+            let t0 = Instant::now();
+            let features = vision.forward_on(pv, target)?;
+            vl_profile_eval("compute_vision_tower", &[&features], t0, profile)?;
+            let t0 = Instant::now();
+            let projected = embed_vision.forward_on(&features, target)?;
+            vl_profile_eval(
+                "compute_embed_vision_projection",
+                &[&projected],
+                t0,
+                profile,
+            )?;
+            let shape = projected.shape();
+            let dims = shape.as_slice();
+            if dims.len() != 3 || dims[0] != 1 {
+                return Err(anyhow!(
+                    "Gemma4Model::compute_vision_embeds image {idx} expected [1,N,H], got {dims:?}"
+                ));
+            }
+            let n = dims[1];
+            let hidden = dims[2];
+            let expected = t * (gh / pool) * (gw / pool);
+            if expected != n {
+                return Err(anyhow!(
+                    "Gemma4Model::compute_vision_embeds image {idx}: grid_thw implies {expected} soft tokens but vision produced {n}; max per image {}",
+                    self.vision_soft_tokens_per_image
+                ));
+            }
+            let t0 = Instant::now();
+            let out = projected.reshape_on((n, hidden), target)?;
+            vl_profile_eval("compute_vision_reshape", &[&out], t0, profile)?;
+            per_image.push(out);
         }
-        let n = dims[1];
-        let hidden = dims[2];
-        let expected: i32 = grid_thw
-            .iter()
-            .map(|&(t, gh, gw)| {
-                let pool = self
-                    .vision_config
-                    .as_ref()
-                    .map(|vc| vc.pooling_kernel_size)
-                    .unwrap_or(3);
-                t * (gh / pool) * (gw / pool)
-            })
-            .sum();
-        if expected != n {
-            return Err(anyhow!(
-                "Gemma4Model::compute_vision_embeds: grid_thw implies {expected} soft tokens but vision produced {n}; max per image {}",
-                self.vision_soft_tokens_per_image
-            ));
-        }
-        let t0 = Instant::now();
-        let out = projected.reshape_on((n, hidden), target)?;
-        vl_profile_eval("compute_vision_reshape", &[&out], t0, profile)?;
+        let out = if per_image.len() == 1 {
+            per_image.pop().expect("len checked")
+        } else {
+            let t0 = Instant::now();
+            let refs: Vec<&Array> = per_image.iter().collect();
+            let merged = mlx::ops::shape::concatenate_on(&refs, 0, target)?;
+            vl_profile_eval("compute_vision_concat", &[&merged], t0, profile)?;
+            merged
+        };
         if profile {
             tracing::info!(
                 "[gemma4-vl-profile] compute_vision_embeds_total_ms={:.3}",

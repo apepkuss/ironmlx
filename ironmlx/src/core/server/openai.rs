@@ -13,7 +13,6 @@ use axum::{
     Json,
 };
 use base64::Engine;
-use mlx::ops::shape::concatenate;
 use mlx::Array;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -205,13 +204,13 @@ pub async fn decode_image_url(url: &str, client: &reqwest::Client) -> anyhow::Re
 ///
 /// Returns:
 /// - rewritten text-only messages (ready for `render_and_encode`)
-/// - concatenated pixel_values Array (None when no images present)
+/// - per-image pixel_values tensors (None when no images present)
 /// - image_grid_thw list (one entry per image)
 pub async fn expand_image_parts_in_messages(
     messages: Vec<ChatMessage>,
     client: &reqwest::Client,
     vision_input: &VisionInputConfig,
-) -> anyhow::Result<(Vec<ChatMessage>, Option<Array>, Vec<(i32, i32, i32)>)> {
+) -> anyhow::Result<(Vec<ChatMessage>, Option<Vec<Array>>, Vec<(i32, i32, i32)>)> {
     let spatial_merge_size = match vision_input {
         VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
         VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
@@ -227,17 +226,10 @@ pub async fn expand_image_parts_in_messages(
 
     // First pass: collect pixel_values + grid info for every image_url part
     // across all messages, in order.
-    let mut image_count = 0usize;
     for msg in &messages {
         if let Content::Parts(parts) = &msg.content {
             for part in parts {
                 if let ContentPart::ImageUrl { image_url } = part {
-                    if matches!(vision_input, VisionInputConfig::Gemma4 { .. }) && image_count >= 1
-                    {
-                        anyhow::bail!(
-                            "Gemma4 vision currently supports exactly one image per request"
-                        );
-                    }
                     let img_bytes = decode_image_url(&image_url.url, client).await?;
                     match vision_input {
                         VisionInputConfig::Qwen { .. } => {
@@ -256,7 +248,6 @@ pub async fn expand_image_parts_in_messages(
                             all_pixel_values.push(processed.pixel_values);
                         }
                     }
-                    image_count += 1;
                 }
             }
         }
@@ -275,18 +266,17 @@ pub async fn expand_image_parts_in_messages(
         })
         .collect();
 
-    // Concatenate pixel_values along axis 0.
     let pixel_values = if all_pixel_values.is_empty() {
         None
     } else {
-        let refs: Vec<&Array> = all_pixel_values.iter().collect();
-        let concat = concatenate(&refs, 0)?;
         // Eagerly materialize on this (async tokio worker) thread before the
         // tensor crosses into spawn_blocking, where a different worker thread's
         // default MLX stream would not be able to evaluate this thread's lazy
         // graph (errors with "There is no Stream(gpu, N) in current thread").
-        mlx::transforms::eval(&[&concat])?;
-        Some(concat)
+        for pv in &all_pixel_values {
+            mlx::transforms::eval(&[pv])?;
+        }
+        Some(all_pixel_values)
     };
 
     Ok((flat_messages, pixel_values, grid_thw))
@@ -1436,6 +1426,31 @@ mod tests {
         assert_eq!(
             flatten_content_with_placeholders(content, &mut iter),
             "before <image-placeholder> after"
+        );
+    }
+
+    #[test]
+    fn flatten_content_inserts_multiple_placeholders_in_part_order() {
+        let content = Content::Parts(vec![
+            ContentPart::Text { text: "a ".into() },
+            ContentPart::ImageUrl {
+                image_url: crate::core::server::chat_format::ImageUrl {
+                    url: "data:image/jpeg;base64,".into(),
+                },
+            },
+            ContentPart::Text { text: " b ".into() },
+            ContentPart::ImageUrl {
+                image_url: crate::core::server::chat_format::ImageUrl {
+                    url: "data:image/jpeg;base64,".into(),
+                },
+            },
+            ContentPart::Text { text: " c".into() },
+        ]);
+        let placeholders = vec!["<img-0>".to_string(), "<img-1>".to_string()];
+        let mut iter = placeholders.into_iter();
+        assert_eq!(
+            flatten_content_with_placeholders(content, &mut iter),
+            "a <img-0> b <img-1> c"
         );
     }
 
