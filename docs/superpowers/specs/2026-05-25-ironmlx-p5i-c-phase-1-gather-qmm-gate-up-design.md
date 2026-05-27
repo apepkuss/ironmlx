@@ -1,6 +1,6 @@
 # P5i.c Phase 1 γ-lite — `gather_qmm_gate_up` Optimization Design Exploration
 
-**Status (2026-05-27):** Stage β design converged per Codex round-2 review and this in-place review. G1/G4 are satisfied (§ 6); G2/G3 remain the Boss review/commit gates before implementation execution. Stage α T0/T1 infra shipped via separate Stage α prep commit (this commit; per Codex round-3 attribution-clarity binding — supersedes earlier fold-into-Stage-β plan; see § 4.1 + § 10). Stage α T2-T4 sweep is skipped per first-principles (`[feedback-first-principles-no-redundant-sweep]`).
+**Status (2026-05-27):** Stage β design converged per Codex round-2 review and this in-place review. G1/G4 are satisfied (§ 6); G2/G3 remain the Boss review/commit gates before implementation execution. Stage α T0/T1 infra shipped via separate Stage α prep commit `a9c2beb` (per Codex round-3 attribution-clarity binding — supersedes earlier fold-into-Stage-β plan; see § 4.1 + § 10). Stage α T2-T4 sweep is skipped per first-principles (`[feedback-first-principles-no-redundant-sweep]`).
 
 **Historical original status (2026-05-25, superseded by this update):** Design exploration ONLY (γ-lite). Implementation, benchmarking, kernel modification, and acceptance verification were out of scope until the stricter gates in § 6 were satisfied.
 
@@ -160,18 +160,19 @@ Kernel + plan + tests MUST read model dimensions from `text_config` / tensor sha
 
 #### § 4.2.5 v2 conditional trigger (Codex Q1 binding)
 
-Stage β v2 (absorb `expand_dims` + `slice`) MAY be considered **only if** post-v1 measurement (via Stage α T0/T1 infra) shows `expand_dims_on` + `slice_on` boundary overhead **> 3%** of `gate_up_gather_qmm_call` substep. v2 is a separate design pass; v1 close-out commits the kernel + ship infra fold, NOT a v2 promise.
+Stage β v2 (absorb `expand_dims` + `slice`) MAY be considered **only if** post-v1 measurement (via Stage α T0/T1 infra) shows `expand_dims_on` + `slice_on` boundary overhead **> 3%** of `gate_up_gather_qmm_call` substep. v2 is a separate design pass; v1 close-out commits the kernel, wiring, oracle, acceptance evidence, and close-out doc. Stage α infra already shipped in prep commit `a9c2beb`; v1 close-out does not fold it again.
 
 #### § 4.2.6 Acceptance gates (Codex Q3 binding)
 
-Stage β plan MUST embed two mandatory early-stop gates BEFORE production wiring tasks:
+Stage β plan MUST embed mandatory early-stop gates before irreversible or expensive work:
 
 | Gate | Condition |
 |---|---|
 | EG-1 | bench-kernel routing variant achieves kernel-only ≥ 30% reduction vs MLX `gather_quantized_matmul_on` baseline (same shape) |
-| EG-2 | Correctness oracle (§ 5 five cases + shape-forced sorted/default branches) stable across PP=128 + PP=512 + 35B-A3B-4bit 5-10 prompt regression |
+| EG-2a | Kernel-level correctness oracle (§ 5 shape matrix + shape-forced sorted/default branches + gate/up slice equivalence + top-k invariance) stable before production wiring |
+| EG-2b | 35B-A3B-4bit 5-prompt generation regression stable after production wiring smoke and before any L1/L2 acceptance measurement |
 
-If EG-1 fails: kernel design re-iterate (T0-T2); production wiring (T3+) BLOCKED. If EG-2 fails: kernel implementation fixed; do not wire. If both pass: proceed to T3 production wiring + L1/L2 acceptance.
+If EG-1 fails: kernel design re-iterate (T0-T2); production wiring BLOCKED. If EG-2a fails: kernel implementation fixed; do not wire. If EG-2b fails: L1/L2 acceptance measurement and close-out BLOCKED; fix kernel or wiring first. Only after EG-1 + EG-2a + production wiring smoke + EG-2b pass may the plan run L1/L2 acceptance.
 
 L1 + L2 acceptance per § 2.1 unchanged. Codex R1 binding: L1 same-cohort median comparison MUST use `gather_qmm_gate_up` (or its renamed equivalent) substep with **NO** `routing_sort_pack` contamination.
 
@@ -233,7 +234,7 @@ Source: `reports/p5i-c-phase-1-stage-beta-design-questions.md` (gitignored revie
 |---|---|---|
 | Q1 | Stage β v1 ≡ Option A (no absorb expand_dims/slice); v2 conditional on > 3% boundary residual | § 4.2.1 IN/OUT scope; § 4.2.5 v2 trigger |
 | Q2 | Shape-forced sorted/default oracle + 5-10 prompt 35B regression + acceptance only PP=128+512 (PP=2048 smoke not gate) | § 5 oracle requirements (R2 reinforced); planned in Stage β plan |
-| Q3 | Single plan 6-7 task + mandatory early-stop gate (bench-kernel ≥30% + oracle stable before production wiring) | § 4.2.6 EG-1 + EG-2 |
+| Q3 | Single plan 6-7 task + mandatory early-stop gates (bench-kernel ≥30%; kernel oracle before wiring; 35B regression before L1/L2) | § 4.2.6 EG-1 + EG-2a + EG-2b |
 | Q4.1 | NOT integrate `routing_sort_pack` / sort_perm generation in v1 kernel | § 4.2.1 IN scope kernel consumes existing inputs only |
 | Q4.2 | bench-kernel MUST add routing variant; non-routing self_qmm only proves tile structure | § 4.2.2 starting point + plan T0 |
 | Q4.3 | NO hardcode H/I/E/k/head_dim; read from `text_config` / tensor shape | § 4.2.4 model parameter handling table |
@@ -307,10 +308,10 @@ This spec is the primary tracked design artifact across Phase 1.
 - Codex round-2 consultation doc (gitignored): `reports/p5i-c-phase-1-stage-beta-design-questions.md`
 
 **To produce next after this design review closes**:
-- Stage β implementation plan (`docs/superpowers/plans/2026-05-27-ironmlx-p5i-c-phase-1-stage-beta-gather-kernel.md`) — 6-7 tasks per Codex Q3 binding + early-stop gates EG-1/EG-2 per § 4.2.6; drafting the plan is allowed before full G2 closes, but execution waits for Boss plan approval.
+- Stage β implementation plan (`docs/superpowers/plans/2026-05-27-ironmlx-p5i-c-phase-1-stage-beta-gather-kernel.md`) — 6-7 tasks per Codex Q3 binding + early-stop gates EG-1/EG-2a/EG-2b per § 4.2.6; drafting the plan is allowed before full G2 closes, but execution waits for Boss plan approval.
 
 **Two-commit pattern (Codex round-3 attribution-clarity binding, supersedes earlier fold plan)**:
-1. **Stage α prep commit** (this commit, 2026-05-27): T0/T1 child-span instrumentation infra (6 files) + this spec § 4.1 / § 10 alignment edit. Standalone shippable; not gated on Stage β.
+1. **Stage α prep commit** (`a9c2beb`, 2026-05-27): T0/T1 child-span instrumentation infra (6 files) + this spec § 4.1 / § 10 alignment edit. Standalone shippable; not gated on Stage β.
 2. **Stage β close-out commit** (post-G1-G4 + plan + impl + acceptance): custom Metal gather kernel (`ironmlx-bench-kernel` + `ironmlx/src/...`) + correctness oracle harness + L1/L2 acceptance evidence + close-out doc. Single commit per `[feedback-no-empty-commits]` (kernel + wiring + acceptance + close-out doc are coherent perf deliverable).
 
 Rationale: T0/T1 instrumentation infra + Stage β kernel wiring both touch `sparse_moe.rs` + `p5h.rs`. Folding them into one commit creates same-file two-layer modification merge → attribution mixed (T0 instrumentation vs Stage β wiring indistinguishable in hunks) + bisect-hostile (cannot localize regression to instrumentation vs kernel). Codex round-3 binding: attribution clarity outranks single-commit form.
