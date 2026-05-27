@@ -65,7 +65,13 @@ impl Gemma4DecoderLayer {
                 &format!("{prefix}.pre_feedforward_layernorm"),
                 cfg.rms_norm_eps,
             )?,
-            mlp: Gemma4GeGluMlp::from_loader(loader, &format!("{prefix}.mlp"), mlp_intermediate)?,
+            mlp: Gemma4GeGluMlp::from_loader(
+                loader,
+                &format!("{prefix}.mlp"),
+                mlp_intermediate,
+                layer_idx,
+                layer_kind,
+            )?,
             post_feedforward_layernorm: RmsNorm::from_loader(
                 loader,
                 &format!("{prefix}.post_feedforward_layernorm"),

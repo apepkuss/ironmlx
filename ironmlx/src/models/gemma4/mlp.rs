@@ -1,20 +1,31 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, StreamOrDevice};
+use std::time::Instant;
 
 use crate::core::Loader;
 use crate::nn::Linear;
 use crate::Result;
 
+use super::config::Gemma4LayerKind;
 use super::ops::gelu_approx_on;
+use super::profile;
 
 pub struct Gemma4GeGluMlp {
     gate_up: Linear,
     down: Linear,
     intermediate_size: i32,
+    layer_idx: usize,
+    layer_kind: Gemma4LayerKind,
 }
 
 impl Gemma4GeGluMlp {
-    pub fn from_loader(loader: &Loader, prefix: &str, intermediate_size: i32) -> Result<Self> {
+    pub fn from_loader(
+        loader: &Loader,
+        prefix: &str,
+        intermediate_size: i32,
+        layer_idx: usize,
+        layer_kind: Gemma4LayerKind,
+    ) -> Result<Self> {
         let gate_up = load_fused_gate_up(loader, prefix)
             .with_context(|| format!("loading fused Gemma4 GeGLU gate/up at `{prefix}`"))?;
         let down = Linear::from_loader(loader, &format!("{prefix}.down_proj"))
@@ -23,12 +34,25 @@ impl Gemma4GeGluMlp {
             gate_up,
             down,
             intermediate_size,
+            layer_idx,
+            layer_kind,
         })
     }
 
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
+        let profile = profile::vl_layer_enabled();
+        let t0 = Instant::now();
         let projected = self.gate_up.forward_on(x, target)?;
+        profile::eval_layer(
+            "gemma4_text_mlp_gate_up",
+            self.layer_idx,
+            self.layer_kind,
+            &[&projected],
+            t0,
+            profile,
+        )?;
+        let t0 = Instant::now();
         let axis = projected.ndim() as i32 - 1;
         let parts =
             mlx::ops::shape::split_at_on(&projected, &[self.intermediate_size][..], axis, target)?;
@@ -38,9 +62,36 @@ impl Gemma4GeGluMlp {
                 parts.len()
             ));
         }
+        profile::eval_layer(
+            "gemma4_text_mlp_split",
+            self.layer_idx,
+            self.layer_kind,
+            &[&parts[0], &parts[1]],
+            t0,
+            profile,
+        )?;
+        let t0 = Instant::now();
         let gate = gelu_approx_on(&parts[0], target)?;
         let activated = &gate * &parts[1];
-        self.down.forward_on(&activated, target)
+        profile::eval_layer(
+            "gemma4_text_mlp_geglu",
+            self.layer_idx,
+            self.layer_kind,
+            &[&activated],
+            t0,
+            profile,
+        )?;
+        let t0 = Instant::now();
+        let out = self.down.forward_on(&activated, target)?;
+        profile::eval_layer(
+            "gemma4_text_mlp_down",
+            self.layer_idx,
+            self.layer_kind,
+            &[&out],
+            t0,
+            profile,
+        )?;
+        Ok(out)
     }
 }
 
