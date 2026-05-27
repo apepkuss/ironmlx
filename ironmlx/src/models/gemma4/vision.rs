@@ -119,9 +119,9 @@ impl VisionPatchEmbedder {
             ));
         }
         let (b, c, h, w) = (dims[0], dims[1], dims[2], dims[3]);
-        if b != 1 || c != 3 {
+        if b <= 0 || c != 3 {
             return Err(anyhow!(
-                "Gemma4Vision patch embedder supports single RGB image [1,3,H,W], got {dims:?}"
+                "Gemma4Vision patch embedder expects RGB image batch [B,3,H,W], got {dims:?}"
             ));
         }
         let p = self.patch_size;
@@ -147,8 +147,8 @@ impl VisionPatchEmbedder {
         let patches = &(&patches - 0.5_f32) * 2.0_f32;
         let hidden = self.input_proj.forward_on(&patches, target)?;
 
-        let pos_x_arr: Array = (pos_x, &[b, n][..]).try_into()?;
-        let pos_y_arr: Array = (pos_y, &[b, n][..]).try_into()?;
+        let pos_x_arr: Array = (pos_x, &[1_i32, n][..]).try_into()?;
+        let pos_y_arr: Array = (pos_y, &[1_i32, n][..]).try_into()?;
         let table_shape = self.position_embedding_table.shape();
         let table_dims = table_shape.as_slice();
         if table_dims != [2, self.position_embedding_size, self.hidden_size] {
@@ -382,9 +382,9 @@ impl VisionModel {
         let total_t0 = Instant::now();
         let shape = pixel_values.shape();
         let dims = shape.as_slice();
-        if dims.len() != 4 || dims[0] != 1 || dims[1] != 3 {
+        if dims.len() != 4 || dims[0] <= 0 || dims[1] != 3 {
             return Err(anyhow!(
-                "Gemma4VisionModel supports single image [1,3,H,W], got {dims:?}"
+                "Gemma4VisionModel supports image batches [B,3,H,W], got {dims:?}"
             ));
         }
         let (h, w) = (dims[2], dims[3]);
@@ -449,11 +449,8 @@ impl VisionModel {
         let shape = hidden.shape();
         let dims = shape.as_slice();
         let (b, seq, h) = (dims[0], dims[1], dims[2]);
-        if b != 1 {
-            return Err(anyhow!("Gemma4Vision pooler supports B=1, got {b}"));
-        }
         let hidden = if padding.iter().any(|&p| p) {
-            let zero = Array::zeros((1_i32, seq, h), hidden.dtype())?;
+            let zero = Array::zeros_on((b, seq, h), hidden.dtype(), target)?;
             let keep: Vec<bool> = padding.iter().map(|p| !*p).collect();
             let keep_arr: Array = (keep.as_slice(), &[1_i32, seq, 1][..]).try_into()?;
             mlx::ops::where_on(&keep_arr, hidden, &zero, target)?
@@ -493,17 +490,33 @@ impl VisionModel {
         }
 
         let weights_arr: Array = (weights.as_slice(), &[length, seq][..]).try_into()?;
-        let hidden_2d = hidden.reshape_on((seq, h), target)?;
-        let pooled = weights_arr.matmul_on(&hidden_2d, target)?;
-        let pooled = &pooled * (self.cfg.hidden_size as f32).sqrt();
-        let pooled = pooled.reshape_on((1_i32, length, h), target)?;
-        Ok(mlx::ops::indexing::slice_strided_on(
-            &pooled,
-            &[0_i32, 0, 0][..],
-            &[1_i32, valid_count, h][..],
-            &[1_i32, 1, 1][..],
-            target,
-        )?)
+        let mut rows = Vec::with_capacity(b as usize);
+        for row in 0..b {
+            let hidden_row = mlx::ops::indexing::slice_strided_on(
+                &hidden,
+                &[row, 0, 0][..],
+                &[row + 1, seq, h][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?;
+            let hidden_2d = hidden_row.reshape_on((seq, h), target)?;
+            let pooled = weights_arr.matmul_on(&hidden_2d, target)?;
+            let pooled = &pooled * (self.cfg.hidden_size as f32).sqrt();
+            let pooled = pooled.reshape_on((1_i32, length, h), target)?;
+            rows.push(mlx::ops::indexing::slice_strided_on(
+                &pooled,
+                &[0_i32, 0, 0][..],
+                &[1_i32, valid_count, h][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?);
+        }
+        if rows.len() == 1 {
+            Ok(rows.pop().expect("len checked"))
+        } else {
+            let refs: Vec<&Array> = rows.iter().collect();
+            Ok(mlx::ops::shape::concatenate_on(&refs, 0, target)?)
+        }
     }
 }
 
@@ -613,10 +626,7 @@ fn build_rope_tables(
 fn apply_2d_rope_on(x: &Array, rope: &RopeTables, target: StreamOrDevice) -> Result<Array> {
     let shape = x.shape();
     let dims = shape.as_slice();
-    let (b, seq, _heads, head_dim) = (dims[0], dims[1], dims[2], dims[3]);
-    if b != 1 {
-        return Err(anyhow!("Gemma4Vision RoPE supports B=1, got {b}"));
-    }
+    let (_b, seq, _heads, head_dim) = (dims[0], dims[1], dims[2], dims[3]);
     let ndim = 2;
     let channels_per_dim = rope.channels_per_dim;
     if channels_per_dim <= 0 || channels_per_dim * ndim != head_dim {

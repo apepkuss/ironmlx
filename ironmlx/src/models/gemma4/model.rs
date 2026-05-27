@@ -497,10 +497,49 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             .as_ref()
             .map(|vc| vc.pooling_kernel_size)
             .unwrap_or(3);
-        let mut per_image: Vec<Array> = Vec::with_capacity(pixel_values.len());
-        for (idx, (pv, &(t, gh, gw))) in pixel_values.iter().zip(grid_thw.iter()).enumerate() {
+        let mut processed = vec![false; pixel_values.len()];
+        let mut per_image: Vec<Option<Array>> = (0..pixel_values.len()).map(|_| None).collect();
+        for group_start in 0..pixel_values.len() {
+            if processed[group_start] {
+                continue;
+            }
+            let group_shape = pixel_values[group_start].shape();
+            let group_dims = group_shape.as_slice();
+            if group_dims.len() != 4 || group_dims[0] != 1 || group_dims[1] != 3 {
+                return Err(anyhow!(
+                    "Gemma4Model::compute_vision_embeds image {group_start} expected [1,3,H,W], got {group_dims:?}"
+                ));
+            }
+            let mut group_indices = Vec::new();
+            for idx in group_start..pixel_values.len() {
+                if processed[idx] {
+                    continue;
+                }
+                if pixel_values[idx].shape().as_slice() == group_dims {
+                    group_indices.push(idx);
+                    processed[idx] = true;
+                }
+            }
+            if profile && group_indices.len() > 1 {
+                tracing::info!(
+                    "[gemma4-vl-profile] compute_vision_batch_group images={} shape={:?}",
+                    group_indices.len(),
+                    group_dims
+                );
+            }
             let t0 = Instant::now();
-            let features = vision.forward_on(pv, target)?;
+            let batch = if group_indices.len() == 1 {
+                pixel_values[group_indices[0]].clone()
+            } else {
+                let refs: Vec<&Array> = group_indices
+                    .iter()
+                    .map(|&idx| &pixel_values[idx])
+                    .collect();
+                mlx::ops::shape::concatenate_on(&refs, 0, target)?
+            };
+            vl_profile_eval("compute_vision_batch_concat", &[&batch], t0, profile)?;
+            let t0 = Instant::now();
+            let features = vision.forward_on(&batch, target)?;
             vl_profile_eval("compute_vision_tower", &[&features], t0, profile)?;
             let t0 = Instant::now();
             let projected = embed_vision.forward_on(&features, target)?;
@@ -512,25 +551,48 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             )?;
             let shape = projected.shape();
             let dims = shape.as_slice();
-            if dims.len() != 3 || dims[0] != 1 {
+            let group_len = i32::try_from(group_indices.len())
+                .context("Gemma4Model::compute_vision_embeds group size overflow")?;
+            if dims.len() != 3 || dims[0] != group_len {
                 return Err(anyhow!(
-                    "Gemma4Model::compute_vision_embeds image {idx} expected [1,N,H], got {dims:?}"
+                    "Gemma4Model::compute_vision_embeds expected batched projection [{group_len},N,H], got {dims:?}"
                 ));
             }
             let n = dims[1];
             let hidden = dims[2];
-            let expected = t * (gh / pool) * (gw / pool);
-            if expected != n {
-                return Err(anyhow!(
-                    "Gemma4Model::compute_vision_embeds image {idx}: grid_thw implies {expected} soft tokens but vision produced {n}; max per image {}",
-                    self.vision_soft_tokens_per_image
-                ));
+            for (batch_row, &idx) in group_indices.iter().enumerate() {
+                let (t, gh, gw) = grid_thw[idx];
+                let expected = t * (gh / pool) * (gw / pool);
+                if expected != n {
+                    return Err(anyhow!(
+                        "Gemma4Model::compute_vision_embeds image {idx}: grid_thw implies {expected} soft tokens but vision produced {n}; max per image {}",
+                        self.vision_soft_tokens_per_image
+                    ));
+                }
+                let t0 = Instant::now();
+                let row = i32::try_from(batch_row)
+                    .context("Gemma4Model::compute_vision_embeds batch row overflow")?;
+                let sliced = mlx::ops::indexing::slice_strided_on(
+                    &projected,
+                    &[row, 0, 0][..],
+                    &[row + 1, n, hidden][..],
+                    &[1_i32, 1, 1][..],
+                    target,
+                )?;
+                let out = sliced.reshape_on((n, hidden), target)?;
+                vl_profile_eval("compute_vision_reshape", &[&out], t0, profile)?;
+                per_image[idx] = Some(out);
             }
-            let t0 = Instant::now();
-            let out = projected.reshape_on((n, hidden), target)?;
-            vl_profile_eval("compute_vision_reshape", &[&out], t0, profile)?;
-            per_image.push(out);
         }
+        let mut per_image: Vec<Array> = per_image
+            .into_iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                item.ok_or_else(|| {
+                    anyhow!("Gemma4Model::compute_vision_embeds image {idx} was not processed")
+                })
+            })
+            .collect::<Result<_>>()?;
         let out = if per_image.len() == 1 {
             per_image.pop().expect("len checked")
         } else {
