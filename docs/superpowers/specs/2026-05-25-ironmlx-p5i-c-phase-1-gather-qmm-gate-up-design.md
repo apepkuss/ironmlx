@@ -1,6 +1,6 @@
 # P5i.c Phase 1 γ-lite — `gather_qmm_gate_up` Optimization Design Exploration
 
-**Status (2026-05-27):** Stage β design converged per Codex round-2 review and this in-place review. G1/G4 are satisfied (§ 6); G2/G3 remain the Boss review/commit gates before implementation execution. Stage α T0/T1 infra is implemented in the working tree (uncommitted; folds into the Stage β close-out commit). Stage α T2-T4 sweep is skipped per first-principles (`[feedback-first-principles-no-redundant-sweep]`).
+**Status (2026-05-27):** Stage β design converged per Codex round-2 review and this in-place review. G1/G4 are satisfied (§ 6); G2/G3 remain the Boss review/commit gates before implementation execution. Stage α T0/T1 infra shipped via separate Stage α prep commit (this commit; per Codex round-3 attribution-clarity binding — supersedes earlier fold-into-Stage-β plan; see § 4.1 + § 10). Stage α T2-T4 sweep is skipped per first-principles (`[feedback-first-principles-no-redundant-sweep]`).
 
 **Historical original status (2026-05-25, superseded by this update):** Design exploration ONLY (γ-lite). Implementation, benchmarking, kernel modification, and acceptance verification were out of scope until the stricter gates in § 6 were satisfied.
 
@@ -89,7 +89,7 @@ P5h T3 layer-3 MoE diagnostic measured `gather_qmm_gate_up` at 1.25us per layer 
 
 ### § 4.1 Stage α — instrumentation infra ship (sweep SKIPPED per first-principles)
 
-**Status (2026-05-27)**: T0 sub-span instrumentation + T1 aggregator extension are implemented in the working tree (uncommitted; folds into Stage β single close-out commit). T2 12-cell diagnostic sweep, T3 cost decomposition analysis, T4 standalone close-out: **SKIPPED** per Boss + controller first-principles agreement on 2026-05-27. Codex round-2 Q6: agreed SKIP.
+**Status (2026-05-27)**: T0 sub-span instrumentation + T1 aggregator extension shipped via **Stage α prep commit** (separate from Stage β close-out per Codex round-3 attribution-clarity binding; see § 10). T2 12-cell diagnostic sweep, T3 cost decomposition analysis, T4 standalone close-out: **SKIPPED** per Boss + controller first-principles agreement on 2026-05-27. Codex round-2 Q6: agreed SKIP.
 
 **Rationale for SKIP** (recorded in `[feedback-first-principles-no-redundant-sweep]`):
 
@@ -101,8 +101,8 @@ P5h T3 layer-3 MoE diagnostic measured `gather_qmm_gate_up` at 1.25us per layer 
 
 The distribution is determined by MLX op semantics; a 12-cell sweep at any granularity can only confirm what physics already implies. Stage β direction (replace `gather_quantized_matmul_on` with a custom Metal kernel) is invariant under any sweep outcome.
 
-**Working-tree infra (folds into Stage β commit)**:
-- `ironmlx/src/models/qwen3_5_moe/sparse_moe.rs`: 3 child sub-spans wrapping `gather_qmm_gate_up`; runtime-gated by `IRONMLX_P5I_C_GATE_UP_CHILD_SPANS=1` (OnceLock-cached); cfg-gated `p5h-profile`; production binary byte-identical (env-default OFF)
+**Shipped infra (Stage α prep commit)**:
+- `ironmlx/src/models/qwen3_5_moe/sparse_moe.rs`: 3 child sub-spans wrapping `gather_qmm_gate_up`; runtime-gated by `IRONMLX_P5I_C_GATE_UP_CHILD_SPANS=1` (OnceLock-cached); cfg-gated `p5h-profile`; default production path unaffected (env-default OFF; production build path doesn't compile the helpers)
 - `ironmlx/src/core/p5h.rs` + `tools/p5h_aggregator/schema_validator.py`: 3 child span names registered in Rust + Python Lane-B allow-list (lockstep test verifies parity)
 - `tools/p5h_aggregator/multi_repeat.py`: `attribute_child_spans()` + `load_spans_for_child_attribution()` for span_id/parent_span_id tree-identity attribution
 
@@ -309,11 +309,11 @@ This spec is the primary tracked design artifact across Phase 1.
 **To produce next after this design review closes**:
 - Stage β implementation plan (`docs/superpowers/plans/2026-05-27-ironmlx-p5i-c-phase-1-stage-beta-gather-kernel.md`) — 6-7 tasks per Codex Q3 binding + early-stop gates EG-1/EG-2 per § 4.2.6; drafting the plan is allowed before full G2 closes, but execution waits for Boss plan approval.
 
-**To produce only after G1-G4 all hold**:
-- Custom Metal gather kernel (`ironmlx-bench-kernel` + `ironmlx/src/...`)
-- Correctness oracle harness
-- L1/L2 acceptance evidence
-- Single close-out commit (folds Stage α T0/T1 infra + Stage β kernel + close-out doc) per § 4.3 + `[feedback-no-empty-commits]`
+**Two-commit pattern (Codex round-3 attribution-clarity binding, supersedes earlier fold plan)**:
+1. **Stage α prep commit** (this commit, 2026-05-27): T0/T1 child-span instrumentation infra (6 files) + this spec § 4.1 / § 10 alignment edit. Standalone shippable; not gated on Stage β.
+2. **Stage β close-out commit** (post-G1-G4 + plan + impl + acceptance): custom Metal gather kernel (`ironmlx-bench-kernel` + `ironmlx/src/...`) + correctness oracle harness + L1/L2 acceptance evidence + close-out doc. Single commit per `[feedback-no-empty-commits]` (kernel + wiring + acceptance + close-out doc are coherent perf deliverable).
+
+Rationale: T0/T1 instrumentation infra + Stage β kernel wiring both touch `sparse_moe.rs` + `p5h.rs`. Folding them into one commit creates same-file two-layer modification merge → attribution mixed (T0 instrumentation vs Stage β wiring indistinguishable in hunks) + bisect-hostile (cannot localize regression to instrumentation vs kernel). Codex round-3 binding: attribution clarity outranks single-commit form.
 
 ## § 11 References
 

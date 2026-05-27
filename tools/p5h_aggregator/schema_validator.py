@@ -130,6 +130,10 @@ LANE_B_ALLOWED_TREE = LANE_B_REQUIRED_TREE | {
     # required (Lane-B presence not enforced for tokenizer_encode), so it
     # stays in ALLOWED but not REQUIRED.
     "tokenizer_encode",
+    # P5i.c Phase 1 Stage α opt-in children of gather_qmm_gate_up.
+    "gate_up_input_shape_prep",
+    "gate_up_gather_qmm_call",
+    "gate_up_slice_outputs",
 }
 LANE_B_REQUIRED_DIAGNOSTIC: set[str] = set()  # no Lane-B diagnostic spans currently
 LANE_B_ALLOWED_DIAGNOSTIC: set[str] = set()  # no Lane-B diagnostic spans currently

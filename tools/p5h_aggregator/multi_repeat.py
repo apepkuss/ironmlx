@@ -35,7 +35,7 @@ from p5h_2a_se_analysis import bootstrap_median_ci  # noqa: E402
 
 # Import schema_validator's parse_line for production-mode server.log parsing.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from schema_validator import parse_line  # noqa: E402
+from schema_validator import Span, parse_line  # noqa: E402
 
 
 def run_aggregator_one_probe_cell(repeat_dir: Path, tmp_dir: Path) -> Path:
@@ -247,6 +247,86 @@ def extract_production_root_us(repeat_dirs: list[Path], pp: int) -> dict:
         "per_repeat_root_us_median": per_repeat_root_medians,
         "production_root_us_median": overall_median,
     }
+
+
+GATE_UP_CHILD_SPAN_NAMES = {
+    "gate_up_input_shape_prep",
+    "gate_up_gather_qmm_call",
+    "gate_up_slice_outputs",
+}
+
+
+def load_spans_for_child_attribution(server_log: Path) -> list[Span]:
+    """Load P5h Span records from a server.log for Stage α child attribution."""
+    spans: list[Span] = []
+    with server_log.open() as f:
+        for line in f:
+            span = parse_line(line)
+            if span is not None:
+                spans.append(span)
+    if not spans:
+        raise SystemExit(f"{server_log}: no P5h spans found")
+    return spans
+
+
+def attribute_child_spans(records: list[Span], parent: str) -> dict[str, dict[str, float | int]]:
+    """Attribute direct child spans to each parent span instance.
+
+    P5h span names repeat across decoder layers and requests, so attribution
+    MUST use span_id/parent_span_id tree identity instead of parent span name
+    strings. Returns medians across parent span instances.
+    """
+    tree = [span for span in records if span.span_kind == "tree"]
+    children_by_parent: dict[int, list[Span]] = defaultdict(list)
+    for span in tree:
+        if span.parent_span_id is not None:
+            children_by_parent[span.parent_span_id].append(span)
+
+    parent_spans = [span for span in tree if span.span_name == parent]
+    if not parent_spans:
+        raise SystemExit(f"no parent span records found for {parent!r}")
+
+    child_us: dict[str, list[float]] = defaultdict(list)
+    child_share: dict[str, list[float]] = defaultdict(list)
+    residual_us: list[float] = []
+    residual_share: list[float] = []
+
+    for parent_span in parent_spans:
+        named_children = [
+            child
+            for child in children_by_parent.get(parent_span.span_id, [])
+            if child.span_name in GATE_UP_CHILD_SPAN_NAMES
+        ]
+        child_sum = sum(child.inclusive_us for child in named_children)
+        residual = parent_span.inclusive_us - child_sum
+        if residual < -1.0:
+            raise SystemExit(
+                f"{parent} span_id={parent_span.span_id}: child sum exceeds parent "
+                f"by {-residual:.2f}us"
+            )
+        residual_us.append(residual)
+        if parent_span.inclusive_us > 0:
+            residual_share.append(residual / parent_span.inclusive_us * 100.0)
+        for child in named_children:
+            child_us[child.span_name].append(child.inclusive_us)
+            if parent_span.inclusive_us > 0:
+                child_share[child.span_name].append(
+                    child.inclusive_us / parent_span.inclusive_us * 100.0
+                )
+
+    result: dict[str, dict[str, float | int]] = {}
+    for child_name in sorted(child_us):
+        result[child_name] = {
+            "median_us": median(child_us[child_name]),
+            "share_of_parent_pct": median(child_share[child_name]),
+            "instances": len(child_us[child_name]),
+        }
+    result["__residual__"] = {
+        "median_us": median(residual_us),
+        "share_of_parent_pct": median(residual_share) if residual_share else 0.0,
+        "instances": len(residual_us),
+    }
+    return result
 
 
 def main() -> None:

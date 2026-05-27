@@ -1039,3 +1039,13 @@ def test_rust_lane_b_allow_list_subset_of_python():
     assert not missing, (
         f"Rust try-helper allow-list has names not in Python LANE_B_ALLOWED_TREE: {missing}"
     )
+
+
+def test_p5i_c_gate_up_child_spans_allowed_on_lane_b():
+    """Stage α child spans are opt-in Lane-B tree spans and must stay in the
+    Python validator allow-set."""
+    assert {
+        "gate_up_input_shape_prep",
+        "gate_up_gather_qmm_call",
+        "gate_up_slice_outputs",
+    } <= LANE_B_ALLOWED_TREE
