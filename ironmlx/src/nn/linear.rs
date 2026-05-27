@@ -196,9 +196,29 @@ impl Linear {
                 // batch×seq dim is large enough that the simdgroup-MMA tile
                 // pays for itself. Below the threshold most threads are idle
                 // (M=1 decode would burn the SG-MMA path at <1 tok/s), so
-                // fall back to mlx's compute-light qmv. Threshold = 32 covers
-                // the M=1 / small-prefill cases cleanly while keeping the
-                // PP=128/512/2048 prefill on the hardware-MMA path.
+                // fall back to mlx's compute-light qmv.
+                //
+                // Threshold = 2048 matches the P8a Stage 9 self_qmm
+                // acceptance gate test point (M=2048, N=9216, K=2560 gate_up
+                // shape; 1.32× e2e vs MLX per [project-p8a-stage9-findings]),
+                // which is the empirically validated lower bound for
+                // self_qmm beneficial regime. P5i.c Phase B feasibility gate
+                // (2026-05-27) empirically refuted the prior `>= 32` threshold
+                // by measuring 3× substep regression + 1.75-7.52% e2e
+                // regression at PP=128/512 (M=128/512) when
+                // IRONMLX_USE_SELF_QMM=1; per-dispatch overhead (kernel
+                // launch + threadgroup setup + smem staging + encoder cost)
+                // dominates at small M.
+                //
+                // Inflection point between 512 and 2048 is unmeasured; future
+                // work can do a bench-kernel m-sweep to find it and lower
+                // threshold if benefit is meaningful. For now `>= 2048` is the
+                // safe + empirically validated lower bound.
+                //
+                // Production default unaffected (IRONMLX_USE_SELF_QMM is
+                // opt-in env var; default OFF → self_qmm path never taken).
+                // This threshold change only affects users who explicitly
+                // set IRONMLX_USE_SELF_QMM=1 at small-PP workloads.
                 let m_total: i32 = {
                     let dims = x.shape();
                     let s = dims.as_slice();
@@ -208,7 +228,8 @@ impl Linear {
                         s[..s.len() - 1].iter().product()
                     }
                 };
-                let use_self_qmm = crate::nn::self_qmm::enabled() && m_total >= 32;
+                let use_self_qmm =
+                    should_dispatch_self_qmm(crate::nn::self_qmm::enabled(), m_total);
                 let mut y = if use_self_qmm {
                     // Stage 9 self-quant kernel path. qmm_t_on requires
                     // affine biases (per-group zero-points); Qwen3.5
@@ -251,6 +272,20 @@ impl Linear {
             }
         }
     }
+}
+
+/// Pure predicate for M-aware `self_qmm` dispatch — extracted so the
+/// threshold logic is unit-testable without spinning up an MLX runtime.
+///
+/// Production callers pass `crate::nn::self_qmm::enabled()` as the
+/// `self_qmm_enabled` argument; tests pass an explicit boolean.
+///
+/// Threshold is `2048` per the P8a Stage 9 acceptance gate test point
+/// + P5i.c Phase B empirical refutation of the prior `32` threshold (see
+///   `LinearImpl::Quant` branch comment above for full rationale).
+#[inline]
+fn should_dispatch_self_qmm(self_qmm_enabled: bool, m_total: i32) -> bool {
+    self_qmm_enabled && m_total >= 2048
 }
 
 #[cfg(test)]
@@ -337,5 +372,33 @@ mod tests {
 
         assert_eq!(lin.in_features(), in_dim as usize);
         assert_eq!(lin.out_features(), out as usize);
+    }
+
+    /// Regression guard for the P8a Stage 9 + P5i.c Phase B threshold
+    /// `m_total >= 2048`. Phase B feasibility gate (2026-05-27) empirically
+    /// refuted the prior `m_total >= 32` threshold via 3× substep regression
+    /// + 1.75-7.52% e2e regression at PP=128/512 when
+    /// `IRONMLX_USE_SELF_QMM=1`. This test guards against accidental
+    /// lowering of the threshold below the empirically validated lower
+    /// bound (Stage 9 acceptance test point M=2048).
+    #[test]
+    fn self_qmm_dispatch_threshold_is_2048_when_env_enabled() {
+        // Env disabled → never dispatch self_qmm, regardless of M.
+        assert!(!should_dispatch_self_qmm(false, 1));
+        assert!(!should_dispatch_self_qmm(false, 2048));
+        assert!(!should_dispatch_self_qmm(false, 100_000));
+
+        // Env enabled but M below threshold → fall back to MLX qmv path.
+        assert!(!should_dispatch_self_qmm(true, 0));
+        assert!(!should_dispatch_self_qmm(true, 1)); // M=1 decode
+        assert!(!should_dispatch_self_qmm(true, 32)); // prior threshold; now OFF
+        assert!(!should_dispatch_self_qmm(true, 128)); // PP=128 Phase B regression band
+        assert!(!should_dispatch_self_qmm(true, 512)); // PP=512 Phase B regression band
+        assert!(!should_dispatch_self_qmm(true, 2047)); // just below threshold
+
+        // Env enabled AND M at-or-above threshold → dispatch self_qmm.
+        assert!(should_dispatch_self_qmm(true, 2048)); // Stage 9 acceptance gate point
+        assert!(should_dispatch_self_qmm(true, 4096));
+        assert!(should_dispatch_self_qmm(true, 16_384));
     }
 }
