@@ -881,6 +881,37 @@ pub fn count_image_pad(ids: &[u32], image_token_id: i32) -> usize {
     ids.iter().filter(|&&t| t == target).count()
 }
 
+/// Extend a VL chunk end when the fixed boundary would split a contiguous
+/// image-token run. Keeping each image's placeholder run in one text forward
+/// avoids extra cache-update chunks and reduces long-tail MLX/Metal stalls.
+pub(crate) fn extend_vl_chunk_end_for_image_pad(
+    prompt_ids: &[u32],
+    image_token_id: i32,
+    chunk_start: i32,
+    base_chunk_end: i32,
+) -> i32 {
+    if image_token_id < 0 || chunk_start < 0 || base_chunk_end <= chunk_start {
+        return base_chunk_end;
+    }
+
+    let len = prompt_ids.len();
+    let Ok(mut end) = usize::try_from(base_chunk_end) else {
+        return base_chunk_end;
+    };
+    if end == 0 || end >= len {
+        return base_chunk_end.min(len as i32);
+    }
+
+    let pad = image_token_id as u32;
+    if prompt_ids[end - 1] != pad || prompt_ids[end] != pad {
+        return base_chunk_end;
+    }
+    while end < len && prompt_ids[end] == pad {
+        end += 1;
+    }
+    end as i32
+}
+
 /// Slice a MRoPE `[3, 1, S]` position-id tensor on axis 2 by a half-open
 /// range `[start, stop)`. Returns `[3, 1, stop - start]`.
 pub fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<mlx::Array> {
@@ -1025,11 +1056,20 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         let mut chunk_idx: u32 = 0;
         let last_logits = loop {
             let remaining = prompt_len_i32 - pos;
-            let n = if chunk_size == 0 {
+            let mut n = if chunk_size == 0 {
                 remaining
             } else {
                 remaining.min(chunk_size as i32)
             };
+            if chunk_size != 0 && vision_embeds_full.is_some() {
+                let adjusted_end = extend_vl_chunk_end_for_image_pad(
+                    &request.prompt_ids,
+                    request.image_token_id,
+                    pos,
+                    pos + n,
+                );
+                n = adjusted_end - pos;
+            }
 
             // T0a.8 Step 3b: wrap chunk body in gs_chunk_N. The closure
             // captures cache (mut), image_pad_consumed (mut), and the
@@ -1939,6 +1979,31 @@ mod p6_7_helper_tests {
         let ids: Vec<u32> = vec![1, 248056, 2, 248056, 248056, 3];
         assert_eq!(count_image_pad(&ids, 248056), 3);
         assert_eq!(count_image_pad(&ids, 999), 0);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_extends_inside_image_run() {
+        let ids: Vec<u32> = (0..400_u32)
+            .map(|i| if (250..260).contains(&i) { 42 } else { 1 })
+            .collect();
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 260);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_keeps_exact_run_boundary() {
+        let ids: Vec<u32> = (0..400_u32)
+            .map(|i| if (200..256).contains(&i) { 42 } else { 1 })
+            .collect();
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 256);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_keeps_non_image_boundary() {
+        let ids: Vec<u32> = (0..400_u32)
+            .map(|i| if (300..340).contains(&i) { 42 } else { 1 })
+            .collect();
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 256);
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, -1, 0, 256), 256);
     }
 
     #[test]

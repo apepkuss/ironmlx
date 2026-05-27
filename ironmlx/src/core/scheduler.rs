@@ -61,8 +61,9 @@ pub enum SchedulerError {
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
     build_per_row_decode_mask, build_position_ids, build_position_ids_batched,
-    build_position_ids_vl, build_position_ids_vl_batched, count_image_pad, slice_logits_row,
-    slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateRequest,
+    build_position_ids_vl, build_position_ids_vl_batched, count_image_pad,
+    extend_vl_chunk_end_for_image_pad, slice_logits_row, slice_pos_ids_axis2,
+    slice_vision_embeds_rows, GenerateRequest,
 };
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
@@ -304,8 +305,8 @@ pub struct AdmitMidHandle {
     pub(crate) prompt_ids: Vec<u32>,
     pub(crate) prompt_len: i32,
     /// Per-chunk max token count; equals `req.prefill_chunk_size.max(1)`
-    /// at construction, unless the VL R6 fallback forces single-chunk
-    /// (image_pad straddles a chunk boundary — spec §4.6 NG7).
+    /// at construction. VL chunks may exceed it only when extending a
+    /// boundary to keep one contiguous image token run intact.
     pub(crate) chunk_size: i32,
     pub(crate) chunk_start: i32,
     /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
@@ -331,47 +332,6 @@ pub struct AdmitMidHandle {
     /// Last chunk's `[1, 1, vocab]` logits, captured only at the final
     /// chunk for first-token sampling in `admit_mid_finalize`.
     pub(crate) last_logits: Option<Array>,
-}
-
-/// Returns true if any `image_pad` run in `prompt_ids` would straddle
-/// a chunk boundary at `chunk_size`. Used by `admit_mid_begin` to
-/// detect the VL v1 fallback condition (spec §4.6 NG7 / §4.7 R6):
-/// when an image's `image_pad` tokens span chunks, we'd need per-chunk
-/// vision-arg slicing — deferred to v2. v1 forces single-chunk in
-/// this case.
-fn vl_image_pad_crosses_chunk_boundary(
-    prompt_ids: &[u32],
-    image_token_id: i32,
-    chunk_size: i32,
-) -> bool {
-    if image_token_id < 0 || chunk_size <= 0 {
-        return false;
-    }
-    let pad = image_token_id as u32;
-    let cs = chunk_size as usize;
-    let mut in_run = false;
-    let mut run_start = 0usize;
-    for (i, &t) in prompt_ids.iter().enumerate() {
-        if t == pad {
-            if !in_run {
-                in_run = true;
-                run_start = i;
-            }
-        } else if in_run {
-            let run_end = i; // exclusive
-            if run_start / cs != (run_end - 1) / cs {
-                return true;
-            }
-            in_run = false;
-        }
-    }
-    if in_run {
-        let run_end = prompt_ids.len();
-        if run_start / cs != (run_end - 1) / cs {
-            return true;
-        }
-    }
-    false
 }
 
 /// All per-request state the scheduler tracks. Pre-allocated at admit time
@@ -1891,11 +1851,11 @@ impl<M: Model> Scheduler<M> {
     /// [`Scheduler::step`] between chunks so active rows continue
     /// emitting tokens.
     ///
-    /// # VL fallback (spec §4.6 NG7 / §4.7 R6)
-    /// If the request has `image_pad` token runs that span a chunk
-    /// boundary, this v1 implementation forces single-chunk path
-    /// (`chunk_size = prompt_len`). Per-chunk vision slicing is a v2
-    /// task. A warning is logged.
+    /// # VL chunk boundaries
+    /// VL chunking keeps each contiguous `image_pad` run in one chunk by
+    /// extending a fixed boundary when it lands inside an image span. This
+    /// preserves chunked prefill semantics while avoiding extra text forwards
+    /// for one logical image.
     ///
     /// # Errors
     /// - [`SchedulerError::RequestTooLarge`] when
@@ -1948,7 +1908,7 @@ impl<M: Model> Scheduler<M> {
     /// Body of `admit_mid_begin` separated so the caller can centralise
     /// rollback. Steps: extract per-row state, compute floored
     /// `cap_for_temp`, detect dtype, allocate temp_cache, pre-build
-    /// full-prompt position ids, run VL R6 fallback detection.
+    /// full-prompt position ids, and compute full-prompt vision embeddings.
     fn admit_mid_begin_inner(
         &mut self,
         id: RequestId,
@@ -2008,18 +1968,7 @@ impl<M: Model> Scheduler<M> {
 
         let is_vl = pixel_values.is_some();
 
-        // VL R6 fallback: if any image_pad run straddles a chunk
-        // boundary, force single-chunk path (v1 does not slice vision
-        // args per chunk).
-        let mut chunk_size = prefill_chunk_size.max(1);
-        if is_vl && vl_image_pad_crosses_chunk_boundary(&prompt_ids, image_token_id, chunk_size) {
-            tracing::warn!(
-                "[admit_mid_begin] VL request with image_pad spanning chunk boundary; \
-                 forcing single-chunk (chunk_size={chunk_size} -> {prompt_len}); \
-                 v2 will support per-chunk vision slicing",
-            );
-            chunk_size = prompt_len;
-        }
+        let chunk_size = prefill_chunk_size.max(1);
 
         // Pre-build full-prompt MRoPE position ids in the B=1 single-stream
         // shape that `model.forward_on` / `model.forward_vl_chunk` expect:
@@ -2090,10 +2039,20 @@ impl<M: Model> Scheduler<M> {
     {
         self.ensure_not_poisoned()?;
 
-        let chunk_end = handle
+        let base_chunk_end = handle
             .chunk_start
             .saturating_add(handle.chunk_size)
             .min(handle.prompt_len);
+        let chunk_end = if handle.is_vl {
+            extend_vl_chunk_end_for_image_pad(
+                &handle.prompt_ids,
+                handle.image_token_id,
+                handle.chunk_start,
+                base_chunk_end,
+            )
+        } else {
+            base_chunk_end
+        };
         let is_last = chunk_end == handle.prompt_len;
         let chunk_len = chunk_end - handle.chunk_start;
         if chunk_len <= 0 {
@@ -3904,87 +3863,6 @@ mod tests {
             s4.computed_cap_for_prefill(),
             256,
             "empty slots fallback = 256 (defensive default)"
-        );
-    }
-
-    // ─── B1-p2.3c+ chunked admit_mid helper unit tests ──────────────────
-
-    #[test]
-    fn vl_image_pad_crosses_chunk_boundary_detects_run_across() {
-        // image_token_id=42, run at positions 250..260, chunk_size=256.
-        // Run crosses 256-boundary (positions 250-255 in chunk 0, 256-259 in chunk 1).
-        let ids: Vec<u32> = (0..400_u32)
-            .map(|i| {
-                if (250..260).contains(&(i as i32)) {
-                    42
-                } else {
-                    1
-                }
-            })
-            .collect();
-        assert!(
-            super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
-            "run [250..260] should cross 256-boundary at chunk_size=256"
-        );
-        // chunk_size=512 → entire run fits in chunk 0; no crossing.
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 512),
-            "run [250..260] should NOT cross at chunk_size=512"
-        );
-    }
-
-    #[test]
-    fn vl_image_pad_no_pads_returns_false() {
-        // Empty pad run set.
-        let ids: Vec<u32> = (0..200_u32).collect();
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 64),
-            "no image_pad tokens → no crossing possible"
-        );
-        // Also degenerate: empty prompt.
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&[], 42, 64),
-            "empty prompt → no crossing"
-        );
-        // Degenerate: image_token_id < 0 disables the check.
-        let ids2: Vec<u32> = vec![5; 100];
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids2, -1, 32),
-            "image_token_id < 0 disables detection"
-        );
-    }
-
-    #[test]
-    fn vl_image_pad_run_within_single_chunk_returns_false() {
-        // image_pad run [100..150], chunk_size=256 — all in chunk 0.
-        let ids: Vec<u32> = (0..200_u32)
-            .map(|i| {
-                if (100..150).contains(&(i as i32)) {
-                    42
-                } else {
-                    1
-                }
-            })
-            .collect();
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
-            "run [100..150] within chunk 0 should NOT cross"
-        );
-        // Adjacent boundary case: run ends exactly at chunk boundary.
-        // Run [200..256], chunk_size=256. Run start chunk = 200/256 = 0.
-        // Run end-1 = 255, 255/256 = 0. Same chunk → no crossing.
-        let ids2: Vec<u32> = (0..400_u32)
-            .map(|i| {
-                if (200..256).contains(&(i as i32)) {
-                    42
-                } else {
-                    1
-                }
-            })
-            .collect();
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids2, 42, 256),
-            "run [200..256] ends exactly at boundary — fits in chunk 0"
         );
     }
 
