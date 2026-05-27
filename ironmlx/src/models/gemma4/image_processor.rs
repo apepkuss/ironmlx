@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Result};
 use mlx::Array;
+use std::time::Instant;
 
 use super::config::Gemma4VisionConfig;
 
@@ -51,15 +52,25 @@ pub fn resize_target(height: i32, width: i32, cfg: &Gemma4VisionConfig) -> Resul
 }
 
 pub fn preprocess(img_bytes: &[u8], cfg: &Gemma4VisionConfig) -> Result<ProcessedImage> {
+    let profile = std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some();
+    let total_t0 = Instant::now();
+    let t0 = Instant::now();
     let img = image::load_from_memory(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?
         .to_rgb8();
+    if profile {
+        tracing::info!(
+            "[gemma4-vl-profile] image_decode_ms={:.3}",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);
     let (h2, w2) = resize_target(orig_h, orig_w, cfg)?;
 
     let plane = (h2 * w2) as usize;
     let mut chw = vec![0.0_f32; 3 * plane];
 
+    let t0 = Instant::now();
     if orig_h == h2 && orig_w == w2 {
         for (i, p) in img.pixels().enumerate() {
             chw[i] = p.0[0] as f32 / 255.0;
@@ -79,6 +90,16 @@ pub fn preprocess(img_bytes: &[u8], cfg: &Gemma4VisionConfig) -> Result<Processe
             chw[2 * plane + i] = p.0[2] as f32 / 255.0;
         }
     }
+    if profile {
+        tracing::info!(
+            "[gemma4-vl-profile] image_resize_chw_ms={:.3} orig={}x{} resized={}x{}",
+            t0.elapsed().as_secs_f64() * 1000.0,
+            orig_h,
+            orig_w,
+            h2,
+            w2
+        );
+    }
 
     let grid_h = h2 / cfg.patch_size;
     let grid_w = w2 / cfg.patch_size;
@@ -97,9 +118,18 @@ pub fn preprocess(img_bytes: &[u8], cfg: &Gemma4VisionConfig) -> Result<Processe
         ));
     }
 
+    let t0 = Instant::now();
     let pixel_values: Array = (chw.as_slice(), &[1_i32, 3, h2, w2][..])
         .try_into()
         .map_err(|e| anyhow!("Gemma4 image pixel_values array construction: {e}"))?;
+    if profile {
+        tracing::info!(
+            "[gemma4-vl-profile] image_array_ms={:.3} image_preprocess_total_ms={:.3} soft_tokens={}",
+            t0.elapsed().as_secs_f64() * 1000.0,
+            total_t0.elapsed().as_secs_f64() * 1000.0,
+            soft_tokens
+        );
+    }
     Ok(ProcessedImage {
         pixel_values,
         grid_h,

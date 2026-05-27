@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
+use std::time::Instant;
 
 use crate::core::Loader;
 use crate::nn::{Linear, RmsNorm};
@@ -190,7 +191,6 @@ struct VisionAttention {
     num_heads: i32,
     num_kv_heads: i32,
     head_dim: i32,
-    rope_theta: f32,
     rms_norm_eps: f32,
 }
 
@@ -207,7 +207,6 @@ impl VisionAttention {
             num_heads: cfg.num_attention_heads,
             num_kv_heads: cfg.num_key_value_heads,
             head_dim: cfg.head_dim,
-            rope_theta: cfg.rope_theta(),
             rms_norm_eps: cfg.rms_norm_eps,
         })
     }
@@ -215,7 +214,7 @@ impl VisionAttention {
     fn forward_on(
         &self,
         x: &Array,
-        positions: &[(i32, i32)],
+        rope: &RopeTables,
         mask: Option<&Array>,
         target: StreamOrDevice,
     ) -> Result<Array> {
@@ -239,8 +238,8 @@ impl VisionAttention {
         let q = self.q_norm.forward_on(&q, target)?;
         let k = self.k_norm.forward_on(&k, target)?;
         let v = rms_norm_no_scale_on(&v, self.rms_norm_eps, target)?;
-        let q = apply_2d_rope_on(&q, positions, self.rope_theta, target)?;
-        let k = apply_2d_rope_on(&k, positions, self.rope_theta, target)?;
+        let q = apply_2d_rope_on(&q, rope, target)?;
+        let k = apply_2d_rope_on(&k, rope, target)?;
 
         let q = q.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
         let k = k.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
@@ -318,14 +317,12 @@ impl VisionBlock {
     fn forward_on(
         &self,
         x: &Array,
-        positions: &[(i32, i32)],
+        rope: &RopeTables,
         mask: Option<&Array>,
         target: StreamOrDevice,
     ) -> Result<Array> {
         let normed = self.input_layernorm.forward_on(x, target)?;
-        let attn = self
-            .self_attn
-            .forward_on(&normed, positions, mask, target)?;
+        let attn = self.self_attn.forward_on(&normed, rope, mask, target)?;
         let attn = self.post_attention_layernorm.forward_on(&attn, target)?;
         let h = x + &attn;
 
@@ -381,6 +378,8 @@ impl VisionModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let profile = profile_enabled();
+        let total_t0 = Instant::now();
         let shape = pixel_values.shape();
         let dims = shape.as_slice();
         if dims.len() != 4 || dims[0] != 1 || dims[1] != 3 {
@@ -389,33 +388,53 @@ impl VisionModel {
             ));
         }
         let (h, w) = (dims[2], dims[3]);
+        let t0 = Instant::now();
         let (positions, pos_x, pos_y, padding) = patch_positions(h, w, &self.cfg)?;
         let num_real = pos_x.len() as i32;
         let max_patches = self.cfg.max_patches();
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] vision_positions_ms={:.3} real_patches={} max_patches={}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                num_real,
+                max_patches
+            );
+        }
 
+        let t0 = Instant::now();
         let mut hidden = self
             .patch_embedder
             .forward_on(pixel_values, &pos_x, &pos_y, target)?;
-        let num_padding = max_patches - num_real;
-        if num_padding > 0 {
-            let pad = Array::zeros((1_i32, num_padding, self.cfg.hidden_size), hidden.dtype())?;
-            hidden = mlx::ops::shape::concatenate_on(&[&hidden, &pad], 1, target)?;
-        }
-        let mask = if num_padding > 0 {
-            Some(build_attention_mask(&padding, hidden.dtype())?)
-        } else {
-            None
-        };
-        if let Some(m) = &mask {
-            mlx::transforms::eval(&[m])?;
-        }
+        let mask: Option<Array> = None;
+        profile_eval("vision_patch_embed", &[&hidden], t0, profile)?;
 
+        let t0 = Instant::now();
+        let rope = build_rope_tables(
+            &positions,
+            self.cfg.head_dim,
+            self.cfg.rope_theta(),
+            hidden.dtype(),
+            target,
+        )?;
+        let rope_arrays = rope.arrays();
+        profile_eval("vision_rope_tables", &rope_arrays, t0, profile)?;
+
+        let t0 = Instant::now();
         for layer in &self.layers {
-            hidden = layer.forward_on(&hidden, &positions, mask.as_ref(), target)?;
+            hidden = layer.forward_on(&hidden, &rope, mask.as_ref(), target)?;
         }
+        profile_eval("vision_layers", &[&hidden], t0, profile)?;
+        let t0 = Instant::now();
         let mut pooled = self.pool_on(&hidden, &positions, &padding, target)?;
         if let (Some(bias), Some(scale)) = (&self.std_bias, &self.std_scale) {
             pooled = (&pooled - bias) * scale;
+        }
+        profile_eval("vision_pool", &[&pooled], t0, profile)?;
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] vision_total_ms={:.3}",
+                total_t0.elapsed().as_secs_f64() * 1000.0
+            );
         }
         Ok(pooled)
     }
@@ -433,18 +452,20 @@ impl VisionModel {
         if b != 1 {
             return Err(anyhow!("Gemma4Vision pooler supports B=1, got {b}"));
         }
-        let zero = Array::zeros((1_i32, seq, h), hidden.dtype())?;
-        let keep: Vec<bool> = padding.iter().map(|p| !*p).collect();
-        let keep_arr: Array = (keep.as_slice(), &[1_i32, seq, 1][..]).try_into()?;
-        let hidden = mlx::ops::where_on(&keep_arr, hidden, &zero, target)?;
+        let hidden = if padding.iter().any(|&p| p) {
+            let zero = Array::zeros((1_i32, seq, h), hidden.dtype())?;
+            let keep: Vec<bool> = padding.iter().map(|p| !*p).collect();
+            let keep_arr: Array = (keep.as_slice(), &[1_i32, seq, 1][..]).try_into()?;
+            mlx::ops::where_on(&keep_arr, hidden, &zero, target)?
+        } else {
+            hidden.clone()
+        };
 
-        let length = self.cfg.default_output_length;
-        let k = ((seq / length) as f64).sqrt() as i32;
+        let k = self.cfg.pooling_kernel_size;
         if k <= 0 {
-            return Err(anyhow!(
-                "Gemma4Vision pooler invalid kernel from seq={seq}, length={length}"
-            ));
+            return Err(anyhow!("Gemma4Vision pooler invalid kernel {k}"));
         }
+        let length = self.cfg.default_output_length;
         let max_x = positions
             .iter()
             .map(|(x, _)| (*x).max(0))
@@ -488,6 +509,21 @@ impl VisionModel {
 
 type PatchPositions = (Vec<(i32, i32)>, Vec<u32>, Vec<u32>, Vec<bool>);
 
+fn profile_enabled() -> bool {
+    std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some()
+}
+
+fn profile_eval(label: &str, arrays: &[&Array], start: Instant, enabled: bool) -> Result<()> {
+    if enabled {
+        mlx::transforms::eval(arrays)?;
+        tracing::info!(
+            "[gemma4-vl-profile] {label}_ms={:.3}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    Ok(())
+}
+
 fn patch_positions(h: i32, w: i32, cfg: &Gemma4VisionConfig) -> Result<PatchPositions> {
     let ph = h / cfg.patch_size;
     let pw = w / cfg.patch_size;
@@ -498,10 +534,10 @@ fn patch_positions(h: i32, w: i32, cfg: &Gemma4VisionConfig) -> Result<PatchPosi
             "Gemma4Vision patch count {num_real} exceeds max_patches {max_patches}"
         ));
     }
-    let mut positions = Vec::with_capacity(max_patches as usize);
+    let mut positions = Vec::with_capacity(num_real as usize);
     let mut pos_x = Vec::with_capacity(num_real as usize);
     let mut pos_y = Vec::with_capacity(num_real as usize);
-    let mut padding = Vec::with_capacity(max_patches as usize);
+    let mut padding = Vec::with_capacity(num_real as usize);
     for y in 0..ph {
         for x in 0..pw {
             positions.push((x, y));
@@ -510,47 +546,79 @@ fn patch_positions(h: i32, w: i32, cfg: &Gemma4VisionConfig) -> Result<PatchPosi
             padding.push(false);
         }
     }
-    for _ in num_real..max_patches {
-        positions.push((-1, -1));
-        padding.push(true);
-    }
     Ok((positions, pos_x, pos_y, padding))
 }
 
-fn build_attention_mask(padding: &[bool], dtype: Dtype) -> Result<Array> {
-    let seq = i32::try_from(padding.len()).context("Gemma4Vision mask seq length overflow")?;
-    let mut data = vec![0.0_f32; (seq * seq) as usize];
-    for q in 0..seq as usize {
-        for k in 0..seq as usize {
-            if padding[q] || padding[k] {
-                data[q * seq as usize + k] = -10_000.0;
-            }
-        }
-    }
-    let mask: Array = (data.as_slice(), &[1_i32, 1, seq, seq][..]).try_into()?;
-    Ok(mlx::ops::astype(&mask, dtype)?)
+struct RopeTables {
+    cos: Vec<Array>,
+    sin: Vec<Array>,
+    channels_per_dim: i32,
 }
 
-fn apply_2d_rope_on(
-    x: &Array,
+impl RopeTables {
+    fn arrays(&self) -> Vec<&Array> {
+        self.cos.iter().chain(self.sin.iter()).collect()
+    }
+}
+
+fn build_rope_tables(
     positions: &[(i32, i32)],
+    head_dim: i32,
     base: f32,
+    dtype: Dtype,
     target: StreamOrDevice,
-) -> Result<Array> {
+) -> Result<RopeTables> {
+    let ndim = 2;
+    let channels_per_dim = 2 * (head_dim / (2 * ndim));
+    if channels_per_dim <= 0 || channels_per_dim * ndim != head_dim {
+        return Err(anyhow!(
+            "Gemma4Vision RoPE unsupported head_dim {head_dim} for 2D split"
+        ));
+    }
+
+    let seq = i32::try_from(positions.len()).context("Gemma4Vision RoPE seq length overflow")?;
+    let half = channels_per_dim / 2;
+    let mut cos_tables = Vec::with_capacity(ndim as usize);
+    let mut sin_tables = Vec::with_capacity(ndim as usize);
+    for d in 0..ndim {
+        let mut cos = vec![0.0_f32; (seq * channels_per_dim) as usize];
+        let mut sin = vec![0.0_f32; (seq * channels_per_dim) as usize];
+        for (i, (x_pos, y_pos)) in positions.iter().enumerate() {
+            let pos = if d == 0 { *x_pos } else { *y_pos };
+            for j in 0..half {
+                let exponent = (2.0_f32 / channels_per_dim as f32) * j as f32;
+                let timescale = base.powf(exponent);
+                let value = pos as f32 / timescale;
+                let c = value.cos();
+                let s = value.sin();
+                let base_idx = i * channels_per_dim as usize;
+                cos[base_idx + j as usize] = c;
+                sin[base_idx + j as usize] = s;
+                cos[base_idx + (half + j) as usize] = c;
+                sin[base_idx + (half + j) as usize] = s;
+            }
+        }
+        let cos_arr: Array = (cos.as_slice(), &[1_i32, seq, 1, channels_per_dim][..]).try_into()?;
+        let sin_arr: Array = (sin.as_slice(), &[1_i32, seq, 1, channels_per_dim][..]).try_into()?;
+        cos_tables.push(mlx::ops::astype_on(&cos_arr, dtype, target)?);
+        sin_tables.push(mlx::ops::astype_on(&sin_arr, dtype, target)?);
+    }
+    Ok(RopeTables {
+        cos: cos_tables,
+        sin: sin_tables,
+        channels_per_dim,
+    })
+}
+
+fn apply_2d_rope_on(x: &Array, rope: &RopeTables, target: StreamOrDevice) -> Result<Array> {
     let shape = x.shape();
     let dims = shape.as_slice();
     let (b, seq, _heads, head_dim) = (dims[0], dims[1], dims[2], dims[3]);
     if b != 1 {
         return Err(anyhow!("Gemma4Vision RoPE supports B=1, got {b}"));
     }
-    if positions.len() != seq as usize {
-        return Err(anyhow!(
-            "Gemma4Vision RoPE positions.len()={} != seq={seq}",
-            positions.len()
-        ));
-    }
     let ndim = 2;
-    let channels_per_dim = 2 * (head_dim / (2 * ndim));
+    let channels_per_dim = rope.channels_per_dim;
     if channels_per_dim <= 0 || channels_per_dim * ndim != head_dim {
         return Err(anyhow!(
             "Gemma4Vision RoPE unsupported head_dim {head_dim} for 2D split"
@@ -586,28 +654,15 @@ fn apply_2d_rope_on(
         let neg_second = -&second;
         let rotated = mlx::ops::shape::concatenate_on(&[&neg_second, &first], -1, target)?;
 
-        let mut cos = vec![0.0_f32; (seq * channels_per_dim) as usize];
-        let mut sin = vec![0.0_f32; (seq * channels_per_dim) as usize];
-        for (i, (x_pos, y_pos)) in positions.iter().enumerate() {
-            let pos = if d == 0 { *x_pos } else { *y_pos };
-            for j in 0..half {
-                let exponent = (2.0_f32 / channels_per_dim as f32) * j as f32;
-                let timescale = base.powf(exponent);
-                let value = pos as f32 / timescale;
-                let c = value.cos();
-                let s = value.sin();
-                let base_idx = i * channels_per_dim as usize;
-                cos[base_idx + j as usize] = c;
-                sin[base_idx + j as usize] = s;
-                cos[base_idx + (half + j) as usize] = c;
-                sin[base_idx + (half + j) as usize] = s;
-            }
+        let cos_arr = &rope.cos[d as usize];
+        let sin_arr = &rope.sin[d as usize];
+        if cos_arr.shape_at(1) != seq || sin_arr.shape_at(1) != seq {
+            return Err(anyhow!(
+                "Gemma4Vision RoPE table seq mismatch: table={} input={seq}",
+                cos_arr.shape_at(1)
+            ));
         }
-        let cos_arr: Array = (cos.as_slice(), &[1_i32, seq, 1, channels_per_dim][..]).try_into()?;
-        let sin_arr: Array = (sin.as_slice(), &[1_i32, seq, 1, channels_per_dim][..]).try_into()?;
-        let cos_arr = mlx::ops::astype_on(&cos_arr, x.dtype(), target)?;
-        let sin_arr = mlx::ops::astype_on(&sin_arr, x.dtype(), target)?;
-        parts.push(&(&part * &cos_arr) + &(&rotated * &sin_arr));
+        parts.push(&(&part * cos_arr) + &(&rotated * sin_arr));
     }
     let refs: Vec<&Array> = parts.iter().collect();
     Ok(mlx::ops::shape::concatenate_on(&refs, -1, target)?)
@@ -635,12 +690,12 @@ mod tests {
     }
 
     #[test]
-    fn patch_positions_pad_to_max_patches() {
+    fn patch_positions_track_real_patches() {
         let cfg = cfg();
         let (positions, pos_x, pos_y, padding) = patch_positions(48, 48, &cfg).unwrap();
         assert_eq!(pos_x.len(), 9);
         assert_eq!(pos_y.len(), 9);
-        assert_eq!(positions.len(), cfg.max_patches() as usize);
+        assert_eq!(positions.len(), 9);
         assert_eq!(padding.iter().filter(|&&p| !p).count(), 9);
     }
 }

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
+use std::time::Instant;
 
 use crate::core::cache::KVCache;
 use crate::core::memory_budget::ModelMeta;
@@ -55,6 +56,21 @@ fn per_row_slice_last(
     }
     let refs: Vec<&Array> = rows.iter().collect();
     Ok(mlx::ops::shape::concatenate_on(&refs, 0, target)?)
+}
+
+fn vl_profile_enabled() -> bool {
+    std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some()
+}
+
+fn vl_profile_eval(label: &str, arrays: &[&Array], start: Instant, enabled: bool) -> Result<()> {
+    if enabled {
+        mlx::transforms::eval(arrays)?;
+        tracing::info!(
+            "[gemma4-vl-profile] {label}_ms={:.3}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    Ok(())
 }
 
 impl Gemma4Model {
@@ -366,6 +382,8 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         target: StreamOrDevice,
     ) -> Result<Array> {
         let target: StreamOrDevice = target;
+        let profile = vl_profile_enabled();
+        let total_t0 = Instant::now();
         let b = per_row_lens.len();
         if per_row_pixel_values.len() != b || per_row_grid_thw.len() != b {
             return Err(anyhow!(
@@ -373,8 +391,11 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             ));
         }
 
+        let t0 = Instant::now();
         let mut hidden = self.text.embed_on(input_ids, target)?;
+        vl_profile_eval("vl_text_embed", &[&hidden], t0, profile)?;
         let mut all_vision = Vec::new();
+        let t0 = Instant::now();
         for i in 0..b {
             match (per_row_pixel_values[i], per_row_grid_thw[i]) {
                 (Some(pv), Some(grids)) if !grids.is_empty() => {
@@ -389,6 +410,11 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             }
         }
         if !all_vision.is_empty() {
+            let refs: Vec<&Array> = all_vision.iter().collect();
+            vl_profile_eval("vl_compute_vision_embeds_all", &refs, t0, profile)?;
+        }
+        if !all_vision.is_empty() {
+            let t0 = Instant::now();
             let vision_concat = if all_vision.len() == 1 {
                 all_vision.pop().expect("len checked")
             } else {
@@ -401,8 +427,17 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
                 &vision_concat,
                 image_token_id,
             )?;
+            vl_profile_eval("vl_replace_image_tokens", &[&hidden], t0, profile)?;
         }
+        let t0 = Instant::now();
         let per_layer_ids = self.zero_image_token_ids(input_ids, image_token_id)?;
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] vl_zero_image_token_ids_ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let t0 = Instant::now();
         let hidden = self.text.forward_embeddings_on(
             &hidden,
             &per_layer_ids,
@@ -410,8 +445,18 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             cache,
             target,
         )?;
+        vl_profile_eval("vl_text_forward_embeddings", &[&hidden], t0, profile)?;
         let last_positions: Vec<i32> = per_row_lens.iter().map(|&l| l - 1).collect();
-        self.slice_last_and_project(&hidden, Some(&last_positions), target)
+        let t0 = Instant::now();
+        let logits = self.slice_last_and_project(&hidden, Some(&last_positions), target)?;
+        vl_profile_eval("vl_slice_project", &[&logits], t0, profile)?;
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] vl_batched_prefill_total_ms={:.3}",
+                total_t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(logits)
     }
 
     fn compute_vision_embeds(
@@ -421,6 +466,8 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         target: StreamOrDevice,
     ) -> Result<Array> {
         let target: StreamOrDevice = target;
+        let profile = vl_profile_enabled();
+        let total_t0 = Instant::now();
         if grid_thw.is_empty() {
             return Err(anyhow!(
                 "Gemma4Model::compute_vision_embeds: grid_thw cannot be empty"
@@ -433,8 +480,17 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             .embed_vision
             .as_ref()
             .ok_or_else(|| anyhow!("Gemma4Model has no embed_vision projection"))?;
+        let t0 = Instant::now();
         let features = vision.forward_on(pixel_values, target)?;
+        vl_profile_eval("compute_vision_tower", &[&features], t0, profile)?;
+        let t0 = Instant::now();
         let projected = embed_vision.forward_on(&features, target)?;
+        vl_profile_eval(
+            "compute_embed_vision_projection",
+            &[&projected],
+            t0,
+            profile,
+        )?;
         let shape = projected.shape();
         let dims = shape.as_slice();
         if dims.len() != 3 || dims[0] != 1 {
@@ -461,7 +517,16 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
                 self.vision_soft_tokens_per_image
             ));
         }
-        Ok(projected.reshape_on((n, hidden), target)?)
+        let t0 = Instant::now();
+        let out = projected.reshape_on((n, hidden), target)?;
+        vl_profile_eval("compute_vision_reshape", &[&out], t0, profile)?;
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] compute_vision_embeds_total_ms={:.3}",
+                total_t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(out)
     }
 
     fn forward_vl_chunk(
@@ -476,22 +541,44 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         target: StreamOrDevice,
     ) -> Result<Array> {
         let target: StreamOrDevice = target;
+        let profile = vl_profile_enabled();
+        let total_t0 = Instant::now();
+        let t0 = Instant::now();
         let img_count = self.count_image_tokens(input_ids, image_token_id)?;
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] forward_vl_count_image_tokens_ms={:.3} image_tokens={}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                img_count
+            );
+        }
         if img_count > 0 && vision_embeds_slice.is_none() {
             return Err(anyhow!(
                 "Gemma4Model::forward_vl_chunk: chunk has {img_count} image tokens but no vision embeddings"
             ));
         }
+        let t0 = Instant::now();
         let mut hidden = self.text.embed_on(input_ids, target)?;
+        vl_profile_eval("forward_vl_text_embed", &[&hidden], t0, profile)?;
         if let Some(ve) = vision_embeds_slice {
+            let t0 = Instant::now();
             hidden =
                 super::cross_modal::replace_image_tokens(&hidden, input_ids, ve, image_token_id)?;
+            vl_profile_eval("forward_vl_replace_image_tokens", &[&hidden], t0, profile)?;
         }
+        let t0 = Instant::now();
         let per_layer_ids = if img_count > 0 {
             self.zero_image_token_ids(input_ids, image_token_id)?
         } else {
             input_ids.clone()
         };
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] forward_vl_zero_image_token_ids_ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let t0 = Instant::now();
         let hidden = self.text.forward_embeddings_on(
             &hidden,
             &per_layer_ids,
@@ -499,7 +586,22 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             cache,
             target,
         )?;
-        self.slice_last_and_project(&hidden, None, target)
+        vl_profile_eval(
+            "forward_vl_text_forward_embeddings",
+            &[&hidden],
+            t0,
+            profile,
+        )?;
+        let t0 = Instant::now();
+        let logits = self.slice_last_and_project(&hidden, None, target)?;
+        vl_profile_eval("forward_vl_slice_project", &[&logits], t0, profile)?;
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] forward_vl_chunk_total_ms={:.3}",
+                total_t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(logits)
     }
 
     fn forward_vl_hidden(
