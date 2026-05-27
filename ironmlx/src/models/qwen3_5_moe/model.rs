@@ -8,7 +8,7 @@ use mlx::{Array, Dtype, StreamOrDevice};
 use crate::core::cache::{GatedDeltaCache, KVCache};
 use crate::core::memory_budget::ModelMeta;
 use crate::core::{Loader, Model};
-use crate::models::vision::VisionTower;
+use crate::models::vision::{VisionConfig, VisionTower};
 use crate::nn::{AttnKind, LayerCache, Linear};
 use crate::Result;
 
@@ -143,7 +143,43 @@ impl Qwen35MoeModel {
         let shared = 3 * h * se * l / 2;
         // embed + lm_head (separate per tie_word_embeddings=false)
         let embed_head = 2 * vocab * h / 2;
-        attn + routed + shared + embed_head
+        let text = attn + routed + shared + embed_head;
+        let vision = cfg
+            .vision_config
+            .as_ref()
+            .map(Self::approx_vision_weight_bytes)
+            .unwrap_or(0);
+        text + vision
+    }
+
+    /// Conservative bf16 estimate for the shared Qwen3.5 vision tower. The
+    /// MoE text weights are 4-bit, while the vision stack in the MLX VL
+    /// checkpoint is bf16, so budget it at 2 bytes per parameter.
+    fn approx_vision_weight_bytes(cfg: &VisionConfig) -> usize {
+        let h = cfg.hidden_size as usize;
+        let depth = cfg.depth as usize;
+        let inter = cfg.intermediate_size as usize;
+        let out_h = cfg.out_hidden_size as usize;
+        let patch = cfg.patch_size as usize;
+        let temporal = cfg.temporal_patch_size as usize;
+        let in_channels = cfg.in_channels as usize;
+        let pos = cfg.num_position_embeddings as usize;
+        let merge = cfg.spatial_merge_size as usize;
+        let merge_hidden = merge * merge * h;
+
+        let patch_embed = h * temporal * patch * patch * in_channels + h;
+        let pos_embed = pos * h;
+        let block = 2 * h
+            + (3 * h * h + 3 * h)
+            + (h * h + h)
+            + 2 * h
+            + (inter * h + inter)
+            + (h * inter + h);
+        let blocks = depth * block;
+        let merger =
+            2 * h + merge_hidden * merge_hidden + merge_hidden + out_h * merge_hidden + out_h;
+
+        2 * (patch_embed + pos_embed + blocks + merger)
     }
 
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
@@ -691,6 +727,22 @@ mod tests {
         cfg
     }
 
+    fn make_vision_config() -> crate::models::vision::VisionConfig {
+        crate::models::vision::VisionConfig {
+            depth: 2,
+            hidden_size: 32,
+            num_heads: 4,
+            intermediate_size: 64,
+            out_hidden_size: 32,
+            patch_size: 16,
+            spatial_merge_size: 2,
+            temporal_patch_size: 2,
+            in_channels: 3,
+            num_position_embeddings: 64,
+            deepstack_visual_indexes: vec![],
+        }
+    }
+
     fn assert_arrays_equal_f32(a: &Array, b: &Array) {
         let a_vec: Vec<f32> = mlx::ops::astype(a, Dtype::Float32)
             .expect("astype a")
@@ -903,6 +955,20 @@ mod tests {
             4 * 32 * 32 * 4 / 2 + 3 * 8 * 32 * 16 * 4 / 2 + 3 * 32 * 16 * 4 / 2 + 2 * 1024 * 32 / 2
         );
         let _ = cfg; // consumed for compile check
+    }
+
+    #[test]
+    fn model_meta_weight_bytes_includes_vision_config() {
+        let text_model = Qwen35MoeModel::from_cfg_for_test(make_zero_layer_cfg());
+
+        let mut vl_cfg = make_zero_layer_cfg();
+        vl_cfg.vision_config = Some(make_vision_config());
+        let vl_model = Qwen35MoeModel::from_cfg_for_test(vl_cfg);
+
+        assert!(
+            vl_model.model_meta().weight_bytes > text_model.model_meta().weight_bytes,
+            "MoE VL model_meta must reserve memory for vision tower weights"
+        );
     }
 
     #[test]

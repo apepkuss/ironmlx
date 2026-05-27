@@ -52,7 +52,11 @@ trap cleanup EXIT
 
 wait_for_health() {
   local port="$1"
+  local pid="$2"
   for _ in $(seq 1 180); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 2
+    fi
     if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
       return 0
     fi
@@ -61,12 +65,28 @@ wait_for_health() {
   return 1
 }
 
+port_in_use() {
+  local port="$1"
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.settimeout(0.5)
+    sys.exit(0 if sock.connect_ex(("127.0.0.1", port)) == 0 else 1)
+PY
+}
+
 start_server() {
   local port="$1"
   shift
   local log_path="$OUT_DIR/server-$port.log"
   cleanup
   SERVER_PID=""
+  if port_in_use "$port"; then
+    fail "port $port is already in use; choose a free BASE_PORT"
+  fi
   log "starting server on port $port: $*"
   MLX_DIR="$MLX_DIR" "$IRONMLX_BIN" serve \
     --model "$MODEL_DIR" \
@@ -74,7 +94,7 @@ start_server() {
     --port "$port" \
     "$@" >"$log_path" 2>&1 &
   SERVER_PID=$!
-  if ! wait_for_health "$port"; then
+  if ! wait_for_health "$port" "$SERVER_PID"; then
     tail -80 "$log_path" >&2 || true
     fail "server on port $port did not become healthy"
   fi

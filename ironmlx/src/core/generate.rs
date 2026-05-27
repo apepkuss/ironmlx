@@ -1087,6 +1087,17 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                             if is_last {
                                 Some(logits)
                             } else {
+                                #[cfg(feature = "p5h-profile")]
+                                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                                    "mlx_eval_barrier",
+                                    crate::core::p5h::SpanFields::default,
+                                    || {
+                                        mlx::transforms::eval(&[&logits])
+                                            .map_err(anyhow::Error::from)
+                                    },
+                                )?;
+                                #[cfg(not(feature = "p5h-profile"))]
+                                mlx::transforms::eval(&[&logits])?;
                                 None
                             }
                         } else if is_last {
@@ -1154,6 +1165,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                     if is_last {
                         Some(logits)
                     } else {
+                        mlx::transforms::eval(&[&logits])?;
                         None
                     }
                 } else if is_last {
