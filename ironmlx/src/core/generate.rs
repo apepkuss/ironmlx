@@ -4,7 +4,7 @@
 //! lifetime of the stream; owns the per-call cache vector and accumulating
 //! token history.
 
-use std::sync::OnceLock;
+use std::{sync::OnceLock, time::Instant};
 
 use anyhow::anyhow;
 use mlx::{Array, Dtype};
@@ -136,6 +136,7 @@ pub struct GenerationStream<'m, M: Model> {
     /// Last full-text snapshot — diffed against the next decode to produce
     /// incremental text. Sync path only.
     last_decoded_text: String,
+    vl_profile: bool,
 
     /// True iff this stream owns the in-flight Metal capture (set when env
     /// var `IRONMLX_CAPTURE_FILE=<path>` was honored at construction time).
@@ -957,6 +958,19 @@ pub(crate) fn log_vl_chunk_composition(
     );
 }
 
+fn gemma4_vl_profile_enabled() -> bool {
+    std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some()
+}
+
+fn log_gemma4_vl_profile_step_ms(label: &str, start: Option<Instant>, step: usize) {
+    if let Some(start) = start {
+        tracing::info!(
+            "[gemma4-vl-profile] {label}_ms={:.3} decode_step={step}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 const VL_FINAL_TEXT_TAIL_ABSORB_TOKENS: usize = 64;
 
 /// Extend a VL chunk end when the fixed boundary would split a contiguous
@@ -1396,6 +1410,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
 
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
+        let vl_profile = gemma4_vl_profile_enabled();
 
         // Initialize per-stream PRNG state from sampler seed. [2] u32.
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
@@ -1440,6 +1455,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 pending_token_arr: Some(pending),
                 detok: Some(detok),
                 last_decoded_text: String::new(),
+                vl_profile,
                 capture_active,
                 capture_pending_decode,
                 prng_state,
@@ -1487,6 +1503,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 pending_token_arr: None,
                 detok: None,
                 last_decoded_text: initial_text,
+                vl_profile,
                 capture_active,
                 capture_pending_decode,
                 prng_state,
@@ -1572,6 +1589,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
 
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
+        let vl_profile = gemma4_vl_profile_enabled();
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
 
         if pipelined {
@@ -1592,6 +1610,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 pending_token_arr: Some(pending),
                 detok: Some(detok),
                 last_decoded_text: String::new(),
+                vl_profile,
                 capture_active,
                 capture_pending_decode,
                 prng_state,
@@ -1619,6 +1638,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 pending_token_arr: None,
                 detok: None,
                 last_decoded_text: initial_text,
+                vl_profile,
                 capture_active,
                 capture_pending_decode,
                 prng_state,
@@ -1645,35 +1665,52 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         if self.finished {
             return Ok(None);
         }
+        let profile_start = self.vl_profile.then(Instant::now);
+        let decode_step = self
+            .history
+            .len()
+            .saturating_sub(self.request.prompt_ids.len())
+            + if self.pipelined { 1 } else { 0 };
         // If decode-phase Metal capture was deferred, start it now (right
         // before the first decode-step work hits the GPU).
         self.start_deferred_capture();
-        if self.pipelined {
+        let event = if self.pipelined {
             self.next_token_pipelined()
         } else {
             self.next_token_sync()
+        };
+        if matches!(&event, Ok(Some(_))) {
+            log_gemma4_vl_profile_step_ms("decode_step_total", profile_start, decode_step);
         }
+        event
     }
 
     /// Pipelined hot path. Invariant: `self.pending_token_arr` is `Some` and
     /// the lazy scalar (shape `[]` or `[1]`) u32 Array of the token to be
     /// returned on this call.
     fn next_token_pipelined(&mut self) -> Result<Option<GenerateEvent>> {
+        let profile_enabled = self.vl_profile;
+        let decode_step = self.history.len() - self.request.prompt_ids.len() + 1;
+
         // 1. Materialise the pending token. The GPU has been working on it
         //    since the previous next_token call's async_eval (or new()).
+        let wait_start = profile_enabled.then(Instant::now);
         let pending = self
             .pending_token_arr
             .as_ref()
             .expect("pipelined mode invariant: pending_token_arr is Some");
         let token: u32 = pending.item()?;
+        log_gemma4_vl_profile_step_ms("decode_pipelined_pending_item", wait_start, decode_step);
 
         // 2. Push to history; produce incremental text via DecodeStream.
+        let detok_start = profile_enabled.then(Instant::now);
         self.history.push(token);
         let detok = self
             .detok
             .as_mut()
             .expect("pipelined mode invariant: detok is Some");
         let text = detok.step(token)?.unwrap_or_default();
+        log_gemma4_vl_profile_step_ms("decode_detok", detok_start, decode_step);
 
         // 3. Termination check.
         let new_count = self.history.len() - self.request.prompt_ids.len();
@@ -1699,6 +1736,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         // 4. Dispatch step N+1: build forward graph using the just-materialised
         //    pending Array (still holds its value), sample greedily, async_eval
         //    so the GPU starts immediately.
+        let dispatch_start = profile_enabled.then(Instant::now);
         let token_arr_in = self
             .pending_token_arr
             .as_ref()
@@ -1718,6 +1756,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         let logits_flat = logits.reshape((vocab,))?;
         let next_arr = self.request.sampler.sample_async_greedy(&logits_flat)?;
         mlx::transforms::async_eval(&[&next_arr])?;
+        log_gemma4_vl_profile_step_ms("decode_pipelined_dispatch", dispatch_start, decode_step);
 
         // 5. Replace pending and return.
         self.pending_token_arr = Some(next_arr);
@@ -1731,10 +1770,14 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
     /// Synchronous (pre-P8a) decode path. Used when the sampler is
     /// not pipelinable (temperature > 0 or any penalty configured).
     fn next_token_sync(&mut self) -> Result<Option<GenerateEvent>> {
+        let profile_enabled = self.vl_profile;
+        let decode_step = self.history.len() - self.request.prompt_ids.len();
+
         // The token to emit is the most-recent push to history.
         let token = *self.history.last().expect("history non-empty post-new");
 
         // Compute incremental text via cumulative-detok diff.
+        let detok_start = profile_enabled.then(Instant::now);
         let full_text = self
             .tokenizer
             .decode(&self.history, /* skip_special = */ true)
@@ -1744,6 +1787,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             .unwrap_or(&full_text)
             .to_string();
         self.last_decoded_text = full_text;
+        log_gemma4_vl_profile_step_ms("decode_detok", detok_start, decode_step);
 
         // Termination check using the just-emitted token.
         let new_count = self.history.len() - self.request.prompt_ids.len();
@@ -1765,6 +1809,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         }
 
         // Decode one step: feed the just-emitted token back through the model.
+        let forward_sample_start = profile_enabled.then(Instant::now);
         let token_arr: Array = (&[token][..], &[1_i32, 1][..]).try_into()?;
         let pos = (self.history.len() - 1) as i32;
         let position_ids = build_position_ids(pos, 1)?;
@@ -1784,6 +1829,11 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 .sampler
                 .sample(&logits_flat, &self.history, &mut self.prng_state)?;
         self.history.push(next);
+        log_gemma4_vl_profile_step_ms(
+            "decode_sync_forward_sample",
+            forward_sample_start,
+            decode_step,
+        );
 
         Ok(Some(GenerateEvent {
             token,
