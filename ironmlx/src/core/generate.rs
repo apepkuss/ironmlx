@@ -1,7 +1,8 @@
 //! Single-request generation driver: prefill + decode + sampler + EOS termination.
 //!
-//! Borrows a [`Qwen35Model`] and [`Tokenizer`] for the lifetime of the stream;
-//! owns the per-call cache vector and accumulating token history.
+//! Borrows a concrete [`Model`] implementation and [`Tokenizer`] for the
+//! lifetime of the stream; owns the per-call cache vector and accumulating
+//! token history.
 
 use std::sync::OnceLock;
 
@@ -1086,6 +1087,17 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                             if is_last {
                                 Some(logits)
                             } else {
+                                #[cfg(feature = "p5h-profile")]
+                                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                                    "mlx_eval_barrier",
+                                    crate::core::p5h::SpanFields::default,
+                                    || {
+                                        mlx::transforms::eval(&[&logits])
+                                            .map_err(anyhow::Error::from)
+                                    },
+                                )?;
+                                #[cfg(not(feature = "p5h-profile"))]
+                                mlx::transforms::eval(&[&logits])?;
                                 None
                             }
                         } else if is_last {
@@ -1153,6 +1165,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                     if is_last {
                         Some(logits)
                     } else {
+                        mlx::transforms::eval(&[&logits])?;
                         None
                     }
                 } else if is_last {
@@ -1312,11 +1325,10 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
 // Non-VL methods (works for any Model) — decode path and helpers that only
 // call model.forward_on / model.forward_text_hidden (both Model trait methods).
 impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
-    /// Text-only constructor: works for any `M: Model`, including MoE models
-    /// that do not implement `DenseVlMethods`.
+    /// Text-only constructor: works for any `M: Model`.
     ///
     /// Asserts `request.pixel_values.is_none()` — returns `Err` if called with
-    /// image inputs. For VL (dense) models use `GenerationStream::new` instead.
+    /// image inputs. For VL requests use `GenerationStream::new` instead.
     pub fn new_text_only(
         model: &'m M,
         tokenizer: &'m Tokenizer,

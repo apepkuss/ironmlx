@@ -5,12 +5,12 @@ use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{GatedDeltaCache, KVCache};
 use crate::core::Loader;
+use crate::models::vision::VisionTower;
 use crate::nn::{AttnKind, LayerCache, Linear};
 use crate::Result;
 
 use super::config::Qwen35Config;
 use super::text_model::Qwen35TextModel;
-use super::vision::VisionTower;
 
 /// Minimum K/V cache cap that `make_cache` allocates regardless of the
 /// caller-requested cap. Empirically (B1-p2.3f T4), `KVCache::with_step(cap)`

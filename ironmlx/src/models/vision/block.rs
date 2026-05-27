@@ -436,7 +436,7 @@ impl VitBlock {
         cu_seqlens: &[i32],
         name_prefix: &str,
     ) -> Result<Array> {
-        use crate::models::qwen3_5::vision::dump::dump_tensor;
+        use crate::models::vision::dump::dump_tensor;
         // h = x + attn(norm1(x))
         let normed1 = self.norm1.forward(x)?;
         dump_tensor(&format!("{name_prefix}_a_norm1_out"), &normed1);

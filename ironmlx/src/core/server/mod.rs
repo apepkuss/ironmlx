@@ -24,13 +24,12 @@ pub mod scheduler_actor;
 /// HTTP server shared state. The model is wrapped in a tokio Mutex —
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
 ///
-/// 3b-2 adds `scheduler_handle` so text-only short-prompt requests can be
-/// routed through the SchedulerActor; VL / long-prompt requests still
-/// take the GenerationStream path that holds the model lock directly.
+/// 3b-2 adds `scheduler_handle`; short prompts, including VL prompts, route
+/// through the SchedulerActor, while long prompts fall back to GenerationStream.
 ///
 /// P5a-T5: AppState is now generic over `M: Model + DenseVlMethods + Send +
-/// 'static`. CLI call sites pass `Qwen35Model` as the concrete type;
-/// P5c will add the MoE path separately.
+/// 'static`. CLI call sites pass either `Qwen35Model` or `Qwen35MoeModel`
+/// based on the checkpoint `model_type`.
 ///
 /// `Clone` is implemented manually so the derive macro doesn't emit an
 /// unwanted `M: Clone` bound — all fields clone without needing `M: Clone`
@@ -43,8 +42,8 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// disables chunking. Applied to every `GenerateRequest` constructed
     /// by the request handlers.
     pub prefill_chunk_size: usize,
-    /// SchedulerActor handle. Routed to by text-only short-prompt
-    /// requests. See `serve_via_scheduler_*` in `openai.rs`.
+    /// SchedulerActor handle. Routed to by short-prompt requests. See
+    /// `serve_via_scheduler_*` in `openai.rs`.
     pub scheduler_handle: scheduler_actor::SchedulerActorHandle,
     /// Maximum concurrent in-flight requests routed to the SchedulerActor.
     pub b_max: usize,

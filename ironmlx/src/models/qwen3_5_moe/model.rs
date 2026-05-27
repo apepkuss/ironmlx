@@ -8,6 +8,7 @@ use mlx::{Array, Dtype, StreamOrDevice};
 use crate::core::cache::{GatedDeltaCache, KVCache};
 use crate::core::memory_budget::ModelMeta;
 use crate::core::{Loader, Model};
+use crate::models::vision::{VisionConfig, VisionTower};
 use crate::nn::{AttnKind, LayerCache, Linear};
 use crate::Result;
 
@@ -23,6 +24,8 @@ pub struct Qwen35MoeModel {
     text: Qwen35MoeTextModel,
     /// Always Some for 35B-A3B (tie_word_embeddings=false).
     lm_head: Linear,
+    /// Vision encoder; `Some` for multimodal MoE checkpoints loaded with `open_multimodal`.
+    vision: Option<VisionTower>,
 }
 
 /// Slice per-row last hidden states from `hidden [B, S, H]`.
@@ -90,8 +93,21 @@ impl Qwen35MoeModel {
         }
         let lm_head =
             Linear::from_loader(loader, "lm_head").context("loading Qwen35MoeModel lm_head")?;
+        let vision = if let Some(vc) = cfg.vision_config.as_ref() {
+            if loader.contains("vision_tower.patch_embed.proj.weight") {
+                Some(VisionTower::from_loader(loader, vc)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let text = Qwen35MoeTextModel::from_loader(loader, cfg)?;
-        Ok(Self { text, lm_head })
+        Ok(Self {
+            text,
+            lm_head,
+            vision,
+        })
     }
 
     pub fn config(&self) -> &Qwen35MoeConfig {
@@ -100,6 +116,10 @@ impl Qwen35MoeModel {
 
     pub fn text(&self) -> &Qwen35MoeTextModel {
         &self.text
+    }
+
+    pub fn vision(&self) -> Option<&VisionTower> {
+        self.vision.as_ref()
     }
 
     /// Conservative weight-bytes estimate for memory budgeting.
@@ -123,7 +143,43 @@ impl Qwen35MoeModel {
         let shared = 3 * h * se * l / 2;
         // embed + lm_head (separate per tie_word_embeddings=false)
         let embed_head = 2 * vocab * h / 2;
-        attn + routed + shared + embed_head
+        let text = attn + routed + shared + embed_head;
+        let vision = cfg
+            .vision_config
+            .as_ref()
+            .map(Self::approx_vision_weight_bytes)
+            .unwrap_or(0);
+        text + vision
+    }
+
+    /// Conservative bf16 estimate for the shared Qwen3.5 vision tower. The
+    /// MoE text weights are 4-bit, while the vision stack in the MLX VL
+    /// checkpoint is bf16, so budget it at 2 bytes per parameter.
+    fn approx_vision_weight_bytes(cfg: &VisionConfig) -> usize {
+        let h = cfg.hidden_size as usize;
+        let depth = cfg.depth as usize;
+        let inter = cfg.intermediate_size as usize;
+        let out_h = cfg.out_hidden_size as usize;
+        let patch = cfg.patch_size as usize;
+        let temporal = cfg.temporal_patch_size as usize;
+        let in_channels = cfg.in_channels as usize;
+        let pos = cfg.num_position_embeddings as usize;
+        let merge = cfg.spatial_merge_size as usize;
+        let merge_hidden = merge * merge * h;
+
+        let patch_embed = h * temporal * patch * patch * in_channels + h;
+        let pos_embed = pos * h;
+        let block = 2 * h
+            + (3 * h * h + 3 * h)
+            + (h * h + h)
+            + 2 * h
+            + (inter * h + inter)
+            + (h * inter + h);
+        let blocks = depth * block;
+        let merger =
+            2 * h + merge_hidden * merge_hidden + merge_hidden + out_h * merge_hidden + out_h;
+
+        2 * (patch_embed + pos_embed + blocks + merger)
     }
 
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
@@ -232,6 +288,41 @@ impl Qwen35MoeModel {
         Ok(out)
     }
 
+    /// Test-only stub: constructs a zero-layer MoE model from config so tests
+    /// can exercise model-level plumbing without synthesizing decoder weights.
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub fn from_cfg_for_test(cfg: Qwen35MoeConfig) -> Self {
+        let mrope = crate::nn::Mrope::new(
+            cfg.effective_head_dim(),
+            cfg.rope_parameters.rope_theta,
+            cfg.rope_parameters.partial_rotary_factor,
+            &cfg.rope_parameters.mrope_section,
+            true,
+        )
+        .expect("Mrope::new with valid cfg");
+        let h = cfg.hidden_size;
+        let vocab = cfg.vocab_size;
+        let stub_embed = crate::nn::Embedding::from_components_fp_for_test(
+            mlx::Array::zeros((vocab, h), mlx::Dtype::Bfloat16).unwrap(),
+        );
+        let stub_norm = crate::nn::RmsNorm::new(
+            mlx::ops::constructors::ones((h,), mlx::Dtype::Float32).unwrap(),
+            cfg.rms_norm_eps,
+        );
+        let lm_head = Linear::new_fp(
+            mlx::Array::zeros((vocab, h), mlx::Dtype::Float32).unwrap(),
+            None,
+        );
+        let text =
+            Qwen35MoeTextModel::from_components(stub_embed, Vec::new(), stub_norm, mrope, cfg);
+        Self {
+            text,
+            lm_head,
+            vision: None,
+        }
+    }
+
     /// Single-stream forward returning last-position logits `[B, 1, vocab]`.
     pub fn forward_on(
         &self,
@@ -281,6 +372,135 @@ impl Qwen35MoeModel {
         self.slice_last_and_project(&hidden, Some(&last_positions), target)
     }
 
+    /// Compute vision-tower embeddings ready to scatter into image-pad tokens.
+    pub fn compute_vision_embeds(
+        &self,
+        pixel_values: &Array,
+        grid_thw: &[(i32, i32, i32)],
+        _target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let vision = self
+            .vision
+            .as_ref()
+            .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
+        vision.forward(pixel_values, grid_thw)
+    }
+
+    /// Forward one VL prefill chunk with optional pre-computed vision embeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_vl_chunk(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+
+        if let Some(vision_embeds) = vision_embeds_slice {
+            hidden = crate::models::qwen3_5::cross_modal::replace_image_tokens(
+                &hidden,
+                input_ids,
+                vision_embeds,
+                image_token_id,
+            )?;
+        }
+
+        let hidden = self.text.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            decode_mask,
+            None,
+            per_row_lens,
+            target,
+        )?;
+        self.slice_last_and_project(&hidden, None, target)
+    }
+
+    /// VL-capable batched prefill over right-padded text/VL rows.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn batched_prefill_vl(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        attention_mask: &Array,
+        linear_attention_mask: &Array,
+        per_row_lens: &[i32],
+        per_row_pixel_values: &[Option<&Array>],
+        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        image_token_id: i32,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let b = per_row_lens.len();
+        if per_row_pixel_values.len() != b {
+            return Err(anyhow!(
+                "batched_prefill_vl: per_row_pixel_values.len()={} != B={}",
+                per_row_pixel_values.len(),
+                b
+            ));
+        }
+        if per_row_grid_thw.len() != b {
+            return Err(anyhow!(
+                "batched_prefill_vl: per_row_grid_thw.len()={} != B={}",
+                per_row_grid_thw.len(),
+                b
+            ));
+        }
+
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+
+        let mut all_vision_embeds: Vec<Array> = Vec::new();
+        for i in 0..b {
+            match (per_row_pixel_values[i], per_row_grid_thw[i]) {
+                (Some(pv), Some(grids)) if !grids.is_empty() => {
+                    all_vision_embeds.push(self.compute_vision_embeds(pv, grids, target)?);
+                }
+                (Some(_), None) => {
+                    return Err(anyhow!(
+                        "batched_prefill_vl: row {i} has pixel_values but grid_thw is None"
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        if !all_vision_embeds.is_empty() {
+            let vision_concat = if all_vision_embeds.len() == 1 {
+                all_vision_embeds.pop().expect("len == 1")
+            } else {
+                let refs: Vec<&Array> = all_vision_embeds.iter().collect();
+                mlx::ops::concatenate(&refs, 0)
+                    .map_err(|e| anyhow!("vision_embeds concatenate: {e:?}"))?
+            };
+            hidden = crate::models::qwen3_5::cross_modal::replace_image_tokens(
+                &hidden,
+                input_ids,
+                &vision_concat,
+                image_token_id,
+            )?;
+        }
+
+        let hidden = self.text.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            Some(attention_mask),
+            Some(linear_attention_mask),
+            Some(per_row_lens),
+            target,
+        )?;
+        let last_positions: Vec<i32> = per_row_lens.iter().map(|&l| l - 1).collect();
+        self.slice_last_and_project(&hidden, Some(&last_positions), target)
+    }
+
     /// Run transformer + final norm, returning hidden state (no lm_head).
     pub fn forward_text_hidden(
         &self,
@@ -303,6 +523,11 @@ impl Qwen35MoeModel {
 
     pub fn model_meta(&self) -> ModelMeta {
         let cfg = self.config();
+        let spatial_merge_size = cfg
+            .vision_config
+            .as_ref()
+            .map(|vc| vc.spatial_merge_size)
+            .unwrap_or(2);
         ModelMeta {
             num_hidden_layers: cfg.num_hidden_layers,
             num_attention_heads: cfg.num_attention_heads,
@@ -311,9 +536,7 @@ impl Qwen35MoeModel {
             head_dim: cfg.head_dim,
             weight_bytes: self.approx_weight_bytes(),
             max_position_embeddings: cfg.max_position_embeddings,
-            // text-only MoE has no vision; default to 2 (won't be used at runtime
-            // since MoE doesn't expose VL endpoints — Boss decided P5 D2)
-            spatial_merge_size: 2,
+            spatial_merge_size,
         }
     }
 }
@@ -394,55 +617,69 @@ impl Model for Qwen35MoeModel {
     }
 }
 
-/// **Stub** impl to satisfy `Scheduler<M>` / `SchedulerActor<M>` /
-/// `AppState<M>` bound `M: DenseVlMethods + ...` so MoE can flow through
-/// the generic infrastructure. All VL methods panic — MoE is text-only
-/// per P5 D2 and VL endpoints are dense-only per P5c §3.10 CLI dispatch.
-///
-/// This is a compile-time accommodation, not a runtime VL capability.
-/// P6.x (VL phase) will properly factor out the trait or introduce a
-/// `MultimodalModel` marker trait.
+/// Delegate the scheduler's VL extension trait to MoE's inherent runtime
+/// methods. The trait name is historical; both dense and MoE Qwen3.5 variants
+/// use the same scheduler-facing VL surface.
 impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
     fn batched_prefill_vl(
         &self,
-        _input_ids: &mlx::Array,
-        _position_ids: &mlx::Array,
-        _attention_mask: &mlx::Array,
-        _linear_attention_mask: &mlx::Array,
-        _per_row_lens: &[i32],
-        _per_row_pixel_values: &[Option<&mlx::Array>],
-        _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
-        _image_token_id: i32,
-        _cache: Option<&mut [crate::nn::LayerCache]>,
-        _target: mlx::StreamOrDevice,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        attention_mask: &mlx::Array,
+        linear_attention_mask: &mlx::Array,
+        per_row_lens: &[i32],
+        per_row_pixel_values: &[Option<&mlx::Array>],
+        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        image_token_id: i32,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
-        panic!(
-            "Qwen35MoeModel::batched_prefill_vl: MoE is text-only (P5 D2). \
-             VL endpoints should not be wired to MoE; this is a runtime guard."
-        );
+        Qwen35MoeModel::batched_prefill_vl(
+            self,
+            input_ids,
+            position_ids,
+            attention_mask,
+            linear_attention_mask,
+            per_row_lens,
+            per_row_pixel_values,
+            per_row_grid_thw,
+            image_token_id,
+            cache,
+            target,
+        )
     }
 
     fn compute_vision_embeds(
         &self,
-        _pixel_values: &mlx::Array,
-        _grid_thw: &[(i32, i32, i32)],
-        _target: mlx::StreamOrDevice,
+        pixel_values: &mlx::Array,
+        grid_thw: &[(i32, i32, i32)],
+        target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
-        panic!("Qwen35MoeModel::compute_vision_embeds: MoE is text-only (P5 D2).");
+        Qwen35MoeModel::compute_vision_embeds(self, pixel_values, grid_thw, target)
     }
 
     fn forward_vl_chunk(
         &self,
-        _input_ids: &mlx::Array,
-        _position_ids: &mlx::Array,
-        _per_row_lens: Option<&[i32]>,
-        _decode_mask: Option<&mlx::Array>,
-        _cache: Option<&mut [crate::nn::LayerCache]>,
-        _vision_embeds_slice: Option<&mlx::Array>,
-        _image_token_id: i32,
-        _target: mlx::StreamOrDevice,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
-        panic!("Qwen35MoeModel::forward_vl_chunk: MoE is text-only (P5 D2).");
+        Qwen35MoeModel::forward_vl_chunk(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
     }
 }
 
@@ -470,7 +707,7 @@ mod tests {
             linear_value_head_dim: 8,
             linear_conv_kernel_dim: 4,
             rope_parameters: super::super::config::RopeParams {
-                partial_rotary_factor: 0.25,
+                partial_rotary_factor: 1.0,
                 rope_theta: 1e7,
                 mrope_section: vec![2, 1, 1],
             },
@@ -479,7 +716,45 @@ mod tests {
             moe_intermediate_size: 16,
             shared_expert_intermediate_size: 16,
             mlp_only_layers: vec![],
+            vision_config: None,
             max_position_embeddings: 32768,
+        }
+    }
+
+    fn make_zero_layer_cfg() -> Qwen35MoeConfig {
+        let mut cfg = make_cfg();
+        cfg.num_hidden_layers = 0;
+        cfg
+    }
+
+    fn make_vision_config() -> crate::models::vision::VisionConfig {
+        crate::models::vision::VisionConfig {
+            depth: 2,
+            hidden_size: 32,
+            num_heads: 4,
+            intermediate_size: 64,
+            out_hidden_size: 32,
+            patch_size: 16,
+            spatial_merge_size: 2,
+            temporal_patch_size: 2,
+            in_channels: 3,
+            num_position_embeddings: 64,
+            deepstack_visual_indexes: vec![],
+        }
+    }
+
+    fn assert_arrays_equal_f32(a: &Array, b: &Array) {
+        let a_vec: Vec<f32> = mlx::ops::astype(a, Dtype::Float32)
+            .expect("astype a")
+            .to_vec()
+            .expect("to_vec a");
+        let b_vec: Vec<f32> = mlx::ops::astype(b, Dtype::Float32)
+            .expect("astype b")
+            .to_vec()
+            .expect("to_vec b");
+        assert_eq!(a_vec.len(), b_vec.len(), "array len");
+        for (i, (av, bv)) in a_vec.iter().zip(b_vec.iter()).enumerate() {
+            assert_eq!(av, bv, "value[{i}] differs: {av} vs {bv}");
         }
     }
 
@@ -496,6 +771,44 @@ mod tests {
         // but we can exercise make_cache logic directly via a mock-like
         // config-driven path. Test only the config partition logic here;
         // actual make_cache is exercised in integration tests.
+    }
+
+    fn assert_model_vision_slot(model: &Qwen35MoeModel) {
+        let _: &Option<crate::models::vision::VisionTower> = &model.vision;
+    }
+
+    #[test]
+    fn model_exposes_optional_vision_tower_slot() {
+        let _field_check: fn(&Qwen35MoeModel) = assert_model_vision_slot;
+        let _accessor: for<'a> fn(
+            &'a Qwen35MoeModel,
+        ) -> Option<&'a crate::models::vision::VisionTower> = Qwen35MoeModel::vision;
+    }
+
+    #[test]
+    #[ignore = "loads a full local Qwen3.5 MoE VL checkpoint"]
+    fn loads_qwen35_moe_vision_tower_from_real_checkpoint() {
+        let dir = match std::env::var("QWEN35_MOE_VL_MODEL") {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                eprintln!("skip: set QWEN35_MOE_VL_MODEL to a local MoE VL checkpoint");
+                return;
+            }
+        };
+        if !dir.exists() {
+            eprintln!("skip: {} not found", dir.display());
+            return;
+        }
+
+        let loader = crate::core::Loader::open_multimodal(&dir).expect("open_multimodal");
+        let model = Qwen35MoeModel::from_loader(&loader).expect("load model");
+        assert!(model.vision().is_some(), "vision tower should be loaded");
+        let vc = model
+            .config()
+            .vision_config
+            .as_ref()
+            .expect("vision_config present");
+        assert_eq!(vc.out_hidden_size, model.config().hidden_size);
     }
 
     #[test]
@@ -524,6 +837,103 @@ mod tests {
     }
 
     #[test]
+    fn compute_vision_embeds_without_tower_returns_err() {
+        let model = Qwen35MoeModel::from_cfg_for_test(make_zero_layer_cfg());
+        let pixel_values = Array::zeros(&[1, 2, 3, 16, 16], Dtype::Bfloat16).unwrap();
+        let err = model
+            .compute_vision_embeds(&pixel_values, &[(1, 1, 1)], ())
+            .expect_err("missing vision tower must be an error");
+        assert!(
+            err.to_string().contains("model has no vision_tower"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn forward_vl_chunk_text_only_matches_forward_on_stub_model() {
+        use crate::core::generate::{build_position_ids, IMAGE_TOKEN_ID};
+
+        let model = Qwen35MoeModel::from_cfg_for_test(make_zero_layer_cfg());
+        let input_ids: Array = (&[1_i32, 2, 3][..], &[1_i32, 3][..])
+            .try_into()
+            .expect("input_ids");
+        let position_ids = build_position_ids(0, 3).expect("position_ids");
+
+        let logits_text = model
+            .forward_on(&input_ids, &position_ids, None, None, None, ())
+            .expect("forward_on");
+        let logits_vl = model
+            .forward_vl_chunk(
+                &input_ids,
+                &position_ids,
+                None,
+                None,
+                None,
+                None,
+                IMAGE_TOKEN_ID,
+                (),
+            )
+            .expect("forward_vl_chunk text-only");
+
+        assert_arrays_equal_f32(&logits_text, &logits_vl);
+    }
+
+    #[test]
+    fn batched_prefill_vl_text_only_matches_batched_prefill_on_stub_model() {
+        use crate::core::generate::{
+            build_batch_attention_mask, build_batch_linear_mask, build_position_ids_batched,
+            IMAGE_TOKEN_ID,
+        };
+
+        let model = Qwen35MoeModel::from_cfg_for_test(make_zero_layer_cfg());
+        let prompt_lens = vec![3_i32, 2_i32];
+        let max_len = 3_i32;
+        let input_ids: Array = (&[1_i32, 2, 3, 4, 5, 0][..], &[2_i32, max_len][..])
+            .try_into()
+            .expect("input_ids");
+        let position_ids = build_position_ids_batched(&prompt_lens, max_len).expect("position_ids");
+        let attention_mask = build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)
+            .expect("attention_mask");
+        let linear_mask = build_batch_linear_mask(&prompt_lens, max_len).expect("linear_mask");
+        let mut cache_text = model
+            .make_cache(prompt_lens.len() as i32, max_len, Dtype::Bfloat16)
+            .expect("cache_text");
+        let mut cache_vl = model
+            .make_cache(prompt_lens.len() as i32, max_len, Dtype::Bfloat16)
+            .expect("cache_vl");
+
+        let logits_text = model
+            .batched_prefill(
+                &input_ids,
+                &position_ids,
+                &attention_mask,
+                &linear_mask,
+                &prompt_lens,
+                Some(&mut cache_text),
+                (),
+            )
+            .expect("batched_prefill");
+        let per_row_pixel_values: Vec<Option<&Array>> = vec![None, None];
+        let per_row_grid_thw: Vec<Option<&[(i32, i32, i32)]>> = vec![None, None];
+        let logits_vl = model
+            .batched_prefill_vl(
+                &input_ids,
+                &position_ids,
+                &attention_mask,
+                &linear_mask,
+                &prompt_lens,
+                &per_row_pixel_values,
+                &per_row_grid_thw,
+                IMAGE_TOKEN_ID,
+                Some(&mut cache_vl),
+                (),
+            )
+            .expect("batched_prefill_vl text-only");
+
+        assert_arrays_equal_f32(&logits_text, &logits_vl);
+    }
+
+    #[test]
     fn approx_weight_bytes_formula() {
         let cfg = make_cfg();
         let h = 32_usize;
@@ -545,6 +955,20 @@ mod tests {
             4 * 32 * 32 * 4 / 2 + 3 * 8 * 32 * 16 * 4 / 2 + 3 * 32 * 16 * 4 / 2 + 2 * 1024 * 32 / 2
         );
         let _ = cfg; // consumed for compile check
+    }
+
+    #[test]
+    fn model_meta_weight_bytes_includes_vision_config() {
+        let text_model = Qwen35MoeModel::from_cfg_for_test(make_zero_layer_cfg());
+
+        let mut vl_cfg = make_zero_layer_cfg();
+        vl_cfg.vision_config = Some(make_vision_config());
+        let vl_model = Qwen35MoeModel::from_cfg_for_test(vl_cfg);
+
+        assert!(
+            vl_model.model_meta().weight_bytes > text_model.model_meta().weight_bytes,
+            "MoE VL model_meta must reserve memory for vision tower weights"
+        );
     }
 
     #[test]

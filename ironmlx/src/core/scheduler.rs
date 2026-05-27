@@ -90,10 +90,9 @@ type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
 /// (per P5 spec §3.1 — VL methods stay inherent / extension-trait-only).
 ///
-/// Only `Qwen35Model` implements this. `Scheduler<M>` methods that call VL
-/// code paths (vision tower + cross-modal scatter + VL prefill) require
-/// `M: Model + DenseVlMethods`; instantiating such methods with a non-VL model
-/// (e.g., the future `Qwen35MoeModel`) is a compile-time error.
+/// Implemented by Qwen3.5 variants that expose the scheduler-facing VL runtime
+/// surface. `Scheduler<M>` methods that call VL code paths (vision tower +
+/// cross-modal scatter + VL prefill) require `M: Model + DenseVlMethods`.
 pub trait DenseVlMethods {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn batched_prefill_vl(

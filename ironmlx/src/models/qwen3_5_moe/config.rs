@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context};
 use serde::Deserialize;
 
 use crate::core::Loader;
+use crate::models::vision::VisionConfig;
 use crate::nn::AttnKind;
 use crate::Result;
 
@@ -90,17 +91,28 @@ pub struct Qwen35MoeConfig {
     pub shared_expert_intermediate_size: i32,
     #[serde(default)]
     pub mlp_only_layers: Vec<i32>,
+    /// Present in multimodal MoE variants; `None` for text-only.
+    #[serde(default)]
+    pub vision_config: Option<VisionConfig>,
 }
 
 impl Qwen35MoeConfig {
     /// Parse from a [`Loader`]'s `config.json`. Reads `config["text_config"]`.
     pub fn from_loader(loader: &Loader) -> Result<Self> {
-        let raw = loader.config_raw_value();
+        Self::from_raw_config_value(loader.config_raw_value())
+    }
+
+    fn from_raw_config_value(raw: &serde_json::Value) -> Result<Self> {
         let text_config = raw
             .get("text_config")
             .ok_or_else(|| anyhow!("config.json missing text_config field"))?;
-        let cfg: Qwen35MoeConfig = serde_json::from_value(text_config.clone())
+        let mut cfg: Qwen35MoeConfig = serde_json::from_value(text_config.clone())
             .context("failed to deserialize Qwen35MoeConfig from text_config")?;
+        if let Some(vc) = raw.get("vision_config") {
+            cfg.vision_config = Some(
+                serde_json::from_value(vc.clone()).context("failed to deserialize VisionConfig")?,
+            );
+        }
         Ok(cfg)
     }
 
@@ -155,6 +167,43 @@ mod tests {
             "shared_expert_intermediate_size": 512,
             "vocab_size": 248320
         })
+    }
+
+    fn realistic_vision_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "depth": 27,
+            "hidden_size": 1152,
+            "num_heads": 16,
+            "intermediate_size": 4304,
+            "out_hidden_size": 2048,
+            "patch_size": 16,
+            "spatial_merge_size": 2,
+            "temporal_patch_size": 2,
+            "in_channels": 3,
+            "num_position_embeddings": 2304
+        })
+    }
+
+    #[test]
+    fn parses_top_level_vision_config_from_raw_config() {
+        let raw = serde_json::json!({
+            "text_config": realistic_text_config_json(),
+            "vision_config": realistic_vision_config_json()
+        });
+
+        let cfg = Qwen35MoeConfig::from_raw_config_value(&raw).expect("parse");
+        let vc = cfg.vision_config.as_ref().expect("vision_config present");
+
+        assert_eq!(vc.depth, 27);
+        assert_eq!(vc.hidden_size, 1152);
+        assert_eq!(vc.num_heads, 16);
+        assert_eq!(vc.intermediate_size, 4304);
+        assert_eq!(vc.out_hidden_size, 2048);
+        assert_eq!(vc.patch_size, 16);
+        assert_eq!(vc.spatial_merge_size, 2);
+        assert_eq!(vc.temporal_patch_size, 2);
+        assert_eq!(vc.in_channels, 3);
+        assert_eq!(vc.num_position_embeddings, 2304);
     }
 
     #[test]

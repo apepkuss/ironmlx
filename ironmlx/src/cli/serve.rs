@@ -72,9 +72,9 @@ pub struct ServeArgs {
 /// `SchedulerActor<M>` / `AppState<M>` bounds.
 ///
 /// The `DenseVlMethods` bound is required by `server::serve<M>` /
-/// `SchedulerActor<M>`. For text-only models (e.g. `Qwen35MoeModel`) a
-/// panic-on-call stub impl satisfies the bound at compile time; those code
-/// paths are never reachable because VL endpoints are dense-only (P5c §3.10).
+/// `SchedulerActor<M>`. The trait name is historical; both dense and MoE
+/// Qwen3.5 variants implement it so the same OpenAI VL route can serve either
+/// checkpoint family.
 fn serve_with_model<M>(model: M, tokenizer: Tokenizer, args: &ServeArgs) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,

@@ -107,9 +107,9 @@ else
     [admit_mid]='admit_mid|AdmitMidHandle'
     [http_server]='core/server/(openai|anthropic|chat_format|mod)|cli/serve'
     [generate]='core/generate\.rs|GenerationStream'
-    [vision]='models/qwen3_5/(vision|cross_modal|image_processor)'
+    [vision]='models/(vision|qwen3_5/(cross_modal|image_processor)|qwen3_5_moe)'
     [cache]='core/cache/'
-    [model_core]='models/qwen3_5/(model|text_model|config)\.rs'
+    [model_core]='models/(qwen3_5|qwen3_5_moe)/(model|text_model|config)\.rs'
   )
   declare -A SUITES_FOR=(
     [scheduler_or_actor]="b1_p2_3b_2_scheduler_actor b1_p2_3c_3_continuous_batching"

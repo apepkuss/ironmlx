@@ -10,7 +10,7 @@ use anyhow::Result;
 use mlx::{ops, Array};
 
 use crate::core::Loader;
-use crate::models::qwen3_5::VisionConfig;
+pub use crate::models::qwen3_5::VisionConfig;
 
 use self::block::VitBlock;
 use self::dump::dump_tensor;
