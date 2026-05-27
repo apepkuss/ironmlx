@@ -132,6 +132,19 @@ where
     ))
 }
 
+fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
+    let config_path = model_dir.join("config.json");
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let config: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
+    config
+        .get("model_type")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))
+}
+
 pub fn run(args: ServeArgs) -> Result<()> {
     let model_dir = std::path::PathBuf::from(&args.model);
     if !model_dir.exists() {
@@ -141,17 +154,15 @@ pub fn run(args: ServeArgs) -> Result<()> {
         ));
     }
 
-    // open_multimodal so VL checkpoints retain vision_tower.* keys; for
-    // text-only checkpoints the loader simply finds no vision keys.
-    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let model_type = read_model_type(&model_dir)?;
+    let loader = match model_type.as_str() {
+        "gemma4" => Loader::open(&model_dir).context("Loader::open")?,
+        _ => {
+            // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
+            Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
+        }
+    };
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-
-    let model_type = loader
-        .config_raw_value()
-        .get("model_type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))?
-        .to_owned();
 
     match model_type.as_str() {
         "qwen3_5" => {
@@ -169,6 +180,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
                     .context("Qwen35MoeModel::from_loader")?;
                 serve_with_model(model, tokenizer, &args)
             }
+        }
+        "gemma4" => {
+            let model = crate::models::Gemma4Model::from_loader(&loader)
+                .context("Gemma4Model::from_loader")?;
+            serve_with_model(model, tokenizer, &args)
         }
         other => Err(anyhow::anyhow!("unsupported model_type: {other}")),
     }

@@ -9,8 +9,9 @@
 //!
 //! Several Qwen / HF templates call Python string methods (`startswith`,
 //! `endswith`, `strip`, `lstrip`, `rstrip`, `split`) directly on template
-//! strings. `minijinja` does not expose those methods by default; we install
-//! an `unknown_method_callback` that handles the subset used in Qwen templates.
+//! strings. Some templates also call dictionary methods such as `get`.
+//! `minijinja` does not expose those methods by default; we install an
+//! `unknown_method_callback` that handles the subset used by supported models.
 
 use minijinja::value::{from_args, ValueKind};
 use minijinja::{Environment, ErrorKind, Value};
@@ -49,39 +50,51 @@ impl ChatTemplate {
         );
         // Python string method shim — covers the subset used by Qwen / HF templates.
         env.set_unknown_method_callback(|_state, value, method, args| {
-            if value.kind() == ValueKind::String {
-                let s = value.to_string();
-                match method {
-                    "startswith" => {
-                        let (prefix,): (&str,) = from_args(args)?;
-                        return Ok(Value::from(s.starts_with(prefix)));
-                    }
-                    "endswith" => {
-                        let (suffix,): (&str,) = from_args(args)?;
-                        return Ok(Value::from(s.ends_with(suffix)));
-                    }
-                    "strip" => {
-                        let _: () = from_args(args)?;
-                        return Ok(Value::from(s.trim().to_owned()));
-                    }
-                    "lstrip" => {
-                        let _: () = from_args(args)?;
-                        return Ok(Value::from(s.trim_start().to_owned()));
-                    }
-                    "rstrip" => {
-                        let _: () = from_args(args)?;
-                        return Ok(Value::from(s.trim_end().to_owned()));
-                    }
-                    "upper" => {
-                        let _: () = from_args(args)?;
-                        return Ok(Value::from(s.to_uppercase()));
-                    }
-                    "lower" => {
-                        let _: () = from_args(args)?;
-                        return Ok(Value::from(s.to_lowercase()));
-                    }
-                    _ => {}
+            match (value.kind(), method) {
+                (ValueKind::Map, "get") => {
+                    let (key, default): (Value, Option<Value>) = from_args(args)?;
+                    let item = value.get_item(&key)?;
+                    return Ok(if item.is_undefined() {
+                        default.unwrap_or(Value::UNDEFINED)
+                    } else {
+                        item
+                    });
                 }
+                (ValueKind::String, method) => {
+                    let s = value.to_string();
+                    match method {
+                        "startswith" => {
+                            let (prefix,): (&str,) = from_args(args)?;
+                            return Ok(Value::from(s.starts_with(prefix)));
+                        }
+                        "endswith" => {
+                            let (suffix,): (&str,) = from_args(args)?;
+                            return Ok(Value::from(s.ends_with(suffix)));
+                        }
+                        "strip" => {
+                            let _: () = from_args(args)?;
+                            return Ok(Value::from(s.trim().to_owned()));
+                        }
+                        "lstrip" => {
+                            let _: () = from_args(args)?;
+                            return Ok(Value::from(s.trim_start().to_owned()));
+                        }
+                        "rstrip" => {
+                            let _: () = from_args(args)?;
+                            return Ok(Value::from(s.trim_end().to_owned()));
+                        }
+                        "upper" => {
+                            let _: () = from_args(args)?;
+                            return Ok(Value::from(s.to_uppercase()));
+                        }
+                        "lower" => {
+                            let _: () = from_args(args)?;
+                            return Ok(Value::from(s.to_lowercase()));
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
             Err(minijinja::Error::new(
                 ErrorKind::UnknownMethod,
@@ -199,6 +212,18 @@ mod tests {
         // {"enable_thinking": true} → defined+true → THINK branch (else arm).
         let kw = serde_json::json!({"enable_thinking": true});
         assert_eq!(t.render(&[], false, Some(&kw)).unwrap(), "THINK");
+    }
+
+    #[test]
+    fn map_get_method_matches_python_defaults() {
+        let src = r#"{{ messages[0].get('role') }}|{{ messages[0].get('missing', 'fallback') }}|{{ messages[0].get('missing') is undefined }}"#;
+        let t = ChatTemplate::new(src).unwrap();
+        let msgs = vec![Message {
+            role: "user".into(),
+            content: "hi".into(),
+        }];
+        let out = t.render(&msgs, false, None).unwrap();
+        assert_eq!(out, "user|fallback|true");
     }
 
     #[test]

@@ -41,8 +41,8 @@ pub struct GenerateArgs {
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
 
-    /// If set, apply the chat template; otherwise tokenize the raw prompt.
-    #[arg(long, default_value_t = true)]
+    /// Apply the chat template; set to false to tokenize the raw prompt.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub chat: bool,
 
     /// Enable thinking-mode chat templates. Defaults off so CLI generation
@@ -275,8 +275,13 @@ pub fn run(args: GenerateArgs) -> Result<()> {
                 run_generation_with_model(&model, &tokenizer, &args)
             }
         }
+        "gemma4" => {
+            let model = crate::models::Gemma4Model::from_loader(&loader)
+                .context("Gemma4Model::from_loader")?;
+            run_generation_with_model(&model, &tokenizer, &args)
+        }
         other => Err(anyhow::anyhow!(
-            "unsupported model_type: {other} (expected 'qwen3_5' or 'qwen3_5_moe')"
+            "unsupported model_type: {other} (expected 'qwen3_5', 'qwen3_5_moe', or 'gemma4')"
         )),
     }
 }
