@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
+use std::time::Instant;
 
 use crate::core::Loader;
 use crate::nn::{Embedding, LayerCache, Linear, RmsNorm};
@@ -8,6 +9,7 @@ use crate::Result;
 use super::attention::SharedKv;
 use super::config::{Gemma4LayerKind, Gemma4TextConfig};
 use super::decoder_layer::Gemma4DecoderLayer;
+use super::profile;
 use super::rope::RopeOffsets;
 
 pub struct Gemma4TextModel {
@@ -116,14 +118,29 @@ impl Gemma4TextModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let profile = profile::vl_layer_enabled();
+        let total_t0 = Instant::now();
+        let t0 = Instant::now();
         let per_layer_inputs = self.per_layer_inputs_on(per_layer_token_ids, hidden, target)?;
-        self.forward_post_embedding_on(
+        if let Some(pli) = per_layer_inputs.as_ref() {
+            profile::eval("gemma4_text_per_layer_inputs", &[pli], t0, profile)?;
+        } else {
+            profile::log("gemma4_text_per_layer_inputs", t0, profile);
+        }
+        let out = self.forward_post_embedding_on(
             hidden,
             per_layer_inputs.as_ref(),
             per_row_lens,
             cache,
             target,
-        )
+        )?;
+        profile::eval(
+            "gemma4_text_forward_embeddings_breakdown_total",
+            &[&out],
+            total_t0,
+            profile,
+        )?;
+        Ok(out)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -164,47 +181,65 @@ impl Gemma4TextModel {
                 batch
             ));
         }
+        let profile = profile::vl_layer_enabled();
+        let t0 = Instant::now();
         let offsets = RopeOffsets::from_values(cache_offsets(cache.as_deref(), batch)?)?;
+        profile::log("gemma4_text_cache_offsets", t0, profile);
         let explicit_masks = cache.is_some() || per_row_lens.is_some() || batch > 1;
         let full_mask = if explicit_masks {
-            Some(build_attention_mask(
-                offsets.values(),
-                lens,
-                seq,
-                None,
-                Dtype::Bfloat16,
-                target,
-            )?)
+            let t0 = Instant::now();
+            let mask =
+                build_attention_mask(offsets.values(), lens, seq, None, Dtype::Bfloat16, target)?;
+            profile::eval("gemma4_text_full_mask_build", &[&mask], t0, profile)?;
+            Some(mask)
         } else {
+            profile::log("gemma4_text_full_mask_build", Instant::now(), profile);
             None
         };
         let sliding_mask = if explicit_masks || seq > self.cfg.sliding_window {
-            Some(build_attention_mask(
+            let t0 = Instant::now();
+            let mask = build_attention_mask(
                 offsets.values(),
                 lens,
                 seq,
                 Some(self.cfg.sliding_window),
                 Dtype::Bfloat16,
                 target,
-            )?)
+            )?;
+            profile::eval("gemma4_text_sliding_mask_build", &[&mask], t0, profile)?;
+            Some(mask)
         } else {
+            profile::log("gemma4_text_sliding_mask_build", Instant::now(), profile);
             None
         };
 
         let mut x = hidden.clone();
         let mut intermediates: Vec<Option<SharedKv>> = vec![None; self.layers.len()];
         for (idx, layer) in self.layers.iter().enumerate() {
-            let mask = match self.cfg.layer_kind(idx) {
+            let layer_kind = self.cfg.layer_kind(idx);
+            let mask = match layer_kind {
                 Gemma4LayerKind::Sliding => sliding_mask.as_ref(),
                 Gemma4LayerKind::Full => full_mask.as_ref(),
             };
             let pli = match per_layer_inputs {
-                Some(all) => Some(slice_per_layer_input(
-                    all,
-                    idx as i32,
-                    self.cfg.hidden_size_per_layer_input,
-                    target,
-                )?),
+                Some(all) => {
+                    let t0 = Instant::now();
+                    let side = slice_per_layer_input(
+                        all,
+                        idx as i32,
+                        self.cfg.hidden_size_per_layer_input,
+                        target,
+                    )?;
+                    profile::eval_layer(
+                        "gemma4_text_layer_side_slice",
+                        idx,
+                        layer_kind,
+                        &[&side],
+                        t0,
+                        profile,
+                    )?;
+                    Some(side)
+                }
                 None => None,
             };
             let prev_idx = self.cfg.previous_kv_layer(idx);
@@ -217,6 +252,7 @@ impl Gemma4TextModel {
                 Some(c) if idx < first_cache_layer => Some(&mut c[idx]),
                 _ => None,
             };
+            let t0 = Instant::now();
             let (next, kv) = layer.forward_on(
                 &x,
                 mask,
@@ -227,10 +263,21 @@ impl Gemma4TextModel {
                 cache_cell,
                 target,
             )?;
+            profile::eval_layer(
+                "gemma4_text_layer_total",
+                idx,
+                layer_kind,
+                &[&next],
+                t0,
+                profile,
+            )?;
             x = next;
             intermediates[idx] = Some(kv);
         }
-        self.norm.forward_on(&x, target)
+        let t0 = Instant::now();
+        let out = self.norm.forward_on(&x, target)?;
+        profile::eval("gemma4_text_final_norm", &[&out], t0, profile)?;
+        Ok(out)
     }
 
     fn per_layer_inputs_on(
@@ -242,12 +289,21 @@ impl Gemma4TextModel {
         if self.cfg.hidden_size_per_layer_input <= 0 {
             return Ok(None);
         }
+        let profile = profile::vl_layer_enabled();
+        let total_t0 = Instant::now();
+        let t0 = Instant::now();
         let token_inputs = self
             .embed_tokens_per_layer
             .as_ref()
             .ok_or_else(|| anyhow!("Gemma4TextModel: embed_tokens_per_layer missing"))?
             .forward_on(input_ids, target)?;
         let token_inputs = &token_inputs * (self.cfg.hidden_size_per_layer_input as f32).sqrt();
+        profile::eval(
+            "gemma4_text_per_layer_token_inputs",
+            &[&token_inputs],
+            t0,
+            profile,
+        )?;
 
         let dims_borrow = input_ids.shape();
         let dims = dims_borrow.as_slice();
@@ -256,6 +312,7 @@ impl Gemma4TextModel {
         let pli = self.cfg.hidden_size_per_layer_input;
         let token_inputs = token_inputs.reshape_on((batch, seq, layers, pli), target)?;
 
+        let t0 = Instant::now();
         let projected = self
             .per_layer_model_projection
             .as_ref()
@@ -263,12 +320,32 @@ impl Gemma4TextModel {
             .forward_on(hidden, target)?;
         let projected = &projected * (self.cfg.hidden_size as f32).powf(-0.5);
         let projected = projected.reshape_on((batch, seq, layers, pli), target)?;
+        profile::eval(
+            "gemma4_text_per_layer_model_projection",
+            &[&projected],
+            t0,
+            profile,
+        )?;
+        let t0 = Instant::now();
         let projected = self
             .per_layer_projection_norm
             .as_ref()
             .ok_or_else(|| anyhow!("Gemma4TextModel: per_layer_projection_norm missing"))?
             .forward_on(&projected, target)?;
-        Ok(Some((&projected + &token_inputs) * 2.0_f32.powf(-0.5)))
+        let out = (&projected + &token_inputs) * 2.0_f32.powf(-0.5);
+        profile::eval(
+            "gemma4_text_per_layer_projection_norm",
+            &[&out],
+            t0,
+            profile,
+        )?;
+        profile::eval(
+            "gemma4_text_per_layer_inputs_total",
+            &[&out],
+            total_t0,
+            profile,
+        )?;
+        Ok(Some(out))
     }
 }
 

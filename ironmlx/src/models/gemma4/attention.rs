@@ -1,5 +1,6 @@
 use anyhow::Context;
 use mlx::{Array, StreamOrDevice};
+use std::time::Instant;
 
 use crate::core::cache::KVCache;
 use crate::core::Loader;
@@ -8,6 +9,7 @@ use crate::Result;
 
 use super::config::{Gemma4LayerKind, Gemma4TextConfig};
 use super::ops::rms_norm_no_scale_on;
+use super::profile;
 use super::rope::{Gemma4Rope, RopeOffsets};
 
 #[derive(Clone)]
@@ -29,6 +31,8 @@ pub struct Gemma4Attention {
     head_dim: i32,
     rms_norm_eps: f32,
     use_k_eq_v: bool,
+    layer_idx: usize,
+    layer_kind: Gemma4LayerKind,
 }
 
 impl Gemma4Attention {
@@ -66,6 +70,8 @@ impl Gemma4Attention {
             head_dim,
             rms_norm_eps: cfg.rms_norm_eps,
             use_k_eq_v,
+            layer_idx,
+            layer_kind: kind,
         })
     }
 
@@ -81,10 +87,12 @@ impl Gemma4Attention {
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, SharedKv)> {
         let target = target.into();
+        let profile = profile::vl_layer_enabled();
         let dims_borrow = x.shape();
         let dims = dims_borrow.as_slice();
         let (batch, seq) = (dims[0], dims[1]);
 
+        let t0 = Instant::now();
         let q = self
             .q_proj
             .forward_on(x, target)?
@@ -92,10 +100,29 @@ impl Gemma4Attention {
         let q = self.q_norm.forward_on(&q, target)?;
         let q = q.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
         let q = self.rope.apply_on(&q, offsets, target)?;
+        profile::eval_layer(
+            "gemma4_attn_q_path",
+            self.layer_idx,
+            self.layer_kind,
+            &[&q],
+            t0,
+            profile,
+        )?;
 
+        let t0 = Instant::now();
         let kv = match shared_kv {
-            Some(kv) => kv.clone(),
+            Some(kv) => {
+                profile::log_layer(
+                    "gemma4_attn_kv_reuse",
+                    self.layer_idx,
+                    self.layer_kind,
+                    t0,
+                    profile,
+                );
+                kv.clone()
+            }
             None => {
+                let t0 = Instant::now();
                 let raw_k = self
                     .k_proj
                     .forward_on(x, target)?
@@ -109,15 +136,33 @@ impl Gemma4Attention {
                         .forward_on(x, target)?
                         .reshape_on((batch, seq, self.n_kv_heads, self.head_dim), target)?
                 };
+                profile::eval_layer(
+                    "gemma4_attn_kv_project",
+                    self.layer_idx,
+                    self.layer_kind,
+                    &[&raw_k, &raw_v],
+                    t0,
+                    profile,
+                )?;
 
+                let t0 = Instant::now();
                 let k = self.k_norm.forward_on(&raw_k, target)?;
                 let k = k.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
                 let k = self.rope.apply_on(&k, offsets, target)?;
                 let v = rms_norm_no_scale_on(&raw_v, self.rms_norm_eps, target)?
                     .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
+                profile::eval_layer(
+                    "gemma4_attn_kv_norm_rope",
+                    self.layer_idx,
+                    self.layer_kind,
+                    &[&k, &v],
+                    t0,
+                    profile,
+                )?;
 
                 let (keys, values) = match cache {
                     Some(c) => {
+                        let t0 = Instant::now();
                         let lens_owned;
                         let lens = match per_row_lens {
                             Some(l) => l,
@@ -126,14 +171,32 @@ impl Gemma4Attention {
                                 &lens_owned
                             }
                         };
-                        c.update_and_fetch_on(&k, &v, lens, target)?
+                        let (keys, values) = c.update_and_fetch_on(&k, &v, lens, target)?;
+                        profile::eval_layer(
+                            "gemma4_attn_cache_update_fetch",
+                            self.layer_idx,
+                            self.layer_kind,
+                            &[&keys, &values],
+                            t0,
+                            profile,
+                        )?;
+                        (keys, values)
                     }
                     None => (k, v),
                 };
                 SharedKv { keys, values }
             }
         };
+        profile::eval_layer(
+            "gemma4_attn_kv_path",
+            self.layer_idx,
+            self.layer_kind,
+            &[&kv.keys, &kv.values],
+            t0,
+            profile,
+        )?;
 
+        let t0 = Instant::now();
         let out = match mask {
             Some(m) => mlx::fast::scaled_dot_product_attention_on(
                 &q,
@@ -149,10 +212,28 @@ impl Gemma4Attention {
                 &q, &kv.keys, &kv.values, 1.0, "causal", None, None, target,
             )?,
         };
+        profile::eval_layer(
+            "gemma4_attn_sdpa",
+            self.layer_idx,
+            self.layer_kind,
+            &[&out],
+            t0,
+            profile,
+        )?;
 
+        let t0 = Instant::now();
         let out = out
             .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?
             .reshape_on((batch, seq, self.n_heads * self.head_dim), target)?;
-        Ok((self.o_proj.forward_on(&out, target)?, kv))
+        let out = self.o_proj.forward_on(&out, target)?;
+        profile::eval_layer(
+            "gemma4_attn_o_proj",
+            self.layer_idx,
+            self.layer_kind,
+            &[&out],
+            t0,
+            profile,
+        )?;
+        Ok((out, kv))
     }
 }

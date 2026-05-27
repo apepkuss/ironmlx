@@ -1,14 +1,16 @@
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
+use std::time::Instant;
 
 use crate::core::Loader;
 use crate::nn::{LayerCache, Linear, RmsNorm};
 use crate::Result;
 
 use super::attention::{Gemma4Attention, SharedKv};
-use super::config::Gemma4TextConfig;
+use super::config::{Gemma4LayerKind, Gemma4TextConfig};
 use super::mlp::Gemma4GeGluMlp;
 use super::ops::gelu_approx_on;
+use super::profile;
 use super::rope::RopeOffsets;
 
 pub struct Gemma4DecoderLayer {
@@ -22,6 +24,8 @@ pub struct Gemma4DecoderLayer {
     per_layer_projection: Option<Linear>,
     post_per_layer_input_norm: Option<RmsNorm>,
     layer_scalar: Array,
+    layer_idx: usize,
+    layer_kind: Gemma4LayerKind,
 }
 
 impl Gemma4DecoderLayer {
@@ -31,6 +35,7 @@ impl Gemma4DecoderLayer {
         cfg: &Gemma4TextConfig,
         layer_idx: usize,
     ) -> Result<Self> {
+        let layer_kind = cfg.layer_kind(layer_idx);
         let mlp_intermediate =
             if cfg.use_double_wide_mlp && layer_idx >= cfg.first_kv_shared_layer_idx() {
                 cfg.intermediate_size * 2
@@ -92,6 +97,8 @@ impl Gemma4DecoderLayer {
                 None
             },
             layer_scalar: loader.tensor(&format!("{prefix}.layer_scalar"))?.clone(),
+            layer_idx,
+            layer_kind,
         })
     }
 
@@ -108,8 +115,19 @@ impl Gemma4DecoderLayer {
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, SharedKv)> {
         let target = target.into();
+        let profile = profile::vl_layer_enabled();
+        let total_t0 = Instant::now();
         let residual = x.clone();
+        let t0 = Instant::now();
         let h = self.input_layernorm.forward_on(x, target)?;
+        profile::eval_layer(
+            "gemma4_text_layer_input_norm",
+            self.layer_idx,
+            self.layer_kind,
+            &[&h],
+            t0,
+            profile,
+        )?;
         let kv_cache = match cache {
             Some(LayerCache::Full(kv)) => Some(kv),
             Some(LayerCache::Linear(_)) => {
@@ -119,6 +137,7 @@ impl Gemma4DecoderLayer {
             }
             None => None,
         };
+        let t0 = Instant::now();
         let (attn, kv) = self.self_attn.forward_on(
             &h,
             mask,
@@ -128,16 +147,43 @@ impl Gemma4DecoderLayer {
             kv_cache,
             target,
         )?;
+        profile::eval_layer(
+            "gemma4_text_layer_attention",
+            self.layer_idx,
+            self.layer_kind,
+            &[&attn],
+            t0,
+            profile,
+        )?;
+        let t0 = Instant::now();
         let attn = self.post_attention_layernorm.forward_on(&attn, target)?;
         let mut h = &residual + &attn;
+        profile::eval_layer(
+            "gemma4_text_layer_attention_residual",
+            self.layer_idx,
+            self.layer_kind,
+            &[&h],
+            t0,
+            profile,
+        )?;
 
         let residual = h.clone();
+        let t0 = Instant::now();
         let ffn = self.pre_feedforward_layernorm.forward_on(&h, target)?;
         let ffn = self.mlp.forward_on(&ffn, target)?;
         let ffn = self.post_feedforward_layernorm.forward_on(&ffn, target)?;
         h = &residual + &ffn;
+        profile::eval_layer(
+            "gemma4_text_layer_ffn",
+            self.layer_idx,
+            self.layer_kind,
+            &[&h],
+            t0,
+            profile,
+        )?;
 
         if let Some(side) = per_layer_input {
+            let t0 = Instant::now();
             let gate = self
                 .per_layer_input_gate
                 .as_ref()
@@ -156,9 +202,25 @@ impl Gemma4DecoderLayer {
                 .ok_or_else(|| anyhow!("Gemma4DecoderLayer: post per-layer input norm missing"))?
                 .forward_on(&gate, target)?;
             h = &h + &gate;
+            profile::eval_layer(
+                "gemma4_text_layer_side_input",
+                self.layer_idx,
+                self.layer_kind,
+                &[&h],
+                t0,
+                profile,
+            )?;
         }
 
         h = &h * &self.layer_scalar;
+        profile::eval_layer(
+            "gemma4_text_layer_decoder_total",
+            self.layer_idx,
+            self.layer_kind,
+            &[&h],
+            total_t0,
+            profile,
+        )?;
         Ok((h, kv))
     }
 }

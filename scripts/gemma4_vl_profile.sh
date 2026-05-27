@@ -8,6 +8,7 @@
 # Usage:
 #   ./scripts/gemma4_vl_profile.sh
 #   ./scripts/gemma4_vl_profile.sh --case multi-repeat
+#   ./scripts/gemma4_vl_profile.sh --layer-profile --case multi-repeat
 #   ./scripts/gemma4_vl_profile.sh --build
 #
 # Env:
@@ -19,6 +20,7 @@
 #   GEMMA4_DISTINCT_IMAGE_1=<image-path>
 #   GEMMA4_DISTINCT_IMAGE_2=<image-path>
 #   CHUNK_SIZES="0 256 64"
+#   LAYER_PROFILE=0
 #   MAX_TOKENS=2
 
 set -euo pipefail
@@ -28,6 +30,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PROFILE_CASE="all"
 BUILD=0
+LAYER_PROFILE="${LAYER_PROFILE:-0}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,6 +40,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --build)
             BUILD=1
+            shift
+            ;;
+        --layer-profile)
+            LAYER_PROFILE=1
             shift
             ;;
         -h|--help)
@@ -105,7 +112,7 @@ mkdir -p "$REPORT_DIR"
 METRICS_TSV="$REPORT_DIR/metrics.tsv"
 SUMMARY_TSV="$REPORT_DIR/summary.tsv"
 {
-    printf 'case\tchunk_size\tmetric\tvalue_ms\tlog_file\n'
+    printf 'case\tchunk_size\tmetric\tvalue_ms\tlayer_idx\tlayer_kind\tlog_file\n'
 } > "$METRICS_TSV"
 {
     printf 'case\tchunk_size\toutput_sha256\toutput_bytes\thidden_chunks\tslice_projects\tdedup_ms\tdedup_images\tdedup_unique\tdedup_duplicates\tstdout_file\tstderr_file\n'
@@ -127,12 +134,22 @@ append_metrics() {
         /\[gemma4-vl-profile\]/ {
             line = $0
             while (match(line, /[[:alnum:]_]+_ms=[0-9]+(\.[0-9]+)?/)) {
-                kv = substr(line, RSTART, RLENGTH)
+                metric_start = RSTART
+                metric_len = RLENGTH
+                kv = substr(line, metric_start, metric_len)
                 split(kv, parts, "=")
                 metric = parts[1]
                 sub(/_ms$/, "", metric)
-                printf "%s\t%s\t%s\t%s\t%s\n", case_name, chunk, metric, parts[2], log_file
-                line = substr(line, RSTART + RLENGTH)
+                layer_idx = "-"
+                layer_kind = "-"
+                if (match($0, /layer_idx=-?[0-9]+/)) {
+                    layer_idx = substr($0, RSTART + 10, RLENGTH - 10)
+                }
+                if (match($0, /layer_kind=[^[:space:]]+/)) {
+                    layer_kind = substr($0, RSTART + 11, RLENGTH - 11)
+                }
+                printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", case_name, chunk, metric, parts[2], layer_idx, layer_kind, log_file
+                line = substr(line, metric_start + metric_len)
             }
         }
     ' "$log_file" >> "$METRICS_TSV"
@@ -166,7 +183,11 @@ run_case() {
         done
 
         {
-            printf 'MLX_DIR=%q RUST_LOG=info IRONMLX_GEMMA4_VL_PROFILE=1 %q generate --model %q ' "$MLX_DIR" "$IRONMLX_BIN" "$GEMMA4_MODEL"
+            printf 'MLX_DIR=%q RUST_LOG=info IRONMLX_GEMMA4_VL_PROFILE=1 ' "$MLX_DIR"
+            if [[ "$LAYER_PROFILE" -eq 1 ]]; then
+                printf 'IRONMLX_GEMMA4_VL_LAYER_PROFILE=1 '
+            fi
+            printf '%q generate --model %q ' "$IRONMLX_BIN" "$GEMMA4_MODEL"
             printf '%q ' "${image_args[@]}"
             printf -- '--prompt %q --max-tokens %q --prefill-chunk-size %q\n' "$prompt" "$MAX_TOKENS" "$chunk_size"
         } > "$command_file"
@@ -176,16 +197,30 @@ run_case() {
         echo "  stdout: $stdout_file"
         echo "  stderr: $stderr_file"
 
-        MLX_DIR="$MLX_DIR" \
-            RUST_LOG=info \
-            IRONMLX_GEMMA4_VL_PROFILE=1 \
-            "$IRONMLX_BIN" generate \
-            --model "$GEMMA4_MODEL" \
-            "${image_args[@]}" \
-            --prompt "$prompt" \
-            --max-tokens "$MAX_TOKENS" \
-            --prefill-chunk-size "$chunk_size" \
-            > "$stdout_file" 2> "$stderr_file"
+        if [[ "$LAYER_PROFILE" -eq 1 ]]; then
+            MLX_DIR="$MLX_DIR" \
+                RUST_LOG=info \
+                IRONMLX_GEMMA4_VL_PROFILE=1 \
+                IRONMLX_GEMMA4_VL_LAYER_PROFILE=1 \
+                "$IRONMLX_BIN" generate \
+                --model "$GEMMA4_MODEL" \
+                "${image_args[@]}" \
+                --prompt "$prompt" \
+                --max-tokens "$MAX_TOKENS" \
+                --prefill-chunk-size "$chunk_size" \
+                > "$stdout_file" 2> "$stderr_file"
+        else
+            MLX_DIR="$MLX_DIR" \
+                RUST_LOG=info \
+                IRONMLX_GEMMA4_VL_PROFILE=1 \
+                "$IRONMLX_BIN" generate \
+                --model "$GEMMA4_MODEL" \
+                "${image_args[@]}" \
+                --prompt "$prompt" \
+                --max-tokens "$MAX_TOKENS" \
+                --prefill-chunk-size "$chunk_size" \
+                > "$stdout_file" 2> "$stderr_file"
+        fi
 
         append_metrics "$name" "$chunk_size" "$stderr_file"
 
@@ -224,6 +259,7 @@ echo "report: $REPORT_DIR"
 echo "binary: $IRONMLX_BIN"
 echo "model:  $GEMMA4_MODEL"
 echo "chunks: $CHUNK_SIZES"
+echo "layer_profile: $LAYER_PROFILE"
 echo ""
 
 if [[ "$PROFILE_CASE" == "all" || "$PROFILE_CASE" == "single" ]]; then
@@ -244,3 +280,6 @@ fi
 echo "=== Gemma4 VL profile PASS ==="
 echo "summary: $SUMMARY_TSV"
 echo "metrics: $METRICS_TSV"
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$SCRIPT_DIR/gemma4_vl_profile_report.py" --report "$REPORT_DIR"
+fi
