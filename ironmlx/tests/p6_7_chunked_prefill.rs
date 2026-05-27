@@ -100,7 +100,7 @@ fn p6_7_chunked_prefill_matrix() {
             sampler: Sampler::greedy(),
             stop_token_ids: stop_token_ids.clone(),
             prefill_chunk_size: cs,
-            pixel_values: Some(pv),
+            pixel_values: Some(vec![pv]),
             image_grid_thw: Some(grids.clone()),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,

@@ -242,7 +242,7 @@ async fn scheduler_actor_vl_routes_to_gs() {
     let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
     let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
 
-    // Build a minimal VL request marker — pixel_values = Some(non-None Array).
+    // Build a minimal VL request marker — pixel_values = Some(non-empty image list).
     // The routing decision only checks `pixel_values.is_some()`; building a
     // real VL prompt for end-to-end inference is heavy (P6 fixture) and is
     // already covered by `p6_qwen35_vl_logits_match`. This test verifies the
@@ -259,7 +259,7 @@ async fn scheduler_actor_vl_routes_to_gs() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0, // chunking off — VL routing wins anyway
-        pixel_values: Some(dummy_image),
+        pixel_values: Some(vec![dummy_image]),
         image_grid_thw: Some(dummy_grid),
         image_spatial_merge_size: 2,
         image_token_id: 248056,

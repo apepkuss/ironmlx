@@ -40,6 +40,7 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             /* admission_queue_max */ 32,
             /* max_cache_cap */ 32768,
             /* p5h_measurement_eval_probes */ false,
+            /* vision_input_override */ None,
         )
         .await
     })

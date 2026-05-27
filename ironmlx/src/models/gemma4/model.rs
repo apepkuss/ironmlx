@@ -73,6 +73,70 @@ fn vl_profile_eval(label: &str, arrays: &[&Array], start: Instant, enabled: bool
     Ok(())
 }
 
+struct ExactUniqueImageRows {
+    unique_indices: Vec<usize>,
+    image_rows: Vec<(usize, usize)>,
+}
+
+fn exact_unique_image_rows(
+    pixel_values: &[Array],
+    group_indices: &[usize],
+    profile: bool,
+) -> Result<ExactUniqueImageRows> {
+    if group_indices.len() <= 1 {
+        let idx = group_indices
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("Gemma4 exact image dedup: empty shape group"))?;
+        return Ok(ExactUniqueImageRows {
+            unique_indices: vec![idx],
+            image_rows: vec![(idx, 0)],
+        });
+    }
+
+    let t0 = Instant::now();
+    let mut unique_indices = Vec::with_capacity(group_indices.len());
+    let mut unique_pixels: Vec<Vec<f32>> = Vec::with_capacity(group_indices.len());
+    let mut image_rows = Vec::with_capacity(group_indices.len());
+
+    for &idx in group_indices {
+        let pv = &pixel_values[idx];
+        if pv.dtype() != Dtype::Float32 {
+            return Err(anyhow!(
+                "Gemma4 exact image dedup expects Float32 pixel_values, image {idx} has {:?}",
+                pv.dtype()
+            ));
+        }
+        let pixels = pv.to_vec::<f32>()?;
+        if let Some(row) = unique_pixels
+            .iter()
+            .position(|existing| existing == &pixels)
+        {
+            image_rows.push((idx, row));
+        } else {
+            let row = unique_indices.len();
+            unique_indices.push(idx);
+            unique_pixels.push(pixels);
+            image_rows.push((idx, row));
+        }
+    }
+
+    if profile {
+        tracing::info!(
+            "[gemma4-vl-profile] compute_vision_exact_dedup_ms={:.3} images={} unique={} duplicates={}",
+            t0.elapsed().as_secs_f64() * 1000.0,
+            group_indices.len(),
+            unique_indices.len(),
+            group_indices.len() - unique_indices.len()
+        );
+    }
+
+    Ok(ExactUniqueImageRows {
+        unique_indices,
+        image_rows,
+    })
+}
+
 impl Gemma4Model {
     pub fn from_loader(loader: &Loader) -> Result<Self> {
         let cfg = Gemma4Config::from_loader(loader).context("parsing Gemma4Config")?;
@@ -527,11 +591,20 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
                     group_dims
                 );
             }
+            let exact_rows = exact_unique_image_rows(pixel_values, &group_indices, profile)?;
+            if profile && exact_rows.unique_indices.len() != group_indices.len() {
+                tracing::info!(
+                    "[gemma4-vl-profile] compute_vision_exact_reuse images={} unique={}",
+                    group_indices.len(),
+                    exact_rows.unique_indices.len()
+                );
+            }
             let t0 = Instant::now();
-            let batch = if group_indices.len() == 1 {
-                pixel_values[group_indices[0]].clone()
+            let batch = if exact_rows.unique_indices.len() == 1 {
+                pixel_values[exact_rows.unique_indices[0]].clone()
             } else {
-                let refs: Vec<&Array> = group_indices
+                let refs: Vec<&Array> = exact_rows
+                    .unique_indices
                     .iter()
                     .map(|&idx| &pixel_values[idx])
                     .collect();
@@ -551,16 +624,23 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
             )?;
             let shape = projected.shape();
             let dims = shape.as_slice();
-            let group_len = i32::try_from(group_indices.len())
+            let unique_len = i32::try_from(exact_rows.unique_indices.len())
                 .context("Gemma4Model::compute_vision_embeds group size overflow")?;
-            if dims.len() != 3 || dims[0] != group_len {
+            if dims.len() != 3 || dims[0] != unique_len {
                 return Err(anyhow!(
-                    "Gemma4Model::compute_vision_embeds expected batched projection [{group_len},N,H], got {dims:?}"
+                    "Gemma4Model::compute_vision_embeds expected batched projection [{unique_len},N,H], got {dims:?}"
                 ));
             }
             let n = dims[1];
             let hidden = dims[2];
-            for (batch_row, &idx) in group_indices.iter().enumerate() {
+            let mut unique_outputs: Vec<Option<Array>> =
+                (0..exact_rows.unique_indices.len()).map(|_| None).collect();
+            for (unique_row, (&idx, output_slot)) in exact_rows
+                .unique_indices
+                .iter()
+                .zip(unique_outputs.iter_mut())
+                .enumerate()
+            {
                 let (t, gh, gw) = grid_thw[idx];
                 let expected = t * (gh / pool) * (gw / pool);
                 if expected != n {
@@ -570,7 +650,7 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
                     ));
                 }
                 let t0 = Instant::now();
-                let row = i32::try_from(batch_row)
+                let row = i32::try_from(unique_row)
                     .context("Gemma4Model::compute_vision_embeds batch row overflow")?;
                 let sliced = mlx::ops::indexing::slice_strided_on(
                     &projected,
@@ -581,6 +661,26 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
                 )?;
                 let out = sliced.reshape_on((n, hidden), target)?;
                 vl_profile_eval("compute_vision_reshape", &[&out], t0, profile)?;
+                *output_slot = Some(out);
+            }
+            for (idx, unique_row) in exact_rows.image_rows {
+                let out = unique_outputs
+                    .get(unique_row)
+                    .and_then(|item| item.as_ref())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Gemma4Model::compute_vision_embeds missing unique image row {unique_row}"
+                        )
+                    })?
+                    .clone();
+                let (t, gh, gw) = grid_thw[idx];
+                let expected = t * (gh / pool) * (gw / pool);
+                if expected != n {
+                    return Err(anyhow!(
+                        "Gemma4Model::compute_vision_embeds image {idx}: grid_thw implies {expected} soft tokens but reused vision row has {n}; max per image {}",
+                        self.vision_soft_tokens_per_image
+                    ));
+                }
                 per_image[idx] = Some(out);
             }
         }
@@ -700,5 +800,54 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         Err(anyhow!(
             "Gemma4Model::forward_vl_hidden: Gemma4 Dense support is text-only in this task"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_unique_image_rows_reuses_identical_pixels() {
+        let a: Array = (
+            &[0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0][..],
+            &[1_i32, 3, 1, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let b: Array = (
+            &[0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0][..],
+            &[1_i32, 3, 1, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let c: Array = (
+            &[0.0_f32, 1.0, 2.0, 3.0, 4.0, 6.0][..],
+            &[1_i32, 3, 1, 2][..],
+        )
+            .try_into()
+            .unwrap();
+        let images = vec![a, b, c];
+
+        let exact_rows = exact_unique_image_rows(&images, &[0, 1, 2], false).unwrap();
+
+        assert_eq!(exact_rows.unique_indices, vec![0, 2]);
+        assert_eq!(exact_rows.image_rows, vec![(0, 0), (1, 0), (2, 1)]);
+    }
+
+    #[test]
+    fn exact_unique_image_rows_preserves_unique_order() {
+        let a: Array = (&[1.0_f32; 6][..], &[1_i32, 3, 1, 2][..])
+            .try_into()
+            .unwrap();
+        let b: Array = (&[2.0_f32; 6][..], &[1_i32, 3, 1, 2][..])
+            .try_into()
+            .unwrap();
+        let images = vec![a, b];
+
+        let exact_rows = exact_unique_image_rows(&images, &[0, 1], false).unwrap();
+
+        assert_eq!(exact_rows.unique_indices, vec![0, 1]);
+        assert_eq!(exact_rows.image_rows, vec![(0, 0), (1, 1)]);
     }
 }

@@ -203,7 +203,7 @@ fn p6_qwen35_vl_logits_match() {
             None, // per_row_lens
             None, // decode_mask
             None, // cache
-            Some(&pv),
+            Some(std::slice::from_ref(&pv)),
             Some(&grids_tup),
             ironmlx::core::generate::IMAGE_TOKEN_ID,
             (),

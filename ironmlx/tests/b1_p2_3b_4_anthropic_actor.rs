@@ -24,7 +24,7 @@ use ironmlx::core::sampler::Sampler;
 use ironmlx::core::server::scheduler_actor::{
     spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand,
 };
-use ironmlx::core::server::AppState;
+use ironmlx::core::server::{AppState, VisionInputConfig};
 use ironmlx::core::{Loader, Message, Tokenizer};
 use ironmlx::models::qwen3_5::Qwen35Model;
 
@@ -276,6 +276,9 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         tokenizer: tokenizer.clone(),
         model_id: "test-model".to_string(),
         prefill_chunk_size: 256,
+        vision_input: VisionInputConfig::Qwen {
+            spatial_merge_size: 2,
+        },
         scheduler_handle: handle.clone(),
         b_max: 4,
         admission_deadline_ms: 5,
