@@ -141,11 +141,13 @@ Create `qmm_gather.metal.in` with the final kernel name `ironmlx_gather_qmm`. It
 Add `ironmlx-bench-kernel/src/gather_qmm.rs` with argument parsing for:
 - `--gather-qmm`
 - `--shape sorted|default`
-- `--m`, `--n-per-expert`, `--k`, `--num-experts`, `--topk`
+- `--m-tokens`, `--n-per-expert`, `--k`, `--num-experts`, `--topk`
 - `--bm`, `--bn`, `--bk`
 - `--runs`, `--warmup`
 - `--mlx-baseline`
 - `--sweep`
+
+`--m-tokens` means original batch token count `BS` for both shape families. The sorted bench expands it to `BS * topk` output slots; the default bench keeps `x` at `BS` rows and produces `BS * topk` output slots via `rhs_indices=[BS, topk]`. Do not interpret `--m-tokens` as already-packed sorted rows, or sorted/default EG-1 rows will compare different physical workloads.
 
 Preserve current self_qmm behavior when `--gather-qmm` is not supplied.
 
@@ -156,7 +158,7 @@ Run:
 export MLX_DIR=$HOME/.local/mlx
 cargo build --release -p ironmlx-bench-kernel
 target/release/ironmlx-bench-kernel --help
-target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --mlx-baseline
+target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --mlx-baseline
 cargo fmt
 cargo +nightly fmt --all -- --check
 cargo +nightly clippy --all-features --workspace -- -D warnings
@@ -179,81 +181,144 @@ Report files touched and command outputs. Do not commit.
 **Files:**
 - Modify: `ironmlx/src/nn/gather_qmm/mod.rs`
 - Modify: `ironmlx/src/nn/gather_qmm/kernel.rs`
+- Modify: `ironmlx/src/nn/gather_qmm/lookup.rs`
 - Modify: `ironmlx/src/nn/gather_qmm/metal/qmm_gather.metal.in`
 - Modify: `ironmlx-bench-kernel/src/gather_qmm.rs`
 
-- [ ] **Step 1.1: Implement Rust dispatch using `MetalKernel` only**
+### History note (Codex round-4 redesign trigger)
+
+T1 was first executed 2026-05-27 with a naive scalar kernel that produced bit-identical numerical correctness vs MLX baseline but ran 3-5× slower (sorted ratio 5.16×, default 3.25×). Codex round-4 review concluded the naive baseline cannot close EG-1 even after tile sweep — "tile sweep is for 5-15% closing on a sane kernel, not rescuing a 3-5× slow implementation" (see `reports/p5i-c-phase-1-stage-beta-t1-redesign-questions.md`). The steps below are the **redesigned T1**; T1 first-attempt code in the working tree is the starting point and is partially superseded.
+
+### Step 1.0: Interface freeze (Codex round-4 Sup-3 binding)
+
+Before kernel body rewrite, lock the surviving-redesign interfaces so the kernel body change doesn't require second-round refactor:
+
+- [ ] **Step 1.0.1: `dispatch_gather_qmm` accepts `Option<&Array>` for biases**
+
+`ironmlx/src/nn/gather_qmm/kernel.rs` + `mod.rs`: change `biases: &Array` parameter to `biases: Option<&Array>` at the API boundary, matching MLX `gather_quantized_matmul_on` contract. Stage Beta v1 supports only affine quantization, so `None` must return a clear pre-dispatch error (`mode="affine" requires biases`) instead of synthesizing dummy buffers or silently falling back. v1 callers pass `Some(&biases)` and `HAS_BIAS` remains `1`; a future no-bias quant mode must add an explicit no-bias kernel input list before setting `HAS_BIAS=0`.
+
+- [ ] **Step 1.0.2: `BK` template int is real K-axis step (not GROUP_SIZE alias)**
+
+`ironmlx/src/nn/gather_qmm/metal/qmm_gather.metal.in`: kernel body uses `BK` (not hardcoded `GROUP_SIZE=64`) as the inner-K loop step. Supported Stage Beta values are `BK=32` and `BK=64` only. A dequant segment must never reuse one `(scale, bias)` across a quant group boundary: `BK=32` loads one group id for each 32-wide segment and naturally switches group every two outer iterations; `BK=64` loads once per outer iteration. If a future tile uses `BK>64`, split the dequant work into group-sized subsegments first; do not broaden the sweep by assuming one scale/bias covers multiple groups.
+
+- [ ] **Step 1.0.3: `SUPPORTED_TILES` set in lookup.rs**
+
+`ironmlx/src/nn/gather_qmm/lookup.rs`: replace single `SAFE_TILE` constant with the explicit T1 set:
+
+```rust
+pub const SUPPORTED_TILES: &[Tile] = &[Tile { bm: 32, bn: 64, bk: 32 }];
+```
+
+`select_tile()` returns one of the supported tiles based on `(shape_family, m_out, n2_col, k)`. `kernel.rs::validate_tile()` changes from hardcoded equality against private constants to `SUPPORTED_TILES.iter().any(|t| t.bm == bm && t.bn == bn && t.bk == bk)`. T2 may expand `SUPPORTED_TILES`, but only together with matching kernel support for every added tile.
+
+- [ ] **Step 1.0.4: `dispatch_gather_qmm` accepts `out_shape: Shape` (not `Vec<i32>`)**
+
+`ironmlx/src/nn/gather_qmm/kernel.rs` + `mod.rs`: change `out_dims: Vec<i32>` parameter to `out_shape: Shape`. Caller in `mod.rs` constructs `Shape` once instead of `Vec<i32>` + dispatch-side conversion.
+
+- [ ] **Step 1.0.5: bench-kernel `--sweep` flag fail-fast in T1 (T2 wires real sweep)**
+
+`ironmlx-bench-kernel/src/gather_qmm.rs::run()`: at top, `anyhow::ensure!(!args.sweep, "T1 does not support --sweep; T2 enables tile sweep mode")`. T2 step 2.2 replaces the ensure with real sweep loop.
+
+- [ ] **Step 1.0.6: Input order — document deviation from plan literal**
+
+`ironmlx/src/nn/gather_qmm/kernel.rs`: keep current input order `["x", "rhs_indices", "w", "scales", "biases"]` (rhs_indices adjacent to x is semantically clearer than plan literal `[x, w, scales, biases, rhs_indices]`); add a comment near `.inputs(...)` chain documenting this deviation from plan T1.1 literal binding. MLX binds by name, no runtime impact.
+
+### Step 1.1: Implement Rust dispatch using `MetalKernel` only
 
 Model `kernel.rs` after `self_qmm/kernel.rs`:
 - `const GATHER_QMM_SOURCE: &str = include_str!("metal/qmm_gather.metal.in");`
 - one `OnceLock<MetalKernel>`
 - `MetalKernel::builder("ironmlx_gather_qmm")`
-- inputs: `x`, `w`, `scales`, `biases`, `rhs_indices`
+- inputs: `["x", "rhs_indices", "w", "scales", "biases"]` (per Step 1.0.6 deviation note)
 - output: `out`
 - `ensure_row_contiguous(true)`
 - template ints: `M_OUT`, `N2`, `K`, `TOPK`, `BM`, `BN`, `BK`, `SORTED`, `HAS_BIAS`
+- `HAS_BIAS=1` in Stage Beta v1 after `biases.is_some()` validation; do not dispatch a no-bias path until a separate no-bias input list exists
 
 Do not touch `mlx-sys`.
 
-- [ ] **Step 1.2: Implement shape normalization**
+### Step 1.2: Implement shape normalization
 
 In Rust before dispatch:
 - validate `x` rank is 3 or 4 for production/profile paths.
 - validate `rhs_indices` rank is 1 or 2.
 - derive `K` from `x.shape().last()`.
-- derive `N2 = weight.shape()[1]` and require `N2 % 2 == 0`.
+- derive `N2 = weight.shape()[1]` (the fused 2*I cols per Codex Q1) and require `N2 % 2 == 0`.
 - sorted: derive `M_OUT` from flattened rhs id count and preserve the non-H leading dimensions from `x`.
 - default: derive `BS = x.shape()[0]`, `TOPK = rhs_indices.shape()[1]`, `M_OUT = BS * TOPK`, and output shape `[BS, TOPK, 1, N2]`.
 - require expert ids are `u32` or cast at call site before invoking this API.
 
-- [ ] **Step 1.3: Implement Metal kernel**
+### Step 1.3: Implement Metal kernel with SG-MMA + vectorized loads (Codex round-4 Q1 binding — Layer 1)
 
-Implement the Q4 affine group_size=64 gather matmul:
+Implement the Q4 affine group_size=64 gather matmul using **Apple Metal SIMD-group matrix operations and vectorized/cooperative loads from the first complete implementation**. Naive scalar implementations (one thread per output element, scalar FMA accumulation, no vector/cooperative loads) are NOT acceptable v1 baseline per Codex round-4 Q1 binding ("scalar kernel cannot feed SG-MMA cores; both layers MUST appear together").
+
+Required Layer-1 optimization stack:
+
+- **SG-MMA**: use `simdgroup_matrix` / `simdgroup_float8x8` style float accumulators with half fragments for the inner K-axis matmul accumulation. Reference: `ironmlx/src/nn/self_qmm/metal/qmm_t.metal.in` SG-MMA dispatch pattern.
+- **Vectorized/cooperative loads**: use vectorized or cooperative per-thread loads equivalent to the self_qmm Stage 9 pattern for `x`, packed Q4 weights, and dequantized half fragments. The Layer-1 kernel may use the minimal threadgroup staging required by SG-MMA; the deferred optimization layer is extra reuse/bank-conflict/register scheduling beyond that basic SG-MMA staging.
+
+Routing + dequant semantics unchanged from naive impl:
 - per output slot, map to `x_row` and `expert_id` using sorted/default rules.
 - weight base = `expert_id * per_expert_stride`.
 - dequantize Q4 affine using the same scale/bias semantics as MLX affine quantization and `self_qmm`.
-- accumulate over `K`.
+- accumulate over K via SG-MMA fragment accumulation.
 - write fused channels `0..2I` into `out`.
 - keep bounds checks for partial `BM` and `BN` tiles.
 
-The first complete implementation may use the single safe tile `(32,64,32)`. Additional tile candidates are enabled only after T1 deterministic correctness passes.
+Tile constraint: single safe tile `(32, 64, 32)` for v1 baseline; T2 enables tile sweep only after the Layer-1 smoke ratio reaches the EG-1 proceed band (`<= 0.85`) and correctness passes. **The single-tile binding does NOT mean naive scalar implementation** (the binding constrains tile geometry exploration, not optimization stack depth).
 
-- [ ] **Step 1.4: Build deterministic bench inputs**
+### Step 1.4: Build deterministic bench inputs
 
 In `ironmlx-bench-kernel/src/gather_qmm.rs`:
 - build raw `x` and raw per-expert weights from deterministic `Vec<f32>` data.
 - quantize raw weights with `mlx::quantization::quantize(..., Some(64), Some(4), "affine", None)`.
 - never synthesize random packed weights directly.
-- for sorted shape, create `x` with `[M * topk, 1, K]` or `[M * topk, 1, 1, K]` and rhs ids with `[M * topk]`.
-- for default shape, create `x` with `[M, 1, 1, K]` and rhs ids with `[M, topk]`.
-- when `--mlx-baseline` is set, compare against `mlx::quantization::gather_quantized_matmul_on` with matching `sorted_indices`.
+- treat `--m-tokens` as original batch token count `BS`.
+- for sorted shape, create `x` with `[BS * topk, 1, K]` or `[BS * topk, 1, 1, K]` and rhs ids with `[BS * topk]`.
+- for default shape, create `x` with `[BS, 1, 1, K]` and rhs ids with `[BS, topk]`.
+- MLX baseline runs unconditionally as correctness oracle (T1-first-attempt deviation from plan `--mlx-baseline` conditional; safer; document in run() doc).
 - print CSV with exact header:
   ```text
   shape,bm,bn,bk,candidate_us,mlx_us,ratio
   ```
 
-- [ ] **Step 1.5: Smoke both shape families**
+### Step 1.5: Smoke both shape families + EG-1 hard-stop ladder check
 
 Run:
 ```bash
 export MLX_DIR=$HOME/.local/mlx
 cargo build --release -p ironmlx-bench-kernel
-target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 32 --bn 64 --bk 32 --runs 5 --warmup 2 --mlx-baseline
-target/release/ironmlx-bench-kernel --gather-qmm --shape default --m 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 32 --bn 64 --bk 32 --runs 5 --warmup 2 --mlx-baseline
+target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 32 --bn 64 --bk 32 --runs 5 --warmup 2 --mlx-baseline
+target/release/ironmlx-bench-kernel --gather-qmm --shape default --m-tokens 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 32 --bn 64 --bk 32 --runs 5 --warmup 2 --mlx-baseline
 cargo fmt
 cargo +nightly fmt --all -- --check
 cargo +nightly clippy --all-features --workspace -- -D warnings
 cargo build --release
 ```
 
+(Note: `--m-tokens` per T0 deviation from plan literal `--m`; flag-clash with existing self_qmm `--m`.)
+
 Expected:
 - Both bench commands print one CSV data row.
-- Candidate output is numerically checked inside the bench before timing is trusted.
+- Candidate output is numerically checked inside the bench before timing is trusted (`max_abs_diff < 0.5` matching self_qmm Stage 9 tolerance; bounded raw input `[-0.1, 0.1]` keeps bf16 output stable so empirical drift = 0.0).
 - Cargo gates pass.
 
-- [ ] **Step 1.6: Stop and report**
+**EG-1 hard-stop ladder verdict** (per spec § 4.2.6 Codex round-4 binding) — apply to BOTH sorted and default ratios:
 
-Report sorted/default CSV rows and any numerical drift summary. Do not commit.
+| ratio band | verdict | next step |
+|---|---|---|
+| ≤ 0.70 | **PASS** | report DONE; T2 tile sweep + T3 oracle proceed normally |
+| 0.70 - 0.85 | **PASS_WITH_DIAGNOSTIC** | report DONE_WITH_CONCERNS; T2 proceeds; T5 L1 production diagnostic MUST verify fused-output / op-boundary savings translate to e2e L2 ≥ 5% before T6 close-out |
+| 0.85 - 1.0 | **HALT** | report BLOCKED; escalate to Boss. Production wiring forbidden unless explicit op-boundary residual evidence justifies proceeding |
+| > 1.0 | **BLOCKED** | report BLOCKED; redesign kernel (Layer 2: add threadgroup memory cache) OR re-think Phase 1 sub-goals (Boss decision). Tile sweep is NOT acceptable rescue |
+
+The single-shape pair (sorted, default) of `[BM=32, BN=64, BK=32]` measurements at Layer 1 (SG-MMA + vec_loads) determines whether to proceed to T2, escalate Layer 2 (threadgroup cache), or BLOCK. Codex round-4 hard-stop ladder explicitly: tile sweep cannot rescue > 1.0 ratio.
+
+### Step 1.6: Stop and report
+
+Report sorted/default CSV rows + EG-1 ladder verdict + any numerical drift summary. Do not commit.
+
+If verdict is `HALT` or `BLOCKED` (worse ratio > 0.85), stop before T2. For `HALT`, production wiring remains forbidden unless Boss/controller accepts explicit op-boundary residual evidence. For `BLOCKED`, controller / Boss decides whether to proceed to Layer 2, invest in further kernel redesign, or halt Phase 1 for sub-goal re-think per Codex round-4 hard-stop binding.
 
 ---
 
@@ -261,6 +326,8 @@ Report sorted/default CSV rows and any numerical drift summary. Do not commit.
 
 **Files:**
 - Modify: `ironmlx/src/nn/gather_qmm/lookup.rs`
+- Modify: `ironmlx/src/nn/gather_qmm/kernel.rs`
+- Modify: `ironmlx/src/nn/gather_qmm/metal/qmm_gather.metal.in`
 - Modify: `ironmlx-bench-kernel/src/gather_qmm.rs`
 
 - [ ] **Step 2.1: Enable only bounded candidate set**
@@ -276,7 +343,7 @@ Use this candidate set unless T1 evidence shows a correctness issue for a specif
 (32,128,64)
 ```
 
-Do not expand the set before Boss/controller approval.
+Replace the T1 `--sweep` fail-fast with a real sweep loop over this exact list. Add a tile to `SUPPORTED_TILES` only if `kernel.rs` and `qmm_gather.metal.in` actually honor that `(BM, BN, BK)` combination; do not make `lookup.rs` accept a tile that the Metal body still treats as `(32,64,32)`. Do not expand the set before Boss/controller approval.
 
 - [ ] **Step 2.2: Run sorted and default sweeps**
 
@@ -284,11 +351,11 @@ Run:
 ```bash
 export MLX_DIR=$HOME/.local/mlx
 cargo build --release -p ironmlx-bench-kernel
-target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --sweep --runs 9 --warmup 3 --mlx-baseline > /tmp/p5i-c-stage-beta-eg1-sorted.csv
-target/release/ironmlx-bench-kernel --gather-qmm --shape default --m 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --sweep --runs 9 --warmup 3 --mlx-baseline > /tmp/p5i-c-stage-beta-eg1-default.csv
+target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --sweep --runs 9 --warmup 3 --mlx-baseline > /tmp/p5i-c-stage-beta-eg1-sorted.csv
+target/release/ironmlx-bench-kernel --gather-qmm --shape default --m-tokens 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --sweep --runs 9 --warmup 3 --mlx-baseline > /tmp/p5i-c-stage-beta-eg1-default.csv
 ```
 
-- [ ] **Step 2.3: Compute EG-1 verdict**
+- [ ] **Step 2.3: Compute EG-1 ladder verdict**
 
 Run:
 ```bash
@@ -304,25 +371,44 @@ def best(path):
         r["ratio"] = float(r["ratio"])
     return min(rows, key=lambda r: r["ratio"])
 
+def band(ratio):
+    if ratio <= 0.70:
+        return "PASS"
+    if ratio <= 0.85:
+        return "PASS_WITH_DIAGNOSTIC"
+    if ratio <= 1.0:
+        return "HALT"
+    return "BLOCKED"
+
 sorted_best = best("/tmp/p5i-c-stage-beta-eg1-sorted.csv")
 default_best = best("/tmp/p5i-c-stage-beta-eg1-default.csv")
+overall_ratio = max(sorted_best["ratio"], default_best["ratio"])
+overall_verdict = band(overall_ratio)
+proceed = overall_verdict in {"PASS", "PASS_WITH_DIAGNOSTIC"}
 verdict = {
     "sorted": sorted_best,
     "default": default_best,
-    "pass": sorted_best["ratio"] <= 0.70 and default_best["ratio"] <= 0.70,
+    "overall_ratio": overall_ratio,
+    "verdict": overall_verdict,
+    "strict_pass": overall_verdict == "PASS",
+    "diagnostic_band": overall_verdict == "PASS_WITH_DIAGNOSTIC",
+    "pass": proceed,
 }
 Path("/tmp/p5i-c-stage-beta-eg1.json").write_text(json.dumps(verdict, indent=2))
 print(json.dumps(verdict, indent=2))
-if not verdict["pass"]:
-    raise SystemExit("EG-1 FAIL: do not proceed to Task 3")
+if not proceed:
+    raise SystemExit(f"EG-1 {overall_verdict}: do not proceed to Task 3 without Boss/controller decision")
 PY
 ```
 
-Expected: both sorted and default ratios are `<= 0.70`.
+Expected:
+- `verdict == "PASS"` when both sorted and default ratios are `<= 0.70`.
+- `verdict == "PASS_WITH_DIAGNOSTIC"` when the worse ratio is `> 0.70` and `<= 0.85`; T3/T4 may proceed, but T5 L1/L2 must decide whether the kernel ships.
+- `verdict == "HALT"` or `"BLOCKED"` stops before T3 unless Boss/controller explicitly changes the plan.
 
-- [ ] **Step 2.4: Populate lookup only after PASS**
+- [ ] **Step 2.4: Populate lookup only after EG-1 proceed verdict**
 
-Update `select_tile()` with the winning sorted and default prefill tiles from `/tmp/p5i-c-stage-beta-eg1.json`. Decode remains out of scope and must error before dispatch.
+Update `select_tile()` with the winning sorted and default prefill tiles from `/tmp/p5i-c-stage-beta-eg1.json` only when `pass == true` (`PASS` or `PASS_WITH_DIAGNOSTIC`). Decode remains out of scope and must error before dispatch.
 
 - [ ] **Step 2.5: Cargo gates**
 
@@ -745,6 +831,7 @@ Create `docs/p5i-c-phase-1-stage-beta-close-out.md` with:
 - status date from `date +%F`;
 - commit lineage: `a9c2beb` Stage alpha baseline, current Stage Beta working tree;
 - EG-1 sorted/default ratios and tiles from `/tmp/p5i-c-stage-beta-eg1.json`;
+- EG-1 ladder verdict (`PASS` or `PASS_WITH_DIAGNOSTIC`) and whether L1/L2 ultimately discharged any diagnostic-band concern;
 - EG-2a and EG-2b verdicts;
 - L1 table from `/tmp/p5i-c-stage-beta-l1.json`;
 - L2 table from `/tmp/p5i-c-stage-beta-l2.json`;
@@ -817,4 +904,7 @@ Expected: one Stage Beta close-out commit.
 - [ ] L1 uses `default_profile` and child spans, not `quiet_acceptance`.
 - [ ] L2 uses `quiet_acceptance` and P5h+2.e protocol.
 - [ ] Long measurements are run once per gate; failures stop for decision.
+- [ ] `--m-tokens` uses the same `BS` semantics for sorted and default bench shapes.
+- [ ] EG-1 ladder is applied consistently in T1 smoke, T2 sweep, and T6 close-out.
+- [ ] Every tile accepted by lookup is implemented by the Metal kernel, not just listed.
 - [ ] Close-out has actual measured values and no placeholders.

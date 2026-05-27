@@ -168,11 +168,20 @@ Stage β plan MUST embed mandatory early-stop gates before irreversible or expen
 
 | Gate | Condition |
 |---|---|
-| EG-1 | bench-kernel routing variant achieves kernel-only ≥ 30% reduction vs MLX `gather_quantized_matmul_on` baseline (same shape) |
+| EG-1 | bench-kernel routing variant kernel-only ratio (= `candidate_us / mlx_us`) vs MLX `gather_quantized_matmul_on` baseline (same shape). PASS / diagnostic-band / halt ladder defined below (Codex round-4 binding) |
 | EG-2a | Kernel-level correctness oracle (§ 5 shape matrix + shape-forced sorted/default branches + gate/up slice equivalence + top-k invariance) stable before production wiring |
 | EG-2b | 35B-A3B-4bit 5-prompt generation regression stable after production wiring smoke and before any L1/L2 acceptance measurement |
 
-If EG-1 fails: kernel design re-iterate (T0-T2); production wiring BLOCKED. If EG-2a fails: kernel implementation fixed; do not wire. If EG-2b fails: L1/L2 acceptance measurement and close-out BLOCKED; fix kernel or wiring first. Only after EG-1 + EG-2a + production wiring smoke + EG-2b pass may the plan run L1/L2 acceptance.
+**EG-1 hard-stop ladder** (Codex round-4 binding — supersedes earlier flat ≥30% binding):
+
+| ratio band | verdict | next step |
+|---|---|---|
+| ≤ 0.70 | **PASS** | T2 tile sweep + T3 oracle proceed normally |
+| 0.70 - 0.85 | **PASS_WITH_DIAGNOSTIC** | T2 proceeds; T5 L1 production diagnostic MUST verify fused-output / op-boundary savings translate to e2e L2 ≥ 5% before T6 close-out |
+| 0.85 - 1.0 | **HALT — escalate to Boss** | Production wiring forbidden unless explicit op-boundary residual evidence justifies proceeding; default action is kernel redesign or phase goal re-think |
+| > 1.0 | **BLOCKED** | No production wiring, no L2 acceptance run; redesign kernel OR re-think Phase 1 sub-goals (e.g., Phase 2 priority shift). Tile sweep is NOT acceptable rescue for > 1.0 ratio (Codex round-4: "tile sweep is for 5-15% closing on a sane kernel, not rescuing a 3-5× slow implementation") |
+
+If EG-2a fails: kernel implementation fixed; do not wire. If EG-2b fails: L1/L2 acceptance measurement and close-out BLOCKED; fix kernel or wiring first. Only after EG-1 ≤ 0.85 (PASS or PASS_WITH_DIAGNOSTIC) + EG-2a + production wiring smoke + EG-2b pass may the plan run L1/L2 acceptance.
 
 L1 + L2 acceptance per § 2.1 unchanged. Codex R1 binding: L1 same-cohort median comparison MUST use `gather_qmm_gate_up` (or its renamed equivalent) substep with **NO** `routing_sort_pack` contamination.
 
@@ -246,6 +255,19 @@ Source: `reports/p5i-c-phase-1-stage-beta-design-questions.md` (gitignored revie
 | R2 | Shape-forced sorted/default branch oracle | § 5 second bullet updated |
 | R3 | Fused weight lazy build pre-materialize before measurement | § 4.3 protocol note |
 | R4 | Phase 2 scaffold only interface; no `gather_qmm_down` impl in v1 | § 4.2.1 IN/OUT scope |
+
+### § 6.6 Codex round-4 bindings (audit trail — T1 redesign)
+
+Source: `reports/p5i-c-phase-1-stage-beta-t1-redesign-questions.md` (gitignored review report; triggered by T1 naive scalar kernel running 3-5× slower than MLX baseline at bit-identical correctness).
+
+| Binding | Subject | Effect in this spec |
+|---|---|---|
+| Q1 | T1 redesign incremental layers (Option B) — first layer **MUST combine SG-MMA + vectorized loads** (vec<half/uint, 4>); subsequent layers (threadgroup memory cache + register schedule + fused-output exploit) only if prior layer's ratio > 0.70 | Plan T1.3 amended (naive scalar NOT acceptable v1 baseline; SG-MMA + vec_loads required from v1) |
+| Q2 | EG-1 hard-stop ladder ≤0.70 PASS / 0.70-0.85 PASS_WITH_DIAGNOSTIC / 0.85-1.0 HALT-escalate / >1.0 BLOCKED (supersedes flat ≥30% Q3 binding) | § 4.2.6 ladder table |
+| Q3 | Amend plan before T1 redesign dispatch (avoid mid-flight semantic drift between plan and code) | Plan T1.3 + T1 Interface freeze checklist + T1 hard-stop ladder; this spec amendment same commit |
+| Sup-1 | Don't skip Phase 2; `gather_qmm_down` has same kernel quality risk + lower share | § 9 OOS unchanged; no Phase 2 priority shift |
+| Sup-2 | Tile sweep is for 5-15% closing on a sane kernel, NOT rescuing 3-5× slow implementation | § 4.2.3 tile geometry note + plan T2 wall budget unchanged |
+| Sup-3 | Interface freeze before kernel body rewrite (avoid second-round refactor) | Plan T1 Interface freeze checklist: BK real K-axis step / `biases: Option<&Array>` matching MLX contract / `SUPPORTED_TILES` set in lookup / `out_shape: Shape` (not Vec<i32>) / bench-kernel `--sweep` wired or fail-fast / input order `(x, rhs_indices, w, scales, biases)` documented |
 
 ## § 7 Sister-extension interface (Codex round-1 Q1(d) binding)
 
