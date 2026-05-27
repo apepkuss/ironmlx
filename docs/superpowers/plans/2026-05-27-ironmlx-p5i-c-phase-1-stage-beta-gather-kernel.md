@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace MLX `gather_quantized_matmul_on` at the `gather_qmm_gate_up` call sites with a custom Metal gather kernel, while preserving correctness and proving L1 substep >= 30% reduction plus L2 e2e pp_tps >= 5% gain at PP=128 and PP=512.
+**Goal:** Replace MLX `gather_quantized_matmul_on` at the sorted `gather_qmm_gate_up` call sites with a custom Metal gather kernel, while preserving sorted/default correctness and proving L1 substep >= 30% reduction plus L2 e2e pp_tps >= 5% gain at PP=128 and PP=512.
 
-**Architecture:** Add a focused `ironmlx::nn::gather_qmm` module that mirrors the current `self_qmm` `MetalKernel::builder + include_str!(metal/*.metal.in) + template_int` dispatch pattern. The kernel consumes existing routing products only: sorted branch uses already-sorted `x` plus one expert id per output slot; default branch uses token `x` plus `[BS, topk]` expert ids and maps each output slot back to its source token. Rust keeps `expand_dims_on` and `slice_on`; the kernel returns fused `[..., 2I]` output for gate/up.
+**Architecture:** Add a focused `ironmlx::nn::gather_qmm` module that mirrors the current `self_qmm` `MetalKernel::builder + include_str!(metal/*.metal.in) + template_int` dispatch pattern, but uses a sorted-routing tile structure aligned with MLX `gather_qmm_rhs` observations. Production wiring replaces only sorted gate_up calls; default gate_up calls keep the existing MLX baseline and the custom kernel covers default shape only in the oracle. Rust keeps `expand_dims_on` and `slice_on`; the kernel returns fused `[..., 2I]` output for gate/up.
 
 **Tech Stack:** Rust, MLX Rust wrapper, MLX `MetalKernel`, Metal shader source under `ironmlx/src/nn/gather_qmm/metal/`, `ironmlx-bench-kernel` for bounded kernel-only measurement, `tools/p5h_2b_protocol_experiment.py` plus `tools/p5i_c_pp_tps_envelope.py` for production measurement.
 
@@ -25,7 +25,7 @@ This plan replaces the earlier draft because that draft contained non-executable
 - Stage Beta implementation execution starts only after Boss approves this plan.
 - Baseline for L1/L2 is Stage alpha prep commit `a9c2beb`.
 - Stage alpha child-span infra is already shipped; do not re-instrument and do not re-run the skipped Stage alpha sweep.
-- No dispatch-time MLX fallback. Unsupported layout, quantization, rank, or shape must return an error before enabling the new path.
+- No dispatch-time MLX fallback inside the custom gather kernel. Unsupported layout, quantization, rank, or shape must return an error before enabling the new path. The default gate_up branch intentionally keeps its existing MLX call site per sorted-only scope; that is not a runtime fallback from the custom dispatch.
 - Do not run production e2e sweeps for tile search. Tile search is bench-kernel only.
 - Do not start the long L2 production measurement unless EG-1, EG-2a, production wiring smoke, and EG-2b have passed.
 - Do not repeat any long measurement just to improve optics. If an accepted gate fails, stop and report the evidence for Boss/controller decision.
@@ -39,6 +39,7 @@ This plan replaces the earlier draft because that draft contained non-executable
   ```
 - Final close-out additionally runs `cargo build --release --features p5h-profile`, the oracle tests, and `PYTHONPATH=. uv run pytest tools/p5h_aggregator/tests/ -q`.
 - The reviewed plan document may be committed after Boss approval and before execution. No code or measurement-evidence commits before T6. T6 is the single Stage Beta implementation close-out commit.
+- If EG-1 returns `HALT` or `BLOCKED`, skip success-path T3-T6. Do not commit experimental kernel code by default; write a negative-finding report for Boss/controller decision and commit only after explicit approval.
 
 ## File Map
 
@@ -46,13 +47,13 @@ This plan replaces the earlier draft because that draft contained non-executable
 |---|---|---|---|
 | `ironmlx/src/nn/gather_qmm/mod.rs` | Create | T0-T1 | Public API, shape contracts, quant/layout validation |
 | `ironmlx/src/nn/gather_qmm/kernel.rs` | Create | T0-T1 | `MetalKernel` dispatch and output-shape construction |
-| `ironmlx/src/nn/gather_qmm/lookup.rs` | Create | T0-T2 | M5 Max prefill tile lookup for sorted/default routing shapes |
+| `ironmlx/src/nn/gather_qmm/lookup.rs` | Create | T0-T2 | M5 Max prefill tile lookup for sorted routing plus default oracle coverage |
 | `ironmlx/src/nn/gather_qmm/metal/qmm_gather.metal.in` | Create | T1 | Q4 affine group_size=64 gather kernel |
 | `ironmlx/src/nn/mod.rs` | Modify | T0 | Export `gather_qmm` module |
 | `ironmlx-bench-kernel/src/gather_qmm.rs` | Create | T0-T2 | Deterministic routing harness, MLX baseline compare, bounded tile sweep |
 | `ironmlx-bench-kernel/src/main.rs` | Modify | T0-T2 | Add gather bench mode without breaking current self_qmm mode |
 | `ironmlx/tests/gather_qmm_oracle.rs` | Create | T3 | EG-2a synthetic oracle |
-| `ironmlx/src/models/qwen3_5_moe/sparse_moe.rs` | Modify | T4 | Replace exactly four gate_up MLX call sites; do not touch down path |
+| `ironmlx/src/models/qwen3_5_moe/sparse_moe.rs` | Modify | T4 | Replace exactly two **sorted** gate_up MLX call sites (profile sorted ~651 + production sorted ~1067); default gate_up sites (~727 profile default + ~1098 production default) keep MLX baseline per spec § 4.2.7 (Codex round-5 Q1 + Q4 b'). Do not touch down path. |
 | `tools/p5i_c_generation_regression.py` | Create | T4 | EG-2b baseline-vs-candidate 35B generation regression via local OpenAI-compatible servers |
 | `docs/p5i-c-phase-1-stage-beta-close-out.md` | Create | T6 | Final evidence and shipped verdict |
 | `docs/superpowers/specs/2026-05-25-ironmlx-p5i-c-phase-1-gather-qmm-gate-up-design.md` | Modify | T6 | Mark G2/G3/Phase 1 status after evidence exists |
@@ -130,7 +131,7 @@ Create `lookup.rs` with:
 - `Phase::{Prefill, Decode}`
 - `select_tile(...)`
 
-T0 returns the fixed safe starting tile `(BM=32, BN=64, BK=32)` for both prefill shape families. Decode returns an error at the dispatch layer; decode tile selection is out of scope.
+T0 returns the fixed sorted-path starting tile `(BM=16, BN=32, BK=32)` for sorted prefill, matching the MLX `gather_qmm_rhs` non-NAX observation. The default shape family may point at a correctness-only tile but is not used in production wiring. Decode returns an error at the dispatch layer; decode tile selection is out of scope.
 
 - [ ] **Step 0.4: Add Metal source shell**
 
@@ -158,7 +159,7 @@ Run:
 export MLX_DIR=$HOME/.local/mlx
 cargo build --release -p ironmlx-bench-kernel
 target/release/ironmlx-bench-kernel --help
-target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --mlx-baseline
+target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 16 --bn 32 --bk 32 --mlx-baseline
 cargo fmt
 cargo +nightly fmt --all -- --check
 cargo +nightly clippy --all-features --workspace -- -D warnings
@@ -185,9 +186,18 @@ Report files touched and command outputs. Do not commit.
 - Modify: `ironmlx/src/nn/gather_qmm/metal/qmm_gather.metal.in`
 - Modify: `ironmlx-bench-kernel/src/gather_qmm.rs`
 
-### History note (Codex round-4 redesign trigger)
+### History note (T1 timeline — first-attempt + round-4 redesign + round-5 scope narrowing)
 
-T1 was first executed 2026-05-27 with a naive scalar kernel that produced bit-identical numerical correctness vs MLX baseline but ran 3-5× slower (sorted ratio 5.16×, default 3.25×). Codex round-4 review concluded the naive baseline cannot close EG-1 even after tile sweep — "tile sweep is for 5-15% closing on a sane kernel, not rescuing a 3-5× slow implementation" (see `reports/p5i-c-phase-1-stage-beta-t1-redesign-questions.md`). The steps below are the **redesigned T1**; T1 first-attempt code in the working tree is the starting point and is partially superseded.
+T1 was first executed 2026-05-27 with a naive scalar kernel that produced bit-identical numerical correctness vs MLX baseline but ran 3-5× slower (sorted ratio 5.16×, default 3.25×). Codex round-4 review concluded the naive baseline cannot close EG-1 even after tile sweep — "tile sweep is for 5-15% closing on a sane kernel, not rescuing a 3-5× slow implementation" (see `reports/p5i-c-phase-1-stage-beta-t1-redesign-questions.md`).
+
+T1 round-4 redesign (SG-MMA + cooperative loads, single tile (32, 64, 32)) was executed and **BLOCKED** per EG-1 hard-stop ladder: sorted ratio 2.35× (still > 1.0) / default ratio 4.84× (REGRESSION vs naive scalar). Implementer architectural root-cause finding: BM=32 grouped SG-MMA is structurally incompatible with unsorted default path — each BM=32 tile sees ~32 unique experts → 87.5% SG-MMA 8×8 fragment waste. MLX itself uses two distinct kernels for sorted vs unsorted gather routing. See `reports/p5i-c-phase-1-stage-beta-t1-redesign-blocked-questions.md` for full architectural analysis.
+
+Codex round-5 binding **Option E — sorted-only scope narrowing + one bounded redesign**:
+- Default path keeps MLX baseline (no custom kernel dispatched in production) — Phase 1 perf target is PP=128/512 prefill which always goes sorted path per `sparse_moe.rs:44 SORTED_ROUTING_MIN_BS_K = 512` with `topk=8` → BS×k = 1024/4096 ≥ 512. Default path is correctness-only via oracle.
+- Sorted path gets **one more bounded redesign** aligned with MLX `gather_qmm_rhs` / `gather_qmm_rhs_nax` tile structure (NOT self_qmm BM=32/BN=64). If sorted ratio still > 0.85 after this bounded redesign, close Phase 1 gate_up as negative finding; do NOT extend redesign budget chasing diminishing returns.
+- EG-1 ladder applies to **sorted ratio only**; default ratio is informational logged in bench output but does NOT participate in verdict.
+
+The steps below are the **round-5 sorted-only T1 redesign**; T1 round-4 redesign code in the working tree is the starting point and is partially superseded.
 
 ### Step 1.0: Interface freeze (Codex round-4 Sup-3 binding)
 
@@ -203,13 +213,13 @@ Before kernel body rewrite, lock the surviving-redesign interfaces so the kernel
 
 - [ ] **Step 1.0.3: `SUPPORTED_TILES` set in lookup.rs**
 
-`ironmlx/src/nn/gather_qmm/lookup.rs`: replace single `SAFE_TILE` constant with the explicit T1 set:
+`ironmlx/src/nn/gather_qmm/lookup.rs`: replace single `SAFE_TILE` constant with the explicit sorted-path T1 set:
 
 ```rust
-pub const SUPPORTED_TILES: &[Tile] = &[Tile { bm: 32, bn: 64, bk: 32 }];
+pub const SUPPORTED_TILES: &[Tile] = &[Tile { bm: 16, bn: 32, bk: 32 }];
 ```
 
-`select_tile()` returns one of the supported tiles based on `(shape_family, m_out, n2_col, k)`. `kernel.rs::validate_tile()` changes from hardcoded equality against private constants to `SUPPORTED_TILES.iter().any(|t| t.bm == bm && t.bn == bn && t.bk == bk)`. T2 may expand `SUPPORTED_TILES`, but only together with matching kernel support for every added tile.
+`select_tile()` returns one of the supported tiles based on `(shape_family, m_out, n2_col, k)`. `kernel.rs::validate_tile()` changes from hardcoded equality against private constants to `SUPPORTED_TILES.iter().any(|t| t.bm == bm && t.bn == bn && t.bk == bk)`. T2 may expand `SUPPORTED_TILES`, but only together with matching kernel support for every added tile. Do not keep `(32,64,32)` as the sorted default; that self_qmm-shaped tile was the round-4 failed structure.
 
 - [ ] **Step 1.0.4: `dispatch_gather_qmm` accepts `out_shape: Shape` (not `Vec<i32>`)**
 
@@ -217,7 +227,7 @@ pub const SUPPORTED_TILES: &[Tile] = &[Tile { bm: 32, bn: 64, bk: 32 }];
 
 - [ ] **Step 1.0.5: bench-kernel `--sweep` flag fail-fast in T1 (T2 wires real sweep)**
 
-`ironmlx-bench-kernel/src/gather_qmm.rs::run()`: at top, `anyhow::ensure!(!args.sweep, "T1 does not support --sweep; T2 enables tile sweep mode")`. T2 step 2.2 replaces the ensure with real sweep loop.
+`ironmlx-bench-kernel/src/gather_qmm.rs::run()`: at top, `anyhow::ensure!(!args.sweep, "T1 does not support --sweep; T2 enables tile sweep mode")`. T2 step 2.1 replaces the ensure with real sweep loop.
 
 - [ ] **Step 1.0.6: Input order — document deviation from plan literal**
 
@@ -248,24 +258,38 @@ In Rust before dispatch:
 - default: derive `BS = x.shape()[0]`, `TOPK = rhs_indices.shape()[1]`, `M_OUT = BS * TOPK`, and output shape `[BS, TOPK, 1, N2]`.
 - require expert ids are `u32` or cast at call site before invoking this API.
 
-### Step 1.3: Implement Metal kernel with SG-MMA + vectorized loads (Codex round-4 Q1 binding — Layer 1)
+### Step 1.3: Sorted-path kernel redesign per MLX gather_qmm_rhs structure (Codex round-5 Q1 binding — sorted-only)
 
-Implement the Q4 affine group_size=64 gather matmul using **Apple Metal SIMD-group matrix operations and vectorized/cooperative loads from the first complete implementation**. Naive scalar implementations (one thread per output element, scalar FMA accumulation, no vector/cooperative loads) are NOT acceptable v1 baseline per Codex round-4 Q1 binding ("scalar kernel cannot feed SG-MMA cores; both layers MUST appear together").
+Implement the sorted-path Q4 affine `group_size=64` gather matmul **aligned with MLX `affine_gather_qmm_rhs` / `affine_gather_qmm_rhs_nax` tile structure + B/E conditions** (NOT self_qmm BM=32/BN=64 — that structure was tried in round-4 redesign and produced sorted ratio 2.35×, > 1.0 BLOCKED). The T1 baseline sorted tile is `(BM=16, BN=32, BK=32)`, matching MLX's non-NAX `affine_gather_qmm_rhs` instantiation; only use another base tile if the implementation report explains the Metal/kernel reason and updates every command below. The custom kernel MUST also handle the default-shape input for **correctness-only oracle exercise** (per spec § 4.2.7), but production wiring is sorted-path only.
 
-Required Layer-1 optimization stack:
+**Reference (observation only per `[feedback-no-spec-from-competitors]`)**:
+- `/Users/xin/workspace/iron-rivals/mlx/mlx/backend/metal/quantized.cpp:1470` (gather_qmm dispatcher; identifies which sub-kernel for each shape)
+- `/Users/xin/workspace/iron-rivals/mlx/mlx/backend/metal/kernels/quantized.metal` `affine_gather_qmm_rhs` + `affine_gather_qmm_rhs_nax`
+- `/Users/xin/workspace/iron-rivals/mlx/mlx/backend/metal/kernels/quantized.h:2245` (non-NAX sorted RHS kernel template; instantiated as `BM=16, BN=32, BK=32, WM=1, WN=2`)
+- Codex round-5 Q2 fact: default path with M=1 + right_sorted=false → MLX dispatches `gather_qmv_fast` / `gather_qmv`, NOT `gather_qmm_t` (implementer round-4 misread). BM=32 grouped SG-MMA is wrong tool for default regardless of which MLX kernel default uses.
 
-- **SG-MMA**: use `simdgroup_matrix` / `simdgroup_float8x8` style float accumulators with half fragments for the inner K-axis matmul accumulation. Reference: `ironmlx/src/nn/self_qmm/metal/qmm_t.metal.in` SG-MMA dispatch pattern.
-- **Vectorized/cooperative loads**: use vectorized or cooperative per-thread loads equivalent to the self_qmm Stage 9 pattern for `x`, packed Q4 weights, and dequantized half fragments. The Layer-1 kernel may use the minimal threadgroup staging required by SG-MMA; the deferred optimization layer is extra reuse/bank-conflict/register scheduling beyond that basic SG-MMA staging.
+Read both MLX upstream sources to understand the sorted-path tile geometry + threadgroup decomposition + B/E (routed slots per expert) condition handling. Then design the ironmlx custom kernel independently with the goal: **sorted bench ratio ≤ 0.85 at both PP=128-like and PP=512-like bench shapes** before T2 begins sweep.
 
-Routing + dequant semantics unchanged from naive impl:
-- per output slot, map to `x_row` and `expert_id` using sorted/default rules.
+Required Layer-1 optimization stack (round-4 Codex Q1 retained, narrowed to sorted-path):
+- **SG-MMA**: simdgroup_matrix-style accumulators with half fragments for sorted-path's per-tile-shared-expert structure. Reference: MLX `affine_gather_qmm_rhs` SG-MMA layout.
+- **Vectorized/cooperative loads**: vectorized/cooperative per-thread loads for `x`, packed Q4 weights, and dequantized half fragments. Sorted path's row-sharing-expert structure naturally aligns with SG-MMA fragment utilization (unlike default path where ~32 unique experts per BM=32 tile → 87.5% frag waste; this is precisely why default path is scope-narrowed out per Codex round-5 Q1).
+- **Threadgroup memory cache**: round-5 Q1 binding allows this from v1 (NOT split into Layer 2) because the round-4 "incremental layers" binding was for the BM=32/BN=64 path that failed; this sorted-only redesign should incorporate all sorted-path-relevant optimizations in one bounded iteration.
+
+Routing + dequant semantics:
+- per sorted output slot (slot index = output row), map directly to `x_row = slot` and `expert_id = rhs_indices[slot]`.
 - weight base = `expert_id * per_expert_stride`.
-- dequantize Q4 affine using the same scale/bias semantics as MLX affine quantization and `self_qmm`.
+- dequantize Q4 affine using the same scale/bias semantics as MLX affine quantization.
 - accumulate over K via SG-MMA fragment accumulation.
 - write fused channels `0..2I` into `out`.
 - keep bounds checks for partial `BM` and `BN` tiles.
 
-Tile constraint: single safe tile `(32, 64, 32)` for v1 baseline; T2 enables tile sweep only after the Layer-1 smoke ratio reaches the EG-1 proceed band (`<= 0.85`) and correctness passes. **The single-tile binding does NOT mean naive scalar implementation** (the binding constrains tile geometry exploration, not optimization stack depth).
+Default-path body in the custom kernel is correctness-only: use the simplest body that preserves bit-equivalence against MLX for `[BS,1,1,H] + [BS,topk] -> [BS,topk,1,2I]` and works with the same supported tile validation. A per-slot scalar body is acceptable here because production default call sites keep MLX and default performance is not a gate. Do not spend time adding default-path SG-MMA, tile sweep, or register scheduling.
+
+Default-path correctness MUST preserve EG-2a oracle PASS but does NOT need to meet any perf threshold. Document the correctness-only implementation choice in the DONE report.
+
+Tile constraint: single safe tile `(16, 32, 32)` for v1 baseline sorted-path measurement; T2 enables tile sweep only after sorted-path bench ratio reaches EG-1 proceed band (`<= 0.85`) at both PP=128-like and PP=512-like bench shapes and correctness passes. If the MLX-rhs-aligned structure naturally requires a different sorted-tile shape, expand `SUPPORTED_TILES` per Codex round-2 Sup-3 binding (matching kernel support for every added tile) and document the deviation in DONE report.
+
+**Codex round-5 Q1 bounded-iteration cap**: this is **one bounded redesign**. If after this iteration sorted ratio remains > 0.85 (HALT or BLOCKED band per EG-1 ladder), Phase 1 gate_up closes as negative finding (do NOT extend redesign budget). Controller surfaces result to Boss for pivot decision; do NOT unilaterally proceed to a second iteration.
 
 ### Step 1.4: Build deterministic bench inputs
 
@@ -282,47 +306,58 @@ In `ironmlx-bench-kernel/src/gather_qmm.rs`:
   shape,bm,bn,bk,candidate_us,mlx_us,ratio
   ```
 
-### Step 1.5: Smoke both shape families + EG-1 hard-stop ladder check
+### Step 1.5: Smoke both shape families + EG-1 hard-stop ladder check (sorted-only gate)
 
 Run:
 ```bash
 export MLX_DIR=$HOME/.local/mlx
 cargo build --release -p ironmlx-bench-kernel
-target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 32 --bn 64 --bk 32 --runs 5 --warmup 2 --mlx-baseline
-target/release/ironmlx-bench-kernel --gather-qmm --shape default --m-tokens 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 32 --bn 64 --bk 32 --runs 5 --warmup 2 --mlx-baseline
+target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 16 --bn 32 --bk 32 --runs 5 --warmup 2 --mlx-baseline
+target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 512 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 16 --bn 32 --bk 32 --runs 5 --warmup 2 --mlx-baseline
+target/release/ironmlx-bench-kernel --gather-qmm --shape default --m-tokens 32 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 16 --bn 32 --bk 32 --runs 3 --warmup 1 --mlx-baseline
 cargo fmt
 cargo +nightly fmt --all -- --check
 cargo +nightly clippy --all-features --workspace -- -D warnings
 cargo build --release
 ```
 
-(Note: `--m-tokens` per T0 deviation from plan literal `--m`; flag-clash with existing self_qmm `--m`.)
+(Note: `--m-tokens` per T0 deviation from plan literal `--m`; flag-clash with existing self_qmm `--m`. Default-shape bench still runs for correctness oracle but its ratio is informational only per spec § 4.2.7.)
 
 Expected:
-- Both bench commands print one CSV data row.
-- Candidate output is numerically checked inside the bench before timing is trusted (`max_abs_diff < 0.5` matching self_qmm Stage 9 tolerance; bounded raw input `[-0.1, 0.1]` keeps bf16 output stable so empirical drift = 0.0).
+- All three bench commands print one CSV data row.
+- Candidate output is numerically checked inside the bench before timing is trusted (`max_abs_diff < 0.5` matching self_qmm Stage 9 tolerance; bounded raw input `[-0.1, 0.1]` keeps bf16 output stable).
 - Cargo gates pass.
 
-**EG-1 hard-stop ladder verdict** (per spec § 4.2.6 Codex round-4 binding) — apply to BOTH sorted and default ratios:
+**EG-1 hard-stop ladder verdict — worst sorted ratio only** (per spec § 4.2.6 + § 4.2.7 Codex round-5 binding):
 
-| ratio band | verdict | next step |
+| sorted ratio band | verdict | next step |
 |---|---|---|
-| ≤ 0.70 | **PASS** | report DONE; T2 tile sweep + T3 oracle proceed normally |
+| ≤ 0.70 | **PASS** | report DONE; T2 sorted-only tile sweep + T3 oracle proceed normally |
 | 0.70 - 0.85 | **PASS_WITH_DIAGNOSTIC** | report DONE_WITH_CONCERNS; T2 proceeds; T5 L1 production diagnostic MUST verify fused-output / op-boundary savings translate to e2e L2 ≥ 5% before T6 close-out |
-| 0.85 - 1.0 | **HALT** | report BLOCKED; escalate to Boss. Production wiring forbidden unless explicit op-boundary residual evidence justifies proceeding |
-| > 1.0 | **BLOCKED** | report BLOCKED; redesign kernel (Layer 2: add threadgroup memory cache) OR re-think Phase 1 sub-goals (Boss decision). Tile sweep is NOT acceptable rescue |
+| 0.85 - 1.0 | **HALT** | report BLOCKED; escalate to Boss. Production wiring forbidden unless explicit op-boundary residual evidence justifies proceeding. Per Codex round-5 Q1: "if sorted still > 0.85 after the one bounded redesign, close Phase 1 gate_up; switch to next candidate." |
+| > 1.0 | **BLOCKED** | report BLOCKED; per Codex round-5 Q1 close Phase 1 gate_up as negative finding and surface pivot decision to Boss. Tile sweep is NOT acceptable rescue. Per Codex round-5 Q4 b': D-style "L2 ≥ 5% empirically achievable if kernel-only ≥ 1.0" is FORBIDDEN. |
 
-The single-shape pair (sorted, default) of `[BM=32, BN=64, BK=32]` measurements at Layer 1 (SG-MMA + vec_loads) determines whether to proceed to T2, escalate Layer 2 (threadgroup cache), or BLOCK. Codex round-4 hard-stop ladder explicitly: tile sweep cannot rescue > 1.0 ratio.
+Default-path ratio: log to CSV + DONE report (informational); NOT a perf gate; does NOT affect EG-1 verdict. Use a small default shape (`m-tokens=32`, `M_OUT=256`) so the correctness path stays covered without spending time on non-target performance.
+
+The worse sorted ratio across PP=128-like (`m-tokens=128`) and PP=512-like (`m-tokens=512`) shapes at `[BM=16, BN=32, BK=32]` (or whatever sorted-aligned tile the redesign uses) determines whether to proceed to T2 sorted-only sweep, HALT for Boss decision, or BLOCK Phase 1 gate_up. Codex round-5 binding explicitly: this is one bounded sorted-only iteration; do not extend redesign budget chasing diminishing returns.
 
 ### Step 1.6: Stop and report
 
-Report sorted/default CSV rows + EG-1 ladder verdict + any numerical drift summary. Do not commit.
+Report:
+- sorted CSV rows for PP=128-like and PP=512-like shapes + worst sorted ratio + EG-1 verdict (PASS / PASS_WITH_DIAGNOSTIC / HALT / BLOCKED based on worst sorted ratio only)
+- default CSV row + default ratio (informational only)
+- default-path correctness-only implementation note + EG-2a oracle preview status
+- numerical drift summary (max_abs_diff both shapes)
+- cargo gate confirmations
+- HEAD `026dbd4` unchanged
 
-If verdict is `HALT` or `BLOCKED` (worse ratio > 0.85), stop before T2. For `HALT`, production wiring remains forbidden unless Boss/controller accepts explicit op-boundary residual evidence. For `BLOCKED`, controller / Boss decides whether to proceed to Layer 2, invest in further kernel redesign, or halt Phase 1 for sub-goal re-think per Codex round-4 hard-stop binding.
+Do not commit.
+
+If verdict is `HALT` or `BLOCKED` (sorted ratio > 0.85), stop before T2. Surface to Boss for pivot decision (per Codex round-5 Q1 + § 6.7 Q5: close Phase 1 gate_up as negative finding; do NOT pivot to Phase 2 as escape hatch; document negative result and re-examine Phase 1 candidates).
 
 ---
 
-## Task 2: Bounded Tile Search And EG-1
+## Task 2: Bounded Tile Search And EG-1 (sorted-only per Codex round-5)
 
 **Files:**
 - Modify: `ironmlx/src/nn/gather_qmm/lookup.rs`
@@ -330,32 +365,42 @@ If verdict is `HALT` or `BLOCKED` (worse ratio > 0.85), stop before T2. For `HAL
 - Modify: `ironmlx/src/nn/gather_qmm/metal/qmm_gather.metal.in`
 - Modify: `ironmlx-bench-kernel/src/gather_qmm.rs`
 
-- [ ] **Step 2.1: Enable only bounded candidate set**
+T2 only proceeds if T1.5 sorted-path verdict is **PASS** or **PASS_WITH_DIAGNOSTIC** (sorted ratio ≤ 0.85). HALT / BLOCKED at T1 → T2 does not start; Phase 1 gate_up closes as negative finding per Codex round-5 Q1.
 
-Use this candidate set unless T1 evidence shows a correctness issue for a specific tile:
+- [ ] **Step 2.1: Enable only bounded sorted-tile candidate set**
+
+T2 sweeps sorted-path tiles only (default path keeps MLX baseline per spec § 4.2.7; default tile selection is not Phase 1 scope). Use this candidate set unless T1 evidence shows a correctness issue for a specific tile or T1 redesign chose a different sorted-aligned tile family (e.g., aligned with MLX `gather_qmm_rhs` tile geometry):
 
 ```text
+(16,32,32)
+(16,64,32)
+(32,32,32)
 (32,64,32)
-(32,128,32)
-(64,64,32)
-(64,128,32)
-(32,64,64)
-(32,128,64)
+(16,32,64)
+(32,32,64)
 ```
 
-Replace the T1 `--sweep` fail-fast with a real sweep loop over this exact list. Add a tile to `SUPPORTED_TILES` only if `kernel.rs` and `qmm_gather.metal.in` actually honor that `(BM, BN, BK)` combination; do not make `lookup.rs` accept a tile that the Metal body still treats as `(32,64,32)`. Do not expand the set before Boss/controller approval.
+If T1 redesign chose a non-`(16,32,32)` base tile (per Step 1.3 deviation note), revise this list to swing around the T1-aligned shape before running the sweep. Replace the T1 `--sweep` fail-fast with a real sweep loop over the resulting list. Add a tile to `SUPPORTED_TILES` only if `kernel.rs` and `qmm_gather.metal.in` actually honor that `(BM, BN, BK)` combination; do not make `lookup.rs` accept a tile that the Metal body still treats as the v1 baseline tile. Do not expand the set before Boss/controller approval.
 
-- [ ] **Step 2.2: Run sorted and default sweeps**
+- [ ] **Step 2.2: Run sorted sweep**
 
 Run:
 ```bash
 export MLX_DIR=$HOME/.local/mlx
 cargo build --release -p ironmlx-bench-kernel
-target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 64 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --sweep --runs 9 --warmup 3 --mlx-baseline > /tmp/p5i-c-stage-beta-eg1-sorted.csv
-target/release/ironmlx-bench-kernel --gather-qmm --shape default --m-tokens 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --sweep --runs 9 --warmup 3 --mlx-baseline > /tmp/p5i-c-stage-beta-eg1-default.csv
+target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 128 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --sweep --runs 9 --warmup 3 --mlx-baseline > /tmp/p5i-c-stage-beta-eg1-sorted-pp128.csv
+target/release/ironmlx-bench-kernel --gather-qmm --shape sorted --m-tokens 512 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --sweep --runs 9 --warmup 3 --mlx-baseline > /tmp/p5i-c-stage-beta-eg1-sorted-pp512.csv
 ```
 
-- [ ] **Step 2.3: Compute EG-1 ladder verdict**
+Default-shape sweep is **skipped** per Codex round-5 scope narrowing. Optional informational default-shape check is single point only:
+
+```bash
+target/release/ironmlx-bench-kernel --gather-qmm --shape default --m-tokens 32 --n-per-expert 512 --k 2048 --num-experts 256 --topk 8 --bm 16 --bn 32 --bk 32 --runs 3 --warmup 1 --mlx-baseline
+```
+
+Do not run a default sweep.
+
+- [ ] **Step 2.3: Compute EG-1 ladder verdict (sorted-only)**
 
 Run:
 ```bash
@@ -380,35 +425,36 @@ def band(ratio):
         return "HALT"
     return "BLOCKED"
 
-sorted_best = best("/tmp/p5i-c-stage-beta-eg1-sorted.csv")
-default_best = best("/tmp/p5i-c-stage-beta-eg1-default.csv")
-overall_ratio = max(sorted_best["ratio"], default_best["ratio"])
-overall_verdict = band(overall_ratio)
-proceed = overall_verdict in {"PASS", "PASS_WITH_DIAGNOSTIC"}
-verdict = {
-    "sorted": sorted_best,
-    "default": default_best,
-    "overall_ratio": overall_ratio,
-    "verdict": overall_verdict,
-    "strict_pass": overall_verdict == "PASS",
-    "diagnostic_band": overall_verdict == "PASS_WITH_DIAGNOSTIC",
+sorted_pp128_best = best("/tmp/p5i-c-stage-beta-eg1-sorted-pp128.csv")
+sorted_pp512_best = best("/tmp/p5i-c-stage-beta-eg1-sorted-pp512.csv")
+sorted_ratio = max(sorted_pp128_best["ratio"], sorted_pp512_best["ratio"])
+verdict = band(sorted_ratio)
+proceed = verdict in {"PASS", "PASS_WITH_DIAGNOSTIC"}
+result = {
+    "sorted_pp128": sorted_pp128_best,
+    "sorted_pp512": sorted_pp512_best,
+    "worst_sorted_ratio": sorted_ratio,
+    "verdict": verdict,
+    "strict_pass": verdict == "PASS",
+    "diagnostic_band": verdict == "PASS_WITH_DIAGNOSTIC",
     "pass": proceed,
+    "default_note": "default path keeps MLX baseline per spec § 4.2.7; not part of EG-1 verdict (Codex round-5 Q4 b').",
 }
-Path("/tmp/p5i-c-stage-beta-eg1.json").write_text(json.dumps(verdict, indent=2))
-print(json.dumps(verdict, indent=2))
+Path("/tmp/p5i-c-stage-beta-eg1.json").write_text(json.dumps(result, indent=2))
+print(json.dumps(result, indent=2))
 if not proceed:
-    raise SystemExit(f"EG-1 {overall_verdict}: do not proceed to Task 3 without Boss/controller decision")
+    raise SystemExit(f"EG-1 {verdict}: do not proceed to Task 3 without Boss/controller decision (Codex round-5 Q1: close Phase 1 gate_up as negative finding)")
 PY
 ```
 
 Expected:
-- `verdict == "PASS"` when both sorted and default ratios are `<= 0.70`.
-- `verdict == "PASS_WITH_DIAGNOSTIC"` when the worse ratio is `> 0.70` and `<= 0.85`; T3/T4 may proceed, but T5 L1/L2 must decide whether the kernel ships.
-- `verdict == "HALT"` or `"BLOCKED"` stops before T3 unless Boss/controller explicitly changes the plan.
+- `verdict == "PASS"` when both PP=128-like and PP=512-like sorted best ratios are `<= 0.70`.
+- `verdict == "PASS_WITH_DIAGNOSTIC"` when the worse sorted best ratio is `> 0.70` and `<= 0.85`; T3/T4 may proceed, but T5 L2 must decide whether the kernel ships.
+- `verdict == "HALT"` or `"BLOCKED"` stops before T3; surface to Boss for pivot decision per Codex round-5 Q1.
 
-- [ ] **Step 2.4: Populate lookup only after EG-1 proceed verdict**
+- [ ] **Step 2.4: Populate lookup only after EG-1 proceed verdict (sorted only)**
 
-Update `select_tile()` with the winning sorted and default prefill tiles from `/tmp/p5i-c-stage-beta-eg1.json` only when `pass == true` (`PASS` or `PASS_WITH_DIAGNOSTIC`). Decode remains out of scope and must error before dispatch.
+Update `select_tile()` for the sorted shape family with the winning prefill tile from `/tmp/p5i-c-stage-beta-eg1.json` only when `pass == true` (`PASS` or `PASS_WITH_DIAGNOSTIC`). If PP=128 and PP=512 choose different tiles, encode the smallest shape-family heuristic needed to select between those two winners; do not add additional runtime probing or production e2e sweep. Default shape family `select_tile()` is unused in production (default keeps MLX baseline per spec § 4.2.7) — keep its lookup entry pointing at the v1 baseline tile for oracle correctness coverage. Decode remains out of scope and must error before dispatch.
 
 - [ ] **Step 2.5: Cargo gates**
 
@@ -423,7 +469,35 @@ cargo build --release
 
 - [ ] **Step 2.6: Stop and report**
 
-Report top tile per shape, ratios, and `/tmp/p5i-c-stage-beta-eg1.json`. Do not commit.
+Report top sorted tile(s), PP=128-like and PP=512-like sorted ratios, `/tmp/p5i-c-stage-beta-eg1.json`, and (if measured) the informational default-shape single-point ratio. Do not commit.
+
+---
+
+## Blocked Path: Negative Finding Close-Out
+
+Use this path only if T1 or T2 returns `HALT` or `BLOCKED`.
+
+**Files:**
+- Create: `reports/p5i-c-stage-beta-gate-up-negative-finding.md`
+
+- [ ] **Step B.1: Stop success-path execution**
+
+Do not run T3, T4, T5, or success-path T6. Do not wire production call sites. Do not run L1/L2 acceptance measurements.
+
+- [ ] **Step B.2: Write negative-finding report**
+
+Create `reports/p5i-c-stage-beta-gate-up-negative-finding.md` with:
+- triggering task (`T1` or `T2`);
+- sorted PP=128-like and PP=512-like CSV rows;
+- worst sorted ratio and EG-1 verdict;
+- default-shape informational ratio if measured;
+- architectural reason the bounded sorted-only redesign did not enter `<=0.85`;
+- explicit statement that Phase 1 gate_up is closed as a negative finding unless Boss overrides;
+- recommended next candidate review path, without committing to Phase 2 as an escape hatch.
+
+- [ ] **Step B.3: Report to Boss/controller**
+
+Report the negative-finding document path and the exact EG-1 evidence. Wait for Boss/controller decision before committing docs or keeping/removing experimental code.
 
 ---
 
@@ -483,15 +557,15 @@ Report test names and `/tmp/p5i-c-stage-beta-eg2a.json`. Do not commit.
 - Modify: `ironmlx/src/models/qwen3_5_moe/sparse_moe.rs`
 - Create: `tools/p5i_c_generation_regression.py`
 
-- [ ] **Step 4.1: Replace exactly four gate_up call sites**
+- [ ] **Step 4.1: Replace exactly two sorted gate_up call sites** (Codex round-5 Q1 sorted-only wiring)
 
-Modify only:
-- profile sorted gate_up call inside `gate_up_gather_qmm_call` child span;
-- profile default gate_up call inside `gate_up_gather_qmm_call` child span;
-- production sorted gate_up call;
-- production default gate_up call.
+Modify only the **sorted-branch** gate_up call sites:
+- profile sorted gate_up call inside `gate_up_gather_qmm_call` child span (~ line 651);
+- production sorted gate_up call (~ line 1067).
 
-Do not modify the two `gather_qmm_down` MLX calls.
+**Do NOT modify** the default-branch gate_up call sites (~ line 727 profile default + ~ line 1098 production default) — they keep `mlx::quantization::gather_quantized_matmul_on` call unchanged per spec § 4.2.7 (Codex round-5 Q4 b' binding: default path is correctness-only via oracle; production keeps MLX).
+
+Do not modify the two `gather_qmm_down` MLX calls (~ line 817 + ~ line 1133) — Phase 2 scope.
 
 - [ ] **Step 4.2: Verify call-site count**
 
@@ -501,9 +575,9 @@ rg -n "gather_quantized_matmul_on\\(" ironmlx/src/models/qwen3_5_moe/sparse_moe.
 rg -n "gather_qmm_on\\(" ironmlx/src/models/qwen3_5_moe/sparse_moe.rs
 ```
 
-Expected:
-- exactly 2 `gather_quantized_matmul_on(` code call sites remain, both for down path;
-- exactly 4 `gather_qmm_on(` call sites exist, all for gate_up.
+Expected (per Codex round-5 sorted-only wiring):
+- exactly **4** `gather_quantized_matmul_on(` code call sites remain: 2 default gate_up (727 + 1098 keep MLX per § 4.2.7) + 2 down (817 + 1133 Phase 2 scope);
+- exactly **2** `gather_qmm_on(` call sites exist: both sorted gate_up (651 profile sorted + 1067 production sorted).
 
 - [ ] **Step 4.3: Build both profile and production**
 
@@ -546,18 +620,20 @@ Create `tools/p5i_c_generation_regression.py` with these exact behaviors:
 - arguments: `--baseline-bin`, `--candidate-bin`, `--model-dir`, `--baseline-port`, `--candidate-port`, `--out-json`;
 - start both servers with `serve --model <model-dir> --host 127.0.0.1 --port <port>`;
 - wait for both `/v1/chat/completions` endpoints to accept requests;
-- send 5 fixed prompts:
+- send 5 fixed prompts, with at least two long-prefill prompts that are intentionally >64 English tokens so sorted gate_up wiring is exercised during prefill:
   - raw short: `"Explain matrix multiplication in one sentence."`
   - raw medium: `"Write three concise bullets about Apple Silicon unified memory."`
   - raw code: `"Return a Rust function signature for adding two f32 values."`
-  - chat short: system `"You are concise."`, user `"What is a MoE router?"`
-  - chat medium: system `"You answer technically."`, user `"Summarize why gather matmul is expensive in MoE prefill."`
+  - long raw sorted-path: `"In one compact paragraph, explain why a mixture of experts model routes each token to a small subset of experts, why the routing indices create gathered matrix multiplication work during prefill, why sorted routing improves locality, and why preserving numerical equivalence matters for deterministic regression testing."`
+  - long chat sorted-path: system `"You answer technically and concisely."`, user `"Summarize the performance tradeoff between sorted expert routing and unsorted expert routing in a quantized mixture of experts prefill kernel. Mention memory locality, expert id grouping, matrix fragment utilization, and why a kernel optimized for one routing pattern can be inefficient for the other."`
 - request body for each prompt: `model="qwen3.5-moe"`, `max_tokens=16`, `temperature=0`, `seed=42`, `stream=false`;
 - compare `choices[0].message.content` exactly between baseline and candidate;
 - write `/tmp/p5i-c-stage-beta-eg2b.json` with `pass`, per-prompt baseline/candidate text, and mismatch list;
 - terminate both servers on success or failure.
 
 Use only Python standard library modules (`argparse`, `json`, `subprocess`, `time`, `urllib.request`, `urllib.error`, `signal`, `contextlib`, `pathlib`) so no new dependency is introduced.
+
+If a future tokenizer-aware helper exists locally, the tool may assert the two long prompts tokenize to at least 64 prompt tokens before sending requests. Without that helper, keep the long prompt text above; do not replace it with short prompts that might exercise only the default MLX path.
 
 - [ ] **Step 4.6: Build/reuse baseline binary for EG-2b**
 
@@ -597,6 +673,18 @@ Report call-site count, smoke output dir, and EG-2b JSON. Do not commit.
 ## Task 5: L1 And L2 Acceptance Measurement
 
 **Files:** no source changes.
+
+- [ ] **Step 5.0: Confirm PP=128/512 exercise sorted path**
+
+Run:
+```bash
+rg -n "SORTED_ROUTING_MIN_BS_K|let use_sorted|bs_k = bs \\* k" ironmlx/src/models/qwen3_5_moe/sparse_moe.rs
+```
+
+Expected:
+- `SORTED_ROUTING_MIN_BS_K` is `512`.
+- `use_sorted` is computed from `bs * k >= SORTED_ROUTING_MIN_BS_K`.
+- With Qwen3.5 `topk=8`, PP=128 and PP=512 imply `bs*k = 1024` and `4096`, so both L1/L2 acceptance cells exercise the sorted production call sites. If this logic changes before T5, stop and revise the plan before running long measurements.
 
 - [ ] **Step 5.1: Create or reuse baseline worktree**
 
@@ -830,7 +918,8 @@ PY
 Create `docs/p5i-c-phase-1-stage-beta-close-out.md` with:
 - status date from `date +%F`;
 - commit lineage: `a9c2beb` Stage alpha baseline, current Stage Beta working tree;
-- EG-1 sorted/default ratios and tiles from `/tmp/p5i-c-stage-beta-eg1.json`;
+- EG-1 PP=128-like and PP=512-like sorted ratios and tiles from `/tmp/p5i-c-stage-beta-eg1.json`;
+- optional default-shape single-point ratio if it was measured, explicitly labeled informational and not part of EG-1;
 - EG-1 ladder verdict (`PASS` or `PASS_WITH_DIAGNOSTIC`) and whether L1/L2 ultimately discharged any diagnostic-band concern;
 - EG-2a and EG-2b verdicts;
 - L1 table from `/tmp/p5i-c-stage-beta-l1.json`;
@@ -900,7 +989,7 @@ Expected: one Stage Beta close-out commit.
 - [ ] No production e2e used for tile search.
 - [ ] No dispatch-time MLX fallback.
 - [ ] No hardcoded model dimensions in kernel or call sites.
-- [ ] Exactly four gate_up call sites wired; down remains untouched.
+- [ ] Exactly **two sorted** gate_up call sites wired (profile sorted ~651 + production sorted ~1067); default gate_up sites (~727 + ~1098) keep MLX baseline; down remains untouched (Codex round-5 sorted-only scope per spec § 4.2.7).
 - [ ] L1 uses `default_profile` and child spans, not `quiet_acceptance`.
 - [ ] L2 uses `quiet_acceptance` and P5h+2.e protocol.
 - [ ] Long measurements are run once per gate; failures stop for decision.

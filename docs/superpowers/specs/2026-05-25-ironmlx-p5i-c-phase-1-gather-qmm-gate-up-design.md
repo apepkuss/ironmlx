@@ -112,16 +112,21 @@ The distribution is determined by MLX op semantics; a 12-cell sweep at any granu
 
 **Status (2026-05-27)**: Design is locked subject to Boss acceptance of this updated spec. Implementation planning MAY start after this spec review closes; implementation execution still requires the Stage β implementation plan review gate (§ 6).
 
-**Purpose**: replace `mlx::quantization::gather_quantized_matmul_on` for the gate_up call sites in `SparseMoeBlock::forward_on` (sorted + default branches) with a custom Metal kernel that produces fused `(gate, up)` output, eliminating the dominant cost identified by op semantics in § 4.1.
+**Purpose**: replace `mlx::quantization::gather_quantized_matmul_on` for the **sorted-branch** gate_up call sites in `SparseMoeBlock::forward_on` with a custom Metal kernel that produces fused `(gate, up)` output, eliminating the dominant cost on the sorted-routing path that PP=128/512 prefill actually exercises (per Codex round-5 Q1 binding sorted-only scope). Default-branch call sites keep the MLX baseline kernel.
 
-#### § 4.2.1 Scope (v1 — Codex Q1 binding: v1 ≡ Option A)
+#### § 4.2.1 Scope (v1 — Codex round-5 Q1 binding: sorted-only production wiring; Codex round-2 Q1 Option A retained)
 
 **IN SCOPE for v1**:
-- Custom Metal kernel for 4-bit affine `group_size=64` quantized matmul with gather (rhs_indices) routing
+- Custom Metal kernel for 4-bit affine `group_size=64` quantized matmul with gather (rhs_indices) routing — **sorted-routing path only** (kernel input shape `[BS*k, ..., H]`, `rhs_indices = [BS*k]` or `[BS*k, 1]`, one expert id per output slot)
 - Kernel output shape `[..., 2I]` (fused gate + up channels concatenated along last dim, matching P5i.a T2 fused weight)
 - Rust caller performs `slice_on` (gate_out, up_out) on kernel output — **slice stays in Rust**, kernel does not return two buffers
-- Kernel consumes existing sorted-branch (`sorted_x`, `sorted_topk_2d`) or default-branch (`expand_dims`-shaped `x`, `inds_u32`) inputs — kernel does **not** generate `sort_perm` (Codex Q4.1 binding: routing_sort_pack stays out)
+- Kernel consumes existing sorted-branch inputs (`sorted_x`, `sorted_topk_2d`); kernel does **not** generate `sort_perm` (Codex Q4.1 binding: routing_sort_pack stays out)
 - Kernel API parameterized on `(weight_layout, output_shape_constraint)` to scaffold Phase 2 `gather_qmm_down` interface (per § 7); Phase 2 kernel is **not** implemented in v1 (Codex R4 binding)
+- **Production wiring**: replace MLX call at **sorted gate_up sites only** (`sparse_moe.rs` line ~651 profile sorted + line ~1067 production sorted). Default gate_up sites (line ~727 profile default + line ~1098 production default) keep `mlx::quantization::gather_quantized_matmul_on` call unchanged.
+
+**OUT OF SCOPE for v1** (Codex round-5 Q1 binding — sorted-only scope narrowing):
+- Default-routing-path performance optimization (Codex round-4 T1 redesign empirically showed BM=32 grouped SG-MMA causes 49% REGRESSION vs naive scalar on default path due to algorithmic mismatch — each BM=32 tile sees ~32 unique experts → 87.5% SG-MMA fragment waste. Per Codex round-5 Q1: "default path is not Phase 1 perf target; PP=128/512 prefill goes through sorted path because `SORTED_ROUTING_MIN_BS_K = 512` and topk=8 yield BS*k = 1024/4096 ≥ 512 → sorted branch active.")
+- **Default-path call sites keep MLX baseline kernel** — no custom kernel dispatched. Default correctness oracle MUST still pass (per § 5 + § 4.2.7), but default-path is not a perf target and not a perf gate.
 
 **OUT OF SCOPE for v1** (deferred to v2 conditional; see § 4.2.5):
 - Absorbing `expand_dims_on` (input prep) into kernel
@@ -129,11 +134,12 @@ The distribution is determined by MLX op semantics; a 12-cell sweep at any granu
 
 **Hardware target**: M5 Max + 128 GB UMA only initial; cross-device tile tuning deferred per `[project-cross-device-tuning-deferred]`.
 
-#### § 4.2.2 Kernel structure starting point (Codex Q4.2 binding)
+#### § 4.2.2 Kernel structure starting point (Codex round-5 Q1 + Q2 binding — supersedes round-2 self_qmm reference)
 
-- **Fork** ironmlx P8a stage 9 `self_qmm` Q4_K_M Metal kernel (block 256 / super-block 8; +35% mlx bench-kernel baseline; 1.32× must gate at PP=2048 per `[project-p8a-stage9-findings]`) as kernel structure quality reference
-- **Add** routing dimension handling (gather via `rhs_indices`); independent design — llama.cpp `ggml_metal_mul_mat_id_q4_k_f32` is observation only per `[feedback-no-spec-from-competitors]`
-- **Bench-kernel harness MUST add a routing variant** (Codex Q4.2 binding); non-routing P8a stage 9 self_qmm only proves tile structure quality, not gather kernel correctness/perf
+- **Align with MLX `gather_qmm_rhs` / `gather_qmm_rhs_nax` sorted-path tile structure + B/E conditions** (per Codex round-5 Q1: MLX's sorted-path kernel is the structural reference for this scope-narrowed redesign; `self_qmm` BM=32 / BN=64 / BK=32 structure was tried in T1 first-attempt + T1 round-4 redesign and proved insufficient for sorted at the bounded-iteration budget — sorted ratio 2.35× even with SG-MMA + cooperative loads)
+- **Add** routing dimension handling (gather via `rhs_indices`); independent design per `[feedback-no-spec-from-competitors]` — llama.cpp `ggml_metal_mul_mat_id_q4_k_f32` and ironmlx P8a stage 9 `self_qmm` are reference observations only
+- **Bench-kernel harness MUST add a routing variant** (Codex round-2 Q4.2 binding retained); already shipped in T0/T1 working tree
+- **Implementation surface reference**: MLX upstream `mlx/backend/metal/kernels/quantized.metal` `affine_gather_qmm_rhs` (and `affine_gather_qmm_rhs_nax` for NAX-aware variants) provides the sorted-path tile geometry + threadgroup decomposition reference. Do NOT copy MLX source verbatim (philosophy violation per `[feedback-no-spec-from-competitors]`); use as observation to inform independent design.
 
 #### § 4.2.3 Tile / threadgroup geometry (Codex Q5.3 binding)
 
@@ -168,20 +174,31 @@ Stage β plan MUST embed mandatory early-stop gates before irreversible or expen
 
 | Gate | Condition |
 |---|---|
-| EG-1 | bench-kernel routing variant kernel-only ratio (= `candidate_us / mlx_us`) vs MLX `gather_quantized_matmul_on` baseline (same shape). PASS / diagnostic-band / halt ladder defined below (Codex round-4 binding) |
-| EG-2a | Kernel-level correctness oracle (§ 5 shape matrix + shape-forced sorted/default branches + gate/up slice equivalence + top-k invariance) stable before production wiring |
+| EG-1 | bench-kernel **sorted-path** kernel-only ratio (= `candidate_us / mlx_us`) vs MLX `gather_quantized_matmul_on` baseline (sorted shape). PASS / diagnostic-band / halt ladder defined below (Codex round-4 binding + round-5 sorted-only narrowing). Default-path ratio is informational only, NOT a perf gate (Codex round-5 Q4 b'). |
+| EG-2a | Kernel-level correctness oracle (§ 5 shape matrix + shape-forced sorted/default branches + gate/up slice equivalence + top-k invariance) stable before production wiring. **Default-path correctness MUST still pass** even though default uses MLX baseline in production (per § 4.2.7) — oracle exercises the custom kernel on default shape to verify the kernel API contract. |
 | EG-2b | 35B-A3B-4bit 5-prompt generation regression stable after production wiring smoke and before any L1/L2 acceptance measurement |
 
-**EG-1 hard-stop ladder** (Codex round-4 binding — supersedes earlier flat ≥30% binding):
+**EG-1 hard-stop ladder — sorted-path ratio only** (Codex round-4 ladder + round-5 sorted-only narrowing):
 
 | ratio band | verdict | next step |
 |---|---|---|
 | ≤ 0.70 | **PASS** | T2 tile sweep + T3 oracle proceed normally |
 | 0.70 - 0.85 | **PASS_WITH_DIAGNOSTIC** | T2 proceeds; T5 L1 production diagnostic MUST verify fused-output / op-boundary savings translate to e2e L2 ≥ 5% before T6 close-out |
-| 0.85 - 1.0 | **HALT — escalate to Boss** | Production wiring forbidden unless explicit op-boundary residual evidence justifies proceeding; default action is kernel redesign or phase goal re-think |
-| > 1.0 | **BLOCKED** | No production wiring, no L2 acceptance run; redesign kernel OR re-think Phase 1 sub-goals (e.g., Phase 2 priority shift). Tile sweep is NOT acceptable rescue for > 1.0 ratio (Codex round-4: "tile sweep is for 5-15% closing on a sane kernel, not rescuing a 3-5× slow implementation") |
+| 0.85 - 1.0 | **HALT — escalate to Boss** | Production wiring forbidden unless explicit op-boundary residual evidence justifies proceeding; default action is kernel redesign or Phase 1 close as negative finding |
+| > 1.0 | **BLOCKED** | No production wiring, no L2 acceptance run; redesign kernel OR close Phase 1 gate_up as negative finding (Codex round-5 Q1: "if sorted still > 0.85 after the one bounded redesign, close Phase 1 gate_up; switch to next candidate"). Tile sweep is NOT acceptable rescue for > 1.0 ratio. Per Codex round-5 Q4 binding: D-style "kernel-only ≥ 1.0 acceptable if L2 ≥ 5% empirically achievable" is **FORBIDDEN** — slice / op-boundary saving cannot compensate a 1.5-2× kernel slowdown by first-principles. |
 
 If EG-2a fails: kernel implementation fixed; do not wire. If EG-2b fails: L1/L2 acceptance measurement and close-out BLOCKED; fix kernel or wiring first. Only after EG-1 ≤ 0.85 (PASS or PASS_WITH_DIAGNOSTIC) + EG-2a + production wiring smoke + EG-2b pass may the plan run L1/L2 acceptance.
+
+#### § 4.2.7 Default-path treatment (Codex round-5 Q4 b' binding)
+
+The Stage β v1 custom Metal kernel is scope-narrowed to sorted-routing path. Default-routing path treatment:
+
+- **Correctness**: § 5 oracle MUST cover the default-shape branch (`[BS, 1, 1, H] + [BS, k] → [BS, k, 1, 2I]`) via the custom kernel. The custom kernel must produce numerically equal output to MLX baseline on default-shape input (per oracle EG-2a). This validates the kernel API contract on both branches and keeps Phase 2 sister-extension (`gather_qmm_down`) interface evolvable.
+- **Production wiring**: default-path call sites (`sparse_moe.rs` line ~727 profile default + line ~1098 production default) keep `mlx::quantization::gather_quantized_matmul_on` call. Custom kernel is NOT dispatched on default path in production.
+- **Performance gate**: default-path ratio is informational (logged in T1 bench output) but does NOT participate in EG-1 verdict, T5 L1 measurement, or T5 L2 measurement.
+- **Phase 1 perf rationale** (Codex round-5 Q1): code path `ironmlx/src/models/qwen3_5_moe/sparse_moe.rs:44 SORTED_ROUTING_MIN_BS_K = 512` + Qwen3.5-35B-A3B-4bit `topk=8` → PP=128 (BS×k = 1024) and PP=512 (BS×k = 4096) both ≥ SORTED_ROUTING_MIN_BS_K → both go sorted branch in production. Default branch is exercised only at smaller PP (PP < 64 → BS×k < 512) which is not Phase 1 perf measurement scope.
+
+Future evolution: if Phase 2+ measurement shows default-path overhead becomes Phase-1-aggregate-perf-relevant (e.g., PP < 64 acceptance becomes a Phase 1+ target), default-path kernel optimization can be re-opened as a separate stage. v1 keeps it out per Codex round-5 binding.
 
 L1 + L2 acceptance per § 2.1 unchanged. Codex R1 binding: L1 same-cohort median comparison MUST use `gather_qmm_gate_up` (or its renamed equivalent) substep with **NO** `routing_sort_pack` contamination.
 
@@ -268,6 +285,18 @@ Source: `reports/p5i-c-phase-1-stage-beta-t1-redesign-questions.md` (gitignored 
 | Sup-1 | Don't skip Phase 2; `gather_qmm_down` has same kernel quality risk + lower share | § 9 OOS unchanged; no Phase 2 priority shift |
 | Sup-2 | Tile sweep is for 5-15% closing on a sane kernel, NOT rescuing 3-5× slow implementation | § 4.2.3 tile geometry note + plan T2 wall budget unchanged |
 | Sup-3 | Interface freeze before kernel body rewrite (avoid second-round refactor) | Plan T1 Interface freeze checklist: BK real K-axis step / `biases: Option<&Array>` matching MLX contract / `SUPPORTED_TILES` set in lookup / `out_shape: Shape` (not Vec<i32>) / bench-kernel `--sweep` wired or fail-fast / input order `(x, rhs_indices, w, scales, biases)` documented |
+
+### § 6.7 Codex round-5 bindings (audit trail — T1 redesign BLOCKED → sorted-only scope)
+
+Source: `reports/p5i-c-phase-1-stage-beta-t1-redesign-blocked-questions.md` (gitignored round-5 review report). Triggered by Codex round-4 T1 redesign empirically producing sorted ratio 2.35× / default ratio 4.84× — both > 1.0 BLOCKED — with the architectural finding that BM=32 grouped SG-MMA is structurally incompatible with unsorted default path (SG-MMA 8×8 frag 87.5% wasted when each tile row has different expert id).
+
+| Binding | Subject | Effect in this spec |
+|---|---|---|
+| Q1 | **Option E: sorted-only scope narrowing + one bounded redesign** (supersedes round-4 Q1 incremental-layers binding for default path). Default path keeps MLX; custom kernel covers correctness oracle only on default. Sorted gets one more bounded redesign aligned with MLX `gather_qmm_rhs` / `gather_qmm_rhs_nax` tile structure (NOT self_qmm BM=32/BN=64). If sorted still > 0.85 after this bounded redesign, close Phase 1 gate_up as negative finding; move to next candidate. | § 4.2.1 IN/OUT scope; § 4.2.2 kernel structure; § 4.2.7 default treatment |
+| Q2 | Implementer T1 round-4 architectural finding "BM=32 grouped SG-MMA structurally incompatible with unsorted default" is **correct**, with one fact-check: default path with M=1 + right_sorted=false dispatches via MLX `gather_qmv_fast` / `gather_qmv` (not `gather_qmm_t` as implementer claimed). The BLOCKED conclusion stands either way: BM=32 grouped SG-MMA is wrong tool for unsorted default — need QMV-style per-slot kernel OR don't optimize default. 16×16 / 32×8 fragment reshape cannot rescue "each row has different expert"; only expert-regrouping or per-slot/vector kernel can. | § 4.2.2 MLX reference paths; no change to BLOCKED conclusion |
+| Q3 | **Revise round-4 Sup-1**: do not directly skip Phase 2 as escape hatch, but do not treat Phase 2 as guaranteed easier either. `gather_qmm_down` shares the `rhs_idx_used + sorted_flag` dispatch contract → also has sorted/default dual-path; not structurally simpler. Shapes differ (`down`: K=I=512, N=H=2048 vs `gate_up`: K=H=2048, N=2I=1024) so bottleneck may shift, but evidence does not justify Phase 2 priority shift before completing the one bounded sorted-only redesign per Q1. | § 9 OOS retained; no Phase 2 priority shift; revised Sup-1 nuance recorded here |
+| Q4 | **Revise round-4 Q2 ladder to b'**: sorted target path keeps EG-1 ladder (`≤0.70` PASS / `0.70-0.85` PASS_WITH_DIAGNOSTIC / `>0.85` stop). Default-path Stage β v1 only requires correctness oracle (per § 4.2.7); default is NOT a perf gate and does NOT contribute to EG-1 verdict. D-style "kernel-only ≥ 1.0 acceptable if L2 ≥ 5% empirically achievable" is **FORBIDDEN**: slice / op-boundary saving cannot compensate a 1.5-2× kernel slowdown by first-principles + Amdahl R1 (gate_up ~23% share → L2 ≥ 5% requires substep ~22%+ reduction). | § 4.2.6 ladder + § 4.2.7 default-path treatment |
+| Q5 | Option E adopted (sorted-only scope narrowing + one bounded redesign), with explicit fallback: if bounded sorted redesign fails to reach `≤ 0.85`, close Phase 1 gate_up as negative finding and pivot per Codex Q1 + Q3 (do NOT extend redesign budget chasing diminishing returns; do NOT pivot to Phase 2 as escape hatch; document negative result and re-examine Phase 1 candidates) | § 4.2.6 ladder fallback clause |
 
 ## § 7 Sister-extension interface (Codex round-1 Q1(d) binding)
 
