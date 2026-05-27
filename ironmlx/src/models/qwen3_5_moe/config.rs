@@ -102,7 +102,7 @@ impl Qwen35MoeConfig {
         Self::from_raw_config_value(loader.config_raw_value())
     }
 
-    fn from_raw_config_value(raw: &serde_json::Value) -> Result<Self> {
+    pub(crate) fn from_raw_config_value(raw: &serde_json::Value) -> Result<Self> {
         let text_config = raw
             .get("text_config")
             .ok_or_else(|| anyhow!("config.json missing text_config field"))?;
