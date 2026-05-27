@@ -2129,10 +2129,9 @@ impl<M: Model> Scheduler<M> {
         // - Last chunk: `forward_on` returns `[1, 1, vocab]` logits via
         //   lm_head, captured for first-token sampling in
         //   `admit_mid_finalize`.
-        // - Intermediate chunk: text path uses `text().forward_on`
-        //   (skips lm_head; we don't need logits), VL path uses
-        //   `forward_vl_chunk` (always returns logits — we discard).
-        //   Either way the result is `eval`-d before return so the
+        // - Intermediate chunk: text and VL paths use hidden-only forwards
+        //   (skips lm_head; we don't need logits). Either way the result is
+        //   `eval`-d before return so the
         //   chunk's lazy graph materialises here rather than ballooning
         //   into the interleaved `Scheduler::step` call. (GenerationStream
         //   chunked prefill at core/generate.rs ~line 1053 uses the
@@ -2154,19 +2153,29 @@ impl<M: Model> Scheduler<M> {
                 None
             };
 
-            let logits = model.forward_vl_chunk(
-                &input_ids,
-                &position_ids,
-                None, // per_row_lens (B=1 path derives from input shape)
-                None, // decode_mask (prefill — model builds its own causal mask)
-                Some(&mut handle.temp_cache),
-                ve_slice.as_ref(),
-                handle.image_token_id,
-                mlx::StreamOrDevice::default(),
-            )?;
             if is_last {
+                let logits = model.forward_vl_chunk(
+                    &input_ids,
+                    &position_ids,
+                    None, // per_row_lens (B=1 path derives from input shape)
+                    None, // decode_mask (prefill — model builds its own causal mask)
+                    Some(&mut handle.temp_cache),
+                    ve_slice.as_ref(),
+                    handle.image_token_id,
+                    mlx::StreamOrDevice::default(),
+                )?;
                 Some(logits)
             } else {
+                let hidden = model.forward_vl_hidden(
+                    &input_ids,
+                    &position_ids,
+                    None, // per_row_lens (B=1 path derives from input shape)
+                    None, // decode_mask (prefill — model builds its own causal mask)
+                    Some(&mut handle.temp_cache),
+                    ve_slice.as_ref(),
+                    handle.image_token_id,
+                    mlx::StreamOrDevice::default(),
+                )?;
                 // T4.2 (Codex Option A): wrap the EXISTING explicit per-chunk
                 // sync barrier in `mlx_eval_barrier` tree span. Parent context
                 // is the active P5h trace stack top when one is active; the
@@ -2179,10 +2188,10 @@ impl<M: Model> Scheduler<M> {
                 crate::core::p5h::try_with_p5h_span_from_current_trace(
                     "mlx_eval_barrier",
                     crate::core::p5h::SpanFields::default,
-                    || mlx::transforms::eval(&[&logits]).map_err(anyhow::Error::from),
+                    || mlx::transforms::eval(&[&hidden]).map_err(anyhow::Error::from),
                 )?;
                 #[cfg(not(feature = "p5h-profile"))]
-                mlx::transforms::eval(&[&logits])?;
+                mlx::transforms::eval(&[&hidden])?;
                 None
             }
         } else if is_last {

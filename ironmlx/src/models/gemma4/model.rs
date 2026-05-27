@@ -352,6 +352,78 @@ impl Gemma4Model {
         let ids = ids_i32.to_vec::<i32>()?;
         Ok(ids.iter().filter(|&&id| id == image_token_id).count())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_vl_hidden_on(
+        &self,
+        input_ids: &Array,
+        _position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        _decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let profile = vl_profile_enabled();
+        let total_t0 = Instant::now();
+        let t0 = Instant::now();
+        let img_count = self.count_image_tokens(input_ids, image_token_id)?;
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] forward_vl_count_image_tokens_ms={:.3} image_tokens={}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                img_count
+            );
+        }
+        if img_count > 0 && vision_embeds_slice.is_none() {
+            return Err(anyhow!(
+                "Gemma4Model::forward_vl_hidden: chunk has {img_count} image tokens but no vision embeddings"
+            ));
+        }
+        let t0 = Instant::now();
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+        vl_profile_eval("forward_vl_text_embed", &[&hidden], t0, profile)?;
+        if let Some(ve) = vision_embeds_slice {
+            let t0 = Instant::now();
+            hidden =
+                super::cross_modal::replace_image_tokens(&hidden, input_ids, ve, image_token_id)?;
+            vl_profile_eval("forward_vl_replace_image_tokens", &[&hidden], t0, profile)?;
+        }
+        let t0 = Instant::now();
+        let per_layer_ids = if img_count > 0 {
+            self.zero_image_token_ids(input_ids, image_token_id)?
+        } else {
+            input_ids.clone()
+        };
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] forward_vl_zero_image_token_ids_ms={:.3}",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let t0 = Instant::now();
+        let hidden = self.text.forward_embeddings_on(
+            &hidden,
+            &per_layer_ids,
+            per_row_lens,
+            cache,
+            target,
+        )?;
+        vl_profile_eval(
+            "forward_vl_text_forward_embeddings",
+            &[&hidden],
+            t0,
+            profile,
+        )?;
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] forward_vl_hidden_total_ms={:.3}",
+                total_t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(hidden)
+    }
 }
 
 impl Model for Gemma4Model {
@@ -722,57 +794,17 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
         image_token_id: i32,
         target: StreamOrDevice,
     ) -> Result<Array> {
-        let target: StreamOrDevice = target;
         let profile = vl_profile_enabled();
         let total_t0 = Instant::now();
-        let t0 = Instant::now();
-        let img_count = self.count_image_tokens(input_ids, image_token_id)?;
-        if profile {
-            tracing::info!(
-                "[gemma4-vl-profile] forward_vl_count_image_tokens_ms={:.3} image_tokens={}",
-                t0.elapsed().as_secs_f64() * 1000.0,
-                img_count
-            );
-        }
-        if img_count > 0 && vision_embeds_slice.is_none() {
-            return Err(anyhow!(
-                "Gemma4Model::forward_vl_chunk: chunk has {img_count} image tokens but no vision embeddings"
-            ));
-        }
-        let t0 = Instant::now();
-        let mut hidden = self.text.embed_on(input_ids, target)?;
-        vl_profile_eval("forward_vl_text_embed", &[&hidden], t0, profile)?;
-        if let Some(ve) = vision_embeds_slice {
-            let t0 = Instant::now();
-            hidden =
-                super::cross_modal::replace_image_tokens(&hidden, input_ids, ve, image_token_id)?;
-            vl_profile_eval("forward_vl_replace_image_tokens", &[&hidden], t0, profile)?;
-        }
-        let t0 = Instant::now();
-        let per_layer_ids = if img_count > 0 {
-            self.zero_image_token_ids(input_ids, image_token_id)?
-        } else {
-            input_ids.clone()
-        };
-        if profile {
-            tracing::info!(
-                "[gemma4-vl-profile] forward_vl_zero_image_token_ids_ms={:.3}",
-                t0.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-        let t0 = Instant::now();
-        let hidden = self.text.forward_embeddings_on(
-            &hidden,
-            &per_layer_ids,
+        let hidden = self.forward_vl_hidden_on(
+            input_ids,
+            _position_ids,
             per_row_lens,
+            _decode_mask,
             cache,
+            vision_embeds_slice,
+            image_token_id,
             target,
-        )?;
-        vl_profile_eval(
-            "forward_vl_text_forward_embeddings",
-            &[&hidden],
-            t0,
-            profile,
         )?;
         let t0 = Instant::now();
         let logits = self.slice_last_and_project(&hidden, None, target)?;
@@ -787,19 +819,25 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
     }
 
     fn forward_vl_hidden(
-        &self,
-        _input_ids: &Array,
-        _position_ids: &Array,
-        _per_row_lens: Option<&[i32]>,
-        _decode_mask: Option<&Array>,
-        _cache: Option<&mut [LayerCache]>,
-        _vision_embeds_slice: Option<&Array>,
-        _image_token_id: i32,
-        _target: StreamOrDevice,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: StreamOrDevice,
     ) -> Result<Array> {
-        Err(anyhow!(
-            "Gemma4Model::forward_vl_hidden: Gemma4 Dense support is text-only in this task"
-        ))
+        self.forward_vl_hidden_on(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
     }
 }
 

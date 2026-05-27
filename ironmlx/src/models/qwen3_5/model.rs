@@ -332,8 +332,6 @@ impl Qwen35Model {
             target,
         )?;
 
-        // Step 4: slice last position and project to logits.
-        // VL chunk path is single-stream B=1; no per-row last position needed.
         self.slice_last_and_project(&hidden, None, target)
     }
 

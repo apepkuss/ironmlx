@@ -1079,30 +1079,29 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
 
                         let is_last = pos + n == prompt_len_i32;
                         let logits_or_hidden = if vision_embeds_full.is_some() {
-                            let logits = model.forward_vl_chunk(
-                                &chunk_arr,
-                                &chunk_pos_ids,
-                                None, // per_row_lens
-                                None, // decode_mask
-                                Some(&mut cache),
-                                ve_slice.as_ref(),
-                                request.image_token_id,
-                                ().into(),
-                            )?;
                             if is_last {
-                                Some(logits)
+                                Some(model.forward_vl_chunk(
+                                    &chunk_arr,
+                                    &chunk_pos_ids,
+                                    None, // per_row_lens
+                                    None, // decode_mask
+                                    Some(&mut cache),
+                                    ve_slice.as_ref(),
+                                    request.image_token_id,
+                                    ().into(),
+                                )?)
                             } else {
-                                #[cfg(feature = "p5h-profile")]
-                                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                                    "mlx_eval_barrier",
-                                    crate::core::p5h::SpanFields::default,
-                                    || {
-                                        mlx::transforms::eval(&[&logits])
-                                            .map_err(anyhow::Error::from)
-                                    },
+                                let hidden = model.forward_vl_hidden(
+                                    &chunk_arr,
+                                    &chunk_pos_ids,
+                                    None, // per_row_lens
+                                    None, // decode_mask
+                                    Some(&mut cache),
+                                    ve_slice.as_ref(),
+                                    request.image_token_id,
+                                    ().into(),
                                 )?;
-                                #[cfg(not(feature = "p5h-profile"))]
-                                mlx::transforms::eval(&[&logits])?;
+                                mlx::transforms::eval(&[&hidden])?;
                                 None
                             }
                         } else if is_last {
@@ -1157,20 +1156,29 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
 
                 let is_last = pos + n == prompt_len_i32;
                 let logits_or_hidden = if vision_embeds_full.is_some() {
-                    let logits = model.forward_vl_chunk(
-                        &chunk_arr,
-                        &chunk_pos_ids,
-                        None, // per_row_lens
-                        None, // decode_mask
-                        Some(&mut cache),
-                        ve_slice.as_ref(),
-                        request.image_token_id,
-                        ().into(),
-                    )?;
                     if is_last {
-                        Some(logits)
+                        Some(model.forward_vl_chunk(
+                            &chunk_arr,
+                            &chunk_pos_ids,
+                            None, // per_row_lens
+                            None, // decode_mask
+                            Some(&mut cache),
+                            ve_slice.as_ref(),
+                            request.image_token_id,
+                            ().into(),
+                        )?)
                     } else {
-                        mlx::transforms::eval(&[&logits])?;
+                        let hidden = model.forward_vl_hidden(
+                            &chunk_arr,
+                            &chunk_pos_ids,
+                            None, // per_row_lens
+                            None, // decode_mask
+                            Some(&mut cache),
+                            ve_slice.as_ref(),
+                            request.image_token_id,
+                            ().into(),
+                        )?;
+                        mlx::transforms::eval(&[&hidden])?;
                         None
                     }
                 } else if is_last {
