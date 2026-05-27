@@ -957,9 +957,15 @@ pub(crate) fn log_vl_chunk_composition(
     );
 }
 
+const VL_FINAL_TEXT_TAIL_ABSORB_TOKENS: usize = 64;
+
 /// Extend a VL chunk end when the fixed boundary would split a contiguous
 /// image-token run. Keeping each image's placeholder run in one text forward
 /// avoids extra cache-update chunks and reduces long-tail MLX/Metal stalls.
+///
+/// After choosing the boundary, absorb a short final text-only tail into the
+/// current chunk. The extra text tokens are cheap compared with launching a
+/// separate final forward over a tiny tail while carrying the full KV state.
 pub(crate) fn extend_vl_chunk_end_for_image_pad(
     prompt_ids: &[u32],
     image_token_id: i32,
@@ -979,11 +985,17 @@ pub(crate) fn extend_vl_chunk_end_for_image_pad(
     }
 
     let pad = image_token_id as u32;
-    if prompt_ids[end - 1] != pad || prompt_ids[end] != pad {
-        return base_chunk_end;
+    if prompt_ids[end - 1] == pad && prompt_ids[end] == pad {
+        while end < len && prompt_ids[end] == pad {
+            end += 1;
+        }
     }
-    while end < len && prompt_ids[end] == pad {
-        end += 1;
+    let tail_len = len.saturating_sub(end);
+    if tail_len > 0
+        && tail_len <= VL_FINAL_TEXT_TAIL_ABSORB_TOKENS
+        && !prompt_ids[end..].contains(&pad)
+    {
+        return len as i32;
     }
     end as i32
 }
@@ -2126,11 +2138,44 @@ mod p6_7_helper_tests {
     }
 
     #[test]
+    fn extend_vl_chunk_end_absorbs_short_final_text_tail_after_image_run() {
+        let ids: Vec<u32> = (0..275_u32)
+            .map(|i| if (250..260).contains(&i) { 42 } else { 1 })
+            .collect();
+
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 275);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_keeps_tail_with_image_tokens() {
+        let ids: Vec<u32> = (0..275_u32)
+            .map(|i| {
+                if (250..260).contains(&i) || (270..273).contains(&i) {
+                    42
+                } else {
+                    1
+                }
+            })
+            .collect();
+
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 260);
+    }
+
+    #[test]
     fn extend_vl_chunk_end_keeps_exact_run_boundary() {
         let ids: Vec<u32> = (0..400_u32)
             .map(|i| if (200..256).contains(&i) { 42 } else { 1 })
             .collect();
         assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 256);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_absorbs_short_text_tail_after_exact_boundary() {
+        let ids: Vec<u32> = (0..275_u32)
+            .map(|i| if (200..256).contains(&i) { 42 } else { 1 })
+            .collect();
+
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 275);
     }
 
     #[test]
