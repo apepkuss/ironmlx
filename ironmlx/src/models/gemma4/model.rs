@@ -494,6 +494,10 @@ impl Model for Gemma4Model {
         )
     }
 
+    fn requires_position_ids(&self) -> bool {
+        false
+    }
+
     fn model_meta(&self) -> ModelMeta {
         Gemma4Model::model_meta(self)
     }

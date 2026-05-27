@@ -116,6 +116,9 @@ pub struct GenerationStream<'m, M: Model> {
     /// `vision_embeds_full` by previous chunks.
     #[allow(dead_code)]
     image_pad_consumed: usize,
+    /// Reusable `[3, 1, 1]` placeholder for models that derive positions
+    /// internally instead of consuming caller-built MRoPE position ids.
+    dummy_position_ids: Option<Array>,
     /// All token ids so far: prompt ++ generated.
     history: Vec<u32>,
     request: GenerateRequest,
@@ -1106,6 +1109,12 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         #[cfg(not(feature = "p5h-profile"))]
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
 
+        let dummy_position_ids = if model.requires_position_ids() {
+            None
+        } else {
+            Some(build_position_ids(0, 1)?)
+        };
+
         // Prefill: chunked when `prefill_chunk_size > 0` and the prompt exceeds
         // it. Intermediate chunks call the text-only forward (cache update,
         // no lm_head); the last chunk goes through the full forward to
@@ -1124,23 +1133,25 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         // land in the cache anyway.
 
         // P6.7: For VL requests, run the vision tower once before the
-        // chunking loop and build MRoPE position ids for the full prompt.
-        // Each chunk then slices vision_embeds and position_ids by its
-        // own range, ensuring the chunked path is numerically equivalent
-        // to single-chunk forward_vl.
+        // chunking loop. Models that consume MRoPE position ids also build
+        // them for the full prompt so each chunk can slice its own range.
         let (vision_embeds_full, position_ids_full) = if let (Some(pv), Some(grids)) = (
             request.pixel_values.as_deref(),
             request.image_grid_thw.as_deref(),
         ) {
             let ve = model.compute_vision_embeds(pv, grids, ().into())?;
-            let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
-            let pos_full = build_position_ids_vl(
-                &full_ids_i32,
-                grids,
-                request.image_token_id,
-                request.image_spatial_merge_size,
-            )?;
-            (Some(ve), Some(pos_full))
+            let pos_full = if dummy_position_ids.is_some() {
+                None
+            } else {
+                let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
+                Some(build_position_ids_vl(
+                    &full_ids_i32,
+                    grids,
+                    request.image_token_id,
+                    request.image_spatial_merge_size,
+                )?)
+            };
+            (Some(ve), pos_full)
         } else {
             (None, None)
         };
@@ -1199,7 +1210,9 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                             &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
                         let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
 
-                        let chunk_pos_ids = if let Some(pos_full) = position_ids_full.as_ref() {
+                        let chunk_pos_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                            dummy.clone()
+                        } else if let Some(pos_full) = position_ids_full.as_ref() {
                             slice_pos_ids_axis2(pos_full, pos, pos + n)?
                         } else {
                             build_position_ids(pos, n)?
@@ -1292,7 +1305,9 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
                 let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
 
-                let chunk_pos_ids = if let Some(pos_full) = position_ids_full.as_ref() {
+                let chunk_pos_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                    dummy.clone()
+                } else if let Some(pos_full) = position_ids_full.as_ref() {
                     slice_pos_ids_axis2(pos_full, pos, pos + n)?
                 } else {
                     build_position_ids(pos, n)?
@@ -1448,6 +1463,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 vision_embeds_full: None,
                 position_ids_full: None,
                 image_pad_consumed: 0,
+                dummy_position_ids,
                 history,
                 request,
                 finished: false,
@@ -1496,6 +1512,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 vision_embeds_full: None,
                 position_ids_full: None,
                 image_pad_consumed: 0,
+                dummy_position_ids,
                 history,
                 request,
                 finished: false,
@@ -1542,6 +1559,11 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = Dtype::Bfloat16;
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
+        let dummy_position_ids = if model.requires_position_ids() {
+            None
+        } else {
+            Some(build_position_ids(0, 1)?)
+        };
 
         let chunk_size = request.prefill_chunk_size;
         let prompt_len_i32 = prompt_len as i32;
@@ -1555,7 +1577,11 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             };
             let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
             let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
-            let chunk_pos_ids = build_position_ids(pos, n)?;
+            let chunk_pos_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                dummy.clone()
+            } else {
+                build_position_ids(pos, n)?
+            };
 
             let is_last = pos + n == prompt_len_i32;
             let logits_or_hidden = if is_last {
@@ -1603,6 +1629,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 vision_embeds_full: None,
                 position_ids_full: None,
                 image_pad_consumed: 0,
+                dummy_position_ids,
                 history,
                 request,
                 finished: false,
@@ -1631,6 +1658,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 vision_embeds_full: None,
                 position_ids_full: None,
                 image_pad_consumed: 0,
+                dummy_position_ids,
                 history,
                 request,
                 finished: false,
@@ -1657,6 +1685,13 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                     "metal capture failed to start ({path}): {e}; continuing without capture"
                 ),
             }
+        }
+    }
+
+    fn decode_position_ids(&self, pos: i32) -> Result<Array> {
+        match self.dummy_position_ids.as_ref() {
+            Some(dummy) => Ok(dummy.clone()),
+            None => build_position_ids(pos, 1),
         }
     }
 
@@ -1743,7 +1778,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             .expect("pipelined mode invariant: pending_token_arr is Some")
             .reshape((1_i32, 1_i32))?;
         let pos = (self.history.len() - 1) as i32;
-        let position_ids = build_position_ids(pos, 1)?;
+        let position_ids = self.decode_position_ids(pos)?;
         let logits = self.model.forward_on(
             &token_arr_in,
             &position_ids,
@@ -1812,7 +1847,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         let forward_sample_start = profile_enabled.then(Instant::now);
         let token_arr: Array = (&[token][..], &[1_i32, 1][..]).try_into()?;
         let pos = (self.history.len() - 1) as i32;
-        let position_ids = build_position_ids(pos, 1)?;
+        let position_ids = self.decode_position_ids(pos)?;
         let logits = self.model.forward_on(
             &token_arr,
             &position_ids,

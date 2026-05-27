@@ -54,6 +54,14 @@ pub trait Model {
         target: StreamOrDevice,
     ) -> Result<Array>;
 
+    /// Whether caller-built MRoPE `position_ids` are semantically consumed by
+    /// this model. Models returning `false` derive positions internally and
+    /// may receive a reusable placeholder Array from generation/scheduler hot
+    /// paths.
+    fn requires_position_ids(&self) -> bool {
+        true
+    }
+
     fn model_meta(&self) -> ModelMeta;
 
     fn num_hidden_layers(&self) -> usize;

@@ -314,12 +314,14 @@ pub struct AdmitMidHandle {
     pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
     pub(crate) is_vl: bool,
     pub(crate) image_token_id: i32,
-    /// Pre-computed `[3, 1, prompt_len]` MRoPE position ids for the
-    /// full prompt — sliced per chunk inside `admit_mid_chunk` to
-    /// avoid rebuilding on each iteration. For VL it incorporates
-    /// `image_spatial_merge_size` + `image_grid_thw` (consumed in
-    /// `admit_mid_begin` when building this Array — no need to carry
-    /// the inputs forward).
+    /// Whether `position_ids_full` holds real full-prompt MRoPE ids. When
+    /// false, it is a reusable placeholder for models that derive positions
+    /// internally.
+    pub(crate) position_ids_required: bool,
+    /// Pre-computed `[3, 1, prompt_len]` MRoPE position ids for the full
+    /// prompt when `position_ids_required` is true; sliced per chunk inside
+    /// `admit_mid_chunk`. For VL it incorporates `image_spatial_merge_size`
+    /// + `image_grid_thw`.
     pub(crate) position_ids_full: Array,
     /// Pre-computed full-prompt vision embeddings
     /// `[N_image_pad_total, hidden]` — only populated for VL requests.
@@ -485,6 +487,9 @@ pub struct Scheduler<M: Model> {
     /// compact: `cache_rows[i]` is the scheduler slot stored at model batch
     /// row `i`.
     cache_rows: Vec<usize>,
+    /// Reusable placeholder for models that derive positions internally and
+    /// do not consume caller-built MRoPE position ids.
+    dummy_position_ids: Option<Array>,
     poisoned: bool,
     /// Upper bound on `prompt_len + max_new_tokens` per request, computed
     /// at boot as `min(cli_max_cache_cap, model.config.max_position_embeddings)`.
@@ -516,6 +521,7 @@ impl<M: Model> std::fmt::Debug for Scheduler<M> {
             .field("phase", &self.phase)
             .field("cache_layers", &self.cache.as_ref().map(|c| c.len()))
             .field("cache_rows", &self.cache_rows)
+            .field("has_dummy_position_ids", &self.dummy_position_ids.is_some())
             .field("poisoned", &self.poisoned)
             .finish()
     }
@@ -586,6 +592,7 @@ impl<M: Model> Scheduler<M> {
             phase: Phase::Idle,
             cache: None,
             cache_rows: Vec::new(),
+            dummy_position_ids: None,
             poisoned: false,
             effective_cap_max,
             prng_state,
@@ -636,6 +643,15 @@ impl<M: Model> Scheduler<M> {
     /// Maximum concurrent in-flight requests this scheduler can hold.
     pub fn b_max(&self) -> usize {
         self.b_max
+    }
+
+    fn reusable_dummy_position_ids(&mut self) -> Result<Array> {
+        if let Some(position_ids) = self.dummy_position_ids.as_ref() {
+            return Ok(position_ids.clone());
+        }
+        let position_ids = build_position_ids(0, 1)?;
+        self.dummy_position_ids = Some(position_ids.clone());
+        Ok(position_ids)
     }
 
     /// Admit a new request. Walks `slots` for the first `None`, fills it
@@ -1146,6 +1162,11 @@ impl<M: Model> Scheduler<M> {
         }
         self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
         self.cache_rows = prefill_rows.clone();
+        let dummy_position_ids = if model.requires_position_ids() {
+            None
+        } else {
+            Some(self.reusable_dummy_position_ids()?)
+        };
 
         // Run prefill. Capture [B, 1, vocab] logits (sequence axis already
         // collapsed via slice_last_and_project) for first-token sampling.
@@ -1206,7 +1227,7 @@ impl<M: Model> Scheduler<M> {
                 .ok_or_else(|| anyhow!("cache missing after allocation — internal bug"))?
                 .as_mut_slice();
             let logits = if any_vl {
-                // Collect per-row prompt_ids (i32 conversion) + per-row vision args + tokenizer consts.
+                // Collect per-row prompt ids, vision args, and tokenizer constants in compact cache order.
                 let per_row_ids_i32: Vec<Vec<i32>> = prefill_rows
                     .iter()
                     .map(|&row| {
@@ -1261,7 +1282,9 @@ impl<M: Model> Scheduler<M> {
                     let grids = per_row_grids[0].ok_or_else(|| {
                         anyhow!("single-row VL prefill: pixel_values present but grid_thw is None")
                     })?;
-                    let position_ids_full = if grids.is_empty() {
+                    let position_ids_full = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else if grids.is_empty() {
                         build_position_ids(0, max_len)?
                     } else {
                         build_position_ids_vl(&per_row_ids_i32[0], grids, img_token_id, merge_size)?
@@ -1294,10 +1317,15 @@ impl<M: Model> Scheduler<M> {
                             &[1_i32, max_len][..],
                             &[1_i32, 1][..],
                         )?;
-                        let prefix_position_ids =
-                            slice_pos_ids_axis2(&position_ids_full, 0, prefix_len)?;
-                        let last_position_ids =
-                            slice_pos_ids_axis2(&position_ids_full, prefix_len, max_len)?;
+                        let (prefix_position_ids, last_position_ids) =
+                            if dummy_position_ids.is_some() {
+                                (position_ids_full.clone(), position_ids_full.clone())
+                            } else {
+                                (
+                                    slice_pos_ids_axis2(&position_ids_full, 0, prefix_len)?,
+                                    slice_pos_ids_axis2(&position_ids_full, prefix_len, max_len)?,
+                                )
+                            };
 
                         let prompt_ids = &per_row_ids_i32[0];
                         let prefix_image_pads = prompt_ids[..prefix_len as usize]
@@ -1360,13 +1388,17 @@ impl<M: Model> Scheduler<M> {
                     let attention_mask =
                         build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
                     let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
-                    let position_ids = build_position_ids_vl_batched(
-                        &per_row_ids_refs,
-                        &per_row_grids,
-                        img_token_id,
-                        merge_size,
-                        max_len,
-                    )?;
+                    let position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else {
+                        build_position_ids_vl_batched(
+                            &per_row_ids_refs,
+                            &per_row_grids,
+                            img_token_id,
+                            merge_size,
+                            max_len,
+                        )?
+                    };
 
                     model.batched_prefill_vl(
                         &input_ids,
@@ -1390,7 +1422,11 @@ impl<M: Model> Scheduler<M> {
                         &[1_i32, prefix_len][..],
                         &[1_i32, 1][..],
                     )?;
-                    let prefix_position_ids = build_position_ids(0, prefix_len)?;
+                    let prefix_position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else {
+                        build_position_ids(0, prefix_len)?
+                    };
                     let _prefix_hidden = model.forward_text_hidden(
                         &prefix_input_ids,
                         &prefix_position_ids,
@@ -1406,7 +1442,11 @@ impl<M: Model> Scheduler<M> {
                         &[1_i32, max_len][..],
                         &[1_i32, 1][..],
                     )?;
-                    let last_position_ids = build_position_ids(prefix_len, 1)?;
+                    let last_position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else {
+                        build_position_ids(prefix_len, 1)?
+                    };
                     model.forward_on(
                         &last_input_ids,
                         &last_position_ids,
@@ -1416,7 +1456,11 @@ impl<M: Model> Scheduler<M> {
                         mlx::StreamOrDevice::default(),
                     )?
                 } else {
-                    let position_ids = build_position_ids(0, max_len)?;
+                    let position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else {
+                        build_position_ids(0, max_len)?
+                    };
                     model.forward_on(
                         &input_ids,
                         &position_ids,
@@ -1430,7 +1474,11 @@ impl<M: Model> Scheduler<M> {
                 let attention_mask =
                     build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
                 let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
-                let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
+                let position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                    dummy.clone()
+                } else {
+                    build_position_ids_batched(&prompt_lens, max_len)?
+                };
                 model.batched_prefill(
                     &input_ids,
                     &position_ids,
@@ -1707,17 +1755,23 @@ impl<M: Model> Scheduler<M> {
             .try_into()
             .map_err(|e| anyhow!("step: build input_ids Array failed: {e:?}"))?;
 
-        // Build [3, B_active, 1] decode position ids.
-        let per_row_pos: Vec<i32> = active_rows
-            .iter()
-            .map(|&slot_row| {
-                self.slots[slot_row]
-                    .as_ref()
-                    .expect("active row implies Some")
-                    .real_len
-            })
-            .collect();
-        let position_ids = build_decode_position_ids(&per_row_pos)?;
+        // Build [3, B_active, 1] decode position ids only for models that consume
+        // them. Gemma4 derives positions from KV offsets, so the hot path can
+        // reuse a placeholder without changing model semantics.
+        let position_ids = if model.requires_position_ids() {
+            let per_row_pos: Vec<i32> = active_rows
+                .iter()
+                .map(|&slot_row| {
+                    self.slots[slot_row]
+                        .as_ref()
+                        .expect("active row implies Some")
+                        .real_len
+                })
+                .collect();
+            build_decode_position_ids(&per_row_pos)?
+        } else {
+            self.reusable_dummy_position_ids()?
+        };
 
         // Per-row lens for compact decode: every model-facing row writes
         // exactly one token.
@@ -1967,14 +2021,17 @@ impl<M: Model> Scheduler<M> {
         let temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
 
         let is_vl = pixel_values.is_some();
+        let position_ids_required = model.requires_position_ids();
 
         let chunk_size = prefill_chunk_size.max(1);
 
-        // Pre-build full-prompt MRoPE position ids in the B=1 single-stream
-        // shape that `model.forward_on` / `model.forward_vl_chunk` expect:
-        // `[3, 1, prompt_len]`. Chunked path slices axis 2 per chunk.
-        let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
-        let position_ids_full = if is_vl {
+        // Pre-build full-prompt MRoPE position ids only for models that
+        // consume them. Others carry a reusable placeholder and skip slicing
+        // in `admit_mid_chunk`.
+        let position_ids_full = if !position_ids_required {
+            self.reusable_dummy_position_ids()?
+        } else if is_vl {
+            let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
             build_position_ids_vl(
                 &prompt_ids_i32,
                 image_grid_thw
@@ -2012,6 +2069,7 @@ impl<M: Model> Scheduler<M> {
             temp_cache,
             is_vl,
             image_token_id,
+            position_ids_required,
             position_ids_full,
             vision_embeds_full,
             image_pad_consumed: 0,
@@ -2070,10 +2128,13 @@ impl<M: Model> Scheduler<M> {
             .try_into()
             .map_err(|e| anyhow!("admit_mid_chunk: input_ids try_into Array failed: {e:?}"))?;
 
-        // Slice axis 2 of the pre-built full-prompt position ids.
-        // position_ids_full shape: [3, 1, prompt_len].
-        let position_ids =
-            slice_pos_ids_axis2(&handle.position_ids_full, handle.chunk_start, chunk_end)?;
+        // Slice axis 2 only when real caller-built position ids are required.
+        // Models that derive positions internally carry a reusable placeholder.
+        let position_ids = if handle.position_ids_required {
+            slice_pos_ids_axis2(&handle.position_ids_full, handle.chunk_start, chunk_end)?
+        } else {
+            handle.position_ids_full.clone()
+        };
 
         // Forward via the B=1 single-stream API (same path GS chunked
         // prefill uses). The pre-3c+ implementation went through
