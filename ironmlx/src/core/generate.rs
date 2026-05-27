@@ -881,6 +881,82 @@ pub fn count_image_pad(ids: &[u32], image_token_id: i32) -> usize {
     ids.iter().filter(|&&t| t == target).count()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VlChunkComposition {
+    pub seq_len: usize,
+    pub image_tokens: usize,
+    pub text_tokens: usize,
+    pub image_runs: usize,
+    pub leading_image_tokens: usize,
+    pub trailing_image_tokens: usize,
+}
+
+pub(crate) fn vl_chunk_composition(ids: &[u32], image_token_id: i32) -> VlChunkComposition {
+    let target = if image_token_id >= 0 {
+        Some(image_token_id as u32)
+    } else {
+        None
+    };
+    let mut image_tokens = 0usize;
+    let mut image_runs = 0usize;
+    let mut in_image_run = false;
+    for &id in ids {
+        let is_image = Some(id) == target;
+        if is_image {
+            image_tokens += 1;
+            if !in_image_run {
+                image_runs += 1;
+                in_image_run = true;
+            }
+        } else {
+            in_image_run = false;
+        }
+    }
+    let leading_image_tokens = ids.iter().take_while(|&&id| Some(id) == target).count();
+    let trailing_image_tokens = ids
+        .iter()
+        .rev()
+        .take_while(|&&id| Some(id) == target)
+        .count();
+    VlChunkComposition {
+        seq_len: ids.len(),
+        image_tokens,
+        text_tokens: ids.len().saturating_sub(image_tokens),
+        image_runs,
+        leading_image_tokens,
+        trailing_image_tokens,
+    }
+}
+
+pub(crate) fn log_vl_chunk_composition(
+    path: &str,
+    chunk_range: std::ops::Range<i32>,
+    is_last: bool,
+    ids: &[u32],
+    image_token_id: i32,
+    image_rows: std::ops::Range<usize>,
+) {
+    if std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_none() {
+        return;
+    }
+    let c = vl_chunk_composition(ids, image_token_id);
+    tracing::info!(
+        "[gemma4-vl-profile] vl_chunk_composition path={} chunk_start={} chunk_end={} seq={} image_tokens={} text_tokens={} image_runs={} leading_image_tokens={} trailing_image_tokens={} image_rows_start={} image_rows_end={} is_last={}",
+        path,
+        chunk_range.start,
+        chunk_range.end,
+        c.seq_len,
+        c.image_tokens,
+        c.text_tokens,
+        c.image_runs,
+        c.leading_image_tokens,
+        c.trailing_image_tokens,
+        image_rows.start,
+        image_rows.end,
+        is_last
+    );
+}
+
 /// Extend a VL chunk end when the fixed boundary would split a contiguous
 /// image-token run. Keeping each image's placeholder run in one text forward
 /// avoids extra cache-update chunks and reduces long-tail MLX/Metal stalls.
@@ -1103,8 +1179,15 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                             build_position_ids(pos, n)?
                         };
 
+                        let is_vl = vision_embeds_full.is_some();
+                        let is_last = pos + n == prompt_len_i32;
+                        let k_i = if is_vl {
+                            count_image_pad(chunk_ids, request.image_token_id)
+                        } else {
+                            0
+                        };
+                        let image_rows_start = image_pad_consumed;
                         let ve_slice = if let Some(ve_full) = vision_embeds_full.as_ref() {
-                            let k_i = count_image_pad(chunk_ids, request.image_token_id);
                             if k_i > 0 {
                                 let start = image_pad_consumed;
                                 let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
@@ -1116,8 +1199,17 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                         } else {
                             None
                         };
+                        if is_vl {
+                            log_vl_chunk_composition(
+                                "generate",
+                                pos..pos + n,
+                                is_last,
+                                chunk_ids,
+                                request.image_token_id,
+                                image_rows_start..image_rows_start + k_i,
+                            );
+                        }
 
-                        let is_last = pos + n == prompt_len_i32;
                         let logits_or_hidden = if vision_embeds_full.is_some() {
                             if is_last {
                                 Some(model.forward_vl_chunk(
@@ -1180,8 +1272,15 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                     build_position_ids(pos, n)?
                 };
 
+                let is_vl = vision_embeds_full.is_some();
+                let is_last = pos + n == prompt_len_i32;
+                let k_i = if is_vl {
+                    count_image_pad(chunk_ids, request.image_token_id)
+                } else {
+                    0
+                };
+                let image_rows_start = image_pad_consumed;
                 let ve_slice = if let Some(ve_full) = vision_embeds_full.as_ref() {
-                    let k_i = count_image_pad(chunk_ids, request.image_token_id);
                     if k_i > 0 {
                         let start = image_pad_consumed;
                         let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
@@ -1193,8 +1292,17 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 } else {
                     None
                 };
+                if is_vl {
+                    log_vl_chunk_composition(
+                        "generate",
+                        pos..pos + n,
+                        is_last,
+                        chunk_ids,
+                        request.image_token_id,
+                        image_rows_start..image_rows_start + k_i,
+                    );
+                }
 
-                let is_last = pos + n == prompt_len_i32;
                 let logits_or_hidden = if vision_embeds_full.is_some() {
                     if is_last {
                         Some(model.forward_vl_chunk(
@@ -1979,6 +2087,34 @@ mod p6_7_helper_tests {
         let ids: Vec<u32> = vec![1, 248056, 2, 248056, 248056, 3];
         assert_eq!(count_image_pad(&ids, 248056), 3);
         assert_eq!(count_image_pad(&ids, 999), 0);
+    }
+
+    #[test]
+    fn vl_chunk_composition_counts_runs_and_edges() {
+        let ids: Vec<u32> = vec![42, 42, 1, 42, 2, 42, 42, 42];
+
+        let c = vl_chunk_composition(&ids, 42);
+
+        assert_eq!(c.seq_len, 8);
+        assert_eq!(c.image_tokens, 6);
+        assert_eq!(c.text_tokens, 2);
+        assert_eq!(c.image_runs, 3);
+        assert_eq!(c.leading_image_tokens, 2);
+        assert_eq!(c.trailing_image_tokens, 3);
+    }
+
+    #[test]
+    fn vl_chunk_composition_treats_negative_image_id_as_absent() {
+        let ids: Vec<u32> = vec![1, 2, 3];
+
+        let c = vl_chunk_composition(&ids, -1);
+
+        assert_eq!(c.seq_len, 3);
+        assert_eq!(c.image_tokens, 0);
+        assert_eq!(c.text_tokens, 3);
+        assert_eq!(c.image_runs, 0);
+        assert_eq!(c.leading_image_tokens, 0);
+        assert_eq!(c.trailing_image_tokens, 0);
     }
 
     #[test]

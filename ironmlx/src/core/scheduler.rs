@@ -62,8 +62,8 @@ use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
     build_per_row_decode_mask, build_position_ids, build_position_ids_batched,
     build_position_ids_vl, build_position_ids_vl_batched, count_image_pad,
-    extend_vl_chunk_end_for_image_pad, slice_logits_row, slice_pos_ids_axis2,
-    slice_vision_embeds_rows, GenerateRequest,
+    extend_vl_chunk_end_for_image_pad, log_vl_chunk_composition, slice_logits_row,
+    slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateRequest,
 };
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
@@ -2099,6 +2099,7 @@ impl<M: Model> Scheduler<M> {
             // VL chunk: slice the rows of `vision_embeds_full` that
             // correspond to this chunk's `image_pad` token count.
             let k_i = count_image_pad(chunk_ids_u32, handle.image_token_id);
+            let image_rows_start = handle.image_pad_consumed;
             let ve_slice = if k_i > 0 {
                 let ve_full = handle
                     .vision_embeds_full
@@ -2111,6 +2112,14 @@ impl<M: Model> Scheduler<M> {
             } else {
                 None
             };
+            log_vl_chunk_composition(
+                "scheduler",
+                handle.chunk_start..chunk_end,
+                is_last,
+                chunk_ids_u32,
+                handle.image_token_id,
+                image_rows_start..image_rows_start + k_i,
+            );
 
             if is_last {
                 let logits = model.forward_vl_chunk(

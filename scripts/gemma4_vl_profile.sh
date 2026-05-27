@@ -111,12 +111,16 @@ mkdir -p "$REPORT_DIR"
 
 METRICS_TSV="$REPORT_DIR/metrics.tsv"
 SUMMARY_TSV="$REPORT_DIR/summary.tsv"
+CHUNKS_TSV="$REPORT_DIR/chunks.tsv"
 {
     printf 'case\tchunk_size\tmetric\tvalue_ms\tlayer_idx\tlayer_kind\tlog_file\n'
 } > "$METRICS_TSV"
 {
     printf 'case\tchunk_size\toutput_sha256\toutput_bytes\thidden_chunks\tslice_projects\tdedup_ms\tdedup_images\tdedup_unique\tdedup_duplicates\tstdout_file\tstderr_file\n'
 } > "$SUMMARY_TSV"
+{
+    printf 'case\tchunk_size\tpath\tchunk_start\tchunk_end\tseq\timage_tokens\ttext_tokens\timage_runs\tleading_image_tokens\ttrailing_image_tokens\timage_rows_start\timage_rows_end\tis_last\tlog_file\n'
+} > "$CHUNKS_TSV"
 
 require_file() {
     if [[ ! -f "$1" ]]; then
@@ -153,6 +157,29 @@ append_metrics() {
             }
         }
     ' "$log_file" >> "$METRICS_TSV"
+}
+
+append_chunks() {
+    local name="$1"
+    local chunk_size="$2"
+    local log_file="$3"
+
+    awk -v case_name="$name" -v chunk="$chunk_size" -v log_file="$log_file" '
+        function field(key,    pattern) {
+            pattern = key "=[^[:space:]]+"
+            if (match($0, pattern)) {
+                return substr($0, RSTART + length(key) + 1, RLENGTH - length(key) - 1)
+            }
+            return "-"
+        }
+        /\[gemma4-vl-profile\] vl_chunk_composition/ {
+            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", \
+                case_name, chunk, field("path"), field("chunk_start"), field("chunk_end"), \
+                field("seq"), field("image_tokens"), field("text_tokens"), field("image_runs"), \
+                field("leading_image_tokens"), field("trailing_image_tokens"), \
+                field("image_rows_start"), field("image_rows_end"), field("is_last"), log_file
+        }
+    ' "$log_file" >> "$CHUNKS_TSV"
 }
 
 dedup_field() {
@@ -223,6 +250,7 @@ run_case() {
         fi
 
         append_metrics "$name" "$chunk_size" "$stderr_file"
+        append_chunks "$name" "$chunk_size" "$stderr_file"
 
         local output_sha output_bytes hidden_chunks slice_projects dedup_line
         output_sha="$(shasum -a 256 "$stdout_file" | awk '{print $1}')"
@@ -280,6 +308,7 @@ fi
 echo "=== Gemma4 VL profile PASS ==="
 echo "summary: $SUMMARY_TSV"
 echo "metrics: $METRICS_TSV"
+echo "chunks:  $CHUNKS_TSV"
 if command -v python3 >/dev/null 2>&1; then
     python3 "$SCRIPT_DIR/gemma4_vl_profile_report.py" --report "$REPORT_DIR"
 fi

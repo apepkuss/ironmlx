@@ -43,11 +43,13 @@ def main() -> None:
     report = args.report.resolve() if args.report else latest_report(repo)
     summary_path = report / "summary.tsv"
     metrics_path = report / "metrics.tsv"
-    if not summary_path.exists() or not metrics_path.exists():
-        raise SystemExit(f"missing summary.tsv or metrics.tsv in {report}")
+    chunks_path = report / "chunks.tsv"
+    if not summary_path.exists() or not metrics_path.exists() or not chunks_path.exists():
+        raise SystemExit(f"missing summary.tsv, metrics.tsv, or chunks.tsv in {report}")
 
     summary = read_tsv(summary_path)
     metrics = read_tsv(metrics_path)
+    chunks = read_tsv(chunks_path)
 
     by_run: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
     for row in metrics:
@@ -108,6 +110,41 @@ def main() -> None:
             ["metric", "sum_ms", "count"],
             [[metric, ms(total), str(counts[metric])] for metric, total in top],
         )
+
+    lines.append("## Chunk Composition")
+    lines.append("")
+    write_table(
+        lines,
+        [
+            "case",
+            "chunk",
+            "path",
+            "range",
+            "seq",
+            "image",
+            "text",
+            "runs",
+            "lead/trail",
+            "image_rows",
+            "last",
+        ],
+        [
+            [
+                row["case"],
+                row["chunk_size"],
+                row["path"],
+                f'{row["chunk_start"]}-{row["chunk_end"]}',
+                row["seq"],
+                row["image_tokens"],
+                row["text_tokens"],
+                row["image_runs"],
+                f'{row["leading_image_tokens"]}/{row["trailing_image_tokens"]}',
+                f'{row["image_rows_start"]}-{row["image_rows_end"]}',
+                row["is_last"],
+            ]
+            for row in chunks
+        ],
+    )
 
     layer_rows = [row for row in metrics if row.get("layer_idx", "-") != "-"]
     if layer_rows:
