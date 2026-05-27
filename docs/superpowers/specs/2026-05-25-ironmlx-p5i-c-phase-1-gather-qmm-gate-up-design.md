@@ -1,9 +1,11 @@
 # P5i.c Phase 1 γ-lite — `gather_qmm_gate_up` Optimization Design Exploration
 
-**Status:** Design exploration ONLY (γ-lite). DO NOT commit until Boss approves per `[feedback-review-spec-before-commit]`. Implementation, benchmarking, kernel modification, and acceptance verification are ALL OUT-OF-SCOPE until § 6 G1-G4 are satisfied.
+**Status (2026-05-27):** Stage β design converged per Codex round-2 review and this in-place review. G1/G4 are satisfied (§ 6); G2/G3 remain the Boss review/commit gates before implementation execution. Stage α T0/T1 infra is implemented in the working tree (uncommitted; folds into the Stage β close-out commit). Stage α T2-T4 sweep is skipped per first-principles (`[feedback-first-principles-no-redundant-sweep]`).
+
+**Historical original status (2026-05-25, superseded by this update):** Design exploration ONLY (γ-lite). Implementation, benchmarking, kernel modification, and acceptance verification were out of scope until the stricter gates in § 6 were satisfied.
 
 **Date:** 2026-05-25.
-**Branch (proposed):** `ironmlx-p5i-c-phase-1-brainstorm` off the Boss-approved P5h+2.d design/plan base. If forked before P5h+2.d implementation closes, keep this branch docs-only so P5h+2.d measurement WIP stays isolated.
+**Branch:** `ironmlx-p5i-c-phase-1` off P5h+2.e Acceptance-passed HEAD (`8ff074d` lineage).
 **Predecessor docs:**
 - P5h+2.d spec § 11 (Phase 1 parallel boundaries): `docs/superpowers/specs/2026-05-25-ironmlx-p5h+2-d-thermal-investigation-design.md`
 - P5i.c Phase 0 ranking snapshot: `docs/p5i-c-phase-0-ranking-snapshot.md`
@@ -14,12 +16,12 @@
 
 ## § 0 Goal + scope binding
 
-Design exploration of `gather_qmm_gate_up` optimization candidate (Phase 0 R1 default rule trigger; cross-PP tier-1 stable at PP=128 23.38% / PP=512 22.84% share). Output of this phase = **docs-only design artifacts**, with this spec as the primary tracked artifact. NO implementation code. NO kernel modifications. NO performance benchmarks. NO writing-plans handoff.
+Design and implementation boundary for `gather_qmm_gate_up` optimization candidate (Phase 0 R1 default rule trigger; cross-PP tier-1 stable at PP=128 23.38% / PP=512 22.84% share). The original γ-lite output was docs-only. This update records the Stage β design lock and the constraints that the implementation plan MUST follow after Boss approval.
 
 **This phase explicitly does NOT commit to:**
-- Implementation timing (gated on stricter conditions, § 6)
 - Project-level +10% target (gated on Phase 1 + Phase 2+ combined, § 2)
 - Any project-level acceptance criteria depending on the stable vs-omlx delta, which remains separate from the Phase 1 local gate
+- Starting implementation execution before Boss approves this updated spec and the subsequent implementation plan (§ 6)
 
 ## § 1 Phase 0 evidence + Amdahl analysis
 
@@ -54,8 +56,8 @@ Both must hold when eventually measured:
 
 | # | Criterion | Method |
 |---|---|---|
-| L1 | `gather_qmm_gate_up` substep wall-time (P5h-style production-mode instrumentation) reduced by ≥30% vs the implementation-start baseline HEAD | per-substep median across ≥3 fresh-spawn repeats, within envelope precision |
-| L2 | End-to-end pp_tps improvement ≥5% vs the same implementation-start baseline (statistically significant under the accepted per-PP envelope target) | `tools/p5i_c_pp_tps_envelope.py` per PP × 3 repeats, requires envelope PASS first |
+| L1 | `gather_qmm_gate_up` substep wall-time reduced by ≥30% vs the implementation-start baseline HEAD, excluding `routing_sort_pack` | same-cohort P5h production-mode diagnostic at PP=128 and PP=512; use `default_profile` or `buffered_profile` because `quiet_acceptance` suppresses `[p5h-profile]` substep lines; compare baseline and candidate under the same logging mode |
+| L2 | End-to-end pp_tps improvement ≥5% vs the same implementation-start baseline (statistically significant under the accepted per-PP envelope target) | `quiet_acceptance` production protocol with `tools/p5i_c_pp_tps_envelope.py` per PP × 3 repeats; requires envelope PASS first |
 
 ### § 2.2 Project-level gate (NOT discharged by Phase 1)
 
@@ -63,7 +65,12 @@ Project target `ironmlx >= 1.10 * omlx` is a multi-phase aggregate, evaluated AF
 
 ### § 2.3 Measurement protocol binding
 
-All Phase 1 measurements MUST use the accepted production protocol lineage: Phase 0 production-mode capture harness (`P5I_C_MODE=production`), `same_spawn_per_pp` lifecycle, `quiet_acceptance` logging, plus the P5h+2.e-resolved protocol from `docs/p5h+2-e-close-out.md`: cooldown `120s`, equal-budget same-shape preheat (`P5I_C_PREHEAT_PP_LIST="512,{pp}"`, `P5I_C_PREHEAT_RUNS=550`), and `tools/p5i_c_pp_tps_envelope.py` per-PP acceptance targets (`small_pp_acceptance_threshold` for PP=128; `standard_acceptance_threshold` otherwise). Mismatched protocol (e.g., bench-kernel isolated micro-benchmark or legacy single-shape 1100-run preheat) MUST NOT be used as primary evidence — only as secondary diagnostic.
+All Phase 1 end-to-end acceptance measurements MUST use the accepted production protocol lineage: Phase 0 production-mode capture harness (`P5I_C_MODE=production`), `same_spawn_per_pp` lifecycle, `quiet_acceptance` logging, plus the P5h+2.e-resolved protocol from `docs/p5h+2-e-close-out.md`: cooldown `120s`, equal-budget same-shape preheat (`P5I_C_PREHEAT_PP_LIST="512,{pp}"`, `P5I_C_PREHEAT_RUNS=550`), and `tools/p5i_c_pp_tps_envelope.py` per-PP acceptance targets (`small_pp_acceptance_threshold` for PP=128; `standard_acceptance_threshold` otherwise).
+
+Diagnostic measurements have narrower authority:
+- Bench-kernel measurements select tile/threadgroup candidates and discharge EG-1 only; they do not prove L2.
+- P5h substep diagnostics for L1 may use `default_profile` or `buffered_profile` because `quiet_acceptance` intentionally suppresses info-level `[p5h-profile]` decomposition lines. They MUST compare baseline and candidate under the same logging mode and MUST NOT be used as e2e acceptance evidence.
+- Production e2e sweeps MUST NOT be used for tile search. Tile search stays bench-kernel-only and bounded by § 4.2.3.
 
 ## § 3 Hypothesis set — why `gate_up` is 23% (Codex round-1 Q18 binding)
 
@@ -80,48 +87,116 @@ P5h T3 layer-3 MoE diagnostic measured `gather_qmm_gate_up` at 1.25us per layer 
 
 ## § 4 Technical direction — staged α → β (Codex round-1 Q2 binding, rephrased)
 
-### § 4.1 Stage α — diagnostic + low-risk verification
+### § 4.1 Stage α — instrumentation infra ship (sweep SKIPPED per first-principles)
 
-**Purpose**: cost decomposition + low-risk early signal. NOT a "likely sufficient" optimization path on its own (Codex binding).
+**Status (2026-05-27)**: T0 sub-span instrumentation + T1 aggregator extension are implemented in the working tree (uncommitted; folds into Stage β single close-out commit). T2 12-cell diagnostic sweep, T3 cost decomposition analysis, T4 standalone close-out: **SKIPPED** per Boss + controller first-principles agreement on 2026-05-27. Codex round-2 Q6: agreed SKIP.
 
-Investigations (in eventual implementation; Phase 1 design only describes scope):
-- Device-aware tile selection sweep for `mlx::quantization::gather_quantized_matmul_on` on M5 Max (M_threshold + tile geometry; per `[feedback-device-aware-tile]` 4-dim lookup `(device=M5Max, quant=Q4, shape=routing-gathered, phase=prefill)`)
-- Cost breakdown via Metal capture (sort_perm scatter, expand_dims, gather index lookup, slice gate/up, eval barriers between MLX ops)
-- Identify whether the 23% is dominated by compute-tile geometry OR by routing/memory/shape overhead
+**Rationale for SKIP** (recorded in `[feedback-first-principles-no-redundant-sweep]`):
 
-Stage α deliverables: diagnostic report, NOT performance acceptance. Expected gain: bounded (5-15% per [project-p5g-findings] op-level matmul saturation lesson).
+| Substep | MLX op semantics | Physically-bounded share |
+|---|---|---|
+| `gate_up_input_shape_prep` | `expand_dims_on` = view-only O(1) shape descriptor; no data motion | < 0.5% |
+| `gate_up_gather_qmm_call` | `gather_quantized_matmul_on` = 4-bit MoE GEMM dominant compute | > 95% |
+| `gate_up_slice_outputs` | 2× `slice_on` = view / lightweight strided indexing | < 5% |
 
-### § 4.2 Stage β — custom Metal gather kernel (real value path)
+The distribution is determined by MLX op semantics; a 12-cell sweep at any granularity can only confirm what physics already implies. Stage β direction (replace `gather_quantized_matmul_on` with a custom Metal kernel) is invariant under any sweep outcome.
 
-**Purpose**: address the dominant cost identified in Stage α with integrated kernel design.
+**Working-tree infra (folds into Stage β commit)**:
+- `ironmlx/src/models/qwen3_5_moe/sparse_moe.rs`: 3 child sub-spans wrapping `gather_qmm_gate_up`; runtime-gated by `IRONMLX_P5I_C_GATE_UP_CHILD_SPANS=1` (OnceLock-cached); cfg-gated `p5h-profile`; production binary byte-identical (env-default OFF)
+- `ironmlx/src/core/p5h.rs` + `tools/p5h_aggregator/schema_validator.py`: 3 child span names registered in Rust + Python Lane-B allow-list (lockstep test verifies parity)
+- `tools/p5h_aggregator/multi_repeat.py`: `attribute_child_spans()` + `load_spans_for_child_attribution()` for span_id/parent_span_id tree-identity attribution
 
-Design integrates:
-- Sorted-routing input shape (sort_perm + expert-bucketed token reordering)
-- Expert-id index lookup (replacing MLX-API `gather_quantized_matmul_on` per-call routing)
-- Fused gate + up output (matches P5i.a T2 fused weight; output `(gate_out, up_out)` returned together without intermediate materialization)
-- Optional: absorbing the `expand_dims` + downstream `slice` boundaries to remove MLX op-boundary overhead
+**Future use**: any time Stage β v1 ships and we need to verify `expand_dims_on` + `slice_on` boundary overhead is < 3% (Q1 v2 trigger), the infra is in place — flip env var to `1` and re-run aggregator. No re-instrumentation needed.
 
-Starting point evaluation (per Codex round-1 Q4 binding): adapt llama.cpp's `ggml_metal_mul_mat_id_q4_k_f32` (gather variant that already handles routing dimension) as REFERENCE OBSERVATION only — design independently per `[feedback-design-philosophy]` + `[feedback-no-spec-from-competitors]`.
+### § 4.2 Stage β — custom Metal gather kernel (Codex round-2 locked design)
 
-P8a stage 9 `self_qmm` Q4_K_M kernel rewrite (NOT gather variant) is reference for kernel structure quality (+35% mlx baseline at bench-kernel level; 1.32× must gate at PP=2048) but NOT for routing handling.
+**Status (2026-05-27)**: Design is locked subject to Boss acceptance of this updated spec. Implementation planning MAY start after this spec review closes; implementation execution still requires the Stage β implementation plan review gate (§ 6).
 
-Stage β deliverables after Stage α completes: finalized custom Metal kernel spec + integration plan. During γ-lite, this document only locks Stage β constraints and decision criteria; concrete kernel parameters, tile shapes, threadgroup geometry, and implementation tasks are deliberately deferred until α produces a measured cost decomposition.
+**Purpose**: replace `mlx::quantization::gather_quantized_matmul_on` for the gate_up call sites in `SparseMoeBlock::forward_on` (sorted + default branches) with a custom Metal kernel that produces fused `(gate, up)` output, eliminating the dominant cost identified by op semantics in § 4.1.
 
-### § 4.3 Staging order discipline
+#### § 4.2.1 Scope (v1 — Codex Q1 binding: v1 ≡ Option A)
 
-α MUST complete + provide cost decomposition BEFORE β kernel design specifics. If α reveals that compute-tile geometry is dominant (W4 false), β can scope down to tile-only optimization with less custom-Metal risk. If α confirms routing/memory dominance (W4 true), β must address that holistically. γ-lite may document β constraints, but MUST NOT pre-choose tile sizes, threadgroup geometry, or integration tasks before α.
+**IN SCOPE for v1**:
+- Custom Metal kernel for 4-bit affine `group_size=64` quantized matmul with gather (rhs_indices) routing
+- Kernel output shape `[..., 2I]` (fused gate + up channels concatenated along last dim, matching P5i.a T2 fused weight)
+- Rust caller performs `slice_on` (gate_out, up_out) on kernel output — **slice stays in Rust**, kernel does not return two buffers
+- Kernel consumes existing sorted-branch (`sorted_x`, `sorted_topk_2d`) or default-branch (`expand_dims`-shaped `x`, `inds_u32`) inputs — kernel does **not** generate `sort_perm` (Codex Q4.1 binding: routing_sort_pack stays out)
+- Kernel API parameterized on `(weight_layout, output_shape_constraint)` to scaffold Phase 2 `gather_qmm_down` interface (per § 7); Phase 2 kernel is **not** implemented in v1 (Codex R4 binding)
+
+**OUT OF SCOPE for v1** (deferred to v2 conditional; see § 4.2.5):
+- Absorbing `expand_dims_on` (input prep) into kernel
+- Absorbing `slice_on` (output split into separate gate/up buffers) into kernel
+
+**Hardware target**: M5 Max + 128 GB UMA only initial; cross-device tile tuning deferred per `[project-cross-device-tuning-deferred]`.
+
+#### § 4.2.2 Kernel structure starting point (Codex Q4.2 binding)
+
+- **Fork** ironmlx P8a stage 9 `self_qmm` Q4_K_M Metal kernel (block 256 / super-block 8; +35% mlx bench-kernel baseline; 1.32× must gate at PP=2048 per `[project-p8a-stage9-findings]`) as kernel structure quality reference
+- **Add** routing dimension handling (gather via `rhs_indices`); independent design — llama.cpp `ggml_metal_mul_mat_id_q4_k_f32` is observation only per `[feedback-no-spec-from-competitors]`
+- **Bench-kernel harness MUST add a routing variant** (Codex Q4.2 binding); non-routing P8a stage 9 self_qmm only proves tile structure quality, not gather kernel correctness/perf
+
+#### § 4.2.3 Tile / threadgroup geometry (Codex Q5.3 binding)
+
+- 4-dim lookup `(device=M5Max, quant=Q4_affine_gs64, shape=routing-gathered, phase=prefill)` per `[feedback-device-aware-tile]`
+- Tile selection performed at **bench-kernel level**, small candidate set, ≤ 1-2 hr GPU budget; **NOT** in production e2e sweep
+- Decode-phase tile selection deferred (per § 9)
+
+#### § 4.2.4 Model parameter handling (Codex Q4.3 binding)
+
+Kernel + plan + tests MUST read model dimensions from `text_config` / tensor shapes at runtime — **DO NOT hardcode** `hidden_size`, `moe_intermediate_size`, `num_experts`, `num_experts_per_tok`, `head_dim`, `num_hidden_layers`. Current Qwen3.5-35B-A3B-4bit verified values (for sanity-check only):
+
+| Field | Value |
+|---|---|
+| `hidden_size` (H) | 2048 |
+| `moe_intermediate_size` (I) | 512 |
+| `num_experts` (E) | 256 |
+| `num_experts_per_tok` (k) | 8 |
+| `head_dim` | 256 |
+| `num_attention_heads` | 16 |
+| `num_key_value_heads` | 2 |
+| `num_hidden_layers` | 40 |
+| `quantization` | `{bits: 4, group_size: 64, mode: affine}` |
+| `shared_expert_intermediate_size` | 512 |
+
+#### § 4.2.5 v2 conditional trigger (Codex Q1 binding)
+
+Stage β v2 (absorb `expand_dims` + `slice`) MAY be considered **only if** post-v1 measurement (via Stage α T0/T1 infra) shows `expand_dims_on` + `slice_on` boundary overhead **> 3%** of `gate_up_gather_qmm_call` substep. v2 is a separate design pass; v1 close-out commits the kernel + ship infra fold, NOT a v2 promise.
+
+#### § 4.2.6 Acceptance gates (Codex Q3 binding)
+
+Stage β plan MUST embed two mandatory early-stop gates BEFORE production wiring tasks:
+
+| Gate | Condition |
+|---|---|
+| EG-1 | bench-kernel routing variant achieves kernel-only ≥ 30% reduction vs MLX `gather_quantized_matmul_on` baseline (same shape) |
+| EG-2 | Correctness oracle (§ 5 five cases + shape-forced sorted/default branches) stable across PP=128 + PP=512 + 35B-A3B-4bit 5-10 prompt regression |
+
+If EG-1 fails: kernel design re-iterate (T0-T2); production wiring (T3+) BLOCKED. If EG-2 fails: kernel implementation fixed; do not wire. If both pass: proceed to T3 production wiring + L1/L2 acceptance.
+
+L1 + L2 acceptance per § 2.1 unchanged. Codex R1 binding: L1 same-cohort median comparison MUST use `gather_qmm_gate_up` (or its renamed equivalent) substep with **NO** `routing_sort_pack` contamination.
+
+### § 4.3 Staging order discipline (Stage α SKIPPED; Stage β unblocked)
+
+The earlier requirement to complete Stage α before specifying Stage β is **superseded** by first-principles SKIP (§ 4.1 rationale). Stage β design unblocked based on:
+1. MLX op semantics determining cost distribution
+2. P5h+1 op-level findings (`[project-p5h-findings]`: MoE substep gate_up GEMM saturated at op-level)
+3. P8a stage 9 self_qmm precedent for Q4_K_M kernel structure
+
+γ-lite output boundary (§ 10) updated accordingly: Stage β design is now the intended output of Phase 1 design phase; implementation plan and execution proceed only through § 6 gates.
+
+Codex R3 binding: fused weight (`fused_gate_up`) lazy-build MUST be materialized before any measurement cell — covered by current measurement protocol § 2.3 preheat (550 runs equal-budget same-shape) + Rule B first-run trim as secondary guard. Codex R2 binding: oracle MUST shape-force sorted vs default branches (not rely on PP=128/512 naturally hitting `SORTED_ROUTING_MIN_BS_K` boundary).
 
 ## § 5 Correctness oracle requirements (Codex round-1 Q13 binding addition)
 
 Eventual Phase 1 implementation testing MUST cover (spec scope for plan-stage):
 
 - **Profile + production path equivalence**: both `#[cfg(feature = "p5h-profile")]` span path and default production path in `SparseMoeBlock::forward_on`. The profile path currently uses rank-4 sorted tensors; the default production path uses the P5i.a rank-3 sorted simplification.
-- **Sorted vs default routing equivalence**: both routing branches (`BS*k >= SORTED_ROUTING_MIN_BS_K` and `< SORTED_ROUTING_MIN_BS_K`) because PP=128/512 and future batch shapes may exercise different paths.
+- **Sorted vs default routing equivalence**: both routing branches (`BS*k >= SORTED_ROUTING_MIN_BS_K` and `< SORTED_ROUTING_MIN_BS_K`) — Codex round-2 R2 binding: oracle **MUST shape-force** both branches (e.g., explicit `BS*k` boundary forcing in oracle inputs), not rely on PP=128/512 naturally hitting the boundary.
 - **Gate/up slice equivalence**: optimized kernel's `(gate_out, up_out)` numerically equal current `gather_quantized_matmul_on(fused) + slice` output within MLX eval precision tolerance
 - **Top-k order invariance**: final routed output equivalent when the selected expert set is the same but top-k order differs; intermediate gate/up comparisons must canonicalize `(token, expert, score)` tuples before comparing
 - **Weighted reduce equivalence**: post-MoE weighted_reduce output matches pre-optimization Qwen3.5-35B-A3B-4bit reference
 
-Oracle MUST run against the actual MoE 35B model on a regression-test prompt suite (TBD in Phase 1 implementation plan, NOT this spec).
+Oracle MUST run against the actual MoE 35B model on a regression-test prompt suite — Codex round-2 Q2 binding scope: 5-10 prompts covering raw text + chat-template, short + medium-length; e2e acceptance only PP=128 + PP=512 (PP=2048 smoke pass not required as gate). Exact prompt list materialized in Stage β implementation plan, NOT this spec.
 
 ### § 5.1 Shape matrix the implementation plan must preserve
 
@@ -132,23 +207,44 @@ Oracle MUST run against the actual MoE 35B model on a regression-test prompt sui
 | production sorted | `[BS*k, 1, H]` | `[BS*k]` | `[BS*k, 1, I]` |
 | production default | `[BS, 1, 1, H]` | `[BS, k]` | `[BS, k, 1, I]` |
 
-## § 6 Implementation gating (Codex round-1 binding — STRICTER)
+## § 6 Implementation execution gating (Codex round-1 binding — STRICTER)
 
-Phase 1 implementation MAY start ONLY when ALL hold:
+Phase 1 implementation execution (kernel code, production wiring, performance benchmark execution) MAY start ONLY when ALL hold:
 
 | # | Condition |
 |---|---|
 | G1 | P5h+2.e close-out doc (`docs/p5h+2-e-close-out.md`) EXPLICITLY backfills Phase 0 § 7 #4 PASS and allows Phase 1 implementation to proceed to Boss approval. **Satisfied by commit `9a35ae17`.** |
-| G2 | Boss explicitly approves Phase 1 implementation kick-off |
-| G3 | Phase 1 design spec (this doc) committed + Boss-approved |
-| G4 | New branch `ironmlx-p5i-c-phase-1` forked from a P5h+2.e Acceptance-passed HEAD |
+| G2 | Boss explicitly approves this updated Stage β design and the subsequent implementation plan. **Pending current review + plan review.** |
+| G3 | Phase 1 design spec (this doc) committed + Boss-approved. **In-place updated 2026-05-27 with Codex round-2 bindings; pending Boss review + commit.** |
+| G4 | New branch `ironmlx-p5i-c-phase-1` forked from a P5h+2.e Acceptance-passed HEAD. **Satisfied** (branch forked off `8ff074d`; Stage α T0/T1 working-tree state). |
 
 **NOT acceptable** as sole conditions:
 - ~~P5h+2.d Stage 1 Mechanism gate = strong/weak yes alone~~ (per Codex binding; Mechanism gate is intermediate signal, not unblock authority)
 - ~~P5h+2.d Acceptance gate intermediate progress~~ (must be superseded by CLOSED P5h+2.e + Phase 0 backfilled, not in-progress)
 - ~~P5h+2.e in-progress envelope numbers without close-out~~ (satisfied only after `docs/p5h+2-e-close-out.md` exists with final evidence)
 
-During γ-lite (until G1-G4 all hold): NO benchmarks, NO kernel changes, NO production-runtime code touched.
+Until G1-G4 all hold: no Stage β kernel implementation, no production-runtime wiring, and no performance benchmark execution. Drafting and reviewing the implementation plan is not implementation execution.
+
+### § 6.5 Codex round-2 bindings (audit trail)
+
+Source: `reports/p5i-c-phase-1-stage-beta-design-questions.md` (gitignored review report).
+
+| Binding | Subject | Effect in this spec |
+|---|---|---|
+| Q1 | Stage β v1 ≡ Option A (no absorb expand_dims/slice); v2 conditional on > 3% boundary residual | § 4.2.1 IN/OUT scope; § 4.2.5 v2 trigger |
+| Q2 | Shape-forced sorted/default oracle + 5-10 prompt 35B regression + acceptance only PP=128+512 (PP=2048 smoke not gate) | § 5 oracle requirements (R2 reinforced); planned in Stage β plan |
+| Q3 | Single plan 6-7 task + mandatory early-stop gate (bench-kernel ≥30% + oracle stable before production wiring) | § 4.2.6 EG-1 + EG-2 |
+| Q4.1 | NOT integrate `routing_sort_pack` / sort_perm generation in v1 kernel | § 4.2.1 IN scope kernel consumes existing inputs only |
+| Q4.2 | bench-kernel MUST add routing variant; non-routing self_qmm only proves tile structure | § 4.2.2 starting point + plan T0 |
+| Q4.3 | NO hardcode H/I/E/k/head_dim; read from `text_config` / tensor shape | § 4.2.4 model parameter handling table |
+| Q5.1 | NO dispatch-time MLX fallback | § 9 explicit OOS |
+| Q5.2 | NO alt quantization scheme evaluation | § 9 explicit OOS |
+| Q5.3 | NO production e2e sweep for tile search (bench-kernel only ≤ 1-2 hr GPU) | § 4.2.3 tile geometry |
+| Q6 | Stage α SKIP agreed | § 4.1 SKIP rationale |
+| R1 | L1 same-cohort median; NO routing_sort_pack contamination | § 4.2.6 EG-1 cohort definition |
+| R2 | Shape-forced sorted/default branch oracle | § 5 second bullet updated |
+| R3 | Fused weight lazy build pre-materialize before measurement | § 4.3 protocol note |
+| R4 | Phase 2 scaffold only interface; no `gather_qmm_down` impl in v1 | § 4.2.1 IN/OUT scope |
 
 ## § 7 Sister-extension interface (Codex round-1 Q1(d) binding)
 
@@ -165,43 +261,63 @@ This is a DESIGN constraint, NOT implementation work. Parameterized weight handl
 | Code | Risk | Mitigation in spec |
 |---|---|---|
 | R1 | **Amdahl ceiling**: gate_up alone cannot discharge `ironmlx >= 1.10 * omlx`; ≥43% reduction only means ~+10% vs ironmlx's own baseline | § 1.2 + § 2.2 — project gate explicitly deferred; Phase 1 ≠ project +10% |
-| R2 | **Op-level matmul saturation lesson** (P5g): pure tile tweaks may saturate fast | § 4.3 — α is diagnostic only; β is the real path |
+| R2 | **Op-level matmul saturation lesson** (P5g): pure tile tweaks may saturate fast | § 4.2 — Stage β integrates gather routing into a custom kernel and uses EG-1 before production wiring |
 | R3 | **Sorted/default dual-path risk**: PP=128 vs PP=512 may take different `SORTED_ROUTING_MIN_BS_K` branches; optimization may help one but not the other | § 5 oracle covers both; § 2.1 acceptance requires both PP=128 + PP=512 |
 | R4 | **Fused weight lazy build noise**: `fused_gate_up(target)` lazy on first forward — must be excluded from measurement | Phase 1 measurement protocol must include explicit preheat/materialization before measured cells; Rule B first-run trim is a secondary guard, not the primary mitigation |
 | R5 | **MLX op boundary / slice / eval materialization** may be dominant cost (not matmul math); custom Metal alone may not solve | § 3 W4 + § 4.2 — Stage β explicitly designs for routing/memory/shape overhead, not just compute tile |
-| R6 | **Protocol mismatch**: measuring via bench-kernel isolated harness ≠ Phase 0 production-mode | § 2.3 — production-mode protocol binding mandatory; bench-kernel diagnostic only |
-| R7 | **P5h+2.d Acceptance gate FAIL**: blocks Phase 1 implementation indefinitely | § 6 G1 stays unblocked condition; Phase 1 spec remains in design state if P5h+2.d FAIL → re-brainstorm needed |
+| R6 | **Protocol mismatch**: bench-kernel, substep profile, and production e2e answer different questions | § 2.3 taxonomy binds each evidence type: bench-kernel only discharges EG-1/tile diagnostics; L1 uses same-cohort P5h diagnostic; L2 uses `quiet_acceptance` |
+| R7 | **Implementation gate drift**: design text may be read as authorization to start kernel work before Boss review / plan review / commit gates close | § 6 keeps G2/G3 pending and explicitly blocks Stage β kernel implementation until all gates hold |
 | R8 | **Correctness regression on 35B-A3B-4bit**: hard to detect in Metal-level optimizations; numerical drift may pass unit oracles but fail downstream generation quality | § 5 oracle must run actual generation regression on MoE 35B reference prompts |
+| R9 | **Unsupported shape or quant silently falling back to MLX**: fallback would hide dispatch mistakes and corrupt attribution | § 9 forbids dispatch-time MLX fallback; unsupported shapes MUST fail before enabling the new kernel |
 
 ## § 9 Out-of-scope (this phase)
 
 Defer to later phases:
-- `gather_qmm_down` (tier-2 ~12% share) — Phase 2 (interface-reserved per § 7)
+- `gather_qmm_down` (tier-2 ~12% share) — Phase 2 (interface-reserved per § 7; v1 kernel impl explicitly **not** in Stage β per Codex R4)
 - `swiglu_activation` fusion — Phase 2+ (NOT interface-reserved; significant additional design)
-- `routing_sort_pack` co-design with gather — Phase 3+ (architectural change)
+- `routing_sort_pack` co-design with gather — Phase 3+ (architectural change; Codex Q4.1 binding: Stage β kernel consumes existing sort_perm output, does NOT generate it)
 - Cross-device tile tuning beyond M5 Max — separate phase per `[project-cross-device-tuning-deferred]`
+- Decode-phase tile selection (`phase=decode` in 4-dim lookup) — separate phase
 - Attention family (`gda_step_1a_in_proj_qkvz` tier-3 10-15% share) — separate phase
 - Qwen3.5 Dense (4B) optimization — separate, not MoE blocked
 - Project-level +10% pp_tps achievement — multi-phase aggregate, deferred
 
-## § 10 γ-lite output boundary (Codex round-1 Q7 binding)
+**Explicitly OUT for Stage β v1 per Codex round-2 bindings**:
+- Absorbing `expand_dims_on` (input prep) into kernel (Q1; defer to v2 conditional § 4.2.5)
+- Absorbing `slice_on` (output split) into kernel (Q1; defer to v2 conditional § 4.2.5)
+- Dispatch-time MLX `gather_quantized_matmul_on` fallback (Q5.1; fall-back is anti-pattern; new kernel MUST be unconditional or not enabled; unsupported shape/quant combinations block enabling the new path instead of falling back at dispatch)
+- Alternative quantization schemes — Q4_0 / Q4_K_S / Q5_K_M / non-affine (Q5.2; v1 locked on current model's `Q4_affine_gs64`)
+- Production e2e sweep as tile search method (Q5.3; tile selection bench-kernel only ≤ 1-2 hr GPU)
 
-This spec is the primary tracked output of Phase 1 γ-lite.
+## § 10 γ-lite output boundary (Codex round-1 Q7 binding) + Stage β design lock (2026-05-27)
 
-**Explicitly NOT produced in γ-lite:**
-- Implementation plan (`docs/superpowers/plans/...`) — written ONLY after § 6 G1-G4 satisfied
-- Code changes — none in this phase
-- Performance benchmarks — none in this phase
-- Acceptance verification — none in this phase
+**γ-lite exit status (2026-05-27)**: G1/G4 satisfied per § 6; Stage β design is converged but still awaits Boss approval and commit closure through G2/G3. Phase moves out of γ-lite only after those gates close.
 
-**Produced:**
-- This design spec
-- Codex consultation doc (gitignored): `reports/p5i-c-phase-1-brainstorm-codex-questions.md`
-- Memory entry: new `[project-p5i-c-phase-1-findings]` summarizing γ-lite outcome + readiness state
+This spec is the primary tracked design artifact across Phase 1.
+
+**Produced in γ-lite (closed)**:
+- This design spec (initial brainstorm → Codex round-1 bindings)
+- Codex round-1 consultation doc (gitignored): `reports/p5i-c-phase-1-brainstorm-codex-questions.md`
+- Memory entry: `[project-p5i-c-phase-1-findings]` (γ-lite outcome + readiness)
+
+**Produced in Stage β design lock (2026-05-27, this in-place update)**:
+- § 4 rewrite with Codex round-2 bindings
+- § 6.5 Codex round-2 audit trail
+- § 9 expanded OOS items
+- Codex round-2 consultation doc (gitignored): `reports/p5i-c-phase-1-stage-beta-design-questions.md`
+
+**To produce next after this design review closes**:
+- Stage β implementation plan (`docs/superpowers/plans/2026-05-27-ironmlx-p5i-c-phase-1-stage-beta-gather-kernel.md`) — 6-7 tasks per Codex Q3 binding + early-stop gates EG-1/EG-2 per § 4.2.6; drafting the plan is allowed before full G2 closes, but execution waits for Boss plan approval.
+
+**To produce only after G1-G4 all hold**:
+- Custom Metal gather kernel (`ironmlx-bench-kernel` + `ironmlx/src/...`)
+- Correctness oracle harness
+- L1/L2 acceptance evidence
+- Single close-out commit (folds Stage α T0/T1 infra + Stage β kernel + close-out doc) per § 4.3 + `[feedback-no-empty-commits]`
 
 ## § 11 References
 
-- Spec source chain: this doc + `reports/p5i-c-phase-1-brainstorm-codex-questions.md`
+- Spec source chain: this doc + `reports/p5i-c-phase-1-brainstorm-codex-questions.md` (round-1) + `reports/p5i-c-phase-1-stage-beta-design-questions.md` (round-2)
 - Predecessor specs / plans:
   - `docs/superpowers/specs/2026-05-25-ironmlx-p5h+2-d-thermal-investigation-design.md` § 11 (binding parent)
   - `docs/p5i-c-phase-0-ranking-snapshot.md` (Phase 0 R1 candidate evidence)
@@ -211,5 +327,5 @@ This spec is the primary tracked output of Phase 1 γ-lite.
   - llama.cpp `ggml_metal_mul_mat_id_q4_k_f32` (gather Q4_K kernel structure)
   - mlx `gather_quantized_matmul` (current implementation; ironmlx calls via `mlx::quantization::gather_quantized_matmul_on`)
   - P8a stage 9 `self_qmm` Q4_K_M kernel (Metal kernel structure quality reference; NOT routing handling)
-- Memory: `[project-p5i-c-phase-0-findings]`, `[project-p5h-t3-findings]`, `[project-p8a-stage9-findings]`, `[feedback-device-aware-tile]`, `[project-cross-device-tuning-deferred]`, `[project-p5g-findings]`, `[feedback-design-philosophy]`, `[feedback-no-spec-from-competitors]`
+- Memory: `[project-p5i-c-phase-0-findings]`, `[project-p5h-t3-findings]`, `[project-p8a-stage9-findings]`, `[project-p5h-findings]`, `[project-p5h-2e-findings]`, `[feedback-device-aware-tile]`, `[project-cross-device-tuning-deferred]`, `[project-p5g-findings]`, `[feedback-design-philosophy]`, `[feedback-no-spec-from-competitors]`, `[feedback-first-principles-no-redundant-sweep]`, `[feedback-performance-stability-priority]`, `[reference-current-machine]`
 - Codex round-1 brainstorm review: `reports/p5i-c-phase-1-brainstorm-codex-questions.md`
