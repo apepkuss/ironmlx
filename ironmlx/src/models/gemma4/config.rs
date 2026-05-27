@@ -70,6 +70,82 @@ fn default_max_position_embeddings() -> i32 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct Gemma4VisionConfig {
+    #[serde(default = "default_vision_model_type")]
+    pub model_type: String,
+    pub hidden_size: i32,
+    pub intermediate_size: i32,
+    pub num_hidden_layers: i32,
+    pub num_attention_heads: i32,
+    pub num_key_value_heads: i32,
+    pub head_dim: i32,
+    #[serde(default)]
+    pub global_head_dim: Option<i32>,
+    #[serde(default = "default_hidden_activation")]
+    pub hidden_activation: String,
+    #[serde(default = "default_rms_norm_eps")]
+    pub rms_norm_eps: f32,
+    #[serde(default = "default_max_position_embeddings")]
+    pub max_position_embeddings: i32,
+    #[serde(default)]
+    pub attention_bias: bool,
+    #[serde(default)]
+    pub attention_dropout: f32,
+    #[serde(default)]
+    pub layer_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub rope_parameters: Option<Gemma4VisionRopeParams>,
+    #[serde(default = "default_vision_output_length")]
+    pub default_output_length: i32,
+    #[serde(default = "default_patch_size")]
+    pub patch_size: i32,
+    #[serde(default = "default_position_embedding_size")]
+    pub position_embedding_size: i32,
+    #[serde(default = "default_pooling_kernel_size")]
+    pub pooling_kernel_size: i32,
+    #[serde(default)]
+    pub use_clipped_linears: bool,
+    #[serde(default)]
+    pub standardize: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Gemma4VisionRopeParams {
+    #[serde(default = "default_vision_rope_theta")]
+    pub rope_theta: f32,
+    #[serde(default = "default_rope_type")]
+    pub rope_type: String,
+}
+
+fn default_vision_model_type() -> String {
+    "gemma4_vision".to_owned()
+}
+
+fn default_hidden_activation() -> String {
+    "gelu_pytorch_tanh".to_owned()
+}
+
+fn default_vision_output_length() -> i32 {
+    280
+}
+
+fn default_patch_size() -> i32 {
+    16
+}
+
+fn default_position_embedding_size() -> i32 {
+    10_240
+}
+
+fn default_pooling_kernel_size() -> i32 {
+    3
+}
+
+fn default_vision_rope_theta() -> f32 {
+    100.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Gemma4TextConfig {
     #[serde(default = "default_text_model_type")]
     pub model_type: String,
@@ -136,9 +212,17 @@ pub struct Gemma4Config {
     pub model_type: String,
     pub text_config: Gemma4TextConfig,
     #[serde(default)]
+    pub vision_config: Option<Gemma4VisionConfig>,
+    #[serde(default)]
     pub image_token_id: Option<i32>,
     #[serde(default)]
     pub audio_token_id: Option<i32>,
+    #[serde(default)]
+    pub boi_token_id: Option<i32>,
+    #[serde(default)]
+    pub eoi_token_id: Option<i32>,
+    #[serde(default = "default_vision_output_length")]
+    pub vision_soft_tokens_per_image: i32,
 }
 
 fn default_model_type() -> String {
@@ -159,7 +243,69 @@ impl Gemma4Config {
                 self.model_type
             ));
         }
-        self.text_config.validate_and_finalize()
+        self.text_config.validate_and_finalize()?;
+        if let Some(vc) = &self.vision_config {
+            vc.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl Gemma4VisionConfig {
+    fn validate(&self) -> Result<()> {
+        if self.model_type != "gemma4_vision" {
+            return Err(anyhow!(
+                "Gemma4VisionConfig: expected model_type=gemma4_vision, got `{}`",
+                self.model_type
+            ));
+        }
+        if self.hidden_size <= 0
+            || self.intermediate_size <= 0
+            || self.num_hidden_layers <= 0
+            || self.num_attention_heads <= 0
+            || self.num_key_value_heads <= 0
+            || self.head_dim <= 0
+        {
+            return Err(anyhow!(
+                "Gemma4VisionConfig: hidden/intermediate/layer/head dimensions must be positive"
+            ));
+        }
+        if self.patch_size <= 0 || self.pooling_kernel_size <= 0 {
+            return Err(anyhow!(
+                "Gemma4VisionConfig: patch_size and pooling_kernel_size must be positive"
+            ));
+        }
+        if self.default_output_length <= 0 || self.position_embedding_size <= 0 {
+            return Err(anyhow!(
+                "Gemma4VisionConfig: output length and position embedding size must be positive"
+            ));
+        }
+        if self.hidden_activation != "gelu_pytorch_tanh" {
+            return Err(anyhow!(
+                "Gemma4VisionConfig: unsupported hidden_activation `{}`",
+                self.hidden_activation
+            ));
+        }
+        if let Some(params) = &self.rope_parameters {
+            if params.rope_type != "default" {
+                return Err(anyhow!(
+                    "Gemma4VisionConfig: unsupported rope_type `{}`",
+                    params.rope_type
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn rope_theta(&self) -> f32 {
+        self.rope_parameters
+            .as_ref()
+            .map(|p| p.rope_theta)
+            .unwrap_or_else(default_vision_rope_theta)
+    }
+
+    pub fn max_patches(&self) -> i32 {
+        self.default_output_length * self.pooling_kernel_size * self.pooling_kernel_size
     }
 }
 

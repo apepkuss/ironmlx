@@ -21,6 +21,16 @@ pub mod health;
 mod openai;
 pub mod scheduler_actor;
 
+#[derive(Clone)]
+pub enum VisionInputConfig {
+    Qwen {
+        spatial_merge_size: i32,
+    },
+    Gemma4 {
+        vision_config: crate::models::gemma4::Gemma4VisionConfig,
+    },
+}
+
 /// HTTP server shared state. The model is wrapped in a tokio Mutex —
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
 ///
@@ -42,6 +52,7 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// disables chunking. Applied to every `GenerateRequest` constructed
     /// by the request handlers.
     pub prefill_chunk_size: usize,
+    pub vision_input: VisionInputConfig,
     /// SchedulerActor handle. Routed to by short-prompt requests. See
     /// `serve_via_scheduler_*` in `openai.rs`.
     pub scheduler_handle: scheduler_actor::SchedulerActorHandle,
@@ -66,6 +77,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             tokenizer: self.tokenizer.clone(),
             model_id: self.model_id.clone(),
             prefill_chunk_size: self.prefill_chunk_size,
+            vision_input: self.vision_input.clone(),
             scheduler_handle: self.scheduler_handle.clone(),
             b_max: self.b_max,
             admission_deadline_ms: self.admission_deadline_ms,
@@ -89,6 +101,7 @@ pub async fn serve<M>(
     admission_queue_max: usize,
     max_cache_cap: usize,              // 3f
     p5h_measurement_eval_probes: bool, // P5h+1 T1
+    vision_input_override: Option<VisionInputConfig>,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -132,6 +145,9 @@ where
         effective_cap_max,
         meta,
     )?;
+    let vision_input = vision_input_override.unwrap_or(VisionInputConfig::Qwen {
+        spatial_merge_size: meta.spatial_merge_size,
+    });
 
     // B1-p2.5 G3: Build SchedulerHealthCollector from shared Arc atomics
     // exposed by SchedulerActorHandle. max_position_embeddings already resolved
@@ -155,6 +171,7 @@ where
         tokenizer: Arc::new(tokenizer),
         model_id,
         prefill_chunk_size,
+        vision_input,
         scheduler_handle,
         b_max,
         admission_deadline_ms,

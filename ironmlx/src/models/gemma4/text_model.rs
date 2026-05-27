@@ -103,9 +103,22 @@ impl Gemma4TextModel {
             ));
         }
         let hidden = self.embed_on(input_ids, target)?;
-        let per_layer_inputs = self.per_layer_inputs_on(input_ids, &hidden, target)?;
+        self.forward_embeddings_on(&hidden, input_ids, per_row_lens, cache, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_embeddings_on(
+        &self,
+        hidden: &Array,
+        per_layer_token_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let per_layer_inputs = self.per_layer_inputs_on(per_layer_token_ids, hidden, target)?;
         self.forward_post_embedding_on(
-            &hidden,
+            hidden,
             per_layer_inputs.as_ref(),
             per_row_lens,
             cache,

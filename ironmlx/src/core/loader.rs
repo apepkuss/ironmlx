@@ -221,10 +221,12 @@ impl Loader {
     ) -> Result<()> {
         let is_qwen35 = is_qwen35_offset_gamma_model(config_raw);
 
-        // 0. Drop non-text tower keys unless caller explicitly requests them.
-        //    LLM-only inference (Loader::open) drops them; multimodal inference
-        //    (Loader::open_multimodal) retains them for VisionTower.
-        if !keep_vision_tower {
+        // 0. Drop non-text tower keys unless caller explicitly requests the
+        //    vision path. Audio is not supported by any ironmlx path yet, so it
+        //    is always discarded before conv/norm detection.
+        if keep_vision_tower {
+            weights.retain(|k, _| !k.starts_with("audio_tower.") && !k.starts_with("embed_audio."));
+        } else {
             weights.retain(|k, _| {
                 !k.starts_with("vision_tower.")
                     && !k.starts_with("audio_tower.")
@@ -719,6 +721,16 @@ mod tests {
         let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
         // vision_tower.* must be retained when keep_vision_tower=true.
         w.insert("vision_tower.patch_embed.proj.weight".into(), arr.clone());
+        w.insert(
+            "embed_vision.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        // Audio is still unsupported and must not survive open_multimodal.
+        w.insert("audio_tower.layers.0.weight".into(), arr.clone());
+        w.insert(
+            "embed_audio.embedding_projection.weight".into(),
+            arr.clone(),
+        );
         w.insert("model.embed_tokens.weight".into(), arr.clone());
 
         Loader::sanitize(&mut w, &empty_text_config(), true).unwrap();
@@ -726,6 +738,18 @@ mod tests {
         assert!(
             w.contains_key("vision_tower.patch_embed.proj.weight"),
             "vision_tower key must be kept when keep_vision_tower=true"
+        );
+        assert!(
+            w.contains_key("embed_vision.embedding_projection.weight"),
+            "embed_vision key must be kept when keep_vision_tower=true"
+        );
+        assert!(
+            !w.contains_key("audio_tower.layers.0.weight"),
+            "audio_tower key must be dropped even when keep_vision_tower=true"
+        );
+        assert!(
+            !w.contains_key("embed_audio.embedding_projection.weight"),
+            "embed_audio key must be dropped even when keep_vision_tower=true"
         );
         assert!(
             w.contains_key("model.embed_tokens.weight"),
