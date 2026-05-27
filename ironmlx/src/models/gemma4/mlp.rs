@@ -7,7 +7,7 @@ use crate::nn::Linear;
 use crate::Result;
 
 use super::config::Gemma4LayerKind;
-use super::ops::gelu_approx_on;
+use super::ops::gelu_approx_mul_on;
 use super::profile;
 
 pub struct Gemma4GeGluMlp {
@@ -71,8 +71,7 @@ impl Gemma4GeGluMlp {
             profile,
         )?;
         let t0 = Instant::now();
-        let gate = gelu_approx_on(&parts[0], target)?;
-        let activated = &gate * &parts[1];
+        let activated = gelu_approx_mul_on(&parts[0], &parts[1], target)?;
         profile::eval_layer(
             "gemma4_text_mlp_geglu",
             self.layer_idx,
