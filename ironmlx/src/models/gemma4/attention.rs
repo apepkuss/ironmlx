@@ -91,6 +91,8 @@ impl Gemma4Attention {
         let dims_borrow = x.shape();
         let dims = dims_borrow.as_slice();
         let (batch, seq) = (dims[0], dims[1]);
+        let single_row_decode =
+            cache.as_ref().is_some() && batch == 1 && seq == 1 && per_row_lens.is_none();
 
         let t0 = Instant::now();
         let q = self
@@ -207,6 +209,9 @@ impl Gemma4Attention {
                 Some(m),
                 None,
                 target,
+            )?,
+            None if single_row_decode => mlx::fast::scaled_dot_product_attention_on(
+                &q, &kv.keys, &kv.values, 1.0, "", None, None, target,
             )?,
             None => mlx::fast::scaled_dot_product_attention_on(
                 &q, &kv.keys, &kv.values, 1.0, "causal", None, None, target,

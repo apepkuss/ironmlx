@@ -186,7 +186,9 @@ impl Gemma4TextModel {
         let offsets = RopeOffsets::from_values(cache_offsets(cache.as_deref(), batch)?)?;
         profile::log("gemma4_text_cache_offsets", t0, profile);
         let explicit_masks = cache.is_some() || per_row_lens.is_some() || batch > 1;
-        let full_mask = if explicit_masks {
+        let single_row_decode = cache.is_some() && per_row_lens.is_none() && batch == 1 && seq == 1;
+        let single_row_decode_len = offsets.values().first().copied().unwrap_or(0) + seq;
+        let full_mask = if explicit_masks && !single_row_decode {
             let t0 = Instant::now();
             let mask =
                 build_attention_mask(offsets.values(), lens, seq, None, Dtype::Bfloat16, target)?;
@@ -196,7 +198,11 @@ impl Gemma4TextModel {
             profile::log("gemma4_text_full_mask_build", Instant::now(), profile);
             None
         };
-        let sliding_mask = if explicit_masks || seq > self.cfg.sliding_window {
+        let needs_sliding_decode_mask =
+            single_row_decode && single_row_decode_len > self.cfg.sliding_window;
+        let sliding_mask = if needs_sliding_decode_mask
+            || (!single_row_decode && (explicit_masks || seq > self.cfg.sliding_window))
+        {
             let t0 = Instant::now();
             let mask = build_attention_mask(
                 offsets.values(),
