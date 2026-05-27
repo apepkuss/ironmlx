@@ -58,7 +58,7 @@ impl Linear {
         let bias = loader.tensor_opt(&bias_key).cloned();
 
         if loader.contains(&scales_key) {
-            let qmeta = loader.quant_meta().ok_or_else(|| {
+            let qmeta = loader.quant_meta_for(prefix).ok_or_else(|| {
                 anyhow!(
                     "Linear `{prefix}`: `{scales_key}` present but Loader has no quantization meta"
                 )

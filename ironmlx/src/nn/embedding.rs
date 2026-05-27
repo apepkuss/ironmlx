@@ -53,7 +53,7 @@ impl Embedding {
         let weight = loader.tensor(&weight_key)?.clone();
 
         if loader.contains(&scales_key) {
-            let qmeta = loader.quant_meta().ok_or_else(|| {
+            let qmeta = loader.quant_meta_for(prefix).ok_or_else(|| {
                 anyhow!(
                     "Embedding `{prefix}`: `{scales_key}` present but Loader has no quantization meta"
                 )

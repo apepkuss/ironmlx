@@ -3,12 +3,16 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use clap::Args;
+use mlx::ops::shape::concatenate;
+use mlx::Array;
 
 use crate::core::generate::{GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
 use crate::core::sampler::Sampler;
+use crate::core::scheduler::DenseVlMethods;
 use crate::core::{Loader, Message, Model, Tokenizer};
+use crate::models::qwen3_5::image_processor;
 use crate::Result;
 
 #[derive(Args, Debug)]
@@ -18,6 +22,12 @@ pub struct GenerateArgs {
 
     #[arg(long)]
     pub prompt: String,
+
+    /// Local image path. Repeat to provide multiple images. If the prompt
+    /// contains <image> markers, they are replaced in argument order;
+    /// otherwise image placeholders are prepended before the prompt.
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<PathBuf>,
 
     #[arg(long, default_value_t = 256)]
     pub max_tokens: usize,
@@ -43,19 +53,129 @@ pub struct GenerateArgs {
     pub prefill_chunk_size: usize,
 }
 
-fn run_generation_with_model<M: Model>(
+struct PreparedImages {
+    pixel_values: Option<Array>,
+    image_grid_thw: Option<Vec<(i32, i32, i32)>>,
+    placeholders: Vec<String>,
+}
+
+fn image_token_count_for_grid(grid: (i32, i32, i32), spatial_merge_size: i32) -> Result<usize> {
+    let (_t, gh, gw) = grid;
+    if spatial_merge_size <= 0 {
+        return Err(anyhow!(
+            "image_spatial_merge_size must be > 0, got {spatial_merge_size}"
+        ));
+    }
+    if gh % spatial_merge_size != 0 || gw % spatial_merge_size != 0 {
+        return Err(anyhow!(
+            "image grid {gh}x{gw} is not divisible by spatial_merge_size={spatial_merge_size}"
+        ));
+    }
+    Ok(((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize)
+}
+
+fn image_placeholder_string(token_count: usize) -> String {
+    let mut out = String::with_capacity(
+        "<|vision_start|>".len() + token_count * "<|image_pad|>".len() + "<|vision_end|>".len(),
+    );
+    out.push_str("<|vision_start|>");
+    for _ in 0..token_count {
+        out.push_str("<|image_pad|>");
+    }
+    out.push_str("<|vision_end|>");
+    out
+}
+
+fn inject_image_placeholders(prompt: &str, placeholders: &[String]) -> Result<String> {
+    if placeholders.is_empty() {
+        return Ok(prompt.to_owned());
+    }
+
+    let marker = "<image>";
+    let marker_count = prompt.match_indices(marker).count();
+    if marker_count == 0 {
+        let mut out = String::new();
+        for placeholder in placeholders {
+            out.push_str(placeholder);
+        }
+        out.push_str(prompt);
+        return Ok(out);
+    }
+
+    if marker_count != placeholders.len() {
+        return Err(anyhow!(
+            "prompt contains {marker_count} <image> markers but {} --image arguments were provided",
+            placeholders.len()
+        ));
+    }
+
+    let mut out =
+        String::with_capacity(prompt.len() + placeholders.iter().map(String::len).sum::<usize>());
+    let mut rest = prompt;
+    for placeholder in placeholders {
+        let Some(idx) = rest.find(marker) else {
+            break;
+        };
+        out.push_str(&rest[..idx]);
+        out.push_str(placeholder);
+        rest = &rest[idx + marker.len()..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn prepare_images(args: &GenerateArgs, spatial_merge_size: i32) -> Result<PreparedImages> {
+    if args.images.is_empty() {
+        return Ok(PreparedImages {
+            pixel_values: None,
+            image_grid_thw: None,
+            placeholders: Vec::new(),
+        });
+    }
+
+    let mut all_pixel_values = Vec::with_capacity(args.images.len());
+    let mut grids = Vec::with_capacity(args.images.len());
+    let mut placeholders = Vec::with_capacity(args.images.len());
+
+    for path in &args.images {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("reading --image {}", path.display()))?;
+        let (pixel_values, gh, gw) = image_processor::preprocess(&bytes)
+            .with_context(|| format!("preprocessing --image {}", path.display()))?;
+        let grid = (1, gh, gw);
+        let token_count = image_token_count_for_grid(grid, spatial_merge_size)?;
+        all_pixel_values.push(pixel_values);
+        grids.push(grid);
+        placeholders.push(image_placeholder_string(token_count));
+    }
+
+    let refs: Vec<&Array> = all_pixel_values.iter().collect();
+    let pixel_values = concatenate(&refs, 0).context("concatenating CLI image pixel_values")?;
+    mlx::transforms::eval(&[&pixel_values]).context("evaluating CLI image pixel_values")?;
+
+    Ok(PreparedImages {
+        pixel_values: Some(pixel_values),
+        image_grid_thw: Some(grids),
+        placeholders,
+    })
+}
+
+fn run_generation_with_model<M: Model + DenseVlMethods>(
     model: &M,
     tokenizer: &Tokenizer,
     args: &GenerateArgs,
 ) -> Result<()> {
+    let spatial_merge_size = model.model_meta().spatial_merge_size;
+    let prepared_images = prepare_images(args, spatial_merge_size)?;
+    let prompt_content = inject_image_placeholders(&args.prompt, &prepared_images.placeholders)?;
     let prompt = if args.chat && tokenizer.has_chat_template() {
         let messages = vec![Message {
             role: "user".into(),
-            content: args.prompt.clone(),
+            content: prompt_content,
         }];
         tokenizer.apply_chat_template(&messages, true, /* extra_kwargs = */ None)?
     } else {
-        args.prompt.clone()
+        prompt_content
     };
     let prompt_ids = tokenizer.encode(&prompt, /* add_special_tokens = */ false)?;
 
@@ -76,18 +196,25 @@ fn run_generation_with_model<M: Model>(
         sampler,
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: args.prefill_chunk_size,
-        pixel_values: None,
-        image_grid_thw: None,
-        // CLI is text-only; both values unused when image_grid_thw is None.
-        image_spatial_merge_size: 2,
-        image_token_id: IMAGE_TOKEN_ID,
+        pixel_values: prepared_images.pixel_values,
+        image_grid_thw: prepared_images.image_grid_thw,
+        image_spatial_merge_size: spatial_merge_size,
+        image_token_id: tokenizer
+            .token_to_id("<|image_pad|>")
+            .map(|id| id as i32)
+            .unwrap_or(IMAGE_TOKEN_ID),
         #[cfg(feature = "p5h-profile")]
         p5h_trace: None,
         #[cfg(feature = "p5h-profile")]
         p5h_root_span: None,
     };
 
-    let mut stream = GenerationStream::new_text_only(model, tokenizer, request)?;
+    let has_images = request.pixel_values.is_some();
+    let mut stream = if has_images {
+        GenerationStream::new(model, tokenizer, request)?
+    } else {
+        GenerationStream::new_text_only(model, tokenizer, request)?
+    };
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     while let Some(ev) = stream.next_token()? {
@@ -111,7 +238,11 @@ pub fn run(args: GenerateArgs) -> Result<()> {
             args.model
         ));
     }
-    let loader = Loader::open(&model_dir).context("Loader::open")?;
+    let loader = if args.images.is_empty() {
+        Loader::open(&model_dir).context("Loader::open")?
+    } else {
+        Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
+    };
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
 
     let model_type = loader
@@ -128,12 +259,56 @@ pub fn run(args: GenerateArgs) -> Result<()> {
             run_generation_with_model(&model, &tokenizer, &args)
         }
         "qwen3_5_moe" => {
-            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
-                .context("Qwen35MoeModel::from_loader")?;
-            run_generation_with_model(&model, &tokenizer, &args)
+            if crate::models::is_qwen36_moe_config(loader.config_raw_value()) {
+                let model = crate::models::Qwen36MoeModel::from_loader(&loader)
+                    .context("Qwen36MoeModel::from_loader")?;
+                run_generation_with_model(&model, &tokenizer, &args)
+            } else {
+                let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                    .context("Qwen35MoeModel::from_loader")?;
+                run_generation_with_model(&model, &tokenizer, &args)
+            }
         }
         other => Err(anyhow::anyhow!(
             "unsupported model_type: {other} (expected 'qwen3_5' or 'qwen3_5_moe')"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_token_count_uses_spatial_merge_size() {
+        assert_eq!(image_token_count_for_grid((1, 4, 6), 2).unwrap(), 6);
+    }
+
+    #[test]
+    fn inject_image_placeholders_replaces_markers_in_order() {
+        let out = inject_image_placeholders(
+            "A <image> then B <image>",
+            &["[img0]".to_owned(), "[img1]".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(out, "A [img0] then B [img1]");
+    }
+
+    #[test]
+    fn inject_image_placeholders_prepends_when_prompt_has_no_markers() {
+        let out = inject_image_placeholders(
+            "Describe this.",
+            &["[img0]".to_owned(), "[img1]".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(out, "[img0][img1]Describe this.");
+    }
+
+    #[test]
+    fn inject_image_placeholders_rejects_marker_count_mismatch() {
+        let err =
+            inject_image_placeholders("A <image>", &["[img0]".to_owned(), "[img1]".to_owned()])
+                .expect_err("marker mismatch");
+        assert!(err.to_string().contains("markers"));
     }
 }

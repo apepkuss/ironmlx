@@ -160,9 +160,15 @@ pub fn run(args: ServeArgs) -> Result<()> {
             serve_with_model(model, tokenizer, &args)
         }
         "qwen3_5_moe" => {
-            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
-                .context("Qwen35MoeModel::from_loader")?;
-            serve_with_model(model, tokenizer, &args)
+            if crate::models::is_qwen36_moe_config(loader.config_raw_value()) {
+                let model = crate::models::Qwen36MoeModel::from_loader(&loader)
+                    .context("Qwen36MoeModel::from_loader")?;
+                serve_with_model(model, tokenizer, &args)
+            } else {
+                let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                    .context("Qwen35MoeModel::from_loader")?;
+                serve_with_model(model, tokenizer, &args)
+            }
         }
         other => Err(anyhow::anyhow!("unsupported model_type: {other}")),
     }

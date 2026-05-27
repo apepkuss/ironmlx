@@ -19,7 +19,7 @@ pub enum QuantMode {
 }
 
 /// Quantization metadata parsed from `config.json`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuantMeta {
     /// Group size for per-group quantization parameters.
     pub group_size: i32,
@@ -63,6 +63,7 @@ pub struct TokenizerConfig {
 pub struct Loader {
     tensors: HashMap<String, Array>,
     quant: Option<QuantMeta>,
+    quant_overrides: HashMap<String, QuantMeta>,
     tokenizer_config: TokenizerConfig,
     config_raw: serde_json::Value,
     model_dir: std::path::PathBuf,
@@ -119,6 +120,10 @@ impl Loader {
         }
 
         let quant = parse_quant_meta(&config_raw)?;
+        let quant_overrides = match quant {
+            Some(global) => parse_quant_overrides(&config_raw, global)?,
+            None => HashMap::new(),
+        };
 
         let mut tensors = load_safetensors(model_dir)?;
 
@@ -144,6 +149,7 @@ impl Loader {
         Ok(Self {
             tensors,
             quant,
+            quant_overrides,
             tokenizer_config,
             config_raw,
             model_dir: model_dir.to_path_buf(),
@@ -175,6 +181,12 @@ impl Loader {
     /// Quantization metadata, or None if model is not quantized.
     pub fn quant_meta(&self) -> Option<QuantMeta> {
         self.quant
+    }
+
+    /// Quantization metadata for a tensor prefix. Per-prefix overrides in
+    /// `config.json` take precedence over the global quantization metadata.
+    pub fn quant_meta_for(&self, prefix: &str) -> Option<QuantMeta> {
+        self.quant_overrides.get(prefix).copied().or(self.quant)
     }
 
     /// Parse model-specific config struct via serde.
@@ -306,34 +318,79 @@ impl Loader {
     }
 }
 
-fn parse_quant_meta(config_raw: &serde_json::Value) -> Result<Option<QuantMeta>> {
-    let Some(q) = config_raw
+fn quant_config_value(config_raw: &serde_json::Value) -> Option<&serde_json::Value> {
+    config_raw
         .get("quantization")
         .or_else(|| config_raw.get("quantization_config"))
-    else {
+}
+
+fn parse_quant_meta(config_raw: &serde_json::Value) -> Result<Option<QuantMeta>> {
+    let Some(q) = quant_config_value(config_raw) else {
         return Ok(None);
     };
+    Ok(Some(parse_quant_meta_value(q, None, "quantization")?))
+}
+
+fn parse_quant_overrides(
+    config_raw: &serde_json::Value,
+    global: QuantMeta,
+) -> Result<HashMap<String, QuantMeta>> {
+    let Some(q) = quant_config_value(config_raw) else {
+        return Ok(HashMap::new());
+    };
+    let q_obj = q
+        .as_object()
+        .ok_or_else(|| anyhow!("quantization must be a JSON object"))?;
+    let mut overrides = HashMap::new();
+
+    for (key, value) in q_obj {
+        if value.as_object().is_none()
+            || (value.get("bits").is_none() && value.get("group_size").is_none())
+        {
+            continue;
+        }
+        let prefix = normalize_quant_prefix(key);
+        let meta =
+            parse_quant_meta_value(value, Some(global.mode), &format!("quantization.{key}"))?;
+        overrides.insert(prefix, meta);
+    }
+
+    Ok(overrides)
+}
+
+fn parse_quant_meta_value(
+    q: &serde_json::Value,
+    default_mode: Option<QuantMode>,
+    context_name: &str,
+) -> Result<QuantMeta> {
     let group_size_i64 = q
         .get("group_size")
         .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow!("quantization.group_size missing or non-int"))?;
-    let group_size =
-        i32::try_from(group_size_i64).context("quantization.group_size out of i32 range")?;
+        .ok_or_else(|| anyhow!("{context_name}.group_size missing or non-int"))?;
+    let group_size = i32::try_from(group_size_i64)
+        .with_context(|| format!("{context_name}.group_size out of i32 range"))?;
     let bits_i64 = q
         .get("bits")
         .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow!("quantization.bits missing or non-int"))?;
-    let bits = i32::try_from(bits_i64).context("quantization.bits out of i32 range")?;
-    let mode_str = q.get("mode").and_then(|m| m.as_str()).unwrap_or("affine");
-    let mode = match mode_str {
-        "affine" => QuantMode::Affine,
-        other => return Err(anyhow!("unsupported quantization.mode `{other}`")),
+        .ok_or_else(|| anyhow!("{context_name}.bits missing or non-int"))?;
+    let bits =
+        i32::try_from(bits_i64).with_context(|| format!("{context_name}.bits out of i32 range"))?;
+    let mode = match q.get("mode").and_then(|m| m.as_str()) {
+        Some("affine") => QuantMode::Affine,
+        Some(other) => return Err(anyhow!("unsupported {context_name}.mode `{other}`")),
+        None => default_mode.unwrap_or(QuantMode::Affine),
     };
-    Ok(Some(QuantMeta {
+    Ok(QuantMeta {
         group_size,
         bits,
         mode,
-    }))
+    })
+}
+
+fn normalize_quant_prefix(key: &str) -> String {
+    key.strip_prefix("language_model.")
+        .unwrap_or(key)
+        .to_owned()
 }
 
 fn load_safetensors(model_dir: &Path) -> Result<HashMap<String, Array>> {
@@ -409,6 +466,65 @@ mod tests {
         let q = parse_quant_meta(&cfg).unwrap().expect("quant");
         assert_eq!(q.bits, 8);
         assert_eq!(q.group_size, 128);
+    }
+
+    #[test]
+    fn parse_quant_overrides_normalizes_language_model_prefix() {
+        let cfg = json!({
+            "quantization": {
+                "group_size": 64,
+                "bits": 4,
+                "mode": "affine",
+                "language_model.model.layers.0.mlp.gate": {
+                    "group_size": 64,
+                    "bits": 8
+                }
+            }
+        });
+        let global = parse_quant_meta(&cfg).unwrap().expect("global quant");
+        let overrides = parse_quant_overrides(&cfg, global).unwrap();
+
+        assert_eq!(
+            overrides["model.layers.0.mlp.gate"],
+            QuantMeta {
+                group_size: 64,
+                bits: 8,
+                mode: QuantMode::Affine,
+            }
+        );
+    }
+
+    #[test]
+    fn quant_meta_for_prefers_override_then_falls_back_to_global() {
+        let global = QuantMeta {
+            group_size: 64,
+            bits: 4,
+            mode: QuantMode::Affine,
+        };
+        let override_meta = QuantMeta {
+            group_size: 64,
+            bits: 8,
+            mode: QuantMode::Affine,
+        };
+        let mut quant_overrides = HashMap::new();
+        quant_overrides.insert("model.layers.0.mlp.gate".to_owned(), override_meta);
+        let loader = Loader {
+            tensors: HashMap::new(),
+            quant: Some(global),
+            quant_overrides,
+            tokenizer_config: TokenizerConfig::default(),
+            config_raw: json!({}),
+            model_dir: std::path::PathBuf::new(),
+        };
+
+        assert_eq!(
+            loader.quant_meta_for("model.layers.0.mlp.gate"),
+            Some(override_meta)
+        );
+        assert_eq!(
+            loader.quant_meta_for("model.layers.0.self_attn.q_proj"),
+            Some(global)
+        );
     }
 
     #[test]
