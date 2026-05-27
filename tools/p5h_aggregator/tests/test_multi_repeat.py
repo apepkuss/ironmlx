@@ -8,7 +8,11 @@ from pathlib import Path
 TOOLS_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOLS_DIR))
 
-from p5h_aggregator.multi_repeat import parse_attribution_csv  # noqa: E402
+from p5h_aggregator.multi_repeat import (  # noqa: E402
+    attribute_child_spans,
+    parse_attribution_csv,
+)
+from p5h_aggregator.schema_validator import Span  # noqa: E402
 
 
 def test_parse_attribution_csv_root_via_empty_parent_span_id(tmp_path):
@@ -89,3 +93,71 @@ def test_parse_attribution_csv_raises_on_missing_root(tmp_path):
 
     with pytest.raises(SystemExit):
         parse_attribution_csv(csv_path)
+
+
+def _tree_span(
+    request_id: str,
+    span_id: int,
+    parent_span_id: int | None,
+    span_name: str,
+    parent_span: str | None,
+    inclusive_us: float,
+    layer_idx: int = 0,
+) -> Span:
+    return Span(
+        request_id=request_id,
+        routing_path="scheduler",
+        prompt_tokens=128,
+        seq=0,
+        layer_idx=layer_idx,
+        chunk_idx=None,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        span_name=span_name,
+        parent_span=parent_span,
+        start_ns=0,
+        end_ns=int(inclusive_us * 1000),
+        mode="ok",
+        span_kind="tree",
+    )
+
+
+def test_child_span_attribution_uses_parent_span_id_tree_identity():
+    records = []
+    for req_idx in range(3):
+        parent_id = 100 + req_idx
+        records.extend(
+            [
+                _tree_span(f"r{req_idx}", parent_id, 10, "gather_qmm_gate_up", "mlp_path", 1000.0),
+                _tree_span(f"r{req_idx}", parent_id + 1, parent_id, "gate_up_input_shape_prep", "gather_qmm_gate_up", 50.0),
+                _tree_span(f"r{req_idx}", parent_id + 2, parent_id, "gate_up_gather_qmm_call", "gather_qmm_gate_up", 800.0),
+                _tree_span(f"r{req_idx}", parent_id + 3, parent_id, "gate_up_slice_outputs", "gather_qmm_gate_up", 100.0),
+                _tree_span(f"r{req_idx}", parent_id + 4, 10, "gate_up_gather_qmm_call", "mlp_path", 9999.0),
+            ]
+        )
+
+    result = attribute_child_spans(records, parent="gather_qmm_gate_up")
+
+    assert result["gate_up_input_shape_prep"]["median_us"] == 50.0
+    assert result["gate_up_input_shape_prep"]["share_of_parent_pct"] == 5.0
+    assert result["gate_up_gather_qmm_call"]["median_us"] == 800.0
+    assert result["gate_up_gather_qmm_call"]["share_of_parent_pct"] == 80.0
+    assert result["gate_up_slice_outputs"]["median_us"] == 100.0
+    assert result["gate_up_slice_outputs"]["share_of_parent_pct"] == 10.0
+    assert result["__residual__"]["median_us"] == 50.0
+    assert result["__residual__"]["share_of_parent_pct"] == 5.0
+
+
+def test_child_span_attribution_handles_missing_child_span():
+    parent_id = 500
+    records = [
+        _tree_span("r0", parent_id, 10, "gather_qmm_gate_up", "mlp_path", 500.0),
+        _tree_span("r0", parent_id + 1, parent_id, "gate_up_gather_qmm_call", "gather_qmm_gate_up", 450.0),
+    ]
+
+    result = attribute_child_spans(records, parent="gather_qmm_gate_up")
+
+    assert "gate_up_gather_qmm_call" in result
+    assert "gate_up_input_shape_prep" not in result
+    assert result["__residual__"]["median_us"] == 50.0
+    assert result["__residual__"]["share_of_parent_pct"] == 10.0

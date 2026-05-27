@@ -54,6 +54,38 @@ fn expert_occupancy_log_enabled() -> bool {
     })
 }
 
+#[cfg(feature = "p5h-profile")]
+fn p5i_c_gate_up_child_spans_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IRONMLX_P5I_C_GATE_UP_CHILD_SPANS")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
+#[cfg(feature = "p5h-profile")]
+fn with_p5i_c_gate_up_child_span<T>(
+    enabled: bool,
+    span_name: &'static str,
+    layer_idx: i32,
+    body: impl FnOnce() -> T,
+) -> T {
+    if enabled {
+        crate::core::p5h::try_with_p5h_span_from_current_trace(
+            span_name,
+            || crate::core::p5h::SpanFields {
+                layer_idx: Some(layer_idx),
+                ..Default::default()
+            },
+            body,
+        )
+    } else {
+        body()
+    }
+}
+
 /// Source legacy gate + up weights, consumed once during lazy fused-weight
 /// build then dropped to release the 2 × (E × I × H/8) buffer per layer.
 struct LazyGateUpSource {
@@ -396,6 +428,10 @@ impl SparseMoeBlock {
             // expand_dims as part of gather_qmm input shaping. Span count
             // is invariant across branches.
 
+            // P5i.c Phase 1 Stage α: capture gate_up child-span opt-in flag
+            // once per forward pass (OnceLock cached; env var read only once).
+            let gate_up_child_spans_enabled = p5i_c_gate_up_child_spans_enabled();
+
             // Substep 1: router_logits_softmax_topk — Linear(hidden→E) +
             // softmax + argpartition top-k + slice + take_along + renormalize
             // + cast indices to uint32 for downstream gather_qmm.
@@ -606,39 +642,57 @@ impl SparseMoeBlock {
                         let fused = self.routed.fused_gate_up(target)?;
                         if let Some((sorted_x_4d, sorted_topk_2d, sort_perm)) = sort_pack_state {
                             let bs_k_local = sorted_topk_2d.shape().as_slice()[0];
-                            let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
-                                &sorted_x_4d,
-                                &fused.weight,
-                                &fused.scales,
-                                fused.biases.as_ref(),
-                                None,
-                                Some(&sorted_topk_2d),
-                                true,
-                                Some(self.routed.group_size),
-                                Some(self.routed.bits),
-                                "affine",
-                                /* sorted_indices */ true,
-                                target,
-                            )
-                            .context("SparseMoeBlock: gate_up gather_qmm (sorted, p5h-profile)")?;
-                            // sorted-profile branch promotes sorted_x to rank-4
-                            // [BS*k,1,1,H]; gather_qmm output is rank-4
-                            // [BS*k,1,1,2*I] (lhs_indices broadcast shape +
-                            // [M=1, N=2*I]). Slice along axis=-1.
-                            let gate_out = slice_on(
-                                &gate_up_out,
-                                [0_i32, 0, 0, 0],
-                                [bs_k_local, 1, 1, i],
-                                target,
-                            )
-                            .context("SparseMoeBlock: slice gate_out (sorted, p5h-profile)")?;
-                            let up_out = slice_on(
-                                &gate_up_out,
-                                [0_i32, 0, 0, i],
-                                [bs_k_local, 1, 1, 2 * i],
-                                target,
-                            )
-                            .context("SparseMoeBlock: slice up_out (sorted, p5h-profile)")?;
+                            // Phase 1 Stage α: cost decomposition sub-spans (sorted branch).
+                            let gate_up_out = with_p5i_c_gate_up_child_span(
+                                gate_up_child_spans_enabled,
+                                "gate_up_gather_qmm_call",
+                                layer_idx,
+                                || -> Result<Array> {
+                                    mlx::quantization::gather_quantized_matmul_on(
+                                        &sorted_x_4d,
+                                        &fused.weight,
+                                        &fused.scales,
+                                        fused.biases.as_ref(),
+                                        None,
+                                        Some(&sorted_topk_2d),
+                                        true,
+                                        Some(self.routed.group_size),
+                                        Some(self.routed.bits),
+                                        "affine",
+                                        /* sorted_indices */ true,
+                                        target,
+                                    )
+                                    .context(
+                                        "SparseMoeBlock: gate_up gather_qmm (sorted, p5h-profile)",
+                                    )
+                                },
+                            )?;
+                            let (gate_out, up_out) = with_p5i_c_gate_up_child_span(
+                                gate_up_child_spans_enabled,
+                                "gate_up_slice_outputs",
+                                layer_idx,
+                                || -> Result<(Array, Array)> {
+                                    let gate_out = slice_on(
+                                        &gate_up_out,
+                                        [0_i32, 0, 0, 0],
+                                        [bs_k_local, 1, 1, i],
+                                        target,
+                                    )
+                                    .context(
+                                        "SparseMoeBlock: slice gate_out (sorted, p5h-profile)",
+                                    )?;
+                                    let up_out = slice_on(
+                                        &gate_up_out,
+                                        [0_i32, 0, 0, i],
+                                        [bs_k_local, 1, 1, 2 * i],
+                                        target,
+                                    )
+                                    .context(
+                                        "SparseMoeBlock: slice up_out (sorted, p5h-profile)",
+                                    )?;
+                                    Ok((gate_out, up_out))
+                                },
+                            )?;
                             // P5h+1 T1: measurement-eval probe (sorted branch).
                             if crate::core::p5h::is_measurement_eval_probes_active() {
                                 mlx::transforms::eval(&[
@@ -651,37 +705,70 @@ impl SparseMoeBlock {
                             Ok((gate_out, up_out, sorted_topk_2d, true, Some(sort_perm)))
                         } else {
                             // --- Default broadcast path. ---
-                            let x_in = mlx::ops::shape::expand_dims_on(
-                                &flat_x,
-                                &[-2_i32, -3_i32][..],
-                                target,
-                            )
-                            .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")?;
-                            let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
-                                &x_in,
-                                &fused.weight,
-                                &fused.scales,
-                                fused.biases.as_ref(),
-                                None,
-                                Some(&inds_u32),
-                                true,
-                                Some(self.routed.group_size),
-                                Some(self.routed.bits),
-                                "affine",
-                                false,
-                                target,
-                            )
-                            .context("SparseMoeBlock: gate_up gather_qmm (default, p5h-profile)")?;
-                            let gate_out =
-                                slice_on(&gate_up_out, [0_i32, 0, 0, 0], [bs, k, 1, i], target)
+                            // Phase 1 Stage α: cost decomposition sub-spans (default branch).
+                            let x_in = with_p5i_c_gate_up_child_span(
+                                gate_up_child_spans_enabled,
+                                "gate_up_input_shape_prep",
+                                layer_idx,
+                                || -> Result<Array> {
+                                    mlx::ops::shape::expand_dims_on(
+                                        &flat_x,
+                                        &[-2_i32, -3_i32][..],
+                                        target,
+                                    )
+                                    .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")
+                                },
+                            )?;
+                            let gate_up_out = with_p5i_c_gate_up_child_span(
+                                gate_up_child_spans_enabled,
+                                "gate_up_gather_qmm_call",
+                                layer_idx,
+                                || -> Result<Array> {
+                                    mlx::quantization::gather_quantized_matmul_on(
+                                        &x_in,
+                                        &fused.weight,
+                                        &fused.scales,
+                                        fused.biases.as_ref(),
+                                        None,
+                                        Some(&inds_u32),
+                                        true,
+                                        Some(self.routed.group_size),
+                                        Some(self.routed.bits),
+                                        "affine",
+                                        /* sorted_indices */ false,
+                                        target,
+                                    )
+                                    .context(
+                                        "SparseMoeBlock: gate_up gather_qmm (default, p5h-profile)",
+                                    )
+                                },
+                            )?;
+                            let (gate_out, up_out) = with_p5i_c_gate_up_child_span(
+                                gate_up_child_spans_enabled,
+                                "gate_up_slice_outputs",
+                                layer_idx,
+                                || -> Result<(Array, Array)> {
+                                    let gate_out = slice_on(
+                                        &gate_up_out,
+                                        [0_i32, 0, 0, 0],
+                                        [bs, k, 1, i],
+                                        target,
+                                    )
                                     .context(
                                         "SparseMoeBlock: slice gate_out (default, p5h-profile)",
                                     )?;
-                            let up_out =
-                                slice_on(&gate_up_out, [0_i32, 0, 0, i], [bs, k, 1, 2 * i], target)
+                                    let up_out = slice_on(
+                                        &gate_up_out,
+                                        [0_i32, 0, 0, i],
+                                        [bs, k, 1, 2 * i],
+                                        target,
+                                    )
                                     .context(
                                         "SparseMoeBlock: slice up_out (default, p5h-profile)",
                                     )?;
+                                    Ok((gate_out, up_out))
+                                },
+                            )?;
                             // P5h+1 T1: measurement-eval probe (default branch).
                             if crate::core::p5h::is_measurement_eval_probes_active() {
                                 mlx::transforms::eval(&[&gate_out, &up_out, &inds_u32])?;
