@@ -1309,6 +1309,9 @@ impl<M: Model> Scheduler<M> {
             .iter()
             .map(|s| matches!(s, Some(r) if !r.finished && !r.generated_tokens.is_empty()))
             .collect();
+        if !active_at_start.iter().any(|&active| active) {
+            return Ok(Vec::new());
+        }
 
         // Build [B, 1] input_ids in slot order.
         // - For active rows: last generated token. `active_at_start`
@@ -2990,6 +2993,30 @@ mod tests {
         assert!(
             err_msg.contains("step illegal in Finished phase"),
             "expected `step illegal in Finished phase` in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_step_only_mid_admit_reserved_rows_is_noop() {
+        let model = P5h2cFakeModel;
+        let mut s = Scheduler::<P5h2cFakeModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+
+        s.force_phase(Phase::Decoding);
+        let id = s
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("mid-admit reserve");
+
+        let events = s.step(&model).expect("reserved-only step should noop");
+        assert!(events.is_empty());
+        assert_eq!(s.phase(), Phase::Decoding);
+        assert!(
+            s.get(id).unwrap().generated_tokens.is_empty(),
+            "reserved row must not receive a generated token before admit_mid_finalize"
         );
     }
 }
