@@ -325,9 +325,11 @@ impl VisionTower {
         let pos_embed_all = ops::concatenate(&refs, 0)?;
         dump_tensor("02_pos_embed_contrib", &pos_embed_all);
 
-        // Add to patch features
-        let x_cast = ops::cast::astype(x, pe_dtype)?;
-        let result = &x_cast + &pos_embed_all;
+        // Add to patch features without downcasting the patch-embed activations.
+        // mlx-vlm performs `hidden_states + pos_embeds` directly; with Qwen3.6
+        // the patch projection output is fp32 while learned positional embeds
+        // are bf16, so MLX promotion keeps the block input in fp32.
+        let result = x + &pos_embed_all;
         Ok(result)
     }
 

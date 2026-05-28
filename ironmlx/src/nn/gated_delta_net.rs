@@ -155,22 +155,20 @@ impl GatedDeltaNetConfig {
 /// Mirrors mlx-lm's `Qwen3NextGatedDeltaNet`
 /// (`/Volumes/Dev/mlx-lm/mlx_lm/models/qwen3_5.py:85-205`). Components:
 ///
-/// - `in_proj_qkvz` — fused matmul (Q+K+V outputs concat'd with the gate
-///   `z`); equivalent to mlx-lm's `in_proj_qkvz`. Sliced in `forward_on`.
-/// - `in_proj_ba` — fused matmul (forget signal `b` + decay signal `a`);
-///   equivalent to mlx-lm's `in_proj_ba`. Sliced in `forward_on`.
+/// - `in_proj_qkv` — Q/K/V input projection feeding the depthwise conv.
+/// - `in_proj_z` — value gate projection consumed by `RmsNormGated`.
+/// - `in_proj_b` / `in_proj_a` — forget and decay signal projections for
+///   the delta-rule recurrence.
 /// - `conv1d` — depthwise temporal mixing across the Q/K/V channels (then
 ///   silu via module-level fused compile cell)
 /// - `norm` — `RmsNormGated`: `silu(z) * rms_norm(y)` final mixing
 /// - `out_proj` — back to `hidden_size`
 /// - `a_log` / `dt_bias` — per-head learned parameters for compute_g
 pub struct GatedDeltaNet {
-    /// Fused (qkv, z) input projection — concatenated along axis 0 at load
-    /// time. Output `[B, S, conv_dim + value_dim]`; sliced in `forward_on`.
-    in_proj_qkvz: Linear,
-    /// Fused (b, a) input projection — concatenated along axis 0 at load
-    /// time. Output `[B, S, num_v_heads * 2]`; sliced in `forward_on`.
-    in_proj_ba: Linear,
+    in_proj_qkv: Linear,
+    in_proj_z: Linear,
+    in_proj_b: Linear,
+    in_proj_a: Linear,
     conv1d: Conv1d,
     norm: RmsNormGated,
     out_proj: Linear,
@@ -189,125 +187,12 @@ pub struct GatedDeltaNet {
 }
 
 impl GatedDeltaNet {
-    /// Production constructor: load all weight tensors + a_log + dt_bias,
-    /// fusing in_proj_qkv+z → in_proj_qkvz and in_proj_b+a → in_proj_ba
-    /// at load time via axis-0 concatenation.
+    /// Production constructor: load all weight tensors + a_log + dt_bias.
     pub fn from_loader(loader: &Loader, prefix: &str, cfg: GatedDeltaNetConfig) -> Result<Self> {
-        let qmeta = loader.quant_meta().ok_or_else(|| {
-            anyhow!("{prefix}: GatedDeltaNet input projections require quantized loader")
-        })?;
-
-        // Fuse in_proj_qkv + in_proj_z → in_proj_qkvz (output axis 0).
-        let qkv_w = loader
-            .tensor(&format!("{prefix}.in_proj_qkv.weight"))?
-            .clone();
-        let qkv_s = loader
-            .tensor(&format!("{prefix}.in_proj_qkv.scales"))?
-            .clone();
-        let qkv_b_opt = loader
-            .tensor_opt(&format!("{prefix}.in_proj_qkv.biases"))
-            .cloned();
-        let z_w = loader
-            .tensor(&format!("{prefix}.in_proj_z.weight"))?
-            .clone();
-        let z_s = loader
-            .tensor(&format!("{prefix}.in_proj_z.scales"))?
-            .clone();
-        let z_b_opt = loader
-            .tensor_opt(&format!("{prefix}.in_proj_z.biases"))
-            .cloned();
-
-        let qkvz_weight = mlx::ops::shape::concatenate(&[&qkv_w, &z_w], 0)?;
-        let qkvz_scales = mlx::ops::shape::concatenate(&[&qkv_s, &z_s], 0)?;
-        let qkvz_biases = match (qkv_b_opt, z_b_opt) {
-            (Some(a), Some(b)) => Some(mlx::ops::shape::concatenate(&[&a, &b], 0)?),
-            (None, None) => None,
-            _ => {
-                return Err(anyhow!(
-                    "{prefix}: in_proj_qkv.biases and in_proj_z.biases must agree on Some/None"
-                ));
-            }
-        };
-
-        // Eagerly evaluate the fused qkvz tensors on the loading thread so that
-        // no lazy stream-tagged computation escapes into model fields that will
-        // be read from other threads (e.g. tokio blocking-pool during inference).
-        // MLX's CommandEncoder map is thread_local; a lazy Array whose primitive
-        // carries Stream(gpu, N) will panic with "There is no Stream(gpu, N) in
-        // current thread" when gpu::eval is called on a thread that never called
-        // gpu::new_stream(N). The eager eval here materialises the concatenated
-        // tensors so that only plain data buffers (no primitives) are stored.
-        {
-            let mut to_eval: Vec<&Array> = vec![&qkvz_weight, &qkvz_scales];
-            if let Some(b) = &qkvz_biases {
-                to_eval.push(b);
-            }
-            mlx::transforms::eval(&to_eval)
-                .map_err(|e| anyhow!("{prefix}: eager eval of fused qkvz tensors failed: {e}"))?;
-        }
-
-        let in_proj_qkvz = Linear::new_quant(
-            qkvz_weight,
-            qkvz_scales,
-            qkvz_biases,
-            None,
-            qmeta.group_size,
-            qmeta.bits,
-        );
-
-        // Fuse in_proj_b + in_proj_a → in_proj_ba (b first, a second).
-        let b_w = loader
-            .tensor(&format!("{prefix}.in_proj_b.weight"))?
-            .clone();
-        let b_s = loader
-            .tensor(&format!("{prefix}.in_proj_b.scales"))?
-            .clone();
-        let b_b_opt = loader
-            .tensor_opt(&format!("{prefix}.in_proj_b.biases"))
-            .cloned();
-        let a_w = loader
-            .tensor(&format!("{prefix}.in_proj_a.weight"))?
-            .clone();
-        let a_s = loader
-            .tensor(&format!("{prefix}.in_proj_a.scales"))?
-            .clone();
-        let a_b_opt = loader
-            .tensor_opt(&format!("{prefix}.in_proj_a.biases"))
-            .cloned();
-
-        let ba_weight = mlx::ops::shape::concatenate(&[&b_w, &a_w], 0)?;
-        let ba_scales = mlx::ops::shape::concatenate(&[&b_s, &a_s], 0)?;
-        let ba_biases = match (b_b_opt, a_b_opt) {
-            (Some(p), Some(q)) => Some(mlx::ops::shape::concatenate(&[&p, &q], 0)?),
-            (None, None) => None,
-            _ => {
-                return Err(anyhow!(
-                    "{prefix}: in_proj_b.biases and in_proj_a.biases must agree on Some/None"
-                ));
-            }
-        };
-
-        // Same thread-crossing guard as above: eval fused ba tensors before
-        // storing them so no lazy Stream(gpu, N) primitives escape to the
-        // blocking-pool inference thread.
-        {
-            let mut to_eval: Vec<&Array> = vec![&ba_weight, &ba_scales];
-            if let Some(b) = &ba_biases {
-                to_eval.push(b);
-            }
-            mlx::transforms::eval(&to_eval)
-                .map_err(|e| anyhow!("{prefix}: eager eval of fused ba tensors failed: {e}"))?;
-        }
-
-        let in_proj_ba = Linear::new_quant(
-            ba_weight,
-            ba_scales,
-            ba_biases,
-            None,
-            qmeta.group_size,
-            qmeta.bits,
-        );
-
+        let in_proj_qkv = Linear::from_loader(loader, &format!("{prefix}.in_proj_qkv"))?;
+        let in_proj_z = Linear::from_loader(loader, &format!("{prefix}.in_proj_z"))?;
+        let in_proj_b = Linear::from_loader(loader, &format!("{prefix}.in_proj_b"))?;
+        let in_proj_a = Linear::from_loader(loader, &format!("{prefix}.in_proj_a"))?;
         let conv1d_cfg = Conv1dConfig {
             in_channels: cfg.conv_dim(),
             out_channels: cfg.conv_dim(),
@@ -324,8 +209,10 @@ impl GatedDeltaNet {
         let dt_bias = loader.tensor(&format!("{prefix}.dt_bias"))?.clone();
 
         Ok(Self {
-            in_proj_qkvz,
-            in_proj_ba,
+            in_proj_qkv,
+            in_proj_z,
+            in_proj_b,
+            in_proj_a,
             conv1d,
             norm,
             out_proj,
@@ -343,19 +230,15 @@ impl GatedDeltaNet {
 
     /// Test/composition seam: build from pre-built nn building blocks.
     ///
-    /// `in_proj_qkvz` and `in_proj_ba` must already be the fused forms
-    /// (output dim concatenated along axis 0). For tests that build
-    /// separate qkv/z/a/b Linears, concat the underlying weights via
-    /// `mlx::ops::shape::concatenate` first then pass a single fused
-    /// Linear here.
-    ///
     /// `pub` (not `pub(crate)`) so integration tests in `ironmlx/tests/` can use it.
     /// Hidden from rustdoc via `#[doc(hidden)]`.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn from_components(
-        in_proj_qkvz: Linear,
-        in_proj_ba: Linear,
+        in_proj_qkv: Linear,
+        in_proj_z: Linear,
+        in_proj_b: Linear,
+        in_proj_a: Linear,
         conv1d: Conv1d,
         norm: RmsNormGated,
         out_proj: Linear,
@@ -364,8 +247,10 @@ impl GatedDeltaNet {
         cfg: GatedDeltaNetConfig,
     ) -> Self {
         Self {
-            in_proj_qkvz,
-            in_proj_ba,
+            in_proj_qkv,
+            in_proj_z,
+            in_proj_b,
+            in_proj_a,
             conv1d,
             norm,
             out_proj,
@@ -462,15 +347,6 @@ impl GatedDeltaNet {
         let batch = dims[0];
         let seq = dims[1];
 
-        // Hoist commonly-used dim accessors to forward-scope so Step 1a/1b's
-        // expanded wraps (qkv/z and b/a slicing inside the substep closures)
-        // can reference them. Same constants are also consumed by Step 2a/2c
-        // (conv_dim) and Step 3+ downstream — single source of truth avoids
-        // re-evaluating `self.cfg.*()` at multiple sites.
-        let conv_dim = self.cfg.conv_dim();
-        let value_dim = self.cfg.value_dim();
-        let num_v_heads = self.cfg.num_v_heads;
-
         // P5g T0 Layer 1 entry: materialize input + cache states before timer starts.
         // Drains prior lazy ops so they're not attributed to GatedDeltaNet's forward
         // cost; also forces cache.conv_state + cache.recurrent_state to be tangible
@@ -539,14 +415,10 @@ impl GatedDeltaNet {
         #[cfg(feature = "p5g-profile")]
         let mut _p5h_t0b_h4_step_7d: Option<u64> = None;
 
-        // Step 1: fused projections + slice (was 4 quantized matmuls; now 2).
-        // Step 1a: in_proj_qkvz → split qkvz into (qkv, z), then mask-zero qkv
-        // at pad positions. The slicing + mask multiply are bundled into this
-        // wrap (rather than living as standalone code after Step 1b) because
-        // they are the immediate downstream consumers of qkvz; under the P5h
-        // T0a coverage gate the previously-orphaned transition code surfaced
-        // as a ~20 us/layer attention_path gap. Expanding the wrap to cover
-        // {forward + qkv/z slice + mask multiply} closes that gap.
+        // Step 1: reference-equivalent input projections.
+        // Step 1a: in_proj_qkv + in_proj_z, then mask-zero qkv at pad
+        // positions. The mask multiply stays bundled with qkv projection
+        // because it is the immediate downstream consumer before conv1d.
         //
         // Mask-zero rationale (preserved from the prior standalone block):
         // The conv1d is temporal — its output at real-token position t uses
@@ -559,7 +431,7 @@ impl GatedDeltaNet {
         // `[L_i - (k-1), L_i)`), and the kernel post-write of conv_state then
         // captures those pad-slot outputs — so we zero pad qkv up front to
         // keep pad-slot conv1d output benign and avoid leaking pad embeddings
-        // (which are non-zero garbage from in_proj_qkvz) into the cache
+        // (which are non-zero garbage from in_proj_qkv) into the cache
         // update path's per-row slice.
         //
         // The gated_delta_step kernel's per-token mask only skips compute at
@@ -587,19 +459,8 @@ impl GatedDeltaNet {
                         ..Default::default()
                     },
                     || -> Result<(Array, Array)> {
-                        let qkvz = self.in_proj_qkvz.forward_on(x, target)?;
-                        let qkv = mlx::ops::indexing::slice_strided(
-                            &qkvz,
-                            &[0_i32, 0, 0][..],
-                            &[batch, seq, conv_dim][..],
-                            &[1_i32, 1, 1][..],
-                        )?;
-                        let z = mlx::ops::indexing::slice_strided(
-                            &qkvz,
-                            &[0_i32, 0, conv_dim][..],
-                            &[batch, seq, conv_dim + value_dim][..],
-                            &[1_i32, 1, 1][..],
-                        )?;
+                        let qkv = self.in_proj_qkv.forward_on(x, target)?;
+                        let z = self.in_proj_z.forward_on(x, target)?;
                         let qkv = if let Some(m) = mask {
                             let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
                             let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
@@ -617,19 +478,8 @@ impl GatedDeltaNet {
             }
             #[cfg(not(feature = "p5h-profile"))]
             {
-                let qkvz = self.in_proj_qkvz.forward_on(x, target)?;
-                let qkv = mlx::ops::indexing::slice_strided(
-                    &qkvz,
-                    &[0_i32, 0, 0][..],
-                    &[batch, seq, conv_dim][..],
-                    &[1_i32, 1, 1][..],
-                )?;
-                let z = mlx::ops::indexing::slice_strided(
-                    &qkvz,
-                    &[0_i32, 0, conv_dim][..],
-                    &[batch, seq, conv_dim + value_dim][..],
-                    &[1_i32, 1, 1][..],
-                )?;
+                let qkv = self.in_proj_qkv.forward_on(x, target)?;
+                let z = self.in_proj_z.forward_on(x, target)?;
                 let qkv = if let Some(m) = mask {
                     let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
                     let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
@@ -651,10 +501,9 @@ impl GatedDeltaNet {
             }
         }
 
-        // Step 1b: in_proj_ba → split ba into (b, a). Same coverage-gap
-        // motivation as Step 1a: slicing is bundled into the wrap so the
-        // immediate downstream consumer of ba is included in the substep
-        // timing/attribution.
+        // Step 1b: in_proj_b + in_proj_a. Keep both projections in the same
+        // profiling span because they form one logical recurrence-parameter
+        // stage.
         #[cfg(feature = "p5g-profile")]
         let _p5g_step_start_1b = if matches!(_p5g_mode, ProfileMode::Layer2) {
             Some(std::time::Instant::now())
@@ -671,19 +520,8 @@ impl GatedDeltaNet {
                         ..Default::default()
                     },
                     || -> Result<(Array, Array)> {
-                        let ba = self.in_proj_ba.forward_on(x, target)?;
-                        let b = mlx::ops::indexing::slice_strided(
-                            &ba,
-                            &[0_i32, 0, 0][..],
-                            &[batch, seq, num_v_heads][..],
-                            &[1_i32, 1, 1][..],
-                        )?;
-                        let a = mlx::ops::indexing::slice_strided(
-                            &ba,
-                            &[0_i32, 0, num_v_heads][..],
-                            &[batch, seq, num_v_heads + num_v_heads][..],
-                            &[1_i32, 1, 1][..],
-                        )?;
+                        let b = self.in_proj_b.forward_on(x, target)?;
+                        let a = self.in_proj_a.forward_on(x, target)?;
                         // P5h+1 T1: measurement-eval probe.
                         if crate::core::p5h::is_measurement_eval_probes_active() {
                             mlx::transforms::eval(&[&b, &a])?;
@@ -694,19 +532,8 @@ impl GatedDeltaNet {
             }
             #[cfg(not(feature = "p5h-profile"))]
             {
-                let ba = self.in_proj_ba.forward_on(x, target)?;
-                let b = mlx::ops::indexing::slice_strided(
-                    &ba,
-                    &[0_i32, 0, 0][..],
-                    &[batch, seq, num_v_heads][..],
-                    &[1_i32, 1, 1][..],
-                )?;
-                let a = mlx::ops::indexing::slice_strided(
-                    &ba,
-                    &[0_i32, 0, num_v_heads][..],
-                    &[batch, seq, num_v_heads + num_v_heads][..],
-                    &[1_i32, 1, 1][..],
-                )?;
+                let b = self.in_proj_b.forward_on(x, target)?;
+                let a = self.in_proj_a.forward_on(x, target)?;
                 (b, a)
             }
         };
@@ -2205,13 +2032,11 @@ mod tests {
         let a_log = Array::zeros((cfg.num_v_heads,), Dtype::Float32).unwrap();
         let dt_bias = mlx::ops::constructors::ones((cfg.num_v_heads,), Dtype::Float32).unwrap();
 
-        // Fuse qkv+z → qkvz and b+a → ba along axis 0.
-        let qkvz_w = concatenate(&[&qkv_w, &z_w], 0).unwrap();
-        let ba_w = concatenate(&[&b_w, &a_w], 0).unwrap();
-
         GatedDeltaNet::from_components(
-            crate::nn::Linear::new_fp(qkvz_w, None),
-            crate::nn::Linear::new_fp(ba_w, None),
+            crate::nn::Linear::new_fp(qkv_w, None),
+            crate::nn::Linear::new_fp(z_w, None),
+            crate::nn::Linear::new_fp(b_w, None),
+            crate::nn::Linear::new_fp(a_w, None),
             crate::nn::Conv1d::new(
                 conv_w,
                 None,
@@ -2417,63 +2242,6 @@ mod tests {
     #[test]
     fn gated_delta_zero_state_masked_kernel_matches_explicit_zero_state() {
         assert_zero_state_kernel_matches_regular(true);
-    }
-
-    #[test]
-    fn qkvz_concat_load_matches_separate_matmuls() {
-        // Use Linear::new_fp (fp32, no quant) so we can exercise the concat
-        // logic without needing a real quantized fixture. The concat math is
-        // identical for fp and quantized weights along axis 0.
-        let hidden_size = 4_i32;
-        let qkv_out = 6_i32;
-        let z_out = 4_i32;
-
-        let x_data: Vec<f32> = (0..hidden_size).map(|i| (i as f32) * 0.1).collect();
-        let x: Array = (x_data.as_slice(), &[1_i32, 1, hidden_size][..])
-            .try_into()
-            .unwrap();
-
-        let w_qkv_data: Vec<f32> = (0..qkv_out * hidden_size)
-            .map(|i| (i as f32) * 0.01 - 0.05)
-            .collect();
-        let w_z_data: Vec<f32> = (0..z_out * hidden_size)
-            .map(|i| (i as f32) * 0.02 + 0.03)
-            .collect();
-        let w_qkv: Array = (w_qkv_data.as_slice(), &[qkv_out, hidden_size][..])
-            .try_into()
-            .unwrap();
-        let w_z: Array = (w_z_data.as_slice(), &[z_out, hidden_size][..])
-            .try_into()
-            .unwrap();
-
-        let lin_qkv = crate::nn::Linear::new_fp(w_qkv.clone(), None);
-        let lin_z = crate::nn::Linear::new_fp(w_z.clone(), None);
-        let out_qkv: Vec<f32> = lin_qkv.forward(&x).unwrap().to_vec().unwrap();
-        let out_z: Vec<f32> = lin_z.forward(&x).unwrap().to_vec().unwrap();
-
-        let w_fused = mlx::ops::shape::concatenate(&[&w_qkv, &w_z], 0).unwrap();
-        let lin_fused = crate::nn::Linear::new_fp(w_fused, None);
-        let out_fused = lin_fused.forward(&x).unwrap();
-
-        let fused_qkv = mlx::ops::indexing::slice_strided(
-            &out_fused,
-            &[0_i32, 0, 0][..],
-            &[1_i32, 1, qkv_out][..],
-            &[1_i32, 1, 1][..],
-        )
-        .unwrap();
-        let fused_z = mlx::ops::indexing::slice_strided(
-            &out_fused,
-            &[0_i32, 0, qkv_out][..],
-            &[1_i32, 1, qkv_out + z_out][..],
-            &[1_i32, 1, 1][..],
-        )
-        .unwrap();
-        let fused_qkv_vec: Vec<f32> = fused_qkv.to_vec().unwrap();
-        let fused_z_vec: Vec<f32> = fused_z.to_vec().unwrap();
-
-        assert_eq!(fused_qkv_vec, out_qkv);
-        assert_eq!(fused_z_vec, out_z);
     }
 
     #[test]

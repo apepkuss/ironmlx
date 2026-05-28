@@ -105,13 +105,33 @@ impl LayerNorm {
 
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
-        Ok(mlx::fast::layer_norm_on(
-            x,
-            Some(&self.weight),
-            self.bias.as_ref(),
-            self.eps,
-            target,
-        )?)
+        let target = target.into();
+        let input_dtype = x.dtype();
+
+        let weight_cast;
+        let weight = if self.weight.dtype() == input_dtype {
+            &self.weight
+        } else {
+            weight_cast = mlx::ops::cast::astype_on(&self.weight, input_dtype, target)?;
+            &weight_cast
+        };
+
+        let bias_cast;
+        let bias = match self.bias.as_ref() {
+            Some(b) if b.dtype() == input_dtype => Some(b),
+            Some(b) => {
+                bias_cast = mlx::ops::cast::astype_on(b, input_dtype, target)?;
+                Some(&bias_cast)
+            }
+            None => None,
+        };
+
+        let out = mlx::fast::layer_norm_on(x, Some(weight), bias, self.eps, target)?;
+        if out.dtype() == input_dtype {
+            Ok(out)
+        } else {
+            Ok(mlx::ops::cast::astype_on(&out, input_dtype, target)?)
+        }
     }
 }
 
@@ -235,6 +255,26 @@ mod tests {
         };
         let x = Array::zeros((1, 4), Dtype::Float32).unwrap();
         let _ = norm.forward(&x).unwrap();
+    }
+
+    #[test]
+    fn layernorm_preserves_input_dtype_with_bf16_parameters() {
+        let weight = mlx::ops::cast::astype(
+            &mlx::ops::constructors::ones((4_i32,), Dtype::Float32).unwrap(),
+            Dtype::Bfloat16,
+        )
+        .unwrap();
+        let bias = mlx::ops::cast::astype(
+            &Array::zeros((4_i32,), Dtype::Float32).unwrap(),
+            Dtype::Bfloat16,
+        )
+        .unwrap();
+        let norm = LayerNorm::new(weight, Some(bias), 1e-6);
+        let x: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1, 4)).try_into().unwrap();
+
+        let y = norm.forward(&x).unwrap();
+
+        assert_eq!(y.dtype(), Dtype::Float32);
     }
 
     #[test]

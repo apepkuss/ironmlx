@@ -69,7 +69,7 @@ impl DecoderLayerMoe {
                         attention_bias: cfg.attention_bias,
                     },
                 )?;
-                AttnPath::Full(ga)
+                AttnPath::Full(Box::new(ga))
             }
             AttnKind::Linear => {
                 let gdn = GatedDeltaNet::from_loader(
@@ -85,7 +85,7 @@ impl DecoderLayerMoe {
                         rms_norm_eps: cfg.rms_norm_eps,
                     },
                 )?;
-                AttnPath::Linear(gdn)
+                AttnPath::Linear(Box::new(gdn))
             }
         };
         let post_attention_layernorm = RmsNorm::from_loader(
