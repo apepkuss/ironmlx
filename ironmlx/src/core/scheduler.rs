@@ -466,6 +466,49 @@ fn first_full_layer_offsets(cache: &[LayerCache]) -> Result<&[i32]> {
         })
 }
 
+fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
+    let mut linear_cap = None;
+    for layer in cache {
+        match layer {
+            LayerCache::Full(kv) => return Ok((kv.cap(), kv.dtype())),
+            LayerCache::Linear(gd) => {
+                linear_cap.get_or_insert(gd.cap());
+            }
+        };
+    }
+    linear_cap
+        .map(|cap| (cap, Dtype::Bfloat16))
+        .ok_or_else(|| anyhow!("cache_cap_and_dtype: cache has no layers"))
+}
+
+fn adopt_cache_row_layers(
+    dst: &mut [LayerCache],
+    src: &[LayerCache],
+    dst_row: usize,
+    src_row: usize,
+    context: &str,
+) -> Result<()> {
+    if dst.len() != src.len() {
+        return Err(anyhow!(
+            "{context}: cache layer count mismatch ({} vs {})",
+            dst.len(),
+            src.len()
+        ));
+    }
+    for (dst_layer, src_layer) in dst.iter_mut().zip(src.iter()) {
+        match (dst_layer, src_layer) {
+            (LayerCache::Full(dst_kv), LayerCache::Full(src_kv)) => {
+                dst_kv.adopt_row_from(src_kv, dst_row, src_row)?;
+            }
+            (LayerCache::Linear(dst_gd), LayerCache::Linear(src_gd)) => {
+                dst_gd.adopt_row_from(src_gd, dst_row, src_row)?;
+            }
+            _ => return Err(anyhow!("{context}: cache layer kind mismatch")),
+        }
+    }
+    Ok(())
+}
+
 /// Fixed-capacity scheduler holding up to `b_max` in-flight requests.
 ///
 /// 3a is single-threaded only — no `Send + Sync` impls. A later sub-phase
@@ -477,6 +520,10 @@ pub struct Scheduler<M: Model> {
     next_id: u64,
     phase: Phase,
     cache: Option<Vec<LayerCache>>,
+    /// Scheduler slot rows represented by `cache` batch rows. The cache is
+    /// compact: `cache_rows[i]` is the scheduler slot stored at model batch
+    /// row `i`.
+    cache_rows: Vec<usize>,
     poisoned: bool,
     /// Upper bound on `prompt_len + max_new_tokens` per request, computed
     /// at boot as `min(cli_max_cache_cap, model.config.max_position_embeddings)`.
@@ -507,6 +554,7 @@ impl<M: Model> std::fmt::Debug for Scheduler<M> {
             .field("next_id", &self.next_id)
             .field("phase", &self.phase)
             .field("cache_layers", &self.cache.as_ref().map(|c| c.len()))
+            .field("cache_rows", &self.cache_rows)
             .field("poisoned", &self.poisoned)
             .finish()
     }
@@ -576,6 +624,7 @@ impl<M: Model> Scheduler<M> {
             next_id: 0,
             phase: Phase::Idle,
             cache: None,
+            cache_rows: Vec::new(),
             poisoned: false,
             effective_cap_max,
             prng_state,
@@ -722,9 +771,9 @@ impl<M: Model> Scheduler<M> {
     /// counter keeps incrementing).
     pub fn evict(&mut self, id: RequestId) -> Result<()> {
         self.ensure_not_poisoned()?;
-        // 3c-3: evict allowed in all phases. Slot is cleared; main cache
-        // state for this row stays in place (no resource leak; next
-        // admit_mid into this slot overwrites via adopt_row_from).
+        // 3c-3: evict allowed in all phases. Slot is cleared; compact cache
+        // rows are reconciled lazily on the next decode step or mid-admit
+        // finalize.
         let row_idx = self
             .slots
             .iter()
@@ -822,6 +871,155 @@ impl<M: Model> Scheduler<M> {
         Ok(())
     }
 
+    fn compact_prng_state_for_rows(&self, rows: &[usize]) -> Result<Array> {
+        let host: Vec<u32> = self.prng_state.to_vec()?;
+        let mut compact = Vec::with_capacity(rows.len() * 2);
+        for &row in rows {
+            anyhow::ensure!(
+                row < self.b_max,
+                "compact_prng_state_for_rows: row={row} >= b_max={}",
+                self.b_max
+            );
+            let start = row * 2;
+            compact.extend_from_slice(&host[start..start + 2]);
+        }
+        (&compact[..], &[rows.len() as i32, 2_i32][..])
+            .try_into()
+            .map_err(|e| anyhow!("compact_prng_state_for_rows: Array build failed: {e:?}"))
+    }
+
+    fn scatter_prng_state_from_rows(&mut self, rows: &[usize], compact: &Array) -> Result<()> {
+        let compact_host: Vec<u32> = compact.to_vec()?;
+        anyhow::ensure!(
+            compact_host.len() == rows.len() * 2,
+            "scatter_prng_state_from_rows: compact len {} != rows*2 {}",
+            compact_host.len(),
+            rows.len() * 2
+        );
+        let mut host: Vec<u32> = self.prng_state.to_vec()?;
+        for (compact_row, &slot_row) in rows.iter().enumerate() {
+            anyhow::ensure!(
+                slot_row < self.b_max,
+                "scatter_prng_state_from_rows: slot_row={slot_row} >= b_max={}",
+                self.b_max
+            );
+            let dst = slot_row * 2;
+            let src = compact_row * 2;
+            host[dst] = compact_host[src];
+            host[dst + 1] = compact_host[src + 1];
+        }
+        self.prng_state = (&host[..], &[self.b_max as i32, 2_i32][..])
+            .try_into()
+            .map_err(|e| anyhow!("scatter_prng_state_from_rows: Array rebuild failed: {e:?}"))?;
+        Ok(())
+    }
+
+    fn rebuild_cache_layout(&mut self, model: &M, target_rows: &[usize]) -> Result<()> {
+        if self.cache_rows == target_rows {
+            return Ok(());
+        }
+        if target_rows.is_empty() {
+            self.cache = None;
+            self.cache_rows.clear();
+            return Ok(());
+        }
+
+        let old_cache = self
+            .cache
+            .take()
+            .ok_or_else(|| anyhow!("rebuild_cache_layout: cache absent"))?;
+        let old_rows = std::mem::take(&mut self.cache_rows);
+        let (cap, dtype) = cache_cap_and_dtype(&old_cache)?;
+        let mut new_cache = model.make_cache(target_rows.len() as i32, cap, dtype)?;
+
+        for (dst_row, &slot_row) in target_rows.iter().enumerate() {
+            let src_row = old_rows
+                .iter()
+                .position(|&row| row == slot_row)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "rebuild_cache_layout: target slot row {slot_row} missing from old layout {:?}",
+                        old_rows
+                    )
+                })?;
+            adopt_cache_row_layers(
+                &mut new_cache,
+                &old_cache,
+                dst_row,
+                src_row,
+                "rebuild_cache_layout",
+            )?;
+        }
+
+        self.cache = Some(new_cache);
+        self.cache_rows = target_rows.to_vec();
+        Ok(())
+    }
+
+    fn install_cache_with_temp_row(
+        &mut self,
+        model: &M,
+        temp_cache: &[LayerCache],
+        temp_slot_row: usize,
+    ) -> Result<()> {
+        let old_cache = self
+            .cache
+            .take()
+            .ok_or_else(|| anyhow!("install_cache_with_temp_row: main cache absent"))?;
+        let old_rows = std::mem::take(&mut self.cache_rows);
+        let (old_cap, dtype) = cache_cap_and_dtype(&old_cache)?;
+        let (temp_cap, _) = cache_cap_and_dtype(temp_cache)?;
+        let cap = old_cap.max(temp_cap);
+
+        let mut target_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| {
+                matches!(slot, Some(state) if !state.finished && !state.generated_tokens.is_empty())
+                    .then_some(row)
+            })
+            .collect();
+        if !target_rows.contains(&temp_slot_row) {
+            target_rows.push(temp_slot_row);
+        }
+        target_rows.sort_unstable();
+
+        let mut new_cache = model.make_cache(target_rows.len() as i32, cap, dtype)?;
+        for (dst_row, &slot_row) in target_rows.iter().enumerate() {
+            if slot_row == temp_slot_row {
+                adopt_cache_row_layers(
+                    &mut new_cache,
+                    temp_cache,
+                    dst_row,
+                    0,
+                    "install_cache_with_temp_row",
+                )?;
+            } else {
+                let src_row = old_rows
+                    .iter()
+                    .position(|&row| row == slot_row)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "install_cache_with_temp_row: slot row {slot_row} missing from old layout {:?}",
+                            old_rows
+                        )
+                    })?;
+                adopt_cache_row_layers(
+                    &mut new_cache,
+                    &old_cache,
+                    dst_row,
+                    src_row,
+                    "install_cache_with_temp_row",
+                )?;
+            }
+        }
+
+        self.cache = Some(new_cache);
+        self.cache_rows = target_rows;
+        Ok(())
+    }
+
     /// Free all in-flight rows and reset every layer cache to offset 0
     /// (preserves Array allocations for reuse). Only legal in
     /// `Decoding`/`Finished` phases. After this call the scheduler is back
@@ -851,6 +1049,7 @@ impl<M: Model> Scheduler<M> {
         // seconds). Pre-3f kept the cache + reset offsets but locked the
         // first batch's cap forever — incompatible with dynamic cap.
         self.cache = None;
+        self.cache_rows.clear();
         self.phase = Phase::Idle;
         self.poisoned = false;
         Ok(())
@@ -859,19 +1058,19 @@ impl<M: Model> Scheduler<M> {
     /// Run batched prefill for every currently-admitted request. Only legal
     /// in `Idle`/`Admitting` phase with `active_count() >= 1`.
     ///
-    /// Lazy-allocates the batched KV cache on first call (`b_max` rows;
-    /// capacity = `min(max(prompt_len + max_new_tokens) over slots,
-    /// effective_cap_max)`, bf16). Subsequent calls after `evict_all`
-    /// allocate fresh — `evict_all` drops the cache (3f) so the next
-    /// batch's cap is sized to its slots, not inherited from the prior batch.
+    /// Allocates the batched KV cache on first call using the compact occupied
+    /// row count (`B_prefill`, not `b_max`). Capacity is
+    /// `min(max(prompt_len + max_new_tokens) over slots, effective_cap_max)`,
+    /// bf16. Subsequent calls after `evict_all` allocate fresh — `evict_all`
+    /// drops the cache (3f) so the next batch's cap is sized to its slots, not
+    /// inherited from the prior batch.
     ///
     /// Builds a right-padded model-facing batch over occupied rows only. Its
     /// tensors are `[B_prefill, T_max]` input_ids, `[3, B_prefill, T_max]`
     /// position_ids, `[B_prefill, 1, T_max, T_max]` attention mask, and
     /// `[B_prefill, T_max]` linear mask, then calls `M::batched_prefill` via
-    /// the `Model` trait.
-    /// If `B_prefill < b_max`, the compact cache rows are adopted back into the
-    /// `b_max`-shaped main cache before decode starts.
+    /// the `Model` trait. The resulting cache remains compact; decode uses the
+    /// same scheduler-row mapping rather than padding up to `b_max`.
     ///
     /// After prefill, samples the first token via a three-stage dispatch:
     /// Stage A collects per-row `sampler` refs + prompt histories in compact
@@ -928,17 +1127,11 @@ impl<M: Model> Scheduler<M> {
         #[cfg(feature = "p5h-profile")]
         let p5h_trace = self.cloned_active_row_p5h_trace_and_root()?;
 
-        let compact_prefill = active_rows.len() < self.b_max;
-        let prefill_rows: Vec<usize> = if compact_prefill {
-            active_rows
-        } else {
-            (0..self.b_max).collect()
-        };
+        let prefill_rows = active_rows;
 
         // Build the model-facing prefill batch in active slot order. When
-        // there are empty scheduler slots, the model sees only occupied rows;
-        // the compact cache is adopted back into the b_max-shaped main cache
-        // before decode starts.
+        // there are empty scheduler slots, the model and cache see only
+        // occupied rows.
         let prompt_lens: Vec<i32> = prefill_rows
             .iter()
             .map(|&row| {
@@ -981,18 +1174,17 @@ impl<M: Model> Scheduler<M> {
                 .is_some_and(|r| r.pixel_values.is_some())
         });
 
-        // Lazy-allocate the cache.
+        // Allocate the compact cache exactly to the occupied scheduler rows.
         // TODO: when a non-bf16 model lands, expose dtype via the `Model`
         // trait and thread it here.
         let cap = self.prefill_cache_cap();
-        if self.cache.is_none() {
-            self.cache = Some(model.make_cache(self.b_max as i32, cap, Dtype::Bfloat16)?);
+        if self.cache.is_some() {
+            return Err(anyhow!(
+                "prefill_admitted: cache already allocated before prefill"
+            ));
         }
-        let mut compact_cache = if compact_prefill {
-            Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?)
-        } else {
-            None
-        };
+        self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
+        self.cache_rows = prefill_rows.clone();
 
         // Run prefill. Capture [B, 1, vocab] logits (sequence axis already
         // collapsed via slice_last_and_project) for first-token sampling.
@@ -1047,14 +1239,11 @@ impl<M: Model> Scheduler<M> {
                 )),
                 _ => None,
             };
-            let prefill_cache = match compact_cache.as_mut() {
-                Some(cache) => cache.as_mut_slice(),
-                None => self
-                    .cache
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?
-                    .as_mut_slice(),
-            };
+            let prefill_cache = self
+                .cache
+                .as_mut()
+                .ok_or_else(|| anyhow!("cache missing after allocation — internal bug"))?
+                .as_mut_slice();
             let logits = if any_vl {
                 // Collect per-row prompt_ids (i32 conversion) + per-row vision args + tokenizer consts.
                 let per_row_ids_i32: Vec<Vec<i32>> = prefill_rows
@@ -1322,35 +1511,6 @@ impl<M: Model> Scheduler<M> {
 
         let logits = logits_result?;
 
-        if let Some(temp_cache) = compact_cache.as_ref() {
-            let main_cache = self
-                .cache
-                .as_mut()
-                .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?;
-            if main_cache.len() != temp_cache.len() {
-                return Err(anyhow!(
-                    "prefill_admitted: compact cache layer count mismatch ({} vs {})",
-                    main_cache.len(),
-                    temp_cache.len()
-                ));
-            }
-            for (main_layer, temp_layer) in main_cache.iter_mut().zip(temp_cache.iter()) {
-                match (main_layer, temp_layer) {
-                    (LayerCache::Full(main_kv), LayerCache::Full(temp_kv)) => {
-                        for (src_row, &dst_row) in prefill_rows.iter().enumerate() {
-                            main_kv.adopt_row_from(temp_kv, dst_row, src_row)?;
-                        }
-                    }
-                    (LayerCache::Linear(main_gd), LayerCache::Linear(temp_gd)) => {
-                        for (src_row, &dst_row) in prefill_rows.iter().enumerate() {
-                            main_gd.adopt_row_from(temp_gd, dst_row, src_row)?;
-                        }
-                    }
-                    _ => return Err(anyhow!("prefill_admitted: compact cache kind mismatch")),
-                }
-            }
-        }
-
         // After per-row prefill, row i's cache is filled up to position
         // prompt_lens[i] - 1. The first decode step must use position
         // prompt_lens[i] for that row.
@@ -1441,12 +1601,13 @@ impl<M: Model> Scheduler<M> {
         // Stage B — dispatch sample_batch once over [B, vocab]. `sample_batch`
         // internally calls `.to_vec()` which forces the entire prefill graph
         // to materialize; this wrapper makes that cost attributable.
+        let mut compact_prng = self.compact_prng_state_for_rows(&prefill_rows)?;
         let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
         let sample_result = crate::core::sampler::sample_batch(
             &row_samplers,
             &logits_bv,
             &history_refs,
-            &mut self.prng_state,
+            &mut compact_prng,
         )
         .map_err(|e| anyhow!("prefill_admitted: sample_batch failed: {e:?}"));
 
@@ -1461,6 +1622,9 @@ impl<M: Model> Scheduler<M> {
         }
 
         let tokens = sample_result?;
+        drop(history_refs);
+        drop(row_samplers);
+        self.scatter_prng_state_from_rows(&prefill_rows, &compact_prng)?;
 
         // Stage C — distribute tokens + termination per occupied row.
         let mut events: Vec<StepEvent> = Vec::new();
@@ -1507,21 +1671,18 @@ impl<M: Model> Scheduler<M> {
     /// Only legal in `Decoding` phase.
     ///
     /// Advance every non-finished active row by one decode token using a
-    /// three-stage sample_batch dispatch rather than per-row sampler calls.
-    /// Stage A collects `active_at_start` flags, then builds per-row sampler
-    /// refs + token histories — sentinel greedy + empty history for pad /
-    /// finished / mid-admit rows so sample_batch sees a uniform `[B]` view;
-    /// sentinel tokens are discarded in Stage C, avoiding conditional dispatch
-    /// inside the hot sampling path. Stage B packs `[B, 1]` input_ids, runs
-    /// `forward_on`, reshapes `[B, 1, vocab]` → `[B, vocab]`, and calls
-    /// `sample_batch` once — coalescing all-greedy batches into one GPU op.
-    /// Stage C distributes tokens only to `active_at_start` rows, advances
-    /// `real_len`, checks EOS / `max_new_tokens`, and collects events.
+    /// compact cache layout and a three-stage sample_batch dispatch rather
+    /// than per-row sampler calls. Stage A collects compact active rows and
+    /// builds per-row sampler refs + histories. Stage B packs
+    /// `[B_active, 1]` input_ids, runs `forward_on`, reshapes
+    /// `[B_active, 1, vocab]` → `[B_active, vocab]`, and calls
+    /// `sample_batch` once. Stage C distributes tokens back to scheduler
+    /// rows, advances `real_len`, checks EOS / `max_new_tokens`, and collects
+    /// events.
     ///
-    /// Already-finished rows are still padded into the forward (lockstep
-    /// cost — see spec §7). Only active-at-start rows appear in the returned
-    /// event list. Transitions phase to `Finished` when all occupied rows
-    /// are done.
+    /// Finished, evicted, empty, and mid-admit-reserved rows are excluded
+    /// from the model-facing decode batch. Transitions phase to `Finished`
+    /// when all occupied rows are done.
     pub fn step(&mut self, model: &M) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
         match self.step_inner(model) {
@@ -1541,8 +1702,6 @@ impl<M: Model> Scheduler<M> {
             ));
         }
 
-        let b = self.b_max;
-
         // Capture which rows are eligible to step at the start of this
         // call. Eligible = `Some` slot AND not finished AND already has
         // at least one generated token. The `!generated_tokens.is_empty()`
@@ -1554,66 +1713,54 @@ impl<M: Model> Scheduler<M> {
         // mid-admit row — the main cache slot stays empty until
         // finalize's adopt overwrites it.
         //
-        // Already-finished rows are also padded into the forward
-        // (lockstep cost — see spec §7).
-        let active_at_start: Vec<bool> = self
+        let active_rows: Vec<usize> = self
             .slots
             .iter()
-            .map(|s| matches!(s, Some(r) if !r.finished && !r.generated_tokens.is_empty()))
+            .enumerate()
+            .filter_map(|(row, slot)| {
+                matches!(slot, Some(r) if !r.finished && !r.generated_tokens.is_empty())
+                    .then_some(row)
+            })
             .collect();
-        if !active_at_start.iter().any(|&active| active) {
+        if active_rows.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Build [B, 1] input_ids in slot order.
-        // - For active rows: last generated token. `active_at_start`
-        //   guarantees `generated_tokens` is non-empty so .last() unwrap
-        //   is safe.
-        // - For pad / mid-admit / finished rows: pad 0.
-        let last_tokens: Vec<i32> = self
-            .slots
+        self.rebuild_cache_layout(model, &active_rows)?;
+        let b = active_rows.len();
+
+        // Build [B_active, 1] input_ids in compact cache order.
+        let last_tokens: Vec<i32> = active_rows
             .iter()
-            .zip(active_at_start.iter())
-            .map(|(slot, &active)| {
-                if active {
-                    let r = slot.as_ref().expect("active implies Some");
-                    *r.generated_tokens
-                        .last()
-                        .expect("active_at_start guarantees ≥1 generated token")
-                        as i32
-                } else {
-                    0
-                }
+            .map(|&slot_row| {
+                let r = self.slots[slot_row]
+                    .as_ref()
+                    .expect("active row implies Some");
+                *r.generated_tokens
+                    .last()
+                    .expect("active_rows guarantees generated_tokens is non-empty")
+                    as i32
             })
             .collect();
         let input_ids: Array = (&last_tokens[..], &[b as i32, 1][..])
             .try_into()
             .map_err(|e| anyhow!("step: build input_ids Array failed: {e:?}"))?;
 
-        // Build [3, B, 1] decode position ids. Active rows use real_len
-        // (which is prompt_len + generated_count so far). Pad rows use 0.
-        let per_row_pos: Vec<i32> = self
-            .slots
+        // Build [3, B_active, 1] decode position ids.
+        let per_row_pos: Vec<i32> = active_rows
             .iter()
-            .zip(active_at_start.iter())
-            .map(|(slot, &active)| {
-                if active {
-                    slot.as_ref().expect("active implies Some").real_len
-                } else {
-                    0
-                }
+            .map(|&slot_row| {
+                self.slots[slot_row]
+                    .as_ref()
+                    .expect("active row implies Some")
+                    .real_len
             })
             .collect();
         let position_ids = build_decode_position_ids(&per_row_pos)?;
 
-        // Per-row lens for decode: each active row writes 1 token; pad
-        // rows (finished, mid-admit, or None slots) write 0 to skip the
-        // K/V write. Mid-admit rows must skip so finalize's adopt_row_from
-        // can cleanly install the prefilled state at offset 0.
-        let per_row_lens: Vec<i32> = active_at_start
-            .iter()
-            .map(|&active| if active { 1 } else { 0 })
-            .collect();
+        // Per-row lens for compact decode: every model-facing row writes
+        // exactly one token.
+        let per_row_lens: Vec<i32> = vec![1; b];
 
         let cache_ref = self
             .cache
@@ -1622,40 +1769,24 @@ impl<M: Model> Scheduler<M> {
 
         // Build per-row decode mask BEFORE the forward — necessary so
         // SDPA correctly masks stale K/V cells for rows whose cache
-        // offsets have diverged from max(offsets). Without the mask,
-        // finished rows would attend to stale buffer-init zero K/V at
-        // positions [offsets[i]..max_off], deflating their real-position
-        // softmax weights. Outputs of finished rows are discarded by
-        // this step, but the mask is also a prerequisite for 3c-3's
-        // mid-batch admit/evict where slot reuse would expose
-        // previously-written stale K/V to new admissions.
-        //
-        // Clone offsets into Vec to release the immutable borrow before
-        // re-borrowing cache_ref mutably for the forward.
+        // offsets have diverged from max(offsets).
         let pre_offsets: Vec<i32> = first_full_layer_offsets(cache_ref)?.to_vec();
-        // The write lengths above remain exact: inactive rows use
-        // per_row_lens=0 so caches are not mutated. The attention mask,
-        // however, must not contain an all-`-inf` row: SDPA would produce
-        // NaNs even though the row's logits are discarded later. Give pad /
-        // finished / mid-admit rows at least one zero-K/V cell to attend to.
+        anyhow::ensure!(
+            pre_offsets.len() == b,
+            "step: cache offset rows {} != active rows {}",
+            pre_offsets.len(),
+            b
+        );
         let mask_row_lens: Vec<i32> = pre_offsets
             .iter()
             .zip(per_row_lens.iter())
-            .zip(active_at_start.iter())
-            .map(|((o, n), active)| {
-                let real_len = o + n;
-                if *active {
-                    real_len
-                } else {
-                    real_len.max(1)
-                }
-            })
+            .map(|(o, n)| o + n)
             .collect();
         let max_real_len = mask_row_lens
             .iter()
             .copied()
             .max()
-            .expect("Decoding phase guarantees b_max >= 1 and mask_row_lens is non-empty");
+            .expect("active_rows is non-empty");
         let decode_mask = build_per_row_decode_mask(&mask_row_lens, max_real_len, Dtype::Bfloat16)?;
 
         let logits = model.forward_on(
@@ -1674,48 +1805,43 @@ impl<M: Model> Scheduler<M> {
             .reshape(&[b as i32, vocab][..])
             .map_err(|e| anyhow!("step: reshape logits [B,1,vocab]->[B,vocab] failed: {e:?}"))?;
 
-        // Stage A — collect per-row sampler refs + histories in slot order.
-        // Sentinel covers pad / inactive rows; their tokens are discarded.
-        let sentinel = Sampler::greedy();
+        // Stage A — collect per-row sampler refs + histories in compact
+        // active-row order.
         let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
         let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
-        for (b_idx, &was_active) in active_at_start.iter().enumerate() {
-            if was_active {
-                let state = self.slots[b_idx]
-                    .as_ref()
-                    .expect("active_at_start guaranteed Some");
-                row_samplers.push(&state.sampler);
-                let mut hist: Vec<u32> =
-                    Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
-                hist.extend_from_slice(&state.prompt_ids);
-                hist.extend_from_slice(&state.generated_tokens);
-                row_histories.push(hist);
-            } else {
-                row_samplers.push(&sentinel);
-                row_histories.push(Vec::new());
-            }
+        for &slot_row in &active_rows {
+            let state = self.slots[slot_row]
+                .as_ref()
+                .expect("active_rows guaranteed Some");
+            row_samplers.push(&state.sampler);
+            let mut hist: Vec<u32> =
+                Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+            hist.extend_from_slice(&state.prompt_ids);
+            hist.extend_from_slice(&state.generated_tokens);
+            row_histories.push(hist);
         }
 
         // Stage B — dispatch sample_batch once over [B, vocab].
+        let mut compact_prng = self.compact_prng_state_for_rows(&active_rows)?;
         let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
         let tokens = crate::core::sampler::sample_batch(
             &row_samplers,
             &logits_bv,
             &history_refs,
-            &mut self.prng_state,
+            &mut compact_prng,
         )
         .map_err(|e| anyhow!("step: sample_batch failed: {e:?}"))?;
+        drop(history_refs);
+        drop(row_samplers);
+        self.scatter_prng_state_from_rows(&active_rows, &compact_prng)?;
 
         // Stage C — distribute tokens + termination per active row.
         let mut events: Vec<StepEvent> = Vec::new();
-        for (b_idx, &was_active) in active_at_start.iter().enumerate() {
-            if !was_active {
-                continue;
-            }
-            let token = tokens[b_idx];
-            let state = self.slots[b_idx]
+        for (batch_row, &slot_row) in active_rows.iter().enumerate() {
+            let token = tokens[batch_row];
+            let state = self.slots[slot_row]
                 .as_mut()
-                .expect("active_at_start guaranteed Some");
+                .expect("active_rows guaranteed Some");
 
             state.generated_tokens.push(token);
             state.real_len += 1;
@@ -1747,33 +1873,6 @@ impl<M: Model> Scheduler<M> {
         }
 
         Ok(events)
-    }
-
-    /// Raise every layer of the main cache's `cap` to `target_cap` if
-    /// smaller. Used by `admit_mid_finalize` before adoption so that a
-    /// longer mid-batch request can land into a cache that was sized
-    /// for the original batch's `slots_max`.
-    ///
-    /// `KVCache::grow_cap` lifts the bound only; the physical K/V
-    /// buffer is grown lazily by `adopt_row_from`'s `grow_to`.
-    /// `GatedDeltaCache::grow_cap` is a pure i32 field update — its
-    /// `conv_state` and `recurrent_state` shapes do not depend on
-    /// `cap`. Both are no-ops if `target_cap <= layer.cap`.
-    ///
-    /// Errs only if the cache has not been lazy-allocated yet — which
-    /// is impossible from `admit_mid_begin` (Decoding phase guarantees
-    /// `prefill_admitted` already ran).
-    fn grow_main_cache_to(&mut self, target_cap: i32) -> Result<()> {
-        let cache = self.cache.as_mut().ok_or_else(|| {
-            anyhow!("grow_main_cache_to: cache absent — internal bug (admit_mid in Decoding phase implies prefill_admitted ran)")
-        })?;
-        for layer in cache.iter_mut() {
-            match layer {
-                LayerCache::Full(kv) => kv.grow_cap(target_cap),
-                LayerCache::Linear(gd) => gd.grow_cap(target_cap),
-            }
-        }
-        Ok(())
     }
 
     /// Begin a chunked mid-batch admit (B1-p2.3c+).
@@ -2127,18 +2226,17 @@ impl<M: Model> Scheduler<M> {
         Ok(is_last)
     }
 
-    /// Finalise a chunked mid-batch admit: grow the main cache to
-    /// `temp_cache.cap` if needed (Option C from 3f), adopt
-    /// `temp_cache` row 0 into `main_cache` at `handle.row_idx`,
-    /// sample the new row's first token from `handle.last_logits`,
-    /// then update the row's termination state.
+    /// Finalise a chunked mid-batch admit: rebuild the compact main-cache
+    /// layout from still-live decode rows plus `temp_cache` row 0 at
+    /// `handle.row_idx`, sample the new row's first token from
+    /// `handle.last_logits`, then update the row's termination state.
     ///
     /// Returns `(request_id, first_event)`; caller routes the event
     /// to its `event_rx`.
     pub fn admit_mid_finalize(
         &mut self,
         handle: AdmitMidHandle,
-        _model: &M,
+        model: &M,
     ) -> Result<(RequestId, StepEvent)> {
         self.ensure_not_poisoned()?;
         let AdmitMidHandle {
@@ -2153,41 +2251,7 @@ impl<M: Model> Scheduler<M> {
         let logits = last_logits
             .ok_or_else(|| anyhow!("admit_mid_finalize: last_logits absent (no chunks ran?)"))?;
 
-        // Grow main cache cap from temp_cache.cap (3f Option C).
-        let cap_for_temp = temp_cache
-            .iter()
-            .find_map(|c| match c {
-                LayerCache::Full(kv) => Some(kv.cap()),
-                _ => None,
-            })
-            .unwrap_or(0);
-        self.grow_main_cache_to(cap_for_temp)?;
-
-        // Adopt temp → main per layer.
-        {
-            let main_cache = self
-                .cache
-                .as_mut()
-                .expect("cache asserted Some by Decoding phase");
-            if main_cache.len() != temp_cache.len() {
-                return Err(anyhow!(
-                    "admit_mid_finalize: cache layer count mismatch ({} vs {})",
-                    main_cache.len(),
-                    temp_cache.len()
-                ));
-            }
-            for (main_layer, temp_layer) in main_cache.iter_mut().zip(temp_cache.iter()) {
-                match (main_layer, temp_layer) {
-                    (LayerCache::Full(main_kv), LayerCache::Full(temp_kv)) => {
-                        main_kv.adopt_row_from(temp_kv, row_idx, 0)?;
-                    }
-                    (LayerCache::Linear(main_gd), LayerCache::Linear(temp_gd)) => {
-                        main_gd.adopt_row_from(temp_gd, row_idx, 0)?;
-                    }
-                    _ => return Err(anyhow!("admit_mid_finalize: cache layer kind mismatch")),
-                }
-            }
-        }
+        self.install_cache_with_temp_row(model, &temp_cache, row_idx)?;
 
         // Sample first generated token using centralized PRNG state.
         let row_logits = slice_logits_row(&logits, 0)?;
@@ -2235,9 +2299,8 @@ impl<M: Model> Scheduler<M> {
     }
 
     /// Sweep finished rows: clear their slot, drop their event channel,
-    /// and return the evicted IDs. Cache buffer entries for evicted
-    /// slots stay in place — a subsequent `admit_mid` into the same
-    /// slot overwrites via `adopt_row_from`.
+    /// and return the evicted IDs. The compact cache is reconciled lazily
+    /// by the next decode step or mid-admit finalize.
     ///
     /// Phase transition: Decoding -> Finished if `active_count == 0`
     /// after the sweep. This duplicates `step_inner`'s end-of-loop
@@ -3045,7 +3108,7 @@ mod tests {
         let model = RecordingPrefillModel::default();
         let events = s.prefill_admitted(&model).expect("prefill");
 
-        assert_eq!(model.make_cache_batches(), vec![4, 2]);
+        assert_eq!(model.make_cache_batches(), vec![2]);
         assert_eq!(model.text_prefill_batches(), vec![2]);
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
@@ -3097,7 +3160,7 @@ mod tests {
     }
 
     #[test]
-    fn step_with_empty_scheduler_slot_keeps_pad_row_mask_nonzero() {
+    fn step_with_empty_scheduler_slot_decodes_only_compact_active_row() {
         let mut s = Scheduler::<StepDecodeMaskModel>::new(
             2,
             32768,
@@ -3117,7 +3180,67 @@ mod tests {
             .expect("step must tolerate empty non-active scheduler slots");
         assert_eq!(step_events.len(), 1);
         assert_eq!(step_events[0].id, id);
-        assert_eq!(model.decode_lens_seen(), vec![vec![1, 0]]);
+        assert_eq!(model.decode_lens_seen(), vec![vec![1]]);
+    }
+
+    #[test]
+    fn step_single_active_row_with_larger_bmax_decodes_compact_b1() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id = s.admit(mk_req(vec![1, 2, 3])).expect("admit");
+
+        let model = StepDecodeMaskModel::default();
+        let prefill_events = s.prefill_admitted(&model).expect("prefill");
+        assert_eq!(prefill_events.len(), 1);
+        assert_eq!(prefill_events[0].id, id);
+        assert_eq!(s.phase(), Phase::Decoding);
+
+        let step_events = s.step(&model).expect("step");
+        assert_eq!(step_events.len(), 1);
+        assert_eq!(step_events[0].id, id);
+        assert_eq!(model.decode_lens_seen(), vec![vec![1]]);
+    }
+
+    #[test]
+    fn admit_mid_finalize_replaces_stale_cache_row_when_slot_reused() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let _id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        let id_1 = s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+
+        let model = StepDecodeMaskModel::default();
+        s.prefill_admitted(&model).expect("prefill");
+        s.get_mut(id_1).expect("row 1").finished = true;
+
+        let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+        let evicted = s.gc_finished_rows(&mut event_txs);
+        assert_eq!(evicted, vec![id_1]);
+
+        let mut mid_req = mk_req(vec![7, 8, 9]);
+        mid_req.prefill_chunk_size = 512;
+        let mut handle = s
+            .admit_mid_begin(mid_req, &model)
+            .expect("admit_mid_begin should reuse stale slot row");
+        assert_eq!(handle.row_idx, 1);
+        assert!(s
+            .admit_mid_chunk(&mut handle, &model)
+            .expect("single chunk"));
+        let (_id, event) = s
+            .admit_mid_finalize(handle, &model)
+            .expect("finalize should replace stale cache row");
+        assert_eq!(event.finish_reason, None);
+
+        let step_events = s.step(&model).expect("step after stale-row reuse");
+        assert_eq!(step_events.len(), 2);
+        assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
     }
 
     #[test]
@@ -3250,7 +3373,7 @@ mod tests {
         let model = RecordingPrefillModel::default();
         let events = s.prefill_admitted(&model).expect("prefill");
 
-        assert_eq!(model.make_cache_batches(), vec![3, 2]);
+        assert_eq!(model.make_cache_batches(), vec![2]);
         assert_eq!(model.vl_prefill_batches(), vec![2]);
         assert_eq!(model.vl_pixel_value_lens(), vec![2]);
         assert_eq!(events.len(), 2);

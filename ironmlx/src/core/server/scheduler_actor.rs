@@ -1187,11 +1187,13 @@ mod tests {
     impl Model for SchedulerActorFakeModel {
         fn make_cache(
             &self,
-            _batch: i32,
-            _cap: i32,
-            _dtype: mlx::Dtype,
+            batch: i32,
+            cap: i32,
+            dtype: mlx::Dtype,
         ) -> Result<Vec<crate::nn::LayerCache>> {
-            Ok(Vec::new())
+            Ok(vec![crate::nn::LayerCache::Full(
+                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+            )])
         }
 
         fn forward_on(
