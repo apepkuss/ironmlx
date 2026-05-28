@@ -44,12 +44,14 @@ def main() -> None:
     summary_path = report / "summary.tsv"
     metrics_path = report / "metrics.tsv"
     chunks_path = report / "chunks.tsv"
+    captures_path = report / "captures.tsv"
     if not summary_path.exists() or not metrics_path.exists() or not chunks_path.exists():
         raise SystemExit(f"missing summary.tsv, metrics.tsv, or chunks.tsv in {report}")
 
     summary = read_tsv(summary_path)
     metrics = read_tsv(metrics_path)
     chunks = read_tsv(chunks_path)
+    captures = read_tsv(captures_path) if captures_path.exists() else []
 
     by_run: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
     for row in metrics:
@@ -145,6 +147,28 @@ def main() -> None:
             for row in chunks
         ],
     )
+
+    capture_rows = [row for row in captures if row.get("status") != "-"]
+    if capture_rows:
+        lines.append("## Metal Captures")
+        lines.append("")
+        write_table(
+            lines,
+            ["case", "chunk", "phase", "status", "MiB", "capture_file"],
+            [
+                [
+                    row["case"],
+                    row["chunk_size"],
+                    row["phase"],
+                    row["status"],
+                    ms(float(row["bytes_kib"]) / 1024.0)
+                    if row["bytes_kib"] != "-"
+                    else "-",
+                    f'`{row["capture_file"]}`',
+                ]
+                for row in capture_rows
+            ],
+        )
 
     layer_rows = [row for row in metrics if row.get("layer_idx", "-") != "-"]
     if layer_rows:

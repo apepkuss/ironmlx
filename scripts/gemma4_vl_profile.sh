@@ -11,6 +11,8 @@
 #   ./scripts/gemma4_vl_profile.sh --layer-profile --case multi-repeat
 #   ./scripts/gemma4_vl_profile.sh --pipeline-profile --case multi-distinct
 #   ./scripts/gemma4_vl_profile.sh --pipeline-sync-probe --case multi-distinct
+#   ./scripts/gemma4_vl_profile.sh --metal-capture --case multi-distinct
+#   ./scripts/gemma4_vl_profile.sh --metal-capture --capture-phase all --case single
 #   ./scripts/gemma4_vl_profile.sh --build
 #
 # Env:
@@ -25,6 +27,8 @@
 #   LAYER_PROFILE=0
 #   PIPELINE_PROFILE=0
 #   PIPELINE_SYNC_PROBE=0
+#   METAL_CAPTURE=0                  # .gputrace files can be many GiB
+#   CAPTURE_PHASE=decode              # decode|all
 #   MAX_TOKENS=2
 
 set -euo pipefail
@@ -37,6 +41,8 @@ BUILD=0
 LAYER_PROFILE="${LAYER_PROFILE:-0}"
 PIPELINE_PROFILE="${PIPELINE_PROFILE:-0}"
 PIPELINE_SYNC_PROBE="${PIPELINE_SYNC_PROBE:-0}"
+METAL_CAPTURE="${METAL_CAPTURE:-0}"
+CAPTURE_PHASE="${CAPTURE_PHASE:-decode}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -61,8 +67,16 @@ while [[ $# -gt 0 ]]; do
             PIPELINE_SYNC_PROBE=1
             shift
             ;;
+        --metal-capture)
+            METAL_CAPTURE=1
+            shift
+            ;;
+        --capture-phase)
+            CAPTURE_PHASE="${2:-}"
+            shift 2
+            ;;
         -h|--help)
-            sed -n '1,29p' "$0"
+            sed -n '1,33p' "$0"
             exit 0
             ;;
         *)
@@ -84,6 +98,15 @@ esac
 if [[ "$PIPELINE_SYNC_PROBE" -eq 1 ]]; then
     PIPELINE_PROFILE=1
 fi
+
+case "$CAPTURE_PHASE" in
+    decode|all)
+        ;;
+    *)
+        echo "[gemma4-vl-profile] CAPTURE_PHASE must be one of: decode, all" >&2
+        exit 2
+        ;;
+esac
 
 export MLX_DIR="${MLX_DIR:-$HOME/.local/mlx}"
 
@@ -131,6 +154,7 @@ mkdir -p "$REPORT_DIR"
 METRICS_TSV="$REPORT_DIR/metrics.tsv"
 SUMMARY_TSV="$REPORT_DIR/summary.tsv"
 CHUNKS_TSV="$REPORT_DIR/chunks.tsv"
+CAPTURES_TSV="$REPORT_DIR/captures.tsv"
 {
     printf 'case\tchunk_size\tmetric\tvalue_ms\tlayer_idx\tlayer_kind\tlog_file\n'
 } > "$METRICS_TSV"
@@ -140,6 +164,9 @@ CHUNKS_TSV="$REPORT_DIR/chunks.tsv"
 {
     printf 'case\tchunk_size\tpath\tchunk_start\tchunk_end\tseq\timage_tokens\ttext_tokens\timage_runs\tleading_image_tokens\ttrailing_image_tokens\timage_rows_start\timage_rows_end\tis_last\tlog_file\n'
 } > "$CHUNKS_TSV"
+{
+    printf 'case\tchunk_size\tphase\tcapture_file\tstatus\tbytes_kib\tstderr_file\n'
+} > "$CAPTURES_TSV"
 
 require_file() {
     if [[ ! -f "$1" ]]; then
@@ -222,6 +249,7 @@ run_case() {
         local stdout_file="${base}.stdout.txt"
         local stderr_file="${base}.stderr.log"
         local command_file="${base}.command.txt"
+        local capture_file="${base}.gputrace"
 
         local image_args=()
         for image in "${images[@]}"; do
@@ -239,6 +267,9 @@ run_case() {
             if [[ "$PIPELINE_SYNC_PROBE" -eq 1 ]]; then
                 printf 'IRONMLX_GEMMA4_VL_PIPELINE_SYNC_PROBE=1 '
             fi
+            if [[ "$METAL_CAPTURE" -eq 1 ]]; then
+                printf 'MTL_CAPTURE_ENABLED=1 IRONMLX_CAPTURE_FILE=%q IRONMLX_CAPTURE_PHASE=%q ' "$capture_file" "$CAPTURE_PHASE"
+            fi
             printf '%q generate --model %q ' "$IRONMLX_BIN" "$GEMMA4_MODEL"
             printf '%q ' "${image_args[@]}"
             printf -- '--prompt %q --max-tokens %q --prefill-chunk-size %q\n' "$prompt" "$MAX_TOKENS" "$chunk_size"
@@ -248,6 +279,9 @@ run_case() {
         echo "  images: ${images[*]}"
         echo "  stdout: $stdout_file"
         echo "  stderr: $stderr_file"
+        if [[ "$METAL_CAPTURE" -eq 1 ]]; then
+            echo "  capture: $capture_file"
+        fi
 
         local env_args=(
             "MLX_DIR=$MLX_DIR"
@@ -263,6 +297,11 @@ run_case() {
         if [[ "$PIPELINE_SYNC_PROBE" -eq 1 ]]; then
             env_args+=("IRONMLX_GEMMA4_VL_PIPELINE_SYNC_PROBE=1")
         fi
+        if [[ "$METAL_CAPTURE" -eq 1 ]]; then
+            env_args+=("MTL_CAPTURE_ENABLED=1")
+            env_args+=("IRONMLX_CAPTURE_FILE=$capture_file")
+            env_args+=("IRONMLX_CAPTURE_PHASE=$CAPTURE_PHASE")
+        fi
         env "${env_args[@]}" \
             "$IRONMLX_BIN" generate \
             --model "$GEMMA4_MODEL" \
@@ -274,6 +313,19 @@ run_case() {
 
         append_metrics "$name" "$chunk_size" "$stderr_file"
         append_chunks "$name" "$chunk_size" "$stderr_file"
+
+        if [[ "$METAL_CAPTURE" -eq 1 ]]; then
+            local capture_status capture_kib
+            if [[ -e "$capture_file" ]]; then
+                capture_status="ok"
+                capture_kib="$(du -sk "$capture_file" | awk '{print $1}')"
+            else
+                capture_status="missing"
+                capture_kib="-"
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$name" "$chunk_size" "$CAPTURE_PHASE" "$capture_file" "$capture_status" "$capture_kib" "$stderr_file" >> "$CAPTURES_TSV"
+        fi
 
         local output_sha output_bytes hidden_chunks slice_projects dedup_line
         output_sha="$(shasum -a 256 "$stdout_file" | awk '{print $1}')"
@@ -313,6 +365,8 @@ echo "chunks: $CHUNK_SIZES"
 echo "layer_profile: $LAYER_PROFILE"
 echo "pipeline_profile: $PIPELINE_PROFILE"
 echo "pipeline_sync_probe: $PIPELINE_SYNC_PROBE"
+echo "metal_capture: $METAL_CAPTURE"
+echo "capture_phase: $CAPTURE_PHASE"
 echo ""
 
 if [[ "$PROFILE_CASE" == "all" || "$PROFILE_CASE" == "single" ]]; then
@@ -334,6 +388,9 @@ echo "=== Gemma4 VL profile PASS ==="
 echo "summary: $SUMMARY_TSV"
 echo "metrics: $METRICS_TSV"
 echo "chunks:  $CHUNKS_TSV"
+if [[ "$METAL_CAPTURE" -eq 1 ]]; then
+    echo "captures: $CAPTURES_TSV"
+fi
 if command -v python3 >/dev/null 2>&1; then
     python3 "$SCRIPT_DIR/gemma4_vl_profile_report.py" --report "$REPORT_DIR"
 fi
