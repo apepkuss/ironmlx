@@ -400,6 +400,32 @@ impl Qwen35MoeModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let hidden = self.forward_vl_hidden(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )?;
+        self.slice_last_and_project(&hidden, None, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_vl_hidden(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
         let mut hidden = self.text.embed_on(input_ids, target)?;
 
         if let Some(vision_embeds) = vision_embeds_slice {
@@ -411,7 +437,7 @@ impl Qwen35MoeModel {
             )?;
         }
 
-        let hidden = self.text.forward_post_embedding_on(
+        self.text.forward_post_embedding_on(
             &hidden,
             position_ids,
             cache,
@@ -419,8 +445,7 @@ impl Qwen35MoeModel {
             None,
             per_row_lens,
             target,
-        )?;
-        self.slice_last_and_project(&hidden, None, target)
+        )
     }
 
     /// VL-capable batched prefill over right-padded text/VL rows.
@@ -670,6 +695,30 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Qwen35MoeModel::forward_vl_chunk(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
+    }
+
+    fn forward_vl_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen35MoeModel::forward_vl_hidden(
             self,
             input_ids,
             position_ids,

@@ -302,19 +302,49 @@ impl Qwen35Model {
     ) -> Result<Array> {
         let target = target.into();
 
-        // Step 1: embed token ids → [B, S, hidden_size]
-        let mut hidden = self.text.embed_on(input_ids, target)?;
+        let hidden = self.forward_vl_hidden(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )?;
 
-        // Step 2: if a vision_embeds slice was provided, scatter it into
-        // the image-pad positions of this chunk. The slice's row count
-        // must match the chunk's image-pad count (enforced by callee).
+        // Step 4: slice last position and project to logits.
+        // VL chunk path is single-stream B=1; no per-row last position needed.
+        self.slice_last_and_project(&hidden, None, target)
+    }
+
+    /// Forward one VL prefill chunk through embeddings + transformer + final
+    /// norm, returning hidden states without projecting to logits.
+    ///
+    /// This is used by scheduler prefix prefill paths where the chunk only
+    /// needs to populate KV / recurrent cache; the final token chunk performs
+    /// the vocabulary projection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_vl_hidden(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        let mut hidden = self.text.embed_on(input_ids, target)?;
         if let Some(ve) = vision_embeds_slice {
             hidden =
                 super::cross_modal::replace_image_tokens(&hidden, input_ids, ve, image_token_id)?;
         }
 
-        // Step 3: run transformer layers + final norm.
-        let hidden = self.text.forward_post_embedding_on(
+        self.text.forward_post_embedding_on(
             &hidden,
             position_ids,
             cache,
@@ -322,11 +352,7 @@ impl Qwen35Model {
             None,
             per_row_lens,
             target,
-        )?;
-
-        // Step 4: slice last position and project to logits.
-        // VL chunk path is single-stream B=1; no per-row last position needed.
-        self.slice_last_and_project(&hidden, None, target)
+        )
     }
 
     /// # Arguments

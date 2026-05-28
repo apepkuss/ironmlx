@@ -128,6 +128,19 @@ pub trait DenseVlMethods {
         image_token_id: i32,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_vl_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array>;
 }
 
 impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
@@ -185,6 +198,30 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         crate::models::qwen3_5::Qwen35Model::forward_vl_chunk(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
+    }
+
+    fn forward_vl_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        crate::models::qwen3_5::Qwen35Model::forward_vl_hidden(
             self,
             input_ids,
             position_ids,
@@ -944,9 +981,6 @@ impl<M: Model> Scheduler<M> {
                 .is_some_and(|r| r.pixel_values.is_some())
         });
 
-        let attention_mask = build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
-        let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
-
         // Lazy-allocate the cache.
         // TODO: when a non-bf16 model lands, expose dtype via the `Model`
         // trait and thread it here.
@@ -960,9 +994,10 @@ impl<M: Model> Scheduler<M> {
             None
         };
 
-        // Run batched prefill. Capture [B, 1, vocab] logits (sequence axis
-        // already collapsed via slice_last_and_project) for first-token
-        // sampling.
+        // Run prefill. Capture [B, 1, vocab] logits (sequence axis already
+        // collapsed via slice_last_and_project) for first-token sampling.
+        // Single-row batches use the single-stream model API so text and VL
+        // requests avoid right-pad masks that have no semantic work at B=1.
         //
         // T0a.9: wrap in `model_prefill_forward` span. Pattern (per Codex v11
         // P2 #5): capture Result without `?`, close span, then `?` the result
@@ -1072,27 +1107,179 @@ impl<M: Model> Scheduler<M> {
                     })
                     .expect("any_vl == true implies at least one VL slot");
 
-                let position_ids = build_position_ids_vl_batched(
-                    &per_row_ids_refs,
-                    &per_row_grids,
-                    img_token_id,
-                    merge_size,
-                    max_len,
-                )?;
+                if b == 1 {
+                    let grids = per_row_grids[0].ok_or_else(|| {
+                        anyhow!("single-row VL prefill: pixel_values present but grid_thw is None")
+                    })?;
+                    let position_ids_full = if grids.is_empty() {
+                        build_position_ids(0, max_len)?
+                    } else {
+                        build_position_ids_vl(&per_row_ids_i32[0], grids, img_token_id, merge_size)?
+                    };
+                    let vision_embeds_full = if grids.is_empty() {
+                        None
+                    } else {
+                        let pv = per_row_pv[0].ok_or_else(|| {
+                            anyhow!(
+                                "single-row VL prefill: grid_thw present but pixel_values is None"
+                            )
+                        })?;
+                        Some(model.compute_vision_embeds(
+                            pv,
+                            grids,
+                            mlx::StreamOrDevice::default(),
+                        )?)
+                    };
+                    if max_len > 1 {
+                        let prefix_len = max_len - 1;
+                        let prefix_input_ids = mlx::ops::indexing::slice_strided(
+                            &input_ids,
+                            &[0_i32, 0][..],
+                            &[1_i32, prefix_len][..],
+                            &[1_i32, 1][..],
+                        )?;
+                        let last_input_ids = mlx::ops::indexing::slice_strided(
+                            &input_ids,
+                            &[0_i32, prefix_len][..],
+                            &[1_i32, max_len][..],
+                            &[1_i32, 1][..],
+                        )?;
+                        let prefix_position_ids =
+                            slice_pos_ids_axis2(&position_ids_full, 0, prefix_len)?;
+                        let last_position_ids =
+                            slice_pos_ids_axis2(&position_ids_full, prefix_len, max_len)?;
 
-                model.batched_prefill_vl(
-                    &input_ids,
-                    &position_ids,
-                    &attention_mask,
-                    &linear_attention_mask,
-                    &prompt_lens,
-                    &per_row_pv,
-                    &per_row_grids,
-                    img_token_id,
-                    Some(prefill_cache),
-                    mlx::StreamOrDevice::default(),
-                )?
+                        let prompt_ids = &per_row_ids_i32[0];
+                        let prefix_image_pads = prompt_ids[..prefix_len as usize]
+                            .iter()
+                            .filter(|&&tok| tok == img_token_id)
+                            .count();
+                        let last_image_pads = prompt_ids[prefix_len as usize..max_len as usize]
+                            .iter()
+                            .filter(|&&tok| tok == img_token_id)
+                            .count();
+                        let prefix_vision_embeds = match vision_embeds_full.as_ref() {
+                            Some(ve) if prefix_image_pads > 0 => {
+                                Some(slice_vision_embeds_rows(ve, 0, prefix_image_pads)?)
+                            }
+                            _ => None,
+                        };
+                        let last_vision_embeds = match vision_embeds_full.as_ref() {
+                            Some(ve) if last_image_pads > 0 => Some(slice_vision_embeds_rows(
+                                ve,
+                                prefix_image_pads,
+                                prefix_image_pads + last_image_pads,
+                            )?),
+                            _ => None,
+                        };
+
+                        let _prefix_hidden = model.forward_vl_hidden(
+                            &prefix_input_ids,
+                            &prefix_position_ids,
+                            None,
+                            None,
+                            Some(&mut *prefill_cache),
+                            prefix_vision_embeds.as_ref(),
+                            img_token_id,
+                            mlx::StreamOrDevice::default(),
+                        )?;
+
+                        model.forward_vl_chunk(
+                            &last_input_ids,
+                            &last_position_ids,
+                            None,
+                            None,
+                            Some(&mut *prefill_cache),
+                            last_vision_embeds.as_ref(),
+                            img_token_id,
+                            mlx::StreamOrDevice::default(),
+                        )?
+                    } else {
+                        model.forward_vl_chunk(
+                            &input_ids,
+                            &position_ids_full,
+                            None,
+                            None,
+                            Some(prefill_cache),
+                            vision_embeds_full.as_ref(),
+                            img_token_id,
+                            mlx::StreamOrDevice::default(),
+                        )?
+                    }
+                } else {
+                    let attention_mask =
+                        build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
+                    let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
+                    let position_ids = build_position_ids_vl_batched(
+                        &per_row_ids_refs,
+                        &per_row_grids,
+                        img_token_id,
+                        merge_size,
+                        max_len,
+                    )?;
+
+                    model.batched_prefill_vl(
+                        &input_ids,
+                        &position_ids,
+                        &attention_mask,
+                        &linear_attention_mask,
+                        &prompt_lens,
+                        &per_row_pv,
+                        &per_row_grids,
+                        img_token_id,
+                        Some(prefill_cache),
+                        mlx::StreamOrDevice::default(),
+                    )?
+                }
+            } else if b == 1 {
+                if max_len > 1 {
+                    let prefix_len = max_len - 1;
+                    let prefix_input_ids = mlx::ops::indexing::slice_strided(
+                        &input_ids,
+                        &[0_i32, 0][..],
+                        &[1_i32, prefix_len][..],
+                        &[1_i32, 1][..],
+                    )?;
+                    let prefix_position_ids = build_position_ids(0, prefix_len)?;
+                    let _prefix_hidden = model.forward_text_hidden(
+                        &prefix_input_ids,
+                        &prefix_position_ids,
+                        None,
+                        None,
+                        Some(&mut *prefill_cache),
+                        mlx::StreamOrDevice::default(),
+                    )?;
+
+                    let last_input_ids = mlx::ops::indexing::slice_strided(
+                        &input_ids,
+                        &[0_i32, prefix_len][..],
+                        &[1_i32, max_len][..],
+                        &[1_i32, 1][..],
+                    )?;
+                    let last_position_ids = build_position_ids(prefix_len, 1)?;
+                    model.forward_on(
+                        &last_input_ids,
+                        &last_position_ids,
+                        None,
+                        None,
+                        Some(&mut *prefill_cache),
+                        mlx::StreamOrDevice::default(),
+                    )?
+                } else {
+                    let position_ids = build_position_ids(0, max_len)?;
+                    model.forward_on(
+                        &input_ids,
+                        &position_ids,
+                        None,
+                        None,
+                        Some(prefill_cache),
+                        mlx::StreamOrDevice::default(),
+                    )?
+                }
             } else {
+                let attention_mask =
+                    build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
+                let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
                 let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
                 model.batched_prefill(
                     &input_ids,
@@ -2176,14 +2363,25 @@ mod tests {
 
         fn forward_on(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
             _cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("P5h+2.c unit tests never call decode forward")
+            let b = input_ids.shape().as_slice()[0] as usize;
+            let vocab = 8_usize;
+            let mut flat = vec![0.0_f32; b * vocab];
+            for row in 0..b {
+                flat[row * vocab + 3] = 100.0;
+            }
+            let logits_bv: mlx::Array = (&flat[..], &[b as i32, vocab as i32][..])
+                .try_into()
+                .expect("fake logits [B,V]");
+            logits_bv
+                .reshape(&[b as i32, 1, vocab as i32][..])
+                .map_err(|e| anyhow::anyhow!("fake logits reshape failed: {e:?}"))
         }
 
         fn batched_prefill(
@@ -2212,14 +2410,17 @@ mod tests {
 
         fn forward_text_hidden(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
             _cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("P5h+2.c unit tests never call chunk hidden forward")
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            mlx::Array::zeros((dims[0], dims[1], 4_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
 
         fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
@@ -2270,12 +2471,35 @@ mod tests {
         ) -> crate::Result<mlx::Array> {
             unreachable!("P5h+2.c unit tests are text-only")
         }
+
+        fn forward_vl_hidden(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _vision_embeds_slice: Option<&mlx::Array>,
+            _image_token_id: i32,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("P5h+2.c unit tests are text-only")
+        }
     }
 
     #[derive(Default)]
     struct RecordingPrefillModel {
         make_cache_batches: std::sync::Mutex<Vec<i32>>,
+        text_forward_batches: std::sync::Mutex<Vec<i32>>,
+        text_forward_seq_lens: std::sync::Mutex<Vec<i32>>,
+        text_forward_masks: std::sync::Mutex<Vec<(bool, bool)>>,
+        text_hidden_shapes: std::sync::Mutex<Vec<(i32, i32)>>,
         text_prefill_batches: std::sync::Mutex<Vec<i32>>,
+        vl_chunk_batches: std::sync::Mutex<Vec<i32>>,
+        vl_chunk_vision_present: std::sync::Mutex<Vec<bool>>,
+        vl_hidden_shapes: std::sync::Mutex<Vec<(i32, i32)>>,
+        vl_hidden_vision_present: std::sync::Mutex<Vec<bool>>,
+        vision_grid_lens: std::sync::Mutex<Vec<usize>>,
         vl_prefill_batches: std::sync::Mutex<Vec<i32>>,
         vl_pixel_value_lens: std::sync::Mutex<Vec<usize>>,
     }
@@ -2285,8 +2509,44 @@ mod tests {
             self.make_cache_batches.lock().unwrap().clone()
         }
 
+        fn text_forward_batches(&self) -> Vec<i32> {
+            self.text_forward_batches.lock().unwrap().clone()
+        }
+
+        fn text_forward_seq_lens(&self) -> Vec<i32> {
+            self.text_forward_seq_lens.lock().unwrap().clone()
+        }
+
+        fn text_forward_masks(&self) -> Vec<(bool, bool)> {
+            self.text_forward_masks.lock().unwrap().clone()
+        }
+
+        fn text_hidden_shapes(&self) -> Vec<(i32, i32)> {
+            self.text_hidden_shapes.lock().unwrap().clone()
+        }
+
         fn text_prefill_batches(&self) -> Vec<i32> {
             self.text_prefill_batches.lock().unwrap().clone()
+        }
+
+        fn vl_chunk_batches(&self) -> Vec<i32> {
+            self.vl_chunk_batches.lock().unwrap().clone()
+        }
+
+        fn vl_chunk_vision_present(&self) -> Vec<bool> {
+            self.vl_chunk_vision_present.lock().unwrap().clone()
+        }
+
+        fn vl_hidden_shapes(&self) -> Vec<(i32, i32)> {
+            self.vl_hidden_shapes.lock().unwrap().clone()
+        }
+
+        fn vl_hidden_vision_present(&self) -> Vec<bool> {
+            self.vl_hidden_vision_present.lock().unwrap().clone()
+        }
+
+        fn vision_grid_lens(&self) -> Vec<usize> {
+            self.vision_grid_lens.lock().unwrap().clone()
         }
 
         fn vl_prefill_batches(&self) -> Vec<i32> {
@@ -2326,14 +2586,24 @@ mod tests {
 
         fn forward_on(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
-            _per_row_lens: Option<&[i32]>,
-            _decode_mask: Option<&mlx::Array>,
+            per_row_lens: Option<&[i32]>,
+            decode_mask: Option<&mlx::Array>,
             _cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("RecordingPrefillModel tests never call decode forward")
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            let batch = dims[0];
+            let seq = dims[1];
+            self.text_forward_batches.lock().unwrap().push(batch);
+            self.text_forward_seq_lens.lock().unwrap().push(seq);
+            self.text_forward_masks
+                .lock()
+                .unwrap()
+                .push((per_row_lens.is_some(), decode_mask.is_some()));
+            fake_logits_for_batch(batch)
         }
 
         fn batched_prefill(
@@ -2353,14 +2623,21 @@ mod tests {
 
         fn forward_text_hidden(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
             _cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("RecordingPrefillModel tests never call chunk hidden forward")
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            self.text_hidden_shapes
+                .lock()
+                .unwrap()
+                .push((dims[0], dims[1]));
+            mlx::Array::zeros((dims[0], dims[1], 4_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
 
         fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
@@ -2398,24 +2675,59 @@ mod tests {
         fn compute_vision_embeds(
             &self,
             _pixel_values: &mlx::Array,
-            _grid_thw: &[(i32, i32, i32)],
+            grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("RecordingPrefillModel tests never call compute_vision_embeds")
+            self.vision_grid_lens.lock().unwrap().push(grid_thw.len());
+            let flat = vec![0.0_f32; grid_thw.len().max(1)];
+            (&flat[..], &[grid_thw.len().max(1) as i32, 1_i32][..])
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("fake vision embeds failed: {e:?}"))
         }
 
         fn forward_vl_chunk(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
             _cache: Option<&mut [crate::nn::LayerCache]>,
-            _vision_embeds_slice: Option<&mlx::Array>,
+            vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("RecordingPrefillModel tests never call VL chunk forward")
+            let batch = input_ids.shape().as_slice()[0];
+            self.vl_chunk_batches.lock().unwrap().push(batch);
+            self.vl_chunk_vision_present
+                .lock()
+                .unwrap()
+                .push(vision_embeds_slice.is_some());
+            fake_logits_for_batch(batch)
+        }
+
+        fn forward_vl_hidden(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            vision_embeds_slice: Option<&mlx::Array>,
+            _image_token_id: i32,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            self.vl_hidden_shapes
+                .lock()
+                .unwrap()
+                .push((dims[0], dims[1]));
+            self.vl_hidden_vision_present
+                .lock()
+                .unwrap()
+                .push(vision_embeds_slice.is_some());
+            mlx::Array::zeros((dims[0], dims[1], 4_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake vl hidden failed: {e:?}"))
         }
     }
 
@@ -2564,6 +2876,29 @@ mod tests {
     }
 
     #[test]
+    fn prefill_admitted_single_text_row_uses_forward_on_fast_path() {
+        let mut s = Scheduler::<RecordingPrefillModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id = s.admit(mk_req(vec![1, 2, 3])).expect("admit");
+
+        let model = RecordingPrefillModel::default();
+        let events = s.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.make_cache_batches(), vec![1]);
+        assert_eq!(model.text_hidden_shapes(), vec![(1, 2)]);
+        assert_eq!(model.text_forward_batches(), vec![1]);
+        assert_eq!(model.text_forward_seq_lens(), vec![1]);
+        assert_eq!(model.text_forward_masks(), vec![(false, false)]);
+        assert_eq!(model.text_prefill_batches(), Vec::<i32>::new());
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].id, events[0].token), (id, 3));
+    }
+
+    #[test]
     fn prefill_admitted_uses_full_batch_when_all_rows_active() {
         let mut s = Scheduler::<RecordingPrefillModel>::new(
             2,
@@ -2585,12 +2920,12 @@ mod tests {
     }
 
     #[test]
-    fn prefill_admitted_compacts_vl_rows() {
+    fn prefill_admitted_single_vl_row_splits_prefix_and_last_token() {
         use crate::core::generate::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
         let mut s = Scheduler::<RecordingPrefillModel>::new(
-            3,
+            1,
             32768,
             crate::core::memory_budget::test_meta_qwen35(),
         )
@@ -2606,7 +2941,7 @@ mod tests {
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
             pixel_values: Some(pixel_values),
-            image_grid_thw: Some(vec![(1_i32, 1_i32, 1_i32)]),
+            image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
             #[cfg(feature = "p5h-profile")]
@@ -2619,11 +2954,107 @@ mod tests {
         let model = RecordingPrefillModel::default();
         let events = s.prefill_admitted(&model).expect("prefill");
 
-        assert_eq!(model.make_cache_batches(), vec![3, 1]);
-        assert_eq!(model.vl_prefill_batches(), vec![1]);
-        assert_eq!(model.vl_pixel_value_lens(), vec![1]);
+        assert_eq!(model.make_cache_batches(), vec![1]);
+        assert_eq!(model.vision_grid_lens(), vec![1]);
+        assert_eq!(model.vl_hidden_shapes(), vec![(1, 2)]);
+        assert_eq!(model.vl_hidden_vision_present(), vec![true]);
+        assert_eq!(model.vl_chunk_batches(), vec![1]);
+        assert_eq!(model.vl_chunk_vision_present(), vec![false]);
+        assert_eq!(model.vl_prefill_batches(), Vec::<i32>::new());
         assert_eq!(events.len(), 1);
         assert_eq!((events[0].id, events[0].token), (id, 3));
+    }
+
+    #[test]
+    fn prefill_admitted_single_vl_row_preserves_multi_image_grids() {
+        use crate::core::generate::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        let mut s = Scheduler::<RecordingPrefillModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let pixel_values: mlx::Array = (&[0.0_f32; 8][..], &[2_i32, 4][..])
+            .try_into()
+            .expect("pixel_values");
+        let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
+        let req = GenerateRequest {
+            prompt_ids: vec![1, IMAGE_TOKEN_ID as u32, 2, IMAGE_TOKEN_ID as u32, 3],
+            max_new_tokens: 16,
+            sampler: Sampler::greedy(),
+            stop_token_ids: vec![2],
+            prefill_chunk_size: 0,
+            pixel_values: Some(pixel_values),
+            image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32), (1_i32, 2_i32, 2_i32)]),
+            image_spatial_merge_size: 2,
+            image_token_id: IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
+        };
+        let id = s.admit(req).expect("admit vl");
+
+        let model = RecordingPrefillModel::default();
+        let events = s.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.make_cache_batches(), vec![1]);
+        assert_eq!(model.vision_grid_lens(), vec![2]);
+        assert_eq!(model.vl_hidden_shapes(), vec![(1, 4)]);
+        assert_eq!(model.vl_hidden_vision_present(), vec![true]);
+        assert_eq!(model.vl_chunk_batches(), vec![1]);
+        assert_eq!(model.vl_chunk_vision_present(), vec![false]);
+        assert_eq!(model.vl_prefill_batches(), Vec::<i32>::new());
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].id, events[0].token), (id, 3));
+    }
+
+    #[test]
+    fn prefill_admitted_compacts_vl_rows() {
+        use crate::core::generate::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        let mut s = Scheduler::<RecordingPrefillModel>::new(
+            3,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let pixel_values: mlx::Array = (&[0.0_f32; 4][..], &[1_i32, 4][..])
+            .try_into()
+            .expect("pixel_values");
+        let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
+        let mk_vl_req = |pixel_values: mlx::Array| GenerateRequest {
+            prompt_ids: vec![1, IMAGE_TOKEN_ID as u32, 2],
+            max_new_tokens: 16,
+            sampler: Sampler::greedy(),
+            stop_token_ids: vec![2],
+            prefill_chunk_size: 0,
+            pixel_values: Some(pixel_values),
+            image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
+            image_spatial_merge_size: 2,
+            image_token_id: IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
+        };
+        let id_0 = s
+            .admit(mk_vl_req(pixel_values.clone()))
+            .expect("admit vl 0");
+        let id_1 = s.admit(mk_vl_req(pixel_values)).expect("admit vl 1");
+
+        let model = RecordingPrefillModel::default();
+        let events = s.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.make_cache_batches(), vec![3, 2]);
+        assert_eq!(model.vl_prefill_batches(), vec![2]);
+        assert_eq!(model.vl_pixel_value_lens(), vec![2]);
+        assert_eq!(events.len(), 2);
+        assert_eq!((events[0].id, events[0].token), (id_0, 3));
+        assert_eq!((events[1].id, events[1].token), (id_1, 4));
     }
 
     #[test]

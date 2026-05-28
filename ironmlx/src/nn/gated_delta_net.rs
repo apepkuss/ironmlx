@@ -179,6 +179,8 @@ pub struct GatedDeltaNet {
     cfg: GatedDeltaNetConfig,
     kernel_no_mask: OnceLock<MetalKernel>,
     kernel_masked: OnceLock<MetalKernel>,
+    kernel_zero_state_no_mask: OnceLock<MetalKernel>,
+    kernel_zero_state_masked: OnceLock<MetalKernel>,
     /// Layer index for profile log. Some(N) if parsed from `model.layers.{N}.linear_attn`
     /// prefix at `from_loader`; None for `from_components` (unit-test path) or prefix
     /// parse failure. Profile-only field (zero footprint without `p5g-profile`).
@@ -332,6 +334,8 @@ impl GatedDeltaNet {
             cfg,
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
+            kernel_zero_state_no_mask: OnceLock::new(),
+            kernel_zero_state_masked: OnceLock::new(),
             #[cfg(feature = "p5g-profile")]
             profile_layer_idx: parse_layer_idx_from_prefix(prefix),
         })
@@ -370,6 +374,8 @@ impl GatedDeltaNet {
             cfg,
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
+            kernel_zero_state_no_mask: OnceLock::new(),
+            kernel_zero_state_masked: OnceLock::new(),
             #[cfg(feature = "p5g-profile")]
             profile_layer_idx: None,
         }
@@ -1408,33 +1414,52 @@ impl GatedDeltaNet {
                                     ..Default::default()
                                 },
                                 || -> Result<(Array, Array)> {
-                                    // Step 7a: build/get the appropriate kernel
-                                    let kernel = if mask.is_some() {
-                                        self.kernel_masked.get_or_init(|| {
+                                    // Step 7a: build/get the appropriate kernel.
+                                    // Initial chunks start from an all-zero
+                                    // recurrent state; use a dedicated kernel
+                                    // that initializes registers to zero rather
+                                    // than reading a large fp32 zero buffer.
+                                    let zero_state = match cache.as_deref() {
+                                        Some(c) => c.offsets().iter().all(|&o| o == 0),
+                                        None => true,
+                                    };
+                                    let kernel = match (mask.is_some(), zero_state) {
+                                        (true, true) => {
+                                            self.kernel_zero_state_masked.get_or_init(|| {
+                                                build_gated_delta_zero_state_kernel(true)
+                                                    .expect("build zero-state masked kernel")
+                                            })
+                                        }
+                                        (false, true) => {
+                                            self.kernel_zero_state_no_mask.get_or_init(|| {
+                                                build_gated_delta_zero_state_kernel(false)
+                                                    .expect("build zero-state no-mask kernel")
+                                            })
+                                        }
+                                        (true, false) => self.kernel_masked.get_or_init(|| {
                                             build_gated_delta_kernel(true)
                                                 .expect("build masked kernel")
-                                        })
-                                    } else {
-                                        self.kernel_no_mask.get_or_init(|| {
+                                        }),
+                                        (false, false) => self.kernel_no_mask.get_or_init(|| {
                                             build_gated_delta_kernel(false)
                                                 .expect("build no-mask kernel")
-                                        })
+                                        }),
                                     };
 
-                                    // Step 7b: get state_in from cache (or
-                                    // fresh zeros). see cfg-off arm below for
-                                    // Arc-share / cache-slot rationale.
-                                    let state_in = match cache.as_deref() {
-                                        Some(c) => c.recurrent_state().clone(),
-                                        None => Array::zeros(
-                                            (
-                                                batch,
-                                                self.cfg.num_v_heads,
-                                                self.cfg.head_v_dim,
-                                                self.cfg.head_k_dim,
-                                            ),
-                                            Dtype::Float32,
-                                        )?,
+                                    // Step 7b: get state_in only after the
+                                    // stream has already advanced. See cfg-off
+                                    // arm below for Arc-share / cache-slot
+                                    // rationale.
+                                    let state_in = if zero_state {
+                                        None
+                                    } else {
+                                        Some(
+                                            cache
+                                                .as_deref()
+                                                .expect("nonzero GDN state requires cache to exist")
+                                                .recurrent_state()
+                                                .clone(),
+                                        )
                                     };
 
                                     // Step 7c: T as 0-dim int32 array.
@@ -1511,15 +1536,12 @@ impl GatedDeltaNet {
                                     ]);
 
                                     // Step 7d: dispatch
-                                    let mut kernel_inputs: Vec<&Array> = vec![
-                                        &q_scaled,
-                                        &k_scaled,
-                                        &v_per_head,
-                                        &g,
-                                        &beta,
-                                        &state_in,
-                                        &t_arr,
-                                    ];
+                                    let mut kernel_inputs: Vec<&Array> =
+                                        vec![&q_scaled, &k_scaled, &v_per_head, &g, &beta];
+                                    if let Some(state_in) = state_in.as_ref() {
+                                        kernel_inputs.push(state_in);
+                                    }
+                                    kernel_inputs.push(&t_arr);
                                     if let Some(m) = mask {
                                         kernel_inputs.push(m);
                                     }
@@ -1631,32 +1653,46 @@ impl GatedDeltaNet {
             }
             #[cfg(not(feature = "p5h-profile"))]
             {
-                // Step 7a: build/get the appropriate kernel
-                let kernel = if mask.is_some() {
-                    self.kernel_masked.get_or_init(|| {
+                // Step 7a: build/get the appropriate kernel. The initial
+                // prefill chunk has a logically all-zero recurrent state; use
+                // a zero-state variant so the kernel does not read or
+                // materialize a large fp32 zero buffer.
+                let zero_state = match cache.as_deref() {
+                    Some(c) => c.offsets().iter().all(|&o| o == 0),
+                    None => true,
+                };
+                let kernel = match (mask.is_some(), zero_state) {
+                    (true, true) => self.kernel_zero_state_masked.get_or_init(|| {
+                        build_gated_delta_zero_state_kernel(true)
+                            .expect("build zero-state masked kernel")
+                    }),
+                    (false, true) => self.kernel_zero_state_no_mask.get_or_init(|| {
+                        build_gated_delta_zero_state_kernel(false)
+                            .expect("build zero-state no-mask kernel")
+                    }),
+                    (true, false) => self.kernel_masked.get_or_init(|| {
                         build_gated_delta_kernel(true).expect("build masked kernel")
-                    })
-                } else {
-                    self.kernel_no_mask.get_or_init(|| {
+                    }),
+                    (false, false) => self.kernel_no_mask.get_or_init(|| {
                         build_gated_delta_kernel(false).expect("build no-mask kernel")
-                    })
+                    }),
                 };
 
-                // Step 7b: get state_in from cache (or fresh zeros).
-                // Note: `Array::clone()` is cheap (Arc-share refcount inc on `array_desc_`,
-                // not a deep memory copy); the kernel dispatch needs an `&Array`, and
-                // the cache must keep its slot for `update_recurrent` later.
-                let state_in = match cache.as_deref() {
-                    Some(c) => c.recurrent_state().clone(),
-                    None => Array::zeros(
-                        (
-                            batch,
-                            self.cfg.num_v_heads,
-                            self.cfg.head_v_dim,
-                            self.cfg.head_k_dim,
-                        ),
-                        Dtype::Float32,
-                    )?,
+                // Step 7b: get state_in only after the stream has advanced.
+                // Note: `Array::clone()` is cheap (Arc-share refcount inc on
+                // `array_desc_`, not a deep memory copy); the regular kernel
+                // dispatch needs an `&Array`, and the cache must keep its slot
+                // for `update_recurrent` later.
+                let state_in = if zero_state {
+                    None
+                } else {
+                    Some(
+                        cache
+                            .as_deref()
+                            .expect("nonzero GDN state requires cache to exist")
+                            .recurrent_state()
+                            .clone(),
+                    )
                 };
 
                 // Step 7c: T as 0-dim int32 array.
@@ -1720,15 +1756,12 @@ impl GatedDeltaNet {
                 ]);
 
                 // Step 7d: dispatch
-                let mut kernel_inputs: Vec<&Array> = vec![
-                    &q_scaled,
-                    &k_scaled,
-                    &v_per_head,
-                    &g,
-                    &beta,
-                    &state_in,
-                    &t_arr,
-                ];
+                let mut kernel_inputs: Vec<&Array> =
+                    vec![&q_scaled, &k_scaled, &v_per_head, &g, &beta];
+                if let Some(state_in) = state_in.as_ref() {
+                    kernel_inputs.push(state_in);
+                }
+                kernel_inputs.push(&t_arr);
                 if let Some(m) = mask {
                     kernel_inputs.push(m);
                 }
@@ -2005,10 +2038,32 @@ impl GatedDeltaNet {
 /// int32_t& T` — usable directly as an integer in the shader (e.g.
 /// `for (int t = 0; t < T; ++t)`).
 pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
+    build_gated_delta_kernel_impl(masked, false)
+}
+
+/// Build a `gated_delta_step` kernel for the first chunk of a stream, where
+/// recurrent state is known to be all zeros. This variant intentionally has no
+/// `state_in` input: it initializes the per-thread register tile to 0 and still
+/// emits the same `state_out` shape as the regular kernel.
+pub(crate) fn build_gated_delta_zero_state_kernel(masked: bool) -> Result<MetalKernel> {
+    build_gated_delta_kernel_impl(masked, true)
+}
+
+fn build_gated_delta_kernel_impl(masked: bool, zero_state: bool) -> Result<MetalKernel> {
     let mask_clause = if masked {
         "mask[b_idx * T + t]"
     } else {
         "true"
+    };
+    let state_in_ptr = if zero_state {
+        ""
+    } else {
+        "auto i_state = state_in + (n * Dv + dv_idx) * Dk;"
+    };
+    let state_init = if zero_state {
+        "state[i] = 0.0f;"
+    } else {
+        "state[i] = static_cast<float>(i_state[s_idx]);"
     };
     let src = format!(
         r#"
@@ -2030,13 +2085,13 @@ pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
         auto dv_idx = thread_position_in_grid.y;
 
         // state_in, state_out: [B, Hv, Dv, Dk]
-        auto i_state = state_in + (n * Dv + dv_idx) * Dk;
+        {state_in_ptr}
         auto o_state = state_out + (n * Dv + dv_idx) * Dk;
 
         float state[n_per_t];
         for (int i = 0; i < n_per_t; ++i) {{
           auto s_idx = n_per_t * dk_idx + i;
-          state[i] = static_cast<float>(i_state[s_idx]);
+          {state_init}
         }}
 
         // g, beta: [B, T, Hv]
@@ -2085,19 +2140,23 @@ pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
           o_state[s_idx] = static_cast<StT>(state[i]);
         }}
         "#,
-        mask_clause = mask_clause
+        mask_clause = mask_clause,
+        state_in_ptr = state_in_ptr,
+        state_init = state_init
     );
 
-    let name = if masked {
-        "ironmlx_gated_delta_masked"
-    } else {
-        "ironmlx_gated_delta"
+    let name = match (masked, zero_state) {
+        (false, false) => "ironmlx_gated_delta",
+        (true, false) => "ironmlx_gated_delta_masked",
+        (false, true) => "ironmlx_gated_delta_zero_state",
+        (true, true) => "ironmlx_gated_delta_zero_state_masked",
     };
 
-    let inputs: &[&str] = if masked {
-        &["q", "k", "v", "g", "beta", "state_in", "T", "mask"]
-    } else {
-        &["q", "k", "v", "g", "beta", "state_in", "T"]
+    let inputs: &[&str] = match (masked, zero_state) {
+        (false, false) => &["q", "k", "v", "g", "beta", "state_in", "T"],
+        (true, false) => &["q", "k", "v", "g", "beta", "state_in", "T", "mask"],
+        (false, true) => &["q", "k", "v", "g", "beta", "T"],
+        (true, true) => &["q", "k", "v", "g", "beta", "T", "mask"],
     };
 
     Ok(MetalKernel::builder(name)
@@ -2257,6 +2316,107 @@ mod tests {
 
         let _y = outputs.take_at(0).expect("y");
         let _state = outputs.take_at(0).expect("state");
+    }
+
+    fn assert_zero_state_kernel_matches_regular(masked: bool) {
+        let regular = build_gated_delta_kernel(masked).expect("regular kernel");
+        let zero_state = build_gated_delta_zero_state_kernel(masked).expect("zero-state kernel");
+
+        let q_data: Vec<f32> = (0..64).map(|i| (i as f32) * 0.001 + 0.01).collect();
+        let k_data: Vec<f32> = (0..64).map(|i| (i as f32) * -0.0007 + 0.02).collect();
+        let v_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.003 + 0.1).collect();
+        let g_data = [0.7_f32, 0.5];
+        let beta_data = [0.25_f32, 0.4];
+
+        let q: Array = (q_data.as_slice(), (1_i32, 2, 1, 32)).try_into().unwrap();
+        let k: Array = (k_data.as_slice(), (1_i32, 2, 1, 32)).try_into().unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 2, 1, 8)).try_into().unwrap();
+        let g: Array = (g_data.as_slice(), (1_i32, 2, 1)).try_into().unwrap();
+        let beta: Array = (beta_data.as_slice(), (1_i32, 2, 1)).try_into().unwrap();
+        let state_in = Array::zeros((1_i32, 1, 8, 32), Dtype::Float32).unwrap();
+        let t_arr: Array = (&[2_i32][..], ()).try_into().unwrap();
+        let mask: Option<Array> = masked.then(|| {
+            let mask_data = [true, false];
+            (mask_data.as_slice(), (2_i32,)).try_into().unwrap()
+        });
+
+        let y_shape = Shape::from(vec![1, 2, 1, 8]);
+        let state_shape = Shape::from(vec![1, 1, 8, 32]);
+        let output_shapes = [y_shape.clone(), state_shape.clone()];
+        let output_dtypes = [Dtype::Float32, Dtype::Float32];
+
+        let mut regular_inputs: Vec<&Array> = vec![&q, &k, &v, &g, &beta, &state_in, &t_arr];
+        if let Some(mask) = mask.as_ref() {
+            regular_inputs.push(mask);
+        }
+        let mut regular_out = regular
+            .dispatch_builder()
+            .inputs(&regular_inputs)
+            .output_shapes(&output_shapes)
+            .output_dtypes(&output_dtypes)
+            .grid(32, 8, 1)
+            .threadgroup(32, 4, 1)
+            .template_int("Dk", 32)
+            .template_int("Dv", 8)
+            .template_int("Hk", 1)
+            .template_int("Hv", 1)
+            .template_dtype("InT", Dtype::Float32)
+            .template_dtype("StT", Dtype::Float32)
+            .dispatch()
+            .expect("dispatch regular");
+
+        let mut zero_inputs: Vec<&Array> = vec![&q, &k, &v, &g, &beta, &t_arr];
+        if let Some(mask) = mask.as_ref() {
+            zero_inputs.push(mask);
+        }
+        let mut zero_out = zero_state
+            .dispatch_builder()
+            .inputs(&zero_inputs)
+            .output_shapes(&[y_shape, state_shape])
+            .output_dtypes(&output_dtypes)
+            .grid(32, 8, 1)
+            .threadgroup(32, 4, 1)
+            .template_int("Dk", 32)
+            .template_int("Dv", 8)
+            .template_int("Hk", 1)
+            .template_int("Hv", 1)
+            .template_dtype("InT", Dtype::Float32)
+            .template_dtype("StT", Dtype::Float32)
+            .dispatch()
+            .expect("dispatch zero-state");
+
+        let regular_y = regular_out.take_at(0).expect("regular y");
+        let regular_state = regular_out.take_at(0).expect("regular state");
+        let zero_y = zero_out.take_at(0).expect("zero y");
+        let zero_state_out = zero_out.take_at(0).expect("zero state");
+
+        let regular_y_vec: Vec<f32> = regular_y.to_vec().unwrap();
+        let zero_y_vec: Vec<f32> = zero_y.to_vec().unwrap();
+        let regular_state_vec: Vec<f32> = regular_state.to_vec().unwrap();
+        let zero_state_vec: Vec<f32> = zero_state_out.to_vec().unwrap();
+
+        for (actual, expected) in zero_y_vec.iter().zip(regular_y_vec.iter()) {
+            assert!(
+                (actual - expected).abs() <= 1e-5,
+                "zero-state y diverged: actual={actual} expected={expected}"
+            );
+        }
+        for (actual, expected) in zero_state_vec.iter().zip(regular_state_vec.iter()) {
+            assert!(
+                (actual - expected).abs() <= 1e-5,
+                "zero-state recurrent state diverged: actual={actual} expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn gated_delta_zero_state_kernel_matches_explicit_zero_state() {
+        assert_zero_state_kernel_matches_regular(false);
+    }
+
+    #[test]
+    fn gated_delta_zero_state_masked_kernel_matches_explicit_zero_state() {
+        assert_zero_state_kernel_matches_regular(true);
     }
 
     #[test]

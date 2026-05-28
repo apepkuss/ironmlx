@@ -1286,6 +1286,20 @@ mod tests {
         ) -> Result<mlx::Array> {
             unreachable!("scheduler_actor policy unit tests are text-only")
         }
+
+        fn forward_vl_hidden(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _vision_embeds_slice: Option<&mlx::Array>,
+            _image_token_id: i32,
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            unreachable!("scheduler_actor policy unit tests are text-only")
+        }
     }
 
     fn fake_logits(batch: usize) -> Result<mlx::Array> {
