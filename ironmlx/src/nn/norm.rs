@@ -8,6 +8,10 @@
 //! Each layer exposes a default `forward` (current default stream) and a
 //! stream-targeted `forward_on` variant (P5.7 contract).
 
+use std::sync::OnceLock;
+
+use anyhow::anyhow;
+use mlx::compile::{compile, CompiledFn, ShapeMode};
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
@@ -119,13 +123,18 @@ impl LayerNorm {
 pub struct RmsNormGated {
     weight: Array,
     eps: f32,
+    gated_mul: OnceLock<CompiledFn>,
 }
 
 impl RmsNormGated {
     /// Production constructor: load `{prefix}.weight`.
     pub fn from_loader(loader: &Loader, prefix: &str, eps: f32) -> Result<Self> {
         let weight = loader.tensor(&format!("{prefix}.weight"))?.clone();
-        Ok(Self { weight, eps })
+        Ok(Self {
+            weight,
+            eps,
+            gated_mul: OnceLock::new(),
+        })
     }
 
     /// Test/composition seam: build from in-memory weight + eps.
@@ -135,7 +144,34 @@ impl RmsNormGated {
     /// `#[doc(hidden)]`.
     #[doc(hidden)]
     pub fn new(weight: Array, eps: f32) -> Self {
-        Self { weight, eps }
+        Self {
+            weight,
+            eps,
+            gated_mul: OnceLock::new(),
+        }
+    }
+
+    fn gated_mul(&self) -> &CompiledFn {
+        self.gated_mul.get_or_init(|| {
+            compile(
+                |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+                    let hidden = inputs[0];
+                    let gate = inputs[1];
+                    let normed = inputs[2];
+                    let hidden_dtype = hidden.dtype();
+
+                    let gate_f32 = mlx::ops::cast::astype(gate, Dtype::Float32)?;
+                    let gate_sig = gate_f32.sigmoid()?;
+                    let gate_silu = &gate_f32 * &gate_sig;
+                    let normed_f32 = mlx::ops::cast::astype(normed, Dtype::Float32)?;
+                    let out_f32 = &gate_silu * &normed_f32;
+                    let out = mlx::ops::cast::astype(&out_f32, hidden_dtype)?;
+                    Ok(vec![out])
+                },
+                ShapeMode::Shapeless,
+            )
+            .expect("RmsNormGated gated_mul compile")
+        })
     }
 
     /// Forward pass with default stream.
@@ -157,12 +193,12 @@ impl RmsNormGated {
 
         match gate {
             Some(g) => {
-                let g_f32 = mlx::ops::cast::astype(g, Dtype::Float32)?;
-                let g_sig = g_f32.sigmoid()?;
-                let g_silu = &g_f32 * &g_sig;
-                let normed_f32 = mlx::ops::cast::astype(&normed, Dtype::Float32)?;
-                let mul_f32 = &g_silu * &normed_f32;
-                Ok(mlx::ops::cast::astype(&mul_f32, hidden_dtype)?)
+                let mut outs = self
+                    .gated_mul()
+                    .invoke(&[hidden, g, &normed])
+                    .map_err(|e| anyhow!("RmsNormGated gated_mul invoke failed: {e}"))?;
+                outs.pop()
+                    .ok_or_else(|| anyhow!("RmsNormGated gated_mul returned no outputs"))
             }
             None => Ok(mlx::ops::cast::astype(&normed, hidden_dtype)?),
         }
@@ -221,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn rms_norm_gated_with_gate_finite() {
+    fn rms_norm_gated_with_gate_matches_silu_rmsnorm() {
         // With gate=Some, dispatch should produce finite output (exact silu * rmsnorm
         // values aren't asserted at unit level — those go in the integration test).
         let weight = mlx::ops::constructors::ones((4_i32,), Dtype::Float32).unwrap();
@@ -236,11 +272,21 @@ mod tests {
         assert_eq!(y.dtype(), Dtype::Float32);
         let v: Vec<f32> = y.to_vec().unwrap();
         assert!(v.iter().all(|x| x.is_finite()));
-        // gate=0 channel (index 2): silu(0) = 0 * sigmoid(0) = 0, so y[2] = 0
-        assert!(
-            v[2].abs() < 1e-6,
-            "gate=0 should yield zero output, got {}",
-            v[2]
-        );
+
+        let rms = ((1.0_f32 + 4.0 + 9.0 + 16.0) / 4.0 + 1e-6).sqrt();
+        let expected: Vec<f32> = x_data
+            .iter()
+            .zip(g_data.iter())
+            .map(|(&x_i, &g_i)| {
+                let silu = g_i * (1.0 / (1.0 + (-g_i).exp()));
+                silu * (x_i / rms)
+            })
+            .collect();
+        for (idx, (got, want)) in v.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-5,
+                "compiled gated path mismatch at {idx}: got {got}, want {want}"
+            );
+        }
     }
 }
