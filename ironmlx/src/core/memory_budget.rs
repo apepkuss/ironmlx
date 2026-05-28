@@ -217,6 +217,29 @@ pub fn test_meta_qwen35_moe() -> ModelMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn total_ram_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_total_ram_bytes<T>(bytes: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = total_ram_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", bytes);
+
+        struct ClearTotalRamEnv;
+        impl Drop for ClearTotalRamEnv {
+            fn drop(&mut self) {
+                std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+            }
+        }
+        let _clear = ClearTotalRamEnv;
+
+        f()
+    }
 
     fn meta() -> ModelMeta {
         test_meta_qwen35()
@@ -237,21 +260,21 @@ mod tests {
 
     #[test]
     fn validate_within_budget_ok() {
-        std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "34359738368"); // 32 GiB
-        let st = validate_startup_budget(1, 4096, &meta()).expect("should fit");
-        assert!(st.soft_limit() > 0);
-        std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        with_total_ram_bytes("34359738368", || {
+            let st = validate_startup_budget(1, 4096, &meta()).expect("should fit");
+            assert!(st.soft_limit() > 0);
+        });
     }
 
     #[test]
     fn validate_over_budget_err() {
-        std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "8589934592"); // 8 GiB
-        let err = validate_startup_budget(4, 32768, &meta())
-            .expect_err("4 × 32768 × 114688 should exceed 8 - 3 - 2 = 3 GiB budget");
-        let msg = format!("{err}");
-        assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
-        assert!(msg.contains("Lower --b-max"), "msg: {msg}");
-        std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        with_total_ram_bytes("8589934592", || {
+            let err = validate_startup_budget(4, 32768, &meta())
+                .expect_err("4 × 32768 × 114688 should exceed 8 - 3 - 2 = 3 GiB budget");
+            let msg = format!("{err}");
+            assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
+            assert!(msg.contains("Lower --b-max"), "msg: {msg}");
+        });
     }
 
     #[test]
@@ -281,22 +304,22 @@ mod tests {
 
     #[test]
     fn moe_validate_budget_realistic_32gb_fits() {
-        std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "34359738368"); // 32 GiB
-        let st = validate_startup_budget(1, 8192, &test_meta_qwen35_moe())
-            .expect("32GB host should fit 1 stream × 8K context for MoE");
-        assert!(st.soft_limit() > 0);
-        std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        with_total_ram_bytes("34359738368", || {
+            let st = validate_startup_budget(1, 8192, &test_meta_qwen35_moe())
+                .expect("32GB host should fit 1 stream × 8K context for MoE");
+            assert!(st.soft_limit() > 0);
+        });
     }
 
     #[test]
     fn moe_validate_budget_rejects_overcommit_16gb() {
-        std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", "17179869184"); // 16 GiB
-                                                                     // 16 GB - 17 GB weights - 2 GB safety margin = negative budget,
-                                                                     // any cap must be rejected.
-        let err = validate_startup_budget(1, 4096, &test_meta_qwen35_moe())
-            .expect_err("16GB host cannot fit 17GB MoE weights");
-        let msg = format!("{err}");
-        assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
-        std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        with_total_ram_bytes("17179869184", || {
+            // 16 GB - 17 GB weights - 2 GB safety margin = negative budget,
+            // any cap must be rejected.
+            let err = validate_startup_budget(1, 4096, &test_meta_qwen35_moe())
+                .expect_err("16GB host cannot fit 17GB MoE weights");
+            let msg = format!("{err}");
+            assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
+        });
     }
 }
