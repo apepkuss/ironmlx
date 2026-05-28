@@ -99,6 +99,33 @@ Additional `seq=521` ablations under `p5g-profile`:
 
 Conclusion: the long-prefill gap is reproduced inside Rust `GatedDeltaNet` itself. The shape-specific signature is important: `seq=1` is at parity while `seq=521` is about 2.3x slower per layer than the MLX Python reference. The remaining high-signal area is the custom gated-delta Metal dispatch path and Rust MLX binding/materialization behavior for long sequences.
 
+### Direct Stage Breakdown
+
+Added:
+
+- `scripts/qwen36_p5g_direct_summary.py` for direct-bench `[p5g-profile] layer2` log aggregation.
+- `scripts/qwen36_gdn_stage_compare.py` for an aligned MLX/Python stage benchmark using the same fused qkvz/ba projection shape.
+
+Artifacts:
+
+- Rust direct layer2: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/ironmlx_gdn_bench_layer2_seq521_measured_summary.json`
+- MLX/Python aligned stage: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/mlx_gdn_stage_seq521_aligned.json`
+
+Selected `seq=521` p50 forced-eval stage timings:
+
+| Stage | Rust p50 | MLX/Python p50 | Finding |
+| --- | ---: | ---: | --- |
+| qkvz projection + slice | 2238 us | 1288 us | largest Rust-side excess |
+| ba projection + slice | 231 us | 249 us | parity |
+| conv1d + silu | 237 us | 291 us | parity |
+| q/k rmsnorm | 224 us | 218 us | parity |
+| compute_g | 206 us | 178 us | parity |
+| sigmoid beta | 155 us | 180 us | parity |
+| gated-delta kernel + state | 851 us | 1304 us | Rust is not slower here |
+| gated RMSNorm + out projection | 1000 us | 702 us | secondary Rust-side excess |
+
+The stage sums are higher than the no-profile whole-forward timings because layer2 deliberately inserts eval barriers after each stage. The important directional result is that the custom gated-delta kernel is not the slow stage under aligned forced-eval measurement; the remaining excess is concentrated in qkvz projection and output projection/materialization. This shifts the next investigation from "rewrite GDN recurrent kernel" to "quantized linear / graph scheduling around GDN projections".
+
 ## Lessons From P5h/P5i
 
 - Do not continue the prior custom `gather_qmm_gate_up` kernel line: earlier P5i/P5i.c experiments showed that path underperformed MLX's steel implementation.
@@ -107,7 +134,7 @@ Conclusion: the long-prefill gap is reproduced inside Rust `GatedDeltaNet` itsel
 
 ## Next Tasks
 
-- Add a Rust-side GDN stage breakdown benchmark that uses the same real layer and records forced-eval timings for projection, conv, q/k norm, compute_g, gated-delta kernel materialization, and output norm/proj in one process.
-- Compare Rust custom Metal kernel dispatch against a same-source MLX/Python custom-kernel harness to determine whether the delta is in kernel source, MLX C++ binding wrappers, or upstream MLX graph scheduling.
-- Investigate whether `MetalKernel::dispatch_builder` allocates avoidable per-call vectors/shapes/template args in the long-prefill path; only optimize this if stage evidence shows dispatch construction, not GPU kernel body, is material.
-- Only after stage evidence is available choose a production optimization. Current evidence rules out rewriting MoE kernels and does not justify reverting GDN projection fusion.
+- Add a focused Rust/Python quantized-linear microbench for GDN qkvz and out projection shapes. The candidate root is now shape-specific quantized linear or post-linear materialization, not the recurrent Metal kernel.
+- Inspect `Linear::forward_on` / `mlx::quantization::quantized_matmul_on` call shape for avoidable per-call overhead, stream-target encoding overhead, and whether qkvz's fused output shape triggers a slower MLX path from Rust than Python.
+- Re-evaluate full GDN after any quantized-linear candidate; the acceptance gate should be whole-forward `ironmlx-gdn-bench` p50, not only forced-eval stage totals.
+- Current evidence rules out rewriting MoE kernels and argues against starting with a gated-delta kernel rewrite.

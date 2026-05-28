@@ -114,6 +114,8 @@ struct Summary {
 }
 
 fn main() -> Result<()> {
+    init_tracing();
+
     let args = Args::parse();
     let seqs = if args.seq.is_empty() {
         vec![521, 1]
@@ -194,6 +196,20 @@ fn main() -> Result<()> {
         .with_context(|| format!("writing {}", args.out.display()))?;
     Ok(())
 }
+
+#[cfg(feature = "p5g-profile")]
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ironmlx=info,warn")),
+        )
+        .try_init();
+}
+
+#[cfg(not(feature = "p5g-profile"))]
+fn init_tracing() {}
 
 fn shapes_for_mode(mode: CacheMode) -> Vec<BenchShape> {
     match mode {
