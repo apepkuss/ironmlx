@@ -745,6 +745,30 @@ impl<M: Model> Scheduler<M> {
             .collect()
     }
 
+    fn prefill_cache_cap(&self) -> i32 {
+        // B1-p2.3f: dynamic cap = max(prompt_len + max_new_tokens) over
+        // admitted slots, bounded by effective_cap_max (defense-in-depth;
+        // admit gate already rejects oversize).
+        //
+        // Logical cap is then floored at MIN_KV_CACHE_CAP_FOR_GPU_PERF to
+        // avoid the MLX Metal kernel slow-path cliff for tight K/V buffer
+        // widths. The floor is a physical-buffer concern; admit-gate
+        // semantics still use the user-requested cap.
+        let slots_max = self
+            .slots
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .map(|r| {
+                let max_new_i32 = i32::try_from(r.max_new_tokens).unwrap_or(i32::MAX);
+                (r.prompt_ids.len() as i32).saturating_add(max_new_i32)
+            })
+            .max()
+            .unwrap_or(256);
+        slots_max
+            .min(self.effective_cap_max as i32)
+            .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF)
+    }
+
     /// Current scheduler phase. See [`Phase`] for the state machine.
     pub fn phase(&self) -> Phase {
         self.phase
@@ -804,20 +828,23 @@ impl<M: Model> Scheduler<M> {
     /// allocate fresh — `evict_all` drops the cache (3f) so the next
     /// batch's cap is sized to its slots, not inherited from the prior batch.
     ///
-    /// Builds right-padded `[B, T_max]` input_ids + `[3, B, T_max]`
-    /// position_ids + `[B, 1, T_max, T_max]` attention mask + `[B, T_max]`
-    /// linear mask, then calls `M::batched_prefill` via the `Model` trait.
+    /// Builds a right-padded model-facing batch over occupied rows only. Its
+    /// tensors are `[B_prefill, T_max]` input_ids, `[3, B_prefill, T_max]`
+    /// position_ids, `[B_prefill, 1, T_max, T_max]` attention mask, and
+    /// `[B_prefill, T_max]` linear mask, then calls `M::batched_prefill` via
+    /// the `Model` trait.
+    /// If `B_prefill < b_max`, the compact cache rows are adopted back into the
+    /// `b_max`-shaped main cache before decode starts.
     ///
     /// After prefill, samples the first token via a three-stage dispatch:
-    /// Stage A collects per-row `sampler` refs + prompt histories (sentinel
-    /// greedy + empty history for `None` slots so sample_batch sees a uniform
-    /// `[B]` view without branching). Stage B reshapes `[B, 1, vocab]` →
-    /// `[B, vocab]` and calls `sample_batch` once — coalescing all-greedy
-    /// batches into a single GPU op rather than B serial kernel launches.
-    /// Stage C distributes tokens to occupied rows, checks EOS / `max_new_tokens`,
-    /// and emits one [`StepEvent`] per occupied row. Sentinel-row outputs are
-    /// silently discarded. Transitions to `Decoding` (or `Finished` if every
-    /// first token was EOS). See spec §4.5.
+    /// Stage A collects per-row `sampler` refs + prompt histories in compact
+    /// prefill order. Stage B reshapes `[B_prefill, 1, vocab]` →
+    /// `[B_prefill, vocab]` and calls `sample_batch` once — coalescing
+    /// all-greedy batches into a single GPU op rather than B serial kernel
+    /// launches. Stage C distributes tokens back to their scheduler rows,
+    /// checks EOS / `max_new_tokens`, and emits one [`StepEvent`] per occupied
+    /// row. Transitions to `Decoding` (or `Finished` if every first token was
+    /// EOS). See spec §4.5.
     pub fn prefill_admitted(&mut self, model: &M) -> Result<Vec<StepEvent>>
     where
         M: DenseVlMethods,
@@ -845,7 +872,13 @@ impl<M: Model> Scheduler<M> {
                 ));
             }
         }
-        if self.active_count() == 0 {
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| slot.as_ref().map(|_| row))
+            .collect();
+        if active_rows.is_empty() {
             return Err(anyhow!("prefill_admitted: no admitted requests to prefill"));
         }
 
@@ -858,16 +891,26 @@ impl<M: Model> Scheduler<M> {
         #[cfg(feature = "p5h-profile")]
         let p5h_trace = self.cloned_active_row_p5h_trace_and_root()?;
 
-        // Build per-row prompt-length vector in slot order. None slots get
-        // a synthetic length=1 so that build_position_ids_batched and the
-        // mask builders accept the input (they assert > 0). The row stays
-        // all-pad-zero in input_ids; attention masks treat its single
-        // "real" column as pad K/V (zeroed by the model's batched_prefill
-        // path), so active rows see no leakage from None slots.
-        let prompt_lens: Vec<i32> = self
-            .slots
+        let compact_prefill = active_rows.len() < self.b_max;
+        let prefill_rows: Vec<usize> = if compact_prefill {
+            active_rows
+        } else {
+            (0..self.b_max).collect()
+        };
+
+        // Build the model-facing prefill batch in active slot order. When
+        // there are empty scheduler slots, the model sees only occupied rows;
+        // the compact cache is adopted back into the b_max-shaped main cache
+        // before decode starts.
+        let prompt_lens: Vec<i32> = prefill_rows
             .iter()
-            .map(|s| s.as_ref().map(|r| r.prompt_ids.len() as i32).unwrap_or(1))
+            .map(|&row| {
+                self.slots[row]
+                    .as_ref()
+                    .expect("prefill_rows contain only occupied slots")
+                    .prompt_ids
+                    .len() as i32
+            })
             .collect();
         let max_len = prompt_lens.iter().copied().max().unwrap_or(0);
         if max_len <= 0 {
@@ -876,18 +919,18 @@ impl<M: Model> Scheduler<M> {
             ));
         }
 
-        // Build [B, T_max] right-padded input_ids (pad value 0). Slot order
-        // matches the slots vector — None rows become full-zero.
-        let b = self.b_max;
+        // Build [B_prefill, T_max] right-padded input_ids (pad value 0).
+        let b = prefill_rows.len();
         let t = max_len as usize;
         let mut flat: Vec<i32> = vec![0; b * t];
-        for (row, slot) in self.slots.iter().enumerate() {
-            if let Some(state) = slot {
-                for (j, &tok) in state.prompt_ids.iter().enumerate() {
-                    flat[row * t + j] = tok as i32;
-                }
-                // positions [state.prompt_ids.len() .. t] stay 0 (pad)
+        for (batch_row, &slot_row) in prefill_rows.iter().enumerate() {
+            let state = self.slots[slot_row]
+                .as_ref()
+                .expect("prefill_rows contain only occupied slots");
+            for (j, &tok) in state.prompt_ids.iter().enumerate() {
+                flat[batch_row * t + j] = tok as i32;
             }
+            // positions [state.prompt_ids.len() .. t] stay 0 (pad)
         }
         let input_ids: Array = (&flat[..], &[b as i32, max_len][..])
             .try_into()
@@ -895,10 +938,11 @@ impl<M: Model> Scheduler<M> {
 
         // B1-p2.4: detect any VL row. Dispatch determines both position_ids
         // builder and prefill entry point.
-        let any_vl = self
-            .slots
-            .iter()
-            .any(|s| s.as_ref().is_some_and(|r| r.pixel_values.is_some()));
+        let any_vl = prefill_rows.iter().any(|&row| {
+            self.slots[row]
+                .as_ref()
+                .is_some_and(|r| r.pixel_values.is_some())
+        });
 
         let attention_mask = build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
         let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
@@ -906,42 +950,15 @@ impl<M: Model> Scheduler<M> {
         // Lazy-allocate the cache.
         // TODO: when a non-bf16 model lands, expose dtype via the `Model`
         // trait and thread it here.
+        let cap = self.prefill_cache_cap();
         if self.cache.is_none() {
-            // B1-p2.3f: dynamic cap = max(prompt_len + max_new_tokens) over
-            // admitted slots, bounded by effective_cap_max (defense-in-depth;
-            // admit gate already rejects oversize). min_cap=256 fallback if
-            // all slots None (defensive — not reachable in production since
-            // prefill_admitted asserts active_count() >= 1 earlier).
-            let slots_max = self
-                .slots
-                .iter()
-                .filter_map(|s| s.as_ref())
-                .map(|r| {
-                    let max_new_i32 = i32::try_from(r.max_new_tokens).unwrap_or(i32::MAX);
-                    (r.prompt_ids.len() as i32).saturating_add(max_new_i32)
-                })
-                .max()
-                .unwrap_or(256);
-            // Logical cap: largest per-slot (prompt_len + max_new_tokens),
-            // bounded by user's effective_cap_max. Then floored at
-            // MIN_KV_CACHE_CAP_FOR_GPU_PERF to avoid the MLX Metal
-            // kernel slow-path cliff for tight K/V buffer widths
-            // (cap < ~256 → 100-300× decode-step slowdown).
-            //
-            // Order: floor LAST so it can exceed `effective_cap_max`
-            // when the user-set cap_max is itself below the floor.
-            // The floor is a physical-buffer concern; admit-gate
-            // semantics use `cap_needed > effective_cap_max` based on
-            // the user-requested size, not the physical KVCache cap.
-            let cap = slots_max
-                .min(self.effective_cap_max as i32)
-                .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
-            self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
+            self.cache = Some(model.make_cache(self.b_max as i32, cap, Dtype::Bfloat16)?);
         }
-        let cache_ref = self
-            .cache
-            .as_mut()
-            .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?;
+        let mut compact_cache = if compact_prefill {
+            Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?)
+        } else {
+            None
+        };
 
         // Run batched prefill. Capture [B, 1, vocab] logits (sequence axis
         // already collapsed via slice_last_and_project) for first-token
@@ -995,39 +1012,61 @@ impl<M: Model> Scheduler<M> {
                 )),
                 _ => None,
             };
+            let prefill_cache = match compact_cache.as_mut() {
+                Some(cache) => cache.as_mut_slice(),
+                None => self
+                    .cache
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?
+                    .as_mut_slice(),
+            };
             let logits = if any_vl {
                 // Collect per-row prompt_ids (i32 conversion) + per-row vision args + tokenizer consts.
-                let per_row_ids_i32: Vec<Vec<i32>> = self
-                    .slots
+                let per_row_ids_i32: Vec<Vec<i32>> = prefill_rows
                     .iter()
-                    .map(|s| match s {
-                        Some(r) => r.prompt_ids.iter().map(|&t| t as i32).collect(),
-                        None => vec![0_i32], // synthetic length-1 zero row (matches prompt_lens fallback)
+                    .map(|&row| {
+                        self.slots[row]
+                            .as_ref()
+                            .expect("prefill_rows contain only occupied slots")
+                            .prompt_ids
+                            .iter()
+                            .map(|&t| t as i32)
+                            .collect()
                     })
                     .collect();
                 let per_row_ids_refs: Vec<&[i32]> =
                     per_row_ids_i32.iter().map(|v| v.as_slice()).collect();
-                let per_row_grids_owned: Vec<Option<Vec<(i32, i32, i32)>>> = self
-                    .slots
+                let per_row_grids_owned: Vec<Option<Vec<(i32, i32, i32)>>> = prefill_rows
                     .iter()
-                    .map(|s| s.as_ref().and_then(|r| r.image_grid_thw.clone()))
+                    .map(|&row| {
+                        self.slots[row]
+                            .as_ref()
+                            .expect("prefill_rows contain only occupied slots")
+                            .image_grid_thw
+                            .clone()
+                    })
                     .collect();
                 let per_row_grids: Vec<GridThwSlice<'_>> = per_row_grids_owned
                     .iter()
                     .map(|opt| opt.as_deref())
                     .collect();
-                let per_row_pv: Vec<Option<&Array>> = self
-                    .slots
+                let per_row_pv: Vec<Option<&Array>> = prefill_rows
                     .iter()
-                    .map(|s| s.as_ref().and_then(|r| r.pixel_values.as_ref()))
+                    .map(|&row| {
+                        self.slots[row]
+                            .as_ref()
+                            .expect("prefill_rows contain only occupied slots")
+                            .pixel_values
+                            .as_ref()
+                    })
                     .collect();
 
                 // Tokenizer-defined constants from the first VL slot.
-                let (img_token_id, merge_size) = self
-                    .slots
+                let (img_token_id, merge_size) = prefill_rows
                     .iter()
-                    .find_map(|s| {
-                        s.as_ref()
+                    .find_map(|&row| {
+                        self.slots[row]
+                            .as_ref()
                             .filter(|r| r.pixel_values.is_some())
                             .map(|r| (r.image_token_id, r.image_spatial_merge_size))
                     })
@@ -1050,7 +1089,7 @@ impl<M: Model> Scheduler<M> {
                     &per_row_pv,
                     &per_row_grids,
                     img_token_id,
-                    Some(cache_ref),
+                    Some(prefill_cache),
                     mlx::StreamOrDevice::default(),
                 )?
             } else {
@@ -1061,7 +1100,7 @@ impl<M: Model> Scheduler<M> {
                     &attention_mask,
                     &linear_attention_mask,
                     &prompt_lens,
-                    Some(cache_ref),
+                    Some(prefill_cache),
                     mlx::StreamOrDevice::default(),
                 )?
             };
@@ -1096,13 +1135,43 @@ impl<M: Model> Scheduler<M> {
 
         let logits = logits_result?;
 
+        if let Some(temp_cache) = compact_cache.as_ref() {
+            let main_cache = self
+                .cache
+                .as_mut()
+                .ok_or_else(|| anyhow!("cache missing after lazy-alloc — internal bug"))?;
+            if main_cache.len() != temp_cache.len() {
+                return Err(anyhow!(
+                    "prefill_admitted: compact cache layer count mismatch ({} vs {})",
+                    main_cache.len(),
+                    temp_cache.len()
+                ));
+            }
+            for (main_layer, temp_layer) in main_cache.iter_mut().zip(temp_cache.iter()) {
+                match (main_layer, temp_layer) {
+                    (LayerCache::Full(main_kv), LayerCache::Full(temp_kv)) => {
+                        for (src_row, &dst_row) in prefill_rows.iter().enumerate() {
+                            main_kv.adopt_row_from(temp_kv, dst_row, src_row)?;
+                        }
+                    }
+                    (LayerCache::Linear(main_gd), LayerCache::Linear(temp_gd)) => {
+                        for (src_row, &dst_row) in prefill_rows.iter().enumerate() {
+                            main_gd.adopt_row_from(temp_gd, dst_row, src_row)?;
+                        }
+                    }
+                    _ => return Err(anyhow!("prefill_admitted: compact cache kind mismatch")),
+                }
+            }
+        }
+
         // After per-row prefill, row i's cache is filled up to position
         // prompt_lens[i] - 1. The first decode step must use position
         // prompt_lens[i] for that row.
-        for (slot, &plen) in self.slots.iter_mut().zip(prompt_lens.iter()) {
-            if let Some(state) = slot.as_mut() {
-                state.real_len = plen;
-            }
+        for (&slot_row, &plen) in prefill_rows.iter().zip(prompt_lens.iter()) {
+            let state = self.slots[slot_row]
+                .as_mut()
+                .expect("prefill_rows contain only occupied slots");
+            state.real_len = plen;
         }
 
         // Sample first token per occupied row from logits[:, 0, :].
@@ -1149,19 +1218,15 @@ impl<M: Model> Scheduler<M> {
             }
         };
 
-        // Stage A — collect per-row sampler refs + histories in slot order.
-        // Sentinel covers None / pad rows; their tokens are discarded.
-        let sentinel = Sampler::greedy();
+        // Stage A — collect per-row sampler refs + histories in compact prefill order.
         let mut row_samplers: Vec<&Sampler> = Vec::with_capacity(b);
         let mut row_histories: Vec<Vec<u32>> = Vec::with_capacity(b);
-        for b_idx in 0..b {
-            if let Some(state) = self.slots[b_idx].as_ref() {
-                row_samplers.push(&state.sampler);
-                row_histories.push(state.prompt_ids.clone());
-            } else {
-                row_samplers.push(&sentinel);
-                row_histories.push(Vec::new());
-            }
+        for &slot_row in &prefill_rows {
+            let state = self.slots[slot_row]
+                .as_ref()
+                .expect("prefill_rows contain only occupied slots");
+            row_samplers.push(&state.sampler);
+            row_histories.push(state.prompt_ids.clone());
         }
 
         // Close the prepare span BEFORE opening the materialize sibling so
@@ -1212,11 +1277,11 @@ impl<M: Model> Scheduler<M> {
 
         // Stage C — distribute tokens + termination per occupied row.
         let mut events: Vec<StepEvent> = Vec::new();
-        for (b_idx, &token) in tokens.iter().enumerate() {
-            if self.slots[b_idx].is_none() {
-                continue;
-            }
-            let state = self.slots[b_idx].as_mut().expect("is_some checked above");
+        for (batch_row, &token) in tokens.iter().enumerate() {
+            let slot_row = prefill_rows[batch_row];
+            let state = self.slots[slot_row]
+                .as_mut()
+                .expect("prefill_rows contain only occupied slots");
 
             state.generated_tokens.push(token);
             state.real_len += 1;
@@ -2028,19 +2093,7 @@ impl<M: Model> Scheduler<M> {
     /// invoking a real model.
     #[cfg(test)]
     pub(crate) fn computed_cap_for_prefill(&self) -> i32 {
-        let slots_max = self
-            .slots
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .map(|r| {
-                let max_new_i32 = i32::try_from(r.max_new_tokens).unwrap_or(i32::MAX);
-                (r.prompt_ids.len() as i32).saturating_add(max_new_i32)
-            })
-            .max()
-            .unwrap_or(256);
-        slots_max
-            .min(self.effective_cap_max as i32)
-            .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF)
+        self.prefill_cache_cap()
     }
 }
 
@@ -2219,6 +2272,153 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingPrefillModel {
+        make_cache_batches: std::sync::Mutex<Vec<i32>>,
+        text_prefill_batches: std::sync::Mutex<Vec<i32>>,
+        vl_prefill_batches: std::sync::Mutex<Vec<i32>>,
+        vl_pixel_value_lens: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl RecordingPrefillModel {
+        fn make_cache_batches(&self) -> Vec<i32> {
+            self.make_cache_batches.lock().unwrap().clone()
+        }
+
+        fn text_prefill_batches(&self) -> Vec<i32> {
+            self.text_prefill_batches.lock().unwrap().clone()
+        }
+
+        fn vl_prefill_batches(&self) -> Vec<i32> {
+            self.vl_prefill_batches.lock().unwrap().clone()
+        }
+
+        fn vl_pixel_value_lens(&self) -> Vec<usize> {
+            self.vl_pixel_value_lens.lock().unwrap().clone()
+        }
+    }
+
+    fn fake_logits_for_batch(batch: i32) -> crate::Result<mlx::Array> {
+        let batch_usize = batch as usize;
+        let vocab = 16_usize;
+        let mut flat = vec![0.0_f32; batch_usize * vocab];
+        for row in 0..batch_usize {
+            flat[row * vocab + row + 3] = 100.0;
+        }
+        let logits_bv: mlx::Array = (&flat[..], &[batch, vocab as i32][..])
+            .try_into()
+            .expect("fake logits [B,V]");
+        logits_bv
+            .reshape(&[batch, 1, vocab as i32][..])
+            .map_err(|e| anyhow::anyhow!("fake logits reshape failed: {e:?}"))
+    }
+
+    impl crate::core::model::Model for RecordingPrefillModel {
+        fn make_cache(
+            &self,
+            batch: i32,
+            _cap: i32,
+            _dtype: mlx::Dtype,
+        ) -> crate::Result<Vec<crate::nn::LayerCache>> {
+            self.make_cache_batches.lock().unwrap().push(batch);
+            Ok(Vec::new())
+        }
+
+        fn forward_on(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("RecordingPrefillModel tests never call decode forward")
+        }
+
+        fn batched_prefill(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _attention_mask: &mlx::Array,
+            _linear_attention_mask: &mlx::Array,
+            _per_row_lens: &[i32],
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            let batch = input_ids.shape().as_slice()[0];
+            self.text_prefill_batches.lock().unwrap().push(batch);
+            fake_logits_for_batch(batch)
+        }
+
+        fn forward_text_hidden(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("RecordingPrefillModel tests never call chunk hidden forward")
+        }
+
+        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+            crate::core::memory_budget::test_meta_qwen35()
+        }
+
+        fn num_hidden_layers(&self) -> usize {
+            0
+        }
+    }
+
+    impl DenseVlMethods for RecordingPrefillModel {
+        fn batched_prefill_vl(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _attention_mask: &mlx::Array,
+            _linear_attention_mask: &mlx::Array,
+            _per_row_lens: &[i32],
+            per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+            _image_token_id: i32,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            let batch = input_ids.shape().as_slice()[0];
+            self.vl_prefill_batches.lock().unwrap().push(batch);
+            self.vl_pixel_value_lens
+                .lock()
+                .unwrap()
+                .push(per_row_pixel_values.len());
+            fake_logits_for_batch(batch)
+        }
+
+        fn compute_vision_embeds(
+            &self,
+            _pixel_values: &mlx::Array,
+            _grid_thw: &[(i32, i32, i32)],
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("RecordingPrefillModel tests never call compute_vision_embeds")
+        }
+
+        fn forward_vl_chunk(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _vision_embeds_slice: Option<&mlx::Array>,
+            _image_token_id: i32,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("RecordingPrefillModel tests never call VL chunk forward")
+        }
+    }
+
     #[test]
     fn scheduler_new_empty() {
         let s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
@@ -2338,6 +2538,92 @@ mod tests {
         assert_eq!(s.occupied_rows(), vec![0, 1, 2]);
         s.evict(id_1).expect("evict 1");
         assert_eq!(s.occupied_rows(), vec![0, 2]);
+    }
+
+    #[test]
+    fn prefill_admitted_compacts_sparse_initial_rows() {
+        let mut s = Scheduler::<RecordingPrefillModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        let id_gap = s.admit(mk_req(vec![4, 5, 6])).expect("admit gap");
+        let id_2 = s.admit(mk_req(vec![7, 8, 9])).expect("admit 2");
+        s.evict(id_gap).expect("evict middle row");
+
+        let model = RecordingPrefillModel::default();
+        let events = s.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.make_cache_batches(), vec![4, 2]);
+        assert_eq!(model.text_prefill_batches(), vec![2]);
+        assert_eq!(events.len(), 2);
+        assert_eq!((events[0].id, events[0].token), (id_0, 3));
+        assert_eq!((events[1].id, events[1].token), (id_2, 4));
+    }
+
+    #[test]
+    fn prefill_admitted_uses_full_batch_when_all_rows_active() {
+        let mut s = Scheduler::<RecordingPrefillModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        let id_1 = s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+
+        let model = RecordingPrefillModel::default();
+        let events = s.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.make_cache_batches(), vec![2]);
+        assert_eq!(model.text_prefill_batches(), vec![2]);
+        assert_eq!(events.len(), 2);
+        assert_eq!((events[0].id, events[0].token), (id_0, 3));
+        assert_eq!((events[1].id, events[1].token), (id_1, 4));
+    }
+
+    #[test]
+    fn prefill_admitted_compacts_vl_rows() {
+        use crate::core::generate::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        let mut s = Scheduler::<RecordingPrefillModel>::new(
+            3,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let pixel_values: mlx::Array = (&[0.0_f32; 4][..], &[1_i32, 4][..])
+            .try_into()
+            .expect("pixel_values");
+        let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
+        let req = GenerateRequest {
+            prompt_ids: vec![1, IMAGE_TOKEN_ID as u32, 2],
+            max_new_tokens: 16,
+            sampler: Sampler::greedy(),
+            stop_token_ids: vec![2],
+            prefill_chunk_size: 0,
+            pixel_values: Some(pixel_values),
+            image_grid_thw: Some(vec![(1_i32, 1_i32, 1_i32)]),
+            image_spatial_merge_size: 2,
+            image_token_id: IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
+        };
+        let id = s.admit(req).expect("admit vl");
+
+        let model = RecordingPrefillModel::default();
+        let events = s.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.make_cache_batches(), vec![3, 1]);
+        assert_eq!(model.vl_prefill_batches(), vec![1]);
+        assert_eq!(model.vl_pixel_value_lens(), vec![1]);
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].id, events[0].token), (id, 3));
     }
 
     #[test]
