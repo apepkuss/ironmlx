@@ -1,6 +1,6 @@
 //! iron-bench — head-to-head HTTP benchmark harness for OpenAI-compatible LLM endpoints.
 //!
-//! Drives multiple `--target name=URL` endpoints with the same synthetic-prompt matrix
+//! Drives multiple `--target name=URL` endpoints with the same prompt matrix
 //! and reports TTFT / TG decode / TPOT / PP prefill / E2E across N timed runs (median +
 //! p95). Engine-neutral; no dependency on ironmlx/mlx crates.
 
@@ -14,6 +14,8 @@ mod prompt;
 mod report;
 mod runner;
 
+use prompt::build_prompt_sources;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "iron-bench",
@@ -26,7 +28,7 @@ struct Args {
     #[arg(long, value_parser = parse_target, required = true, num_args = 1..)]
     target: Vec<(String, String)>,
 
-    /// Path to model dir containing `tokenizer.json` (used for prompt synthesis only).
+    /// Path to model dir containing `tokenizer.json` (used for prompt construction and PP labels).
     #[arg(long)]
     model_dir: PathBuf,
 
@@ -35,8 +37,14 @@ struct Args {
     model: String,
 
     /// Prompt token lengths to test (comma-separated).
-    #[arg(long, value_delimiter = ',', default_values_t = vec![128_usize, 512, 2048])]
-    prompt_len: Vec<usize>,
+    #[arg(long, value_delimiter = ',')]
+    prompt_len: Option<Vec<usize>>,
+
+    /// Use the exact prompt text from this file for one benchmark cell.
+    /// The reported PP target is the local tokenizer count of the file
+    /// contents. Mutually exclusive with `--prompt-len`.
+    #[arg(long)]
+    fixed_prompt_file: Option<PathBuf>,
 
     /// Number of generated tokens per request.
     #[arg(long, default_value_t = 128)]
@@ -183,27 +191,14 @@ async fn main() -> Result<()> {
         );
     }
 
-    match args.concurrent {
-        None => eprintln!(
-            "iron-bench v1 (sequential): {} target(s), prompt_len={:?}, max_tokens={}, runs={}, warmup={}",
-            args.target.len(),
-            args.prompt_len,
-            args.max_tokens,
-            args.runs,
-            args.warmup,
-        ),
-        Some(n) => eprintln!(
-            "iron-bench v2 (concurrent): {} target(s), prompt_len={:?}, max_tokens={}, concurrent={}, duration={}s, warmup_duration={}s",
-            args.target.len(),
-            args.prompt_len,
-            args.max_tokens,
-            n,
-            args.duration,
-            args.warmup_duration,
-        ),
+    if args.fixed_prompt_file.is_some() && args.nonce_seed.is_some() {
+        anyhow::bail!(
+            "--nonce-seed is incompatible with --fixed-prompt-file: fixed prompts do not use nonces."
+        );
     }
 
-    // Load tokenizer.json from --model-dir for synthetic prompt construction.
+    // Load tokenizer.json before building prompt sources so fixed prompts get
+    // an accurate local PP label.
     let tokenizer_path = args.model_dir.join("tokenizer.json");
     let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| {
         anyhow::anyhow!(
@@ -211,6 +206,43 @@ async fn main() -> Result<()> {
             tokenizer_path.display()
         )
     })?;
+
+    let fixed_prompt_text =
+        match &args.fixed_prompt_file {
+            Some(path) => Some(std::fs::read_to_string(path).with_context(|| {
+                format!("failed to read --fixed-prompt-file {}", path.display())
+            })?),
+            None => None,
+        };
+    let prompt_sources = build_prompt_sources(
+        &tokenizer,
+        args.prompt_len.as_deref(),
+        fixed_prompt_text.as_deref(),
+    )?;
+    let prompt_targets: Vec<usize> = prompt_sources
+        .iter()
+        .map(|source| source.target_tokens())
+        .collect();
+
+    match args.concurrent {
+        None => eprintln!(
+            "iron-bench v1 (sequential): {} target(s), prompt_len={:?}, max_tokens={}, runs={}, warmup={}",
+            args.target.len(),
+            prompt_targets,
+            args.max_tokens,
+            args.runs,
+            args.warmup,
+        ),
+        Some(n) => eprintln!(
+            "iron-bench v2 (concurrent): {} target(s), prompt_len={:?}, max_tokens={}, concurrent={}, duration={}s, warmup_duration={}s",
+            args.target.len(),
+            prompt_targets,
+            args.max_tokens,
+            n,
+            args.duration,
+            args.warmup_duration,
+        ),
+    }
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(args.timeout))
@@ -230,14 +262,14 @@ async fn main() -> Result<()> {
     match args.concurrent {
         None => {
             // v1 sequential path
-            for pp in &args.prompt_len {
+            for prompt_source in &prompt_sources {
                 for (target_name, target_url) in &args.target {
                     let cell = runner::run_cell(
                         &client,
                         target_name,
                         target_url,
                         &args.model,
-                        *pp,
+                        prompt_source,
                         args.max_tokens,
                         args.warmup,
                         args.runs,
@@ -256,14 +288,15 @@ async fn main() -> Result<()> {
             // v2 concurrent path: share Client + Tokenizer via Arc.
             let client_arc = std::sync::Arc::new(client);
             let tokenizer_arc = std::sync::Arc::new(tokenizer);
-            for pp in &args.prompt_len {
+            for prompt_source in &prompt_sources {
+                let prompt_source_arc = std::sync::Arc::new(prompt_source.clone());
                 for (target_name, target_url) in &args.target {
                     let cell = runner::run_cell_concurrent(
                         client_arc.clone(),
                         target_name,
                         target_url,
                         &args.model,
-                        *pp,
+                        prompt_source_arc.clone(),
                         args.max_tokens,
                         std::time::Duration::from_secs(args.warmup_duration),
                         std::time::Duration::from_secs(args.duration),
