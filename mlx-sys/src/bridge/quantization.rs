@@ -82,6 +82,24 @@ pub mod ffi {
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
+        unsafe fn quantized_matmul_bench_ms(
+            x: &MlxArray,
+            w: &MlxArray,
+            scales: &MlxArray,
+            biases: *const MlxArray,
+            transpose: bool,
+            has_group_size: bool,
+            group_size: i32,
+            has_bits: bool,
+            bits: i32,
+            mode: &str,
+            runs: usize,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<Vec<f64>>;
+
         // ===== qqmm =====
         unsafe fn qqmm(
             x: &MlxArray,

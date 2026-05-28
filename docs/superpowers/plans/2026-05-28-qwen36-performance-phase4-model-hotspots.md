@@ -171,7 +171,8 @@ Conclusion: the root is now narrowed below `Linear::forward_on`: Rust direct cal
 
 ## Next Tasks
 
-- Inspect the MLX Rust bridge vs MLX Python binding path for `quantized_matmul`: stream target encoding, default-stream selection, array contiguity/strides, and any Python-side fast-path or graph compile/cache behavior that the Rust binding misses.
-- Add a C++-side probe, if needed, that calls `mlx::core::quantized_matmul` directly with the same qkvz/out arrays. This should separate Rust FFI overhead/argument conversion from MLX C++ kernel scheduling.
-- Re-evaluate full GDN after any quantized-matmul candidate; the acceptance gate should be whole-forward `ironmlx-gdn-bench` p50, not only qlinear microbench totals.
-- Current evidence rules out rewriting MoE kernels and argues against starting with a gated-delta kernel rewrite.
+- Phase 5 completed the MLX Rust bridge vs MLX Python binding check; see `docs/superpowers/plans/2026-05-28-qwen36-performance-phase5-mlx-qmm-root-cause.md`.
+- Stream target/default-stream diagnostics did not support directly porting the prototype's worker-stream promotion.
+- A C++-side `quantized_matmul` loop probe showed Rust bridge overhead is not the dominant cause.
+- The decisive finding is MLX-version dependent: Rust linked against MLX 0.31.2 recovers the qlinear/GDN long-prefill performance, while the local MLX 0.32.0 build regresses quantized matmul heavily.
+- Next product decision: pin/recommend MLX 0.31.2 for Qwen3.6 4-bit production, or bisect/fix the local MLX 0.32.0 qmm regression before treating scheduler/model code as the bottleneck.

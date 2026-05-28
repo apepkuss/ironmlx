@@ -7,11 +7,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use ironmlx::core::{Loader, QuantMeta};
 use ironmlx::models::Qwen35MoeConfig;
 use ironmlx::nn::{self_qmm, AttnKind, GatedDeltaNetConfig, Linear, RmsNormGated};
-use mlx::{random, Array, Dtype};
+use mlx::{random, Array, Device, Dtype, StreamOrDevice};
 use serde::Serialize;
 
 #[derive(Parser, Debug)]
@@ -52,6 +52,32 @@ struct Args {
     /// Include diagnostic direct self_qmm cases, bypassing Linear's production threshold.
     #[arg(long)]
     include_self_qmm: bool,
+
+    /// Include C++-side direct quantized_matmul timing-loop diagnostics.
+    #[arg(long)]
+    include_cxx_qmm: bool,
+
+    /// Stream target mode for qlinear diagnostics.
+    #[arg(long, value_enum, default_value_t = StreamMode::Default)]
+    stream_mode: StreamMode,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum StreamMode {
+    /// Preserve existing behavior: pass no explicit target, so MLX resolves the current default.
+    Default,
+    /// Pass the current GPU default stream explicitly to targeted ops.
+    ExplicitDefault,
+    /// Create a fresh GPU stream and promote it to this thread's default.
+    NewDefault,
+    /// Create a fresh GPU stream and pass it explicitly to targeted ops.
+    NewExplicit,
+}
+
+#[derive(Clone, Copy)]
+struct BenchTarget {
+    label: &'static str,
+    target: StreamOrDevice,
 }
 
 struct QuantProjection {
@@ -78,6 +104,8 @@ struct Meta {
     seqs: Vec<i32>,
     warmup_runs: usize,
     measured_runs: usize,
+    stream_mode: &'static str,
+    include_cxx_qmm: bool,
     hidden_size: i32,
     conv_dim: i32,
     value_dim: i32,
@@ -108,6 +136,7 @@ struct Summary {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let bench_target = args.stream_mode.configure()?;
     let seqs = if args.seq.is_empty() {
         vec![521, 1]
     } else {
@@ -164,15 +193,32 @@ fn main() -> Result<()> {
             "qkvz-direct-qmm",
             args.warmup_runs,
             args.runs,
-            || qkvz.forward_direct(&x_hidden).map(|out| vec![out]),
+            || {
+                qkvz.forward_direct_on(&x_hidden, bench_target.target)
+                    .map(|out| vec![out])
+            },
         )?);
+        if args.include_cxx_qmm {
+            records.push(bench_cxx_qmm(
+                seq,
+                "qkvz-cxx-loop-qmm",
+                &qkvz,
+                &x_hidden,
+                args.warmup_runs,
+                args.runs,
+                bench_target.target,
+            )?);
+        }
         if args.include_self_qmm {
             records.push(bench_case(
                 seq,
                 "qkvz-self-qmm",
                 args.warmup_runs,
                 args.runs,
-                || qkvz.forward_self_qmm(&x_hidden).map(|out| vec![out]),
+                || {
+                    qkvz.forward_self_qmm_on(&x_hidden, bench_target.target)
+                        .map(|out| vec![out])
+                },
             )?);
         }
         records.push(bench_case(
@@ -180,29 +226,51 @@ fn main() -> Result<()> {
             "qkvz-linear",
             args.warmup_runs,
             args.runs,
-            || qkvz.forward_linear(&x_hidden).map(|out| vec![out]),
+            || {
+                qkvz.forward_linear_on(&x_hidden, bench_target.target)
+                    .map(|out| vec![out])
+            },
         )?);
         records.push(bench_case(
             seq,
             "qkvz-linear-slice",
             args.warmup_runs,
             args.runs,
-            || qkvz_linear_slice(&qkvz, &x_hidden, gdn_cfg, seq),
+            || qkvz_linear_slice(&qkvz, &x_hidden, gdn_cfg, seq, bench_target.target),
         )?);
         records.push(bench_case(
             seq,
             "out-direct-qmm",
             args.warmup_runs,
             args.runs,
-            || out_proj.forward_direct(&x_value).map(|out| vec![out]),
+            || {
+                out_proj
+                    .forward_direct_on(&x_value, bench_target.target)
+                    .map(|out| vec![out])
+            },
         )?);
+        if args.include_cxx_qmm {
+            records.push(bench_cxx_qmm(
+                seq,
+                "out-cxx-loop-qmm",
+                &out_proj,
+                &x_value,
+                args.warmup_runs,
+                args.runs,
+                bench_target.target,
+            )?);
+        }
         if args.include_self_qmm {
             records.push(bench_case(
                 seq,
                 "out-self-qmm",
                 args.warmup_runs,
                 args.runs,
-                || out_proj.forward_self_qmm(&x_value).map(|out| vec![out]),
+                || {
+                    out_proj
+                        .forward_self_qmm_on(&x_value, bench_target.target)
+                        .map(|out| vec![out])
+                },
             )?);
         }
         records.push(bench_case(
@@ -210,14 +278,28 @@ fn main() -> Result<()> {
             "out-linear",
             args.warmup_runs,
             args.runs,
-            || out_proj.forward_linear(&x_value).map(|out| vec![out]),
+            || {
+                out_proj
+                    .forward_linear_on(&x_value, bench_target.target)
+                    .map(|out| vec![out])
+            },
         )?);
         records.push(bench_case(
             seq,
             "norm-out-linear",
             args.warmup_runs,
             args.runs,
-            || norm_out_linear(&norm, &out_proj, &y_heads, &z_heads, gdn_cfg, seq),
+            || {
+                norm_out_linear(
+                    &norm,
+                    &out_proj,
+                    &y_heads,
+                    &z_heads,
+                    gdn_cfg,
+                    seq,
+                    bench_target.target,
+                )
+            },
         )?);
     }
 
@@ -229,6 +311,8 @@ fn main() -> Result<()> {
             seqs,
             warmup_runs: args.warmup_runs,
             measured_runs: args.runs,
+            stream_mode: bench_target.label,
+            include_cxx_qmm: args.include_cxx_qmm,
             hidden_size: gdn_cfg.hidden_size,
             conv_dim: gdn_cfg.conv_dim(),
             value_dim: gdn_cfg.value_dim(),
@@ -246,7 +330,7 @@ fn main() -> Result<()> {
 }
 
 impl QuantProjection {
-    fn forward_direct(&self, x: &Array) -> Result<Array> {
+    fn forward_direct_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
         let mut y = mlx::quantization::quantized_matmul_on(
             x,
             &self.weight,
@@ -256,19 +340,19 @@ impl QuantProjection {
             Some(self.group_size),
             Some(self.bits),
             "affine",
-            (),
+            target,
         )?;
         if let Some(bias) = &self.bias {
-            y = &y + bias;
+            y = mlx::ops::binary::add_on(&y, bias, target)?;
         }
         Ok(y)
     }
 
-    fn forward_linear(&self, x: &Array) -> Result<Array> {
-        self.linear.forward_on(x, ())
+    fn forward_linear_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
+        self.linear.forward_on(x, target)
     }
 
-    fn forward_self_qmm(&self, x: &Array) -> Result<Array> {
+    fn forward_self_qmm_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
         let biases = self
             .biases
             .as_ref()
@@ -280,12 +364,75 @@ impl QuantProjection {
             biases,
             self.bits,
             self.group_size,
-            (),
+            target,
         )?;
         if let Some(bias) = &self.bias {
-            y = &y + bias;
+            y = mlx::ops::binary::add_on(&y, bias, target)?;
         }
         Ok(y)
+    }
+
+    fn cxx_qmm_timings_ms(
+        &self,
+        x: &Array,
+        runs: usize,
+        target: StreamOrDevice,
+    ) -> Result<Vec<f64>> {
+        mlx::quantization::quantized_matmul_bench_ms(
+            x,
+            &self.weight,
+            &self.scales,
+            self.biases.as_ref(),
+            true,
+            Some(self.group_size),
+            Some(self.bits),
+            "affine",
+            runs,
+            target,
+        )
+        .map_err(anyhow::Error::from)
+    }
+
+    fn output_shape_for(&self, x: &Array) -> Vec<i32> {
+        let mut shape = x.shape().as_slice().to_vec();
+        if let Some(last) = shape.last_mut() {
+            *last = self.weight.shape().as_slice()[0];
+        }
+        shape
+    }
+}
+
+impl StreamMode {
+    fn configure(self) -> Result<BenchTarget> {
+        let gpu = Device::gpu(0);
+        match self {
+            StreamMode::Default => Ok(BenchTarget {
+                label: "default",
+                target: StreamOrDevice::default(),
+            }),
+            StreamMode::ExplicitDefault => {
+                let stream = mlx::default_stream(gpu);
+                Ok(BenchTarget {
+                    label: "explicit-default",
+                    target: stream.into(),
+                })
+            }
+            StreamMode::NewDefault => {
+                let stream = mlx::new_stream(gpu).context("creating diagnostic GPU stream")?;
+                mlx::set_default_stream(stream);
+                Ok(BenchTarget {
+                    label: "new-default",
+                    target: StreamOrDevice::default(),
+                })
+            }
+            StreamMode::NewExplicit => {
+                let stream = mlx::new_stream(gpu).context("creating diagnostic GPU stream")?;
+                Ok(BenchTarget {
+                    label: "new-explicit",
+                    target: stream.into(),
+                })
+            }
+        }
     }
 }
 
@@ -404,23 +551,26 @@ fn qkvz_linear_slice(
     x: &Array,
     cfg: GatedDeltaNetConfig,
     seq: i32,
+    target: StreamOrDevice,
 ) -> Result<Vec<Array>> {
-    let qkvz_out = qkvz.forward_linear(x)?;
+    let qkvz_out = qkvz.forward_linear_on(x, target)?;
     let conv_dim = cfg.conv_dim();
     let value_dim = cfg.value_dim();
-    let qkv = mlx::ops::indexing::slice_strided(
+    let qkv = mlx::ops::indexing::slice_strided_on(
         &qkvz_out,
         &[0_i32, 0, 0][..],
         &[1_i32, seq, conv_dim][..],
         &[1_i32, 1, 1][..],
+        target,
     )?;
-    let z = mlx::ops::indexing::slice_strided(
+    let z = mlx::ops::indexing::slice_strided_on(
         &qkvz_out,
         &[0_i32, 0, conv_dim][..],
         &[1_i32, seq, conv_dim + value_dim][..],
         &[1_i32, 1, 1][..],
+        target,
     )?
-    .reshape_on((1_i32, seq, cfg.num_v_heads, cfg.head_v_dim), ())?;
+    .reshape_on((1_i32, seq, cfg.num_v_heads, cfg.head_v_dim), target)?;
     Ok(vec![qkv, z])
 }
 
@@ -431,10 +581,34 @@ fn norm_out_linear(
     z_heads: &Array,
     cfg: GatedDeltaNetConfig,
     seq: i32,
+    target: StreamOrDevice,
 ) -> Result<Vec<Array>> {
-    let normed = norm.forward_on(y_heads, Some(z_heads), ())?;
-    let normed_flat = normed.reshape_on((1_i32, seq, cfg.value_dim()), ())?;
-    out_proj.forward_linear(&normed_flat).map(|out| vec![out])
+    let normed = norm.forward_on(y_heads, Some(z_heads), target)?;
+    let normed_flat = normed.reshape_on((1_i32, seq, cfg.value_dim()), target)?;
+    out_proj
+        .forward_linear_on(&normed_flat, target)
+        .map(|out| vec![out])
+}
+
+fn bench_cxx_qmm(
+    seq: i32,
+    case: &'static str,
+    projection: &QuantProjection,
+    x: &Array,
+    warmup_runs: usize,
+    runs: usize,
+    target: StreamOrDevice,
+) -> Result<Record> {
+    let warmups = projection.cxx_qmm_timings_ms(x, warmup_runs, target)?;
+    let values_ms = projection.cxx_qmm_timings_ms(x, runs, target)?;
+    Ok(Record {
+        seq,
+        case,
+        output_shapes: vec![projection.output_shape_for(x)],
+        summary: summarize(&values_ms),
+        warmups,
+        values_ms,
+    })
 }
 
 fn random_bf16<S>(seed: u64, shape: S) -> Result<Array>
@@ -549,5 +723,45 @@ mod tests {
     #[test]
     fn percentile_returns_none_for_empty_input() {
         assert_eq!(percentile(&[], 95.0), None);
+    }
+
+    #[test]
+    fn stream_mode_cli_names_are_stable() {
+        use clap::ValueEnum;
+
+        let names: Vec<String> = StreamMode::value_variants()
+            .iter()
+            .filter_map(|mode| {
+                mode.to_possible_value()
+                    .map(|value| value.get_name().to_string())
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["default", "explicit-default", "new-default", "new-explicit"]
+        );
+    }
+
+    #[test]
+    fn cxx_quantized_matmul_bench_ms_allows_zero_runs() {
+        let x = Array::zeros((1_i32, 1, 4), Dtype::Float32).expect("x");
+        let w = Array::zeros((2_i32, 1), Dtype::Uint32).expect("w");
+        let scales = Array::zeros((2_i32, 1), Dtype::Float32).expect("scales");
+
+        let timings = mlx::quantization::quantized_matmul_bench_ms(
+            &x,
+            &w,
+            &scales,
+            None,
+            true,
+            Some(32),
+            Some(4),
+            "affine",
+            0,
+            StreamOrDevice::default(),
+        )
+        .expect("zero-run cxx qmm bench");
+
+        assert!(timings.is_empty());
     }
 }

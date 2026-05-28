@@ -266,6 +266,52 @@ pub fn qqmm_on(
     Ok(Array::from_inner(inner))
 }
 
+/// Diagnostic-only C++-side timing loop for [`quantized_matmul_on`].
+///
+/// This is intentionally not used by production inference. It lets benchmark
+/// binaries separate Rust-side loop / return-value overhead from MLX C++ kernel
+/// scheduling when investigating backend regressions.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn quantized_matmul_bench_ms(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    transpose: bool,
+    group_size: Option<i32>,
+    bits: Option<i32>,
+    mode: &str,
+    runs: usize,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Vec<f64>> {
+    let b_ptr = biases.map_or(std::ptr::null(), |a| a.as_inner() as *const _);
+    let (has_gs, gs) = group_size.map_or((false, 0), |v| (true, v));
+    let (has_b, b) = bits.map_or((false, 0), |v| (true, v));
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    // SAFETY: b_ptr is null or borrow of `biases: &Array` valid for this call.
+    unsafe {
+        mlx_sys::quantization::ffi::quantized_matmul_bench_ms(
+            x.as_inner(),
+            w.as_inner(),
+            scales.as_inner(),
+            b_ptr,
+            transpose,
+            has_gs,
+            gs,
+            has_b,
+            b,
+            mode,
+            runs,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        )
+    }
+    .map_err(Error::from)
+}
+
 /// Quantized matmul with matrix-level gather (MoE / expert routing).
 #[allow(clippy::too_many_arguments)]
 pub fn gather_quantized_matmul(
