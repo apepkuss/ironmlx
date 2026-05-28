@@ -7,7 +7,7 @@ use crate::nn::{Linear, RmsNorm};
 use crate::Result;
 
 use super::config::Gemma4VisionConfig;
-use super::ops::{gelu_approx_on, rms_norm_no_scale_on};
+use super::ops::{gelu_approx_mul_on, rms_norm_no_scale_on};
 
 struct ClippableLinear {
     linear: Linear,
@@ -272,8 +272,8 @@ impl VisionMlp {
     fn forward_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
         let gate = self.gate_proj.forward_on(x, target)?;
         let up = self.up_proj.forward_on(x, target)?;
-        let act = gelu_approx_on(&gate, target)?;
-        self.down_proj.forward_on(&(&act * &up), target)
+        let act = gelu_approx_mul_on(&gate, &up, target)?;
+        self.down_proj.forward_on(&act, target)
     }
 }
 

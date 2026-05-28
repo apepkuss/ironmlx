@@ -1,9 +1,12 @@
 use anyhow::anyhow;
-use mlx::{ops, Array, MetalKernel, Shape, StreamOrDevice};
+#[cfg(test)]
+use mlx::ops;
+use mlx::{Array, MetalKernel, Shape, StreamOrDevice};
 use std::sync::OnceLock;
 
 use crate::Result;
 
+#[cfg(test)]
 const SQRT_2_OVER_PI: f32 = 0.797_884_6;
 
 pub fn rms_norm_no_scale_on(
@@ -14,7 +17,8 @@ pub fn rms_norm_no_scale_on(
     Ok(mlx::fast::rms_norm_on(x, None, eps, target)?)
 }
 
-pub fn gelu_approx_on(x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
+#[cfg(test)]
+fn gelu_approx_on(x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
     let target = target.into();
     let three: Array = (&[3_i32][..], ()).try_into()?;
     let x3 = x.power_on(&three, target)?;
@@ -427,6 +431,7 @@ pub fn logit_softcap_on(
     Ok(&capped * softcap)
 }
 
+#[cfg(test)]
 fn scalar_f32(v: f32) -> Result<Array> {
     Ok((&[v][..], ()).try_into()?)
 }

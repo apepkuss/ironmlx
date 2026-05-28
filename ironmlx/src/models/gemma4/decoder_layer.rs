@@ -9,7 +9,7 @@ use crate::Result;
 use super::attention::{Gemma4Attention, SharedKv};
 use super::config::{Gemma4LayerKind, Gemma4TextConfig};
 use super::mlp::Gemma4GeGluMlp;
-use super::ops::gelu_approx_on;
+use super::ops::gelu_approx_mul_on;
 use super::profile;
 use super::rope::RopeOffsets;
 
@@ -195,8 +195,7 @@ impl Gemma4DecoderLayer {
                 .as_ref()
                 .ok_or_else(|| anyhow!("Gemma4DecoderLayer: per-layer input gate missing"))?
                 .forward_on(&h, target)?;
-            let gate = gelu_approx_on(&gate, target)?;
-            let gate = &gate * side;
+            let gate = gelu_approx_mul_on(&gate, side, target)?;
             let gate = self
                 .per_layer_projection
                 .as_ref()
