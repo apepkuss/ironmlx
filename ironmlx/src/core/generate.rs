@@ -965,6 +965,15 @@ fn gemma4_vl_profile_enabled() -> bool {
     std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some()
 }
 
+fn gemma4_vl_pipeline_profile_enabled() -> bool {
+    gemma4_vl_profile_enabled() && std::env::var_os("IRONMLX_GEMMA4_VL_PIPELINE_PROFILE").is_some()
+}
+
+fn gemma4_vl_pipeline_sync_probe_enabled() -> bool {
+    gemma4_vl_pipeline_profile_enabled()
+        && std::env::var_os("IRONMLX_GEMMA4_VL_PIPELINE_SYNC_PROBE").is_some()
+}
+
 fn log_gemma4_vl_profile_step_ms(label: &str, start: Option<Instant>, step: usize) {
     if let Some(start) = start {
         tracing::info!(
@@ -1725,6 +1734,8 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
     /// returned on this call.
     fn next_token_pipelined(&mut self) -> Result<Option<GenerateEvent>> {
         let profile_enabled = self.vl_profile;
+        let pipeline_profile = profile_enabled && gemma4_vl_pipeline_profile_enabled();
+        let sync_probe = pipeline_profile && gemma4_vl_pipeline_sync_probe_enabled();
         let decode_step = self.history.len() - self.request.prompt_ids.len() + 1;
 
         // 1. Materialise the pending token. The GPU has been working on it
@@ -1772,13 +1783,20 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         //    pending Array (still holds its value), sample greedily, async_eval
         //    so the GPU starts immediately.
         let dispatch_start = profile_enabled.then(Instant::now);
+        let t0 = pipeline_profile.then(Instant::now);
         let token_arr_in = self
             .pending_token_arr
             .as_ref()
             .expect("pipelined mode invariant: pending_token_arr is Some")
             .reshape((1_i32, 1_i32))?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_token_arr_reshape", t0, decode_step);
+
         let pos = (self.history.len() - 1) as i32;
+        let t0 = pipeline_profile.then(Instant::now);
         let position_ids = self.decode_position_ids(pos)?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_position_ids", t0, decode_step);
+
+        let t0 = pipeline_profile.then(Instant::now);
         let logits = self.model.forward_on(
             &token_arr_in,
             &position_ids,
@@ -1787,10 +1805,27 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             Some(&mut self.cache),
             ().into(),
         )?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_forward_graph", t0, decode_step);
+
+        let t0 = pipeline_profile.then(Instant::now);
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_logits_reshape", t0, decode_step);
+
+        let t0 = pipeline_profile.then(Instant::now);
         let next_arr = self.request.sampler.sample_async_greedy(&logits_flat)?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_sample_graph", t0, decode_step);
+
+        let t0 = pipeline_profile.then(Instant::now);
         mlx::transforms::async_eval(&[&next_arr])?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_async_eval", t0, decode_step);
+
+        if sync_probe {
+            let t0 = Some(Instant::now());
+            mlx::transforms::eval(&[&next_arr])?;
+            log_gemma4_vl_profile_step_ms("decode_pipeline_sync_probe_eval", t0, decode_step);
+        }
+
         log_gemma4_vl_profile_step_ms("decode_pipelined_dispatch", dispatch_start, decode_step);
 
         // 5. Replace pending and return.

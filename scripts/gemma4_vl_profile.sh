@@ -9,6 +9,8 @@
 #   ./scripts/gemma4_vl_profile.sh
 #   ./scripts/gemma4_vl_profile.sh --case multi-repeat
 #   ./scripts/gemma4_vl_profile.sh --layer-profile --case multi-repeat
+#   ./scripts/gemma4_vl_profile.sh --pipeline-profile --case multi-distinct
+#   ./scripts/gemma4_vl_profile.sh --pipeline-sync-probe --case multi-distinct
 #   ./scripts/gemma4_vl_profile.sh --build
 #
 # Env:
@@ -21,6 +23,8 @@
 #   GEMMA4_DISTINCT_IMAGE_2=<image-path>
 #   CHUNK_SIZES="0 256 64"
 #   LAYER_PROFILE=0
+#   PIPELINE_PROFILE=0
+#   PIPELINE_SYNC_PROBE=0
 #   MAX_TOKENS=2
 
 set -euo pipefail
@@ -31,6 +35,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROFILE_CASE="all"
 BUILD=0
 LAYER_PROFILE="${LAYER_PROFILE:-0}"
+PIPELINE_PROFILE="${PIPELINE_PROFILE:-0}"
+PIPELINE_SYNC_PROBE="${PIPELINE_SYNC_PROBE:-0}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -46,8 +52,17 @@ while [[ $# -gt 0 ]]; do
             LAYER_PROFILE=1
             shift
             ;;
+        --pipeline-profile)
+            PIPELINE_PROFILE=1
+            shift
+            ;;
+        --pipeline-sync-probe)
+            PIPELINE_PROFILE=1
+            PIPELINE_SYNC_PROBE=1
+            shift
+            ;;
         -h|--help)
-            sed -n '1,25p' "$0"
+            sed -n '1,29p' "$0"
             exit 0
             ;;
         *)
@@ -65,6 +80,10 @@ case "$PROFILE_CASE" in
         exit 2
         ;;
 esac
+
+if [[ "$PIPELINE_SYNC_PROBE" -eq 1 ]]; then
+    PIPELINE_PROFILE=1
+fi
 
 export MLX_DIR="${MLX_DIR:-$HOME/.local/mlx}"
 
@@ -214,6 +233,12 @@ run_case() {
             if [[ "$LAYER_PROFILE" -eq 1 ]]; then
                 printf 'IRONMLX_GEMMA4_VL_LAYER_PROFILE=1 '
             fi
+            if [[ "$PIPELINE_PROFILE" -eq 1 ]]; then
+                printf 'IRONMLX_GEMMA4_VL_PIPELINE_PROFILE=1 '
+            fi
+            if [[ "$PIPELINE_SYNC_PROBE" -eq 1 ]]; then
+                printf 'IRONMLX_GEMMA4_VL_PIPELINE_SYNC_PROBE=1 '
+            fi
             printf '%q generate --model %q ' "$IRONMLX_BIN" "$GEMMA4_MODEL"
             printf '%q ' "${image_args[@]}"
             printf -- '--prompt %q --max-tokens %q --prefill-chunk-size %q\n' "$prompt" "$MAX_TOKENS" "$chunk_size"
@@ -224,30 +249,28 @@ run_case() {
         echo "  stdout: $stdout_file"
         echo "  stderr: $stderr_file"
 
+        local env_args=(
+            "MLX_DIR=$MLX_DIR"
+            "RUST_LOG=info"
+            "IRONMLX_GEMMA4_VL_PROFILE=1"
+        )
         if [[ "$LAYER_PROFILE" -eq 1 ]]; then
-            MLX_DIR="$MLX_DIR" \
-                RUST_LOG=info \
-                IRONMLX_GEMMA4_VL_PROFILE=1 \
-                IRONMLX_GEMMA4_VL_LAYER_PROFILE=1 \
-                "$IRONMLX_BIN" generate \
-                --model "$GEMMA4_MODEL" \
-                "${image_args[@]}" \
-                --prompt "$prompt" \
-                --max-tokens "$MAX_TOKENS" \
-                --prefill-chunk-size "$chunk_size" \
-                > "$stdout_file" 2> "$stderr_file"
-        else
-            MLX_DIR="$MLX_DIR" \
-                RUST_LOG=info \
-                IRONMLX_GEMMA4_VL_PROFILE=1 \
-                "$IRONMLX_BIN" generate \
-                --model "$GEMMA4_MODEL" \
-                "${image_args[@]}" \
-                --prompt "$prompt" \
-                --max-tokens "$MAX_TOKENS" \
-                --prefill-chunk-size "$chunk_size" \
-                > "$stdout_file" 2> "$stderr_file"
+            env_args+=("IRONMLX_GEMMA4_VL_LAYER_PROFILE=1")
         fi
+        if [[ "$PIPELINE_PROFILE" -eq 1 ]]; then
+            env_args+=("IRONMLX_GEMMA4_VL_PIPELINE_PROFILE=1")
+        fi
+        if [[ "$PIPELINE_SYNC_PROBE" -eq 1 ]]; then
+            env_args+=("IRONMLX_GEMMA4_VL_PIPELINE_SYNC_PROBE=1")
+        fi
+        env "${env_args[@]}" \
+            "$IRONMLX_BIN" generate \
+            --model "$GEMMA4_MODEL" \
+            "${image_args[@]}" \
+            --prompt "$prompt" \
+            --max-tokens "$MAX_TOKENS" \
+            --prefill-chunk-size "$chunk_size" \
+            > "$stdout_file" 2> "$stderr_file"
 
         append_metrics "$name" "$chunk_size" "$stderr_file"
         append_chunks "$name" "$chunk_size" "$stderr_file"
@@ -288,6 +311,8 @@ echo "binary: $IRONMLX_BIN"
 echo "model:  $GEMMA4_MODEL"
 echo "chunks: $CHUNK_SIZES"
 echo "layer_profile: $LAYER_PROFILE"
+echo "pipeline_profile: $PIPELINE_PROFILE"
+echo "pipeline_sync_probe: $PIPELINE_SYNC_PROBE"
 echo ""
 
 if [[ "$PROFILE_CASE" == "all" || "$PROFILE_CASE" == "single" ]]; then
