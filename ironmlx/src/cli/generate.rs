@@ -45,6 +45,11 @@ pub struct GenerateArgs {
     #[arg(long, default_value_t = true)]
     pub chat: bool,
 
+    /// Enable thinking-mode chat templates. Defaults off so CLI generation
+    /// returns the requested answer directly unless the caller opts in.
+    #[arg(long, default_value_t = false)]
+    pub enable_thinking: bool,
+
     /// Prefill chunk size — max tokens per prefill forward call. `0`
     /// disables chunking (single-shot forward over the whole prompt).
     /// Intermediate chunks update the cache only; the last chunk runs
@@ -173,7 +178,8 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
             role: "user".into(),
             content: prompt_content,
         }];
-        tokenizer.apply_chat_template(&messages, true, /* extra_kwargs = */ None)?
+        let extra_kwargs = serde_json::json!({"enable_thinking": args.enable_thinking});
+        tokenizer.apply_chat_template(&messages, true, Some(&extra_kwargs))?
     } else {
         prompt_content
     };
@@ -278,10 +284,34 @@ pub fn run(args: GenerateArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct GenerateTestCli {
+        #[command(flatten)]
+        args: GenerateArgs,
+    }
 
     #[test]
     fn image_token_count_uses_spatial_merge_size() {
         assert_eq!(image_token_count_for_grid((1, 4, 6), 2).unwrap(), 6);
+    }
+
+    #[test]
+    fn enable_thinking_defaults_off_and_can_be_enabled() {
+        let default_cli =
+            GenerateTestCli::parse_from(["test", "--model", "/tmp/model", "--prompt", "hello"]);
+        assert!(!default_cli.args.enable_thinking);
+
+        let enabled_cli = GenerateTestCli::parse_from([
+            "test",
+            "--model",
+            "/tmp/model",
+            "--prompt",
+            "hello",
+            "--enable-thinking",
+        ]);
+        assert!(enabled_cli.args.enable_thinking);
     }
 
     #[test]

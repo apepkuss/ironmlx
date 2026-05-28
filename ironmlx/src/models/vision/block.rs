@@ -337,9 +337,7 @@ impl VitAttention {
 
         // Step 8: output projection (fused addmm to match nn.Linear)
         let proj_wt = self.proj_w.transpose_on(())?;
-        let out = ops::addmm(&self.proj_b, &output, &proj_wt, 1.0, 1.0)?;
-
-        Ok(out)
+        ops::addmm(&self.proj_b, &output, &proj_wt, 1.0, 1.0).map_err(anyhow::Error::from)
     }
 }
 

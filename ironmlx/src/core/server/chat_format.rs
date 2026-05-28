@@ -41,8 +41,9 @@ impl Content {
     /// The placeholder uses Qwen3.5 vision special tokens:
     ///   `<|vision_start|>` (248053) + N × `<|image_pad|>` (248056) + `<|vision_end|>` (248054)
     ///
-    /// `image_token_counts` supplies the per-image N value (= grid_h/2 * grid_w/2),
-    /// consumed in order as image parts are encountered.
+    /// `image_token_counts` supplies the per-image N value (= grid_h/2 * grid_w/2).
+    /// Image placeholders are emitted before text, matching the Qwen VL prompt
+    /// layout used by the CLI and reference mlx-vlm path.
     pub fn to_flat_string(
         &self,
         image_token_counts: &mut std::collections::VecDeque<usize>,
@@ -50,21 +51,23 @@ impl Content {
         match self {
             Content::Text(t) => t.clone(),
             Content::Parts(parts) => {
-                let mut buf = String::new();
+                let mut image_buf = String::new();
+                let mut text_buf = String::new();
                 for part in parts {
                     match part {
-                        ContentPart::Text { text } => buf.push_str(text),
+                        ContentPart::Text { text } => text_buf.push_str(text),
                         ContentPart::ImageUrl { .. } => {
                             let n = image_token_counts.pop_front().unwrap_or(1);
-                            buf.push_str("<|vision_start|>");
+                            image_buf.push_str("<|vision_start|>");
                             for _ in 0..n {
-                                buf.push_str("<|image_pad|>");
+                                image_buf.push_str("<|image_pad|>");
                             }
-                            buf.push_str("<|vision_end|>");
+                            image_buf.push_str("<|vision_end|>");
                         }
                     }
                 }
-                buf
+                image_buf.push_str(&text_buf);
+                image_buf
             }
         }
     }
@@ -254,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn content_parts_flat_string_replaces_image_with_placeholder() {
+    fn content_parts_flat_string_prepends_image_placeholders() {
         let parts = vec![
             ContentPart::Text {
                 text: "Look: ".into(),
@@ -272,8 +275,8 @@ mod tests {
         // Provide a count of 2 for the image
         let mut counts = std::collections::VecDeque::from([2usize]);
         let result = c.to_flat_string(&mut counts);
-        assert!(result.starts_with("Look: <|vision_start|>"));
+        assert!(result.starts_with("<|vision_start|>"));
         assert!(result.contains("<|image_pad|><|image_pad|>"));
-        assert!(result.ends_with("<|vision_end|> done"));
+        assert!(result.ends_with("<|vision_end|>Look:  done"));
     }
 }

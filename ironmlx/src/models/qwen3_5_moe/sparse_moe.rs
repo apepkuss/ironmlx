@@ -40,11 +40,12 @@ use crate::nn::{Linear, Mlp};
 use crate::Result;
 
 /// Minimum (batch_size * num_experts_per_tok) for the sorted-routing path.
-/// MLX's gather_qmm rhs fast path (mlx/backend/metal/quantized.cpp:1484)
-/// requires B >= 16 && B/E >= 4. For E=128 experts that's B >= 512;
-/// below that we'd pay argsort + take_along_axis + take + reshape
-/// overhead with no kernel-level benefit.
-const SORTED_ROUTING_MIN_BS_K: i32 = 512;
+///
+/// This mirrors MLX-LM's `SwitchGLU` routing contract: sort expert indices once
+/// `indices.size >= 64`. Keeping this threshold aligned is correctness-critical
+/// for short Qwen3.6 MoE prefills, where the unsorted gather_qmm path can
+/// diverge from the reference route packing even before any KV-cache logic runs.
+const SORTED_ROUTING_MIN_BS_K: i32 = 64;
 const MAX_EXACT_U32_IN_F32: i32 = 1 << 24;
 
 fn sorted_token_indices_from_sort_perm(
@@ -586,11 +587,10 @@ impl SparseMoeBlock {
             // emits a zero-cost no-op span per spec hard-rule #9 so the
             // span sequence is invariant across branches.
             //
-            // Sorted-flat path (BS*k >= SORTED_ROUTING_MIN_BS_K, P5e T5 B.1):
-            // pre-sort tokens by expert id and pass `sorted_indices=true` to
-            // gather_qmm so MLX's `gather_qmm_rhs` fast path
-            // (mlx/mlx/backend/metal/quantized.cpp:1484) triggers. We physically
-            // gather `flat_x` rows by the sorted token id so each
+            // Sorted-flat path (BS*k >= SORTED_ROUTING_MIN_BS_K): pre-sort
+            // tokens by expert id and pass `sorted_indices=true`, matching
+            // MLX-LM `SwitchGLU` for `indices.size >= 64`. We physically gather
+            // `flat_x` rows by the sorted token id so each
             // (token, expert-slot) is its own x-row; this changes x.shape from
             // [BS,1,1,H] to [BS*k,1,1,H] and `rhs_indices` from [BS,k] to
             // [BS*k,1] but keeps the GatherQMM output semantics identical
@@ -1047,26 +1047,20 @@ impl SparseMoeBlock {
             //
             // Two routing strategies are dispatched here based on `bs * k`:
             //
-            //   - Sorted-flat path (BS*k >= SORTED_ROUTING_MIN_BS_K, P5e T5 B.1): pre-sort tokens by
-            //     expert id and pass `sorted_indices=true`. MLX's Metal kernel has
-            //     a `gather_qmm_rhs` fast path keyed on `right_sorted_ == true`
-            //     (mlx/mlx/backend/metal/quantized.cpp:1484) that triggers only
-            //     when `lhs_indices` is None AND `sorted_indices` is set AND
-            //     `M==1 && B>=16 && B/E>=4`. We satisfy `lhs_indices=None`
-            //     unchanged; we satisfy `right_sorted_` by sorting `inds_u32`
-            //     before the call. We physically gather `flat_x` rows by the
-            //     sorted token id so each (token,expert-slot) is its own x-row;
-            //     this changes x.shape from [BS,1,1,H] to [BS*k,1,1,H] and
-            //     `rhs_indices` from [BS,k] to [BS*k,1] but keeps the GatherQMM
-            //     output semantics identical (B = BS*k both cases). After
-            //     down_proj we invert the permutation to restore original
-            //     token/k order before the score-weighted sum.
+            //   - Sorted-flat path (BS*k >= SORTED_ROUTING_MIN_BS_K): pre-sort
+            //     tokens by expert id and pass `sorted_indices=true`, matching
+            //     MLX-LM `SwitchGLU` for `indices.size >= 64`. We physically
+            //     gather `flat_x` rows by the sorted token id so each
+            //     (token,expert-slot) is its own x-row; this changes x.shape
+            //     from [BS,1,1,H] to [BS*k,1,1,H] and `rhs_indices` from [BS,k]
+            //     to [BS*k,1] but keeps the GatherQMM output semantics identical
+            //     (B = BS*k both cases). After down_proj we invert the permutation
+            //     to restore original token/k order before the score-weighted sum.
             //
             //   - Default broadcast path (BS*k < SORTED_ROUTING_MIN_BS_K): keep `x` as [BS,1,1,H]
             //     and let MLX broadcast `lhs_indices` from [BS,1] to [BS,k].
-            //     Avoids the argsort/scatter overhead on short decode batches
-            //     where the fast path's `B>=16 && B/E>=4` requirements are not
-            //     met anyway.
+            //     Avoids the argsort/scatter overhead on tiny decode batches
+            //     below the reference sorting threshold.
             //
             // MLX gather_qmm API contract (unchanged from T0): when `rhs_indices`
             // has rank-r, the input `x` must have rank r+2 (the leading r dims
@@ -1257,6 +1251,11 @@ impl SparseMoeBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorted_routing_threshold_matches_mlx_switch_glu_contract() {
+        assert_eq!(SORTED_ROUTING_MIN_BS_K, 64);
+    }
 
     /// Compile-time check: RoutedExperts fields are public and Array can be
     /// referenced through them. Numerical correctness deferred to T5

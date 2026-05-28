@@ -565,7 +565,7 @@ mod tests {
                     content: "Say hi.".to_owned(),
                 }],
                 true,
-                None,
+                Some(&serde_json::json!({"enable_thinking": false})),
             )
             .expect("chat template");
         let prompt_ids = tokenizer
@@ -576,6 +576,128 @@ mod tests {
             crate::core::generate::GenerationStream::new_text_only(&model, &tokenizer, request)
                 .expect("stream");
         assert!(stream.next_token().expect("next token").is_some());
+    }
+
+    #[test]
+    #[ignore = "checks full local Qwen3.6 MoE text forward paths against a reference first token"]
+    fn qwen36_moe_text_forward_paths_first_token_real_checkpoint() {
+        let Some(dir) = qwen36_model_dir() else {
+            return;
+        };
+        let loader = crate::core::Loader::open(&dir).expect("open");
+        let tokenizer = crate::core::Tokenizer::from_loader(&loader).expect("tokenizer");
+        let model = Qwen36MoeModel::from_loader(&loader).expect("model");
+        let prompt = tokenizer
+            .apply_chat_template(
+                &[crate::core::Message {
+                    role: "user".to_owned(),
+                    content:
+                        "Write one concise sentence explaining why reproducible benchmarks matter."
+                            .to_owned(),
+                }],
+                true,
+                Some(&serde_json::json!({"enable_thinking": false})),
+            )
+            .expect("chat template");
+        let prompt_ids = tokenizer
+            .encode(&prompt, false)
+            .expect("tokenize text prompt");
+        let len = prompt_ids.len() as i32;
+        let input_ids: Array = (prompt_ids.as_slice(), &[1_i32, len][..])
+            .try_into()
+            .expect("input ids");
+        let position_ids = crate::core::generate::build_position_ids(0, len).expect("position ids");
+        let sample = |logits: &Array| {
+            let vocab = logits.shape().as_slice()[2];
+            let flat = logits.reshape((vocab,)).expect("reshape logits");
+            let mut prng = mlx::random::key(0).expect("prng");
+            crate::core::sampler::Sampler::greedy()
+                .sample(&flat, &prompt_ids, &mut prng)
+                .expect("sample")
+        };
+        // Verified against the pinned MLX runtime documented for Qwen3.6
+        // quality checks; the token decodes as "Re" for a direct answer.
+        let expected_first_token = 674_u32;
+
+        let logits_no_cache = model
+            .forward_on(&input_ids, &position_ids, None, None, None, ())
+            .expect("forward no cache");
+        assert_eq!(sample(&logits_no_cache), expected_first_token);
+
+        let mut full_cache = model
+            .make_cache(1, len + 4, Dtype::Bfloat16)
+            .expect("full cache");
+        let logits_full_cache = model
+            .forward_on(
+                &input_ids,
+                &position_ids,
+                None,
+                None,
+                Some(&mut full_cache),
+                (),
+            )
+            .expect("forward full cache");
+        assert_eq!(sample(&logits_full_cache), expected_first_token);
+
+        let mut split_cache = model
+            .make_cache(1, len + 4, Dtype::Bfloat16)
+            .expect("split cache");
+        let prefix_len = len - 1;
+        let prefix_ids = mlx::ops::indexing::slice_strided(
+            &input_ids,
+            &[0_i32, 0][..],
+            &[1_i32, prefix_len][..],
+            &[1_i32, 1][..],
+        )
+        .expect("prefix ids");
+        let prefix_pos =
+            crate::core::generate::build_position_ids(0, prefix_len).expect("prefix pos");
+        let prefix_hidden = model
+            .forward_text_hidden(
+                &prefix_ids,
+                &prefix_pos,
+                None,
+                None,
+                Some(&mut split_cache),
+                (),
+            )
+            .expect("prefix hidden");
+        mlx::transforms::eval(&[&prefix_hidden]).expect("eval prefix");
+        let last_ids = mlx::ops::indexing::slice_strided(
+            &input_ids,
+            &[0_i32, prefix_len][..],
+            &[1_i32, len][..],
+            &[1_i32, 1][..],
+        )
+        .expect("last ids");
+        let last_pos = crate::core::generate::build_position_ids(prefix_len, 1).expect("last pos");
+        let logits_split_cache = model
+            .forward_on(&last_ids, &last_pos, None, None, Some(&mut split_cache), ())
+            .expect("forward split cache");
+        assert_eq!(sample(&logits_split_cache), expected_first_token);
+
+        let mut batch_cache = model
+            .make_cache(1, len + 4, Dtype::Bfloat16)
+            .expect("batch cache");
+        let batch_pos =
+            crate::core::generate::build_position_ids_batched(&[len], len).expect("batch pos");
+        let attention_mask =
+            crate::core::generate::build_batch_attention_mask(&[len], len, Dtype::Bfloat16)
+                .expect("attention mask");
+        let linear_mask =
+            crate::core::generate::build_batch_linear_mask(&[len], len).expect("linear mask");
+        let logits_batched = model
+            .batched_prefill(
+                &input_ids,
+                &batch_pos,
+                &attention_mask,
+                &linear_mask,
+                &[len],
+                Some(&mut batch_cache),
+                (),
+            )
+            .expect("batched prefill");
+        assert_eq!(sample(&logits_batched), expected_first_token);
     }
 
     #[test]
@@ -617,6 +739,76 @@ mod tests {
         let mut stream = crate::core::generate::GenerationStream::new(&model, &tokenizer, request)
             .expect("stream");
         assert!(stream.next_token().expect("next token").is_some());
+    }
+
+    #[test]
+    #[ignore = "checks single-image first token on a full local Qwen3.6 MoE checkpoint"]
+    fn qwen36_moe_single_image_forward_first_token_real_checkpoint() {
+        let Some(dir) = qwen36_model_dir() else {
+            return;
+        };
+        let loader = crate::core::Loader::open_multimodal(&dir).expect("open_multimodal");
+        let tokenizer = crate::core::Tokenizer::from_loader(&loader).expect("tokenizer");
+        let model = Qwen36MoeModel::from_loader(&loader).expect("model");
+        let merge = model.model_meta().spatial_merge_size;
+        let (pixel_values, grids, mut content) =
+            prepare_fixture_images(&["tests/fixtures/p6_qwen35_vl/coco_sample.jpg"], merge);
+        content.push_str(
+            "Describe this image in one concise sentence. Mention the main animals and the furniture color.",
+        );
+        let prompt = tokenizer
+            .apply_chat_template(
+                &[crate::core::Message {
+                    role: "user".to_owned(),
+                    content,
+                }],
+                true,
+                Some(&serde_json::json!({"enable_thinking": false})),
+            )
+            .expect("chat template");
+        let prompt_ids = tokenizer
+            .encode(&prompt, false)
+            .expect("tokenize single-image prompt");
+        let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&id| id as i32).collect();
+        let len = prompt_ids.len() as i32;
+        let input_ids: Array = (prompt_ids.as_slice(), &[1_i32, len][..])
+            .try_into()
+            .expect("input ids");
+        let image_token_id = tokenizer
+            .token_to_id("<|image_pad|>")
+            .map(|id| id as i32)
+            .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID);
+        let position_ids = crate::core::generate::build_position_ids_vl(
+            &prompt_ids_i32,
+            &grids,
+            image_token_id,
+            merge,
+        )
+        .expect("position ids");
+        let vision_embeds = model
+            .compute_vision_embeds(&pixel_values, &grids, ())
+            .expect("vision embeds");
+        let logits = model
+            .forward_vl_chunk(
+                &input_ids,
+                &position_ids,
+                None,
+                None,
+                None,
+                Some(&vision_embeds),
+                image_token_id,
+                (),
+            )
+            .expect("forward vl chunk");
+
+        let vocab = logits.shape().as_slice()[2];
+        let flat = logits.reshape((vocab,)).expect("reshape logits");
+        let mut prng = mlx::random::key(0).expect("prng");
+        let got = crate::core::sampler::Sampler::greedy()
+            .sample(&flat, &prompt_ids, &mut prng)
+            .expect("sample");
+
+        assert_eq!(got, 11_280_u32);
     }
 
     #[test]

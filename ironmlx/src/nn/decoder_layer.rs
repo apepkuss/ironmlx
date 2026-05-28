@@ -56,8 +56,8 @@ pub struct DecoderLayerConfig {
 /// via [`DecoderLayer::from_components_full`] / [`DecoderLayer::from_components_linear`].
 #[doc(hidden)]
 pub enum AttnPath {
-    Full(GatedAttention),
-    Linear(GatedDeltaNet),
+    Full(Box<GatedAttention>),
+    Linear(Box<GatedDeltaNet>),
 }
 
 /// Per-layer cache, paired with [`AttnPath`].
@@ -103,7 +103,7 @@ impl DecoderLayer {
     ) -> Self {
         Self {
             input_layernorm,
-            attn: AttnPath::Full(self_attn),
+            attn: AttnPath::Full(Box::new(self_attn)),
             post_attention_layernorm,
             mlp,
             cfg,
@@ -121,7 +121,7 @@ impl DecoderLayer {
     ) -> Self {
         Self {
             input_layernorm,
-            attn: AttnPath::Linear(linear_attn),
+            attn: AttnPath::Linear(Box::new(linear_attn)),
             post_attention_layernorm,
             mlp,
             cfg,
@@ -314,7 +314,7 @@ impl DecoderLayer {
                         attention_bias: cfg.attention_bias,
                     },
                 )?;
-                AttnPath::Full(ga)
+                AttnPath::Full(Box::new(ga))
             }
             AttnKind::Linear => {
                 let gdn = GatedDeltaNet::from_loader(
@@ -330,7 +330,7 @@ impl DecoderLayer {
                         rms_norm_eps: cfg.rms_norm_eps,
                     },
                 )?;
-                AttnPath::Linear(gdn)
+                AttnPath::Linear(Box::new(gdn))
             }
         };
         let post_attention_layernorm = RmsNorm::from_loader(

@@ -27,6 +27,9 @@ fn default_rope_theta() -> f32 {
 fn default_max_position_embeddings() -> i32 {
     32768
 }
+fn default_norm_topk_prob() -> bool {
+    true
+}
 
 impl Default for RopeParams {
     fn default() -> Self {
@@ -84,7 +87,7 @@ pub struct Qwen35MoeConfig {
     // ─ MoE-specific fields ─
     pub num_experts: i32,
     pub num_experts_per_tok: i32,
-    #[serde(default)]
+    #[serde(default = "default_norm_topk_prob")]
     pub norm_topk_prob: bool,
     pub moe_intermediate_size: i32,
     pub shared_expert_intermediate_size: i32,
@@ -220,10 +223,10 @@ mod tests {
     }
 
     #[test]
-    fn norm_topk_prob_defaults_false_when_absent() {
+    fn norm_topk_prob_defaults_true_when_absent() {
         let cfg: Qwen35MoeConfig =
             serde_json::from_value(realistic_text_config_json()).expect("parse");
-        assert!(!cfg.norm_topk_prob);
+        assert!(cfg.norm_topk_prob);
     }
 
     #[test]
@@ -232,6 +235,14 @@ mod tests {
         v["norm_topk_prob"] = serde_json::Value::Bool(true);
         let cfg: Qwen35MoeConfig = serde_json::from_value(v).expect("parse");
         assert!(cfg.norm_topk_prob);
+    }
+
+    #[test]
+    fn norm_topk_prob_parses_explicit_false() {
+        let mut v = realistic_text_config_json();
+        v["norm_topk_prob"] = serde_json::Value::Bool(false);
+        let cfg: Qwen35MoeConfig = serde_json::from_value(v).expect("parse");
+        assert!(!cfg.norm_topk_prob);
     }
 
     #[test]
