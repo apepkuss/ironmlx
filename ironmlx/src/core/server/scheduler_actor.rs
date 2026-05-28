@@ -7,12 +7,15 @@
 //! `b_max` (saturate path) or the deadline expires (hard limit, no
 //! reset on new admits).
 //!
-//! 3c-3 introduces the rolling decode loop: after first-batch prefill
-//! the driver biased-selects between `cmd_rx.recv()` (mid-batch admit)
-//! and an always-ready step branch. Mid admits route through
-//! [`Scheduler::admit_mid`] (B=1 temp-cache prefill + adopt-into-main);
-//! step branch calls [`Scheduler::step`] + [`Scheduler::gc_finished_rows`].
-//! The loop exits when `active_count == 0` AND `cmd_rx` is empty.
+//! 3c-3 introduced the rolling decode loop: after first-batch prefill
+//! the driver usually biased-selects between `cmd_rx.recv()` (mid-batch
+//! admit) and an always-ready step branch. Admission work marks the next
+//! decode step as due, so active rows take one [`Scheduler::step`] before
+//! the actor accepts more optional mid-batch admission work. Mid admits
+//! route through [`Scheduler::admit_mid`] (B=1 temp-cache prefill +
+//! adopt-into-main); step branch calls [`Scheduler::step`] +
+//! [`Scheduler::gc_finished_rows`]. The loop exits when
+//! `active_count == 0` AND `cmd_rx` is empty.
 //!
 //! See `docs/superpowers/specs/2026-05-13-b1-p2-3b-3-admission-window-design.md` § 4.
 
@@ -49,14 +52,40 @@ struct PendingAdmit {
     reply_tx: oneshot::Sender<Result<AdmitReply>>,
 }
 
-/// Event yielded by the rolling decode loop's biased select. Either a
-/// new admit command arrived (mid-batch admit), the always-ready step
-/// branch fired, or the cmd_rx channel was closed (shutdown).
+/// Event yielded by the rolling decode loop. Either a new admit command
+/// arrived (mid-batch admit), a decode step is due, or the cmd_rx channel
+/// was closed (shutdown).
 #[allow(clippy::large_enum_variant)] // Admit(SchedulerCommand) intentionally large; boxing would add allocation on hot path
 enum RollingEvent {
     Admit(SchedulerCommand),
     Step,
     Shutdown,
+}
+
+/// Rolling-loop admission fairness policy.
+///
+/// Any completed admission work (initial prefill or mid-batch prefill)
+/// makes one decode step due before the actor accepts more optional
+/// admission work. This bounds active streams' token gap under sustained
+/// arrivals while keeping the existing initial admission window and FIFO
+/// queue semantics intact.
+#[derive(Debug, Default)]
+struct RollingAdmissionPolicy {
+    decode_due_after_admission: bool,
+}
+
+impl RollingAdmissionPolicy {
+    fn record_admission_work(&mut self) {
+        self.decode_due_after_admission = true;
+    }
+
+    fn record_decode_step(&mut self) {
+        self.decode_due_after_admission = false;
+    }
+
+    fn should_force_decode(&self, phase: Phase, active_count: usize) -> bool {
+        self.decode_due_after_admission && phase == Phase::Decoding && active_count > 0
+    }
 }
 
 /// P5h+2.c regression counter: incremented every time the actor's Step
@@ -387,7 +416,9 @@ fn driver_loop<M>(
             }
         }
 
-        // ===== Rolling decode loop with biased mid-batch admit + queue drain. =====
+        // ===== Rolling decode loop with bounded mid-batch admit + queue drain. =====
+        let mut admission_policy = RollingAdmissionPolicy::default();
+        admission_policy.record_admission_work();
         'rolling: loop {
             // P5h+2.c: pre-event Finished-batch finalization + handoff. If
             // previous iteration's prefill_admitted/step left phase=Finished
@@ -416,23 +447,31 @@ fn driver_loop<M>(
                     admission_deadline,
                     &rt,
                 ) {
-                    RollingControl::ContinueRolling => continue 'rolling,
+                    RollingControl::ContinueRolling => {
+                        admission_policy.record_admission_work();
+                        continue 'rolling;
+                    }
                     RollingControl::BreakRolling => break 'rolling,
                     RollingControl::ContinueOuter => continue 'outer,
                     RollingControl::ReturnActor => return,
                 }
             }
 
-            let evt: RollingEvent = rt.block_on(async {
-                tokio::select! {
-                    biased;
-                    maybe_cmd = cmd_rx.recv() => match maybe_cmd {
-                        Some(cmd) => RollingEvent::Admit(cmd),
-                        None => RollingEvent::Shutdown,
-                    },
-                    _ = std::future::ready(()) => RollingEvent::Step,
-                }
-            });
+            let evt: RollingEvent =
+                if admission_policy.should_force_decode(sched.phase(), sched.active_count()) {
+                    RollingEvent::Step
+                } else {
+                    rt.block_on(async {
+                        tokio::select! {
+                            biased;
+                            maybe_cmd = cmd_rx.recv() => match maybe_cmd {
+                                Some(cmd) => RollingEvent::Admit(cmd),
+                                None => RollingEvent::Shutdown,
+                            },
+                            _ = std::future::ready(()) => RollingEvent::Step,
+                        }
+                    })
+                };
 
             match evt {
                 RollingEvent::Shutdown => {
@@ -456,13 +495,15 @@ fn driver_loop<M>(
                             &queue_rejected,
                         );
                     } else {
-                        handle_admit_mid_chunked(
+                        if handle_admit_mid_chunked(
                             cmd,
                             &mut sched,
                             &mut event_txs,
                             &admit_count,
                             &model,
-                        );
+                        ) {
+                            admission_policy.record_admission_work();
+                        }
                     }
                 }
                 RollingEvent::Step => {
@@ -476,18 +517,22 @@ fn driver_loop<M>(
                                 route_event(ev, &event_txs);
                             }
                             sched.gc_finished_rows(&mut event_txs);
+                            admission_policy.record_decode_step();
                             // ===== Post-gc queue drain. =====
                             // Free slots → pull from admission_queue head
-                            // until either the queue empties or we re-
-                            // saturate at b_max.
-                            drain_admission_queue(
+                            // for one bounded mid-admit. Further queued
+                            // requests wait for the next decode turn so
+                            // active streams keep making progress.
+                            if drain_admission_queue(
                                 &mut admission_queue,
                                 &mut sched,
                                 &mut event_txs,
                                 &admit_count,
                                 &model,
                                 b_max,
-                            );
+                            ) {
+                                admission_policy.record_admission_work();
+                            }
                         }
                         Err(e) => {
                             tracing::error!("[SchedulerActor] step error: {e:?}");
@@ -548,7 +593,10 @@ fn driver_loop<M>(
                     admission_deadline,
                     &rt,
                 ) {
-                    RollingControl::ContinueRolling => continue 'rolling,
+                    RollingControl::ContinueRolling => {
+                        admission_policy.record_admission_work();
+                        continue 'rolling;
+                    }
                     RollingControl::BreakRolling => break 'rolling,
                     RollingControl::ContinueOuter => continue 'outer,
                     RollingControl::ReturnActor => return,
@@ -684,7 +732,8 @@ fn handle_admit_mid_chunked<M>(
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
-) where
+) -> bool
+where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
@@ -697,7 +746,7 @@ fn handle_admit_mid_chunked<M>(
             Ok(h) => h,
             Err(e) => {
                 let _ = reply_tx.send(Err(e));
-                return;
+                return false;
             }
         }
     };
@@ -710,10 +759,10 @@ fn handle_admit_mid_chunked<M>(
         }))
         .is_err()
     {
-        // Caller dropped reply_rx before we did any GPU work.
+        // Caller dropped reply_rx before the prefill chunks completed.
         let _ = sched.evict(id);
         event_txs.remove(&id);
-        return;
+        return true;
     }
 
     // Phase 2: chunk loop. Interleave one active-row step per chunk
@@ -727,7 +776,7 @@ fn handle_admit_mid_chunked<M>(
                     tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
                     let _ = sched.evict(id);
                     event_txs.remove(&id);
-                    return;
+                    return true;
                 }
             }
         };
@@ -752,7 +801,7 @@ fn handle_admit_mid_chunked<M>(
                 tracing::error!("[SchedulerActor] step error inside chunked admit_mid loop: {e:?}");
                 let _ = sched.evict(id);
                 event_txs.remove(&id);
-                return;
+                return true;
             }
         }
     }
@@ -770,6 +819,7 @@ fn handle_admit_mid_chunked<M>(
             event_txs.remove(&id);
         }
     }
+    true
 }
 
 /// Push a pending admit into the queue if there's capacity; otherwise reply
@@ -799,10 +849,11 @@ fn enqueue_or_reject(
     queue_depth_peak.fetch_max(queue.len(), Ordering::Relaxed);
 }
 
-/// Drain the admission queue head-by-head while the Scheduler has free
-/// slots. Each drained entry is handed to `handle_admit_mid_chunked` which runs
-/// the B=1 prefill + adopts the row + sends `AdmitReply`. Stops when the
-/// queue empties or `active_count() == b_max`.
+/// Drain at most one successful mid-batch admit from the admission queue.
+/// Each drained entry is handed to `handle_admit_mid_chunked` which runs the
+/// B=1 prefill + adopts the row + sends `AdmitReply`. Invalid queued entries
+/// that fail before GPU admission work are skipped, but once any admission
+/// work happens the caller must return to decode before draining more queue.
 ///
 /// IMPORTANT: `admit_mid` is only legal in `Decoding` phase. If
 /// `gc_finished_rows` just transitioned the scheduler to `Finished`
@@ -817,28 +868,31 @@ fn drain_admission_queue<M>(
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
     b_max: usize,
-) where
+) -> bool
+where
     M: Model + DenseVlMethods + Send + 'static,
 {
     // admit_mid is only legal in Decoding phase.
     if sched.phase() != Phase::Decoding {
-        return;
+        return false;
     }
     while sched.active_count() < b_max {
         let Some(pending) = queue.pop_front() else {
-            return;
+            return false;
         };
         let cmd = SchedulerCommand::Admit {
             request: pending.request,
             reply_tx: pending.reply_tx,
         };
-        handle_admit_mid_chunked(cmd, sched, event_txs, admit_count, model);
+        let did_admission_work =
+            handle_admit_mid_chunked(cmd, sched, event_txs, admit_count, model);
         // Re-check phase after each mid-admit — if admit_mid itself
         // exhausted remaining rows and transitioned to Finished, stop.
-        if sched.phase() != Phase::Decoding {
-            return;
+        if did_admission_work || sched.phase() != Phase::Decoding {
+            return did_admission_work;
         }
     }
+    false
 }
 
 fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>) {
@@ -1124,6 +1178,226 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
+    use crate::core::sampler::Sampler;
+
+    struct SchedulerActorFakeModel;
+
+    impl Model for SchedulerActorFakeModel {
+        fn make_cache(
+            &self,
+            _batch: i32,
+            _cap: i32,
+            _dtype: mlx::Dtype,
+        ) -> Result<Vec<crate::nn::LayerCache>> {
+            Ok(Vec::new())
+        }
+
+        fn forward_on(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            fake_logits(input_ids.shape().as_slice()[0] as usize)
+        }
+
+        fn batched_prefill(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _attention_mask: &mlx::Array,
+            _linear_attention_mask: &mlx::Array,
+            _per_row_lens: &[i32],
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            fake_logits(input_ids.shape().as_slice()[0] as usize)
+        }
+
+        fn forward_text_hidden(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            let shape = input_ids.shape();
+            let b = shape.as_slice()[0] as usize;
+            let s = shape.as_slice()[1] as usize;
+            let hidden = 4_usize;
+            let flat = vec![0.0_f32; b * s * hidden];
+            (&flat[..], &[b as i32, s as i32, hidden as i32][..])
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("fake hidden Array failed: {e:?}"))
+        }
+
+        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+            crate::core::memory_budget::test_meta_qwen35()
+        }
+
+        fn num_hidden_layers(&self) -> usize {
+            0
+        }
+    }
+
+    impl DenseVlMethods for SchedulerActorFakeModel {
+        fn batched_prefill_vl(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _attention_mask: &mlx::Array,
+            _linear_attention_mask: &mlx::Array,
+            _per_row_lens: &[i32],
+            _per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+            _image_token_id: i32,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            unreachable!("scheduler_actor policy unit tests are text-only")
+        }
+
+        fn compute_vision_embeds(
+            &self,
+            _pixel_values: &mlx::Array,
+            _grid_thw: &[(i32, i32, i32)],
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            unreachable!("scheduler_actor policy unit tests are text-only")
+        }
+
+        fn forward_vl_chunk(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _vision_embeds_slice: Option<&mlx::Array>,
+            _image_token_id: i32,
+            _target: mlx::StreamOrDevice,
+        ) -> Result<mlx::Array> {
+            unreachable!("scheduler_actor policy unit tests are text-only")
+        }
+    }
+
+    fn fake_logits(batch: usize) -> Result<mlx::Array> {
+        let vocab = 8_usize;
+        let mut flat = vec![0.0_f32; batch * vocab];
+        for row in 0..batch {
+            flat[row * vocab + 3] = 100.0;
+        }
+        let logits_bv: mlx::Array = (&flat[..], &[batch as i32, vocab as i32][..])
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("fake logits Array failed: {e:?}"))?;
+        logits_bv
+            .reshape(&[batch as i32, 1, vocab as i32][..])
+            .map_err(|e| anyhow::anyhow!("fake logits reshape failed: {e:?}"))
+    }
+
+    fn mk_req(prompt_token: u32) -> GenerateRequest {
+        GenerateRequest {
+            prompt_ids: vec![prompt_token],
+            max_new_tokens: 16,
+            sampler: Sampler::greedy(),
+            stop_token_ids: vec![2],
+            prefill_chunk_size: 0,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: IMAGE_TOKEN_ID,
+            #[cfg(feature = "p5h-profile")]
+            p5h_trace: None,
+            #[cfg(feature = "p5h-profile")]
+            p5h_root_span: None,
+        }
+    }
+
+    fn queued_pending(prompt_token: u32) -> (PendingAdmit, oneshot::Receiver<Result<AdmitReply>>) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        (
+            PendingAdmit {
+                request: mk_req(prompt_token),
+                reply_tx,
+            },
+            reply_rx,
+        )
+    }
+
+    #[test]
+    fn rolling_policy_forces_one_decode_after_admission_work() {
+        let mut policy = RollingAdmissionPolicy::default();
+
+        assert!(!policy.should_force_decode(Phase::Decoding, 1));
+        policy.record_admission_work();
+        assert!(policy.should_force_decode(Phase::Decoding, 1));
+
+        policy.record_decode_step();
+        assert!(!policy.should_force_decode(Phase::Decoding, 1));
+    }
+
+    #[test]
+    fn rolling_policy_does_not_force_decode_without_active_decoding_rows() {
+        let mut policy = RollingAdmissionPolicy::default();
+
+        policy.record_admission_work();
+        assert!(!policy.should_force_decode(Phase::Idle, 1));
+        assert!(!policy.should_force_decode(Phase::Finished, 1));
+        assert!(!policy.should_force_decode(Phase::Decoding, 0));
+    }
+
+    #[test]
+    fn drain_admission_queue_limits_successful_mid_admit_to_one_per_turn() {
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+        let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        sched.admit(mk_req(11)).expect("initial admit");
+        let prefill_events = sched
+            .prefill_admitted(&SchedulerActorFakeModel)
+            .expect("initial prefill");
+        assert_eq!(prefill_events.len(), 1);
+        assert_eq!(sched.phase(), Phase::Decoding);
+
+        let (pending_1, reply_rx_1) = queued_pending(21);
+        let (pending_2, reply_rx_2) = queued_pending(22);
+        let (pending_3, reply_rx_3) = queued_pending(23);
+        let _reply_rxs = [reply_rx_1, reply_rx_2, reply_rx_3];
+        let mut queue = VecDeque::from([pending_1, pending_2, pending_3]);
+        let mut event_txs = HashMap::new();
+        let admit_count = Arc::new(AtomicU64::new(0));
+
+        let did_admit = drain_admission_queue(
+            &mut queue,
+            &mut sched,
+            &mut event_txs,
+            &admit_count,
+            &model,
+            4,
+        );
+
+        assert!(did_admit, "expected one queued request to be admitted");
+        assert_eq!(
+            queue.len(),
+            2,
+            "queue drain should leave remaining queued requests for later decode turns"
+        );
+        assert_eq!(
+            sched.active_count(),
+            2,
+            "one active row plus exactly one mid-admitted row"
+        );
+    }
 
     /// Drop the SchedulerActorHandle (and thus cmd_tx); confirm the driver
     /// task exits cleanly. We can't construct a real Qwen35Model in a unit
