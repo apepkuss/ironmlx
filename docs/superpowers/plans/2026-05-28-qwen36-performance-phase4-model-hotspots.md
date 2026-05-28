@@ -70,20 +70,44 @@ The fused-shape path is numerically equivalent to the reference within bf16 tole
 
 Conclusion: GDN projection fusion itself is not the problem; it is neutral-to-positive under MLX. If GDN is the gap, the likely source is lower-level ironmlx execution around custom Metal dispatch, cache/materialization boundaries, or Rust MLX binding call shape.
 
+### Rust GatedDeltaNet Core Microbench
+
+Added `ironmlx/src/bin/ironmlx-gdn-bench.rs`.
+
+This loads one real Qwen3.6 linear-attention layer directly from the checkpoint and measures `GatedDeltaNet::forward_on` without model assembly, HTTP, scheduler, tokenizer, or sampler overhead.
+
+Results from `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/ironmlx_gdn_bench_seq521_seq1.json`:
+
+| Shape | Cache mode | ironmlx p50 | Finding |
+| --- | --- | ---: | --- |
+| `seq=521` | no-cache | 4.766 ms | materially slower than MLX no-cache full GDN at 2.067 ms |
+| `seq=521` | fresh cache, output eval only | 3.982 ms | materially slower than MLX fresh-cache full GDN at 1.739 ms |
+| `seq=521` | fresh cache, output + cache-state eval | 3.964 ms | cache-state materialization is not the main delta |
+| `seq=1` | no-cache | 0.268 ms | roughly parity with MLX no-cache at 0.261 ms |
+| `seq=1` | fresh cache, output eval only | 0.263 ms | roughly parity with MLX fresh-cache at 0.257 ms |
+| `seq=1` | fresh cache, output + cache-state eval | 0.261 ms | cache-state materialization is not the decode-path issue |
+
+Additional `seq=521` ablations under `p5g-profile`:
+
+| Diagnostic | p50 | Finding |
+| --- | ---: | --- |
+| profile feature off-mode control | 4.037 ms | matches non-profile direct benchmark |
+| substitute conv output | 3.949 ms | conv is not the main root cause |
+| substitute `t_arr` scalar | 4.043 ms | scalar construction is not the root cause |
+| substitute `compute_g` input | 4.877 ms | not a useful optimization direction; changed kernel input values can worsen timing |
+| temporary force-regular-state kernel | 3.959 ms | zero-state kernel variant is not the root cause |
+
+Conclusion: the long-prefill gap is reproduced inside Rust `GatedDeltaNet` itself. The shape-specific signature is important: `seq=1` is at parity while `seq=521` is about 2.3x slower per layer than the MLX Python reference. The remaining high-signal area is the custom gated-delta Metal dispatch path and Rust MLX binding/materialization behavior for long sequences.
+
 ## Lessons From P5h/P5i
 
 - Do not continue the prior custom `gather_qmm_gate_up` kernel line: earlier P5i/P5i.c experiments showed that path underperformed MLX's steel implementation.
 - Do not optimize based only on forced-eval subspan totals. Full-path MLX microbenches show MoE is effectively at parity despite P5H ranking it highly.
-- Treat GDN as the next high-signal target, but measure it with a production-shaped Rust microbench before changing kernels.
+- Treat GDN as the next high-signal target. The Rust core microbench now confirms the gap is in long-prefill `GatedDeltaNet`, not in MoE, projection fusion, HTTP, scheduler, or cache-state eval.
 
 ## Next Tasks
 
-- Add a Rust GDN core benchmark that loads one `GatedDeltaNet` layer directly from the Qwen3.6 checkpoint and measures warm steady-state `seq=521` and `seq=1` with and without cache.
-- Compare that Rust GDN steady-state result against `scripts/qwen36_gdn_path_compare.py`.
-- If Rust GDN is materially slower than the MLX reference, isolate:
-  - custom zero-state vs regular state kernel path,
-  - `MetalKernel::dispatch_builder` overhead,
-  - per-call scalar `t_arr` construction,
-  - cache state update materialization,
-  - `RmsNormGated` compiled function boundary.
-- Only after that choose a production optimization. Current evidence is insufficient to justify rewriting MoE kernels or reverting GDN projection fusion.
+- Add a Rust-side GDN stage breakdown benchmark that uses the same real layer and records forced-eval timings for projection, conv, q/k norm, compute_g, gated-delta kernel materialization, and output norm/proj in one process.
+- Compare Rust custom Metal kernel dispatch against a same-source MLX/Python custom-kernel harness to determine whether the delta is in kernel source, MLX C++ binding wrappers, or upstream MLX graph scheduling.
+- Investigate whether `MetalKernel::dispatch_builder` allocates avoidable per-call vectors/shapes/template args in the long-prefill path; only optimize this if stage evidence shows dispatch construction, not GPU kernel body, is material.
+- Only after stage evidence is available choose a production optimization. Current evidence rules out rewriting MoE kernels and does not justify reverting GDN projection fusion.
