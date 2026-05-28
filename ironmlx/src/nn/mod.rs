@@ -4,6 +4,7 @@
 //! that reads its weights directly. Forward methods are inherent (per-layer);
 //! there is no `Module` trait — see P1 spec § 3 for rationale.
 
+pub(crate) mod activations;
 pub mod attention;
 pub mod conv;
 pub mod decoder_layer;

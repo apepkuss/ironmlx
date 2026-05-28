@@ -27,12 +27,14 @@
 //!   7. out = routed_y + shared_gated  → reshape [B, S, H]
 
 use anyhow::{anyhow, Context};
+use mlx::compile::CompiledFn;
 use mlx::ops::indexing::{slice_on, take_along_axis_on, take_on};
 use mlx::ops::shape::concatenate_on;
 use mlx::ops::sort::{argpartition_on, argsort_on};
 use mlx::{Array, StreamOrDevice};
 
 use crate::core::Loader;
+use crate::nn::activations::{build_swiglu, invoke_swiglu};
 use crate::nn::{Linear, Mlp};
 use crate::Result;
 
@@ -401,6 +403,7 @@ pub struct SparseMoeBlock {
     shared_expert_gate: Linear,
     /// Number of experts selected per token.
     num_experts_per_tok: i32,
+    swiglu: std::sync::OnceLock<CompiledFn>,
 }
 
 impl SparseMoeBlock {
@@ -428,7 +431,16 @@ impl SparseMoeBlock {
             shared_expert,
             shared_expert_gate,
             num_experts_per_tok,
+            swiglu: std::sync::OnceLock::new(),
         })
+    }
+
+    fn swiglu(&self) -> &CompiledFn {
+        self.swiglu.get_or_init(build_swiglu)
+    }
+
+    fn swiglu_on(&self, gate: &Array, up: &Array) -> Result<Array> {
+        invoke_swiglu(self.swiglu(), gate, up)
     }
 
     /// Forward pass: `[B, S, H]` → `[B, S, H]`.
@@ -829,11 +841,7 @@ impl SparseMoeBlock {
                     ..Default::default()
                 },
                 || -> Result<Array> {
-                    let gate_sig = gate_out
-                        .sigmoid_on(target)
-                        .context("SparseMoeBlock: gate sigmoid")?;
-                    let gate_silu = &gate_out * &gate_sig;
-                    let act = &gate_silu * &up_out;
+                    let act = self.swiglu_on(&gate_out, &up_out)?;
                     // P5h+1 T1: measurement-eval probe.
                     if crate::core::p5h::is_measurement_eval_probes_active() {
                         mlx::transforms::eval(&[&act])?;
@@ -905,10 +913,10 @@ impl SparseMoeBlock {
                         mlx::ops::shape::squeeze_on(&down_out_4d, &[-2_i32][..], target)
                             .context("SparseMoeBlock: squeeze down_proj dim -2")?
                     };
-                    // scores: [BS, k] → unsqueeze → [BS, k, 1] for broadcast.
+                    // scores: [BS, k] -> [BS, k, 1] for broadcast.
                     let scores_unsq = mlx::ops::shape::expand_dims_on(&scores, -1_i32, target)
-                        .context("SparseMoeBlock: expand scores dim")?; // [BS, k, 1]
-                    let weighted = &down_out * &scores_unsq; // [BS, k, H]
+                        .context("SparseMoeBlock: expand scores dim")?;
+                    let weighted = &down_out * &scores_unsq;
                     let routed_y = mlx::ops::sum_on(&weighted, -2_i32, false, target)
                         .context("SparseMoeBlock: sum across k")?;
                     // P5h+1 T1: measurement-eval probe.
@@ -1147,11 +1155,7 @@ impl SparseMoeBlock {
             //   sorted path:  [BS*k, 1, 1, moe_inter]
             //   default path: [BS, k, 1, moe_inter]
             // Both element-wise — same code path.
-            let gate_sig = gate_out
-                .sigmoid_on(target)
-                .context("SparseMoeBlock: gate sigmoid")?;
-            let gate_silu = &gate_out * &gate_sig;
-            let act = &gate_silu * &up_out;
+            let act = self.swiglu_on(&gate_out, &up_out)?;
 
             let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
                 &act,
@@ -1197,10 +1201,10 @@ impl SparseMoeBlock {
             };
 
             let routed_y = {
-                // scores: [BS, k] → unsqueeze → [BS, k, 1] for broadcast with [BS, k, H].
+                // scores: [BS, k] -> [BS, k, 1] for broadcast with [BS, k, H].
                 let scores_unsq = mlx::ops::shape::expand_dims_on(&scores, -1_i32, target)
-                    .context("SparseMoeBlock: expand scores dim")?; // [BS, k, 1]
-                let weighted = &down_out * &scores_unsq; // [BS, k, H]
+                    .context("SparseMoeBlock: expand scores dim")?;
+                let weighted = &down_out * &scores_unsq;
                 mlx::ops::sum_on(&weighted, -2_i32, false, target)
                     .context("SparseMoeBlock: sum across k")?
             };
