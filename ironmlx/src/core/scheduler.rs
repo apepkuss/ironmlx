@@ -1633,18 +1633,30 @@ impl<M: Model> Scheduler<M> {
         // Clone offsets into Vec to release the immutable borrow before
         // re-borrowing cache_ref mutably for the forward.
         let pre_offsets: Vec<i32> = first_full_layer_offsets(cache_ref)?.to_vec();
-        let per_row_real_lens: Vec<i32> = pre_offsets
+        // The write lengths above remain exact: inactive rows use
+        // per_row_lens=0 so caches are not mutated. The attention mask,
+        // however, must not contain an all-`-inf` row: SDPA would produce
+        // NaNs even though the row's logits are discarded later. Give pad /
+        // finished / mid-admit rows at least one zero-K/V cell to attend to.
+        let mask_row_lens: Vec<i32> = pre_offsets
             .iter()
             .zip(per_row_lens.iter())
-            .map(|(o, n)| o + n)
+            .zip(active_at_start.iter())
+            .map(|((o, n), active)| {
+                let real_len = o + n;
+                if *active {
+                    real_len
+                } else {
+                    real_len.max(1)
+                }
+            })
             .collect();
-        let max_real_len = per_row_real_lens
+        let max_real_len = mask_row_lens
             .iter()
             .copied()
             .max()
-            .expect("Decoding phase guarantees b_max >= 1 and per_row_real_lens is non-empty");
-        let decode_mask =
-            build_per_row_decode_mask(&per_row_real_lens, max_real_len, Dtype::Bfloat16)?;
+            .expect("Decoding phase guarantees b_max >= 1 and mask_row_lens is non-empty");
+        let decode_mask = build_per_row_decode_mask(&mask_row_lens, max_real_len, Dtype::Bfloat16)?;
 
         let logits = model.forward_on(
             &input_ids,
@@ -2731,6 +2743,171 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct StepDecodeMaskModel {
+        decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
+    }
+
+    impl StepDecodeMaskModel {
+        fn bump_first_full_cache(
+            cache: Option<&mut [crate::nn::LayerCache]>,
+            input_ids: &mlx::Array,
+            per_row_lens: Option<&[i32]>,
+        ) -> crate::Result<()> {
+            let Some(cache) = cache else {
+                return Ok(());
+            };
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            let batch = dims[0];
+            let seq = dims[1];
+            let lens_owned;
+            let lens = if let Some(lens) = per_row_lens {
+                lens
+            } else {
+                lens_owned = vec![seq; batch as usize];
+                lens_owned.as_slice()
+            };
+            let k = mlx::Array::zeros((batch, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
+                .map_err(|e| anyhow::anyhow!("fake k failed: {e:?}"))?;
+            let v = mlx::Array::zeros((batch, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
+                .map_err(|e| anyhow::anyhow!("fake v failed: {e:?}"))?;
+            for layer in cache {
+                if let crate::nn::LayerCache::Full(kv) = layer {
+                    kv.update_and_fetch(&k, &v, lens)?;
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        fn decode_lens_seen(&self) -> Vec<Vec<i32>> {
+            self.decode_lens_seen.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::core::model::Model for StepDecodeMaskModel {
+        fn make_cache(
+            &self,
+            batch: i32,
+            cap: i32,
+            dtype: mlx::Dtype,
+        ) -> crate::Result<Vec<crate::nn::LayerCache>> {
+            Ok(vec![crate::nn::LayerCache::Full(
+                crate::core::KVCache::new(batch, 1, 1, 1, dtype, cap),
+            )])
+        }
+
+        fn forward_on(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            if let Some(lens) = per_row_lens {
+                self.decode_lens_seen.lock().unwrap().push(lens.to_vec());
+            }
+            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            fake_logits_for_batch(input_ids.shape().as_slice()[0])
+        }
+
+        fn batched_prefill(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _attention_mask: &mlx::Array,
+            _linear_attention_mask: &mlx::Array,
+            per_row_lens: &[i32],
+            cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
+            fake_logits_for_batch(input_ids.shape().as_slice()[0])
+        }
+
+        fn forward_text_hidden(
+            &self,
+            input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            mlx::Array::zeros((dims[0], dims[1], 4_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
+        }
+
+        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+            crate::core::memory_budget::test_meta_qwen35()
+        }
+
+        fn num_hidden_layers(&self) -> usize {
+            1
+        }
+    }
+
+    impl DenseVlMethods for StepDecodeMaskModel {
+        fn batched_prefill_vl(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _attention_mask: &mlx::Array,
+            _linear_attention_mask: &mlx::Array,
+            _per_row_lens: &[i32],
+            _per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+            _image_token_id: i32,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("step decode-mask regression is text-only")
+        }
+
+        fn compute_vision_embeds(
+            &self,
+            _pixel_values: &mlx::Array,
+            _grid_thw: &[(i32, i32, i32)],
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("step decode-mask regression is text-only")
+        }
+
+        fn forward_vl_chunk(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _vision_embeds_slice: Option<&mlx::Array>,
+            _image_token_id: i32,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("step decode-mask regression is text-only")
+        }
+
+        fn forward_vl_hidden(
+            &self,
+            _input_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&mlx::Array>,
+            _cache: Option<&mut [crate::nn::LayerCache]>,
+            _vision_embeds_slice: Option<&mlx::Array>,
+            _image_token_id: i32,
+            _target: mlx::StreamOrDevice,
+        ) -> crate::Result<mlx::Array> {
+            unreachable!("step decode-mask regression is text-only")
+        }
+    }
+
     #[test]
     fn scheduler_new_empty() {
         let s = TestScheduler::new(4, 32768, crate::core::memory_budget::test_meta_qwen35())
@@ -2917,6 +3094,30 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
         assert_eq!((events[1].id, events[1].token), (id_1, 4));
+    }
+
+    #[test]
+    fn step_with_empty_scheduler_slot_keeps_pad_row_mask_nonzero() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id = s.admit(mk_req(vec![1, 2, 3])).expect("admit");
+
+        let model = StepDecodeMaskModel::default();
+        let prefill_events = s.prefill_admitted(&model).expect("prefill");
+        assert_eq!(prefill_events.len(), 1);
+        assert_eq!(prefill_events[0].id, id);
+        assert_eq!(s.phase(), Phase::Decoding);
+
+        let step_events = s
+            .step(&model)
+            .expect("step must tolerate empty non-active scheduler slots");
+        assert_eq!(step_events.len(), 1);
+        assert_eq!(step_events[0].id, id);
+        assert_eq!(model.decode_lens_seen(), vec![vec![1, 0]]);
     }
 
     #[test]
