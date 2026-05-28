@@ -7,7 +7,9 @@ use crate::nn::Linear;
 use crate::Result;
 
 use super::config::Gemma4LayerKind;
-use super::ops::gelu_approx_mul_on;
+use super::ops::{
+    gelu_approx_mul_on, quantized_gate_up_geglu_decode_on, QuantizedGateUpGeGluDecode,
+};
 use super::profile;
 
 pub struct Gemma4GeGluMlp {
@@ -42,6 +44,42 @@ impl Gemma4GeGluMlp {
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
         let profile = profile::vl_layer_enabled();
+
+        if let Some(parts) = self.gate_up.quantized_parts() {
+            if let (None, Some(qbiases)) = (parts.bias, parts.biases) {
+                let t0 = Instant::now();
+                let params = QuantizedGateUpGeGluDecode {
+                    weight: parts.weight,
+                    scales: parts.scales,
+                    biases: qbiases,
+                    intermediate_size: self.intermediate_size,
+                    group_size: parts.group_size,
+                    bits: parts.bits,
+                };
+                if let Some(activated) = quantized_gate_up_geglu_decode_on(x, params, target)? {
+                    profile::eval_layer(
+                        "gemma4_text_mlp_gate_up_geglu_fused",
+                        self.layer_idx,
+                        self.layer_kind,
+                        &[&activated],
+                        t0,
+                        profile,
+                    )?;
+                    let t0 = Instant::now();
+                    let out = self.down.forward_on(&activated, target)?;
+                    profile::eval_layer(
+                        "gemma4_text_mlp_down",
+                        self.layer_idx,
+                        self.layer_kind,
+                        &[&out],
+                        t0,
+                        profile,
+                    )?;
+                    return Ok(out);
+                }
+            }
+        }
+
         let t0 = Instant::now();
         let projected = self.gate_up.forward_on(x, target)?;
         profile::eval_layer(

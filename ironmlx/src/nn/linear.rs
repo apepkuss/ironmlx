@@ -19,6 +19,16 @@ pub struct Linear {
     inner: LinearImpl,
 }
 
+/// Borrowed quantized Linear internals for architecture-specific fused paths.
+pub(crate) struct QuantizedLinearParts<'a> {
+    pub(crate) weight: &'a Array,
+    pub(crate) scales: &'a Array,
+    pub(crate) biases: Option<&'a Array>,
+    pub(crate) bias: Option<&'a Array>,
+    pub(crate) group_size: i32,
+    pub(crate) bits: i32,
+}
+
 /// Internal backend variant. Private — callers use [`Linear`].
 enum LinearImpl {
     Fp {
@@ -169,6 +179,27 @@ impl Linear {
         match &self.inner {
             LinearImpl::Fp { weight, .. } => weight.shape().as_slice()[0] as usize,
             LinearImpl::Quant { weight, .. } => weight.shape().as_slice()[0] as usize,
+        }
+    }
+
+    pub(crate) fn quantized_parts(&self) -> Option<QuantizedLinearParts<'_>> {
+        match &self.inner {
+            LinearImpl::Fp { .. } => None,
+            LinearImpl::Quant {
+                weight,
+                scales,
+                biases,
+                bias,
+                group_size,
+                bits,
+            } => Some(QuantizedLinearParts {
+                weight,
+                scales,
+                biases: biases.as_ref(),
+                bias: bias.as_ref(),
+                group_size: *group_size,
+                bits: *bits,
+            }),
         }
     }
 

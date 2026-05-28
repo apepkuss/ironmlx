@@ -42,6 +42,14 @@ impl RmsNorm {
         Self { weight, eps }
     }
 
+    pub(crate) fn weight(&self) -> &Array {
+        &self.weight
+    }
+
+    pub(crate) fn eps(&self) -> f32 {
+        self.eps
+    }
+
     /// Forward pass on the current default stream.
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())

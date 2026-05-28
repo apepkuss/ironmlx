@@ -8,7 +8,8 @@ use super::config::Gemma4RopeParams;
 #[derive(Clone)]
 pub struct RopeOffsets {
     values: Vec<i32>,
-    array: Option<Array>,
+    values_array: Array,
+    non_uniform_array: Option<Array>,
 }
 
 impl RopeOffsets {
@@ -16,16 +17,21 @@ impl RopeOffsets {
         if values.is_empty() {
             return Err(anyhow!("Gemma4 RopeOffsets cannot be empty"));
         }
-        let array = if values.iter().all(|&v| v == values[0]) {
+        let values_array: Array = (&values[..], &[values.len() as i32][..]).try_into()?;
+        let non_uniform_array = if values.iter().all(|&v| v == values[0]) {
             None
         } else {
-            Some((&values[..], &[values.len() as i32][..]).try_into()?)
+            Some(values_array.clone())
         };
-        Ok(Self { values, array })
+        Ok(Self {
+            values,
+            values_array,
+            non_uniform_array,
+        })
     }
 
     pub fn scalar(&self) -> Option<i32> {
-        if self.array.is_none() {
+        if self.non_uniform_array.is_none() {
             Some(self.values[0])
         } else {
             None
@@ -33,7 +39,11 @@ impl RopeOffsets {
     }
 
     pub fn array(&self) -> Option<&Array> {
-        self.array.as_ref()
+        self.non_uniform_array.as_ref()
+    }
+
+    pub(crate) fn values_array(&self) -> &Array {
+        &self.values_array
     }
 
     pub fn values(&self) -> &[i32] {
@@ -117,6 +127,17 @@ impl Gemma4Rope {
                 offsets,
                 target,
             ),
+        }
+    }
+
+    pub(crate) fn default_params(&self) -> Option<(i32, f32, bool)> {
+        match self {
+            Self::Default {
+                dims,
+                base,
+                traditional,
+            } => Some((*dims, *base, *traditional)),
+            Self::Proportional { .. } => None,
         }
     }
 }

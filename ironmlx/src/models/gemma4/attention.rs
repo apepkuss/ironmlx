@@ -8,7 +8,7 @@ use crate::nn::{Linear, RmsNorm};
 use crate::Result;
 
 use super::config::{Gemma4LayerKind, Gemma4TextConfig};
-use super::ops::rms_norm_no_scale_on;
+use super::ops::{rms_norm_default_rope_decode_on, rms_norm_no_scale_on, RmsNormDefaultRopeDecode};
 use super::profile;
 use super::rope::{Gemma4Rope, RopeOffsets};
 
@@ -99,9 +99,15 @@ impl Gemma4Attention {
             .q_proj
             .forward_on(x, target)?
             .reshape_on((batch, seq, self.n_heads, self.head_dim), target)?;
-        let q = self.q_norm.forward_on(&q, target)?;
-        let q = q.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
-        let q = self.rope.apply_on(&q, offsets, target)?;
+        let q =
+            match self.decode_default_rope_on(&q, &self.q_norm, self.n_heads, offsets, target)? {
+                Some(q) => q,
+                None => {
+                    let q = self.q_norm.forward_on(&q, target)?;
+                    let q = q.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
+                    self.rope.apply_on(&q, offsets, target)?
+                }
+            };
         profile::eval_layer(
             "gemma4_attn_q_path",
             self.layer_idx,
@@ -148,9 +154,20 @@ impl Gemma4Attention {
                 )?;
 
                 let t0 = Instant::now();
-                let k = self.k_norm.forward_on(&raw_k, target)?;
-                let k = k.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
-                let k = self.rope.apply_on(&k, offsets, target)?;
+                let k = match self.decode_default_rope_on(
+                    &raw_k,
+                    &self.k_norm,
+                    self.n_kv_heads,
+                    offsets,
+                    target,
+                )? {
+                    Some(k) => k,
+                    None => {
+                        let k = self.k_norm.forward_on(&raw_k, target)?;
+                        let k = k.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
+                        self.rope.apply_on(&k, offsets, target)?
+                    }
+                };
                 let v = rms_norm_no_scale_on(&raw_v, self.rms_norm_eps, target)?
                     .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
                 profile::eval_layer(
@@ -240,5 +257,31 @@ impl Gemma4Attention {
             profile,
         )?;
         Ok((out, kv))
+    }
+
+    fn decode_default_rope_on(
+        &self,
+        x: &Array,
+        norm: &RmsNorm,
+        heads: i32,
+        offsets: &RopeOffsets,
+        target: StreamOrDevice,
+    ) -> Result<Option<Array>> {
+        let Some((dims, base, traditional)) = self.rope.default_params() else {
+            return Ok(None);
+        };
+        if dims != self.head_dim || offsets.scalar().is_none() {
+            return Ok(None);
+        }
+        let params = RmsNormDefaultRopeDecode {
+            weight: norm.weight(),
+            offsets: offsets.values_array(),
+            eps: norm.eps(),
+            base,
+            traditional,
+            heads,
+            head_dim: self.head_dim,
+        };
+        rms_norm_default_rope_decode_on(x, params, target)
     }
 }

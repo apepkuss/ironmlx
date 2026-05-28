@@ -11,8 +11,16 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mlx::{ops, Array, Dtype};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Layout {
+    /// Quantize logical [N, K] and call quantized_matmul(transpose=true).
+    Transposed,
+    /// Quantize logical [K, N] and call quantized_matmul(transpose=false).
+    NonTransposed,
+}
 
 #[derive(Parser, Debug)]
 #[command(about = "ironmlx self-quant matmul kernel micro-benchmark")]
@@ -30,11 +38,11 @@ struct Args {
     k: i32,
 
     /// Tile BM
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 32)]
     bm: i32,
 
     /// Tile BN
-    #[arg(long, default_value_t = 128)]
+    #[arg(long, default_value_t = 64)]
     bn: i32,
 
     /// Tile BK
@@ -60,6 +68,14 @@ struct Args {
     /// Run mlx baseline (`quantized_matmul_on` affine) for comparison
     #[arg(long, default_value_t = false)]
     mlx_baseline: bool,
+
+    /// Skip the ironmlx self_qmm kernel and only run requested baselines.
+    #[arg(long, default_value_t = false)]
+    skip_self_qmm: bool,
+
+    /// Quantized weight layout for the MLX baseline.
+    #[arg(long, value_enum, default_value_t = Layout::Transposed)]
+    layout: Layout,
 }
 
 /// Build `(x, w_packed, w_scales, w_biases)` test inputs at the given shape.
@@ -73,6 +89,7 @@ fn build_inputs(
     k: i32,
     group_size: i32,
     bits: i32,
+    layout: Layout,
 ) -> Result<(Array, Array, Array, Array)> {
     // x bf16 [M, K] — small uniform range
     let x_count = (m as usize) * (k as usize);
@@ -80,10 +97,15 @@ fn build_inputs(
     let x_f32: Array = (x_data.as_slice(), (m, k)).try_into()?;
     let x = ops::cast::astype(&x_f32, Dtype::Bfloat16)?;
 
-    // raw weights bf16 [N, K] — small uniform range
-    let w_count = (n as usize) * (k as usize);
+    // raw weights bf16. Transposed layout stores logical [N, K] for x @ W^T;
+    // non-transposed stores logical [K, N] for x @ W.
+    let w_shape = match layout {
+        Layout::Transposed => (n, k),
+        Layout::NonTransposed => (k, n),
+    };
+    let w_count = (w_shape.0 as usize) * (w_shape.1 as usize);
     let w_data: Vec<f32> = (0..w_count).map(|i| ((i as f32) * 0.0005) - 0.3).collect();
-    let raw_w_f32: Array = (w_data.as_slice(), (n, k)).try_into()?;
+    let raw_w_f32: Array = (w_data.as_slice(), w_shape).try_into()?;
     let raw_w_bf16 = ops::cast::astype(&raw_w_f32, Dtype::Bfloat16)?;
 
     // Quantize via mlx public API: returns [packed, scales, biases] for "affine"
@@ -133,7 +155,7 @@ fn time_mlx_baseline(args: &Args, inputs: &(Array, Array, Array, Array)) -> Resu
             w,
             s,
             Some(b),
-            /* transpose = */ true,
+            args.layout == Layout::Transposed,
             Some(args.group_size),
             Some(args.bits),
             "affine",
@@ -150,7 +172,7 @@ fn time_mlx_baseline(args: &Args, inputs: &(Array, Array, Array, Array)) -> Resu
             w,
             s,
             Some(b),
-            /* transpose = */ true,
+            args.layout == Layout::Transposed,
             Some(args.group_size),
             Some(args.bits),
             "affine",
@@ -167,6 +189,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     println!("# ironmlx-bench-kernel");
     println!("M={}, N={}, K={}", args.m, args.n, args.k);
+    println!("MLX layout: {:?}", args.layout);
     println!("Tile: BM={}, BN={}, BK={}", args.bm, args.bn, args.bk);
     println!("Quant: bits={}, group_size={}", args.bits, args.group_size);
     println!(
@@ -175,27 +198,45 @@ fn main() -> Result<()> {
     );
     println!();
 
-    let inputs = build_inputs(args.m, args.n, args.k, args.group_size, args.bits)?;
+    let inputs = build_inputs(
+        args.m,
+        args.n,
+        args.k,
+        args.group_size,
+        args.bits,
+        args.layout,
+    )?;
 
-    let self_t = time_self_qmm(&args, &inputs)?;
     let flops = 2.0 * (args.m as f64) * (args.n as f64) * (args.k as f64);
-    let self_gflops = flops / self_t / 1e9;
-    println!(
-        "self_qmm:    median {:.3} ms, {:.1} GFLOP/s",
-        self_t * 1000.0,
-        self_gflops
-    );
+    let self_t = if args.skip_self_qmm {
+        println!("self_qmm:    skipped (--skip-self-qmm)");
+        None
+    } else if args.layout == Layout::Transposed {
+        let self_t = time_self_qmm(&args, &inputs)?;
+        let self_gflops = flops / self_t / 1e9;
+        println!(
+            "self_qmm:    median {:.3} ms, {:.1} GFLOP/s",
+            self_t * 1000.0,
+            self_gflops
+        );
+        Some(self_t)
+    } else {
+        println!("self_qmm:    skipped (requires transposed [N,K] packed layout)");
+        None
+    };
 
     if args.mlx_baseline {
         let mlx_t = time_mlx_baseline(&args, &inputs)?;
         let mlx_gflops = flops / mlx_t / 1e9;
-        let speedup = mlx_t / self_t;
         println!(
             "mlx affine:  median {:.3} ms, {:.1} GFLOP/s",
             mlx_t * 1000.0,
             mlx_gflops
         );
-        println!("self_qmm vs mlx: {speedup:.2}x speedup");
+        if let Some(self_t) = self_t {
+            let speedup = mlx_t / self_t;
+            println!("self_qmm vs mlx: {speedup:.2}x speedup");
+        }
     }
 
     Ok(())
