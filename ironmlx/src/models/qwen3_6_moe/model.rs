@@ -77,6 +77,30 @@ impl Qwen36MoeModel {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_vl_hidden(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.inner.forward_vl_hidden(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
+    }
+
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn batched_prefill_vl(
         &self,
@@ -308,6 +332,30 @@ impl crate::core::scheduler::DenseVlMethods for Qwen36MoeModel {
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
         Qwen36MoeModel::forward_vl_chunk(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
+    }
+
+    fn forward_vl_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        Qwen36MoeModel::forward_vl_hidden(
             self,
             input_ids,
             position_ids,
