@@ -8,7 +8,7 @@ Rust bindings to [Apple MLX](https://github.com/ml-explore/mlx) via the [cxx](ht
 
 - macOS, Apple Silicon
 - Rust 1.94+
-- Prebuilt MLX 0.32+ at `$MLX_DIR`
+- Prebuilt MLX 0.32+ at `$MLX_DIR`, built in Release mode with MLX Metal NAX kernels enabled
 
 ## Quickstart
 
@@ -17,12 +17,25 @@ Build MLX once (any prefix you like):
 ```bash
 cd /path/to/mlx
 mkdir -p build && cd build
+xcrun -sdk macosx --show-sdk-version
+printf '__METAL_VERSION__\n' | xcrun -sdk macosx metal -E -x metal -P - | tail -1
 cmake .. -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
+  -DMLX_METAL_PATH=$HOME/.local/mlx/lib \
   -DCMAKE_INSTALL_PREFIX=$HOME/.local/mlx
+if grep -q MLX_METAL_NO_NAX CMakeFiles/mlx.dir/flags.make; then
+  echo "MLX was configured without NAX Metal kernels; use full Xcode with macOS SDK 26.2+ / Metal 400+."
+  exit 1
+fi
 make -j$(sysctl -n hw.ncpu) && make install
 export MLX_DIR=$HOME/.local/mlx
 ```
+
+For Qwen3.6 MoE performance work, the MLX runtime build is part of the product
+surface. Command Line Tools SDKs can configure MLX with `MLX_METAL_NO_NAX`,
+which keeps correctness but substantially slows qmm and decode paths. Prefer the
+full Xcode toolchain and verify that the installed `$MLX_DIR/lib/mlx.metallib`
+comes from the same NAX-enabled Release build.
 
 Then in your project:
 

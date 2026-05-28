@@ -99,11 +99,22 @@ Full `GatedDeltaNet` `seq=521` p50:
 | Rust + MLX 0.32.0 | 4.469 ms | 3.917 ms | 3.920 ms |
 | Rust + MLX 0.31.2 | 3.439 ms | 1.883 ms | 1.883 ms |
 
-Conclusion: the remaining long-prefill gap is primarily an MLX 0.32.0 quantized-matmul regression or local MLX build difference, not a Qwen3.6 MoE architecture flaw, scheduler/admission policy flaw, GDN kernel flaw, or Rust bridge overhead issue.
+Conclusion at the time: the remaining long-prefill gap was an MLX runtime-level
+issue, not a Qwen3.6 MoE architecture flaw, scheduler/admission policy flaw, GDN
+kernel flaw, or Rust bridge overhead issue.
+
+Refinement: Phase 6 narrowed this further. Clean Release builds of MLX `v0.31.2`,
+`84961223`, and `2165dc08` all land in the fast qmm/GDN band when built with the
+full Xcode SDK and NAX kernels enabled. The installed `/Users/xin/.local/mlx`
+control is the slow outlier because its MLX flags include `MLX_METAL_NO_NAX`.
+See `2026-05-28-qwen36-performance-phase6-mlx-nax-runtime.md`.
 
 ## Next Tasks
 
-- Decide product policy for MLX runtime selection: pin/recommend MLX 0.31.2 for Qwen3.6 4-bit production until the 0.32.0 qmm regression is understood, or bisect/fix the local MLX 0.32.0 build.
-- Add a lightweight runtime/version guard only after deciding the policy; do not silently paper over the dependency-level regression.
+- Use the NAX-enabled canonical `/Users/xin/.local/mlx` build for the next
+  Qwen3.6 performance runs.
+- Treat `MLX_METAL_NO_NAX` as a build-time performance gate instead of pinning to
+  MLX `v0.31.2` on this machine.
 - Keep the qlinear C++ loop probe as a regression tool for future MLX upgrades.
-- Re-run end-to-end Qwen3.6 core/serve performance after selecting the runtime policy.
+- Re-run end-to-end Qwen3.6 core/serve performance and compare against omlx with
+  the corrected MLX runtime.
