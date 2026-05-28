@@ -15,7 +15,8 @@
 //!   1. gates  = router_gate(x)                   Linear (quantized)
 //!   2. probs  = softmax(gates, axis=-1)           [B, S, E]
 //!   3. inds   = argpartition(probs, -k, axis=-1)[..., -k:]  [B, S, k]
-//!   4. scores = take_along_axis(probs, inds, -1) / scores.sum(-1, keepdim)
+//!   4. scores = take_along_axis(probs, inds, -1), optionally normalized
+//!      across top-k when the model config enables norm_topk_prob
 //!   5. routed = gather_quantized_matmul_on on flat [BS, H]:
 //!      x_in = expand_dims(flat, [-2,-3])  → [BS, 1, 1, H]
 //!      gate_out, up_out: [BS, k, 1, moe_inter]
@@ -94,6 +95,49 @@ fn sorted_token_indices_from_sort_perm(
         .map_err(|e| anyhow!("SparseMoeBlock: build token_idx array: {e}"))?;
     take_along_axis_on(&token_idx, sort_perm, -1_i32, target)
         .context("SparseMoeBlock: take_along_axis sort token_idx")
+}
+
+fn router_topk_scores_and_indices(
+    logits: &Array,
+    k: i32,
+    num_experts: i32,
+    norm_topk_prob: bool,
+    target: StreamOrDevice,
+) -> Result<(Array, Array)> {
+    let dims = logits.shape();
+    let shape = dims.as_slice();
+    if shape.len() != 2 {
+        return Err(anyhow!(
+            "SparseMoeBlock: router logits must be rank-2 [BS,E], got rank {}",
+            shape.len()
+        ));
+    }
+    let bs = shape[0];
+    let probs = mlx::ops::softmax_on(logits, -1_i32, /* precise */ true, target)
+        .context("SparseMoeBlock: router softmax")?;
+    let part_inds =
+        argpartition_on(&probs, -(k), -1, target).context("SparseMoeBlock: argpartition")?;
+    let inds = mlx::ops::slice_strided_on(
+        &part_inds,
+        [0_i32, num_experts - k],
+        [bs, num_experts],
+        [1_i32, 1_i32],
+        target,
+    )
+    .context("SparseMoeBlock: slice top-k from argpartition")?;
+
+    let scores_raw = take_along_axis_on(&probs, &inds, -1, target)
+        .context("SparseMoeBlock: take top-k probabilities")?;
+    let scores = if norm_topk_prob {
+        let scores_sum = mlx::ops::sum_on(&scores_raw, -1_i32, /* keepdim */ true, target)
+            .context("SparseMoeBlock: sum top-k probabilities")?;
+        &scores_raw / &scores_sum
+    } else {
+        scores_raw
+    };
+    let inds_u32 = mlx::ops::cast::astype_on(&inds, mlx::Dtype::Uint32, target)
+        .context("SparseMoeBlock: cast indices to Uint32")?;
+    Ok((scores, inds_u32))
 }
 
 #[cfg(feature = "p5h-profile")]
@@ -388,7 +432,8 @@ impl RoutedExperts {
 
 /// Sparse MoE block for Qwen3.5-MoE.
 ///
-/// Routing: softmax → argpartition top-k → renormalize.
+/// Routing: softmax → argpartition top-k, with optional top-k renormalization
+/// controlled by checkpoint config.
 /// Routed path: `gather_quantized_matmul_on` (G1) fused stacked SwiGLU.
 /// Shared path: standard `Mlp` gated by `sigmoid(shared_expert_gate(x))`.
 pub struct SparseMoeBlock {
@@ -403,6 +448,8 @@ pub struct SparseMoeBlock {
     shared_expert_gate: Linear,
     /// Number of experts selected per token.
     num_experts_per_tok: i32,
+    /// Whether selected expert scores are renormalized across top-k.
+    norm_topk_prob: bool,
     swiglu: std::sync::OnceLock<CompiledFn>,
 }
 
@@ -414,7 +461,12 @@ impl SparseMoeBlock {
     ///   `{prefix}.switch_mlp`        — routed stacked experts
     ///   `{prefix}.shared_expert`     — shared SwiGLU Mlp
     ///   `{prefix}.shared_expert_gate`— sigmoid gate Linear (quantized)
-    pub fn from_loader(loader: &Loader, prefix: &str, num_experts_per_tok: i32) -> Result<Self> {
+    pub fn from_loader(
+        loader: &Loader,
+        prefix: &str,
+        num_experts_per_tok: i32,
+        norm_topk_prob: bool,
+    ) -> Result<Self> {
         let router_gate = Linear::from_loader(loader, &format!("{prefix}.gate"))
             .context("SparseMoeBlock: loading router gate")?;
         let routed = RoutedExperts::from_loader(loader, &format!("{prefix}.switch_mlp"))
@@ -431,6 +483,7 @@ impl SparseMoeBlock {
             shared_expert,
             shared_expert_gate,
             num_experts_per_tok,
+            norm_topk_prob,
             swiglu: std::sync::OnceLock::new(),
         })
     }
@@ -496,8 +549,8 @@ impl SparseMoeBlock {
             let gate_up_child_spans_enabled = p5i_c_gate_up_child_spans_enabled();
 
             // Substep 1: router_logits_softmax_topk — Linear(hidden→E) +
-            // softmax + argpartition top-k + slice + take_along + renormalize
-            // + cast indices to uint32 for downstream gather_qmm.
+            // top-k selection + checkpoint-controlled score normalization +
+            // cast indices to uint32 for downstream gather_qmm.
             //
             // argpartition is preferable to topk: we don't need the top-k
             // elements sorted internally (each is independently weight-summed
@@ -513,26 +566,14 @@ impl SparseMoeBlock {
                 },
                 || -> Result<(Array, Array)> {
                     let logits = self.router_gate.forward_on(&flat_x, target)?; // [BS, E]
-                    let probs =
-                        mlx::ops::softmax_on(&logits, -1_i32, /* precise */ true, target)?; // [BS, E]
-                    let part_inds = argpartition_on(&probs, -(k), -1, target)
-                        .context("SparseMoeBlock: argpartition")?;
-                    let inds = mlx::ops::slice_strided_on(
-                        &part_inds,
-                        [0_i32, num_experts - k],
-                        [bs, num_experts],
-                        [1_i32, 1_i32],
+                    let (scores, inds_u32) = router_topk_scores_and_indices(
+                        &logits,
+                        k,
+                        num_experts,
+                        self.norm_topk_prob,
                         target,
-                    )
-                    .context("SparseMoeBlock: slice top-k from argpartition")?; // [BS, k]
-                    let scores_raw = take_along_axis_on(&probs, &inds, -1, target)
-                        .context("SparseMoeBlock: take_along_axis")?; // [BS, k]
-                    let scores_sum =
-                        mlx::ops::sum_on(&scores_raw, -1_i32, /* keepdim */ true, target)?; // [BS, 1]
-                    let scores = &scores_raw / &scores_sum; // [BS, k]
-                    let inds_u32 = mlx::ops::cast::astype_on(&inds, mlx::Dtype::Uint32, target)
-                        .context("SparseMoeBlock: cast indices to Uint32")?; // [BS, k]
-                                                                             // P5h+1 T1: measurement-eval probe.
+                    )?;
+                    // P5h+1 T1: measurement-eval probe.
                     if crate::core::p5h::is_measurement_eval_probes_active() {
                         mlx::transforms::eval(&[&scores, &inds_u32])?;
                     }
@@ -886,7 +927,7 @@ impl SparseMoeBlock {
 
             // Substep 6: routing_unsort_weighted_reduce — unpack (sorted
             // branch: argsort inv_perm + take + reshape; default branch:
-            // squeeze) into [BS, k, H], then weight by renormalized scores
+            // squeeze) into [BS, k, H], then weight by router scores
             // and reduce across k → [BS, H].
             let routed_y = crate::core::p5h::try_with_p5h_span_from_current_trace(
                 "routing_unsort_weighted_reduce",
@@ -983,46 +1024,26 @@ impl SparseMoeBlock {
             // only by the p5h-profile substep spans above).
             let _ = layer_idx;
 
-            // (1) Router: Linear → [BS, E], then softmax along expert axis.
+            // (1) Router: Linear -> [BS, E], then top-k expert selection.
             let logits = self.router_gate.forward_on(&flat_x, target)?; // [BS, E]
-            let probs = mlx::ops::softmax_on(&logits, -1_i32, /* precise */ true, target)?; // [BS, E]
 
-            // (2) Top-k selection via argpartition.
+            // (2) Top-k selection via argpartition, plus score normalization
+            // matching `norm_topk_prob`.
             // argpartition is preferable to topk here: we don't need the top-k
             // elements sorted internally (each is independently weight-summed via
             // gather_qmm); we only need to know which k indices to gather. MLX
-            // argpartition is a single pass; the values are recovered via
-            // take_along_axis. This is an MLX-op-selection optimization, not
-            // dictated by any reference implementation.
-            // argpartition kth=-(k) places the top-k elements in the last k
-            // positions of the returned index array. We then slice [BS, E] →
-            // [BS, k] keeping the last k columns.
-            let part_inds = argpartition_on(&probs, -(k), -1, target)
-                .context("SparseMoeBlock: argpartition")?;
-            // part_inds: [BS, E] — take last k columns via strided slice.
-            // mlx::ops::slice_strided_on lives in the indexing module but is
-            // re-exported at mlx::ops level.
-            let inds = mlx::ops::slice_strided_on(
-                &part_inds,
-                [0_i32, num_experts - k], // start: row 0, col E-k
-                [bs, num_experts],        // stop (exclusive): all rows, end of E dim
-                [1_i32, 1_i32],           // stride 1 on both dims
+            // argpartition is applied after the full router softmax so this
+            // mirrors the reference inference path; normalization is then
+            // applied only when the checkpoint config requests it.
+            let (scores, inds_u32) = router_topk_scores_and_indices(
+                &logits,
+                k,
+                num_experts,
+                self.norm_topk_prob,
                 target,
-            )
-            .context("SparseMoeBlock: slice top-k from argpartition")?; // [BS, k]
+            )?;
 
-            // (3) Gather top-k probs and renormalize.
-            let scores_raw = take_along_axis_on(&probs, &inds, -1, target)
-                .context("SparseMoeBlock: take_along_axis")?; // [BS, k]
-            let scores_sum =
-                mlx::ops::sum_on(&scores_raw, -1_i32, /* keepdim */ true, target)?; // [BS, 1]
-            let scores = &scores_raw / &scores_sum; // [BS, k] — panics on shape mismatch (broadcast guaranteed)
-
-            // (4) Cast indices to uint32 (gather_qmm requirement).
-            let inds_u32 = mlx::ops::cast::astype_on(&inds, mlx::Dtype::Uint32, target)
-                .context("SparseMoeBlock: cast indices to Uint32")?; // [BS, k]
-
-            // (5) Routed SwiGLU via gather_quantized_matmul_on (G1 path).
+            // (3) Routed SwiGLU via gather_quantized_matmul_on (G1 path).
             //
             // Two routing strategies are dispatched here based on `bs * k`:
             //
@@ -1176,7 +1197,7 @@ impl SparseMoeBlock {
             //   sorted path:  [BS*k, 1, H]      (in sorted order)
             //   default path: [BS, k, 1, H]     (in original order, unchanged)
 
-            // (6) Weight by renormalized scores and reduce over k.
+            // (6) Weight by router scores and reduce over k.
             //
             // Both branches converge on `down_out: [BS, k, H]` so the score
             // weighting + reduce is shared.
@@ -1289,6 +1310,55 @@ mod tests {
             out.to_vec::<u32>()?,
             vec![max / 8, (max - 1) / 8, (max - 7) / 8, 15 / 8]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn router_scores_do_not_renormalize_when_norm_topk_false() -> Result<()> {
+        let logits: Array = (&[4.0_f32, 3.0, 1.0, 0.0][..], [1, 4])
+            .try_into()
+            .map_err(|e| anyhow!("build logits: {e}"))?;
+        let (scores, inds) =
+            router_topk_scores_and_indices(&logits, 2, 4, false, StreamOrDevice::default())?;
+
+        let got = scores.to_vec::<f32>()?;
+        let ids = inds.to_vec::<u32>()?;
+        let denom = 4.0_f32.exp() + 3.0_f32.exp() + 1.0_f32.exp() + 0.0_f32.exp();
+        let logits_by_id = [4.0_f32, 3.0, 1.0, 0.0];
+        let want: Vec<f32> = ids
+            .iter()
+            .map(|&id| logits_by_id[id as usize].exp() / denom)
+            .collect();
+
+        for (got, want) in got.iter().zip(want.iter()) {
+            approx::assert_abs_diff_eq!(got, want, epsilon = 1e-5);
+        }
+        assert!(got.iter().sum::<f32>() < 1.0);
+        Ok(())
+    }
+
+    #[test]
+    fn router_scores_renormalize_when_norm_topk_true() -> Result<()> {
+        let logits: Array = (&[4.0_f32, 3.0, 1.0, 0.0][..], [1, 4])
+            .try_into()
+            .map_err(|e| anyhow!("build logits: {e}"))?;
+        let (scores, inds) =
+            router_topk_scores_and_indices(&logits, 2, 4, true, StreamOrDevice::default())?;
+
+        let got = scores.to_vec::<f32>()?;
+        let ids = inds.to_vec::<u32>()?;
+        let logits_by_id = [4.0_f32, 3.0, 1.0, 0.0];
+        let selected_exp: Vec<f32> = ids
+            .iter()
+            .map(|&id| logits_by_id[id as usize].exp())
+            .collect();
+        let denom: f32 = selected_exp.iter().sum();
+        let want: Vec<f32> = selected_exp.into_iter().map(|v| v / denom).collect();
+
+        for (got, want) in got.iter().zip(want.iter()) {
+            approx::assert_abs_diff_eq!(got, want, epsilon = 1e-5);
+        }
+        approx::assert_abs_diff_eq!(got.iter().sum::<f32>(), 1.0, epsilon = 1e-5);
         Ok(())
     }
 }

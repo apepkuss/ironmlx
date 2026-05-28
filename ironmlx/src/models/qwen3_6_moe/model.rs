@@ -399,6 +399,7 @@ mod tests {
             },
             num_experts: 8,
             num_experts_per_tok: 2,
+            norm_topk_prob: false,
             moe_intermediate_size: 16,
             shared_expert_intermediate_size: 16,
             mlp_only_layers: vec![],

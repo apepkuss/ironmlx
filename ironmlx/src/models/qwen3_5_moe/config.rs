@@ -40,13 +40,10 @@ impl Default for RopeParams {
 
 /// Subset of `config.json["text_config"]` for Qwen3.5 MoE inference.
 ///
-/// Note: `norm_topk_prob` and `router_aux_loss_coef` are deliberately
-/// excluded from this struct. ironmlx unconditionally renormalizes
-/// top-k probabilities in the router (a numerically stable choice that
-/// keeps probabilities summing to 1 across all configurations);
-/// `router_aux_loss_coef` is a training-time field with no effect at
-/// inference. serde silently ignores unknown fields by default, so
-/// extra fields in the snapshot `text_config` are harmlessly skipped.
+/// Note: `router_aux_loss_coef` is deliberately excluded from this struct.
+/// It is a training-time field with no effect at inference. serde silently
+/// ignores unknown fields by default, so extra fields in the snapshot
+/// `text_config` are harmlessly skipped.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Qwen35MoeConfig {
     // ─ Dense-shared fields (same names as Qwen35Config) ─
@@ -87,6 +84,8 @@ pub struct Qwen35MoeConfig {
     // ─ MoE-specific fields ─
     pub num_experts: i32,
     pub num_experts_per_tok: i32,
+    #[serde(default)]
+    pub norm_topk_prob: bool,
     pub moe_intermediate_size: i32,
     pub shared_expert_intermediate_size: i32,
     #[serde(default)]
@@ -218,6 +217,21 @@ mod tests {
         assert!(cfg.mlp_only_layers.is_empty());
         assert_eq!(cfg.hidden_size, 2048);
         assert_eq!(cfg.head_dim, Some(256));
+    }
+
+    #[test]
+    fn norm_topk_prob_defaults_false_when_absent() {
+        let cfg: Qwen35MoeConfig =
+            serde_json::from_value(realistic_text_config_json()).expect("parse");
+        assert!(!cfg.norm_topk_prob);
+    }
+
+    #[test]
+    fn norm_topk_prob_parses_explicit_true() {
+        let mut v = realistic_text_config_json();
+        v["norm_topk_prob"] = serde_json::Value::Bool(true);
+        let cfg: Qwen35MoeConfig = serde_json::from_value(v).expect("parse");
+        assert!(cfg.norm_topk_prob);
     }
 
     #[test]
