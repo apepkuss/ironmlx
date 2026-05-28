@@ -126,15 +126,52 @@ Selected `seq=521` p50 forced-eval stage timings:
 
 The stage sums are higher than the no-profile whole-forward timings because layer2 deliberately inserts eval barriers after each stage. The important directional result is that the custom gated-delta kernel is not the slow stage under aligned forced-eval measurement; the remaining excess is concentrated in qkvz projection and output projection/materialization. This shifts the next investigation from "rewrite GDN recurrent kernel" to "quantized linear / graph scheduling around GDN projections".
 
+### Focused Quantized-Linear Breakdown
+
+Added:
+
+- `ironmlx/src/bin/ironmlx-qlinear-bench.rs` for direct Rust benchmarks of GDN qkvz/out projection shapes.
+- `scripts/qwen36_qlinear_compare.py` for the same projection shapes under MLX Python.
+
+Artifacts:
+
+- Rust default qlinear: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/ironmlx_qlinear_seq521_seq1.json`
+- Rust with direct self_qmm diagnostics: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/ironmlx_qlinear_self_seq521_seq1.json`
+- MLX/Python qlinear: `/tmp/ironmlx-qwen36-perf-phase4-latest/captures/mlx_qlinear_seq521_seq1.json`
+
+Selected p50 timings:
+
+| Shape | Case | Rust p50 | MLX/Python p50 | Finding |
+| --- | --- | ---: | ---: | --- |
+| `seq=521` | qkvz direct qmm | 2.360 ms | 1.239 ms | Rust C++ bridge qmm path is already slower before `Linear` wrapper/slice |
+| `seq=521` | qkvz linear + slice | 2.309 ms | 1.069 ms | slice/materialization is not the extra Rust-side root |
+| `seq=521` | out direct qmm | 0.969 ms | 0.519 ms | same long-prefill qmm gap on smaller output projection |
+| `seq=521` | out linear | 0.965 ms | 0.517 ms | `Linear::forward_on` wrapper adds no material overhead |
+| `seq=521` | norm + out linear | 1.031 ms | 0.559 ms | stage-8 excess is dominated by out qmm, not gated RMSNorm |
+| `seq=1` | qkvz direct qmm | 0.200 ms | 0.230 ms | decode shape remains parity-to-faster in Rust |
+| `seq=1` | out direct qmm | 0.172 ms | 0.228 ms | decode shape remains parity-to-faster in Rust |
+
+Direct self_qmm diagnostics under the same Rust harness:
+
+| Shape | Case | p50 | Finding |
+| --- | --- | ---: | --- |
+| `seq=521` | qkvz self_qmm | 2.409 ms | slightly slower than MLX qmm; not a qkvz fix |
+| `seq=521` | out self_qmm | 0.939 ms | slight win over Rust MLX qmm but still far slower than MLX/Python |
+| `seq=1` | qkvz self_qmm | 0.333 ms | decode regression |
+| `seq=1` | out self_qmm | 0.307 ms | decode regression |
+
+Conclusion: the root is now narrowed below `Linear::forward_on`: Rust direct calls to `mlx::quantization::quantized_matmul_on` are already ~1.8-2.2x slower than MLX/Python for long-prefill GDN projection shapes, while decode is at parity. The Rust shim calls the same `mlx::core::quantized_matmul` entry point with default target encoding; no large Rust wrapper, slice, norm, or self_qmm-threshold explanation remains. Do not lower the production self_qmm threshold based on these data.
+
 ## Lessons From P5h/P5i
 
 - Do not continue the prior custom `gather_qmm_gate_up` kernel line: earlier P5i/P5i.c experiments showed that path underperformed MLX's steel implementation.
 - Do not optimize based only on forced-eval subspan totals. Full-path MLX microbenches show MoE is effectively at parity despite P5H ranking it highly.
 - Treat GDN as the next high-signal target. The Rust core microbench now confirms the gap is in long-prefill `GatedDeltaNet`, not in MoE, projection fusion, HTTP, scheduler, or cache-state eval.
+- Do not lower the existing self_qmm dispatch threshold as a quick fix: focused qkvz/out diagnostics show no qkvz gain and clear decode regressions.
 
 ## Next Tasks
 
-- Add a focused Rust/Python quantized-linear microbench for GDN qkvz and out projection shapes. The candidate root is now shape-specific quantized linear or post-linear materialization, not the recurrent Metal kernel.
-- Inspect `Linear::forward_on` / `mlx::quantization::quantized_matmul_on` call shape for avoidable per-call overhead, stream-target encoding overhead, and whether qkvz's fused output shape triggers a slower MLX path from Rust than Python.
-- Re-evaluate full GDN after any quantized-linear candidate; the acceptance gate should be whole-forward `ironmlx-gdn-bench` p50, not only forced-eval stage totals.
+- Inspect the MLX Rust bridge vs MLX Python binding path for `quantized_matmul`: stream target encoding, default-stream selection, array contiguity/strides, and any Python-side fast-path or graph compile/cache behavior that the Rust binding misses.
+- Add a C++-side probe, if needed, that calls `mlx::core::quantized_matmul` directly with the same qkvz/out arrays. This should separate Rust FFI overhead/argument conversion from MLX C++ kernel scheduling.
+- Re-evaluate full GDN after any quantized-matmul candidate; the acceptance gate should be whole-forward `ironmlx-gdn-bench` p50, not only qlinear microbench totals.
 - Current evidence rules out rewriting MoE kernels and argues against starting with a gated-delta kernel rewrite.
