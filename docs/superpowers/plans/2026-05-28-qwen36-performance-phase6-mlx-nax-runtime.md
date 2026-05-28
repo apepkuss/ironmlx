@@ -175,7 +175,7 @@ path.
 
 ## Next Tasks
 
-- After canonical MLX is NAX-enabled, rerun Qwen3.6 core/serve benchmarks and
-  compare against omlx.
+- Qwen3.6 core/serve benchmarks were rerun after the canonical NAX MLX rebuild;
+  see `2026-05-28-qwen36-performance-phase7-nax-e2e.md`.
 - Use the qlinear/GDN benchmark probes as runtime regression checks for future MLX
   source or toolchain upgrades.
