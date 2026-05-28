@@ -42,6 +42,57 @@ use crate::Result;
 /// below that we'd pay argsort + take_along_axis + take + reshape
 /// overhead with no kernel-level benefit.
 const SORTED_ROUTING_MIN_BS_K: i32 = 512;
+const MAX_EXACT_U32_IN_F32: i32 = 1 << 24;
+
+fn sorted_token_indices_from_sort_perm(
+    sort_perm: &Array,
+    k: i32,
+    bs_k: i32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    if k <= 0 {
+        return Err(anyhow!("SparseMoeBlock: top-k must be positive, got {k}"));
+    }
+    if bs_k < 0 {
+        return Err(anyhow!(
+            "SparseMoeBlock: bs_k must be non-negative, got {bs_k}"
+        ));
+    }
+
+    // sorted_token_idx[i] = sort_perm[i] / k, i.e. the original token row
+    // feeding sorted slot i. For normal Qwen MoE batch/context sizes, the
+    // permutation is exactly representable as f32, so keeping the division in
+    // the MLX graph avoids building and uploading a Rust-side [BS*k] helper
+    // array on every MoE layer.
+    if bs_k <= MAX_EXACT_U32_IN_F32 {
+        let sort_perm_f32 = mlx::ops::cast::astype_on(sort_perm, mlx::Dtype::Float32, target)
+            .context("SparseMoeBlock: cast sort_perm to Float32")?;
+        let k_scalar: Array = (&[k as f32][..], ())
+            .try_into()
+            .map_err(|e| anyhow!("SparseMoeBlock: build k scalar: {e}"))?;
+        let div = sort_perm_f32
+            .try_div_on(&k_scalar, target)
+            .context("SparseMoeBlock: sort_perm / k")?;
+        let sorted_token_idx_f32 = div
+            .floor_on(target)
+            .context("SparseMoeBlock: floor(sort_perm / k)")?;
+        return mlx::ops::cast::astype_on(&sorted_token_idx_f32, mlx::Dtype::Uint32, target)
+            .context("SparseMoeBlock: cast sorted_token_idx to Uint32");
+    }
+
+    // Exact fallback for oversized batches. This preserves correctness rather
+    // than relying on f32 integer precision beyond 2^24.
+    let bs_k_usize = usize::try_from(bs_k)
+        .map_err(|e| anyhow!("SparseMoeBlock: bs_k does not fit usize: {e}"))?;
+    let k_usize =
+        usize::try_from(k).map_err(|e| anyhow!("SparseMoeBlock: k does not fit usize: {e}"))?;
+    let token_idx_vec: Vec<u32> = (0..bs_k_usize).map(|i| (i / k_usize) as u32).collect();
+    let token_idx: Array = (token_idx_vec.as_slice(), [bs_k])
+        .try_into()
+        .map_err(|e| anyhow!("SparseMoeBlock: build token_idx array: {e}"))?;
+    take_along_axis_on(&token_idx, sort_perm, -1_i32, target)
+        .context("SparseMoeBlock: take_along_axis sort token_idx")
+}
 
 #[cfg(feature = "p5h-profile")]
 fn expert_occupancy_log_enabled() -> bool {
@@ -521,20 +572,8 @@ impl SparseMoeBlock {
                     let sorted_topk_2d =
                         mlx::ops::shape::reshape(&sorted_topk_1d, [bs_k, 1_i32])
                             .context("SparseMoeBlock: reshape sorted_topk to [BS*k, 1]")?;
-                    // token_idx[i] = i / k. Built Rust-side then uploaded; for
-                    // PP=2048 this is 8192 u32s (32 KB), negligible vs. the
-                    // 3 gather_qmm calls. No mlx-side integer floor_divide
-                    // is exposed, so this is the most direct route.
-                    let bs_k_usize = bs_k as usize;
-                    let k_usize = k as usize;
-                    let token_idx_vec: Vec<u32> =
-                        (0..bs_k_usize).map(|i| (i / k_usize) as u32).collect();
-                    let token_idx: Array = (token_idx_vec.as_slice(), [bs_k])
-                        .try_into()
-                        .map_err(|e| anyhow!("SparseMoeBlock: build token_idx array: {e}"))?;
                     let sorted_token_idx =
-                        take_along_axis_on(&token_idx, &sort_perm, -1_i32, target)
-                            .context("SparseMoeBlock: take_along_axis sort token_idx")?;
+                        sorted_token_indices_from_sort_perm(&sort_perm, k, bs_k, target)?;
                     // Physically gather flat_x rows in sorted order.
                     // flat_x: [BS, H], sorted_token_idx: [BS*k] -> [BS*k, H].
                     let sorted_x_2d = take_on(&flat_x, &sorted_token_idx, 0_i32, target)
@@ -1026,24 +1065,8 @@ impl SparseMoeBlock {
                 let sorted_topk = take_along_axis_on(&flat_topk, &sort_perm, -1_i32, target)
                     .context("SparseMoeBlock: take_along_axis sort flat_topk")?;
 
-                // token_idx[i] = i / k — the original token index for sorted
-                // slot i. Built Rust-side then uploaded; for PP=2048 this is
-                // 8192 u32s (32 KB), negligible vs. the 3 gather_qmm calls.
-                // No mlx-side integer floor_divide is exposed, so this is the
-                // most direct route. token_idx values are in [0, BS), used as
-                // axis-0 indices into flat_x.
-                let bs_k_usize = bs_k as usize;
-                let k_usize = k as usize;
-                let token_idx_vec: Vec<u32> =
-                    (0..bs_k_usize).map(|i| (i / k_usize) as u32).collect();
-                let token_idx: Array = (token_idx_vec.as_slice(), [bs_k])
-                    .try_into()
-                    .map_err(|e| anyhow!("SparseMoeBlock: build token_idx array: {e}"))?;
-
-                // Apply the same permutation to token_idx so sorted_token_idx[i]
-                // tells us which row of flat_x feeds sorted slot i.
-                let sorted_token_idx = take_along_axis_on(&token_idx, &sort_perm, -1_i32, target)
-                    .context("SparseMoeBlock: take_along_axis sort token_idx")?;
+                let sorted_token_idx =
+                    sorted_token_indices_from_sort_perm(&sort_perm, k, bs_k, target)?;
 
                 // Physically gather flat_x rows in sorted order.
                 // flat_x: [BS, H], sorted_token_idx: [BS*k] -> [BS*k, H].
@@ -1231,5 +1254,37 @@ mod tests {
     fn sparse_moe_types_are_public() {
         // Trivial: ensure module-level types are accessible and the module builds.
         let _check: fn(&RoutedExperts) -> i32 = |_| 0;
+    }
+
+    #[test]
+    fn sorted_token_indices_follow_sort_permutation() -> Result<()> {
+        let sort_perm: Array = (&[5_u32, 0, 7, 3, 2, 1, 4, 6][..], [8])
+            .try_into()
+            .map_err(|e| anyhow!("build sort_perm: {e}"))?;
+        let out =
+            sorted_token_indices_from_sort_perm(&sort_perm, 2, 8, mlx::StreamOrDevice::default())?;
+
+        assert_eq!(out.to_vec::<u32>()?, vec![2, 0, 3, 1, 1, 0, 2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn sorted_token_indices_handle_high_exact_f32_range() -> Result<()> {
+        let max = (MAX_EXACT_U32_IN_F32 - 1) as u32;
+        let sort_perm: Array = (&[max, max - 1, max - 7, 15_u32][..], [4])
+            .try_into()
+            .map_err(|e| anyhow!("build high sort_perm: {e}"))?;
+        let out = sorted_token_indices_from_sort_perm(
+            &sort_perm,
+            8,
+            MAX_EXACT_U32_IN_F32,
+            mlx::StreamOrDevice::default(),
+        )?;
+
+        assert_eq!(
+            out.to_vec::<u32>()?,
+            vec![max / 8, (max - 1) / 8, (max - 7) / 8, 15 / 8]
+        );
+        Ok(())
     }
 }
