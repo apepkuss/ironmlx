@@ -1,7 +1,10 @@
 #include "cxx_mlx_shim/quantization.h"
 #include "cxx_mlx_shim/shim_helpers.h"
 
+#include <chrono>
 #include <stdexcept>
+
+#include "mlx/transforms.h"
 
 namespace cxx_mlx {
 
@@ -93,6 +96,40 @@ std::unique_ptr<MlxArray> quantized_matmul(
       opt_i(has_bits, bits),
       std::string(mode),
       target));
+}
+
+rust::Vec<double> quantized_matmul_bench_ms(
+    const MlxArray& x, const MlxArray& w, const MlxArray& scales,
+    const MlxArray* biases,
+    bool transpose,
+    bool has_group_size, int32_t group_size,
+    bool has_bits, int32_t bits,
+    rust::Str mode,
+    size_t runs,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = decode_stream_or_device(has_target, is_device_only, device_type, stream_index);
+  auto maybe_biases = opt_arr(biases);
+  auto maybe_group_size = opt_i(has_group_size, group_size);
+  auto maybe_bits = opt_i(has_bits, bits);
+  auto mode_string = std::string(mode);
+
+  rust::Vec<double> timings;
+  timings.reserve(runs);
+  for (size_t i = 0; i < runs; ++i) {
+    auto started = std::chrono::steady_clock::now();
+    auto y = mlx::core::quantized_matmul(
+        x, w, scales, maybe_biases,
+        transpose,
+        maybe_group_size,
+        maybe_bits,
+        mode_string,
+        target);
+    mlx::core::eval(std::vector<mlx::core::array>{y});
+    mlx::core::synchronize();
+    auto elapsed = std::chrono::steady_clock::now() - started;
+    timings.push_back(std::chrono::duration<double, std::milli>(elapsed).count());
+  }
+  return timings;
 }
 
 // ===== qqmm =====
