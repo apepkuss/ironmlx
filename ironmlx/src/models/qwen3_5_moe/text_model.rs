@@ -55,6 +55,7 @@ impl Qwen35MoeTextModel {
                 linear_conv_kernel_dim: cfg.linear_conv_kernel_dim,
                 num_experts: cfg.num_experts,
                 num_experts_per_tok: cfg.num_experts_per_tok,
+                norm_topk_prob: cfg.norm_topk_prob,
             };
             let kind = cfg.layer_kind(i);
             layers.push(DecoderLayerMoe::from_loader(

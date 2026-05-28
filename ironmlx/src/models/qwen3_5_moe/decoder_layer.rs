@@ -30,6 +30,7 @@ pub struct DecoderLayerMoeConfig {
     pub linear_conv_kernel_dim: i32,
     pub num_experts: i32,
     pub num_experts_per_tok: i32,
+    pub norm_topk_prob: bool,
 }
 
 pub struct DecoderLayerMoe {
@@ -92,8 +93,12 @@ impl DecoderLayerMoe {
             &format!("{prefix}.post_attention_layernorm"),
             cfg.rms_norm_eps,
         )?;
-        let ffn =
-            SparseMoeBlock::from_loader(loader, &format!("{prefix}.mlp"), cfg.num_experts_per_tok)?;
+        let ffn = SparseMoeBlock::from_loader(
+            loader,
+            &format!("{prefix}.mlp"),
+            cfg.num_experts_per_tok,
+            cfg.norm_topk_prob,
+        )?;
         Ok(Self {
             input_layernorm,
             attn,
