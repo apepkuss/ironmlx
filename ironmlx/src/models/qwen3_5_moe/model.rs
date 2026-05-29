@@ -761,7 +761,6 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
             target,
         )
     }
-
 }
 
 #[cfg(test)]

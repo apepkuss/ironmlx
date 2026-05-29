@@ -171,8 +171,8 @@ fn prepare_images(
             .as_ref()
             .ok_or_else(|| anyhow!("Gemma4 config has no vision_config"))?;
         for path in &args.images {
-            let bytes =
-                std::fs::read(path).with_context(|| format!("reading --image {}", path.display()))?;
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading --image {}", path.display()))?;
             let processed =
                 crate::models::gemma4::image_processor::preprocess(&bytes, vision_config)
                     .with_context(|| format!("preprocessing --image {}", path.display()))?;
@@ -190,8 +190,8 @@ fn prepare_images(
         )
     } else {
         for path in &args.images {
-            let bytes =
-                std::fs::read(path).with_context(|| format!("reading --image {}", path.display()))?;
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading --image {}", path.display()))?;
             let (pixel_values, gh, gw) = image_processor::preprocess(&bytes)
                 .with_context(|| format!("preprocessing --image {}", path.display()))?;
             let grid = (1, gh, gw);

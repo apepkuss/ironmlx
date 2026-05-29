@@ -823,6 +823,7 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
     }
 
     fn forward_vl_hidden(
+        &self,
         input_ids: &Array,
         position_ids: &Array,
         per_row_lens: Option<&[i32]>,
