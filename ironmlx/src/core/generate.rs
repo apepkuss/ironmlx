@@ -4,7 +4,7 @@
 //! lifetime of the stream; owns the per-call cache vector and accumulating
 //! token history.
 
-use std::sync::OnceLock;
+use std::{sync::OnceLock, time::Instant};
 
 use anyhow::anyhow;
 use mlx::{Array, Dtype};
@@ -39,9 +39,14 @@ pub struct GenerateRequest {
     /// chunks; intermediate chunks update the cache only (no lm_head), the
     /// last chunk runs the full forward + lm_head.
     pub prefill_chunk_size: usize,
-    /// Image patches `[N_patches, 2, 3, 16, 16]` from preprocess. `None` = text-only.
-    pub pixel_values: Option<Array>,
-    /// Per-image `(T, H, W)` grids — must match `pixel_values` patch count.
+    /// Per-image preprocessed vision inputs in prompt order. `None` = text-only.
+    ///
+    /// Qwen images are fixed-size patch sequences and can be concatenated by
+    /// the model implementation. Gemma4 images keep their original resized
+    /// `[1, 3, H, W]` tensor per image because different images can have
+    /// different `H/W`.
+    pub pixel_values: Option<Vec<Array>>,
+    /// Per-image `(T, H, W)` grids in the same order as `pixel_values`.
     pub image_grid_thw: Option<Vec<(i32, i32, i32)>>,
     /// `VisionConfig.spatial_merge_size` for this model. Used to compute the
     /// MRoPE VL position-id strides; only consulted when `image_grid_thw` is
@@ -111,6 +116,9 @@ pub struct GenerationStream<'m, M: Model> {
     /// `vision_embeds_full` by previous chunks.
     #[allow(dead_code)]
     image_pad_consumed: usize,
+    /// Reusable `[3, 1, 1]` placeholder for models that derive positions
+    /// internally instead of consuming caller-built MRoPE position ids.
+    dummy_position_ids: Option<Array>,
     /// All token ids so far: prompt ++ generated.
     history: Vec<u32>,
     request: GenerateRequest,
@@ -131,6 +139,7 @@ pub struct GenerationStream<'m, M: Model> {
     /// Last full-text snapshot — diffed against the next decode to produce
     /// incremental text. Sync path only.
     last_decoded_text: String,
+    vl_profile: bool,
 
     /// True iff this stream owns the in-flight Metal capture (set when env
     /// var `IRONMLX_CAPTURE_FILE=<path>` was honored at construction time).
@@ -876,6 +885,147 @@ pub fn count_image_pad(ids: &[u32], image_token_id: i32) -> usize {
     ids.iter().filter(|&&t| t == target).count()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VlChunkComposition {
+    pub seq_len: usize,
+    pub image_tokens: usize,
+    pub text_tokens: usize,
+    pub image_runs: usize,
+    pub leading_image_tokens: usize,
+    pub trailing_image_tokens: usize,
+}
+
+pub(crate) fn vl_chunk_composition(ids: &[u32], image_token_id: i32) -> VlChunkComposition {
+    let target = if image_token_id >= 0 {
+        Some(image_token_id as u32)
+    } else {
+        None
+    };
+    let mut image_tokens = 0usize;
+    let mut image_runs = 0usize;
+    let mut in_image_run = false;
+    for &id in ids {
+        let is_image = Some(id) == target;
+        if is_image {
+            image_tokens += 1;
+            if !in_image_run {
+                image_runs += 1;
+                in_image_run = true;
+            }
+        } else {
+            in_image_run = false;
+        }
+    }
+    let leading_image_tokens = ids.iter().take_while(|&&id| Some(id) == target).count();
+    let trailing_image_tokens = ids
+        .iter()
+        .rev()
+        .take_while(|&&id| Some(id) == target)
+        .count();
+    VlChunkComposition {
+        seq_len: ids.len(),
+        image_tokens,
+        text_tokens: ids.len().saturating_sub(image_tokens),
+        image_runs,
+        leading_image_tokens,
+        trailing_image_tokens,
+    }
+}
+
+pub(crate) fn log_vl_chunk_composition(
+    path: &str,
+    chunk_range: std::ops::Range<i32>,
+    is_last: bool,
+    ids: &[u32],
+    image_token_id: i32,
+    image_rows: std::ops::Range<usize>,
+) {
+    if std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_none() {
+        return;
+    }
+    let c = vl_chunk_composition(ids, image_token_id);
+    tracing::info!(
+        "[gemma4-vl-profile] vl_chunk_composition path={} chunk_start={} chunk_end={} seq={} image_tokens={} text_tokens={} image_runs={} leading_image_tokens={} trailing_image_tokens={} image_rows_start={} image_rows_end={} is_last={}",
+        path,
+        chunk_range.start,
+        chunk_range.end,
+        c.seq_len,
+        c.image_tokens,
+        c.text_tokens,
+        c.image_runs,
+        c.leading_image_tokens,
+        c.trailing_image_tokens,
+        image_rows.start,
+        image_rows.end,
+        is_last
+    );
+}
+
+fn gemma4_vl_profile_enabled() -> bool {
+    std::env::var_os("IRONMLX_GEMMA4_VL_PROFILE").is_some()
+}
+
+fn gemma4_vl_pipeline_profile_enabled() -> bool {
+    gemma4_vl_profile_enabled() && std::env::var_os("IRONMLX_GEMMA4_VL_PIPELINE_PROFILE").is_some()
+}
+
+fn gemma4_vl_pipeline_sync_probe_enabled() -> bool {
+    gemma4_vl_pipeline_profile_enabled()
+        && std::env::var_os("IRONMLX_GEMMA4_VL_PIPELINE_SYNC_PROBE").is_some()
+}
+
+fn log_gemma4_vl_profile_step_ms(label: &str, start: Option<Instant>, step: usize) {
+    if let Some(start) = start {
+        tracing::info!(
+            "[gemma4-vl-profile] {label}_ms={:.3} decode_step={step}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
+const VL_FINAL_TEXT_TAIL_ABSORB_TOKENS: usize = 64;
+
+/// Extend a VL chunk end when the fixed boundary would split a contiguous
+/// image-token run. Keeping each image's placeholder run in one text forward
+/// avoids extra cache-update chunks and reduces long-tail MLX/Metal stalls.
+///
+/// After choosing the boundary, absorb a short final text-only tail into the
+/// current chunk. The extra text tokens are cheap compared with launching a
+/// separate final forward over a tiny tail while carrying the full KV state.
+pub(crate) fn extend_vl_chunk_end_for_image_pad(
+    prompt_ids: &[u32],
+    image_token_id: i32,
+    chunk_start: i32,
+    base_chunk_end: i32,
+) -> i32 {
+    if image_token_id < 0 || chunk_start < 0 || base_chunk_end <= chunk_start {
+        return base_chunk_end;
+    }
+
+    let len = prompt_ids.len();
+    let Ok(mut end) = usize::try_from(base_chunk_end) else {
+        return base_chunk_end;
+    };
+    if end == 0 || end >= len {
+        return base_chunk_end.min(len as i32);
+    }
+
+    let pad = image_token_id as u32;
+    if prompt_ids[end - 1] == pad && prompt_ids[end] == pad {
+        while end < len && prompt_ids[end] == pad {
+            end += 1;
+        }
+    }
+    let tail_len = len.saturating_sub(end);
+    if tail_len > 0
+        && tail_len <= VL_FINAL_TEXT_TAIL_ABSORB_TOKENS
+        && !prompt_ids[end..].contains(&pad)
+    {
+        return len as i32;
+    }
+    end as i32
+}
+
 /// Slice a MRoPE `[3, 1, S]` position-id tensor on axis 2 by a half-open
 /// range `[start, stop)`. Returns `[3, 1, stop - start]`.
 pub fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<mlx::Array> {
@@ -968,6 +1118,12 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         #[cfg(not(feature = "p5h-profile"))]
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
 
+        let dummy_position_ids = if model.requires_position_ids() {
+            None
+        } else {
+            Some(build_position_ids(0, 1)?)
+        };
+
         // Prefill: chunked when `prefill_chunk_size > 0` and the prompt exceeds
         // it. Intermediate chunks call the text-only forward (cache update,
         // no lm_head); the last chunk goes through the full forward to
@@ -986,23 +1142,25 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         // land in the cache anyway.
 
         // P6.7: For VL requests, run the vision tower once before the
-        // chunking loop and build MRoPE position ids for the full prompt.
-        // Each chunk then slices vision_embeds and position_ids by its
-        // own range, ensuring the chunked path is numerically equivalent
-        // to single-chunk forward_vl.
+        // chunking loop. Models that consume MRoPE position ids also build
+        // them for the full prompt so each chunk can slice its own range.
         let (vision_embeds_full, position_ids_full) = if let (Some(pv), Some(grids)) = (
-            request.pixel_values.as_ref(),
+            request.pixel_values.as_deref(),
             request.image_grid_thw.as_deref(),
         ) {
             let ve = model.compute_vision_embeds(pv, grids, ().into())?;
-            let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
-            let pos_full = build_position_ids_vl(
-                &full_ids_i32,
-                grids,
-                request.image_token_id,
-                request.image_spatial_merge_size,
-            )?;
-            (Some(ve), Some(pos_full))
+            let pos_full = if dummy_position_ids.is_some() {
+                None
+            } else {
+                let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
+                Some(build_position_ids_vl(
+                    &full_ids_i32,
+                    grids,
+                    request.image_token_id,
+                    request.image_spatial_merge_size,
+                )?)
+            };
+            (Some(ve), pos_full)
         } else {
             (None, None)
         };
@@ -1020,11 +1178,20 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         let mut chunk_idx: u32 = 0;
         let last_logits = loop {
             let remaining = prompt_len_i32 - pos;
-            let n = if chunk_size == 0 {
+            let mut n = if chunk_size == 0 {
                 remaining
             } else {
                 remaining.min(chunk_size as i32)
             };
+            if chunk_size != 0 && vision_embeds_full.is_some() {
+                let adjusted_end = extend_vl_chunk_end_for_image_pad(
+                    &request.prompt_ids,
+                    request.image_token_id,
+                    pos,
+                    pos + n,
+                );
+                n = adjusted_end - pos;
+            }
 
             // T0a.8 Step 3b: wrap chunk body in gs_chunk_N. The closure
             // captures cache (mut), image_pad_consumed (mut), and the
@@ -1052,14 +1219,23 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                             &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
                         let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
 
-                        let chunk_pos_ids = if let Some(pos_full) = position_ids_full.as_ref() {
+                        let chunk_pos_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                            dummy.clone()
+                        } else if let Some(pos_full) = position_ids_full.as_ref() {
                             slice_pos_ids_axis2(pos_full, pos, pos + n)?
                         } else {
                             build_position_ids(pos, n)?
                         };
 
+                        let is_vl = vision_embeds_full.is_some();
+                        let is_last = pos + n == prompt_len_i32;
+                        let k_i = if is_vl {
+                            count_image_pad(chunk_ids, request.image_token_id)
+                        } else {
+                            0
+                        };
+                        let image_rows_start = image_pad_consumed;
                         let ve_slice = if let Some(ve_full) = vision_embeds_full.as_ref() {
-                            let k_i = count_image_pad(chunk_ids, request.image_token_id);
                             if k_i > 0 {
                                 let start = image_pad_consumed;
                                 let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
@@ -1071,33 +1247,41 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                         } else {
                             None
                         };
-
-                        let is_last = pos + n == prompt_len_i32;
-                        let logits_or_hidden = if vision_embeds_full.is_some() {
-                            let logits = model.forward_vl_chunk(
-                                &chunk_arr,
-                                &chunk_pos_ids,
-                                None, // per_row_lens
-                                None, // decode_mask
-                                Some(&mut cache),
-                                ve_slice.as_ref(),
+                        if is_vl {
+                            log_vl_chunk_composition(
+                                "generate",
+                                pos..pos + n,
+                                is_last,
+                                chunk_ids,
                                 request.image_token_id,
-                                ().into(),
-                            )?;
+                                image_rows_start..image_rows_start + k_i,
+                            );
+                        }
+
+                        let logits_or_hidden = if vision_embeds_full.is_some() {
                             if is_last {
-                                Some(logits)
+                                Some(model.forward_vl_chunk(
+                                    &chunk_arr,
+                                    &chunk_pos_ids,
+                                    None, // per_row_lens
+                                    None, // decode_mask
+                                    Some(&mut cache),
+                                    ve_slice.as_ref(),
+                                    request.image_token_id,
+                                    ().into(),
+                                )?)
                             } else {
-                                #[cfg(feature = "p5h-profile")]
-                                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                                    "mlx_eval_barrier",
-                                    crate::core::p5h::SpanFields::default,
-                                    || {
-                                        mlx::transforms::eval(&[&logits])
-                                            .map_err(anyhow::Error::from)
-                                    },
+                                let hidden = model.forward_vl_hidden(
+                                    &chunk_arr,
+                                    &chunk_pos_ids,
+                                    None, // per_row_lens
+                                    None, // decode_mask
+                                    Some(&mut cache),
+                                    ve_slice.as_ref(),
+                                    request.image_token_id,
+                                    ().into(),
                                 )?;
-                                #[cfg(not(feature = "p5h-profile"))]
-                                mlx::transforms::eval(&[&logits])?;
+                                mlx::transforms::eval(&[&hidden])?;
                                 None
                             }
                         } else if is_last {
@@ -1130,14 +1314,23 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
                 let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
 
-                let chunk_pos_ids = if let Some(pos_full) = position_ids_full.as_ref() {
+                let chunk_pos_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                    dummy.clone()
+                } else if let Some(pos_full) = position_ids_full.as_ref() {
                     slice_pos_ids_axis2(pos_full, pos, pos + n)?
                 } else {
                     build_position_ids(pos, n)?
                 };
 
+                let is_vl = vision_embeds_full.is_some();
+                let is_last = pos + n == prompt_len_i32;
+                let k_i = if is_vl {
+                    count_image_pad(chunk_ids, request.image_token_id)
+                } else {
+                    0
+                };
+                let image_rows_start = image_pad_consumed;
                 let ve_slice = if let Some(ve_full) = vision_embeds_full.as_ref() {
-                    let k_i = count_image_pad(chunk_ids, request.image_token_id);
                     if k_i > 0 {
                         let start = image_pad_consumed;
                         let slice = slice_vision_embeds_rows(ve_full, start, start + k_i)?;
@@ -1149,23 +1342,41 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 } else {
                     None
                 };
-
-                let is_last = pos + n == prompt_len_i32;
-                let logits_or_hidden = if vision_embeds_full.is_some() {
-                    let logits = model.forward_vl_chunk(
-                        &chunk_arr,
-                        &chunk_pos_ids,
-                        None, // per_row_lens
-                        None, // decode_mask
-                        Some(&mut cache),
-                        ve_slice.as_ref(),
+                if is_vl {
+                    log_vl_chunk_composition(
+                        "generate",
+                        pos..pos + n,
+                        is_last,
+                        chunk_ids,
                         request.image_token_id,
-                        ().into(),
-                    )?;
+                        image_rows_start..image_rows_start + k_i,
+                    );
+                }
+
+                let logits_or_hidden = if vision_embeds_full.is_some() {
                     if is_last {
-                        Some(logits)
+                        Some(model.forward_vl_chunk(
+                            &chunk_arr,
+                            &chunk_pos_ids,
+                            None, // per_row_lens
+                            None, // decode_mask
+                            Some(&mut cache),
+                            ve_slice.as_ref(),
+                            request.image_token_id,
+                            ().into(),
+                        )?)
                     } else {
-                        mlx::transforms::eval(&[&logits])?;
+                        let hidden = model.forward_vl_hidden(
+                            &chunk_arr,
+                            &chunk_pos_ids,
+                            None, // per_row_lens
+                            None, // decode_mask
+                            Some(&mut cache),
+                            ve_slice.as_ref(),
+                            request.image_token_id,
+                            ().into(),
+                        )?;
+                        mlx::transforms::eval(&[&hidden])?;
                         None
                     }
                 } else if is_last {
@@ -1223,6 +1434,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
 
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
+        let vl_profile = gemma4_vl_profile_enabled();
 
         // Initialize per-stream PRNG state from sampler seed. [2] u32.
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
@@ -1260,6 +1472,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 vision_embeds_full: None,
                 position_ids_full: None,
                 image_pad_consumed: 0,
+                dummy_position_ids,
                 history,
                 request,
                 finished: false,
@@ -1267,6 +1480,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 pending_token_arr: Some(pending),
                 detok: Some(detok),
                 last_decoded_text: String::new(),
+                vl_profile,
                 capture_active,
                 capture_pending_decode,
                 prng_state,
@@ -1307,6 +1521,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 vision_embeds_full: None,
                 position_ids_full: None,
                 image_pad_consumed: 0,
+                dummy_position_ids,
                 history,
                 request,
                 finished: false,
@@ -1314,6 +1529,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
                 pending_token_arr: None,
                 detok: None,
                 last_decoded_text: initial_text,
+                vl_profile,
                 capture_active,
                 capture_pending_decode,
                 prng_state,
@@ -1352,6 +1568,11 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = Dtype::Bfloat16;
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
+        let dummy_position_ids = if model.requires_position_ids() {
+            None
+        } else {
+            Some(build_position_ids(0, 1)?)
+        };
 
         let chunk_size = request.prefill_chunk_size;
         let prompt_len_i32 = prompt_len as i32;
@@ -1365,7 +1586,11 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             };
             let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
             let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
-            let chunk_pos_ids = build_position_ids(pos, n)?;
+            let chunk_pos_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                dummy.clone()
+            } else {
+                build_position_ids(pos, n)?
+            };
 
             let is_last = pos + n == prompt_len_i32;
             let logits_or_hidden = if is_last {
@@ -1399,6 +1624,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
 
         let history = request.prompt_ids.clone();
         let pipelined = request.sampler.is_pipelinable();
+        let vl_profile = gemma4_vl_profile_enabled();
         let mut prng_state = mlx::random::key(request.sampler.seed)?;
 
         if pipelined {
@@ -1412,6 +1638,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 vision_embeds_full: None,
                 position_ids_full: None,
                 image_pad_consumed: 0,
+                dummy_position_ids,
                 history,
                 request,
                 finished: false,
@@ -1419,6 +1646,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 pending_token_arr: Some(pending),
                 detok: Some(detok),
                 last_decoded_text: String::new(),
+                vl_profile,
                 capture_active,
                 capture_pending_decode,
                 prng_state,
@@ -1439,6 +1667,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 vision_embeds_full: None,
                 position_ids_full: None,
                 image_pad_consumed: 0,
+                dummy_position_ids,
                 history,
                 request,
                 finished: false,
@@ -1446,6 +1675,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 pending_token_arr: None,
                 detok: None,
                 last_decoded_text: initial_text,
+                vl_profile,
                 capture_active,
                 capture_pending_decode,
                 prng_state,
@@ -1467,40 +1697,66 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         }
     }
 
+    fn decode_position_ids(&self, pos: i32) -> Result<Array> {
+        match self.dummy_position_ids.as_ref() {
+            Some(dummy) => Ok(dummy.clone()),
+            None => build_position_ids(pos, 1),
+        }
+    }
+
     /// Pull the next event. Returns `Ok(None)` after the stream terminates.
     pub fn next_token(&mut self) -> Result<Option<GenerateEvent>> {
         if self.finished {
             return Ok(None);
         }
+        let profile_start = self.vl_profile.then(Instant::now);
+        let decode_step = self
+            .history
+            .len()
+            .saturating_sub(self.request.prompt_ids.len())
+            + if self.pipelined { 1 } else { 0 };
         // If decode-phase Metal capture was deferred, start it now (right
         // before the first decode-step work hits the GPU).
         self.start_deferred_capture();
-        if self.pipelined {
+        let event = if self.pipelined {
             self.next_token_pipelined()
         } else {
             self.next_token_sync()
+        };
+        if matches!(&event, Ok(Some(_))) {
+            log_gemma4_vl_profile_step_ms("decode_step_total", profile_start, decode_step);
         }
+        event
     }
 
     /// Pipelined hot path. Invariant: `self.pending_token_arr` is `Some` and
     /// the lazy scalar (shape `[]` or `[1]`) u32 Array of the token to be
     /// returned on this call.
     fn next_token_pipelined(&mut self) -> Result<Option<GenerateEvent>> {
+        let profile_enabled = self.vl_profile;
+        let pipeline_profile = profile_enabled && gemma4_vl_pipeline_profile_enabled();
+        let sync_probe = pipeline_profile && gemma4_vl_pipeline_sync_probe_enabled();
+        let decode_step = self.history.len() - self.request.prompt_ids.len() + 1;
+
         // 1. Materialise the pending token. The GPU has been working on it
         //    since the previous next_token call's async_eval (or new()).
+        let wait_start = profile_enabled.then(Instant::now);
         let pending = self
             .pending_token_arr
             .as_ref()
             .expect("pipelined mode invariant: pending_token_arr is Some");
         let token: u32 = pending.item()?;
+        log_gemma4_vl_profile_step_ms("decode_pipelined_pending_item", wait_start, decode_step);
 
         // 2. Push to history; produce incremental text via DecodeStream.
+        let detok_start = profile_enabled.then(Instant::now);
         self.history.push(token);
         let detok = self
             .detok
             .as_mut()
             .expect("pipelined mode invariant: detok is Some");
         let text = detok.step(token)?.unwrap_or_default();
+        log_gemma4_vl_profile_step_ms("decode_detok", detok_start, decode_step);
 
         // 3. Termination check.
         let new_count = self.history.len() - self.request.prompt_ids.len();
@@ -1526,13 +1782,21 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         // 4. Dispatch step N+1: build forward graph using the just-materialised
         //    pending Array (still holds its value), sample greedily, async_eval
         //    so the GPU starts immediately.
+        let dispatch_start = profile_enabled.then(Instant::now);
+        let t0 = pipeline_profile.then(Instant::now);
         let token_arr_in = self
             .pending_token_arr
             .as_ref()
             .expect("pipelined mode invariant: pending_token_arr is Some")
             .reshape((1_i32, 1_i32))?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_token_arr_reshape", t0, decode_step);
+
         let pos = (self.history.len() - 1) as i32;
-        let position_ids = build_position_ids(pos, 1)?;
+        let t0 = pipeline_profile.then(Instant::now);
+        let position_ids = self.decode_position_ids(pos)?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_position_ids", t0, decode_step);
+
+        let t0 = pipeline_profile.then(Instant::now);
         let logits = self.model.forward_on(
             &token_arr_in,
             &position_ids,
@@ -1541,10 +1805,28 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             Some(&mut self.cache),
             ().into(),
         )?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_forward_graph", t0, decode_step);
+
+        let t0 = pipeline_profile.then(Instant::now);
         let vocab = logits.shape().as_slice()[2];
         let logits_flat = logits.reshape((vocab,))?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_logits_reshape", t0, decode_step);
+
+        let t0 = pipeline_profile.then(Instant::now);
         let next_arr = self.request.sampler.sample_async_greedy(&logits_flat)?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_sample_graph", t0, decode_step);
+
+        let t0 = pipeline_profile.then(Instant::now);
         mlx::transforms::async_eval(&[&next_arr])?;
+        log_gemma4_vl_profile_step_ms("decode_pipeline_async_eval", t0, decode_step);
+
+        if sync_probe {
+            let t0 = Some(Instant::now());
+            mlx::transforms::eval(&[&next_arr])?;
+            log_gemma4_vl_profile_step_ms("decode_pipeline_sync_probe_eval", t0, decode_step);
+        }
+
+        log_gemma4_vl_profile_step_ms("decode_pipelined_dispatch", dispatch_start, decode_step);
 
         // 5. Replace pending and return.
         self.pending_token_arr = Some(next_arr);
@@ -1558,10 +1840,14 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
     /// Synchronous (pre-P8a) decode path. Used when the sampler is
     /// not pipelinable (temperature > 0 or any penalty configured).
     fn next_token_sync(&mut self) -> Result<Option<GenerateEvent>> {
+        let profile_enabled = self.vl_profile;
+        let decode_step = self.history.len() - self.request.prompt_ids.len();
+
         // The token to emit is the most-recent push to history.
         let token = *self.history.last().expect("history non-empty post-new");
 
         // Compute incremental text via cumulative-detok diff.
+        let detok_start = profile_enabled.then(Instant::now);
         let full_text = self
             .tokenizer
             .decode(&self.history, /* skip_special = */ true)
@@ -1571,6 +1857,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             .unwrap_or(&full_text)
             .to_string();
         self.last_decoded_text = full_text;
+        log_gemma4_vl_profile_step_ms("decode_detok", detok_start, decode_step);
 
         // Termination check using the just-emitted token.
         let new_count = self.history.len() - self.request.prompt_ids.len();
@@ -1592,9 +1879,10 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
         }
 
         // Decode one step: feed the just-emitted token back through the model.
+        let forward_sample_start = profile_enabled.then(Instant::now);
         let token_arr: Array = (&[token][..], &[1_i32, 1][..]).try_into()?;
         let pos = (self.history.len() - 1) as i32;
-        let position_ids = build_position_ids(pos, 1)?;
+        let position_ids = self.decode_position_ids(pos)?;
         let logits = self.model.forward_on(
             &token_arr,
             &position_ids,
@@ -1611,6 +1899,11 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
                 .sampler
                 .sample(&logits_flat, &self.history, &mut self.prng_state)?;
         self.history.push(next);
+        log_gemma4_vl_profile_step_ms(
+            "decode_sync_forward_sample",
+            forward_sample_start,
+            decode_step,
+        );
 
         Ok(Some(GenerateEvent {
             token,
@@ -1728,6 +2021,31 @@ mod tests {
         assert!(req.pixel_values.is_none());
         assert!(req.image_grid_thw.is_none());
         assert_eq!(req.prompt_ids.len(), 3);
+    }
+
+    #[test]
+    fn position_ids_vl_single_stream_two_images_preserves_order() {
+        let image_token_id = 258880_i32;
+        let merge_size = 3_i32;
+        let input_ids: Vec<i32> = vec![
+            10,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            11,
+            image_token_id,
+            12,
+        ];
+        let grids = vec![(1_i32, 6_i32, 6_i32), (1_i32, 3_i32, 3_i32)];
+
+        let pos = build_position_ids_vl(&input_ids, &grids, image_token_id, merge_size)
+            .expect("position ids");
+        assert_eq!(pos.shape().as_slice(), &[3_i32, 1_i32, 8_i32]);
+        let flat: Vec<i32> = pos.to_vec().expect("to_vec");
+        assert_eq!(&flat[0..8], &[0, 1, 1, 1, 1, 3, 4, 5]);
+        assert_eq!(&flat[8..16], &[0, 1, 1, 2, 2, 3, 4, 5]);
+        assert_eq!(&flat[16..24], &[0, 1, 2, 1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -1901,6 +2219,92 @@ mod p6_7_helper_tests {
         let ids: Vec<u32> = vec![1, 248056, 2, 248056, 248056, 3];
         assert_eq!(count_image_pad(&ids, 248056), 3);
         assert_eq!(count_image_pad(&ids, 999), 0);
+    }
+
+    #[test]
+    fn vl_chunk_composition_counts_runs_and_edges() {
+        let ids: Vec<u32> = vec![42, 42, 1, 42, 2, 42, 42, 42];
+
+        let c = vl_chunk_composition(&ids, 42);
+
+        assert_eq!(c.seq_len, 8);
+        assert_eq!(c.image_tokens, 6);
+        assert_eq!(c.text_tokens, 2);
+        assert_eq!(c.image_runs, 3);
+        assert_eq!(c.leading_image_tokens, 2);
+        assert_eq!(c.trailing_image_tokens, 3);
+    }
+
+    #[test]
+    fn vl_chunk_composition_treats_negative_image_id_as_absent() {
+        let ids: Vec<u32> = vec![1, 2, 3];
+
+        let c = vl_chunk_composition(&ids, -1);
+
+        assert_eq!(c.seq_len, 3);
+        assert_eq!(c.image_tokens, 0);
+        assert_eq!(c.text_tokens, 3);
+        assert_eq!(c.image_runs, 0);
+        assert_eq!(c.leading_image_tokens, 0);
+        assert_eq!(c.trailing_image_tokens, 0);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_extends_inside_image_run() {
+        let ids: Vec<u32> = (0..400_u32)
+            .map(|i| if (250..260).contains(&i) { 42 } else { 1 })
+            .collect();
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 260);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_absorbs_short_final_text_tail_after_image_run() {
+        let ids: Vec<u32> = (0..275_u32)
+            .map(|i| if (250..260).contains(&i) { 42 } else { 1 })
+            .collect();
+
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 275);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_keeps_tail_with_image_tokens() {
+        let ids: Vec<u32> = (0..275_u32)
+            .map(|i| {
+                if (250..260).contains(&i) || (270..273).contains(&i) {
+                    42
+                } else {
+                    1
+                }
+            })
+            .collect();
+
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 260);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_keeps_exact_run_boundary() {
+        let ids: Vec<u32> = (0..400_u32)
+            .map(|i| if (200..256).contains(&i) { 42 } else { 1 })
+            .collect();
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 256);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_absorbs_short_text_tail_after_exact_boundary() {
+        let ids: Vec<u32> = (0..275_u32)
+            .map(|i| if (200..256).contains(&i) { 42 } else { 1 })
+            .collect();
+
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 275);
+    }
+
+    #[test]
+    fn extend_vl_chunk_end_keeps_non_image_boundary() {
+        let ids: Vec<u32> = (0..400_u32)
+            .map(|i| if (300..340).contains(&i) { 42 } else { 1 })
+            .collect();
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 256);
+        assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, -1, 0, 256), 256);
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //! logits`), matching Qwen3.5's lm_head-tied configuration.
 
 use anyhow::anyhow;
-use mlx::{Array, StreamOrDevice};
+use mlx::{Array, MetalKernel, Shape, StreamOrDevice};
+use std::sync::OnceLock;
 
 use crate::core::Loader;
 use crate::Result;
@@ -93,32 +94,43 @@ impl Embedding {
                 biases,
                 group_size,
                 bits,
-            } => {
-                // P8a-stage5: gather packed rows first, then dequantize the
-                // tiny slice — mirrors mlx-lm's QuantizedEmbedding. Per-token
-                // dequant work drops from O(vocab × dim) to O(B × S × dim).
-                // Quantization metadata is per-row (scales / biases sized
-                // along vocab axis), so axis-0 gather preserves group
-                // alignment.
-                let weight_rows = weight.take_on(tokens, 0, target)?;
-                let scales_rows = scales.take_on(tokens, 0, target)?;
-                let biases_rows = biases
-                    .as_ref()
-                    .map(|b| b.take_on(tokens, 0, target))
-                    .transpose()?;
-                let dequant = mlx::quantization::dequantize_on(
-                    &weight_rows,
-                    &scales_rows,
-                    biases_rows.as_ref(),
-                    Some(*group_size),
-                    Some(*bits),
-                    "affine",
-                    None,
-                    None,
-                    target,
-                )?;
-                Ok(dequant)
-            }
+            } => match qembedding_decode_on(
+                tokens,
+                weight,
+                scales,
+                biases.as_ref(),
+                *group_size,
+                *bits,
+                target,
+            )? {
+                Some(y) => Ok(y),
+                None => {
+                    // P8a-stage5: gather packed rows first, then dequantize the
+                    // tiny slice — mirrors mlx-lm's QuantizedEmbedding. Per-token
+                    // dequant work drops from O(vocab × dim) to O(B × S × dim).
+                    // Quantization metadata is per-row (scales / biases sized
+                    // along vocab axis), so axis-0 gather preserves group
+                    // alignment.
+                    let weight_rows = weight.take_on(tokens, 0, target)?;
+                    let scales_rows = scales.take_on(tokens, 0, target)?;
+                    let biases_rows = biases
+                        .as_ref()
+                        .map(|b| b.take_on(tokens, 0, target))
+                        .transpose()?;
+                    let dequant = mlx::quantization::dequantize_on(
+                        &weight_rows,
+                        &scales_rows,
+                        biases_rows.as_ref(),
+                        Some(*group_size),
+                        Some(*bits),
+                        "affine",
+                        None,
+                        None,
+                        target,
+                    )?;
+                    Ok(dequant)
+                }
+            },
         }
     }
 
@@ -171,14 +183,120 @@ impl Embedding {
     }
 }
 
+fn qembedding_decode_on(
+    tokens: &Array,
+    weight: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    group_size: i32,
+    bits: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Option<Array>> {
+    let Some(biases) = biases else {
+        return Ok(None);
+    };
+    if group_size != 64 || bits != 4 || tokens.shape().numel() != 1 {
+        return Ok(None);
+    }
+
+    let weight_shape = weight.shape();
+    let weight_dims = weight_shape.as_slice();
+    if weight_dims.len() != 2 {
+        return Ok(None);
+    }
+    let vocab = weight_dims[0];
+    let packed_dim = weight_dims[1];
+    let dim = packed_dim * 8;
+    if vocab <= 0 || packed_dim <= 0 || dim % group_size != 0 {
+        return Ok(None);
+    }
+    let sb_shape = [vocab, dim / group_size];
+    if scales.shape().as_slice() != sb_shape || biases.shape().as_slice() != sb_shape {
+        return Ok(None);
+    }
+    let output_dtype = biases.dtype();
+    if scales.dtype() != output_dtype {
+        return Ok(None);
+    }
+
+    let mut out_dims = tokens.shape().as_slice().to_vec();
+    out_dims.push(dim);
+    let out_shape = Shape::from(out_dims);
+    let target = target.into();
+    let kernel = qembedding_decode_kernel()?;
+    let mut outputs = kernel
+        .dispatch_builder()
+        .inputs(&[tokens, weight, scales, biases])
+        .output_shapes(&[out_shape])
+        .output_dtypes(&[output_dtype])
+        .grid(dim, 1, 1)
+        .threadgroup(256.min(dim), 1, 1)
+        .stream(target)
+        .template_int("PACKED_DIM", packed_dim)
+        .template_int("GROUPS", dim / group_size)
+        .template_int("DIM", dim)
+        .dispatch()?;
+    Ok(Some(outputs.take_at(0)?))
+}
+
+fn qembedding_decode_kernel() -> Result<&'static MetalKernel> {
+    static CELL: OnceLock<MetalKernel> = OnceLock::new();
+    if let Some(kernel) = CELL.get() {
+        return Ok(kernel);
+    }
+
+    let source = r#"
+        uint d = thread_position_in_grid.x;
+        if (d >= DIM) {
+            return;
+        }
+
+        uint token = uint(tokens[0]);
+        uint packed_idx = d >> 3;
+        uint shift = (d & 7u) << 2;
+        uint q = (w[token * PACKED_DIM + packed_idx] >> shift) & 0x0fu;
+        uint group = d >> 6;
+        uint sb = token * GROUPS + group;
+        float y = float(scales[sb]) * float(q) + float(biases[sb]);
+        out[d] = static_cast<__typeof__(*out)>(y);
+    "#;
+
+    let kernel = MetalKernel::builder("ironmlx_qembedding_decode_4bit_gs64")
+        .inputs(&["tokens", "w", "scales", "biases"])
+        .outputs(&["out"])
+        .source(source)
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()?;
+    Ok(CELL.get_or_init(|| kernel))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mlx::Array;
+    use mlx::{ops, Array, Dtype};
 
     fn fp_embedding(weight: Array) -> Embedding {
         Embedding {
             inner: EmbeddingImpl::Fp { weight },
+        }
+    }
+
+    fn assert_all_close(got: &Array, expected: &Array, tol: f32) {
+        let got = ops::cast::astype(got, Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let expected = ops::cast::astype(expected, Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(got.len(), expected.len());
+        for (idx, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (g - e).abs() <= tol,
+                "idx={idx} got={g} expected={e} tol={tol}"
+            );
         }
     }
 
@@ -222,5 +340,76 @@ mod tests {
 
         assert_eq!(logits.shape().as_slice(), &[1, 1, 3]);
         assert_eq!(logits.to_vec::<f32>().expect("to_vec"), vec![2.0, 3.0, 5.0]);
+    }
+
+    fn assert_quantized_single_token_matches_dequantize(raw_dtype: Dtype) {
+        let vocab = 4_i32;
+        let dim = 64_i32;
+        let group_size = 64_i32;
+        let bits = 4_i32;
+
+        let w_data: Vec<f32> = (0..(vocab * dim))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.01)
+            .collect();
+        let raw_w_f32: Array = (w_data.as_slice(), (vocab, dim)).try_into().unwrap();
+        let raw_w = ops::cast::astype(&raw_w_f32, raw_dtype).unwrap();
+        let q = mlx::quantization::quantize(&raw_w, Some(group_size), Some(bits), "affine", None)
+            .unwrap();
+        let weight = q[0].clone();
+        let scales = q[1].clone();
+        let biases = q[2].clone();
+        let tokens: Array = (&[2_u32][..], &[1_i32, 1][..]).try_into().unwrap();
+
+        let weight_rows = weight.take(&tokens, 0).unwrap();
+        let scales_rows = scales.take(&tokens, 0).unwrap();
+        let biases_rows = biases.take(&tokens, 0).unwrap();
+        let expected = mlx::quantization::dequantize(
+            &weight_rows,
+            &scales_rows,
+            Some(&biases_rows),
+            Some(group_size),
+            Some(bits),
+            "affine",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let layer = Embedding {
+            inner: EmbeddingImpl::Quant {
+                weight,
+                scales,
+                biases: Some(biases),
+                group_size,
+                bits,
+            },
+        };
+        let got = layer.forward(&tokens).unwrap();
+
+        assert_eq!(got.shape().as_slice(), expected.shape().as_slice());
+        assert_eq!(got.dtype(), expected.dtype());
+        assert_all_close(&got, &expected, 0.001);
+    }
+
+    #[test]
+    fn quantized_single_token_forward_matches_dequantize_bfloat16() {
+        assert_quantized_single_token_matches_dequantize(Dtype::Bfloat16);
+    }
+
+    #[test]
+    fn quantized_single_token_forward_matches_dequantize_float32() {
+        assert_quantized_single_token_matches_dequantize(Dtype::Float32);
+    }
+
+    #[test]
+    fn quantized_decode_rejects_multi_token_input() {
+        let tokens: Array = (&[1_u32, 2][..], &[2_i32][..]).try_into().unwrap();
+        let weight = Array::zeros((4_i32, 8_i32), Dtype::Uint32).unwrap();
+        let scales = Array::zeros((4_i32, 1_i32), Dtype::Float32).unwrap();
+        let biases = Array::zeros((4_i32, 1_i32), Dtype::Float32).unwrap();
+
+        let got =
+            qembedding_decode_on(&tokens, &weight, &scales, Some(&biases), 64, 4, ()).unwrap();
+        assert!(got.is_none());
     }
 }

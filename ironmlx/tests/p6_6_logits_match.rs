@@ -150,7 +150,7 @@ fn p6_6_logits_match() {
             None, // per_row_lens
             None, // decode_mask
             None, // cache
-            Some(&pv),
+            Some(std::slice::from_ref(&pv)),
             Some(&grids),
             IMAGE_TOKEN_ID,
             (),

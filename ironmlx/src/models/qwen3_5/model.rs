@@ -256,21 +256,40 @@ impl Qwen35Model {
     /// vision tower once and reuse the embeddings across chunks.
     ///
     /// # Arguments
-    /// - `pixel_values` — `[N, T, C, H, W]` pre-processed patches.
+    /// - `pixel_values` — per-image `[N, T, C, H, W]` pre-processed patches.
     /// - `grid_thw`     — per-image `(temporal, height, width)`; must be
     ///   non-empty and sum to `N` along T·H·W.
     /// - `target`       — compute device / stream.
     pub fn compute_vision_embeds(
         &self,
-        pixel_values: &Array,
+        pixel_values: &[Array],
         grid_thw: &[(i32, i32, i32)],
         _target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
+        if pixel_values.is_empty() {
+            return Err(anyhow!(
+                "compute_vision_embeds: pixel_values cannot be empty"
+            ));
+        }
+        if pixel_values.len() != grid_thw.len() {
+            return Err(anyhow!(
+                "compute_vision_embeds: pixel_values.len()={} must equal grid_thw.len()={}",
+                pixel_values.len(),
+                grid_thw.len()
+            ));
+        }
         let vision = self
             .vision
             .as_ref()
             .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
-        vision.forward(pixel_values, grid_thw)
+        if pixel_values.len() == 1 {
+            vision.forward(&pixel_values[0], grid_thw)
+        } else {
+            let refs: Vec<&Array> = pixel_values.iter().collect();
+            let merged = mlx::ops::concatenate(&refs, 0)
+                .map_err(|e| anyhow!("compute_vision_embeds pixel_values concatenate: {e:?}"))?;
+            vision.forward(&merged, grid_thw)
+        }
     }
 
     /// Forward a single chunk of a VL prefill. Expects the caller has
@@ -313,8 +332,6 @@ impl Qwen35Model {
             target,
         )?;
 
-        // Step 4: slice last position and project to logits.
-        // VL chunk path is single-stream B=1; no per-row last position needed.
         self.slice_last_and_project(&hidden, None, target)
     }
 
@@ -359,7 +376,7 @@ impl Qwen35Model {
     /// - `input_ids`      — `[B, S]` int32 token ids (B must be 1 for P6).
     /// - `position_ids`   — `[3, B, S]` int32 per Mrope contract.
     /// - `cache`          — optional per-layer cache slice.
-    /// - `pixel_values`   — pre-processed image patches `[N, T, C, H, W]`.
+    /// - `pixel_values`   — per-image pre-processed image patches `[N, T, C, H, W]`.
     /// - `grid_thw`       — per-image `(temporal, height, width)` grid sizes;
     ///   **required** when `pixel_values.is_some()`.
     /// - `image_token_id` — tokenizer id of the per-patch image placeholder
@@ -373,7 +390,7 @@ impl Qwen35Model {
         per_row_lens: Option<&[i32]>,
         decode_mask: Option<&Array>,
         cache: Option<&mut [LayerCache]>,
-        pixel_values: Option<&Array>,
+        pixel_values: Option<&[Array]>,
         grid_thw: Option<&[(i32, i32, i32)]>,
         image_token_id: i32,
         target: impl Into<StreamOrDevice>,
@@ -494,12 +511,12 @@ impl Qwen35Model {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn batched_prefill_vl(
         &self,
-        input_ids: &Array,                       // [B, S_max] right-padded
-        position_ids: &Array,                    // [3, B, S_max] MRoPE
-        attention_mask: &Array,                  // [B, 1, S_max, S_max] additive bf16
-        linear_attention_mask: &Array,           // [B, S_max] bool
-        per_row_lens: &[i32],                    // real prompt lens
-        per_row_pixel_values: &[Option<&Array>], // None for text rows
+        input_ids: &Array,                         // [B, S_max] right-padded
+        position_ids: &Array,                      // [3, B, S_max] MRoPE
+        attention_mask: &Array,                    // [B, 1, S_max, S_max] additive bf16
+        linear_attention_mask: &Array,             // [B, S_max] bool
+        per_row_lens: &[i32],                      // real prompt lens
+        per_row_pixel_values: &[Option<&[Array]>], // None for text rows
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
         cache: Option<&mut [LayerCache]>,
@@ -982,7 +999,7 @@ mod tests {
             )
             .unwrap();
 
-        let per_row_pv: Vec<Option<&Array>> = vec![None, None];
+        let per_row_pv: Vec<Option<&[Array]>> = vec![None, None];
         let per_row_grids: Vec<Option<&[(i32, i32, i32)]>> = vec![None, None];
         let logits_vl = model
             .batched_prefill_vl(
@@ -1082,7 +1099,7 @@ mod tests {
                 None,
                 None,
                 Some(&mut cache_a),
-                Some(&pixel_values),
+                Some(std::slice::from_ref(&pixel_values)),
                 Some(&grids_real),
                 IMAGE_TOKEN_ID,
                 (),
@@ -1101,7 +1118,7 @@ mod tests {
         let attention_mask =
             build_batch_attention_mask(&[prompt_len], prompt_len, Dtype::Bfloat16).unwrap();
         let linear_mask = build_batch_linear_mask(&[prompt_len], prompt_len).unwrap();
-        let per_row_pv: Vec<Option<&Array>> = vec![Some(&pixel_values)];
+        let per_row_pv: Vec<Option<&[Array]>> = vec![Some(std::slice::from_ref(&pixel_values))];
         let per_row_grids: Vec<Option<&[(i32, i32, i32)]>> = vec![Some(&grids_real[..])];
         let mut cache_b = model.make_cache(1, prompt_len, Dtype::Bfloat16).unwrap();
         let logits_b = model

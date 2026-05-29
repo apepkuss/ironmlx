@@ -201,12 +201,10 @@ impl Loader {
         &self.config_raw
     }
 
-    /// HF Qwen3.5 sanitize aligned with mlx-lm `qwen3_5.py::Model::sanitize` +
-    /// `TextModel::sanitize`.
+    /// HF checkpoint sanitize aligned with model-specific text-only loading.
     ///
     /// Mutates `weights` in place:
-    /// 0. Drop `vision_tower.*` keys when `keep_vision_tower` is false (LLM-only
-    ///    inference). Pass `true` via [`Loader::open_multimodal`] to retain them.
+    /// 0. Drop non-text tower keys when the caller requests text-only loading.
     ///    Strip `language_model.` prefix from all remaining keys so that downstream
     ///    code can use plain `model.*` paths (e.g. `model.embed_tokens.weight`).
     /// 1. Strips `mtp.*` keys (the dedicated MTP head — see P8c).
@@ -221,11 +219,20 @@ impl Loader {
         config_raw: &serde_json::Value,
         keep_vision_tower: bool,
     ) -> Result<()> {
-        // 0. Drop vision_tower.* keys unless caller explicitly requests them.
-        //    LLM-only inference (Loader::open) drops them; multimodal inference
-        //    (Loader::open_multimodal) retains them for VisionTower.
-        if !keep_vision_tower {
-            weights.retain(|k, _| !k.starts_with("vision_tower."));
+        let is_qwen35 = is_qwen35_offset_gamma_model(config_raw);
+
+        // 0. Drop non-text tower keys unless caller explicitly requests the
+        //    vision path. Audio is not supported by any ironmlx path yet, so it
+        //    is always discarded before conv/norm detection.
+        if keep_vision_tower {
+            weights.retain(|k, _| !k.starts_with("audio_tower.") && !k.starts_with("embed_audio."));
+        } else {
+            weights.retain(|k, _| {
+                !k.starts_with("vision_tower.")
+                    && !k.starts_with("audio_tower.")
+                    && !k.starts_with("embed_vision.")
+                    && !k.starts_with("embed_audio.")
+            });
         }
 
         // Strip language_model. prefix when present so downstream code can use
@@ -246,7 +253,7 @@ impl Loader {
         let has_unsanitized_conv1d = weights.iter().any(|(k, v)| {
             k.ends_with("conv1d.weight") && v.shape().as_slice().last().copied().unwrap_or(1) != 1
         });
-        let should_shift_norm = has_mtp || has_unsanitized_conv1d;
+        let should_shift_norm = is_qwen35 && (has_mtp || has_unsanitized_conv1d);
 
         // 1. Strip mtp.*
         weights.retain(|k, _| !k.contains("mtp."));
@@ -256,6 +263,11 @@ impl Loader {
             .get("text_config")
             .and_then(|tc| tc.get("tie_word_embeddings"))
             .and_then(|v| v.as_bool())
+            .or_else(|| {
+                config_raw
+                    .get("tie_word_embeddings")
+                    .and_then(|v| v.as_bool())
+            })
             .unwrap_or(false);
         if tie {
             weights.remove("lm_head.weight");
@@ -391,6 +403,16 @@ fn normalize_quant_prefix(key: &str) -> String {
     key.strip_prefix("language_model.")
         .unwrap_or(key)
         .to_owned()
+}
+
+fn is_qwen35_offset_gamma_model(config_raw: &serde_json::Value) -> bool {
+    let top = config_raw.get("model_type").and_then(|v| v.as_str());
+    let text = config_raw
+        .get("text_config")
+        .and_then(|tc| tc.get("model_type"))
+        .and_then(|v| v.as_str());
+    top.is_some_and(|m| m == "qwen3_5" || m == "qwen3_5_moe")
+        || text.is_some_and(|m| m == "qwen3_5_text" || m == "qwen3_5_moe_text")
 }
 
 fn load_safetensors(model_dir: &Path) -> Result<HashMap<String, Array>> {
@@ -555,6 +577,12 @@ mod tests {
     fn empty_text_config() -> serde_json::Value {
         serde_json::json!({"text_config": {}})
     }
+    fn qwen35_text_config() -> serde_json::Value {
+        serde_json::json!({"model_type": "qwen3_5", "text_config": {"model_type": "qwen3_5_text"}})
+    }
+    fn gemma4_text_config() -> serde_json::Value {
+        serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}})
+    }
     fn tied_text_config() -> serde_json::Value {
         serde_json::json!({"text_config": {"tie_word_embeddings": true}})
     }
@@ -575,7 +603,7 @@ mod tests {
             norm_arr.clone(),
         );
 
-        Loader::sanitize(&mut w, &empty_text_config(), false).unwrap();
+        Loader::sanitize(&mut w, &qwen35_text_config(), false).unwrap();
 
         // mtp.* is gone.
         assert!(!w.contains_key("mtp.layers.0.input_layernorm.weight"));
@@ -636,6 +664,32 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_gemma4_audio_conv_does_not_shift_text_norm() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let conv: Array = (&[0.0_f32; 2 * 3 * 5][..], &[2_i32, 3, 5][..])
+            .try_into()
+            .unwrap();
+        w.insert("audio_tower.depthwise_conv1d.weight".into(), conv);
+        let norm: Array = (&[0.5_f32; 4][..], (4_i32,)).try_into().unwrap();
+        w.insert("language_model.model.norm.weight".into(), norm);
+
+        Loader::sanitize(&mut w, &gemma4_text_config(), false).unwrap();
+
+        assert!(
+            !w.contains_key("audio_tower.depthwise_conv1d.weight"),
+            "text-only Gemma4 load must drop audio tower keys before conv handling"
+        );
+        let n = w.get("model.norm.weight").unwrap();
+        let v: Vec<f32> = n.to_vec().unwrap();
+        for x in v {
+            assert!(
+                (x - 0.5).abs() < 1e-6,
+                "Gemma4 norm should stay at 0.5, got {x}"
+            );
+        }
+    }
+
+    #[test]
     fn sanitize_drops_vision_tower_keys() {
         let mut w: HashMap<String, Array> = HashMap::new();
         let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
@@ -667,6 +721,16 @@ mod tests {
         let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
         // vision_tower.* must be retained when keep_vision_tower=true.
         w.insert("vision_tower.patch_embed.proj.weight".into(), arr.clone());
+        w.insert(
+            "embed_vision.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        // Audio is still unsupported and must not survive open_multimodal.
+        w.insert("audio_tower.layers.0.weight".into(), arr.clone());
+        w.insert(
+            "embed_audio.embedding_projection.weight".into(),
+            arr.clone(),
+        );
         w.insert("model.embed_tokens.weight".into(), arr.clone());
 
         Loader::sanitize(&mut w, &empty_text_config(), true).unwrap();
@@ -674,6 +738,18 @@ mod tests {
         assert!(
             w.contains_key("vision_tower.patch_embed.proj.weight"),
             "vision_tower key must be kept when keep_vision_tower=true"
+        );
+        assert!(
+            w.contains_key("embed_vision.embedding_projection.weight"),
+            "embed_vision key must be kept when keep_vision_tower=true"
+        );
+        assert!(
+            !w.contains_key("audio_tower.layers.0.weight"),
+            "audio_tower key must be dropped even when keep_vision_tower=true"
+        );
+        assert!(
+            !w.contains_key("embed_audio.embedding_projection.weight"),
+            "embed_audio key must be dropped even when keep_vision_tower=true"
         );
         assert!(
             w.contains_key("model.embed_tokens.weight"),

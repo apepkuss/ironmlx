@@ -118,7 +118,7 @@ fn run_b1_baseline(
     model: &Qwen35Model,
     tokenizer: &Tokenizer,
     prompt_ids: Vec<u32>,
-    pixel_values: Option<Array>,
+    pixel_values: Option<Vec<Array>>,
     image_grid_thw: Option<Vec<(i32, i32, i32)>>,
     max_new_tokens: usize,
 ) -> Vec<u32> {
@@ -181,7 +181,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
             &guard,
             &tok_a,
             prompt_a_c,
-            Some(pv_a_c),
+            Some(vec![pv_a_c]),
             Some(grids_a_c),
             max_new,
         )
@@ -200,7 +200,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
             &guard,
             &tok_b,
             prompt_b_c,
-            Some(pv_b_c),
+            Some(vec![pv_b_c]),
             Some(grids_b_c),
             max_new,
         )
@@ -221,7 +221,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
-        pixel_values: Some(pv_a),
+        pixel_values: Some(vec![pv_a]),
         image_grid_thw: Some(grids_a),
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
@@ -245,7 +245,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
-        pixel_values: Some(pv_b),
+        pixel_values: Some(vec![pv_b]),
         image_grid_thw: Some(grids_b),
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
@@ -349,7 +349,14 @@ async fn batched_vl_b2_mixed_text_and_vl() {
     let pvl = prompt_vl.clone();
     let baseline_vl = tokio::task::spawn_blocking(move || {
         let guard = model_v.blocking_lock();
-        run_b1_baseline(&guard, &tok_v, pvl, Some(pv_c), Some(grids_c), max_new)
+        run_b1_baseline(
+            &guard,
+            &tok_v,
+            pvl,
+            Some(vec![pv_c]),
+            Some(grids_c),
+            max_new,
+        )
     })
     .await
     .unwrap();
@@ -390,7 +397,7 @@ async fn batched_vl_b2_mixed_text_and_vl() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
-        pixel_values: Some(pv),
+        pixel_values: Some(vec![pv]),
         image_grid_thw: Some(grids),
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
@@ -500,7 +507,14 @@ async fn mid_admit_vl_during_text_decode() {
     let pvl = prompt_vl.clone();
     let baseline_vl = tokio::task::spawn_blocking(move || {
         let guard = model_v.blocking_lock();
-        run_b1_baseline(&guard, &tok_v, pvl, Some(pv_c), Some(grids_c), max_new)
+        run_b1_baseline(
+            &guard,
+            &tok_v,
+            pvl,
+            Some(vec![pv_c]),
+            Some(grids_c),
+            max_new,
+        )
     })
     .await
     .unwrap();
@@ -586,7 +600,7 @@ async fn mid_admit_vl_during_text_decode() {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
-                pixel_values: Some(pv),
+                pixel_values: Some(vec![pv]),
                 image_grid_thw: Some(grids),
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
@@ -680,10 +694,8 @@ async fn batched_vl_multi_image_per_row() {
     // Eagerly eval before concatenate so no lazy stream-tagged ops cross thread boundary.
     mlx::transforms::eval(&[&pv_a, &pv_b]).expect("eval pv_a, pv_b");
 
-    // Row 0: 2 images concatenated
-    let pixel_values_0 = mlx::ops::shape::concatenate(&[&pv_a, &pv_b], 0).unwrap();
-    // Eval the concatenated result too.
-    mlx::transforms::eval(&[&pixel_values_0]).expect("eval pixel_values_0");
+    // Row 0: 2 images in prompt order.
+    let pixel_values_0 = vec![pv_a, pv_b];
     let grids_0: Vec<(i32, i32, i32)> = vec![(1, gh_a, gw_a), (1, gh_b, gw_b)];
 
     let merge_size = 2_i32;
@@ -730,7 +742,14 @@ async fn batched_vl_multi_image_per_row() {
     let p1 = prompt_1.clone();
     let baseline_1 = tokio::task::spawn_blocking(move || {
         let guard = model_1.blocking_lock();
-        run_b1_baseline(&guard, &tok_1, p1, Some(pv_1_c), Some(grids_1_c), max_new)
+        run_b1_baseline(
+            &guard,
+            &tok_1,
+            p1,
+            Some(vec![pv_1_c]),
+            Some(grids_1_c),
+            max_new,
+        )
     })
     .await
     .unwrap();
@@ -773,7 +792,7 @@ async fn batched_vl_multi_image_per_row() {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
-                pixel_values: Some(pv_1),
+                pixel_values: Some(vec![pv_1]),
                 image_grid_thw: Some(grids_1),
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,

@@ -437,6 +437,37 @@ impl KVCache {
         per_row_lens: &[i32],
         target: StreamOrDevice,
     ) -> Result<()> {
+        let k_seq = k.shape().as_slice()[2];
+        if self.batch == 1 && per_row_lens.len() == 1 && per_row_lens[0] == k_seq {
+            let n = per_row_lens[0];
+            if n == 0 {
+                return Ok(());
+            }
+            let off = self.offsets[0];
+            let end = off + n;
+            let keys_full = self.keys.as_ref().expect("keys allocated by grow_to");
+            let values_full = self.values.as_ref().expect("values allocated by grow_to");
+            let new_keys = slice_update_on(
+                keys_full,
+                k,
+                [0_i32, 0, off, 0],
+                [1_i32, self.n_kv_heads, end, self.head_dim],
+                [1_i32, 1, 1, 1],
+                target,
+            )?;
+            let new_values = slice_update_on(
+                values_full,
+                v,
+                [0_i32, 0, off, 0],
+                [1_i32, self.n_kv_heads, end, self.v_head_dim],
+                [1_i32, 1, 1, 1],
+                target,
+            )?;
+            self.keys = Some(new_keys);
+            self.values = Some(new_values);
+            return Ok(());
+        }
+
         for (i_usize, &n) in per_row_lens.iter().enumerate() {
             if n == 0 {
                 continue;

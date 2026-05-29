@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context};
 use clap::Args;
-use mlx::ops::shape::concatenate;
 use mlx::Array;
 
 use crate::core::generate::{GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
@@ -41,8 +40,8 @@ pub struct GenerateArgs {
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
 
-    /// If set, apply the chat template; otherwise tokenize the raw prompt.
-    #[arg(long, default_value_t = true)]
+    /// Apply the chat template; set to false to tokenize the raw prompt.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub chat: bool,
 
     /// Enable thinking-mode chat templates. Defaults off so CLI generation
@@ -59,9 +58,11 @@ pub struct GenerateArgs {
 }
 
 struct PreparedImages {
-    pixel_values: Option<Array>,
+    pixel_values: Option<Vec<Array>>,
     image_grid_thw: Option<Vec<(i32, i32, i32)>>,
     placeholders: Vec<String>,
+    image_spatial_merge_size: i32,
+    image_token_id: i32,
 }
 
 fn image_token_count_for_grid(grid: (i32, i32, i32), spatial_merge_size: i32) -> Result<usize> {
@@ -79,7 +80,7 @@ fn image_token_count_for_grid(grid: (i32, i32, i32), spatial_merge_size: i32) ->
     Ok(((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize)
 }
 
-fn image_placeholder_string(token_count: usize) -> String {
+fn qwen_image_placeholder_string(token_count: usize) -> String {
     let mut out = String::with_capacity(
         "<|vision_start|>".len() + token_count * "<|image_pad|>".len() + "<|vision_end|>".len(),
     );
@@ -88,6 +89,15 @@ fn image_placeholder_string(token_count: usize) -> String {
         out.push_str("<|image_pad|>");
     }
     out.push_str("<|vision_end|>");
+    out
+}
+
+fn gemma4_placeholder(token_count: usize) -> String {
+    let mut out = String::from("<|image>");
+    for _ in 0..token_count {
+        out.push_str("<|image|>");
+    }
+    out.push_str("<image|>");
     out
 }
 
@@ -129,12 +139,23 @@ fn inject_image_placeholders(prompt: &str, placeholders: &[String]) -> Result<St
     Ok(out)
 }
 
-fn prepare_images(args: &GenerateArgs, spatial_merge_size: i32) -> Result<PreparedImages> {
+fn prepare_images(
+    args: &GenerateArgs,
+    loader: &Loader,
+    tokenizer: &Tokenizer,
+    model_type: &str,
+    default_spatial_merge_size: i32,
+) -> Result<PreparedImages> {
     if args.images.is_empty() {
         return Ok(PreparedImages {
             pixel_values: None,
             image_grid_thw: None,
             placeholders: Vec::new(),
+            image_spatial_merge_size: default_spatial_merge_size,
+            image_token_id: tokenizer
+                .token_to_id("<|image_pad|>")
+                .map(|id| id as i32)
+                .unwrap_or(IMAGE_TOKEN_ID),
         });
     }
 
@@ -142,36 +163,75 @@ fn prepare_images(args: &GenerateArgs, spatial_merge_size: i32) -> Result<Prepar
     let mut grids = Vec::with_capacity(args.images.len());
     let mut placeholders = Vec::with_capacity(args.images.len());
 
-    for path in &args.images {
-        let bytes =
-            std::fs::read(path).with_context(|| format!("reading --image {}", path.display()))?;
-        let (pixel_values, gh, gw) = image_processor::preprocess(&bytes)
-            .with_context(|| format!("preprocessing --image {}", path.display()))?;
-        let grid = (1, gh, gw);
-        let token_count = image_token_count_for_grid(grid, spatial_merge_size)?;
-        all_pixel_values.push(pixel_values);
-        grids.push(grid);
-        placeholders.push(image_placeholder_string(token_count));
-    }
-
-    let refs: Vec<&Array> = all_pixel_values.iter().collect();
-    let pixel_values = concatenate(&refs, 0).context("concatenating CLI image pixel_values")?;
-    mlx::transforms::eval(&[&pixel_values]).context("evaluating CLI image pixel_values")?;
+    let (spatial_merge_size, image_token_id) = if model_type == "gemma4" {
+        let cfg = crate::models::gemma4::Gemma4Config::from_loader(loader)
+            .context("Gemma4Config::from_loader")?;
+        let vision_config = cfg
+            .vision_config
+            .as_ref()
+            .ok_or_else(|| anyhow!("Gemma4 config has no vision_config"))?;
+        for path in &args.images {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading --image {}", path.display()))?;
+            let processed =
+                crate::models::gemma4::image_processor::preprocess(&bytes, vision_config)
+                    .with_context(|| format!("preprocessing --image {}", path.display()))?;
+            all_pixel_values.push(processed.pixel_values);
+            grids.push((1, processed.grid_h, processed.grid_w));
+            placeholders.push(gemma4_placeholder(processed.soft_tokens));
+        }
+        (
+            vision_config.pooling_kernel_size,
+            tokenizer
+                .token_to_id("<|image|>")
+                .map(|id| id as i32)
+                .or(cfg.image_token_id)
+                .unwrap_or(258_880),
+        )
+    } else {
+        for path in &args.images {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading --image {}", path.display()))?;
+            let (pixel_values, gh, gw) = image_processor::preprocess(&bytes)
+                .with_context(|| format!("preprocessing --image {}", path.display()))?;
+            let grid = (1, gh, gw);
+            let token_count = image_token_count_for_grid(grid, default_spatial_merge_size)?;
+            all_pixel_values.push(pixel_values);
+            grids.push(grid);
+            placeholders.push(qwen_image_placeholder_string(token_count));
+        }
+        (
+            default_spatial_merge_size,
+            tokenizer
+                .token_to_id("<|image_pad|>")
+                .map(|id| id as i32)
+                .unwrap_or(IMAGE_TOKEN_ID),
+        )
+    };
 
     Ok(PreparedImages {
-        pixel_values: Some(pixel_values),
+        pixel_values: Some(all_pixel_values),
         image_grid_thw: Some(grids),
         placeholders,
+        image_spatial_merge_size: spatial_merge_size,
+        image_token_id,
     })
 }
 
 fn run_generation_with_model<M: Model + DenseVlMethods>(
     model: &M,
     tokenizer: &Tokenizer,
+    loader: &Loader,
+    model_type: &str,
     args: &GenerateArgs,
 ) -> Result<()> {
-    let spatial_merge_size = model.model_meta().spatial_merge_size;
-    let prepared_images = prepare_images(args, spatial_merge_size)?;
+    let prepared_images = prepare_images(
+        args,
+        loader,
+        tokenizer,
+        model_type,
+        model.model_meta().spatial_merge_size,
+    )?;
     let prompt_content = inject_image_placeholders(&args.prompt, &prepared_images.placeholders)?;
     let prompt = if args.chat && tokenizer.has_chat_template() {
         let messages = vec![Message {
@@ -204,11 +264,8 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
         prefill_chunk_size: args.prefill_chunk_size,
         pixel_values: prepared_images.pixel_values,
         image_grid_thw: prepared_images.image_grid_thw,
-        image_spatial_merge_size: spatial_merge_size,
-        image_token_id: tokenizer
-            .token_to_id("<|image_pad|>")
-            .map(|id| id as i32)
-            .unwrap_or(IMAGE_TOKEN_ID),
+        image_spatial_merge_size: prepared_images.image_spatial_merge_size,
+        image_token_id: prepared_images.image_token_id,
         #[cfg(feature = "p5h-profile")]
         p5h_trace: None,
         #[cfg(feature = "p5h-profile")]
@@ -262,21 +319,26 @@ pub fn run(args: GenerateArgs) -> Result<()> {
         "qwen3_5" => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
-            run_generation_with_model(&model, &tokenizer, &args)
+            run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
         }
         "qwen3_5_moe" => {
             if crate::models::is_qwen36_moe_config(loader.config_raw_value()) {
                 let model = crate::models::Qwen36MoeModel::from_loader(&loader)
                     .context("Qwen36MoeModel::from_loader")?;
-                run_generation_with_model(&model, &tokenizer, &args)
+                run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
             } else {
                 let model = crate::models::Qwen35MoeModel::from_loader(&loader)
                     .context("Qwen35MoeModel::from_loader")?;
-                run_generation_with_model(&model, &tokenizer, &args)
+                run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
             }
         }
+        "gemma4" => {
+            let model = crate::models::Gemma4Model::from_loader(&loader)
+                .context("Gemma4Model::from_loader")?;
+            run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
+        }
         other => Err(anyhow::anyhow!(
-            "unsupported model_type: {other} (expected 'qwen3_5' or 'qwen3_5_moe')"
+            "unsupported model_type: {other} (expected 'qwen3_5', 'qwen3_5_moe', or 'gemma4')"
         )),
     }
 }

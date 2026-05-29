@@ -61,7 +61,8 @@ pub enum SchedulerError {
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
     build_per_row_decode_mask, build_position_ids, build_position_ids_batched,
-    build_position_ids_vl, build_position_ids_vl_batched, count_image_pad, slice_logits_row,
+    build_position_ids_vl, build_position_ids_vl_batched, count_image_pad,
+    extend_vl_chunk_end_for_image_pad, log_vl_chunk_composition, slice_logits_row,
     slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateRequest,
 };
 use crate::core::model::Model;
@@ -86,6 +87,7 @@ static FIRST_EVAL_AMORTIZED_COST_FIRED: std::sync::OnceLock<()> = std::sync::Onc
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
 type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
+type PixelValuesSlice<'a> = Option<&'a [Array]>;
 
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
 /// (per P5 spec §3.1 — VL methods stay inherent / extension-trait-only).
@@ -102,7 +104,7 @@ pub trait DenseVlMethods {
         attention_mask: &mlx::Array,
         linear_attention_mask: &mlx::Array,
         per_row_lens: &[i32],
-        per_row_pixel_values: &[Option<&mlx::Array>],
+        per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
         cache: Option<&mut [crate::nn::LayerCache]>,
@@ -111,7 +113,7 @@ pub trait DenseVlMethods {
 
     fn compute_vision_embeds(
         &self,
-        pixel_values: &mlx::Array,
+        pixel_values: &[mlx::Array],
         grid_thw: &[(i32, i32, i32)],
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array>;
@@ -151,7 +153,7 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
         attention_mask: &mlx::Array,
         linear_attention_mask: &mlx::Array,
         per_row_lens: &[i32],
-        per_row_pixel_values: &[Option<&mlx::Array>],
+        per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
         cache: Option<&mut [crate::nn::LayerCache]>,
@@ -174,7 +176,7 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
 
     fn compute_vision_embeds(
         &self,
-        pixel_values: &mlx::Array,
+        pixel_values: &[mlx::Array],
         grid_thw: &[(i32, i32, i32)],
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
@@ -303,8 +305,8 @@ pub struct AdmitMidHandle {
     pub(crate) prompt_ids: Vec<u32>,
     pub(crate) prompt_len: i32,
     /// Per-chunk max token count; equals `req.prefill_chunk_size.max(1)`
-    /// at construction, unless the VL R6 fallback forces single-chunk
-    /// (image_pad straddles a chunk boundary — spec §4.6 NG7).
+    /// at construction. VL chunks may exceed it only when extending a
+    /// boundary to keep one contiguous image token run intact.
     pub(crate) chunk_size: i32,
     pub(crate) chunk_start: i32,
     /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
@@ -312,12 +314,14 @@ pub struct AdmitMidHandle {
     pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
     pub(crate) is_vl: bool,
     pub(crate) image_token_id: i32,
-    /// Pre-computed `[3, 1, prompt_len]` MRoPE position ids for the
-    /// full prompt — sliced per chunk inside `admit_mid_chunk` to
-    /// avoid rebuilding on each iteration. For VL it incorporates
-    /// `image_spatial_merge_size` + `image_grid_thw` (consumed in
-    /// `admit_mid_begin` when building this Array — no need to carry
-    /// the inputs forward).
+    /// Whether `position_ids_full` holds real full-prompt MRoPE ids. When
+    /// false, it is a reusable placeholder for models that derive positions
+    /// internally.
+    pub(crate) position_ids_required: bool,
+    /// Pre-computed `[3, 1, prompt_len]` MRoPE position ids for the full
+    /// prompt when `position_ids_required` is true; sliced per chunk inside
+    /// `admit_mid_chunk`. For VL it incorporates `image_spatial_merge_size`
+    /// + `image_grid_thw`.
     pub(crate) position_ids_full: Array,
     /// Pre-computed full-prompt vision embeddings
     /// `[N_image_pad_total, hidden]` — only populated for VL requests.
@@ -330,47 +334,6 @@ pub struct AdmitMidHandle {
     /// Last chunk's `[1, 1, vocab]` logits, captured only at the final
     /// chunk for first-token sampling in `admit_mid_finalize`.
     pub(crate) last_logits: Option<Array>,
-}
-
-/// Returns true if any `image_pad` run in `prompt_ids` would straddle
-/// a chunk boundary at `chunk_size`. Used by `admit_mid_begin` to
-/// detect the VL v1 fallback condition (spec §4.6 NG7 / §4.7 R6):
-/// when an image's `image_pad` tokens span chunks, we'd need per-chunk
-/// vision-arg slicing — deferred to v2. v1 forces single-chunk in
-/// this case.
-fn vl_image_pad_crosses_chunk_boundary(
-    prompt_ids: &[u32],
-    image_token_id: i32,
-    chunk_size: i32,
-) -> bool {
-    if image_token_id < 0 || chunk_size <= 0 {
-        return false;
-    }
-    let pad = image_token_id as u32;
-    let cs = chunk_size as usize;
-    let mut in_run = false;
-    let mut run_start = 0usize;
-    for (i, &t) in prompt_ids.iter().enumerate() {
-        if t == pad {
-            if !in_run {
-                in_run = true;
-                run_start = i;
-            }
-        } else if in_run {
-            let run_end = i; // exclusive
-            if run_start / cs != (run_end - 1) / cs {
-                return true;
-            }
-            in_run = false;
-        }
-    }
-    if in_run {
-        let run_end = prompt_ids.len();
-        if run_start / cs != (run_end - 1) / cs {
-            return true;
-        }
-    }
-    false
 }
 
 /// All per-request state the scheduler tracks. Pre-allocated at admit time
@@ -413,9 +376,9 @@ pub struct RequestState {
     pub finish_reason: Option<&'static str>,
 
     // ─── B1-p2.4: VL fields, carried from GenerateRequest at admit ───
-    /// Vision input. `None` for text-only rows. `Array` clone is mlx
-    /// reference-counted — cheap. Lives until evict.
-    pub pixel_values: Option<Array>,
+    /// Vision inputs in image order. `None` for text-only rows. `Array`
+    /// clone is mlx reference-counted — cheap. Lives until evict.
+    pub pixel_values: Option<Vec<Array>>,
     /// Per-image `(temporal, height, width)` grid sizes; same len as image
     /// count for this row. `None` ⇔ `pixel_values.is_none()`.
     pub image_grid_thw: Option<Vec<(i32, i32, i32)>>,
@@ -524,6 +487,9 @@ pub struct Scheduler<M: Model> {
     /// compact: `cache_rows[i]` is the scheduler slot stored at model batch
     /// row `i`.
     cache_rows: Vec<usize>,
+    /// Reusable placeholder for models that derive positions internally and
+    /// do not consume caller-built MRoPE position ids.
+    dummy_position_ids: Option<Array>,
     poisoned: bool,
     /// Upper bound on `prompt_len + max_new_tokens` per request, computed
     /// at boot as `min(cli_max_cache_cap, model.config.max_position_embeddings)`.
@@ -555,6 +521,7 @@ impl<M: Model> std::fmt::Debug for Scheduler<M> {
             .field("phase", &self.phase)
             .field("cache_layers", &self.cache.as_ref().map(|c| c.len()))
             .field("cache_rows", &self.cache_rows)
+            .field("has_dummy_position_ids", &self.dummy_position_ids.is_some())
             .field("poisoned", &self.poisoned)
             .finish()
     }
@@ -625,6 +592,7 @@ impl<M: Model> Scheduler<M> {
             phase: Phase::Idle,
             cache: None,
             cache_rows: Vec::new(),
+            dummy_position_ids: None,
             poisoned: false,
             effective_cap_max,
             prng_state,
@@ -675,6 +643,15 @@ impl<M: Model> Scheduler<M> {
     /// Maximum concurrent in-flight requests this scheduler can hold.
     pub fn b_max(&self) -> usize {
         self.b_max
+    }
+
+    fn reusable_dummy_position_ids(&mut self) -> Result<Array> {
+        if let Some(position_ids) = self.dummy_position_ids.as_ref() {
+            return Ok(position_ids.clone());
+        }
+        let position_ids = build_position_ids(0, 1)?;
+        self.dummy_position_ids = Some(position_ids.clone());
+        Ok(position_ids)
     }
 
     /// Admit a new request. Walks `slots` for the first `None`, fills it
@@ -1185,6 +1162,11 @@ impl<M: Model> Scheduler<M> {
         }
         self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
         self.cache_rows = prefill_rows.clone();
+        let dummy_position_ids = if model.requires_position_ids() {
+            None
+        } else {
+            Some(self.reusable_dummy_position_ids()?)
+        };
 
         // Run prefill. Capture [B, 1, vocab] logits (sequence axis already
         // collapsed via slice_last_and_project) for first-token sampling.
@@ -1245,7 +1227,7 @@ impl<M: Model> Scheduler<M> {
                 .ok_or_else(|| anyhow!("cache missing after allocation — internal bug"))?
                 .as_mut_slice();
             let logits = if any_vl {
-                // Collect per-row prompt_ids (i32 conversion) + per-row vision args + tokenizer consts.
+                // Collect per-row prompt ids, vision args, and tokenizer constants in compact cache order.
                 let per_row_ids_i32: Vec<Vec<i32>> = prefill_rows
                     .iter()
                     .map(|&row| {
@@ -1274,14 +1256,14 @@ impl<M: Model> Scheduler<M> {
                     .iter()
                     .map(|opt| opt.as_deref())
                     .collect();
-                let per_row_pv: Vec<Option<&Array>> = prefill_rows
+                let per_row_pv: Vec<PixelValuesSlice<'_>> = prefill_rows
                     .iter()
                     .map(|&row| {
                         self.slots[row]
                             .as_ref()
                             .expect("prefill_rows contain only occupied slots")
                             .pixel_values
-                            .as_ref()
+                            .as_deref()
                     })
                     .collect();
 
@@ -1300,7 +1282,9 @@ impl<M: Model> Scheduler<M> {
                     let grids = per_row_grids[0].ok_or_else(|| {
                         anyhow!("single-row VL prefill: pixel_values present but grid_thw is None")
                     })?;
-                    let position_ids_full = if grids.is_empty() {
+                    let position_ids_full = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else if grids.is_empty() {
                         build_position_ids(0, max_len)?
                     } else {
                         build_position_ids_vl(&per_row_ids_i32[0], grids, img_token_id, merge_size)?
@@ -1333,10 +1317,15 @@ impl<M: Model> Scheduler<M> {
                             &[1_i32, max_len][..],
                             &[1_i32, 1][..],
                         )?;
-                        let prefix_position_ids =
-                            slice_pos_ids_axis2(&position_ids_full, 0, prefix_len)?;
-                        let last_position_ids =
-                            slice_pos_ids_axis2(&position_ids_full, prefix_len, max_len)?;
+                        let (prefix_position_ids, last_position_ids) =
+                            if dummy_position_ids.is_some() {
+                                (position_ids_full.clone(), position_ids_full.clone())
+                            } else {
+                                (
+                                    slice_pos_ids_axis2(&position_ids_full, 0, prefix_len)?,
+                                    slice_pos_ids_axis2(&position_ids_full, prefix_len, max_len)?,
+                                )
+                            };
 
                         let prompt_ids = &per_row_ids_i32[0];
                         let prefix_image_pads = prompt_ids[..prefix_len as usize]
@@ -1399,13 +1388,17 @@ impl<M: Model> Scheduler<M> {
                     let attention_mask =
                         build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
                     let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
-                    let position_ids = build_position_ids_vl_batched(
-                        &per_row_ids_refs,
-                        &per_row_grids,
-                        img_token_id,
-                        merge_size,
-                        max_len,
-                    )?;
+                    let position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else {
+                        build_position_ids_vl_batched(
+                            &per_row_ids_refs,
+                            &per_row_grids,
+                            img_token_id,
+                            merge_size,
+                            max_len,
+                        )?
+                    };
 
                     model.batched_prefill_vl(
                         &input_ids,
@@ -1429,7 +1422,11 @@ impl<M: Model> Scheduler<M> {
                         &[1_i32, prefix_len][..],
                         &[1_i32, 1][..],
                     )?;
-                    let prefix_position_ids = build_position_ids(0, prefix_len)?;
+                    let prefix_position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else {
+                        build_position_ids(0, prefix_len)?
+                    };
                     let _prefix_hidden = model.forward_text_hidden(
                         &prefix_input_ids,
                         &prefix_position_ids,
@@ -1445,7 +1442,11 @@ impl<M: Model> Scheduler<M> {
                         &[1_i32, max_len][..],
                         &[1_i32, 1][..],
                     )?;
-                    let last_position_ids = build_position_ids(prefix_len, 1)?;
+                    let last_position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else {
+                        build_position_ids(prefix_len, 1)?
+                    };
                     model.forward_on(
                         &last_input_ids,
                         &last_position_ids,
@@ -1455,7 +1456,11 @@ impl<M: Model> Scheduler<M> {
                         mlx::StreamOrDevice::default(),
                     )?
                 } else {
-                    let position_ids = build_position_ids(0, max_len)?;
+                    let position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                        dummy.clone()
+                    } else {
+                        build_position_ids(0, max_len)?
+                    };
                     model.forward_on(
                         &input_ids,
                         &position_ids,
@@ -1469,7 +1474,11 @@ impl<M: Model> Scheduler<M> {
                 let attention_mask =
                     build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
                 let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
-                let position_ids = build_position_ids_batched(&prompt_lens, max_len)?;
+                let position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
+                    dummy.clone()
+                } else {
+                    build_position_ids_batched(&prompt_lens, max_len)?
+                };
                 model.batched_prefill(
                     &input_ids,
                     &position_ids,
@@ -1746,17 +1755,23 @@ impl<M: Model> Scheduler<M> {
             .try_into()
             .map_err(|e| anyhow!("step: build input_ids Array failed: {e:?}"))?;
 
-        // Build [3, B_active, 1] decode position ids.
-        let per_row_pos: Vec<i32> = active_rows
-            .iter()
-            .map(|&slot_row| {
-                self.slots[slot_row]
-                    .as_ref()
-                    .expect("active row implies Some")
-                    .real_len
-            })
-            .collect();
-        let position_ids = build_decode_position_ids(&per_row_pos)?;
+        // Build [3, B_active, 1] decode position ids only for models that consume
+        // them. Gemma4 derives positions from KV offsets, so the hot path can
+        // reuse a placeholder without changing model semantics.
+        let position_ids = if model.requires_position_ids() {
+            let per_row_pos: Vec<i32> = active_rows
+                .iter()
+                .map(|&slot_row| {
+                    self.slots[slot_row]
+                        .as_ref()
+                        .expect("active row implies Some")
+                        .real_len
+                })
+                .collect();
+            build_decode_position_ids(&per_row_pos)?
+        } else {
+            self.reusable_dummy_position_ids()?
+        };
 
         // Per-row lens for compact decode: every model-facing row writes
         // exactly one token.
@@ -1890,11 +1905,11 @@ impl<M: Model> Scheduler<M> {
     /// [`Scheduler::step`] between chunks so active rows continue
     /// emitting tokens.
     ///
-    /// # VL fallback (spec §4.6 NG7 / §4.7 R6)
-    /// If the request has `image_pad` token runs that span a chunk
-    /// boundary, this v1 implementation forces single-chunk path
-    /// (`chunk_size = prompt_len`). Per-chunk vision slicing is a v2
-    /// task. A warning is logged.
+    /// # VL chunk boundaries
+    /// VL chunking keeps each contiguous `image_pad` run in one chunk by
+    /// extending a fixed boundary when it lands inside an image span. This
+    /// preserves chunked prefill semantics while avoiding extra text forwards
+    /// for one logical image.
     ///
     /// # Errors
     /// - [`SchedulerError::RequestTooLarge`] when
@@ -1947,7 +1962,7 @@ impl<M: Model> Scheduler<M> {
     /// Body of `admit_mid_begin` separated so the caller can centralise
     /// rollback. Steps: extract per-row state, compute floored
     /// `cap_for_temp`, detect dtype, allocate temp_cache, pre-build
-    /// full-prompt position ids, run VL R6 fallback detection.
+    /// full-prompt position ids, and compute full-prompt vision embeddings.
     fn admit_mid_begin_inner(
         &mut self,
         id: RequestId,
@@ -2006,25 +2021,17 @@ impl<M: Model> Scheduler<M> {
         let temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
 
         let is_vl = pixel_values.is_some();
+        let position_ids_required = model.requires_position_ids();
 
-        // VL R6 fallback: if any image_pad run straddles a chunk
-        // boundary, force single-chunk path (v1 does not slice vision
-        // args per chunk).
-        let mut chunk_size = prefill_chunk_size.max(1);
-        if is_vl && vl_image_pad_crosses_chunk_boundary(&prompt_ids, image_token_id, chunk_size) {
-            tracing::warn!(
-                "[admit_mid_begin] VL request with image_pad spanning chunk boundary; \
-                 forcing single-chunk (chunk_size={chunk_size} -> {prompt_len}); \
-                 v2 will support per-chunk vision slicing",
-            );
-            chunk_size = prompt_len;
-        }
+        let chunk_size = prefill_chunk_size.max(1);
 
-        // Pre-build full-prompt MRoPE position ids in the B=1 single-stream
-        // shape that `model.forward_on` / `model.forward_vl_chunk` expect:
-        // `[3, 1, prompt_len]`. Chunked path slices axis 2 per chunk.
-        let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
-        let position_ids_full = if is_vl {
+        // Pre-build full-prompt MRoPE position ids only for models that
+        // consume them. Others carry a reusable placeholder and skip slicing
+        // in `admit_mid_chunk`.
+        let position_ids_full = if !position_ids_required {
+            self.reusable_dummy_position_ids()?
+        } else if is_vl {
+            let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
             build_position_ids_vl(
                 &prompt_ids_i32,
                 image_grid_thw
@@ -2042,7 +2049,7 @@ impl<M: Model> Scheduler<M> {
         // running offset via `image_pad_consumed`.
         let vision_embeds_full = if is_vl {
             let pv = pixel_values
-                .as_ref()
+                .as_deref()
                 .expect("is_vl implies pixel_values is Some");
             let grids = image_grid_thw
                 .as_deref()
@@ -2062,6 +2069,7 @@ impl<M: Model> Scheduler<M> {
             temp_cache,
             is_vl,
             image_token_id,
+            position_ids_required,
             position_ids_full,
             vision_embeds_full,
             image_pad_consumed: 0,
@@ -2089,10 +2097,20 @@ impl<M: Model> Scheduler<M> {
     {
         self.ensure_not_poisoned()?;
 
-        let chunk_end = handle
+        let base_chunk_end = handle
             .chunk_start
             .saturating_add(handle.chunk_size)
             .min(handle.prompt_len);
+        let chunk_end = if handle.is_vl {
+            extend_vl_chunk_end_for_image_pad(
+                &handle.prompt_ids,
+                handle.image_token_id,
+                handle.chunk_start,
+                base_chunk_end,
+            )
+        } else {
+            base_chunk_end
+        };
         let is_last = chunk_end == handle.prompt_len;
         let chunk_len = chunk_end - handle.chunk_start;
         if chunk_len <= 0 {
@@ -2110,10 +2128,13 @@ impl<M: Model> Scheduler<M> {
             .try_into()
             .map_err(|e| anyhow!("admit_mid_chunk: input_ids try_into Array failed: {e:?}"))?;
 
-        // Slice axis 2 of the pre-built full-prompt position ids.
-        // position_ids_full shape: [3, 1, prompt_len].
-        let position_ids =
-            slice_pos_ids_axis2(&handle.position_ids_full, handle.chunk_start, chunk_end)?;
+        // Slice axis 2 only when real caller-built position ids are required.
+        // Models that derive positions internally carry a reusable placeholder.
+        let position_ids = if handle.position_ids_required {
+            slice_pos_ids_axis2(&handle.position_ids_full, handle.chunk_start, chunk_end)?
+        } else {
+            handle.position_ids_full.clone()
+        };
 
         // Forward via the B=1 single-stream API (same path GS chunked
         // prefill uses). The pre-3c+ implementation went through
@@ -2128,10 +2149,9 @@ impl<M: Model> Scheduler<M> {
         // - Last chunk: `forward_on` returns `[1, 1, vocab]` logits via
         //   lm_head, captured for first-token sampling in
         //   `admit_mid_finalize`.
-        // - Intermediate chunk: text path uses `text().forward_on`
-        //   (skips lm_head; we don't need logits), VL path uses
-        //   `forward_vl_chunk` (always returns logits — we discard).
-        //   Either way the result is `eval`-d before return so the
+        // - Intermediate chunk: text and VL paths use hidden-only forwards
+        //   (skips lm_head; we don't need logits). Either way the result is
+        //   `eval`-d before return so the
         //   chunk's lazy graph materialises here rather than ballooning
         //   into the interleaved `Scheduler::step` call. (GenerationStream
         //   chunked prefill at core/generate.rs ~line 1053 uses the
@@ -2140,6 +2160,7 @@ impl<M: Model> Scheduler<M> {
             // VL chunk: slice the rows of `vision_embeds_full` that
             // correspond to this chunk's `image_pad` token count.
             let k_i = count_image_pad(chunk_ids_u32, handle.image_token_id);
+            let image_rows_start = handle.image_pad_consumed;
             let ve_slice = if k_i > 0 {
                 let ve_full = handle
                     .vision_embeds_full
@@ -2152,20 +2173,38 @@ impl<M: Model> Scheduler<M> {
             } else {
                 None
             };
-
-            let logits = model.forward_vl_chunk(
-                &input_ids,
-                &position_ids,
-                None, // per_row_lens (B=1 path derives from input shape)
-                None, // decode_mask (prefill — model builds its own causal mask)
-                Some(&mut handle.temp_cache),
-                ve_slice.as_ref(),
+            log_vl_chunk_composition(
+                "scheduler",
+                handle.chunk_start..chunk_end,
+                is_last,
+                chunk_ids_u32,
                 handle.image_token_id,
-                mlx::StreamOrDevice::default(),
-            )?;
+                image_rows_start..image_rows_start + k_i,
+            );
+
             if is_last {
+                let logits = model.forward_vl_chunk(
+                    &input_ids,
+                    &position_ids,
+                    None, // per_row_lens (B=1 path derives from input shape)
+                    None, // decode_mask (prefill — model builds its own causal mask)
+                    Some(&mut handle.temp_cache),
+                    ve_slice.as_ref(),
+                    handle.image_token_id,
+                    mlx::StreamOrDevice::default(),
+                )?;
                 Some(logits)
             } else {
+                let hidden = model.forward_vl_hidden(
+                    &input_ids,
+                    &position_ids,
+                    None, // per_row_lens (B=1 path derives from input shape)
+                    None, // decode_mask (prefill — model builds its own causal mask)
+                    Some(&mut handle.temp_cache),
+                    ve_slice.as_ref(),
+                    handle.image_token_id,
+                    mlx::StreamOrDevice::default(),
+                )?;
                 // T4.2 (Codex Option A): wrap the EXISTING explicit per-chunk
                 // sync barrier in `mlx_eval_barrier` tree span. Parent context
                 // is the active P5h trace stack top when one is active; the
@@ -2178,10 +2217,10 @@ impl<M: Model> Scheduler<M> {
                 crate::core::p5h::try_with_p5h_span_from_current_trace(
                     "mlx_eval_barrier",
                     crate::core::p5h::SpanFields::default,
-                    || mlx::transforms::eval(&[&logits]).map_err(anyhow::Error::from),
+                    || mlx::transforms::eval(&[&hidden]).map_err(anyhow::Error::from),
                 )?;
                 #[cfg(not(feature = "p5h-profile"))]
-                mlx::transforms::eval(&[&logits])?;
+                mlx::transforms::eval(&[&hidden])?;
                 None
             }
         } else if is_last {
@@ -2515,7 +2554,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
             _cache: Option<&mut [crate::nn::LayerCache]>,
@@ -2526,7 +2565,7 @@ mod tests {
 
         fn compute_vision_embeds(
             &self,
-            _pixel_values: &mlx::Array,
+            _pixel_values: &[mlx::Array],
             _grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
@@ -3708,7 +3747,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
-            pixel_values: Some(pv_bf16),
+            pixel_values: Some(vec![pv_bf16]),
             image_grid_thw: Some(grids.clone()),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
@@ -3894,87 +3933,6 @@ mod tests {
             s4.computed_cap_for_prefill(),
             256,
             "empty slots fallback = 256 (defensive default)"
-        );
-    }
-
-    // ─── B1-p2.3c+ chunked admit_mid helper unit tests ──────────────────
-
-    #[test]
-    fn vl_image_pad_crosses_chunk_boundary_detects_run_across() {
-        // image_token_id=42, run at positions 250..260, chunk_size=256.
-        // Run crosses 256-boundary (positions 250-255 in chunk 0, 256-259 in chunk 1).
-        let ids: Vec<u32> = (0..400_u32)
-            .map(|i| {
-                if (250..260).contains(&(i as i32)) {
-                    42
-                } else {
-                    1
-                }
-            })
-            .collect();
-        assert!(
-            super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
-            "run [250..260] should cross 256-boundary at chunk_size=256"
-        );
-        // chunk_size=512 → entire run fits in chunk 0; no crossing.
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 512),
-            "run [250..260] should NOT cross at chunk_size=512"
-        );
-    }
-
-    #[test]
-    fn vl_image_pad_no_pads_returns_false() {
-        // Empty pad run set.
-        let ids: Vec<u32> = (0..200_u32).collect();
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 64),
-            "no image_pad tokens → no crossing possible"
-        );
-        // Also degenerate: empty prompt.
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&[], 42, 64),
-            "empty prompt → no crossing"
-        );
-        // Degenerate: image_token_id < 0 disables the check.
-        let ids2: Vec<u32> = vec![5; 100];
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids2, -1, 32),
-            "image_token_id < 0 disables detection"
-        );
-    }
-
-    #[test]
-    fn vl_image_pad_run_within_single_chunk_returns_false() {
-        // image_pad run [100..150], chunk_size=256 — all in chunk 0.
-        let ids: Vec<u32> = (0..200_u32)
-            .map(|i| {
-                if (100..150).contains(&(i as i32)) {
-                    42
-                } else {
-                    1
-                }
-            })
-            .collect();
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids, 42, 256),
-            "run [100..150] within chunk 0 should NOT cross"
-        );
-        // Adjacent boundary case: run ends exactly at chunk boundary.
-        // Run [200..256], chunk_size=256. Run start chunk = 200/256 = 0.
-        // Run end-1 = 255, 255/256 = 0. Same chunk → no crossing.
-        let ids2: Vec<u32> = (0..400_u32)
-            .map(|i| {
-                if (200..256).contains(&(i as i32)) {
-                    42
-                } else {
-                    1
-                }
-            })
-            .collect();
-        assert!(
-            !super::vl_image_pad_crosses_chunk_boundary(&ids2, 42, 256),
-            "run [200..256] ends exactly at boundary — fits in chunk 0"
         );
     }
 

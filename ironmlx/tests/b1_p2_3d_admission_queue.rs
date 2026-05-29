@@ -390,6 +390,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             32,    // admission_queue_max
             32768, // max_cache_cap (3f default)
             false, // p5h_measurement_eval_probes (P5h+1 T1)
+            None,  // vision_input_override
         )
         .await
     });

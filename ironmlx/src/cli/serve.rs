@@ -75,7 +75,12 @@ pub struct ServeArgs {
 /// `SchedulerActor<M>`. The trait name is historical; both dense and MoE
 /// Qwen3.5 variants implement it so the same OpenAI VL route can serve either
 /// checkpoint family.
-fn serve_with_model<M>(model: M, tokenizer: Tokenizer, args: &ServeArgs) -> Result<()>
+fn serve_with_model<M>(
+    model: M,
+    tokenizer: Tokenizer,
+    args: &ServeArgs,
+    vision_input: Option<server::VisionInputConfig>,
+) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
@@ -129,7 +134,21 @@ where
         args.admission_queue_max,
         args.max_cache_cap,
         p5h_measurement_eval_probes,
+        vision_input,
     ))
+}
+
+fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
+    let config_path = model_dir.join("config.json");
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let config: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
+    config
+        .get("model_type")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))
 }
 
 pub fn run(args: ServeArgs) -> Result<()> {
@@ -141,34 +160,45 @@ pub fn run(args: ServeArgs) -> Result<()> {
         ));
     }
 
-    // open_multimodal so VL checkpoints retain vision_tower.* keys; for
-    // text-only checkpoints the loader simply finds no vision keys.
-    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let model_type = read_model_type(&model_dir)?;
+    let loader = match model_type.as_str() {
+        "gemma4" => Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?,
+        _ => {
+            // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
+            Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
+        }
+    };
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-
-    let model_type = loader
-        .config_raw_value()
-        .get("model_type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))?
-        .to_owned();
+    let vision_input = if model_type == "gemma4" {
+        let cfg = crate::models::gemma4::Gemma4Config::from_loader(&loader)
+            .context("Gemma4Config::from_loader")?;
+        cfg.vision_config
+            .map(|vision_config| server::VisionInputConfig::Gemma4 { vision_config })
+    } else {
+        None
+    };
 
     match model_type.as_str() {
         "qwen3_5" => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
-            serve_with_model(model, tokenizer, &args)
+            serve_with_model(model, tokenizer, &args, vision_input)
         }
         "qwen3_5_moe" => {
             if crate::models::is_qwen36_moe_config(loader.config_raw_value()) {
                 let model = crate::models::Qwen36MoeModel::from_loader(&loader)
                     .context("Qwen36MoeModel::from_loader")?;
-                serve_with_model(model, tokenizer, &args)
+                serve_with_model(model, tokenizer, &args, vision_input)
             } else {
                 let model = crate::models::Qwen35MoeModel::from_loader(&loader)
                     .context("Qwen35MoeModel::from_loader")?;
-                serve_with_model(model, tokenizer, &args)
+                serve_with_model(model, tokenizer, &args, vision_input)
             }
+        }
+        "gemma4" => {
+            let model = crate::models::Gemma4Model::from_loader(&loader)
+                .context("Gemma4Model::from_loader")?;
+            serve_with_model(model, tokenizer, &args, vision_input)
         }
         other => Err(anyhow::anyhow!("unsupported model_type: {other}")),
     }

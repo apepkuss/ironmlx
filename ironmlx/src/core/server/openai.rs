@@ -3,7 +3,6 @@
 //! Supports both streaming (`stream: true` → SSE) and non-streaming
 //! (`stream: false` → JSON).
 
-use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -14,7 +13,6 @@ use axum::{
     Json,
 };
 use base64::Engine;
-use mlx::ops::shape::concatenate;
 use mlx::Array;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -30,7 +28,8 @@ use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
-use crate::models::qwen3_5::image_processor;
+use crate::core::server::VisionInputConfig;
+use crate::models::{gemma4, qwen3_5};
 
 use super::AppState;
 
@@ -205,13 +204,17 @@ pub async fn decode_image_url(url: &str, client: &reqwest::Client) -> anyhow::Re
 ///
 /// Returns:
 /// - rewritten text-only messages (ready for `render_and_encode`)
-/// - concatenated pixel_values Array (None when no images present)
+/// - per-image pixel_values tensors (None when no images present)
 /// - image_grid_thw list (one entry per image)
 pub async fn expand_image_parts_in_messages(
     messages: Vec<ChatMessage>,
     client: &reqwest::Client,
-    spatial_merge_size: i32,
-) -> anyhow::Result<(Vec<ChatMessage>, Option<Array>, Vec<(i32, i32, i32)>)> {
+    vision_input: &VisionInputConfig,
+) -> anyhow::Result<(Vec<ChatMessage>, Option<Vec<Array>>, Vec<(i32, i32, i32)>)> {
+    let spatial_merge_size = match vision_input {
+        VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
+        VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
+    };
     if spatial_merge_size <= 0 {
         return Err(anyhow::anyhow!(
             "expand_image_parts_in_messages: spatial_merge_size must be > 0 (got {spatial_merge_size})"
@@ -219,6 +222,7 @@ pub async fn expand_image_parts_in_messages(
     }
     let mut all_pixel_values: Vec<Array> = Vec::new();
     let mut grid_thw: Vec<(i32, i32, i32)> = Vec::new();
+    let mut placeholders: Vec<String> = Vec::new();
 
     // First pass: collect pixel_values + grid info for every image_url part
     // across all messages, in order.
@@ -227,27 +231,34 @@ pub async fn expand_image_parts_in_messages(
             for part in parts {
                 if let ContentPart::ImageUrl { image_url } = part {
                     let img_bytes = decode_image_url(&image_url.url, client).await?;
-                    let (pv, gh, gw) = image_processor::preprocess(&img_bytes)?;
-                    all_pixel_values.push(pv);
-                    grid_thw.push((1, gh, gw));
+                    match vision_input {
+                        VisionInputConfig::Qwen { .. } => {
+                            let (pv, gh, gw) = qwen3_5::image_processor::preprocess(&img_bytes)?;
+                            let n =
+                                ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
+                            placeholders.push(qwen_placeholder(n));
+                            all_pixel_values.push(pv);
+                            grid_thw.push((1, gh, gw));
+                        }
+                        VisionInputConfig::Gemma4 { vision_config } => {
+                            let processed =
+                                gemma4::image_processor::preprocess(&img_bytes, vision_config)?;
+                            placeholders.push(gemma4_placeholder(processed.soft_tokens));
+                            grid_thw.push((1, processed.grid_h, processed.grid_w));
+                            all_pixel_values.push(processed.pixel_values);
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Build per-message image token counts ((gh/m) * (gw/m)) in the same
-    // order images were collected, where m = spatial_merge_size.
-    let token_counts: Vec<usize> = grid_thw
-        .iter()
-        .map(|&(_, gh, gw)| ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize)
-        .collect();
-    let mut counts_deque: VecDeque<usize> = VecDeque::from(token_counts);
-
     // Second pass: rewrite messages to plain-text with placeholder tokens.
+    let mut placeholders = placeholders.into_iter();
     let flat_messages: Vec<ChatMessage> = messages
         .into_iter()
         .map(|msg| {
-            let flat = msg.content.to_flat_string(&mut counts_deque);
+            let flat = flatten_content_with_placeholders(msg.content, &mut placeholders);
             ChatMessage {
                 role: msg.role,
                 content: Content::Text(flat),
@@ -255,21 +266,59 @@ pub async fn expand_image_parts_in_messages(
         })
         .collect();
 
-    // Concatenate pixel_values along axis 0.
     let pixel_values = if all_pixel_values.is_empty() {
         None
     } else {
-        let refs: Vec<&Array> = all_pixel_values.iter().collect();
-        let concat = concatenate(&refs, 0)?;
         // Eagerly materialize on this (async tokio worker) thread before the
         // tensor crosses into spawn_blocking, where a different worker thread's
         // default MLX stream would not be able to evaluate this thread's lazy
         // graph (errors with "There is no Stream(gpu, N) in current thread").
-        mlx::transforms::eval(&[&concat])?;
-        Some(concat)
+        for pv in &all_pixel_values {
+            mlx::transforms::eval(&[pv])?;
+        }
+        Some(all_pixel_values)
     };
 
     Ok((flat_messages, pixel_values, grid_thw))
+}
+
+fn qwen_placeholder(n: usize) -> String {
+    let mut s = String::from("<|vision_start|>");
+    for _ in 0..n {
+        s.push_str("<|image_pad|>");
+    }
+    s.push_str("<|vision_end|>");
+    s
+}
+
+fn gemma4_placeholder(n: usize) -> String {
+    let mut s = String::from("<|image>");
+    for _ in 0..n {
+        s.push_str("<|image|>");
+    }
+    s.push_str("<image|>");
+    s
+}
+
+fn flatten_content_with_placeholders(
+    content: Content,
+    placeholders: &mut impl Iterator<Item = String>,
+) -> String {
+    match content {
+        Content::Text(t) => t,
+        Content::Parts(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    ContentPart::Text { text } => out.push_str(&text),
+                    ContentPart::ImageUrl { .. } => {
+                        out.push_str(&placeholders.next().unwrap_or_default());
+                    }
+                }
+            }
+            out
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -349,41 +398,39 @@ where
     // For text-only requests this is a cheap no-op (no images to fetch).
     let http_client = reqwest::Client::new();
 
-    // Read spatial_merge_size from ModelMeta so generic M doesn't need a
-    // model-specific config() method. ModelMeta.spatial_merge_size is set
-    // from VisionConfig at model construction time; defaults to 2 for
-    // text-only models (matches Qwen3.5-VL default).
-    let spatial_merge_size: i32 = state.model.lock().await.model_meta().spatial_merge_size;
-
-    // Resolve `<|image_pad|>` to its tokenizer id, so VL routing works for
-    // sibling Qwen-family models with different special-token ids. Falls back
-    // to the Qwen3.5-VL default constant if the token is absent (text-only
-    // tokenizer or otherwise non-VL model — in that case image_grid_thw will
-    // also be empty so the id is unused).
-    let image_token_id: i32 = state
-        .tokenizer
-        .token_to_id("<|image_pad|>")
-        .map(|id| id as i32)
-        .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID);
+    let (image_token_id, spatial_merge_size) = match &state.vision_input {
+        VisionInputConfig::Qwen { spatial_merge_size } => (
+            state
+                .tokenizer
+                .token_to_id("<|image_pad|>")
+                .map(|id| id as i32)
+                .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID),
+            *spatial_merge_size,
+        ),
+        VisionInputConfig::Gemma4 { vision_config } => (
+            state
+                .tokenizer
+                .token_to_id("<|image|>")
+                .map(|id| id as i32)
+                .unwrap_or(258_880),
+            vision_config.pooling_kernel_size,
+        ),
+    };
 
     // Expand multimodal content parts: decode images, build pixel_values,
     // rewrite messages to text-with-placeholder.
-    let (flat_messages, pixel_values, image_grid_thw) = match expand_image_parts_in_messages(
-        req.messages,
-        &http_client,
-        spatial_merge_size,
-    )
-    .await
-    {
-        Ok(t) => t,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("image decode/preprocess: {e}"),
-            )
-                .into_response();
-        }
-    };
+    let (flat_messages, pixel_values, image_grid_thw) =
+        match expand_image_parts_in_messages(req.messages, &http_client, &state.vision_input).await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("image decode/preprocess: {e}"),
+                )
+                    .into_response();
+            }
+        };
 
     let image_grid_thw_opt = if image_grid_thw.is_empty() {
         None
@@ -1344,6 +1391,67 @@ mod tests {
         assert!(s.contains("\"prompt_tokens\":5"));
         assert!(s.contains("\"completion_tokens\":1"));
         assert!(s.contains("\"total_tokens\":6"));
+    }
+
+    #[test]
+    fn qwen_placeholder_uses_existing_vl_tokens() {
+        assert_eq!(
+            qwen_placeholder(2),
+            "<|vision_start|><|image_pad|><|image_pad|><|vision_end|>"
+        );
+    }
+
+    #[test]
+    fn gemma4_placeholder_uses_boundary_and_soft_tokens() {
+        assert_eq!(gemma4_placeholder(2), "<|image><|image|><|image|><image|>");
+    }
+
+    #[test]
+    fn flatten_content_inserts_placeholders_in_part_order() {
+        let content = Content::Parts(vec![
+            ContentPart::Text {
+                text: "before ".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: crate::core::server::chat_format::ImageUrl {
+                    url: "data:image/jpeg;base64,".into(),
+                },
+            },
+            ContentPart::Text {
+                text: " after".into(),
+            },
+        ]);
+        let placeholders = vec!["<image-placeholder>".to_string()];
+        let mut iter = placeholders.into_iter();
+        assert_eq!(
+            flatten_content_with_placeholders(content, &mut iter),
+            "before <image-placeholder> after"
+        );
+    }
+
+    #[test]
+    fn flatten_content_inserts_multiple_placeholders_in_part_order() {
+        let content = Content::Parts(vec![
+            ContentPart::Text { text: "a ".into() },
+            ContentPart::ImageUrl {
+                image_url: crate::core::server::chat_format::ImageUrl {
+                    url: "data:image/jpeg;base64,".into(),
+                },
+            },
+            ContentPart::Text { text: " b ".into() },
+            ContentPart::ImageUrl {
+                image_url: crate::core::server::chat_format::ImageUrl {
+                    url: "data:image/jpeg;base64,".into(),
+                },
+            },
+            ContentPart::Text { text: " c".into() },
+        ]);
+        let placeholders = vec!["<img-0>".to_string(), "<img-1>".to_string()];
+        let mut iter = placeholders.into_iter();
+        assert_eq!(
+            flatten_content_with_placeholders(content, &mut iter),
+            "a <img-0> b <img-1> c"
+        );
     }
 
     #[tokio::test]

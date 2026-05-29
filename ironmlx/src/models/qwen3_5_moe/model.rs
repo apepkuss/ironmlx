@@ -653,12 +653,32 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
         attention_mask: &mlx::Array,
         linear_attention_mask: &mlx::Array,
         per_row_lens: &[i32],
-        per_row_pixel_values: &[Option<&mlx::Array>],
+        per_row_pixel_values: &[Option<&[mlx::Array]>],
         per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
         image_token_id: i32,
         cache: Option<&mut [crate::nn::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
+        let mut row_pixel_values = Vec::with_capacity(per_row_pixel_values.len());
+        for row in per_row_pixel_values {
+            let Some(values) = row else {
+                row_pixel_values.push(None);
+                continue;
+            };
+            if values.is_empty() {
+                return Err(anyhow!(
+                    "Qwen35MoeModel::batched_prefill_vl: row pixel_values cannot be empty"
+                ));
+            }
+            if values.len() == 1 {
+                row_pixel_values.push(Some(values[0].clone()));
+            } else {
+                let refs: Vec<&Array> = values.iter().collect();
+                row_pixel_values.push(Some(mlx::ops::shape::concatenate(&refs, 0)?));
+            }
+        }
+        let row_pixel_refs: Vec<Option<&Array>> =
+            row_pixel_values.iter().map(|opt| opt.as_ref()).collect();
         Qwen35MoeModel::batched_prefill_vl(
             self,
             input_ids,
@@ -666,7 +686,7 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
             attention_mask,
             linear_attention_mask,
             per_row_lens,
-            per_row_pixel_values,
+            &row_pixel_refs,
             per_row_grid_thw,
             image_token_id,
             cache,
@@ -676,11 +696,22 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
 
     fn compute_vision_embeds(
         &self,
-        pixel_values: &mlx::Array,
+        pixel_values: &[mlx::Array],
         grid_thw: &[(i32, i32, i32)],
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
-        Qwen35MoeModel::compute_vision_embeds(self, pixel_values, grid_thw, target)
+        if pixel_values.is_empty() {
+            return Err(anyhow!(
+                "Qwen35MoeModel::compute_vision_embeds: pixel_values cannot be empty"
+            ));
+        }
+        let pixels = if pixel_values.len() == 1 {
+            pixel_values[0].clone()
+        } else {
+            let refs: Vec<&Array> = pixel_values.iter().collect();
+            mlx::ops::shape::concatenate(&refs, 0)?
+        };
+        Qwen35MoeModel::compute_vision_embeds(self, &pixels, grid_thw, target)
     }
 
     fn forward_vl_chunk(
