@@ -36,8 +36,8 @@ against an independent Python reference built only from `mlx.core` primitives
 | `layer0_mlp_up_proj_weight.npy` | `[64, 32]` | bf16 | SwiGLU up |
 | `layer0_mlp_down_proj_weight.npy` | `[32, 64]` | bf16 | SwiGLU down |
 | `norm_weight.npy` | `[32]` | fp32 | mtp.norm |
-| `expected_cos.npy` | `[1, 4, 4]` | fp32 | Mrope::cos_sin output |
-| `expected_sin.npy` | `[1, 4, 4]` | fp32 | Mrope::cos_sin output |
+| `expected_cos.npy` | `[1, 4, 8]` | fp32 | Mrope::cos_sin output |
+| `expected_sin.npy` | `[1, 4, 8]` | fp32 | Mrope::cos_sin output |
 | `expected_mtp_out.npy` | `[1, 4, 32]` | fp32 | post-`mtp.norm` hidden state |
 
 `expected_mtp_out` ends up at fp32 because all RmsNorm weights in this fixture are

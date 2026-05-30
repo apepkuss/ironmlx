@@ -58,50 +58,81 @@ def build_position_ids() -> mx.array:
 
 
 def reference_cos_sin(position_ids: mx.array, inv_freq: mx.array) -> tuple[mx.array, mx.array]:
-    """Reference MRoPE cos/sin -- independent re-implementation per the spec."""
+    """Reference MRoPE cos/sin -- independent re-implementation from RoPE first
+    principles (standard `[B, S, rot_dim]` layout via `concat([freqs, freqs])`).
+
+    Standard RoPE:
+      freqs[s, b, t, i] = pos[s, b, t] * inv_freq[i]   for i in [0, HALF)
+      emb               = concatenate([freqs_t, freqs_t], axis=-1)  -> [..., ROT_DIM]
+      cos = cos(emb), sin = sin(emb)
+
+    MRoPE adds a per-section stream selection: output slot `i` (for i in [0, HALF))
+    draws its frequency from the modality stream that owns section `i`. The source
+    column index into `freqs[stream]` is the SAME `i` as the destination slot. For
+    text-only prompts the three streams carry identical position ids, so the
+    selection collapses to a single stream -- but we implement the general
+    selection anyway so the reference stays faithful to the multimodal algorithm.
+
+    The full `ROT_DIM` (not HALF) is returned: `emb` duplicates the per-position
+    `freqs_t` block so that downstream `rotate_half` reads cos[d]/sin[d] for the
+    full rotated span. Returned shape is `[B, S, ROT_DIM]`.
+    """
     pos_f = position_ids.astype(mx.float32)
-    pos_unsq = pos_f[..., None]                # [3, B, S, 1]
-    inv_unsq = inv_freq.reshape((1, 1, 1, -1)) # [1, 1, 1, half]
-    freqs = pos_unsq * inv_unsq                 # [3, B, S, half]
-    cos_per = mx.cos(freqs)
-    sin_per = mx.sin(freqs)
+    pos_unsq = pos_f[..., None]                 # [n_streams, B, S, 1]
+    inv_unsq = inv_freq.reshape((1, 1, 1, -1))  # [1, 1, 1, HALF]
+    freqs = pos_unsq * inv_unsq                 # [n_streams, B, S, HALF]
 
-    # 3-section concat along last axis
-    offsets = [0]
-    for n in SECTIONS:
-        offsets.append(offsets[-1] + n)
+    # MRoPE per-section stream selection. slot_stream[i] is the stream index
+    # whose freqs[stream, :, :, i] feeds output slot i. Sections are filled
+    # round-robin across streams: stream s owns slots {s, s+n_streams, ...}
+    # up to SECTIONS[s] entries (source/destination column index identical).
+    n_streams = len(SECTIONS)
+    slot_stream = [0] * HALF
+    for s, sect_len in enumerate(SECTIONS):
+        for k in range(sect_len):
+            slot_stream[s + k * n_streams] = s
 
-    cos_segs = []
-    sin_segs = []
-    for s, (lo, hi) in enumerate(zip(offsets[:-1], offsets[1:])):
-        cos_segs.append(cos_per[s, :, :, lo:hi])
-        sin_segs.append(sin_per[s, :, :, lo:hi])
-    cos = mx.concatenate(cos_segs, axis=-1)
-    sin = mx.concatenate(sin_segs, axis=-1)
+    freq_slots = [freqs[slot_stream[i], :, :, i : i + 1] for i in range(HALF)]
+    freqs_t = mx.concatenate(freq_slots, axis=-1)  # [B, S, HALF]
+
+    # Duplicate to full ROT_DIM: emb = concat([freqs_t, freqs_t]).
+    emb = mx.concatenate([freqs_t, freqs_t], axis=-1)  # [B, S, ROT_DIM]
+    cos = mx.cos(emb)
+    sin = mx.sin(emb)
     return cos, sin
 
 
-def reference_apply(
-    x: mx.array, cos: mx.array, sin: mx.array
-) -> mx.array:
-    """Apply interleaved rotation to `x` (Q or K), tail pass-through."""
-    # x: [B, H, S, HEAD_DIM]
+def rotate_half(x: mx.array) -> mx.array:
+    """Standard RoPE `rotate_half`: split the last axis in two and rotate.
+
+      rotate_half([x1, x2]) = [-x2, x1]   (x1, x2 each ROT_DIM/2 wide)
+    """
+    half = x.shape[-1] // 2
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    return mx.concatenate([-x2, x1], axis=-1)
+
+
+def reference_apply(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+    """Apply split-half RoPE rotation to `x` (Q or K), tail pass-through.
+
+    Standard `rotate_half` formula (independent of any Rust impl):
+        y = x * cos + rotate_half(x) * sin
+    expanded per channel d in [0, ROT_DIM) with ROT_HALF = ROT_DIM/2:
+        d <  ROT_HALF: y[d] = x[d]*cos[d] - x[d + ROT_HALF]*sin[d]
+        d >= ROT_HALF: y[d] = x[d]*cos[d] + x[d - ROT_HALF]*sin[d]
+    Channels d in [ROT_DIM, HEAD_DIM) pass through unchanged.
+    """
+    # x: [B, H, S, HEAD_DIM]; cos/sin: [B, S, ROT_DIM] (fp32).
     rot = x[..., :ROT_DIM]
     tail = x[..., ROT_DIM:]
 
-    # Interleaved: even (2p) and odd (2p+1) channels form pairs sharing cos[p], sin[p].
-    even = rot[..., 0::2]  # [B, H, S, HALF]
-    odd = rot[..., 1::2]
-
-    # Broadcast cos/sin: [B, S, HALF] -> [B, 1, S, HALF]
+    # Broadcast cos/sin across heads: [B, S, ROT_DIM] -> [B, 1, S, ROT_DIM].
     c = cos[:, None, :, :]
     s = sin[:, None, :, :]
 
-    rot_even = (even.astype(mx.float32) * c - odd.astype(mx.float32) * s).astype(x.dtype)
-    rot_odd = (even.astype(mx.float32) * s + odd.astype(mx.float32) * c).astype(x.dtype)
-
-    # Re-interleave
-    out_rot = mx.stack([rot_even, rot_odd], axis=-1).reshape(x.shape[:-1] + (ROT_DIM,))
+    rot_f = rot.astype(mx.float32)
+    out_rot = (rot_f * c + rotate_half(rot_f) * s).astype(x.dtype)
     return mx.concatenate([out_rot, tail], axis=-1)
 
 

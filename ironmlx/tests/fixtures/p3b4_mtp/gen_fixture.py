@@ -50,33 +50,52 @@ def _build_position_ids() -> mx.array:
 
 
 def _ref_cos_sin(position_ids: mx.array, inv_freq: mx.array) -> tuple[mx.array, mx.array]:
+    """Reference MRoPE cos/sin from RoPE first principles (standard
+    `[B, S, ROT_DIM]` layout via `concat([freqs, freqs])`).
+
+      freqs[s, b, t, i] = pos[s, b, t] * inv_freq[i]   for i in [0, HALF)
+      freqs_t[b, t, i]  = freqs[slot_stream[i], b, t, i]  (MRoPE section select)
+      emb               = concatenate([freqs_t, freqs_t], axis=-1)  -> [..., ROT_DIM]
+      cos = cos(emb), sin = sin(emb)
+
+    Output slot i draws its frequency from the stream owning section i (source
+    column index identical to slot i). Text-only streams collapse to one stream,
+    but the general selection is kept faithful to the multimodal algorithm.
+    Returns full ROT_DIM (not HALF) for downstream rotate_half.
+    """
     pos_f = position_ids.astype(mx.float32)
-    pos_unsq = pos_f[..., None]
-    inv_unsq = inv_freq.reshape((1, 1, 1, -1))
-    freqs = pos_unsq * inv_unsq
-    cos_per = mx.cos(freqs)
-    sin_per = mx.sin(freqs)
-    offsets = [0]
-    for n in SECTIONS:
-        offsets.append(offsets[-1] + n)
-    cos_segs = []
-    sin_segs = []
-    for s, (lo, hi) in enumerate(zip(offsets[:-1], offsets[1:])):
-        cos_segs.append(cos_per[s, :, :, lo:hi])
-        sin_segs.append(sin_per[s, :, :, lo:hi])
-    return mx.concatenate(cos_segs, axis=-1), mx.concatenate(sin_segs, axis=-1)
+    pos_unsq = pos_f[..., None]                 # [n_streams, B, S, 1]
+    inv_unsq = inv_freq.reshape((1, 1, 1, -1))  # [1, 1, 1, HALF]
+    freqs = pos_unsq * inv_unsq                 # [n_streams, B, S, HALF]
+
+    n_streams = len(SECTIONS)
+    slot_stream = [0] * HALF
+    for s, sect_len in enumerate(SECTIONS):
+        for k in range(sect_len):
+            slot_stream[s + k * n_streams] = s
+
+    freq_slots = [freqs[slot_stream[i], :, :, i : i + 1] for i in range(HALF)]
+    freqs_t = mx.concatenate(freq_slots, axis=-1)  # [B, S, HALF]
+
+    emb = mx.concatenate([freqs_t, freqs_t], axis=-1)  # [B, S, ROT_DIM]
+    return mx.cos(emb), mx.sin(emb)
+
+
+def _rotate_half(x: mx.array) -> mx.array:
+    """Standard RoPE rotate_half: rotate_half([x1, x2]) = [-x2, x1]."""
+    half = x.shape[-1] // 2
+    return mx.concatenate([-x[..., half:], x[..., :half]], axis=-1)
 
 
 def _ref_apply_rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+    """Apply split-half RoPE rotation (y = x*cos + rotate_half(x)*sin); tail
+    pass-through. Derived from RoPE math, not transcribed from the Rust impl."""
     rot = x[..., :ROT_DIM]
     tail = x[..., ROT_DIM:]
-    even = rot[..., 0::2]
-    odd = rot[..., 1::2]
-    c = cos[:, None, :, :]
+    c = cos[:, None, :, :]  # [B, S, ROT_DIM] -> [B, 1, S, ROT_DIM]
     s = sin[:, None, :, :]
-    rot_even = (even.astype(mx.float32) * c - odd.astype(mx.float32) * s).astype(x.dtype)
-    rot_odd = (even.astype(mx.float32) * s + odd.astype(mx.float32) * c).astype(x.dtype)
-    out_rot = mx.stack([rot_even, rot_odd], axis=-1).reshape(x.shape[:-1] + (ROT_DIM,))
+    rot_f = rot.astype(mx.float32)
+    out_rot = (rot_f * c + _rotate_half(rot_f) * s).astype(x.dtype)
     return mx.concatenate([out_rot, tail], axis=-1)
 
 
