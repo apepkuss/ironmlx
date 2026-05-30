@@ -470,6 +470,9 @@ fn adopt_cache_row_layers(
             (LayerCache::Linear(dst_gd), LayerCache::Linear(src_gd)) => {
                 dst_gd.adopt_row_from(src_gd, dst_row, src_row)?;
             }
+            (LayerCache::Mla(dst_mla), LayerCache::Mla(src_mla)) => {
+                dst_mla.adopt_row_from(src_mla, dst_row, src_row)?;
+            }
             _ => return Err(anyhow!("{context}: cache layer kind mismatch")),
         }
     }
@@ -1223,6 +1226,7 @@ impl<M: Model> Scheduler<M> {
                     ctx.clone(),
                     mpf.clone(),
                 )),
+                // Mla: matches on (p5h_trace, mpf_span) profiling tuple, not LayerCache — cache-kind-independent, correct for GLM.
                 _ => None,
             };
             let prefill_cache = self
@@ -1344,6 +1348,7 @@ impl<M: Model> Scheduler<M> {
                             Some(ve) if prefix_image_pads > 0 => {
                                 Some(slice_vision_embeds_rows(ve, 0, prefix_image_pads)?)
                             }
+                            // Mla: matches on vision_embeds_full Option (VL-only path), not LayerCache — GLM is text-only, never reaches here.
                             _ => None,
                         };
                         let last_vision_embeds = match vision_embeds_full.as_ref() {
@@ -1352,6 +1357,7 @@ impl<M: Model> Scheduler<M> {
                                 prefix_image_pads,
                                 prefix_image_pads + last_image_pads,
                             )?),
+                            // Mla: matches on vision_embeds_full Option (VL-only path), not LayerCache — GLM is text-only, never reaches here.
                             _ => None,
                         };
 
@@ -2017,6 +2023,7 @@ impl<M: Model> Scheduler<M> {
                 .iter()
                 .find_map(|c| match c {
                     LayerCache::Full(kv) => Some(kv.dtype()),
+                    LayerCache::Mla(mla) => Some(mla.dtype()),
                     _ => None,
                 })
                 .unwrap_or(Dtype::Bfloat16)
