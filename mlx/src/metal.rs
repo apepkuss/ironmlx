@@ -14,12 +14,12 @@
 //! # Example
 //!
 //! ```no_run
-//! use mlx::metal::capture;
+//! use mlx::metal;
 //!
 //! # fn main() -> mlx::Result<()> {
-//! capture::start("/tmp/my_run.gputrace")?;
+//! metal::start("/tmp/my_run.gputrace")?;
 //! // ... run MLX ops you want to profile ...
-//! capture::stop()?;
+//! metal::stop()?;
 //! # Ok(())
 //! # }
 //! ```
