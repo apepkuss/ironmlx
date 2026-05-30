@@ -11,7 +11,9 @@ use clap::{Parser, ValueEnum};
 use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::{GenerateRequest, GenerationStream, Loader, Model, Sampler, Scheduler};
 use ironmlx::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
-use ironmlx::models::{is_qwen36_moe_config, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel};
+use ironmlx::models::{
+    is_qwen36_moe_config, Glm4MoeLiteModel, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel,
+};
 use ironmlx::Tokenizer;
 use serde::Serialize;
 
@@ -155,8 +157,14 @@ fn main() -> Result<()> {
                 run_for_model(&model, &tokenizer, &args, load_ms)
             }
         }
+        "glm4_moe_lite" => {
+            let model =
+                Glm4MoeLiteModel::from_loader(&loader).context("Glm4MoeLiteModel::from_loader")?;
+            let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+            run_for_model(&model, &tokenizer, &args, load_ms)
+        }
         other => Err(anyhow!(
-            "unsupported model_type: {other} (expected 'qwen3_5' or 'qwen3_5_moe')"
+            "unsupported model_type: {other} (expected 'qwen3_5', 'qwen3_5_moe', or 'glm4_moe_lite')"
         )),
     }
 }

@@ -200,6 +200,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 .context("Gemma4Model::from_loader")?;
             serve_with_model(model, tokenizer, &args, vision_input)
         }
+        "glm4_moe_lite" => {
+            let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
+                .context("Glm4MoeLiteModel::from_loader")?;
+            serve_with_model(model, tokenizer, &args, None)
+        }
         other => Err(anyhow::anyhow!("unsupported model_type: {other}")),
     }
 }
