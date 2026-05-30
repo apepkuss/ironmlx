@@ -217,6 +217,105 @@ impl MlaLatentCache {
         Ok((c_kv_slice, k_pe_slice))
     }
 
+    /// Copy src's row `src_row` cached latent (c_kv + k_pe, positions 0..src.offsets[src_row])
+    /// into self's row `dst_row`, and set self.offsets[dst_row] = src.offsets[src_row].
+    /// Mirrors KVCache::adopt_row_from for the two differing-width buffers. Used by
+    /// the scheduler's continuous-batching row compaction (adopt_cache_row_layers).
+    pub fn adopt_row_from(
+        &mut self,
+        src: &MlaLatentCache,
+        dst_row: usize,
+        src_row: usize,
+    ) -> Result<()> {
+        if self.kv_lora != src.kv_lora || self.rope != src.rope || self.dtype != src.dtype {
+            anyhow::bail!(
+                "MlaLatentCache::adopt_row_from: shape/dtype mismatch (self={}/{}/{:?}, src={}/{}/{:?})",
+                self.kv_lora, self.rope, self.dtype, src.kv_lora, src.rope, src.dtype,
+            );
+        }
+        if dst_row >= self.batch as usize {
+            anyhow::bail!(
+                "MlaLatentCache::adopt_row_from: dst_row {} >= self.batch {}",
+                dst_row,
+                self.batch
+            );
+        }
+        if src_row >= src.batch as usize {
+            anyhow::bail!(
+                "MlaLatentCache::adopt_row_from: src_row {} >= src.batch {}",
+                src_row,
+                src.batch
+            );
+        }
+        let src_off = src.offsets[src_row];
+        if src_off > self.cap {
+            anyhow::bail!(
+                "MlaLatentCache::adopt_row_from: src.offsets[{}] = {} > self.cap {}",
+                src_row,
+                src_off,
+                self.cap
+            );
+        }
+        if src_off > 0 {
+            let current_capacity = self
+                .c_kv
+                .as_ref()
+                .map(|a| a.shape().as_slice()[2])
+                .unwrap_or(0);
+            if src_off > current_capacity {
+                let target_capacity =
+                    ((src_off + self.step - 1) / self.step * self.step).min(self.cap);
+                self.grow_to(target_capacity, ().into())?;
+            }
+            let src_c_kv = src.c_kv.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "MlaLatentCache::adopt_row_from: src has offset {src_off} but c_kv unallocated"
+                )
+            })?;
+            let src_k_pe = src.k_pe.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "MlaLatentCache::adopt_row_from: src has offset {src_off} but k_pe unallocated"
+                )
+            })?;
+            let c_kv_slice = slice_strided_on(
+                src_c_kv,
+                [src_row as i32, 0, 0, 0],
+                [src_row as i32 + 1, 1, src_off, self.kv_lora],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            let k_pe_slice = slice_strided_on(
+                src_k_pe,
+                [src_row as i32, 0, 0, 0],
+                [src_row as i32 + 1, 1, src_off, self.rope],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            let c_kv_full = self.c_kv.as_ref().expect("grow_to allocated c_kv");
+            let k_pe_full = self.k_pe.as_ref().expect("grow_to allocated k_pe");
+            let new_c_kv = slice_update_on(
+                c_kv_full,
+                &c_kv_slice,
+                [dst_row as i32, 0, 0, 0],
+                [dst_row as i32 + 1, 1, src_off, self.kv_lora],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            let new_k_pe = slice_update_on(
+                k_pe_full,
+                &k_pe_slice,
+                [dst_row as i32, 0, 0, 0],
+                [dst_row as i32 + 1, 1, src_off, self.rope],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            self.c_kv = Some(new_c_kv);
+            self.k_pe = Some(new_k_pe);
+        }
+        self.offsets[dst_row] = src_off;
+        Ok(())
+    }
+
     /// Grow both latent buffers to `new_capacity` along axis 2 (sequence
     /// dimension). Old contents are preserved at `[..., 0..max_offset, ...]`.
     /// Mirrors `KVCache::grow_to`, duplicated for the two differing widths.
@@ -471,5 +570,67 @@ mod tests {
         assert!(r.is_err());
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("cap"), "msg should mention cap; got: {msg}");
+    }
+
+    #[test]
+    fn adopt_row_copies_src_row_offset_and_data() {
+        // src: batch=2, kv_lora=4, rope=2, cap=8. Fill row 1 with 2 tokens.
+        let mut src = MlaLatentCache::new(2, 4, 2, Dtype::Float32, 8).with_step(8);
+        // row0 lens 0, row1 lens 2: c_kv row1 = 5.0, k_pe row1 = 6.0
+        let c_kv: Array = {
+            let mut d = vec![0.0_f32; 2 * 1 * 2 * 4]; // [B=2,1,S=2,4]
+            for v in d.iter_mut().skip(1 * 2 * 4) {
+                *v = 5.0;
+            } // row1 block
+            (&d[..], (2_i32, 1, 2, 4)).try_into().unwrap()
+        };
+        let k_pe: Array = {
+            let mut d = vec![0.0_f32; 2 * 1 * 2 * 2];
+            for v in d.iter_mut().skip(1 * 2 * 2) {
+                *v = 6.0;
+            }
+            (&d[..], (2_i32, 1, 2, 2)).try_into().unwrap()
+        };
+        src.update_and_fetch_on(&c_kv, &k_pe, &[0, 2], ()).unwrap();
+        assert_eq!(src.offsets(), &[0, 2]);
+
+        // dst: batch=1, same dims. Adopt src row 1 -> dst row 0.
+        let mut dst = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8).with_step(8);
+        dst.adopt_row_from(&src, 0, 1).unwrap();
+        assert_eq!(
+            dst.offsets(),
+            &[2],
+            "dst row0 offset must == src row1 offset"
+        );
+
+        // Read back the adopted data by appending 1 real token and fetching the
+        // full [1,1,3,*] history (avoids the all-zero fast path, which returns an
+        // empty slice). Tokens 0,1 must be the adopted values; token 2 the new one.
+        let new_kv: Array = (&[8.0_f32; 4][..], (1_i32, 1, 1, 4)).try_into().unwrap();
+        let new_pe: Array = (&[9.0_f32; 2][..], (1_i32, 1, 1, 2)).try_into().unwrap();
+        let (kv_f, pe_f) = dst.update_and_fetch_on(&new_kv, &new_pe, &[1], ()).unwrap();
+        assert_eq!(kv_f.shape().as_slice(), &[1, 1, 3, 4]);
+        assert_eq!(dst.offsets(), &[3]);
+        let kv: Vec<f32> = kv_f.to_vec().unwrap(); // [1,1,3,4] row-major
+        for v in kv.iter().take(2 * 4) {
+            assert_eq!(*v, 5.0, "adopted c_kv tokens 0,1 must be 5.0");
+        }
+        for v in kv.iter().take(3 * 4).skip(2 * 4) {
+            assert_eq!(*v, 8.0, "appended c_kv token 2 must be 8.0");
+        }
+        let pe: Vec<f32> = pe_f.to_vec().unwrap(); // [1,1,3,2]
+        for v in pe.iter().take(2 * 2) {
+            assert_eq!(*v, 6.0, "adopted k_pe tokens 0,1 must be 6.0");
+        }
+        for v in pe.iter().take(3 * 2).skip(2 * 2) {
+            assert_eq!(*v, 9.0, "appended k_pe token 2 must be 9.0");
+        }
+    }
+
+    #[test]
+    fn adopt_row_rejects_dim_mismatch() {
+        let src = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8);
+        let mut dst = MlaLatentCache::new(1, 8, 2, Dtype::Float32, 8); // kv_lora differs
+        assert!(dst.adopt_row_from(&src, 0, 0).is_err());
     }
 }
