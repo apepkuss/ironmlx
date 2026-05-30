@@ -385,6 +385,19 @@ impl MlaAttention {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        // SDPA requires the `mask_arr` dtype to promote to the attention output
+        // dtype (q/k/v promoted type). `pe_scores` accumulates in float32 (the
+        // scaled-RoPE matmul promotes via the f32 `scale_array`, and the engine
+        // additive mask carries `-inf` in f32), while q/k/v are the bf16
+        // activation dtype — f32 does NOT promote to bf16. Demote `pe_scores`
+        // to the latent (SDPA input) dtype so the mask matches. `kv_latent` is
+        // an SDPA input in both regimes, so its dtype is the safe target.
+        let mask_dtype = kv_latent.dtype();
+        let pe_scores = if pe_scores.dtype() == mask_dtype {
+            pe_scores.clone()
+        } else {
+            mlx::ops::cast::astype_on(pe_scores, mask_dtype, target)?
+        };
         if decode {
             // DECODE: fold the query into latent space, attend against the
             // cached latent (K = V = kv_latent), then un-fold the output.
@@ -395,7 +408,7 @@ impl MlaAttention {
                 kv_latent,
                 self.scale,
                 "array",
-                Some(pe_scores),
+                Some(&pe_scores),
                 None,
                 target,
             )?; // [B,H,L,kv_lora]
@@ -412,7 +425,7 @@ impl MlaAttention {
                 &v,
                 self.scale,
                 "array",
-                Some(pe_scores),
+                Some(&pe_scores),
                 None,
                 target,
             )?) // [B,H,L,v_head]

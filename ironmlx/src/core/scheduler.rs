@@ -407,24 +407,27 @@ pub struct RequestState {
     pub(crate) p5h_root_span: Option<crate::core::p5h::SpanHandle>,
 }
 
-/// Read pre-write per-row offsets from the first Full-attention layer's
-/// `KVCache`. Used by [`Scheduler::step`] to construct the per-row decode
-/// mask before the forward.
+/// Read pre-write per-row offsets from the first cache layer that tracks
+/// per-row sequence positions (`Full` KV or `Mla` latent). Used by
+/// [`Scheduler::step`] to construct the per-row decode mask before the forward.
 ///
-/// All Full-attention layers advance their `KVCache.offsets()` in
-/// lockstep across decode steps (per-row offsets diverge across rows
-/// but NOT across layers for a given row). Any Full layer's offsets
-/// view is equivalent — picking the first is arbitrary but consistent.
+/// All such layers advance their `offsets()` in lockstep across decode steps
+/// (per-row offsets diverge across rows but NOT across layers for a given row).
+/// Any such layer's offsets view is equivalent — picking the first is arbitrary
+/// but consistent. `KVCache::offsets()` and `MlaLatentCache::offsets()` have
+/// identical semantics. `Linear` (GatedDelta) caches do not expose per-row
+/// offsets and are skipped.
 fn first_full_layer_offsets(cache: &[LayerCache]) -> Result<&[i32]> {
     cache
         .iter()
         .find_map(|c| match c {
             LayerCache::Full(kv) => Some(kv.offsets()),
+            LayerCache::Mla(mla) => Some(mla.offsets()),
             _ => None,
         })
         .ok_or_else(|| {
             anyhow!(
-                "Scheduler::step: no Full-attention layer in cache; per-row offsets unavailable"
+                "Scheduler::step: no offset-tracking (Full/Mla) layer in cache; per-row offsets unavailable"
             )
         })
 }
