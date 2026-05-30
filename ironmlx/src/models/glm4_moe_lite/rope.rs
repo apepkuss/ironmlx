@@ -42,25 +42,6 @@ impl Glm4Rope {
             target,
         )?)
     }
-
-    /// Scalar-offset variant (uniform batch; B=1 prefill).
-    pub fn apply_scalar(
-        &self,
-        x: &Array,
-        offset: i32,
-        target: impl Into<StreamOrDevice>,
-    ) -> Result<Array> {
-        Ok(mlx::fast::rope_on(
-            x,
-            self.dims,
-            true,
-            Some(self.base),
-            1.0,
-            offset,
-            None,
-            target,
-        )?)
-    }
 }
 
 #[cfg(test)]

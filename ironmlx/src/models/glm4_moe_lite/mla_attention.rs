@@ -193,31 +193,25 @@ impl MlaAttention {
         })
     }
 
-    /// Per-head v-projection (`unembed_out`). Consumed by Task 4b's two-regime
-    /// SDPA dispatch (decode: `output @ unembed_out`; prefill: `v = unembed_out(latent)`).
-    pub fn unembed_out(&self) -> &PerHeadQuantLinear {
+    /// Per-head v-projection (`unembed_out`). Test-only seam for the
+    /// inline equivalence gate (decode: `output @ unembed_out`).
+    #[cfg(test)]
+    fn unembed_out(&self) -> &PerHeadQuantLinear {
         &self.unembed_out
     }
 
-    /// Absorbed-MLA query projection (`embed_q`). Consumed by Task 4b
-    /// (decode: `q_nope = embed_q(q_nope)`; prefill: `k = embed_q(latent, transpose=false)`).
-    pub fn embed_q(&self) -> &PerHeadQuantLinear {
+    /// Absorbed-MLA query projection (`embed_q`). Test-only seam for the
+    /// inline equivalence gate (decode: `q_nope = embed_q(q_nope)`).
+    #[cfg(test)]
+    fn embed_q(&self) -> &PerHeadQuantLinear {
         &self.embed_q
     }
 
-    /// Output projection (`o_proj`). Consumed by Task 4b after head merge.
-    pub fn o_proj(&self) -> &Linear {
-        &self.o_proj
-    }
-
-    /// Attention softmax scale `1/sqrt(q_head_dim)`. Consumed by Task 4b SDPA.
-    pub fn scale(&self) -> f32 {
+    /// Attention softmax scale `1/sqrt(q_head_dim)`. Test-only seam for the
+    /// inline equivalence gate.
+    #[cfg(test)]
+    fn scale(&self) -> f32 {
         self.scale
-    }
-
-    /// Per-head value dim (`v_head_dim`). Consumed by Task 4b head merge.
-    pub fn v_head(&self) -> i32 {
-        self.v_head
     }
 
     /// Shared MLA prefix common to both regimes (mirrors
