@@ -98,7 +98,7 @@ ironmlx/src/models/glm4_moe_lite/
 - **caveats**：
   - 缓存的是 **归一化后** c_kv（`kv_a_layernorm` 增益已折进），读时**不可**再归一。
   - 缓存的是 **rope 后** k_pe（相对偏移一次性烘焙）。
-  - buffer width 576 ≥ 256 → 不触发 Metal slow-path cliff（KV floor 记忆）。
+  - KV-floor 记忆是关于 cache **容量/步长**（`cap`/`step` < 256 触发 cache-update Metal 慢路径），**不是** head-dim 宽度。`MlaLatentCache` 须沿用 `KVCache` 的 `step=256` 默认（`with_step(cap)` 一次性预分配）来规避该 cliff；c_kv 宽 512 / k_pe 宽 64 与该 cliff 无关。（订正：原"buffer width 576 ≥ 256"论据有误——SDPA fused-kernel 选择看 query 长度+head_dim∈支持集，与 buffer 宽度无关；absorbed-MLA 两路本就走 fallback，见 §4.5。）
 
 ---
 
