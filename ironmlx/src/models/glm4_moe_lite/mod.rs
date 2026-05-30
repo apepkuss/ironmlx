@@ -1,6 +1,7 @@
 //! GLM-4.7-Flash (`glm4_moe_lite`) model module.
 
 pub mod config;
+pub mod mla_cache;
 pub mod model;
 pub mod rope;
 

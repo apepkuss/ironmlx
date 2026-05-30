@@ -434,6 +434,7 @@ fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
     for layer in cache {
         match layer {
             LayerCache::Full(kv) => return Ok((kv.cap(), kv.dtype())),
+            LayerCache::Mla(mla) => return Ok((mla.cap(), mla.dtype())),
             LayerCache::Linear(gd) => {
                 linear_cap.get_or_insert(gd.cap());
             }

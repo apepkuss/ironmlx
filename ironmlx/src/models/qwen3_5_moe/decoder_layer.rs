@@ -226,6 +226,9 @@ impl DecoderLayerMoe {
                                 (AttnPath::Linear(_), Some(LayerCache::Full(_))) => Err(anyhow!(
                                     "DecoderLayerMoe::forward_on: Linear attn layer received Full cache (kind mismatch)"
                                 )),
+                                (_, Some(LayerCache::Mla(_))) => Err(anyhow!(
+                                    "DecoderLayerMoe::forward_on: received Mla cache (kind mismatch)"
+                                )),
                             }
                         },
                     )?;
@@ -328,6 +331,11 @@ impl DecoderLayerMoe {
                 (AttnPath::Linear(_), Some(LayerCache::Full(_))) => {
                     return Err(anyhow!(
                         "DecoderLayerMoe::forward_on: Linear attn layer received Full cache (kind mismatch)"
+                    ));
+                }
+                (_, Some(LayerCache::Mla(_))) => {
+                    return Err(anyhow!(
+                        "DecoderLayerMoe::forward_on: received Mla cache (kind mismatch)"
                     ));
                 }
             };
