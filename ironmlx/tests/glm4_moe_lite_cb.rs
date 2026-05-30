@@ -37,6 +37,7 @@
 //!     cargo test -p ironmlx --release --test glm4_moe_lite_cb -- --ignored --nocapture --test-threads=1
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -159,6 +160,26 @@ fn spawn(
         .expect("spawn_scheduler_actor")
 }
 
+/// Block (cooperatively) until the actor's rolling decode loop has driven at
+/// least `target` outer batches, i.e. the already-admitted rows are confirmed
+/// to be in `Decoding` and stepping. Mirrors the mid-admit timing signal used
+/// by `b1_p2_3c_3_continuous_batching.rs` (`batch_count` polling beats a fixed
+/// sleep, which is fragile on a cold GPU where prefill can exceed 200ms). This
+/// lets a follow-up `Admit` land WHILE the batch is saturated, so it is queued
+/// and later mid-admitted into a freed slot rather than starting a fresh batch.
+async fn wait_for_batch_count(handle: &SchedulerActorHandle, target: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if handle.batch_count.load(Ordering::Relaxed) >= target {
+            return;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("batch_count never reached {target} within 60s — prefill stalled");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// Generate one prompt's greedy continuation SERIALLY through a fresh b_max=1
 /// scheduler actor (same engine path as the concurrent run, one slot).
 async fn run_serial(
@@ -273,5 +294,154 @@ async fn b_gt_1_decode_matches_serial() {
     eprintln!(
         "GLM-4.7-Flash B>1 OK: both prompts' b_max=2 concurrent decode == b_max=1 serial \
          (per-token identical, {max_new} tokens each)"
+    );
+}
+
+/// THE MID-ADMIT + ROW-REUSE CORRECTNESS GATE (Task 4 Step 1).
+///
+/// Exercises the continuous-batching machinery that the simpler B>1 gate above
+/// does NOT touch: mid-flight admit into a freed slot (`admit_mid_begin` /
+/// `admit_mid_chunk` / `admit_mid_finalize`) plus cache row compaction
+/// (`rebuild_cache_layout` → `adopt_cache_row_layers`) on the `LayerCache::Mla`
+/// arm added in Task 2.
+///
+/// Scenario (b_max=2, three different-length prompts, greedy temperature 0,
+/// stop tokens disabled, fixed `max_new`):
+///   1. Admit LONG-prompt A (small `max_new` so it FINISHES first) and
+///      SHORT-prompt B (large `max_new`). Both fill the two slots and prefill
+///      together (rows 0 and 1).
+///   2. Poll `batch_count` so the follow-up admit lands while the batch is
+///      saturated. Submit MEDIUM-prompt C — with both slots busy + `Decoding`,
+///      C is QUEUED (it cannot start a fresh batch).
+///   3. A reaches its `max_new` first and is GC'd, freeing slot row 0. The
+///      driver's post-step queue drain pulls C and mid-admits it: B=1 prefill
+///      into a temp Mla cache, then `admit_mid_finalize` adopts that temp row
+///      into the freed slot (`MlaLatentCache::adopt_row_from`). This is GENUINE
+///      slot reuse — C reuses the row A vacated.
+///   4. Once A finishes, the surviving row B (compact cache row 1) is
+///      relocated to compact row 0 on the next decode step
+///      (`rebuild_cache_layout` with a DIFFERENT src/dst row → the Mla arm of
+///      `adopt_cache_row_layers` performs a real buffer migration). C then
+///      decodes alongside B from the reused slot.
+///
+/// HARD GATE: each prompt's generated token stream is bit-identical to that
+/// same prompt's b_max=1 SERIAL stream through the same scheduler engine. A
+/// single mismatched token fails — no tolerance. A bug in the Task 1/2 Mla
+/// adopt/rebuild path (row migration during compaction, per-row offset
+/// bookkeeping after compaction) would surface as a divergence HERE while the
+/// simpler B>1 gate (no finish/reuse/compaction) still passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn mid_admit_row_reuse_matches_serial() {
+    let Some((model, tokenizer)) = load_fixture() else {
+        eprintln!("skip: no GLM-4.7-Flash weights (set GLM47_MODEL_DIR)");
+        return;
+    };
+    let meta = model.lock().await.model_meta();
+
+    // Three DIFFERENT-LENGTH prompts → heterogeneous per-row cache lengths
+    // through prefill, compaction, and mid-admit.
+    let prompt_a = tokenize_prompt(
+        &tokenizer,
+        "Explain in detail how a transformer language model processes a sequence of tokens, \
+         step by step, including attention and the feed-forward blocks.",
+    );
+    let prompt_b = tokenize_prompt(&tokenizer, "Hi");
+    let prompt_c = tokenize_prompt(
+        &tokenizer,
+        "Summarize the theory of relativity for a curious child.",
+    );
+    assert_ne!(prompt_a.len(), prompt_b.len());
+    assert_ne!(prompt_a.len(), prompt_c.len());
+    assert_ne!(prompt_b.len(), prompt_c.len());
+    eprintln!(
+        "prompt lengths: A={} B={} C={}",
+        prompt_a.len(),
+        prompt_b.len(),
+        prompt_c.len()
+    );
+
+    // A finishes FIRST (small cap) so its slot is freed and reused by C.
+    // B outlives A so a surviving row gets compacted. C is the mid-admitted
+    // reuser; it must outlast the moment of admit so it decodes post-compaction.
+    let max_new_a: usize = 6;
+    let max_new_b: usize = 24;
+    let max_new_c: usize = 16;
+
+    // --- b_max=1 serial baselines (one fresh scheduler each, same engine). ---
+    let serial_a = run_serial(model.clone(), meta, prompt_a.clone(), max_new_a).await;
+    let serial_b = run_serial(model.clone(), meta, prompt_b.clone(), max_new_b).await;
+    let serial_c = run_serial(model.clone(), meta, prompt_c.clone(), max_new_c).await;
+
+    // --- b_max=2 continuous-batching run with mid-flight admit + reuse. ---
+    let handle = spawn(model.clone(), 2, meta);
+
+    let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a.clone(), max_new_a))
+        .await
+        .expect("admit A");
+    let reply_b = submit_admit(&handle.cmd_tx, make_request(prompt_b.clone(), max_new_b))
+        .await
+        .expect("admit B");
+    let mut rx_a = reply_a.event_rx;
+    let mut rx_b = reply_b.event_rx;
+
+    // Wait until A+B are decoding (≥1 outer batch) so C is queued, not
+    // started as a fresh batch.
+    wait_for_batch_count(&handle, 1).await;
+
+    // Submit C while both slots are busy → queued, then mid-admitted into the
+    // slot A frees when it finishes.
+    let reply_c = submit_admit(&handle.cmd_tx, make_request(prompt_c.clone(), max_new_c))
+        .await
+        .expect("admit C (queued, mid-admitted on A's freed slot)");
+    let mut rx_c = reply_c.event_rx;
+
+    // Drain all three. A finishes first (freeing its row), C is mid-admitted
+    // into it, B + C decode through the compacted layout.
+    let (events_a, events_b, events_c) = tokio::join!(
+        drain_until_finished(&mut rx_a),
+        drain_until_finished(&mut rx_b),
+        drain_until_finished(&mut rx_c),
+    );
+
+    let cb_a: Vec<u32> = events_a.iter().map(|e| e.token).collect();
+    let cb_b: Vec<u32> = events_b.iter().map(|e| e.token).collect();
+    let cb_c: Vec<u32> = events_c.iter().map(|e| e.token).collect();
+
+    eprintln!("serial_a (b=1)  = {serial_a:?}");
+    eprintln!("cb_a (mid-admit) = {cb_a:?}");
+    eprintln!("serial_b (b=1)  = {serial_b:?}");
+    eprintln!("cb_b (mid-admit) = {cb_b:?}");
+    eprintln!("serial_c (b=1)  = {serial_c:?}");
+    eprintln!("cb_c (reused slot) = {cb_c:?}");
+
+    // Each run produces exactly `max_new` tokens (stop disabled).
+    assert_eq!(events_a.len(), max_new_a, "A event count");
+    assert_eq!(events_a.last().unwrap().finish_reason, Some("length"));
+    assert_eq!(events_b.len(), max_new_b, "B event count");
+    assert_eq!(events_b.last().unwrap().finish_reason, Some("length"));
+    assert_eq!(events_c.len(), max_new_c, "C event count");
+    assert_eq!(events_c.last().unwrap().finish_reason, Some("length"));
+    assert_eq!(serial_a.len(), max_new_a, "serial A length");
+    assert_eq!(serial_b.len(), max_new_b, "serial B length");
+    assert_eq!(serial_c.len(), max_new_c, "serial C length");
+
+    // HARD GATE: per-token bit-identical to each prompt's serial baseline.
+    assert_eq!(
+        cb_a, serial_a,
+        "prompt A (finishes-first): mid-admit batch decode diverged from b_max=1 serial"
+    );
+    assert_eq!(
+        cb_b, serial_b,
+        "prompt B (survives compaction): mid-admit batch decode diverged from b_max=1 serial"
+    );
+    assert_eq!(
+        cb_c, serial_c,
+        "prompt C (mid-admitted into A's reused slot): decode diverged from b_max=1 serial"
+    );
+
+    eprintln!(
+        "GLM-4.7-Flash mid-admit + row-reuse OK: A(finish)/B(compact)/C(reuse) all \
+         per-token identical to b_max=1 serial through the Mla adopt/rebuild path"
     );
 }
