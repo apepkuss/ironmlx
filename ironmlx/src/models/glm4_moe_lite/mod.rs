@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod model;
+pub mod rope;
 
 pub use config::Glm4MoeLiteConfig;
 pub use model::Glm4MoeLiteModel;
