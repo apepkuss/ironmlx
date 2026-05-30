@@ -284,16 +284,28 @@ mod tests {
         Ok(())
     }
 
-    /// Pins the two silent-bug warnings (spec § 6):
-    ///   - selection uses sigmoid (not softmax),
-    ///   - weights come from the RAW sigmoid scores (not the bias-corrected
-    ///     `choice` scores).
-    /// logits = [0,0,0,0] → sigmoid = 0.5 each. bias = [-9,9,9,-9] steers
-    /// selection to experts {1,2}. RAW weights = [0.5, 0.5] → normalized
-    /// [0.5, 0.5] → ×1.8 = [0.9, 0.9].
+    /// SILENT-BUG SENTINEL for the two `noaux_tc_route` risks (spec § 6):
+    ///   - selection scores use sigmoid (NOT softmax — the Qwen path),
+    ///   - routing weights come from the RAW sigmoid scores (NOT the
+    ///     bias-corrected `choice` scores).
+    ///
+    /// NON-UNIFORM logits are mandatory: with the old `[0,0,0,0]` inputs the
+    /// correct path, the softmax-bug path, and the weights-from-choice-bug path
+    /// ALL collapse to `[0.9, 0.9]` after `norm_topk_prob`, making the test a
+    /// tautology. Here logits = [0,1,2,0] → sigmoid s = [0.5, 0.7310586,
+    /// 0.8807971, 0.5]; choice = s + bias (bias = [-9,9,9,-9]) selects experts
+    /// {1,2}; RAW weights {0.7310586, 0.8807971} → normalized (sum 1.6118557)
+    /// {0.453534, 0.546466} → ×1.8 = {0.816361, 0.983639}.
+    ///
+    /// This now FAILS under either bug:
+    ///   - softmax bug → normalized ≈[0.269, 0.731] → ×1.8 ≈[0.484, 1.316];
+    ///   - weights-from-choice bug → normalized ≈[0.496, 0.504] → ×1.8
+    ///     ≈[0.893, 0.907].
+    /// Only correct sigmoid-from-raw yields {0.816, 0.984}. argpartition order
+    /// is unspecified, so the two weights are asserted order-independently.
     #[test]
     fn router_selects_with_bias_weights_from_raw_sigmoid() -> Result<()> {
-        let logits = arr(&[0.0, 0.0, 0.0, 0.0], &[1, 4]);
+        let logits = arr(&[0.0, 1.0, 2.0, 0.0], &[1, 4]);
         let bias = arr(&[-9.0, 9.0, 9.0, -9.0], &[4]);
         let (inds, weights) =
             noaux_tc_route(&logits, &bias, 2, true, 1.8, StreamOrDevice::default())?;
@@ -306,12 +318,14 @@ mod tests {
             "selection must pick the bias-boosted experts"
         );
 
-        let wv = weights.to_vec::<f32>()?;
+        let mut wv: Vec<f32> = weights.to_vec::<f32>()?;
         assert_eq!(wv.len(), 2);
-        for w in wv {
+        wv.sort_by(|a, b| a.partial_cmp(b).expect("weights are finite"));
+        let want = [0.816361_f32, 0.983639];
+        for (w, e) in wv.iter().zip(want.iter()) {
             assert!(
-                (w - 0.9).abs() < 1e-5,
-                "weight must be raw-sigmoid 0.5 → norm 0.5 → ×1.8 = 0.9, got {w}"
+                (w - e).abs() < 1e-4,
+                "weight must be raw-sigmoid → norm → ×1.8 = {e}, got {w} (all {wv:?})"
             );
         }
         Ok(())
