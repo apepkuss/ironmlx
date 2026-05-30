@@ -677,6 +677,9 @@ async fn per_row_offset_invalid_args_return_err() {
                 LayerCache::Linear(gdc) => {
                     gdc.reset().expect("reset");
                 }
+                LayerCache::Mla(c) => {
+                    c.reset().expect("reset");
+                }
             }
         }
 
@@ -703,6 +706,9 @@ async fn per_row_offset_invalid_args_return_err() {
                 LayerCache::Linear(gdc) => {
                     gdc.reset().expect("reset");
                 }
+                LayerCache::Mla(c) => {
+                    c.reset().expect("reset");
+                }
             }
         }
 
@@ -728,6 +734,9 @@ async fn per_row_offset_invalid_args_return_err() {
                 LayerCache::Full(kv) => kv.reset(),
                 LayerCache::Linear(gdc) => {
                     gdc.reset().expect("reset");
+                }
+                LayerCache::Mla(c) => {
+                    c.reset().expect("reset");
                 }
             }
         }

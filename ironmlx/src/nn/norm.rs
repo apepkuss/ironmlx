@@ -237,8 +237,10 @@ impl RmsNormGated {
 mod tests {
     use super::*;
     use mlx::Dtype;
+    use serial_test::serial;
 
     #[test]
+    #[serial(mlx_metal)]
     fn rmsnorm_unit_weight_normalizes() {
         // weight = ones, so RMSNorm(x) = x / sqrt(mean(x^2) + eps).
         let weight: Array = (&[1.0_f32; 4][..], (4,)).try_into().unwrap();
@@ -253,6 +255,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn layernorm_runs_without_panic() {
         let weight: Array = (&[1.0_f32; 4][..], (4,)).try_into().unwrap();
         let bias: Array = (&[0.0_f32; 4][..], (4,)).try_into().unwrap();
@@ -266,6 +269,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn layernorm_preserves_input_dtype_with_bf16_parameters() {
         let weight = mlx::ops::cast::astype(
             &mlx::ops::constructors::ones((4_i32,), Dtype::Float32).unwrap(),
@@ -286,6 +290,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn rms_norm_gated_none_path_shape_dtype() {
         // Verify shape/dtype/finiteness of the gate=None code path.
         // (Strict equivalence to a separate RmsNorm computation is not asserted —
@@ -305,6 +310,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn rms_norm_gated_with_gate_matches_silu_rmsnorm() {
         // With gate=Some, dispatch should produce finite output (exact silu * rmsnorm
         // values aren't asserted at unit level — those go in the integration test).

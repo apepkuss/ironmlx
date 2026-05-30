@@ -565,7 +565,7 @@ mod tests {
             sampler: crate::core::sampler::Sampler::greedy(),
             stop_token_ids: tokenizer.eos_token_ids().to_vec(),
             prefill_chunk_size: 0,
-            pixel_values,
+            pixel_values: pixel_values.map(|pv| vec![pv]),
             image_grid_thw,
             image_spatial_merge_size,
             image_token_id: tokenizer
@@ -816,7 +816,7 @@ mod tests {
         )
         .expect("position ids");
         let vision_embeds = model
-            .compute_vision_embeds(&pixel_values, &grids, ())
+            .compute_vision_embeds(std::slice::from_ref(&pixel_values), &grids, ())
             .expect("vision embeds");
         let logits = model
             .forward_vl_chunk(

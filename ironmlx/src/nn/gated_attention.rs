@@ -519,6 +519,7 @@ mod tests {
     use super::*;
     use mlx::ops::constructors;
     use mlx::{Array, Dtype};
+    use serial_test::serial;
 
     /// Build a small synthetic GatedAttention for unit tests.
     /// B=1, S=4, Hq=4, Hkv=2, D=8, hidden=32; partial=1.0 → rot_dim=8.
@@ -551,6 +552,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn from_components_carries_config() {
         let attn = small_gated_attention();
         let cfg = attn.config();
@@ -562,6 +564,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn from_components_computes_scale() {
         let attn = small_gated_attention();
         // scale = 1 / sqrt(head_dim=8)
@@ -570,6 +573,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_shape_and_dtype_fp32() {
         let attn = small_gated_attention();
         let mrope = Mrope::new(8, 1e7, 1.0, &[2, 1, 1], true).unwrap();
@@ -590,6 +594,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_shape_and_dtype_bf16() {
         // Build a bf16-weight attention so that bf16 input stays bf16 through
         // the full forward path. MLX promotes bf16 @ fp32 → fp32, so weights
@@ -635,6 +640,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_with_zero_weight_dispatch_succeeds() {
         // q_proj weight has shape [Hq*D*2, hidden] = [64, 32], all zeros. So
         // q_proj output is zero regardless of input → gate is zero → sigmoid(0)
@@ -665,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn per_head_split_layout_distinguishable_from_flat_split() {
         // 2 heads, head_dim = 2 (small for hand-checkable math).
         // q_proj: [Hq*D*2, hidden] = [8, 4]. Per-head row layout:

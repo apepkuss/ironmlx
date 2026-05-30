@@ -33,8 +33,8 @@ Generated `.npy` files (committed to git, ~10 KB total):
 | `o_proj_weight.npy` | `[32, 32]` | bf16 |
 | `q_norm_weight.npy` | `[8]` | fp32 |
 | `k_norm_weight.npy` | `[8]` | fp32 |
-| `expected_cos.npy` | `[1, 4, 4]` | fp32 |
-| `expected_sin.npy` | `[1, 4, 4]` | fp32 |
+| `expected_cos.npy` | `[1, 4, 8]` | fp32 |
+| `expected_sin.npy` | `[1, 4, 8]` | fp32 |
 | `expected_gated_attn_out.npy` | `[1, 4, 32]` | fp32 |
 
 > **Note on output dtype**: `expected_gated_attn_out.npy` is fp32 even though

@@ -2671,6 +2671,11 @@ mod tests {
             self.vl_prefill_batches.lock().unwrap().clone()
         }
 
+        // Only read by `prefill_admitted_compacts_vl_rows`, which is gated out
+        // of the p5h-profile build (multi-row test incompatible with the
+        // single-row invariant). Gate the accessor identically so the
+        // p5h-profile build does not warn on a dead method.
+        #[cfg(not(feature = "p5h-profile"))]
         fn vl_pixel_value_lens(&self) -> Vec<usize> {
             self.vl_pixel_value_lens.lock().unwrap().clone()
         }
@@ -2775,7 +2780,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            per_row_pixel_values: &[Option<&mlx::Array>],
+            per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
             _cache: Option<&mut [crate::nn::LayerCache]>,
@@ -2792,7 +2797,7 @@ mod tests {
 
         fn compute_vision_embeds(
             &self,
-            _pixel_values: &mlx::Array,
+            _pixel_values: &[mlx::Array],
             grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
@@ -2967,7 +2972,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
             _cache: Option<&mut [crate::nn::LayerCache]>,
@@ -2978,7 +2983,7 @@ mod tests {
 
         fn compute_vision_embeds(
             &self,
-            _pixel_values: &mlx::Array,
+            _pixel_values: &[mlx::Array],
             _grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
@@ -3135,6 +3140,14 @@ mod tests {
         assert_eq!(s.occupied_rows(), vec![0, 2]);
     }
 
+    // Multi-row prefill test: builds >1 active row, so it exercises the
+    // batched compaction path. Under `p5h-profile` the scheduler enforces a
+    // hard single-row invariant (`prefill_admitted_inner` →
+    // `cloned_active_row_p5h_trace_and_root`: "expected exactly 1 active row,
+    // --b-max 1 required"), so a multi-row build is meaningless / would fail
+    // there. Gate it out of the p5h-profile build; it still runs under
+    // default features.
+    #[cfg(not(feature = "p5h-profile"))]
     #[test]
     fn prefill_admitted_compacts_sparse_initial_rows() {
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -3181,6 +3194,10 @@ mod tests {
         assert_eq!((events[0].id, events[0].token), (id, 3));
     }
 
+    // Multi-row prefill test (2 active rows) — incompatible with the
+    // p5h-profile single-row invariant (see
+    // prefill_admitted_compacts_sparse_initial_rows). Default-feature only.
+    #[cfg(not(feature = "p5h-profile"))]
     #[test]
     fn prefill_admitted_uses_full_batch_when_all_rows_active() {
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -3248,6 +3265,11 @@ mod tests {
         assert_eq!(model.decode_lens_seen(), vec![vec![1]]);
     }
 
+    // Multi-row test: prefills 2 active rows (then exercises mid-admit stale
+    // slot reuse). The initial `prefill_admitted` with 2 active rows trips the
+    // p5h-profile single-row invariant (see
+    // prefill_admitted_compacts_sparse_initial_rows). Default-feature only.
+    #[cfg(not(feature = "p5h-profile"))]
     #[test]
     fn admit_mid_finalize_replaces_stale_cache_row_when_slot_reused() {
         let mut s = Scheduler::<StepDecodeMaskModel>::new(
@@ -3307,7 +3329,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
-            pixel_values: Some(pixel_values),
+            pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
@@ -3353,7 +3375,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
-            pixel_values: Some(pixel_values),
+            pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32), (1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
@@ -3378,6 +3400,10 @@ mod tests {
         assert_eq!((events[0].id, events[0].token), (id, 3));
     }
 
+    // Multi-row VL prefill test (2 active VL rows) — incompatible with the
+    // p5h-profile single-row invariant (see
+    // prefill_admitted_compacts_sparse_initial_rows). Default-feature only.
+    #[cfg(not(feature = "p5h-profile"))]
     #[test]
     fn prefill_admitted_compacts_vl_rows() {
         use crate::core::generate::IMAGE_TOKEN_ID;
@@ -3399,7 +3425,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
-            pixel_values: Some(pixel_values),
+            pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,

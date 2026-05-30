@@ -239,6 +239,18 @@ use std::sync::Mutex;
 
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only per-thread span-open counter. Bumped in `next_span_id()` on
+    /// the SAME code path as the global `NEXT_SPAN_ID.fetch_add`, but isolated
+    /// per thread so concurrent tests opening p5h spans cannot perturb a
+    /// given test's open-count delta. Tests that need to prove "a span
+    /// actually opened" (delta == 1) or "no span opened" (delta == 0) assert
+    /// against this thread-local instead of the global atomic, which is
+    /// parallel-unsafe (other test threads advance the shared counter).
+    pub(crate) static TEST_SPAN_OPEN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// P5h+1 T1 measurement-probe global. When `true`, selected ROI substep
 /// closures call `mlx::transforms::eval` on their returned `Array` value(s)
 /// before the span closes so each substep accrues the incremental MLX
@@ -389,6 +401,8 @@ pub(crate) fn monotonic_ns_public() -> u64 {
 }
 
 fn next_span_id() -> u64 {
+    #[cfg(test)]
+    TEST_SPAN_OPEN_COUNT.with(|c| c.set(c.get() + 1));
     NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -1050,24 +1064,26 @@ mod tests {
         // top-level allow-listed names. `gs_chunk_N` is on the allow-list.
         // v21 P1 strengthens this test: prove a span ACTUALLY emitted (not
         // just that stack length returned to base) by capturing the
-        // next-span-id BEFORE the call and verifying NEXT_SPAN_ID advanced
-        // by exactly 1 — which only happens when `with_p5h_span_from_current_trace`
+        // span-open count BEFORE the call and verifying it advanced by
+        // exactly 1 — which only happens when `with_p5h_span_from_current_trace`
         // ran the open path. (Stack length restored is necessary but not
         // sufficient: a Lane-B SUPPRESSED call also leaves the stack
         // unchanged, so the prior assertion accepted both correct and
-        // incorrect behavior.)
+        // incorrect behavior.) Uses the per-thread TEST_SPAN_OPEN_COUNT
+        // instead of the global NEXT_SPAN_ID so concurrent tests opening
+        // spans on other threads cannot perturb this delta (parallel-safe).
         let ctx = lane_b_ctx();
         let root = dummy_span(99);
         let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
-        let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+        let id_before = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
         let result =
             try_with_p5h_span_from_current_trace("gs_chunk_N", SpanFields::default, || 13u32);
-        let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+        let id_after = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
         assert_eq!(result, 13);
-        // Span DID emit → atomic counter advanced by exactly 1.
+        // Span DID emit → this thread's open count advanced by exactly 1.
         assert_eq!(
             id_after, id_before + 1,
-            "Lane-B allow-listed span_name MUST emit (advance NEXT_SPAN_ID by 1); got id_before={id_before}, id_after={id_after}",
+            "Lane-B allow-listed span_name MUST emit (advance span-open count by 1); got id_before={id_before}, id_after={id_after}",
         );
         // And stack returned to base_parent after body.
         P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
@@ -1082,9 +1098,11 @@ mod tests {
         let root = dummy_span(99);
         let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
         for name in ["gs_kv_cache_alloc", "gs_first_token_sample_dispatch"] {
-            let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            // Per-thread TEST_SPAN_OPEN_COUNT (parallel-safe) instead of the
+            // global NEXT_SPAN_ID atomic.
+            let id_before = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
             let _ = try_with_p5h_span_from_current_trace(name, SpanFields::default, || ());
-            let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            let id_after = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
             assert_eq!(
                 id_after,
                 id_before + 1,
@@ -1114,14 +1132,16 @@ mod tests {
             "router_logits_softmax_topk",
             "cache_state_update",
         ] {
-            let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            // Per-thread TEST_SPAN_OPEN_COUNT (parallel-safe) instead of the
+            // global NEXT_SPAN_ID atomic.
+            let id_before = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
             let result = try_with_p5h_span_from_current_trace(name, SpanFields::default, || 17u32);
-            let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            let id_after = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
             assert_eq!(result, 17);
             assert_eq!(
                 id_after,
                 id_before + 1,
-                "P5h+1 T2 Lane-B deep span_name `{name}` MUST emit (advance NEXT_SPAN_ID by 1); got id_before={id_before}, id_after={id_after}",
+                "P5h+1 T2 Lane-B deep span_name `{name}` MUST emit (advance span-open count by 1); got id_before={id_before}, id_after={id_after}",
             );
             // Stack returned to base_parent after body.
             P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
@@ -1139,13 +1159,17 @@ mod tests {
         let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
         for name in ["totally_unknown_span", "made_up_op_name"] {
             let before_len = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow().len());
-            let id_before = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            // Per-thread TEST_SPAN_OPEN_COUNT (parallel-safe) instead of the
+            // global NEXT_SPAN_ID atomic: a concurrent test opening a span on
+            // another thread would advance the global counter and falsely fail
+            // this "MUST NOT emit" assertion.
+            let id_before = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
             let result = try_with_p5h_span_from_current_trace(name, SpanFields::default, || 17u32);
-            let id_after = NEXT_SPAN_ID.load(std::sync::atomic::Ordering::Relaxed);
+            let id_after = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
             assert_eq!(result, 17);
             assert_eq!(
                 id_after, id_before,
-                "Lane-B unknown span_name `{name}` MUST NOT emit; NEXT_SPAN_ID changed from {id_before} to {id_after}",
+                "Lane-B unknown span_name `{name}` MUST NOT emit; span-open count changed from {id_before} to {id_after}",
             );
             let after_len = P5H_CURRENT_SPAN_STACK.with(|s| s.borrow().len());
             assert_eq!(

@@ -25,8 +25,8 @@ Generated `.npy` files (committed to git, ~870KB total):
 | `input_k.npy` | `[1, 8, 8, 256]` | bf16 |
 | `input_position_ids.npy` | `[3, 1, 8]` | i32 |
 | `input_inv_freq.npy` | `[32]` | fp32 |
-| `expected_cos.npy` | `[1, 8, 32]` | fp32 |
-| `expected_sin.npy` | `[1, 8, 32]` | fp32 |
+| `expected_cos.npy` | `[1, 8, 64]` | fp32 |
+| `expected_sin.npy` | `[1, 8, 64]` | fp32 |
 | `expected_q_rot.npy` | `[1, 64, 8, 256]` | bf16 |
 | `expected_k_rot.npy` | `[1, 8, 8, 256]` | bf16 |
 | `input_v.npy` | `[1, 8, 8, 256]` | bf16 |
