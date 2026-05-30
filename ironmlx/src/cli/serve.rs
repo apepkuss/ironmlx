@@ -201,11 +201,6 @@ pub fn run(args: ServeArgs) -> Result<()> {
             serve_with_model(model, tokenizer, &args, vision_input)
         }
         "glm4_moe_lite" => {
-            if args.b_max > 1 {
-                return Err(anyhow::anyhow!(
-                    "glm4_moe_lite currently requires --b-max 1 (continuous batching / mid-admit not yet supported for the MLA latent cache)"
-                ));
-            }
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
                 .context("Glm4MoeLiteModel::from_loader")?;
             serve_with_model(model, tokenizer, &args, None)

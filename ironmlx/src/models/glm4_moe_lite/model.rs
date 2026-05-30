@@ -11,11 +11,13 @@
 //!   a placeholder.
 //! - **`linear_attention_mask` is ignored.** GLM has no linear-attention path;
 //!   `batched_prefill` accepts the argument for trait-shape parity only.
-//! - **Regime is per-call uniform.** A single forward is either all-prefill
-//!   (`L > 1`) or all-decode (`L == 1`); mixed per-row regimes are rejected by
-//!   the `per_row_lens` uniformity assert in [`Glm4MoeLiteModel::run_layers`].
-//!   The scheduler keeps prefill and decode phases separate, so this always
-//!   holds in practice.
+//! - **Regime is per-call uniform (structurally).** A single forward is either
+//!   all-prefill (`L > 1`) or all-decode (`L == 1`); the regime is decided by
+//!   the single query length `L` (the `[B, L]` input's seq dim), so prefill and
+//!   decode rows can never be mixed in one forward. `per_row_lens` is the count
+//!   of REAL tokens each row writes to the cache and legitimately differs per
+//!   row in B>1 batched prefill of different-length prompts — it is NOT the
+//!   regime and is not required to be uniform.
 //! - **Causal mask.** When the caller passes `mask = None` with `L > 1` (the
 //!   B=1 prefix-forward + chunked-prefill paths), the model builds its own
 //!   lower-right-aligned additive causal mask internally — mirroring the
@@ -23,11 +25,12 @@
 //!   path. When `mask = Some(..)` (e.g. `batched_prefill`'s engine mask), it is
 //!   passed straight through. For decode (`L == 1`) no mask is needed: the
 //!   single query attends to the whole valid cache.
-//! - **`--b-max 1` requirement.** Continuous-batching mid-admit
-//!   (`adopt_cache_row_layers`) does not yet support the `LayerCache::Mla`
-//!   variant, so GLM must be served with `--b-max 1` (a single in-flight
-//!   sequence) until that wiring is added. Decode and B=1 prefill are fully
-//!   supported.
+//! - **Continuous batching (`--b-max > 1`).** Supported: `MlaLatentCache`
+//!   implements per-row migration (`adopt_row_from`) and the scheduler wires
+//!   `LayerCache::Mla` into row-adoption + the dtype-finder, so B>1 batched
+//!   prefill (different-length prompts) and B>1 heterogeneous-offset decode
+//!   are both correct (verified bit-identical vs B=1 serial in
+//!   `tests/glm4_moe_lite_cb.rs`).
 //!
 //! GLM is the first text-only model in this engine: the scheduler-facing
 //! `DenseVlMethods` surface is implemented as a text-only stub that errors.
@@ -264,13 +267,18 @@ impl Glm4MoeLiteModel {
                 batch
             ));
         }
-        // Regime uniformity (scheduler guarantees this; assert defensively —
-        // REJECTS mixed prefill/decode in one forward).
-        if !prl.iter().all(|&l| l == prl[0]) {
-            return Err(anyhow!(
-                "glm4_moe_lite: non-uniform per_row_lens {prl:?} (mixed prefill/decode in one forward unsupported)"
-            ));
-        }
+        // Regime uniformity is guaranteed STRUCTURALLY: the regime (prefill
+        // `L > 1` vs decode `L == 1`) is decided by the single query length
+        // `seq_len`, which is one scalar shared by every row of the `[B, L]`
+        // input — there is no way to mix prefill and decode rows in one
+        // forward. `per_row_lens` is NOT regime: it is the number of REAL
+        // (non-pad) tokens each row writes to the cache, which legitimately
+        // DIFFERS per row in B>1 batched prefill of different-length prompts
+        // ([7, 21], …); the engine `attention_mask` masks the padding and the
+        // per-row latent write (`MlaLatentCache::write_per_row`) writes each
+        // row's leading-N slab independently. Per-row validity (`0 <= n <= L`)
+        // is enforced by `update_and_fetch_on`, so no extra check is needed
+        // here (mirrors the Qwen full-attention batched-prefill contract).
 
         // RoPE offset = pre-update per-row cache length (uniform across layers);
         // read from layer 0 before any layer writes its cache this step.
