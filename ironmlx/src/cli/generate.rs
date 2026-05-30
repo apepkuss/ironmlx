@@ -337,8 +337,13 @@ pub fn run(args: GenerateArgs) -> Result<()> {
                 .context("Gemma4Model::from_loader")?;
             run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
         }
+        "glm4_moe_lite" => {
+            let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
+                .context("Glm4MoeLiteModel::from_loader")?;
+            run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
+        }
         other => Err(anyhow::anyhow!(
-            "unsupported model_type: {other} (expected 'qwen3_5', 'qwen3_5_moe', or 'gemma4')"
+            "unsupported model_type: {other} (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', or 'glm4_moe_lite')"
         )),
     }
 }

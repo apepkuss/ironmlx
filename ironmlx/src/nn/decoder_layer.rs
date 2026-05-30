@@ -65,6 +65,7 @@ pub enum AttnPath {
 pub enum LayerCache {
     Full(KVCache),
     Linear(GatedDeltaCache),
+    Mla(crate::models::glm4_moe_lite::mla_cache::MlaLatentCache),
 }
 
 impl LayerCache {
@@ -77,6 +78,7 @@ impl LayerCache {
                 Ok(())
             }
             LayerCache::Linear(gd) => gd.reset(),
+            LayerCache::Mla(c) => c.reset(),
         }
     }
 }
@@ -274,6 +276,11 @@ impl DecoderLayer {
             (AttnPath::Linear(_), Some(LayerCache::Full(_))) => {
                 return Err(anyhow!(
                     "DecoderLayer::forward_on: Linear attn layer received Full cache (kind mismatch)"
+                ));
+            }
+            (_, Some(LayerCache::Mla(_))) => {
+                return Err(anyhow!(
+                    "DecoderLayer::forward_on: received Mla cache (kind mismatch)"
                 ));
             }
         };

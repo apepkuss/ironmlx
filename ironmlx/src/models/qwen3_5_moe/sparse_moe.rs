@@ -248,6 +248,9 @@ pub struct RoutedExperts {
     pub group_size: i32,
     pub bits: i32,
     pub num_experts: i32,
+    /// Lazily-built compiled SwiGLU closure for the routed activation.
+    /// Owned here so `apply_experts` is self-contained.
+    swiglu: std::sync::OnceLock<CompiledFn>,
 }
 
 impl RoutedExperts {
@@ -328,6 +331,7 @@ impl RoutedExperts {
             group_size: qmeta.group_size,
             bits: qmeta.bits,
             num_experts,
+            swiglu: std::sync::OnceLock::new(),
         })
     }
 
@@ -429,6 +433,171 @@ impl RoutedExperts {
             .get()
             .expect("just set under mutex; OnceLock is now populated"))
     }
+
+    /// SwitchGLU-style routed-expert combine.
+    ///
+    /// Route flat tokens `x` `[BS, H]` through the top-k experts named by
+    /// `inds` `[BS, k]` (Uint32), weight each expert output by `weights`
+    /// `[BS, k]`, and reduce across k → `[BS, H]`.
+    ///
+    /// Mirrors mlx_lm `SwitchGLU.__call__` (`switch_layers.py`) and is the
+    /// exact dispatch previously inlined in `SparseMoeBlock::forward_on`
+    /// (extracted verbatim so Qwen routing is byte-identical):
+    ///   - `inds` is passed as `rhs_indices` to `gather_quantized_matmul_on`
+    ///     (the expert id per (token, slot)); `transpose=true`.
+    ///   - Sorted-flat path when `BS*k >= SORTED_ROUTING_MIN_BS_K` (=64):
+    ///     pre-sort tokens by expert id, pass `sorted_indices=true`; x is
+    ///     gathered to `[BS*k, 1, H]` (rank r+2 with r=1, so `lhs_indices`
+    ///     defaults to `x.shape()[..-2] = [BS*k]` and broadcasts trivially
+    ///     against `rhs_indices [BS*k]`). After down_proj the permutation is
+    ///     inverted to restore original token/slot order.
+    ///   - Default broadcast path otherwise: x kept `[BS, 1, 1, H]` and MLX
+    ///     broadcasts `rhs_indices [BS, k]` over the leading dims.
+    ///
+    /// Caller is responsible for `target` stream selection; `()` selects the
+    /// MLX default stream.
+    pub fn apply_experts(
+        &self,
+        x: &Array,
+        inds: &Array,
+        weights: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let xdims = x.shape();
+        let xvec = xdims.as_slice();
+        if xvec.len() != 2 {
+            return Err(anyhow!(
+                "RoutedExperts::apply_experts: x must be rank-2 [BS,H], got rank {}",
+                xvec.len()
+            ));
+        }
+        let (bs, h) = (xvec[0], xvec[1]);
+        let idims = inds.shape();
+        let ivec = idims.as_slice();
+        if ivec.len() != 2 || ivec[0] != bs {
+            return Err(anyhow!(
+                "RoutedExperts::apply_experts: inds must be [BS,k] with BS={bs}, got {ivec:?}"
+            ));
+        }
+        let k = ivec[1];
+        let bs_k = bs * k;
+        let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
+
+        let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) = if use_sorted {
+            // --- Sorted routing path. ---
+            let flat_topk = mlx::ops::shape::reshape(inds, [bs_k])
+                .context("RoutedExperts::apply_experts: reshape inds to [BS*k]")?;
+            let sort_perm = argsort_on(&flat_topk, -1_i32, target)
+                .context("RoutedExperts::apply_experts: argsort flat_topk")?; // [BS*k]
+            let sorted_topk = take_along_axis_on(&flat_topk, &sort_perm, -1_i32, target)
+                .context("RoutedExperts::apply_experts: take_along_axis sort flat_topk")?;
+            let sorted_token_idx =
+                sorted_token_indices_from_sort_perm(&sort_perm, k, bs_k, target)?;
+            let sorted_x_2d = take_on(x, &sorted_token_idx, 0_i32, target)
+                .context("RoutedExperts::apply_experts: take x by sorted_token_idx")?;
+            let sorted_x_3d = mlx::ops::shape::expand_dims_on(&sorted_x_2d, -2_i32, target)
+                .context("RoutedExperts::apply_experts: expand_dims sorted_x → [BS*k,1,H]")?;
+
+            let fused = self.fused_gate_up(target)?;
+            let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
+                &sorted_x_3d,
+                &fused.weight,
+                &fused.scales,
+                fused.biases.as_ref(),
+                None,
+                Some(&sorted_topk),
+                true,
+                Some(self.group_size),
+                Some(self.bits),
+                "affine",
+                /* sorted_indices */ true,
+                target,
+            )
+            .context("RoutedExperts::apply_experts: gate_up gather_qmm (sorted)")?;
+            let i = self.moe_intermediate;
+            let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0], [bs_k, 1, i], target)
+                .context("RoutedExperts::apply_experts: slice gate_out (sorted)")?;
+            let up_out = slice_on(&gate_up_out, [0_i32, 0, i], [bs_k, 1, 2 * i], target)
+                .context("RoutedExperts::apply_experts: slice up_out (sorted)")?;
+
+            (gate_out, up_out, sorted_topk, true, Some(sort_perm))
+        } else {
+            // --- Default broadcast path. ---
+            let x_in = mlx::ops::shape::expand_dims_on(x, &[-2_i32, -3_i32][..], target)
+                .context("RoutedExperts::apply_experts: expand_dims x → [BS,1,1,H]")?; // [BS, 1, 1, H]
+
+            let fused = self.fused_gate_up(target)?;
+            let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
+                &x_in,
+                &fused.weight,
+                &fused.scales,
+                fused.biases.as_ref(),
+                None,
+                Some(inds),
+                true,
+                Some(self.group_size),
+                Some(self.bits),
+                "affine",
+                false,
+                target,
+            )
+            .context("RoutedExperts::apply_experts: gate_up gather_qmm (default)")?; // [BS, k, 1, 2*I]
+            let i = self.moe_intermediate;
+            let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0, 0], [bs, k, 1, i], target)
+                .context("RoutedExperts::apply_experts: slice gate_out (default)")?;
+            let up_out = slice_on(&gate_up_out, [0_i32, 0, 0, i], [bs, k, 1, 2 * i], target)
+                .context("RoutedExperts::apply_experts: slice up_out (default)")?;
+
+            (gate_out, up_out, inds.clone(), false, None)
+        };
+
+        // SwiGLU activation: silu(gate) * up. Element-wise; same code path for
+        // both routing branches.
+        let act = invoke_swiglu(self.swiglu(), &gate_out, &up_out)?;
+
+        let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
+            &act,
+            &self.down_weight,
+            &self.down_scales,
+            self.down_biases.as_ref(),
+            None,
+            Some(&rhs_idx_used),
+            true,
+            Some(self.group_size),
+            Some(self.bits),
+            "affine",
+            sorted_flag,
+            target,
+        )
+        .context("RoutedExperts::apply_experts: down_proj gather_qmm")?;
+
+        // Restore [BS, k, H] order, then weight + reduce across k.
+        let down_out = if let Some(sort_perm) = sort_perm_opt {
+            let inv_perm = argsort_on(&sort_perm, -1_i32, target)
+                .context("RoutedExperts::apply_experts: argsort inv permutation")?;
+            let down_out_2d = mlx::ops::shape::reshape(&down_out_raw, [bs_k, h])
+                .context("RoutedExperts::apply_experts: reshape sorted down_out to [BS*k, H]")?;
+            let unsorted_2d = take_on(&down_out_2d, &inv_perm, 0_i32, target)
+                .context("RoutedExperts::apply_experts: take inv_perm to restore order")?;
+            mlx::ops::shape::reshape(&unsorted_2d, [bs, k, h])
+                .context("RoutedExperts::apply_experts: reshape unsorted to [BS, k, H]")?
+        } else {
+            mlx::ops::shape::squeeze_on(&down_out_raw, &[-2_i32][..], target)
+                .context("RoutedExperts::apply_experts: squeeze down_proj dim -2")?
+        };
+
+        // weights: [BS, k] -> [BS, k, 1] for broadcast with [BS, k, H].
+        let weights_unsq = mlx::ops::shape::expand_dims_on(weights, -1_i32, target)
+            .context("RoutedExperts::apply_experts: expand weights dim")?;
+        let weighted = &down_out * &weights_unsq;
+        mlx::ops::sum_on(&weighted, -2_i32, false, target)
+            .context("RoutedExperts::apply_experts: sum across k")
+    }
+
+    /// Lazily-built compiled SwiGLU closure shared by `apply_experts`.
+    fn swiglu(&self) -> &CompiledFn {
+        self.swiglu.get_or_init(build_swiglu)
+    }
 }
 
 /// Sparse MoE block for Qwen3.5-MoE.
@@ -451,6 +620,11 @@ pub struct SparseMoeBlock {
     num_experts_per_tok: i32,
     /// Whether selected expert scores are renormalized across top-k.
     norm_topk_prob: bool,
+    /// Compiled SwiGLU closure for the per-substep `swiglu_activation` span.
+    /// Only the p5h-profile path activates SwiGLU inline here; the production
+    /// path routes through `RoutedExperts::apply_experts` (which owns its own
+    /// compiled closure).
+    #[cfg(feature = "p5h-profile")]
     swiglu: std::sync::OnceLock<CompiledFn>,
 }
 
@@ -485,14 +659,17 @@ impl SparseMoeBlock {
             shared_expert_gate,
             num_experts_per_tok,
             norm_topk_prob,
+            #[cfg(feature = "p5h-profile")]
             swiglu: std::sync::OnceLock::new(),
         })
     }
 
+    #[cfg(feature = "p5h-profile")]
     fn swiglu(&self) -> &CompiledFn {
         self.swiglu.get_or_init(build_swiglu)
     }
 
+    #[cfg(feature = "p5h-profile")]
     fn swiglu_on(&self, gate: &Array, up: &Array) -> Result<Array> {
         invoke_swiglu(self.swiglu(), gate, up)
     }
@@ -518,8 +695,6 @@ impl SparseMoeBlock {
         let bs = b * s;
         let k = self.num_experts_per_tok;
         let num_experts = self.routed.num_experts;
-        let bs_k = bs * k;
-        let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
 
         // --- Flatten [B, S, H] → [BS, H] for routing and expert kernels. ---
         // Setup before the 8 substep spans; not attributed to any substep.
@@ -528,6 +703,8 @@ impl SparseMoeBlock {
 
         #[cfg(feature = "p5h-profile")]
         {
+            let bs_k = bs * k;
+            let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
             // T3.2: 8-substep instrumentation, all under the `mlp_path` wrapper
             // opened by DecoderLayerMoe::forward_on (T0a.11 step 1) per
             // decoder_layer.rs:249. Substep names per spec § 3 T3 lines 886-894
@@ -1043,186 +1220,17 @@ impl SparseMoeBlock {
                 target,
             )?;
 
-            // (3) Routed SwiGLU via gather_quantized_matmul_on (G1 path).
+            // (3) Routed SwiGLU via the shared SwitchGLU-style combine.
             //
-            // Two routing strategies are dispatched here based on `bs * k`:
-            //
-            //   - Sorted-flat path (BS*k >= SORTED_ROUTING_MIN_BS_K): pre-sort
-            //     tokens by expert id and pass `sorted_indices=true`, matching
-            //     MLX-LM `SwitchGLU` for `indices.size >= 64`. We physically
-            //     gather `flat_x` rows by the sorted token id so each
-            //     (token,expert-slot) is its own x-row; this changes x.shape
-            //     from [BS,1,1,H] to [BS*k,1,1,H] and `rhs_indices` from [BS,k]
-            //     to [BS*k,1] but keeps the GatherQMM output semantics identical
-            //     (B = BS*k both cases). After down_proj we invert the permutation
-            //     to restore original token/k order before the score-weighted sum.
-            //
-            //   - Default broadcast path (BS*k < SORTED_ROUTING_MIN_BS_K): keep `x` as [BS,1,1,H]
-            //     and let MLX broadcast `lhs_indices` from [BS,1] to [BS,k].
-            //     Avoids the argsort/scatter overhead on tiny decode batches
-            //     below the reference sorting threshold.
-            //
-            // MLX gather_qmm API contract (unchanged from T0): when `rhs_indices`
-            // has rank-r, the input `x` must have rank r+2 (the leading r dims
-            // are broadcast against rhs_indices, the trailing 2 are matrix dims).
-
-            let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) = if use_sorted {
-                // --- Sorted routing path. ---
-
-                // Flatten topk indices: [BS, k] -> [BS*k].
-                let flat_topk = mlx::ops::shape::reshape(&inds_u32, [bs_k])
-                    .context("SparseMoeBlock: reshape inds_u32 to [BS*k]")?;
-
-                // argsort returns the permutation that sorts flat_topk ascending
-                // by expert id. Stable per MLX semantics. Dtype Uint32.
-                let sort_perm = argsort_on(&flat_topk, -1_i32, target)
-                    .context("SparseMoeBlock: argsort flat_topk")?; // [BS*k]
-
-                // sorted_topk: the actual expert id per sorted slot. This is
-                // what gets passed as rhs_indices so right_sorted_ is true.
-                // P5i.a T1 C1: keep rank-1 (no [BS*k,1] reshape). Paired with
-                // sorted_x rank-3 below so the default lhs_indices (x.shape()[..-2]
-                // = [BS*k]) matches rhs_indices shape exactly; broadcast/copy is a
-                // no-op. fast-path entry condition x.size()/x.shape(-2)/x.shape(-1)
-                // == indices.size() ⇒ BS*k == BS*k preserved.
-                let sorted_topk = take_along_axis_on(&flat_topk, &sort_perm, -1_i32, target)
-                    .context("SparseMoeBlock: take_along_axis sort flat_topk")?;
-
-                let sorted_token_idx =
-                    sorted_token_indices_from_sort_perm(&sort_perm, k, bs_k, target)?;
-
-                // Physically gather flat_x rows in sorted order.
-                // flat_x: [BS, H], sorted_token_idx: [BS*k] -> [BS*k, H].
-                let sorted_x_2d = take_on(&flat_x, &sorted_token_idx, 0_i32, target)
-                    .context("SparseMoeBlock: take flat_x by sorted_token_idx")?;
-                // P5i.a T1 C1: promote to rank-3 [BS*k, 1, H] for gather_qmm
-                // (r+2 with r=1 instead of r=2). MLX gather_qmm_rhs fast path
-                // still triggers: x.shape(-2)=1 ⇒ M=1; B = out.size()/M/N =
-                // BS*k. Default lhs_indices shape becomes x.shape()[..-2]=[BS*k]
-                // which broadcasts trivially against rhs_indices [BS*k] (also
-                // rank-1, see C1 above), so x.size()/x.shape(-2)/x.shape(-1)
-                // == BS*k == indices.size() — no broadcast/copy needed.
-                // Replaces double expand_dims (was [-2,-3]) with single -2 axis.
-                let sorted_x_3d = mlx::ops::shape::expand_dims_on(&sorted_x_2d, -2_i32, target)
-                    .context("SparseMoeBlock: expand_dims sorted_x → [BS*k,1,H]")?;
-
-                // P5i.a T2: single fused gate+up gather_qmm + slice.
-                // Output shape: [BS*k, 1, 2*I]; slice along axis=-1 into
-                // gate_out [BS*k, 1, I] and up_out [BS*k, 1, I].
-                let fused = self.routed.fused_gate_up(target)?;
-                let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
-                    &sorted_x_3d,
-                    &fused.weight,
-                    &fused.scales,
-                    fused.biases.as_ref(),
-                    None,
-                    Some(&sorted_topk),
-                    true,
-                    Some(self.routed.group_size),
-                    Some(self.routed.bits),
-                    "affine",
-                    /* sorted_indices */ true,
-                    target,
-                )
-                .context("SparseMoeBlock: gate_up gather_qmm (sorted)")?;
-                let i = self.routed.moe_intermediate;
-                let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0], [bs_k, 1, i], target)
-                    .context("SparseMoeBlock: slice gate_out from gate_up (sorted)")?;
-                let up_out = slice_on(&gate_up_out, [0_i32, 0, i], [bs_k, 1, 2 * i], target)
-                    .context("SparseMoeBlock: slice up_out from gate_up (sorted)")?;
-
-                (gate_out, up_out, sorted_topk, true, Some(sort_perm))
-            } else {
-                // --- Default broadcast path (Stage 1 final). ---
-                let x_in = mlx::ops::shape::expand_dims_on(&flat_x, &[-2_i32, -3_i32][..], target)
-                    .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")?; // [BS, 1, 1, H]
-
-                // P5i.a T2: single fused gate+up gather_qmm + slice.
-                // Output shape: [BS, k, 1, 2*I]; slice along axis=-1 into
-                // gate_out [BS, k, 1, I] and up_out [BS, k, 1, I].
-                let fused = self.routed.fused_gate_up(target)?;
-                let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
-                    &x_in,
-                    &fused.weight,
-                    &fused.scales,
-                    fused.biases.as_ref(),
-                    None,
-                    Some(&inds_u32),
-                    true,
-                    Some(self.routed.group_size),
-                    Some(self.routed.bits),
-                    "affine",
-                    false,
-                    target,
-                )
-                .context("SparseMoeBlock: gate_up gather_qmm")?; // [BS, k, 1, 2*I]
-                let i = self.routed.moe_intermediate;
-                let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0, 0], [bs, k, 1, i], target)
-                    .context("SparseMoeBlock: slice gate_out from gate_up (default)")?;
-                let up_out = slice_on(&gate_up_out, [0_i32, 0, 0, i], [bs, k, 1, 2 * i], target)
-                    .context("SparseMoeBlock: slice up_out from gate_up (default)")?;
-
-                (gate_out, up_out, inds_u32, false, None)
-            };
-
-            // SwiGLU activation: silu(gate) * up  where silu(z) = z * sigmoid(z)
-            // gate_out, up_out:
-            //   sorted path:  [BS*k, 1, 1, moe_inter]
-            //   default path: [BS, k, 1, moe_inter]
-            // Both element-wise — same code path.
-            let act = self.swiglu_on(&gate_out, &up_out)?;
-
-            let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
-                &act,
-                &self.routed.down_weight,
-                &self.routed.down_scales,
-                self.routed.down_biases.as_ref(),
-                None,
-                Some(&rhs_idx_used),
-                true,
-                Some(self.routed.group_size),
-                Some(self.routed.bits),
-                "affine",
-                sorted_flag,
-                target,
-            )
-            .context("SparseMoeBlock: down_proj gather_qmm")?;
-            // down_out_raw shape (post-T1 C1 rank-3 sorted simplification):
-            //   sorted path:  [BS*k, 1, H]      (in sorted order)
-            //   default path: [BS, k, 1, H]     (in original order, unchanged)
-
-            // (6) Weight by router scores and reduce over k.
-            //
-            // Both branches converge on `down_out: [BS, k, H]` so the score
-            // weighting + reduce is shared.
-            let down_out = if let Some(sort_perm) = sort_perm_opt {
-                // Sorted path: squeeze [BS*k, 1, H] -> [BS*k, H], then invert
-                // the permutation to restore original token/k order before
-                // reshape to [BS, k, H]. inv_perm = argsort(sort_perm).
-                let inv_perm = argsort_on(&sort_perm, -1_i32, target)
-                    .context("SparseMoeBlock: argsort inv permutation")?;
-                // Reshape over squeeze: dims are statically known singletons here, so
-                // reshape becomes a graph metadata change with no op-node, cheaper than
-                // invoking squeeze.
-                let down_out_2d = mlx::ops::shape::reshape(&down_out_raw, [bs_k, h])
-                    .context("SparseMoeBlock: reshape sorted down_out to [BS*k, H]")?;
-                let unsorted_2d = take_on(&down_out_2d, &inv_perm, 0_i32, target)
-                    .context("SparseMoeBlock: take inv_perm to restore order")?;
-                mlx::ops::shape::reshape(&unsorted_2d, [bs, k, h])
-                    .context("SparseMoeBlock: reshape unsorted to [BS, k, H]")?
-            } else {
-                mlx::ops::shape::squeeze_on(&down_out_raw, &[-2_i32][..], target)
-                    .context("SparseMoeBlock: squeeze down_proj dim -2")?
-            };
-
-            let routed_y = {
-                // scores: [BS, k] -> [BS, k, 1] for broadcast with [BS, k, H].
-                let scores_unsq = mlx::ops::shape::expand_dims_on(&scores, -1_i32, target)
-                    .context("SparseMoeBlock: expand scores dim")?;
-                let weighted = &down_out * &scores_unsq;
-                mlx::ops::sum_on(&weighted, -2_i32, false, target)
-                    .context("SparseMoeBlock: sum across k")?
-            };
+            // `RoutedExperts::apply_experts` performs the sorted/broadcast
+            // gather_qmm dispatch (threshold SORTED_ROUTING_MIN_BS_K=64),
+            // fused gate/up, SwiGLU, down_proj, then weights + reduces across
+            // k. `inds_u32` is the rhs_indices (expert id per (token, slot));
+            // `scores` are the per-slot routing weights. This is the exact
+            // logic previously inlined here, extracted so GLM-4 can reuse it.
+            let routed_y = self
+                .routed
+                .apply_experts(&flat_x, &inds_u32, &scores, target)?;
 
             // (7) Shared expert with independent sigmoid gate.
             let shared_y = self

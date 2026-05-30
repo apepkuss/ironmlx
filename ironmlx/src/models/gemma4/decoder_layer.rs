@@ -141,6 +141,11 @@ impl Gemma4DecoderLayer {
                     "Gemma4DecoderLayer: expected Full KV cache, got Linear"
                 ));
             }
+            Some(LayerCache::Mla(_)) => {
+                return Err(anyhow!(
+                    "Gemma4DecoderLayer: expected Full KV cache, got Mla"
+                ));
+            }
             None => None,
         };
         let t0 = Instant::now();
