@@ -324,6 +324,7 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use mlx::Array;
+    use serial_test::serial;
 
     fn fp_linear(weight: Array, bias: Option<Array>) -> Linear {
         Linear {
@@ -332,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn fp_forward_matches_manual_matmul() {
         // weight [out=2, in=3] = [[1,2,3],[4,5,6]]
         // x [batch=1, in=3] = [1,1,1]
@@ -348,6 +350,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn fp_forward_with_bias() {
         // weight = identity [[1,0],[0,1]], x = [3, 4], bias = [10, 20]
         // y = [3*1+4*0, 3*0+4*1] + [10, 20] = [13, 24]
@@ -363,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn fp_dtype_preserved() {
         let weight = Array::try_from((&[1.0f32, 0.0, 0.0, 1.0][..], &[2, 2][..])).unwrap();
         let x = Array::try_from((&[1.0f32, 2.0][..], &[1, 2][..])).unwrap();
@@ -374,6 +378,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn new_quant_round_trips_via_from_loader_shape() {
         // We cannot construct a real quantized weight from thin air without a
         // tokenizer / safetensors fixture. Instead verify the structural

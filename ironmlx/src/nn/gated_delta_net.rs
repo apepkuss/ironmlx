@@ -1999,6 +1999,7 @@ fn build_gated_delta_kernel_impl(masked: bool, zero_state: bool) -> Result<Metal
 mod tests {
     use super::*;
     use mlx::{Array, Dtype, Shape};
+    use serial_test::serial;
 
     fn small_gdn_components() -> GatedDeltaNet {
         // Synthetic small model:
@@ -2059,6 +2060,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn gdn_construction_carries_config() {
         let gdn = small_gdn_components();
         let cfg = gdn.config();
@@ -2068,6 +2070,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn gdn_forward_shape_dtype_no_cache() {
         let gdn = small_gdn_components();
         // x: [B=1, S=4, hidden=32] — note: small zeros so the SSM dispatch
@@ -2085,6 +2088,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn gdn_forward_with_cache_advances_offset() {
         let gdn = small_gdn_components();
         let cfg = gdn.config();
@@ -2107,6 +2111,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn gated_delta_step_kernel_links() {
         // Dk must be >= 32 so that n_per_t = Dk/32 >= 1 (Metal C++ forbids
         // zero-length arrays). Use Dk=32, Dv=8, Hk=Hv=1, B=1, T=1.
@@ -2235,16 +2240,19 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn gated_delta_zero_state_kernel_matches_explicit_zero_state() {
         assert_zero_state_kernel_matches_regular(false);
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn gated_delta_zero_state_masked_kernel_matches_explicit_zero_state() {
         assert_zero_state_kernel_matches_regular(true);
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn gated_delta_step_masked_zero_path() {
         // mask=0 everywhere: output should be 0, state unchanged.
         // Use non-zero state_in to verify state isn't accidentally modified.

@@ -47,3 +47,9 @@ p5h-profile = []
 [dev-dependencies]
 approx = "0.5"
 tokio-stream.workspace = true
+# Serializes tests that share global MLX/Metal state (default stream / command
+# encoder / first-compile of cached `OnceLock` custom `MetalKernel`s). Without
+# this, parallel test threads race on that shared state and intermittently
+# corrupt computed values (custom-kernel vs composed-MLX divergence well above
+# the numeric tolerance). Tests in the `mlx_metal` group run one-at-a-time.
+serial_test = { version = "3", default-features = false }

@@ -507,8 +507,10 @@ impl Mrope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial(mlx_metal)]
     fn mrope_construction_with_qwen35_params() {
         // head_dim 256, partial 0.25 -> rot_dim 64, half 32.
         // sections [11, 11, 10] sum = 32, matches half.
@@ -520,12 +522,14 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn mrope_inv_freq_shape() {
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
         assert_eq!(mrope.inv_freq().shape().as_slice(), &[32]);
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn cos_sin_shape_and_dtype() {
         // Qwen3.5: head_dim=256, partial=0.25 -> rot_dim=64, half=32
         // cos/sin output is [B, S, rot_dim=64] (mirrors mlx-vlm concatenate([freqs,freqs]))
@@ -551,6 +555,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn cos_sin_seq_eq_one_decode() {
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
         // Decode step: position 42 across all 3 streams.
@@ -562,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn apply_shape_and_dtype_fp32() {
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
 
@@ -582,6 +588,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn apply_shape_and_dtype_bf16() {
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
         let q = Array::zeros((1_i32, 64, 4, 256), Dtype::Bfloat16).unwrap();
@@ -597,6 +604,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn apply_partial_rotary_tail_unchanged() {
         // head_dim=256, partial=0.25 -> rot_dim=64. Tail [64..256) must be unchanged.
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
@@ -632,6 +640,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn apply_split_half_known_rotation() {
         // Build a tiny mrope where head_dim=4, rot_dim=4, sections=[1,1,0]
         // (sections sum to half=2). Manual values let us verify split-half rotation.
@@ -675,6 +684,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn apply_gqa_different_q_kv_heads() {
         // Qwen3.5-style GQA: Hq=64, Hkv=8.
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
@@ -691,6 +701,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn apply_rejects_wrong_cos_shape() {
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
         let q = Array::zeros((1_i32, 64, 4, 256), Dtype::Float32).unwrap();
@@ -705,6 +716,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn apply_rejects_wrong_cos_dtype() {
         let mrope = Mrope::new(256, 1e7, 0.25, &[11, 11, 10], true).unwrap();
         let q = Array::zeros((1_i32, 64, 4, 256), Dtype::Float32).unwrap();

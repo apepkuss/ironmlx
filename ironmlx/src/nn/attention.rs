@@ -259,6 +259,7 @@ mod tests {
     use crate::nn::Linear;
     use mlx::ops::constructors;
     use mlx::{Array, Dtype};
+    use serial_test::serial;
 
     /// Risk #1 mitigation (b1-p2.3c-2 spec §9): verify mlx fast SDPA accepts
     /// a `[B, 1, 1, K]` additive bf16 mask passed via the existing
@@ -269,6 +270,7 @@ mod tests {
     /// here are 0 / -inf so the kernel applies them additively — we only
     /// assert the call succeeds and the output has the right shape.
     #[test]
+    #[serial(mlx_metal)]
     fn attention_forward_on_accepts_decode_mask_shape() {
         // B=2, n_heads=2, n_kv_heads=2, head_dim=32, hidden=64
         let cfg = AttentionConfig {

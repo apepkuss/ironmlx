@@ -275,6 +275,7 @@ fn qembedding_decode_kernel() -> Result<&'static MetalKernel> {
 mod tests {
     use super::*;
     use mlx::{ops, Array, Dtype};
+    use serial_test::serial;
 
     fn fp_embedding(weight: Array) -> Embedding {
         Embedding {
@@ -301,6 +302,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn fp_forward_lookup() {
         // 4-row vocab, 3-dim embeddings: rows are [1,2,3], [4,5,6],
         // [7,8,9], [10,11,12].
@@ -325,6 +327,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn as_output_tied_projection() {
         // weight [vocab=3, dim=2] = [[1,0],[0,1],[1,1]]
         // hidden [batch=1, seq=1, dim=2] = [2, 3]
@@ -392,16 +395,19 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn quantized_single_token_forward_matches_dequantize_bfloat16() {
         assert_quantized_single_token_matches_dequantize(Dtype::Bfloat16);
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn quantized_single_token_forward_matches_dequantize_float32() {
         assert_quantized_single_token_matches_dequantize(Dtype::Float32);
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn quantized_decode_rejects_multi_token_input() {
         let tokens: Array = (&[1_u32, 2][..], &[2_i32][..]).try_into().unwrap();
         let weight = Array::zeros((4_i32, 8_i32), Dtype::Uint32).unwrap();

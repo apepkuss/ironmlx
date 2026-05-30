@@ -73,8 +73,10 @@ impl Mlp {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+    use serial_test::serial;
 
     #[test]
+    #[serial(mlx_metal)]
     fn swiglu_forward_matches_manual_silu_mul() {
         let identity: Array = (&[1.0_f32, 0.0, 0.0, 1.0][..], (2, 2)).try_into().unwrap();
         let mlp = Mlp::from_components(

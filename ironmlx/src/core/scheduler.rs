@@ -2671,6 +2671,11 @@ mod tests {
             self.vl_prefill_batches.lock().unwrap().clone()
         }
 
+        // Only read by `prefill_admitted_compacts_vl_rows`, which is gated out
+        // of the p5h-profile build (multi-row test incompatible with the
+        // single-row invariant). Gate the accessor identically so the
+        // p5h-profile build does not warn on a dead method.
+        #[cfg(not(feature = "p5h-profile"))]
         fn vl_pixel_value_lens(&self) -> Vec<usize> {
             self.vl_pixel_value_lens.lock().unwrap().clone()
         }
@@ -3135,6 +3140,14 @@ mod tests {
         assert_eq!(s.occupied_rows(), vec![0, 2]);
     }
 
+    // Multi-row prefill test: builds >1 active row, so it exercises the
+    // batched compaction path. Under `p5h-profile` the scheduler enforces a
+    // hard single-row invariant (`prefill_admitted_inner` →
+    // `cloned_active_row_p5h_trace_and_root`: "expected exactly 1 active row,
+    // --b-max 1 required"), so a multi-row build is meaningless / would fail
+    // there. Gate it out of the p5h-profile build; it still runs under
+    // default features.
+    #[cfg(not(feature = "p5h-profile"))]
     #[test]
     fn prefill_admitted_compacts_sparse_initial_rows() {
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -3181,6 +3194,10 @@ mod tests {
         assert_eq!((events[0].id, events[0].token), (id, 3));
     }
 
+    // Multi-row prefill test (2 active rows) — incompatible with the
+    // p5h-profile single-row invariant (see
+    // prefill_admitted_compacts_sparse_initial_rows). Default-feature only.
+    #[cfg(not(feature = "p5h-profile"))]
     #[test]
     fn prefill_admitted_uses_full_batch_when_all_rows_active() {
         let mut s = Scheduler::<RecordingPrefillModel>::new(
@@ -3248,6 +3265,11 @@ mod tests {
         assert_eq!(model.decode_lens_seen(), vec![vec![1]]);
     }
 
+    // Multi-row test: prefills 2 active rows (then exercises mid-admit stale
+    // slot reuse). The initial `prefill_admitted` with 2 active rows trips the
+    // p5h-profile single-row invariant (see
+    // prefill_admitted_compacts_sparse_initial_rows). Default-feature only.
+    #[cfg(not(feature = "p5h-profile"))]
     #[test]
     fn admit_mid_finalize_replaces_stale_cache_row_when_slot_reused() {
         let mut s = Scheduler::<StepDecodeMaskModel>::new(
@@ -3378,6 +3400,10 @@ mod tests {
         assert_eq!((events[0].id, events[0].token), (id, 3));
     }
 
+    // Multi-row VL prefill test (2 active VL rows) — incompatible with the
+    // p5h-profile single-row invariant (see
+    // prefill_admitted_compacts_sparse_initial_rows). Default-feature only.
+    #[cfg(not(feature = "p5h-profile"))]
     #[test]
     fn prefill_admitted_compacts_vl_rows() {
         use crate::core::generate::IMAGE_TOKEN_ID;

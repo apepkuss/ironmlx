@@ -82,6 +82,7 @@ impl Conv1d {
 mod tests {
     use super::*;
     use mlx::{Array, Dtype};
+    use serial_test::serial;
 
     fn small_depthwise_conv() -> Conv1d {
         let weight = Array::zeros((6_i32, 3, 1), Dtype::Float32).unwrap();
@@ -98,6 +99,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn conv1d_construction_from_components() {
         let conv = small_depthwise_conv();
         assert_eq!(conv.config().out_channels, 6);
@@ -105,6 +107,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn conv1d_forward_shape_depthwise() {
         let conv = small_depthwise_conv();
         // input: [N=1, L=4, C=6]; output: [1, 4-3+1=2, 6]

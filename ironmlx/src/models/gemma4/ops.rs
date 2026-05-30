@@ -440,6 +440,7 @@ fn scalar_f32(v: f32) -> Result<Array> {
 mod tests {
     use super::*;
     use mlx::Dtype;
+    use serial_test::serial;
 
     fn assert_all_close(got: &Array, expected: &Array, tol: f32) {
         let got_f32 = ops::cast::astype(got, Dtype::Float32).unwrap();
@@ -457,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn geglu_fused_matches_composed_f32() {
         let gate: Array = (
             &[-3.0_f32, -1.0, -0.25, 0.0, 0.25, 1.0, 3.0, 6.0][..],
@@ -477,6 +479,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn geglu_fused_accepts_split_views() {
         let gate: Array = (
             &[0.25_f32, -1.0, 2.0, 0.5, -0.75, 1.25][..],
@@ -496,6 +499,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn geglu_fused_matches_composed_bf16_with_final_bf16_tolerance() {
         let gate_f32: Array = (
             &[-3.0_f32, -1.0, -0.25, 0.0, 0.25, 1.0, 3.0, 6.0][..],
@@ -518,6 +522,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn qmv_geglu_decode_matches_composed_bf16() {
         let n = 8_i32;
         let k = 512_i32;
@@ -571,11 +576,13 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn rms_norm_default_rope_decode_matches_composed_non_traditional() {
         assert_rms_norm_default_rope_decode(false);
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn rms_norm_default_rope_decode_matches_composed_traditional() {
         assert_rms_norm_default_rope_decode(true);
     }
@@ -629,6 +636,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn geglu_fused_rejects_shape_mismatch() {
         let gate = Array::zeros((2, 3), Dtype::Float32).unwrap();
         let up = Array::zeros((3, 2), Dtype::Float32).unwrap();

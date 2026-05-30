@@ -401,6 +401,7 @@ mod tests {
     use mlx::{Array, Dtype};
 
     use crate::nn::Linear;
+    use serial_test::serial;
 
     fn rand_w(shape: &[i32], dtype: Dtype) -> Array {
         let n: usize = shape.iter().map(|d| *d as usize).product();
@@ -485,6 +486,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn from_components_carries_config() {
         let cfg = small_cfg();
         let layer = build_decoder_layer(cfg);
@@ -518,6 +520,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_shape_and_dtype_fp32() {
         let cfg = small_cfg();
         let layer = build_decoder_layer(cfg);
@@ -530,6 +533,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_shape_and_dtype_bf16() {
         // bf16 input (with bf16 norm weights) → bf16 output preserved.
         let cfg = small_cfg();
@@ -607,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_residual_paths_zero_blocks_yield_input() {
         // Zero out attn (o_proj=0) AND mlp (down_proj=0); the two residual chains
         // independently reduce DecoderLayer to identity:  out = x + 0 + 0 = x.
@@ -685,6 +690,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn from_components_full_carries_kind_and_config() {
         let cfg = small_cfg();
         let layer = build_decoder_layer(cfg); // existing helper builds Full variant
@@ -693,6 +699,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn from_components_linear_carries_kind() {
         // GatedDeltaNet::from_components requires P3b3 internals (Conv1d,
         // RmsNormGated, Linear etc.) that are heavy to wire up here. Keep this
@@ -703,6 +710,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn full_layer_with_linear_cache_errors() {
         let cfg = small_cfg();
         let layer = build_decoder_layer(cfg);
@@ -730,6 +738,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn linear_cache_full_arm_compiles() {
         // The Linear-layer + Full-cache mismatch arm in forward_on requires
         // a real GatedDeltaNet to construct (heavy P3b3 internals). The

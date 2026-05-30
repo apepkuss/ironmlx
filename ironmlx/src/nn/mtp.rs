@@ -274,6 +274,7 @@ mod tests {
     use mlx::{Array, Dtype};
 
     use crate::nn::{GatedAttention, GatedAttentionConfig, Mlp};
+    use serial_test::serial;
 
     fn rand_w(shape: &[i32], dtype: Dtype) -> Array {
         let n: usize = shape.iter().map(|d| *d as usize).product();
@@ -375,6 +376,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn mtp_construction_components() {
         let mtp = build_mtp(1);
         assert_eq!(mtp.num_layers(), 1);
@@ -383,6 +385,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_shape_and_dtype() {
         let mtp = build_mtp(1);
         let cfg = small_layer_cfg();
@@ -411,6 +414,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_validates_shape_mismatch() {
         let mtp = build_mtp(1);
         let cfg = small_layer_cfg();
@@ -434,6 +438,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_validates_cache_layers_mismatch() {
         let mtp = build_mtp(1); // 1 MTP layer
         let cfg = small_layer_cfg();
@@ -475,6 +480,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_validates_rank_mismatch() {
         // Rank-2 hidden_states (missing seq dim) → must Err with "rank-3" message.
         let mtp = build_mtp(1);
@@ -499,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_validates_hidden_size_mismatch() {
         // Last-axis mismatch (hidden_size in input != cfg.hidden_size) → must Err.
         let mtp = build_mtp(1);
@@ -525,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
     fn forward_concat_layout_e_then_h() {
         // Pin concat order [e, h] (NOT [h, e]) — matches mlx-lm qwen3_5_mtp.py:380.
         //
