@@ -4,6 +4,7 @@ pub mod config;
 pub mod mla_attention;
 pub mod mla_cache;
 pub mod model;
+pub mod moe;
 pub mod rope;
 
 pub use config::Glm4MoeLiteConfig;
