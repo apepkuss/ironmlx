@@ -2775,7 +2775,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            per_row_pixel_values: &[Option<&mlx::Array>],
+            per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
             _cache: Option<&mut [crate::nn::LayerCache]>,
@@ -2792,7 +2792,7 @@ mod tests {
 
         fn compute_vision_embeds(
             &self,
-            _pixel_values: &mlx::Array,
+            _pixel_values: &[mlx::Array],
             grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
@@ -2967,7 +2967,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
             _cache: Option<&mut [crate::nn::LayerCache]>,
@@ -2978,7 +2978,7 @@ mod tests {
 
         fn compute_vision_embeds(
             &self,
-            _pixel_values: &mlx::Array,
+            _pixel_values: &[mlx::Array],
             _grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
@@ -3307,7 +3307,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
-            pixel_values: Some(pixel_values),
+            pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
@@ -3353,7 +3353,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
-            pixel_values: Some(pixel_values),
+            pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32), (1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
@@ -3399,7 +3399,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
-            pixel_values: Some(pixel_values),
+            pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,

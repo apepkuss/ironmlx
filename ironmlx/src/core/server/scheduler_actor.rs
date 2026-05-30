@@ -1257,7 +1257,7 @@ mod tests {
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
             _per_row_lens: &[i32],
-            _per_row_pixel_values: &[Option<&mlx::Array>],
+            _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
             _cache: Option<&mut [crate::nn::LayerCache]>,
@@ -1268,7 +1268,7 @@ mod tests {
 
         fn compute_vision_embeds(
             &self,
-            _pixel_values: &mlx::Array,
+            _pixel_values: &[mlx::Array],
             _grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
