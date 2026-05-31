@@ -107,8 +107,10 @@ fn per_row_slice_last(
 /// `0..=(Lc - L + q)`; later positions are `-inf`-masked. Identical semantics
 /// to `generate::build_chunked_prefill_attention_mask` with
 /// `chunk_start = Lc - L`, `chunk_len = L`, and replicates the implicit
-/// `mask_mode="causal"` behaviour Qwen relies on. B is always 1 here (GLM
-/// serves `--b-max 1`); the `[1, 1, L, Lc]` mask broadcasts across heads.
+/// `mask_mode="causal"` behaviour Qwen relies on. B is always 1 here because
+/// this mask=None path only fires on the B=1 prefix-forward / chunked-prefill
+/// callers (batched_prefill always supplies an explicit mask); the
+/// `[1, 1, L, Lc]` mask broadcasts across heads.
 fn build_internal_causal_mask(l: i32, lc: i32, dtype: Dtype) -> Result<Array> {
     let chunk_start = lc - l;
     if chunk_start < 0 {
@@ -297,7 +299,9 @@ impl Glm4MoeLiteModel {
         let owned_mask: Option<Array> = match mask {
             Some(_) => None,
             None if seq_len > 1 => {
-                // B is always 1 on the mask=None prefill paths (per b-max=1).
+                // B is always 1 here: mask=None only happens on the B=1
+                // prefix-forward / chunked-prefill paths (batched_prefill
+                // always passes an explicit mask).
                 let lc = offsets_vec.iter().copied().max().unwrap_or(0) + seq_len;
                 Some(build_internal_causal_mask(seq_len, lc, Dtype::Bfloat16)?)
             }

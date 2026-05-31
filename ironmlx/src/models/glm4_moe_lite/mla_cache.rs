@@ -633,4 +633,100 @@ mod tests {
         let mut dst = MlaLatentCache::new(1, 8, 2, Dtype::Float32, 8); // kv_lora differs
         assert!(dst.adopt_row_from(&src, 0, 0).is_err());
     }
+
+    #[test]
+    fn adopt_row_rejects_dst_row_out_of_bounds() {
+        // dst_row >= self.batch must Err. Mirrors KVCache out-of-bounds case 1.
+        let src = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8);
+        let mut dst = MlaLatentCache::new(2, 4, 2, Dtype::Float32, 8);
+        let r = dst.adopt_row_from(&src, 2, 0); // dst_row=2 with batch=2
+        assert!(r.is_err(), "dst_row=2 with batch=2 should Err");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("dst_row") || msg.contains("batch"),
+            "msg should mention dst_row OOB; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn adopt_row_rejects_src_row_out_of_bounds() {
+        // src_row >= src.batch must Err. Mirrors KVCache out-of-bounds case 2.
+        let src = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8);
+        let mut dst = MlaLatentCache::new(2, 4, 2, Dtype::Float32, 8);
+        let r = dst.adopt_row_from(&src, 0, 1); // src_row=1 with src.batch=1
+        assert!(r.is_err(), "src_row=1 with src.batch=1 should Err");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("src_row") || msg.contains("batch"),
+            "msg should mention src_row OOB; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn adopt_row_rejects_cap_exceeded() {
+        // src writes 6 tokens (offset=6); dst has cap=4 < 6 → must Err before any
+        // grow. Mirrors KVCache out-of-bounds case 3.
+        let mut src = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8).with_step(8);
+        let c_kv = make_input(6, 4);
+        let k_pe = make_input(6, 2);
+        src.update_and_fetch_on(&c_kv, &k_pe, &[6], ()).unwrap();
+        assert_eq!(src.offsets(), &[6]);
+
+        let mut dst = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 4).with_step(4);
+        let r = dst.adopt_row_from(&src, 0, 0); // src.offsets[0]=6 > dst.cap=4
+        assert!(r.is_err(), "src.offsets=6 > self.cap=4 should Err");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("cap"), "msg should mention cap; got: {msg}");
+    }
+
+    #[test]
+    fn adopt_row_grows_on_adopt_and_copies_data() {
+        // Exercise the grow-on-adopt branch: dst is built with a small step so the
+        // adopted src offset (6) exceeds the dst's grown-once capacity and forces a
+        // second grow_to mid-adopt. (Production pins this away via step == cap, but
+        // the branch must still copy data + offset correctly.)
+        // src: batch=1, kv_lora=4, rope=2, cap=8. Fill row 0 with 6 tokens:
+        // c_kv = 5.0, k_pe = 6.0.
+        let mut src = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8).with_step(8);
+        let c_kv: Array = (&[5.0_f32; 6 * 4][..], (1_i32, 1, 6, 4))
+            .try_into()
+            .unwrap();
+        let k_pe: Array = (&[6.0_f32; 6 * 2][..], (1_i32, 1, 6, 2))
+            .try_into()
+            .unwrap();
+        src.update_and_fetch_on(&c_kv, &k_pe, &[6], ()).unwrap();
+        assert_eq!(src.offsets(), &[6]);
+
+        // dst: step=2 so the first grow during adopt lands at ceil(6/2)*2 = 6,
+        // crossing the lazy initial capacity of 0. cap=8 leaves headroom.
+        let mut dst = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8).with_step(2);
+        dst.adopt_row_from(&src, 0, 0).unwrap();
+        assert_eq!(
+            dst.offsets(),
+            &[6],
+            "dst row0 offset must == src row0 offset after grow-on-adopt"
+        );
+
+        // Read back by appending 1 token and fetching the full [1,1,7,*] history
+        // (avoids the all-zero fast path). Tokens 0..=5 must be the adopted values.
+        let new_kv: Array = (&[8.0_f32; 4][..], (1_i32, 1, 1, 4)).try_into().unwrap();
+        let new_pe: Array = (&[9.0_f32; 2][..], (1_i32, 1, 1, 2)).try_into().unwrap();
+        let (kv_f, pe_f) = dst.update_and_fetch_on(&new_kv, &new_pe, &[1], ()).unwrap();
+        assert_eq!(kv_f.shape().as_slice(), &[1, 1, 7, 4]);
+        assert_eq!(dst.offsets(), &[7]);
+        let kv: Vec<f32> = kv_f.to_vec().unwrap(); // [1,1,7,4] row-major
+        for v in kv.iter().take(6 * 4) {
+            assert_eq!(*v, 5.0, "adopted c_kv tokens 0..=5 must be 5.0");
+        }
+        for v in kv.iter().take(7 * 4).skip(6 * 4) {
+            assert_eq!(*v, 8.0, "appended c_kv token 6 must be 8.0");
+        }
+        let pe: Vec<f32> = pe_f.to_vec().unwrap(); // [1,1,7,2]
+        for v in pe.iter().take(6 * 2) {
+            assert_eq!(*v, 6.0, "adopted k_pe tokens 0..=5 must be 6.0");
+        }
+        for v in pe.iter().take(7 * 2).skip(6 * 2) {
+            assert_eq!(*v, 9.0, "appended k_pe token 6 must be 9.0");
+        }
+    }
 }

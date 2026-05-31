@@ -351,9 +351,29 @@ async fn mid_admit_row_reuse_matches_serial() {
         &tokenizer,
         "Summarize the theory of relativity for a curious child.",
     );
-    assert_ne!(prompt_a.len(), prompt_b.len());
-    assert_ne!(prompt_a.len(), prompt_c.len());
-    assert_ne!(prompt_b.len(), prompt_c.len());
+    // All three lengths must differ to exercise per-row heterogeneous cache
+    // offsets through prefill, compaction, and mid-admit.
+    assert_ne!(
+        prompt_a.len(),
+        prompt_b.len(),
+        "prompts A/B must differ in length (got A={} B={})",
+        prompt_a.len(),
+        prompt_b.len()
+    );
+    assert_ne!(
+        prompt_a.len(),
+        prompt_c.len(),
+        "prompts A/C must differ in length (got A={} C={})",
+        prompt_a.len(),
+        prompt_c.len()
+    );
+    assert_ne!(
+        prompt_b.len(),
+        prompt_c.len(),
+        "prompts B/C must differ in length (got B={} C={})",
+        prompt_b.len(),
+        prompt_c.len()
+    );
     eprintln!(
         "prompt lengths: A={} B={} C={}",
         prompt_a.len(),
@@ -408,19 +428,35 @@ async fn mid_admit_row_reuse_matches_serial() {
     let cb_b: Vec<u32> = events_b.iter().map(|e| e.token).collect();
     let cb_c: Vec<u32> = events_c.iter().map(|e| e.token).collect();
 
-    eprintln!("serial_a (b=1)  = {serial_a:?}");
-    eprintln!("cb_a (mid-admit) = {cb_a:?}");
-    eprintln!("serial_b (b=1)  = {serial_b:?}");
-    eprintln!("cb_b (mid-admit) = {cb_b:?}");
-    eprintln!("serial_c (b=1)  = {serial_c:?}");
-    eprintln!("cb_c (reused slot) = {cb_c:?}");
+    eprintln!("serial_a   (b=1)       = {serial_a:?}");
+    eprintln!("cb_a       (mid-admit) = {cb_a:?}");
+    eprintln!("serial_b   (b=1)       = {serial_b:?}");
+    eprintln!("cb_b       (mid-admit) = {cb_b:?}");
+    eprintln!("serial_c   (b=1)       = {serial_c:?}");
+    eprintln!("cb_c       (reused)    = {cb_c:?}");
 
-    // Each run produces exactly `max_new` tokens (stop disabled).
-    assert_eq!(events_a.len(), max_new_a, "A event count");
+    // Each run produces exactly `max_new` tokens (stop disabled), finishing
+    // with reason "length".
+    assert_eq!(
+        events_a.len(),
+        max_new_a,
+        "A produced {} events; want {max_new_a}",
+        events_a.len()
+    );
     assert_eq!(events_a.last().unwrap().finish_reason, Some("length"));
-    assert_eq!(events_b.len(), max_new_b, "B event count");
+    assert_eq!(
+        events_b.len(),
+        max_new_b,
+        "B produced {} events; want {max_new_b}",
+        events_b.len()
+    );
     assert_eq!(events_b.last().unwrap().finish_reason, Some("length"));
-    assert_eq!(events_c.len(), max_new_c, "C event count");
+    assert_eq!(
+        events_c.len(),
+        max_new_c,
+        "C produced {} events; want {max_new_c}",
+        events_c.len()
+    );
     assert_eq!(events_c.last().unwrap().finish_reason, Some("length"));
     assert_eq!(serial_a.len(), max_new_a, "serial A length");
     assert_eq!(serial_b.len(), max_new_b, "serial B length");

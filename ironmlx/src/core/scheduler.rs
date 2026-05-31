@@ -2013,7 +2013,7 @@ impl<M: Model> Scheduler<M> {
             .max(prompt_len)
             .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
 
-        // Dtype from main cache's first Full layer.
+        // Dtype from the first cache layer (Full or Mla).
         let dtype = {
             let main_cache = self
                 .cache
