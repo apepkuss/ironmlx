@@ -11,9 +11,7 @@ use clap::{Parser, ValueEnum};
 use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::{GenerateRequest, GenerationStream, Loader, Model, Sampler, Scheduler};
 use ironmlx::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
-use ironmlx::models::{
-    is_qwen36_moe_config, Glm4MoeLiteModel, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel,
-};
+use ironmlx::models::{Glm4MoeLiteModel, ModelArchitecture, Qwen35Model, Qwen35MoeModel};
 use ironmlx::Tokenizer;
 use serde::Serialize;
 
@@ -131,40 +129,28 @@ fn main() -> Result<()> {
     let load_started = Instant::now();
     let loader = Loader::open(&args.model).context("Loader::open")?;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-    let model_type = loader
-        .config_raw_value()
-        .get("model_type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("config.json missing model_type"))?
-        .to_owned();
+    let architecture = ModelArchitecture::from_config_value(loader.config_raw_value())?;
 
-    match model_type.as_str() {
-        "qwen3_5" => {
+    match architecture {
+        ModelArchitecture::Qwen35Dense => {
             let model = Qwen35Model::from_loader(&loader).context("Qwen35Model::from_loader")?;
             let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
             run_for_model(&model, &tokenizer, &args, load_ms)
         }
-        "qwen3_5_moe" => {
-            if is_qwen36_moe_config(loader.config_raw_value()) {
-                let model =
-                    Qwen36MoeModel::from_loader(&loader).context("Qwen36MoeModel::from_loader")?;
-                let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
-                run_for_model(&model, &tokenizer, &args, load_ms)
-            } else {
-                let model =
-                    Qwen35MoeModel::from_loader(&loader).context("Qwen35MoeModel::from_loader")?;
-                let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
-                run_for_model(&model, &tokenizer, &args, load_ms)
-            }
+        ModelArchitecture::Qwen35Moe => {
+            let model =
+                Qwen35MoeModel::from_loader(&loader).context("Qwen35MoeModel::from_loader")?;
+            let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+            run_for_model(&model, &tokenizer, &args, load_ms)
         }
-        "glm4_moe_lite" => {
+        ModelArchitecture::Glm4MoeLite => {
             let model =
                 Glm4MoeLiteModel::from_loader(&loader).context("Glm4MoeLiteModel::from_loader")?;
             let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
             run_for_model(&model, &tokenizer, &args, load_ms)
         }
-        other => Err(anyhow!(
-            "unsupported model_type: {other} (expected 'qwen3_5', 'qwen3_5_moe', or 'glm4_moe_lite')"
+        ModelArchitecture::Gemma4 => Err(anyhow!(
+            "unsupported model_type: gemma4 (expected 'qwen3_5', 'qwen3_5_moe', or 'glm4_moe_lite')"
         )),
     }
 }

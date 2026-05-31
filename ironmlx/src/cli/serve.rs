@@ -161,15 +161,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
     }
 
     let model_type = read_model_type(&model_dir)?;
-    let loader = match model_type.as_str() {
-        "gemma4" => Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?,
-        _ => {
-            // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
-            Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
-        }
-    };
+    let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
+    // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
+    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-    let vision_input = if model_type == "gemma4" {
+    let vision_input = if architecture == crate::models::ModelArchitecture::Gemma4 {
         let cfg = crate::models::gemma4::Gemma4Config::from_loader(&loader)
             .context("Gemma4Config::from_loader")?;
         cfg.vision_config
@@ -178,33 +174,26 @@ pub fn run(args: ServeArgs) -> Result<()> {
         None
     };
 
-    match model_type.as_str() {
-        "qwen3_5" => {
+    match architecture {
+        crate::models::ModelArchitecture::Qwen35Dense => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
             serve_with_model(model, tokenizer, &args, vision_input)
         }
-        "qwen3_5_moe" => {
-            if crate::models::is_qwen36_moe_config(loader.config_raw_value()) {
-                let model = crate::models::Qwen36MoeModel::from_loader(&loader)
-                    .context("Qwen36MoeModel::from_loader")?;
-                serve_with_model(model, tokenizer, &args, vision_input)
-            } else {
-                let model = crate::models::Qwen35MoeModel::from_loader(&loader)
-                    .context("Qwen35MoeModel::from_loader")?;
-                serve_with_model(model, tokenizer, &args, vision_input)
-            }
+        crate::models::ModelArchitecture::Qwen35Moe => {
+            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                .context("Qwen35MoeModel::from_loader")?;
+            serve_with_model(model, tokenizer, &args, vision_input)
         }
-        "gemma4" => {
+        crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
             serve_with_model(model, tokenizer, &args, vision_input)
         }
-        "glm4_moe_lite" => {
+        crate::models::ModelArchitecture::Glm4MoeLite => {
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
                 .context("Glm4MoeLiteModel::from_loader")?;
             serve_with_model(model, tokenizer, &args, None)
         }
-        other => Err(anyhow::anyhow!("unsupported model_type: {other}")),
     }
 }

@@ -308,43 +308,31 @@ pub fn run(args: GenerateArgs) -> Result<()> {
     };
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
 
-    let model_type = loader
-        .config_raw_value()
-        .get("model_type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))?
-        .to_owned();
+    let architecture =
+        crate::models::ModelArchitecture::from_config_value(loader.config_raw_value())?;
+    let model_type = architecture.model_type();
 
-    match model_type.as_str() {
-        "qwen3_5" => {
+    match architecture {
+        crate::models::ModelArchitecture::Qwen35Dense => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
-            run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
+            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
-        "qwen3_5_moe" => {
-            if crate::models::is_qwen36_moe_config(loader.config_raw_value()) {
-                let model = crate::models::Qwen36MoeModel::from_loader(&loader)
-                    .context("Qwen36MoeModel::from_loader")?;
-                run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
-            } else {
-                let model = crate::models::Qwen35MoeModel::from_loader(&loader)
-                    .context("Qwen35MoeModel::from_loader")?;
-                run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
-            }
+        crate::models::ModelArchitecture::Qwen35Moe => {
+            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                .context("Qwen35MoeModel::from_loader")?;
+            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
-        "gemma4" => {
+        crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
-            run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
+            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
-        "glm4_moe_lite" => {
+        crate::models::ModelArchitecture::Glm4MoeLite => {
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
                 .context("Glm4MoeLiteModel::from_loader")?;
-            run_generation_with_model(&model, &tokenizer, &loader, &model_type, &args)
+            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
-        other => Err(anyhow::anyhow!(
-            "unsupported model_type: {other} (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', or 'glm4_moe_lite')"
-        )),
     }
 }
 
