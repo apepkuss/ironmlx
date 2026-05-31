@@ -30,6 +30,22 @@ use crate::models::glm4_moe_lite::config::Glm4MoeLiteConfig;
 use crate::models::qwen3_5_moe::sparse_moe::RoutedExperts;
 use crate::nn::{Linear, Mlp};
 
+#[cfg(feature = "p5h-profile")]
+fn p5h_layer_fields(layer_idx: i32) -> crate::core::p5h::SpanFields {
+    crate::core::p5h::SpanFields {
+        layer_idx: Some(layer_idx),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "p5h-profile")]
+fn p5h_eval(arrays: &[&Array]) -> Result<()> {
+    if crate::core::p5h::is_measurement_eval_probes_active() {
+        mlx::transforms::eval(arrays)?;
+    }
+    Ok(())
+}
+
 /// noaux_tc router: sigmoid scores + additive selection bias → top-k experts.
 ///
 /// Mirrors mlx_lm `group_expert_select` for the `n_group == 1` path (no group
@@ -215,28 +231,90 @@ impl Glm4MoeBlock {
         let flat =
             reshape_on(x, [bs, h], target).context("Glm4MoeBlock: reshape [B,S,H] → [BS,H]")?;
 
-        // Router: plain-float Linear logits → noaux_tc sigmoid selection.
-        let logits = self
-            .gate
-            .forward_on(&flat, target)
-            .context("Glm4MoeBlock: router gate forward")?; // [BS, E]
-        let (inds, weights) =
-            noaux_tc_route(&logits, &self.bias, self.k, self.norm, self.scale, target)?;
+        #[cfg(feature = "p5h-profile")]
+        {
+            let (inds, weights) = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "glm_moe_router_noaux_topk",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<(Array, Array)> {
+                    let logits = self
+                        .gate
+                        .forward_on(&flat, target)
+                        .context("Glm4MoeBlock: router gate forward")?; // [BS, E]
+                    let (inds, weights) =
+                        noaux_tc_route(&logits, &self.bias, self.k, self.norm, self.scale, target)?;
+                    p5h_eval(&[&inds, &weights])?;
+                    Ok((inds, weights))
+                },
+            )?;
 
-        // Routed experts (SwitchGLU-style combine) + ungated shared expert.
-        let routed = self
-            .experts
-            .apply_experts(&flat, &inds, &weights, target)
-            .context("Glm4MoeBlock: routed experts")?; // [BS, H]
-        let shared = self
-            .shared
-            .forward_on(&flat, target)
-            .context("Glm4MoeBlock: shared expert forward")?; // [BS, H] (UNGATED)
+            let routed = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "glm_moe_routed_experts",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<Array> {
+                    let routed = self
+                        .experts
+                        .apply_experts(&flat, &inds, &weights, target, layer_idx)
+                        .context("Glm4MoeBlock: routed experts")?;
+                    p5h_eval(&[&routed])?;
+                    Ok(routed)
+                },
+            )?; // [BS, H]
 
-        let out_flat = routed
-            .try_add_on(&shared, target)
-            .context("Glm4MoeBlock: routed + shared")?; // [BS, H]
-        reshape_on(&out_flat, [b, s, h], target).context("Glm4MoeBlock: reshape [BS,H] → [B,S,H]")
+            let shared = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "glm_moe_shared_expert",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<Array> {
+                    let shared = self
+                        .shared
+                        .forward_on(&flat, target)
+                        .context("Glm4MoeBlock: shared expert forward")?;
+                    p5h_eval(&[&shared])?;
+                    Ok(shared)
+                },
+            )?; // [BS, H] (UNGATED)
+
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "glm_moe_output_sum",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<Array> {
+                    let out_flat = routed
+                        .try_add_on(&shared, target)
+                        .context("Glm4MoeBlock: routed + shared")?; // [BS, H]
+                    let out = reshape_on(&out_flat, [b, s, h], target)
+                        .context("Glm4MoeBlock: reshape [BS,H] → [B,S,H]")?;
+                    p5h_eval(&[&out])?;
+                    Ok(out)
+                },
+            )
+        }
+
+        #[cfg(not(feature = "p5h-profile"))]
+        {
+            // Router: plain-float Linear logits → noaux_tc sigmoid selection.
+            let logits = self
+                .gate
+                .forward_on(&flat, target)
+                .context("Glm4MoeBlock: router gate forward")?; // [BS, E]
+            let (inds, weights) =
+                noaux_tc_route(&logits, &self.bias, self.k, self.norm, self.scale, target)?;
+
+            // Routed experts (SwitchGLU-style combine) + ungated shared expert.
+            let routed = self
+                .experts
+                .apply_experts(&flat, &inds, &weights, target, layer_idx)
+                .context("Glm4MoeBlock: routed experts")?; // [BS, H]
+            let shared = self
+                .shared
+                .forward_on(&flat, target)
+                .context("Glm4MoeBlock: shared expert forward")?; // [BS, H] (UNGATED)
+
+            let out_flat = routed
+                .try_add_on(&shared, target)
+                .context("Glm4MoeBlock: routed + shared")?; // [BS, H]
+            reshape_on(&out_flat, [b, s, h], target)
+                .context("Glm4MoeBlock: reshape [BS,H] → [B,S,H]")
+        }
     }
 }
 

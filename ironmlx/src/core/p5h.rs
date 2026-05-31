@@ -687,7 +687,9 @@ pub fn with_p5h_span_from_current_trace<T>(
 ///     `input_norm`, `attention_path`, `residual_overhead`,
 ///     `post_attention_norm`, `mlp_path`.
 ///   * T2 GatedAttention substeps under `attention_path`.
+///   * GLM MLA substeps under `attention_path`.
 ///   * T3 MoE substeps under `mlp_path` (incl. shared expert + routing).
+///   * GLM noaux MoE substeps under `mlp_path`.
 ///   * GDN 11 substeps under `attention_path` for hybrid models.
 ///   * Cache + lm_head: `cache_state_update`,
 ///     `slice_last_and_project_lm_head`.
@@ -712,6 +714,14 @@ const LANE_B_ALLOWED_TRY_SPAN_NAMES: &[&str] = &[
     "fused_sdpa",
     "gate_sigmoid_mul",
     "o_proj",
+    "glm_mla_project_qkv",
+    "glm_mla_cache_update_fetch",
+    "glm_mla_rope_scores",
+    "glm_mla_embed_q",
+    "glm_mla_sdpa",
+    "glm_mla_unembed_out",
+    "glm_mla_prefill_unfold_k",
+    "glm_mla_prefill_unfold_v",
     "router_logits_softmax_topk",
     "routing_sort_pack",
     "gather_qmm_gate_up",
@@ -723,6 +733,14 @@ const LANE_B_ALLOWED_TRY_SPAN_NAMES: &[&str] = &[
     "routing_unsort_weighted_reduce",
     "shared_expert",
     "moe_output_sum",
+    "glm_moe_router_noaux_topk",
+    "glm_moe_routed_experts",
+    "glm_moe_routed_gate_up_gather_qmm",
+    "glm_moe_routed_swiglu",
+    "glm_moe_routed_down_gather_qmm",
+    "glm_moe_routed_weighted_reduce",
+    "glm_moe_shared_expert",
+    "glm_moe_output_sum",
     "cache_state_update",
     "slice_last_and_project_lm_head",
     "gda_step_1a_in_proj_qkvz",
@@ -1144,6 +1162,42 @@ mod tests {
                 "P5h+1 T2 Lane-B deep span_name `{name}` MUST emit (advance span-open count by 1); got id_before={id_before}, id_after={id_after}",
             );
             // Stack returned to base_parent after body.
+            P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
+        }
+    }
+
+    #[test]
+    fn try_with_span_lane_b_emits_glm_deep_names() {
+        let ctx = lane_b_ctx();
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        for name in [
+            "glm_mla_project_qkv",
+            "glm_mla_cache_update_fetch",
+            "glm_mla_rope_scores",
+            "glm_mla_embed_q",
+            "glm_mla_sdpa",
+            "glm_mla_unembed_out",
+            "glm_mla_prefill_unfold_k",
+            "glm_mla_prefill_unfold_v",
+            "glm_moe_router_noaux_topk",
+            "glm_moe_routed_experts",
+            "glm_moe_routed_gate_up_gather_qmm",
+            "glm_moe_routed_swiglu",
+            "glm_moe_routed_down_gather_qmm",
+            "glm_moe_routed_weighted_reduce",
+            "glm_moe_shared_expert",
+            "glm_moe_output_sum",
+        ] {
+            let id_before = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
+            let result = try_with_p5h_span_from_current_trace(name, SpanFields::default, || 19u32);
+            let id_after = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
+            assert_eq!(result, 19);
+            assert_eq!(
+                id_after,
+                id_before + 1,
+                "GLM Lane-B deep span_name `{name}` MUST emit"
+            );
             P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
         }
     }

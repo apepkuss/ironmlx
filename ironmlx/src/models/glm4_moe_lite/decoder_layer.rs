@@ -5,11 +5,8 @@
 //! FFN → residual`. The FFN is the dense [`Mlp`] for layer 0 (`first_k_dense_replace`)
 //! and the noaux_tc [`Glm4MoeBlock`] for layers `>= first_k_dense_replace`.
 //!
-//! p5h profiling spans (see `qwen3_5_moe/decoder_layer.rs`) are intentionally
-//! NOT wired here: this is the first correct GLM integration and the plain
-//! residual path keeps the hot path free of profiling-only branching. A future
-//! task can add `#[cfg(feature = "p5h-profile")]` spans mirroring the Qwen MoE
-//! layer if GLM attribution is needed.
+//! p5h profiling spans mirror `qwen3_5_moe/decoder_layer.rs` under the
+//! `p5h-profile` feature only; default builds keep the plain hot path.
 
 use anyhow::Result;
 use mlx::{Array, StreamOrDevice};
@@ -21,6 +18,14 @@ use super::config::Glm4MoeLiteConfig;
 use super::mla_attention::MlaAttention;
 use super::mla_cache::MlaLatentCache;
 use super::moe::Glm4MoeBlock;
+
+#[cfg(feature = "p5h-profile")]
+fn p5h_layer_fields(layer_idx: i32) -> crate::core::p5h::SpanFields {
+    crate::core::p5h::SpanFields {
+        layer_idx: Some(layer_idx),
+        ..Default::default()
+    }
+}
 
 /// Feed-forward sub-block: dense SwiGLU MLP (layer 0) or the MoE router block.
 ///
@@ -87,17 +92,80 @@ impl Glm4DecoderLayer {
         layer_idx: i32,
     ) -> Result<Array> {
         let target = target.into();
-        let normed_in = self.input_layernorm.forward_on(x, target)?;
-        let attn = self
-            .attn
-            .forward_on(&normed_in, offset, cache, per_row_lens, mask, target)?;
-        let h = mlx::ops::binary::add_on(x, &attn, target)?;
+        #[cfg(feature = "p5h-profile")]
+        {
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "decoder_layer_N",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<Array> {
+                    let normed_in = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                        "input_norm",
+                        || p5h_layer_fields(layer_idx),
+                        || self.input_layernorm.forward_on(x, target),
+                    )?;
+                    let attn = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                        "attention_path",
+                        || p5h_layer_fields(layer_idx),
+                        || {
+                            self.attn.forward_on(
+                                &normed_in,
+                                offset,
+                                cache,
+                                per_row_lens,
+                                mask,
+                                target,
+                                layer_idx,
+                            )
+                        },
+                    )?;
+                    let h = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                        "residual_overhead",
+                        || p5h_layer_fields(layer_idx),
+                        || mlx::ops::binary::add_on(x, &attn, target),
+                    )?;
 
-        let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
-        let ffn_out = match &self.ffn {
-            Ffn::Dense(m) => m.forward_on(&normed_post, target)?,
-            Ffn::Moe(b) => b.forward_on(&normed_post, target, layer_idx)?,
-        };
-        Ok(mlx::ops::binary::add_on(&h, &ffn_out, target)?)
+                    let normed_post = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                        "post_attention_norm",
+                        || p5h_layer_fields(layer_idx),
+                        || self.post_attention_layernorm.forward_on(&h, target),
+                    )?;
+                    let ffn_out = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                        "mlp_path",
+                        || p5h_layer_fields(layer_idx),
+                        || match &self.ffn {
+                            Ffn::Dense(m) => m.forward_on(&normed_post, target),
+                            Ffn::Moe(b) => b.forward_on(&normed_post, target, layer_idx),
+                        },
+                    )?;
+                    crate::core::p5h::try_with_p5h_span_from_current_trace(
+                        "residual_overhead",
+                        || p5h_layer_fields(layer_idx),
+                        || -> Result<Array> { Ok(mlx::ops::binary::add_on(&h, &ffn_out, target)?) },
+                    )
+                },
+            )
+        }
+
+        #[cfg(not(feature = "p5h-profile"))]
+        {
+            let normed_in = self.input_layernorm.forward_on(x, target)?;
+            let attn = self.attn.forward_on(
+                &normed_in,
+                offset,
+                cache,
+                per_row_lens,
+                mask,
+                target,
+                layer_idx,
+            )?;
+            let h = mlx::ops::binary::add_on(x, &attn, target)?;
+
+            let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
+            let ffn_out = match &self.ffn {
+                Ffn::Dense(m) => m.forward_on(&normed_post, target)?,
+                Ffn::Moe(b) => b.forward_on(&normed_post, target, layer_idx)?,
+            };
+            Ok(mlx::ops::binary::add_on(&h, &ffn_out, target)?)
+        }
     }
 }

@@ -27,6 +27,22 @@ use super::config::Glm4MoeLiteConfig;
 use super::mla_cache::MlaLatentCache;
 use super::rope::Glm4Rope;
 
+#[cfg(feature = "p5h-profile")]
+fn p5h_layer_fields(layer_idx: i32) -> crate::core::p5h::SpanFields {
+    crate::core::p5h::SpanFields {
+        layer_idx: Some(layer_idx),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "p5h-profile")]
+fn p5h_eval(arrays: &[&Array]) -> Result<()> {
+    if crate::core::p5h::is_measurement_eval_probes_active() {
+        mlx::transforms::eval(arrays)?;
+    }
+    Ok(())
+}
+
 /// Per-head stacked quantized linear (mirrors omlx `QuantizedMultiLinear`).
 ///
 /// Weight is `[H, out, in/8]` (4-bit packed) with per-group `scales` and
@@ -309,6 +325,7 @@ impl MlaAttention {
         per_row_lens: &[i32],
         mask: Option<&Array>,
         target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
     ) -> Result<Array> {
         let target = target.into();
         let dims = x.shape();
@@ -317,10 +334,36 @@ impl MlaAttention {
         let l = s[1];
 
         // Shared prefix: q/kv down+up projections, latent split + norm, RoPE.
+        #[cfg(feature = "p5h-profile")]
+        let (q_nope, q_pe, c_kv_n, k_pe) = {
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "glm_mla_project_qkv",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<(Array, Array, Array, Array)> {
+                    let out = self.project_qkv(x, offset, target)?;
+                    p5h_eval(&[&out.0, &out.1, &out.2, &out.3])?;
+                    Ok(out)
+                },
+            )?
+        };
+        #[cfg(not(feature = "p5h-profile"))]
         let (q_nope, q_pe, c_kv_n, k_pe) = self.project_qkv(x, offset, target)?;
 
         // Append the new latent + k_pe and fetch the full history.
         // kv_latent: [B,1,Lc,kv_lora]; k_pe_all: [B,1,Lc,qk_rope].
+        #[cfg(feature = "p5h-profile")]
+        let (kv_latent, k_pe_all) = {
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "glm_mla_cache_update_fetch",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<(Array, Array)> {
+                    let out = cache.update_and_fetch_on(&c_kv_n, &k_pe, per_row_lens, target)?;
+                    p5h_eval(&[&out.0, &out.1])?;
+                    Ok(out)
+                },
+            )?
+        };
+        #[cfg(not(feature = "p5h-profile"))]
         let (kv_latent, k_pe_all) =
             cache.update_and_fetch_on(&c_kv_n, &k_pe, per_row_lens, target)?;
 
@@ -328,23 +371,59 @@ impl MlaAttention {
         // q_pe [B,H,L,qk_rope]; swapaxes(-1,-2) on the single-kv-head k_pe_all
         // [B,1,Lc,qk_rope] -> [B,1,qk_rope,Lc]; matmul broadcasts the kv head
         // across all H query heads -> pe_scores [B,H,L,Lc].
-        let q_pe_scaled = mlx::ops::binary::multiply_on(&q_pe, &self.scale_array()?, target)?;
-        let k_pe_t = k_pe_all.transpose_axes_on(&[0, 1, 3, 2][..], target)?;
-        let mut pe_scores = q_pe_scaled.matmul_on(&k_pe_t, target)?;
-
-        // Fold the engine's ADDITIVE float mask into pe_scores (see doc above).
-        if let Some(m) = mask {
-            pe_scores = mlx::ops::binary::add_on(&pe_scores, m, target)?;
-        }
+        #[cfg(feature = "p5h-profile")]
+        let pe_scores = {
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "glm_mla_rope_scores",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<Array> {
+                    let q_pe_scaled =
+                        mlx::ops::binary::multiply_on(&q_pe, &self.scale_array()?, target)?;
+                    let k_pe_t = k_pe_all.transpose_axes_on(&[0, 1, 3, 2][..], target)?;
+                    let mut pe_scores = q_pe_scaled.matmul_on(&k_pe_t, target)?;
+                    if let Some(m) = mask {
+                        pe_scores = mlx::ops::binary::add_on(&pe_scores, m, target)?;
+                    }
+                    p5h_eval(&[&pe_scores])?;
+                    Ok(pe_scores)
+                },
+            )?
+        };
+        #[cfg(not(feature = "p5h-profile"))]
+        let pe_scores = {
+            let q_pe_scaled = mlx::ops::binary::multiply_on(&q_pe, &self.scale_array()?, target)?;
+            let k_pe_t = k_pe_all.transpose_axes_on(&[0, 1, 3, 2][..], target)?;
+            let mut pe_scores = q_pe_scaled.matmul_on(&k_pe_t, target)?;
+            // Fold the engine's ADDITIVE float mask into pe_scores (see doc above).
+            if let Some(m) = mask {
+                pe_scores = mlx::ops::binary::add_on(&pe_scores, m, target)?;
+            }
+            pe_scores
+        };
 
         // Regime-dispatched SDPA + value un-fold (decode when L==1).
-        let out = self.attend_regime(&q_nope, &kv_latent, &pe_scores, l == 1, target)?;
+        let out = self.attend_regime(&q_nope, &kv_latent, &pe_scores, l == 1, target, layer_idx)?;
 
         // Merge heads: [B,H,L,v_head] -> [B,L,H,v_head] -> [B,L,H*v_head].
         let out = out
             .transpose_axes_on(&[0, 2, 1, 3][..], target)?
             .reshape_on((b, l, self.n_heads * self.v_head), target)?;
-        self.o_proj.forward_on(&out, target)
+        #[cfg(feature = "p5h-profile")]
+        {
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                "o_proj",
+                || p5h_layer_fields(layer_idx),
+                || -> Result<Array> {
+                    let out = self.o_proj.forward_on(&out, target)?;
+                    p5h_eval(&[&out])?;
+                    Ok(out)
+                },
+            )
+        }
+        #[cfg(not(feature = "p5h-profile"))]
+        {
+            self.o_proj.forward_on(&out, target)
+        }
     }
 
     /// Two-regime SDPA core: given the per-head NoPE query `q_nope`
@@ -377,8 +456,11 @@ impl MlaAttention {
         pe_scores: &Array,
         decode: bool,
         target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
     ) -> Result<Array> {
         let target = target.into();
+        #[cfg(not(feature = "p5h-profile"))]
+        let _ = layer_idx;
         // SDPA requires the `mask_arr` dtype to promote to the attention output
         // dtype (q/k/v promoted type). `pe_scores` accumulates in float32 (the
         // scaled-RoPE matmul promotes via the f32 `scale_array`, and the engine
@@ -395,34 +477,118 @@ impl MlaAttention {
         if decode {
             // DECODE: fold the query into latent space, attend against the
             // cached latent (K = V = kv_latent), then un-fold the output.
-            let q_lat = self.embed_q.apply(q_nope, true, target)?; // [B,H,L,kv_lora]
-            let o = mlx::fast::scaled_dot_product_attention_on(
-                &q_lat,
-                kv_latent,
-                kv_latent,
-                self.scale,
-                "array",
-                Some(&pe_scores),
-                None,
-                target,
-            )?; // [B,H,L,kv_lora]
-            self.unembed_out.apply(&o, true, target) // [B,H,L,v_head]
+            #[cfg(feature = "p5h-profile")]
+            {
+                let q_lat = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "glm_mla_embed_q",
+                    || p5h_layer_fields(layer_idx),
+                    || -> Result<Array> {
+                        let q_lat = self.embed_q.apply(q_nope, true, target)?;
+                        p5h_eval(&[&q_lat])?;
+                        Ok(q_lat)
+                    },
+                )?; // [B,H,L,kv_lora]
+                let o = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "glm_mla_sdpa",
+                    || p5h_layer_fields(layer_idx),
+                    || -> Result<Array> {
+                        let o = mlx::fast::scaled_dot_product_attention_on(
+                            &q_lat,
+                            kv_latent,
+                            kv_latent,
+                            self.scale,
+                            "array",
+                            Some(&pe_scores),
+                            None,
+                            target,
+                        )?;
+                        p5h_eval(&[&o])?;
+                        Ok(o)
+                    },
+                )?; // [B,H,L,kv_lora]
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "glm_mla_unembed_out",
+                    || p5h_layer_fields(layer_idx),
+                    || -> Result<Array> {
+                        let out = self.unembed_out.apply(&o, true, target)?;
+                        p5h_eval(&[&out])?;
+                        Ok(out)
+                    },
+                ) // [B,H,L,v_head]
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                let q_lat = self.embed_q.apply(q_nope, true, target)?; // [B,H,L,kv_lora]
+                let o = mlx::fast::scaled_dot_product_attention_on(
+                    &q_lat,
+                    kv_latent,
+                    kv_latent,
+                    self.scale,
+                    "array",
+                    Some(&pe_scores),
+                    None,
+                    target,
+                )?; // [B,H,L,kv_lora]
+                self.unembed_out.apply(&o, true, target) // [B,H,L,v_head]
+            }
         } else {
             // PREFILL: un-fold the cached latent into per-head K (qk_nope) and
             // V (v_head). SDPA tolerates V last-dim != Q/K last-dim (MLX only
             // enforces q==k last dim + k==v head-count).
-            let k = self.embed_q.apply(kv_latent, false, target)?; // [B,H,Lc,qk_nope]
-            let v = self.unembed_out.apply(kv_latent, true, target)?; // [B,H,Lc,v_head]
-            Ok(mlx::fast::scaled_dot_product_attention_on(
-                q_nope,
-                &k,
-                &v,
-                self.scale,
-                "array",
-                Some(&pe_scores),
-                None,
-                target,
-            )?) // [B,H,L,v_head]
+            #[cfg(feature = "p5h-profile")]
+            {
+                let k = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "glm_mla_prefill_unfold_k",
+                    || p5h_layer_fields(layer_idx),
+                    || -> Result<Array> {
+                        let k = self.embed_q.apply(kv_latent, false, target)?;
+                        p5h_eval(&[&k])?;
+                        Ok(k)
+                    },
+                )?; // [B,H,Lc,qk_nope]
+                let v = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "glm_mla_prefill_unfold_v",
+                    || p5h_layer_fields(layer_idx),
+                    || -> Result<Array> {
+                        let v = self.unembed_out.apply(kv_latent, true, target)?;
+                        p5h_eval(&[&v])?;
+                        Ok(v)
+                    },
+                )?; // [B,H,Lc,v_head]
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "glm_mla_sdpa",
+                    || p5h_layer_fields(layer_idx),
+                    || -> Result<Array> {
+                        let out = mlx::fast::scaled_dot_product_attention_on(
+                            q_nope,
+                            &k,
+                            &v,
+                            self.scale,
+                            "array",
+                            Some(&pe_scores),
+                            None,
+                            target,
+                        )?;
+                        p5h_eval(&[&out])?;
+                        Ok(out)
+                    },
+                ) // [B,H,L,v_head]
+            }
+            #[cfg(not(feature = "p5h-profile"))]
+            {
+                let k = self.embed_q.apply(kv_latent, false, target)?; // [B,H,Lc,qk_nope]
+                let v = self.unembed_out.apply(kv_latent, true, target)?; // [B,H,Lc,v_head]
+                Ok(mlx::fast::scaled_dot_product_attention_on(
+                    q_nope,
+                    &k,
+                    &v,
+                    self.scale,
+                    "array",
+                    Some(&pe_scores),
+                    None,
+                    target,
+                )?) // [B,H,L,v_head]
+            }
         }
     }
 
@@ -974,10 +1140,10 @@ mod tests {
         let pe_scores = arr(&pe_data, &[1, h as i32, 1, lc as i32]);
 
         let out_dec = mla
-            .attend_regime(&q_nope, &kv_latent, &pe_scores, true, ())
+            .attend_regime(&q_nope, &kv_latent, &pe_scores, true, (), -1)
             .unwrap();
         let out_pre = mla
-            .attend_regime(&q_nope, &kv_latent, &pe_scores, false, ())
+            .attend_regime(&q_nope, &kv_latent, &pe_scores, false, (), -1)
             .unwrap();
         assert_eq!(
             out_dec.shape().as_slice(),
@@ -1060,6 +1226,7 @@ mod tests {
                 &[3],
                 Some(&mask_seed),
                 (),
+                -1,
             )
             .unwrap();
             c
@@ -1073,7 +1240,7 @@ mod tests {
         // Decode seeing all 4 positions (after the write, Lc = 4): mask=None.
         let mut c_full = build_cache();
         let out_full = mla
-            .forward_on(&x4, &off(&[3], &[1]), &mut c_full, &[1], None, ())
+            .forward_on(&x4, &off(&[3], &[1]), &mut c_full, &[1], None, (), -1)
             .unwrap();
 
         // Decode with cached position 2 blocked via an additive mask -> output
@@ -1082,7 +1249,15 @@ mod tests {
         let neg = f32::NEG_INFINITY;
         let dmask = arr(&[0.0, 0.0, neg, 0.0], &[1, 1, 1, 4]);
         let out_mask = mla
-            .forward_on(&x4, &off(&[3], &[1]), &mut c_mask, &[1], Some(&dmask), ())
+            .forward_on(
+                &x4,
+                &off(&[3], &[1]),
+                &mut c_mask,
+                &[1],
+                Some(&dmask),
+                (),
+                -1,
+            )
             .unwrap();
 
         let vf = out_full.to_vec::<f32>().unwrap();
@@ -1109,14 +1284,14 @@ mod tests {
         let x3 = arr(&rnd((3 * hidden) as usize, 11), &[1, 3, hidden]);
         let mask3 = causal_mask(3);
         let o3 = mla
-            .forward_on(&x3, &off(&[0], &[1]), &mut c1, &[3], Some(&mask3), ())
+            .forward_on(&x3, &off(&[0], &[1]), &mut c1, &[3], Some(&mask3), (), -1)
             .unwrap();
         assert_eq!(o3.shape().as_slice(), &[1, 3, hidden]);
 
         // Decode L=1 against the now-3-token cache -> [1,1,hidden].
         let x1 = arr(&rnd(hidden as usize, 12), &[1, 1, hidden]);
         let o1 = mla
-            .forward_on(&x1, &off(&[3], &[1]), &mut c1, &[1], None, ())
+            .forward_on(&x1, &off(&[3], &[1]), &mut c1, &[1], None, (), -1)
             .unwrap();
         assert_eq!(o1.shape().as_slice(), &[1, 1, hidden]);
     }
