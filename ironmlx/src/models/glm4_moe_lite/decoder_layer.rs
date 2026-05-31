@@ -17,7 +17,8 @@ use crate::nn::{Mlp, RmsNorm};
 use super::config::Glm4MoeLiteConfig;
 use super::mla_attention::MlaAttention;
 use super::mla_cache::MlaLatentCache;
-use super::moe::Glm4MoeBlock;
+use super::moe::{Glm4MoeBlock, GlmMoeBlockMode};
+use super::rope::RopeOffset;
 
 #[cfg(feature = "p5h-profile")]
 fn p5h_layer_fields(layer_idx: i32) -> crate::core::p5h::SpanFields {
@@ -42,6 +43,17 @@ pub struct Glm4DecoderLayer {
     attn: MlaAttention,
     post_attention_layernorm: RmsNorm,
     ffn: Ffn,
+}
+
+/// Diagnostic block execution mode used by full-forward attribution benches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecoderBlockMode {
+    Full,
+    SkipAttention,
+    SkipAttentionRoutedOnly,
+    SkipAttentionRoutedFixedOnly,
+    SkipAttentionSharedOnly,
+    SkipFfn,
 }
 
 impl Glm4DecoderLayer {
@@ -91,13 +103,149 @@ impl Glm4DecoderLayer {
         target: impl Into<StreamOrDevice>,
         layer_idx: i32,
     ) -> Result<Array> {
+        self.forward_with_rope_offset(
+            x,
+            RopeOffset::PerRow(offset),
+            cache,
+            per_row_lens,
+            mask,
+            target,
+            layer_idx,
+            DecoderBlockMode::Full,
+        )
+    }
+
+    /// Diagnostic variant of [`Self::forward_on`] with sub-block skipping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_on_with_block_mode(
+        &self,
+        x: &Array,
+        offset: &Array,
+        cache: &mut MlaLatentCache,
+        per_row_lens: &[i32],
+        mask: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
+        block_mode: DecoderBlockMode,
+    ) -> Result<Array> {
+        self.forward_with_rope_offset(
+            x,
+            RopeOffset::PerRow(offset),
+            cache,
+            per_row_lens,
+            mask,
+            target,
+            layer_idx,
+            block_mode,
+        )
+    }
+
+    /// B=1 fast path using scalar RoPE offset, matching mlx-lm's `cache.offset`
+    /// call shape while preserving the per-row array path for batched rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_on_scalar_offset(
+        &self,
+        x: &Array,
+        offset: i32,
+        cache: &mut MlaLatentCache,
+        per_row_lens: &[i32],
+        mask: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        self.forward_with_rope_offset(
+            x,
+            RopeOffset::Scalar(offset),
+            cache,
+            per_row_lens,
+            mask,
+            target,
+            layer_idx,
+            DecoderBlockMode::Full,
+        )
+    }
+
+    /// Diagnostic variant of [`Self::forward_on_scalar_offset`] with sub-block skipping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_on_scalar_offset_with_block_mode(
+        &self,
+        x: &Array,
+        offset: i32,
+        cache: &mut MlaLatentCache,
+        per_row_lens: &[i32],
+        mask: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
+        block_mode: DecoderBlockMode,
+    ) -> Result<Array> {
+        self.forward_with_rope_offset(
+            x,
+            RopeOffset::Scalar(offset),
+            cache,
+            per_row_lens,
+            mask,
+            target,
+            layer_idx,
+            block_mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_with_rope_offset(
+        &self,
+        x: &Array,
+        offset: RopeOffset<'_>,
+        cache: &mut MlaLatentCache,
+        per_row_lens: &[i32],
+        mask: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
+        block_mode: DecoderBlockMode,
+    ) -> Result<Array> {
         let target = target.into();
+        let skip_attention_moe_mode = match block_mode {
+            DecoderBlockMode::SkipAttentionRoutedOnly => Some(GlmMoeBlockMode::RoutedOnly),
+            DecoderBlockMode::SkipAttentionRoutedFixedOnly => {
+                Some(GlmMoeBlockMode::RoutedFixedOnly)
+            }
+            DecoderBlockMode::SkipAttentionSharedOnly => Some(GlmMoeBlockMode::SharedOnly),
+            DecoderBlockMode::SkipAttention => Some(GlmMoeBlockMode::Full),
+            _ => None,
+        };
         #[cfg(feature = "p5h-profile")]
         {
             crate::core::p5h::try_with_p5h_span_from_current_trace(
                 "decoder_layer_N",
                 || p5h_layer_fields(layer_idx),
                 || -> Result<Array> {
+                    if let Some(moe_mode) = skip_attention_moe_mode {
+                        let normed_post = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                            "post_attention_norm",
+                            || p5h_layer_fields(layer_idx),
+                            || self.post_attention_layernorm.forward_on(x, target),
+                        )?;
+                        let ffn_out = crate::core::p5h::try_with_p5h_span_from_current_trace(
+                            "mlp_path",
+                            || p5h_layer_fields(layer_idx),
+                            || match &self.ffn {
+                                Ffn::Dense(m) => m.forward_on(&normed_post, target),
+                                Ffn::Moe(b) => b.forward_on_with_mode(
+                                    &normed_post,
+                                    target,
+                                    layer_idx,
+                                    moe_mode,
+                                ),
+                            },
+                        )?;
+                        return crate::core::p5h::try_with_p5h_span_from_current_trace(
+                            "residual_overhead",
+                            || p5h_layer_fields(layer_idx),
+                            || -> Result<Array> {
+                                Ok(mlx::ops::binary::add_on(x, &ffn_out, target)?)
+                            },
+                        );
+                    }
+
                     let normed_in = crate::core::p5h::try_with_p5h_span_from_current_trace(
                         "input_norm",
                         || p5h_layer_fields(layer_idx),
@@ -107,7 +255,7 @@ impl Glm4DecoderLayer {
                         "attention_path",
                         || p5h_layer_fields(layer_idx),
                         || {
-                            self.attn.forward_on(
+                            self.attn.forward_with_rope_offset(
                                 &normed_in,
                                 offset,
                                 cache,
@@ -124,6 +272,10 @@ impl Glm4DecoderLayer {
                         || mlx::ops::binary::add_on(x, &attn, target),
                     )?;
 
+                    if block_mode == DecoderBlockMode::SkipFfn {
+                        return Ok(h);
+                    }
+
                     let normed_post = crate::core::p5h::try_with_p5h_span_from_current_trace(
                         "post_attention_norm",
                         || p5h_layer_fields(layer_idx),
@@ -134,7 +286,12 @@ impl Glm4DecoderLayer {
                         || p5h_layer_fields(layer_idx),
                         || match &self.ffn {
                             Ffn::Dense(m) => m.forward_on(&normed_post, target),
-                            Ffn::Moe(b) => b.forward_on(&normed_post, target, layer_idx),
+                            Ffn::Moe(b) => b.forward_on_with_mode(
+                                &normed_post,
+                                target,
+                                layer_idx,
+                                GlmMoeBlockMode::Full,
+                            ),
                         },
                     )?;
                     crate::core::p5h::try_with_p5h_span_from_current_trace(
@@ -148,8 +305,19 @@ impl Glm4DecoderLayer {
 
         #[cfg(not(feature = "p5h-profile"))]
         {
+            if let Some(moe_mode) = skip_attention_moe_mode {
+                let normed_post = self.post_attention_layernorm.forward_on(x, target)?;
+                let ffn_out = match &self.ffn {
+                    Ffn::Dense(m) => m.forward_on(&normed_post, target)?,
+                    Ffn::Moe(b) => {
+                        b.forward_on_with_mode(&normed_post, target, layer_idx, moe_mode)?
+                    }
+                };
+                return Ok(mlx::ops::binary::add_on(x, &ffn_out, target)?);
+            }
+
             let normed_in = self.input_layernorm.forward_on(x, target)?;
-            let attn = self.attn.forward_on(
+            let attn = self.attn.forward_with_rope_offset(
                 &normed_in,
                 offset,
                 cache,
@@ -160,10 +328,16 @@ impl Glm4DecoderLayer {
             )?;
             let h = mlx::ops::binary::add_on(x, &attn, target)?;
 
+            if block_mode == DecoderBlockMode::SkipFfn {
+                return Ok(h);
+            }
+
             let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
             let ffn_out = match &self.ffn {
                 Ffn::Dense(m) => m.forward_on(&normed_post, target)?,
-                Ffn::Moe(b) => b.forward_on(&normed_post, target, layer_idx)?,
+                Ffn::Moe(b) => {
+                    b.forward_on_with_mode(&normed_post, target, layer_idx, GlmMoeBlockMode::Full)?
+                }
             };
             Ok(mlx::ops::binary::add_on(&h, &ffn_out, target)?)
         }

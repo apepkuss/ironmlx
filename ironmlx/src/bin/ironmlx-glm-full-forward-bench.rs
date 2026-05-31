@@ -10,9 +10,10 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
 use ironmlx::core::{Loader, Sampler};
 use ironmlx::models::glm4_moe_lite::config::Glm4MoeLiteConfig;
-use ironmlx::models::glm4_moe_lite::decoder_layer::Glm4DecoderLayer;
+use ironmlx::models::glm4_moe_lite::decoder_layer::{DecoderBlockMode, Glm4DecoderLayer};
 use ironmlx::models::glm4_moe_lite::mla_cache::MlaLatentCache;
 use ironmlx::nn::{Embedding, LayerCache, Linear, RmsNorm};
+use mlx::compile::CompileMode as MlxCompileMode;
 use mlx::{Array, Device, Dtype, StreamOrDevice};
 use serde::Serialize;
 
@@ -58,6 +59,14 @@ struct Args {
     /// Optional materialization after every decoder layer for graph-boundary diagnostics.
     #[arg(long, value_enum, default_value_t = LayerEvalMode::None)]
     layer_eval_mode: LayerEvalMode,
+
+    /// Diagnostic sub-block execution mode.
+    #[arg(long, value_enum, default_value_t = BlockMode::Full)]
+    block_mode: BlockMode,
+
+    /// Global MLX compile mode for diagnostic attribution.
+    #[arg(long, value_enum, default_value_t = CompileMode::Enabled)]
+    compile_mode: CompileMode,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -82,6 +91,34 @@ enum LayerEvalMode {
     EvalSync,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BlockMode {
+    /// Run the full decoder block.
+    Full,
+    /// Skip attention and run only post-attention norm plus FFN residual.
+    SkipAttn,
+    /// Skip attention and run only the routed MoE branch in MoE layers.
+    SkipAttnRouted,
+    /// Skip attention and run routed experts with fixed synthetic routing.
+    SkipAttnRoutedFixed,
+    /// Skip attention and run only the shared expert branch in MoE layers.
+    SkipAttnShared,
+    /// Run attention residual and skip post-attention norm plus FFN.
+    SkipFfn,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CompileMode {
+    /// Full MLX compile mode.
+    Enabled,
+    /// Disable MLX compile and execute compiled closures eagerly.
+    Disabled,
+    /// MLX compile without simplify pass.
+    NoSimplify,
+    /// MLX compile without fusion pass.
+    NoFuse,
+}
+
 #[derive(Clone, Copy)]
 struct BenchTarget {
     label: &'static str,
@@ -92,6 +129,7 @@ struct BenchTarget {
 struct ForwardOptions {
     target: StreamOrDevice,
     layer_eval_mode: LayerEvalMode,
+    block_mode: DecoderBlockMode,
     depth: i32,
 }
 
@@ -111,6 +149,8 @@ struct Meta {
     measured_runs: usize,
     stream_mode: &'static str,
     layer_eval_mode: &'static str,
+    block_mode: &'static str,
+    compile_mode: &'static str,
     hidden_size: i32,
     vocab_size: i32,
     num_hidden_layers: i32,
@@ -126,8 +166,14 @@ struct Record {
     case: &'static str,
     output_shapes: Vec<Vec<i32>>,
     summary: Summary,
+    build_summary: Summary,
+    eval_sync_summary: Summary,
     warmups_ms: Vec<f64>,
+    build_warmups_ms: Vec<f64>,
+    eval_sync_warmups_ms: Vec<f64>,
     values_ms: Vec<f64>,
+    build_values_ms: Vec<f64>,
+    eval_sync_values_ms: Vec<f64>,
 }
 
 #[derive(Serialize)]
@@ -138,9 +184,17 @@ struct Summary {
     mean_ms: Option<f64>,
 }
 
+struct Timing {
+    total_ms: f64,
+    build_ms: f64,
+    eval_sync_ms: f64,
+    output_shapes: Vec<Vec<i32>>,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     validate_args(&args)?;
+    args.compile_mode.configure();
     let bench_target = args.stream_mode.configure()?;
     let ctx_lens = if args.ctx_lens.is_empty() {
         vec![128, 512, 725, 2048]
@@ -204,6 +258,8 @@ fn main() -> Result<()> {
             measured_runs: args.runs,
             stream_mode: bench_target.label,
             layer_eval_mode: args.layer_eval_mode.label(),
+            block_mode: args.block_mode.label(),
+            compile_mode: args.compile_mode.label(),
             hidden_size: cfg.hidden_size,
             vocab_size: cfg.vocab_size,
             num_hidden_layers: cfg.num_hidden_layers,
@@ -377,7 +433,12 @@ impl BenchGlmModel {
                 ))
             }
         };
-        let offset: Array = (&offsets_vec[..], &[batch][..]).try_into()?;
+        let scalar_offset = (batch == 1).then_some(offsets_vec[0]);
+        let per_row_offset: Option<Array> = if scalar_offset.is_some() {
+            None
+        } else {
+            Some((&offsets_vec[..], &[batch][..]).try_into()?)
+        };
 
         let owned_mask: Option<Array> = match mask {
             Some(_) => None,
@@ -396,7 +457,32 @@ impl BenchGlmModel {
                     "BenchGlmModel: expected LayerCache::Mla at layer {i}"
                 ));
             };
-            h = layer.forward_on(&h, &offset, c, &prl, effective_mask, target, i as i32)?;
+            h = if let Some(offset) = scalar_offset {
+                layer.forward_on_scalar_offset_with_block_mode(
+                    &h,
+                    offset,
+                    c,
+                    &prl,
+                    effective_mask,
+                    target,
+                    i as i32,
+                    opts.block_mode,
+                )?
+            } else {
+                let offset = per_row_offset
+                    .as_ref()
+                    .expect("per_row_offset must exist for batch > 1");
+                layer.forward_on_with_block_mode(
+                    &h,
+                    offset,
+                    c,
+                    &prl,
+                    effective_mask,
+                    target,
+                    i as i32,
+                    opts.block_mode,
+                )?
+            };
             opts.layer_eval_mode.apply(&h)?;
         }
         self.norm.forward_on(&h, target)
@@ -462,6 +548,12 @@ fn run_full_hidden_case(
     args: &Args,
     target: StreamOrDevice,
 ) -> Result<Record> {
+    let opts = ForwardOptions {
+        target,
+        layer_eval_mode: args.layer_eval_mode,
+        block_mode: args.block_mode.to_decoder(),
+        depth,
+    };
     let mut cache = prepare_cache(
         model,
         cfg,
@@ -482,16 +574,7 @@ fn run_full_hidden_case(
         "full-hidden",
         args.warmup_runs,
         args.runs,
-        || {
-            run_decode_hidden(
-                model,
-                decode_tokens.next()?,
-                &mut cache,
-                target,
-                args.layer_eval_mode,
-                depth,
-            )
-        },
+        || run_decode_hidden(model, decode_tokens.next()?, &mut cache, opts),
     )
 }
 
@@ -503,6 +586,12 @@ fn run_full_logits_case(
     args: &Args,
     target: StreamOrDevice,
 ) -> Result<Record> {
+    let opts = ForwardOptions {
+        target,
+        layer_eval_mode: args.layer_eval_mode,
+        block_mode: args.block_mode.to_decoder(),
+        depth,
+    };
     let mut cache = prepare_cache(
         model,
         cfg,
@@ -523,16 +612,7 @@ fn run_full_logits_case(
         "full-logits",
         args.warmup_runs,
         args.runs,
-        || {
-            run_decode_logits(
-                model,
-                decode_tokens.next()?,
-                &mut cache,
-                target,
-                args.layer_eval_mode,
-                depth,
-            )
-        },
+        || run_decode_logits(model, decode_tokens.next()?, &mut cache, opts),
     )
 }
 
@@ -545,6 +625,12 @@ fn run_full_logits_sample_case(
     args: &Args,
     target: StreamOrDevice,
 ) -> Result<Record> {
+    let opts = ForwardOptions {
+        target,
+        layer_eval_mode: args.layer_eval_mode,
+        block_mode: args.block_mode.to_decoder(),
+        depth,
+    };
     let mut cache = prepare_cache(
         model,
         cfg,
@@ -565,17 +651,7 @@ fn run_full_logits_sample_case(
         "full-logits-sample",
         args.warmup_runs,
         args.runs,
-        || {
-            run_decode_logits_sample(
-                model,
-                sampler,
-                decode_tokens.next()?,
-                &mut cache,
-                target,
-                args.layer_eval_mode,
-                depth,
-            )
-        },
+        || run_decode_logits_sample(model, sampler, decode_tokens.next()?, &mut cache, opts),
     )
 }
 
@@ -587,6 +663,12 @@ fn run_full_logits_repeat_case(
     args: &Args,
     target: StreamOrDevice,
 ) -> Result<Record> {
+    let opts = ForwardOptions {
+        target,
+        layer_eval_mode: args.layer_eval_mode,
+        block_mode: args.block_mode.to_decoder(),
+        depth,
+    };
     let mut cache = prepare_cache(
         model,
         cfg,
@@ -607,16 +689,7 @@ fn run_full_logits_repeat_case(
         "full-logits-repeat",
         args.warmup_runs,
         args.runs,
-        || {
-            run_decode_logits(
-                model,
-                decode_tokens.next()?,
-                &mut cache,
-                target,
-                args.layer_eval_mode,
-                depth,
-            )
-        },
+        || run_decode_logits(model, decode_tokens.next()?, &mut cache, opts),
     )
 }
 
@@ -646,6 +719,7 @@ fn prepare_cache(
         ForwardOptions {
             target,
             layer_eval_mode: args.layer_eval_mode,
+            block_mode: args.block_mode.to_decoder(),
             depth,
         },
     )?;
@@ -658,22 +732,10 @@ fn run_decode_hidden(
     model: &BenchGlmModel,
     token: u32,
     cache: &mut [LayerCache],
-    target: StreamOrDevice,
-    layer_eval_mode: LayerEvalMode,
-    depth: i32,
+    opts: ForwardOptions,
 ) -> Result<Vec<Array>> {
     let input = decode_token_array(token)?;
-    let hidden = model.forward_hidden_depth(
-        &input,
-        None,
-        None,
-        Some(cache),
-        ForwardOptions {
-            target,
-            layer_eval_mode,
-            depth,
-        },
-    )?;
+    let hidden = model.forward_hidden_depth(&input, None, None, Some(cache), opts)?;
     Ok(vec![hidden])
 }
 
@@ -681,11 +743,9 @@ fn run_decode_logits(
     model: &BenchGlmModel,
     token: u32,
     cache: &mut [LayerCache],
-    target: StreamOrDevice,
-    layer_eval_mode: LayerEvalMode,
-    depth: i32,
+    opts: ForwardOptions,
 ) -> Result<Vec<Array>> {
-    let logits = decode_logits(model, token, cache, target, layer_eval_mode, depth)?;
+    let logits = decode_logits(model, token, cache, opts)?;
     Ok(vec![logits])
 }
 
@@ -694,11 +754,9 @@ fn run_decode_logits_sample(
     sampler: &Sampler,
     token: u32,
     cache: &mut [LayerCache],
-    target: StreamOrDevice,
-    layer_eval_mode: LayerEvalMode,
-    depth: i32,
+    opts: ForwardOptions,
 ) -> Result<Vec<Array>> {
-    let logits = decode_logits(model, token, cache, target, layer_eval_mode, depth)?;
+    let logits = decode_logits(model, token, cache, opts)?;
     let vocab = logits.shape().as_slice()[2];
     let flat = logits.reshape((vocab,))?;
     let next = sampler.sample_async_greedy(&flat)?;
@@ -709,22 +767,10 @@ fn decode_logits(
     model: &BenchGlmModel,
     token: u32,
     cache: &mut [LayerCache],
-    target: StreamOrDevice,
-    layer_eval_mode: LayerEvalMode,
-    depth: i32,
+    opts: ForwardOptions,
 ) -> Result<Array> {
     let input = decode_token_array(token)?;
-    model.forward_logits_depth(
-        &input,
-        None,
-        None,
-        Some(cache),
-        ForwardOptions {
-            target,
-            layer_eval_mode,
-            depth,
-        },
-    )
+    model.forward_logits_depth(&input, None, None, Some(cache), opts)
 }
 
 fn decode_token_array(token: u32) -> Result<Array> {
@@ -793,17 +839,25 @@ where
 {
     let mut output_shapes = Vec::new();
     let mut warmups_ms = Vec::with_capacity(warmup_runs);
+    let mut build_warmups_ms = Vec::with_capacity(warmup_runs);
+    let mut eval_sync_warmups_ms = Vec::with_capacity(warmup_runs);
     for _ in 0..warmup_runs {
-        let (elapsed_ms, shapes) = time_once(&mut f)?;
-        output_shapes = shapes;
-        warmups_ms.push(elapsed_ms);
+        let timing = time_once(&mut f)?;
+        output_shapes = timing.output_shapes;
+        warmups_ms.push(timing.total_ms);
+        build_warmups_ms.push(timing.build_ms);
+        eval_sync_warmups_ms.push(timing.eval_sync_ms);
     }
 
     let mut values_ms = Vec::with_capacity(runs);
+    let mut build_values_ms = Vec::with_capacity(runs);
+    let mut eval_sync_values_ms = Vec::with_capacity(runs);
     for _ in 0..runs {
-        let (elapsed_ms, shapes) = time_once(&mut f)?;
-        output_shapes = shapes;
-        values_ms.push(elapsed_ms);
+        let timing = time_once(&mut f)?;
+        output_shapes = timing.output_shapes;
+        values_ms.push(timing.total_ms);
+        build_values_ms.push(timing.build_ms);
+        eval_sync_values_ms.push(timing.eval_sync_ms);
     }
 
     Ok(Record {
@@ -812,26 +866,40 @@ where
         case,
         output_shapes,
         summary: summarize(&values_ms),
+        build_summary: summarize(&build_values_ms),
+        eval_sync_summary: summarize(&eval_sync_values_ms),
         warmups_ms,
+        build_warmups_ms,
+        eval_sync_warmups_ms,
         values_ms,
+        build_values_ms,
+        eval_sync_values_ms,
     })
 }
 
-fn time_once<F>(f: &mut F) -> Result<(f64, Vec<Vec<i32>>)>
+fn time_once<F>(f: &mut F) -> Result<Timing>
 where
     F: FnMut() -> Result<Vec<Array>>,
 {
     let started = Instant::now();
     let outputs = f()?;
+    let build_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let eval_started = Instant::now();
     let refs: Vec<&Array> = outputs.iter().collect();
     mlx::transforms::eval(&refs)?;
     mlx::transforms::synchronize()?;
-    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let shapes = outputs
+    let eval_sync_ms = eval_started.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let output_shapes = outputs
         .iter()
         .map(|a| a.shape().as_slice().to_vec())
         .collect();
-    Ok((elapsed_ms, shapes))
+    Ok(Timing {
+        total_ms,
+        build_ms,
+        eval_sync_ms,
+        output_shapes,
+    })
 }
 
 fn summarize(values: &[f64]) -> Summary {
@@ -922,24 +990,73 @@ impl LayerEvalMode {
     }
 }
 
+impl BlockMode {
+    fn label(self) -> &'static str {
+        match self {
+            BlockMode::Full => "full",
+            BlockMode::SkipAttn => "skip-attn",
+            BlockMode::SkipAttnRouted => "skip-attn-routed",
+            BlockMode::SkipAttnRoutedFixed => "skip-attn-routed-fixed",
+            BlockMode::SkipAttnShared => "skip-attn-shared",
+            BlockMode::SkipFfn => "skip-ffn",
+        }
+    }
+
+    fn to_decoder(self) -> DecoderBlockMode {
+        match self {
+            BlockMode::Full => DecoderBlockMode::Full,
+            BlockMode::SkipAttn => DecoderBlockMode::SkipAttention,
+            BlockMode::SkipAttnRouted => DecoderBlockMode::SkipAttentionRoutedOnly,
+            BlockMode::SkipAttnRoutedFixed => DecoderBlockMode::SkipAttentionRoutedFixedOnly,
+            BlockMode::SkipAttnShared => DecoderBlockMode::SkipAttentionSharedOnly,
+            BlockMode::SkipFfn => DecoderBlockMode::SkipFfn,
+        }
+    }
+}
+
+impl CompileMode {
+    fn label(self) -> &'static str {
+        match self {
+            CompileMode::Enabled => "enabled",
+            CompileMode::Disabled => "disabled",
+            CompileMode::NoSimplify => "no-simplify",
+            CompileMode::NoFuse => "no-fuse",
+        }
+    }
+
+    fn configure(self) {
+        let mode = match self {
+            CompileMode::Enabled => MlxCompileMode::Enabled,
+            CompileMode::Disabled => MlxCompileMode::Disabled,
+            CompileMode::NoSimplify => MlxCompileMode::NoSimplify,
+            CompileMode::NoFuse => MlxCompileMode::NoFuse,
+        };
+        mlx::compile::set_compile_mode(mode);
+    }
+}
+
 fn print_summary(output: &BenchOutput) {
     println!("# ironmlx-glm-full-forward-bench");
     println!(
-        "layers={} H={} V={} stream={} layer_eval={}",
+        "layers={} H={} V={} stream={} layer_eval={} block_mode={} compile_mode={}",
         output.meta.num_hidden_layers,
         output.meta.hidden_size,
         output.meta.vocab_size,
         output.meta.stream_mode,
-        output.meta.layer_eval_mode
+        output.meta.layer_eval_mode,
+        output.meta.block_mode,
+        output.meta.compile_mode
     );
     for record in &output.records {
         println!(
-            "ctx={:<5} depth={:<2} case={:<22} p50={:>8.4} ms p95={:>8.4} ms",
+            "ctx={:<5} depth={:<2} case={:<22} p50={:>8.4} ms p95={:>8.4} ms build_p50={:>8.4} ms eval_sync_p50={:>8.4} ms",
             record.ctx_len,
             record.depth,
             record.case,
             record.summary.p50_ms.unwrap_or(f64::NAN),
-            record.summary.p95_ms.unwrap_or(f64::NAN)
+            record.summary.p95_ms.unwrap_or(f64::NAN),
+            record.build_summary.p50_ms.unwrap_or(f64::NAN),
+            record.eval_sync_summary.p50_ms.unwrap_or(f64::NAN)
         );
     }
 }
@@ -977,6 +1094,27 @@ mod tests {
         assert_eq!(LayerEvalMode::None.label(), "none");
         assert_eq!(LayerEvalMode::Eval.label(), "eval");
         assert_eq!(LayerEvalMode::EvalSync.label(), "eval-sync");
+    }
+
+    #[test]
+    fn block_mode_labels_are_stable() {
+        assert_eq!(BlockMode::Full.label(), "full");
+        assert_eq!(BlockMode::SkipAttn.label(), "skip-attn");
+        assert_eq!(BlockMode::SkipAttnRouted.label(), "skip-attn-routed");
+        assert_eq!(
+            BlockMode::SkipAttnRoutedFixed.label(),
+            "skip-attn-routed-fixed"
+        );
+        assert_eq!(BlockMode::SkipAttnShared.label(), "skip-attn-shared");
+        assert_eq!(BlockMode::SkipFfn.label(), "skip-ffn");
+    }
+
+    #[test]
+    fn compile_mode_labels_are_stable() {
+        assert_eq!(CompileMode::Enabled.label(), "enabled");
+        assert_eq!(CompileMode::Disabled.label(), "disabled");
+        assert_eq!(CompileMode::NoSimplify.label(), "no-simplify");
+        assert_eq!(CompileMode::NoFuse.label(), "no-fuse");
     }
 
     #[test]

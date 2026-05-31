@@ -300,7 +300,12 @@ impl Glm4MoeLiteModel {
                 ))
             }
         };
-        let offset: Array = (&offsets_vec[..], &[batch][..]).try_into()?;
+        let scalar_offset = (batch == 1).then_some(offsets_vec[0]);
+        let per_row_offset: Option<Array> = if scalar_offset.is_some() {
+            None
+        } else {
+            Some((&offsets_vec[..], &[batch][..]).try_into()?)
+        };
 
         // Build the internal causal mask when the engine did not supply one and
         // this is a multi-token (prefill) forward. Decode (L == 1) needs none.
@@ -324,7 +329,22 @@ impl Glm4MoeLiteModel {
                     "glm4_moe_lite: expected LayerCache::Mla at layer {i}"
                 ));
             };
-            h = layer.forward_on(&h, &offset, c, &prl, effective_mask, target, i as i32)?;
+            h = if let Some(offset) = scalar_offset {
+                layer.forward_on_scalar_offset(
+                    &h,
+                    offset,
+                    c,
+                    &prl,
+                    effective_mask,
+                    target,
+                    i as i32,
+                )?
+            } else {
+                let offset = per_row_offset
+                    .as_ref()
+                    .expect("per_row_offset must exist for batch > 1");
+                layer.forward_on(&h, offset, c, &prl, effective_mask, target, i as i32)?
+            };
         }
         self.norm.forward_on(&h, target)
     }

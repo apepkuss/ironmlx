@@ -25,7 +25,7 @@ use crate::nn::{Linear, RmsNorm};
 
 use super::config::Glm4MoeLiteConfig;
 use super::mla_cache::MlaLatentCache;
-use super::rope::Glm4Rope;
+use super::rope::{Glm4Rope, RopeOffset};
 
 #[cfg(feature = "p5h-profile")]
 fn p5h_layer_fields(layer_idx: i32) -> crate::core::p5h::SpanFields {
@@ -246,6 +246,24 @@ impl MlaAttention {
         offset: &Array,
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, Array, Array, Array)> {
+        self.project_qkv_with_offset(x, RopeOffset::PerRow(offset), target)
+    }
+
+    pub fn project_qkv_with_scalar_offset(
+        &self,
+        x: &Array,
+        offset: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array, Array, Array)> {
+        self.project_qkv_with_offset(x, RopeOffset::Scalar(offset), target)
+    }
+
+    fn project_qkv_with_offset(
+        &self,
+        x: &Array,
+        offset: RopeOffset<'_>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array, Array, Array)> {
         let target = target.into();
         let dims = x.shape();
         let s = dims.as_slice();
@@ -281,8 +299,8 @@ impl MlaAttention {
             .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
 
         // --- Decoupled RoPE on the rope channels of q and k ---
-        let q_pe = self.rope.apply(&q_pe, offset, target)?;
-        let k_pe = self.rope.apply(&k_pe, offset, target)?;
+        let q_pe = self.rope.apply_offset(&q_pe, offset, target)?;
+        let k_pe = self.rope.apply_offset(&k_pe, offset, target)?;
 
         Ok((q_nope, q_pe, c_kv_n, k_pe))
     }
@@ -303,7 +321,7 @@ impl MlaAttention {
     ///
     /// `pe_scores = (q_pe * scale) @ k_pe_allᵀ` carries the decoupled-RoPE
     /// contribution to the logits AND the engine mask. SDPA is invoked with
-    /// `mask_mode = "array"` (`mask_arr = Some(&pe_scores)`); the `"causal"`
+    /// `mask_mode = ""` (`mask_arr = Some(&pe_scores)`); the `"causal"`
     /// mode is intentionally unused — all masking is folded into `pe_scores`.
     ///
     /// **Mask convention (ADDITIVE float, ironmlx engine):** the engine emits a
@@ -327,6 +345,50 @@ impl MlaAttention {
         target: impl Into<StreamOrDevice>,
         layer_idx: i32,
     ) -> Result<Array> {
+        self.forward_with_rope_offset(
+            x,
+            RopeOffset::PerRow(offset),
+            cache,
+            per_row_lens,
+            mask,
+            target,
+            layer_idx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_on_scalar_offset(
+        &self,
+        x: &Array,
+        offset: i32,
+        cache: &mut MlaLatentCache,
+        per_row_lens: &[i32],
+        mask: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        self.forward_with_rope_offset(
+            x,
+            RopeOffset::Scalar(offset),
+            cache,
+            per_row_lens,
+            mask,
+            target,
+            layer_idx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_with_rope_offset(
+        &self,
+        x: &Array,
+        offset: RopeOffset<'_>,
+        cache: &mut MlaLatentCache,
+        per_row_lens: &[i32],
+        mask: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
+    ) -> Result<Array> {
         let target = target.into();
         let dims = x.shape();
         let s = dims.as_slice();
@@ -340,14 +402,14 @@ impl MlaAttention {
                 "glm_mla_project_qkv",
                 || p5h_layer_fields(layer_idx),
                 || -> Result<(Array, Array, Array, Array)> {
-                    let out = self.project_qkv(x, offset, target)?;
+                    let out = self.project_qkv_with_offset(x, offset, target)?;
                     p5h_eval(&[&out.0, &out.1, &out.2, &out.3])?;
                     Ok(out)
                 },
             )?
         };
         #[cfg(not(feature = "p5h-profile"))]
-        let (q_nope, q_pe, c_kv_n, k_pe) = self.project_qkv(x, offset, target)?;
+        let (q_nope, q_pe, c_kv_n, k_pe) = self.project_qkv_with_offset(x, offset, target)?;
 
         // Append the new latent + k_pe and fetch the full history.
         // kv_latent: [B,1,Lc,kv_lora]; k_pe_all: [B,1,Lc,qk_rope].
@@ -377,8 +439,11 @@ impl MlaAttention {
                 "glm_mla_rope_scores",
                 || p5h_layer_fields(layer_idx),
                 || -> Result<Array> {
-                    let q_pe_scaled =
-                        mlx::ops::binary::multiply_on(&q_pe, &self.scale_array()?, target)?;
+                    let q_pe_scaled = mlx::ops::binary::multiply_on(
+                        &q_pe,
+                        &self.scale_array_like(&q_pe, target)?,
+                        target,
+                    )?;
                     let k_pe_t = k_pe_all.transpose_axes_on(&[0, 1, 3, 2][..], target)?;
                     let mut pe_scores = q_pe_scaled.matmul_on(&k_pe_t, target)?;
                     if let Some(m) = mask {
@@ -391,7 +456,11 @@ impl MlaAttention {
         };
         #[cfg(not(feature = "p5h-profile"))]
         let pe_scores = {
-            let q_pe_scaled = mlx::ops::binary::multiply_on(&q_pe, &self.scale_array()?, target)?;
+            let q_pe_scaled = mlx::ops::binary::multiply_on(
+                &q_pe,
+                &self.scale_array_like(&q_pe, target)?,
+                target,
+            )?;
             let k_pe_t = k_pe_all.transpose_axes_on(&[0, 1, 3, 2][..], target)?;
             let mut pe_scores = q_pe_scaled.matmul_on(&k_pe_t, target)?;
             // Fold the engine's ADDITIVE float mask into pe_scores (see doc above).
@@ -462,12 +531,10 @@ impl MlaAttention {
         #[cfg(not(feature = "p5h-profile"))]
         let _ = layer_idx;
         // SDPA requires the `mask_arr` dtype to promote to the attention output
-        // dtype (q/k/v promoted type). `pe_scores` accumulates in float32 (the
-        // scaled-RoPE matmul promotes via the f32 `scale_array`, and the engine
-        // additive mask carries `-inf` in f32), while q/k/v are the bf16
-        // activation dtype — f32 does NOT promote to bf16. Demote `pe_scores`
-        // to the latent (SDPA input) dtype so the mask matches. `kv_latent` is
-        // an SDPA input in both regimes, so its dtype is the safe target.
+        // dtype (q/k/v promoted type). The RoPE score path keeps its scale in
+        // the activation dtype to match mlx-lm, but an engine additive mask can
+        // still promote the scores. Demote to the latent (SDPA input) dtype so
+        // the mask matches. `kv_latent` is an SDPA input in both regimes.
         let mask_dtype = kv_latent.dtype();
         let pe_scores = if pe_scores.dtype() == mask_dtype {
             pe_scores.clone()
@@ -497,7 +564,7 @@ impl MlaAttention {
                             kv_latent,
                             kv_latent,
                             self.scale,
-                            "array",
+                            "",
                             Some(&pe_scores),
                             None,
                             target,
@@ -524,7 +591,7 @@ impl MlaAttention {
                     kv_latent,
                     kv_latent,
                     self.scale,
-                    "array",
+                    "",
                     Some(&pe_scores),
                     None,
                     target,
@@ -564,7 +631,7 @@ impl MlaAttention {
                             &k,
                             &v,
                             self.scale,
-                            "array",
+                            "",
                             Some(&pe_scores),
                             None,
                             target,
@@ -583,7 +650,7 @@ impl MlaAttention {
                     &k,
                     &v,
                     self.scale,
-                    "array",
+                    "",
                     Some(&pe_scores),
                     None,
                     target,
@@ -592,10 +659,14 @@ impl MlaAttention {
         }
     }
 
-    /// Build the softmax scale as a 1-element `Array` for `multiply_on`
-    /// (the overloaded `&Array * f32` panics on error; this propagates it).
-    fn scale_array(&self) -> Result<Array> {
-        Ok((&[self.scale][..], ()).try_into()?)
+    /// Build the RoPE score scale in the same dtype as `like`.
+    ///
+    /// MLX Python scalar literals do not promote BF16 inputs to F32 here,
+    /// while Rust `f32` scalar arrays do. Cast the scalar to the activation
+    /// dtype so the Rust graph matches mlx-lm's dtype path.
+    fn scale_array_like(&self, like: &Array, target: StreamOrDevice) -> Result<Array> {
+        let scale: Array = (&[self.scale][..], ()).try_into()?;
+        Ok(mlx::ops::cast::astype_on(&scale, like.dtype(), target)?)
     }
 
     /// Tiny test constructor from explicit arrays (dims `H=2, qk_nope=4,

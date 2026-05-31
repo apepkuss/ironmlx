@@ -511,6 +511,33 @@ impl RoutedExperts {
         target: StreamOrDevice,
         layer_idx: i32,
     ) -> Result<Array> {
+        self.apply_experts_inner(x, inds, weights, target, layer_idx, false)
+    }
+
+    /// GLM/DeepSeek-style routed combine where the weighted-reduce result is
+    /// cast back to the expert output dtype after multiplying by fp32 routing
+    /// scores. Qwen mlx-lm paths keep the uncast sum, so the default
+    /// [`Self::apply_experts`] preserves that behavior.
+    pub fn apply_experts_cast_output(
+        &self,
+        x: &Array,
+        inds: &Array,
+        weights: &Array,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        self.apply_experts_inner(x, inds, weights, target, layer_idx, true)
+    }
+
+    fn apply_experts_inner(
+        &self,
+        x: &Array,
+        inds: &Array,
+        weights: &Array,
+        target: StreamOrDevice,
+        layer_idx: i32,
+        cast_output_to_expert_dtype: bool,
+    ) -> Result<Array> {
         let xdims = x.shape();
         let xvec = xdims.as_slice();
         if xvec.len() != 2 {
@@ -698,8 +725,13 @@ impl RoutedExperts {
                 let weights_unsq = mlx::ops::shape::expand_dims_on(weights, -1_i32, target)
                     .context("RoutedExperts::apply_experts: expand weights dim")?;
                 let weighted = &down_out * &weights_unsq;
-                let out = mlx::ops::sum_on(&weighted, -2_i32, false, target)
+                let mut out = mlx::ops::sum_on(&weighted, -2_i32, false, target)
                     .context("RoutedExperts::apply_experts: sum across k")?;
+                if cast_output_to_expert_dtype {
+                    out = out.astype_on(down_out.dtype(), target).context(
+                        "RoutedExperts::apply_experts: cast weighted sum to expert dtype",
+                    )?;
+                }
                 #[cfg(feature = "p5h-profile")]
                 {
                     eval_glm_routed_experts_child(&[&out])?;
