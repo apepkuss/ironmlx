@@ -179,6 +179,7 @@ pub struct Glm4MoeBlock {
 }
 
 /// Diagnostic MoE execution mode for full-forward attribution benches.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlmMoeBlockMode {
     Full,
@@ -239,6 +240,7 @@ impl Glm4MoeBlock {
     }
 
     /// Diagnostic variant of [`Self::forward_on`] that can isolate routed or shared experts.
+    #[doc(hidden)]
     pub fn forward_on_with_mode(
         &self,
         x: &Array,

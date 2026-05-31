@@ -46,6 +46,7 @@ pub struct Glm4DecoderLayer {
 }
 
 /// Diagnostic block execution mode used by full-forward attribution benches.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecoderBlockMode {
     Full,
@@ -116,6 +117,7 @@ impl Glm4DecoderLayer {
     }
 
     /// Diagnostic variant of [`Self::forward_on`] with sub-block skipping.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on_with_block_mode(
         &self,
@@ -166,6 +168,7 @@ impl Glm4DecoderLayer {
     }
 
     /// Diagnostic variant of [`Self::forward_on_scalar_offset`] with sub-block skipping.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on_scalar_offset_with_block_mode(
         &self,

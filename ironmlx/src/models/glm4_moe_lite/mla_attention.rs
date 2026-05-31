@@ -249,15 +249,6 @@ impl MlaAttention {
         self.project_qkv_with_offset(x, RopeOffset::PerRow(offset), target)
     }
 
-    pub fn project_qkv_with_scalar_offset(
-        &self,
-        x: &Array,
-        offset: i32,
-        target: impl Into<StreamOrDevice>,
-    ) -> Result<(Array, Array, Array, Array)> {
-        self.project_qkv_with_offset(x, RopeOffset::Scalar(offset), target)
-    }
-
     fn project_qkv_with_offset(
         &self,
         x: &Array,
@@ -348,28 +339,6 @@ impl MlaAttention {
         self.forward_with_rope_offset(
             x,
             RopeOffset::PerRow(offset),
-            cache,
-            per_row_lens,
-            mask,
-            target,
-            layer_idx,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_on_scalar_offset(
-        &self,
-        x: &Array,
-        offset: i32,
-        cache: &mut MlaLatentCache,
-        per_row_lens: &[i32],
-        mask: Option<&Array>,
-        target: impl Into<StreamOrDevice>,
-        layer_idx: i32,
-    ) -> Result<Array> {
-        self.forward_with_rope_offset(
-            x,
-            RopeOffset::Scalar(offset),
             cache,
             per_row_lens,
             mask,
