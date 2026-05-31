@@ -22,13 +22,13 @@ layout as Qwen3.5 MoE-VL, while adding Qwen3.6-specific per-module quantization
 metadata. The reliable implementation is therefore:
 
 - keep the existing MoE-VL execution kernel shared
-- add a named `qwen3_6_moe` architecture package
+- keep `qwen3_6_moe` as a named checkpoint-validation facade
 - validate Qwen3.6 by checkpoint structure
-- route Qwen3.6 checkpoints explicitly through the new public model type
+- route Qwen3.6 checkpoints through the shared Qwen3.5 MoE execution architecture
 - fix loader quantization metadata so Qwen3.6 router gates load correctly
 
 This avoids duplicated numeric kernels while still giving IronMLX a dedicated,
-discoverable Qwen3.6 product API.
+discoverable Qwen3.6 validation API.
 
 ## Tasks
 
@@ -41,8 +41,8 @@ discoverable Qwen3.6 product API.
 
 2. Wire model exports and dispatch.
    - Export `qwen3_6_moe` from `ironmlx/src/models/mod.rs`.
-   - Update `ironmlx generate` dispatch to prefer Qwen3.6 when detected.
-   - Update `ironmlx serve` dispatch to prefer Qwen3.6 when detected.
+   - Dispatch product entry points by `ModelArchitecture`.
+   - Map `model_type = "qwen3_5_moe"` to the shared Qwen3.5 MoE execution path.
 
 3. Complete CLI image support.
    - Add repeated `--image <PATH>` arguments.

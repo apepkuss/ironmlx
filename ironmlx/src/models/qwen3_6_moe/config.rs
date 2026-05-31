@@ -1,4 +1,9 @@
-//! Qwen3.6 MoE config detection and validation.
+//! Qwen3.6 MoE checkpoint-identity detection and validation.
+//!
+//! This is stricter than execution-architecture detection: Qwen3.6 MoE uses
+//! the Qwen3.5 MoE graph, but its released checkpoint has distinctive vision
+//! metadata and 8-bit router-gate quantization overrides that are useful for
+//! validation and regression tests.
 
 use std::ops::Deref;
 

@@ -1,8 +1,10 @@
 //! Model architectures.
 //!
-//! Each architecture lives in its own directory. Sharing between
+//! Each execution architecture lives in its own directory. Sharing between
 //! architectures happens via [`crate::nn`], [`crate::core`], and explicitly
-//! shared model modules.
+//! shared model modules. Modules for checkpoint-specific validation facades
+//! may live next to architecture modules when they preserve a public core API
+//! without changing the execution graph.
 //!
 //! Planned (in implementation order):
 //! - **P3-P4** — `qwen3_5` (Dense): hybrid gated-delta + gated full attention,
@@ -14,6 +16,9 @@
 //!   token routing.
 //! - **Gemma4** — dense text-only language path with per-layer inputs,
 //!   sliding/full attention, KV sharing, and tied output projection.
+//! - **Qwen3.6 MoE facade** — `qwen3_6_moe` validates Qwen3.6 MoE checkpoint
+//!   structure and exposes Qwen3.6-specific regression hooks while delegating
+//!   numeric execution to the `qwen3_5_moe` architecture.
 
 pub mod architecture;
 pub mod gemma4;

@@ -25,43 +25,46 @@ The Qwen3.6 35B A3B 4-bit checkpoint declares:
   gates
 
 The tensor key set and vision configuration match the existing Qwen3.5 MoE-VL
-implementation. The product design therefore treats Qwen3.6 MoE as an explicit
-architecture facade over the shared Qwen3.5 MoE execution kernel, with
-Qwen3.6-specific validation and dispatch driven by checkpoint structure rather
-than repository path guessing.
+implementation. The current product design therefore dispatches Qwen3.6 MoE by
+execution architecture (`model_type = "qwen3_5_moe"` maps to `Qwen35MoeModel`)
+while keeping a Qwen3.6-specific facade for checkpoint validation and
+regression tests.
 
 ## Architecture Boundary
 
-Add `ironmlx/src/models/qwen3_6_moe/` as the public architecture package. This
-package owns:
+Keep `ironmlx/src/models/qwen3_6_moe/` as the public checkpoint-identity facade.
+This package owns:
 
 - `Qwen36MoeConfig`
 - `Qwen36MoeModel`
 - Qwen3.6 checkpoint detection and validation
-- public exports used by CLI, serve, and core model users
+- public exports used by core model users and Qwen3.6-specific regression tests
 
 The package delegates the numeric execution path to the existing MoE-VL model
 kernel because the checkpoint itself declares the same Hugging Face architecture
 and tensor layout. The wrapper is not a loose compatibility fallback: it rejects
-non-Qwen3.6-shaped configs and exposes Qwen3.6 as a named model family in the
-IronMLX API.
+non-Qwen3.6-shaped configs and exposes Qwen3.6 as a named validated checkpoint
+facade in the IronMLX core API.
 
 ## Entry-Point Flow
 
 ```mermaid
 flowchart TD
-    A["Loader reads config and weights"] --> B{"Qwen3.6 MoE detector"}
-    B -- "matched" --> C["Qwen36MoeModel"]
-    B -- "not matched" --> D["Existing model dispatch"]
-    C --> E["core Model API"]
+    A["Loader reads config and weights"] --> B{"ModelArchitecture"}
+    B -- "qwen3_5_moe" --> C["Qwen35MoeModel"]
+    B -- "qwen3_5" --> D["Qwen35Model"]
+    B -- "gemma4" --> E["Gemma4Model"]
     C --> F["generate CLI"]
     C --> G["serve API"]
-    F --> H{"images provided"}
-    H -- "no" --> I["text-only stream"]
-    H -- "yes" --> J["VL stream with image grids"]
-    G --> K["OpenAI chat content parts"]
-    K --> L["single or multi image preprocessing"]
-    L --> J
+    C --> H["core Model API"]
+    I["Qwen36MoeModel facade"] --> J["checkpoint validation and regression tests"]
+    I --> C
+    F --> K{"images provided"}
+    K -- "no" --> L["text-only stream"]
+    K -- "yes" --> M["VL stream with image grids"]
+    G --> N["OpenAI chat content parts"]
+    N --> O["single or multi image preprocessing"]
+    O --> M
 ```
 
 Mermaid syntax check: node labels with punctuation are quoted, branch labels are
@@ -105,9 +108,10 @@ in the serve API, where HTTP request validation and URL decoding already belong.
 
 ## Serve API
 
-`ironmlx serve` must dispatch Qwen3.6 checkpoints to `Qwen36MoeModel`. The
-existing OpenAI-compatible `/v1/chat/completions` endpoint remains the product
-surface for image input:
+`ironmlx serve` dispatches Qwen3.6 checkpoints by execution architecture, so
+`model_type = "qwen3_5_moe"` loads `Qwen35MoeModel`. The existing
+OpenAI-compatible `/v1/chat/completions` endpoint remains the product surface
+for image input:
 
 - text-only messages
 - one image content part

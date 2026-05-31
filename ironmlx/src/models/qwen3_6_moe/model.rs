@@ -1,4 +1,9 @@
 //! Qwen3.6 MoE model facade.
+//!
+//! This wrapper enforces Qwen3.6 MoE checkpoint structure before delegating
+//! numeric execution to [`Qwen35MoeModel`]. Runtime entry points such as
+//! `generate` and `serve` dispatch by execution architecture and can use
+//! `Qwen35MoeModel` directly for these checkpoints.
 
 use anyhow::Context;
 use mlx::{Array, Dtype, StreamOrDevice};
