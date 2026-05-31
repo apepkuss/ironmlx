@@ -8,9 +8,11 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
-use ironmlx::core::{build_position_ids, Loader, Sampler};
+use ironmlx::core::{Loader, Sampler};
 use ironmlx::models::glm4_moe_lite::config::Glm4MoeLiteConfig;
-use ironmlx::models::Glm4MoeLiteModel;
+use ironmlx::models::glm4_moe_lite::decoder_layer::Glm4DecoderLayer;
+use ironmlx::models::glm4_moe_lite::mla_cache::MlaLatentCache;
+use ironmlx::nn::{Embedding, LayerCache, Linear, RmsNorm};
 use mlx::{Array, Device, Dtype, StreamOrDevice};
 use serde::Serialize;
 
@@ -28,6 +30,10 @@ struct Args {
     /// Existing cache lengths to prefill before decode. Pass multiple times.
     #[arg(long = "ctx-len")]
     ctx_lens: Vec<i32>,
+
+    /// Number of leading decoder layers to execute. Pass multiple times.
+    #[arg(long = "depth")]
+    depths: Vec<i32>,
 
     /// Timed decode runs per case. Each run advances the cache by one token.
     #[arg(long, default_value_t = 50)]
@@ -48,6 +54,10 @@ struct Args {
     /// Stream target mode for diagnostics.
     #[arg(long, value_enum, default_value_t = StreamMode::Default)]
     stream_mode: StreamMode,
+
+    /// Optional materialization after every decoder layer for graph-boundary diagnostics.
+    #[arg(long, value_enum, default_value_t = LayerEvalMode::None)]
+    layer_eval_mode: LayerEvalMode,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -62,10 +72,27 @@ enum StreamMode {
     NewExplicit,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LayerEvalMode {
+    /// Preserve the default full-model lazy graph.
+    None,
+    /// Call mlx::eval on the hidden state after every decoder layer.
+    Eval,
+    /// Call mlx::eval and synchronize after every decoder layer.
+    EvalSync,
+}
+
 #[derive(Clone, Copy)]
 struct BenchTarget {
     label: &'static str,
     target: StreamOrDevice,
+}
+
+#[derive(Clone, Copy)]
+struct ForwardOptions {
+    target: StreamOrDevice,
+    layer_eval_mode: LayerEvalMode,
+    depth: i32,
 }
 
 #[derive(Serialize)]
@@ -79,9 +106,11 @@ struct Meta {
     backend: &'static str,
     model_dir: String,
     ctx_lens: Vec<i32>,
+    depths: Vec<i32>,
     warmup_runs: usize,
     measured_runs: usize,
     stream_mode: &'static str,
+    layer_eval_mode: &'static str,
     hidden_size: i32,
     vocab_size: i32,
     num_hidden_layers: i32,
@@ -93,6 +122,7 @@ struct Meta {
 #[derive(Serialize)]
 struct Record {
     ctx_len: i32,
+    depth: i32,
     case: &'static str,
     output_shapes: Vec<Vec<i32>>,
     summary: Summary,
@@ -120,41 +150,48 @@ fn main() -> Result<()> {
 
     let loader = Loader::open(&args.model).context("Loader::open")?;
     let cfg = Glm4MoeLiteConfig::from_loader(&loader).context("loading GLM config")?;
-    let model = Glm4MoeLiteModel::from_loader_with_config(&loader, cfg.clone())
-        .context("loading Glm4MoeLiteModel")?;
+    let depths = selected_depths(&args.depths, cfg.num_hidden_layers)?;
+    let model = BenchGlmModel::from_loader_with_config(&loader, cfg.clone())
+        .context("loading BenchGlmModel")?;
     let sampler = Sampler::greedy();
     let mut records = Vec::new();
 
     for &ctx_len in &ctx_lens {
-        records.push(run_full_hidden_case(
-            &model,
-            &cfg,
-            ctx_len,
-            &args,
-            bench_target.target,
-        )?);
-        records.push(run_full_logits_case(
-            &model,
-            &cfg,
-            ctx_len,
-            &args,
-            bench_target.target,
-        )?);
-        records.push(run_full_logits_sample_case(
-            &model,
-            &cfg,
-            &sampler,
-            ctx_len,
-            &args,
-            bench_target.target,
-        )?);
-        records.push(run_full_logits_repeat_case(
-            &model,
-            &cfg,
-            ctx_len,
-            &args,
-            bench_target.target,
-        )?);
+        for &depth in &depths {
+            records.push(run_full_hidden_case(
+                &model,
+                &cfg,
+                ctx_len,
+                depth,
+                &args,
+                bench_target.target,
+            )?);
+            records.push(run_full_logits_case(
+                &model,
+                &cfg,
+                ctx_len,
+                depth,
+                &args,
+                bench_target.target,
+            )?);
+            records.push(run_full_logits_sample_case(
+                &model,
+                &cfg,
+                &sampler,
+                ctx_len,
+                depth,
+                &args,
+                bench_target.target,
+            )?);
+            records.push(run_full_logits_repeat_case(
+                &model,
+                &cfg,
+                ctx_len,
+                depth,
+                &args,
+                bench_target.target,
+            )?);
+        }
     }
 
     let output = BenchOutput {
@@ -162,14 +199,16 @@ fn main() -> Result<()> {
             backend: "ironmlx-glm-full-forward",
             model_dir: args.model.display().to_string(),
             ctx_lens,
+            depths,
             warmup_runs: args.warmup_runs,
             measured_runs: args.runs,
             stream_mode: bench_target.label,
+            layer_eval_mode: args.layer_eval_mode.label(),
             hidden_size: cfg.hidden_size,
             vocab_size: cfg.vocab_size,
             num_hidden_layers: cfg.num_hidden_layers,
             dtype: "bfloat16",
-            cache_prealloc: "model.make_cache(..., cap >= ctx_len + warmup + runs)",
+            cache_prealloc: "BenchGlmModel::make_cache(depth, ..., cap >= ctx_len + warmup + runs)",
             token_source: "deterministic synthetic token ids in [256, vocab_size)",
         },
         records,
@@ -201,10 +240,225 @@ fn validate_ctx_lens(ctx_lens: &[i32]) -> Result<()> {
     Ok(())
 }
 
+fn validate_depths(depths: &[i32], num_hidden_layers: i32) -> Result<()> {
+    if num_hidden_layers <= 0 {
+        return Err(anyhow!(
+            "num_hidden_layers must be positive, got {num_hidden_layers}"
+        ));
+    }
+    for &depth in depths {
+        if depth <= 0 || depth > num_hidden_layers {
+            return Err(anyhow!(
+                "--depth values must be in [1, {num_hidden_layers}], got {depth}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn selected_depths(depths: &[i32], num_hidden_layers: i32) -> Result<Vec<i32>> {
+    validate_depths(depths, num_hidden_layers)?;
+    if depths.is_empty() {
+        Ok(vec![num_hidden_layers])
+    } else {
+        Ok(depths.to_vec())
+    }
+}
+
+struct BenchGlmModel {
+    embed_tokens: Embedding,
+    layers: Vec<Glm4DecoderLayer>,
+    norm: RmsNorm,
+    lm_head: Linear,
+    cfg: Glm4MoeLiteConfig,
+}
+
+impl BenchGlmModel {
+    fn from_loader_with_config(loader: &Loader, cfg: Glm4MoeLiteConfig) -> Result<Self> {
+        if cfg.tie_word_embeddings {
+            return Err(anyhow!(
+                "BenchGlmModel: tie_word_embeddings expected false (got true)"
+            ));
+        }
+        let embed_tokens = Embedding::from_loader(loader, "model.embed_tokens")
+            .context("loading BenchGlmModel embed_tokens")?;
+        let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
+        for i in 0..cfg.num_hidden_layers {
+            layers.push(
+                Glm4DecoderLayer::from_loader(loader, i, &cfg)
+                    .with_context(|| format!("loading BenchGlmModel layer {i}"))?,
+            );
+        }
+        let norm = RmsNorm::from_loader(loader, "model.norm", cfg.rms_norm_eps)
+            .context("loading BenchGlmModel norm")?;
+        let lm_head =
+            Linear::from_loader(loader, "lm_head").context("loading BenchGlmModel lm_head")?;
+        Ok(Self {
+            embed_tokens,
+            layers,
+            norm,
+            lm_head,
+            cfg,
+        })
+    }
+
+    fn make_cache(
+        &self,
+        depth: i32,
+        batch: i32,
+        cap: i32,
+        dtype: Dtype,
+    ) -> Result<Vec<LayerCache>> {
+        validate_depths(&[depth], self.cfg.num_hidden_layers)?;
+        Ok((0..depth)
+            .map(|_| {
+                LayerCache::Mla(
+                    MlaLatentCache::new(
+                        batch,
+                        self.cfg.kv_lora_rank,
+                        self.cfg.qk_rope_head_dim,
+                        dtype,
+                        cap,
+                    )
+                    .with_step(cap),
+                )
+            })
+            .collect())
+    }
+
+    fn forward_hidden_depth(
+        &self,
+        input_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        opts: ForwardOptions,
+    ) -> Result<Array> {
+        let target = opts.target;
+        let depth = opts.depth;
+        let depth_usize = usize::try_from(depth).context("depth must be positive")?;
+        if depth_usize == 0 || depth_usize > self.layers.len() {
+            return Err(anyhow!(
+                "BenchGlmModel: depth {} out of [1, {}]",
+                depth,
+                self.layers.len()
+            ));
+        }
+
+        let in_dims = input_ids.shape();
+        let in_s = in_dims.as_slice();
+        let batch = in_s[0];
+        let seq_len = in_s[1];
+
+        let caches = cache.ok_or_else(|| anyhow!("BenchGlmModel requires a cache"))?;
+        if caches.len() != depth_usize {
+            return Err(anyhow!(
+                "BenchGlmModel: cache.len()={} != depth={depth}",
+                caches.len()
+            ));
+        }
+
+        let prl: Vec<i32> = per_row_lens
+            .map(|s| s.to_vec())
+            .unwrap_or_else(|| vec![seq_len; batch as usize]);
+        if prl.len() != batch as usize {
+            return Err(anyhow!(
+                "BenchGlmModel: per_row_lens.len()={} != batch={}",
+                prl.len(),
+                batch
+            ));
+        }
+
+        let offsets_vec = match &caches[0] {
+            LayerCache::Mla(c) => c.offsets().to_vec(),
+            _ => {
+                return Err(anyhow!(
+                    "BenchGlmModel: expected LayerCache::Mla at layer 0"
+                ))
+            }
+        };
+        let offset: Array = (&offsets_vec[..], &[batch][..]).try_into()?;
+
+        let owned_mask: Option<Array> = match mask {
+            Some(_) => None,
+            None if seq_len > 1 => {
+                let lc = offsets_vec.iter().copied().max().unwrap_or(0) + seq_len;
+                Some(build_internal_causal_mask(seq_len, lc, Dtype::Bfloat16)?)
+            }
+            None => None,
+        };
+        let effective_mask: Option<&Array> = mask.or(owned_mask.as_ref());
+
+        let mut h = self.embed_tokens.forward_on(input_ids, target)?;
+        for (i, layer) in self.layers.iter().take(depth_usize).enumerate() {
+            let LayerCache::Mla(c) = &mut caches[i] else {
+                return Err(anyhow!(
+                    "BenchGlmModel: expected LayerCache::Mla at layer {i}"
+                ));
+            };
+            h = layer.forward_on(&h, &offset, c, &prl, effective_mask, target, i as i32)?;
+            opts.layer_eval_mode.apply(&h)?;
+        }
+        self.norm.forward_on(&h, target)
+    }
+
+    fn forward_logits_depth(
+        &self,
+        input_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        opts: ForwardOptions,
+    ) -> Result<Array> {
+        let target = opts.target;
+        let hidden = self.forward_hidden_depth(input_ids, per_row_lens, mask, cache, opts)?;
+        let dims_borrow = hidden.shape();
+        let dims = dims_borrow.as_slice();
+        let (b, s, hsz) = (dims[0], dims[1], dims[2]);
+        let last_hidden = if s > 1 {
+            mlx::ops::indexing::slice_strided_on(
+                &hidden,
+                &[0_i32, s - 1, 0][..],
+                &[b, s, hsz][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?
+        } else {
+            hidden
+        };
+        self.lm_head.forward_on(&last_hidden, target)
+    }
+}
+
+fn build_internal_causal_mask(l: i32, lc: i32, dtype: Dtype) -> Result<Array> {
+    let chunk_start = lc - l;
+    if chunk_start < 0 {
+        return Err(anyhow!(
+            "build_internal_causal_mask: cache len Lc={lc} < query len L={l}"
+        ));
+    }
+    let q_len = l as usize;
+    let kv_len = lc as usize;
+    let cs = chunk_start as usize;
+    let neg_inf = f32::NEG_INFINITY;
+    let mut flat = vec![neg_inf; q_len * kv_len];
+    for q in 0..q_len {
+        for k in 0..cs {
+            flat[q * kv_len + k] = 0.0;
+        }
+        for k in 0..=q {
+            flat[q * kv_len + cs + k] = 0.0;
+        }
+    }
+    let arr_f32: Array = (&flat[..], &[1_i32, 1_i32, l, lc][..]).try_into()?;
+    Ok(mlx::ops::cast::astype(&arr_f32, dtype)?)
+}
+
 fn run_full_hidden_case(
-    model: &Glm4MoeLiteModel,
+    model: &BenchGlmModel,
     cfg: &Glm4MoeLiteConfig,
     ctx_len: i32,
+    depth: i32,
     args: &Args,
     target: StreamOrDevice,
 ) -> Result<Record> {
@@ -212,79 +466,124 @@ fn run_full_hidden_case(
         model,
         cfg,
         ctx_len,
+        depth,
         args,
         target,
-        args.seed + ctx_len as u64,
+        args.seed + depth as u64 * 10_000_000 + ctx_len as u64,
     )?;
     let mut decode_tokens = DecodeTokens::new(
-        args.seed + 1_000_000 + ctx_len as u64,
-        args.warmup_runs + args.runs,
-        cfg.vocab_size,
-    )?;
-    bench_case(ctx_len, "full-hidden", args.warmup_runs, args.runs, || {
-        run_decode_hidden(model, decode_tokens.next()?, &mut cache, target)
-    })
-}
-
-fn run_full_logits_case(
-    model: &Glm4MoeLiteModel,
-    cfg: &Glm4MoeLiteConfig,
-    ctx_len: i32,
-    args: &Args,
-    target: StreamOrDevice,
-) -> Result<Record> {
-    let mut cache = prepare_cache(
-        model,
-        cfg,
-        ctx_len,
-        args,
-        target,
-        args.seed + 2_000_000 + ctx_len as u64,
-    )?;
-    let mut decode_tokens = DecodeTokens::new(
-        args.seed + 3_000_000 + ctx_len as u64,
-        args.warmup_runs + args.runs,
-        cfg.vocab_size,
-    )?;
-    bench_case(ctx_len, "full-logits", args.warmup_runs, args.runs, || {
-        run_decode_logits(model, decode_tokens.next()?, &mut cache, target)
-    })
-}
-
-fn run_full_logits_sample_case(
-    model: &Glm4MoeLiteModel,
-    cfg: &Glm4MoeLiteConfig,
-    sampler: &Sampler,
-    ctx_len: i32,
-    args: &Args,
-    target: StreamOrDevice,
-) -> Result<Record> {
-    let mut cache = prepare_cache(
-        model,
-        cfg,
-        ctx_len,
-        args,
-        target,
-        args.seed + 4_000_000 + ctx_len as u64,
-    )?;
-    let mut decode_tokens = DecodeTokens::new(
-        args.seed + 5_000_000 + ctx_len as u64,
+        args.seed + depth as u64 * 10_000_000 + 1_000_000 + ctx_len as u64,
         args.warmup_runs + args.runs,
         cfg.vocab_size,
     )?;
     bench_case(
         ctx_len,
+        depth,
+        "full-hidden",
+        args.warmup_runs,
+        args.runs,
+        || {
+            run_decode_hidden(
+                model,
+                decode_tokens.next()?,
+                &mut cache,
+                target,
+                args.layer_eval_mode,
+                depth,
+            )
+        },
+    )
+}
+
+fn run_full_logits_case(
+    model: &BenchGlmModel,
+    cfg: &Glm4MoeLiteConfig,
+    ctx_len: i32,
+    depth: i32,
+    args: &Args,
+    target: StreamOrDevice,
+) -> Result<Record> {
+    let mut cache = prepare_cache(
+        model,
+        cfg,
+        ctx_len,
+        depth,
+        args,
+        target,
+        args.seed + depth as u64 * 10_000_000 + 2_000_000 + ctx_len as u64,
+    )?;
+    let mut decode_tokens = DecodeTokens::new(
+        args.seed + depth as u64 * 10_000_000 + 3_000_000 + ctx_len as u64,
+        args.warmup_runs + args.runs,
+        cfg.vocab_size,
+    )?;
+    bench_case(
+        ctx_len,
+        depth,
+        "full-logits",
+        args.warmup_runs,
+        args.runs,
+        || {
+            run_decode_logits(
+                model,
+                decode_tokens.next()?,
+                &mut cache,
+                target,
+                args.layer_eval_mode,
+                depth,
+            )
+        },
+    )
+}
+
+fn run_full_logits_sample_case(
+    model: &BenchGlmModel,
+    cfg: &Glm4MoeLiteConfig,
+    sampler: &Sampler,
+    ctx_len: i32,
+    depth: i32,
+    args: &Args,
+    target: StreamOrDevice,
+) -> Result<Record> {
+    let mut cache = prepare_cache(
+        model,
+        cfg,
+        ctx_len,
+        depth,
+        args,
+        target,
+        args.seed + depth as u64 * 10_000_000 + 4_000_000 + ctx_len as u64,
+    )?;
+    let mut decode_tokens = DecodeTokens::new(
+        args.seed + depth as u64 * 10_000_000 + 5_000_000 + ctx_len as u64,
+        args.warmup_runs + args.runs,
+        cfg.vocab_size,
+    )?;
+    bench_case(
+        ctx_len,
+        depth,
         "full-logits-sample",
         args.warmup_runs,
         args.runs,
-        || run_decode_logits_sample(model, sampler, decode_tokens.next()?, &mut cache, target),
+        || {
+            run_decode_logits_sample(
+                model,
+                sampler,
+                decode_tokens.next()?,
+                &mut cache,
+                target,
+                args.layer_eval_mode,
+                depth,
+            )
+        },
     )
 }
 
 fn run_full_logits_repeat_case(
-    model: &Glm4MoeLiteModel,
+    model: &BenchGlmModel,
     cfg: &Glm4MoeLiteConfig,
     ctx_len: i32,
+    depth: i32,
     args: &Args,
     target: StreamOrDevice,
 ) -> Result<Record> {
@@ -292,80 +591,114 @@ fn run_full_logits_repeat_case(
         model,
         cfg,
         ctx_len,
+        depth,
         args,
         target,
-        args.seed + 6_000_000 + ctx_len as u64,
+        args.seed + depth as u64 * 10_000_000 + 6_000_000 + ctx_len as u64,
     )?;
     let mut decode_tokens = DecodeTokens::new(
-        args.seed + 7_000_000 + ctx_len as u64,
+        args.seed + depth as u64 * 10_000_000 + 7_000_000 + ctx_len as u64,
         args.warmup_runs + args.runs,
         cfg.vocab_size,
     )?;
     bench_case(
         ctx_len,
+        depth,
         "full-logits-repeat",
         args.warmup_runs,
         args.runs,
-        || run_decode_logits(model, decode_tokens.next()?, &mut cache, target),
+        || {
+            run_decode_logits(
+                model,
+                decode_tokens.next()?,
+                &mut cache,
+                target,
+                args.layer_eval_mode,
+                depth,
+            )
+        },
     )
 }
 
 fn prepare_cache(
-    model: &Glm4MoeLiteModel,
+    model: &BenchGlmModel,
     cfg: &Glm4MoeLiteConfig,
     ctx_len: i32,
+    depth: i32,
     args: &Args,
     target: StreamOrDevice,
     seed: u64,
-) -> Result<Vec<ironmlx::nn::LayerCache>> {
+) -> Result<Vec<LayerCache>> {
     let extra_steps = i32::try_from(args.warmup_runs.saturating_add(args.runs))
         .context("warmup+runs exceeds i32")?;
     let cap = ctx_len
         .checked_add(extra_steps)
         .and_then(|n| n.checked_add(8))
         .ok_or_else(|| anyhow!("cache cap overflow for ctx_len={ctx_len}"))?;
-    let mut cache = model.make_cache(1, cap, Dtype::Bfloat16)?;
+    let mut cache = model.make_cache(depth, 1, cap, Dtype::Bfloat16)?;
     let ids = synthetic_token_ids(seed, ctx_len, cfg.vocab_size)?;
     let input: Array = (&ids[..], &[1_i32, ctx_len][..]).try_into()?;
-    let position_ids = build_position_ids(0, ctx_len)?;
-    let hidden =
-        model.forward_text_hidden(&input, &position_ids, None, None, Some(&mut cache), target)?;
+    let hidden = model.forward_hidden_depth(
+        &input,
+        None,
+        None,
+        Some(&mut cache),
+        ForwardOptions {
+            target,
+            layer_eval_mode: args.layer_eval_mode,
+            depth,
+        },
+    )?;
     mlx::transforms::eval(&[&hidden])?;
     mlx::transforms::synchronize()?;
     Ok(cache)
 }
 
 fn run_decode_hidden(
-    model: &Glm4MoeLiteModel,
+    model: &BenchGlmModel,
     token: u32,
-    cache: &mut [ironmlx::nn::LayerCache],
+    cache: &mut [LayerCache],
     target: StreamOrDevice,
+    layer_eval_mode: LayerEvalMode,
+    depth: i32,
 ) -> Result<Vec<Array>> {
     let input = decode_token_array(token)?;
-    let position_ids = build_position_ids(0, 1)?;
-    let hidden =
-        model.forward_text_hidden(&input, &position_ids, None, None, Some(cache), target)?;
+    let hidden = model.forward_hidden_depth(
+        &input,
+        None,
+        None,
+        Some(cache),
+        ForwardOptions {
+            target,
+            layer_eval_mode,
+            depth,
+        },
+    )?;
     Ok(vec![hidden])
 }
 
 fn run_decode_logits(
-    model: &Glm4MoeLiteModel,
+    model: &BenchGlmModel,
     token: u32,
-    cache: &mut [ironmlx::nn::LayerCache],
+    cache: &mut [LayerCache],
     target: StreamOrDevice,
+    layer_eval_mode: LayerEvalMode,
+    depth: i32,
 ) -> Result<Vec<Array>> {
-    let logits = decode_logits(model, token, cache, target)?;
+    let logits = decode_logits(model, token, cache, target, layer_eval_mode, depth)?;
     Ok(vec![logits])
 }
 
 fn run_decode_logits_sample(
-    model: &Glm4MoeLiteModel,
+    model: &BenchGlmModel,
     sampler: &Sampler,
     token: u32,
-    cache: &mut [ironmlx::nn::LayerCache],
+    cache: &mut [LayerCache],
     target: StreamOrDevice,
+    layer_eval_mode: LayerEvalMode,
+    depth: i32,
 ) -> Result<Vec<Array>> {
-    let logits = decode_logits(model, token, cache, target)?;
+    let logits = decode_logits(model, token, cache, target, layer_eval_mode, depth)?;
     let vocab = logits.shape().as_slice()[2];
     let flat = logits.reshape((vocab,))?;
     let next = sampler.sample_async_greedy(&flat)?;
@@ -373,14 +706,25 @@ fn run_decode_logits_sample(
 }
 
 fn decode_logits(
-    model: &Glm4MoeLiteModel,
+    model: &BenchGlmModel,
     token: u32,
-    cache: &mut [ironmlx::nn::LayerCache],
+    cache: &mut [LayerCache],
     target: StreamOrDevice,
+    layer_eval_mode: LayerEvalMode,
+    depth: i32,
 ) -> Result<Array> {
     let input = decode_token_array(token)?;
-    let position_ids = build_position_ids(0, 1)?;
-    model.forward_on(&input, &position_ids, None, None, Some(cache), target)
+    model.forward_logits_depth(
+        &input,
+        None,
+        None,
+        Some(cache),
+        ForwardOptions {
+            target,
+            layer_eval_mode,
+            depth,
+        },
+    )
 }
 
 fn decode_token_array(token: u32) -> Result<Array> {
@@ -438,6 +782,7 @@ fn synthetic_token_ids(seed: u64, len: i32, vocab_size: i32) -> Result<Vec<u32>>
 
 fn bench_case<F>(
     ctx_len: i32,
+    depth: i32,
     case: &'static str,
     warmup_runs: usize,
     runs: usize,
@@ -463,6 +808,7 @@ where
 
     Ok(Record {
         ctx_len,
+        depth,
         case,
         output_shapes,
         summary: summarize(&values_ms),
@@ -551,19 +897,46 @@ impl StreamMode {
     }
 }
 
+impl LayerEvalMode {
+    fn label(self) -> &'static str {
+        match self {
+            LayerEvalMode::None => "none",
+            LayerEvalMode::Eval => "eval",
+            LayerEvalMode::EvalSync => "eval-sync",
+        }
+    }
+
+    fn apply(self, hidden: &Array) -> Result<()> {
+        match self {
+            LayerEvalMode::None => Ok(()),
+            LayerEvalMode::Eval => {
+                mlx::transforms::eval(&[hidden])?;
+                Ok(())
+            }
+            LayerEvalMode::EvalSync => {
+                mlx::transforms::eval(&[hidden])?;
+                mlx::transforms::synchronize()?;
+                Ok(())
+            }
+        }
+    }
+}
+
 fn print_summary(output: &BenchOutput) {
     println!("# ironmlx-glm-full-forward-bench");
     println!(
-        "layers={} H={} V={} stream={}",
+        "layers={} H={} V={} stream={} layer_eval={}",
         output.meta.num_hidden_layers,
         output.meta.hidden_size,
         output.meta.vocab_size,
-        output.meta.stream_mode
+        output.meta.stream_mode,
+        output.meta.layer_eval_mode
     );
     for record in &output.records {
         println!(
-            "ctx={:<5} case={:<22} p50={:>8.4} ms p95={:>8.4} ms",
+            "ctx={:<5} depth={:<2} case={:<22} p50={:>8.4} ms p95={:>8.4} ms",
             record.ctx_len,
+            record.depth,
             record.case,
             record.summary.p50_ms.unwrap_or(f64::NAN),
             record.summary.p95_ms.unwrap_or(f64::NAN)
@@ -585,6 +958,25 @@ mod tests {
     fn validate_ctx_lens_accepts_default_empty_and_positive_values() {
         validate_ctx_lens(&[]).unwrap();
         validate_ctx_lens(&[128, 512]).unwrap();
+    }
+
+    #[test]
+    fn validate_depths_rejects_out_of_range_values() {
+        assert!(validate_depths(&[0], 47).is_err());
+        assert!(validate_depths(&[48], 47).is_err());
+    }
+
+    #[test]
+    fn selected_depths_default_to_full_depth() {
+        assert_eq!(selected_depths(&[], 47).unwrap(), vec![47]);
+        assert_eq!(selected_depths(&[1, 4, 47], 47).unwrap(), vec![1, 4, 47]);
+    }
+
+    #[test]
+    fn layer_eval_mode_labels_are_stable() {
+        assert_eq!(LayerEvalMode::None.label(), "none");
+        assert_eq!(LayerEvalMode::Eval.label(), "eval");
+        assert_eq!(LayerEvalMode::EvalSync.label(), "eval-sync");
     }
 
     #[test]
