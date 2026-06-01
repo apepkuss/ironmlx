@@ -250,25 +250,33 @@ cargo run --release -p iron-bench -- \
 
 ### 多候选合并与选择
 
-多个候选的 JSON 可以合并为一个 calibration 文件：
-
-```bash
-jq -s '{
-  schema_version: 1,
-  model_name: .[0].model_name,
-  hardware_label: .[0].hardware_label,
-  measurements: map(.measurements[])
-}' candidate-*.json > calibration.json
-```
-
-然后运行：
+多个候选的 JSON 可以用内置 merge 子命令合并为一个 calibration 文件：
 
 ```bash
 cargo run --release -p ironmlx -- \
-  scheduler-autotune \
+  scheduler-autotune merge \
+  --input candidate-b1.json \
+  --input candidate-b2.json \
+  --output calibration.json
+```
+
+然后显式运行 select：
+
+```bash
+cargo run --release -p ironmlx -- \
+  scheduler-autotune select \
   --input calibration.json \
   --format text
 ```
+
+merge 默认执行严格校验：
+
+- `schema_version` 必须为 1。
+- 所有输入必须有相同的 `model_name`、`hardware_label` 和归一化后的 `objective`。
+- 每个输入必须包含 measurements。
+- 每个候选 config 必须覆盖同一组 `(prompt_len, max_new_tokens, concurrency)` 场景。
+
+如果只是为了临时检查不完整数据，可以显式追加 `--allow-incomplete-coverage`，但该结果不适合作为候选之间的公平选择依据。
 
 公平性要求：
 
@@ -282,5 +290,4 @@ cargo run --release -p ironmlx -- \
 - agent 常见长 prompt 下，TTFT 与 ITL 哪个应作为主优化目标，需要按产品场景定义权重。
 - chunk 粒度应按模型、prompt 长度、机器内存和 decode cadence 综合决定，不能只用固定阈值。
 - 离线 profile 的持久化位置、版本兼容和手动参数优先级需要单独设计。
-- 如何把多个 `iron-bench --format autotune-json` 候选自动合并为一个 calibration 文件仍需后续衔接。
 - 真正运行时 autotune 是否允许根据 `/healthz` 和队列状态动态调整策略，需要先证明不会引入抖动。

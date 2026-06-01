@@ -65,12 +65,51 @@ mod tests {
 
         match cli.command {
             Command::SchedulerAutotune(args) => {
-                assert_eq!(args.input.to_string_lossy(), "calibration.json");
+                assert_eq!(
+                    args.input.expect("expected legacy input").to_string_lossy(),
+                    "calibration.json"
+                );
                 assert_eq!(
                     args.format,
                     super::scheduler_autotune::SchedulerAutotuneOutputFormat::Json
                 );
             }
+            other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scheduler_autotune_merge_subcommand_parses_inputs_and_output() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "scheduler-autotune",
+            "merge",
+            "--input",
+            "candidate-a.json",
+            "--input",
+            "candidate-b.json",
+            "--output",
+            "calibration.json",
+        ]);
+
+        match cli.command {
+            Command::SchedulerAutotune(args) => match args.action {
+                Some(super::scheduler_autotune::SchedulerAutotuneAction::Merge(merge)) => {
+                    assert_eq!(merge.input.len(), 2);
+                    assert_eq!(merge.input[0].to_string_lossy(), "candidate-a.json");
+                    assert_eq!(merge.input[1].to_string_lossy(), "candidate-b.json");
+                    assert_eq!(
+                        merge
+                            .output
+                            .as_ref()
+                            .expect("expected output")
+                            .to_string_lossy(),
+                        "calibration.json"
+                    );
+                    assert!(!merge.allow_incomplete_coverage);
+                }
+                other => panic!("expected Merge action, got {other:?}"),
+            },
             other => panic!("expected SchedulerAutotune command, got {other:?}"),
         }
     }

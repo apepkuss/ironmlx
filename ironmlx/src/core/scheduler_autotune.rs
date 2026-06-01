@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
+use anyhow::{bail, Result};
+
 use crate::core::memory_budget::{
     kv_bytes_per_token, ModelMeta, SAFETY_MARGIN_BYTES, SOFT_LIMIT_FRAC,
 };
@@ -470,6 +472,65 @@ pub struct SchedulerAutotuneProfileSelection {
     pub warnings: Vec<SchedulerAutotuneSelectionNote>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerAutotuneMergeOptions {
+    pub require_complete_coverage: bool,
+}
+
+impl Default for SchedulerAutotuneMergeOptions {
+    fn default() -> Self {
+        Self {
+            require_complete_coverage: true,
+        }
+    }
+}
+
+pub fn merge_scheduler_autotune_calibrations(
+    inputs: Vec<SchedulerAutotuneCalibrationInput>,
+    options: SchedulerAutotuneMergeOptions,
+) -> Result<SchedulerAutotuneCalibrationInput> {
+    let mut iter = inputs.into_iter();
+    let Some(mut merged) = iter.next() else {
+        bail!("at least one calibration input is required");
+    };
+
+    validate_single_calibration(&merged, "input[0]")?;
+    let objective = merged.objective.normalized();
+    merged.objective = objective;
+
+    for (idx, mut input) in iter.enumerate() {
+        let label = format!("input[{}]", idx + 1);
+        validate_single_calibration(&input, &label)?;
+        input.objective = input.objective.normalized();
+
+        if input.model_name != merged.model_name {
+            bail!(
+                "{label} model_name mismatch: expected {}, got {}",
+                merged.model_name,
+                input.model_name
+            );
+        }
+        if input.hardware_label != merged.hardware_label {
+            bail!(
+                "{label} hardware_label mismatch: expected {}, got {}",
+                merged.hardware_label,
+                input.hardware_label
+            );
+        }
+        if input.objective != objective {
+            bail!("{label} objective mismatch");
+        }
+
+        merged.measurements.extend(input.measurements);
+    }
+
+    if options.require_complete_coverage {
+        validate_complete_scenario_coverage(&merged.measurements)?;
+    }
+
+    Ok(merged)
+}
+
 pub fn select_scheduler_autotune_profile(
     input: SchedulerAutotuneCalibrationInput,
 ) -> SchedulerAutotuneProfileSelection {
@@ -770,6 +831,71 @@ fn coverage_warnings(
         ));
     }
     warnings
+}
+
+fn validate_single_calibration(
+    input: &SchedulerAutotuneCalibrationInput,
+    label: &str,
+) -> Result<()> {
+    if input.schema_version != 1 {
+        bail!(
+            "{label} schema_version mismatch: expected 1, got {}",
+            input.schema_version
+        );
+    }
+    if input.model_name.trim().is_empty() {
+        bail!("{label} model_name must not be empty");
+    }
+    if input.hardware_label.trim().is_empty() {
+        bail!("{label} hardware_label must not be empty");
+    }
+    if input.measurements.is_empty() {
+        bail!("{label} measurements must not be empty");
+    }
+    Ok(())
+}
+
+fn validate_complete_scenario_coverage(
+    measurements: &[SchedulerAutotuneMeasurement],
+) -> Result<()> {
+    let mut scenarios_by_config: BTreeMap<
+        SchedulerAutotuneProfileConfig,
+        BTreeSet<SchedulerAutotuneScenario>,
+    > = BTreeMap::new();
+    for row in measurements {
+        scenarios_by_config
+            .entry(row.config)
+            .or_default()
+            .insert(SchedulerAutotuneScenario::from(row));
+    }
+
+    let mut iter = scenarios_by_config.into_iter();
+    let Some((baseline_config, baseline_scenarios)) = iter.next() else {
+        return Ok(());
+    };
+
+    for (config, scenarios) in iter {
+        if scenarios != baseline_scenarios {
+            let missing = baseline_scenarios.difference(&scenarios).count();
+            let extra = scenarios.difference(&baseline_scenarios).count();
+            bail!(
+                "scenario coverage mismatch for b_max={} prefill_chunk_size={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={} against baseline b_max={} prefill_chunk_size={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={}: missing {} scenario(s), extra {} scenario(s)",
+                config.b_max,
+                config.prefill_chunk_size,
+                config.admission_deadline_ms,
+                config.admission_queue_max,
+                config.max_cache_cap,
+                baseline_config.b_max,
+                baseline_config.prefill_chunk_size,
+                baseline_config.admission_deadline_ms,
+                baseline_config.admission_queue_max,
+                baseline_config.max_cache_cap,
+                missing,
+                extra
+            );
+        }
+    }
+    Ok(())
 }
 
 fn rejected_candidate(
