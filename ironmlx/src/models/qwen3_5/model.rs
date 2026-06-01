@@ -508,6 +508,9 @@ impl Qwen35Model {
     /// greedy argmax is bit-identical. Verified by integration scenarios in
     /// the unit tests below (text-only equivalence vs `batched_prefill`,
     /// and B=1 equivalence vs `forward_vl`).
+    ///
+    /// Note: `MiniCpmV46Model::batched_prefill_vl` mirrors this (SigLIP vision
+    /// instead of NaViT) — keep the two in sync when fixing bugs here.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn batched_prefill_vl(
         &self,

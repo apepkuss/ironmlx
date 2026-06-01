@@ -678,7 +678,7 @@ mod tests {
     /// Run with:
     /// ```text
     /// MINICPMV46_MODEL=<path> cargo test --release -p ironmlx --lib \
-    ///   minicpmv4_6::tests::text_only_vl_chunk_delegates_to_core_forward -- --ignored --nocapture
+    ///   minicpmv4_6::model::tests::text_only_vl_chunk_delegates_to_core_forward -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "requires MINICPMV46_MODEL env var pointing to a real 4-bit checkpoint"]
