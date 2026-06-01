@@ -21,8 +21,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -52,6 +52,7 @@ pub enum SchedulerCommand {
 struct PendingAdmit {
     request: GenerateRequest,
     reply_tx: oneshot::Sender<Result<AdmitReply>>,
+    queued_at_profile: Option<Instant>,
 }
 
 fn fresh_prefill_batch_limit_for_request<M: Model>(
@@ -75,6 +76,57 @@ enum RollingEvent {
     AdvanceMidAdmit,
     Step,
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RollingMidAdmitSource {
+    Direct,
+    Queue,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MidAdmitProfileContext {
+    source: RollingMidAdmitSource,
+    queue_wait_ms: Option<f64>,
+    queue_len: usize,
+}
+
+impl RollingMidAdmitSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            RollingMidAdmitSource::Direct => "direct",
+            RollingMidAdmitSource::Queue => "queue",
+        }
+    }
+}
+
+fn rolling_profile_enabled_from_env(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn rolling_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        rolling_profile_enabled_from_env(
+            std::env::var("IRONMLX_CHUNKED_ROLLING_PROFILE")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+fn rolling_profile_t_ms(now: Instant) -> f64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = *EPOCH.get_or_init(|| now);
+    now.saturating_duration_since(epoch).as_secs_f64() * 1000.0
+}
+
+fn rolling_profile_elapsed_ms(start: Instant, end: Instant) -> f64 {
+    end.saturating_duration_since(start).as_secs_f64() * 1000.0
+}
+
+fn rolling_profile_queue_wait_ms(queued_at: Instant, now: Instant) -> f64 {
+    rolling_profile_elapsed_ms(queued_at, now)
 }
 
 /// Rolling-loop admission fairness policy.
@@ -403,17 +455,42 @@ fn driver_loop<M>(
 
         // ===== First-batch prefill. =====
         batch_count.fetch_add(1, Ordering::Relaxed);
+        let prefill_profile = rolling_profile_enabled()
+            .then(|| (sched.active_count(), admission_queue.len(), Instant::now()));
         let prefill_result = {
             let model_lock = model.blocking_lock();
             sched.prefill_admitted(&model_lock)
         };
         match prefill_result {
             Ok(prefill_events) => {
+                if let Some((prefill_active, prefill_queue_len, prefill_timer)) = prefill_profile {
+                    let prefill_end = Instant::now();
+                    tracing::info!(
+                        "[chunked-rolling-profile] event=fresh_prefill t_ms={:.3} active_count={} queue_len={} fresh_batch_limit={} event_count={} elapsed_ms={:.3}",
+                        rolling_profile_t_ms(prefill_end),
+                        prefill_active,
+                        prefill_queue_len,
+                        fresh_batch_limit,
+                        prefill_events.len(),
+                        rolling_profile_elapsed_ms(prefill_timer, prefill_end)
+                    );
+                }
                 for ev in prefill_events {
                     route_event(ev, &event_txs);
                 }
             }
             Err(e) => {
+                if let Some((prefill_active, prefill_queue_len, prefill_timer)) = prefill_profile {
+                    let prefill_end = Instant::now();
+                    tracing::info!(
+                        "[chunked-rolling-profile] event=fresh_prefill_error t_ms={:.3} active_count={} queue_len={} fresh_batch_limit={} elapsed_ms={:.3}",
+                        rolling_profile_t_ms(prefill_end),
+                        prefill_active,
+                        prefill_queue_len,
+                        fresh_batch_limit,
+                        rolling_profile_elapsed_ms(prefill_timer, prefill_end)
+                    );
+                }
                 tracing::error!("[SchedulerActor] prefill error: {e:?}");
                 if let Err(evict_err) = sched.evict_all() {
                     tracing::warn!(
@@ -525,6 +602,11 @@ fn driver_loop<M>(
                         &mut event_txs,
                         &admit_count,
                         &model,
+                        MidAdmitProfileContext {
+                            source: RollingMidAdmitSource::Direct,
+                            queue_wait_ms: None,
+                            queue_len: admission_queue.len(),
+                        },
                     ) {
                         admission_policy.record_admission_work();
                     }
@@ -536,21 +618,54 @@ fn driver_loop<M>(
                         &mut event_txs,
                         &admit_count,
                         &model,
+                        admission_queue.len(),
                     ) {
                         admission_policy.record_admission_work();
                     }
                 }
                 RollingEvent::Step => {
+                    let step_profile = rolling_profile_enabled().then(|| {
+                        (
+                            sched.active_count(),
+                            admission_queue.len(),
+                            in_flight_mid_admit.is_some(),
+                            Instant::now(),
+                        )
+                    });
                     let step_result = {
                         let model_lock = model.blocking_lock();
                         sched.step(&model_lock)
                     };
+                    let step_end = step_profile.map(|_| Instant::now());
                     match step_result {
                         Ok(events) => {
+                            let event_count = events.len();
                             for ev in events {
                                 route_event(ev, &event_txs);
                             }
-                            sched.gc_finished_rows(&mut event_txs);
+                            let evicted_count = sched.gc_finished_rows(&mut event_txs).len();
+                            if let (
+                                Some((
+                                    step_active_before,
+                                    step_queue_len,
+                                    step_had_in_flight_mid_admit,
+                                    step_timer,
+                                )),
+                                Some(step_end),
+                            ) = (step_profile, step_end)
+                            {
+                                tracing::info!(
+                                    "[chunked-rolling-profile] event=decode_step t_ms={:.3} active_before={} active_after={} queue_len={} had_in_flight_mid_admit={} event_count={} evicted_count={} elapsed_ms={:.3}",
+                                    rolling_profile_t_ms(step_end),
+                                    step_active_before,
+                                    sched.active_count(),
+                                    step_queue_len,
+                                    step_had_in_flight_mid_admit,
+                                    event_count,
+                                    evicted_count,
+                                    rolling_profile_elapsed_ms(step_timer, step_end)
+                                );
+                            }
                             admission_policy.record_decode_step();
                             // ===== Post-gc queue drain. =====
                             // Free slots → pull from admission_queue head
@@ -572,6 +687,26 @@ fn driver_loop<M>(
                             }
                         }
                         Err(e) => {
+                            if let (
+                                Some((
+                                    step_active_before,
+                                    step_queue_len,
+                                    step_had_in_flight_mid_admit,
+                                    step_timer,
+                                )),
+                                Some(step_end),
+                            ) = (step_profile, step_end)
+                            {
+                                tracing::info!(
+                                    "[chunked-rolling-profile] event=decode_step_error t_ms={:.3} active_before={} active_after={} queue_len={} had_in_flight_mid_admit={} elapsed_ms={:.3}",
+                                    rolling_profile_t_ms(step_end),
+                                    step_active_before,
+                                    sched.active_count(),
+                                    step_queue_len,
+                                    step_had_in_flight_mid_admit,
+                                    rolling_profile_elapsed_ms(step_timer, step_end)
+                                );
+                            }
                             tracing::error!("[SchedulerActor] step error: {e:?}");
                             #[cfg(feature = "p5h-profile")]
                             if format!("{e:?}").contains("step illegal in Finished phase") {
@@ -781,11 +916,20 @@ fn begin_mid_admit<M>(
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     model: &Arc<Mutex<M>>,
+    profile_context: MidAdmitProfileContext,
 ) -> Option<AdmitMidHandle>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
+    let admit_profile = rolling_profile_enabled().then(|| {
+        (
+            request.prompt_ids.len(),
+            request.prefill_chunk_size,
+            sched.active_count(),
+            Instant::now(),
+        )
+    });
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
     // Phase 1: begin.
@@ -799,7 +943,25 @@ where
             }
         }
     };
+    let begin_end = admit_profile.map(|_| Instant::now());
     let id = handle.request_id;
+    if let (Some((prompt_len, prefill_chunk_size, active_before, begin_start)), Some(begin_end)) =
+        (admit_profile, begin_end)
+    {
+        tracing::info!(
+            "[chunked-rolling-profile] event=mid_begin t_ms={:.3} request_id={} source={} prompt_len={} prefill_chunk_size={} active_before={} active_after={} queue_len={} queue_wait_ms={:.3} elapsed_ms={:.3}",
+            rolling_profile_t_ms(begin_end),
+            id.0,
+            profile_context.source.as_str(),
+            prompt_len,
+            prefill_chunk_size,
+            active_before,
+            sched.active_count(),
+            profile_context.queue_len,
+            profile_context.queue_wait_ms.unwrap_or(-1.0),
+            rolling_profile_elapsed_ms(begin_start, begin_end)
+        );
+    }
     event_txs.insert(id, event_tx);
     if reply_tx
         .send(Ok(AdmitReply {
@@ -824,6 +986,7 @@ fn start_mid_admit_one_chunk<M>(
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
+    profile_context: MidAdmitProfileContext,
 ) -> bool
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -831,11 +994,18 @@ where
     if in_flight_mid_admit.is_some() {
         return false;
     }
-    let Some(handle) = begin_mid_admit(cmd, sched, event_txs, model) else {
+    let Some(handle) = begin_mid_admit(cmd, sched, event_txs, model, profile_context) else {
         return false;
     };
     *in_flight_mid_admit = Some(handle);
-    advance_mid_admit_one_chunk(in_flight_mid_admit, sched, event_txs, admit_count, model)
+    advance_mid_admit_one_chunk(
+        in_flight_mid_admit,
+        sched,
+        event_txs,
+        admit_count,
+        model,
+        profile_context.queue_len,
+    )
 }
 
 fn advance_mid_admit_one_chunk<M>(
@@ -844,6 +1014,7 @@ fn advance_mid_admit_one_chunk<M>(
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
+    queue_len: usize,
 ) -> bool
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -852,12 +1023,40 @@ where
         return false;
     };
     let id = handle.request_id;
+    let chunk_profile = rolling_profile_enabled().then(|| {
+        (
+            handle.chunk_start,
+            handle.prompt_len,
+            handle.chunk_size,
+            sched.active_count(),
+            Instant::now(),
+        )
+    });
 
     let is_last = {
         let m = model.blocking_lock();
         match sched.admit_mid_chunk(&mut handle, &m) {
             Ok(b) => b,
             Err(e) => {
+                if let Some((chunk_start, prompt_len, chunk_size, active_count, chunk_timer)) =
+                    chunk_profile
+                {
+                    let chunk_end_time = Instant::now();
+                    let chunk_end = handle.chunk_start;
+                    tracing::info!(
+                        "[chunked-rolling-profile] event=mid_chunk_error t_ms={:.3} request_id={} chunk_start={} chunk_end={} chunk_len={} prompt_len={} chunk_size={} active_count={} queue_len={} elapsed_ms={:.3}",
+                        rolling_profile_t_ms(chunk_end_time),
+                        id.0,
+                        chunk_start,
+                        chunk_end,
+                        chunk_end.saturating_sub(chunk_start),
+                        prompt_len,
+                        chunk_size,
+                        active_count,
+                        queue_len,
+                        rolling_profile_elapsed_ms(chunk_timer, chunk_end_time)
+                    );
+                }
                 tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
                 let _ = sched.evict(id);
                 event_txs.remove(&id);
@@ -865,19 +1064,63 @@ where
             }
         }
     };
+    if let Some((chunk_start, prompt_len, chunk_size, active_count, chunk_timer)) = chunk_profile {
+        let chunk_end_time = Instant::now();
+        let chunk_end = handle.chunk_start;
+        tracing::info!(
+            "[chunked-rolling-profile] event=mid_chunk t_ms={:.3} request_id={} chunk_start={} chunk_end={} chunk_len={} prompt_len={} chunk_size={} is_last={} active_count={} queue_len={} elapsed_ms={:.3}",
+            rolling_profile_t_ms(chunk_end_time),
+            id.0,
+            chunk_start,
+            chunk_end,
+            chunk_end.saturating_sub(chunk_start),
+            prompt_len,
+            chunk_size,
+            is_last,
+            active_count,
+            queue_len,
+            rolling_profile_elapsed_ms(chunk_timer, chunk_end_time)
+        );
+    }
 
     if !is_last {
         *in_flight_mid_admit = Some(handle);
         return true;
     }
 
+    let finalize_profile =
+        rolling_profile_enabled().then(|| (sched.active_count(), Instant::now()));
     let m = model.blocking_lock();
     match sched.admit_mid_finalize(handle, &m) {
         Ok((_id, first_event)) => {
             admit_count.fetch_add(1, Ordering::Relaxed);
+            if let Some((active_before, finalize_timer)) = finalize_profile {
+                let finalize_end = Instant::now();
+                tracing::info!(
+                    "[chunked-rolling-profile] event=mid_finalize t_ms={:.3} request_id={} active_before={} active_after={} queue_len={} elapsed_ms={:.3}",
+                    rolling_profile_t_ms(finalize_end),
+                    id.0,
+                    active_before,
+                    sched.active_count(),
+                    queue_len,
+                    rolling_profile_elapsed_ms(finalize_timer, finalize_end)
+                );
+            }
             route_event(first_event, event_txs);
         }
         Err(e) => {
+            if let Some((active_before, finalize_timer)) = finalize_profile {
+                let finalize_end = Instant::now();
+                tracing::info!(
+                    "[chunked-rolling-profile] event=mid_finalize_error t_ms={:.3} request_id={} active_before={} active_after={} queue_len={} elapsed_ms={:.3}",
+                    rolling_profile_t_ms(finalize_end),
+                    id.0,
+                    active_before,
+                    sched.active_count(),
+                    queue_len,
+                    rolling_profile_elapsed_ms(finalize_timer, finalize_end)
+                );
+            }
             tracing::error!("[SchedulerActor] admit_mid_finalize error: {e:?}");
             let _ = sched.evict(id);
             event_txs.remove(&id);
@@ -909,8 +1152,30 @@ fn enqueue_or_reject(
         )));
         return;
     }
-    queue.push_back(PendingAdmit { request, reply_tx });
+    let enqueue_profile = rolling_profile_enabled().then(|| {
+        (
+            Instant::now(),
+            request.prompt_ids.len(),
+            request.prefill_chunk_size,
+        )
+    });
+    let queued_at_profile = enqueue_profile.map(|(now, _, _)| now);
+    queue.push_back(PendingAdmit {
+        request,
+        reply_tx,
+        queued_at_profile,
+    });
     queue_depth_peak.fetch_max(queue.len(), Ordering::Relaxed);
+    if let Some((now, prompt_len, prefill_chunk_size)) = enqueue_profile {
+        tracing::info!(
+            "[chunked-rolling-profile] event=queue_enqueue t_ms={:.3} prompt_len={} prefill_chunk_size={} queue_len={} queue_max={}",
+            rolling_profile_t_ms(now),
+            prompt_len,
+            prefill_chunk_size,
+            queue.len(),
+            queue_max
+        );
+    }
 }
 
 /// Drain at most one mid-batch admit chunk from the admission queue.
@@ -959,6 +1224,21 @@ where
         let pending = queue
             .pop_front()
             .expect("queue.front returned Some immediately before pop_front");
+        let dequeue_profile = pending.queued_at_profile.map(|queued_at| {
+            let now = Instant::now();
+            (now, rolling_profile_queue_wait_ms(queued_at, now))
+        });
+        let queue_wait_ms = dequeue_profile.map(|(_, wait_ms)| wait_ms);
+        if let Some((dequeue_at, queue_wait_ms)) = dequeue_profile {
+            tracing::info!(
+                "[chunked-rolling-profile] event=queue_dequeue t_ms={:.3} prompt_len={} prefill_chunk_size={} queue_len={} queue_wait_ms={:.3}",
+                rolling_profile_t_ms(dequeue_at),
+                pending.request.prompt_ids.len(),
+                pending.request.prefill_chunk_size,
+                queue.len(),
+                queue_wait_ms
+            );
+        }
         let cmd = SchedulerCommand::Admit {
             request: pending.request,
             reply_tx: pending.reply_tx,
@@ -970,6 +1250,11 @@ where
             event_txs,
             admit_count,
             model,
+            MidAdmitProfileContext {
+                source: RollingMidAdmitSource::Queue,
+                queue_wait_ms,
+                queue_len: queue.len(),
+            },
         );
         // Re-check phase after each mid-admit — if admit_mid itself
         // exhausted remaining rows and transitioned to Finished, stop.
@@ -1438,6 +1723,7 @@ mod tests {
             PendingAdmit {
                 request: mk_req(prompt_token),
                 reply_tx,
+                queued_at_profile: None,
             },
             reply_rx,
         )
@@ -1463,6 +1749,25 @@ mod tests {
         assert!(!policy.should_force_decode(Phase::Idle, 1));
         assert!(!policy.should_force_decode(Phase::Finished, 1));
         assert!(!policy.should_force_decode(Phase::Decoding, 0));
+    }
+
+    #[test]
+    fn rolling_profile_env_parser_only_enables_explicit_one() {
+        assert!(rolling_profile_enabled_from_env(Some("1")));
+        assert!(!rolling_profile_enabled_from_env(None));
+        assert!(!rolling_profile_enabled_from_env(Some("")));
+        assert!(!rolling_profile_enabled_from_env(Some("true")));
+        assert!(!rolling_profile_enabled_from_env(Some("0")));
+    }
+
+    #[test]
+    fn rolling_profile_queue_wait_ms_uses_supplied_clock() {
+        let queued_at = std::time::Instant::now();
+        let now = queued_at + Duration::from_micros(12_345);
+
+        let wait_ms = rolling_profile_queue_wait_ms(queued_at, now);
+
+        assert!((wait_ms - 12.345).abs() < 1e-9);
     }
 
     #[test]
@@ -1590,6 +1895,7 @@ mod tests {
         let mut queue = VecDeque::from([PendingAdmit {
             request: chunked_req,
             reply_tx,
+            queued_at_profile: None,
         }]);
         let mut event_txs = HashMap::new();
         let admit_count = Arc::new(AtomicU64::new(0));
