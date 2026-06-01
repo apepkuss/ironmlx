@@ -141,6 +141,7 @@ fn precompute_coeffs(in_size: i32, out_size: i32) -> (Vec<i32>, Vec<i32>, usize)
         if xmax > in_size {
             xmax = in_size;
         }
+        // xmax is now the tap count (not a right-boundary index); stored below as the per-row 'xsize'.
         xmax -= xmin;
 
         let mut ww = 0.0_f64;
@@ -244,6 +245,49 @@ fn normalize_pixel(rgb: [u8; 3]) -> [f32; 3] {
     ]
 }
 
+/// Normalize a resized HWC u8 RGB buffer and pack it into the
+/// `[14, n*14, 3]` flat layout used by `SiglipEmbeddings`.
+///
+/// # Net mapping
+/// `out[ph, j, c] = normalize_pixel(c, gh*14 + ph, gw*14 + pw)`
+/// where `j = ((gh * grid_w) + gw) * 14 + pw`.
+///
+/// Returns `(packed, grid_h, grid_w)`.
+fn pack_patches(resized: &[u8], h: i32, w: i32) -> (Vec<f32>, i32, i32) {
+    let grid_h = h / PATCH;
+    let grid_w = w / PATCH;
+    let n = grid_h * grid_w;
+    let total_w = (n * PATCH) as usize; // n*14
+    let mut packed = vec![0.0_f32; PATCH as usize * total_w * 3];
+    let row_w = w as usize; // resized image row width in pixels (HWC)
+
+    // mlx-vlm builds CHW `(3, H, W)` normalized pixels, runs `_reshape_by_patch`
+    // → CHW-packed `(3, 14, n*14)` whose last axis flattens `(gh, gw, pw)`
+    // row-major, then `get_vision_embedding` transposes `(1,2,0)` → HWC
+    // `(14, n*14, 3)` and `expand_dims(0)` → `(1, 14, n*14, 3)`.
+    for gh in 0..grid_h {
+        for ph in 0..PATCH {
+            let src_y = (gh * PATCH + ph) as usize;
+            for gw in 0..grid_w {
+                let j_base = (((gh * grid_w) + gw) * PATCH) as usize;
+                for pw in 0..PATCH {
+                    let src_x = (gw * PATCH + pw) as usize;
+                    let sp = (src_y * row_w + src_x) * 3;
+                    let norm = normalize_pixel([resized[sp], resized[sp + 1], resized[sp + 2]]);
+                    // out index for [14, total_w, 3] HWC:
+                    //   ((ph * total_w) + j) * 3 + c
+                    let j = j_base + pw as usize;
+                    let base = ((ph as usize) * total_w + j) * 3;
+                    packed[base] = norm[0];
+                    packed[base + 1] = norm[1];
+                    packed[base + 2] = norm[2];
+                }
+            }
+        }
+    }
+    (packed, grid_h, grid_w)
+}
+
 /// Single-image (no-slice) MiniCPM-V-4.6 preprocess.
 ///
 /// Returns `(pixel_values [1, 14, n*14, 3] f32 (HWC), grid_h, grid_w)` where
@@ -274,46 +318,10 @@ pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
         )
     };
 
-    let h = best_h;
-    let w = best_w;
-    let grid_h = h / PATCH;
-    let grid_w = w / PATCH;
+    // 4 + 5. Normalize and pack into [14, n*14, 3], then expand_dims(0).
+    let (packed, grid_h, grid_w) = pack_patches(&resized, best_h, best_w);
     let n = grid_h * grid_w;
-
-    // 4 + 5. Normalize and pack directly into the final HWC packed layout
-    //        `[1, 14, n*14, 3]`.
-    //
-    // mlx-vlm builds CHW `(3, H, W)` normalized pixels, runs `_reshape_by_patch`
-    // → CHW-packed `(3, 14, n*14)` whose last axis flattens `(gh, gw, pw)`
-    // row-major, then `get_vision_embedding` transposes `(1,2,0)` → HWC
-    // `(14, n*14, 3)` and `expand_dims(0)` → `(1, 14, n*14, 3)`.
-    //
-    // Net mapping: out[0, ph, j, c] = normalized_pixel(c, gh*14 + ph, gw*14 + pw)
-    // where j = ((gh * grid_w) + gw) * 14 + pw. We write that mapping directly.
-    let total_w = (n * PATCH) as usize; // n*14
-    let mut packed = vec![0.0_f32; PATCH as usize * total_w * 3];
-    let row_w = w as usize; // resized image row width in pixels (HWC)
-
-    for gh in 0..grid_h {
-        for ph in 0..PATCH {
-            let src_y = (gh * PATCH + ph) as usize;
-            for gw in 0..grid_w {
-                let j_base = (((gh * grid_w) + gw) * PATCH) as usize;
-                for pw in 0..PATCH {
-                    let src_x = (gw * PATCH + pw) as usize;
-                    let sp = (src_y * row_w + src_x) * 3;
-                    let norm = normalize_pixel([resized[sp], resized[sp + 1], resized[sp + 2]]);
-                    // out index for [1, 14, total_w, 3] HWC, batch 0:
-                    //   ((ph * total_w) + j) * 3 + c
-                    let j = j_base + pw as usize;
-                    let base = ((ph as usize) * total_w + j) * 3;
-                    packed[base] = norm[0];
-                    packed[base + 1] = norm[1];
-                    packed[base + 2] = norm[2];
-                }
-            }
-        }
-    }
+    let total_w = (n * PATCH) as usize;
 
     // Build [14, n*14, 3] then expand_dims(0) → [1, 14, n*14, 3], matching the
     // qwen3_5 image_processor idiom for Array construction + shape ops.
@@ -377,7 +385,7 @@ mod tests {
 
     #[test]
     fn pil_bicubic_resize_identity_when_same_size() {
-        // 2×2 RGB → 2×2 must be a no-op (coeffs reduce to a unit kernel).
+        // same-size resize: the 3-tap bicubic kernel over edge-clamped boundaries reproduces the original pixels
         let src: Vec<u8> = vec![
             10, 20, 30, 40, 50, 60, // row 0: px(0,0), px(1,0)
             70, 80, 90, 100, 110, 120, // row 1: px(0,1), px(1,1)
@@ -392,5 +400,92 @@ mod tests {
         let src: Vec<u8> = (0..(4 * 4 * 3)).map(|i| (i % 256) as u8).collect();
         let out = pil_bicubic_resize(&src, 4, 4, 2, 3);
         assert_eq!(out.len(), 2 * 3 * 3);
+    }
+
+    #[test]
+    fn precompute_coeffs_downscale_produces_normalized_taps() {
+        // 8 → 4: filterscale = 2.0 > 1.0, so ksize is larger than in the upscale
+        // (same-size) case where filterscale == 1.0.
+        let (kk_down, _bounds_down, ksize_down) = precompute_coeffs(8, 4);
+
+        // ksize for downscale (filterscale=2): support = 2*2 = 4 → ceil(4)*2+1 = 9
+        // ksize for identity (filterscale=1): support = 2*1 = 2 → ceil(2)*2+1 = 5
+        let (_kk_id, _bounds_id, ksize_id) = precompute_coeffs(4, 4);
+        assert!(
+            ksize_down > ksize_id,
+            "downscale ksize ({ksize_down}) should exceed identity ksize ({ksize_id})"
+        );
+
+        // Each output position's coefficients must sum to 1<<PRECISION_BITS in
+        // fixed-point (the normalize_coeffs_8bpc convention Pillow uses).
+        let expected_sum = 1_i64 << PRECISION_BITS;
+        let tolerance: i64 = 4; // rounding headroom: at most 1 ULP per tap
+
+        for out_idx in 0..4_usize {
+            let base = out_idx * ksize_down;
+            let sum: i64 = kk_down[base..base + ksize_down]
+                .iter()
+                .map(|&v| v as i64)
+                .sum();
+            assert!(
+                (sum - expected_sum).abs() <= tolerance,
+                "output pixel {out_idx}: coeff sum {sum} deviates from {expected_sum} by more than {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn pack_loop_maps_patch_grid_row_major() {
+        // Build a 28×28 synthetic HWC u8 image (2×2 patch grid, PATCH=14).
+        // Each pixel value encodes its position: pixel[row, col, ch] is set to
+        // a distinguishable u8 derived from (row, col, ch).  We then call
+        // pack_patches and verify the pack-loop index mapping for one known cell.
+        //
+        // pack_patches: out[ph, j, c] = normalize_pixel(c, gh*14+ph, gw*14+pw)
+        // where j = ((gh*grid_w + gw)*14 + pw).
+        //
+        // For gh=1, gw=0, ph=3, pw=5, c=2:
+        //   src_y = 1*14+3 = 17, src_x = 0*14+5 = 5
+        //   j     = (1*2 + 0)*14 + 5 = 33
+        //   base  = (3 * (2*2*14) + 33) * 3 + 2 = (3*56 + 33)*3 + 2 = 201*3 + 2 = 605
+
+        const H: i32 = 28;
+        const W: i32 = 28;
+        let mut src = vec![0_u8; (H * W * 3) as usize];
+        for row in 0..H as usize {
+            for col in 0..W as usize {
+                for ch in 0..3_usize {
+                    // encode: (row * W * 3 + col * 3 + ch) % 251  (251 is prime, fits u8)
+                    src[(row * W as usize + col) * 3 + ch] =
+                        ((row * W as usize * 3 + col * 3 + ch) % 251) as u8;
+                }
+            }
+        }
+
+        let (packed, grid_h, grid_w) = pack_patches(&src, H, W);
+        assert_eq!((grid_h, grid_w), (2, 2));
+
+        // Spot-check: gh=1, gw=0, ph=3, pw=5, c=2
+        let gh = 1_i32;
+        let gw = 0_i32;
+        let ph = 3_i32;
+        let pw = 5_i32;
+        let c = 2_usize;
+
+        let src_y = (gh * PATCH + ph) as usize;
+        let src_x = (gw * PATCH + pw) as usize;
+        let sp = (src_y * W as usize + src_x) * 3 + c;
+        let expected_norm = normalize_pixel([src[sp - c], src[sp - c + 1], src[sp - c + 2]])[c];
+
+        let total_w = (grid_h * grid_w * PATCH) as usize; // 2*2*14=56
+        let j = (((gh * grid_w) + gw) * PATCH + pw) as usize;
+        let base = (ph as usize * total_w + j) * 3 + c;
+
+        assert!(
+            (packed[base] - expected_norm).abs() < 1e-6,
+            "packed[ph={ph}, j={j}, c={c}] = {} but expected normalize_pixel(...)[{c}] = {}",
+            packed[base],
+            expected_norm
+        );
     }
 }
