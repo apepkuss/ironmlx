@@ -499,8 +499,9 @@ fn driver_loop<M>(
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
-                    if sched.active_count() >= b_max {
-                        // Slot full — push to queue (or reject if queue full).
+                    let rolling_limit = fresh_prefill_batch_limit_for_command::<M>(&cmd, b_max);
+                    if sched.active_count() >= rolling_limit {
+                        // Rolling admission limit reached — queue for a later decode turn.
                         enqueue_or_reject(
                             cmd,
                             &mut admission_queue,
@@ -873,6 +874,8 @@ fn enqueue_or_reject(
 /// B=1 prefill + adopts the row + sends `AdmitReply`. Invalid queued entries
 /// that fail before GPU admission work are skipped, but once any admission
 /// work happens the caller must return to decode before draining more queue.
+/// The model's `fresh_prefill_batch_limit` also caps rolling mid-admit, so
+/// model-specific long-prompt limits cannot be bypassed after initial prefill.
 ///
 /// IMPORTANT: `admit_mid` is only legal in `Decoding` phase. If
 /// `gc_finished_rows` just transitioned the scheduler to `Finished`
@@ -896,9 +899,16 @@ where
         return false;
     }
     while sched.active_count() < b_max {
-        let Some(pending) = queue.pop_front() else {
+        let Some(pending) = queue.front() else {
             return false;
         };
+        let rolling_limit = fresh_prefill_batch_limit_for_request::<M>(&pending.request, b_max);
+        if sched.active_count() >= rolling_limit {
+            return false;
+        }
+        let pending = queue
+            .pop_front()
+            .expect("queue.front returned Some immediately before pop_front");
         let cmd = SchedulerCommand::Admit {
             request: pending.request,
             reply_tx: pending.reply_tx,
@@ -1263,6 +1273,13 @@ mod tests {
                 .map_err(|e| anyhow::anyhow!("fake hidden Array failed: {e:?}"))
         }
 
+        fn fresh_prefill_batch_limit(_prompt_len: usize, b_max: usize) -> usize
+        where
+            Self: Sized,
+        {
+            b_max.min(2)
+        }
+
         fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
         }
@@ -1436,6 +1453,53 @@ mod tests {
             2,
             "one active row plus exactly one mid-admitted row"
         );
+    }
+
+    #[test]
+    fn drain_admission_queue_respects_rolling_prefill_batch_limit() {
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+        let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        sched.admit(mk_req(11)).expect("initial admit 1");
+        sched.admit(mk_req(12)).expect("initial admit 2");
+        let prefill_events = sched
+            .prefill_admitted(&SchedulerActorFakeModel)
+            .expect("initial prefill");
+        assert_eq!(prefill_events.len(), 2);
+        assert_eq!(sched.phase(), Phase::Decoding);
+        assert_eq!(sched.active_count(), 2);
+
+        let (pending_1, reply_rx_1) = queued_pending(21);
+        let (pending_2, reply_rx_2) = queued_pending(22);
+        let _reply_rxs = [reply_rx_1, reply_rx_2];
+        let mut queue = VecDeque::from([pending_1, pending_2]);
+        let mut event_txs = HashMap::new();
+        let admit_count = Arc::new(AtomicU64::new(0));
+
+        let did_admit = drain_admission_queue(
+            &mut queue,
+            &mut sched,
+            &mut event_txs,
+            &admit_count,
+            &model,
+            4,
+        );
+
+        assert!(
+            !did_admit,
+            "active rows already reached the model's rolling prefill batch limit"
+        );
+        assert_eq!(
+            queue.len(),
+            2,
+            "queued requests should wait for decode progress instead of growing active batch"
+        );
+        assert_eq!(sched.active_count(), 2);
+        assert_eq!(admit_count.load(Ordering::Relaxed), 0);
     }
 
     /// Drop the SchedulerActorHandle (and thus cmd_tx); confirm the driver
