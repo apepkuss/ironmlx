@@ -18,6 +18,7 @@
 //! the text-only Qwen3.5 dense path by dropping `vision_config`.
 
 pub mod config;
+pub mod image_processor;
 pub mod vision;
 
 pub use config::text_config_from_loader;
