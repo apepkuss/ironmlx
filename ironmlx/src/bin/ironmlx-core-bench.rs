@@ -11,7 +11,9 @@ use clap::{Parser, ValueEnum};
 use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::{GenerateRequest, GenerationStream, Loader, Model, Sampler, Scheduler};
 use ironmlx::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
-use ironmlx::models::{Glm4MoeLiteModel, ModelArchitecture, Qwen35Model, Qwen35MoeModel};
+use ironmlx::models::{
+    Glm4MoeLiteModel, LlamaModel, ModelArchitecture, Qwen35Model, Qwen35MoeModel,
+};
 use ironmlx::Tokenizer;
 use serde::Serialize;
 
@@ -152,6 +154,11 @@ fn main() -> Result<()> {
         ModelArchitecture::Gemma4 => Err(anyhow!(
             "unsupported model_type: gemma4 (expected 'qwen3_5', 'qwen3_5_moe', or 'glm4_moe_lite')"
         )),
+        ModelArchitecture::Llama => {
+            let model = LlamaModel::from_loader(&loader).context("LlamaModel::from_loader")?;
+            let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+            run_for_model(&model, &tokenizer, &args, load_ms)
+        }
     }
 }
 
