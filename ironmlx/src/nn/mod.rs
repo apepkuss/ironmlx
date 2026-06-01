@@ -5,6 +5,7 @@
 //! there is no `Module` trait — see P1 spec § 3 for rationale.
 
 pub(crate) mod activations;
+pub(crate) use activations::gelu_tanh;
 pub mod attention;
 pub mod conv;
 pub mod decoder_layer;
