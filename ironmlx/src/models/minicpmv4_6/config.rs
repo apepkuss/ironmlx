@@ -20,6 +20,7 @@
 //!      (`vision_config = None`) — image inputs are out of scope.
 
 use anyhow::{anyhow, Context};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::Loader;
@@ -32,6 +33,81 @@ use crate::Result;
 /// irrelevant (identical position streams), but matching the family default
 /// keeps the rotary tables identical to a native Qwen3.5 run.
 const DEFAULT_MROPE_SECTION: [i32; 3] = [11, 11, 10];
+
+/// SigLIP vision config for MiniCPM-V-4.6, plus the top-level merge params the
+/// vision stack needs. Parsed separately from the text Qwen35Config.
+#[derive(Debug, Clone)]
+pub struct MiniCpmV46VisionConfig {
+    pub hidden_size: i32,
+    pub intermediate_size: i32,
+    pub num_hidden_layers: i32,
+    pub num_attention_heads: i32,
+    pub patch_size: i32,
+    pub image_size: i32,
+    pub layer_norm_eps: f32,
+    /// sqrt of position_embedding table rows = image_size / patch_size (70).
+    pub pos_grid_side: i32,
+    /// Top-level config.json fields the vision forward needs.
+    pub insert_layer_id: i32,
+    pub merge_group: (i32, i32),
+    pub image_token_id: i32,
+}
+
+impl MiniCpmV46VisionConfig {
+    pub fn head_dim(&self) -> i32 {
+        self.hidden_size / self.num_attention_heads
+    }
+
+    pub fn from_loader(loader: &Loader) -> Result<Self> {
+        Self::from_raw(loader.config_raw_value())
+    }
+
+    pub fn from_raw(raw: &Value) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct VisionRaw {
+            hidden_size: i32,
+            intermediate_size: i32,
+            num_hidden_layers: i32,
+            num_attention_heads: i32,
+            patch_size: i32,
+            image_size: i32,
+            #[serde(default = "default_vis_eps")]
+            layer_norm_eps: f32,
+        }
+        fn default_vis_eps() -> f32 {
+            1e-6
+        }
+
+        let vraw = raw
+            .get("vision_config")
+            .ok_or_else(|| anyhow!("MiniCPM-V-4.6 config missing vision_config"))?;
+        let v: VisionRaw =
+            serde_json::from_value(vraw.clone()).context("deserialize MiniCpmV46VisionConfig")?;
+        let insert_layer_id = raw
+            .get("insert_layer_id")
+            .and_then(Value::as_i64)
+            .unwrap_or(6) as i32;
+        let image_token_id = raw
+            .get("image_token_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("MiniCPM-V-4.6 config missing image_token_id"))?
+            as i32;
+        let pos_grid_side = v.image_size / v.patch_size;
+        Ok(Self {
+            hidden_size: v.hidden_size,
+            intermediate_size: v.intermediate_size,
+            num_hidden_layers: v.num_hidden_layers,
+            num_attention_heads: v.num_attention_heads,
+            patch_size: v.patch_size,
+            image_size: v.image_size,
+            layer_norm_eps: v.layer_norm_eps,
+            pos_grid_side,
+            insert_layer_id,
+            merge_group: (2, 2),
+            image_token_id,
+        })
+    }
+}
 
 /// Parse a MiniCPM-V-4.6 checkpoint's `text_config` into a [`Qwen35Config`]
 /// suitable for the text-only Qwen3.5 dense execution graph.
@@ -80,6 +156,7 @@ mod tests {
             "model_type": "minicpmv4_6",
             "architectures": ["MiniCPMV4_6ForConditionalGeneration"],
             "image_token_id": 248056,
+            "insert_layer_id": 6,
             "text_config": {
                 "model_type": "qwen3_5_text",
                 "attention_bias": false,
@@ -179,5 +256,22 @@ mod tests {
             err.to_string().contains("missing text_config"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parses_vision_config_and_merge_params() {
+        let raw = raw_minicpmv46_config();
+        let vc = MiniCpmV46VisionConfig::from_raw(&raw).expect("parse");
+        assert_eq!(vc.hidden_size, 1152);
+        assert_eq!(vc.num_hidden_layers, 27);
+        assert_eq!(vc.num_attention_heads, 16);
+        assert_eq!(vc.head_dim(), 72);
+        assert_eq!(vc.patch_size, 14);
+        assert_eq!(vc.image_size, 980);
+        assert_eq!(vc.pos_grid_side, 70); // 980 / 14
+        assert_eq!(vc.insert_layer_id, 6);
+        assert_eq!(vc.merge_group, (2, 2));
+        assert_eq!(vc.image_token_id, 248056);
+        assert!((vc.layer_norm_eps - 1e-6).abs() < 1e-9);
     }
 }
