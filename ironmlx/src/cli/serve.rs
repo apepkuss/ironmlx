@@ -205,6 +205,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 .context("Glm4MoeLiteModel::from_loader")?;
             serve_with_model(model, tokenizer, &args, None)
         }
+        crate::models::ModelArchitecture::Llama => {
+            let model = crate::models::LlamaModel::from_loader(&loader)
+                .context("LlamaModel::from_loader")?;
+            serve_with_model(model, tokenizer, &args, None)
+        }
     }
 }
 

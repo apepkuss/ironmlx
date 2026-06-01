@@ -13,11 +13,15 @@ pub enum ModelArchitecture {
     Qwen35Moe,
     Gemma4,
     Glm4MoeLite,
+    /// Standard Llama-family GQA dense decoder. MiniCPM5-1B ships
+    /// `model_type = "llama"` / `architectures = ["LlamaForCausalLM"]` and is a
+    /// plain GQA dense checkpoint (no MoE / MLA / sliding-window / Q-K norm).
+    Llama,
 }
 
 impl ModelArchitecture {
     pub const EXPECTED_MODEL_TYPES: &'static str =
-        "'qwen3_5', 'qwen3_5_moe', 'gemma4', or 'glm4_moe_lite'";
+        "'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', or 'llama'";
 
     pub fn from_config_value(raw: &Value) -> Result<Self> {
         let model_type = raw
@@ -33,6 +37,7 @@ impl ModelArchitecture {
             "qwen3_5_moe" => Ok(Self::Qwen35Moe),
             "gemma4" => Ok(Self::Gemma4),
             "glm4_moe_lite" => Ok(Self::Glm4MoeLite),
+            "llama" => Ok(Self::Llama),
             other => Err(anyhow!(
                 "unsupported model_type: {other} (expected {})",
                 Self::EXPECTED_MODEL_TYPES
@@ -46,6 +51,7 @@ impl ModelArchitecture {
             Self::Qwen35Moe => "qwen3_5_moe",
             Self::Gemma4 => "gemma4",
             Self::Glm4MoeLite => "glm4_moe_lite",
+            Self::Llama => "llama",
         }
     }
 }

@@ -333,6 +333,11 @@ pub fn run(args: GenerateArgs) -> Result<()> {
                 .context("Glm4MoeLiteModel::from_loader")?;
             run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
+        crate::models::ModelArchitecture::Llama => {
+            let model = crate::models::LlamaModel::from_loader(&loader)
+                .context("LlamaModel::from_loader")?;
+            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+        }
     }
 }
 
