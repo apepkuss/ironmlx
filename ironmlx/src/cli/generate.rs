@@ -216,7 +216,7 @@ fn prepare_images(
         // ids = [248078] + [248056]*N + [248079], N = (gh//4)*(gw//4).
         let vcfg = crate::models::minicpmv4_6::config::MiniCpmV46VisionConfig::from_loader(loader)
             .context("MiniCpmV46VisionConfig::from_loader")?;
-        // image_token_id from config (248056); fallback to tokenizer lookup, then literal.
+        // image_token_id: tokenizer lookup (<|image_pad|> → 248056) first; fallback to config image_token_id.
         let image_tok_id = tokenizer
             .token_to_id("<|image_pad|>")
             .map(|id| id as i32)
