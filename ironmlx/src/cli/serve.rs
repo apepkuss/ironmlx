@@ -217,11 +217,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
             serve_with_model(model, tokenizer, &args, None)
         }
         crate::models::ModelArchitecture::MiniCpmV46 => {
-            // Full MiniCpmV46Model (text + optional SigLIP vision tower).
-            // P2b will add --image CLI support; for now text-only dispatch.
+            // MiniCpmV46Model serves text + single-image VL (vision_input set above).
             let model = crate::models::minicpmv4_6::model_from_loader(&loader)
                 .context("minicpmv4_6::model_from_loader")?;
-            serve_with_model(model, tokenizer, &args, None)
+            serve_with_model(model, tokenizer, &args, vision_input)
         }
     }
 }
