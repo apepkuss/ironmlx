@@ -42,9 +42,12 @@ impl Mha {
         })
     }
 
-    /// Linear projection: x @ w^T + b.
+    /// Linear projection: addmm(b, x, Wᵀ) — fused bias-matmul.
+    ///
+    /// // addmm (bias, x, Wᵀ) matches mlx nn.Linear — avoids 1-ULP drift vs the Python reference (see vision/block.rs).
     fn proj(x: &Array, w: &Array, b: &Array, t: StreamOrDevice) -> Result<Array> {
-        Ok(&ops::matmul(x, &w.transpose_on(t)?)? + b)
+        let wt = w.transpose_on(t)?;
+        Ok(ops::addmm_on(b, x, &wt, 1.0, 1.0, t)?)
     }
 
     fn forward_on(&self, x: &Array, t: StreamOrDevice) -> Result<Array> {
@@ -115,9 +118,11 @@ impl SiglipEncoderLayer {
 
         // MLP sublayer: pre-norm → fc1 → gelu_tanh → fc2 → residual.
         let n = self.ln2.forward_on(&h, t)?;
-        let mlp = &ops::matmul(&n, &self.fc1w.transpose_on(t)?)? + &self.fc1b;
+        let wt1 = self.fc1w.transpose_on(t)?;
+        let mlp = ops::addmm_on(&self.fc1b, &n, &wt1, 1.0, 1.0, t)?;
         let mlp = gelu_tanh(&mlp, t)?;
-        let mlp = &ops::matmul(&mlp, &self.fc2w.transpose_on(t)?)? + &self.fc2b;
+        let wt2 = self.fc2w.transpose_on(t)?;
+        let mlp = ops::addmm_on(&self.fc2b, &mlp, &wt2, 1.0, 1.0, t)?;
 
         Ok(&h + &mlp)
     }
@@ -165,6 +170,9 @@ impl SiglipEncoderLayer {
 // ---------------------------------------------------------------------------
 
 pub struct SiglipEncoder {
+    /// Public so the vision orchestration can run layers in two segments and
+    /// insert the VitMerger resampler after `insert_layer_id` (mid-encoder
+    /// downsample); a single all-layers forward would not allow that.
     pub layers: Vec<SiglipEncoderLayer>,
 }
 
