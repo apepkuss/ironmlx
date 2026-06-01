@@ -16,6 +16,9 @@ use mlx::Array;
 const PATCH: i32 = 14;
 /// `scale_resolution` from preprocessor_config.json.
 const SCALE_RESOLUTION: i32 = 448;
+/// `max_slice_nums` from preprocessor_config.json — the LLaVA-UHD slice cap and
+/// the default `max_slice_nums` argument for [`preprocess_sliced`].
+pub const MAX_SLICE_NUMS: i32 = 9;
 /// `image_mean` from preprocessor_config.json (all channels 0.5).
 const IMAGE_MEAN: [f32; 3] = [0.5, 0.5, 0.5];
 /// `image_std` from preprocessor_config.json (all channels 0.5).
@@ -47,20 +50,28 @@ fn ensure_divide(length: f64, patch: i32) -> i32 {
     (py_round(length / p) * p).max(p) as i32
 }
 
-/// Port of mlx-vlm `_find_best_resize` for the single-image path
-/// (`allow_upscale=True`, so the rescale branch always runs).
+/// Port of mlx-vlm `_find_best_resize`.
 ///
-/// Input/output are `(width, height)` to match the PIL `image.size` ordering
-/// mlx-vlm uses. Returns `(best_width, best_height)`.
-fn find_best_resize(width: i32, height: i32) -> (i32, i32) {
-    // allow_upscale=True → always enter the rescale branch.
-    let ratio = width as f64 / (height.max(1) as f64);
-    let height = (SCALE_RESOLUTION as f64 / ratio.max(1e-6).sqrt()) as i32;
-    let width = (height as f64 * ratio) as i32;
-
+/// Input is `(width, height)` to match the PIL `image.size` ordering mlx-vlm
+/// uses; the values are `f64` because `_get_refine_size` passes fractional
+/// `grid_width`/`grid_height`. Returns `(best_width, best_height)` integers.
+///
+/// The rescale branch runs iff `width*height > scale_resolution²` OR
+/// `allow_upscale`. `int(...)` casts truncate toward zero (Python `int()`).
+fn find_best_resize(width: f64, height: f64, allow_upscale: bool) -> (i32, i32) {
+    let (mut w, mut h) = (width, height);
+    let scale = SCALE_RESOLUTION as f64;
+    if (w * h > scale * scale) || allow_upscale {
+        let ratio = w / h.max(1.0);
+        // Python `int()` truncates toward zero; values here are positive.
+        let new_h = (scale / ratio.max(1e-6).sqrt()).trunc();
+        let new_w = (new_h * ratio).trunc();
+        w = new_w;
+        h = new_h;
+    }
     let merge_factor = PATCH * 4;
-    let best_width = ensure_divide(width as f64, merge_factor);
-    let best_height = ensure_divide(height as f64, merge_factor);
+    let best_width = ensure_divide(w, merge_factor);
+    let best_height = ensure_divide(h, merge_factor);
     (best_width, best_height)
 }
 
@@ -301,25 +312,39 @@ pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
         .to_rgb8();
     let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);
 
-    // 2. _find_best_resize on (width, height).
-    let (best_w, best_h) = find_best_resize(orig_w, orig_h);
+    // 2. _find_best_resize on (width, height) — single-image path is allow_upscale=True.
+    let (best_w, best_h) = find_best_resize(orig_w as f64, orig_h as f64, true);
 
     // 3. PIL-exact BICUBIC resize over the HWC u8 buffer (see `pil_bicubic_resize`).
     let src_hwc: &[u8] = img.as_raw(); // HWC u8, orig_w × orig_h
-    let resized: Vec<u8> = if orig_w == best_w && orig_h == best_h {
+    let resized: Vec<u8> = resize_rgb(src_hwc, orig_w, orig_h, best_w, best_h);
+
+    // 4 + 5. Normalize, pack into [14, n*14, 3], expand_dims(0) → [1, 14, n*14, 3].
+    slice_to_array(&resized, best_h, best_w)
+}
+
+/// Resize an HWC u8 RGB buffer `orig_w`×`orig_h` → `dst_w`×`dst_h` with PIL-exact
+/// BICUBIC, short-circuiting a no-op resize (identical dims) to a copy.
+fn resize_rgb(src_hwc: &[u8], orig_w: i32, orig_h: i32, dst_w: i32, dst_h: i32) -> Vec<u8> {
+    if orig_w == dst_w && orig_h == dst_h {
         src_hwc.to_vec()
     } else {
         pil_bicubic_resize(
             src_hwc,
             orig_w as usize,
             orig_h as usize,
-            best_w as usize,
-            best_h as usize,
+            dst_w as usize,
+            dst_h as usize,
         )
-    };
+    }
+}
 
-    // 4 + 5. Normalize and pack into [14, n*14, 3], then expand_dims(0).
-    let (packed, grid_h, grid_w) = pack_patches(&resized, best_h, best_w);
+/// Normalize + pack a resized HWC u8 RGB buffer (`w`×`h`) into the
+/// `[1, 14, n*14, 3]` (HWC) tensor `SiglipEmbeddings::forward_on` consumes, plus
+/// `(grid_h = h/14, grid_w = w/14)`. Shared by `preprocess` and
+/// `preprocess_sliced` so every slice goes through the identical code path.
+fn slice_to_array(resized: &[u8], h: i32, w: i32) -> Result<(Array, i32, i32)> {
+    let (packed, grid_h, grid_w) = pack_patches(resized, h, w);
     let n = grid_h * grid_w;
     let total_w = (n * PATCH) as usize;
 
@@ -327,9 +352,182 @@ pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
     // qwen3_5 image_processor idiom for Array construction + shape ops.
     let arr: Array = (packed.as_slice(), &[PATCH, total_w as i32, 3][..])
         .try_into()
-        .map_err(|e| anyhow!("preprocess: array construction: {e}"))?;
+        .map_err(|e| anyhow!("slice_to_array: array construction: {e}"))?;
     let arr = expand_dims(&arr, &[0_i32][..])?;
     Ok((arr, grid_h, grid_w))
+}
+
+// --- LLaVA-UHD adaptive multi-slice preprocessing (slice_mode=True) ----------
+//
+// Port of mlx-vlm's `slice_image` / `get_sliced_grid` / `_get_refine_size` /
+// `_split_to_patches`. Operates on the decoded HWC u8 RGB buffer (carried as
+// `(Vec<u8>, width, height)`); crops + resizes reuse `resize_rgb` /
+// `pil_bicubic_resize` so the per-slice pixels go through the same resampler as
+// the single-image path. Grid tuples are `(grid_x, grid_y)` matching PIL/mlx-vlm
+// where `grid_x` divides WIDTH and `grid_y` divides HEIGHT.
+
+/// Port of mlx-vlm `get_sliced_grid`. Returns `Some((grid_x, grid_y))` when the
+/// image should be sliced, or `None` (`multiple <= 1`) for the no-slice path.
+///
+/// Input `(width, height)`; `grid_x` divides width, `grid_y` divides height.
+fn get_sliced_grid(width: i32, height: i32, max_slice_nums: i32) -> Option<(i32, i32)> {
+    let scale = SCALE_RESOLUTION as f64;
+    let ratio = (width as f64 * height as f64) / (scale * scale);
+    // multiple = min(ceil(ratio), max_slice_nums)
+    let multiple = (ratio.ceil() as i32).min(max_slice_nums);
+    if multiple <= 1 {
+        return None;
+    }
+
+    // Candidate grid_nums: {multiple-1, multiple, multiple+1} filtered to
+    // `gn != 1 && gn <= max_slice_nums`.
+    let mut candidate_grids: Vec<(i32, i32)> = Vec::new();
+    for grid_num in [multiple - 1, multiple, multiple + 1] {
+        if grid_num == 1 || grid_num > max_slice_nums {
+            continue;
+        }
+        // All (factor, grid_num/factor) for factor dividing grid_num, ascending.
+        let mut factor = 1;
+        while factor <= grid_num {
+            if grid_num % factor == 0 {
+                candidate_grids.push((factor, grid_num / factor));
+            }
+            factor += 1;
+        }
+    }
+
+    // Pick the grid minimizing |log(w/h) - log(gx/gy)|. First-seen wins on ties
+    // (strict `<`), matching Python's iteration order.
+    let log_ratio = (width as f64 / (height.max(1) as f64)).ln();
+    let mut best_grid = (1, 1);
+    let mut min_error = f64::INFINITY;
+    for grid in candidate_grids {
+        let error = (log_ratio - (grid.0 as f64 / grid.1 as f64).ln()).abs();
+        if error < min_error {
+            best_grid = grid;
+            min_error = error;
+        }
+    }
+    Some(best_grid)
+}
+
+/// Port of mlx-vlm `_get_refine_size`. Input `(width, height)` and the chosen
+/// `grid = (grid_x, grid_y)`; returns the refine-image `(width, height)` (each
+/// dimension a clean multiple of the corresponding grid dimension).
+fn get_refine_size(width: i32, height: i32, grid: (i32, i32)) -> (i32, i32) {
+    let (gx, gy) = grid;
+    let refine_w = ensure_divide(width as f64, gx);
+    let refine_h = ensure_divide(height as f64, gy);
+    // grid_width / grid_height are fractional; _find_best_resize takes floats.
+    let grid_width = refine_w as f64 / gx as f64;
+    let grid_height = refine_h as f64 / gy as f64;
+    // mlx-vlm calls with allow_upscale=True here.
+    let (best_w, best_h) = find_best_resize(grid_width, grid_height, true);
+    (best_w * gx, best_h * gy)
+}
+
+/// Port of mlx-vlm `_split_to_patches`. Crops the resized refine image
+/// (`(buf, width, height)`) into a row-major grid of cells.
+///
+/// `cell_w = width / grid_x`, `cell_h = height / grid_y` (integer division).
+/// Iterates `top` (rows) outer, `left` (cols) inner — row-major. Returns the
+/// flattened cells as `(cell_buf, cell_w, cell_h)`.
+fn split_to_patches(
+    buf: &[u8],
+    width: i32,
+    height: i32,
+    grid: (i32, i32),
+) -> Vec<(Vec<u8>, i32, i32)> {
+    let (gx, gy) = grid;
+    let cell_w = width / gx;
+    let cell_h = height / gy;
+    let row_stride = width as usize * 3;
+    let mut out = Vec::with_capacity((gx * gy) as usize);
+
+    let mut top = 0;
+    while top < height {
+        let mut left = 0;
+        while left < width {
+            // Crop (left, top, left+cell_w, top+cell_h) → HWC u8.
+            let mut cell = vec![0_u8; (cell_w * cell_h * 3) as usize];
+            for row in 0..cell_h as usize {
+                let src_off = (top as usize + row) * row_stride + left as usize * 3;
+                let dst_off = row * cell_w as usize * 3;
+                let span = cell_w as usize * 3;
+                cell[dst_off..dst_off + span].copy_from_slice(&buf[src_off..src_off + span]);
+            }
+            out.push((cell, cell_w, cell_h));
+            left += cell_w;
+        }
+        top += cell_h;
+    }
+    out
+}
+
+/// Port of mlx-vlm `slice_image`. Operates on the decoded HWC u8 RGB buffer
+/// `(src, orig_w, orig_h)` and returns the ordered slice list (source first,
+/// then patches row-major), each `(resized_buf, width, height)`.
+///
+/// - No-slice (`get_sliced_grid` → None): one resized source with
+///   `find_best_resize(allow_upscale=true)`.
+/// - Slice: source uses `find_best_resize(allow_upscale=false)`; the refine
+///   image uses `get_refine_size` and is split into `grid_x*grid_y` patches.
+fn slice_image(
+    src: &[u8],
+    orig_w: i32,
+    orig_h: i32,
+    max_slice_nums: i32,
+) -> Vec<(Vec<u8>, i32, i32)> {
+    match get_sliced_grid(orig_w, orig_h, max_slice_nums) {
+        None => {
+            let (best_w, best_h) = find_best_resize(orig_w as f64, orig_h as f64, true);
+            let source = resize_rgb(src, orig_w, orig_h, best_w, best_h);
+            vec![(source, best_w, best_h)]
+        }
+        Some(grid) => {
+            // Source image: allow_upscale=false.
+            let (src_w, src_h) = find_best_resize(orig_w as f64, orig_h as f64, false);
+            let source = resize_rgb(src, orig_w, orig_h, src_w, src_h);
+
+            // Refine image: allow_upscale=true, then split into patches.
+            let (refine_w, refine_h) = get_refine_size(orig_w, orig_h, grid);
+            let refine = resize_rgb(src, orig_w, orig_h, refine_w, refine_h);
+            let patches = split_to_patches(&refine, refine_w, refine_h, grid);
+
+            let mut slices = Vec::with_capacity(1 + patches.len());
+            slices.push((source, src_w, src_h));
+            slices.extend(patches);
+            slices
+        }
+    }
+}
+
+/// LLaVA-UHD adaptive multi-slice MiniCPM-V-4.6 preprocess (`slice_mode=True`).
+///
+/// Returns the ordered slice list — the source (overview) image first, then the
+/// refine-image patches in row-major order — each as
+/// `(pixel_values [1, 14, n*14, 3] f32 (HWC), grid_h, grid_w)` where
+/// `n = grid_h*grid_w`. When the image is too small to slice (`get_sliced_grid`
+/// → None) the list has a single element identical to `preprocess`'s output.
+///
+/// `max_slice_nums` caps the LLaVA-UHD slice count; the checkpoint default is 9
+/// (see [`MAX_SLICE_NUMS`]).
+pub fn preprocess_sliced(img_bytes: &[u8], max_slice_nums: i32) -> Result<Vec<(Array, i32, i32)>> {
+    // 1. Decode → RGB8 (matches PIL `.convert("RGB")`).
+    let img = image::load_from_memory(img_bytes)
+        .map_err(|e| anyhow!("decode image: {e}"))?
+        .to_rgb8();
+    let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);
+    let src_hwc: &[u8] = img.as_raw();
+
+    // 2. LLaVA-UHD slice (source + row-major refine patches).
+    let slices = slice_image(src_hwc, orig_w, orig_h, max_slice_nums);
+
+    // 3. Each slice → normalize + pack + Array (shared with `preprocess`).
+    slices
+        .into_iter()
+        .map(|(buf, w, h)| slice_to_array(&buf, h, w))
+        .collect()
 }
 
 #[cfg(test)]
@@ -367,10 +565,96 @@ mod tests {
         // ratio = 640/480 = 1.3333; height = int(448/sqrt(1.3333)) = int(387.97)=387
         // width = int(387*1.3333) = int(516.0) = 516
         // best = (ensure_divide(516,56), ensure_divide(387,56)) = (504, 392)
-        let (bw, bh) = find_best_resize(640, 480);
+        let (bw, bh) = find_best_resize(640.0, 480.0, true);
         assert_eq!((bw, bh), (504, 392));
         // grid_h = 392/14 = 28, grid_w = 504/14 = 36
         assert_eq!((bh / PATCH, bw / PATCH), (28, 36));
+    }
+
+    #[test]
+    fn get_sliced_grid_cases() {
+        // Small image: ratio = 300*300/448² = 0.4484 → ceil = 1 → multiple=1 → None.
+        assert_eq!(get_sliced_grid(300, 300, 9), None);
+        // Exactly scale²: ratio = 1.0 → ceil = 1 → multiple=1 → None.
+        assert_eq!(get_sliced_grid(448, 448, 9), None);
+
+        // coco_sample (640×480): ratio = 1.5306 → ceil=2 → multiple=2.
+        // candidates {1(skip),2,3}: gn=2 → (1,2),(2,1); gn=3 → (1,3),(3,1).
+        // log(640/480)=0.2877; errors: (1,2)=|0.2877-(-0.693)|=0.981,
+        // (2,1)=|0.2877-0.693|=0.405 (best so far), (1,3)=1.386, (3,1)=0.811.
+        // → best (2,1): grid_x=2 (width split), grid_y=1.
+        assert_eq!(get_sliced_grid(640, 480, 9), Some((2, 1)));
+
+        // Wide landscape (1600×600): ratio = 4.7832 → ceil=5 → multiple=5.
+        // candidates {4,5,6}; factor pairs incl (4,1) → matches wide log_ratio.
+        assert_eq!(get_sliced_grid(1600, 600, 9), Some((4, 1)));
+
+        // 1280×960: ratio = 6.1224 → multiple=7 → best (3,2).
+        assert_eq!(get_sliced_grid(1280, 960, 9), Some((3, 2)));
+
+        // 2000×1000: ratio = 9.96 capped at max=9 → best (4,2).
+        assert_eq!(get_sliced_grid(2000, 1000, 9), Some((4, 2)));
+    }
+
+    #[test]
+    fn ensure_divide_and_refine() {
+        // ensure_divide(100, 56) = round(1.7857)*56 = 2*56 = 112.
+        assert_eq!(ensure_divide(100.0, 56), 112);
+
+        // get_refine_size for coco_sample (640×480) with grid (gx=2, gy=1):
+        //   refine_w = ensure_divide(640, 2) = round(320)*2 = 640
+        //   refine_h = ensure_divide(480, 1) = round(480)*1 = 480
+        //   grid_width = 640/2 = 320, grid_height = 480/1 = 480
+        //   find_best_resize((320,480), allow_upscale=true):
+        //     ratio = 320/480 = 0.6667; h = int(448/sqrt(0.6667)) = int(548.6) = 548
+        //     w = int(548*0.6667) = int(365.3) = 365
+        //     best = (ensure_divide(365,56), ensure_divide(548,56)) = (392, 560)
+        //   refine_size = (392*2, 560*1) = (784, 560)
+        assert_eq!(get_refine_size(640, 480, (2, 1)), (784, 560));
+        // refine dims must be clean multiples of (patch * grid) per axis:
+        // 784 / (14*2) = 28 patch-cols/grid_x, 560 / (14*1) = 40 patch-rows.
+        assert_eq!(784 % (PATCH * 2), 0);
+        assert_eq!(560 % (PATCH * 1), 0);
+    }
+
+    #[test]
+    fn split_to_patches_row_major() {
+        // 4×2 image (W=4,H=2), grid (gx=2, gy=1): cell_w=2, cell_h=2, 2 cells.
+        // Build HWC u8 where px(x,y,c) = x*10 + y*100 + c so we can identify cells.
+        let (w, h) = (4_i32, 2_i32);
+        let mut buf = vec![0_u8; (w * h * 3) as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                for c in 0..3usize {
+                    buf[(y * w as usize + x) * 3 + c] = (x * 10 + y * 100 + c) as u8;
+                }
+            }
+        }
+        let cells = split_to_patches(&buf, w, h, (2, 1));
+        assert_eq!(cells.len(), 2);
+        // Cell 0: left=0 → columns x in {0,1}. Cell 1: left=2 → x in {2,3}.
+        assert_eq!((cells[0].1, cells[0].2), (2, 2));
+        // top-left pixel of cell 0 = px(0,0): [0,1,2]
+        assert_eq!(&cells[0].0[0..3], &[0, 1, 2]);
+        // top-left pixel of cell 1 = px(2,0): [20,21,22]
+        assert_eq!(&cells[1].0[0..3], &[20, 21, 22]);
+        // row 1 of cell 1, col 0 = px(2,1): [120,121,122]
+        let row1 = cells[1].0[(2 * 3)..(2 * 3 + 3)].to_vec();
+        assert_eq!(row1, vec![120, 121, 122]);
+    }
+
+    #[test]
+    fn slice_image_count_and_grids_coco() {
+        // Synthetic 640×480 solid buffer → grid (2,1) → 3 slices.
+        let (w, h) = (640_i32, 480_i32);
+        let buf = vec![128_u8; (w * h * 3) as usize];
+        let slices = slice_image(&buf, w, h, 9);
+        assert_eq!(slices.len(), 3, "1 source + 2 refine patches");
+        // Source: find_best_resize(allow_upscale=false) = (504, 392).
+        assert_eq!((slices[0].1, slices[0].2), (504, 392));
+        // Each refine patch: refine (784×560) split (2,1) → cell (392, 560).
+        assert_eq!((slices[1].1, slices[1].2), (392, 560));
+        assert_eq!((slices[2].1, slices[2].2), (392, 560));
     }
 
     #[test]
