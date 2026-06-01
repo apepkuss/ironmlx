@@ -292,6 +292,7 @@ fn run_vl_logits_scenario(tag: &str, image_count: usize) {
             (),
         )
         .expect("forward_vl_chunk");
+    // → [1, 1, vocab] last-token logits
     let vocab = logits.shape().as_slice()[2];
     let last_flat = logits.reshape((vocab,)).expect("reshape");
 
@@ -342,9 +343,11 @@ fn run_vl_logits_scenario(tag: &str, image_count: usize) {
     let set_ref: BTreeSet<usize> = top5_ref.iter().copied().collect();
     if set_rust != set_ref {
         let exp_v = to_f32_vec(&expected);
-        // Reference logit at the rank-5 boundary (the 5th-highest), with a small
-        // tolerance for the bf16 quantization step at this magnitude (~0.0625 = a
-        // single bf16 ULP near logit 24).
+        // Reference logit at the rank-5 boundary (the 5th-highest).
+        // TIE_TOL = 0.0625: a conservative tolerance (≈ half a bf16 ULP in the
+        // [16,32) exponent band where the observed rank-5 tie at ~23.625 lives;
+        // one full ULP there is 0.125) for accepting a boundary token swap ONLY
+        // against a reference tie partner at the same logit.
         let rank5_ref_logit = top5_ref
             .iter()
             .map(|&t| exp_v[t])

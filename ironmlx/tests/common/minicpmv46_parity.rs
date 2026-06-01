@@ -1,11 +1,7 @@
 //! Shared parity-test helpers for MiniCPM-V-4.6 integration tests.
 //!
-//! Used by:
-//!   - `minicpmv46_text_logits_match`    (fixture dir: `tests/fixtures/minicpmv46`)
-//!   - `minicpmv46_vision_parity`        (fixture dir: `FIXTURE_DIR_VL`)
-//!   - `minicpmv46_single_image_parity`  (fixture dir: `FIXTURE_DIR_VL`)
-//!   - `minicpmv46_preprocess_parity`    (fixture dir: `FIXTURE_DIR_VL`)
-//!   - `minicpmv46_single_image_generate_e2e` (fixture dir: `FIXTURE_DIR_VL`)
+//! Used by all `minicpmv46_*_parity`, `minicpmv46_*_match`, and
+//! `minicpmv46_*_e2e` integration tests.
 //!
 //! Each test loads fixtures from its own directory; `load_npy_in` is the
 //! general entry-point that accepts the directory explicitly.  Tests that all
