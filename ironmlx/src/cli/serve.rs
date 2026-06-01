@@ -86,12 +86,22 @@ where
 {
     #[cfg(feature = "p5h-profile")]
     {
-        assert_eq!(
-            args.b_max, 1,
-            "p5h-profile feature requires --b-max 1 (single-active-row invariant per § 2.5a). \
-             Got --b-max {}. Rebuild without --features p5h-profile to use multi-row batching.",
+        assert!(
+            args.b_max == 1 || crate::core::p5h::scheduler_decode_allow_multi_row(),
+            "p5h-profile feature requires --b-max 1 for legacy request-root attribution \
+             (single-active-row invariant per § 2.5a). Got --b-max {}. \
+             Set IRONMLX_P5H_SCHEDULER_DECODE_ALLOW_MULTI_ROW=1 only for experimental \
+             unary scheduler decode attribution, or rebuild without --features p5h-profile \
+             to use ordinary multi-row batching.",
             args.b_max,
         );
+        if args.b_max != 1 {
+            tracing::warn!(
+                "p5h-profile multi-row escape hatch enabled for scheduler decode attribution; \
+                 use unary/non-streaming clients so legacy streaming request-root p5h trees do \
+                 not enter their single-active-row prefill path"
+            );
+        }
     }
 
     // Surface b_max at boot so operators can confirm whether single-request
@@ -195,5 +205,14 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 .context("Glm4MoeLiteModel::from_loader")?;
             serve_with_model(model, tokenizer, &args, None)
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "p5h-profile")]
+mod tests {
+    #[test]
+    fn p5h_scheduler_decode_multi_row_escape_hatch_is_owned_by_p5h_config() {
+        assert!(crate::core::p5h::scheduler_decode_allow_multi_row_from_env_value(Some("1")));
     }
 }

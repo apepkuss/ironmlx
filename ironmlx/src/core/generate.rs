@@ -24,32 +24,8 @@ use crate::Result;
 static CAPTURE_CLAIMED: OnceLock<()> = OnceLock::new();
 
 #[cfg(feature = "p5h-profile")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct P5hDecodeProfileConfig {
-    eval_probes: bool,
-}
-
-#[cfg(feature = "p5h-profile")]
 static P5H_DECODE_PROFILE_STEP_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
-
-#[cfg(feature = "p5h-profile")]
-fn p5h_decode_profile_config_from_env_values(
-    spans_enabled: bool,
-    eval_probes_enabled: bool,
-) -> Option<P5hDecodeProfileConfig> {
-    spans_enabled.then_some(P5hDecodeProfileConfig {
-        eval_probes: eval_probes_enabled,
-    })
-}
-
-#[cfg(feature = "p5h-profile")]
-fn p5h_decode_profile_config_from_env() -> Option<P5hDecodeProfileConfig> {
-    p5h_decode_profile_config_from_env_values(
-        std::env::var_os("IRONMLX_P5H_DECODE_SPANS").is_some(),
-        std::env::var_os("IRONMLX_P5H_DECODE_EVAL_PROBES").is_some(),
-    )
-}
 
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
@@ -1735,7 +1711,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
     /// Pull the next event. Returns `Ok(None)` after the stream terminates.
     pub fn next_token(&mut self) -> Result<Option<GenerateEvent>> {
         #[cfg(feature = "p5h-profile")]
-        if let Some(config) = p5h_decode_profile_config_from_env() {
+        if let Some(config) = crate::core::p5h::decode_profile_config_from_env() {
             return self.next_token_with_p5h_decode_profile(config);
         }
 
@@ -1769,7 +1745,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
     #[cfg(feature = "p5h-profile")]
     fn next_token_with_p5h_decode_profile(
         &mut self,
-        config: P5hDecodeProfileConfig,
+        config: crate::core::p5h::P5hDecodeProfileConfig,
     ) -> Result<Option<GenerateEvent>> {
         if self.finished {
             return Ok(None);
@@ -2107,25 +2083,6 @@ mod tests {
         assert!(req.pixel_values.is_none());
         assert!(req.image_grid_thw.is_none());
         assert_eq!(req.prompt_ids.len(), 3);
-    }
-
-    #[cfg(feature = "p5h-profile")]
-    #[test]
-    fn p5h_decode_profile_config_requires_span_env() {
-        assert_eq!(p5h_decode_profile_config_from_env_values(false, true), None);
-    }
-
-    #[cfg(feature = "p5h-profile")]
-    #[test]
-    fn p5h_decode_profile_config_enables_optional_eval_probes() {
-        assert_eq!(
-            p5h_decode_profile_config_from_env_values(true, true),
-            Some(P5hDecodeProfileConfig { eval_probes: true })
-        );
-        assert_eq!(
-            p5h_decode_profile_config_from_env_values(true, false),
-            Some(P5hDecodeProfileConfig { eval_probes: false })
-        );
     }
 
     #[test]

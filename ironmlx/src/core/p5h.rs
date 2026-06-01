@@ -189,8 +189,8 @@ pub struct P5hTraceGuard {
 impl P5hTraceGuard {
     /// Per § 2.5a: enter takes a `base_parent` SpanHandle that seeds the span
     /// stack. The base_parent is the explicit top-level span the caller has
-    /// already opened. Authorized call sites are enumerated in § 2.5a
-    /// "Authorized P5hTraceGuard::enter sites" — DO NOT add new ones.
+    /// already opened. New call sites must follow that same explicit-root
+    /// discipline and must stay feature-gated to p5h profiling paths.
     pub fn enter(ctx: P5hTraceContext, base_parent: SpanHandle) -> Self {
         P5H_CURRENT_TRACE.with(|c| {
             let mut slot = c.borrow_mut();
@@ -238,6 +238,50 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "p5h-profile")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct P5hDecodeProfileConfig {
+    pub eval_probes: bool,
+}
+
+#[cfg(feature = "p5h-profile")]
+pub(crate) fn decode_profile_config_from_env_values(
+    spans_enabled: bool,
+    eval_probes_enabled: bool,
+) -> Option<P5hDecodeProfileConfig> {
+    spans_enabled.then_some(P5hDecodeProfileConfig {
+        eval_probes: eval_probes_enabled,
+    })
+}
+
+#[cfg(feature = "p5h-profile")]
+pub(crate) fn decode_profile_config_from_env() -> Option<P5hDecodeProfileConfig> {
+    decode_profile_config_from_env_values(
+        std::env::var_os("IRONMLX_P5H_DECODE_SPANS").is_some(),
+        std::env::var_os("IRONMLX_P5H_DECODE_EVAL_PROBES").is_some(),
+    )
+}
+
+/// Experimental escape hatch used only for scheduler decode attribution.
+///
+/// Legacy p5h request-root profiling assumes exactly one active scheduler row.
+/// Scheduler decode attribution uses an independent root span per decode step,
+/// so multi-row experiments must explicitly skip the legacy request-root prefill
+/// plumbing while keeping the decode-step root enabled.
+#[cfg(feature = "p5h-profile")]
+pub(crate) fn scheduler_decode_allow_multi_row_from_env_value(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+#[cfg(feature = "p5h-profile")]
+pub(crate) fn scheduler_decode_allow_multi_row() -> bool {
+    scheduler_decode_allow_multi_row_from_env_value(
+        std::env::var("IRONMLX_P5H_SCHEDULER_DECODE_ALLOW_MULTI_ROW")
+            .ok()
+            .as_deref(),
+    )
+}
 
 #[cfg(test)]
 thread_local! {
@@ -899,6 +943,37 @@ mod tests {
         }
         P5H_CURRENT_TRACE.with(|c| assert!(c.borrow().is_none()));
         P5H_CURRENT_SPAN_STACK.with(|s| assert!(s.borrow().is_empty()));
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn decode_profile_config_requires_span_env() {
+        assert_eq!(decode_profile_config_from_env_values(false, true), None);
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn decode_profile_config_tracks_eval_probe_flag() {
+        assert_eq!(
+            decode_profile_config_from_env_values(true, true),
+            Some(P5hDecodeProfileConfig { eval_probes: true })
+        );
+        assert_eq!(
+            decode_profile_config_from_env_values(true, false),
+            Some(P5hDecodeProfileConfig { eval_probes: false })
+        );
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn scheduler_decode_multi_row_escape_hatch_is_explicit() {
+        assert!(!scheduler_decode_allow_multi_row_from_env_value(None));
+        assert!(!scheduler_decode_allow_multi_row_from_env_value(Some("")));
+        assert!(!scheduler_decode_allow_multi_row_from_env_value(Some(
+            "true"
+        )));
+        assert!(!scheduler_decode_allow_multi_row_from_env_value(Some("0")));
+        assert!(scheduler_decode_allow_multi_row_from_env_value(Some("1")));
     }
 
     #[test]

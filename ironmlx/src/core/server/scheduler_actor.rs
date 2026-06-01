@@ -171,6 +171,34 @@ impl RollingAdmissionPolicy {
 #[doc(hidden)]
 pub static STEP_ILLEGAL_FINISHED_PHASE_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(feature = "p5h-profile")]
+static P5H_SCHEDULER_DECODE_PROFILE_STEP_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "p5h-profile")]
+fn scheduler_decode_profile_context(global_step: u64) -> crate::core::p5h::P5hTraceContext {
+    crate::core::p5h::P5hTraceContext {
+        request_id: format!("scheduler-decode-profile-{global_step}"),
+        prompt_tokens: 0,
+        routing_path: "scheduler",
+    }
+}
+
+#[cfg(feature = "p5h-profile")]
+fn scheduler_decode_profile_span_fields(
+    seq: u32,
+    config: crate::core::p5h::P5hDecodeProfileConfig,
+) -> crate::core::p5h::SpanFields {
+    crate::core::p5h::SpanFields {
+        seq: Some(seq),
+        mode: Some(if config.eval_probes {
+            "decode_probe"
+        } else {
+            "decode_trace"
+        }),
+        ..Default::default()
+    }
+}
+
 /// Result returned by [`drive_empty_scheduler_handoff`] encoding what the
 /// caller's rolling loop should do next. Matches the existing `continue
 /// 'rolling` / `break 'rolling` / `continue 'outer` / `return` patterns
@@ -632,6 +660,35 @@ fn driver_loop<M>(
                             Instant::now(),
                         )
                     });
+                    #[cfg(feature = "p5h-profile")]
+                    let step_result = if let Some(config) =
+                        crate::core::p5h::decode_profile_config_from_env()
+                    {
+                        crate::core::p5h::set_measurement_eval_probes_active(config.eval_probes);
+                        let global_step =
+                            P5H_SCHEDULER_DECODE_PROFILE_STEP_ID.fetch_add(1, Ordering::Relaxed);
+                        let seq = u32::try_from(global_step).unwrap_or(u32::MAX);
+                        let ctx = scheduler_decode_profile_context(global_step);
+                        let root =
+                            crate::core::p5h::open_p5h_span(&ctx, None, "decode_step_scheduler");
+                        let result = {
+                            let _guard =
+                                crate::core::p5h::P5hTraceGuard::enter(ctx.clone(), root.clone());
+                            let model_lock = model.blocking_lock();
+                            sched.step(&model_lock)
+                        };
+                        crate::core::p5h::close_p5h_span(
+                            &ctx,
+                            root,
+                            crate::core::p5h::monotonic_ns_public(),
+                            scheduler_decode_profile_span_fields(seq, config),
+                        );
+                        result
+                    } else {
+                        let model_lock = model.blocking_lock();
+                        sched.step(&model_lock)
+                    };
+                    #[cfg(not(feature = "p5h-profile"))]
                     let step_result = {
                         let model_lock = model.blocking_lock();
                         sched.step(&model_lock)
@@ -1768,6 +1825,34 @@ mod tests {
         let wait_ms = rolling_profile_queue_wait_ms(queued_at, now);
 
         assert!((wait_ms - 12.345).abs() < 1e-9);
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn scheduler_decode_profile_context_marks_scheduler_route() {
+        let ctx = scheduler_decode_profile_context(42);
+
+        assert_eq!(ctx.request_id, "scheduler-decode-profile-42");
+        assert_eq!(ctx.prompt_tokens, 0);
+        assert_eq!(ctx.routing_path, "scheduler");
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn scheduler_decode_profile_fields_mark_trace_or_probe_mode() {
+        let trace = scheduler_decode_profile_span_fields(
+            7,
+            crate::core::p5h::P5hDecodeProfileConfig { eval_probes: false },
+        );
+        let probe = scheduler_decode_profile_span_fields(
+            8,
+            crate::core::p5h::P5hDecodeProfileConfig { eval_probes: true },
+        );
+
+        assert_eq!(trace.seq, Some(7));
+        assert_eq!(trace.mode, Some("decode_trace"));
+        assert_eq!(probe.seq, Some(8));
+        assert_eq!(probe.mode, Some("decode_probe"));
     }
 
     #[test]

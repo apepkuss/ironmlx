@@ -1746,6 +1746,13 @@ impl<M: Model> Scheduler<M> {
             return Ok(Vec::new());
         }
 
+        #[cfg(feature = "p5h-profile")]
+        crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "scheduler_decode_rebuild_cache_layout",
+            crate::core::p5h::SpanFields::default,
+            || self.rebuild_cache_layout(model, &active_rows),
+        )?;
+        #[cfg(not(feature = "p5h-profile"))]
         self.rebuild_cache_layout(model, &active_rows)?;
         let b = active_rows.len();
 
@@ -1813,8 +1820,31 @@ impl<M: Model> Scheduler<M> {
             .copied()
             .max()
             .expect("active_rows is non-empty");
+        #[cfg(feature = "p5h-profile")]
+        let decode_mask = crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "scheduler_decode_mask_build",
+            crate::core::p5h::SpanFields::default,
+            || build_per_row_decode_mask(&mask_row_lens, max_real_len, Dtype::Bfloat16),
+        )?;
+        #[cfg(not(feature = "p5h-profile"))]
         let decode_mask = build_per_row_decode_mask(&mask_row_lens, max_real_len, Dtype::Bfloat16)?;
 
+        #[cfg(feature = "p5h-profile")]
+        let logits = crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "model_decode_forward",
+            crate::core::p5h::SpanFields::default,
+            || {
+                model.forward_on(
+                    &input_ids,
+                    &position_ids,
+                    Some(&per_row_lens),
+                    Some(&decode_mask),
+                    Some(cache_ref),
+                    mlx::StreamOrDevice::default(),
+                )
+            },
+        )?;
+        #[cfg(not(feature = "p5h-profile"))]
         let logits = model.forward_on(
             &input_ids,
             &position_ids,
@@ -1850,6 +1880,21 @@ impl<M: Model> Scheduler<M> {
         // Stage B — dispatch sample_batch once over [B, vocab].
         let mut compact_prng = self.compact_prng_state_for_rows(&active_rows)?;
         let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
+        #[cfg(feature = "p5h-profile")]
+        let tokens = crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "decode_sampling_materialize_and_sample",
+            crate::core::p5h::SpanFields::default,
+            || {
+                crate::core::sampler::sample_batch(
+                    &row_samplers,
+                    &logits_bv,
+                    &history_refs,
+                    &mut compact_prng,
+                )
+                .map_err(|e| anyhow!("step: sample_batch failed: {e:?}"))
+            },
+        )?;
+        #[cfg(not(feature = "p5h-profile"))]
         let tokens = crate::core::sampler::sample_batch(
             &row_samplers,
             &logits_bv,
@@ -2425,7 +2470,24 @@ impl<M: crate::core::model::Model> Scheduler<M> {
             crate::core::p5h::SpanHandle,
         )>,
     > {
+        self.cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(
+            crate::core::p5h::scheduler_decode_allow_multi_row(),
+        )
+    }
+
+    fn cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(
+        &self,
+        allow_multi_row: bool,
+    ) -> anyhow::Result<
+        Option<(
+            crate::core::p5h::P5hTraceContext,
+            crate::core::p5h::SpanHandle,
+        )>,
+    > {
         let active: Vec<&RequestState> = self.slots.iter().filter_map(|s| s.as_ref()).collect();
+        if allow_multi_row && active.len() > 1 {
+            return Ok(None);
+        }
         anyhow::ensure!(
             active.len() == 1,
             "p5h-profile invariant: expected exactly 1 active row, found {} (--b-max 1 required)",
@@ -3150,6 +3212,25 @@ mod tests {
         assert_eq!(s.occupied_rows(), vec![0, 1, 2]);
         s.evict(id_1).expect("evict 1");
         assert_eq!(s.occupied_rows(), vec![0, 2]);
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn p5h_scheduler_decode_multi_row_escape_hatch_skips_legacy_request_root() {
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
+        let _id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        let _id_1 = s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+
+        let err = s
+            .cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(false)
+            .expect_err("legacy request-root profiling still requires one row");
+        assert!(err.to_string().contains("expected exactly 1 active row"));
+
+        let skipped = s
+            .cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(true)
+            .expect("escape hatch should skip legacy request-root profiling");
+        assert!(skipped.is_none());
     }
 
     // Multi-row prefill test: builds >1 active row, so it exercises the
