@@ -237,6 +237,26 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
     }
 }
 
+fn maybe_build_decode_mask(mask_row_lens: &[i32], max_real_len: i32) -> Result<Option<Array>> {
+    if mask_row_lens.iter().all(|&len| len == max_real_len) {
+        return Ok(None);
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    {
+        crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "scheduler_decode_mask_build",
+            crate::core::p5h::SpanFields::default,
+            || build_per_row_decode_mask(mask_row_lens, max_real_len, Dtype::Bfloat16),
+        )
+        .map(Some)
+    }
+    #[cfg(not(feature = "p5h-profile"))]
+    {
+        build_per_row_decode_mask(mask_row_lens, max_real_len, Dtype::Bfloat16).map(Some)
+    }
+}
+
 /// Opaque, monotonically-increasing identifier for an admitted request.
 ///
 /// Never reused after the request is evicted — admitting another request into
@@ -286,9 +306,8 @@ pub struct StepEvent {
 /// State shared across the three `admit_mid_*` calls that make up a
 /// chunked mid-batch admit (B1-p2.3c+). Built by [`Scheduler::admit_mid_begin`],
 /// mutated by [`Scheduler::admit_mid_chunk`] calls, consumed by
-/// [`Scheduler::admit_mid_finalize`]. The caller
-/// (`SchedulerActor::driver_loop`'s `handle_admit_mid_chunked`) owns this
-/// between calls and interleaves `Scheduler::step` between chunks so
+/// [`Scheduler::admit_mid_finalize`]. `SchedulerActor::driver_loop` owns
+/// this between calls and interleaves `Scheduler::step` between chunks so
 /// active rows continue emitting tokens during a long-prompt mid-batch
 /// admit.
 ///
@@ -304,9 +323,11 @@ pub struct AdmitMidHandle {
     /// per-chunk without re-borrowing slot state across calls.
     pub(crate) prompt_ids: Vec<u32>,
     pub(crate) prompt_len: i32,
-    /// Per-chunk max token count; equals `req.prefill_chunk_size.max(1)`
-    /// at construction. VL chunks may exceed it only when extending a
-    /// boundary to keep one contiguous image token run intact.
+    /// Per-chunk max token count. When `req.prefill_chunk_size == 0`, this
+    /// equals `prompt_len` to preserve the "disable chunking" CLI semantic.
+    /// Otherwise it equals `req.prefill_chunk_size.max(1)`. VL chunks may
+    /// exceed it only when extending a boundary to keep one contiguous image
+    /// token run intact.
     pub(crate) chunk_size: i32,
     pub(crate) chunk_start: i32,
     /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
@@ -390,9 +411,9 @@ pub struct RequestState {
     /// `GenerateRequest::image_token_id`. Unused if `pixel_values` is None.
     pub image_token_id: i32,
     /// Per-request chunk size for chunked mid-batch prefill. Copied from
-    /// `GenerateRequest::prefill_chunk_size` at admit time, clamped to i32
-    /// and floored at 1. Used by `admit_mid_begin` to initialise
-    /// `AdmitMidHandle::chunk_size`.
+    /// `GenerateRequest::prefill_chunk_size` at admit time, clamped to i32.
+    /// `0` is preserved as "disable chunking" and expanded to prompt length
+    /// when `admit_mid_begin` initialises `AdmitMidHandle::chunk_size`.
     pub prefill_chunk_size: i32,
     /// KV cache bytes charged to budget at admit time. Released on
     /// row completion / eviction. B1-p2.5.
@@ -469,6 +490,9 @@ fn adopt_cache_row_layers(
             }
             (LayerCache::Linear(dst_gd), LayerCache::Linear(src_gd)) => {
                 dst_gd.adopt_row_from(src_gd, dst_row, src_row)?;
+            }
+            (LayerCache::Mla(dst_mla), LayerCache::Mla(src_mla)) => {
+                dst_mla.adopt_row_from(src_mla, dst_row, src_row)?;
             }
             _ => return Err(anyhow!("{context}: cache layer kind mismatch")),
         }
@@ -729,7 +753,7 @@ impl<M: Model> Scheduler<M> {
             image_grid_thw: req.image_grid_thw,
             image_spatial_merge_size: req.image_spatial_merge_size,
             image_token_id: req.image_token_id,
-            prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(512).max(1),
+            prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(i32::MAX),
             kv_bytes_admitted: requested_bytes,
             #[cfg(feature = "p5h-profile")]
             p5h_trace: req.p5h_trace.clone(),
@@ -1223,6 +1247,7 @@ impl<M: Model> Scheduler<M> {
                     ctx.clone(),
                     mpf.clone(),
                 )),
+                // Mla: matches on (p5h_trace, mpf_span) profiling tuple, not LayerCache — cache-kind-independent, correct for GLM.
                 _ => None,
             };
             let prefill_cache = self
@@ -1344,6 +1369,7 @@ impl<M: Model> Scheduler<M> {
                             Some(ve) if prefix_image_pads > 0 => {
                                 Some(slice_vision_embeds_rows(ve, 0, prefix_image_pads)?)
                             }
+                            // Mla: matches on vision_embeds_full Option (VL-only path), not LayerCache — GLM is text-only, never reaches here.
                             _ => None,
                         };
                         let last_vision_embeds = match vision_embeds_full.as_ref() {
@@ -1352,6 +1378,7 @@ impl<M: Model> Scheduler<M> {
                                 prefix_image_pads,
                                 prefix_image_pads + last_image_pads,
                             )?),
+                            // Mla: matches on vision_embeds_full Option (VL-only path), not LayerCache — GLM is text-only, never reaches here.
                             _ => None,
                         };
 
@@ -1739,6 +1766,13 @@ impl<M: Model> Scheduler<M> {
             return Ok(Vec::new());
         }
 
+        #[cfg(feature = "p5h-profile")]
+        crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "scheduler_decode_rebuild_cache_layout",
+            crate::core::p5h::SpanFields::default,
+            || self.rebuild_cache_layout(model, &active_rows),
+        )?;
+        #[cfg(not(feature = "p5h-profile"))]
         self.rebuild_cache_layout(model, &active_rows)?;
         let b = active_rows.len();
 
@@ -1806,13 +1840,29 @@ impl<M: Model> Scheduler<M> {
             .copied()
             .max()
             .expect("active_rows is non-empty");
-        let decode_mask = build_per_row_decode_mask(&mask_row_lens, max_real_len, Dtype::Bfloat16)?;
+        let decode_mask = maybe_build_decode_mask(&mask_row_lens, max_real_len)?;
 
+        #[cfg(feature = "p5h-profile")]
+        let logits = crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "model_decode_forward",
+            crate::core::p5h::SpanFields::default,
+            || {
+                model.forward_on(
+                    &input_ids,
+                    &position_ids,
+                    Some(&per_row_lens),
+                    decode_mask.as_ref(),
+                    Some(cache_ref),
+                    mlx::StreamOrDevice::default(),
+                )
+            },
+        )?;
+        #[cfg(not(feature = "p5h-profile"))]
         let logits = model.forward_on(
             &input_ids,
             &position_ids,
             Some(&per_row_lens),
-            Some(&decode_mask),
+            decode_mask.as_ref(),
             Some(cache_ref),
             mlx::StreamOrDevice::default(),
         )?;
@@ -1843,6 +1893,21 @@ impl<M: Model> Scheduler<M> {
         // Stage B — dispatch sample_batch once over [B, vocab].
         let mut compact_prng = self.compact_prng_state_for_rows(&active_rows)?;
         let history_refs: Vec<&[u32]> = row_histories.iter().map(|h| h.as_slice()).collect();
+        #[cfg(feature = "p5h-profile")]
+        let tokens = crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "decode_sampling_materialize_and_sample",
+            crate::core::p5h::SpanFields::default,
+            || {
+                crate::core::sampler::sample_batch(
+                    &row_samplers,
+                    &logits_bv,
+                    &history_refs,
+                    &mut compact_prng,
+                )
+                .map_err(|e| anyhow!("step: sample_batch failed: {e:?}"))
+            },
+        )?;
+        #[cfg(not(feature = "p5h-profile"))]
         let tokens = crate::core::sampler::sample_batch(
             &row_samplers,
             &logits_bv,
@@ -2007,7 +2072,7 @@ impl<M: Model> Scheduler<M> {
             .max(prompt_len)
             .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
 
-        // Dtype from main cache's first Full layer.
+        // Dtype from the first cache layer (Full or Mla).
         let dtype = {
             let main_cache = self
                 .cache
@@ -2017,6 +2082,7 @@ impl<M: Model> Scheduler<M> {
                 .iter()
                 .find_map(|c| match c {
                     LayerCache::Full(kv) => Some(kv.dtype()),
+                    LayerCache::Mla(mla) => Some(mla.dtype()),
                     _ => None,
                 })
                 .unwrap_or(Dtype::Bfloat16)
@@ -2027,7 +2093,11 @@ impl<M: Model> Scheduler<M> {
         let is_vl = pixel_values.is_some();
         let position_ids_required = model.requires_position_ids();
 
-        let chunk_size = prefill_chunk_size.max(1);
+        let chunk_size = if prefill_chunk_size == 0 {
+            prompt_len.max(1)
+        } else {
+            prefill_chunk_size.max(1)
+        };
 
         // Pre-build full-prompt MRoPE position ids only for models that
         // consume them. Others carry a reusable placeholder and skip slicing
@@ -2413,7 +2483,24 @@ impl<M: crate::core::model::Model> Scheduler<M> {
             crate::core::p5h::SpanHandle,
         )>,
     > {
+        self.cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(
+            crate::core::p5h::scheduler_decode_allow_multi_row(),
+        )
+    }
+
+    fn cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(
+        &self,
+        allow_multi_row: bool,
+    ) -> anyhow::Result<
+        Option<(
+            crate::core::p5h::P5hTraceContext,
+            crate::core::p5h::SpanHandle,
+        )>,
+    > {
         let active: Vec<&RequestState> = self.slots.iter().filter_map(|s| s.as_ref()).collect();
+        if allow_multi_row && active.len() > 1 {
+            return Ok(None);
+        }
         anyhow::ensure!(
             active.len() == 1,
             "p5h-profile invariant: expected exactly 1 active row, found {} (--b-max 1 required)",
@@ -2857,6 +2944,7 @@ mod tests {
     #[derive(Default)]
     struct StepDecodeMaskModel {
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
+        decode_mask_seen: std::sync::Mutex<Vec<bool>>,
     }
 
     impl StepDecodeMaskModel {
@@ -2895,6 +2983,10 @@ mod tests {
         fn decode_lens_seen(&self) -> Vec<Vec<i32>> {
             self.decode_lens_seen.lock().unwrap().clone()
         }
+
+        fn decode_mask_seen(&self) -> Vec<bool> {
+            self.decode_mask_seen.lock().unwrap().clone()
+        }
     }
 
     impl crate::core::model::Model for StepDecodeMaskModel {
@@ -2914,13 +3006,17 @@ mod tests {
             input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
-            _decode_mask: Option<&mlx::Array>,
+            decode_mask: Option<&mlx::Array>,
             cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             if let Some(lens) = per_row_lens {
                 self.decode_lens_seen.lock().unwrap().push(lens.to_vec());
             }
+            self.decode_mask_seen
+                .lock()
+                .unwrap()
+                .push(decode_mask.is_some());
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
             fake_logits_for_batch(input_ids.shape().as_slice()[0])
         }
@@ -3140,6 +3236,25 @@ mod tests {
         assert_eq!(s.occupied_rows(), vec![0, 2]);
     }
 
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn p5h_scheduler_decode_multi_row_escape_hatch_skips_legacy_request_root() {
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
+        let _id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        let _id_1 = s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+
+        let err = s
+            .cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(false)
+            .expect_err("legacy request-root profiling still requires one row");
+        assert!(err.to_string().contains("expected exactly 1 active row"));
+
+        let skipped = s
+            .cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(true)
+            .expect("escape hatch should skip legacy request-root profiling");
+        assert!(skipped.is_none());
+    }
+
     // Multi-row prefill test: builds >1 active row, so it exercises the
     // batched compaction path. Under `p5h-profile` the scheduler enforces a
     // hard single-row invariant (`prefill_admitted_inner` →
@@ -3306,6 +3421,71 @@ mod tests {
         let step_events = s.step(&model).expect("step after stale-row reuse");
         assert_eq!(step_events.len(), 2);
         assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+    }
+
+    #[cfg(not(feature = "p5h-profile"))]
+    #[test]
+    fn step_uniform_decode_lengths_omits_all_zero_decode_mask() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+
+        let model = StepDecodeMaskModel::default();
+        s.prefill_admitted(&model).expect("prefill");
+
+        let step_events = s.step(&model).expect("step");
+        assert_eq!(step_events.len(), 2);
+        assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+        assert_eq!(model.decode_mask_seen(), vec![false]);
+    }
+
+    #[cfg(not(feature = "p5h-profile"))]
+    #[test]
+    fn step_ragged_decode_lengths_keeps_decode_mask() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        s.admit(mk_req(vec![4, 5, 6, 7])).expect("admit 1");
+
+        let model = StepDecodeMaskModel::default();
+        s.prefill_admitted(&model).expect("prefill");
+
+        let step_events = s.step(&model).expect("step");
+        assert_eq!(step_events.len(), 2);
+        assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+        assert_eq!(model.decode_mask_seen(), vec![true]);
+    }
+
+    #[test]
+    fn admit_mid_prefill_chunk_size_zero_disables_chunking() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let _id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+
+        let model = StepDecodeMaskModel::default();
+        s.prefill_admitted(&model).expect("prefill");
+
+        let mid_req = mk_req(vec![7, 8, 9, 10]);
+        assert_eq!(mid_req.prefill_chunk_size, 0);
+        let mut handle = s.admit_mid_begin(mid_req, &model).expect("admit_mid_begin");
+
+        assert_eq!(handle.chunk_size, handle.prompt_len);
+        assert!(s
+            .admit_mid_chunk(&mut handle, &model)
+            .expect("0 disables chunking, so first chunk is last"));
     }
 
     #[test]

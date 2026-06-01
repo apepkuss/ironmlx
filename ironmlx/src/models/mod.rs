@@ -1,10 +1,10 @@
 //! Model architectures.
 //!
-//! Each architecture lives in its own directory. Sharing between
+//! Each execution architecture lives in its own directory. Sharing between
 //! architectures happens via [`crate::nn`], [`crate::core`], and explicitly
-//! shared model modules. Qwen3.6 MoE is a named facade over the shared MoE-VL
-//! kernel because the checkpoint declares the same HF architecture and tensor
-//! graph while adding Qwen3.6-specific config validation and quant metadata.
+//! shared model modules. Modules for checkpoint-specific validation facades
+//! may live next to architecture modules when they preserve a public core API
+//! without changing the execution graph.
 //!
 //! Planned (in implementation order):
 //! - **P3-P4** — `qwen3_5` (Dense): hybrid gated-delta + gated full attention,
@@ -16,7 +16,11 @@
 //!   token routing.
 //! - **Gemma4** — dense text-only language path with per-layer inputs,
 //!   sliding/full attention, KV sharing, and tied output projection.
+//! - **Qwen3.6 MoE facade** — `qwen3_6_moe` validates Qwen3.6 MoE checkpoint
+//!   structure and exposes Qwen3.6-specific regression hooks while delegating
+//!   numeric execution to the `qwen3_5_moe` architecture.
 
+pub mod architecture;
 pub mod gemma4;
 pub mod glm4_moe_lite;
 pub mod qwen3_5;
@@ -24,6 +28,7 @@ pub mod qwen3_5_moe;
 pub mod qwen3_6_moe;
 pub mod vision;
 
+pub use architecture::ModelArchitecture;
 pub use gemma4::{Gemma4Config, Gemma4Model, Gemma4TextConfig};
 pub use glm4_moe_lite::{Glm4MoeLiteConfig, Glm4MoeLiteModel};
 pub use qwen3_5::{Qwen35Config, Qwen35Model, Qwen35TextModel, RopeParams};

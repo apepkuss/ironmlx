@@ -189,8 +189,8 @@ pub struct P5hTraceGuard {
 impl P5hTraceGuard {
     /// Per § 2.5a: enter takes a `base_parent` SpanHandle that seeds the span
     /// stack. The base_parent is the explicit top-level span the caller has
-    /// already opened. Authorized call sites are enumerated in § 2.5a
-    /// "Authorized P5hTraceGuard::enter sites" — DO NOT add new ones.
+    /// already opened. New call sites must follow that same explicit-root
+    /// discipline and must stay feature-gated to p5h profiling paths.
     pub fn enter(ctx: P5hTraceContext, base_parent: SpanHandle) -> Self {
         P5H_CURRENT_TRACE.with(|c| {
             let mut slot = c.borrow_mut();
@@ -238,6 +238,50 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "p5h-profile")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct P5hDecodeProfileConfig {
+    pub eval_probes: bool,
+}
+
+#[cfg(feature = "p5h-profile")]
+pub(crate) fn decode_profile_config_from_env_values(
+    spans_enabled: bool,
+    eval_probes_enabled: bool,
+) -> Option<P5hDecodeProfileConfig> {
+    spans_enabled.then_some(P5hDecodeProfileConfig {
+        eval_probes: eval_probes_enabled,
+    })
+}
+
+#[cfg(feature = "p5h-profile")]
+pub(crate) fn decode_profile_config_from_env() -> Option<P5hDecodeProfileConfig> {
+    decode_profile_config_from_env_values(
+        std::env::var_os("IRONMLX_P5H_DECODE_SPANS").is_some(),
+        std::env::var_os("IRONMLX_P5H_DECODE_EVAL_PROBES").is_some(),
+    )
+}
+
+/// Experimental escape hatch used only for scheduler decode attribution.
+///
+/// Legacy p5h request-root profiling assumes exactly one active scheduler row.
+/// Scheduler decode attribution uses an independent root span per decode step,
+/// so multi-row experiments must explicitly skip the legacy request-root prefill
+/// plumbing while keeping the decode-step root enabled.
+#[cfg(feature = "p5h-profile")]
+pub(crate) fn scheduler_decode_allow_multi_row_from_env_value(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+#[cfg(feature = "p5h-profile")]
+pub(crate) fn scheduler_decode_allow_multi_row() -> bool {
+    scheduler_decode_allow_multi_row_from_env_value(
+        std::env::var("IRONMLX_P5H_SCHEDULER_DECODE_ALLOW_MULTI_ROW")
+            .ok()
+            .as_deref(),
+    )
+}
 
 #[cfg(test)]
 thread_local! {
@@ -687,7 +731,9 @@ pub fn with_p5h_span_from_current_trace<T>(
 ///     `input_norm`, `attention_path`, `residual_overhead`,
 ///     `post_attention_norm`, `mlp_path`.
 ///   * T2 GatedAttention substeps under `attention_path`.
+///   * GLM MLA substeps under `attention_path`.
 ///   * T3 MoE substeps under `mlp_path` (incl. shared expert + routing).
+///   * GLM noaux MoE substeps under `mlp_path`.
 ///   * GDN 11 substeps under `attention_path` for hybrid models.
 ///   * Cache + lm_head: `cache_state_update`,
 ///     `slice_last_and_project_lm_head`.
@@ -712,6 +758,14 @@ const LANE_B_ALLOWED_TRY_SPAN_NAMES: &[&str] = &[
     "fused_sdpa",
     "gate_sigmoid_mul",
     "o_proj",
+    "glm_mla_project_qkv",
+    "glm_mla_cache_update_fetch",
+    "glm_mla_rope_scores",
+    "glm_mla_embed_q",
+    "glm_mla_sdpa",
+    "glm_mla_unembed_out",
+    "glm_mla_prefill_unfold_k",
+    "glm_mla_prefill_unfold_v",
     "router_logits_softmax_topk",
     "routing_sort_pack",
     "gather_qmm_gate_up",
@@ -723,6 +777,14 @@ const LANE_B_ALLOWED_TRY_SPAN_NAMES: &[&str] = &[
     "routing_unsort_weighted_reduce",
     "shared_expert",
     "moe_output_sum",
+    "glm_moe_router_noaux_topk",
+    "glm_moe_routed_experts",
+    "glm_moe_routed_gate_up_gather_qmm",
+    "glm_moe_routed_swiglu",
+    "glm_moe_routed_down_gather_qmm",
+    "glm_moe_routed_weighted_reduce",
+    "glm_moe_shared_expert",
+    "glm_moe_output_sum",
     "cache_state_update",
     "slice_last_and_project_lm_head",
     "gda_step_1a_in_proj_qkvz",
@@ -881,6 +943,37 @@ mod tests {
         }
         P5H_CURRENT_TRACE.with(|c| assert!(c.borrow().is_none()));
         P5H_CURRENT_SPAN_STACK.with(|s| assert!(s.borrow().is_empty()));
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn decode_profile_config_requires_span_env() {
+        assert_eq!(decode_profile_config_from_env_values(false, true), None);
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn decode_profile_config_tracks_eval_probe_flag() {
+        assert_eq!(
+            decode_profile_config_from_env_values(true, true),
+            Some(P5hDecodeProfileConfig { eval_probes: true })
+        );
+        assert_eq!(
+            decode_profile_config_from_env_values(true, false),
+            Some(P5hDecodeProfileConfig { eval_probes: false })
+        );
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn scheduler_decode_multi_row_escape_hatch_is_explicit() {
+        assert!(!scheduler_decode_allow_multi_row_from_env_value(None));
+        assert!(!scheduler_decode_allow_multi_row_from_env_value(Some("")));
+        assert!(!scheduler_decode_allow_multi_row_from_env_value(Some(
+            "true"
+        )));
+        assert!(!scheduler_decode_allow_multi_row_from_env_value(Some("0")));
+        assert!(scheduler_decode_allow_multi_row_from_env_value(Some("1")));
     }
 
     #[test]
@@ -1144,6 +1237,42 @@ mod tests {
                 "P5h+1 T2 Lane-B deep span_name `{name}` MUST emit (advance span-open count by 1); got id_before={id_before}, id_after={id_after}",
             );
             // Stack returned to base_parent after body.
+            P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
+        }
+    }
+
+    #[test]
+    fn try_with_span_lane_b_emits_glm_deep_names() {
+        let ctx = lane_b_ctx();
+        let root = dummy_span(99);
+        let _g = P5hTraceGuard::enter(ctx.clone(), root.clone());
+        for name in [
+            "glm_mla_project_qkv",
+            "glm_mla_cache_update_fetch",
+            "glm_mla_rope_scores",
+            "glm_mla_embed_q",
+            "glm_mla_sdpa",
+            "glm_mla_unembed_out",
+            "glm_mla_prefill_unfold_k",
+            "glm_mla_prefill_unfold_v",
+            "glm_moe_router_noaux_topk",
+            "glm_moe_routed_experts",
+            "glm_moe_routed_gate_up_gather_qmm",
+            "glm_moe_routed_swiglu",
+            "glm_moe_routed_down_gather_qmm",
+            "glm_moe_routed_weighted_reduce",
+            "glm_moe_shared_expert",
+            "glm_moe_output_sum",
+        ] {
+            let id_before = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
+            let result = try_with_p5h_span_from_current_trace(name, SpanFields::default, || 19u32);
+            let id_after = TEST_SPAN_OPEN_COUNT.with(|c| c.get());
+            assert_eq!(result, 19);
+            assert_eq!(
+                id_after,
+                id_before + 1,
+                "GLM Lane-B deep span_name `{name}` MUST emit"
+            );
             P5H_CURRENT_SPAN_STACK.with(|s| assert_eq!(s.borrow().len(), 1));
         }
     }

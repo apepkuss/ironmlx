@@ -11,6 +11,7 @@ ironmlx branch: `ironmlx-qwen36-vl-quality`.
 ## Findings
 
 - The checkpoint is a Qwen3.6 MoE/VL model, not text-only. It exposes Qwen3.5-compatible hybrid MoE language layers plus a vision tower.
+- Current product entry points dispatch this checkpoint by execution architecture: `model_type = "qwen3_5_moe"` maps to the shared `Qwen35MoeModel` path. The `Qwen36MoeModel` facade remains for checkpoint-identity validation and Qwen3.6-specific regression hooks, not for a distinct numeric graph.
 - Text-only Qwen3.6 MoE paths pass the first-token regression across no-cache, full-cache, split-cache, and batched-prefill paths when linked against the verified static MLX install.
 - Single-image VL parity requires image placeholders before the user text. The CLI already follows this layout; the OpenAI-compatible server now normalizes image content parts to the same Qwen-native layout.
 - The CLI generation entry now passes `enable_thinking=false` by default when applying chat templates. This matches the server quality harness and prevents Qwen3.6 from returning thinking-process text for ordinary answer-style CLI prompts. Callers can opt in with `--enable-thinking`.

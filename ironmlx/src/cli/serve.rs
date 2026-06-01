@@ -86,12 +86,22 @@ where
 {
     #[cfg(feature = "p5h-profile")]
     {
-        assert_eq!(
-            args.b_max, 1,
-            "p5h-profile feature requires --b-max 1 (single-active-row invariant per § 2.5a). \
-             Got --b-max {}. Rebuild without --features p5h-profile to use multi-row batching.",
+        assert!(
+            args.b_max == 1 || crate::core::p5h::scheduler_decode_allow_multi_row(),
+            "p5h-profile feature requires --b-max 1 for legacy request-root attribution \
+             (single-active-row invariant per § 2.5a). Got --b-max {}. \
+             Set IRONMLX_P5H_SCHEDULER_DECODE_ALLOW_MULTI_ROW=1 only for experimental \
+             unary scheduler decode attribution, or rebuild without --features p5h-profile \
+             to use ordinary multi-row batching.",
             args.b_max,
         );
+        if args.b_max != 1 {
+            tracing::warn!(
+                "p5h-profile multi-row escape hatch enabled for scheduler decode attribution; \
+                 use unary/non-streaming clients so legacy streaming request-root p5h trees do \
+                 not enter their single-active-row prefill path"
+            );
+        }
     }
 
     // Surface b_max at boot so operators can confirm whether single-request
@@ -161,15 +171,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
     }
 
     let model_type = read_model_type(&model_dir)?;
-    let loader = match model_type.as_str() {
-        "gemma4" => Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?,
-        _ => {
-            // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
-            Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
-        }
-    };
+    let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
+    // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
+    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-    let vision_input = if model_type == "gemma4" {
+    let vision_input = if architecture == crate::models::ModelArchitecture::Gemma4 {
         let cfg = crate::models::gemma4::Gemma4Config::from_loader(&loader)
             .context("Gemma4Config::from_loader")?;
         cfg.vision_config
@@ -178,38 +184,35 @@ pub fn run(args: ServeArgs) -> Result<()> {
         None
     };
 
-    match model_type.as_str() {
-        "qwen3_5" => {
+    match architecture {
+        crate::models::ModelArchitecture::Qwen35Dense => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
             serve_with_model(model, tokenizer, &args, vision_input)
         }
-        "qwen3_5_moe" => {
-            if crate::models::is_qwen36_moe_config(loader.config_raw_value()) {
-                let model = crate::models::Qwen36MoeModel::from_loader(&loader)
-                    .context("Qwen36MoeModel::from_loader")?;
-                serve_with_model(model, tokenizer, &args, vision_input)
-            } else {
-                let model = crate::models::Qwen35MoeModel::from_loader(&loader)
-                    .context("Qwen35MoeModel::from_loader")?;
-                serve_with_model(model, tokenizer, &args, vision_input)
-            }
+        crate::models::ModelArchitecture::Qwen35Moe => {
+            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                .context("Qwen35MoeModel::from_loader")?;
+            serve_with_model(model, tokenizer, &args, vision_input)
         }
-        "gemma4" => {
+        crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
             serve_with_model(model, tokenizer, &args, vision_input)
         }
-        "glm4_moe_lite" => {
-            if args.b_max > 1 {
-                return Err(anyhow::anyhow!(
-                    "glm4_moe_lite currently requires --b-max 1 (continuous batching / mid-admit not yet supported for the MLA latent cache)"
-                ));
-            }
+        crate::models::ModelArchitecture::Glm4MoeLite => {
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
                 .context("Glm4MoeLiteModel::from_loader")?;
             serve_with_model(model, tokenizer, &args, None)
         }
-        other => Err(anyhow::anyhow!("unsupported model_type: {other}")),
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "p5h-profile")]
+mod tests {
+    #[test]
+    fn p5h_scheduler_decode_multi_row_escape_hatch_is_owned_by_p5h_config() {
+        assert!(crate::core::p5h::scheduler_decode_allow_multi_row_from_env_value(Some("1")));
     }
 }

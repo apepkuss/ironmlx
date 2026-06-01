@@ -1,9 +1,11 @@
-//! Qwen3.6 MoE architecture package.
+//! Qwen3.6 MoE checkpoint facade.
 //!
-//! The public Qwen3.6 entry point is explicit even though the downloaded
-//! checkpoint declares the same HF architecture and tensor graph as Qwen3.5
-//! MoE-VL. Qwen3.6-specific validation and dispatch live here; numeric
-//! execution is delegated to the shared MoE-VL kernel.
+//! Downloaded Qwen3.6 MoE checkpoints declare the same HF architecture and
+//! tensor graph as Qwen3.5 MoE-VL (`model_type = "qwen3_5_moe"`), so product
+//! entry points dispatch them through [`crate::models::ModelArchitecture`] to
+//! the shared Qwen3.5 MoE execution graph. This module remains as a validated
+//! checkpoint facade for direct core API users, Qwen3.6-specific config
+//! validation, and real-checkpoint regression tests.
 
 pub mod config;
 pub mod model;

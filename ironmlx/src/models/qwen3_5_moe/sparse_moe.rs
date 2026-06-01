@@ -184,6 +184,53 @@ fn with_p5i_c_gate_up_child_span<T>(
     }
 }
 
+#[cfg(feature = "p5h-profile")]
+fn glm_routed_experts_child_spans_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IRONMLX_GLM_ROUTED_EXPERTS_CHILD_SPANS")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
+fn with_glm_routed_experts_child_span<T>(
+    enabled: bool,
+    span_name: &'static str,
+    layer_idx: i32,
+    body: impl FnOnce() -> T,
+) -> T {
+    #[cfg(feature = "p5h-profile")]
+    {
+        if enabled {
+            crate::core::p5h::try_with_p5h_span_from_current_trace(
+                span_name,
+                || crate::core::p5h::SpanFields {
+                    layer_idx: Some(layer_idx),
+                    ..Default::default()
+                },
+                body,
+            )
+        } else {
+            body()
+        }
+    }
+    #[cfg(not(feature = "p5h-profile"))]
+    {
+        let _ = (enabled, span_name, layer_idx);
+        body()
+    }
+}
+
+#[cfg(feature = "p5h-profile")]
+fn eval_glm_routed_experts_child(arrays: &[&Array]) -> Result<()> {
+    if crate::core::p5h::is_measurement_eval_probes_active() {
+        mlx::transforms::eval(arrays)?;
+    }
+    Ok(())
+}
+
 /// Source legacy gate + up weights, consumed once during lazy fused-weight
 /// build then dropped to release the 2 × (E × I × H/8) buffer per layer.
 struct LazyGateUpSource {
@@ -462,6 +509,34 @@ impl RoutedExperts {
         inds: &Array,
         weights: &Array,
         target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        self.apply_experts_inner(x, inds, weights, target, layer_idx, false)
+    }
+
+    /// GLM/DeepSeek-style routed combine where the weighted-reduce result is
+    /// cast back to the expert output dtype after multiplying by fp32 routing
+    /// scores. Qwen mlx-lm paths keep the uncast sum, so the default
+    /// [`Self::apply_experts`] preserves that behavior.
+    pub fn apply_experts_cast_output(
+        &self,
+        x: &Array,
+        inds: &Array,
+        weights: &Array,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        self.apply_experts_inner(x, inds, weights, target, layer_idx, true)
+    }
+
+    fn apply_experts_inner(
+        &self,
+        x: &Array,
+        inds: &Array,
+        weights: &Array,
+        target: StreamOrDevice,
+        layer_idx: i32,
+        cast_output_to_expert_dtype: bool,
     ) -> Result<Array> {
         let xdims = x.shape();
         let xvec = xdims.as_slice();
@@ -482,116 +557,188 @@ impl RoutedExperts {
         let k = ivec[1];
         let bs_k = bs * k;
         let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
+        #[cfg(feature = "p5h-profile")]
+        let child_spans_enabled = glm_routed_experts_child_spans_enabled();
+        #[cfg(not(feature = "p5h-profile"))]
+        let child_spans_enabled = false;
 
-        let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) = if use_sorted {
-            // --- Sorted routing path. ---
-            let flat_topk = mlx::ops::shape::reshape(inds, [bs_k])
-                .context("RoutedExperts::apply_experts: reshape inds to [BS*k]")?;
-            let sort_perm = argsort_on(&flat_topk, -1_i32, target)
-                .context("RoutedExperts::apply_experts: argsort flat_topk")?; // [BS*k]
-            let sorted_topk = take_along_axis_on(&flat_topk, &sort_perm, -1_i32, target)
-                .context("RoutedExperts::apply_experts: take_along_axis sort flat_topk")?;
-            let sorted_token_idx =
-                sorted_token_indices_from_sort_perm(&sort_perm, k, bs_k, target)?;
-            let sorted_x_2d = take_on(x, &sorted_token_idx, 0_i32, target)
-                .context("RoutedExperts::apply_experts: take x by sorted_token_idx")?;
-            let sorted_x_3d = mlx::ops::shape::expand_dims_on(&sorted_x_2d, -2_i32, target)
-                .context("RoutedExperts::apply_experts: expand_dims sorted_x → [BS*k,1,H]")?;
+        let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) =
+            with_glm_routed_experts_child_span(
+                child_spans_enabled,
+                "glm_moe_routed_gate_up_gather_qmm",
+                layer_idx,
+                || -> Result<(Array, Array, Array, bool, Option<Array>)> {
+                    let result = if use_sorted {
+                        // --- Sorted routing path. ---
+                        let flat_topk = mlx::ops::shape::reshape(inds, [bs_k])
+                            .context("RoutedExperts::apply_experts: reshape inds to [BS*k]")?;
+                        let sort_perm = argsort_on(&flat_topk, -1_i32, target)
+                            .context("RoutedExperts::apply_experts: argsort flat_topk")?; // [BS*k]
+                        let sorted_topk = take_along_axis_on(
+                            &flat_topk, &sort_perm, -1_i32, target,
+                        )
+                        .context("RoutedExperts::apply_experts: take_along_axis sort flat_topk")?;
+                        let sorted_token_idx =
+                            sorted_token_indices_from_sort_perm(&sort_perm, k, bs_k, target)?;
+                        let sorted_x_2d = take_on(x, &sorted_token_idx, 0_i32, target)
+                            .context("RoutedExperts::apply_experts: take x by sorted_token_idx")?;
+                        let sorted_x_3d =
+                            mlx::ops::shape::expand_dims_on(&sorted_x_2d, -2_i32, target).context(
+                                "RoutedExperts::apply_experts: expand_dims sorted_x → [BS*k,1,H]",
+                            )?;
 
-            let fused = self.fused_gate_up(target)?;
-            let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
-                &sorted_x_3d,
-                &fused.weight,
-                &fused.scales,
-                fused.biases.as_ref(),
-                None,
-                Some(&sorted_topk),
-                true,
-                Some(self.group_size),
-                Some(self.bits),
-                "affine",
-                /* sorted_indices */ true,
-                target,
-            )
-            .context("RoutedExperts::apply_experts: gate_up gather_qmm (sorted)")?;
-            let i = self.moe_intermediate;
-            let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0], [bs_k, 1, i], target)
-                .context("RoutedExperts::apply_experts: slice gate_out (sorted)")?;
-            let up_out = slice_on(&gate_up_out, [0_i32, 0, i], [bs_k, 1, 2 * i], target)
-                .context("RoutedExperts::apply_experts: slice up_out (sorted)")?;
+                        let fused = self.fused_gate_up(target)?;
+                        let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
+                            &sorted_x_3d,
+                            &fused.weight,
+                            &fused.scales,
+                            fused.biases.as_ref(),
+                            None,
+                            Some(&sorted_topk),
+                            true,
+                            Some(self.group_size),
+                            Some(self.bits),
+                            "affine",
+                            /* sorted_indices */ true,
+                            target,
+                        )
+                        .context("RoutedExperts::apply_experts: gate_up gather_qmm (sorted)")?;
+                        let i = self.moe_intermediate;
+                        let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0], [bs_k, 1, i], target)
+                            .context("RoutedExperts::apply_experts: slice gate_out (sorted)")?;
+                        let up_out =
+                            slice_on(&gate_up_out, [0_i32, 0, i], [bs_k, 1, 2 * i], target)
+                                .context("RoutedExperts::apply_experts: slice up_out (sorted)")?;
 
-            (gate_out, up_out, sorted_topk, true, Some(sort_perm))
-        } else {
-            // --- Default broadcast path. ---
-            let x_in = mlx::ops::shape::expand_dims_on(x, &[-2_i32, -3_i32][..], target)
-                .context("RoutedExperts::apply_experts: expand_dims x → [BS,1,1,H]")?; // [BS, 1, 1, H]
+                        (gate_out, up_out, sorted_topk, true, Some(sort_perm))
+                    } else {
+                        // --- Default broadcast path. ---
+                        let x_in =
+                            mlx::ops::shape::expand_dims_on(x, &[-2_i32, -3_i32][..], target)
+                                .context(
+                                    "RoutedExperts::apply_experts: expand_dims x → [BS,1,1,H]",
+                                )?; // [BS, 1, 1, H]
 
-            let fused = self.fused_gate_up(target)?;
-            let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
-                &x_in,
-                &fused.weight,
-                &fused.scales,
-                fused.biases.as_ref(),
-                None,
-                Some(inds),
-                true,
-                Some(self.group_size),
-                Some(self.bits),
-                "affine",
-                false,
-                target,
-            )
-            .context("RoutedExperts::apply_experts: gate_up gather_qmm (default)")?; // [BS, k, 1, 2*I]
-            let i = self.moe_intermediate;
-            let gate_out = slice_on(&gate_up_out, [0_i32, 0, 0, 0], [bs, k, 1, i], target)
-                .context("RoutedExperts::apply_experts: slice gate_out (default)")?;
-            let up_out = slice_on(&gate_up_out, [0_i32, 0, 0, i], [bs, k, 1, 2 * i], target)
-                .context("RoutedExperts::apply_experts: slice up_out (default)")?;
+                        let fused = self.fused_gate_up(target)?;
+                        let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
+                            &x_in,
+                            &fused.weight,
+                            &fused.scales,
+                            fused.biases.as_ref(),
+                            None,
+                            Some(inds),
+                            true,
+                            Some(self.group_size),
+                            Some(self.bits),
+                            "affine",
+                            false,
+                            target,
+                        )
+                        .context("RoutedExperts::apply_experts: gate_up gather_qmm (default)")?; // [BS, k, 1, 2*I]
+                        let i = self.moe_intermediate;
+                        let gate_out =
+                            slice_on(&gate_up_out, [0_i32, 0, 0, 0], [bs, k, 1, i], target)
+                                .context(
+                                    "RoutedExperts::apply_experts: slice gate_out (default)",
+                                )?;
+                        let up_out =
+                            slice_on(&gate_up_out, [0_i32, 0, 0, i], [bs, k, 1, 2 * i], target)
+                                .context("RoutedExperts::apply_experts: slice up_out (default)")?;
 
-            (gate_out, up_out, inds.clone(), false, None)
-        };
+                        (gate_out, up_out, inds.clone(), false, None)
+                    };
+
+                    #[cfg(feature = "p5h-profile")]
+                    {
+                        eval_glm_routed_experts_child(&[&result.0, &result.1])?;
+                    }
+                    Ok(result)
+                },
+            )?;
 
         // SwiGLU activation: silu(gate) * up. Element-wise; same code path for
         // both routing branches.
-        let act = invoke_swiglu(self.swiglu(), &gate_out, &up_out)?;
+        let act = with_glm_routed_experts_child_span(
+            child_spans_enabled,
+            "glm_moe_routed_swiglu",
+            layer_idx,
+            || -> Result<Array> {
+                let act = invoke_swiglu(self.swiglu(), &gate_out, &up_out)?;
+                #[cfg(feature = "p5h-profile")]
+                {
+                    eval_glm_routed_experts_child(&[&act])?;
+                }
+                Ok(act)
+            },
+        )?;
 
-        let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
-            &act,
-            &self.down_weight,
-            &self.down_scales,
-            self.down_biases.as_ref(),
-            None,
-            Some(&rhs_idx_used),
-            true,
-            Some(self.group_size),
-            Some(self.bits),
-            "affine",
-            sorted_flag,
-            target,
-        )
-        .context("RoutedExperts::apply_experts: down_proj gather_qmm")?;
+        let down_out = with_glm_routed_experts_child_span(
+            child_spans_enabled,
+            "glm_moe_routed_down_gather_qmm",
+            layer_idx,
+            || -> Result<Array> {
+                let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
+                    &act,
+                    &self.down_weight,
+                    &self.down_scales,
+                    self.down_biases.as_ref(),
+                    None,
+                    Some(&rhs_idx_used),
+                    true,
+                    Some(self.group_size),
+                    Some(self.bits),
+                    "affine",
+                    sorted_flag,
+                    target,
+                )
+                .context("RoutedExperts::apply_experts: down_proj gather_qmm")?;
 
-        // Restore [BS, k, H] order, then weight + reduce across k.
-        let down_out = if let Some(sort_perm) = sort_perm_opt {
-            let inv_perm = argsort_on(&sort_perm, -1_i32, target)
-                .context("RoutedExperts::apply_experts: argsort inv permutation")?;
-            let down_out_2d = mlx::ops::shape::reshape(&down_out_raw, [bs_k, h])
-                .context("RoutedExperts::apply_experts: reshape sorted down_out to [BS*k, H]")?;
-            let unsorted_2d = take_on(&down_out_2d, &inv_perm, 0_i32, target)
-                .context("RoutedExperts::apply_experts: take inv_perm to restore order")?;
-            mlx::ops::shape::reshape(&unsorted_2d, [bs, k, h])
-                .context("RoutedExperts::apply_experts: reshape unsorted to [BS, k, H]")?
-        } else {
-            mlx::ops::shape::squeeze_on(&down_out_raw, &[-2_i32][..], target)
-                .context("RoutedExperts::apply_experts: squeeze down_proj dim -2")?
-        };
+                // Restore [BS, k, H] order, then weight + reduce across k.
+                let down_out = if let Some(sort_perm) = sort_perm_opt {
+                    let inv_perm = argsort_on(&sort_perm, -1_i32, target)
+                        .context("RoutedExperts::apply_experts: argsort inv permutation")?;
+                    let down_out_2d = mlx::ops::shape::reshape(&down_out_raw, [bs_k, h]).context(
+                        "RoutedExperts::apply_experts: reshape sorted down_out to [BS*k, H]",
+                    )?;
+                    let unsorted_2d = take_on(&down_out_2d, &inv_perm, 0_i32, target)
+                        .context("RoutedExperts::apply_experts: take inv_perm to restore order")?;
+                    mlx::ops::shape::reshape(&unsorted_2d, [bs, k, h])
+                        .context("RoutedExperts::apply_experts: reshape unsorted to [BS, k, H]")?
+                } else {
+                    mlx::ops::shape::squeeze_on(&down_out_raw, &[-2_i32][..], target)
+                        .context("RoutedExperts::apply_experts: squeeze down_proj dim -2")?
+                };
+                #[cfg(feature = "p5h-profile")]
+                {
+                    eval_glm_routed_experts_child(&[&down_out])?;
+                }
+                Ok(down_out)
+            },
+        )?;
 
         // weights: [BS, k] -> [BS, k, 1] for broadcast with [BS, k, H].
-        let weights_unsq = mlx::ops::shape::expand_dims_on(weights, -1_i32, target)
-            .context("RoutedExperts::apply_experts: expand weights dim")?;
-        let weighted = &down_out * &weights_unsq;
-        mlx::ops::sum_on(&weighted, -2_i32, false, target)
-            .context("RoutedExperts::apply_experts: sum across k")
+        with_glm_routed_experts_child_span(
+            child_spans_enabled,
+            "glm_moe_routed_weighted_reduce",
+            layer_idx,
+            || -> Result<Array> {
+                let weights_unsq = mlx::ops::shape::expand_dims_on(weights, -1_i32, target)
+                    .context("RoutedExperts::apply_experts: expand weights dim")?;
+                let weighted = &down_out * &weights_unsq;
+                let mut out = mlx::ops::sum_on(&weighted, -2_i32, false, target)
+                    .context("RoutedExperts::apply_experts: sum across k")?;
+                if cast_output_to_expert_dtype {
+                    out = out.astype_on(down_out.dtype(), target).context(
+                        "RoutedExperts::apply_experts: cast weighted sum to expert dtype",
+                    )?;
+                }
+                #[cfg(feature = "p5h-profile")]
+                {
+                    eval_glm_routed_experts_child(&[&out])?;
+                }
+                Ok(out)
+            },
+        )
     }
 
     /// Lazily-built compiled SwiGLU closure shared by `apply_experts`.
@@ -1230,7 +1377,7 @@ impl SparseMoeBlock {
             // logic previously inlined here, extracted so GLM-4 can reuse it.
             let routed_y = self
                 .routed
-                .apply_experts(&flat_x, &inds_u32, &scores, target)?;
+                .apply_experts(&flat_x, &inds_u32, &scores, target, layer_idx)?;
 
             // (7) Shared expert with independent sigmoid gate.
             let shared_y = self

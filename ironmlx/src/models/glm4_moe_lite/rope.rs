@@ -13,6 +13,12 @@
 use anyhow::Result;
 use mlx::{Array, StreamOrDevice};
 
+#[derive(Clone, Copy)]
+pub enum RopeOffset<'a> {
+    Scalar(i32),
+    PerRow(&'a Array),
+}
+
 pub struct Glm4Rope {
     dims: i32,
     base: f32,
@@ -31,16 +37,50 @@ impl Glm4Rope {
         offset: &Array,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        Ok(mlx::fast::rope_with_array_offset_on(
-            x,
-            self.dims,
-            true,
-            Some(self.base),
-            1.0,
-            offset,
-            None,
-            target,
-        )?)
+        self.apply_offset(x, RopeOffset::PerRow(offset), target)
+    }
+
+    /// `x`: `[B,H,S,dims]`; `offset`: scalar start position shared by all rows.
+    /// Used by the B=1 GLM decode/prefill fast path, matching mlx-lm's
+    /// `cache.offset` call shape.
+    pub fn apply_scalar(
+        &self,
+        x: &Array,
+        offset: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.apply_offset(x, RopeOffset::Scalar(offset), target)
+    }
+
+    pub fn apply_offset(
+        &self,
+        x: &Array,
+        offset: RopeOffset<'_>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        match offset {
+            RopeOffset::Scalar(offset) => Ok(mlx::fast::rope_on(
+                x,
+                self.dims,
+                true,
+                Some(self.base),
+                1.0,
+                offset,
+                None,
+                target,
+            )?),
+            RopeOffset::PerRow(offset) => Ok(mlx::fast::rope_with_array_offset_on(
+                x,
+                self.dims,
+                true,
+                Some(self.base),
+                1.0,
+                offset,
+                None,
+                target,
+            )?),
+        }
     }
 }
 
@@ -133,5 +173,25 @@ mod tests {
             got[4],
             got[5]
         );
+    }
+
+    #[test]
+    fn scalar_matches_per_row_for_batch_one() {
+        let rope = Glm4Rope::new(4, 10000.0);
+        let x = arr(&[1.0, 0.0, 0.0, 1.0], &[1, 1, 1, 4]);
+        let offset = off(&[5], &[1]);
+
+        let per_row = rope.apply(&x, &offset, ()).unwrap();
+        let scalar = rope.apply_scalar(&x, 5, ()).unwrap();
+        let per_row_values = per_row.to_vec::<f32>().unwrap();
+        let scalar_values = scalar.to_vec::<f32>().unwrap();
+
+        for (i, (a, b)) in per_row_values.iter().zip(scalar_values.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "channel {i}: per_row={a}, scalar={b}, diff={}",
+                (a - b).abs()
+            );
+        }
     }
 }

@@ -477,11 +477,12 @@ where
 
     let prompt_len = prompt_ids.len();
 
-    // Routing: short-prompt → SchedulerActor; long-prompt → GenerationStream.
+    // Routing: short-prompt and model-limited chunked long-prompt requests
+    // use SchedulerActor; other chunked long prompts keep using GenerationStream.
     // B1-p2.4: VL fallback removed — VL requests now route through Scheduler
     // via Scheduler::admit/admit_mid + batched_prefill_vl.
-    // COMPAT(3b-2): long-prompt fallback to GS sunsets in 3c+ chunked-prefill phase.
-    let use_scheduler = state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size;
+    let use_scheduler =
+        super::should_route_to_scheduler::<M>(prompt_len, state.prefill_chunk_size, state.b_max);
 
     // Per Codex plan review v16 P1 #2 + v17 P1 #1 + v18 P1 #1: p5h state ONLY
     // for streaming requests. Reuse the existing `stream` local from Step 2
