@@ -85,6 +85,30 @@ fn llama_round_trips_model_type_string() {
 }
 
 #[test]
+fn minicpmv46_declared_model_type_maps_to_execution_architecture() {
+    // MiniCPM-V-4.6 ships `model_type = "minicpmv4_6"` with a nested
+    // `text_config.model_type = "qwen3_5_text"` Qwen3.5-text backbone. It maps
+    // to a dedicated execution architecture that runs the text-only Qwen3.5
+    // dense graph.
+    let minicpmv46 = json!({
+        "model_type": "minicpmv4_6",
+        "architectures": ["MiniCPMV4_6ForConditionalGeneration"],
+        "text_config": { "model_type": "qwen3_5_text" },
+        "vision_config": { "model_type": "minicpmv4_6_vision" },
+        "image_token_id": 248056
+    });
+    assert_eq!(
+        ModelArchitecture::from_config_value(&minicpmv46).unwrap(),
+        ModelArchitecture::MiniCpmV46
+    );
+}
+
+#[test]
+fn minicpmv46_round_trips_model_type_string() {
+    assert_eq!(ModelArchitecture::MiniCpmV46.model_type(), "minicpmv4_6");
+}
+
+#[test]
 fn unsupported_model_type_reports_supported_architectures() {
     let config = json!({ "model_type": "qwen2_vl" });
 
@@ -92,6 +116,6 @@ fn unsupported_model_type_reports_supported_architectures() {
 
     assert_eq!(
         err.to_string(),
-        "unsupported model_type: qwen2_vl (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', or 'llama')"
+        "unsupported model_type: qwen2_vl (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', 'llama', or 'minicpmv4_6')"
     );
 }

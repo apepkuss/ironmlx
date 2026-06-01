@@ -159,6 +159,13 @@ fn main() -> Result<()> {
             let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
             run_for_model(&model, &tokenizer, &args, load_ms)
         }
+        ModelArchitecture::MiniCpmV46 => {
+            // Text-only Qwen3.5 dense backbone (SigLIP vision tower not yet implemented).
+            let model = ironmlx::models::minicpmv4_6::model_from_loader(&loader)
+                .context("minicpmv4_6::model_from_loader")?;
+            let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+            run_for_model(&model, &tokenizer, &args, load_ms)
+        }
     }
 }
 

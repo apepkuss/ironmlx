@@ -338,6 +338,11 @@ pub fn run(args: GenerateArgs) -> Result<()> {
                 .context("LlamaModel::from_loader")?;
             run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
+        crate::models::ModelArchitecture::MiniCpmV46 => {
+            let model = crate::models::minicpmv4_6::model_from_loader(&loader)
+                .context("minicpmv4_6::model_from_loader")?;
+            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+        }
     }
 }
 
