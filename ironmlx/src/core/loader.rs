@@ -232,6 +232,8 @@ impl Loader {
                     && !k.starts_with("audio_tower.")
                     && !k.starts_with("embed_vision.")
                     && !k.starts_with("embed_audio.")
+                    && !k.starts_with("vit_merger.")
+                    && !k.starts_with("merger.")
             });
         }
 
@@ -708,6 +710,82 @@ mod tests {
         assert!(
             !w.contains_key("vision_tower.patch_embed.proj.weight"),
             "vision_tower key must be dropped"
+        );
+        assert!(
+            w.contains_key("model.embed_tokens.weight"),
+            "plain model.* key must be preserved"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_resampler_keys_when_multimodal() {
+        // keep_vision_tower=true → vit_merger.* / merger.* must be retained.
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+        w.insert("vit_merger.pre_norm.weight".into(), arr.clone());
+        w.insert("vit_merger.self_attn.q_proj.weight".into(), arr.clone());
+        w.insert("merger.mlp.0.linear_1.weight".into(), arr.clone());
+        w.insert("merger.mlp.0.pre_norm.weight".into(), arr.clone());
+        w.insert("vision_tower.encoder.layers.0.weight".into(), arr.clone());
+        w.insert("model.embed_tokens.weight".into(), arr.clone());
+
+        Loader::sanitize(&mut w, &empty_text_config(), true).unwrap();
+
+        assert!(
+            w.contains_key("vit_merger.pre_norm.weight"),
+            "vit_merger.* must be kept when keep_vision_tower=true"
+        );
+        assert!(
+            w.contains_key("vit_merger.self_attn.q_proj.weight"),
+            "vit_merger.* must be kept when keep_vision_tower=true"
+        );
+        assert!(
+            w.contains_key("merger.mlp.0.linear_1.weight"),
+            "merger.* must be kept when keep_vision_tower=true"
+        );
+        assert!(
+            w.contains_key("merger.mlp.0.pre_norm.weight"),
+            "merger.* must be kept when keep_vision_tower=true"
+        );
+        assert!(
+            w.contains_key("vision_tower.encoder.layers.0.weight"),
+            "vision_tower.* must be kept when keep_vision_tower=true"
+        );
+    }
+
+    #[test]
+    fn sanitize_drops_resampler_keys_when_text_only() {
+        // keep_vision_tower=false → vit_merger.* / merger.* must be dropped.
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+        w.insert("vit_merger.pre_norm.weight".into(), arr.clone());
+        w.insert("vit_merger.self_attn.q_proj.weight".into(), arr.clone());
+        w.insert("merger.mlp.0.linear_1.weight".into(), arr.clone());
+        w.insert("merger.mlp.0.pre_norm.weight".into(), arr.clone());
+        w.insert("vision_tower.encoder.layers.0.weight".into(), arr.clone());
+        w.insert("model.embed_tokens.weight".into(), arr.clone());
+
+        Loader::sanitize(&mut w, &empty_text_config(), false).unwrap();
+
+        assert!(
+            !w.contains_key("vit_merger.pre_norm.weight"),
+            "vit_merger.* must be dropped when keep_vision_tower=false"
+        );
+        assert!(
+            !w.contains_key("vit_merger.self_attn.q_proj.weight"),
+            "vit_merger.* must be dropped when keep_vision_tower=false"
+        );
+        assert!(
+            !w.contains_key("merger.mlp.0.linear_1.weight"),
+            "merger.* must be dropped when keep_vision_tower=false"
+        );
+        assert!(
+            !w.contains_key("merger.mlp.0.pre_norm.weight"),
+            "merger.* must be dropped when keep_vision_tower=false"
+        );
+        assert!(
+            !w.contains_key("vision_tower.encoder.layers.0.weight"),
+            "vision_tower.* must be dropped when keep_vision_tower=false"
         );
         assert!(
             w.contains_key("model.embed_tokens.weight"),
