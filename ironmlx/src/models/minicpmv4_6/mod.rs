@@ -24,6 +24,46 @@ pub use model::MiniCpmV46Model;
 use crate::core::Loader;
 use crate::Result;
 
+/// Build the MiniCPM-V-4.6 image placeholder string:
+/// `<image>` + `<|image_pad|>` × `n` + `</image>`.
+///
+/// All three tokens are registered special tokens; when tokenised they produce
+/// the id sequence `[248078] + [248056]*n + [248079]`, which exactly matches
+/// the P2a gen-script (`gen_single_image_logits.py`, `use_image_id=False`,
+/// `slice_mode=False`) fixture `expected_input_ids_img.npy`.
+///
+/// This is the single source of truth for image-token injection in both the
+/// CLI (`cli/generate.rs`) and the HTTP serve path (`core/server/openai.rs`).
+pub fn image_placeholder_string(n: usize) -> String {
+    let mut out =
+        String::with_capacity("<image>".len() + n * "<|image_pad|>".len() + "</image>".len());
+    out.push_str("<image>");
+    for _ in 0..n {
+        out.push_str("<|image_pad|>");
+    }
+    out.push_str("</image>");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_placeholder_string_format() {
+        // N=3 → ids [248078, 248056×3, 248079] when tokenised.
+        assert_eq!(
+            image_placeholder_string(3),
+            "<image><|image_pad|><|image_pad|><|image_pad|></image>"
+        );
+    }
+
+    #[test]
+    fn image_placeholder_string_zero() {
+        assert_eq!(image_placeholder_string(0), "<image></image>");
+    }
+}
+
 /// Build a [`MiniCpmV46Model`] from a MiniCPM-V-4.6 checkpoint.
 ///
 /// Parses the nested `text_config` into a `Qwen35Config`, loads the Qwen3.5

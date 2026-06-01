@@ -92,26 +92,6 @@ fn qwen_image_placeholder_string(token_count: usize) -> String {
     out
 }
 
-/// Build the MiniCPM-V-4.6 image placeholder string:
-/// `<image>` + `<|image_pad|>` × token_count + `</image>`.
-///
-/// When tokenised (all three are registered special tokens), this produces the
-/// id sequence `[248078] + [248056]*token_count + [248079]`, which exactly
-/// matches what the P2a gen-script (`gen_single_image_logits.py`,
-/// `use_image_id=False`, `slice_mode=False`) dumps into
-/// `expected_input_ids_img.npy`.
-fn minicpmv46_image_placeholder_string(token_count: usize) -> String {
-    let mut out = String::with_capacity(
-        "<image>".len() + token_count * "<|image_pad|>".len() + "</image>".len(),
-    );
-    out.push_str("<image>");
-    for _ in 0..token_count {
-        out.push_str("<|image_pad|>");
-    }
-    out.push_str("</image>");
-    out
-}
-
 fn gemma4_placeholder(token_count: usize) -> String {
     let mut out = String::from("<|image>");
     for _ in 0..token_count {
@@ -231,7 +211,9 @@ fn prepare_images(
             let token_count = image_token_count_for_grid(grid, default_spatial_merge_size)?;
             all_pixel_values.push(pixel_values);
             grids.push(grid);
-            placeholders.push(minicpmv46_image_placeholder_string(token_count));
+            placeholders.push(crate::models::minicpmv4_6::image_placeholder_string(
+                token_count,
+            ));
         }
         (default_spatial_merge_size, image_tok_id)
     } else {
@@ -416,8 +398,8 @@ mod tests {
 
     #[test]
     fn minicpmv46_placeholder_wraps_correct_tokens() {
-        // Verify the helper builds the correct <image>...<|image_pad|>...</image> string.
-        let s = minicpmv46_image_placeholder_string(3);
+        // Verify the canonical fn builds the correct <image>...<|image_pad|>...</image> string.
+        let s = crate::models::minicpmv4_6::image_placeholder_string(3);
         assert_eq!(s, "<image><|image_pad|><|image_pad|><|image_pad|></image>");
     }
 

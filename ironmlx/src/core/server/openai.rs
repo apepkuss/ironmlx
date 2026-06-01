@@ -254,11 +254,11 @@ pub async fn expand_image_parts_in_messages(
                                     &img_bytes,
                                 )?;
                             // N = (gh/4)*(gw/4): VitMerger 2×2 + Merger 2×2 = effective 4×
-                            // downsample. spatial_merge_size=4 matches the CLI path
-                            // (minicpmv46_image_placeholder_string in generate.rs).
+                            // downsample. spatial_merge_size=4.
                             let n =
                                 ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
-                            placeholders.push(minicpmv46_placeholder(n));
+                            placeholders
+                                .push(crate::models::minicpmv4_6::image_placeholder_string(n));
                             grid_thw.push((1, gh, gw));
                             all_pixel_values.push(pv);
                         }
@@ -312,25 +312,6 @@ fn gemma4_placeholder(n: usize) -> String {
         s.push_str("<|image|>");
     }
     s.push_str("<image|>");
-    s
-}
-
-/// MiniCPM-V-4.6 image placeholder: `<image>` + `<|image_pad|>` × n + `</image>`.
-///
-/// When tokenised (all three are registered special tokens), this produces
-/// `[248078] + [248056]*n + [248079]`, matching the P2a fixture
-/// (`expected_input_ids_img.npy`, `use_image_id=False`, `slice_mode=False`).
-///
-/// Mirror of `minicpmv46_image_placeholder_string` in `cli/generate.rs` —
-/// keep both in sync if the convention changes.
-fn minicpmv46_placeholder(n: usize) -> String {
-    let mut s =
-        String::with_capacity("<image>".len() + n * "<|image_pad|>".len() + "</image>".len());
-    s.push_str("<image>");
-    for _ in 0..n {
-        s.push_str("<|image_pad|>");
-    }
-    s.push_str("</image>");
     s
 }
 
@@ -1629,7 +1610,7 @@ mod tests {
     fn minicpmv46_placeholder_format() {
         // N=3 → [248078, 248056, 248056, 248056, 248079] when tokenised.
         assert_eq!(
-            minicpmv46_placeholder(3),
+            crate::models::minicpmv4_6::image_placeholder_string(3),
             "<image><|image_pad|><|image_pad|><|image_pad|></image>"
         );
     }
