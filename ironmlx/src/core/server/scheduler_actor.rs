@@ -52,6 +52,18 @@ struct PendingAdmit {
     reply_tx: oneshot::Sender<Result<AdmitReply>>,
 }
 
+fn fresh_prefill_batch_limit_for_request<M: Model>(
+    request: &GenerateRequest,
+    b_max: usize,
+) -> usize {
+    M::fresh_prefill_batch_limit(request.prompt_ids.len(), b_max).clamp(1, b_max)
+}
+
+fn fresh_prefill_batch_limit_for_command<M: Model>(cmd: &SchedulerCommand, b_max: usize) -> usize {
+    let SchedulerCommand::Admit { request, .. } = cmd;
+    fresh_prefill_batch_limit_for_request::<M>(request, b_max)
+}
+
 /// Event yielded by the rolling decode loop. Either a new admit command
 /// arrived (mid-batch admit), a decode step is due, or the cmd_rx channel
 /// was closed (shutdown).
@@ -357,6 +369,7 @@ fn driver_loop<M>(
         let Some(first_cmd) = rt.block_on(cmd_rx.recv()) else {
             return; // cmd_rx closed; all senders dropped.
         };
+        let fresh_batch_limit = fresh_prefill_batch_limit_for_command::<M>(&first_cmd, b_max);
         handle_admit(first_cmd, &mut sched, &mut event_txs, &admit_count);
 
         if sched.active_count() == 0 {
@@ -365,9 +378,9 @@ fn driver_loop<M>(
         }
 
         // ===== Admission window: drain additional admits until deadline
-        //       or saturate at b_max. Beyond b_max within the window, push
-        //       to admission_queue (bounded by admission_queue_max). =====
-        if sched.active_count() < b_max {
+        //       or the model's fresh-prefill batch limit. Beyond the limit,
+        //       push to admission_queue (bounded by admission_queue_max). =====
+        if sched.active_count() < fresh_batch_limit {
             rt.block_on(drain_window(
                 &mut cmd_rx,
                 &mut sched,
@@ -377,6 +390,7 @@ fn driver_loop<M>(
                 &saturate_triggered,
                 &queue_depth_peak,
                 &queue_rejected,
+                fresh_batch_limit,
                 b_max,
                 admission_queue_max,
                 admission_deadline,
@@ -617,10 +631,10 @@ fn driver_loop<M>(
     }
 }
 
-/// Drain additional `Admit` commands until either the deadline expires or
-/// the Scheduler saturates at `b_max`. Hard deadline — new admits do NOT
-/// reset the timer. Once saturated, additional admits within the window
-/// go to the admission queue (bounded by `admission_queue_max`).
+/// Drain additional `Admit` commands until either the deadline expires or the
+/// fresh-batch admission limit is reached. Hard deadline — new admits do NOT
+/// reset the timer. Once the limit is reached, additional admits within the
+/// window go to the admission queue (bounded by `admission_queue_max`).
 #[allow(clippy::too_many_arguments)]
 async fn drain_window<M>(
     cmd_rx: &mut mpsc::Receiver<SchedulerCommand>,
@@ -631,23 +645,26 @@ async fn drain_window<M>(
     saturate_triggered: &Arc<AtomicU64>,
     queue_depth_peak: &Arc<AtomicUsize>,
     queue_rejected: &Arc<AtomicU64>,
+    batch_limit: usize,
     b_max: usize,
     queue_max: usize,
     deadline: Duration,
 ) where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let batch_limit = batch_limit.clamp(1, b_max);
     let timer = tokio::time::sleep(deadline);
     tokio::pin!(timer);
-    let mut saturated = false;
+    let mut limit_reached = false;
     loop {
         tokio::select! {
             biased;
             _ = &mut timer => return,
             maybe = cmd_rx.recv() => {
                 let Some(cmd) = maybe else { return }; // channel closed
-                if saturated {
-                    // Already at b_max — push to queue or reject.
+                if limit_reached {
+                    // Fresh batch is full for this model/prompt policy — push
+                    // to queue or reject.
                     enqueue_or_reject(
                         cmd,
                         admission_queue,
@@ -658,9 +675,11 @@ async fn drain_window<M>(
                     continue;
                 }
                 handle_admit(cmd, sched, event_txs, admit_count);
-                if sched.active_count() >= b_max {
-                    saturate_triggered.fetch_add(1, Ordering::Relaxed);
-                    saturated = true;
+                if sched.active_count() >= batch_limit {
+                    if batch_limit >= b_max {
+                        saturate_triggered.fetch_add(1, Ordering::Relaxed);
+                    }
+                    limit_reached = true;
                     // Stay in the loop until deadline so queued admits
                     // arriving during the window's remaining time are
                     // captured. (Pre-3d returned here; 3d keeps draining.)
@@ -1029,6 +1048,7 @@ where
         let pending = admission_queue
             .pop_front()
             .expect("queue non-empty checked");
+        let fresh_batch_limit = fresh_prefill_batch_limit_for_request::<M>(&pending.request, b_max);
         handle_admit(
             SchedulerCommand::Admit {
                 request: pending.request,
@@ -1042,11 +1062,11 @@ where
             // Admit failed; loop to drain more queue (or exit).
             return RollingControl::ContinueRolling;
         }
-        if sched.active_count() < b_max {
+        if sched.active_count() < fresh_batch_limit {
             // Drain queue head-by-head into the new batch (no deadline —
             // these are already-queued admits, not racing-in cmd_rx).
             // Then optionally drain_window for fresh cmd_rx admits.
-            while sched.active_count() < b_max {
+            while sched.active_count() < fresh_batch_limit {
                 let Some(p) = admission_queue.pop_front() else {
                     break;
                 };
@@ -1061,7 +1081,7 @@ where
                 );
             }
             // Optionally absorb cmd_rx admits arriving right now.
-            if sched.active_count() < b_max {
+            if sched.active_count() < fresh_batch_limit {
                 rt.block_on(drain_window(
                     cmd_rx,
                     sched,
@@ -1071,6 +1091,7 @@ where
                     saturate_triggered,
                     queue_depth_peak,
                     queue_rejected,
+                    fresh_batch_limit,
                     b_max,
                     admission_queue_max,
                     admission_deadline,
@@ -1110,6 +1131,7 @@ where
     // Queue empty + no active rows — same logic as pre-3d.
     match cmd_rx.try_recv() {
         Ok(cmd) => {
+            let fresh_batch_limit = fresh_prefill_batch_limit_for_command::<M>(&cmd, b_max);
             if sched.phase() == Phase::Decoding {
                 if let Err(evict_err) = sched.evict_all() {
                     tracing::warn!(
@@ -1127,7 +1149,7 @@ where
             if sched.active_count() == 0 {
                 return RollingControl::BreakRolling;
             }
-            if sched.active_count() < b_max {
+            if sched.active_count() < fresh_batch_limit {
                 rt.block_on(drain_window(
                     cmd_rx,
                     sched,
@@ -1137,6 +1159,7 @@ where
                     saturate_triggered,
                     queue_depth_peak,
                     queue_rejected,
+                    fresh_batch_limit,
                     b_max,
                     admission_queue_max,
                     admission_deadline,

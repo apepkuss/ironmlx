@@ -47,6 +47,8 @@ use super::config::Glm4MoeLiteConfig;
 use super::decoder_layer::Glm4DecoderLayer;
 use super::mla_cache::MlaLatentCache;
 
+const LONG_PREFILL_SINGLE_BATCH_THRESHOLD: usize = 1024;
+
 #[cfg(feature = "p5h-profile")]
 fn p5h_eval(arrays: &[&Array]) -> Result<()> {
     if crate::core::p5h::is_measurement_eval_probes_active() {
@@ -477,6 +479,14 @@ impl Model for Glm4MoeLiteModel {
         Glm4MoeLiteModel::make_cache(self, batch, cap, dtype)
     }
 
+    fn fresh_prefill_batch_limit(prompt_len: usize, b_max: usize) -> usize {
+        if prompt_len >= LONG_PREFILL_SINGLE_BATCH_THRESHOLD {
+            1
+        } else {
+            b_max
+        }
+    }
+
     fn forward_on(
         &self,
         input_ids: &Array,
@@ -549,6 +559,27 @@ impl Model for Glm4MoeLiteModel {
 
     fn num_hidden_layers(&self) -> usize {
         self.cfg.num_hidden_layers as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_prefill_batch_limit_keeps_short_prompts_batched() {
+        assert_eq!(
+            <Glm4MoeLiteModel as Model>::fresh_prefill_batch_limit(512, 4),
+            4
+        );
+    }
+
+    #[test]
+    fn fresh_prefill_batch_limit_serializes_long_prompts() {
+        assert_eq!(
+            <Glm4MoeLiteModel as Model>::fresh_prefill_batch_limit(2048, 4),
+            1
+        );
     }
 }
 

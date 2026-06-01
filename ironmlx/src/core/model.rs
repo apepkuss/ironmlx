@@ -62,6 +62,20 @@ pub trait Model {
         true
     }
 
+    /// Maximum number of requests this model wants to admit into one fresh
+    /// prefill batch for a prompt of `prompt_len` tokens.
+    ///
+    /// The default keeps the scheduler's existing behavior. Model
+    /// implementations can lower this when their B>1 long-prefill path is
+    /// slower than B=1 prefill plus rolling mid-admission.
+    fn fresh_prefill_batch_limit(prompt_len: usize, b_max: usize) -> usize
+    where
+        Self: Sized,
+    {
+        let _ = prompt_len;
+        b_max
+    }
+
     fn model_meta(&self) -> ModelMeta;
 
     fn num_hidden_layers(&self) -> usize;
