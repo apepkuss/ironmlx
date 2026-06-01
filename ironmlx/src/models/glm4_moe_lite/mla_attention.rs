@@ -472,8 +472,8 @@ impl MlaAttention {
     ///
     /// SDPA computes `softmax(scale·q@kᵀ + pe_scores) @ v`; the same softmax
     /// scale is passed in both regimes, and `pe_scores` already carries the
-    /// `*scale` RoPE term + mask (so `"causal"` mode is intentionally unused —
-    /// all masking is folded into `pe_scores`, `mask_mode = "array"`).
+    /// `*scale` RoPE term + mask (so `"causal"` mode is intentionally unused;
+    /// all masking is passed as `mask_arr` with empty `mask_mode`).
     ///
     /// The two regimes are algebraically identical:
     /// - **Decode** folds the query into the latent (`q_lat = embed_q(q_nope)`),

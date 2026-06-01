@@ -80,6 +80,11 @@ struct BenchTarget {
     target: StreamOrDevice,
 }
 
+struct SdpaMaskCase {
+    case: &'static str,
+    mask_mode: &'static str,
+}
+
 struct DecodeInputs {
     x: Array,
     offset: Array,
@@ -234,18 +239,34 @@ fn main() -> Result<()> {
         let q_lat = embed_q.apply(&q_nope, true, bench_target.target)?;
         mlx::transforms::eval(&[&q_lat])?;
 
-        records.push(bench_case(
-            ctx_len,
-            "sdpa",
-            args.warmup_runs,
-            args.runs,
-            || {
-                run_decode_sdpa(&q_lat, &kv_latent, &pe_scores, &cfg, bench_target.target)
+        for sdpa_case in sdpa_mask_cases() {
+            records.push(bench_case(
+                ctx_len,
+                sdpa_case.case,
+                args.warmup_runs,
+                args.runs,
+                || {
+                    run_decode_sdpa(
+                        &q_lat,
+                        &kv_latent,
+                        &pe_scores,
+                        &cfg,
+                        sdpa_case.mask_mode,
+                        bench_target.target,
+                    )
                     .map(|out| vec![out])
-            },
-        )?);
+                },
+            )?);
+        }
 
-        let sdpa_out = run_decode_sdpa(&q_lat, &kv_latent, &pe_scores, &cfg, bench_target.target)?;
+        let sdpa_out = run_decode_sdpa(
+            &q_lat,
+            &kv_latent,
+            &pe_scores,
+            &cfg,
+            "",
+            bench_target.target,
+        )?;
         mlx::transforms::eval(&[&sdpa_out])?;
 
         records.push(bench_case(
@@ -491,6 +512,7 @@ fn run_decode_sdpa(
     kv_latent: &Array,
     pe_scores: &Array,
     cfg: &Glm4MoeLiteConfig,
+    mask_mode: &str,
     target: StreamOrDevice,
 ) -> Result<Array> {
     let mask = if pe_scores.dtype() == kv_latent.dtype() {
@@ -503,11 +525,24 @@ fn run_decode_sdpa(
         kv_latent,
         kv_latent,
         cfg.softmax_scale(),
-        "array",
+        mask_mode,
         Some(&mask),
         None,
         target,
     )?)
+}
+
+fn sdpa_mask_cases() -> [SdpaMaskCase; 2] {
+    [
+        SdpaMaskCase {
+            case: "sdpa",
+            mask_mode: "",
+        },
+        SdpaMaskCase {
+            case: "sdpa-mask-array",
+            mask_mode: "array",
+        },
+    ]
 }
 
 fn merge_heads(out: &Array, cfg: &Glm4MoeLiteConfig, target: StreamOrDevice) -> Result<Array> {
@@ -711,6 +746,16 @@ mod tests {
     fn validate_batch_accepts_positive_values() {
         validate_batch(1).unwrap();
         validate_batch(4).unwrap();
+    }
+
+    #[test]
+    fn sdpa_mask_cases_cover_production_and_array_diagnostic() {
+        let cases = sdpa_mask_cases();
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].case, "sdpa");
+        assert_eq!(cases[0].mask_mode, "");
+        assert_eq!(cases[1].case, "sdpa-mask-array");
+        assert_eq!(cases[1].mask_mode, "array");
     }
 
     #[test]
