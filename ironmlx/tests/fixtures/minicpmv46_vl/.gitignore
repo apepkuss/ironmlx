@@ -1,3 +1,5 @@
 expected_*.npy
 input_*.npy
 multislice_*.npy
+sliced_*.npy
+2img_*.npy
