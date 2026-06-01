@@ -19,52 +19,21 @@
 //!   cargo test --release -p ironmlx --test minicpmv46_vision_parity -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
-
 use mlx::{ops, Array, Dtype};
 
 use ironmlx::core::Loader;
 use ironmlx::models::minicpmv4_6::config::MiniCpmV46VisionConfig;
 use ironmlx::models::minicpmv4_6::vision::MiniCpmV46Vision;
 
-const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/minicpmv46_vl");
+mod common;
+use common::minicpmv46_parity::{
+    checkpoint_dir, load_npy_in, max_abs_diff, to_f32_vec, FIXTURE_DIR_VL,
+};
+
 const PATCH: i32 = 14;
 
 fn load_npy(name: &str) -> Array {
-    let p = format!("{FIXTURE_DIR}/{name}");
-    mlx::io::load_npy(&p)
-        .unwrap_or_else(|e| panic!("failed to load {p} — run gen_vision_embeds.py first: {e}"))
-}
-
-fn checkpoint_dir() -> PathBuf {
-    let env = std::env::var("MINICPMV46_MODEL").expect(
-        "MINICPMV46_MODEL env var must point to the MiniCPM-V-4.6-4bit snapshot dir (#[ignore] test)",
-    );
-    PathBuf::from(env)
-}
-
-fn to_f32_vec(a: &Array) -> Vec<f32> {
-    ops::cast::astype(a, Dtype::Float32)
-        .expect("astype f32")
-        .to_vec()
-        .expect("to_vec")
-}
-
-/// Worst-element absolute deviation between two arrays (cast to f32).
-fn max_abs_diff(a: &Array, b: &Array) -> f32 {
-    let av = to_f32_vec(a);
-    let bv = to_f32_vec(b);
-    assert_eq!(
-        av.len(),
-        bv.len(),
-        "size mismatch: {} vs {}",
-        av.len(),
-        bv.len()
-    );
-    av.iter()
-        .zip(bv.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0_f32, f32::max)
+    load_npy_in(FIXTURE_DIR_VL, name)
 }
 
 /// Flattened cosine similarity between two arrays (cast to f32).

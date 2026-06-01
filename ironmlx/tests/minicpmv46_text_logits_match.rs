@@ -16,80 +16,22 @@
 //!   cargo test --release -p ironmlx --test minicpmv46_text_logits_match -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
-
 use mlx::{Array, Dtype};
 
 use ironmlx::core::{generate::build_position_ids, Loader, Model};
 use ironmlx::models::minicpmv4_6;
 
+mod common;
+use common::minicpmv46_parity::{checkpoint_dir, diff_at, greedy_argmax, max_abs_diff, top_k};
+
+/// Fixture directory for the text-only logits test.  Distinct from the VL
+/// fixture dir (`tests/fixtures/minicpmv46_vl`) used by the vision tests.
 const FIXTURE_DIR: &str = "tests/fixtures/minicpmv46";
 
 fn load_npy(name: &str) -> Array {
     let p = format!("{FIXTURE_DIR}/{name}");
     mlx::io::load_npy(&p)
         .unwrap_or_else(|e| panic!("failed to load {p} — run gen_logits.py first: {e}"))
-}
-
-fn checkpoint_dir() -> PathBuf {
-    let env = std::env::var("MINICPMV46_MODEL").expect(
-        "MINICPMV46_MODEL env var must point to the MiniCPM-V-4.6-4bit snapshot dir (#[ignore] test)",
-    );
-    PathBuf::from(env)
-}
-
-fn max_abs_diff(a: &Array, b: &Array) -> f32 {
-    let av: Vec<f32> = mlx::ops::cast::astype(a, Dtype::Float32)
-        .unwrap()
-        .to_vec()
-        .unwrap();
-    let bv: Vec<f32> = mlx::ops::cast::astype(b, Dtype::Float32)
-        .unwrap()
-        .to_vec()
-        .unwrap();
-    assert_eq!(av.len(), bv.len(), "shape mismatch");
-    av.iter()
-        .zip(bv.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0_f32, f32::max)
-}
-
-/// Greedy argmax over a 1-D logits Array (cast to fp32 first).
-fn greedy_argmax(arr: &Array) -> usize {
-    let v: Vec<f32> = mlx::ops::cast::astype(arr, Dtype::Float32)
-        .unwrap()
-        .to_vec()
-        .unwrap();
-    v.iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i)
-        .unwrap()
-}
-
-/// Top-k token ids by logit value (descending), for distribution-shape comparison.
-fn top_k(arr: &Array, k: usize) -> Vec<usize> {
-    let v: Vec<f32> = mlx::ops::cast::astype(arr, Dtype::Float32)
-        .unwrap()
-        .to_vec()
-        .unwrap();
-    let mut idx: Vec<usize> = (0..v.len()).collect();
-    idx.sort_by(|&a, &b| v[b].partial_cmp(&v[a]).unwrap_or(std::cmp::Ordering::Equal));
-    idx.truncate(k);
-    idx
-}
-
-/// Absolute logit difference at a specific token index.
-fn diff_at(a: &Array, b: &Array, i: usize) -> f32 {
-    let av: Vec<f32> = mlx::ops::cast::astype(a, Dtype::Float32)
-        .unwrap()
-        .to_vec()
-        .unwrap();
-    let bv: Vec<f32> = mlx::ops::cast::astype(b, Dtype::Float32)
-        .unwrap()
-        .to_vec()
-        .unwrap();
-    (av[i] - bv[i]).abs()
 }
 
 /// Number of prompt fixtures emitted by `gen_logits.py` (`PROMPTS` length).

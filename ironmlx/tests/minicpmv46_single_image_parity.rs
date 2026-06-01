@@ -28,79 +28,22 @@
 //!   cargo test --release -p ironmlx --test minicpmv46_single_image_parity -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
-
 use mlx::{ops, Array, Dtype};
 
 use ironmlx::core::generate::build_position_ids;
 use ironmlx::core::Loader;
 use ironmlx::models::minicpmv4_6::model::MiniCpmV46Model;
 
-const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/minicpmv46_vl");
+mod common;
+use common::minicpmv46_parity::{
+    checkpoint_dir, diff_at, greedy_argmax, load_npy_in, max_abs_diff, to_f32_vec, top_k,
+    FIXTURE_DIR_VL,
+};
+
 const PATCH: i32 = 14;
 
 fn load_npy(name: &str) -> Array {
-    let p = format!("{FIXTURE_DIR}/{name}");
-    mlx::io::load_npy(&p).unwrap_or_else(|e| {
-        panic!("failed to load {p} — run gen_single_image_logits.py first: {e}")
-    })
-}
-
-fn checkpoint_dir() -> PathBuf {
-    let env = std::env::var("MINICPMV46_MODEL").expect(
-        "MINICPMV46_MODEL env var must point to the MiniCPM-V-4.6-4bit snapshot dir (#[ignore] test)",
-    );
-    PathBuf::from(env)
-}
-
-fn to_f32_vec(a: &Array) -> Vec<f32> {
-    ops::cast::astype(a, Dtype::Float32)
-        .expect("astype f32")
-        .to_vec()
-        .expect("to_vec")
-}
-
-/// Worst-element absolute deviation between two arrays (cast to f32).
-fn max_abs_diff(a: &Array, b: &Array) -> f32 {
-    let av = to_f32_vec(a);
-    let bv = to_f32_vec(b);
-    assert_eq!(
-        av.len(),
-        bv.len(),
-        "size mismatch: {} vs {}",
-        av.len(),
-        bv.len()
-    );
-    av.iter()
-        .zip(bv.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0_f32, f32::max)
-}
-
-/// Greedy argmax over a 1-D logits Array (cast to fp32 first).
-fn greedy_argmax(arr: &Array) -> usize {
-    let v = to_f32_vec(arr);
-    v.iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i)
-        .unwrap()
-}
-
-/// Top-k token ids by logit value (descending), for distribution-shape comparison.
-fn top_k(arr: &Array, k: usize) -> Vec<usize> {
-    let v = to_f32_vec(arr);
-    let mut idx: Vec<usize> = (0..v.len()).collect();
-    idx.sort_by(|&a, &b| v[b].partial_cmp(&v[a]).unwrap_or(std::cmp::Ordering::Equal));
-    idx.truncate(k);
-    idx
-}
-
-/// Absolute logit difference at a specific token index.
-fn diff_at(a: &Array, b: &Array, i: usize) -> f32 {
-    let av = to_f32_vec(a);
-    let bv = to_f32_vec(b);
-    (av[i] - bv[i]).abs()
+    load_npy_in(FIXTURE_DIR_VL, name)
 }
 
 #[test]

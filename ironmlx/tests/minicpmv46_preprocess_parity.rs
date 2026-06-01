@@ -20,23 +20,15 @@
 //!   cargo test --release -p ironmlx --test minicpmv46_preprocess_parity -- --ignored --nocapture
 //! ```
 
-use mlx::{ops, Array, Dtype};
-
 use ironmlx::models::minicpmv4_6::image_processor::preprocess;
 
-const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/minicpmv46_vl");
+mod common;
+use common::minicpmv46_parity::{load_npy_in, to_f32_vec, FIXTURE_DIR_VL};
+
+use mlx::Array;
 
 fn load_npy(name: &str) -> Array {
-    let p = format!("{FIXTURE_DIR}/{name}");
-    mlx::io::load_npy(&p)
-        .unwrap_or_else(|e| panic!("failed to load {p} — run gen_vision_embeds.py first: {e}"))
-}
-
-fn to_f32_vec(a: &Array) -> Vec<f32> {
-    ops::cast::astype(a, Dtype::Float32)
-        .expect("astype f32")
-        .to_vec()
-        .expect("to_vec")
+    load_npy_in(FIXTURE_DIR_VL, name)
 }
 
 #[test]

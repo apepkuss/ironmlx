@@ -29,8 +29,6 @@
 //!   cargo test --release -p ironmlx --test minicpmv46_single_image_generate_e2e -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
-
 use mlx::{ops, Array, Dtype};
 
 use ironmlx::core::generate::{build_position_ids, GenerateRequest, GenerationStream};
@@ -38,7 +36,9 @@ use ironmlx::core::model::Model;
 use ironmlx::core::{Loader, Sampler, Tokenizer};
 use ironmlx::models::minicpmv4_6::model::MiniCpmV46Model;
 
-const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/minicpmv46_vl");
+mod common;
+use common::minicpmv46_parity::{checkpoint_dir, load_npy_in, to_f32_vec, FIXTURE_DIR_VL};
+
 const PATCH: i32 = 14;
 /// `<|image_pad|>` token id; matches the model + the fixture generator constant.
 const IMAGE_TOKEN_ID: i32 = 248056;
@@ -55,33 +55,17 @@ const SPATIAL_MERGE_SIZE: i32 = 4;
 /// within the noise floor) stays under it.
 const LOGIT_NOISE_FLOOR: f32 = 1.0;
 
-fn to_f32_vec(a: &Array) -> Vec<f32> {
-    ops::cast::astype(a, Dtype::Float32)
-        .expect("astype f32")
-        .to_vec()
-        .expect("to_vec")
+fn load_npy(name: &str) -> Array {
+    load_npy_in(FIXTURE_DIR_VL, name)
 }
 
-fn greedy_argmax(v: &[f32]) -> usize {
+/// Greedy argmax over a `&[f32]` slice (already cast to f32).
+fn greedy_argmax_vec(v: &[f32]) -> usize {
     v.iter()
         .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap()
-}
-
-fn load_npy(name: &str) -> Array {
-    let p = format!("{FIXTURE_DIR}/{name}");
-    mlx::io::load_npy(&p).unwrap_or_else(|e| {
-        panic!("failed to load {p} — run gen_single_image_generate.py first: {e}")
-    })
-}
-
-fn checkpoint_dir() -> PathBuf {
-    let env = std::env::var("MINICPMV46_MODEL").expect(
-        "MINICPMV46_MODEL env var must point to the MiniCPM-V-4.6-4bit snapshot dir (#[ignore] test)",
-    );
-    PathBuf::from(env)
 }
 
 #[test]
@@ -262,7 +246,7 @@ fn minicpmv46_single_image_generate_e2e() {
             .expect("teacher-forced decode");
         let vocab = logits.shape().as_slice()[2];
         let lv = to_f32_vec(&logits.reshape((vocab,)).expect("reshape"));
-        let am = greedy_argmax(&lv);
+        let am = greedy_argmax_vec(&lv);
         let gap = lv[ref_out as usize] - lv[am];
         if am == ref_out as usize {
             tf_exact += 1;
