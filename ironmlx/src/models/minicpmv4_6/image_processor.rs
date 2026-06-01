@@ -471,23 +471,26 @@ fn split_to_patches(
 
 /// Port of mlx-vlm `slice_image`. Operates on the decoded HWC u8 RGB buffer
 /// `(src, orig_w, orig_h)` and returns the ordered slice list (source first,
-/// then patches row-major), each `(resized_buf, width, height)`.
+/// then patches row-major), each `(resized_buf, width, height)`, plus the
+/// `best_grid = Some((grid_x, grid_y))` that drove the slicing (`None` when
+/// no slicing was applied).
 ///
 /// - No-slice (`get_sliced_grid` → None): one resized source with
 ///   `find_best_resize(allow_upscale=true)`.
 /// - Slice: source uses `find_best_resize(allow_upscale=false)`; the refine
 ///   image uses `get_refine_size` and is split into `grid_x*grid_y` patches.
+#[allow(clippy::type_complexity)]
 fn slice_image(
     src: &[u8],
     orig_w: i32,
     orig_h: i32,
     max_slice_nums: i32,
-) -> Vec<(Vec<u8>, i32, i32)> {
+) -> (Vec<(Vec<u8>, i32, i32)>, Option<(i32, i32)>) {
     match get_sliced_grid(orig_w, orig_h, max_slice_nums) {
         None => {
             let (best_w, best_h) = find_best_resize(orig_w as f64, orig_h as f64, true);
             let source = resize_rgb(src, orig_w, orig_h, best_w, best_h);
-            vec![(source, best_w, best_h)]
+            (vec![(source, best_w, best_h)], None)
         }
         Some(grid) => {
             // Source image: allow_upscale=false.
@@ -502,7 +505,7 @@ fn slice_image(
             let mut slices = Vec::with_capacity(1 + patches.len());
             slices.push((source, src_w, src_h));
             slices.extend(patches);
-            slices
+            (slices, Some(grid))
         }
     }
 }
@@ -518,6 +521,35 @@ fn slice_image(
 /// `max_slice_nums` caps the LLaVA-UHD slice count; the checkpoint default is 9
 /// (see [`MAX_SLICE_NUMS`]).
 pub fn preprocess_sliced(img_bytes: &[u8], max_slice_nums: i32) -> Result<Vec<(Array, i32, i32)>> {
+    let (slices, _best_grid) = preprocess_sliced_inner(img_bytes, max_slice_nums)?;
+    Ok(slices)
+}
+
+/// LLaVA-UHD adaptive multi-slice preprocess that also surfaces the slice grid.
+///
+/// Like [`preprocess_sliced`] but additionally returns `best_grid =
+/// Some((grid_x, grid_y))` (the LLaVA-UHD grid that drove the slicing), or
+/// `None` when the image was too small to slice.  The slice grid is required by
+/// the prompt-placeholder builder ([`crate::models::minicpmv4_6::sliced_image_placeholder_string`]).
+///
+/// Order guarantees are identical to [`preprocess_sliced`]: source first, then
+/// refine patches in row-major order matching `grid_x` (columns) × `grid_y`
+/// (rows).
+#[allow(clippy::type_complexity)]
+pub fn preprocess_sliced_with_grid(
+    img_bytes: &[u8],
+    max_slice_nums: i32,
+) -> Result<(Vec<(Array, i32, i32)>, Option<(i32, i32)>)> {
+    preprocess_sliced_inner(img_bytes, max_slice_nums)
+}
+
+/// Shared implementation for [`preprocess_sliced`] and
+/// [`preprocess_sliced_with_grid`].
+#[allow(clippy::type_complexity)]
+fn preprocess_sliced_inner(
+    img_bytes: &[u8],
+    max_slice_nums: i32,
+) -> Result<(Vec<(Array, i32, i32)>, Option<(i32, i32)>)> {
     // 1. Decode → RGB8 (matches PIL `.convert("RGB")`).
     let img = image::load_from_memory(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?
@@ -526,13 +558,14 @@ pub fn preprocess_sliced(img_bytes: &[u8], max_slice_nums: i32) -> Result<Vec<(A
     let src_hwc: &[u8] = img.as_raw();
 
     // 2. LLaVA-UHD slice (source + row-major refine patches).
-    let slices = slice_image(src_hwc, orig_w, orig_h, max_slice_nums);
+    let (raw_slices, best_grid) = slice_image(src_hwc, orig_w, orig_h, max_slice_nums);
 
     // 3. Each slice → normalize + pack + Array (shared with `preprocess`).
-    slices
+    let slices: Result<Vec<(Array, i32, i32)>> = raw_slices
         .into_iter()
         .map(|(buf, w, h)| slice_to_array(&buf, h, w))
-        .collect()
+        .collect();
+    Ok((slices?, best_grid))
 }
 
 #[cfg(test)]
@@ -660,8 +693,9 @@ mod tests {
         // Synthetic 640×480 solid buffer → grid (2,1) → 3 slices.
         let (w, h) = (640_i32, 480_i32);
         let buf = vec![128_u8; (w * h * 3) as usize];
-        let slices = slice_image(&buf, w, h, 9);
+        let (slices, best_grid) = slice_image(&buf, w, h, 9);
         assert_eq!(slices.len(), 3, "1 source + 2 refine patches");
+        assert_eq!(best_grid, Some((2, 1)), "best_grid should be (gx=2, gy=1)");
         // Source: find_best_resize(allow_upscale=false) → area 307200 > 448²=200704 so rescale fires anyway → (504, 392).
         assert_eq!((slices[0].1, slices[0].2), (504, 392));
         // Each refine patch: refine (784×560) split (2,1) → cell (392, 560).
