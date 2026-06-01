@@ -165,6 +165,16 @@ mod tests {
     }
 
     #[test]
+    fn sliced_placeholder_asymmetric_grid() {
+        // grid (3,2): grid_x=3 cols, grid_y=2 rows → 6 <slice> blocks, exactly 1 inter-row newline.
+        let s = sliced_image_placeholder_string(4, 2, (3, 2));
+        assert_eq!(s.matches("<slice>").count(), 6);
+        assert_eq!(s.matches("</slice>").count(), 6);
+        assert_eq!(s.matches("<|image_pad|>").count(), 4 + 6 * 2); // source(4) + 6 slices × 2
+        assert_eq!(s.matches('\n').count(), 1); // grid_y - 1
+    }
+
+    #[test]
     fn sliced_placeholder_no_slice_equals_image_placeholder() {
         assert_eq!(
             sliced_image_placeholder_string(7, 0, (0, 0)),
