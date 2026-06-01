@@ -11,9 +11,11 @@
 //! This module therefore runs the **text path on the shared Qwen3.5 dense
 //! execution graph** ([`Qwen35Model`]). It only adapts the config
 //! (see [`config`]) — defaulting the omitted `mrope_section` and skipping the
-//! incompatible SigLIP `vision_config`. The SigLIP vision tower + resampler are
-//! NOT yet implemented, so image inputs are out of scope; only text prompts are
-//! supported.
+//! incompatible SigLIP `vision_config`. The SigLIP vision stack is implemented
+//! in the `vision` submodule (`MiniCpmV46Vision`), but is not yet wired into a
+//! model/dispatch/inference path — image inputs remain out of scope until the
+//! VLM model is added (P2). This `model_from_loader` facade deliberately runs
+//! the text-only Qwen3.5 dense path by dropping `vision_config`.
 
 pub mod config;
 pub mod vision;

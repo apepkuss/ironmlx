@@ -16,8 +16,10 @@
 //!   2. The top-level `vision_config` is a SigLIP encoder (`minicpmv4_6_vision`)
 //!      whose schema is incompatible with the Qwen3.5-VL NaViT
 //!      [`VisionConfig`](crate::models::qwen3_5::VisionConfig). The SigLIP
-//!      tower + resampler are not yet implemented, so it is skipped
-//!      (`vision_config = None`) — image inputs are out of scope.
+//!      vision stack is implemented in the `vision` submodule, but
+//!      `text_config_from_loader` intentionally drops `vision_config`
+//!      (`vision_config = None`) because it builds the text-only Qwen3.5 path —
+//!      image inputs remain out of scope until the VLM model is added (P2).
 
 use anyhow::{anyhow, Context};
 use serde::Deserialize;
