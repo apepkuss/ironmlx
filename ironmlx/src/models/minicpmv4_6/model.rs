@@ -39,6 +39,7 @@ pub struct MiniCpmV46Model {
     image_token_id: i32,
 }
 
+// Copied from qwen3_5/model.rs — keep in sync; bug fixes here must be mirrored there (and vice versa).
 /// Slice per-row last hidden states from `hidden [B, S, H]`.
 ///
 /// For row `i`, extracts `hidden[i, last_positions[i], :]` then stacks
@@ -110,16 +111,15 @@ impl MiniCpmV46Model {
 
         let vcfg = MiniCpmV46VisionConfig::from_loader(loader).ok();
 
-        let vision = if vcfg.is_some()
-            && loader.contains("vision_tower.embeddings.patch_embedding.weight")
-        {
-            vcfg.as_ref()
-                .map(|vc| MiniCpmV46Vision::from_loader(loader, vc))
-                .transpose()?
+        let vision = if let Some(ref vc) = vcfg {
+            if loader.contains("vision_tower.embeddings.patch_embedding.weight") {
+                Some(MiniCpmV46Vision::from_loader(loader, vc)?)
+            } else {
+                None
+            }
         } else {
             None
         };
-
         let image_token_id = vcfg
             .map(|v| v.image_token_id)
             .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID);
@@ -138,6 +138,7 @@ impl MiniCpmV46Model {
         self.text.config()
     }
 
+    // Copied from qwen3_5/model.rs — keep in sync; bug fixes here must be mirrored there (and vice versa).
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
     /// vocab logits `[B, 1, vocab_size]`.
     ///
@@ -172,10 +173,28 @@ impl MiniCpmV46Model {
         }
     }
 
+    // Copied from qwen3_5/model.rs — keep in sync; bug fixes here must be mirrored there (and vice versa).
     /// Construct a per-layer cache list matching this model's hybrid topology.
     ///
     /// Mirrors `Qwen35Model::make_cache` exactly — same Full/Linear partition
     /// logic driven by `cfg.layer_kind(i)`, same GPU-perf note re: cap floor.
+    /// Bug fixes must be mirrored in `qwen3_5/model.rs`.
+    ///
+    /// **GPU-perf note (B1-p2.3f T4):** the per-layer K/V buffer width
+    /// equals the cap because `KVCache::with_step(cap)` is used for
+    /// one-shot allocation (avoids grow_to + memcpy on first decode
+    /// step at long context — P8a-stage6 optimization). Production
+    /// callers (Scheduler main cache + admit_mid temp cache,
+    /// GenerationStream cache) MUST pre-clamp their requested cap to
+    /// at least `crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF`
+    /// to avoid the MLX Metal kernel slow path (cap < ~256 → 100-300×
+    /// decode-step slowdown on Apple Silicon — verified in T4 sweep
+    /// regression against p4_http_smoke + b1_p2_3b_3 concurrent-gs test).
+    ///
+    /// `make_cache` does NOT apply the floor itself so unit tests that
+    /// validate tight-cap overflow rejection (e.g.
+    /// `b1_p2_3c_1_per_row_offset_invalid_args_return_err`) keep
+    /// working unchanged.
     pub fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
         let cfg = self.config();
         let head_dim = cfg.effective_head_dim();
@@ -183,6 +202,11 @@ impl MiniCpmV46Model {
         for i in 0..cfg.num_hidden_layers {
             match cfg.layer_kind(i) {
                 AttnKind::Full => {
+                    // P8a-stage6: one-shot allocate to full cap (step >= cap)
+                    // so the first decode step at long context never triggers
+                    // grow_to. KVCache's default step=256 would otherwise
+                    // round prefill alloc down to a step boundary and force
+                    // a full-buffer reallocation + memcpy on decode step 1.
                     out.push(LayerCache::Full(
                         KVCache::new(
                             batch,
