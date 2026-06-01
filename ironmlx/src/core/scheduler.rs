@@ -237,6 +237,26 @@ impl DenseVlMethods for crate::models::qwen3_5::Qwen35Model {
     }
 }
 
+fn maybe_build_decode_mask(mask_row_lens: &[i32], max_real_len: i32) -> Result<Option<Array>> {
+    if mask_row_lens.iter().all(|&len| len == max_real_len) {
+        return Ok(None);
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    {
+        crate::core::p5h::try_with_p5h_span_from_current_trace(
+            "scheduler_decode_mask_build",
+            crate::core::p5h::SpanFields::default,
+            || build_per_row_decode_mask(mask_row_lens, max_real_len, Dtype::Bfloat16),
+        )
+        .map(Some)
+    }
+    #[cfg(not(feature = "p5h-profile"))]
+    {
+        build_per_row_decode_mask(mask_row_lens, max_real_len, Dtype::Bfloat16).map(Some)
+    }
+}
+
 /// Opaque, monotonically-increasing identifier for an admitted request.
 ///
 /// Never reused after the request is evicted — admitting another request into
@@ -1820,14 +1840,7 @@ impl<M: Model> Scheduler<M> {
             .copied()
             .max()
             .expect("active_rows is non-empty");
-        #[cfg(feature = "p5h-profile")]
-        let decode_mask = crate::core::p5h::try_with_p5h_span_from_current_trace(
-            "scheduler_decode_mask_build",
-            crate::core::p5h::SpanFields::default,
-            || build_per_row_decode_mask(&mask_row_lens, max_real_len, Dtype::Bfloat16),
-        )?;
-        #[cfg(not(feature = "p5h-profile"))]
-        let decode_mask = build_per_row_decode_mask(&mask_row_lens, max_real_len, Dtype::Bfloat16)?;
+        let decode_mask = maybe_build_decode_mask(&mask_row_lens, max_real_len)?;
 
         #[cfg(feature = "p5h-profile")]
         let logits = crate::core::p5h::try_with_p5h_span_from_current_trace(
@@ -1838,7 +1851,7 @@ impl<M: Model> Scheduler<M> {
                     &input_ids,
                     &position_ids,
                     Some(&per_row_lens),
-                    Some(&decode_mask),
+                    decode_mask.as_ref(),
                     Some(cache_ref),
                     mlx::StreamOrDevice::default(),
                 )
@@ -1849,7 +1862,7 @@ impl<M: Model> Scheduler<M> {
             &input_ids,
             &position_ids,
             Some(&per_row_lens),
-            Some(&decode_mask),
+            decode_mask.as_ref(),
             Some(cache_ref),
             mlx::StreamOrDevice::default(),
         )?;
@@ -2931,6 +2944,7 @@ mod tests {
     #[derive(Default)]
     struct StepDecodeMaskModel {
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
+        decode_mask_seen: std::sync::Mutex<Vec<bool>>,
     }
 
     impl StepDecodeMaskModel {
@@ -2969,6 +2983,10 @@ mod tests {
         fn decode_lens_seen(&self) -> Vec<Vec<i32>> {
             self.decode_lens_seen.lock().unwrap().clone()
         }
+
+        fn decode_mask_seen(&self) -> Vec<bool> {
+            self.decode_mask_seen.lock().unwrap().clone()
+        }
     }
 
     impl crate::core::model::Model for StepDecodeMaskModel {
@@ -2988,13 +3006,17 @@ mod tests {
             input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             per_row_lens: Option<&[i32]>,
-            _decode_mask: Option<&mlx::Array>,
+            decode_mask: Option<&mlx::Array>,
             cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
             if let Some(lens) = per_row_lens {
                 self.decode_lens_seen.lock().unwrap().push(lens.to_vec());
             }
+            self.decode_mask_seen
+                .lock()
+                .unwrap()
+                .push(decode_mask.is_some());
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
             fake_logits_for_batch(input_ids.shape().as_slice()[0])
         }
@@ -3399,6 +3421,48 @@ mod tests {
         let step_events = s.step(&model).expect("step after stale-row reuse");
         assert_eq!(step_events.len(), 2);
         assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+    }
+
+    #[cfg(not(feature = "p5h-profile"))]
+    #[test]
+    fn step_uniform_decode_lengths_omits_all_zero_decode_mask() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+
+        let model = StepDecodeMaskModel::default();
+        s.prefill_admitted(&model).expect("prefill");
+
+        let step_events = s.step(&model).expect("step");
+        assert_eq!(step_events.len(), 2);
+        assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+        assert_eq!(model.decode_mask_seen(), vec![false]);
+    }
+
+    #[cfg(not(feature = "p5h-profile"))]
+    #[test]
+    fn step_ragged_decode_lengths_keeps_decode_mask() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        s.admit(mk_req(vec![4, 5, 6, 7])).expect("admit 1");
+
+        let model = StepDecodeMaskModel::default();
+        s.prefill_admitted(&model).expect("prefill");
+
+        let step_events = s.step(&model).expect("step");
+        assert_eq!(step_events.len(), 2);
+        assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+        assert_eq!(model.decode_mask_seen(), vec![true]);
     }
 
     #[test]
