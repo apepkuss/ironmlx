@@ -25,7 +25,7 @@ pub struct SiglipEmbeddings {
 /// `frac >= boundaries` where `boundaries = mx.arange(1/side, 1.0, 1/side)`.
 /// MLX's Metal `arange` kernel computes `out[j] = start + j*step` in the array
 /// dtype (here f32) — and the GPU fuses that into a single-rounded FMA, so
-/// `boundaries[j] = fma(j, f32(1/side), f32(1/side))` — NOT a freshly
+/// `boundaries[j] = fma(j, step, step)` where `step = (1.0 / side as f64) as f32` — NOT a freshly
 /// recomputed `(j+1)/side`. The two formulations disagree at the exact tie
 /// `frac == (j+1)/side` (e.g. `26/28 == 65/70`): the FMA boundary rounds
 /// slightly *above* `frac`, so the tie does NOT increment the bucket.
@@ -34,7 +34,7 @@ pub struct SiglipEmbeddings {
 /// therefore replicate the `start + j*step` FMA boundary arithmetic verbatim
 /// (verified bit-identical to `mx.arange` across all `side-1` boundaries).
 pub fn position_bucket_ids(grid_h: i32, grid_w: i32, side: i32) -> Vec<i32> {
-    // boundaries[j] = fma(j, step, start), start = step = f32(1/side),
+    // boundaries[j] = fma(j, step, step), step = (1.0 / side as f64) as f32,
     // j in 0..side-1. Bit-matches `mx.arange(1/side, 1.0, 1/side)` on Metal.
     let step = (1.0_f64 / side as f64) as f32;
     let boundaries: Vec<f32> = (0..side - 1)

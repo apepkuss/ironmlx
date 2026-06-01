@@ -28,6 +28,7 @@ use ironmlx::models::minicpmv4_6::config::MiniCpmV46VisionConfig;
 use ironmlx::models::minicpmv4_6::vision::MiniCpmV46Vision;
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/minicpmv46_vl");
+const PATCH: i32 = 14;
 
 fn load_npy(name: &str) -> Array {
     let p = format!("{FIXTURE_DIR}/{name}");
@@ -114,9 +115,12 @@ fn minicpmv46_vision_parity() {
         "input_pixel_values must be 4-D [1, 14, n*14, 3], got {d:?}"
     );
     assert_eq!(d[0], 1, "batch dim must be 1, got {d:?}");
-    assert_eq!(d[1], 14, "packed height must be patch=14, got {d:?}");
+    assert_eq!(
+        d[1], PATCH,
+        "packed height must be patch={PATCH}, got {d:?}"
+    );
     assert_eq!(d[3], 3, "channel dim must be 3, got {d:?}");
-    let n = d[2] / 14;
+    let n = d[2] / PATCH;
     assert_eq!(
         n,
         gh * gw,
