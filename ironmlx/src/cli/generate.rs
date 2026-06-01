@@ -92,6 +92,26 @@ fn qwen_image_placeholder_string(token_count: usize) -> String {
     out
 }
 
+/// Build the MiniCPM-V-4.6 image placeholder string:
+/// `<image>` + `<|image_pad|>` × token_count + `</image>`.
+///
+/// When tokenised (all three are registered special tokens), this produces the
+/// id sequence `[248078] + [248056]*token_count + [248079]`, which exactly
+/// matches what the P2a gen-script (`gen_single_image_logits.py`,
+/// `use_image_id=False`, `slice_mode=False`) dumps into
+/// `expected_input_ids_img.npy`.
+fn minicpmv46_image_placeholder_string(token_count: usize) -> String {
+    let mut out = String::with_capacity(
+        "<image>".len() + token_count * "<|image_pad|>".len() + "</image>".len(),
+    );
+    out.push_str("<image>");
+    for _ in 0..token_count {
+        out.push_str("<|image_pad|>");
+    }
+    out.push_str("</image>");
+    out
+}
+
 fn gemma4_placeholder(token_count: usize) -> String {
     let mut out = String::from("<|image>");
     for _ in 0..token_count {
@@ -188,6 +208,32 @@ fn prepare_images(
                 .or(cfg.image_token_id)
                 .unwrap_or(258_880),
         )
+    } else if model_type == "minicpmv4_6" {
+        // MiniCPM-V-4.6: use model-config image_token_id (248056 = <|image_pad|>);
+        // spatial_merge_size = 4 (2×2 Merger, "16x" downsample mode).
+        // Placeholder: <image> + <|image_pad|>×N + </image>  (use_image_id=False,
+        // slice_mode=False), matching P2a gen_single_image_logits.py convention:
+        // ids = [248078] + [248056]*N + [248079], N = (gh//4)*(gw//4).
+        let vcfg = crate::models::minicpmv4_6::config::MiniCpmV46VisionConfig::from_loader(loader)
+            .context("MiniCpmV46VisionConfig::from_loader")?;
+        // image_token_id from config (248056); fallback to tokenizer lookup, then literal.
+        let image_tok_id = tokenizer
+            .token_to_id("<|image_pad|>")
+            .map(|id| id as i32)
+            .unwrap_or(vcfg.image_token_id);
+        for path in &args.images {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading --image {}", path.display()))?;
+            let (pixel_values, gh, gw) =
+                crate::models::minicpmv4_6::image_processor::preprocess(&bytes)
+                    .with_context(|| format!("preprocessing --image {}", path.display()))?;
+            let grid = (1, gh, gw);
+            let token_count = image_token_count_for_grid(grid, default_spatial_merge_size)?;
+            all_pixel_values.push(pixel_values);
+            grids.push(grid);
+            placeholders.push(minicpmv46_image_placeholder_string(token_count));
+        }
+        (default_spatial_merge_size, image_tok_id)
     } else {
         for path in &args.images {
             let bytes = std::fs::read(path)
@@ -360,6 +406,19 @@ mod tests {
     #[test]
     fn image_token_count_uses_spatial_merge_size() {
         assert_eq!(image_token_count_for_grid((1, 4, 6), 2).unwrap(), 6);
+    }
+
+    #[test]
+    fn minicpmv46_image_token_count_uses_4x_downsample() {
+        // MiniCPM-V grid (28,36) → vision tokens (28/4)*(36/4) = 63.
+        assert_eq!(image_token_count_for_grid((1, 28, 36), 4).unwrap(), 63);
+    }
+
+    #[test]
+    fn minicpmv46_placeholder_wraps_correct_tokens() {
+        // Verify the helper builds the correct <image>...<|image_pad|>...</image> string.
+        let s = minicpmv46_image_placeholder_string(3);
+        assert_eq!(s, "<image><|image_pad|><|image_pad|><|image_pad|></image>");
     }
 
     #[test]
