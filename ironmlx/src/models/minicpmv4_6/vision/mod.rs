@@ -94,8 +94,7 @@ impl MiniCpmV46Vision {
                 gh = nh;
                 gw = nw;
                 // Restore batch dim: [1, merged_h*merged_w, hidden]
-                let merged_hidden = merged.shape().as_slice()[1];
-                h = merged.reshape_on(&[1, gh * gw, merged_hidden][..], t)?;
+                h = merged.reshape_on(&[1, gh * gw, hidden_dim][..], t)?;
             }
         }
 

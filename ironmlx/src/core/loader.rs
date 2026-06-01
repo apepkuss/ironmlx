@@ -207,6 +207,8 @@ impl Loader {
     /// 0. Drop non-text tower keys when the caller requests text-only loading.
     ///    Strip `language_model.` prefix from all remaining keys so that downstream
     ///    code can use plain `model.*` paths (e.g. `model.embed_tokens.weight`).
+    ///    Also drops `vit_merger.*` and `merger.*` (MiniCPM-V-4.6 resampler weights,
+    ///    not needed for text-only inference).
     /// 1. Strips `mtp.*` keys (the dedicated MTP head — see P8c).
     /// 2. If `text_config.tie_word_embeddings`, drops `lm_head.{weight,scales,biases}`.
     /// 3. `transpose_axes [0, 2, 1]` on `conv1d.weight` tensors whose last dim != 1
