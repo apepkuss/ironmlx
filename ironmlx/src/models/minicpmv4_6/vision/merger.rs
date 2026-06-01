@@ -19,6 +19,9 @@ use crate::nn::{gelu_tanh, LayerNorm};
 // Self-attention over grouped window tokens (q = k = v = normed windows)
 // ---------------------------------------------------------------------------
 
+// Structurally identical to encoder.rs::Mha but operates per-window (seq=4)
+// rather than over the full image sequence. Extract to a shared crate::nn MHA
+// helper only if a third call site appears (avoid premature abstraction).
 struct SelfAttn {
     qw: Array,
     qb: Array,
@@ -217,7 +220,9 @@ impl VitMerger {
         let ln = |n: i32| LayerNorm::new(ln_weight(n), Some(zeros1d(n)), 1e-6);
 
         let head_dim = hidden / heads;
-        let group_tokens = 4_i32; // 2×2
+        let merge_gh = 2_i32;
+        let merge_gw = 2_i32;
+        let group_tokens = merge_gh * merge_gw;
         let group_hidden = hidden * group_tokens;
 
         Self {
@@ -239,8 +244,8 @@ impl VitMerger {
             linear_1b: zeros1d(merged_hidden),
             linear_2w: zeros2d(hidden, merged_hidden),
             linear_2b: zeros1d(hidden),
-            merge_gh: 2,
-            merge_gw: 2,
+            merge_gh,
+            merge_gw,
         }
     }
 }
