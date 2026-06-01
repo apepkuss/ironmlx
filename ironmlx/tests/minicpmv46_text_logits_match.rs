@@ -3,7 +3,7 @@
 //! MiniCPM-V-4.6's language backbone is Qwen3.5-text verbatim. This loads
 //! `mlx-community/MiniCPM-V-4.6-4bit` from `$MINICPMV46_MODEL` via the
 //! `minicpmv4_6` text-only facade, feeds the exact token ids captured from
-//! mlx-vlm, runs `Qwen35Model::forward_on`, and compares the last-position
+//! mlx-vlm, runs `MiniCpmV46Model::forward_on`, and compares the last-position
 //! logits to the mlx-vlm reference. Feeding the saved ids (rather than
 //! re-tokenizing) isolates LM-forward correctness from tokenizer parity.
 //!

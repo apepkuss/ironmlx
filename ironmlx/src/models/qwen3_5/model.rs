@@ -55,6 +55,7 @@ pub struct Qwen35Model {
 /// # Errors
 /// - `last_positions.len() != B`
 /// - `last_positions[i] < 0 || last_positions[i] >= S` for any `i`
+// Note: MiniCpmV46Model (minicpmv4_6/model.rs) copies this — keep the two in sync when fixing bugs here.
 fn per_row_slice_last(
     hidden: &Array,
     last_positions: &[i32],
@@ -608,6 +609,7 @@ impl Qwen35Model {
     /// When `last_positions` is `None` (single-stream `forward_on` and VL
     /// chunk callers), the fallback slices column `S - 1` for every row —
     /// behaviourally equivalent for B=1 or uniform-length inputs.
+    // Note: MiniCpmV46Model (minicpmv4_6/model.rs) copies this — keep the two in sync when fixing bugs here.
     fn slice_last_and_project(
         &self,
         hidden: &Array,
@@ -653,6 +655,7 @@ impl Qwen35Model {
     /// validate tight-cap overflow rejection (e.g.
     /// `b1_p2_3c_1_per_row_offset_invalid_args_return_err`) keep
     /// working unchanged.
+    // Note: MiniCpmV46Model (minicpmv4_6/model.rs) copies this — keep the two in sync when fixing bugs here.
     pub fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
         let cfg = self.config();
         let head_dim = cfg.effective_head_dim();
