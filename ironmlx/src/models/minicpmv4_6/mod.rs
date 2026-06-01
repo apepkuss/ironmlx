@@ -45,6 +45,85 @@ pub fn image_placeholder_string(n: usize) -> String {
     out
 }
 
+/// Build the MiniCPM-V-4.6 sliced-image prompt placeholder string.
+///
+/// `source_tokens` = source slice's image-token count = `(source_gh/4)*(source_gw/4)`.
+/// `slice_tokens`  = per patch-slice image-token count = `(slice_gh/4)*(slice_gw/4)`.
+/// `grid`          = `(grid_x, grid_y)` = the slice grid (grid_x columns, grid_y rows).
+///
+/// Produces:
+/// ```text
+/// <image>{<|image_pad|> × source_tokens}</image>
+/// ```
+/// followed, when `grid_x * grid_y > 0`, by:
+/// ```text
+/// for row in 0..grid_y:
+///   grid_x × (<slice>{<|image_pad|> × slice_tokens}</slice>)
+///   if row != grid_y - 1: "\n"
+/// ```
+///
+/// This convention mirrors `_build_placeholder_ids_for_image` in
+/// `processing_minicpmv4_6.py` (lines 1058-1064), where the newline is
+/// appended after each row *except* the last.
+///
+/// When `grid` is `(0, 0)` or `grid_x * grid_y == 0`, the result equals
+/// `image_placeholder_string(source_tokens)` (no-slice path).
+pub fn sliced_image_placeholder_string(
+    source_tokens: usize,
+    slice_tokens: usize,
+    grid: (i32, i32),
+) -> String {
+    let (grid_x, grid_y) = grid;
+    let no_slices = grid_x <= 0 || grid_y <= 0;
+
+    // Capacity estimate: image block + slice blocks + newlines.
+    let slice_block_len = "<slice>".len() + slice_tokens * "<|image_pad|>".len() + "</slice>".len();
+    let slice_count = if no_slices {
+        0usize
+    } else {
+        (grid_x as usize) * (grid_y as usize)
+    };
+    let newline_count = if no_slices || grid_y <= 1 {
+        0usize
+    } else {
+        (grid_y as usize) - 1
+    };
+    let capacity = "<image>".len()
+        + source_tokens * "<|image_pad|>".len()
+        + "</image>".len()
+        + slice_count * slice_block_len
+        + newline_count;
+
+    let mut out = String::with_capacity(capacity);
+
+    // Source / overview block — always present.
+    out.push_str("<image>");
+    for _ in 0..source_tokens {
+        out.push_str("<|image_pad|>");
+    }
+    out.push_str("</image>");
+
+    if no_slices {
+        return out;
+    }
+
+    // Patch-slice blocks: grid_y rows × grid_x cols; "\n" between rows.
+    for row_idx in 0..grid_y {
+        for _ in 0..grid_x {
+            out.push_str("<slice>");
+            for _ in 0..slice_tokens {
+                out.push_str("<|image_pad|>");
+            }
+            out.push_str("</slice>");
+        }
+        if row_idx != grid_y - 1 {
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,6 +140,36 @@ mod tests {
     #[test]
     fn image_placeholder_string_zero() {
         assert_eq!(image_placeholder_string(0), "<image></image>");
+    }
+
+    #[test]
+    fn sliced_placeholder_single_row() {
+        // grid (2,1): 1 row, 2 cols → 1 <image> + 2 <slice>, NO newline.
+        let s = sliced_image_placeholder_string(4, 2, (2, 1));
+        assert_eq!(s.matches("<image>").count(), 1);
+        assert_eq!(s.matches("</image>").count(), 1);
+        assert_eq!(s.matches("<slice>").count(), 2);
+        assert_eq!(s.matches("</slice>").count(), 2);
+        assert_eq!(s.matches("<|image_pad|>").count(), 4 + 2 * 2);
+        assert_eq!(s.matches('\n').count(), 0); // single row
+                                                // structure: <image> block comes before any <slice>
+        assert!(s.find("<image>").unwrap() < s.find("<slice>").unwrap());
+    }
+
+    #[test]
+    fn sliced_placeholder_multi_row_has_inter_row_newlines() {
+        // grid (2,2): 2 rows × 2 cols → 4 <slice>, exactly 1 newline (between the 2 rows).
+        let s = sliced_image_placeholder_string(4, 2, (2, 2));
+        assert_eq!(s.matches("<slice>").count(), 4);
+        assert_eq!(s.matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn sliced_placeholder_no_slice_equals_image_placeholder() {
+        assert_eq!(
+            sliced_image_placeholder_string(7, 0, (0, 0)),
+            image_placeholder_string(7)
+        );
     }
 }
 
