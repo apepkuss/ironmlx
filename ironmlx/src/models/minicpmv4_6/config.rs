@@ -49,8 +49,12 @@ pub struct MiniCpmV46VisionConfig {
     pub pos_grid_side: i32,
     /// Top-level config.json fields the vision forward needs.
     pub insert_layer_id: i32,
-    pub merge_group: (i32, i32),
     pub image_token_id: i32,
+    /// Resampler window size — a fixed architecture constant (2×2), NOT a
+    /// parsed config key. Derives from `downsample_mode="16x"` /
+    /// `window_kernel_size`; both VitMerger and Merger downsample the grid by
+    /// this factor.
+    pub merge_group: (i32, i32),
 }
 
 impl MiniCpmV46VisionConfig {
@@ -83,6 +87,7 @@ impl MiniCpmV46VisionConfig {
             .ok_or_else(|| anyhow!("MiniCPM-V-4.6 config missing vision_config"))?;
         let v: VisionRaw =
             serde_json::from_value(vraw.clone()).context("deserialize MiniCpmV46VisionConfig")?;
+        // mlx-vlm ModelConfig default; real MiniCPM-V-4.6 checkpoints set this explicitly (=6).
         let insert_layer_id = raw
             .get("insert_layer_id")
             .and_then(Value::as_i64)
@@ -103,8 +108,8 @@ impl MiniCpmV46VisionConfig {
             layer_norm_eps: v.layer_norm_eps,
             pos_grid_side,
             insert_layer_id,
-            merge_group: (2, 2),
             image_token_id,
+            merge_group: (2, 2),
         })
     }
 }
@@ -263,6 +268,7 @@ mod tests {
         let raw = raw_minicpmv46_config();
         let vc = MiniCpmV46VisionConfig::from_raw(&raw).expect("parse");
         assert_eq!(vc.hidden_size, 1152);
+        assert_eq!(vc.intermediate_size, 4304);
         assert_eq!(vc.num_hidden_layers, 27);
         assert_eq!(vc.num_attention_heads, 16);
         assert_eq!(vc.head_dim(), 72);
