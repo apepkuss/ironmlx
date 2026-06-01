@@ -1,11 +1,15 @@
-//! VitMerger — mid-encoder window resampler for MiniCPM-V-4.6.
+//! Spatial resamplers for MiniCPM-V-4.6.
 //!
-//! Inserts after `insert_layer_id` in the SigLIP encoder. Groups each
-//! non-overlapping (gh × gw) = (2 × 2) window of spatial tokens, runs a
-//! local self-attention followed by mean-pooling and a two-layer MLP, and
-//! returns a spatially down-sampled sequence at half resolution in each dim.
+//! - `VitMerger`: mid-encoder window (2×2) cross-attention resampler inserted
+//!   after `insert_layer_id` in the SigLIP encoder; groups each non-overlapping
+//!   (gh × gw) = (2 × 2) window of spatial tokens, runs a local self-attention
+//!   followed by mean-pooling and a two-layer MLP, and returns a spatially
+//!   down-sampled sequence at half resolution in each dim.
+//! - `Merger`: final 2×2 reshape-flatten + MLP projection to the LM hidden size
+//!   (`hidden_size * 4 = 4608` → `lm_hidden = 1024`).
 //!
-//! Matches `VitMerger.__call__` in mlx-vlm's `minicpmv4_6/minicpmv4_6.py`.
+//! Both types match the corresponding `__call__` implementations in mlx-vlm's
+//! `minicpmv4_6/minicpmv4_6.py`.
 
 use anyhow::{ensure, Result};
 use mlx::fast::scaled_dot_product_attention;
@@ -329,19 +333,19 @@ impl Merger {
         // Reshape: [grid_h*grid_w, inner] → [mh, gh, mw, gw, inner]
         //   → transpose(0,2,1,3,4) → [mh, mw, gh, gw, inner]
         //   → [mh*mw, inner*gh*gw]  (flatten spatial group into feature axis)
-        let hidden = x
+        let flat = x
             .reshape_on(&[grid_h, grid_w, inner_dim][..], t)?
             .reshape_on(&[mh, gh, mw, gw, inner_dim][..], t)?
             .transpose_axes_on(&[0_i32, 2, 1, 3, 4][..], t)?
             .reshape_on(&[mh * mw, inner_dim * gh * gw][..], t)?;
 
         // MergerBlock: pre_norm → linear_1 → gelu_tanh → linear_2
-        let hidden = self.pre_norm.forward_on(&hidden, t)?;
+        let x = self.pre_norm.forward_on(&flat, t)?;
         let wt1 = self.linear_1w.transpose_on(t)?;
-        let hidden = ops::addmm_on(&self.linear_1b, &hidden, &wt1, 1.0, 1.0, t)?;
-        let hidden = gelu_tanh(&hidden, t)?;
+        let x = ops::addmm_on(&self.linear_1b, &x, &wt1, 1.0, 1.0, t)?;
+        let x = gelu_tanh(&x, t)?;
         let wt2 = self.linear_2w.transpose_on(t)?;
-        let out = ops::addmm_on(&self.linear_2b, &hidden, &wt2, 1.0, 1.0, t)?;
+        let out = ops::addmm_on(&self.linear_2b, &x, &wt2, 1.0, 1.0, t)?;
 
         Ok((out, mh, mw))
     }
