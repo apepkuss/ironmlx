@@ -56,6 +56,11 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 32768)]
     pub max_cache_cap: usize,
 
+    /// Print scheduler/autotune diagnostics and recommendations at startup.
+    /// Diagnose-only: this does not change any runtime parameter.
+    #[arg(long, default_value_t = false)]
+    pub scheduler_autotune_report: bool,
+
     /// P5h+1 T1 measurement probe: force selected span bodies (Lane A
     /// `first_token_sampling_materialize_and_sample` + the ROI substep
     /// closures under GatedAttention / GatedDeltaNet / SparseMoeBlock +
@@ -143,6 +148,7 @@ where
         args.admission_deadline_ms,
         args.admission_queue_max,
         args.max_cache_cap,
+        args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
         vision_input,
     ))

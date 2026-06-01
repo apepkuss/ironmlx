@@ -8,6 +8,7 @@ pub mod memory_budget;
 pub mod model;
 pub mod sampler;
 pub mod scheduler;
+pub mod scheduler_autotune;
 pub mod server;
 pub mod tokenizer;
 

@@ -115,7 +115,8 @@ pub async fn serve<M>(
     b_max: usize,
     admission_deadline_ms: u64,
     admission_queue_max: usize,
-    max_cache_cap: usize,              // 3f
+    max_cache_cap: usize, // 3f
+    scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool, // P5h+1 T1
     vision_input_override: Option<VisionInputConfig>,
 ) -> Result<()>
@@ -150,6 +151,27 @@ where
             max_cache_cap,
             model_max_context,
             model_max_context
+        );
+    }
+    if scheduler_autotune_report {
+        let report = crate::core::scheduler_autotune::build_scheduler_autotune_report(
+            crate::core::scheduler_autotune::SchedulerAutotuneInput {
+                model_name: model_id.clone(),
+                meta,
+                prefill_chunk_size,
+                b_max,
+                admission_deadline_ms,
+                admission_queue_max,
+                requested_max_cache_cap: max_cache_cap,
+                effective_cap_max,
+                total_ram_bytes: crate::core::memory_budget::system_total_ram_bytes(),
+            },
+            crate::core::scheduler_autotune::prompt_batch_limits_for_model::<M>(b_max),
+        );
+        tracing::info!(
+            target: "ironmlx::scheduler_autotune",
+            "\n{}",
+            report.render_text()
         );
     }
 
