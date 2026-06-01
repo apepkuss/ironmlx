@@ -175,13 +175,19 @@ pub fn run(args: ServeArgs) -> Result<()> {
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-    let vision_input = if architecture == crate::models::ModelArchitecture::Gemma4 {
-        let cfg = crate::models::gemma4::Gemma4Config::from_loader(&loader)
-            .context("Gemma4Config::from_loader")?;
-        cfg.vision_config
-            .map(|vision_config| server::VisionInputConfig::Gemma4 { vision_config })
-    } else {
-        None
+    let vision_input = match architecture {
+        crate::models::ModelArchitecture::Gemma4 => {
+            let cfg = crate::models::gemma4::Gemma4Config::from_loader(&loader)
+                .context("Gemma4Config::from_loader")?;
+            cfg.vision_config
+                .map(|vision_config| server::VisionInputConfig::Gemma4 { vision_config })
+        }
+        crate::models::ModelArchitecture::MiniCpmV46 => {
+            Some(server::VisionInputConfig::MiniCpmV46 {
+                spatial_merge_size: 4,
+            })
+        }
+        _ => None,
     };
 
     match architecture {

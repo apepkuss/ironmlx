@@ -214,6 +214,7 @@ pub async fn expand_image_parts_in_messages(
     let spatial_merge_size = match vision_input {
         VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
         VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
+        VisionInputConfig::MiniCpmV46 { spatial_merge_size } => *spatial_merge_size,
     };
     if spatial_merge_size <= 0 {
         return Err(anyhow::anyhow!(
@@ -246,6 +247,20 @@ pub async fn expand_image_parts_in_messages(
                             placeholders.push(gemma4_placeholder(processed.soft_tokens));
                             grid_thw.push((1, processed.grid_h, processed.grid_w));
                             all_pixel_values.push(processed.pixel_values);
+                        }
+                        VisionInputConfig::MiniCpmV46 { .. } => {
+                            let (pv, gh, gw) =
+                                crate::models::minicpmv4_6::image_processor::preprocess(
+                                    &img_bytes,
+                                )?;
+                            // N = (gh/4)*(gw/4): VitMerger 2×2 + Merger 2×2 = effective 4×
+                            // downsample. spatial_merge_size=4 matches the CLI path
+                            // (minicpmv46_image_placeholder_string in generate.rs).
+                            let n =
+                                ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
+                            placeholders.push(minicpmv46_placeholder(n));
+                            grid_thw.push((1, gh, gw));
+                            all_pixel_values.push(pv);
                         }
                     }
                 }
@@ -297,6 +312,25 @@ fn gemma4_placeholder(n: usize) -> String {
         s.push_str("<|image|>");
     }
     s.push_str("<image|>");
+    s
+}
+
+/// MiniCPM-V-4.6 image placeholder: `<image>` + `<|image_pad|>` × n + `</image>`.
+///
+/// When tokenised (all three are registered special tokens), this produces
+/// `[248078] + [248056]*n + [248079]`, matching the P2a fixture
+/// (`expected_input_ids_img.npy`, `use_image_id=False`, `slice_mode=False`).
+///
+/// Mirror of `minicpmv46_image_placeholder_string` in `cli/generate.rs` —
+/// keep both in sync if the convention changes.
+fn minicpmv46_placeholder(n: usize) -> String {
+    let mut s =
+        String::with_capacity("<image>".len() + n * "<|image_pad|>".len() + "</image>".len());
+    s.push_str("<image>");
+    for _ in 0..n {
+        s.push_str("<|image_pad|>");
+    }
+    s.push_str("</image>");
     s
 }
 
@@ -414,6 +448,15 @@ where
                 .map(|id| id as i32)
                 .unwrap_or(258_880),
             vision_config.pooling_kernel_size,
+        ),
+        VisionInputConfig::MiniCpmV46 { spatial_merge_size } => (
+            // image_token_id = 248056 (<|image_pad|>) per P2a fixture.
+            state
+                .tokenizer
+                .token_to_id("<|image_pad|>")
+                .map(|id| id as i32)
+                .unwrap_or(248_056),
+            *spatial_merge_size,
         ),
     };
 
@@ -1564,5 +1607,30 @@ mod tests {
         let resp = admit_err_to_response(err);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(resp.headers().get("retry-after").is_none());
+    }
+
+    /// MiniCPM-V-4.6 VisionInputConfig variant: merge-size accessor returns 4.
+    /// The inline match in expand_image_parts_in_messages must handle the new arm.
+    #[test]
+    fn minicpmv46_vision_input_merge_size() {
+        let cfg = VisionInputConfig::MiniCpmV46 {
+            spatial_merge_size: 4,
+        };
+        let size = match &cfg {
+            VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
+            VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
+            VisionInputConfig::MiniCpmV46 { spatial_merge_size } => *spatial_merge_size,
+        };
+        assert_eq!(size, 4);
+    }
+
+    /// MiniCPM-V-4.6 placeholder string: <image> + <|image_pad|>×N + </image>.
+    #[test]
+    fn minicpmv46_placeholder_format() {
+        // N=3 → [248078, 248056, 248056, 248056, 248079] when tokenised.
+        assert_eq!(
+            minicpmv46_placeholder(3),
+            "<image><|image_pad|><|image_pad|><|image_pad|></image>"
+        );
     }
 }
