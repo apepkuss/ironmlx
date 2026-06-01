@@ -2034,7 +2034,7 @@ mod tests {
     }
 
     /// Contract test: `build_position_ids(0, S)` produces flat sequential
-    /// positions `[0..S-1]` across all 3 MRoPE streams — the invariant that
+    /// positions `[0, 1, …, S-1]` across all 3 MRoPE streams — the invariant that
     /// `GenerationStream`'s `vl_positions_sequential` branch relies on.
     #[test]
     fn build_position_ids_is_flat_sequential_three_streams() {
