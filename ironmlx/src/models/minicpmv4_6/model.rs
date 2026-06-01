@@ -349,6 +349,10 @@ impl crate::core::model::Model for MiniCpmV46Model {
     fn num_hidden_layers(&self) -> usize {
         self.config().num_hidden_layers as usize
     }
+
+    fn vl_positions_sequential(&self) -> bool {
+        true
+    }
 }
 
 impl MiniCpmV46Model {
