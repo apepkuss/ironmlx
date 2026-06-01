@@ -20,7 +20,26 @@ pub struct SiglipEmbeddings {
 /// Map each patch of a (grid_h, grid_w) image to a learned-position-table id
 /// via fractional bucketing against `pos_grid_side` boundaries (mlx-vlm
 /// `_build_position_buckets`). Row-major over (h, w).
+///
+/// Float semantics are an EXACT port of the mlx-vlm reference, which compares
+/// `frac >= boundaries` where `boundaries = mx.arange(1/side, 1.0, 1/side)`.
+/// MLX's Metal `arange` kernel computes `out[j] = start + j*step` in the array
+/// dtype (here f32) — and the GPU fuses that into a single-rounded FMA, so
+/// `boundaries[j] = fma(j, f32(1/side), f32(1/side))` — NOT a freshly
+/// recomputed `(j+1)/side`. The two formulations disagree at the exact tie
+/// `frac == (j+1)/side` (e.g. `26/28 == 65/70`): the FMA boundary rounds
+/// slightly *above* `frac`, so the tie does NOT increment the bucket.
+/// Recomputing `k/side` per step (the naive port) gets that tie wrong and
+/// shifts a whole grid row of position ids, corrupting the embeddings. We
+/// therefore replicate the `start + j*step` FMA boundary arithmetic verbatim
+/// (verified bit-identical to `mx.arange` across all `side-1` boundaries).
 pub fn position_bucket_ids(grid_h: i32, grid_w: i32, side: i32) -> Vec<i32> {
+    // boundaries[j] = fma(j, step, start), start = step = f32(1/side),
+    // j in 0..side-1. Bit-matches `mx.arange(1/side, 1.0, 1/side)` on Metal.
+    let step = (1.0_f64 / side as f64) as f32;
+    let boundaries: Vec<f32> = (0..side - 1)
+        .map(|j| (j as f32).mul_add(step, step))
+        .collect();
     let bucket = |n: i32| -> Vec<i32> {
         let n = n.max(1);
         (0..n)
@@ -28,13 +47,7 @@ pub fn position_bucket_ids(grid_h: i32, grid_w: i32, side: i32) -> Vec<i32> {
                 // Defensive clamp ported from mlx-vlm `_build_position_buckets`;
                 // frac never reaches 1.0 for i in 0..n, but kept for parity.
                 let frac = ((i as f32) / (n as f32)).min(1.0 - 1e-6);
-                let mut b = 0;
-                for k in 1..side {
-                    if frac >= (k as f32) / (side as f32) {
-                        b += 1;
-                    }
-                }
-                b
+                boundaries.iter().filter(|&&b| frac >= b).count() as i32
             })
             .collect()
     };
@@ -116,6 +129,30 @@ mod tests {
         assert_eq!(ids.len(), 16);
         assert_eq!(ids[0], 0);
         assert!(ids.iter().all(|&v| v >= 0 && v < 70 * 70));
+    }
+
+    #[test]
+    fn position_bucket_tie_matches_mlx_arange_fma() {
+        // Regression for the FMA boundary tie bug found in P1 vision parity.
+        // For grid_h=28, side=70: frac(26) = 26/28 == 65/70 exactly. The naive
+        // `frac >= k/side` port counts this tie (bucket 65), but mlx-vlm's
+        // `mx.arange(1/side, 1.0, 1/side)` boundary is FMA-rounded slightly
+        // above frac, so the tie does NOT count (bucket 64). A row's worth of
+        // position ids hinges on this; getting it wrong shifts the whole row.
+        // grid_h=28, grid_w=1 → bw[0]=0, so each id is bh[h]*side + 0 = bh[h]*70.
+        let ids = position_bucket_ids(28, 1, 70);
+        assert_eq!(ids.len(), 28);
+        // Full mlx-vlm reference height buckets for grid_h=28, side=70.
+        let bh_ref: [i32; 28] = [
+            0, 2, 5, 7, 10, 12, 15, 17, 20, 22, 25, 27, 30, 32, 35, 37, 40, 42, 45, 47, 50, 52, 55,
+            57, 60, 62, 64, 67,
+        ];
+        let bh: Vec<i32> = ids.iter().map(|&v| v / 70).collect();
+        assert_eq!(
+            bh[26], 64,
+            "frac==65/70 tie must NOT increment (mlx FMA boundary)"
+        );
+        assert_eq!(bh.as_slice(), &bh_ref);
     }
 
     #[test]
