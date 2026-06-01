@@ -192,8 +192,8 @@ fn prepare_images(
         // MiniCPM-V-4.6: use model-config image_token_id (248056 = <|image_pad|>);
         // spatial_merge_size = 4 (2×2 Merger, "16x" downsample mode).
         // Multi-slice (LLaVA-UHD): source slice first, then refine patches row-major.
-        // Placeholder: sliced_image_placeholder_string (source <image> block +
-        // per-patch <slice> blocks in row-major order matching best_grid).
+        // preprocess_sliced_to_parts is the single source of truth for the
+        // divisibility guard and placeholder construction (CLI + serve share it).
         let vcfg = crate::models::minicpmv4_6::config::MiniCpmV46VisionConfig::from_loader(loader)
             .context("MiniCpmV46VisionConfig::from_loader")?;
         // image_token_id: tokenizer lookup (<|image_pad|> → 248056) first; fallback to config image_token_id.
@@ -204,44 +204,14 @@ fn prepare_images(
         for path in &args.images {
             let bytes = std::fs::read(path)
                 .with_context(|| format!("reading --image {}", path.display()))?;
-            // preprocess_sliced_with_grid: source overview first, then refine patches
-            // row-major, plus the best_grid that drove the slicing.
-            let (slices, best_grid) =
-                crate::models::minicpmv4_6::image_processor::preprocess_sliced_with_grid(
-                    &bytes,
-                    crate::models::minicpmv4_6::image_processor::MAX_SLICE_NUMS,
-                )
-                .with_context(|| format!("preprocessing --image {}", path.display()))?;
-
-            // Source-slice token count (slice[0]) for the <image> block.
-            let (_, src_gh, src_gw) = slices[0];
-            let source_tokens =
-                image_token_count_for_grid((1, src_gh, src_gw), default_spatial_merge_size)?;
-
-            // Per-patch token count (slice[1] if sliced, else 0).
-            let slice_tokens = if slices.len() > 1 {
-                let (_, sl_gh, sl_gw) = slices[1];
-                image_token_count_for_grid((1, sl_gh, sl_gw), default_spatial_merge_size)?
-            } else {
-                0
-            };
-
-            // Push EACH slice's pixel_values + its (1, gh, gw) grid in order:
-            // source first, then patches row-major (source-then-slices image-major
-            // ordering matches replace_image_tokens scatter order).
-            for (pv, gh, gw) in slices {
-                all_pixel_values.push(pv);
-                grids.push((1, gh, gw));
-            }
-
-            // Build the sliced placeholder: <image> source block + <slice> patch
-            // blocks in row-major grid order.
-            let grid = best_grid.unwrap_or((0, 0));
-            placeholders.push(crate::models::minicpmv4_6::sliced_image_placeholder_string(
-                source_tokens,
-                slice_tokens,
-                grid,
-            ));
+            let parts = crate::models::minicpmv4_6::preprocess_sliced_to_parts(
+                &bytes,
+                default_spatial_merge_size,
+            )
+            .with_context(|| format!("preprocessing --image {}", path.display()))?;
+            all_pixel_values.extend(parts.pixel_values);
+            grids.extend(parts.grid_thw);
+            placeholders.push(parts.placeholder);
         }
         (default_spatial_merge_size, image_tok_id)
     } else {

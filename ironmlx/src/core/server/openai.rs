@@ -249,45 +249,16 @@ pub async fn expand_image_parts_in_messages(
                             all_pixel_values.push(processed.pixel_values);
                         }
                         VisionInputConfig::MiniCpmV46 { .. } => {
-                            // Multi-slice (LLaVA-UHD): source overview first, then refine
-                            // patches row-major. Each slice pushed independently so
-                            // pixel/prompt ordering aligns with replace_image_tokens scatter.
-                            let (slices, best_grid) =
-                                crate::models::minicpmv4_6::image_processor::preprocess_sliced_with_grid(
-                                    &img_bytes,
-                                    crate::models::minicpmv4_6::image_processor::MAX_SLICE_NUMS,
-                                )?;
-
-                            // Source-slice token count for <image> block.
-                            let (_, src_gh, src_gw) = slices[0];
-                            let source_tokens = ((src_gh / spatial_merge_size)
-                                * (src_gw / spatial_merge_size))
-                                as usize;
-
-                            // Per-patch token count for each <slice> block (0 when no slices).
-                            let slice_tokens = if slices.len() > 1 {
-                                let (_, sl_gh, sl_gw) = slices[1];
-                                ((sl_gh / spatial_merge_size) * (sl_gw / spatial_merge_size))
-                                    as usize
-                            } else {
-                                0
-                            };
-
-                            // Push EACH slice's pixel_values + (1, gh, gw) grid in order.
-                            for (pv, gh, gw) in slices {
-                                grid_thw.push((1, gh, gw));
-                                all_pixel_values.push(pv);
-                            }
-
-                            // Build sliced placeholder: <image> source + <slice> patches.
-                            let grid = best_grid.unwrap_or((0, 0));
-                            placeholders.push(
-                                crate::models::minicpmv4_6::sliced_image_placeholder_string(
-                                    source_tokens,
-                                    slice_tokens,
-                                    grid,
-                                ),
-                            );
+                            // Multi-slice (LLaVA-UHD): delegate to preprocess_sliced_to_parts,
+                            // which is the single source of truth for the divisibility guard,
+                            // token count, and placeholder construction shared with the CLI.
+                            let parts = crate::models::minicpmv4_6::preprocess_sliced_to_parts(
+                                &img_bytes,
+                                spatial_merge_size,
+                            )?;
+                            all_pixel_values.extend(parts.pixel_values);
+                            grid_thw.extend(parts.grid_thw);
+                            placeholders.push(parts.placeholder);
                         }
                     }
                 }

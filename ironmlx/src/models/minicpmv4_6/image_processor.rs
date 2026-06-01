@@ -12,6 +12,11 @@ use anyhow::{anyhow, Result};
 use mlx::ops::shape::expand_dims;
 use mlx::Array;
 
+/// Ordered list of preprocessed image slices returned by the LLaVA-UHD pipeline:
+/// `(pixel_values [1, 14, n*14, 3], grid_h, grid_w)` per slice. Source first,
+/// then refine patches in row-major order.
+pub type SlicedImages = Vec<(Array, i32, i32)>;
+
 /// `patch_size` from preprocessor_config.json.
 const PATCH: i32 = 14;
 /// `scale_resolution` from preprocessor_config.json.
@@ -520,7 +525,7 @@ fn slice_image(
 ///
 /// `max_slice_nums` caps the LLaVA-UHD slice count; the checkpoint default is 9
 /// (see [`MAX_SLICE_NUMS`]).
-pub fn preprocess_sliced(img_bytes: &[u8], max_slice_nums: i32) -> Result<Vec<(Array, i32, i32)>> {
+pub fn preprocess_sliced(img_bytes: &[u8], max_slice_nums: i32) -> Result<SlicedImages> {
     let (slices, _best_grid) = preprocess_sliced_inner(img_bytes, max_slice_nums)?;
     Ok(slices)
 }
@@ -535,21 +540,19 @@ pub fn preprocess_sliced(img_bytes: &[u8], max_slice_nums: i32) -> Result<Vec<(A
 /// Order guarantees are identical to [`preprocess_sliced`]: source first, then
 /// refine patches in row-major order matching `grid_x` (columns) × `grid_y`
 /// (rows).
-#[allow(clippy::type_complexity)]
 pub fn preprocess_sliced_with_grid(
     img_bytes: &[u8],
     max_slice_nums: i32,
-) -> Result<(Vec<(Array, i32, i32)>, Option<(i32, i32)>)> {
+) -> Result<(SlicedImages, Option<(i32, i32)>)> {
     preprocess_sliced_inner(img_bytes, max_slice_nums)
 }
 
 /// Shared implementation for [`preprocess_sliced`] and
 /// [`preprocess_sliced_with_grid`].
-#[allow(clippy::type_complexity)]
 fn preprocess_sliced_inner(
     img_bytes: &[u8],
     max_slice_nums: i32,
-) -> Result<(Vec<(Array, i32, i32)>, Option<(i32, i32)>)> {
+) -> Result<(SlicedImages, Option<(i32, i32)>)> {
     // 1. Decode → RGB8 (matches PIL `.convert("RGB")`).
     let img = image::load_from_memory(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?

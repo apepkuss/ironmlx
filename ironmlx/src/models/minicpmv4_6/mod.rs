@@ -183,6 +183,73 @@ mod tests {
     }
 }
 
+/// One image's sliced parts for a VL request: per-slice pixel tensors (source
+/// first, then patches row-major), their `(1, gh, gw)` grids, and the prompt
+/// placeholder string. Single source of truth for both CLI and HTTP serve.
+pub struct SlicedImageParts {
+    pub pixel_values: Vec<mlx::Array>,
+    pub grid_thw: Vec<(i32, i32, i32)>,
+    pub placeholder: String,
+}
+
+/// Preprocess one image into its sliced VL parts.
+///
+/// `spatial_merge_size` is the effective vision downsample (= 4 for MiniCPM-V-4.6).
+/// Token count per slice = `(gh / spatial_merge_size) * (gw / spatial_merge_size)`.
+///
+/// Errors if `spatial_merge_size <= 0` or if any slice grid dimension is not
+/// divisible by `spatial_merge_size` — this is the single divisibility guard for
+/// both the CLI and the HTTP serve path.
+///
+/// Push order: source first, then refine patches row-major (image-major across
+/// images, matching `replace_image_tokens` scatter order).
+pub fn preprocess_sliced_to_parts(
+    img_bytes: &[u8],
+    spatial_merge_size: i32,
+) -> crate::Result<SlicedImageParts> {
+    use anyhow::ensure;
+    ensure!(
+        spatial_merge_size > 0,
+        "spatial_merge_size must be > 0, got {spatial_merge_size}"
+    );
+
+    let (slices, best_grid) =
+        image_processor::preprocess_sliced_with_grid(img_bytes, image_processor::MAX_SLICE_NUMS)?;
+
+    let tok = |gh: i32, gw: i32| -> crate::Result<usize> {
+        ensure!(
+            gh % spatial_merge_size == 0 && gw % spatial_merge_size == 0,
+            "slice grid {gh}x{gw} is not divisible by spatial_merge_size={spatial_merge_size}"
+        );
+        Ok(((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize)
+    };
+
+    let (_, src_gh, src_gw) = slices[0];
+    let source_tokens = tok(src_gh, src_gw)?;
+    let slice_tokens = if slices.len() > 1 {
+        let (_, sl_gh, sl_gw) = slices[1];
+        tok(sl_gh, sl_gw)?
+    } else {
+        0
+    };
+
+    let grid = best_grid.unwrap_or((0, 0));
+    let placeholder = sliced_image_placeholder_string(source_tokens, slice_tokens, grid);
+
+    let mut pixel_values = Vec::with_capacity(slices.len());
+    let mut grid_thw = Vec::with_capacity(slices.len());
+    for (pv, gh, gw) in slices {
+        pixel_values.push(pv);
+        grid_thw.push((1, gh, gw));
+    }
+
+    Ok(SlicedImageParts {
+        pixel_values,
+        grid_thw,
+        placeholder,
+    })
+}
+
 /// Build a [`MiniCpmV46Model`] from a MiniCPM-V-4.6 checkpoint.
 ///
 /// Parses the nested `text_config` into a `Qwen35Config`, loads the Qwen3.5
