@@ -218,4 +218,156 @@ mod tests {
         assert!(pv.is_none());
         assert!(grid.is_empty());
     }
+
+    /// Build a minimal in-memory `Tokenizer` that maps `<|image_pad|>` → 99_999
+    /// and `<|image|>` → 88_888.  Uses a hardcoded minimal WordLevel JSON so no
+    /// checkpoint or extra crate is needed.
+    fn make_stub_tokenizer() -> crate::core::tokenizer::Tokenizer {
+        // Minimal tokenizers-0.20 WordLevel JSON with two special tokens.
+        // Verified format with the Python `tokenizers` library.
+        const JSON: &str = r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[{"id":99999,"content":"<|image_pad|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true},{"id":88888,"content":"<|image|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],"normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"<|image_pad|>":99999,"<|image|>":88888},"unk_token":"[UNK]"}}"#;
+
+        // Write to a per-process-unique temp file so `Tokenizer::from_files` can
+        // read it (it requires a `Path`).  The pid suffix avoids races when tests
+        // run concurrently in separate processes.  The file is removed immediately
+        // after loading since `from_files` has already read it.
+        let path = std::env::temp_dir().join(format!(
+            "ironmlx_stub_tokenizer_test_{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, JSON).expect("write stub tokenizer json");
+        let cfg = crate::core::loader::TokenizerConfig {
+            chat_template: None,
+            eos_token: None,
+            bos_token: None,
+            pad_token: None,
+            eos_token_id: None,
+        };
+        let tok = crate::core::tokenizer::Tokenizer::from_files(&path, &cfg)
+            .expect("load stub tokenizer");
+        let _ = std::fs::remove_file(&path); // best-effort cleanup; from_files already read it
+        tok
+    }
+
+    /// Restored from the deleted `openai.rs` tests: `derive_image_token_and_merge`
+    /// must return the correct `spatial_merge_size` (second element) for every
+    /// `VisionInputConfig` variant.  Token-id assertions use the stub tokenizer.
+    #[test]
+    fn derive_image_token_and_merge_returns_correct_merge_size() {
+        let tok = make_stub_tokenizer();
+
+        // MiniCpmV46: merge size propagated from config; token id from vocab or fallback.
+        let (tok_id, merge) = derive_image_token_and_merge(
+            &VisionInputConfig::MiniCpmV46 {
+                spatial_merge_size: 4,
+            },
+            &tok,
+        );
+        assert_eq!(merge, 4, "MiniCpmV46 spatial_merge_size");
+        assert_eq!(tok_id, 99_999, "MiniCpmV46 image_pad token id");
+
+        // Qwen: merge size propagated; same image_pad token.
+        let (tok_id, merge) = derive_image_token_and_merge(
+            &VisionInputConfig::Qwen {
+                spatial_merge_size: 2,
+            },
+            &tok,
+        );
+        assert_eq!(merge, 2, "Qwen spatial_merge_size");
+        assert_eq!(tok_id, 99_999, "Qwen image_pad token id");
+
+        // Gemma4: merge size == pooling_kernel_size; token id comes from <|image|>.
+        let vision_config = crate::models::gemma4::Gemma4VisionConfig {
+            model_type: "gemma4_vision".to_string(),
+            hidden_size: 1152,
+            intermediate_size: 4304,
+            num_hidden_layers: 27,
+            num_attention_heads: 16,
+            num_key_value_heads: 16,
+            head_dim: 72,
+            global_head_dim: None,
+            hidden_activation: "gelu_pytorch_tanh".to_string(),
+            rms_norm_eps: 1e-6,
+            max_position_embeddings: 8192,
+            attention_bias: false,
+            attention_dropout: 0.0,
+            layer_types: None,
+            rope_parameters: None,
+            default_output_length: 256,
+            patch_size: 14,
+            position_embedding_size: 8192,
+            pooling_kernel_size: 3,
+            use_clipped_linears: false,
+            standardize: false,
+        };
+        let (tok_id, merge) =
+            derive_image_token_and_merge(&VisionInputConfig::Gemma4 { vision_config }, &tok);
+        assert_eq!(merge, 3, "Gemma4 pooling_kernel_size");
+        assert_eq!(tok_id, 88_888, "Gemma4 image token id");
+    }
+
+    /// Restored from the deleted `openai.rs` tests: `expand_decoded_messages`
+    /// must insert placeholders in the exact order of image parts, preserving
+    /// surrounding text.  Two images interleaved: [Text, Image, Text, Image, Text].
+    #[test]
+    fn expand_decoded_messages_interleaves_placeholders_in_part_order() {
+        // Use the real COCO fixture — same bytes the image_processor unit tests use.
+        let img_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+        ))
+        .expect("read coco_sample.jpg fixture");
+
+        let msgs = vec![DecodedMessage {
+            role: "user".to_string(),
+            parts: vec![
+                DecodedPart::Text("a ".to_string()),
+                DecodedPart::Image(img_bytes.clone()),
+                DecodedPart::Text(" b ".to_string()),
+                DecodedPart::Image(img_bytes),
+                DecodedPart::Text(" c".to_string()),
+            ],
+        }];
+
+        let (flat, pv, grid) = expand_decoded_messages(
+            msgs,
+            &VisionInputConfig::Qwen {
+                spatial_merge_size: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(flat.len(), 1);
+        let text = match &flat[0].content {
+            Content::Text(t) => t.clone(),
+            _ => panic!("expected Content::Text"),
+        };
+
+        // Structural ordering: "a <ph1> b <ph2> c"
+        assert!(
+            text.starts_with("a "),
+            "text must start with \"a \": got {text:?}"
+        );
+        assert!(
+            text.ends_with(" c"),
+            "text must end with \" c\": got {text:?}"
+        );
+        // Both placeholders are <|vision_start|>…<|vision_end|>; find their positions.
+        let first = text.find("<|vision_start|>").expect("first placeholder");
+        let second = text.rfind("<|vision_start|>").expect("second placeholder");
+        assert_ne!(first, second, "must be two distinct placeholder blocks");
+        // The text " b " must appear between the end of the first placeholder
+        // and the start of the second.
+        let first_end =
+            text.find("<|vision_end|>").expect("first vision_end") + "<|vision_end|>".len();
+        let mid = &text[first_end..second];
+        assert_eq!(
+            mid, " b ",
+            "text between the two image placeholders must be \" b \""
+        );
+
+        // Pixel values collected for both images; grid has two entries.
+        assert!(pv.is_some(), "pixel_values must be Some for image message");
+        assert_eq!(grid.len(), 2, "one grid entry per image");
+    }
 }
