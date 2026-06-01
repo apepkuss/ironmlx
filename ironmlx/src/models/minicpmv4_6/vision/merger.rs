@@ -251,6 +251,125 @@ impl VitMerger {
 }
 
 // ---------------------------------------------------------------------------
+// Merger — final 2×2 → LM-hidden projection
+// ---------------------------------------------------------------------------
+
+/// Final spatial resampler that projects SigLIP tokens from vision-hidden
+/// (`hidden_size * 4 = 4608`) to LM-hidden (1024).
+///
+/// Implements the Python `Merger.__call__` / `MergerBlock.__call__` for the
+/// single-block case (`merger_times = 1`).
+///
+/// Weight prefix: `merger.mlp.0.{pre_norm,linear_1,linear_2}.{weight,bias}`.
+pub struct Merger {
+    /// Pre-norm on the flat `[M, 4*hidden]` windows.
+    pre_norm: LayerNorm,
+    /// 4608 → 4608 projection.
+    linear_1w: Array,
+    linear_1b: Array,
+    /// 4608 → lm_hidden (1024) projection.
+    linear_2w: Array,
+    linear_2b: Array,
+    /// Merge window shape (gh, gw) — (2, 2).
+    merge_gh: i32,
+    merge_gw: i32,
+}
+
+impl Merger {
+    /// Load from checkpoint using the `merger.mlp.0.` prefix.
+    ///
+    /// The LM-hidden output dimension is derived from `linear_2.weight`'s row
+    /// count (shape `[lm_hidden, 4608]`) — no extra config plumbing needed.
+    pub fn from_loader(loader: &Loader, cfg: &MiniCpmV46VisionConfig) -> Result<Self> {
+        let p = "merger.mlp.0";
+        let g = |n: &str| loader.tensor(&format!("{p}.{n}")).cloned();
+
+        let (gh, gw) = cfg.merge_group;
+
+        Ok(Self {
+            pre_norm: LayerNorm::from_loader(loader, &format!("{p}.pre_norm"), cfg.layer_norm_eps)?,
+            linear_1w: g("linear_1.weight")?,
+            linear_1b: g("linear_1.bias")?,
+            linear_2w: g("linear_2.weight")?,
+            linear_2b: g("linear_2.bias")?,
+            merge_gh: gh,
+            merge_gw: gw,
+        })
+    }
+
+    /// Forward pass.
+    ///
+    /// # Arguments
+    /// * `x`      — `[grid_h * grid_w, hidden_size]`, bf16.
+    /// * `grid_h` — spatial height of the incoming token grid.
+    /// * `grid_w` — spatial width  of the incoming token grid.
+    ///
+    /// # Returns
+    /// `(out, merged_h, merged_w)` where `out` is `[merged_h*merged_w, lm_hidden]`.
+    pub fn forward_on(
+        &self,
+        x: &Array,
+        grid_h: i32,
+        grid_w: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, i32, i32)> {
+        let t = target.into();
+        let gh = self.merge_gh;
+        let gw = self.merge_gw;
+
+        ensure!(
+            grid_h % gh == 0 && grid_w % gw == 0,
+            "Merger requires grid divisible by merge_group ({gh}×{gw}), got ({grid_h}×{grid_w})"
+        );
+
+        let mh = grid_h / gh;
+        let mw = grid_w / gw;
+        let inner_dim = x.shape().as_slice()[1]; // hidden_size (1152)
+
+        // Reshape: [grid_h*grid_w, inner] → [mh, gh, mw, gw, inner]
+        //   → transpose(0,2,1,3,4) → [mh, mw, gh, gw, inner]
+        //   → [mh*mw, inner*gh*gw]  (flatten spatial group into feature axis)
+        let hidden = x
+            .reshape_on(&[grid_h, grid_w, inner_dim][..], t)?
+            .reshape_on(&[mh, gh, mw, gw, inner_dim][..], t)?
+            .transpose_axes_on(&[0_i32, 2, 1, 3, 4][..], t)?
+            .reshape_on(&[mh * mw, inner_dim * gh * gw][..], t)?;
+
+        // MergerBlock: pre_norm → linear_1 → gelu_tanh → linear_2
+        let hidden = self.pre_norm.forward_on(&hidden, t)?;
+        let wt1 = self.linear_1w.transpose_on(t)?;
+        let hidden = ops::addmm_on(&self.linear_1b, &hidden, &wt1, 1.0, 1.0, t)?;
+        let hidden = gelu_tanh(&hidden, t)?;
+        let wt2 = self.linear_2w.transpose_on(t)?;
+        let out = ops::addmm_on(&self.linear_2b, &hidden, &wt2, 1.0, 1.0, t)?;
+
+        Ok((out, mh, mw))
+    }
+
+    /// Zero-weight instance for shape-only unit tests (no checkpoint needed).
+    #[cfg(test)]
+    pub fn new_for_test(group_hidden: i32, lm_hidden: i32) -> Self {
+        use mlx::ops::constructors::ones;
+        use mlx::Dtype;
+
+        let zeros1d = |n: i32| Array::zeros(&[n][..], Dtype::Bfloat16).unwrap();
+        let zeros2d = |r: i32, c: i32| Array::zeros(&[r, c][..], Dtype::Bfloat16).unwrap();
+        let ln_weight = |n: i32| ones((n,), Dtype::Bfloat16).unwrap();
+        let ln = |n: i32| LayerNorm::new(ln_weight(n), Some(zeros1d(n)), 1e-6);
+
+        Self {
+            pre_norm: ln(group_hidden),
+            linear_1w: zeros2d(group_hidden, group_hidden),
+            linear_1b: zeros1d(group_hidden),
+            linear_2w: zeros2d(lm_hidden, group_hidden),
+            linear_2b: zeros1d(lm_hidden),
+            merge_gh: 2,
+            merge_gw: 2,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -266,6 +385,16 @@ mod tests {
         let (out, h, w) = m.forward_on(&x, 6, 6, ()).unwrap();
         assert_eq!((h, w), (3, 3));
         assert_eq!(out.shape().as_slice(), &[9, 1152]);
+        assert!(m.forward_on(&x, 5, 6, ()).is_err());
+    }
+
+    #[test]
+    fn merger_outputs_lm_hidden() {
+        let m = Merger::new_for_test(4608, 1024);
+        let x = Array::zeros(&[6 * 6, 1152][..], Dtype::Bfloat16).unwrap();
+        let (out, h, w) = m.forward_on(&x, 6, 6, ()).unwrap();
+        assert_eq!((h, w), (3, 3));
+        assert_eq!(out.shape().as_slice(), &[9, 1024]);
         assert!(m.forward_on(&x, 5, 6, ()).is_err());
     }
 }
