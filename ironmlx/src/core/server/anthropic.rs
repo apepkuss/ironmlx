@@ -854,3 +854,129 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use crate::core::server::chat_format::{ChatMessage, Content, ContentPart, ImageUrl};
+    use crate::core::server::openai::decode_openai_messages;
+    use crate::core::server::vision::expand_decoded_messages;
+    use crate::core::server::VisionInputConfig;
+
+    /// Base64 of the real coco test image (shared by both endpoint paths so the
+    /// decoded bytes are identical by construction; the test proves the two
+    /// decode paths + shared core agree).
+    fn coco_b64() -> String {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+        ))
+        .expect("read coco_sample.jpg fixture");
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn anthropic_one_image(b64: &str) -> Vec<AnthropicMessage> {
+        vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Parts(vec![
+                AnthropicContentPart::Text {
+                    text: "what is this?".to_string(),
+                },
+                AnthropicContentPart::Image {
+                    source: AnthropicImageSource::Base64 {
+                        media_type: "image/jpeg".to_string(),
+                        data: b64.to_string(),
+                    },
+                },
+            ]),
+        }]
+    }
+
+    fn openai_one_image(b64: &str) -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: "user".to_string(),
+            content: Content::Parts(vec![
+                ContentPart::Text {
+                    text: "what is this?".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: format!("data:image/jpeg;base64,{b64}"),
+                    },
+                },
+            ]),
+        }]
+    }
+
+    async fn run_parity(vision_input: VisionInputConfig) {
+        let b64 = coco_b64();
+        let client = reqwest::Client::new();
+        // OpenAI path: data: URL → bytes → shared core.
+        let openai_decoded = decode_openai_messages(openai_one_image(&b64), &client)
+            .await
+            .unwrap();
+        let (o_flat, o_pv, o_grid) =
+            expand_decoded_messages(openai_decoded, &vision_input).unwrap();
+        // Anthropic path: raw base64 → bytes → shared core.
+        let anthropic_decoded = decode_anthropic_messages(anthropic_one_image(&b64)).unwrap();
+        let (a_flat, a_pv, a_grid) =
+            expand_decoded_messages(anthropic_decoded, &vision_input).unwrap();
+
+        // flat text identical
+        assert_eq!(o_flat.len(), a_flat.len());
+        for (o, a) in o_flat.iter().zip(a_flat.iter()) {
+            let (ot, at) = match (&o.content, &a.content) {
+                (Content::Text(o), Content::Text(a)) => (o, a),
+                _ => panic!("expected flat Content::Text"),
+            };
+            assert_eq!(ot, at, "flat text mismatch");
+        }
+        // grid identical
+        assert_eq!(o_grid, a_grid, "grid_thw mismatch");
+        // pixel_values byte-identical
+        let o_pv = o_pv.expect("openai pixels");
+        let a_pv = a_pv.expect("anthropic pixels");
+        assert_eq!(o_pv.len(), a_pv.len(), "pixel tensor count");
+        for (o, a) in o_pv.iter().zip(a_pv.iter()) {
+            let od: Vec<f32> = mlx::ops::cast::astype(o, mlx::Dtype::Float32)
+                .unwrap()
+                .to_vec()
+                .unwrap();
+            let ad: Vec<f32> = mlx::ops::cast::astype(a, mlx::Dtype::Float32)
+                .unwrap()
+                .to_vec()
+                .unwrap();
+            assert_eq!(od, ad, "pixel_values byte mismatch");
+        }
+    }
+
+    #[tokio::test]
+    async fn byte_parity_qwen() {
+        run_parity(VisionInputConfig::Qwen {
+            spatial_merge_size: 2,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn byte_parity_minicpmv46() {
+        run_parity(VisionInputConfig::MiniCpmV46 {
+            spatial_merge_size: 4,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GEMMA4_MODEL pointing at a gemma4 checkpoint with vision_config"]
+    async fn byte_parity_gemma4() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("GEMMA4_MODEL").expect("GEMMA4_MODEL must be set"),
+        );
+        let loader = crate::core::Loader::open_multimodal(&dir).expect("open_multimodal");
+        let vc = crate::models::gemma4::Gemma4Config::from_loader(&loader)
+            .expect("Gemma4Config::from_loader")
+            .vision_config
+            .expect("gemma4 vision_config present");
+        run_parity(VisionInputConfig::Gemma4 { vision_config: vc }).await;
+    }
+}

@@ -18,7 +18,7 @@ use crate::Result;
 pub mod anthropic;
 pub mod chat_format;
 pub mod health;
-mod openai;
+pub(crate) mod openai;
 pub mod scheduler_actor;
 pub mod vision;
 
