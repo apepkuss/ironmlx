@@ -69,7 +69,7 @@ fn find_best_resize(width: f64, height: f64, allow_upscale: bool) -> (i32, i32) 
         w = new_w;
         h = new_h;
     }
-    let merge_factor = PATCH * 4;
+    let merge_factor = PATCH * 4; // PATCH * 4: mlx-vlm dims are kept divisible by patch_size * merge_size(=4).
     let best_width = ensure_divide(w, merge_factor);
     let best_height = ensure_divide(h, merge_factor);
     (best_width, best_height)
@@ -396,6 +396,11 @@ fn get_sliced_grid(width: i32, height: i32, max_slice_nums: i32) -> Option<(i32,
         }
     }
 
+    // No valid factor-pair candidates (degenerate max_slice_nums) → treat as no-slice.
+    if candidate_grids.is_empty() {
+        return None;
+    }
+
     // Pick the grid minimizing |log(w/h) - log(gx/gy)|. First-seen wins on ties
     // (strict `<`), matching Python's iteration order.
     let log_ratio = (width as f64 / (height.max(1) as f64)).ln();
@@ -585,11 +590,18 @@ mod tests {
         // → best (2,1): grid_x=2 (width split), grid_y=1.
         assert_eq!(get_sliced_grid(640, 480, 9), Some((2, 1)));
 
-        // Wide landscape (1600×600): ratio = 4.7832 → ceil=5 → multiple=5.
-        // candidates {4,5,6}; factor pairs incl (4,1) → matches wide log_ratio.
+        // Wide landscape (1600×600): ratio = 960000/200704 = 4.7832 → ceil=5 → multiple=5.
+        // candidates {4,5,6}: gn=4→(1,4),(2,2),(4,1); gn=5→(1,5),(5,1);
+        // gn=6→(1,6),(2,3),(3,2),(6,1).
+        // log(1600/600)=ln(2.6667)=0.9808; errors: (4,1)=|0.9808-ln(4)|=0.405 (min),
+        // next-best (3,2)=|0.9808-ln(1.5)|=0.576, (5,1)=0.628 → best (4,1).
         assert_eq!(get_sliced_grid(1600, 600, 9), Some((4, 1)));
 
-        // 1280×960: ratio = 6.1224 → multiple=7 → best (3,2).
+        // 1280×960: ratio = 1228800/200704 = 6.1224 → ceil=7 → multiple=7.
+        // candidates {6,7,8}: gn=6→(1,6),(2,3),(3,2),(6,1); gn=7→(1,7),(7,1);
+        // gn=8→(1,8),(2,4),(4,2),(8,1).
+        // log(1280/960)=ln(1.3333)=0.2877; errors: (3,2)=|0.2877-ln(1.5)|=0.118 (min),
+        // next-best (4,2)=|0.2877-ln(2)|=0.405, (2,3)=0.693 → best (3,2).
         assert_eq!(get_sliced_grid(1280, 960, 9), Some((3, 2)));
 
         // 2000×1000: ratio = 9.96 capped at max=9 → best (4,2).
@@ -650,7 +662,7 @@ mod tests {
         let buf = vec![128_u8; (w * h * 3) as usize];
         let slices = slice_image(&buf, w, h, 9);
         assert_eq!(slices.len(), 3, "1 source + 2 refine patches");
-        // Source: find_best_resize(allow_upscale=false) = (504, 392).
+        // Source: find_best_resize(allow_upscale=false) → area 307200 > 448²=200704 so rescale fires anyway → (504, 392).
         assert_eq!((slices[0].1, slices[0].2), (504, 392));
         // Each refine patch: refine (784×560) split (2,1) → cell (392, 560).
         assert_eq!((slices[1].1, slices[1].2), (392, 560));
