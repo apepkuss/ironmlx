@@ -174,16 +174,16 @@ enum AnthropicContent {
 | 层 | 覆盖 | 方法 |
 |---|---|---|
 | **byte-parity**（新代码核心） | 3 个 preprocess 变体（Qwen / Gemma4 / MiniCpmV46）| 同一图像，分别经 OpenAI `data:` base64 路径与 Anthropic `source.base64` 路径，断言 `expand_decoded_messages` 产出的 `pixel_values`（eval 后逐字节）、`image_grid_thw`、flat 文本消息（及其经 `render_and_encode` 后的 prompt_ids）、`image_token_id`、`spatial_merge_size` **逐位一致**。不需真模型 forward；Gemma4 变体用真 `vision_config`（已有 checkpoint）或 dummy |
-| **端到端 mlx-vlm 双重 parity** | 4 真 VLM 架构 | Qwen3.5-VL Dense / MoE + MiniCPM-V + Gemma4，经 Anthropic 端点发单图（MiniCPM-V 另加多图 / 多切片），与 mlx-vlm ground-truth 对齐首 token argmax + top-k。baseline 工具走 `iron-rivals/mlx-vlm`（correctness 用 mlx-vlm，不混 omlx）|
+| **端到端 parity**（传递性机制） | 4 真 VLM 架构 | Qwen3.5-VL Dense / MoE + MiniCPM-V + Gemma4：boot server 发 Anthropic 单图请求，断言生成 completion 与 OpenAI 端点同图像请求**逐 token 一致**（OpenAI 端已各自 vs mlx-vlm 验证；叠加 byte-parity 即数学等价于 vs mlx-vlm）。MiniCPM-V 额外**直连 mlx-vlm**：复用现有 `gen_single_image_generate.py` 的 `expected_gen_tokens.npy`，断言 Anthropic 生成首 K token == mlx-vlm reference（baseline 走 `iron-rivals/mlx-vlm`，不混 omlx）。为 Qwen-VL / Gemma4 不新建 mlx-vlm fixture（first-principles：避免冗余，传递性严格等价）|
 | **serde 单测** | Anthropic schema | `image`+`source.base64` 反序列化；纯 string content；text+image 混合 array；误发 OpenAI `image_url` → 解析失败 |
 | **回归** | OpenAI 端重构不变 | 现有 OpenAI VL 测试全绿 + 新 byte-parity 守护 |
 
-> first-principles 说明：Anthropic 新代码（归一化）**架构无关**，仅产出图像字节；其后 preprocess 按 `vision_input` 分流、`forward_vl` 后端与 OpenAI **完全相同**且已被 OpenAI 端各架构接入时验证。故 byte-parity 层已充分覆盖新代码正确性；端到端 4 架构重跑是 Boss 选定的稳健冗余验证（验证同一 forward 后端），非新代码必需。
+> first-principles 说明：Anthropic 新代码（归一化）**架构无关**，仅产出图像字节；其后 preprocess 按 `vision_input` 分流、`forward_vl` 后端与 OpenAI **完全相同**且已被 OpenAI 端各架构接入时验证。故 byte-parity 层已充分覆盖新代码正确性。端到端采用传递性机制：4 架构 Anthropic↔OpenAI 逐 token 一致（OpenAI 端已各自 vs mlx-vlm 验证）+ MiniCPM-V 直连 mlx-vlm fixture，严格等价于 Anthropic 端 vs mlx-vlm，且不新建冗余 fixture（呼应 first-principles 避免冗余 sweep）。
 
 ## 7. 验收标准
 
-1. 4 真 VLM 架构经 Anthropic `/v1/messages` 单图请求，端到端与 mlx-vlm 首 token argmax + top-k 一致。
-2. MiniCPM-V 多图 + 多切片经 Anthropic 端点与 mlx-vlm 对齐。
+1. 4 真 VLM 架构经 Anthropic `/v1/messages` 单图请求，生成 completion 与 OpenAI 端点同图像请求逐 token 一致（传递性机制，§6）。
+2. MiniCPM-V 经 Anthropic 端点单图请求，生成首 K token 直连 mlx-vlm `expected_gen_tokens.npy` reference 一致；多图 / 多切片经 Anthropic 端点与 OpenAI 端点逐 token 一致。
 3. 3 个 preprocess 变体的 OpenAI↔Anthropic byte-parity 测试全绿。
 4. OpenAI 端点重构后现有 VL 测试零回归。
 5. 误发 OpenAI `image_url` 到 Anthropic 端点返回 400（非 422 panic）。
