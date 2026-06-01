@@ -16,6 +16,7 @@
 //! supported.
 
 pub mod config;
+pub mod vision;
 
 pub use config::text_config_from_loader;
 
