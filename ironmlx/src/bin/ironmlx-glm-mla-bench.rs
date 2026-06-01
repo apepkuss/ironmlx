@@ -37,6 +37,10 @@ struct Args {
     #[arg(long = "ctx-len")]
     ctx_lens: Vec<i32>,
 
+    /// Decode batch size to benchmark.
+    #[arg(long, default_value_t = 1)]
+    batch: i32,
+
     /// Timed runs per case.
     #[arg(long, default_value_t = 50)]
     runs: usize,
@@ -95,6 +99,7 @@ struct Meta {
     model_dir: String,
     layer: i32,
     ctx_lens: Vec<i32>,
+    batch_size: i32,
     warmup_runs: usize,
     measured_runs: usize,
     stream_mode: &'static str,
@@ -147,7 +152,7 @@ fn main() -> Result<()> {
 
     let mut records = Vec::new();
     for &ctx_len in &ctx_lens {
-        let inputs = build_decode_inputs(args.seed + ctx_len as u64, ctx_len, &cfg)?;
+        let inputs = build_decode_inputs(args.seed + ctx_len as u64, ctx_len, args.batch, &cfg)?;
         mlx::transforms::eval(&[
             &inputs.x,
             &inputs.offset,
@@ -316,6 +321,7 @@ fn main() -> Result<()> {
             model_dir: args.model.display().to_string(),
             layer: args.layer,
             ctx_lens,
+            batch_size: args.batch,
             warmup_runs: args.warmup_runs,
             measured_runs: args.runs,
             stream_mode: bench_target.label,
@@ -344,6 +350,7 @@ fn validate_args(args: &Args) -> Result<()> {
         return Err(anyhow!("--layer must be non-negative, got {}", args.layer));
     }
     validate_ctx_lens(&args.ctx_lens)?;
+    validate_batch(args.batch)?;
     if args.runs == 0 {
         return Err(anyhow!("--runs must be positive"));
     }
@@ -359,6 +366,13 @@ fn validate_ctx_lens(ctx_lens: &[i32]) -> Result<()> {
     Ok(())
 }
 
+fn validate_batch(batch: i32) -> Result<()> {
+    if batch <= 0 {
+        return Err(anyhow!("--batch must be positive, got {batch}"));
+    }
+    Ok(())
+}
+
 fn validate_layer(cfg: &Glm4MoeLiteConfig, layer: i32) -> Result<()> {
     if layer >= cfg.num_hidden_layers {
         return Err(anyhow!(
@@ -370,15 +384,21 @@ fn validate_layer(cfg: &Glm4MoeLiteConfig, layer: i32) -> Result<()> {
     Ok(())
 }
 
-fn build_decode_inputs(seed: u64, ctx_len: i32, cfg: &Glm4MoeLiteConfig) -> Result<DecodeInputs> {
-    let x = random_bf16_3d(seed, 1, 1, cfg.hidden_size).context("sampling x")?;
+fn build_decode_inputs(
+    seed: u64,
+    ctx_len: i32,
+    batch: i32,
+    cfg: &Glm4MoeLiteConfig,
+) -> Result<DecodeInputs> {
+    validate_batch(batch)?;
+    let x = random_bf16_3d(seed, batch, 1, cfg.hidden_size).context("sampling x")?;
     let cache_len = ctx_len + 1;
     let base_c_kv =
-        random_bf16_4d(seed + 1, 1, 1, cache_len, cfg.kv_lora_rank).context("sampling c_kv")?;
-    let base_k_pe =
-        random_bf16_4d(seed + 2, 1, 1, cache_len, cfg.qk_rope_head_dim).context("sampling k_pe")?;
-    let offsets = [ctx_len];
-    let offset: Array = (&offsets[..], &[1_i32][..]).try_into()?;
+        random_bf16_4d(seed + 1, batch, 1, cache_len, cfg.kv_lora_rank).context("sampling c_kv")?;
+    let base_k_pe = random_bf16_4d(seed + 2, batch, 1, cache_len, cfg.qk_rope_head_dim)
+        .context("sampling k_pe")?;
+    let offsets = vec![ctx_len; batch as usize];
+    let offset: Array = (&offsets[..], &[batch][..]).try_into()?;
     Ok(DecodeInputs {
         x,
         offset,
@@ -416,12 +436,14 @@ fn cache_update_fetch_local(
     cfg: &Glm4MoeLiteConfig,
     target: StreamOrDevice,
 ) -> Result<(Array, Array)> {
+    let base_shape = base_c_kv.shape();
+    let batch = base_shape.as_slice()[0];
     let end = ctx_len + 1;
     let c_kv_updated = slice_update_on(
         base_c_kv,
         c_kv_new,
         [0_i32, 0, ctx_len, 0],
-        [1_i32, 1, end, cfg.kv_lora_rank],
+        [batch, 1, end, cfg.kv_lora_rank],
         [1_i32, 1, 1, 1],
         target,
     )?;
@@ -429,21 +451,21 @@ fn cache_update_fetch_local(
         base_k_pe,
         k_pe_new,
         [0_i32, 0, ctx_len, 0],
-        [1_i32, 1, end, cfg.qk_rope_head_dim],
+        [batch, 1, end, cfg.qk_rope_head_dim],
         [1_i32, 1, 1, 1],
         target,
     )?;
     let c_kv_slice = slice_strided_on(
         &c_kv_updated,
         [0_i32, 0, 0, 0],
-        [1_i32, 1, end, cfg.kv_lora_rank],
+        [batch, 1, end, cfg.kv_lora_rank],
         [1_i32, 1, 1, 1],
         target,
     )?;
     let k_pe_slice = slice_strided_on(
         &k_pe_updated,
         [0_i32, 0, 0, 0],
-        [1_i32, 1, end, cfg.qk_rope_head_dim],
+        [batch, 1, end, cfg.qk_rope_head_dim],
         [1_i32, 1, 1, 1],
         target,
     )?;
@@ -489,9 +511,13 @@ fn run_decode_sdpa(
 }
 
 fn merge_heads(out: &Array, cfg: &Glm4MoeLiteConfig, target: StreamOrDevice) -> Result<Array> {
+    let shape = out.shape();
+    let dims = shape.as_slice();
+    let batch = dims[0];
+    let seq_len = dims[2];
     out.transpose_axes_on(&[0, 2, 1, 3][..], target)?
         .reshape_on(
-            (1_i32, 1_i32, cfg.num_attention_heads * cfg.v_head_dim),
+            (batch, seq_len, cfg.num_attention_heads * cfg.v_head_dim),
             target,
         )
         .map_err(anyhow::Error::from)
@@ -640,13 +666,14 @@ impl StreamMode {
 fn print_summary(output: &BenchOutput) {
     println!("# ironmlx-glm-mla-bench");
     println!(
-        "layer={} H={} heads={} kv_lora={} rope={} v_head={} stream={}",
+        "layer={} H={} heads={} kv_lora={} rope={} v_head={} B={} stream={}",
         output.meta.layer,
         output.meta.hidden_size,
         output.meta.num_attention_heads,
         output.meta.kv_lora_rank,
         output.meta.qk_rope_head_dim,
         output.meta.v_head_dim,
+        output.meta.batch_size,
         output.meta.stream_mode
     );
     for record in &output.records {
@@ -672,6 +699,18 @@ mod tests {
     #[test]
     fn validate_ctx_lens_accepts_zero_and_positive_values() {
         validate_ctx_lens(&[0, 1, 2048]).unwrap();
+    }
+
+    #[test]
+    fn validate_batch_rejects_non_positive_values() {
+        assert!(validate_batch(0).is_err());
+        assert!(validate_batch(-1).is_err());
+    }
+
+    #[test]
+    fn validate_batch_accepts_positive_values() {
+        validate_batch(1).unwrap();
+        validate_batch(4).unwrap();
     }
 
     #[test]

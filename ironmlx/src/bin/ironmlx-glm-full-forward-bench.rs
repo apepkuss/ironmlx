@@ -8,12 +8,15 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
+use ironmlx::core::generate::build_per_row_decode_mask;
+use ironmlx::core::sampler::sample_batch;
 use ironmlx::core::{Loader, Sampler};
 use ironmlx::models::glm4_moe_lite::config::Glm4MoeLiteConfig;
 use ironmlx::models::glm4_moe_lite::decoder_layer::{DecoderBlockMode, Glm4DecoderLayer};
 use ironmlx::models::glm4_moe_lite::mla_cache::MlaLatentCache;
 use ironmlx::nn::{Embedding, LayerCache, Linear, RmsNorm};
 use mlx::compile::CompileMode as MlxCompileMode;
+use mlx::random;
 use mlx::{Array, Device, Dtype, StreamOrDevice};
 use serde::Serialize;
 
@@ -31,6 +34,10 @@ struct Args {
     /// Existing cache lengths to prefill before decode. Pass multiple times.
     #[arg(long = "ctx-len")]
     ctx_lens: Vec<i32>,
+
+    /// Decode batch size to benchmark.
+    #[arg(long, default_value_t = 1)]
+    batch: i32,
 
     /// Number of leading decoder layers to execute. Pass multiple times.
     #[arg(long = "depth")]
@@ -67,6 +74,10 @@ struct Args {
     /// Global MLX compile mode for diagnostic attribution.
     #[arg(long, value_enum, default_value_t = CompileMode::Enabled)]
     compile_mode: CompileMode,
+
+    /// Build and pass the same per-row decode mask shape used by Scheduler::step.
+    #[arg(long, default_value_t = false)]
+    scheduler_decode_mask: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -131,6 +142,7 @@ struct ForwardOptions {
     layer_eval_mode: LayerEvalMode,
     block_mode: DecoderBlockMode,
     depth: i32,
+    scheduler_decode_mask: bool,
 }
 
 #[derive(Serialize)]
@@ -145,12 +157,14 @@ struct Meta {
     model_dir: String,
     ctx_lens: Vec<i32>,
     depths: Vec<i32>,
+    batch_size: i32,
     warmup_runs: usize,
     measured_runs: usize,
     stream_mode: &'static str,
     layer_eval_mode: &'static str,
     block_mode: &'static str,
     compile_mode: &'static str,
+    scheduler_decode_mask: bool,
     hidden_size: i32,
     vocab_size: i32,
     num_hidden_layers: i32,
@@ -254,12 +268,14 @@ fn main() -> Result<()> {
             model_dir: args.model.display().to_string(),
             ctx_lens,
             depths,
+            batch_size: args.batch,
             warmup_runs: args.warmup_runs,
             measured_runs: args.runs,
             stream_mode: bench_target.label,
             layer_eval_mode: args.layer_eval_mode.label(),
             block_mode: args.block_mode.label(),
             compile_mode: args.compile_mode.label(),
+            scheduler_decode_mask: args.scheduler_decode_mask,
             hidden_size: cfg.hidden_size,
             vocab_size: cfg.vocab_size,
             num_hidden_layers: cfg.num_hidden_layers,
@@ -281,6 +297,7 @@ fn main() -> Result<()> {
 
 fn validate_args(args: &Args) -> Result<()> {
     validate_ctx_lens(&args.ctx_lens)?;
+    validate_batch(args.batch)?;
     if args.runs == 0 {
         return Err(anyhow!("--runs must be positive"));
     }
@@ -308,6 +325,13 @@ fn validate_depths(depths: &[i32], num_hidden_layers: i32) -> Result<()> {
                 "--depth values must be in [1, {num_hidden_layers}], got {depth}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_batch(batch: i32) -> Result<()> {
+    if batch <= 0 {
+        return Err(anyhow!("--batch must be positive, got {batch}"));
     }
     Ok(())
 }
@@ -553,6 +577,7 @@ fn run_full_hidden_case(
         layer_eval_mode: args.layer_eval_mode,
         block_mode: args.block_mode.to_decoder(),
         depth,
+        scheduler_decode_mask: args.scheduler_decode_mask,
     };
     let mut cache = prepare_cache(
         model,
@@ -565,7 +590,7 @@ fn run_full_hidden_case(
     )?;
     let mut decode_tokens = DecodeTokens::new(
         args.seed + depth as u64 * 10_000_000 + 1_000_000 + ctx_len as u64,
-        args.warmup_runs + args.runs,
+        checked_decode_token_count(args)?,
         cfg.vocab_size,
     )?;
     bench_case(
@@ -574,7 +599,14 @@ fn run_full_hidden_case(
         "full-hidden",
         args.warmup_runs,
         args.runs,
-        || run_decode_hidden(model, decode_tokens.next()?, &mut cache, opts),
+        || {
+            run_decode_hidden(
+                model,
+                decode_tokens.next_array(args.batch)?,
+                &mut cache,
+                opts,
+            )
+        },
     )
 }
 
@@ -591,6 +623,7 @@ fn run_full_logits_case(
         layer_eval_mode: args.layer_eval_mode,
         block_mode: args.block_mode.to_decoder(),
         depth,
+        scheduler_decode_mask: args.scheduler_decode_mask,
     };
     let mut cache = prepare_cache(
         model,
@@ -603,7 +636,7 @@ fn run_full_logits_case(
     )?;
     let mut decode_tokens = DecodeTokens::new(
         args.seed + depth as u64 * 10_000_000 + 3_000_000 + ctx_len as u64,
-        args.warmup_runs + args.runs,
+        checked_decode_token_count(args)?,
         cfg.vocab_size,
     )?;
     bench_case(
@@ -612,7 +645,14 @@ fn run_full_logits_case(
         "full-logits",
         args.warmup_runs,
         args.runs,
-        || run_decode_logits(model, decode_tokens.next()?, &mut cache, opts),
+        || {
+            run_decode_logits(
+                model,
+                decode_tokens.next_array(args.batch)?,
+                &mut cache,
+                opts,
+            )
+        },
     )
 }
 
@@ -630,6 +670,7 @@ fn run_full_logits_sample_case(
         layer_eval_mode: args.layer_eval_mode,
         block_mode: args.block_mode.to_decoder(),
         depth,
+        scheduler_decode_mask: args.scheduler_decode_mask,
     };
     let mut cache = prepare_cache(
         model,
@@ -642,7 +683,7 @@ fn run_full_logits_sample_case(
     )?;
     let mut decode_tokens = DecodeTokens::new(
         args.seed + depth as u64 * 10_000_000 + 5_000_000 + ctx_len as u64,
-        args.warmup_runs + args.runs,
+        checked_decode_token_count(args)?,
         cfg.vocab_size,
     )?;
     bench_case(
@@ -651,7 +692,15 @@ fn run_full_logits_sample_case(
         "full-logits-sample",
         args.warmup_runs,
         args.runs,
-        || run_decode_logits_sample(model, sampler, decode_tokens.next()?, &mut cache, opts),
+        || {
+            run_decode_logits_sample(
+                model,
+                sampler,
+                decode_tokens.next_array(args.batch)?,
+                &mut cache,
+                opts,
+            )
+        },
     )
 }
 
@@ -668,6 +717,7 @@ fn run_full_logits_repeat_case(
         layer_eval_mode: args.layer_eval_mode,
         block_mode: args.block_mode.to_decoder(),
         depth,
+        scheduler_decode_mask: args.scheduler_decode_mask,
     };
     let mut cache = prepare_cache(
         model,
@@ -680,7 +730,7 @@ fn run_full_logits_repeat_case(
     )?;
     let mut decode_tokens = DecodeTokens::new(
         args.seed + depth as u64 * 10_000_000 + 7_000_000 + ctx_len as u64,
-        args.warmup_runs + args.runs,
+        checked_decode_token_count(args)?,
         cfg.vocab_size,
     )?;
     bench_case(
@@ -689,8 +739,24 @@ fn run_full_logits_repeat_case(
         "full-logits-repeat",
         args.warmup_runs,
         args.runs,
-        || run_decode_logits(model, decode_tokens.next()?, &mut cache, opts),
+        || {
+            run_decode_logits(
+                model,
+                decode_tokens.next_array(args.batch)?,
+                &mut cache,
+                opts,
+            )
+        },
     )
+}
+
+fn checked_decode_token_count(args: &Args) -> Result<usize> {
+    validate_batch(args.batch)?;
+    let batch = usize::try_from(args.batch).context("--batch must be positive")?;
+    args.warmup_runs
+        .checked_add(args.runs)
+        .and_then(|steps| steps.checked_mul(batch))
+        .ok_or_else(|| anyhow!("decode token count overflow"))
 }
 
 fn prepare_cache(
@@ -708,9 +774,13 @@ fn prepare_cache(
         .checked_add(extra_steps)
         .and_then(|n| n.checked_add(8))
         .ok_or_else(|| anyhow!("cache cap overflow for ctx_len={ctx_len}"))?;
-    let mut cache = model.make_cache(depth, 1, cap, Dtype::Bfloat16)?;
-    let ids = synthetic_token_ids(seed, ctx_len, cfg.vocab_size)?;
-    let input: Array = (&ids[..], &[1_i32, ctx_len][..]).try_into()?;
+    let mut cache = model.make_cache(depth, args.batch, cap, Dtype::Bfloat16)?;
+    let token_count = args
+        .batch
+        .checked_mul(ctx_len)
+        .ok_or_else(|| anyhow!("prefill token count overflow"))?;
+    let ids = synthetic_token_ids(seed, token_count, cfg.vocab_size)?;
+    let input: Array = (&ids[..], &[args.batch, ctx_len][..]).try_into()?;
     let hidden = model.forward_hidden_depth(
         &input,
         None,
@@ -721,6 +791,7 @@ fn prepare_cache(
             layer_eval_mode: args.layer_eval_mode,
             block_mode: args.block_mode.to_decoder(),
             depth,
+            scheduler_decode_mask: args.scheduler_decode_mask,
         },
     )?;
     mlx::transforms::eval(&[&hidden])?;
@@ -730,52 +801,124 @@ fn prepare_cache(
 
 fn run_decode_hidden(
     model: &BenchGlmModel,
-    token: u32,
+    input_ids: Array,
     cache: &mut [LayerCache],
     opts: ForwardOptions,
 ) -> Result<Vec<Array>> {
-    let input = decode_token_array(token)?;
-    let hidden = model.forward_hidden_depth(&input, None, None, Some(cache), opts)?;
+    let per_row_lens = decode_per_row_lens(&input_ids)?;
+    let decode_mask = maybe_scheduler_decode_mask(cache, opts.scheduler_decode_mask)?;
+    let hidden = model.forward_hidden_depth(
+        &input_ids,
+        Some(&per_row_lens),
+        decode_mask.as_ref(),
+        Some(cache),
+        opts,
+    )?;
     Ok(vec![hidden])
 }
 
 fn run_decode_logits(
     model: &BenchGlmModel,
-    token: u32,
+    input_ids: Array,
     cache: &mut [LayerCache],
     opts: ForwardOptions,
 ) -> Result<Vec<Array>> {
-    let logits = decode_logits(model, token, cache, opts)?;
+    let logits = decode_logits(model, input_ids, cache, opts)?;
     Ok(vec![logits])
 }
 
 fn run_decode_logits_sample(
     model: &BenchGlmModel,
     sampler: &Sampler,
-    token: u32,
+    input_ids: Array,
     cache: &mut [LayerCache],
     opts: ForwardOptions,
 ) -> Result<Vec<Array>> {
-    let logits = decode_logits(model, token, cache, opts)?;
-    let vocab = logits.shape().as_slice()[2];
-    let flat = logits.reshape((vocab,))?;
-    let next = sampler.sample_async_greedy(&flat)?;
+    let logits = decode_logits(model, input_ids, cache, opts)?;
+    let shape = logits.shape();
+    let dims = shape.as_slice();
+    let (batch, seq_len, vocab) = (dims[0], dims[1], dims[2]);
+    anyhow::ensure!(
+        seq_len == 1,
+        "run_decode_logits_sample expects decode logits with S=1, got {seq_len}"
+    );
+    let next = if batch == 1 {
+        let flat = logits.reshape((vocab,))?;
+        sampler.sample_async_greedy(&flat)?
+    } else {
+        let logits_bv = logits.reshape((batch, vocab))?;
+        let samplers: Vec<&Sampler> = (0..batch).map(|_| sampler).collect();
+        let empty_history: &[u32] = &[];
+        let histories: Vec<&[u32]> = (0..batch).map(|_| empty_history).collect();
+        let mut prng_state = random::key(0).context("sample_batch prng key")?;
+        let tokens = sample_batch(&samplers, &logits_bv, &histories, &mut prng_state)?;
+        (&tokens[..], &[batch][..]).try_into()?
+    };
     Ok(vec![next])
 }
 
 fn decode_logits(
     model: &BenchGlmModel,
-    token: u32,
+    input_ids: Array,
     cache: &mut [LayerCache],
     opts: ForwardOptions,
 ) -> Result<Array> {
-    let input = decode_token_array(token)?;
-    model.forward_logits_depth(&input, None, None, Some(cache), opts)
+    let per_row_lens = decode_per_row_lens(&input_ids)?;
+    let decode_mask = maybe_scheduler_decode_mask(cache, opts.scheduler_decode_mask)?;
+    model.forward_logits_depth(
+        &input_ids,
+        Some(&per_row_lens),
+        decode_mask.as_ref(),
+        Some(cache),
+        opts,
+    )
 }
 
-fn decode_token_array(token: u32) -> Result<Array> {
-    let ids = [token];
-    Ok((&ids[..], &[1_i32, 1_i32][..]).try_into()?)
+fn decode_per_row_lens(input_ids: &Array) -> Result<Vec<i32>> {
+    let shape = input_ids.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(
+        dims.len() == 2 && dims[1] == 1,
+        "decode input_ids must be [B, 1], got {:?}",
+        dims
+    );
+    Ok(vec![1; dims[0] as usize])
+}
+
+fn maybe_scheduler_decode_mask(cache: &[LayerCache], enabled: bool) -> Result<Option<Array>> {
+    if enabled {
+        build_scheduler_decode_mask(cache).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn build_scheduler_decode_mask(cache: &[LayerCache]) -> Result<Array> {
+    let first = cache
+        .first()
+        .ok_or_else(|| anyhow!("build_scheduler_decode_mask: cache is empty"))?;
+    let offsets = match first {
+        LayerCache::Mla(c) => c.offsets(),
+        _ => {
+            return Err(anyhow!(
+                "build_scheduler_decode_mask: expected LayerCache::Mla at layer 0"
+            ))
+        }
+    };
+    let mask_row_lens: Vec<i32> = offsets
+        .iter()
+        .map(|&offset| {
+            offset.checked_add(1).ok_or_else(|| {
+                anyhow!("build_scheduler_decode_mask: cache offset overflow at {offset}")
+            })
+        })
+        .collect::<Result<_>>()?;
+    let max_real_len = mask_row_lens
+        .iter()
+        .copied()
+        .max()
+        .ok_or_else(|| anyhow!("build_scheduler_decode_mask: no cache offsets"))?;
+    build_per_row_decode_mask(&mask_row_lens, max_real_len, Dtype::Bfloat16)
 }
 
 struct DecodeTokens {
@@ -800,6 +943,15 @@ impl DecodeTokens {
             .ok_or_else(|| anyhow!("DecodeTokens exhausted at index {}", self.next_idx))?;
         self.next_idx += 1;
         Ok(token)
+    }
+
+    fn next_array(&mut self, batch: i32) -> Result<Array> {
+        validate_batch(batch)?;
+        let mut ids = Vec::with_capacity(batch as usize);
+        for _ in 0..batch {
+            ids.push(self.next()?);
+        }
+        Ok((&ids[..], &[batch, 1_i32][..]).try_into()?)
     }
 }
 
@@ -1038,14 +1190,16 @@ impl CompileMode {
 fn print_summary(output: &BenchOutput) {
     println!("# ironmlx-glm-full-forward-bench");
     println!(
-        "layers={} H={} V={} stream={} layer_eval={} block_mode={} compile_mode={}",
+        "layers={} H={} V={} B={} stream={} layer_eval={} block_mode={} compile_mode={} scheduler_decode_mask={}",
         output.meta.num_hidden_layers,
         output.meta.hidden_size,
         output.meta.vocab_size,
+        output.meta.batch_size,
         output.meta.stream_mode,
         output.meta.layer_eval_mode,
         output.meta.block_mode,
-        output.meta.compile_mode
+        output.meta.compile_mode,
+        output.meta.scheduler_decode_mask
     );
     for record in &output.records {
         println!(
@@ -1081,6 +1235,18 @@ mod tests {
     fn validate_depths_rejects_out_of_range_values() {
         assert!(validate_depths(&[0], 47).is_err());
         assert!(validate_depths(&[48], 47).is_err());
+    }
+
+    #[test]
+    fn validate_batch_rejects_non_positive_values() {
+        assert!(validate_batch(0).is_err());
+        assert!(validate_batch(-1).is_err());
+    }
+
+    #[test]
+    fn validate_batch_accepts_positive_values() {
+        validate_batch(1).unwrap();
+        validate_batch(4).unwrap();
     }
 
     #[test]
@@ -1136,6 +1302,14 @@ mod tests {
     fn decode_tokens_errors_when_exhausted() {
         let mut tokens = DecodeTokens::new(7, 1, 1024).unwrap();
         tokens.next().unwrap();
+        assert!(tokens.next().is_err());
+    }
+
+    #[test]
+    fn decode_tokens_builds_batch_input_array() {
+        let mut tokens = DecodeTokens::new(7, 3, 1024).unwrap();
+        let input = tokens.next_array(3).unwrap();
+        assert_eq!(input.shape().as_slice(), &[3, 1]);
         assert!(tokens.next().is_err());
     }
 
