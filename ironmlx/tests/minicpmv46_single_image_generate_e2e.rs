@@ -138,6 +138,9 @@ fn minicpmv46_single_image_generate_e2e() {
         gh * gw
     );
     let pix = ops::cast::astype(&pix_f32, Dtype::Bfloat16).expect("cast pixels to bf16");
+    // Keep a clone so the teacher-forced section can reuse the already-cast tensor
+    // after `pix` is moved into the GenerationStream request below.
+    let pix_bf16 = pix.clone();
 
     // Structural sanity: image-token count in ids == (gh/4)*(gw/4) vision rows.
     let img_token_count = ids_i32.iter().filter(|&&id| id == IMAGE_TOKEN_ID).count() as i32;
@@ -230,14 +233,7 @@ fn minicpmv46_single_image_generate_e2e() {
         .expect("make_cache");
     let pos_full = build_position_ids(0, s as i32).expect("prefill positions");
     let ve = model
-        .compute_vision_embeds(
-            &[
-                ops::cast::astype(&load_npy("input_pixel_values.npy"), Dtype::Bfloat16)
-                    .expect("cast pixels"),
-            ],
-            &[(1, gh, gw)],
-            (),
-        )
+        .compute_vision_embeds(&[pix_bf16], &[(1, gh, gw)], ())
         .expect("compute_vision_embeds");
     let _ = model
         .forward_vl_chunk(
@@ -252,7 +248,7 @@ fn minicpmv46_single_image_generate_e2e() {
         )
         .expect("teacher-forced prefill");
 
-    let mut tf_exact = 1_usize; // step 0 already gated exact above
+    let mut tf_exact = 0_usize; // counts TF-loop steps only; step 0 first-token is gated separately above
     for step in 0..k - 1 {
         let ref_in = expected_gen[step]; // mlx-vlm's token entering this decode step
         let ref_out = expected_gen[step + 1]; // mlx-vlm's argmax this step should produce
@@ -289,8 +285,11 @@ fn minicpmv46_single_image_generate_e2e() {
         .take_while(|(a, b)| a == b)
         .count();
     println!(
-        "single_image_generate_e2e: PASS — first token exact; free-run prefix match {free_run_matches}/{k}; \
-         teacher-forced exact {tf_exact}/{k} (mismatches are noise-floor near-ties under {LOGIT_NOISE_FLOOR})"
+        "single_image_generate_e2e: PASS — first token exact (hard gate); \
+         teacher-forced argmax-or-near-tie {tf_exact}/{} steps; \
+         free-run prefix match {free_run_matches}/{k} \
+         (mismatches are noise-floor near-ties under {LOGIT_NOISE_FLOOR})",
+        k - 1
     );
 }
 
