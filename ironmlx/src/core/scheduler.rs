@@ -304,9 +304,11 @@ pub struct AdmitMidHandle {
     /// per-chunk without re-borrowing slot state across calls.
     pub(crate) prompt_ids: Vec<u32>,
     pub(crate) prompt_len: i32,
-    /// Per-chunk max token count; equals `req.prefill_chunk_size.max(1)`
-    /// at construction. VL chunks may exceed it only when extending a
-    /// boundary to keep one contiguous image token run intact.
+    /// Per-chunk max token count. When `req.prefill_chunk_size == 0`, this
+    /// equals `prompt_len` to preserve the "disable chunking" CLI semantic.
+    /// Otherwise it equals `req.prefill_chunk_size.max(1)`. VL chunks may
+    /// exceed it only when extending a boundary to keep one contiguous image
+    /// token run intact.
     pub(crate) chunk_size: i32,
     pub(crate) chunk_start: i32,
     /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
@@ -390,9 +392,9 @@ pub struct RequestState {
     /// `GenerateRequest::image_token_id`. Unused if `pixel_values` is None.
     pub image_token_id: i32,
     /// Per-request chunk size for chunked mid-batch prefill. Copied from
-    /// `GenerateRequest::prefill_chunk_size` at admit time, clamped to i32
-    /// and floored at 1. Used by `admit_mid_begin` to initialise
-    /// `AdmitMidHandle::chunk_size`.
+    /// `GenerateRequest::prefill_chunk_size` at admit time, clamped to i32.
+    /// `0` is preserved as "disable chunking" and expanded to prompt length
+    /// when `admit_mid_begin` initialises `AdmitMidHandle::chunk_size`.
     pub prefill_chunk_size: i32,
     /// KV cache bytes charged to budget at admit time. Released on
     /// row completion / eviction. B1-p2.5.
@@ -732,7 +734,7 @@ impl<M: Model> Scheduler<M> {
             image_grid_thw: req.image_grid_thw,
             image_spatial_merge_size: req.image_spatial_merge_size,
             image_token_id: req.image_token_id,
-            prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(512).max(1),
+            prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(i32::MAX),
             kv_bytes_admitted: requested_bytes,
             #[cfg(feature = "p5h-profile")]
             p5h_trace: req.p5h_trace.clone(),
@@ -2034,7 +2036,11 @@ impl<M: Model> Scheduler<M> {
         let is_vl = pixel_values.is_some();
         let position_ids_required = model.requires_position_ids();
 
-        let chunk_size = prefill_chunk_size.max(1);
+        let chunk_size = if prefill_chunk_size == 0 {
+            prompt_len.max(1)
+        } else {
+            prefill_chunk_size.max(1)
+        };
 
         // Pre-build full-prompt MRoPE position ids only for models that
         // consume them. Others carry a reusable placeholder and skip slicing
@@ -3313,6 +3319,29 @@ mod tests {
         let step_events = s.step(&model).expect("step after stale-row reuse");
         assert_eq!(step_events.len(), 2);
         assert_eq!(model.decode_lens_seen(), vec![vec![1, 1]]);
+    }
+
+    #[test]
+    fn admit_mid_prefill_chunk_size_zero_disables_chunking() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let _id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+
+        let model = StepDecodeMaskModel::default();
+        s.prefill_admitted(&model).expect("prefill");
+
+        let mid_req = mk_req(vec![7, 8, 9, 10]);
+        assert_eq!(mid_req.prefill_chunk_size, 0);
+        let mut handle = s.admit_mid_begin(mid_req, &model).expect("admit_mid_begin");
+
+        assert_eq!(handle.chunk_size, handle.prompt_len);
+        assert!(s
+            .admit_mid_chunk(&mut handle, &model)
+            .expect("0 disables chunking, so first chunk is last"));
     }
 
     #[test]
