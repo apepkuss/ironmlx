@@ -88,6 +88,17 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
     }
 }
 
+pub(crate) fn should_route_to_scheduler<M: Model>(
+    prompt_len: usize,
+    prefill_chunk_size: usize,
+    b_max: usize,
+) -> bool {
+    if prefill_chunk_size == 0 || prompt_len <= prefill_chunk_size {
+        return true;
+    }
+    M::fresh_prefill_batch_limit(prompt_len, b_max) < b_max
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn serve<M>(
     model: M,
@@ -212,7 +223,137 @@ where
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    use mlx::{Array, Dtype, StreamOrDevice};
     use tokio::time::sleep;
+
+    use crate::nn::LayerCache;
+
+    struct DefaultRouteModel;
+    struct LimitedRouteModel;
+
+    impl Model for DefaultRouteModel {
+        fn make_cache(&self, _batch: i32, _cap: i32, _dtype: Dtype) -> Result<Vec<LayerCache>> {
+            unimplemented!("route tests only call the associated route policy")
+        }
+
+        fn forward_on(
+            &self,
+            _input_ids: &Array,
+            _position_ids: &Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&Array>,
+            _cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            unimplemented!("route tests only call the associated route policy")
+        }
+
+        fn batched_prefill(
+            &self,
+            _input_ids: &Array,
+            _position_ids: &Array,
+            _attention_mask: &Array,
+            _linear_attention_mask: &Array,
+            _per_row_lens: &[i32],
+            _cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            unimplemented!("route tests only call the associated route policy")
+        }
+
+        fn forward_text_hidden(
+            &self,
+            _input_ids: &Array,
+            _position_ids: &Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&Array>,
+            _cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            unimplemented!("route tests only call the associated route policy")
+        }
+
+        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+            crate::core::memory_budget::test_meta_qwen35()
+        }
+
+        fn num_hidden_layers(&self) -> usize {
+            0
+        }
+    }
+
+    impl Model for LimitedRouteModel {
+        fn make_cache(&self, _batch: i32, _cap: i32, _dtype: Dtype) -> Result<Vec<LayerCache>> {
+            unimplemented!("route tests only call the associated route policy")
+        }
+
+        fn forward_on(
+            &self,
+            _input_ids: &Array,
+            _position_ids: &Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&Array>,
+            _cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            unimplemented!("route tests only call the associated route policy")
+        }
+
+        fn batched_prefill(
+            &self,
+            _input_ids: &Array,
+            _position_ids: &Array,
+            _attention_mask: &Array,
+            _linear_attention_mask: &Array,
+            _per_row_lens: &[i32],
+            _cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            unimplemented!("route tests only call the associated route policy")
+        }
+
+        fn forward_text_hidden(
+            &self,
+            _input_ids: &Array,
+            _position_ids: &Array,
+            _per_row_lens: Option<&[i32]>,
+            _decode_mask: Option<&Array>,
+            _cache: Option<&mut [LayerCache]>,
+            _target: StreamOrDevice,
+        ) -> Result<Array> {
+            unimplemented!("route tests only call the associated route policy")
+        }
+
+        fn fresh_prefill_batch_limit(_prompt_len: usize, b_max: usize) -> usize
+        where
+            Self: Sized,
+        {
+            b_max.min(2)
+        }
+
+        fn model_meta(&self) -> crate::core::memory_budget::ModelMeta {
+            crate::core::memory_budget::test_meta_qwen35()
+        }
+
+        fn num_hidden_layers(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn route_keeps_unlimited_model_long_prompt_on_generation_stream() {
+        assert!(!should_route_to_scheduler::<DefaultRouteModel>(
+            4096, 2048, 4
+        ));
+    }
+
+    #[test]
+    fn route_uses_scheduler_for_model_limited_chunked_long_prompt() {
+        assert!(should_route_to_scheduler::<LimitedRouteModel>(
+            4096, 2048, 4
+        ));
+    }
 
     /// Verify two concurrent task acquisitions of the same Mutex serialize.
     /// We don't construct a real Qwen35Model — Mutex<()> exhibits the same

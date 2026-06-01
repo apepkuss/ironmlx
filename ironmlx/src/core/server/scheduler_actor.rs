@@ -28,7 +28,9 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
-use crate::core::scheduler::{DenseVlMethods, Phase, RequestId, Scheduler, StepEvent};
+use crate::core::scheduler::{
+    AdmitMidHandle, DenseVlMethods, Phase, RequestId, Scheduler, StepEvent,
+};
 use crate::Result;
 
 /// Commands accepted by the actor. 3b-2 ships only [`Admit`]; later
@@ -46,7 +48,7 @@ pub enum SchedulerCommand {
 
 /// A request parked in `driver_loop`'s admission queue while the scheduler
 /// is at `active_count == b_max`. Drained when `gc_finished_rows` frees a
-/// slot, then handed to `handle_admit_mid_chunked`.
+/// slot, then handed to the rolling mid-admit chunk path.
 struct PendingAdmit {
     request: GenerateRequest,
     reply_tx: oneshot::Sender<Result<AdmitReply>>,
@@ -70,6 +72,7 @@ fn fresh_prefill_batch_limit_for_command<M: Model>(cmd: &SchedulerCommand, b_max
 #[allow(clippy::large_enum_variant)] // Admit(SchedulerCommand) intentionally large; boxing would add allocation on hot path
 enum RollingEvent {
     Admit(SchedulerCommand),
+    AdvanceMidAdmit,
     Step,
     Shutdown,
 }
@@ -342,6 +345,7 @@ fn driver_loop<M>(
     let b_max = sched.b_max();
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
+    let mut in_flight_mid_admit: Option<AdmitMidHandle> = None;
     let rt = tokio::runtime::Handle::current();
 
     'outer: loop {
@@ -474,6 +478,8 @@ fn driver_loop<M>(
             let evt: RollingEvent =
                 if admission_policy.should_force_decode(sched.phase(), sched.active_count()) {
                     RollingEvent::Step
+                } else if in_flight_mid_admit.is_some() {
+                    RollingEvent::AdvanceMidAdmit
                 } else {
                     rt.block_on(async {
                         tokio::select! {
@@ -499,8 +505,11 @@ fn driver_loop<M>(
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
-                    let rolling_limit = fresh_prefill_batch_limit_for_command::<M>(&cmd, b_max);
-                    if sched.active_count() >= rolling_limit {
+                    if !can_start_rolling_mid_admit_for_command::<M>(
+                        &cmd,
+                        sched.active_count(),
+                        b_max,
+                    ) {
                         // Rolling admission limit reached — queue for a later decode turn.
                         enqueue_or_reject(
                             cmd,
@@ -509,16 +518,26 @@ fn driver_loop<M>(
                             &queue_depth_peak,
                             &queue_rejected,
                         );
-                    } else {
-                        if handle_admit_mid_chunked(
-                            cmd,
-                            &mut sched,
-                            &mut event_txs,
-                            &admit_count,
-                            &model,
-                        ) {
-                            admission_policy.record_admission_work();
-                        }
+                    } else if start_mid_admit_one_chunk(
+                        cmd,
+                        &mut in_flight_mid_admit,
+                        &mut sched,
+                        &mut event_txs,
+                        &admit_count,
+                        &model,
+                    ) {
+                        admission_policy.record_admission_work();
+                    }
+                }
+                RollingEvent::AdvanceMidAdmit => {
+                    if advance_mid_admit_one_chunk(
+                        &mut in_flight_mid_admit,
+                        &mut sched,
+                        &mut event_txs,
+                        &admit_count,
+                        &model,
+                    ) {
+                        admission_policy.record_admission_work();
                     }
                 }
                 RollingEvent::Step => {
@@ -538,14 +557,17 @@ fn driver_loop<M>(
                             // for one bounded mid-admit. Further queued
                             // requests wait for the next decode turn so
                             // active streams keep making progress.
-                            if drain_admission_queue(
-                                &mut admission_queue,
-                                &mut sched,
-                                &mut event_txs,
-                                &admit_count,
-                                &model,
-                                b_max,
-                            ) {
+                            if in_flight_mid_admit.is_none()
+                                && drain_admission_queue(
+                                    &mut admission_queue,
+                                    &mut in_flight_mid_admit,
+                                    &mut sched,
+                                    &mut event_txs,
+                                    &admit_count,
+                                    &model,
+                                    b_max,
+                                )
+                            {
                                 admission_policy.record_admission_work();
                             }
                         }
@@ -562,6 +584,7 @@ fn driver_loop<M>(
                                      {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                                 );
                             }
+                            in_flight_mid_admit = None;
                             event_txs.clear();
                             while let Some(pending) = admission_queue.pop_front() {
                                 let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
@@ -628,6 +651,7 @@ fn driver_loop<M>(
                 );
             }
         }
+        in_flight_mid_admit = None;
         event_txs.clear();
     }
 }
@@ -727,32 +751,37 @@ fn handle_admit<M>(
     }
 }
 
-/// Mid-batch admit handler — chunked (B1-p2.3c+).
-///
-/// Orchestrates the three-phase chunked admit:
-/// 1. `Scheduler::admit_mid_begin` — reserve slot + alloc temp cache.
-/// 2. Loop `admit_mid_chunk` until last chunk, interleaving one
-///    `Scheduler::step` between chunks so active rows continue
-///    emitting tokens at chunk-boundary cadence (spec §4.5.5
-///    chunk:step = 1:1).
-/// 3. `Scheduler::admit_mid_finalize` — adopt temp → main cache,
-///    sample first generated token.
-///
-/// Acquires `model.blocking_lock()` per phase (begin / per-chunk /
-/// per-step / finalize) so each phase yields the lock between calls.
-/// Active rows' SSE consumers see token events at ~chunk forward time
-/// granularity instead of one multi-second prefill stall.
-///
-/// On any error during the loop, the orphan slot is evicted and
-/// `event_txs[id]` removed so the next `step()` does not panic on an
-/// empty `generated_tokens`.
-fn handle_admit_mid_chunked<M>(
+fn uses_multi_chunk_prefill(request: &GenerateRequest) -> bool {
+    request.prefill_chunk_size > 0 && request.prompt_ids.len() > request.prefill_chunk_size
+}
+
+fn can_start_rolling_mid_admit_for_request<M: Model>(
+    request: &GenerateRequest,
+    active_count: usize,
+    b_max: usize,
+) -> bool {
+    if active_count >= b_max {
+        return false;
+    }
+    let rolling_limit = fresh_prefill_batch_limit_for_request::<M>(request, b_max);
+    active_count < rolling_limit || uses_multi_chunk_prefill(request)
+}
+
+fn can_start_rolling_mid_admit_for_command<M: Model>(
+    cmd: &SchedulerCommand,
+    active_count: usize,
+    b_max: usize,
+) -> bool {
+    let SchedulerCommand::Admit { request, .. } = cmd;
+    can_start_rolling_mid_admit_for_request::<M>(request, active_count, b_max)
+}
+
+fn begin_mid_admit<M>(
     cmd: SchedulerCommand,
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
-    admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
-) -> bool
+) -> Option<AdmitMidHandle>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
@@ -760,13 +789,13 @@ where
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
     // Phase 1: begin.
-    let mut handle = {
+    let handle = {
         let m = model.blocking_lock();
         match sched.admit_mid_begin(request, &m) {
             Ok(h) => h,
             Err(e) => {
                 let _ = reply_tx.send(Err(e));
-                return false;
+                return None;
             }
         }
     };
@@ -782,51 +811,66 @@ where
         // Caller dropped reply_rx before the prefill chunks completed.
         let _ = sched.evict(id);
         event_txs.remove(&id);
-        return true;
+        return None;
     }
 
-    // Phase 2: chunk loop. Interleave one active-row step per chunk
-    // except after the last chunk (finalize is the next step there).
-    loop {
-        let is_last = {
-            let m = model.blocking_lock();
-            match sched.admit_mid_chunk(&mut handle, &m) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
-                    let _ = sched.evict(id);
-                    event_txs.remove(&id);
-                    return true;
-                }
-            }
-        };
+    Some(handle)
+}
 
-        if is_last {
-            break;
-        }
+fn start_mid_admit_one_chunk<M>(
+    cmd: SchedulerCommand,
+    in_flight_mid_admit: &mut Option<AdmitMidHandle>,
+    sched: &mut Scheduler<M>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    admit_count: &Arc<AtomicU64>,
+    model: &Arc<Mutex<M>>,
+) -> bool
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if in_flight_mid_admit.is_some() {
+        return false;
+    }
+    let Some(handle) = begin_mid_admit(cmd, sched, event_txs, model) else {
+        return false;
+    };
+    *in_flight_mid_admit = Some(handle);
+    advance_mid_admit_one_chunk(in_flight_mid_admit, sched, event_txs, admit_count, model)
+}
 
-        // Interleave one active-row decode step.
-        let step_result = {
-            let m = model.blocking_lock();
-            sched.step(&m)
-        };
-        match step_result {
-            Ok(events) => {
-                for ev in events {
-                    route_event(ev, event_txs);
-                }
-                sched.gc_finished_rows(event_txs);
-            }
+fn advance_mid_admit_one_chunk<M>(
+    in_flight_mid_admit: &mut Option<AdmitMidHandle>,
+    sched: &mut Scheduler<M>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    admit_count: &Arc<AtomicU64>,
+    model: &Arc<Mutex<M>>,
+) -> bool
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let Some(mut handle) = in_flight_mid_admit.take() else {
+        return false;
+    };
+    let id = handle.request_id;
+
+    let is_last = {
+        let m = model.blocking_lock();
+        match sched.admit_mid_chunk(&mut handle, &m) {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!("[SchedulerActor] step error inside chunked admit_mid loop: {e:?}");
+                tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
                 let _ = sched.evict(id);
                 event_txs.remove(&id);
                 return true;
             }
         }
+    };
+
+    if !is_last {
+        *in_flight_mid_admit = Some(handle);
+        return true;
     }
 
-    // Phase 3: finalize.
     let m = model.blocking_lock();
     match sched.admit_mid_finalize(handle, &m) {
         Ok((_id, first_event)) => {
@@ -869,13 +913,12 @@ fn enqueue_or_reject(
     queue_depth_peak.fetch_max(queue.len(), Ordering::Relaxed);
 }
 
-/// Drain at most one successful mid-batch admit from the admission queue.
-/// Each drained entry is handed to `handle_admit_mid_chunked` which runs the
-/// B=1 prefill + adopts the row + sends `AdmitReply`. Invalid queued entries
-/// that fail before GPU admission work are skipped, but once any admission
-/// work happens the caller must return to decode before draining more queue.
-/// The model's `fresh_prefill_batch_limit` also caps rolling mid-admit, so
-/// model-specific long-prompt limits cannot be bypassed after initial prefill.
+/// Drain at most one mid-batch admit chunk from the admission queue.
+/// Full-prompt rolling admits obey the model's `fresh_prefill_batch_limit`.
+/// Multi-chunk admits may start in a spare slot beyond that limit because
+/// each chunk yields back to the rolling loop before the next chunk runs.
+/// Once any admission work happens the caller must return to decode before
+/// draining more queue.
 ///
 /// IMPORTANT: `admit_mid` is only legal in `Decoding` phase. If
 /// `gc_finished_rows` just transitioned the scheduler to `Finished`
@@ -885,6 +928,7 @@ fn enqueue_or_reject(
 /// early here so we do not call `admit_mid` in an illegal phase.
 fn drain_admission_queue<M>(
     queue: &mut VecDeque<PendingAdmit>,
+    in_flight_mid_admit: &mut Option<AdmitMidHandle>,
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
@@ -898,12 +942,18 @@ where
     if sched.phase() != Phase::Decoding {
         return false;
     }
+    if in_flight_mid_admit.is_some() {
+        return false;
+    }
     while sched.active_count() < b_max {
         let Some(pending) = queue.front() else {
             return false;
         };
-        let rolling_limit = fresh_prefill_batch_limit_for_request::<M>(&pending.request, b_max);
-        if sched.active_count() >= rolling_limit {
+        if !can_start_rolling_mid_admit_for_request::<M>(
+            &pending.request,
+            sched.active_count(),
+            b_max,
+        ) {
             return false;
         }
         let pending = queue
@@ -913,8 +963,14 @@ where
             request: pending.request,
             reply_tx: pending.reply_tx,
         };
-        let did_admission_work =
-            handle_admit_mid_chunked(cmd, sched, event_txs, admit_count, model);
+        let did_admission_work = start_mid_admit_one_chunk(
+            cmd,
+            in_flight_mid_admit,
+            sched,
+            event_txs,
+            admit_count,
+            model,
+        );
         // Re-check phase after each mid-admit — if admit_mid itself
         // exhausted remaining rows and transitioned to Finished, stop.
         if did_admission_work || sched.phase() != Phase::Decoding {
@@ -1432,9 +1488,11 @@ mod tests {
         let mut queue = VecDeque::from([pending_1, pending_2, pending_3]);
         let mut event_txs = HashMap::new();
         let admit_count = Arc::new(AtomicU64::new(0));
+        let mut in_flight_mid_admit = None;
 
         let did_admit = drain_admission_queue(
             &mut queue,
+            &mut in_flight_mid_admit,
             &mut sched,
             &mut event_txs,
             &admit_count,
@@ -1453,6 +1511,7 @@ mod tests {
             2,
             "one active row plus exactly one mid-admitted row"
         );
+        assert!(in_flight_mid_admit.is_none());
     }
 
     #[test]
@@ -1479,9 +1538,11 @@ mod tests {
         let mut queue = VecDeque::from([pending_1, pending_2]);
         let mut event_txs = HashMap::new();
         let admit_count = Arc::new(AtomicU64::new(0));
+        let mut in_flight_mid_admit = None;
 
         let did_admit = drain_admission_queue(
             &mut queue,
+            &mut in_flight_mid_admit,
             &mut sched,
             &mut event_txs,
             &admit_count,
@@ -1500,6 +1561,65 @@ mod tests {
         );
         assert_eq!(sched.active_count(), 2);
         assert_eq!(admit_count.load(Ordering::Relaxed), 0);
+        assert!(in_flight_mid_admit.is_none());
+    }
+
+    #[test]
+    fn drain_admission_queue_starts_chunked_mid_admit_beyond_rolling_limit() {
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+        let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        sched.admit(mk_req(11)).expect("initial admit 1");
+        sched.admit(mk_req(12)).expect("initial admit 2");
+        let prefill_events = sched
+            .prefill_admitted(&SchedulerActorFakeModel)
+            .expect("initial prefill");
+        assert_eq!(prefill_events.len(), 2);
+        assert_eq!(sched.phase(), Phase::Decoding);
+        assert_eq!(sched.active_count(), 2);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let mut chunked_req = mk_req(21);
+        chunked_req.prompt_ids = vec![21, 22, 23, 24];
+        chunked_req.prefill_chunk_size = 2;
+        let _reply_rx = reply_rx;
+        let mut queue = VecDeque::from([PendingAdmit {
+            request: chunked_req,
+            reply_tx,
+        }]);
+        let mut event_txs = HashMap::new();
+        let admit_count = Arc::new(AtomicU64::new(0));
+        let mut in_flight_mid_admit = None;
+
+        let did_admit = drain_admission_queue(
+            &mut queue,
+            &mut in_flight_mid_admit,
+            &mut sched,
+            &mut event_txs,
+            &admit_count,
+            &model,
+            4,
+        );
+
+        assert!(
+            did_admit,
+            "chunked queued requests may start prefill under decode-cadence protection"
+        );
+        assert_eq!(queue.len(), 0);
+        assert_eq!(sched.active_count(), 3);
+        assert_eq!(
+            admit_count.load(Ordering::Relaxed),
+            0,
+            "the request should not count as admitted until the final chunk samples its first token"
+        );
+        assert!(
+            in_flight_mid_admit.is_some(),
+            "multi-chunk mid-admit should yield after one chunk"
+        );
     }
 
     /// Drop the SchedulerActorHandle (and thus cmd_tx); confirm the driver

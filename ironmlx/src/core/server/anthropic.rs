@@ -247,13 +247,9 @@ where
         p5h_root_span: None,
     };
 
-    // COMPAT(3b-2/3b-4): long-prompt fallback to GS sunsets in 3c+
-    // chunked-prefill phase. Note: when prefill_chunk_size == 0 (chunking
-    // disabled by config), this predicate routes ALL text requests to the
-    // SchedulerActor regardless of length — equivalent to the GS path's
-    // behavior when chunking is also disabled there.
     let prompt_len = request.prompt_ids.len();
-    let use_scheduler = state.prefill_chunk_size == 0 || prompt_len <= state.prefill_chunk_size;
+    let use_scheduler =
+        super::should_route_to_scheduler::<M>(prompt_len, state.prefill_chunk_size, state.b_max);
 
     match (stream, use_scheduler) {
         (true, true) => serve_via_scheduler_stream(state, request, model_label, input_tokens).await,

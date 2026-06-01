@@ -286,9 +286,8 @@ pub struct StepEvent {
 /// State shared across the three `admit_mid_*` calls that make up a
 /// chunked mid-batch admit (B1-p2.3c+). Built by [`Scheduler::admit_mid_begin`],
 /// mutated by [`Scheduler::admit_mid_chunk`] calls, consumed by
-/// [`Scheduler::admit_mid_finalize`]. The caller
-/// (`SchedulerActor::driver_loop`'s `handle_admit_mid_chunked`) owns this
-/// between calls and interleaves `Scheduler::step` between chunks so
+/// [`Scheduler::admit_mid_finalize`]. `SchedulerActor::driver_loop` owns
+/// this between calls and interleaves `Scheduler::step` between chunks so
 /// active rows continue emitting tokens during a long-prompt mid-batch
 /// admit.
 ///
