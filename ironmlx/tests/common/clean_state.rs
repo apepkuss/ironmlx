@@ -7,6 +7,9 @@
 //! `docs/superpowers/specs/2026-05-18-b1-p2-5-production-hardening-design.md`
 //! §4.3 G4 for rationale.
 
+// Shared test helpers: each integration-test crate uses a subset, so unused-in-this-crate items are expected.
+#![allow(dead_code)]
+
 use std::process::Command;
 use std::time::Instant;
 

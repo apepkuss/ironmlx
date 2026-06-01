@@ -7,6 +7,9 @@
 //! general entry-point that accepts the directory explicitly.  Tests that all
 //! share the VL fixture dir can use the `FIXTURE_DIR_VL` const directly.
 
+// Shared test helpers: each integration-test crate uses a subset, so unused-in-this-crate items are expected.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 use mlx::{ops, Array, Dtype};
