@@ -214,6 +214,7 @@ pub async fn expand_image_parts_in_messages(
     let spatial_merge_size = match vision_input {
         VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
         VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
+        VisionInputConfig::MiniCpmV46 { spatial_merge_size } => *spatial_merge_size,
     };
     if spatial_merge_size <= 0 {
         return Err(anyhow::anyhow!(
@@ -246,6 +247,18 @@ pub async fn expand_image_parts_in_messages(
                             placeholders.push(gemma4_placeholder(processed.soft_tokens));
                             grid_thw.push((1, processed.grid_h, processed.grid_w));
                             all_pixel_values.push(processed.pixel_values);
+                        }
+                        VisionInputConfig::MiniCpmV46 { .. } => {
+                            // Multi-slice (LLaVA-UHD): delegate to preprocess_sliced_to_parts,
+                            // which is the single source of truth for the divisibility guard,
+                            // token count, and placeholder construction shared with the CLI.
+                            let parts = crate::models::minicpmv4_6::preprocess_sliced_to_parts(
+                                &img_bytes,
+                                spatial_merge_size,
+                            )?;
+                            all_pixel_values.extend(parts.pixel_values);
+                            grid_thw.extend(parts.grid_thw);
+                            placeholders.push(parts.placeholder);
                         }
                     }
                 }
@@ -414,6 +427,15 @@ where
                 .map(|id| id as i32)
                 .unwrap_or(258_880),
             vision_config.pooling_kernel_size,
+        ),
+        VisionInputConfig::MiniCpmV46 { spatial_merge_size } => (
+            // image_token_id = 248056 (<|image_pad|>) per P2a fixture.
+            state
+                .tokenizer
+                .token_to_id("<|image_pad|>")
+                .map(|id| id as i32)
+                .unwrap_or(248_056),
+            *spatial_merge_size,
         ),
     };
 
@@ -1564,5 +1586,30 @@ mod tests {
         let resp = admit_err_to_response(err);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(resp.headers().get("retry-after").is_none());
+    }
+
+    /// MiniCPM-V-4.6 VisionInputConfig variant: merge-size accessor returns 4.
+    /// The inline match in expand_image_parts_in_messages must handle the new arm.
+    #[test]
+    fn minicpmv46_vision_input_merge_size() {
+        let cfg = VisionInputConfig::MiniCpmV46 {
+            spatial_merge_size: 4,
+        };
+        let size = match &cfg {
+            VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
+            VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
+            VisionInputConfig::MiniCpmV46 { spatial_merge_size } => *spatial_merge_size,
+        };
+        assert_eq!(size, 4);
+    }
+
+    /// MiniCPM-V-4.6 placeholder string: <image> + <|image_pad|>×N + </image>.
+    #[test]
+    fn minicpmv46_placeholder_format() {
+        // N=3 → [248078, 248056, 248056, 248056, 248079] when tokenised.
+        assert_eq!(
+            crate::models::minicpmv4_6::image_placeholder_string(3),
+            "<image><|image_pad|><|image_pad|><|image_pad|></image>"
+        );
     }
 }

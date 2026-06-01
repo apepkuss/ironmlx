@@ -17,11 +17,19 @@ pub enum ModelArchitecture {
     /// `model_type = "llama"` / `architectures = ["LlamaForCausalLM"]` and is a
     /// plain GQA dense checkpoint (no MoE / MLA / sliding-window / Q-K norm).
     Llama,
+    /// MiniCPM-V-4.6 (`model_type = "minicpmv4_6"`). A vision-language model
+    /// whose language backbone is Qwen3.5-text verbatim
+    /// (`text_config.model_type = "qwen3_5_text"`; mlx-vlm derives its
+    /// `LanguageModel` from `Qwen35LanguageModel`). The text path runs on the
+    /// shared [`Qwen35Dense`](Self::Qwen35Dense) execution graph; the SigLIP
+    /// vision tower + resampler are NOT yet supported, so image inputs are out
+    /// of scope (text-only).
+    MiniCpmV46,
 }
 
 impl ModelArchitecture {
     pub const EXPECTED_MODEL_TYPES: &'static str =
-        "'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', or 'llama'";
+        "'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', 'llama', or 'minicpmv4_6'";
 
     pub fn from_config_value(raw: &Value) -> Result<Self> {
         let model_type = raw
@@ -38,6 +46,7 @@ impl ModelArchitecture {
             "gemma4" => Ok(Self::Gemma4),
             "glm4_moe_lite" => Ok(Self::Glm4MoeLite),
             "llama" => Ok(Self::Llama),
+            "minicpmv4_6" => Ok(Self::MiniCpmV46),
             other => Err(anyhow!(
                 "unsupported model_type: {other} (expected {})",
                 Self::EXPECTED_MODEL_TYPES
@@ -52,6 +61,7 @@ impl ModelArchitecture {
             Self::Gemma4 => "gemma4",
             Self::Glm4MoeLite => "glm4_moe_lite",
             Self::Llama => "llama",
+            Self::MiniCpmV46 => "minicpmv4_6",
         }
     }
 }

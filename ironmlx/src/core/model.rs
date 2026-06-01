@@ -76,6 +76,16 @@ pub trait Model {
         b_max
     }
 
+    /// When this model takes a VL prefill (images present), should the position
+    /// ids be flat **sequential** (`build_position_ids`, all three MRoPE streams
+    /// identical) rather than spatial 2-D MRoPE (`build_position_ids_vl`)?
+    /// MiniCPM-V-4.6 uses sequential positions even with images (mlx-vlm
+    /// `_set_position_state` = arange broadcast). Default `false` preserves the
+    /// spatial-MRoPE behavior of Qwen3.5-VL / Gemma.
+    fn vl_positions_sequential(&self) -> bool {
+        false
+    }
+
     fn model_meta(&self) -> ModelMeta;
 
     fn num_hidden_layers(&self) -> usize;

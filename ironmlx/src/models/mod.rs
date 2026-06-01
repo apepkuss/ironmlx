@@ -19,11 +19,16 @@
 //! - **Qwen3.6 MoE facade** — `qwen3_6_moe` validates Qwen3.6 MoE checkpoint
 //!   structure and exposes Qwen3.6-specific regression hooks while delegating
 //!   numeric execution to the `qwen3_5_moe` architecture.
+//! - **MiniCPM-V-4.6 facade** — `minicpmv4_6` adapts the MiniCPM-V-4.6
+//!   `text_config` (Qwen3.5-text backbone) onto the `qwen3_5` dense execution
+//!   graph for text-only inference. The SigLIP vision tower is not yet
+//!   implemented; image inputs are out of scope.
 
 pub mod architecture;
 pub mod gemma4;
 pub mod glm4_moe_lite;
 pub mod llama;
+pub mod minicpmv4_6;
 pub mod qwen3_5;
 pub mod qwen3_5_moe;
 pub mod qwen3_6_moe;
@@ -33,6 +38,7 @@ pub use architecture::ModelArchitecture;
 pub use gemma4::{Gemma4Config, Gemma4Model, Gemma4TextConfig};
 pub use glm4_moe_lite::{Glm4MoeLiteConfig, Glm4MoeLiteModel};
 pub use llama::{LlamaConfig, LlamaModel};
+pub use minicpmv4_6::MiniCpmV46Model;
 pub use qwen3_5::{Qwen35Config, Qwen35Model, Qwen35TextModel, RopeParams};
 pub use qwen3_5_moe::{
     Qwen35MoeConfig, Qwen35MoeModel, Qwen35MoeTextModel, RopeParams as MoeRopeParams,

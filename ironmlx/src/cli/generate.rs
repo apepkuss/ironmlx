@@ -188,6 +188,32 @@ fn prepare_images(
                 .or(cfg.image_token_id)
                 .unwrap_or(258_880),
         )
+    } else if model_type == "minicpmv4_6" {
+        // MiniCPM-V-4.6: use model-config image_token_id (248056 = <|image_pad|>);
+        // spatial_merge_size = 4 (2×2 Merger, "16x" downsample mode).
+        // Multi-slice (LLaVA-UHD): source slice first, then refine patches row-major.
+        // preprocess_sliced_to_parts is the single source of truth for the
+        // divisibility guard and placeholder construction (CLI + serve share it).
+        let vcfg = crate::models::minicpmv4_6::config::MiniCpmV46VisionConfig::from_loader(loader)
+            .context("MiniCpmV46VisionConfig::from_loader")?;
+        // image_token_id: tokenizer lookup (<|image_pad|> → 248056) first; fallback to config image_token_id.
+        let image_tok_id = tokenizer
+            .token_to_id("<|image_pad|>")
+            .map(|id| id as i32)
+            .unwrap_or(vcfg.image_token_id);
+        for path in &args.images {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading --image {}", path.display()))?;
+            let parts = crate::models::minicpmv4_6::preprocess_sliced_to_parts(
+                &bytes,
+                default_spatial_merge_size,
+            )
+            .with_context(|| format!("preprocessing --image {}", path.display()))?;
+            all_pixel_values.extend(parts.pixel_values);
+            grids.extend(parts.grid_thw);
+            placeholders.push(parts.placeholder);
+        }
+        (default_spatial_merge_size, image_tok_id)
     } else {
         for path in &args.images {
             let bytes = std::fs::read(path)
@@ -338,6 +364,11 @@ pub fn run(args: GenerateArgs) -> Result<()> {
                 .context("LlamaModel::from_loader")?;
             run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
+        crate::models::ModelArchitecture::MiniCpmV46 => {
+            let model = crate::models::minicpmv4_6::model_from_loader(&loader)
+                .context("minicpmv4_6::model_from_loader")?;
+            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+        }
     }
 }
 
@@ -355,6 +386,19 @@ mod tests {
     #[test]
     fn image_token_count_uses_spatial_merge_size() {
         assert_eq!(image_token_count_for_grid((1, 4, 6), 2).unwrap(), 6);
+    }
+
+    #[test]
+    fn minicpmv46_image_token_count_uses_4x_downsample() {
+        // MiniCPM-V grid (28,36) → vision tokens (28/4)*(36/4) = 63.
+        assert_eq!(image_token_count_for_grid((1, 28, 36), 4).unwrap(), 63);
+    }
+
+    #[test]
+    fn minicpmv46_placeholder_wraps_correct_tokens() {
+        // Verify the canonical fn builds the correct <image>...<|image_pad|>...</image> string.
+        let s = crate::models::minicpmv4_6::image_placeholder_string(3);
+        assert_eq!(s, "<image><|image_pad|><|image_pad|><|image_pad|></image>");
     }
 
     #[test]
@@ -400,5 +444,79 @@ mod tests {
             inject_image_placeholders("A <image>", &["[img0]".to_owned(), "[img1]".to_owned()])
                 .expect_err("marker mismatch");
         assert!(err.to_string().contains("markers"));
+    }
+
+    /// Verify the slice→token-count + placeholder wiring without a real model or
+    /// image decode. Synthetic slice list: source grid (28,36), two refine patches
+    /// (40,28) each — matching a 640×480 coco-sample-like image with best_grid (2,1).
+    ///
+    /// source_tokens = (28/4)*(36/4) = 7*9 = 63
+    /// slice_tokens  = (40/4)*(28/4) = 10*7 = 70
+    /// grid (2,1) → 1 row × 2 cols → 2 <slice> blocks, 0 inter-row newlines
+    #[test]
+    fn minicpmv46_multislice_token_count_and_placeholder_wiring() {
+        let spatial_merge_size = 4_i32;
+        let best_grid: Option<(i32, i32)> = Some((2, 1));
+
+        // Synthetic per-slice (gh, gw) pairs: [source, patch0, patch1].
+        let slice_grids: Vec<(i32, i32)> = vec![(28, 36), (40, 28), (40, 28)];
+
+        // Source tokens: slice[0].
+        let (src_gh, src_gw) = slice_grids[0];
+        let source_tokens =
+            ((src_gh / spatial_merge_size) * (src_gw / spatial_merge_size)) as usize;
+        assert_eq!(source_tokens, 63, "source_tokens = (28/4)*(36/4) = 63");
+
+        // Slice tokens: slice[1] (first patch; all patches have the same grid).
+        let slice_tokens = if slice_grids.len() > 1 {
+            let (sl_gh, sl_gw) = slice_grids[1];
+            ((sl_gh / spatial_merge_size) * (sl_gw / spatial_merge_size)) as usize
+        } else {
+            0
+        };
+        assert_eq!(slice_tokens, 70, "slice_tokens = (40/4)*(28/4) = 70");
+
+        // Build the placeholder using the canonical function.
+        let grid = best_grid.unwrap_or((0, 0));
+        let placeholder = crate::models::minicpmv4_6::sliced_image_placeholder_string(
+            source_tokens,
+            slice_tokens,
+            grid,
+        );
+
+        // Structural checks: 1 <image>, 2 <slice>, no inter-row newlines.
+        assert_eq!(
+            placeholder.matches("<image>").count(),
+            1,
+            "exactly one <image> block"
+        );
+        assert_eq!(
+            placeholder.matches("</image>").count(),
+            1,
+            "exactly one </image>"
+        );
+        assert_eq!(
+            placeholder.matches("<slice>").count(),
+            2,
+            "grid (2,1) → 2 <slice> blocks"
+        );
+        assert_eq!(
+            placeholder.matches("</slice>").count(),
+            2,
+            "grid (2,1) → 2 </slice>"
+        );
+        assert_eq!(
+            placeholder.matches('\n').count(),
+            0,
+            "single row → 0 inter-row newlines"
+        );
+
+        // Token counts embedded in placeholder.
+        let pad_count = placeholder.matches("<|image_pad|>").count();
+        assert_eq!(
+            pad_count,
+            source_tokens + 2 * slice_tokens,
+            "total pads = 63 + 2*70 = 203"
+        );
     }
 }

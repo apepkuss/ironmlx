@@ -1155,6 +1155,10 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
             let ve = model.compute_vision_embeds(pv, grids, ().into())?;
             let pos_full = if dummy_position_ids.is_some() {
                 None
+            } else if model.vl_positions_sequential() {
+                // MiniCPM-V: flat sequential positions over the whole prompt
+                // (image tokens included); all three MRoPE streams identical.
+                Some(build_position_ids(0, prompt_len as i32)?)
             } else {
                 let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
                 Some(build_position_ids_vl(
@@ -2027,6 +2031,19 @@ mod tests {
                 assert_eq!(v[stream * 4 + k], 5 + k as i32, "stream {stream}, k {k}");
             }
         }
+    }
+
+    /// Contract test: `build_position_ids(0, S)` produces flat sequential
+    /// positions `[0, 1, …, S-1]` across all 3 MRoPE streams — the invariant that
+    /// `GenerationStream`'s `vl_positions_sequential` branch relies on.
+    #[test]
+    fn build_position_ids_is_flat_sequential_three_streams() {
+        let p = build_position_ids(0, 4).unwrap();
+        assert_eq!(p.shape().as_slice(), &[3, 1, 4]);
+        let v: Vec<i32> = p.to_vec().unwrap();
+        assert_eq!(&v[0..4], &[0, 1, 2, 3]);
+        assert_eq!(&v[4..8], &[0, 1, 2, 3]);
+        assert_eq!(&v[8..12], &[0, 1, 2, 3]);
     }
 
     #[test]
