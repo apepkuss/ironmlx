@@ -14,6 +14,7 @@ pub struct CellStats {
     pub tg_tps_median: f64,
     pub tg_tps_p95: f64,
     pub tpot_ms_median: f64,
+    pub tpot_ms_p95: f64,
     pub pp_tps_median: f64,
     pub e2e_s_median: f64,
     pub e2e_s_p95: f64,
@@ -80,7 +81,8 @@ pub fn reduce_cell(c: &CellResult) -> CellStats {
         ttft_ms_p95: p95(&mut ttft_ms),
         tg_tps_median: median(&mut tg_tps.clone()),
         tg_tps_p95: p95(&mut tg_tps),
-        tpot_ms_median: median(&mut tpot_ms),
+        tpot_ms_median: median(&mut tpot_ms.clone()),
+        tpot_ms_p95: p95(&mut tpot_ms),
         pp_tps_median: median(&mut pp_tps),
         e2e_s_median: median(&mut e2e_s.clone()),
         e2e_s_p95: p95(&mut e2e_s),
@@ -108,6 +110,7 @@ pub struct ConcurrentCellStats {
     pub itl_ms_p50: f64,
     pub itl_ms_p95: f64,
     pub itl_ms_p99: f64,
+    pub e2e_s_p95: f64,
     // Aggregate throughput
     pub agg_tokens_per_sec: f64,
     pub agg_req_per_sec: f64,
@@ -134,6 +137,7 @@ pub fn reduce_concurrent_cell(c: &crate::runner::ConcurrentCellResult) -> Concur
 
     let mut ttft_ms: Vec<f64> = Vec::with_capacity(n);
     let mut itl_ms: Vec<f64> = Vec::with_capacity(n);
+    let mut e2e_s: Vec<f64> = Vec::with_capacity(n);
     let mut total_tokens: u64 = 0;
     let mut finish_reasons: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
@@ -145,6 +149,7 @@ pub fn reduce_concurrent_cell(c: &crate::runner::ConcurrentCellResult) -> Concur
         let r = &outcome.result;
         let ttft = r.timings.ttft();
         let gen = r.timings.gen_duration();
+        let e2e = r.timings.e2e();
 
         let completion_tokens = r
             .server_completion_tokens
@@ -159,6 +164,7 @@ pub fn reduce_concurrent_cell(c: &crate::runner::ConcurrentCellResult) -> Concur
         // Floor divisor to 1.0 when completion <= 1 (matches reduce_cell TPOT semantics).
         let itl_div = (completion_tokens - 1.0).max(1.0);
         itl_ms.push((gen_seconds / itl_div) * 1000.0);
+        e2e_s.push(e2e.as_secs_f64());
 
         total_tokens = total_tokens.saturating_add(completion_tokens as u64);
 
@@ -176,6 +182,7 @@ pub fn reduce_concurrent_cell(c: &crate::runner::ConcurrentCellResult) -> Concur
 
     ttft_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     itl_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    e2e_s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let agg_tokens_per_sec = (total_tokens as f64) / wall_duration_s;
     let agg_req_per_sec = (n as f64) / wall_duration_s;
@@ -208,6 +215,7 @@ pub fn reduce_concurrent_cell(c: &crate::runner::ConcurrentCellResult) -> Concur
         itl_ms_p50: percentile(&itl_ms, 50.0),
         itl_ms_p95: percentile(&itl_ms, 95.0),
         itl_ms_p99: percentile(&itl_ms, 99.0),
+        e2e_s_p95: percentile(&e2e_s, 95.0),
         agg_tokens_per_sec,
         agg_req_per_sec,
         per_worker_req_count,
@@ -771,6 +779,120 @@ pub fn render_json_concurrent(
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutotuneProfileConfig {
+    pub b_max: usize,
+    pub prefill_chunk_size: usize,
+    pub admission_deadline_ms: u64,
+    pub admission_queue_max: usize,
+    pub max_cache_cap: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutotuneExportOptions {
+    pub model_name: String,
+    pub hardware_label: String,
+    pub config: AutotuneProfileConfig,
+    pub memory_budget_ok: bool,
+}
+
+pub fn render_autotune_json_sequential(
+    cells: &[CellResult],
+    options: &AutotuneExportOptions,
+) -> String {
+    let measurements: Vec<serde_json::Value> = cells
+        .iter()
+        .map(|cell| {
+            let stats = reduce_cell(cell);
+            autotune_measurement_json(
+                options,
+                stats.pp_target,
+                stats.tg_target,
+                1,
+                stats.ttft_ms_p95,
+                stats.tpot_ms_p95,
+                stats.e2e_s_p95,
+                stats.tg_tps_median,
+                stats.cached_tokens_warning,
+            )
+        })
+        .collect();
+    render_autotune_root(options, measurements)
+}
+
+pub fn render_autotune_json_concurrent(
+    cells: &[crate::runner::ConcurrentCellResult],
+    options: &AutotuneExportOptions,
+) -> String {
+    let measurements: Vec<serde_json::Value> = cells
+        .iter()
+        .map(|cell| {
+            let stats = reduce_concurrent_cell(cell);
+            autotune_measurement_json(
+                options,
+                stats.pp_target,
+                stats.tg_target,
+                stats.concurrent,
+                stats.ttft_ms_p95,
+                stats.itl_ms_p95,
+                stats.e2e_s_p95,
+                stats.agg_tokens_per_sec,
+                stats.cached_tokens_warning,
+            )
+        })
+        .collect();
+    render_autotune_root(options, measurements)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn autotune_measurement_json(
+    options: &AutotuneExportOptions,
+    prompt_len: usize,
+    max_new_tokens: usize,
+    concurrency: usize,
+    ttft_ms_p95: f64,
+    itl_ms_p95: f64,
+    e2e_s_p95: f64,
+    tokens_per_sec: f64,
+    cached_tokens_warning: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "config": autotune_config_json(options.config),
+        "prompt_len": prompt_len,
+        "max_new_tokens": max_new_tokens,
+        "concurrency": concurrency,
+        "ttft_ms_p95": ttft_ms_p95,
+        "itl_ms_p95": itl_ms_p95,
+        "e2e_s_p95": e2e_s_p95,
+        "tokens_per_sec": tokens_per_sec,
+        "memory_budget_ok": options.memory_budget_ok,
+        "cached_tokens_warning": cached_tokens_warning,
+    })
+}
+
+fn render_autotune_root(
+    options: &AutotuneExportOptions,
+    measurements: Vec<serde_json::Value>,
+) -> String {
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "model_name": options.model_name,
+        "hardware_label": options.hardware_label,
+        "measurements": measurements,
+    });
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn autotune_config_json(config: AutotuneProfileConfig) -> serde_json::Value {
+    serde_json::json!({
+        "b_max": config.b_max,
+        "prefill_chunk_size": config.prefill_chunk_size,
+        "admission_deadline_ms": config.admission_deadline_ms,
+        "admission_queue_max": config.admission_queue_max,
+        "max_cache_cap": config.max_cache_cap,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,5 +1260,127 @@ mod tests {
         );
 
         assert!(!stats.cached_tokens_warning);
+    }
+
+    #[test]
+    fn autotune_json_sequential_exports_scheduler_calibration_schema() {
+        let mut cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 2048,
+            tg_target: 128,
+            runs: vec![fake_outcome(0, 120.0, 1280.0, 128)],
+        };
+        cell.runs[0].result.server_cached_tokens = Some(7);
+
+        let options = AutotuneExportOptions {
+            model_name: "GLM-4.7-flash-4bit".to_string(),
+            hardware_label: "m3-max".to_string(),
+            config: AutotuneProfileConfig {
+                b_max: 2,
+                prefill_chunk_size: 1024,
+                admission_deadline_ms: 5,
+                admission_queue_max: 32,
+                max_cache_cap: 32768,
+            },
+            memory_budget_ok: true,
+        };
+
+        let raw = render_autotune_json_sequential(&[cell], &options);
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["model_name"], "GLM-4.7-flash-4bit");
+        assert_eq!(json["hardware_label"], "m3-max");
+
+        let measurements = json["measurements"].as_array().expect("measurements array");
+        assert_eq!(measurements.len(), 1);
+        let row = &measurements[0];
+        assert_eq!(row["config"]["b_max"], 2);
+        assert_eq!(row["config"]["prefill_chunk_size"], 1024);
+        assert_eq!(row["config"]["admission_deadline_ms"], 5);
+        assert_eq!(row["config"]["admission_queue_max"], 32);
+        assert_eq!(row["config"]["max_cache_cap"], 32768);
+        assert_eq!(row["prompt_len"], 2048);
+        assert_eq!(row["max_new_tokens"], 128);
+        assert_eq!(row["concurrency"], 1);
+        assert_eq!(row["memory_budget_ok"], true);
+        assert_eq!(row["cached_tokens_warning"], true);
+        assert!(row["ttft_ms_p95"].as_f64().unwrap() > 0.0);
+        assert!(row["itl_ms_p95"].as_f64().unwrap() > 0.0);
+        assert!(row["e2e_s_p95"].as_f64().unwrap() > 0.0);
+        assert!(row["tokens_per_sec"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn autotune_json_concurrent_exports_scheduler_calibration_schema() {
+        use crate::runner::{ConcurrentCellResult, RequestOutcome};
+
+        let cell_start = Instant::now();
+        let cell_end = cell_start + Duration::from_secs(1);
+        let mut outcomes = Vec::new();
+        for worker_id in 0..2_usize {
+            for _ in 0..3_usize {
+                let start = Instant::now();
+                let first_token = start + Duration::from_millis(10);
+                let end = first_token + Duration::from_millis(90);
+                outcomes.push(RequestOutcome {
+                    worker_id,
+                    prompt_tokens_local: 2048,
+                    result: RequestResult {
+                        timings: RequestTimings {
+                            start,
+                            first_token: Some(first_token),
+                            end,
+                        },
+                        server_prompt_tokens: Some(2048),
+                        server_completion_tokens: Some(5),
+                        server_cached_tokens: Some(0),
+                        chunk_count: 5,
+                        finish_reason: "stop".to_string(),
+                        content_chars: 20,
+                        request_id: None,
+                    },
+                });
+            }
+        }
+
+        let cell = ConcurrentCellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 2048,
+            tg_target: 128,
+            concurrent: 2,
+            cell_start,
+            cell_end,
+            outcomes,
+        };
+
+        let options = AutotuneExportOptions {
+            model_name: "GLM-4.7-flash-4bit".to_string(),
+            hardware_label: "m3-max".to_string(),
+            config: AutotuneProfileConfig {
+                b_max: 2,
+                prefill_chunk_size: 1024,
+                admission_deadline_ms: 5,
+                admission_queue_max: 32,
+                max_cache_cap: 32768,
+            },
+            memory_budget_ok: false,
+        };
+
+        let raw = render_autotune_json_concurrent(&[cell], &options);
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let row = &json["measurements"][0];
+
+        assert_eq!(row["prompt_len"], 2048);
+        assert_eq!(row["max_new_tokens"], 128);
+        assert_eq!(row["concurrency"], 2);
+        assert_eq!(row["memory_budget_ok"], false);
+        assert_eq!(row["cached_tokens_warning"], false);
+        assert_eq!(row["ttft_ms_p95"].as_f64().unwrap(), 10.0);
+        assert_eq!(row["itl_ms_p95"].as_f64().unwrap(), 22.5);
+        assert!((row["e2e_s_p95"].as_f64().unwrap() - 0.1).abs() < 1e-6);
+        assert_eq!(row["tokens_per_sec"].as_f64().unwrap(), 30.0);
     }
 }

@@ -165,10 +165,122 @@ flowchart TD
 - 如果输入没有 `concurrency > 1`，输出 `no_concurrent_coverage` warning。
 - 如果只剩一个完整候选，输出 `single_candidate` warning，提示这是验证而不是比较。
 
-## 6. 后续研究问题
+## 6. iron-bench 到 calibration JSON 的衔接
+
+`iron-bench` 新增 `--format autotune-json`，用于把一次 benchmark 结果导出为 `ironmlx scheduler-autotune` 可读取的 calibration JSON。该路径仍然是离线诊断能力：
+
+- 不依赖 `ironmlx` crate，保持 engine-neutral。
+- 不从服务端猜测 scheduler 参数。
+- 不应用 profile，不写配置文件。
+- 每次导出只代表一个候选 scheduler config。
+
+### 单候选导出
+
+顺序模式示例：
+
+```bash
+cargo run --release -p iron-bench -- \
+  --target ironmlx=http://localhost:8080 \
+  --model-dir /path/to/GLM-4.7-flash-4bit/snapshot \
+  --model GLM-4.7-flash-4bit \
+  --prompt-len 1024,2048,4096 \
+  --max-tokens 128 \
+  --runs 5 \
+  --warmup 1 \
+  --format autotune-json \
+  --autotune-hardware-label m3-max \
+  --autotune-b-max 2 \
+  --autotune-prefill-chunk-size 1024 \
+  --autotune-admission-deadline-ms 5 \
+  --autotune-admission-queue-max 32 \
+  --autotune-max-cache-cap 32768 \
+  > candidate-b2-c1024.json
+```
+
+并发模式示例：
+
+```bash
+cargo run --release -p iron-bench -- \
+  --target ironmlx=http://localhost:8080 \
+  --model-dir /path/to/GLM-4.7-flash-4bit/snapshot \
+  --model GLM-4.7-flash-4bit \
+  --prompt-len 1024,2048,4096 \
+  --max-tokens 128 \
+  --concurrent 2 \
+  --duration 30 \
+  --warmup-duration 5 \
+  --format autotune-json \
+  --autotune-hardware-label m3-max \
+  --autotune-b-max 2 \
+  --autotune-prefill-chunk-size 1024 \
+  --autotune-admission-deadline-ms 5 \
+  --autotune-admission-queue-max 32 \
+  --autotune-max-cache-cap 32768 \
+  > candidate-b2-c1024-concurrent.json
+```
+
+`--format autotune-json` 要求恰好一个 `--target`，因为 calibration schema 没有 target 字段。对比多个候选时，应分别用不同 server 参数启动 ironmlx，分别导出 JSON，再合并 measurements。
+
+### 字段映射
+
+| iron-bench 模式 | calibration 字段 | 来源 |
+|---|---|---|
+| 顺序 | `prompt_len` | `pp_target` |
+| 顺序 | `max_new_tokens` | `tg_target` |
+| 顺序 | `concurrency` | 固定为 1 |
+| 顺序 | `ttft_ms_p95` | 顺序 cell 的 TTFT p95 |
+| 顺序 | `itl_ms_p95` | 顺序 cell 的 TPOT p95 |
+| 顺序 | `e2e_s_p95` | 顺序 cell 的 E2E p95 |
+| 顺序 | `tokens_per_sec` | 顺序 cell 的 decode TPS median |
+| 并发 | `prompt_len` | `pp_target` |
+| 并发 | `max_new_tokens` | `tg_target` |
+| 并发 | `concurrency` | `--concurrent` worker 数 |
+| 并发 | `ttft_ms_p95` | 并发 cell 的 TTFT p95 |
+| 并发 | `itl_ms_p95` | 并发 cell 的 ITL p95 |
+| 并发 | `e2e_s_p95` | 并发请求 E2E p95 |
+| 并发 | `tokens_per_sec` | 并发 aggregate tokens/s |
+
+`memory_budget_ok` 默认导出为 `true`。如果本次候选在启动诊断或实际运行中已经确认超过内存预算，应追加：
+
+```bash
+--autotune-memory-budget-unsafe
+```
+
+此时导出的 measurements 会带 `memory_budget_ok=false`，后续 selector 会拒绝该候选。
+
+### 多候选合并与选择
+
+多个候选的 JSON 可以合并为一个 calibration 文件：
+
+```bash
+jq -s '{
+  schema_version: 1,
+  model_name: .[0].model_name,
+  hardware_label: .[0].hardware_label,
+  measurements: map(.measurements[])
+}' candidate-*.json > calibration.json
+```
+
+然后运行：
+
+```bash
+cargo run --release -p ironmlx -- \
+  scheduler-autotune \
+  --input calibration.json \
+  --format text
+```
+
+公平性要求：
+
+- 所有候选必须覆盖同一组 `(prompt_len, max_new_tokens, concurrency)` 场景。
+- 不要混合不同模型、不同硬件或不同采样协议的候选。
+- 如果 prefix cache 命中导致 `cached_tokens_warning=true`，selector 会拒绝该候选。
+- 对 agent 场景，至少应覆盖 `prompt_len >= 1024` 和 `concurrency > 1`。
+
+## 7. 后续研究问题
 
 - agent 常见长 prompt 下，TTFT 与 ITL 哪个应作为主优化目标，需要按产品场景定义权重。
 - chunk 粒度应按模型、prompt 长度、机器内存和 decode cadence 综合决定，不能只用固定阈值。
 - 离线 profile 的持久化位置、版本兼容和手动参数优先级需要单独设计。
-- 如何从 `iron-bench` 自动生成 `measurements` schema 仍需后续衔接。
+- 如何把多个 `iron-bench --format autotune-json` 候选自动合并为一个 calibration 文件仍需后续衔接。
 - 真正运行时 autotune 是否允许根据 `/healthz` 和队列状态动态调整策略，需要先证明不会引入抖动。

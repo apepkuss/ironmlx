@@ -79,6 +79,34 @@ struct Args {
     #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
     format: OutputFormat,
 
+    /// Hardware label to embed in `--format autotune-json` output.
+    #[arg(long)]
+    pub autotune_hardware_label: Option<String>,
+
+    /// Scheduler b_max value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_b_max: Option<usize>,
+
+    /// Scheduler prefill_chunk_size value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_prefill_chunk_size: Option<usize>,
+
+    /// Scheduler admission_deadline_ms value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_admission_deadline_ms: Option<u64>,
+
+    /// Scheduler admission_queue_max value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_admission_queue_max: Option<usize>,
+
+    /// Scheduler max_cache_cap value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_max_cache_cap: Option<usize>,
+
+    /// Mark exported autotune measurements as memory-budget unsafe.
+    #[arg(long, default_value_t = false)]
+    pub autotune_memory_budget_unsafe: bool,
+
     /// HTTP request timeout (seconds).
     #[arg(long, default_value_t = 300)]
     timeout: u64,
@@ -114,17 +142,63 @@ struct Args {
     pub nonce_seed: Option<u64>,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum OutputFormat {
     Markdown,
     Csv,
     Json,
+    AutotuneJson,
 }
 
 fn parse_target(s: &str) -> std::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(name, url)| (name.into(), url.trim_end_matches('/').into()))
         .ok_or_else(|| format!("expected name=URL, got '{s}'"))
+}
+
+impl Args {
+    fn autotune_export_options(&self) -> Result<Option<report::AutotuneExportOptions>> {
+        if self.format != OutputFormat::AutotuneJson {
+            return Ok(None);
+        }
+
+        if self.target.len() != 1 {
+            anyhow::bail!(
+                "--format autotune-json requires exactly one --target because the calibration schema has no target field"
+            );
+        }
+
+        let hardware_label = self
+            .autotune_hardware_label
+            .clone()
+            .context("--autotune-hardware-label is required with --format autotune-json")?;
+        if hardware_label.trim().is_empty() {
+            anyhow::bail!("--autotune-hardware-label must not be empty");
+        }
+
+        Ok(Some(report::AutotuneExportOptions {
+            model_name: self.model.clone(),
+            hardware_label,
+            config: report::AutotuneProfileConfig {
+                b_max: self
+                    .autotune_b_max
+                    .context("--autotune-b-max is required with --format autotune-json")?,
+                prefill_chunk_size: self.autotune_prefill_chunk_size.context(
+                    "--autotune-prefill-chunk-size is required with --format autotune-json",
+                )?,
+                admission_deadline_ms: self.autotune_admission_deadline_ms.context(
+                    "--autotune-admission-deadline-ms is required with --format autotune-json",
+                )?,
+                admission_queue_max: self.autotune_admission_queue_max.context(
+                    "--autotune-admission-queue-max is required with --format autotune-json",
+                )?,
+                max_cache_cap: self
+                    .autotune_max_cache_cap
+                    .context("--autotune-max-cache-cap is required with --format autotune-json")?,
+            },
+            memory_budget_ok: !self.autotune_memory_budget_unsafe,
+        }))
+    }
 }
 
 #[tokio::main]
@@ -196,6 +270,8 @@ async fn main() -> Result<()> {
             "--nonce-seed is incompatible with --fixed-prompt-file: fixed prompts do not use nonces."
         );
     }
+
+    let autotune_options = args.autotune_export_options()?;
 
     // Load tokenizer.json before building prompt sources so fixed prompts get
     // an accurate local PP label.
@@ -333,6 +409,12 @@ async fn main() -> Result<()> {
                     args.capture_run_timestamps,
                 ),
                 OutputFormat::Json => report::render_json(&seq_cells, &args.target, args.warmup),
+                OutputFormat::AutotuneJson => report::render_autotune_json_sequential(
+                    &seq_cells,
+                    autotune_options
+                        .as_ref()
+                        .expect("autotune options are validated before benchmark execution"),
+                ),
             }
         }
         Some(concurrent) => {
@@ -359,10 +441,57 @@ async fn main() -> Result<()> {
                     args.duration,
                     args.warmup_duration,
                 ),
+                OutputFormat::AutotuneJson => report::render_autotune_json_concurrent(
+                    &conc_cells,
+                    autotune_options
+                        .as_ref()
+                        .expect("autotune options are validated before benchmark execution"),
+                ),
             }
         }
     };
     println!("{out}");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Args, OutputFormat};
+
+    #[test]
+    fn autotune_cli_parses_output_format_and_scheduler_config() {
+        let args = Args::parse_from([
+            "iron-bench",
+            "--target",
+            "ironmlx=http://localhost:8080",
+            "--model-dir",
+            "/tmp/model",
+            "--format",
+            "autotune-json",
+            "--autotune-hardware-label",
+            "m3-max",
+            "--autotune-b-max",
+            "2",
+            "--autotune-prefill-chunk-size",
+            "1024",
+            "--autotune-admission-deadline-ms",
+            "5",
+            "--autotune-admission-queue-max",
+            "32",
+            "--autotune-max-cache-cap",
+            "32768",
+        ]);
+
+        assert!(matches!(args.format, OutputFormat::AutotuneJson));
+        assert_eq!(args.autotune_hardware_label.as_deref(), Some("m3-max"));
+        assert_eq!(args.autotune_b_max, Some(2));
+        assert_eq!(args.autotune_prefill_chunk_size, Some(1024));
+        assert_eq!(args.autotune_admission_deadline_ms, Some(5));
+        assert_eq!(args.autotune_admission_queue_max, Some(32));
+        assert_eq!(args.autotune_max_cache_cap, Some(32768));
+        assert!(!args.autotune_memory_budget_unsafe);
+    }
 }
