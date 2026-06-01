@@ -1,21 +1,17 @@
-//! MiniCPM-V-4.6 checkpoint facade — text-only language backbone.
+//! MiniCPM-V-4.6 model module.
 //!
 //! MiniCPM-V-4.6 (`model_type = "minicpmv4_6"`,
 //! `architectures = ["MiniCPMV4_6ForConditionalGeneration"]`) is a
 //! vision-language model. Its language backbone is Qwen3.5-text verbatim
-//! (`text_config.model_type = "qwen3_5_text"`; in mlx-vlm the language model is
-//! literally `class LanguageModel(Qwen35LanguageModel)` with only
-//! `get_rope_index` overridden for image positions). The LM weights ship under
-//! `language_model.*`, identical to a native Qwen3.5 checkpoint.
+//! (`text_config.model_type = "qwen3_5_text"`). LM weights ship under
+//! `language_model.*`, identical to a native Qwen3.5 checkpoint. The SigLIP
+//! vision tower ships under `vision_tower.*` and is loaded when the checkpoint
+//! was opened via [`Loader::open_multimodal`] AND contains
+//! `vision_tower.embeddings.patch_embedding.weight`.
 //!
-//! This module therefore runs the **text path on the shared Qwen3.5 dense
-//! execution graph** ([`Qwen35Model`]). It only adapts the config
-//! (see [`config`]) — defaulting the omitted `mrope_section` and skipping the
-//! incompatible SigLIP `vision_config`. The SigLIP vision stack is implemented
-//! in the `vision` submodule (`MiniCpmV46Vision`), but is not yet wired into a
-//! model/dispatch/inference path — image inputs remain out of scope until the
-//! VLM model is added (P2). This `model_from_loader` facade deliberately runs
-//! the text-only Qwen3.5 dense path by dropping `vision_config`.
+//! `model_from_loader` builds the full [`MiniCpmV46Model`] (text + optional
+//! vision). Text-only inference is the `vision = None` case (use
+//! [`Loader::open`] to drop vision weights).
 
 pub mod config;
 pub mod image_processor;
@@ -26,16 +22,16 @@ pub use config::text_config_from_loader;
 pub use model::MiniCpmV46Model;
 
 use crate::core::Loader;
-use crate::models::Qwen35Model;
 use crate::Result;
 
-/// Build a text-only [`Qwen35Model`] from a MiniCPM-V-4.6 checkpoint.
+/// Build a [`MiniCpmV46Model`] from a MiniCPM-V-4.6 checkpoint.
 ///
-/// Parses the nested `text_config` into a `Qwen35Config` (defaulting the
-/// omitted `mrope_section`, dropping the SigLIP `vision_config`) and constructs
-/// the shared Qwen3.5 dense model. The resulting model has no vision tower;
-/// callers must drive it with text-only prompts.
-pub fn model_from_loader(loader: &Loader) -> Result<Qwen35Model> {
-    let cfg = config::text_config_from_loader(loader)?;
-    Qwen35Model::from_loader_with_config(loader, cfg)
+/// Parses the nested `text_config` into a `Qwen35Config`, loads the Qwen3.5
+/// text backbone, and — when the loader was opened via `open_multimodal` AND
+/// contains vision-tower weights — loads the SigLIP vision tower too.
+/// Text-only callers use [`Loader::open`] which drops `vision_tower.*` keys;
+/// the resulting model has `vision = None` and behaves identically to the
+/// pure-text path.
+pub fn model_from_loader(loader: &Loader) -> Result<MiniCpmV46Model> {
+    MiniCpmV46Model::from_loader(loader)
 }

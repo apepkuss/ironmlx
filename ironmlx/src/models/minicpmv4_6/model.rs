@@ -7,11 +7,11 @@
 //! `lm_head` is `None` for MiniCPM-V-4.6 (uses `tie_word_embeddings = true`);
 //! the field is kept for correctness if a future untied variant appears.
 //!
-//! `DenseVlMethods` (required by generate/serve/bench dispatch) is added in
-//! P2a Task 3; until then `MiniCpmV46Model` is pub + re-exported but not yet
-//! wired into `model_from_loader` dispatch.
+//! `DenseVlMethods` is implemented in this module. The `model_from_loader`
+//! facade in `mod.rs` now returns `MiniCpmV46Model` directly (P2a Task 3).
 
 use anyhow::anyhow;
+use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{GatedDeltaCache, KVCache};
@@ -30,12 +30,8 @@ pub struct MiniCpmV46Model {
     lm_head: Option<Linear>,
     /// Vision encoder; `Some` when opened via `open_multimodal` AND
     /// `vision_tower.embeddings.patch_embedding.weight` is present.
-    /// Wired by `DenseVlMethods` in P2a Task 3.
-    #[allow(dead_code)]
     vision: Option<MiniCpmV46Vision>,
     /// Tokenizer id for the per-patch image placeholder.
-    /// Wired by `DenseVlMethods` in P2a Task 3.
-    #[allow(dead_code)]
     image_token_id: i32,
 }
 
@@ -136,6 +132,16 @@ impl MiniCpmV46Model {
 
     pub fn config(&self) -> &crate::models::Qwen35Config {
         self.text.config()
+    }
+
+    /// Returns the image-placeholder token id stored in the model config.
+    ///
+    /// P2b callers (CLI `--image` flow) use this to avoid re-parsing the
+    /// config and tokenizer separately. The field is populated from
+    /// `MiniCpmV46VisionConfig::image_token_id` when present, otherwise
+    /// falls back to [`crate::core::generate::IMAGE_TOKEN_ID`].
+    pub fn image_token_id(&self) -> i32 {
+        self.image_token_id
     }
 
     // Copied from qwen3_5/model.rs — keep in sync; bug fixes here must be mirrored there (and vice versa).
@@ -359,13 +365,375 @@ impl MiniCpmV46Model {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DenseVlMethods — SigLIP vision tower + reused cross-modal scatter
+// ---------------------------------------------------------------------------
+
+impl MiniCpmV46Model {
+    /// Run SigLIP vision encoder on a list of images.
+    ///
+    /// Each `(pixel_values[i], (t, h, w))` → `vision.compute_vision_embeds(pixel_values[i], h, w)`
+    /// → `[N_patches, 1024]`. When multiple images are provided, outputs are
+    /// concatenated along axis 0 to produce a single `[N_total, 1024]` tensor.
+    pub fn compute_vision_embeds(
+        &self,
+        pixel_values: &[Array],
+        grid_thw: &[(i32, i32, i32)],
+        target: impl Into<StreamOrDevice>,
+    ) -> crate::Result<Array> {
+        let target = target.into();
+        if pixel_values.is_empty() {
+            return Err(anyhow!(
+                "MiniCpmV46Model::compute_vision_embeds: pixel_values cannot be empty"
+            ));
+        }
+        if pixel_values.len() != grid_thw.len() {
+            return Err(anyhow!(
+                "compute_vision_embeds: pixel_values.len()={} must equal grid_thw.len()={}",
+                pixel_values.len(),
+                grid_thw.len()
+            ));
+        }
+        let vision = self.vision.as_ref().ok_or_else(|| {
+            anyhow!("MiniCpmV46Model has no vision tower; use Loader::open_multimodal")
+        })?;
+        if pixel_values.len() == 1 {
+            let (_t, h, w) = grid_thw[0];
+            vision.compute_vision_embeds(&pixel_values[0], h, w, target)
+        } else {
+            let mut embeds: Vec<Array> = Vec::with_capacity(pixel_values.len());
+            for (pix, &(_t, h, w)) in pixel_values.iter().zip(grid_thw.iter()) {
+                let ve = vision.compute_vision_embeds(pix, h, w, target)?;
+                embeds.push(ve);
+            }
+            let refs: Vec<&Array> = embeds.iter().collect();
+            concatenate_on(&refs, 0, target)
+                .map_err(|e| anyhow!("compute_vision_embeds concatenate: {e:?}"))
+        }
+    }
+
+    /// Forward a single VL prefill chunk to last-position logits.
+    ///
+    /// When `vision_embeds_slice` is `None`, the vision scatter step is skipped
+    /// and the output is numerically identical to `forward_on`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_vl_chunk(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> crate::Result<Array> {
+        let target = target.into();
+        let hidden = self.forward_vl_hidden(
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )?;
+        self.slice_last_and_project(&hidden, None, target)
+    }
+
+    /// Forward one VL prefill chunk through embeddings + transformer + final
+    /// norm, returning hidden states without projecting to logits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_vl_hidden(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> crate::Result<Array> {
+        let target = target.into();
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+        if let Some(ve) = vision_embeds_slice {
+            hidden = crate::models::qwen3_5::cross_modal::replace_image_tokens(
+                &hidden,
+                input_ids,
+                ve,
+                image_token_id,
+            )?;
+        }
+        self.text.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            decode_mask,
+            None,
+            per_row_lens,
+            target,
+        )
+    }
+
+    /// VL-capable batched prefill over `[B, S_max]` right-padded mixed text/VL
+    /// prompts. Each row independently carries per-row SigLIP pixel_values + grid_thw
+    /// (vision row) or both `None` (text row).
+    ///
+    /// Mirrors Qwen35Model::batched_prefill_vl (SigLIP vision instead of NaViT) — keep in sync.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn batched_prefill_vl(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        attention_mask: &Array,
+        linear_attention_mask: &Array,
+        per_row_lens: &[i32],
+        per_row_pixel_values: &[Option<&[Array]>],
+        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        image_token_id: i32,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> crate::Result<Array> {
+        let target = target.into();
+
+        let b = per_row_lens.len();
+        if per_row_pixel_values.len() != b {
+            return Err(anyhow!(
+                "batched_prefill_vl: per_row_pixel_values.len()={} != B={}",
+                per_row_pixel_values.len(),
+                b
+            ));
+        }
+        if per_row_grid_thw.len() != b {
+            return Err(anyhow!(
+                "batched_prefill_vl: per_row_grid_thw.len()={} != B={}",
+                per_row_grid_thw.len(),
+                b
+            ));
+        }
+
+        // Embed: [B, S_max] → [B, S_max, hidden]
+        let mut hidden = self.text.embed_on(input_ids, target)?;
+
+        // Per-row vision encoder calls (sequential — avoids GPU-memory contention).
+        let mut all_vision_embeds: Vec<Array> = Vec::new();
+        for i in 0..b {
+            match (per_row_pixel_values[i], per_row_grid_thw[i]) {
+                (Some(pv), Some(grids)) if !grids.is_empty() => {
+                    let ve = self.compute_vision_embeds(pv, grids, target)?;
+                    all_vision_embeds.push(ve);
+                }
+                (Some(_), None) => {
+                    return Err(anyhow!(
+                        "batched_prefill_vl: row {i} has pixel_values but grid_thw is None"
+                    ));
+                }
+                _ => { /* text row or VL row with empty grids — skipped */ }
+            }
+        }
+
+        // Scatter vision embeds into image_pad positions (only if any vision rows).
+        if !all_vision_embeds.is_empty() {
+            let vision_concat = if all_vision_embeds.len() == 1 {
+                all_vision_embeds.pop().expect("len == 1")
+            } else {
+                let refs: Vec<&Array> = all_vision_embeds.iter().collect();
+                concatenate_on(&refs, 0, target)
+                    .map_err(|e| anyhow!("vision_embeds concatenate: {e:?}"))?
+            };
+            hidden = crate::models::qwen3_5::cross_modal::replace_image_tokens(
+                &hidden,
+                input_ids,
+                &vision_concat,
+                image_token_id,
+            )?;
+        }
+
+        // Transformer + final norm with both attention masks.
+        let hidden = self.text.forward_post_embedding_on(
+            &hidden,
+            position_ids,
+            cache,
+            Some(attention_mask),
+            Some(linear_attention_mask),
+            Some(per_row_lens),
+            target,
+        )?;
+
+        // Per-row last-position slice + lm_head project.
+        let last_positions: Vec<i32> = per_row_lens.iter().map(|&l| l - 1).collect();
+        self.slice_last_and_project(&hidden, Some(&last_positions), target)
+    }
+}
+
+impl crate::core::scheduler::DenseVlMethods for MiniCpmV46Model {
+    fn compute_vision_embeds(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        MiniCpmV46Model::compute_vision_embeds(self, pixel_values, grid_thw, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_vl_chunk(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        MiniCpmV46Model::forward_vl_chunk(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_vl_hidden(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&mlx::Array>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        vision_embeds_slice: Option<&mlx::Array>,
+        image_token_id: i32,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        MiniCpmV46Model::forward_vl_hidden(
+            self,
+            input_ids,
+            position_ids,
+            per_row_lens,
+            decode_mask,
+            cache,
+            vision_embeds_slice,
+            image_token_id,
+            target,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn batched_prefill_vl(
+        &self,
+        input_ids: &mlx::Array,
+        position_ids: &mlx::Array,
+        attention_mask: &mlx::Array,
+        linear_attention_mask: &mlx::Array,
+        per_row_lens: &[i32],
+        per_row_pixel_values: &[Option<&[mlx::Array]>],
+        per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
+        image_token_id: i32,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        MiniCpmV46Model::batched_prefill_vl(
+            self,
+            input_ids,
+            position_ids,
+            attention_mask,
+            linear_attention_mask,
+            per_row_lens,
+            per_row_pixel_values,
+            per_row_grid_thw,
+            image_token_id,
+            cache,
+            target,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::model::Model;
+    use crate::core::scheduler::DenseVlMethods;
 
     #[test]
-    fn minicpmv46_model_implements_model_trait() {
-        fn assert_model<M: crate::core::model::Model>() {}
+    fn minicpmv46_model_implements_model_and_vl_traits() {
+        fn assert_model<M: crate::core::model::Model + DenseVlMethods>() {}
         assert_model::<MiniCpmV46Model>();
+    }
+
+    /// Text-only equivalence: `forward_on` must produce byte-equal output to
+    /// `forward_vl_chunk(..., vision_embeds_slice=None, ...)`.
+    ///
+    /// Mirrors `qwen3_6_moe::tests::text_only_vl_chunk_delegates_to_core_forward`.
+    ///
+    /// Run with:
+    /// ```text
+    /// MINICPMV46_MODEL=<path> cargo test --release -p ironmlx --lib \
+    ///   minicpmv4_6::tests::text_only_vl_chunk_delegates_to_core_forward -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires MINICPMV46_MODEL env var pointing to a real 4-bit checkpoint"]
+    fn text_only_vl_chunk_delegates_to_core_forward() {
+        use crate::core::generate::{build_position_ids, IMAGE_TOKEN_ID};
+        use crate::core::Loader;
+
+        let model_dir = std::env::var("MINICPMV46_MODEL")
+            .expect("MINICPMV46_MODEL env var must point to the MiniCPM-V-4.6-4bit snapshot dir");
+        let loader = Loader::open(std::path::Path::new(&model_dir)).expect("Loader::open");
+        let model = MiniCpmV46Model::from_loader(&loader).expect("MiniCpmV46Model::from_loader");
+
+        let input_ids: Array = (&[100_i32, 101, 102][..], &[1_i32, 3][..])
+            .try_into()
+            .expect("input_ids");
+        let position_ids = build_position_ids(0, 3).expect("position_ids");
+
+        // text-only path via Model::forward_on
+        let logits_text = model
+            .forward_on(
+                &input_ids,
+                &position_ids,
+                None,
+                None,
+                None,
+                mlx::StreamOrDevice::default(),
+            )
+            .expect("forward_on");
+
+        // DenseVlMethods::forward_vl_chunk with vision_embeds_slice=None must
+        // produce byte-equal output (vision scatter is fully skipped).
+        let logits_vl = model
+            .forward_vl_chunk(
+                &input_ids,
+                &position_ids,
+                None,
+                None,
+                None,
+                None,
+                IMAGE_TOKEN_ID,
+                (),
+            )
+            .expect("forward_vl_chunk text-only");
+
+        let a: Vec<f32> = mlx::ops::astype(&logits_text, Dtype::Float32)
+            .expect("astype text")
+            .to_vec()
+            .expect("to_vec text");
+        let b: Vec<f32> = mlx::ops::astype(&logits_vl, Dtype::Float32)
+            .expect("astype vl")
+            .to_vec()
+            .expect("to_vec vl");
+        assert_eq!(
+            a, b,
+            "forward_on vs forward_vl_chunk(vision=None) must be byte-equal"
+        );
     }
 }

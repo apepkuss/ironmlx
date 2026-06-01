@@ -38,6 +38,7 @@ pub use architecture::ModelArchitecture;
 pub use gemma4::{Gemma4Config, Gemma4Model, Gemma4TextConfig};
 pub use glm4_moe_lite::{Glm4MoeLiteConfig, Glm4MoeLiteModel};
 pub use llama::{LlamaConfig, LlamaModel};
+pub use minicpmv4_6::MiniCpmV46Model;
 pub use qwen3_5::{Qwen35Config, Qwen35Model, Qwen35TextModel, RopeParams};
 pub use qwen3_5_moe::{
     Qwen35MoeConfig, Qwen35MoeModel, Qwen35MoeTextModel, RopeParams as MoeRopeParams,

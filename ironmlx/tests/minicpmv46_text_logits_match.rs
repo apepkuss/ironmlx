@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use mlx::{Array, Dtype};
 
-use ironmlx::core::{generate::build_position_ids, Loader};
+use ironmlx::core::{generate::build_position_ids, Loader, Model};
 use ironmlx::models::minicpmv4_6;
 
 const FIXTURE_DIR: &str = "tests/fixtures/minicpmv46";
@@ -125,7 +125,7 @@ fn minicpmv46_text_logits_match() {
                 Some(&[s]),
                 None,
                 Some(&mut cache),
-                (),
+                mlx::StreamOrDevice::default(),
             )
             .expect("forward_on");
         // logits: [1, 1, vocab] — last position only.

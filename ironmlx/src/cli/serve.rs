@@ -211,8 +211,8 @@ pub fn run(args: ServeArgs) -> Result<()> {
             serve_with_model(model, tokenizer, &args, None)
         }
         crate::models::ModelArchitecture::MiniCpmV46 => {
-            // Text-only backbone on the shared Qwen3.5 dense graph; the SigLIP
-            // vision tower is not yet implemented, so no vision input.
+            // Full MiniCpmV46Model (text + optional SigLIP vision tower).
+            // P2b will add --image CLI support; for now text-only dispatch.
             let model = crate::models::minicpmv4_6::model_from_loader(&loader)
                 .context("minicpmv4_6::model_from_loader")?;
             serve_with_model(model, tokenizer, &args, None)
