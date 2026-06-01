@@ -19,9 +19,11 @@
 
 pub mod config;
 pub mod image_processor;
+pub mod model;
 pub mod vision;
 
 pub use config::text_config_from_loader;
+pub use model::MiniCpmV46Model;
 
 use crate::core::Loader;
 use crate::models::Qwen35Model;
