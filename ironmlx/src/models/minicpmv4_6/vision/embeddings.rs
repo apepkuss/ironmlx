@@ -5,7 +5,7 @@ use mlx::{ops, Array, StreamOrDevice};
 
 use crate::core::Loader;
 
-use super::super::config::MiniCpmV46VisionConfig;
+use crate::models::minicpmv4_6::config::MiniCpmV46VisionConfig;
 
 pub struct SiglipEmbeddings {
     /// Conv weight reshaped to [hidden, patch*patch*channels] = [1152, 588].
@@ -13,7 +13,7 @@ pub struct SiglipEmbeddings {
     patch_b: Array,
     /// [pos_grid_side^2, hidden] = [4900, 1152].
     pos_embed: Array,
-    hidden: i32,
+    hidden_size: i32,
     pos_grid_side: i32,
 }
 
@@ -25,6 +25,8 @@ pub fn position_bucket_ids(grid_h: i32, grid_w: i32, side: i32) -> Vec<i32> {
         let n = n.max(1);
         (0..n)
             .map(|i| {
+                // Defensive clamp ported from mlx-vlm `_build_position_buckets`;
+                // frac never reaches 1.0 for i in 0..n, but kept for parity.
                 let frac = ((i as f32) / (n as f32)).min(1.0 - 1e-6);
                 let mut b = 0;
                 for k in 1..side {
@@ -52,7 +54,7 @@ impl SiglipEmbeddings {
         let w = loader
             .tensor("vision_tower.embeddings.patch_embedding.weight")?
             .clone();
-        let patch_elems = cfg.patch_size * cfg.patch_size * 3;
+        let patch_elems = cfg.patch_size * cfg.patch_size * 3; // patch_size² × 3 (RGB) = 588
         let patch_w_2d = w.reshape(&[cfg.hidden_size, patch_elems][..])?;
         let patch_b = loader
             .tensor("vision_tower.embeddings.patch_embedding.bias")?
@@ -64,7 +66,7 @@ impl SiglipEmbeddings {
             patch_w_2d,
             patch_b,
             pos_embed,
-            hidden: cfg.hidden_size,
+            hidden_size: cfg.hidden_size,
             pos_grid_side: cfg.pos_grid_side,
         })
     }
@@ -81,6 +83,10 @@ impl SiglipEmbeddings {
         let dims = pixel_values.shape();
         let d = dims.as_slice();
         let (p, total_w, c) = (d[1], d[2], d[3]);
+        anyhow::ensure!(
+            total_w % p == 0,
+            "SiglipEmbeddings: packed pixel width {total_w} not divisible by patch {p}"
+        );
         let n = total_w / p;
         let x = pixel_values.reshape_on(&[1, p, n, p, c][..], target)?;
         let x = x.transpose_axes_on(&[0_i32, 2, 1, 3, 4][..], target)?;
@@ -93,7 +99,7 @@ impl SiglipEmbeddings {
         // ops::indexing::take requires uint32 indices
         let id_arr_u32 = ops::cast::astype(&id_arr, mlx::Dtype::Uint32)?;
         let pos = ops::indexing::take(&self.pos_embed, &id_arr_u32, 0)?; // [n, 1152]
-        let pos = pos.reshape_on(&[1_i32, ids.len() as i32, self.hidden][..], target)?;
+        let pos = pos.reshape_on(&[1_i32, ids.len() as i32, self.hidden_size][..], target)?;
         Ok(&embeds + &pos)
     }
 }
@@ -132,7 +138,7 @@ mod tests {
             patch_w_2d: patch_w,
             patch_b,
             pos_embed,
-            hidden,
+            hidden_size: hidden,
             pos_grid_side: 70,
         };
 
@@ -140,5 +146,14 @@ mod tests {
         let pixel_values = Array::zeros(&[1, patch, n * patch, 3], Dtype::Bfloat16).unwrap();
         let out = emb.forward_on(&pixel_values, grid_h, grid_w, ()).unwrap();
         assert_eq!(out.shape().as_slice(), &[1, n, hidden]);
+    }
+
+    #[test]
+    fn position_bucket_ids_rectangular_grid() {
+        let ids = position_bucket_ids(2, 8, 70);
+        assert_eq!(ids.len(), 16);
+        // row-major: id = bucket_h*70 + bucket_w; first row all share bucket_h=0.
+        assert_eq!(ids[0], 0);
+        assert!(ids.iter().all(|&v| v >= 0 && v < 70 * 70));
     }
 }
