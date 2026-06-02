@@ -223,7 +223,7 @@ cargo run --release -p iron-bench -- \
   > candidate-b2-c1024-concurrent.json
 ```
 
-`--format autotune-json` 要求恰好一个 `--target`，因为 calibration schema 没有 target 字段。`hardware_label` 默认由本机 CPU 与内存容量自动生成；低层手动导出时仍可用 `--autotune-hardware-label` 覆盖该输出元数据。对比多个候选时，应分别用不同 server 参数启动 ironmlx，分别导出 JSON，再合并 measurements。
+`--format autotune-json` 要求恰好一个 `--target`，因为 calibration schema 没有 target 字段。`hardware_label` 由本机 CPU 与内存容量自动生成，不提供手动覆盖参数。对比多个候选时，应分别用不同 server 参数启动本机 ironmlx，分别导出 JSON，再合并 measurements。
 
 ### 本地一键校准入口
 
@@ -253,7 +253,7 @@ cargo run --release -p ironmlx -- \
 
 其中 `hardware_label` 是自动生成的输出元数据，不需要用户在 `scheduler-autotune calibrate` 中传入。
 
-手动 `iron-bench`、`scheduler-autotune merge`、`scheduler-autotune select` 路径仍然保留，适合远端服务、非标准采样协议或需要人工编辑 calibration JSON 的场景。
+手动 `iron-bench`、`scheduler-autotune merge`、`scheduler-autotune select` 路径仍然保留，适合本机非标准采样协议或需要人工编辑 calibration JSON 的场景。
 
 ### 字段映射
 

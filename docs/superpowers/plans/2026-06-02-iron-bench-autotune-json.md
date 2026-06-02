@@ -91,7 +91,7 @@ iron-bench \
   --autotune-max-cache-cap 32768
 ```
 
-The test should assert that `OutputFormat::AutotuneJson` parses and all config fields are present. `hardware_label` is generated automatically when the optional `--autotune-hardware-label` override is omitted.
+The test should assert that `OutputFormat::AutotuneJson` parses and all config fields are present. `hardware_label` is generated automatically from the local machine.
 
 - [x] **Step 2: Verify RED**
 
@@ -109,7 +109,7 @@ Expected: compile failure until the new enum variant and CLI fields exist.
 Add `autotune-json` to `OutputFormat`, add explicit `--autotune-*` flags, and validate:
 
 - `--format autotune-json` requires exactly one target;
-- `--format autotune-json` requires all config fields and generates `hardware_label` when no override is provided;
+- `--format autotune-json` requires all config fields and always generates `hardware_label` from the local machine;
 - non-autotune formats keep their existing output unchanged.
 
 - [x] **Step 4: Verify GREEN**

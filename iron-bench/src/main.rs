@@ -80,11 +80,6 @@ struct Args {
     #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
     format: OutputFormat,
 
-    /// Optional hardware label override for `--format autotune-json` output.
-    /// When omitted, iron-bench generates one from the local CPU and memory.
-    #[arg(long)]
-    pub autotune_hardware_label: Option<String>,
-
     /// Scheduler b_max value used by the benchmarked server.
     #[arg(long)]
     pub autotune_b_max: Option<usize>,
@@ -170,17 +165,9 @@ impl Args {
             );
         }
 
-        let hardware_label = match self.autotune_hardware_label.as_deref() {
-            Some(label) if label.trim().is_empty() => {
-                anyhow::bail!("--autotune-hardware-label must not be empty");
-            }
-            Some(label) => label.trim().to_string(),
-            None => detect_hardware_label(),
-        };
-
         Ok(Some(report::AutotuneExportOptions {
             model_name: self.model.clone(),
-            hardware_label,
+            hardware_label: detect_hardware_label(),
             config: report::AutotuneProfileConfig {
                 b_max: self
                     .autotune_b_max
@@ -580,8 +567,6 @@ mod tests {
             "/tmp/model",
             "--format",
             "autotune-json",
-            "--autotune-hardware-label",
-            "m3-max",
             "--autotune-b-max",
             "2",
             "--autotune-prefill-chunk-size",
@@ -595,13 +580,40 @@ mod tests {
         ]);
 
         assert!(matches!(args.format, OutputFormat::AutotuneJson));
-        assert_eq!(args.autotune_hardware_label.as_deref(), Some("m3-max"));
         assert_eq!(args.autotune_b_max, Some(2));
         assert_eq!(args.autotune_prefill_chunk_size, Some(1024));
         assert_eq!(args.autotune_admission_deadline_ms, Some(5));
         assert_eq!(args.autotune_admission_queue_max, Some(32));
         assert_eq!(args.autotune_max_cache_cap, Some(32768));
         assert!(!args.autotune_memory_budget_unsafe);
+    }
+
+    #[test]
+    fn autotune_cli_rejects_manual_hardware_label() {
+        let err = Args::try_parse_from([
+            "iron-bench",
+            "--target",
+            "ironmlx=http://localhost:8080",
+            "--model-dir",
+            "/tmp/model",
+            "--format",
+            "autotune-json",
+            "--autotune-hardware-label",
+            "m3-max",
+            "--autotune-b-max",
+            "2",
+            "--autotune-prefill-chunk-size",
+            "1024",
+            "--autotune-admission-deadline-ms",
+            "5",
+            "--autotune-admission-queue-max",
+            "32",
+            "--autotune-max-cache-cap",
+            "32768",
+        ])
+        .expect_err("manual hardware labels should be rejected");
+
+        assert!(err.to_string().contains("autotune-hardware-label"));
     }
 
     #[test]
