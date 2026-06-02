@@ -129,6 +129,20 @@ fn rolling_profile_queue_wait_ms(queued_at: Instant, now: Instant) -> f64 {
     rolling_profile_elapsed_ms(queued_at, now)
 }
 
+const ROLLING_DECODE_CADENCE_MID_CHUNK_CAP: i32 = 256;
+
+fn cadence_protected_mid_chunk_size(
+    requested_chunk_size: i32,
+    active_count_with_mid_admit: usize,
+) -> i32 {
+    let requested_chunk_size = requested_chunk_size.max(1);
+    if active_count_with_mid_admit > 1 {
+        requested_chunk_size.min(ROLLING_DECODE_CADENCE_MID_CHUNK_CAP)
+    } else {
+        requested_chunk_size
+    }
+}
+
 /// Rolling-loop admission fairness policy.
 ///
 /// Any completed admission work (initial prefill or mid-batch prefill)
@@ -1080,45 +1094,52 @@ where
         return false;
     };
     let id = handle.request_id;
+    let active_count_before_chunk = sched.active_count();
+    let requested_chunk_size = handle.chunk_size;
+    let effective_chunk_size =
+        cadence_protected_mid_chunk_size(requested_chunk_size, active_count_before_chunk);
+    handle.chunk_size = effective_chunk_size;
     let chunk_profile = rolling_profile_enabled().then(|| {
         (
             handle.chunk_start,
             handle.prompt_len,
-            handle.chunk_size,
-            sched.active_count(),
+            effective_chunk_size,
+            active_count_before_chunk,
             Instant::now(),
         )
     });
 
-    let is_last = {
+    let chunk_result = {
         let m = model.blocking_lock();
-        match sched.admit_mid_chunk(&mut handle, &m) {
-            Ok(b) => b,
-            Err(e) => {
-                if let Some((chunk_start, prompt_len, chunk_size, active_count, chunk_timer)) =
-                    chunk_profile
-                {
-                    let chunk_end_time = Instant::now();
-                    let chunk_end = handle.chunk_start;
-                    tracing::info!(
-                        "[chunked-rolling-profile] event=mid_chunk_error t_ms={:.3} request_id={} chunk_start={} chunk_end={} chunk_len={} prompt_len={} chunk_size={} active_count={} queue_len={} elapsed_ms={:.3}",
-                        rolling_profile_t_ms(chunk_end_time),
-                        id.0,
-                        chunk_start,
-                        chunk_end,
-                        chunk_end.saturating_sub(chunk_start),
-                        prompt_len,
-                        chunk_size,
-                        active_count,
-                        queue_len,
-                        rolling_profile_elapsed_ms(chunk_timer, chunk_end_time)
-                    );
-                }
-                tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
-                let _ = sched.evict(id);
-                event_txs.remove(&id);
-                return true;
+        sched.admit_mid_chunk(&mut handle, &m)
+    };
+    handle.chunk_size = requested_chunk_size;
+    let is_last = match chunk_result {
+        Ok(b) => b,
+        Err(e) => {
+            if let Some((chunk_start, prompt_len, chunk_size, active_count, chunk_timer)) =
+                chunk_profile
+            {
+                let chunk_end_time = Instant::now();
+                let chunk_end = handle.chunk_start;
+                tracing::info!(
+                    "[chunked-rolling-profile] event=mid_chunk_error t_ms={:.3} request_id={} chunk_start={} chunk_end={} chunk_len={} prompt_len={} chunk_size={} active_count={} queue_len={} elapsed_ms={:.3}",
+                    rolling_profile_t_ms(chunk_end_time),
+                    id.0,
+                    chunk_start,
+                    chunk_end,
+                    chunk_end.saturating_sub(chunk_start),
+                    prompt_len,
+                    chunk_size,
+                    active_count,
+                    queue_len,
+                    rolling_profile_elapsed_ms(chunk_timer, chunk_end_time)
+                );
             }
+            tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
+            let _ = sched.evict(id);
+            event_txs.remove(&id);
+            return true;
         }
     };
     if let Some((chunk_start, prompt_len, chunk_size, active_count, chunk_timer)) = chunk_profile {
@@ -2010,6 +2031,62 @@ mod tests {
         assert!(
             in_flight_mid_admit.is_some(),
             "multi-chunk mid-admit should yield after one chunk"
+        );
+    }
+
+    #[test]
+    fn drain_admission_queue_caps_chunked_mid_admit_when_decode_rows_are_active() {
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+        let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
+            4,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        sched.admit(mk_req(11)).expect("initial admit 1");
+        sched.admit(mk_req(12)).expect("initial admit 2");
+        let prefill_events = sched
+            .prefill_admitted(&SchedulerActorFakeModel)
+            .expect("initial prefill");
+        assert_eq!(prefill_events.len(), 2);
+        assert_eq!(sched.phase(), Phase::Decoding);
+        assert_eq!(sched.active_count(), 2);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let mut chunked_req = mk_req(21);
+        chunked_req.prompt_ids = (0..1025).collect();
+        chunked_req.prefill_chunk_size = 1024;
+        let _reply_rx = reply_rx;
+        let mut queue = VecDeque::from([PendingAdmit {
+            request: chunked_req,
+            reply_tx,
+            queued_at_profile: None,
+        }]);
+        let mut event_txs = HashMap::new();
+        let admit_count = Arc::new(AtomicU64::new(0));
+        let mut in_flight_mid_admit = None;
+
+        let did_admit = drain_admission_queue(
+            &mut queue,
+            &mut in_flight_mid_admit,
+            &mut sched,
+            &mut event_txs,
+            &admit_count,
+            &model,
+            4,
+        );
+
+        assert!(did_admit, "chunked queued request should start");
+        let handle = in_flight_mid_admit
+            .as_ref()
+            .expect("chunked mid-admit should still be in flight");
+        assert_eq!(
+            handle.chunk_start, 256,
+            "active decode rows should cap the first mid-admit chunk to protect ITL"
+        );
+        assert_eq!(
+            handle.chunk_size, 1024,
+            "cadence cap should be temporary and preserve the request chunk size"
         );
     }
 
