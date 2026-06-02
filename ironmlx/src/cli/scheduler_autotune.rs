@@ -7,8 +7,9 @@ use clap::{Args, Subcommand, ValueEnum};
 
 use crate::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
-    select_scheduler_autotune_profile, SchedulerAutotuneCalibrationInput,
-    SchedulerAutotuneMergeOptions,
+    select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
+    SchedulerAutotuneMergeOptions, SchedulerAutotuneSelectionOptions,
+    SchedulerAutotuneSelectionProfile,
 };
 use crate::Result;
 
@@ -24,6 +25,10 @@ pub struct SchedulerAutotuneArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = SchedulerAutotuneOutputFormat::Text)]
     pub format: SchedulerAutotuneOutputFormat,
+
+    /// Profile used to weight calibration scenarios during selection.
+    #[arg(long, value_enum, default_value_t = SchedulerAutotuneSelectionProfileArg::AgentLongPrompt)]
+    pub selection_profile: SchedulerAutotuneSelectionProfileArg,
 
     /// Write the selected runtime scheduler profile to this JSON path.
     #[arg(long)]
@@ -49,6 +54,10 @@ pub struct SchedulerAutotuneSelectArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = SchedulerAutotuneOutputFormat::Text)]
     pub format: SchedulerAutotuneOutputFormat,
+
+    /// Profile used to weight calibration scenarios during selection.
+    #[arg(long, value_enum, default_value_t = SchedulerAutotuneSelectionProfileArg::AgentLongPrompt)]
+    pub selection_profile: SchedulerAutotuneSelectionProfileArg,
 
     /// Write the selected runtime scheduler profile to this JSON path.
     #[arg(long)]
@@ -76,6 +85,21 @@ pub enum SchedulerAutotuneOutputFormat {
     Json,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerAutotuneSelectionProfileArg {
+    Balanced,
+    AgentLongPrompt,
+}
+
+impl From<SchedulerAutotuneSelectionProfileArg> for SchedulerAutotuneSelectionProfile {
+    fn from(value: SchedulerAutotuneSelectionProfileArg) -> Self {
+        match value {
+            SchedulerAutotuneSelectionProfileArg::Balanced => Self::Balanced,
+            SchedulerAutotuneSelectionProfileArg::AgentLongPrompt => Self::AgentLongPrompt,
+        }
+    }
+}
+
 pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
     match args.action {
         Some(SchedulerAutotuneAction::Select(select)) => run_select(select),
@@ -90,6 +114,7 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
             run_select(SchedulerAutotuneSelectArgs {
                 input,
                 format: args.format,
+                selection_profile: args.selection_profile,
                 write_profile: args.write_profile,
             })
         }
@@ -98,7 +123,12 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
 
 fn run_select(args: SchedulerAutotuneSelectArgs) -> Result<()> {
     let input = read_calibration(&args.input)?;
-    let selection = select_scheduler_autotune_profile(input);
+    let selection = select_scheduler_autotune_profile_with_options(
+        input,
+        SchedulerAutotuneSelectionOptions {
+            profile: args.selection_profile.into(),
+        },
+    );
 
     if let Some(path) = &args.write_profile {
         let profile = build_scheduler_autotune_runtime_profile(&selection)?;

@@ -479,11 +479,47 @@ pub struct SchedulerAutotuneRejectedCandidate {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchedulerAutotuneSelectionProfile {
+    Balanced,
+    #[default]
+    AgentLongPrompt,
+}
+
+impl SchedulerAutotuneSelectionProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::AgentLongPrompt => "agent-long-prompt",
+        }
+    }
+
+    fn scenario_weight(self, scenario: &SchedulerAutotuneScenario) -> f64 {
+        match self {
+            Self::Balanced => 1.0,
+            Self::AgentLongPrompt => {
+                if scenario.prompt_len >= 4096 {
+                    3.0
+                } else {
+                    1.0
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SchedulerAutotuneSelectionOptions {
+    pub profile: SchedulerAutotuneSelectionProfile,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchedulerAutotuneProfileSelection {
     pub diagnose_only: bool,
     pub model_name: String,
     pub hardware_label: String,
+    pub selection_profile: SchedulerAutotuneSelectionProfile,
     pub objective: SchedulerAutotuneObjective,
     pub selected: Option<SchedulerAutotuneCandidateScore>,
     pub candidates: Vec<SchedulerAutotuneCandidateScore>,
@@ -561,6 +597,16 @@ pub fn merge_scheduler_autotune_calibrations(
 pub fn select_scheduler_autotune_profile(
     input: SchedulerAutotuneCalibrationInput,
 ) -> SchedulerAutotuneProfileSelection {
+    select_scheduler_autotune_profile_with_options(
+        input,
+        SchedulerAutotuneSelectionOptions::default(),
+    )
+}
+
+pub fn select_scheduler_autotune_profile_with_options(
+    input: SchedulerAutotuneCalibrationInput,
+    options: SchedulerAutotuneSelectionOptions,
+) -> SchedulerAutotuneProfileSelection {
     let objective = input.objective.normalized();
     let mut grouped: BTreeMap<SchedulerAutotuneProfileConfig, Vec<SchedulerAutotuneMeasurement>> =
         BTreeMap::new();
@@ -633,7 +679,8 @@ pub fn select_scheduler_autotune_profile(
         ));
     }
 
-    let candidates = score_complete_candidates(&complete, &required_scenarios, objective);
+    let candidates =
+        score_complete_candidates(&complete, &required_scenarios, objective, options.profile);
     let selected = candidates.first().cloned();
     if selected.is_none() {
         warnings.push(selection_note(
@@ -646,6 +693,7 @@ pub fn select_scheduler_autotune_profile(
         diagnose_only: true,
         model_name: input.model_name,
         hardware_label: input.hardware_label,
+        selection_profile: options.profile,
         objective,
         selected,
         candidates,
@@ -664,6 +712,12 @@ impl SchedulerAutotuneProfileSelection {
         .unwrap();
         writeln!(out, "model: {}", self.model_name).unwrap();
         writeln!(out, "hardware: {}", self.hardware_label).unwrap();
+        writeln!(
+            out,
+            "selection_profile: {}",
+            self.selection_profile.as_str()
+        )
+        .unwrap();
         writeln!(
             out,
             "objective: ttft_p95={:.2} itl_p95={:.2} e2e_p95={:.2} throughput={:.2}",
@@ -766,6 +820,7 @@ fn score_complete_candidates(
     >,
     required_scenarios: &BTreeSet<SchedulerAutotuneScenario>,
     objective: SchedulerAutotuneObjective,
+    selection_profile: SchedulerAutotuneSelectionProfile,
 ) -> Vec<SchedulerAutotuneCandidateScore> {
     let mut best_by_scenario: BTreeMap<SchedulerAutotuneScenario, ScenarioBest> = BTreeMap::new();
     for scenario in required_scenarios {
@@ -781,6 +836,7 @@ fn score_complete_candidates(
     let mut scored = Vec::new();
     for (config, rows) in complete {
         let mut score_sum = 0.0;
+        let mut scenario_weight_sum = 0.0;
         let mut ttft_norm_sum = 0.0;
         let mut itl_norm_sum = 0.0;
         let mut early_itl_norm_sum = 0.0;
@@ -802,14 +858,20 @@ fn score_complete_candidates(
                 + objective.itl_p95_weight * itl_norm
                 + objective.e2e_p95_weight * e2e_norm
                 + objective.throughput_weight * throughput_norm;
-            score_sum += scenario_score;
-            ttft_norm_sum += ttft_norm;
-            itl_norm_sum += itl_norm;
-            early_itl_norm_sum += early_itl_norm;
-            e2e_norm_sum += e2e_norm;
-            throughput_norm_sum += throughput_norm;
+            let scenario_weight = selection_profile.scenario_weight(scenario);
+            score_sum += scenario_weight * scenario_score;
+            scenario_weight_sum += scenario_weight;
+            ttft_norm_sum += scenario_weight * ttft_norm;
+            itl_norm_sum += scenario_weight * itl_norm;
+            early_itl_norm_sum += scenario_weight * early_itl_norm;
+            e2e_norm_sum += scenario_weight * e2e_norm;
+            throughput_norm_sum += scenario_weight * throughput_norm;
         }
-        let n = required_scenarios.len().max(1) as f64;
+        let n = if scenario_weight_sum > f64::EPSILON {
+            scenario_weight_sum
+        } else {
+            1.0
+        };
         scored.push(SchedulerAutotuneCandidateScore {
             config: *config,
             score: score_sum / n,

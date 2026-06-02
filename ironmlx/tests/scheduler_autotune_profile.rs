@@ -1,7 +1,9 @@
 use ironmlx::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, select_scheduler_autotune_profile,
-    SchedulerAutotuneCalibrationInput, SchedulerAutotuneMeasurement, SchedulerAutotuneObjective,
-    SchedulerAutotuneProfileConfig, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
+    SchedulerAutotuneMeasurement, SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
+    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 
 fn config(
@@ -73,6 +75,91 @@ fn profile_selection_prefers_agent_balanced_config_over_ttft_only_winner() {
     assert_eq!(selected.config, balanced);
     assert!(selection.diagnose_only);
     assert!(selection.render_text().contains("diagnose-only"));
+}
+
+#[test]
+fn agent_long_prompt_profile_prefers_long_prompt_stability_over_short_concurrency_gain() {
+    let long_stable = config(1, 2048, 5);
+    let short_concurrency_winner = config(2, 2048, 5);
+    let calibration = input(vec![
+        measurement(long_stable, 1024, 128, 1, 345.7, 10.74, 1.70, 94.7),
+        measurement(long_stable, 4096, 128, 1, 1650.4, 12.39, 3.21, 81.6),
+        measurement(long_stable, 1024, 128, 2, 2052.6, 10.92, 3.42, 80.9),
+        measurement(long_stable, 4096, 128, 2, 5104.2, 12.72, 6.68, 46.8),
+        measurement(
+            short_concurrency_winner,
+            1024,
+            128,
+            1,
+            365.7,
+            11.05,
+            1.76,
+            92.3,
+        ),
+        measurement(
+            short_concurrency_winner,
+            4096,
+            128,
+            1,
+            2036.2,
+            13.03,
+            3.67,
+            78.3,
+        ),
+        measurement(
+            short_concurrency_winner,
+            1024,
+            128,
+            2,
+            815.9,
+            15.76,
+            2.80,
+            93.8,
+        ),
+        measurement(
+            short_concurrency_winner,
+            4096,
+            128,
+            2,
+            5770.1,
+            12.97,
+            7.38,
+            42.6,
+        ),
+    ]);
+
+    let balanced = select_scheduler_autotune_profile_with_options(
+        calibration.clone(),
+        SchedulerAutotuneSelectionOptions {
+            profile: SchedulerAutotuneSelectionProfile::Balanced,
+        },
+    );
+    let agent_long_prompt = select_scheduler_autotune_profile_with_options(
+        calibration,
+        SchedulerAutotuneSelectionOptions {
+            profile: SchedulerAutotuneSelectionProfile::AgentLongPrompt,
+        },
+    );
+
+    assert_eq!(
+        balanced.selected.expect("balanced selected").config,
+        short_concurrency_winner
+    );
+    assert_eq!(
+        agent_long_prompt
+            .selected
+            .as_ref()
+            .expect("agent-long-prompt selected")
+            .config,
+        long_stable
+    );
+    assert_eq!(
+        agent_long_prompt.selection_profile,
+        SchedulerAutotuneSelectionProfile::AgentLongPrompt
+    );
+    assert!(agent_long_prompt
+        .render_text()
+        .contains("selection_profile: agent-long-prompt"));
 }
 
 #[test]

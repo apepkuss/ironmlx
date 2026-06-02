@@ -7,8 +7,9 @@ use clap::Args;
 
 use crate::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
-    select_scheduler_autotune_profile, SchedulerAutotuneCalibrationInput,
+    select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
     SchedulerAutotuneMergeOptions, SchedulerAutotuneProfileConfig,
+    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
 };
 use crate::Result;
 
@@ -58,6 +59,10 @@ pub struct SchedulerAutotuneCalibrateArgs {
     #[arg(long, value_delimiter = ',')]
     pub concurrency: Vec<usize>,
 
+    /// Profile used to weight calibration scenarios during final selection.
+    #[arg(long, value_enum, default_value_t = super::scheduler_autotune::SchedulerAutotuneSelectionProfileArg::AgentLongPrompt)]
+    pub selection_profile: super::scheduler_autotune::SchedulerAutotuneSelectionProfileArg,
+
     /// Sequential measured runs per cell.
     #[arg(long, default_value_t = 5)]
     pub runs: usize,
@@ -98,6 +103,7 @@ struct ResolvedRunConfig {
     prompt_len: Vec<usize>,
     max_tokens: usize,
     concurrency: Vec<usize>,
+    selection_profile: SchedulerAutotuneSelectionProfile,
     runs: usize,
     warmup: usize,
     duration: u64,
@@ -254,6 +260,7 @@ fn resolve_run_config(
         } else {
             args.concurrency.clone()
         },
+        selection_profile: args.selection_profile.into(),
         runs: args.runs,
         warmup: args.warmup,
         duration: args.duration,
@@ -301,7 +308,7 @@ pub fn run(args: SchedulerAutotuneCalibrateArgs) -> Result<()> {
         inputs.push(read_calibration(path)?);
     }
     let artifacts = FinalArtifactPaths::new(&resolved.output_dir, Some(resolved.write_profile));
-    write_final_outputs(inputs, &artifacts)?;
+    write_final_outputs(inputs, &artifacts, resolved.selection_profile)?;
 
     println!("calibration: {}", artifacts.calibration.display());
     println!("selection_json: {}", artifacts.selection_json.display());
@@ -557,6 +564,7 @@ fn read_calibration(path: &Path) -> Result<SchedulerAutotuneCalibrationInput> {
 fn write_final_outputs(
     inputs: Vec<SchedulerAutotuneCalibrationInput>,
     artifacts: &FinalArtifactPaths,
+    selection_profile: SchedulerAutotuneSelectionProfile,
 ) -> Result<()> {
     let merged = merge_scheduler_autotune_calibrations(
         inputs,
@@ -568,7 +576,12 @@ fn write_final_outputs(
     std::fs::write(&artifacts.calibration, format!("{calibration}\n"))
         .with_context(|| format!("writing {}", artifacts.calibration.display()))?;
 
-    let selection = select_scheduler_autotune_profile(merged);
+    let selection = select_scheduler_autotune_profile_with_options(
+        merged,
+        SchedulerAutotuneSelectionOptions {
+            profile: selection_profile,
+        },
+    );
     let selection_json = serde_json::to_string_pretty(&selection)?;
     std::fs::write(&artifacts.selection_json, format!("{selection_json}\n"))
         .with_context(|| format!("writing {}", artifacts.selection_json.display()))?;
@@ -595,10 +608,11 @@ mod tests {
         parse_candidate_config, resolve_run_config, write_final_outputs, FinalArtifactPaths,
         SchedulerAutotuneCalibrateArgs,
     };
+    use crate::cli::scheduler_autotune::SchedulerAutotuneSelectionProfileArg;
     use crate::core::scheduler_autotune::{
         SchedulerAutotuneCalibrationInput, SchedulerAutotuneMeasurement,
         SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
-        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        SchedulerAutotuneSelectionProfile, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
 
     #[test]
@@ -764,6 +778,10 @@ mod tests {
         );
         assert_eq!(resolved.prompt_len, vec![1024, 4096]);
         assert_eq!(resolved.concurrency, vec![1, 2]);
+        assert_eq!(
+            resolved.selection_profile,
+            SchedulerAutotuneSelectionProfile::AgentLongPrompt
+        );
         assert_eq!(resolved.candidates.len(), 4);
         assert!(resolved.candidates.iter().any(|config| config.b_max == 1));
         assert!(resolved.candidates.iter().any(|config| config.b_max == 2));
@@ -793,6 +811,10 @@ mod tests {
         );
         assert_eq!(resolved.prompt_len, vec![1024, 2048]);
         assert_eq!(resolved.concurrency, vec![1, 2]);
+        assert_eq!(
+            resolved.selection_profile,
+            SchedulerAutotuneSelectionProfile::AgentLongPrompt
+        );
         assert_eq!(resolved.candidates, vec![profile_config()]);
     }
 
@@ -803,8 +825,12 @@ mod tests {
         let profile_path = temp_dir.join("scheduler-profile.json");
         let paths = FinalArtifactPaths::new(&temp_dir, Some(profile_path.clone()));
 
-        write_final_outputs(vec![sample_calibration(profile_config())], &paths)
-            .expect("write final outputs");
+        write_final_outputs(
+            vec![sample_calibration(profile_config())],
+            &paths,
+            SchedulerAutotuneSelectionProfile::AgentLongPrompt,
+        )
+        .expect("write final outputs");
 
         let calibration =
             std::fs::read_to_string(&paths.calibration).expect("read calibration output");
@@ -832,6 +858,7 @@ mod tests {
             prompt_len: vec![1024, 2048],
             max_tokens: 128,
             concurrency: vec![1, 2],
+            selection_profile: SchedulerAutotuneSelectionProfileArg::AgentLongPrompt,
             runs: 5,
             warmup: 1,
             duration: 30,

@@ -74,6 +74,10 @@ mod tests {
                     args.format,
                     super::scheduler_autotune::SchedulerAutotuneOutputFormat::Json
                 );
+                assert_eq!(
+                    args.selection_profile,
+                    super::scheduler_autotune::SchedulerAutotuneSelectionProfileArg::AgentLongPrompt
+                );
             }
             other => panic!("expected SchedulerAutotune command, got {other:?}"),
         }
@@ -89,6 +93,8 @@ mod tests {
             "calibration.json",
             "--format",
             "json",
+            "--selection-profile",
+            "balanced",
             "--write-profile",
             "scheduler-profile.json",
         ]);
@@ -100,6 +106,10 @@ mod tests {
                     assert_eq!(
                         select.format,
                         super::scheduler_autotune::SchedulerAutotuneOutputFormat::Json
+                    );
+                    assert_eq!(
+                        select.selection_profile,
+                        super::scheduler_autotune::SchedulerAutotuneSelectionProfileArg::Balanced
                     );
                     assert_eq!(
                         select
@@ -174,6 +184,8 @@ mod tests {
             "128",
             "--concurrency",
             "1,2",
+            "--selection-profile",
+            "balanced",
             "--write-profile",
             "/tmp/scheduler-profile.json",
         ]);
@@ -210,6 +222,10 @@ mod tests {
                     assert_eq!(calibrate.max_tokens, 128);
                     assert_eq!(calibrate.concurrency, vec![1, 2]);
                     assert_eq!(
+                        calibrate.selection_profile,
+                        super::scheduler_autotune::SchedulerAutotuneSelectionProfileArg::Balanced
+                    );
+                    assert_eq!(
                         calibrate
                             .write_profile
                             .as_ref()
@@ -244,6 +260,10 @@ mod tests {
                     assert!(calibrate.candidates.is_empty());
                     assert!(calibrate.prompt_len.is_empty());
                     assert!(calibrate.concurrency.is_empty());
+                    assert_eq!(
+                        calibrate.selection_profile,
+                        super::scheduler_autotune::SchedulerAutotuneSelectionProfileArg::AgentLongPrompt
+                    );
                     assert!(calibrate.write_profile.is_none());
                 }
                 other => panic!("expected Calibrate action, got {other:?}"),
