@@ -73,8 +73,16 @@ async fn b1_p2_3e_1b_configured_decode_speedup() {
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
     let stop_tokens = tokenizer.eos_token_ids().to_vec();
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let prompts = [
         "Write a short essay on the history of Italian cuisine.",

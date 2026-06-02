@@ -111,8 +111,9 @@ async fn scheduler_actor_b1_text_only_swap() {
     //    loaded (no second disk load needed).
     let meta = model.model_meta();
     let model_arc = Arc::new(Mutex::new(model));
-    let handle = spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn_scheduler_actor");
+    let handle =
+        spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768, 256, meta)
+            .expect("spawn_scheduler_actor");
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -216,8 +217,9 @@ async fn scheduler_actor_long_prompt_routes_to_gs() {
     // because no SchedulerCommand is ever sent on the GS path.
     let meta = model.model_meta();
     let model_arc = Arc::new(Mutex::new(model));
-    let handle = spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn_scheduler_actor");
+    let handle =
+        spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768, 256, meta)
+            .expect("spawn_scheduler_actor");
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     // GS path: no SchedulerCommand sent → admit_count unchanged.
@@ -281,8 +283,9 @@ async fn scheduler_actor_vl_routes_to_gs() {
 
     let meta = model.model_meta();
     let model_arc = Arc::new(Mutex::new(model));
-    let handle = spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn_scheduler_actor");
+    let handle =
+        spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768, 256, meta)
+            .expect("spawn_scheduler_actor");
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     // Routing predicate verified above; drop the request without running

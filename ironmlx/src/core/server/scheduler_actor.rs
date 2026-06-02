@@ -129,15 +129,15 @@ fn rolling_profile_queue_wait_ms(queued_at: Instant, now: Instant) -> f64 {
     rolling_profile_elapsed_ms(queued_at, now)
 }
 
-const ROLLING_DECODE_CADENCE_MID_CHUNK_CAP: i32 = 256;
-
 fn cadence_protected_mid_chunk_size(
     requested_chunk_size: i32,
     active_count_with_mid_admit: usize,
+    decode_cadence_mid_chunk_cap: usize,
 ) -> i32 {
     let requested_chunk_size = requested_chunk_size.max(1);
     if active_count_with_mid_admit > 1 {
-        requested_chunk_size.min(ROLLING_DECODE_CADENCE_MID_CHUNK_CAP)
+        let cap = decode_cadence_mid_chunk_cap.clamp(1, i32::MAX as usize) as i32;
+        requested_chunk_size.min(cap)
     } else {
         requested_chunk_size
     }
@@ -312,6 +312,8 @@ pub struct SchedulerActorHandle {
 ///   per request. Computed at boot as
 ///   `min(--max-cache-cap CLI, model.config.max_position_embeddings)`.
 ///   Passed directly to `Scheduler::new`. B1-p2.3f.
+/// - `decode_cadence_mid_chunk_cap` — maximum rolling mid-admit chunk size
+///   while existing decode rows are active.
 /// - `meta` — model memory-budget metadata for startup validation. B1-p2.5.
 pub fn spawn_scheduler_actor<M>(
     model: Arc<Mutex<M>>,
@@ -319,6 +321,7 @@ pub fn spawn_scheduler_actor<M>(
     admission_deadline: Duration,
     admission_queue_max: usize,
     effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
     meta: crate::core::memory_budget::ModelMeta,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
@@ -394,6 +397,7 @@ where
             queue_rejected_for_task,
             b_active_for_task,
             b_queued_for_task,
+            decode_cadence_mid_chunk_cap,
         );
     });
 
@@ -429,6 +433,7 @@ fn driver_loop<M>(
     queue_rejected: Arc<AtomicU64>,
     b_active: Arc<AtomicU64>,
     b_queued: Arc<AtomicU64>,
+    decode_cadence_mid_chunk_cap: usize,
 ) where
     M: Model + DenseVlMethods + Send + 'static,
 {
@@ -649,6 +654,7 @@ fn driver_loop<M>(
                             queue_wait_ms: None,
                             queue_len: admission_queue.len(),
                         },
+                        decode_cadence_mid_chunk_cap,
                     ) {
                         admission_policy.record_admission_work();
                     }
@@ -661,6 +667,7 @@ fn driver_loop<M>(
                         &admit_count,
                         &model,
                         admission_queue.len(),
+                        decode_cadence_mid_chunk_cap,
                     ) {
                         admission_policy.record_admission_work();
                     }
@@ -752,6 +759,7 @@ fn driver_loop<M>(
                                     &admit_count,
                                     &model,
                                     b_max,
+                                    decode_cadence_mid_chunk_cap,
                                 )
                             {
                                 admission_policy.record_admission_work();
@@ -1050,6 +1058,7 @@ where
     Some(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_mid_admit_one_chunk<M>(
     cmd: SchedulerCommand,
     in_flight_mid_admit: &mut Option<AdmitMidHandle>,
@@ -1058,6 +1067,7 @@ fn start_mid_admit_one_chunk<M>(
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
     profile_context: MidAdmitProfileContext,
+    decode_cadence_mid_chunk_cap: usize,
 ) -> bool
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -1076,6 +1086,7 @@ where
         admit_count,
         model,
         profile_context.queue_len,
+        decode_cadence_mid_chunk_cap,
     )
 }
 
@@ -1086,6 +1097,7 @@ fn advance_mid_admit_one_chunk<M>(
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
     queue_len: usize,
+    decode_cadence_mid_chunk_cap: usize,
 ) -> bool
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -1096,8 +1108,11 @@ where
     let id = handle.request_id;
     let active_count_before_chunk = sched.active_count();
     let requested_chunk_size = handle.chunk_size;
-    let effective_chunk_size =
-        cadence_protected_mid_chunk_size(requested_chunk_size, active_count_before_chunk);
+    let effective_chunk_size = cadence_protected_mid_chunk_size(
+        requested_chunk_size,
+        active_count_before_chunk,
+        decode_cadence_mid_chunk_cap,
+    );
     handle.chunk_size = effective_chunk_size;
     let chunk_profile = rolling_profile_enabled().then(|| {
         (
@@ -1269,6 +1284,7 @@ fn enqueue_or_reject(
 /// exit branch (`active_count == 0 && queue non-empty`) will handle the
 /// queued entries via `evict_all` + fresh `prefill_admitted`. Return
 /// early here so we do not call `admit_mid` in an illegal phase.
+#[allow(clippy::too_many_arguments)]
 fn drain_admission_queue<M>(
     queue: &mut VecDeque<PendingAdmit>,
     in_flight_mid_admit: &mut Option<AdmitMidHandle>,
@@ -1277,6 +1293,7 @@ fn drain_admission_queue<M>(
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
     b_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
 ) -> bool
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -1333,6 +1350,7 @@ where
                 queue_wait_ms,
                 queue_len: queue.len(),
             },
+            decode_cadence_mid_chunk_cap,
         );
         // Re-check phase after each mid-admit — if admit_mid itself
         // exhausted remaining rows and transitioned to Finished, stop.
@@ -1848,6 +1866,13 @@ mod tests {
         assert!((wait_ms - 12.345).abs() < 1e-9);
     }
 
+    #[test]
+    fn cadence_protection_uses_supplied_runtime_cap() {
+        assert_eq!(cadence_protected_mid_chunk_size(1024, 2, 384), 384);
+        assert_eq!(cadence_protected_mid_chunk_size(1024, 1, 384), 1024);
+        assert_eq!(cadence_protected_mid_chunk_size(128, 2, 384), 128);
+    }
+
     #[cfg(feature = "p5h-profile")]
     #[test]
     fn scheduler_decode_profile_context_marks_scheduler_route() {
@@ -1909,6 +1934,7 @@ mod tests {
             &admit_count,
             &model,
             4,
+            256,
         );
 
         assert!(did_admit, "expected one queued request to be admitted");
@@ -1959,6 +1985,7 @@ mod tests {
             &admit_count,
             &model,
             4,
+            256,
         );
 
         assert!(
@@ -2015,6 +2042,7 @@ mod tests {
             &admit_count,
             &model,
             4,
+            256,
         );
 
         assert!(
@@ -2074,6 +2102,7 @@ mod tests {
             &admit_count,
             &model,
             4,
+            384,
         );
 
         assert!(did_admit, "chunked queued request should start");
@@ -2081,7 +2110,7 @@ mod tests {
             .as_ref()
             .expect("chunked mid-admit should still be in flight");
         assert_eq!(
-            handle.chunk_start, 256,
+            handle.chunk_start, 384,
             "active decode rows should cap the first mid-admit chunk to protect ITL"
         );
         assert_eq!(
@@ -2157,6 +2186,7 @@ mod tests {
             /* admission_deadline */ Duration::from_millis(5),
             /* admission_queue_max */ 2,
             /* effective_cap_max */ 32768,
+            /* decode_cadence_mid_chunk_cap */ 256,
             meta,
         )
         .expect("spawn");
@@ -2268,6 +2298,7 @@ mod tests {
             /* admission_deadline */ Duration::from_millis(5),
             /* admission_queue_max */ 1,
             /* effective_cap_max */ 32768,
+            /* decode_cadence_mid_chunk_cap */ 256,
             meta,
         )
         .expect("spawn");

@@ -16,6 +16,7 @@ use crate::core::Model;
 use serde::{Deserialize, Serialize};
 
 const PROMPT_LIMIT_SAMPLES: [usize; 4] = [512, 1024, 2048, 8192];
+pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptBatchLimit {
@@ -33,6 +34,7 @@ pub struct SchedulerAutotuneInput {
     pub admission_queue_max: usize,
     pub requested_max_cache_cap: usize,
     pub effective_cap_max: usize,
+    pub decode_cadence_mid_chunk_cap: usize,
     pub total_ram_bytes: usize,
 }
 
@@ -115,13 +117,14 @@ impl SchedulerAutotuneReport {
         writeln!(out, "model: {}", self.input.model_name).unwrap();
         writeln!(
             out,
-            "current: prefill_chunk_size={} b_max={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={} effective_cap_max={}",
+            "current: prefill_chunk_size={} b_max={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={} effective_cap_max={} decode_cadence_mid_chunk_cap={}",
             self.input.prefill_chunk_size,
             self.input.b_max,
             self.input.admission_deadline_ms,
             self.input.admission_queue_max,
             self.input.requested_max_cache_cap,
-            self.input.effective_cap_max
+            self.input.effective_cap_max,
+            self.input.decode_cadence_mid_chunk_cap
         )
         .unwrap();
         writeln!(
@@ -301,6 +304,19 @@ fn build_recommendations(
         ));
     }
 
+    if input.b_max > 1
+        && input.prefill_chunk_size > 0
+        && input.decode_cadence_mid_chunk_cap < input.prefill_chunk_size
+    {
+        items.push(info(
+            "decode_cadence_cap_active",
+            format!(
+                "decode_cadence_mid_chunk_cap={} can split rolling mid-admit prefill chunks below prefill_chunk_size={} when active decode rows exist",
+                input.decode_cadence_mid_chunk_cap, input.prefill_chunk_size
+            ),
+        ));
+    }
+
     if prompt_batch_limits
         .iter()
         .any(|sample| sample.limit < input.b_max)
@@ -391,6 +407,7 @@ pub struct SchedulerAutotuneProfileConfig {
     pub admission_deadline_ms: u64,
     pub admission_queue_max: usize,
     pub max_cache_cap: usize,
+    pub decode_cadence_mid_chunk_cap: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -401,6 +418,7 @@ pub struct SchedulerAutotuneMeasurement {
     pub concurrency: usize,
     pub ttft_ms_p95: f64,
     pub itl_ms_p95: f64,
+    pub early_itl_ms_p95: f64,
     pub e2e_s_p95: f64,
     pub tokens_per_sec: f64,
     #[serde(default = "default_true")]
@@ -443,6 +461,7 @@ pub struct SchedulerAutotuneCandidateScore {
     pub scenario_count: usize,
     pub mean_ttft_norm: f64,
     pub mean_itl_norm: f64,
+    pub mean_early_itl_norm: f64,
     pub mean_e2e_norm: f64,
     pub mean_throughput_norm: f64,
 }
@@ -659,12 +678,13 @@ impl SchedulerAutotuneProfileSelection {
             Some(selected) => {
                 writeln!(
                     out,
-                    "selected: b_max={} prefill_chunk_size={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={} score={:.4}",
+                    "selected: b_max={} prefill_chunk_size={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={} decode_cadence_mid_chunk_cap={} score={:.4}",
                     selected.config.b_max,
                     selected.config.prefill_chunk_size,
                     selected.config.admission_deadline_ms,
                     selected.config.admission_queue_max,
                     selected.config.max_cache_cap,
+                    selected.config.decode_cadence_mid_chunk_cap,
                     selected.score
                 )
                 .unwrap();
@@ -678,14 +698,16 @@ impl SchedulerAutotuneProfileSelection {
         for item in &self.candidates {
             writeln!(
                 out,
-                "- b_max={} chunk={} deadline_ms={} queue_max={} cap={} score={:.4} scenarios={}",
+                "- b_max={} chunk={} deadline_ms={} queue_max={} cap={} decode_cadence_cap={} score={:.4} scenarios={} early_itl_norm={:.4}",
                 item.config.b_max,
                 item.config.prefill_chunk_size,
                 item.config.admission_deadline_ms,
                 item.config.admission_queue_max,
                 item.config.max_cache_cap,
+                item.config.decode_cadence_mid_chunk_cap,
                 item.score,
                 item.scenario_count,
+                item.mean_early_itl_norm,
             )
             .unwrap();
         }
@@ -697,11 +719,12 @@ impl SchedulerAutotuneProfileSelection {
             for item in &self.rejected {
                 writeln!(
                     out,
-                    "- {} b_max={} chunk={} deadline_ms={}: {}",
+                    "- {} b_max={} chunk={} deadline_ms={} decode_cadence_cap={}: {}",
                     item.code,
                     item.config.b_max,
                     item.config.prefill_chunk_size,
                     item.config.admission_deadline_ms,
+                    item.config.decode_cadence_mid_chunk_cap,
                     item.message
                 )
                 .unwrap();
@@ -729,7 +752,7 @@ pub fn build_scheduler_autotune_runtime_profile(
         .ok_or_else(|| anyhow::anyhow!("selected scheduler profile is required"))?;
 
     Ok(SchedulerAutotuneRuntimeProfile {
-        schema_version: 1,
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: selection.model_name.clone(),
         hardware_label: selection.hardware_label.clone(),
         config: selected.config,
@@ -760,6 +783,7 @@ fn score_complete_candidates(
         let mut score_sum = 0.0;
         let mut ttft_norm_sum = 0.0;
         let mut itl_norm_sum = 0.0;
+        let mut early_itl_norm_sum = 0.0;
         let mut e2e_norm_sum = 0.0;
         let mut throughput_norm_sum = 0.0;
         for scenario in required_scenarios {
@@ -771,6 +795,7 @@ fn score_complete_candidates(
             };
             let ttft_norm = row.ttft_ms_p95 / nonzero(best.ttft_ms_p95);
             let itl_norm = row.itl_ms_p95 / nonzero(best.itl_ms_p95);
+            let early_itl_norm = row.early_itl_ms_p95 / nonzero(best.early_itl_ms_p95);
             let e2e_norm = row.e2e_s_p95 / nonzero(best.e2e_s_p95);
             let throughput_norm = nonzero(best.tokens_per_sec) / nonzero(row.tokens_per_sec);
             let scenario_score = objective.ttft_p95_weight * ttft_norm
@@ -780,6 +805,7 @@ fn score_complete_candidates(
             score_sum += scenario_score;
             ttft_norm_sum += ttft_norm;
             itl_norm_sum += itl_norm;
+            early_itl_norm_sum += early_itl_norm;
             e2e_norm_sum += e2e_norm;
             throughput_norm_sum += throughput_norm;
         }
@@ -790,6 +816,7 @@ fn score_complete_candidates(
             scenario_count: required_scenarios.len(),
             mean_ttft_norm: ttft_norm_sum / n,
             mean_itl_norm: itl_norm_sum / n,
+            mean_early_itl_norm: early_itl_norm_sum / n,
             mean_e2e_norm: e2e_norm_sum / n,
             mean_throughput_norm: throughput_norm_sum / n,
         });
@@ -808,6 +835,7 @@ fn score_complete_candidates(
 struct ScenarioBest {
     ttft_ms_p95: f64,
     itl_ms_p95: f64,
+    early_itl_ms_p95: f64,
     e2e_s_p95: f64,
     tokens_per_sec: f64,
 }
@@ -817,6 +845,7 @@ impl Default for ScenarioBest {
         Self {
             ttft_ms_p95: f64::INFINITY,
             itl_ms_p95: f64::INFINITY,
+            early_itl_ms_p95: f64::INFINITY,
             e2e_s_p95: f64::INFINITY,
             tokens_per_sec: 0.0,
         }
@@ -827,6 +856,7 @@ impl ScenarioBest {
     fn observe(&mut self, row: &SchedulerAutotuneMeasurement) {
         self.ttft_ms_p95 = self.ttft_ms_p95.min(nonzero(row.ttft_ms_p95));
         self.itl_ms_p95 = self.itl_ms_p95.min(nonzero(row.itl_ms_p95));
+        self.early_itl_ms_p95 = self.early_itl_ms_p95.min(nonzero(row.early_itl_ms_p95));
         self.e2e_s_p95 = self.e2e_s_p95.min(nonzero(row.e2e_s_p95));
         self.tokens_per_sec = self.tokens_per_sec.max(nonzero(row.tokens_per_sec));
     }
@@ -861,9 +891,10 @@ fn validate_single_calibration(
     input: &SchedulerAutotuneCalibrationInput,
     label: &str,
 ) -> Result<()> {
-    if input.schema_version != 1 {
+    if input.schema_version != SCHEDULER_AUTOTUNE_SCHEMA_VERSION {
         bail!(
-            "{label} schema_version mismatch: expected 1, got {}",
+            "{label} schema_version mismatch: expected {}, got {}",
+            SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
             input.schema_version
         );
     }
@@ -903,17 +934,19 @@ fn validate_complete_scenario_coverage(
             let missing = baseline_scenarios.difference(&scenarios).count();
             let extra = scenarios.difference(&baseline_scenarios).count();
             bail!(
-                "scenario coverage mismatch for b_max={} prefill_chunk_size={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={} against baseline b_max={} prefill_chunk_size={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={}: missing {} scenario(s), extra {} scenario(s)",
+                "scenario coverage mismatch for b_max={} prefill_chunk_size={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={} decode_cadence_mid_chunk_cap={} against baseline b_max={} prefill_chunk_size={} admission_deadline_ms={} admission_queue_max={} max_cache_cap={} decode_cadence_mid_chunk_cap={}: missing {} scenario(s), extra {} scenario(s)",
                 config.b_max,
                 config.prefill_chunk_size,
                 config.admission_deadline_ms,
                 config.admission_queue_max,
                 config.max_cache_cap,
+                config.decode_cadence_mid_chunk_cap,
                 baseline_config.b_max,
                 baseline_config.prefill_chunk_size,
                 baseline_config.admission_deadline_ms,
                 baseline_config.admission_queue_max,
                 baseline_config.max_cache_cap,
+                baseline_config.decode_cadence_mid_chunk_cap,
                 missing,
                 extra
             );

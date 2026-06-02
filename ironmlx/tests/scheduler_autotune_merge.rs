@@ -1,7 +1,7 @@
 use ironmlx::core::scheduler_autotune::{
     merge_scheduler_autotune_calibrations, SchedulerAutotuneCalibrationInput,
     SchedulerAutotuneMeasurement, SchedulerAutotuneMergeOptions, SchedulerAutotuneObjective,
-    SchedulerAutotuneProfileConfig,
+    SchedulerAutotuneProfileConfig, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 
 fn config(b_max: usize, chunk: usize) -> SchedulerAutotuneProfileConfig {
@@ -11,6 +11,7 @@ fn config(b_max: usize, chunk: usize) -> SchedulerAutotuneProfileConfig {
         admission_deadline_ms: 5,
         admission_queue_max: 32,
         max_cache_cap: 32768,
+        decode_cadence_mid_chunk_cap: 256,
     }
 }
 
@@ -29,6 +30,7 @@ fn measurement(
         itl_ms_p95: 12.0,
         e2e_s_p95: 2.4,
         tokens_per_sec: 80.0,
+        early_itl_ms_p95: 12.0,
         memory_budget_ok: true,
         cached_tokens_warning: false,
     }
@@ -40,7 +42,7 @@ fn input(
     measurements: Vec<SchedulerAutotuneMeasurement>,
 ) -> SchedulerAutotuneCalibrationInput {
     SchedulerAutotuneCalibrationInput {
-        schema_version: 1,
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: model_name.to_string(),
         hardware_label: hardware_label.to_string(),
         objective: SchedulerAutotuneObjective::agent_default(),
@@ -75,7 +77,7 @@ fn merge_calibrations_preserves_metadata_and_concatenates_measurements() {
     )
     .expect("merge should succeed");
 
-    assert_eq!(merged.schema_version, 1);
+    assert_eq!(merged.schema_version, SCHEDULER_AUTOTUNE_SCHEMA_VERSION);
     assert_eq!(merged.model_name, "GLM-4.7-flash-4bit");
     assert_eq!(merged.hardware_label, "m3-max");
     assert_eq!(

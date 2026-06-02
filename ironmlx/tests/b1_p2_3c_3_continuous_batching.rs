@@ -187,8 +187,16 @@ async fn continuous_batching_mid_decode_admit() {
     };
 
     // Drive actor.
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let reply_a = submit_admit(
         &handle.cmd_tx,
@@ -281,8 +289,16 @@ async fn continuous_batching_full_reject() {
 
     // admission_queue_max=0: disable the 3d queue so this test exercises
     // the immediate-reject path (c > b_max → Err "scheduler full").
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 0, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        0,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     // stop_token_ids: vec![] (disable EOS) so A/B don't short-circuit on
     // "Hello"/"World" + cold GPU; ensures the 200ms sleep below + C arrival
@@ -355,8 +371,16 @@ async fn continuous_batching_drains_to_empty() {
     let prompt_b = tokenize_prompt(&tokenizer, "World");
     let stop: Vec<u32> = tokenizer.eos_token_ids().to_vec();
 
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     // First admit + drain.
     let reply_a = submit_admit(&handle.cmd_tx, make_request(prompt_a, 4, stop.clone()))

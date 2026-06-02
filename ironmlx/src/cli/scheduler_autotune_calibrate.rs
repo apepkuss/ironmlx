@@ -86,6 +86,7 @@ pub fn parse_candidate_config(
     let mut admission_deadline_ms = None;
     let mut admission_queue_max = None;
     let mut max_cache_cap = None;
+    let mut decode_cadence_mid_chunk_cap = None;
 
     for part in raw.split(',') {
         let (key, value) = part
@@ -99,6 +100,9 @@ pub fn parse_candidate_config(
             }
             "admission_queue_max" => admission_queue_max = Some(parse_usize_value(key, value)?),
             "max_cache_cap" => max_cache_cap = Some(parse_usize_value(key, value)?),
+            "decode_cadence_mid_chunk_cap" => {
+                decode_cadence_mid_chunk_cap = Some(parse_usize_value(key, value)?);
+            }
             other => return Err(format!("unknown candidate key: {other}")),
         }
     }
@@ -112,6 +116,8 @@ pub fn parse_candidate_config(
         admission_queue_max: admission_queue_max
             .ok_or_else(|| "missing admission_queue_max".to_string())?,
         max_cache_cap: max_cache_cap.ok_or_else(|| "missing max_cache_cap".to_string())?,
+        decode_cadence_mid_chunk_cap: decode_cadence_mid_chunk_cap
+            .ok_or_else(|| "missing decode_cadence_mid_chunk_cap".to_string())?,
     })
 }
 
@@ -233,6 +239,8 @@ fn build_serve_invocation(
             config.admission_queue_max.to_string(),
             "--max-cache-cap".to_string(),
             config.max_cache_cap.to_string(),
+            "--decode-cadence-mid-chunk-cap".to_string(),
+            config.decode_cadence_mid_chunk_cap.to_string(),
         ],
     }
 }
@@ -266,6 +274,8 @@ fn build_iron_bench_invocation(
         config.admission_queue_max.to_string(),
         "--autotune-max-cache-cap".to_string(),
         config.max_cache_cap.to_string(),
+        "--autotune-decode-cadence-mid-chunk-cap".to_string(),
+        config.decode_cadence_mid_chunk_cap.to_string(),
     ];
 
     if concurrency == 1 {
@@ -452,12 +462,13 @@ mod tests {
     use crate::core::scheduler_autotune::{
         SchedulerAutotuneCalibrationInput, SchedulerAutotuneMeasurement,
         SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
+        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
 
     #[test]
     fn parse_candidate_config_accepts_all_required_fields() {
         let config = parse_candidate_config(
-            "b_max=2,prefill_chunk_size=1024,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768",
+            "b_max=2,prefill_chunk_size=1024,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768,decode_cadence_mid_chunk_cap=256",
         )
         .expect("candidate should parse");
 
@@ -466,16 +477,20 @@ mod tests {
         assert_eq!(config.admission_deadline_ms, 5);
         assert_eq!(config.admission_queue_max, 32);
         assert_eq!(config.max_cache_cap, 32768);
+        assert_eq!(config.decode_cadence_mid_chunk_cap, 256);
     }
 
     #[test]
     fn parse_candidate_config_rejects_missing_field() {
         let err = parse_candidate_config(
-            "b_max=2,prefill_chunk_size=1024,admission_deadline_ms=5,admission_queue_max=32",
+            "b_max=2,prefill_chunk_size=1024,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768",
         )
-        .expect_err("missing max_cache_cap should fail");
+        .expect_err("missing decode_cadence_mid_chunk_cap should fail");
 
-        assert!(err.contains("max_cache_cap"), "unexpected error: {err}");
+        assert!(
+            err.contains("decode_cadence_mid_chunk_cap"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -498,6 +513,10 @@ mod tests {
         assert!(command.args.contains(&"1024".to_string()));
         assert!(command.args.contains(&"--port".to_string()));
         assert!(command.args.contains(&"19000".to_string()));
+        assert!(command
+            .args
+            .contains(&"--decode-cadence-mid-chunk-cap".to_string()));
+        assert!(command.args.contains(&"256".to_string()));
     }
 
     #[test]
@@ -525,6 +544,10 @@ mod tests {
         assert!(command.args.contains(&"30".to_string()));
         assert!(command.args.contains(&"--warmup-duration".to_string()));
         assert!(command.args.contains(&"5".to_string()));
+        assert!(command
+            .args
+            .contains(&"--autotune-decode-cadence-mid-chunk-cap".to_string()));
+        assert!(command.args.contains(&"256".to_string()));
     }
 
     #[test]
@@ -614,6 +637,7 @@ mod tests {
             admission_deadline_ms: 5,
             admission_queue_max: 32,
             max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
         }
     }
 
@@ -621,7 +645,7 @@ mod tests {
         config: SchedulerAutotuneProfileConfig,
     ) -> SchedulerAutotuneCalibrationInput {
         SchedulerAutotuneCalibrationInput {
-            schema_version: 1,
+            schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
             model_name: "GLM-4.7-flash-4bit".to_string(),
             hardware_label: "m5-max-128g".to_string(),
             objective: SchedulerAutotuneObjective::agent_default(),
@@ -634,6 +658,7 @@ mod tests {
                 itl_ms_p95: 12.0,
                 e2e_s_p95: 2.5,
                 tokens_per_sec: 90.0,
+                early_itl_ms_p95: 12.0,
                 memory_budget_ok: true,
                 cached_tokens_warning: false,
             }],

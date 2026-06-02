@@ -211,8 +211,16 @@ async fn batched_vl_b2_full_vl_bit_id() {
     eprintln!("[S1] baseline_a={baseline_a:?}  baseline_b={baseline_b:?}");
 
     // Scheduler B=2
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let req_a = GenerateRequest {
@@ -363,8 +371,16 @@ async fn batched_vl_b2_mixed_text_and_vl() {
 
     eprintln!("[S2] baseline_text={baseline_text:?}  baseline_vl={baseline_vl:?}");
 
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let req_text = GenerateRequest {
@@ -524,8 +540,16 @@ async fn mid_admit_vl_during_text_decode() {
     );
 
     // b_max=4 so mid-admit VL can fit alongside A+B
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let (tx_a, rx_a) = oneshot::channel();
@@ -756,8 +780,16 @@ async fn batched_vl_multi_image_per_row() {
 
     eprintln!("[S4] baseline_0={baseline_0:?}  baseline_1={baseline_1:?}");
 
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let (tx_0, rx_0) = oneshot::channel();

@@ -86,8 +86,16 @@ async fn queue_drains_fifo_at_bmax2_c4() {
     // complete; queue_depth_peak >= 2 (2 had to queue).
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 8, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        8,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let texts = ["Hello", "World", "Goodbye", "Farewell"];
     let mut replies = Vec::new();
@@ -139,8 +147,16 @@ async fn queue_overflow_returns_err_via_actor() {
     // is ~150 ms/step regardless of Rust opt-level; 1024 tokens ≈ 150s.
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 3, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        3,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     // stop_token_ids: vec![] (disable EOS) so A/B don't short-circuit on
     // "Hello"/"World" + cold GPU; ensures the burst below finds A/B still
@@ -242,9 +258,16 @@ async fn admission_deadline_config_observed() {
     // batch_count should be 1 (not 2).
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let handle =
-        spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(30), 32, 32768, meta)
-            .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(30),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
 
@@ -313,9 +336,16 @@ async fn b_max_config_8_no_queue() {
     // one batch (queue stays empty).
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let handle =
-        spawn_scheduler_actor(model.clone(), 8, Duration::from_millis(50), 32, 32768, meta)
-            .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        8,
+        Duration::from_millis(50),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let texts = ["a", "b", "c", "d", "e", "f"];
     let mut rxs = Vec::new();
@@ -389,6 +419,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             5,     // admission_deadline_ms
             32,    // admission_queue_max
             32768, // max_cache_cap (3f default)
+            256,   // decode_cadence_mid_chunk_cap
             false, // scheduler_autotune_report
             false, // p5h_measurement_eval_probes (P5h+1 T1)
             None,  // vision_input_override

@@ -93,7 +93,7 @@ async fn test_scheduler_actor_max_tokens_1_no_finished_phase_error() {
     let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
     let meta = model.model_meta();
     let model = Arc::new(Mutex::new(model));
-    let handle = spawn_scheduler_actor(model, 4, Duration::from_millis(5), 32, 32768, meta)
+    let handle = spawn_scheduler_actor(model, 4, Duration::from_millis(5), 32, 32768, 256, meta)
         .expect("spawn_scheduler_actor");
 
     let prompt_ids = tokenize_prompt(&tokenizer, "Say one short word.");

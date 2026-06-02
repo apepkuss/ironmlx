@@ -71,6 +71,7 @@ async fn admit_long_prompt_pp10k() {
         /* admission_deadline */ Duration::from_millis(5),
         /* admission_queue_max */ 32,
         /* effective_cap_max */ 32768,
+        /* decode_cadence_mid_chunk_cap */ 256,
         meta,
     )
     .expect("spawn");

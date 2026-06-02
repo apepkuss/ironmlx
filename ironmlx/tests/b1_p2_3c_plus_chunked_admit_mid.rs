@@ -167,9 +167,16 @@ async fn chunked_admit_mid_stall_delta() {
     //     kernels. Separate actor so warmup tokens don't pollute the
     //     measurement.
     {
-        let warmup_handle =
-            spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-                .expect("spawn");
+        let warmup_handle = spawn_scheduler_actor(
+            model.clone(),
+            4,
+            Duration::from_millis(5),
+            32,
+            32768,
+            256,
+            meta,
+        )
+        .expect("spawn");
         let warmup_req = make_request(
             tokenize_prompt(&tokenizer, "Warmup."),
             4,
@@ -190,9 +197,16 @@ async fn chunked_admit_mid_stall_delta() {
     //     bake ~5×20s of first-time-compile latency into the baseline
     //     gap, swamping the actual stall measurement (T4 finding).
     {
-        let warmup_handle =
-            spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-                .expect("spawn");
+        let warmup_handle = spawn_scheduler_actor(
+            model.clone(),
+            4,
+            Duration::from_millis(5),
+            32,
+            32768,
+            256,
+            meta,
+        )
+        .expect("spawn");
         // A short "active" row to make the long admit route through
         // admit_mid_chunked (active_count > 0).
         let h_short = warmup_handle.clone();
@@ -219,8 +233,16 @@ async fn chunked_admit_mid_stall_delta() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // 2. Measurement actor.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     // 3. Baseline row: long-running short admit (max_new=60). Capture an
     //    Instant per received event for gap analysis.

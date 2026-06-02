@@ -156,7 +156,7 @@ fn spawn(
     b_max: usize,
     meta: ModelMeta,
 ) -> SchedulerActorHandle {
-    spawn_scheduler_actor(model, b_max, Duration::from_millis(5), 32, 32768, meta)
+    spawn_scheduler_actor(model, b_max, Duration::from_millis(5), 32, 32768, 256, meta)
         .expect("spawn_scheduler_actor")
 }
 

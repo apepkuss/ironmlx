@@ -116,6 +116,7 @@ pub async fn serve<M>(
     admission_deadline_ms: u64,
     admission_queue_max: usize,
     max_cache_cap: usize, // 3f
+    decode_cadence_mid_chunk_cap: usize,
     scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool, // P5h+1 T1
     vision_input_override: Option<VisionInputConfig>,
@@ -164,6 +165,7 @@ where
                 admission_queue_max,
                 requested_max_cache_cap: max_cache_cap,
                 effective_cap_max,
+                decode_cadence_mid_chunk_cap,
                 total_ram_bytes: crate::core::memory_budget::system_total_ram_bytes(),
             },
             crate::core::scheduler_autotune::prompt_batch_limits_for_model::<M>(b_max),
@@ -181,6 +183,7 @@ where
         admission_deadline,
         admission_queue_max,
         effective_cap_max,
+        decode_cadence_mid_chunk_cap,
         meta,
     )?;
     let vision_input = vision_input_override.unwrap_or(VisionInputConfig::Qwen {

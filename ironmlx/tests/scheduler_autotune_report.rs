@@ -96,6 +96,7 @@ fn sample_input(total_ram_bytes: usize) -> SchedulerAutotuneInput {
         admission_queue_max: 32,
         requested_max_cache_cap: 32768,
         effective_cap_max: 32768,
+        decode_cadence_mid_chunk_cap: 256,
         total_ram_bytes,
     }
 }

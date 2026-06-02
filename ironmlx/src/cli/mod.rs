@@ -167,7 +167,7 @@ mod tests {
             "--output-dir",
             "/tmp/autotune",
             "--candidate",
-            "b_max=2,prefill_chunk_size=1024,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768",
+            "b_max=2,prefill_chunk_size=1024,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768,decode_cadence_mid_chunk_cap=256",
             "--prompt-len",
             "1024,2048",
             "--max-tokens",
@@ -191,6 +191,7 @@ mod tests {
                     assert_eq!(calibrate.candidates.len(), 1);
                     assert_eq!(calibrate.candidates[0].b_max, 2);
                     assert_eq!(calibrate.candidates[0].prefill_chunk_size, 1024);
+                    assert_eq!(calibrate.candidates[0].decode_cadence_mid_chunk_cap, 256);
                     assert_eq!(calibrate.prompt_len, vec![1024, 2048]);
                     assert_eq!(calibrate.max_tokens, 128);
                     assert_eq!(calibrate.concurrency, vec![1, 2]);

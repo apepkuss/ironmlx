@@ -1,7 +1,7 @@
 use ironmlx::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, select_scheduler_autotune_profile,
     SchedulerAutotuneCalibrationInput, SchedulerAutotuneMeasurement, SchedulerAutotuneObjective,
-    SchedulerAutotuneProfileConfig,
+    SchedulerAutotuneProfileConfig, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 
 fn config(
@@ -15,6 +15,7 @@ fn config(
         admission_deadline_ms,
         admission_queue_max: 32,
         max_cache_cap: 32768,
+        decode_cadence_mid_chunk_cap: 256,
     }
 }
 
@@ -38,6 +39,7 @@ fn measurement(
         itl_ms_p95,
         e2e_s_p95,
         tokens_per_sec,
+        early_itl_ms_p95: itl_ms_p95,
         memory_budget_ok: true,
         cached_tokens_warning: false,
     }
@@ -45,7 +47,7 @@ fn measurement(
 
 fn input(measurements: Vec<SchedulerAutotuneMeasurement>) -> SchedulerAutotuneCalibrationInput {
     SchedulerAutotuneCalibrationInput {
-        schema_version: 1,
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
         model_name: "test-model".to_string(),
         hardware_label: "test-host".to_string(),
         objective: SchedulerAutotuneObjective::agent_default(),
@@ -152,10 +154,11 @@ fn runtime_profile_uses_selected_config_and_metadata() {
     let profile =
         build_scheduler_autotune_runtime_profile(&selection).expect("expected runtime profile");
 
-    assert_eq!(profile.schema_version, 1);
+    assert_eq!(profile.schema_version, SCHEDULER_AUTOTUNE_SCHEMA_VERSION);
     assert_eq!(profile.model_name, "test-model");
     assert_eq!(profile.hardware_label, "test-host");
     assert_eq!(profile.config, selected_config);
+    assert_eq!(profile.config.decode_cadence_mid_chunk_cap, 256);
 }
 
 #[test]

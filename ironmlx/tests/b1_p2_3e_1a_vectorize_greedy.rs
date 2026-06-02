@@ -68,8 +68,16 @@ async fn b1_p2_3e_1a_greedy_decode_speedup() {
     // Spawn 4 concurrent greedy admits → decode goes through the
     // all-greedy fast path inside Scheduler::step's sample_batch
     // dispatch.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let prompts = [
         "Explain why the sky appears blue during the day.",

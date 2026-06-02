@@ -37,7 +37,7 @@ async fn b1_p2_5_startup_rejects_overcommit() {
 
     let (model, _tok) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let result = spawn_scheduler_actor(model, 4, Duration::from_millis(5), 32, 32768, meta);
+    let result = spawn_scheduler_actor(model, 4, Duration::from_millis(5), 32, 32768, 256, meta);
 
     std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
 
@@ -74,6 +74,7 @@ async fn b1_p2_5_admission_gate_rejects_when_full() {
         Duration::from_millis(5),
         0, // queue_max=0 → immediate reject on saturation
         2048,
+        256,
         meta,
     )
     .expect("spawn ok with 16 GiB budget");

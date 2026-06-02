@@ -100,6 +100,10 @@ struct Args {
     #[arg(long)]
     pub autotune_max_cache_cap: Option<usize>,
 
+    /// Scheduler decode-cadence mid-admit chunk cap value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_decode_cadence_mid_chunk_cap: Option<usize>,
+
     /// Mark exported autotune measurements as memory-budget unsafe.
     #[arg(long, default_value_t = false)]
     pub autotune_memory_budget_unsafe: bool,
@@ -184,6 +188,11 @@ impl Args {
                 max_cache_cap: self
                     .autotune_max_cache_cap
                     .context("--autotune-max-cache-cap is required with --format autotune-json")?,
+                decode_cadence_mid_chunk_cap: self
+                    .autotune_decode_cadence_mid_chunk_cap
+                    .context(
+                        "--autotune-decode-cadence-mid-chunk-cap is required with --format autotune-json",
+                    )?,
             },
             memory_budget_ok: !self.autotune_memory_budget_unsafe,
         }))
@@ -577,6 +586,8 @@ mod tests {
             "32",
             "--autotune-max-cache-cap",
             "32768",
+            "--autotune-decode-cadence-mid-chunk-cap",
+            "256",
         ]);
 
         assert!(matches!(args.format, OutputFormat::AutotuneJson));
@@ -585,6 +596,7 @@ mod tests {
         assert_eq!(args.autotune_admission_deadline_ms, Some(5));
         assert_eq!(args.autotune_admission_queue_max, Some(32));
         assert_eq!(args.autotune_max_cache_cap, Some(32768));
+        assert_eq!(args.autotune_decode_cadence_mid_chunk_cap, Some(256));
         assert!(!args.autotune_memory_budget_unsafe);
     }
 
@@ -610,6 +622,8 @@ mod tests {
             "32",
             "--autotune-max-cache-cap",
             "32768",
+            "--autotune-decode-cadence-mid-chunk-cap",
+            "256",
         ])
         .expect_err("manual hardware labels should be rejected");
 
@@ -636,6 +650,8 @@ mod tests {
             "32",
             "--autotune-max-cache-cap",
             "32768",
+            "--autotune-decode-cadence-mid-chunk-cap",
+            "256",
         ]);
 
         let options = args

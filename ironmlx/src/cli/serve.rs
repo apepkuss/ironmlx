@@ -8,6 +8,7 @@ use clap::Args;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
@@ -17,6 +18,7 @@ const DEFAULT_B_MAX: usize = 1;
 const DEFAULT_ADMISSION_DEADLINE_MS: u64 = 5;
 const DEFAULT_ADMISSION_QUEUE_MAX: usize = 32;
 const DEFAULT_MAX_CACHE_CAP: usize = 32768;
+const DEFAULT_DECODE_CADENCE_MID_CHUNK_CAP: usize = 256;
 
 #[derive(Args, Debug)]
 pub struct ServeArgs {
@@ -71,6 +73,13 @@ pub struct ServeArgs {
     #[arg(long)]
     pub max_cache_cap: Option<usize>,
 
+    /// Maximum chunk size used by rolling mid-admit while decode rows are active.
+    /// Smaller values protect decode cadence under concurrent long-prompt admission;
+    /// larger values can reduce queued-request TTFT at the cost of longer decode gaps.
+    /// Defaults to `256` unless supplied by `--scheduler-profile`.
+    #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    pub decode_cadence_mid_chunk_cap: Option<usize>,
+
     /// Runtime scheduler profile exported by `scheduler-autotune select --write-profile`.
     #[arg(long)]
     pub scheduler_profile: Option<PathBuf>,
@@ -99,6 +108,7 @@ struct SchedulerServeConfig {
     admission_deadline_ms: u64,
     admission_queue_max: usize,
     max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
 }
 
 impl Default for SchedulerServeConfig {
@@ -109,6 +119,7 @@ impl Default for SchedulerServeConfig {
             admission_deadline_ms: DEFAULT_ADMISSION_DEADLINE_MS,
             admission_queue_max: DEFAULT_ADMISSION_QUEUE_MAX,
             max_cache_cap: DEFAULT_MAX_CACHE_CAP,
+            decode_cadence_mid_chunk_cap: DEFAULT_DECODE_CADENCE_MID_CHUNK_CAP,
         }
     }
 }
@@ -120,6 +131,7 @@ fn default_scheduler_profile_config() -> SchedulerAutotuneProfileConfig {
         admission_deadline_ms: DEFAULT_ADMISSION_DEADLINE_MS,
         admission_queue_max: DEFAULT_ADMISSION_QUEUE_MAX,
         max_cache_cap: DEFAULT_MAX_CACHE_CAP,
+        decode_cadence_mid_chunk_cap: DEFAULT_DECODE_CADENCE_MID_CHUNK_CAP,
     }
 }
 
@@ -134,9 +146,10 @@ fn resolve_scheduler_serve_config(
     profile: Option<&SchedulerAutotuneRuntimeProfile>,
 ) -> Result<SchedulerServeConfig> {
     if let Some(profile) = profile {
-        if profile.schema_version != 1 {
+        if profile.schema_version != SCHEDULER_AUTOTUNE_SCHEMA_VERSION {
             bail!(
-                "scheduler profile schema_version mismatch: expected 1, got {}",
+                "scheduler profile schema_version mismatch: expected {}, got {}",
+                SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
                 profile.schema_version
             );
         }
@@ -153,10 +166,16 @@ fn resolve_scheduler_serve_config(
             .unwrap_or(base.admission_deadline_ms),
         admission_queue_max: args.admission_queue_max.unwrap_or(base.admission_queue_max),
         max_cache_cap: args.max_cache_cap.unwrap_or(base.max_cache_cap),
+        decode_cadence_mid_chunk_cap: args
+            .decode_cadence_mid_chunk_cap
+            .unwrap_or(base.decode_cadence_mid_chunk_cap),
     };
 
     if config.b_max == 0 {
         bail!("scheduler b_max must be >= 1");
+    }
+    if config.decode_cadence_mid_chunk_cap == 0 {
+        bail!("scheduler decode_cadence_mid_chunk_cap must be >= 1");
     }
 
     Ok(config)
@@ -238,6 +257,7 @@ where
         scheduler_config.admission_deadline_ms,
         scheduler_config.admission_queue_max,
         scheduler_config.max_cache_cap,
+        scheduler_config.decode_cadence_mid_chunk_cap,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
         vision_input,
@@ -339,6 +359,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
 mod scheduler_profile_tests {
     use crate::core::scheduler_autotune::{
         SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
 
     use super::{resolve_scheduler_serve_config, SchedulerServeConfig, ServeArgs};
@@ -350,12 +371,13 @@ mod scheduler_profile_tests {
             admission_deadline_ms: 7,
             admission_queue_max: 16,
             max_cache_cap: 8192,
+            decode_cadence_mid_chunk_cap: 384,
         }
     }
 
     fn runtime_profile() -> SchedulerAutotuneRuntimeProfile {
         SchedulerAutotuneRuntimeProfile {
-            schema_version: 1,
+            schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
             model_name: "test-model".to_string(),
             hardware_label: "test-host".to_string(),
             config: profile_config(),
@@ -372,6 +394,7 @@ mod scheduler_profile_tests {
             admission_deadline_ms: None,
             admission_queue_max: None,
             max_cache_cap: None,
+            decode_cadence_mid_chunk_cap: None,
             scheduler_profile: None,
             scheduler_autotune_report: false,
             #[cfg(feature = "p5h-profile")]
@@ -394,6 +417,7 @@ mod scheduler_profile_tests {
                 admission_deadline_ms: 7,
                 admission_queue_max: 16,
                 max_cache_cap: 8192,
+                decode_cadence_mid_chunk_cap: 384,
             }
         );
     }
@@ -406,6 +430,7 @@ mod scheduler_profile_tests {
             admission_deadline_ms: Some(9),
             admission_queue_max: Some(7),
             max_cache_cap: Some(4096),
+            decode_cadence_mid_chunk_cap: Some(512),
             ..base_args()
         };
 
@@ -420,6 +445,7 @@ mod scheduler_profile_tests {
                 admission_deadline_ms: 9,
                 admission_queue_max: 7,
                 max_cache_cap: 4096,
+                decode_cadence_mid_chunk_cap: 512,
             }
         );
     }

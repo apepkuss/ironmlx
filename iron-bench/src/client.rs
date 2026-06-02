@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 pub struct RequestTimings {
     pub start: Instant,
     pub first_token: Option<Instant>,
+    pub token_times: Vec<Instant>,
     pub end: Instant,
 }
 
@@ -60,6 +61,7 @@ pub struct RequestResult {
 #[derive(Debug, Default)]
 pub struct ParseState {
     pub first_token: Option<Instant>,
+    pub token_times: Vec<Instant>,
     pub chunk_count: u32,
     pub content_chars: usize,
     pub finish_reason: Option<String>,
@@ -113,6 +115,7 @@ pub(crate) fn process_event(state: &mut ParseState, payload: &str, now: Instant)
                 if state.first_token.is_none() {
                     state.first_token = Some(now);
                 }
+                state.token_times.push(now);
                 state.chunk_count += 1;
                 state.content_chars += content.chars().count();
             }
@@ -239,6 +242,7 @@ pub async fn run_chat_completion(
         timings: RequestTimings {
             start,
             first_token: state.first_token,
+            token_times: state.token_times,
             end,
         },
         server_prompt_tokens: state.last_usage.as_ref().and_then(|u| u.prompt_tokens),

@@ -170,8 +170,16 @@ async fn admission_window_two_concurrent_admits_batch_together() {
     );
 
     // 2. Spawn the actor.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
 
@@ -259,6 +267,7 @@ async fn admission_window_b_max_saturate_triggers_immediate_prefill() {
         Duration::from_millis(5),
         32,
         32768,
+        256,
         meta,
     )
     .expect("spawn");
@@ -311,8 +320,16 @@ async fn admission_window_deadline_fires_with_single_admit() {
     let stop_token_ids: Vec<u32> = tokenizer.eos_token_ids().to_vec();
     let max_new_tokens: usize = 6;
 
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
     let saturate_before = handle.saturate_triggered.load(Ordering::Relaxed);
@@ -348,8 +365,16 @@ async fn admission_window_concurrent_scheduler_and_gs_no_deadlock() {
     let stop_token_ids: Vec<u32> = tokenizer.eos_token_ids().to_vec();
     let max_new_tokens: usize = 4;
 
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
 
     // Task A: scheduler path.
