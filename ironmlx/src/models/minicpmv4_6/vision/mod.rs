@@ -45,7 +45,7 @@ impl MiniCpmV46Vision {
     /// Load all vision sub-modules from a checkpoint opened via
     /// [`Loader::open_multimodal`].
     pub fn from_loader(loader: &Loader, cfg: &MiniCpmV46VisionConfig) -> Result<Self> {
-        Ok(Self {
+        let vision = Self {
             embeddings: SiglipEmbeddings::from_loader(loader, cfg)?,
             encoder: SiglipEncoder::from_loader(loader, cfg)?,
             vit_merger: VitMerger::from_loader(loader, cfg)?,
@@ -56,7 +56,34 @@ impl MiniCpmV46Vision {
             )?,
             merger: Merger::from_loader(loader, cfg)?,
             insert_layer_id: cfg.insert_layer_id,
-        })
+        };
+        // Eagerly evaluate every weight tensor on the loading thread. The SigLIP
+        // sub-modules introduce construction-time reshapes (e.g. the patch-conv
+        // weight reshaped to `[1152, 588]`) whose lazy graphs are tagged with
+        // this thread's default MLX stream. The multi-threaded SchedulerActor
+        // runs the vision forward on a different (tokio blocking-pool) thread, so
+        // an unmaterialized graph would fail with "There is no Stream(gpu, N) in
+        // current thread." Mirrors `VisionTower::eval_weights` in the qwen tower.
+        vision.eval_weights()?;
+        Ok(vision)
+    }
+
+    /// Materialize every weight tensor held by the vision stack on the current
+    /// thread, so that later cross-thread inference does not reference a stream
+    /// absent from the inference thread.
+    fn eval_weights(&self) -> Result<()> {
+        let mut refs: Vec<&Array> = Vec::new();
+        self.embeddings.collect_weights(&mut refs);
+        self.encoder.collect_weights(&mut refs);
+        self.vit_merger.collect_weights(&mut refs);
+        refs.push(self.post_ln.weight());
+        if let Some(b) = self.post_ln.bias() {
+            refs.push(b);
+        }
+        self.merger.collect_weights(&mut refs);
+        mlx::transforms::eval(&refs)
+            .map_err(|e| anyhow::anyhow!("MiniCpmV46Vision eval_weights: {e}"))?;
+        Ok(())
     }
 
     /// Single image: `pixel_values` patch-packed, `(grid_h, grid_w)`.

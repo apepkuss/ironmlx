@@ -56,6 +56,17 @@ impl SelfAttn {
         })
     }
 
+    fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(&self.qw);
+        out.push(&self.qb);
+        out.push(&self.kw);
+        out.push(&self.kb);
+        out.push(&self.vw);
+        out.push(&self.vb);
+        out.push(&self.ow);
+        out.push(&self.ob);
+    }
+
     /// Fused bias-matmul projection matching `nn.Linear` behaviour.
     fn proj(x: &Array, w: &Array, b: &Array, t: StreamOrDevice) -> Result<Array> {
         let wt = w.transpose_on(t)?;
@@ -141,6 +152,24 @@ impl VitMerger {
             merge_gh: gh,
             merge_gw: gw,
         })
+    }
+
+    /// Push every weight tensor (norms, attention, MLP) onto `out` for eager
+    /// materialization on the loading thread.
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(self.pre_norm.weight());
+        if let Some(b) = self.pre_norm.bias() {
+            out.push(b);
+        }
+        out.push(self.layer_norm1.weight());
+        if let Some(b) = self.layer_norm1.bias() {
+            out.push(b);
+        }
+        self.self_attn.collect_weights(out);
+        out.push(&self.linear_1w);
+        out.push(&self.linear_1b);
+        out.push(&self.linear_2w);
+        out.push(&self.linear_2b);
     }
 
     /// Forward pass.
@@ -299,6 +328,19 @@ impl Merger {
             merge_gh: gh,
             merge_gw: gw,
         })
+    }
+
+    /// Push every weight tensor (pre-norm + 2-layer MLP) onto `out` for eager
+    /// materialization on the loading thread.
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(self.pre_norm.weight());
+        if let Some(b) = self.pre_norm.bias() {
+            out.push(b);
+        }
+        out.push(&self.linear_1w);
+        out.push(&self.linear_1b);
+        out.push(&self.linear_2w);
+        out.push(&self.linear_2b);
     }
 
     /// Forward pass.
