@@ -6,6 +6,7 @@
 mod generate;
 mod info;
 mod scheduler_autotune;
+mod scheduler_autotune_calibrate;
 mod serve;
 
 use clap::{Parser, Subcommand};
@@ -146,6 +147,66 @@ mod tests {
                     assert!(!merge.allow_incomplete_coverage);
                 }
                 other => panic!("expected Merge action, got {other:?}"),
+            },
+            other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scheduler_autotune_calibrate_subcommand_parses_required_matrix() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "scheduler-autotune",
+            "calibrate",
+            "--model",
+            "/tmp/model",
+            "--model-name",
+            "GLM-4.7-flash-4bit",
+            "--hardware-label",
+            "m5-max-128g",
+            "--iron-bench-bin",
+            "target/release/iron-bench",
+            "--output-dir",
+            "/tmp/autotune",
+            "--candidate",
+            "b_max=2,prefill_chunk_size=1024,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768",
+            "--prompt-len",
+            "1024,2048",
+            "--max-tokens",
+            "128",
+            "--concurrency",
+            "1,2",
+            "--write-profile",
+            "/tmp/scheduler-profile.json",
+        ]);
+
+        match cli.command {
+            Command::SchedulerAutotune(args) => match args.action {
+                Some(super::scheduler_autotune::SchedulerAutotuneAction::Calibrate(calibrate)) => {
+                    assert_eq!(calibrate.model.to_string_lossy(), "/tmp/model");
+                    assert_eq!(calibrate.model_name, "GLM-4.7-flash-4bit");
+                    assert_eq!(calibrate.hardware_label, "m5-max-128g");
+                    assert_eq!(
+                        calibrate.iron_bench_bin.to_string_lossy(),
+                        "target/release/iron-bench"
+                    );
+                    assert_eq!(calibrate.output_dir.to_string_lossy(), "/tmp/autotune");
+                    assert_eq!(calibrate.candidates.len(), 1);
+                    assert_eq!(calibrate.candidates[0].b_max, 2);
+                    assert_eq!(calibrate.candidates[0].prefill_chunk_size, 1024);
+                    assert_eq!(calibrate.prompt_len, vec![1024, 2048]);
+                    assert_eq!(calibrate.max_tokens, 128);
+                    assert_eq!(calibrate.concurrency, vec![1, 2]);
+                    assert_eq!(
+                        calibrate
+                            .write_profile
+                            .as_ref()
+                            .expect("expected write profile")
+                            .to_string_lossy(),
+                        "/tmp/scheduler-profile.json"
+                    );
+                }
+                other => panic!("expected Calibrate action, got {other:?}"),
             },
             other => panic!("expected SchedulerAutotune command, got {other:?}"),
         }

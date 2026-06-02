@@ -36,6 +36,8 @@ pub enum SchedulerAutotuneAction {
     Select(SchedulerAutotuneSelectArgs),
     /// Merge multiple candidate calibration JSON files into one calibration.
     Merge(SchedulerAutotuneMergeArgs),
+    /// Run local scheduler/autotune calibration candidates and write a profile.
+    Calibrate(super::scheduler_autotune_calibrate::SchedulerAutotuneCalibrateArgs),
 }
 
 #[derive(Args, Debug)]
@@ -78,6 +80,9 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
     match args.action {
         Some(SchedulerAutotuneAction::Select(select)) => run_select(select),
         Some(SchedulerAutotuneAction::Merge(merge)) => run_merge(merge),
+        Some(SchedulerAutotuneAction::Calibrate(calibrate)) => {
+            super::scheduler_autotune_calibrate::run(calibrate)
+        }
         None => {
             let input = args
                 .input
