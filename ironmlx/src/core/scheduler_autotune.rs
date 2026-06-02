@@ -472,6 +472,14 @@ pub struct SchedulerAutotuneProfileSelection {
     pub warnings: Vec<SchedulerAutotuneSelectionNote>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneRuntimeProfile {
+    pub schema_version: u32,
+    pub model_name: String,
+    pub hardware_label: String,
+    pub config: SchedulerAutotuneProfileConfig,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerAutotuneMergeOptions {
     pub require_complete_coverage: bool,
@@ -710,6 +718,22 @@ impl SchedulerAutotuneProfileSelection {
         }
         out
     }
+}
+
+pub fn build_scheduler_autotune_runtime_profile(
+    selection: &SchedulerAutotuneProfileSelection,
+) -> Result<SchedulerAutotuneRuntimeProfile> {
+    let selected = selection
+        .selected
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("selected scheduler profile is required"))?;
+
+    Ok(SchedulerAutotuneRuntimeProfile {
+        schema_version: 1,
+        model_name: selection.model_name.clone(),
+        hardware_label: selection.hardware_label.clone(),
+        config: selected.config,
+    })
 }
 
 fn score_complete_candidates(

@@ -1,13 +1,14 @@
 # Scheduler/Autotune 设计研究与轻量落地
 
-状态：阶段 1 诊断报告与阶段 2 离线 profile 选择器已完成轻量落地。worktree `ironmlx-backend-scheduler-autotune`，branch `codex/scheduler-autotune`。
+状态：阶段 1 诊断报告、阶段 2 离线 profile 选择器，以及显式 opt-in 的 profile 导出/应用已完成轻量落地。worktree `ironmlx-backend-scheduler-autotune`，branch `codex/scheduler-autotune`。
 
 ## 0. 结论摘要
 
-本阶段不做自动改参，不改变默认运行行为。当前已落地两类能力：
+本阶段不做自动改参，不改变默认运行行为。当前已落地三类能力：
 
 - 显式 opt-in 的启动诊断能力：读取当前 CLI 参数、模型 `ModelMeta`、有效上下文上限、KV cache 预算和模型级 fresh-prefill batch limit，输出 scheduler/autotune 建议。
-- 离线 profile 选择器：读取外部校准结果 JSON，按 agent 长 prompt 场景权重选择推荐 scheduler 参数组合，但只输出结果，不应用到运行时。
+- 离线 profile 选择器：读取外部校准结果 JSON，按 agent 长 prompt 场景权重选择推荐 scheduler 参数组合，可输出人工可读/JSON 选择结果。
+- 显式 profile 应用：用户通过 `scheduler-autotune select --write-profile` 导出 runtime profile，并在 `serve --scheduler-profile` 中应用；未传 profile 时默认行为不变。
 
 原因：
 
@@ -39,13 +40,14 @@ flowchart TD
 - 输入是外部离线校准结果，不由 serve 热路径采样生成。
 - 对同一模型/机器下的多个候选 scheduler 参数组合进行公平评分。
 - 产出机器/模型 profile 选择结果，例如推荐 `b_max`、chunk 粒度、admission deadline。
-- 不把结果写入配置文件，不改变默认参数。
+- 可通过 `--write-profile` 显式写出 runtime profile；不传该参数时只输出选择结果。
 
-### 阶段 3：显式运行时 autotune（后续）
+### 阶段 3：显式运行时 autotune（部分轻量落地，后续继续研究）
 
-- 用户传入 `--scheduler-autotune` 或指定 profile 后才应用。
-- 应用前打印最终参数和理由。
-- 保留手动参数优先级：用户显式指定的参数不被覆盖，除非 Boss 后续要求支持 override 模式。
+- 用户指定 `--scheduler-profile` 后才应用 profile。
+- `serve` 启动时读取 profile，并打印 profile 的模型/硬件元信息。
+- 保留手动参数优先级：用户显式指定的 scheduler 参数覆盖 profile 中的值。
+- 仍未实现运行期动态控制回路，也不会在请求热路径里自动改参。
 
 ## 2. 本次范围
 
@@ -57,10 +59,11 @@ flowchart TD
 - CLI 新增 `scheduler-autotune` 子命令，用于离线 profile 选择。
 - 新增 profile 选择数据结构、评分函数、拒绝原因和中文/JSON 输出。
 - 新增中文研究文档和实施计划。
+- 新增 runtime profile 导出与 `serve --scheduler-profile` 应用入口。
 
 不做：
 
-- 不自动调整 `b_max` / `prefill_chunk_size` / `admission_deadline_ms`。
+- 不在用户未显式提供 profile 时自动调整 `b_max` / `prefill_chunk_size` / `admission_deadline_ms`。
 - 不新增运行期动态控制回路。
 - 不改变 `/healthz` JSON schema。
 - 不把 GLM-4.7 的模型级经验硬编码为全模型默认。
@@ -269,6 +272,38 @@ cargo run --release -p ironmlx -- \
   --format text
 ```
 
+如果希望把选择结果直接用于 `serve`，可以同时写出 runtime profile：
+
+```bash
+cargo run --release -p ironmlx -- \
+  scheduler-autotune select \
+  --input calibration.json \
+  --format text \
+  --write-profile scheduler-profile.json
+```
+
+然后在启动服务时显式应用：
+
+```bash
+cargo run --release -p ironmlx -- serve \
+  --model /path/to/model \
+  --scheduler-profile scheduler-profile.json \
+  --scheduler-autotune-report
+```
+
+`scheduler-profile.json` 只包含 `schema_version`、`model_name`、`hardware_label` 和已选中的 scheduler 参数。`serve` 只在启动时读取该文件，不做热更新。
+
+显式 CLI scheduler 参数优先级高于 profile。例如：
+
+```bash
+cargo run --release -p ironmlx -- serve \
+  --model /path/to/model \
+  --scheduler-profile scheduler-profile.json \
+  --b-max 1
+```
+
+上例中 `b_max` 使用 CLI 的 `1`，其余未显式传入的 scheduler 参数才从 profile 中读取。
+
 merge 默认执行严格校验：
 
 - `schema_version` 必须为 1。
@@ -289,5 +324,5 @@ merge 默认执行严格校验：
 
 - agent 常见长 prompt 下，TTFT 与 ITL 哪个应作为主优化目标，需要按产品场景定义权重。
 - chunk 粒度应按模型、prompt 长度、机器内存和 decode cadence 综合决定，不能只用固定阈值。
-- 离线 profile 的持久化位置、版本兼容和手动参数优先级需要单独设计。
+- profile 的全局持久化位置、跨版本迁移策略，以及是否需要多 profile 管理，还需要单独设计。
 - 真正运行时 autotune 是否允许根据 `/healthz` 和队列状态动态调整策略，需要先证明不会引入抖动。

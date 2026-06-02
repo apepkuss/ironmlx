@@ -6,8 +6,9 @@ use anyhow::Context;
 use clap::{Args, Subcommand, ValueEnum};
 
 use crate::core::scheduler_autotune::{
-    merge_scheduler_autotune_calibrations, select_scheduler_autotune_profile,
-    SchedulerAutotuneCalibrationInput, SchedulerAutotuneMergeOptions,
+    build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
+    select_scheduler_autotune_profile, SchedulerAutotuneCalibrationInput,
+    SchedulerAutotuneMergeOptions,
 };
 use crate::Result;
 
@@ -23,6 +24,10 @@ pub struct SchedulerAutotuneArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = SchedulerAutotuneOutputFormat::Text)]
     pub format: SchedulerAutotuneOutputFormat,
+
+    /// Write the selected runtime scheduler profile to this JSON path.
+    #[arg(long)]
+    pub write_profile: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -42,6 +47,10 @@ pub struct SchedulerAutotuneSelectArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = SchedulerAutotuneOutputFormat::Text)]
     pub format: SchedulerAutotuneOutputFormat,
+
+    /// Write the selected runtime scheduler profile to this JSON path.
+    #[arg(long)]
+    pub write_profile: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -76,6 +85,7 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
             run_select(SchedulerAutotuneSelectArgs {
                 input,
                 format: args.format,
+                write_profile: args.write_profile,
             })
         }
     }
@@ -84,6 +94,13 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
 fn run_select(args: SchedulerAutotuneSelectArgs) -> Result<()> {
     let input = read_calibration(&args.input)?;
     let selection = select_scheduler_autotune_profile(input);
+
+    if let Some(path) = &args.write_profile {
+        let profile = build_scheduler_autotune_runtime_profile(&selection)?;
+        let output = serde_json::to_string_pretty(&profile)?;
+        std::fs::write(path, format!("{output}\n"))
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
 
     match args.format {
         SchedulerAutotuneOutputFormat::Text => {

@@ -1,11 +1,22 @@
 //! `ironmlx serve` — boot HTTP server with OpenAI + Anthropic compatibility.
 
-use anyhow::Context;
+use std::path::{Path, PathBuf};
+
+use anyhow::{bail, Context};
 use clap::Args;
 
 use crate::core::scheduler::DenseVlMethods;
+use crate::core::scheduler_autotune::{
+    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+};
 use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
+
+const DEFAULT_PREFILL_CHUNK_SIZE: usize = 2048;
+const DEFAULT_B_MAX: usize = 1;
+const DEFAULT_ADMISSION_DEADLINE_MS: u64 = 5;
+const DEFAULT_ADMISSION_QUEUE_MAX: usize = 32;
+const DEFAULT_MAX_CACHE_CAP: usize = 32768;
 
 #[derive(Args, Debug)]
 pub struct ServeArgs {
@@ -25,9 +36,10 @@ pub struct ServeArgs {
     /// Prefill chunk size — max tokens per prefill forward call. `0`
     /// disables chunking (single-shot forward over the whole prompt).
     /// Intermediate chunks update the cache only; the last chunk runs
-    /// the full forward + lm_head.
-    #[arg(long, default_value_t = 2048)]
-    pub prefill_chunk_size: usize,
+    /// the full forward + lm_head. Defaults to `2048` unless supplied by
+    /// `--scheduler-profile`.
+    #[arg(long)]
+    pub prefill_chunk_size: Option<usize>,
 
     /// Maximum concurrent in-flight requests (Scheduler slot count).
     /// Requests beyond this limit go to the admission queue. Default `1`
@@ -35,26 +47,33 @@ pub struct ServeArgs {
     /// MoE compute when only one slot is occupied; pass `--b-max N > 1` to
     /// enable concurrent multi-request batching. `0` rejected at startup
     /// because Scheduler with zero slots cannot admit any request.
-    #[arg(long, default_value_t = 1, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
-    pub b_max: usize,
+    #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    pub b_max: Option<usize>,
 
     /// Admission-window deadline in milliseconds. After the first
     /// admit in a batch arrives, additional admits are absorbed until
     /// this deadline expires or the batch saturates at b_max.
-    #[arg(long, default_value_t = 5)]
-    pub admission_deadline_ms: u64,
+    /// Defaults to `5` unless supplied by `--scheduler-profile`.
+    #[arg(long)]
+    pub admission_deadline_ms: Option<u64>,
 
     /// Capacity of the FIFO admission queue. Requests received while
     /// the scheduler is saturated are parked here. `0` disables queueing
     /// (immediate Err on saturation — mirrors pre-3d behavior).
-    #[arg(long, default_value_t = 32)]
-    pub admission_queue_max: usize,
+    /// Defaults to `32` unless supplied by `--scheduler-profile`.
+    #[arg(long)]
+    pub admission_queue_max: Option<usize>,
 
     /// Maximum allowed `prompt_len + max_new_tokens` per request. Capped
     /// further at the model's `max_position_embeddings` (Qwen3.5-4B: 262144).
     /// Requests beyond this return HTTP 413 Payload Too Large. B1-p2.3f.
-    #[arg(long, default_value_t = 32768)]
-    pub max_cache_cap: usize,
+    /// Defaults to `32768` unless supplied by `--scheduler-profile`.
+    #[arg(long)]
+    pub max_cache_cap: Option<usize>,
+
+    /// Runtime scheduler profile exported by `scheduler-autotune select --write-profile`.
+    #[arg(long)]
+    pub scheduler_profile: Option<PathBuf>,
 
     /// Print scheduler/autotune diagnostics and recommendations at startup.
     /// Diagnose-only: this does not change any runtime parameter.
@@ -73,6 +92,76 @@ pub struct ServeArgs {
     pub p5h_measurement_eval_probes: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SchedulerServeConfig {
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+}
+
+impl Default for SchedulerServeConfig {
+    fn default() -> Self {
+        Self {
+            prefill_chunk_size: DEFAULT_PREFILL_CHUNK_SIZE,
+            b_max: DEFAULT_B_MAX,
+            admission_deadline_ms: DEFAULT_ADMISSION_DEADLINE_MS,
+            admission_queue_max: DEFAULT_ADMISSION_QUEUE_MAX,
+            max_cache_cap: DEFAULT_MAX_CACHE_CAP,
+        }
+    }
+}
+
+fn default_scheduler_profile_config() -> SchedulerAutotuneProfileConfig {
+    SchedulerAutotuneProfileConfig {
+        b_max: DEFAULT_B_MAX,
+        prefill_chunk_size: DEFAULT_PREFILL_CHUNK_SIZE,
+        admission_deadline_ms: DEFAULT_ADMISSION_DEADLINE_MS,
+        admission_queue_max: DEFAULT_ADMISSION_QUEUE_MAX,
+        max_cache_cap: DEFAULT_MAX_CACHE_CAP,
+    }
+}
+
+fn read_scheduler_runtime_profile(path: &Path) -> Result<SchedulerAutotuneRuntimeProfile> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn resolve_scheduler_serve_config(
+    args: &ServeArgs,
+    profile: Option<&SchedulerAutotuneRuntimeProfile>,
+) -> Result<SchedulerServeConfig> {
+    if let Some(profile) = profile {
+        if profile.schema_version != 1 {
+            bail!(
+                "scheduler profile schema_version mismatch: expected 1, got {}",
+                profile.schema_version
+            );
+        }
+    }
+
+    let base = profile
+        .map(|profile| profile.config)
+        .unwrap_or_else(default_scheduler_profile_config);
+    let config = SchedulerServeConfig {
+        prefill_chunk_size: args.prefill_chunk_size.unwrap_or(base.prefill_chunk_size),
+        b_max: args.b_max.unwrap_or(base.b_max),
+        admission_deadline_ms: args
+            .admission_deadline_ms
+            .unwrap_or(base.admission_deadline_ms),
+        admission_queue_max: args.admission_queue_max.unwrap_or(base.admission_queue_max),
+        max_cache_cap: args.max_cache_cap.unwrap_or(base.max_cache_cap),
+    };
+
+    if config.b_max == 0 {
+        bail!("scheduler b_max must be >= 1");
+    }
+
+    Ok(config)
+}
+
 /// Generic serve helper — shared by all model types that satisfy the
 /// `SchedulerActor<M>` / `AppState<M>` bounds.
 ///
@@ -84,6 +173,7 @@ fn serve_with_model<M>(
     model: M,
     tokenizer: Tokenizer,
     args: &ServeArgs,
+    scheduler_config: SchedulerServeConfig,
     vision_input: Option<server::VisionInputConfig>,
 ) -> Result<()>
 where
@@ -92,15 +182,15 @@ where
     #[cfg(feature = "p5h-profile")]
     {
         assert!(
-            args.b_max == 1 || crate::core::p5h::scheduler_decode_allow_multi_row(),
+            scheduler_config.b_max == 1 || crate::core::p5h::scheduler_decode_allow_multi_row(),
             "p5h-profile feature requires --b-max 1 for legacy request-root attribution \
              (single-active-row invariant per § 2.5a). Got --b-max {}. \
              Set IRONMLX_P5H_SCHEDULER_DECODE_ALLOW_MULTI_ROW=1 only for experimental \
              unary scheduler decode attribution, or rebuild without --features p5h-profile \
              to use ordinary multi-row batching.",
-            args.b_max,
+            scheduler_config.b_max,
         );
-        if args.b_max != 1 {
+        if scheduler_config.b_max != 1 {
             tracing::warn!(
                 "p5h-profile multi-row escape hatch enabled for scheduler decode attribution; \
                  use unary/non-streaming clients so legacy streaming request-root p5h trees do \
@@ -112,7 +202,7 @@ where
     // Surface b_max at boot so operators can confirm whether single-request
     // optimized mode (default) or multi-request batching is active without
     // having to inspect process args.
-    if args.b_max == 1 {
+    if scheduler_config.b_max == 1 {
         tracing::info!(
             "ironmlx serve: b_max=1 (single-request optimized mode; \
              pass --b-max N > 1 to enable concurrent multi-request batching)"
@@ -121,7 +211,7 @@ where
         tracing::info!(
             "ironmlx serve: b_max={} (multi-request batching enabled; \
              pass --b-max 1 to switch to single-request optimized mode)",
-            args.b_max,
+            scheduler_config.b_max,
         );
     }
 
@@ -143,11 +233,11 @@ where
         model_id,
         &args.host,
         args.port,
-        args.prefill_chunk_size,
-        args.b_max,
-        args.admission_deadline_ms,
-        args.admission_queue_max,
-        args.max_cache_cap,
+        scheduler_config.prefill_chunk_size,
+        scheduler_config.b_max,
+        scheduler_config.admission_deadline_ms,
+        scheduler_config.admission_queue_max,
+        scheduler_config.max_cache_cap,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
         vision_input,
@@ -168,12 +258,26 @@ fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
 }
 
 pub fn run(args: ServeArgs) -> Result<()> {
-    let model_dir = std::path::PathBuf::from(&args.model);
+    let model_dir = PathBuf::from(&args.model);
     if !model_dir.exists() {
         return Err(anyhow::anyhow!(
             "--model must point to a local directory (got '{}'); HF hub auto-download is deferred",
             args.model
         ));
+    }
+
+    let scheduler_profile = args
+        .scheduler_profile
+        .as_deref()
+        .map(read_scheduler_runtime_profile)
+        .transpose()?;
+    let scheduler_config = resolve_scheduler_serve_config(&args, scheduler_profile.as_ref())?;
+    if let Some(profile) = &scheduler_profile {
+        tracing::info!(
+            "ironmlx serve: scheduler profile applied model_name={} hardware_label={}",
+            profile.model_name,
+            profile.hardware_label
+        );
     }
 
     let model_type = read_model_type(&model_dir)?;
@@ -200,34 +304,124 @@ pub fn run(args: ServeArgs) -> Result<()> {
         crate::models::ModelArchitecture::Qwen35Dense => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
-            serve_with_model(model, tokenizer, &args, vision_input)
+            serve_with_model(model, tokenizer, &args, scheduler_config, vision_input)
         }
         crate::models::ModelArchitecture::Qwen35Moe => {
             let model = crate::models::Qwen35MoeModel::from_loader(&loader)
                 .context("Qwen35MoeModel::from_loader")?;
-            serve_with_model(model, tokenizer, &args, vision_input)
+            serve_with_model(model, tokenizer, &args, scheduler_config, vision_input)
         }
         crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
-            serve_with_model(model, tokenizer, &args, vision_input)
+            serve_with_model(model, tokenizer, &args, scheduler_config, vision_input)
         }
         crate::models::ModelArchitecture::Glm4MoeLite => {
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
                 .context("Glm4MoeLiteModel::from_loader")?;
-            serve_with_model(model, tokenizer, &args, None)
+            serve_with_model(model, tokenizer, &args, scheduler_config, None)
         }
         crate::models::ModelArchitecture::Llama => {
             let model = crate::models::LlamaModel::from_loader(&loader)
                 .context("LlamaModel::from_loader")?;
-            serve_with_model(model, tokenizer, &args, None)
+            serve_with_model(model, tokenizer, &args, scheduler_config, None)
         }
         crate::models::ModelArchitecture::MiniCpmV46 => {
             // MiniCpmV46Model serves text + single-image VL (vision_input set above).
             let model = crate::models::minicpmv4_6::model_from_loader(&loader)
                 .context("minicpmv4_6::model_from_loader")?;
-            serve_with_model(model, tokenizer, &args, vision_input)
+            serve_with_model(model, tokenizer, &args, scheduler_config, vision_input)
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduler_profile_tests {
+    use crate::core::scheduler_autotune::{
+        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+    };
+
+    use super::{resolve_scheduler_serve_config, SchedulerServeConfig, ServeArgs};
+
+    fn profile_config() -> SchedulerAutotuneProfileConfig {
+        SchedulerAutotuneProfileConfig {
+            b_max: 2,
+            prefill_chunk_size: 1024,
+            admission_deadline_ms: 7,
+            admission_queue_max: 16,
+            max_cache_cap: 8192,
+        }
+    }
+
+    fn runtime_profile() -> SchedulerAutotuneRuntimeProfile {
+        SchedulerAutotuneRuntimeProfile {
+            schema_version: 1,
+            model_name: "test-model".to_string(),
+            hardware_label: "test-host".to_string(),
+            config: profile_config(),
+        }
+    }
+
+    fn base_args() -> ServeArgs {
+        ServeArgs {
+            model: "/tmp/model".to_string(),
+            port: 8080,
+            host: "127.0.0.1".to_string(),
+            prefill_chunk_size: None,
+            b_max: None,
+            admission_deadline_ms: None,
+            admission_queue_max: None,
+            max_cache_cap: None,
+            scheduler_profile: None,
+            scheduler_autotune_report: false,
+            #[cfg(feature = "p5h-profile")]
+            p5h_measurement_eval_probes: false,
+        }
+    }
+
+    #[test]
+    fn scheduler_profile_supplies_missing_scheduler_values() {
+        let args = base_args();
+
+        let config =
+            resolve_scheduler_serve_config(&args, Some(&runtime_profile())).expect("resolved");
+
+        assert_eq!(
+            config,
+            SchedulerServeConfig {
+                prefill_chunk_size: 1024,
+                b_max: 2,
+                admission_deadline_ms: 7,
+                admission_queue_max: 16,
+                max_cache_cap: 8192,
+            }
+        );
+    }
+
+    #[test]
+    fn scheduler_profile_cli_values_override_profile_values() {
+        let args = ServeArgs {
+            prefill_chunk_size: Some(256),
+            b_max: Some(1),
+            admission_deadline_ms: Some(9),
+            admission_queue_max: Some(7),
+            max_cache_cap: Some(4096),
+            ..base_args()
+        };
+
+        let config =
+            resolve_scheduler_serve_config(&args, Some(&runtime_profile())).expect("resolved");
+
+        assert_eq!(
+            config,
+            SchedulerServeConfig {
+                prefill_chunk_size: 256,
+                b_max: 1,
+                admission_deadline_ms: 9,
+                admission_queue_max: 7,
+                max_cache_cap: 4096,
+            }
+        );
     }
 }
 

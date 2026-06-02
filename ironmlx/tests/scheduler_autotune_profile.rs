@@ -1,6 +1,7 @@
 use ironmlx::core::scheduler_autotune::{
-    select_scheduler_autotune_profile, SchedulerAutotuneCalibrationInput,
-    SchedulerAutotuneMeasurement, SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
+    build_scheduler_autotune_runtime_profile, select_scheduler_autotune_profile,
+    SchedulerAutotuneCalibrationInput, SchedulerAutotuneMeasurement, SchedulerAutotuneObjective,
+    SchedulerAutotuneProfileConfig,
 };
 
 fn config(
@@ -132,4 +133,43 @@ fn profile_selection_warns_when_agent_long_prompt_or_concurrency_coverage_is_abs
         .warnings
         .iter()
         .any(|item| item.code == "no_concurrent_coverage"));
+}
+
+#[test]
+fn runtime_profile_uses_selected_config_and_metadata() {
+    let selected_config = config(2, 1024, 5);
+    let selection = select_scheduler_autotune_profile(input(vec![measurement(
+        selected_config,
+        2048,
+        128,
+        1,
+        90.0,
+        12.0,
+        2.4,
+        100.0,
+    )]));
+
+    let profile =
+        build_scheduler_autotune_runtime_profile(&selection).expect("expected runtime profile");
+
+    assert_eq!(profile.schema_version, 1);
+    assert_eq!(profile.model_name, "test-model");
+    assert_eq!(profile.hardware_label, "test-host");
+    assert_eq!(profile.config, selected_config);
+}
+
+#[test]
+fn runtime_profile_requires_selected_candidate() {
+    let unsafe_config = config(4, 2048, 5);
+    let mut unsafe_row = measurement(unsafe_config, 2048, 128, 1, 90.0, 12.0, 2.4, 100.0);
+    unsafe_row.memory_budget_ok = false;
+    let selection = select_scheduler_autotune_profile(input(vec![unsafe_row]));
+
+    let error = build_scheduler_autotune_runtime_profile(&selection)
+        .expect_err("profile export should require a selected candidate");
+
+    assert!(
+        error.to_string().contains("selected"),
+        "unexpected error: {error}"
+    );
 }

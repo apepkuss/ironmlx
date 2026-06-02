@@ -79,6 +79,43 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_autotune_select_subcommand_parses_write_profile() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "scheduler-autotune",
+            "select",
+            "--input",
+            "calibration.json",
+            "--format",
+            "json",
+            "--write-profile",
+            "scheduler-profile.json",
+        ]);
+
+        match cli.command {
+            Command::SchedulerAutotune(args) => match args.action {
+                Some(super::scheduler_autotune::SchedulerAutotuneAction::Select(select)) => {
+                    assert_eq!(select.input.to_string_lossy(), "calibration.json");
+                    assert_eq!(
+                        select.format,
+                        super::scheduler_autotune::SchedulerAutotuneOutputFormat::Json
+                    );
+                    assert_eq!(
+                        select
+                            .write_profile
+                            .as_ref()
+                            .expect("expected write profile")
+                            .to_string_lossy(),
+                        "scheduler-profile.json"
+                    );
+                }
+                other => panic!("expected Select action, got {other:?}"),
+            },
+            other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn scheduler_autotune_merge_subcommand_parses_inputs_and_output() {
         let cli = Cli::parse_from([
             "ironmlx",
@@ -111,6 +148,32 @@ mod tests {
                 other => panic!("expected Merge action, got {other:?}"),
             },
             other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_subcommand_parses_scheduler_profile() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--scheduler-profile",
+            "scheduler-profile.json",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.model, "/tmp/model");
+                assert_eq!(
+                    args.scheduler_profile
+                        .as_ref()
+                        .expect("expected scheduler profile")
+                        .to_string_lossy(),
+                    "scheduler-profile.json"
+                );
+            }
+            other => panic!("expected Serve command, got {other:?}"),
         }
     }
 }
