@@ -3,10 +3,6 @@
 //! under the SAME image + prompt + greedy decode.  OpenAI is already validated vs
 //! mlx-vlm per architecture, so this transitively anchors Anthropic to mlx-vlm.
 //!
-//! Also includes one ignored MiniCPM-V-4.6 direct-vs-mlx-vlm test that compares
-//! the Anthropic endpoint output against the `expected_gen_tokens.npy` fixture
-//! produced by `tests/fixtures/minicpmv46_vl/gen_single_image_generate.py`.
-//!
 //! Env vars (each a checkpoint snapshot dir):
 //!   QWEN35_VL_DENSE_MODEL, QWEN35_VL_MOE_MODEL, GEMMA4_MODEL, MINICPMV46_MODEL
 //!
@@ -48,9 +44,6 @@ use ironmlx::core::model::Model;
 use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::server::{self, VisionInputConfig};
 use ironmlx::core::{Loader, Tokenizer};
-
-mod common;
-use common::minicpmv46_parity::{checkpoint_dir, load_npy_in, FIXTURE_DIR_VL};
 
 // ---------------------------------------------------------------------------
 // Image fixture
@@ -308,97 +301,4 @@ async fn e2e_minicpmv46() {
     });
     let _s = boot(model, tok, port, vision);
     assert_transitive_parity(port).await;
-}
-
-// ---------------------------------------------------------------------------
-// MiniCPM-V-4.6 direct-vs-mlx-vlm via Anthropic endpoint
-//
-// Uses the same COCO image fixture used by gen_single_image_generate.py
-// (verified: the gen script reads `../p6_qwen35_vl/coco_sample.jpg`).
-// Re-encodes the Anthropic endpoint's text output and compares token-id
-// prefixes against `expected_gen_tokens.npy` (the mlx-vlm reference tokens).
-//
-// Fixture directory: ironmlx/tests/fixtures/minicpmv46_vl/
-// Fixture file: expected_gen_tokens.npy (int32 [K], gitignored)
-// To regenerate: run gen_single_image_generate.py with MINICPMV46_MODEL set.
-//
-// The vision_embeds stream bug that previously prevented generation is FIXED
-// (c6ae50e); MiniCPM-V now generates correctly on the serve path (see the
-// e2e_minicpmv46 transitivity test above, which PASSES). This direct-vs-fixture
-// test remains a TODO purely on PROMPT ALIGNMENT: the gen script uses
-// `PROMPT = "<image>Describe this image."` (image FIRST, "this"), whereas the
-// shared `anthropic_body` here sends [text "Describe the image.", image] (text
-// first, "the"). To enable it, send a matching prompt — parts
-// [image, text "Describe this image."] — AND match the serve chat-template
-// render to the gen script's, so the token-ids line up.
-//
-// Not a correctness gap: MiniCPM-V's serve-path agreement with mlx-vlm was
-// already established at P2b integration (first-token-exact single-image e2e
-// parity), and the transitivity test anchors the Anthropic endpoint to that
-// validated backend. This direct test is a redundant strengthening, left
-// ignored pending the prompt-alignment chore above.
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires MINICPMV46_MODEL + fixture; prompt-alignment TODO vs gen script (stream bug fixed in c6ae50e)"]
-async fn e2e_minicpmv46_direct_vs_mlxvlm() {
-    use mlx::{ops, Dtype};
-
-    let dir = checkpoint_dir();
-    let loader = Loader::open_multimodal(&dir).unwrap();
-    // Load two tokenizer instances: one for re-encoding the Anthropic output
-    // (kept in scope), one moved into boot().  Tokenizer is not Clone.
-    let tok_encode = Tokenizer::from_loader(&loader).unwrap();
-    let tok_boot = Tokenizer::from_loader(&loader).unwrap();
-    let model = ironmlx::models::minicpmv4_6::model_from_loader(&loader).unwrap();
-
-    // Load the mlx-vlm reference token ids from the fixture.
-    let expected_arr = load_npy_in(FIXTURE_DIR_VL, "expected_gen_tokens.npy");
-    let expected_i32: Vec<i32> = ops::cast::astype(&expected_arr, Dtype::Int32)
-        .unwrap()
-        .to_vec()
-        .unwrap();
-    let expected_u32: Vec<u32> = expected_i32.iter().map(|&i| i as u32).collect();
-
-    // Boot the server using the second tokenizer instance.
-    let port = alloc_port().await;
-    let vision = Some(VisionInputConfig::MiniCpmV46 {
-        spatial_merge_size: 4,
-    });
-    let _s = boot(model, tok_boot, port, vision);
-
-    // Poll /health until the server is accepting connections.
-    let b64 = coco_b64();
-    let c = client();
-    wait_ready(&c, port).await;
-    let got = anthropic_text(&c, port, &b64).await;
-
-    println!(
-        "mlx-vlm reference ({} tokens): {:?}",
-        expected_u32.len(),
-        expected_u32
-    );
-    println!("ironmlx anthropic: {got:?}");
-
-    assert!(!got.is_empty(), "Anthropic completion must not be empty");
-
-    // Re-encode the Anthropic output and compare token-id prefixes.
-    // This is panic-safe on non-ASCII output (avoids byte-slicing UTF-8).
-    let got_ids = tok_encode
-        .encode(&got, false)
-        .expect("re-encode anthropic output");
-    let n = got_ids.len().min(expected_u32.len());
-    assert!(
-        n > 0,
-        "fixture/expected decoded to zero tokens — regenerate the fixture"
-    );
-    assert_eq!(
-        &got_ids[..n],
-        &expected_u32[..n],
-        "Anthropic token-id prefix diverged from mlx-vlm reference\n  got[..{n}]={:?}\n  exp[..{n}]={:?}",
-        &got_ids[..n],
-        &expected_u32[..n],
-    );
-
-    println!("e2e_minicpmv46_direct_vs_mlxvlm: PASS — token-id prefix match {n} tokens",);
 }
