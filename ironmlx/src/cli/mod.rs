@@ -162,8 +162,6 @@ mod tests {
             "/tmp/model",
             "--model-name",
             "GLM-4.7-flash-4bit",
-            "--hardware-label",
-            "m5-max-128g",
             "--iron-bench-bin",
             "target/release/iron-bench",
             "--output-dir",
@@ -185,7 +183,6 @@ mod tests {
                 Some(super::scheduler_autotune::SchedulerAutotuneAction::Calibrate(calibrate)) => {
                     assert_eq!(calibrate.model.to_string_lossy(), "/tmp/model");
                     assert_eq!(calibrate.model_name, "GLM-4.7-flash-4bit");
-                    assert_eq!(calibrate.hardware_label, "m5-max-128g");
                     assert_eq!(
                         calibrate.iron_bench_bin.to_string_lossy(),
                         "target/release/iron-bench"

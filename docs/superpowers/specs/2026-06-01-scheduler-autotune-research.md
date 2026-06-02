@@ -194,7 +194,6 @@ cargo run --release -p iron-bench -- \
   --runs 5 \
   --warmup 1 \
   --format autotune-json \
-  --autotune-hardware-label m3-max \
   --autotune-b-max 2 \
   --autotune-prefill-chunk-size 1024 \
   --autotune-admission-deadline-ms 5 \
@@ -216,7 +215,6 @@ cargo run --release -p iron-bench -- \
   --duration 30 \
   --warmup-duration 5 \
   --format autotune-json \
-  --autotune-hardware-label m3-max \
   --autotune-b-max 2 \
   --autotune-prefill-chunk-size 1024 \
   --autotune-admission-deadline-ms 5 \
@@ -225,7 +223,7 @@ cargo run --release -p iron-bench -- \
   > candidate-b2-c1024-concurrent.json
 ```
 
-`--format autotune-json` 要求恰好一个 `--target`，因为 calibration schema 没有 target 字段。对比多个候选时，应分别用不同 server 参数启动 ironmlx，分别导出 JSON，再合并 measurements。
+`--format autotune-json` 要求恰好一个 `--target`，因为 calibration schema 没有 target 字段。`hardware_label` 默认由本机 CPU 与内存容量自动生成；低层手动导出时仍可用 `--autotune-hardware-label` 覆盖该输出元数据。对比多个候选时，应分别用不同 server 参数启动 ironmlx，分别导出 JSON，再合并 measurements。
 
 ### 本地一键校准入口
 
@@ -236,7 +234,6 @@ cargo run --release -p ironmlx -- \
   scheduler-autotune calibrate \
   --model /path/to/GLM-4.7-flash-4bit/snapshot \
   --model-name GLM-4.7-flash-4bit \
-  --hardware-label m5-max-128g \
   --iron-bench-bin target/release/iron-bench \
   --output-dir reports/scheduler-autotune/glm47-m5max \
   --candidate b_max=1,prefill_chunk_size=2048,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768 \
@@ -253,6 +250,8 @@ cargo run --release -p ironmlx -- \
 - `selection.json`：机器可读选择结果。
 - `selection.txt`：人工可读选择结果。
 - `scheduler-profile.json`：仅在 `--write-profile` 指向该路径时写出。
+
+其中 `hardware_label` 是自动生成的输出元数据，不需要用户在 `scheduler-autotune calibrate` 中传入。
 
 手动 `iron-bench`、`scheduler-autotune merge`、`scheduler-autotune select` 路径仍然保留，适合远端服务、非标准采样协议或需要人工编辑 calibration JSON 的场景。
 

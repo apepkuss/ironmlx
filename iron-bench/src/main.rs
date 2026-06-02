@@ -5,6 +5,7 @@
 //! p95). Engine-neutral; no dependency on ironmlx/mlx crates.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -79,7 +80,8 @@ struct Args {
     #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
     format: OutputFormat,
 
-    /// Hardware label to embed in `--format autotune-json` output.
+    /// Optional hardware label override for `--format autotune-json` output.
+    /// When omitted, iron-bench generates one from the local CPU and memory.
     #[arg(long)]
     pub autotune_hardware_label: Option<String>,
 
@@ -168,13 +170,13 @@ impl Args {
             );
         }
 
-        let hardware_label = self
-            .autotune_hardware_label
-            .clone()
-            .context("--autotune-hardware-label is required with --format autotune-json")?;
-        if hardware_label.trim().is_empty() {
-            anyhow::bail!("--autotune-hardware-label must not be empty");
-        }
+        let hardware_label = match self.autotune_hardware_label.as_deref() {
+            Some(label) if label.trim().is_empty() => {
+                anyhow::bail!("--autotune-hardware-label must not be empty");
+            }
+            Some(label) => label.trim().to_string(),
+            None => detect_hardware_label(),
+        };
 
         Ok(Some(report::AutotuneExportOptions {
             model_name: self.model.clone(),
@@ -198,6 +200,113 @@ impl Args {
             },
             memory_budget_ok: !self.autotune_memory_budget_unsafe,
         }))
+    }
+}
+
+fn detect_hardware_label() -> String {
+    hardware_label_from_parts(detect_cpu_label().as_deref(), detect_total_ram_bytes())
+}
+
+fn hardware_label_from_parts(cpu_label: Option<&str>, total_ram_bytes: Option<u64>) -> String {
+    let cpu = cpu_label
+        .map(slugify_hardware_component)
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| slugify_hardware_component(std::env::consts::ARCH));
+
+    match total_ram_bytes {
+        Some(bytes) => format!("{cpu}-{}gb", rounded_gib(bytes)),
+        None => cpu,
+    }
+}
+
+fn slugify_hardware_component(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_separator = false;
+        } else if !last_was_separator && !slug.is_empty() {
+            slug.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.is_empty() {
+        "unknown".to_string()
+    } else {
+        slug
+    }
+}
+
+fn rounded_gib(bytes: u64) -> u64 {
+    let gib = 1024_u64.pow(3);
+    ((bytes + gib / 2) / gib).max(1)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_cpu_label() -> Option<String> {
+    command_output("sysctl", &["-n", "machdep.cpu.brand_string"])
+        .or_else(|| command_output("sysctl", &["-n", "hw.model"]))
+}
+
+#[cfg(target_os = "linux")]
+fn detect_cpu_label() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    raw.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "model name")
+            .then(|| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn detect_cpu_label() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn detect_total_ram_bytes() -> Option<u64> {
+    command_output("sysctl", &["-n", "hw.memsize"])?
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn detect_total_ram_bytes() -> Option<u64> {
+    let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in raw.lines() {
+        let Some(rest) = line.strip_prefix("MemTotal:") else {
+            continue;
+        };
+        let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+        return kb.checked_mul(1024);
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn detect_total_ram_bytes() -> Option<u64> {
+    None
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -459,7 +568,7 @@ async fn main() -> Result<()> {
 mod tests {
     use clap::Parser;
 
-    use super::{Args, OutputFormat};
+    use super::{hardware_label_from_parts, Args, OutputFormat};
 
     #[test]
     fn autotune_cli_parses_output_format_and_scheduler_config() {
@@ -493,5 +602,42 @@ mod tests {
         assert_eq!(args.autotune_admission_queue_max, Some(32));
         assert_eq!(args.autotune_max_cache_cap, Some(32768));
         assert!(!args.autotune_memory_budget_unsafe);
+    }
+
+    #[test]
+    fn autotune_export_options_generates_hardware_label_when_omitted() {
+        let args = Args::parse_from([
+            "iron-bench",
+            "--target",
+            "ironmlx=http://localhost:8080",
+            "--model-dir",
+            "/tmp/model",
+            "--format",
+            "autotune-json",
+            "--autotune-b-max",
+            "2",
+            "--autotune-prefill-chunk-size",
+            "1024",
+            "--autotune-admission-deadline-ms",
+            "5",
+            "--autotune-admission-queue-max",
+            "32",
+            "--autotune-max-cache-cap",
+            "32768",
+        ]);
+
+        let options = args
+            .autotune_export_options()
+            .expect("autotune options should parse")
+            .expect("autotune-json should produce export options");
+
+        assert!(!options.hardware_label.trim().is_empty());
+    }
+
+    #[test]
+    fn hardware_label_from_parts_slugifies_cpu_and_memory() {
+        let label = hardware_label_from_parts(Some("Apple M5 Max"), Some(128 * 1024_u64.pow(3)));
+
+        assert_eq!(label, "apple-m5-max-128gb");
     }
 }

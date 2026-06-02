@@ -32,7 +32,6 @@ cargo run --release -p ironmlx -- \
   scheduler-autotune calibrate \
   --model /path/to/model \
   --model-name GLM-4.7-flash-4bit \
-  --hardware-label m5-max-128g \
   --iron-bench-bin target/release/iron-bench \
   --output-dir reports/scheduler-autotune/glm47-m5max \
   --candidate b_max=1,prefill_chunk_size=2048,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768 \
@@ -55,6 +54,7 @@ cargo run --release -p ironmlx -- \
 - `--output-dir` 必填，所有中间 JSON、日志和最终结果都写入该目录。
 - `--iron-bench-bin` 必填。本阶段不猜测 cargo workspace，也不隐式下载或构建 benchmark 工具。
 - `--write-profile` 可选；未提供时只写 calibration 和 selection。该路径按用户传入值写入，推荐放在 `--output-dir` 下，便于和本次校准结果一起归档。
+- `hardware_label` 是输出元数据，由 `iron-bench --format autotune-json` 基于本机 CPU 与内存容量自动生成；`scheduler-autotune calibrate` 不要求用户传入硬件标签。
 
 ## 4. 架构
 

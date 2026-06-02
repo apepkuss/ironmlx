@@ -84,7 +84,6 @@ iron-bench \
   --target ironmlx=http://localhost:8080 \
   --model-dir /tmp/model \
   --format autotune-json \
-  --autotune-hardware-label m3-max \
   --autotune-b-max 2 \
   --autotune-prefill-chunk-size 1024 \
   --autotune-admission-deadline-ms 5 \
@@ -92,7 +91,7 @@ iron-bench \
   --autotune-max-cache-cap 32768
 ```
 
-The test should assert that `OutputFormat::AutotuneJson` parses and all config fields are present.
+The test should assert that `OutputFormat::AutotuneJson` parses and all config fields are present. `hardware_label` is generated automatically when the optional `--autotune-hardware-label` override is omitted.
 
 - [x] **Step 2: Verify RED**
 
@@ -110,7 +109,7 @@ Expected: compile failure until the new enum variant and CLI fields exist.
 Add `autotune-json` to `OutputFormat`, add explicit `--autotune-*` flags, and validate:
 
 - `--format autotune-json` requires exactly one target;
-- `--format autotune-json` requires hardware label and all config fields;
+- `--format autotune-json` requires all config fields and generates `hardware_label` when no override is provided;
 - non-autotune formats keep their existing output unchanged.
 
 - [x] **Step 4: Verify GREEN**

@@ -40,8 +40,6 @@ fn scheduler_autotune_calibrate_subcommand_parses_required_matrix() {
         "/tmp/model",
         "--model-name",
         "GLM-4.7-flash-4bit",
-        "--hardware-label",
-        "m5-max-128g",
         "--iron-bench-bin",
         "target/release/iron-bench",
         "--output-dir",
@@ -63,7 +61,6 @@ fn scheduler_autotune_calibrate_subcommand_parses_required_matrix() {
             Some(super::scheduler_autotune::SchedulerAutotuneAction::Calibrate(calibrate)) => {
                 assert_eq!(calibrate.model.to_string_lossy(), "/tmp/model");
                 assert_eq!(calibrate.model_name, "GLM-4.7-flash-4bit");
-                assert_eq!(calibrate.hardware_label, "m5-max-128g");
                 assert_eq!(calibrate.iron_bench_bin.to_string_lossy(), "target/release/iron-bench");
                 assert_eq!(calibrate.output_dir.to_string_lossy(), "/tmp/autotune");
                 assert_eq!(calibrate.candidates.len(), 1);
@@ -149,8 +146,6 @@ pub struct SchedulerAutotuneCalibrateArgs {
     pub model: PathBuf,
     #[arg(long)]
     pub model_name: String,
-    #[arg(long)]
-    pub hardware_label: String,
     #[arg(long)]
     pub iron_bench_bin: PathBuf,
     #[arg(long)]
@@ -569,7 +564,6 @@ cargo run --release -p ironmlx -- \
   scheduler-autotune calibrate \
   --model /path/to/model \
   --model-name GLM-4.7-flash-4bit \
-  --hardware-label m5-max-128g \
   --iron-bench-bin target/release/iron-bench \
   --output-dir reports/scheduler-autotune/glm47-m5max \
   --candidate b_max=1,prefill_chunk_size=2048,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768 \

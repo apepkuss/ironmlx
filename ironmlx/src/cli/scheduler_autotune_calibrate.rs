@@ -25,10 +25,6 @@ pub struct SchedulerAutotuneCalibrateArgs {
     #[arg(long)]
     pub model_name: String,
 
-    /// Hardware label embedded in calibration JSON.
-    #[arg(long)]
-    pub hardware_label: String,
-
     /// Path to the iron-bench binary.
     #[arg(long)]
     pub iron_bench_bin: PathBuf,
@@ -260,8 +256,6 @@ fn build_iron_bench_invocation(
         args.max_tokens.to_string(),
         "--format".to_string(),
         "autotune-json".to_string(),
-        "--autotune-hardware-label".to_string(),
-        args.hardware_label.clone(),
         "--autotune-b-max".to_string(),
         config.b_max.to_string(),
         "--autotune-prefill-chunk-size".to_string(),
@@ -597,7 +591,6 @@ mod tests {
         SchedulerAutotuneCalibrateArgs {
             model: PathBuf::from("/tmp/model"),
             model_name: "GLM-4.7-flash-4bit".to_string(),
-            hardware_label: "m5-max-128g".to_string(),
             iron_bench_bin: PathBuf::from("/tmp/iron-bench"),
             output_dir: PathBuf::from("/tmp/out"),
             candidates: vec![profile_config()],
