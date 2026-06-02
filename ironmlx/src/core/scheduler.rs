@@ -1382,7 +1382,7 @@ impl<M: Model> Scheduler<M> {
                             _ => None,
                         };
 
-                        let _prefix_hidden = model.forward_vl_hidden(
+                        let prefix_hidden = model.forward_vl_hidden(
                             &prefix_input_ids,
                             &prefix_position_ids,
                             None,
@@ -1392,6 +1392,15 @@ impl<M: Model> Scheduler<M> {
                             img_token_id,
                             mlx::StreamOrDevice::default(),
                         )?;
+                        // Commit the prefix chunk's lazy KV-cache writes before the
+                        // last-token chunk reads the SAME cache. Without this barrier the
+                        // prefix-write → last-read chain fuses into one lazy graph whose
+                        // read-after-write on the shared mutable cache buffer MLX
+                        // intermittently miscomputes to all-NaN logits (→ argmax 0 = <pad>
+                        // → empty output) on all-KVCache models such as Gemma4. Evaluating
+                        // the prefix hidden transitively materializes the per-layer
+                        // slice_update/concatenate cache writes it depends on via attention.
+                        mlx::transforms::eval(&[&prefix_hidden])?;
 
                         model.forward_vl_chunk(
                             &last_input_ids,
@@ -1458,7 +1467,7 @@ impl<M: Model> Scheduler<M> {
                     } else {
                         build_position_ids(0, prefix_len)?
                     };
-                    let _prefix_hidden = model.forward_text_hidden(
+                    let prefix_hidden = model.forward_text_hidden(
                         &prefix_input_ids,
                         &prefix_position_ids,
                         None,
@@ -1466,6 +1475,10 @@ impl<M: Model> Scheduler<M> {
                         Some(&mut *prefill_cache),
                         mlx::StreamOrDevice::default(),
                     )?;
+                    // Commit the prefix chunk's lazy KV-cache writes before the last-token
+                    // chunk reads the shared cache (see the VL split site above for the
+                    // all-NaN read-after-write rationale; same b==1 split-prefill hazard).
+                    mlx::transforms::eval(&[&prefix_hidden])?;
 
                     let last_input_ids = mlx::ops::indexing::slice_strided(
                         &input_ids,
