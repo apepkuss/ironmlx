@@ -14,6 +14,10 @@ use crate::Result;
 
 const DEFAULT_PORT: u16 = 18080;
 const DEFAULT_STARTUP_TIMEOUT_SEC: u64 = 300;
+const DEFAULT_OUTPUT_DIR: &str = "reports/scheduler-autotune";
+const DEFAULT_RUNTIME_PROFILE_FILE: &str = "scheduler-profile.json";
+const DEFAULT_PROMPT_LEN: &[usize] = &[1024, 4096];
+const DEFAULT_CONCURRENCY: &[usize] = &[1, 2];
 
 #[derive(Args, Debug)]
 pub struct SchedulerAutotuneCalibrateArgs {
@@ -22,23 +26,27 @@ pub struct SchedulerAutotuneCalibrateArgs {
     pub model: PathBuf,
 
     /// Model name to pass to iron-bench request payloads and calibration JSON.
+    /// Defaults to the model directory name.
     #[arg(long)]
-    pub model_name: String,
+    pub model_name: Option<String>,
 
-    /// Path to the iron-bench binary.
+    /// Path to the iron-bench binary. Defaults to `iron-bench` next to the
+    /// running `ironmlx` executable.
     #[arg(long)]
-    pub iron_bench_bin: PathBuf,
+    pub iron_bench_bin: Option<PathBuf>,
 
     /// Directory for candidate JSON files, logs, and final outputs.
+    /// Defaults to `reports/scheduler-autotune`.
     #[arg(long)]
-    pub output_dir: PathBuf,
+    pub output_dir: Option<PathBuf>,
 
-    /// Scheduler candidate config, repeated once per candidate.
-    #[arg(long = "candidate", required = true, value_parser = parse_candidate_config)]
+    /// Scheduler candidate config, repeated once per candidate. When omitted,
+    /// a conservative built-in agent-oriented matrix is used.
+    #[arg(long = "candidate", value_parser = parse_candidate_config)]
     pub candidates: Vec<SchedulerAutotuneProfileConfig>,
 
-    /// Prompt token lengths to test.
-    #[arg(long, value_delimiter = ',', required = true)]
+    /// Prompt token lengths to test. Defaults to `1024,4096`.
+    #[arg(long, value_delimiter = ',')]
     pub prompt_len: Vec<usize>,
 
     /// Number of generated tokens per request.
@@ -46,7 +54,8 @@ pub struct SchedulerAutotuneCalibrateArgs {
     pub max_tokens: usize,
 
     /// Concurrency levels to test. `1` uses sequential iron-bench mode.
-    #[arg(long, value_delimiter = ',', required = true)]
+    /// Defaults to `1,2`.
+    #[arg(long, value_delimiter = ',')]
     pub concurrency: Vec<usize>,
 
     /// Sequential measured runs per cell.
@@ -73,9 +82,29 @@ pub struct SchedulerAutotuneCalibrateArgs {
     #[arg(long, default_value_t = DEFAULT_STARTUP_TIMEOUT_SEC)]
     pub startup_timeout_sec: u64,
 
-    /// Optional runtime scheduler profile output path.
+    /// Runtime scheduler profile output path. Defaults to
+    /// `<output-dir>/scheduler-profile.json`.
     #[arg(long)]
     pub write_profile: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRunConfig {
+    model: PathBuf,
+    model_name: String,
+    iron_bench_bin: PathBuf,
+    output_dir: PathBuf,
+    candidates: Vec<SchedulerAutotuneProfileConfig>,
+    prompt_len: Vec<usize>,
+    max_tokens: usize,
+    concurrency: Vec<usize>,
+    runs: usize,
+    warmup: usize,
+    duration: u64,
+    warmup_duration: u64,
+    port: u16,
+    startup_timeout_sec: u64,
+    write_profile: PathBuf,
 }
 
 pub fn parse_candidate_config(
@@ -133,30 +162,135 @@ fn parse_u64_value(key: &str, value: &str) -> std::result::Result<u64, String> {
         .map_err(|err| format!("invalid {key}: {err}"))
 }
 
-pub fn run(args: SchedulerAutotuneCalibrateArgs) -> Result<()> {
-    validate_matrix(&args)?;
-    std::fs::create_dir_all(&args.output_dir)
-        .with_context(|| format!("creating {}", args.output_dir.display()))?;
+fn default_candidate_configs() -> Vec<SchedulerAutotuneProfileConfig> {
+    vec![
+        SchedulerAutotuneProfileConfig {
+            b_max: 1,
+            prefill_chunk_size: 2048,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
+        },
+        SchedulerAutotuneProfileConfig {
+            b_max: 2,
+            prefill_chunk_size: 1024,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
+        },
+        SchedulerAutotuneProfileConfig {
+            b_max: 2,
+            prefill_chunk_size: 2048,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
+        },
+        SchedulerAutotuneProfileConfig {
+            b_max: 2,
+            prefill_chunk_size: 1024,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 128,
+        },
+    ]
+}
 
+fn default_model_name(model: &Path) -> Result<String> {
+    let name = model
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("--model-name is required when --model has no directory name")
+        })?;
+    Ok(name.to_string())
+}
+
+fn default_iron_bench_bin(ironmlx_bin: &Path) -> PathBuf {
+    ironmlx_bin.with_file_name("iron-bench")
+}
+
+fn resolve_run_config(
+    args: &SchedulerAutotuneCalibrateArgs,
+    ironmlx_bin: &Path,
+) -> Result<ResolvedRunConfig> {
+    let output_dir = args
+        .output_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_DIR));
+    let write_profile = args
+        .write_profile
+        .clone()
+        .unwrap_or_else(|| output_dir.join(DEFAULT_RUNTIME_PROFILE_FILE));
+
+    Ok(ResolvedRunConfig {
+        model: args.model.clone(),
+        model_name: match &args.model_name {
+            Some(model_name) => model_name.clone(),
+            None => default_model_name(&args.model)?,
+        },
+        iron_bench_bin: args
+            .iron_bench_bin
+            .clone()
+            .unwrap_or_else(|| default_iron_bench_bin(ironmlx_bin)),
+        output_dir,
+        candidates: if args.candidates.is_empty() {
+            default_candidate_configs()
+        } else {
+            args.candidates.clone()
+        },
+        prompt_len: if args.prompt_len.is_empty() {
+            DEFAULT_PROMPT_LEN.to_vec()
+        } else {
+            args.prompt_len.clone()
+        },
+        max_tokens: args.max_tokens,
+        concurrency: if args.concurrency.is_empty() {
+            DEFAULT_CONCURRENCY.to_vec()
+        } else {
+            args.concurrency.clone()
+        },
+        runs: args.runs,
+        warmup: args.warmup,
+        duration: args.duration,
+        warmup_duration: args.warmup_duration,
+        port: args.port,
+        startup_timeout_sec: args.startup_timeout_sec,
+        write_profile,
+    })
+}
+
+pub fn run(args: SchedulerAutotuneCalibrateArgs) -> Result<()> {
     let ironmlx_bin = std::env::current_exe().context("locating current ironmlx executable")?;
-    let target_url = format!("http://127.0.0.1:{}", args.port);
-    let health = health_url(args.port);
+    let resolved = resolve_run_config(&args, &ironmlx_bin)?;
+    validate_matrix(&resolved)?;
+    std::fs::create_dir_all(&resolved.output_dir)
+        .with_context(|| format!("creating {}", resolved.output_dir.display()))?;
+
+    let target_url = format!("http://127.0.0.1:{}", resolved.port);
+    let health = health_url(resolved.port);
     let mut candidate_outputs = Vec::new();
 
-    for (candidate_idx, config) in args.candidates.iter().copied().enumerate() {
-        let serve_log = serve_log_path(&args.output_dir, candidate_idx);
-        let serve_invocation = build_serve_invocation(&ironmlx_bin, &args, config, args.port);
+    for (candidate_idx, config) in resolved.candidates.iter().copied().enumerate() {
+        let serve_log = serve_log_path(&resolved.output_dir, candidate_idx);
+        let serve_invocation =
+            build_serve_invocation(&ironmlx_bin, &resolved, config, resolved.port);
         let _serve = spawn_serve(&serve_invocation, &serve_log)?;
 
-        wait_for_health(&health, Duration::from_secs(args.startup_timeout_sec))
+        wait_for_health(&health, Duration::from_secs(resolved.startup_timeout_sec))
             .with_context(|| format!("serve log: {}", serve_log.display()))?;
 
-        for &concurrency in &args.concurrency {
-            let output_json = candidate_artifact_path(&args.output_dir, candidate_idx, concurrency);
+        for &concurrency in &resolved.concurrency {
+            let output_json =
+                candidate_artifact_path(&resolved.output_dir, candidate_idx, concurrency);
             let stderr_log =
-                candidate_stderr_log_path(&args.output_dir, candidate_idx, concurrency);
+                candidate_stderr_log_path(&resolved.output_dir, candidate_idx, concurrency);
             let bench_invocation =
-                build_iron_bench_invocation(&args, config, concurrency, &target_url);
+                build_iron_bench_invocation(&resolved, config, concurrency, &target_url);
             run_iron_bench(&bench_invocation, &output_json, &stderr_log)?;
             candidate_outputs.push(output_json);
         }
@@ -166,7 +300,7 @@ pub fn run(args: SchedulerAutotuneCalibrateArgs) -> Result<()> {
     for path in &candidate_outputs {
         inputs.push(read_calibration(path)?);
     }
-    let artifacts = FinalArtifactPaths::new(&args.output_dir, args.write_profile.clone());
+    let artifacts = FinalArtifactPaths::new(&resolved.output_dir, Some(resolved.write_profile));
     write_final_outputs(inputs, &artifacts)?;
 
     println!("calibration: {}", artifacts.calibration.display());
@@ -179,7 +313,7 @@ pub fn run(args: SchedulerAutotuneCalibrateArgs) -> Result<()> {
     Ok(())
 }
 
-fn validate_matrix(args: &SchedulerAutotuneCalibrateArgs) -> Result<()> {
+fn validate_matrix(args: &ResolvedRunConfig) -> Result<()> {
     if args.prompt_len.contains(&0) {
         anyhow::bail!("--prompt-len values must be > 0");
     }
@@ -215,7 +349,7 @@ fn serve_log_path(output_dir: &Path, candidate_idx: usize) -> PathBuf {
 
 fn build_serve_invocation(
     ironmlx_bin: &Path,
-    args: &SchedulerAutotuneCalibrateArgs,
+    args: &ResolvedRunConfig,
     config: SchedulerAutotuneProfileConfig,
     port: u16,
 ) -> ProcessInvocation {
@@ -246,7 +380,7 @@ fn build_serve_invocation(
 }
 
 fn build_iron_bench_invocation(
-    args: &SchedulerAutotuneCalibrateArgs,
+    args: &ResolvedRunConfig,
     config: SchedulerAutotuneProfileConfig,
     concurrency: usize,
     target_url: &str,
@@ -324,7 +458,9 @@ impl FinalArtifactPaths {
             calibration: output_dir.join("calibration.json"),
             selection_json: output_dir.join("selection.json"),
             selection_text: output_dir.join("selection.txt"),
-            runtime_profile,
+            runtime_profile: Some(
+                runtime_profile.unwrap_or_else(|| output_dir.join(DEFAULT_RUNTIME_PROFILE_FILE)),
+            ),
         }
     }
 }
@@ -456,7 +592,7 @@ mod tests {
 
     use super::{
         build_iron_bench_invocation, build_serve_invocation, candidate_artifact_path, health_url,
-        parse_candidate_config, write_final_outputs, FinalArtifactPaths,
+        parse_candidate_config, resolve_run_config, write_final_outputs, FinalArtifactPaths,
         SchedulerAutotuneCalibrateArgs,
     };
     use crate::core::scheduler_autotune::{
@@ -501,7 +637,7 @@ mod tests {
 
     #[test]
     fn build_serve_invocation_includes_scheduler_config() {
-        let args = sample_args();
+        let args = sample_resolved_config();
         let command =
             build_serve_invocation(Path::new("/tmp/ironmlx"), &args, profile_config(), 19000);
 
@@ -521,7 +657,7 @@ mod tests {
 
     #[test]
     fn build_iron_bench_invocation_uses_sequential_mode_for_concurrency_one() {
-        let args = sample_args();
+        let args = sample_resolved_config();
         let command =
             build_iron_bench_invocation(&args, profile_config(), 1, "http://127.0.0.1:18080");
 
@@ -534,7 +670,7 @@ mod tests {
 
     #[test]
     fn build_iron_bench_invocation_uses_concurrent_mode_for_concurrency_above_one() {
-        let args = sample_args();
+        let args = sample_resolved_config();
         let command =
             build_iron_bench_invocation(&args, profile_config(), 2, "http://127.0.0.1:18080");
 
@@ -585,6 +721,82 @@ mod tests {
     }
 
     #[test]
+    fn final_artifact_paths_default_runtime_profile_to_output_dir() {
+        let paths = FinalArtifactPaths::new(Path::new("/tmp/out"), None);
+
+        assert_eq!(
+            paths
+                .runtime_profile
+                .as_ref()
+                .expect("profile")
+                .to_string_lossy(),
+            "/tmp/out/scheduler-profile.json"
+        );
+    }
+
+    #[test]
+    fn resolve_run_config_supplies_full_auto_defaults() {
+        let mut args = sample_args();
+        args.model = PathBuf::from("/models/GLM-4.7-flash-4bit");
+        args.model_name = None;
+        args.iron_bench_bin = None;
+        args.output_dir = None;
+        args.candidates.clear();
+        args.prompt_len.clear();
+        args.concurrency.clear();
+        args.write_profile = None;
+
+        let resolved =
+            resolve_run_config(&args, Path::new("/opt/ironmlx/bin/ironmlx")).expect("resolve");
+
+        assert_eq!(resolved.model_name, "GLM-4.7-flash-4bit");
+        assert_eq!(
+            resolved.iron_bench_bin.to_string_lossy(),
+            "/opt/ironmlx/bin/iron-bench"
+        );
+        assert_eq!(
+            resolved.output_dir.to_string_lossy(),
+            "reports/scheduler-autotune"
+        );
+        assert_eq!(
+            resolved.write_profile.to_string_lossy(),
+            "reports/scheduler-autotune/scheduler-profile.json"
+        );
+        assert_eq!(resolved.prompt_len, vec![1024, 4096]);
+        assert_eq!(resolved.concurrency, vec![1, 2]);
+        assert_eq!(resolved.candidates.len(), 4);
+        assert!(resolved.candidates.iter().any(|config| config.b_max == 1));
+        assert!(resolved.candidates.iter().any(|config| config.b_max == 2));
+        assert!(resolved
+            .candidates
+            .iter()
+            .any(|config| config.decode_cadence_mid_chunk_cap == 128));
+        assert!(resolved
+            .candidates
+            .iter()
+            .any(|config| config.decode_cadence_mid_chunk_cap == 256));
+    }
+
+    #[test]
+    fn resolve_run_config_keeps_explicit_overrides() {
+        let args = sample_args();
+
+        let resolved =
+            resolve_run_config(&args, Path::new("/opt/ironmlx/bin/ironmlx")).expect("resolve");
+
+        assert_eq!(resolved.model_name, "GLM-4.7-flash-4bit");
+        assert_eq!(resolved.iron_bench_bin.to_string_lossy(), "/tmp/iron-bench");
+        assert_eq!(resolved.output_dir.to_string_lossy(), "/tmp/out");
+        assert_eq!(
+            resolved.write_profile.to_string_lossy(),
+            "/tmp/profile.json"
+        );
+        assert_eq!(resolved.prompt_len, vec![1024, 2048]);
+        assert_eq!(resolved.concurrency, vec![1, 2]);
+        assert_eq!(resolved.candidates, vec![profile_config()]);
+    }
+
+    #[test]
     fn write_final_outputs_writes_calibration_selection_and_profile() {
         let temp_dir = unique_temp_dir("scheduler-autotune-calibrate-output");
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
@@ -613,9 +825,9 @@ mod tests {
     fn sample_args() -> SchedulerAutotuneCalibrateArgs {
         SchedulerAutotuneCalibrateArgs {
             model: PathBuf::from("/tmp/model"),
-            model_name: "GLM-4.7-flash-4bit".to_string(),
-            iron_bench_bin: PathBuf::from("/tmp/iron-bench"),
-            output_dir: PathBuf::from("/tmp/out"),
+            model_name: Some("GLM-4.7-flash-4bit".to_string()),
+            iron_bench_bin: Some(PathBuf::from("/tmp/iron-bench")),
+            output_dir: Some(PathBuf::from("/tmp/out")),
             candidates: vec![profile_config()],
             prompt_len: vec![1024, 2048],
             max_tokens: 128,
@@ -628,6 +840,10 @@ mod tests {
             startup_timeout_sec: 300,
             write_profile: Some(PathBuf::from("/tmp/profile.json")),
         }
+    }
+
+    fn sample_resolved_config() -> super::ResolvedRunConfig {
+        resolve_run_config(&sample_args(), Path::new("/tmp/ironmlx")).expect("resolve sample")
     }
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {

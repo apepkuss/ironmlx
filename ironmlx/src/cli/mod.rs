@@ -182,12 +182,26 @@ mod tests {
             Command::SchedulerAutotune(args) => match args.action {
                 Some(super::scheduler_autotune::SchedulerAutotuneAction::Calibrate(calibrate)) => {
                     assert_eq!(calibrate.model.to_string_lossy(), "/tmp/model");
-                    assert_eq!(calibrate.model_name, "GLM-4.7-flash-4bit");
                     assert_eq!(
-                        calibrate.iron_bench_bin.to_string_lossy(),
+                        calibrate.model_name.as_ref().expect("expected model name"),
+                        "GLM-4.7-flash-4bit"
+                    );
+                    assert_eq!(
+                        calibrate
+                            .iron_bench_bin
+                            .as_ref()
+                            .expect("expected iron-bench bin")
+                            .to_string_lossy(),
                         "target/release/iron-bench"
                     );
-                    assert_eq!(calibrate.output_dir.to_string_lossy(), "/tmp/autotune");
+                    assert_eq!(
+                        calibrate
+                            .output_dir
+                            .as_ref()
+                            .expect("expected output dir")
+                            .to_string_lossy(),
+                        "/tmp/autotune"
+                    );
                     assert_eq!(calibrate.candidates.len(), 1);
                     assert_eq!(calibrate.candidates[0].b_max, 2);
                     assert_eq!(calibrate.candidates[0].prefill_chunk_size, 1024);
@@ -203,6 +217,34 @@ mod tests {
                             .to_string_lossy(),
                         "/tmp/scheduler-profile.json"
                     );
+                }
+                other => panic!("expected Calibrate action, got {other:?}"),
+            },
+            other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scheduler_autotune_calibrate_subcommand_accepts_full_auto_defaults() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "scheduler-autotune",
+            "calibrate",
+            "--model",
+            "/tmp/GLM-4.7-flash-4bit",
+        ]);
+
+        match cli.command {
+            Command::SchedulerAutotune(args) => match args.action {
+                Some(super::scheduler_autotune::SchedulerAutotuneAction::Calibrate(calibrate)) => {
+                    assert_eq!(calibrate.model.to_string_lossy(), "/tmp/GLM-4.7-flash-4bit");
+                    assert!(calibrate.model_name.is_none());
+                    assert!(calibrate.iron_bench_bin.is_none());
+                    assert!(calibrate.output_dir.is_none());
+                    assert!(calibrate.candidates.is_empty());
+                    assert!(calibrate.prompt_len.is_empty());
+                    assert!(calibrate.concurrency.is_empty());
+                    assert!(calibrate.write_profile.is_none());
                 }
                 other => panic!("expected Calibrate action, got {other:?}"),
             },
