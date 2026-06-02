@@ -15,30 +15,30 @@
 //!     cargo test --release -p ironmlx --test anthropic_image_e2e_parity \
 //!       -- --ignored e2e_qwen35_vl_dense --nocapture
 //!
-//! ## Verification status (2026-06-02, this branch)
+//! ## Verification status (2026-06-02, this branch) — ALL 4 ARCHITECTURES PASS
 //!
-//! - **Qwen3.5-VL dense + MoE: PASS** — Anthropic and OpenAI completions are
-//!   token-identical and non-empty. This is the end-to-end proof that the
-//!   Anthropic image feature works: the transitivity anchor holds wherever the
-//!   shared vision backend itself works.
-//! - **Gemma4 + MiniCPM-V: BLOCKED by PRE-EXISTING serve-path backend bugs**
-//!   — NOT introduced by this feature. The feature diff (vision.rs + the two
-//!   endpoint handlers) touches ZERO model / scheduler / vision-tower code, and
-//!   the OpenAI endpoint — refactored byte-identically — fails IDENTICALLY, so
-//!   the defect is downstream of the wire normalization (which byte-parity tests
-//!   prove correct). Root causes observed by booting the real servers:
-//!     * MiniCPM-V: the scheduler-actor prefill thread evaluates the
-//!       `vision_embeds` lazy graph produced by `MiniCpmV46Model::compute_vision_embeds`,
-//!       but that thread lacks the originating MLX stream → runtime error
-//!       "There is no Stream(gpu, 1) in current thread" → the scheduler poisons
-//!       and rejects the next admit. Surfaced by coco 640x480's multi-slice path.
-//!       (Both endpoints: first request errors, second gets "scheduler poisoned".)
-//!     * Gemma4: vision forward emits 16 tokens that all detokenize to empty
-//!       (special/invalid ids) → HTTP 200 with content "". No error logged.
-//!   Both bugs live in feature-predating model code (e.g. minicpmv4_6/model.rs
-//!   `compute_vision_embeds`, last touched by commits 218de8e / 36551ea) and
-//!   require a SEPARATE backend fix. They block these two architectures'
-//!   end-to-end demonstration but do not implicate the Anthropic feature.
+//! All four real VLM architectures pass e2e parity (Anthropic == OpenAI,
+//! token-identical, non-empty) under both endpoints: Qwen3.5-VL dense,
+//! Qwen3.5-VL MoE, Gemma4, MiniCPM-V-4.6.
+//!
+//! Two PRE-EXISTING serve-path backend bugs (NOT introduced by the Anthropic
+//! image feature — only manifest on the multi-threaded scheduler serve path, so
+//! the feature surfaced them) were root-caused and fixed in this branch:
+//!   * MiniCPM-V (fixed in c6ae50e): `MiniCpmV46Vision::from_loader` never
+//!     eagerly eval'd the SigLIP weights (unlike qwen's `VisionTower`), so the
+//!     lazy weight graph stayed tagged with the construction thread's MLX stream;
+//!     the scheduler-actor prefill thread then failed `to_vec(vision_embeds)`
+//!     with "There is no Stream(gpu, 1) in current thread" → scheduler poisoned.
+//!     Fix: mirror qwen — add `collect_weights` + `MiniCpmV46Vision::eval_weights`.
+//!   * Gemma4 (fixed in 5ddef44): the b==1 split-prefill ran a prefix chunk then
+//!     a last-token chunk against the SAME KVCache, dropping the prefix hidden
+//!     without `eval` → the prefix's lazy cache writes were never committed → the
+//!     last chunk's read-after-write fused into one lazy graph MLX intermittently
+//!     miscomputed to all-NaN logits (argmax 0 = <pad> → empty). ~35-55%
+//!     intermittent, all-KVCache models only (qwen/minicpmv hybrid cache dodged
+//!     it). Fix: `eval` barrier on the prefix hidden at both VL + text split sites.
+//!   Both bugs were in feature-predating model/scheduler code; the OpenAI endpoint
+//!   hit them identically, confirming the Anthropic wire layer was always sound.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -271,12 +271,10 @@ async fn e2e_qwen35_vl_moe() {
 // Gemma4
 // ---------------------------------------------------------------------------
 
-// NOTE: currently BLOCKED by a pre-existing gemma4 vision-forward bug (empty
-// generation: 16 special/invalid tokens → content ""). Both endpoints agree, so
-// the Anthropic normalization is correct; the defect is downstream. See the
-// module-level "Verification status" docs. Not caused by this feature.
+// Fixed in 5ddef44 (scheduler b==1 split-prefill eval barrier). Verified 20/20
+// non-empty on both endpoints with a real COCO description, 0 NaN. See module docs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires GEMMA4_MODEL; also BLOCKED by pre-existing gemma4 empty-gen bug (see module docs)"]
+#[ignore = "requires GEMMA4_MODEL checkpoint"]
 async fn e2e_gemma4() {
     let dir = PathBuf::from(std::env::var("GEMMA4_MODEL").unwrap());
     let loader = Loader::open_multimodal(&dir).unwrap();
@@ -295,14 +293,10 @@ async fn e2e_gemma4() {
 // MiniCPM-V-4.6  (transitivity check)
 // ---------------------------------------------------------------------------
 
-// NOTE: currently BLOCKED by a pre-existing MiniCPM-V vision_embeds cross-thread
-// MLX-stream bug in the scheduler-actor prefill path ("There is no Stream(gpu, 1)
-// in current thread" → scheduler poisoned). Both endpoints hit it identically, so
-// the Anthropic normalization is correct; the defect is downstream in
-// compute_vision_embeds. See the module-level "Verification status" docs. Not
-// caused by this feature.
+// Fixed in c6ae50e (eager eval of SigLIP vision weights at construction). Verified
+// both endpoints return a real COCO description, token-identical. See module docs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires MINICPMV46_MODEL; also BLOCKED by pre-existing vision_embeds cross-thread stream bug (see module docs)"]
+#[ignore = "requires MINICPMV46_MODEL checkpoint"]
 async fn e2e_minicpmv46() {
     let dir = PathBuf::from(std::env::var("MINICPMV46_MODEL").unwrap());
     let loader = Loader::open_multimodal(&dir).unwrap();
@@ -328,18 +322,25 @@ async fn e2e_minicpmv46() {
 // Fixture file: expected_gen_tokens.npy (int32 [K], gitignored)
 // To regenerate: run gen_single_image_generate.py with MINICPMV46_MODEL set.
 //
-// TWO known blockers before this can pass (both out of this feature's scope):
-//   1. The pre-existing vision_embeds cross-thread stream bug (same as
-//      e2e_minicpmv46 above) prevents the server from generating at all.
-//   2. PROMPT ALIGNMENT: the gen script uses `PROMPT = "<image>Describe this
-//      image."` (image FIRST, "this"), whereas `anthropic_body` here sends
-//      [text "Describe the image.", image] (text first, "the"). Once the stream
-//      bug is fixed, this test must send a matching prompt — parts
-//      [image, text "Describe this image."] — for the token-ids to line up.
+// The vision_embeds stream bug that previously prevented generation is FIXED
+// (c6ae50e); MiniCPM-V now generates correctly on the serve path (see the
+// e2e_minicpmv46 transitivity test above, which PASSES). This direct-vs-fixture
+// test remains a TODO purely on PROMPT ALIGNMENT: the gen script uses
+// `PROMPT = "<image>Describe this image."` (image FIRST, "this"), whereas the
+// shared `anthropic_body` here sends [text "Describe the image.", image] (text
+// first, "the"). To enable it, send a matching prompt — parts
+// [image, text "Describe this image."] — AND match the serve chat-template
+// render to the gen script's, so the token-ids line up.
+//
+// Not a correctness gap: MiniCPM-V's serve-path agreement with mlx-vlm was
+// already established at P2b integration (first-token-exact single-image e2e
+// parity), and the transitivity test anchors the Anthropic endpoint to that
+// validated backend. This direct test is a redundant strengthening, left
+// ignored pending the prompt-alignment chore above.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires MINICPMV46_MODEL + fixture; also BLOCKED by pre-existing stream bug + prompt-alignment TODO (see comment above)"]
+#[ignore = "requires MINICPMV46_MODEL + fixture; prompt-alignment TODO vs gen script (stream bug fixed in c6ae50e)"]
 async fn e2e_minicpmv46_direct_vs_mlxvlm() {
     use mlx::{ops, Dtype};
 
