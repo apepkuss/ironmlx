@@ -84,6 +84,14 @@ impl SiglipEmbeddings {
         })
     }
 
+    /// Push every weight tensor onto `out` for eager materialization on the
+    /// loading thread (see [`super::MiniCpmV46Vision::eval_weights`]).
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(&self.patch_w_2d);
+        out.push(&self.patch_b);
+        out.push(&self.pos_embed);
+    }
+
     /// `pixel_values`: patch-packed `[1, patch, n*patch, 3]`. Returns `[1, grid_h*grid_w, hidden]`.
     pub fn forward_on(
         &self,

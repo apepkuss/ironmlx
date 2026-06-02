@@ -28,8 +28,8 @@ use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
+use crate::core::server::vision::{expand_decoded_messages, DecodedMessage, DecodedPart};
 use crate::core::server::VisionInputConfig;
-use crate::models::{gemma4, qwen3_5};
 
 use super::AppState;
 
@@ -198,140 +198,47 @@ pub async fn decode_image_url(url: &str, client: &reqwest::Client) -> anyhow::Re
 // Multimodal message expansion (Step 18.4 + 19.3 helper)
 // ---------------------------------------------------------------------------
 
-/// Walk `messages`, decode + preprocess every `image_url` content part, and
-/// rewrite the messages so all `Content::Parts` are converted to
-/// `Content::Text` with vision token placeholder strings inserted.
-///
-/// Returns:
-/// - rewritten text-only messages (ready for `render_and_encode`)
-/// - per-image pixel_values tensors (None when no images present)
-/// - image_grid_thw list (one entry per image)
+/// Decode every OpenAI `image_url` content part into raw bytes, producing the
+/// wire-agnostic `DecodedMessage` list consumed by the shared vision core.
+pub async fn decode_openai_messages(
+    messages: Vec<ChatMessage>,
+    client: &reqwest::Client,
+) -> anyhow::Result<Vec<DecodedMessage>> {
+    let mut out: Vec<DecodedMessage> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let mut parts: Vec<DecodedPart> = Vec::new();
+        match msg.content {
+            Content::Text(t) => parts.push(DecodedPart::Text(t)),
+            Content::Parts(ps) => {
+                for p in ps {
+                    match p {
+                        ContentPart::Text { text } => parts.push(DecodedPart::Text(text)),
+                        ContentPart::ImageUrl { image_url } => {
+                            let bytes = decode_image_url(&image_url.url, client).await?;
+                            parts.push(DecodedPart::Image(bytes));
+                        }
+                    }
+                }
+            }
+        }
+        out.push(DecodedMessage {
+            role: msg.role,
+            parts,
+        });
+    }
+    Ok(out)
+}
+
+/// Walk `messages`, decode + preprocess every `image_url`, and rewrite to
+/// text-with-placeholder. Signature unchanged so the handler call site is
+/// untouched; the body now delegates to the shared `vision` core.
 pub async fn expand_image_parts_in_messages(
     messages: Vec<ChatMessage>,
     client: &reqwest::Client,
     vision_input: &VisionInputConfig,
 ) -> anyhow::Result<(Vec<ChatMessage>, Option<Vec<Array>>, Vec<(i32, i32, i32)>)> {
-    let spatial_merge_size = match vision_input {
-        VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
-        VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
-        VisionInputConfig::MiniCpmV46 { spatial_merge_size } => *spatial_merge_size,
-    };
-    if spatial_merge_size <= 0 {
-        return Err(anyhow::anyhow!(
-            "expand_image_parts_in_messages: spatial_merge_size must be > 0 (got {spatial_merge_size})"
-        ));
-    }
-    let mut all_pixel_values: Vec<Array> = Vec::new();
-    let mut grid_thw: Vec<(i32, i32, i32)> = Vec::new();
-    let mut placeholders: Vec<String> = Vec::new();
-
-    // First pass: collect pixel_values + grid info for every image_url part
-    // across all messages, in order.
-    for msg in &messages {
-        if let Content::Parts(parts) = &msg.content {
-            for part in parts {
-                if let ContentPart::ImageUrl { image_url } = part {
-                    let img_bytes = decode_image_url(&image_url.url, client).await?;
-                    match vision_input {
-                        VisionInputConfig::Qwen { .. } => {
-                            let (pv, gh, gw) = qwen3_5::image_processor::preprocess(&img_bytes)?;
-                            let n =
-                                ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
-                            placeholders.push(qwen_placeholder(n));
-                            all_pixel_values.push(pv);
-                            grid_thw.push((1, gh, gw));
-                        }
-                        VisionInputConfig::Gemma4 { vision_config } => {
-                            let processed =
-                                gemma4::image_processor::preprocess(&img_bytes, vision_config)?;
-                            placeholders.push(gemma4_placeholder(processed.soft_tokens));
-                            grid_thw.push((1, processed.grid_h, processed.grid_w));
-                            all_pixel_values.push(processed.pixel_values);
-                        }
-                        VisionInputConfig::MiniCpmV46 { .. } => {
-                            // Multi-slice (LLaVA-UHD): delegate to preprocess_sliced_to_parts,
-                            // which is the single source of truth for the divisibility guard,
-                            // token count, and placeholder construction shared with the CLI.
-                            let parts = crate::models::minicpmv4_6::preprocess_sliced_to_parts(
-                                &img_bytes,
-                                spatial_merge_size,
-                            )?;
-                            all_pixel_values.extend(parts.pixel_values);
-                            grid_thw.extend(parts.grid_thw);
-                            placeholders.push(parts.placeholder);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Second pass: rewrite messages to plain-text with placeholder tokens.
-    let mut placeholders = placeholders.into_iter();
-    let flat_messages: Vec<ChatMessage> = messages
-        .into_iter()
-        .map(|msg| {
-            let flat = flatten_content_with_placeholders(msg.content, &mut placeholders);
-            ChatMessage {
-                role: msg.role,
-                content: Content::Text(flat),
-            }
-        })
-        .collect();
-
-    let pixel_values = if all_pixel_values.is_empty() {
-        None
-    } else {
-        // Eagerly materialize on this (async tokio worker) thread before the
-        // tensor crosses into spawn_blocking, where a different worker thread's
-        // default MLX stream would not be able to evaluate this thread's lazy
-        // graph (errors with "There is no Stream(gpu, N) in current thread").
-        for pv in &all_pixel_values {
-            mlx::transforms::eval(&[pv])?;
-        }
-        Some(all_pixel_values)
-    };
-
-    Ok((flat_messages, pixel_values, grid_thw))
-}
-
-fn qwen_placeholder(n: usize) -> String {
-    let mut s = String::from("<|vision_start|>");
-    for _ in 0..n {
-        s.push_str("<|image_pad|>");
-    }
-    s.push_str("<|vision_end|>");
-    s
-}
-
-fn gemma4_placeholder(n: usize) -> String {
-    let mut s = String::from("<|image>");
-    for _ in 0..n {
-        s.push_str("<|image|>");
-    }
-    s.push_str("<image|>");
-    s
-}
-
-fn flatten_content_with_placeholders(
-    content: Content,
-    placeholders: &mut impl Iterator<Item = String>,
-) -> String {
-    match content {
-        Content::Text(t) => t,
-        Content::Parts(parts) => {
-            let mut out = String::new();
-            for part in parts {
-                match part {
-                    ContentPart::Text { text } => out.push_str(&text),
-                    ContentPart::ImageUrl { .. } => {
-                        out.push_str(&placeholders.next().unwrap_or_default());
-                    }
-                }
-            }
-            out
-        }
-    }
+    let decoded = decode_openai_messages(messages, client).await?;
+    expand_decoded_messages(decoded, vision_input)
 }
 
 // ---------------------------------------------------------------------------
@@ -411,33 +318,11 @@ where
     // For text-only requests this is a cheap no-op (no images to fetch).
     let http_client = reqwest::Client::new();
 
-    let (image_token_id, spatial_merge_size) = match &state.vision_input {
-        VisionInputConfig::Qwen { spatial_merge_size } => (
-            state
-                .tokenizer
-                .token_to_id("<|image_pad|>")
-                .map(|id| id as i32)
-                .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID),
-            *spatial_merge_size,
-        ),
-        VisionInputConfig::Gemma4 { vision_config } => (
-            state
-                .tokenizer
-                .token_to_id("<|image|>")
-                .map(|id| id as i32)
-                .unwrap_or(258_880),
-            vision_config.pooling_kernel_size,
-        ),
-        VisionInputConfig::MiniCpmV46 { spatial_merge_size } => (
-            // image_token_id = 248056 (<|image_pad|>) per P2a fixture.
-            state
-                .tokenizer
-                .token_to_id("<|image_pad|>")
-                .map(|id| id as i32)
-                .unwrap_or(248_056),
-            *spatial_merge_size,
-        ),
-    };
+    let (image_token_id, spatial_merge_size) =
+        crate::core::server::vision::derive_image_token_and_merge(
+            &state.vision_input,
+            &state.tokenizer,
+        );
 
     // Expand multimodal content parts: decode images, build pixel_values,
     // rewrite messages to text-with-placeholder.
@@ -1416,67 +1301,6 @@ mod tests {
         assert!(s.contains("\"total_tokens\":6"));
     }
 
-    #[test]
-    fn qwen_placeholder_uses_existing_vl_tokens() {
-        assert_eq!(
-            qwen_placeholder(2),
-            "<|vision_start|><|image_pad|><|image_pad|><|vision_end|>"
-        );
-    }
-
-    #[test]
-    fn gemma4_placeholder_uses_boundary_and_soft_tokens() {
-        assert_eq!(gemma4_placeholder(2), "<|image><|image|><|image|><image|>");
-    }
-
-    #[test]
-    fn flatten_content_inserts_placeholders_in_part_order() {
-        let content = Content::Parts(vec![
-            ContentPart::Text {
-                text: "before ".into(),
-            },
-            ContentPart::ImageUrl {
-                image_url: crate::core::server::chat_format::ImageUrl {
-                    url: "data:image/jpeg;base64,".into(),
-                },
-            },
-            ContentPart::Text {
-                text: " after".into(),
-            },
-        ]);
-        let placeholders = vec!["<image-placeholder>".to_string()];
-        let mut iter = placeholders.into_iter();
-        assert_eq!(
-            flatten_content_with_placeholders(content, &mut iter),
-            "before <image-placeholder> after"
-        );
-    }
-
-    #[test]
-    fn flatten_content_inserts_multiple_placeholders_in_part_order() {
-        let content = Content::Parts(vec![
-            ContentPart::Text { text: "a ".into() },
-            ContentPart::ImageUrl {
-                image_url: crate::core::server::chat_format::ImageUrl {
-                    url: "data:image/jpeg;base64,".into(),
-                },
-            },
-            ContentPart::Text { text: " b ".into() },
-            ContentPart::ImageUrl {
-                image_url: crate::core::server::chat_format::ImageUrl {
-                    url: "data:image/jpeg;base64,".into(),
-                },
-            },
-            ContentPart::Text { text: " c".into() },
-        ]);
-        let placeholders = vec!["<img-0>".to_string(), "<img-1>".to_string()];
-        let mut iter = placeholders.into_iter();
-        assert_eq!(
-            flatten_content_with_placeholders(content, &mut iter),
-            "a <img-0> b <img-1> c"
-        );
-    }
-
     #[tokio::test]
     async fn data_url_decoded_to_bytes() {
         // "/9j/4AAQABAA" is a truncated JPEG header (base64):
@@ -1586,21 +1410,6 @@ mod tests {
         let resp = admit_err_to_response(err);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(resp.headers().get("retry-after").is_none());
-    }
-
-    /// MiniCPM-V-4.6 VisionInputConfig variant: merge-size accessor returns 4.
-    /// The inline match in expand_image_parts_in_messages must handle the new arm.
-    #[test]
-    fn minicpmv46_vision_input_merge_size() {
-        let cfg = VisionInputConfig::MiniCpmV46 {
-            spatial_merge_size: 4,
-        };
-        let size = match &cfg {
-            VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
-            VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
-            VisionInputConfig::MiniCpmV46 { spatial_merge_size } => *spatial_merge_size,
-        };
-        assert_eq!(size, 4);
     }
 
     /// MiniCPM-V-4.6 placeholder string: <image> + <|image_pad|>×N + </image>.

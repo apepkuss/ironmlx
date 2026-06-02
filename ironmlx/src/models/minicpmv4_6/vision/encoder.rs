@@ -42,6 +42,17 @@ impl Mha {
         })
     }
 
+    fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(&self.qw);
+        out.push(&self.qb);
+        out.push(&self.kw);
+        out.push(&self.kb);
+        out.push(&self.vw);
+        out.push(&self.vb);
+        out.push(&self.ow);
+        out.push(&self.ob);
+    }
+
     /// Linear projection: addmm(b, x, Wᵀ) — fused bias-matmul.
     ///
     /// // addmm (bias, x, Wᵀ) matches mlx nn.Linear — avoids 1-ULP drift vs the Python reference (see vision/block.rs).
@@ -108,6 +119,24 @@ impl SiglipEncoderLayer {
             fc2w: g("mlp.fc2.weight")?,
             fc2b: g("mlp.fc2.bias")?,
         })
+    }
+
+    /// Push every weight tensor (norms, attention, MLP) onto `out` for eager
+    /// materialization on the loading thread.
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        out.push(self.ln1.weight());
+        if let Some(b) = self.ln1.bias() {
+            out.push(b);
+        }
+        self.attn.collect_weights(out);
+        out.push(self.ln2.weight());
+        if let Some(b) = self.ln2.bias() {
+            out.push(b);
+        }
+        out.push(&self.fc1w);
+        out.push(&self.fc1b);
+        out.push(&self.fc2w);
+        out.push(&self.fc2b);
     }
 
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
@@ -189,6 +218,13 @@ impl SiglipEncoder {
             )?);
         }
         Ok(Self { layers })
+    }
+
+    /// Push every layer's weights onto `out` for eager materialization.
+    pub(super) fn collect_weights<'a>(&'a self, out: &mut Vec<&'a Array>) {
+        for layer in &self.layers {
+            layer.collect_weights(out);
+        }
     }
 }
 

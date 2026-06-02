@@ -19,12 +19,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
+use base64::Engine;
+
 use crate::core::generate::{GenerateRequest, GenerationStream};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
-use crate::core::server::chat_format::{render_and_encode, ChatMessage, Content, ContentPart};
+use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
+use crate::core::server::vision::{DecodedMessage, DecodedPart};
 
 use super::AppState;
 
@@ -72,11 +75,46 @@ fn admit_err_to_response(err: anyhow::Error) -> Response {
     }
 }
 
+/// Anthropic native image source — base64 only (URL source is out of scope).
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicImageSource {
+    Base64 {
+        // informational; not validated
+        #[allow(dead_code)]
+        media_type: String,
+        data: String,
+    },
+}
+
+/// Anthropic native content block.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicContentPart {
+    Text { text: String },
+    Image { source: AnthropicImageSource },
+}
+
+/// Anthropic message content: plain string or an array of content blocks.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AnthropicContent {
+    Text(String),
+    Parts(Vec<AnthropicContentPart>),
+}
+
+/// Anthropic message (private wire type; not shared with the OpenAI endpoint).
+#[derive(Debug, Deserialize)]
+struct AnthropicMessage {
+    role: String,
+    content: AnthropicContent,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MessagesRequest {
     #[serde(default)]
     pub model: Option<String>,
-    pub messages: Vec<ChatMessage>,
+    messages: Vec<AnthropicMessage>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
     #[serde(default)]
@@ -154,6 +192,40 @@ fn format_event(event_type: &str, payload: &serde_json::Value) -> Bytes {
     Bytes::from(buf)
 }
 
+/// Decode Anthropic native content blocks into the wire-agnostic
+/// `DecodedMessage` list. base64 source is decoded in-process (no network);
+/// `media_type` is informational and not validated.
+fn decode_anthropic_messages(
+    messages: Vec<AnthropicMessage>,
+) -> anyhow::Result<Vec<DecodedMessage>> {
+    let mut out: Vec<DecodedMessage> = Vec::with_capacity(messages.len());
+    for m in messages {
+        let mut parts: Vec<DecodedPart> = Vec::new();
+        match m.content {
+            AnthropicContent::Text(t) => parts.push(DecodedPart::Text(t)),
+            AnthropicContent::Parts(ps) => {
+                for p in ps {
+                    match p {
+                        AnthropicContentPart::Text { text } => parts.push(DecodedPart::Text(text)),
+                        AnthropicContentPart::Image { source } => {
+                            let AnthropicImageSource::Base64 { data, .. } = source;
+                            let bytes = base64::engine::general_purpose::STANDARD
+                                .decode(data.as_bytes())
+                                .map_err(|e| anyhow::anyhow!("image base64 decode: {e}"))?;
+                            parts.push(DecodedPart::Image(bytes));
+                        }
+                    }
+                }
+            }
+        }
+        out.push(DecodedMessage {
+            role: m.role,
+            parts,
+        });
+    }
+    Ok(out)
+}
+
 pub async fn messages<M>(
     State(state): State<AppState<M>>,
     Json(req): Json<MessagesRequest>,
@@ -167,53 +239,36 @@ where
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let sampler = build_sampler(&req);
 
-    // The Anthropic /v1/messages handler is text-only. Reject requests that
-    // include image content parts with a clear 400 rather than silently
-    // dropping them — silent drop produced text-only completions that ignored
-    // the image and confused users (audit ref B6). Multimodal support for the
-    // Anthropic shape is a future expansion; today, route image requests to
-    // /v1/chat/completions.
-    for m in &req.messages {
-        if let Content::Parts(parts) = &m.content {
-            for p in parts {
-                if matches!(p, ContentPart::ImageUrl { .. }) {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        "Anthropic /v1/messages does not yet support image content parts; \
-                         use /v1/chat/completions for image requests"
-                            .to_string(),
-                    )
-                        .into_response();
-                }
-            }
+    // Decode Anthropic wire format -> neutral DecodedMessage (base64 -> bytes).
+    let decoded = match decode_anthropic_messages(req.messages) {
+        Ok(d) => d,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("image decode: {e}")).into_response();
         }
-    }
+    };
 
-    // Flatten any text-only multimodal content parts to plain text.
-    let flat_messages: Vec<ChatMessage> = req
-        .messages
-        .into_iter()
-        .map(|m| {
-            let text = match &m.content {
-                Content::Text(t) => t.clone(),
-                Content::Parts(parts) => parts
-                    .iter()
-                    .filter_map(|p| {
-                        if let ContentPart::Text { text } = p {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(""),
-            };
-            ChatMessage {
-                role: m.role,
-                content: Content::Text(text),
+    // Shared per-model preprocess + placeholder rewrite.
+    let (flat_messages, pixel_values, image_grid_thw) =
+        match crate::core::server::vision::expand_decoded_messages(decoded, &state.vision_input) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("image decode/preprocess: {e}"),
+                )
+                    .into_response();
             }
-        })
-        .collect();
+        };
+    let image_grid_thw_opt = if image_grid_thw.is_empty() {
+        None
+    } else {
+        Some(image_grid_thw)
+    };
+    let (image_token_id, image_spatial_merge_size) =
+        crate::core::server::vision::derive_image_token_and_merge(
+            &state.vision_input,
+            &state.tokenizer,
+        );
 
     // Anthropic /v1/messages doesn't surface chat_template_kwargs in its
     // public schema; pass None.
@@ -235,12 +290,10 @@ where
         sampler,
         stop_token_ids,
         prefill_chunk_size: state.prefill_chunk_size,
-        pixel_values: None,
-        image_grid_thw: None,
-        // Anthropic path is text-only (see audit B6); both values unused
-        // when image_grid_thw is None.
-        image_spatial_merge_size: 2,
-        image_token_id: crate::core::generate::IMAGE_TOKEN_ID,
+        pixel_values,
+        image_grid_thw: image_grid_thw_opt,
+        image_spatial_merge_size,
+        image_token_id,
         #[cfg(feature = "p5h-profile")]
         p5h_trace: None,
         #[cfg(feature = "p5h-profile")]
@@ -748,5 +801,182 @@ mod tests {
         assert!(s.contains("\"stop_reason\":\"end_turn\""));
         assert!(s.contains("\"input_tokens\":3"));
         assert!(s.contains("\"output_tokens\":1"));
+    }
+
+    mod wire_tests {
+        use super::*;
+
+        #[test]
+        fn parses_native_base64_image_block() {
+            let body = r#"
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}}
+                ]
+            }"#;
+            let m: AnthropicMessage = serde_json::from_str(body).unwrap();
+            assert_eq!(m.role, "user");
+            let parts = match m.content {
+                AnthropicContent::Parts(p) => p,
+                _ => panic!("expected Parts"),
+            };
+            assert_eq!(parts.len(), 2);
+            assert!(matches!(parts[0], AnthropicContentPart::Text { .. }));
+            match &parts[1] {
+                AnthropicContentPart::Image { source } => {
+                    let AnthropicImageSource::Base64 { media_type, data } = source;
+                    assert_eq!(media_type, "image/png");
+                    assert_eq!(data, "aGVsbG8=");
+                }
+                _ => panic!("expected Image"),
+            }
+        }
+
+        #[test]
+        fn parses_plain_string_content() {
+            let m: AnthropicMessage =
+                serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
+            assert!(matches!(m.content, AnthropicContent::Text(ref t) if t == "hi"));
+        }
+
+        #[test]
+        fn rejects_openai_image_url_shape() {
+            let body = r#"
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}
+                ]
+            }"#;
+            assert!(serde_json::from_str::<AnthropicMessage>(body).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use crate::core::server::chat_format::{ChatMessage, Content, ContentPart, ImageUrl};
+    use crate::core::server::openai::decode_openai_messages;
+    use crate::core::server::vision::expand_decoded_messages;
+    use crate::core::server::VisionInputConfig;
+
+    /// Base64 of the real coco test image (shared by both endpoint paths so the
+    /// decoded bytes are identical by construction; the test proves the two
+    /// decode paths + shared core agree).
+    fn coco_b64() -> String {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/p6_qwen35_vl/coco_sample.jpg"
+        ))
+        .expect("read coco_sample.jpg fixture");
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn anthropic_one_image(b64: &str) -> Vec<AnthropicMessage> {
+        vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Parts(vec![
+                AnthropicContentPart::Text {
+                    text: "what is this?".to_string(),
+                },
+                AnthropicContentPart::Image {
+                    source: AnthropicImageSource::Base64 {
+                        media_type: "image/jpeg".to_string(),
+                        data: b64.to_string(),
+                    },
+                },
+            ]),
+        }]
+    }
+
+    fn openai_one_image(b64: &str) -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: "user".to_string(),
+            content: Content::Parts(vec![
+                ContentPart::Text {
+                    text: "what is this?".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: format!("data:image/jpeg;base64,{b64}"),
+                    },
+                },
+            ]),
+        }]
+    }
+
+    async fn run_parity(vision_input: VisionInputConfig) {
+        let b64 = coco_b64();
+        let client = reqwest::Client::new();
+        // OpenAI path: data: URL → bytes → shared core.
+        let openai_decoded = decode_openai_messages(openai_one_image(&b64), &client)
+            .await
+            .unwrap();
+        let (o_flat, o_pv, o_grid) =
+            expand_decoded_messages(openai_decoded, &vision_input).unwrap();
+        // Anthropic path: raw base64 → bytes → shared core.
+        let anthropic_decoded = decode_anthropic_messages(anthropic_one_image(&b64)).unwrap();
+        let (a_flat, a_pv, a_grid) =
+            expand_decoded_messages(anthropic_decoded, &vision_input).unwrap();
+
+        // flat text identical
+        assert_eq!(o_flat.len(), a_flat.len());
+        for (o, a) in o_flat.iter().zip(a_flat.iter()) {
+            let (ot, at) = match (&o.content, &a.content) {
+                (Content::Text(o), Content::Text(a)) => (o, a),
+                _ => panic!("expected flat Content::Text"),
+            };
+            assert_eq!(ot, at, "flat text mismatch");
+        }
+        // grid identical
+        assert_eq!(o_grid, a_grid, "grid_thw mismatch");
+        // pixel_values byte-identical
+        let o_pv = o_pv.expect("openai pixels");
+        let a_pv = a_pv.expect("anthropic pixels");
+        assert_eq!(o_pv.len(), a_pv.len(), "pixel tensor count");
+        for (o, a) in o_pv.iter().zip(a_pv.iter()) {
+            let od: Vec<f32> = mlx::ops::cast::astype(o, mlx::Dtype::Float32)
+                .unwrap()
+                .to_vec()
+                .unwrap();
+            let ad: Vec<f32> = mlx::ops::cast::astype(a, mlx::Dtype::Float32)
+                .unwrap()
+                .to_vec()
+                .unwrap();
+            assert_eq!(od, ad, "pixel_values byte mismatch");
+        }
+    }
+
+    #[tokio::test]
+    async fn byte_parity_qwen() {
+        run_parity(VisionInputConfig::Qwen {
+            spatial_merge_size: 2,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn byte_parity_minicpmv46() {
+        run_parity(VisionInputConfig::MiniCpmV46 {
+            spatial_merge_size: 4,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GEMMA4_MODEL pointing at a gemma4 checkpoint with vision_config"]
+    async fn byte_parity_gemma4() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("GEMMA4_MODEL").expect("GEMMA4_MODEL must be set"),
+        );
+        let loader = crate::core::Loader::open_multimodal(&dir).expect("open_multimodal");
+        let vc = crate::models::gemma4::Gemma4Config::from_loader(&loader)
+            .expect("Gemma4Config::from_loader")
+            .vision_config
+            .expect("gemma4 vision_config present");
+        run_parity(VisionInputConfig::Gemma4 { vision_config: vc }).await;
     }
 }
