@@ -1,6 +1,6 @@
 # Scheduler Autotune Calibrate 设计
 
-状态：设计已确认，待实施。目标分支 `codex/scheduler-autotune-calibrate`，基于 `codex/scheduler-autotune`。
+状态：已轻量落地。目标分支 `codex/scheduler-autotune-calibrate`，基于 `codex/scheduler-autotune`。
 
 ## 1. 目标
 
@@ -44,7 +44,7 @@ cargo run --release -p ironmlx -- \
   --warmup 1 \
   --duration 30 \
   --warmup-duration 5 \
-  --write-profile scheduler-profile.json
+  --write-profile reports/scheduler-autotune/glm47-m5max/scheduler-profile.json
 ```
 
 关键规则：
@@ -54,7 +54,7 @@ cargo run --release -p ironmlx -- \
 - `--concurrency N>1` 使用 iron-bench 并发模式。
 - `--output-dir` 必填，所有中间 JSON、日志和最终结果都写入该目录。
 - `--iron-bench-bin` 必填。本阶段不猜测 cargo workspace，也不隐式下载或构建 benchmark 工具。
-- `--write-profile` 可选；未提供时只写 calibration 和 selection。
+- `--write-profile` 可选；未提供时只写 calibration 和 selection。该路径按用户传入值写入，推荐放在 `--output-dir` 下，便于和本次校准结果一起归档。
 
 ## 4. 架构
 
@@ -95,7 +95,7 @@ output-dir/
   selection.txt
   serve-candidate-000.log
   serve-candidate-001.log
-  scheduler-profile.json
+  scheduler-profile.json  # 当 --write-profile 指向 output-dir 下时
 ```
 
 命令完成后：

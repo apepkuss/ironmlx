@@ -1,6 +1,6 @@
 # Scheduler/Autotune 设计研究与轻量落地
 
-状态：阶段 1 诊断报告、阶段 2 离线 profile 选择器，以及显式 opt-in 的 profile 导出/应用已完成轻量落地。worktree `ironmlx-backend-scheduler-autotune`，branch `codex/scheduler-autotune`。
+状态：阶段 1 诊断报告、阶段 2 离线 profile 选择器、显式 opt-in 的 profile 导出/应用已完成轻量落地；阶段 2 的本地校准编排在 `codex/scheduler-autotune-calibrate` 继续轻量落地。
 
 ## 0. 结论摘要
 
@@ -8,6 +8,7 @@
 
 - 显式 opt-in 的启动诊断能力：读取当前 CLI 参数、模型 `ModelMeta`、有效上下文上限、KV cache 预算和模型级 fresh-prefill batch limit，输出 scheduler/autotune 建议。
 - 离线 profile 选择器：读取外部校准结果 JSON，按 agent 长 prompt 场景权重选择推荐 scheduler 参数组合，可输出人工可读/JSON 选择结果。
+- 本地一键校准编排：显式运行 `scheduler-autotune calibrate` 时，逐候选启动本地 `ironmlx serve`，调用 `iron-bench --format autotune-json`，再复用 merge/select/profile 输出链路。
 - 显式 profile 应用：用户通过 `scheduler-autotune select --write-profile` 导出 runtime profile，并在 `serve --scheduler-profile` 中应用；未传 profile 时默认行为不变。
 
 原因：
@@ -37,7 +38,8 @@ flowchart TD
 ### 阶段 2：离线校准（本次轻量落地）
 
 - 新增 `ironmlx scheduler-autotune --input calibration.json --format text|json`。
-- 输入是外部离线校准结果，不由 serve 热路径采样生成。
+- 新增 `ironmlx scheduler-autotune calibrate`，用于本机显式校准候选参数。
+- 输入可以是外部离线校准结果，也可以由 `calibrate` 编排本地 `serve` + `iron-bench` 生成；两者都不由 serve 热路径采样生成。
 - 对同一模型/机器下的多个候选 scheduler 参数组合进行公平评分。
 - 产出机器/模型 profile 选择结果，例如推荐 `b_max`、chunk 粒度、admission deadline。
 - 可通过 `--write-profile` 显式写出 runtime profile；不传该参数时只输出选择结果。
@@ -60,6 +62,7 @@ flowchart TD
 - 新增 profile 选择数据结构、评分函数、拒绝原因和中文/JSON 输出。
 - 新增中文研究文档和实施计划。
 - 新增 runtime profile 导出与 `serve --scheduler-profile` 应用入口。
+- 新增显式 `scheduler-autotune calibrate` 编排入口，复用 `iron-bench --format autotune-json` 生成校准输入。
 
 不做：
 
@@ -67,7 +70,7 @@ flowchart TD
 - 不新增运行期动态控制回路。
 - 不改变 `/healthz` JSON schema。
 - 不把 GLM-4.7 的模型级经验硬编码为全模型默认。
-- 不在本阶段实现 benchmark runner；校准数据由外部工具或人工汇总产生。
+- 不在 serve 热路径实现 benchmark runner；校准数据只来自显式离线命令或人工汇总。
 
 ## 3. 诊断输入
 
@@ -223,6 +226,35 @@ cargo run --release -p iron-bench -- \
 ```
 
 `--format autotune-json` 要求恰好一个 `--target`，因为 calibration schema 没有 target 字段。对比多个候选时，应分别用不同 server 参数启动 ironmlx，分别导出 JSON，再合并 measurements。
+
+### 本地一键校准入口
+
+如果目标是同一台机器、同一模型、同一场景矩阵下比较多个候选，可以使用 `scheduler-autotune calibrate` 编排上述流程：
+
+```bash
+cargo run --release -p ironmlx -- \
+  scheduler-autotune calibrate \
+  --model /path/to/GLM-4.7-flash-4bit/snapshot \
+  --model-name GLM-4.7-flash-4bit \
+  --hardware-label m5-max-128g \
+  --iron-bench-bin target/release/iron-bench \
+  --output-dir reports/scheduler-autotune/glm47-m5max \
+  --candidate b_max=1,prefill_chunk_size=2048,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768 \
+  --candidate b_max=2,prefill_chunk_size=1024,admission_deadline_ms=5,admission_queue_max=32,max_cache_cap=32768 \
+  --prompt-len 1024,2048,4096 \
+  --max-tokens 128 \
+  --concurrency 1,2 \
+  --write-profile reports/scheduler-autotune/glm47-m5max/scheduler-profile.json
+```
+
+该命令会逐候选启动本地 `ironmlx serve`，按并发档位调用 `iron-bench --format autotune-json`，然后写出：
+
+- `calibration.json`：合并后的完整校准输入。
+- `selection.json`：机器可读选择结果。
+- `selection.txt`：人工可读选择结果。
+- `scheduler-profile.json`：仅在 `--write-profile` 指向该路径时写出。
+
+手动 `iron-bench`、`scheduler-autotune merge`、`scheduler-autotune select` 路径仍然保留，适合远端服务、非标准采样协议或需要人工编辑 calibration JSON 的场景。
 
 ### 字段映射
 
