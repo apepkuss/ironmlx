@@ -6,6 +6,7 @@ use anyhow::Context;
 use clap::Args;
 use serde::Serialize;
 
+use super::scheduler_profile_store::SchedulerProfileStore;
 use crate::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
     select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
@@ -312,12 +313,23 @@ pub fn run(args: SchedulerAutotuneCalibrateArgs) -> Result<()> {
     }
     let artifacts = FinalArtifactPaths::new(&resolved.output_dir, Some(resolved.write_profile));
     write_final_outputs(inputs, &artifacts, resolved.selection_profile)?;
+    let stored_runtime_profile = artifacts
+        .runtime_profile
+        .as_ref()
+        .map(|path| {
+            let store = SchedulerProfileStore::default()?;
+            persist_runtime_profile_from_artifact(&store, &resolved.model, path)
+        })
+        .transpose()?;
 
     println!("calibration: {}", artifacts.calibration.display());
     println!("selection_json: {}", artifacts.selection_json.display());
     println!("selection_text: {}", artifacts.selection_text.display());
     if let Some(path) = &artifacts.runtime_profile {
         println!("runtime_profile: {}", path.display());
+    }
+    if let Some(path) = &stored_runtime_profile {
+        println!("stored_runtime_profile: {}", path.display());
     }
 
     Ok(())
@@ -654,6 +666,18 @@ fn read_calibration(path: &Path) -> Result<SchedulerAutotuneCalibrationInput> {
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
+fn persist_runtime_profile_from_artifact(
+    store: &SchedulerProfileStore,
+    model_path: &Path,
+    runtime_profile_path: &Path,
+) -> Result<PathBuf> {
+    let raw = std::fs::read_to_string(runtime_profile_path)
+        .with_context(|| format!("reading {}", runtime_profile_path.display()))?;
+    let profile = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing {}", runtime_profile_path.display()))?;
+    store.persist_profile(model_path, &profile)
+}
+
 fn write_final_outputs(
     inputs: Vec<SchedulerAutotuneCalibrationInput>,
     artifacts: &FinalArtifactPaths,
@@ -698,11 +722,12 @@ mod tests {
 
     use super::{
         build_candidate_benchmark_plan, build_iron_bench_invocation, build_serve_invocation,
-        candidate_artifact_path, health_url, parse_candidate_config, resolve_run_config,
-        write_final_outputs, write_run_order_manifest, FinalArtifactPaths,
-        SchedulerAutotuneCalibrateArgs,
+        candidate_artifact_path, health_url, parse_candidate_config,
+        persist_runtime_profile_from_artifact, resolve_run_config, write_final_outputs,
+        write_run_order_manifest, FinalArtifactPaths, SchedulerAutotuneCalibrateArgs,
     };
     use crate::cli::scheduler_autotune::SchedulerAutotuneSelectionProfileArg;
+    use crate::cli::scheduler_profile_store::SchedulerProfileStore;
     use crate::core::scheduler_autotune::{
         SchedulerAutotuneCalibrationInput, SchedulerAutotuneMeasurement,
         SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
@@ -1007,6 +1032,43 @@ mod tests {
         assert!(selection.contains("\"selected\""));
         assert!(selection_text.contains("scheduler/autotune profile selection"));
         assert!(profile.contains("\"prefill_chunk_size\": 1024"));
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn persist_runtime_profile_from_artifact_writes_profile_store() {
+        let temp_dir = unique_temp_dir("scheduler-autotune-profile-store");
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let model_dir = temp_dir.join("GLM-4.7-Flash-4bit");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let profile_path = temp_dir.join("scheduler-profile.json");
+        let runtime_profile = crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile {
+            schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+            model_name: "GLM-4.7-Flash-4bit".to_string(),
+            hardware_label: "m5-max-128gb".to_string(),
+            config: profile_config(),
+            rules: Vec::new(),
+        };
+        let output = serde_json::to_string_pretty(&runtime_profile).expect("serialize profile");
+        std::fs::write(&profile_path, format!("{output}\n")).expect("write profile artifact");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+
+        let stored_path = persist_runtime_profile_from_artifact(&store, &model_dir, &profile_path)
+            .expect("persist runtime profile");
+
+        assert_eq!(
+            stored_path,
+            store.profile_path("GLM-4.7-Flash-4bit", "m5-max-128gb", &model_dir)
+        );
+        assert!(stored_path.exists());
+        assert_eq!(
+            store
+                .find_profile(&model_dir, "GLM-4.7-Flash-4bit", "m5-max-128gb")
+                .expect("find profile")
+                .expect("stored profile should match"),
+            stored_path
+        );
 
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }

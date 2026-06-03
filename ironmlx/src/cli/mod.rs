@@ -7,6 +7,7 @@ mod generate;
 mod info;
 mod scheduler_autotune;
 mod scheduler_autotune_calibrate;
+mod scheduler_profile_store;
 mod serve;
 
 use clap::{Parser, Subcommand};

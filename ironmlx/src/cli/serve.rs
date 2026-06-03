@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 use clap::Args;
 
+use super::scheduler_profile_store::{
+    detect_scheduler_profile_hardware_label, SchedulerProfileStore,
+};
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
@@ -149,6 +152,53 @@ fn read_scheduler_runtime_profile(path: &Path) -> Result<SchedulerAutotuneRuntim
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+#[derive(Debug)]
+struct SchedulerProfileLoad {
+    path: PathBuf,
+    profile: SchedulerAutotuneRuntimeProfile,
+    auto_loaded: bool,
+}
+
+fn load_scheduler_profile_for_model(
+    args: &ServeArgs,
+    model_dir: &Path,
+    store: Option<&SchedulerProfileStore>,
+    hardware_label: &str,
+) -> Result<Option<SchedulerProfileLoad>> {
+    if let Some(path) = args.scheduler_profile.as_deref() {
+        return Ok(Some(SchedulerProfileLoad {
+            path: path.to_path_buf(),
+            profile: read_scheduler_runtime_profile(path)?,
+            auto_loaded: false,
+        }));
+    }
+
+    let Some(store) = store else {
+        return Ok(None);
+    };
+    let model_name = scheduler_profile_model_name(model_dir)?;
+    let Some(path) = store.find_profile(model_dir, &model_name, hardware_label)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(SchedulerProfileLoad {
+        profile: read_scheduler_runtime_profile(&path)?,
+        path,
+        auto_loaded: true,
+    }))
+}
+
+fn scheduler_profile_model_name(model_dir: &Path) -> Result<String> {
+    model_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow::anyhow!("--model has no directory name for scheduler profile lookup")
+        })
 }
 
 fn apply_scheduler_cli_overrides(
@@ -344,13 +394,22 @@ pub fn run(args: ServeArgs) -> Result<()> {
         ));
     }
 
-    let scheduler_profile = args
-        .scheduler_profile
-        .as_deref()
-        .map(read_scheduler_runtime_profile)
-        .transpose()?;
-    let scheduler_runtime_profile =
-        resolve_scheduler_runtime_profile(&args, scheduler_profile.as_ref())?;
+    let scheduler_profile_store = if args.scheduler_profile.is_none() {
+        Some(SchedulerProfileStore::default()?)
+    } else {
+        None
+    };
+    let scheduler_profile_hardware_label = detect_scheduler_profile_hardware_label();
+    let scheduler_profile_load = load_scheduler_profile_for_model(
+        &args,
+        &model_dir,
+        scheduler_profile_store.as_ref(),
+        &scheduler_profile_hardware_label,
+    )?;
+    let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
+        &args,
+        scheduler_profile_load.as_ref().map(|load| &load.profile),
+    )?;
     let scheduler_config = SchedulerServeConfig {
         prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
         b_max: scheduler_runtime_profile.config.b_max,
@@ -361,11 +420,18 @@ pub fn run(args: ServeArgs) -> Result<()> {
             .config
             .decode_cadence_mid_chunk_cap,
     };
-    if let Some(profile) = &scheduler_profile {
+    if let Some(load) = &scheduler_profile_load {
+        let source = if load.auto_loaded {
+            "store"
+        } else {
+            "explicit"
+        };
         tracing::info!(
-            "ironmlx serve: scheduler profile applied model_name={} hardware_label={} rules={}",
-            profile.model_name,
-            profile.hardware_label,
+            "ironmlx serve: scheduler profile applied source={} path={} model_name={} hardware_label={} rules={}",
+            source,
+            load.path.display(),
+            load.profile.model_name,
+            load.profile.hardware_label,
             scheduler_runtime_profile.rules.len()
         );
     }
@@ -469,6 +535,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
 
 #[cfg(test)]
 mod scheduler_profile_tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::cli::scheduler_profile_store::SchedulerProfileStore;
     use crate::core::scheduler_autotune::{
         SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
         SchedulerAutotuneRuntimeRule, SchedulerAutotuneRuntimeRuleCondition,
@@ -476,8 +546,8 @@ mod scheduler_profile_tests {
     };
 
     use super::{
-        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config, SchedulerServeConfig,
-        ServeArgs,
+        load_scheduler_profile_for_model, resolve_scheduler_runtime_profile,
+        resolve_scheduler_serve_config, SchedulerServeConfig, ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -594,6 +664,78 @@ mod scheduler_profile_tests {
         assert_eq!(profile.rules.len(), 1);
         assert_eq!(profile.rules[0].config.prefill_chunk_size, 256);
         assert_eq!(profile.rules[0].config.decode_cadence_mid_chunk_cap, 64);
+    }
+
+    #[test]
+    fn serve_auto_loads_matching_profile_from_store_when_cli_profile_absent() {
+        let temp_dir = unique_temp_dir("scheduler-profile-store-serve");
+        let model_dir = temp_dir.join("GLM-4.7-Flash-4bit");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        store
+            .persist_profile(&model_dir, &runtime_profile())
+            .expect("persist profile");
+        let args = ServeArgs {
+            model: model_dir.to_string_lossy().into_owned(),
+            ..base_args()
+        };
+
+        let loaded = load_scheduler_profile_for_model(&args, &model_dir, Some(&store), "test-host")
+            .expect("load profile")
+            .expect("stored profile should match");
+
+        assert_eq!(loaded.profile.config, profile_config());
+        assert_eq!(
+            loaded.path,
+            store.profile_path("test-model", "test-host", &model_dir)
+        );
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn explicit_scheduler_profile_overrides_profile_store() {
+        let temp_dir = unique_temp_dir("scheduler-profile-explicit");
+        let model_dir = temp_dir.join("GLM-4.7-Flash-4bit");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        store
+            .persist_profile(&model_dir, &runtime_profile())
+            .expect("persist stored profile");
+        let explicit_profile = SchedulerAutotuneRuntimeProfile {
+            model_name: "explicit-model".to_string(),
+            config: SchedulerAutotuneProfileConfig {
+                prefill_chunk_size: 4096,
+                ..profile_config()
+            },
+            ..runtime_profile()
+        };
+        let explicit_path = temp_dir.join("explicit-profile.json");
+        let output = serde_json::to_string_pretty(&explicit_profile).expect("serialize profile");
+        std::fs::write(&explicit_path, format!("{output}\n")).expect("write explicit profile");
+        let args = ServeArgs {
+            model: model_dir.to_string_lossy().into_owned(),
+            scheduler_profile: Some(explicit_path.clone()),
+            ..base_args()
+        };
+
+        let loaded = load_scheduler_profile_for_model(&args, &model_dir, Some(&store), "test-host")
+            .expect("load profile")
+            .expect("explicit profile should load");
+
+        assert_eq!(loaded.profile.model_name, "explicit-model");
+        assert_eq!(loaded.profile.config.prefill_chunk_size, 4096);
+        assert_eq!(loaded.path, explicit_path);
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
     }
 }
 
