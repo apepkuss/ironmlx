@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Args;
+use serde::Serialize;
 
 use crate::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
@@ -19,6 +20,8 @@ const DEFAULT_OUTPUT_DIR: &str = "reports/scheduler-autotune";
 const DEFAULT_RUNTIME_PROFILE_FILE: &str = "scheduler-profile.json";
 const DEFAULT_PROMPT_LEN: &[usize] = &[1024, 4096];
 const DEFAULT_CONCURRENCY: &[usize] = &[1, 2];
+const RUN_ORDER_MANIFEST_FILE: &str = "run-order.json";
+const RUN_ORDER_STRATEGY: &str = "concurrency-major-mirrored-candidate-order";
 
 #[derive(Args, Debug)]
 pub struct SchedulerAutotuneCalibrateArgs {
@@ -281,26 +284,26 @@ pub fn run(args: SchedulerAutotuneCalibrateArgs) -> Result<()> {
     let target_url = format!("http://127.0.0.1:{}", resolved.port);
     let health = health_url(resolved.port);
     let mut candidate_outputs = Vec::new();
+    let benchmark_plan = build_candidate_benchmark_plan(&resolved);
+    write_run_order_manifest(&resolved.output_dir, &benchmark_plan)?;
 
-    for (candidate_idx, config) in resolved.candidates.iter().copied().enumerate() {
-        let serve_log = serve_log_path(&resolved.output_dir, candidate_idx);
+    for job in benchmark_plan {
+        let serve_log = serve_log_path(&resolved.output_dir, job.candidate_idx, job.concurrency);
         let serve_invocation =
-            build_serve_invocation(&ironmlx_bin, &resolved, config, resolved.port);
+            build_serve_invocation(&ironmlx_bin, &resolved, job.config, resolved.port);
         let _serve = spawn_serve(&serve_invocation, &serve_log)?;
 
         wait_for_health(&health, Duration::from_secs(resolved.startup_timeout_sec))
             .with_context(|| format!("serve log: {}", serve_log.display()))?;
 
-        for &concurrency in &resolved.concurrency {
-            let output_json =
-                candidate_artifact_path(&resolved.output_dir, candidate_idx, concurrency);
-            let stderr_log =
-                candidate_stderr_log_path(&resolved.output_dir, candidate_idx, concurrency);
-            let bench_invocation =
-                build_iron_bench_invocation(&resolved, config, concurrency, &target_url);
-            run_iron_bench(&bench_invocation, &output_json, &stderr_log)?;
-            candidate_outputs.push(output_json);
-        }
+        let output_json =
+            candidate_artifact_path(&resolved.output_dir, job.candidate_idx, job.concurrency);
+        let stderr_log =
+            candidate_stderr_log_path(&resolved.output_dir, job.candidate_idx, job.concurrency);
+        let bench_invocation =
+            build_iron_bench_invocation(&resolved, job.config, job.concurrency, &target_url);
+        run_iron_bench(&bench_invocation, &output_json, &stderr_log)?;
+        candidate_outputs.push(output_json);
     }
 
     let mut inputs = Vec::with_capacity(candidate_outputs.len());
@@ -330,6 +333,94 @@ fn validate_matrix(args: &ResolvedRunConfig) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CandidateBenchmarkJob {
+    ordinal: usize,
+    candidate_idx: usize,
+    config: SchedulerAutotuneProfileConfig,
+    concurrency: usize,
+}
+
+fn build_candidate_benchmark_plan(args: &ResolvedRunConfig) -> Vec<CandidateBenchmarkJob> {
+    let mut jobs = Vec::with_capacity(args.candidates.len() * args.concurrency.len());
+    for (concurrency_idx, &concurrency) in args.concurrency.iter().enumerate() {
+        let mut candidate_indices = (0..args.candidates.len()).collect::<Vec<_>>();
+        if concurrency_idx % 2 == 1 {
+            candidate_indices.reverse();
+        }
+        for candidate_idx in candidate_indices {
+            jobs.push(CandidateBenchmarkJob {
+                ordinal: jobs.len(),
+                candidate_idx,
+                config: args.candidates[candidate_idx],
+                concurrency,
+            });
+        }
+    }
+    jobs
+}
+
+#[derive(Debug, Serialize)]
+struct RunOrderManifest {
+    schema_version: u32,
+    strategy: &'static str,
+    jobs: Vec<RunOrderManifestJob>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunOrderManifestJob {
+    ordinal: usize,
+    candidate_idx: usize,
+    concurrency: usize,
+    config: SchedulerAutotuneProfileConfig,
+    output_json: String,
+    stderr_log: String,
+    serve_log: String,
+}
+
+fn write_run_order_manifest(output_dir: &Path, jobs: &[CandidateBenchmarkJob]) -> Result<()> {
+    let manifest = RunOrderManifest {
+        schema_version: 1,
+        strategy: RUN_ORDER_STRATEGY,
+        jobs: jobs
+            .iter()
+            .map(|job| RunOrderManifestJob {
+                ordinal: job.ordinal,
+                candidate_idx: job.candidate_idx,
+                concurrency: job.concurrency,
+                config: job.config,
+                output_json: artifact_file_name(candidate_artifact_path(
+                    output_dir,
+                    job.candidate_idx,
+                    job.concurrency,
+                )),
+                stderr_log: artifact_file_name(candidate_stderr_log_path(
+                    output_dir,
+                    job.candidate_idx,
+                    job.concurrency,
+                )),
+                serve_log: artifact_file_name(serve_log_path(
+                    output_dir,
+                    job.candidate_idx,
+                    job.concurrency,
+                )),
+            })
+            .collect(),
+    };
+    let output = serde_json::to_string_pretty(&manifest)?;
+    let path = output_dir.join(RUN_ORDER_MANIFEST_FILE);
+    std::fs::write(&path, format!("{output}\n"))
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+fn artifact_file_name(path: PathBuf) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .expect("artifact path should have a UTF-8 file name")
+        .to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcessInvocation {
     program: PathBuf,
@@ -350,8 +441,10 @@ fn candidate_stderr_log_path(
     ))
 }
 
-fn serve_log_path(output_dir: &Path, candidate_idx: usize) -> PathBuf {
-    output_dir.join(format!("serve-candidate-{candidate_idx:03}.log"))
+fn serve_log_path(output_dir: &Path, candidate_idx: usize, concurrency: usize) -> PathBuf {
+    output_dir.join(format!(
+        "serve-candidate-{candidate_idx:03}-c{concurrency}.log"
+    ))
 }
 
 fn build_serve_invocation(
@@ -604,8 +697,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        build_iron_bench_invocation, build_serve_invocation, candidate_artifact_path, health_url,
-        parse_candidate_config, resolve_run_config, write_final_outputs, FinalArtifactPaths,
+        build_candidate_benchmark_plan, build_iron_bench_invocation, build_serve_invocation,
+        candidate_artifact_path, health_url, parse_candidate_config, resolve_run_config,
+        write_final_outputs, write_run_order_manifest, FinalArtifactPaths,
         SchedulerAutotuneCalibrateArgs,
     };
     use crate::cli::scheduler_autotune::SchedulerAutotuneSelectionProfileArg;
@@ -701,6 +795,35 @@ mod tests {
     }
 
     #[test]
+    fn candidate_benchmark_plan_mirrors_candidate_order_across_concurrency_levels() {
+        let mut args = sample_resolved_config();
+        args.candidates = vec![
+            profile_config_with_chunk_and_cap(1024, 128),
+            profile_config_with_chunk_and_cap(2048, 256),
+            profile_config_with_chunk_and_cap(4096, 512),
+        ];
+        args.concurrency = vec![1, 2];
+
+        let plan = build_candidate_benchmark_plan(&args);
+        let observed = plan
+            .iter()
+            .map(|job| (job.ordinal, job.candidate_idx, job.concurrency))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            observed,
+            vec![
+                (0, 0, 1),
+                (1, 1, 1),
+                (2, 2, 1),
+                (3, 2, 2),
+                (4, 1, 2),
+                (5, 0, 2)
+            ]
+        );
+    }
+
+    #[test]
     fn health_url_uses_localhost_and_selected_port() {
         assert_eq!(health_url(19000), "http://127.0.0.1:19000/health");
     }
@@ -746,6 +869,46 @@ mod tests {
                 .to_string_lossy(),
             "/tmp/out/scheduler-profile.json"
         );
+    }
+
+    #[test]
+    fn write_run_order_manifest_records_planned_jobs_and_artifacts() {
+        let temp_dir = unique_temp_dir("scheduler-autotune-run-order");
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let mut args = sample_resolved_config();
+        args.candidates = vec![
+            profile_config_with_chunk_and_cap(1024, 128),
+            profile_config_with_chunk_and_cap(2048, 256),
+        ];
+        args.concurrency = vec![1, 2];
+        args.output_dir = temp_dir.clone();
+        let plan = build_candidate_benchmark_plan(&args);
+
+        write_run_order_manifest(&args.output_dir, &plan).expect("write manifest");
+
+        let raw = std::fs::read_to_string(temp_dir.join("run-order.json")).expect("read manifest");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("manifest json");
+
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(
+            json["strategy"],
+            "concurrency-major-mirrored-candidate-order"
+        );
+        assert_eq!(json["jobs"].as_array().expect("jobs").len(), 4);
+        assert_eq!(json["jobs"][0]["ordinal"], 0);
+        assert_eq!(json["jobs"][0]["candidate_idx"], 0);
+        assert_eq!(json["jobs"][0]["concurrency"], 1);
+        assert_eq!(json["jobs"][0]["config"]["prefill_chunk_size"], 1024);
+        assert_eq!(json["jobs"][0]["output_json"], "candidate-000-c1.json");
+        assert_eq!(json["jobs"][0]["stderr_log"], "candidate-000-c1.stderr.log");
+        assert_eq!(json["jobs"][0]["serve_log"], "serve-candidate-000-c1.log");
+        assert_eq!(json["jobs"][2]["candidate_idx"], 1);
+        assert_eq!(json["jobs"][2]["concurrency"], 2);
+        assert_eq!(json["jobs"][3]["candidate_idx"], 0);
+        assert_eq!(json["jobs"][3]["concurrency"], 2);
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }
 
     #[test]
@@ -874,13 +1037,20 @@ mod tests {
     }
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
+        profile_config_with_chunk_and_cap(1024, 256)
+    }
+
+    fn profile_config_with_chunk_and_cap(
+        prefill_chunk_size: usize,
+        decode_cadence_mid_chunk_cap: usize,
+    ) -> SchedulerAutotuneProfileConfig {
         SchedulerAutotuneProfileConfig {
             b_max: 2,
-            prefill_chunk_size: 1024,
+            prefill_chunk_size,
             admission_deadline_ms: 5,
             admission_queue_max: 32,
             max_cache_cap: 32768,
-            decode_cadence_mid_chunk_cap: 256,
+            decode_cadence_mid_chunk_cap,
         }
     }
 
