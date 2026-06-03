@@ -151,6 +151,7 @@ fn minicpmv46_single_image_generate_e2e() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: Some(vec![pix]),
         image_grid_thw: Some(vec![(1, gh, gw)]),
         image_spatial_merge_size: SPATIAL_MERGE_SIZE,

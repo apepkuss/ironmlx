@@ -56,6 +56,7 @@ fn make_configured_request(
             .with_seed(42),
         stop_token_ids: stop,
         prefill_chunk_size: 128,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,

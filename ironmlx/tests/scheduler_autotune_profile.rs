@@ -2,8 +2,8 @@ use ironmlx::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, select_scheduler_autotune_profile,
     select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
     SchedulerAutotuneMeasurement, SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
-    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
-    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    SchedulerAutotuneRuntimeRequest, SchedulerAutotuneSelectionOptions,
+    SchedulerAutotuneSelectionProfile, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 
 fn config(
@@ -18,6 +18,18 @@ fn config(
         admission_queue_max: 32,
         max_cache_cap: 32768,
         decode_cadence_mid_chunk_cap: 256,
+    }
+}
+
+fn config_with_cadence(
+    b_max: usize,
+    prefill_chunk_size: usize,
+    admission_deadline_ms: u64,
+    decode_cadence_mid_chunk_cap: usize,
+) -> SchedulerAutotuneProfileConfig {
+    SchedulerAutotuneProfileConfig {
+        decode_cadence_mid_chunk_cap,
+        ..config(b_max, prefill_chunk_size, admission_deadline_ms)
     }
 }
 
@@ -262,4 +274,57 @@ fn runtime_profile_requires_selected_candidate() {
         error.to_string().contains("selected"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn runtime_profile_exports_and_applies_long_tg_concurrent_scenario_override() {
+    let global = config_with_cadence(1, 1024, 5, 128);
+    let pressure_point = config_with_cadence(1, 2048, 5, 512);
+    let calibration = input(vec![
+        measurement(global, 4096, 128, 1, 100.0, 10.0, 2.0, 100.0),
+        measurement(pressure_point, 4096, 128, 1, 140.0, 13.0, 2.8, 90.0),
+        measurement(global, 4096, 128, 2, 120.0, 10.5, 2.4, 95.0),
+        measurement(pressure_point, 4096, 128, 2, 160.0, 13.5, 3.1, 88.0),
+        measurement(global, 8192, 128, 2, 220.0, 11.0, 4.0, 80.0),
+        measurement(pressure_point, 8192, 128, 2, 260.0, 14.0, 4.8, 76.0),
+        measurement(global, 8192, 512, 2, 320.0, 13.0, 9.0, 68.0),
+        measurement(pressure_point, 8192, 512, 2, 290.0, 13.5, 8.2, 69.0),
+    ]);
+
+    let selection = select_scheduler_autotune_profile(calibration);
+
+    assert_eq!(
+        selection.selected.as_ref().expect("selected").config,
+        global
+    );
+    assert_eq!(selection.scenario_overrides.len(), 1);
+    let override_rule = &selection.scenario_overrides[0];
+    assert_eq!(override_rule.scenario.prompt_len, 8192);
+    assert_eq!(override_rule.scenario.max_new_tokens, 512);
+    assert_eq!(override_rule.scenario.concurrency, 2);
+    assert_eq!(override_rule.config, pressure_point);
+
+    let profile =
+        build_scheduler_autotune_runtime_profile(&selection).expect("expected runtime profile");
+
+    assert_eq!(profile.config, global);
+    assert_eq!(profile.rules.len(), 1);
+    assert_eq!(profile.rules[0].config, pressure_point);
+    assert_eq!(profile.rules[0].when.prompt_len_gte, 8192);
+    assert_eq!(profile.rules[0].when.max_new_tokens_gte, 512);
+    assert_eq!(profile.rules[0].when.effective_concurrency_gte, 2);
+
+    let selected = profile.select_config(SchedulerAutotuneRuntimeRequest {
+        prompt_len: 8192,
+        max_new_tokens: 512,
+        effective_concurrency: 2,
+    });
+    assert_eq!(selected, pressure_point);
+
+    let fallback = profile.select_config(SchedulerAutotuneRuntimeRequest {
+        prompt_len: 8192,
+        max_new_tokens: 128,
+        effective_concurrency: 2,
+    });
+    assert_eq!(fallback, global);
 }

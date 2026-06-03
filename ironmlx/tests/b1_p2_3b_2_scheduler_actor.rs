@@ -92,6 +92,7 @@ async fn scheduler_actor_b1_text_only_swap() {
         sampler: Sampler::greedy(),
         stop_token_ids: stop_token_ids.clone(),
         prefill_chunk_size: 256, // > prompt_len → routes to scheduler
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -186,6 +187,7 @@ async fn scheduler_actor_long_prompt_routes_to_gs() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: chunk_size,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -261,6 +263,7 @@ async fn scheduler_actor_vl_routes_to_gs() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0, // chunking off — VL routing wins anyway
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: Some(vec![dummy_image]),
         image_grid_thw: Some(dummy_grid),
         image_spatial_merge_size: 2,

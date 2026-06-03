@@ -21,6 +21,10 @@ use tokio::sync::Mutex;
 
 use ironmlx::core::generate::{GenerateRequest, GenerationStream};
 use ironmlx::core::sampler::Sampler;
+use ironmlx::core::scheduler_autotune::{
+    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+};
 use ironmlx::core::server::scheduler_actor::{
     spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand,
 };
@@ -118,6 +122,7 @@ fn make_request(
         sampler: Sampler::greedy(),
         stop_token_ids,
         prefill_chunk_size: 256,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -215,6 +220,7 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
         sampler: Sampler::greedy(),
         stop_token_ids,
         prefill_chunk_size: chunk_size,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -308,6 +314,20 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         admission_deadline_ms: 5,
         admission_queue_max: 32,
         effective_cap_max: 32768, // 3f
+        scheduler_runtime_profile: Arc::new(SchedulerAutotuneRuntimeProfile {
+            schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+            model_name: "test-model".to_string(),
+            hardware_label: "test-host".to_string(),
+            config: SchedulerAutotuneProfileConfig {
+                b_max: 4,
+                prefill_chunk_size: 256,
+                admission_deadline_ms: 5,
+                admission_queue_max: 32,
+                max_cache_cap: 32768,
+                decode_cadence_mid_chunk_cap: 256,
+            },
+            rules: Vec::new(),
+        }),
         health_collector,
     };
 

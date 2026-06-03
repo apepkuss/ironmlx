@@ -89,6 +89,7 @@ async fn b1_p2_5_admission_gate_rejects_when_full() {
         sampler: Sampler::greedy(),
         stop_token_ids: stop_tokens.clone(),
         prefill_chunk_size: 128,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,

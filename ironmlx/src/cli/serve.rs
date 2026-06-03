@@ -135,30 +135,27 @@ fn default_scheduler_profile_config() -> SchedulerAutotuneProfileConfig {
     }
 }
 
+fn default_scheduler_runtime_profile() -> SchedulerAutotuneRuntimeProfile {
+    SchedulerAutotuneRuntimeProfile {
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        model_name: "default".to_string(),
+        hardware_label: "local".to_string(),
+        config: default_scheduler_profile_config(),
+        rules: Vec::new(),
+    }
+}
+
 fn read_scheduler_runtime_profile(path: &Path) -> Result<SchedulerAutotuneRuntimeProfile> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
-fn resolve_scheduler_serve_config(
+fn apply_scheduler_cli_overrides(
     args: &ServeArgs,
-    profile: Option<&SchedulerAutotuneRuntimeProfile>,
-) -> Result<SchedulerServeConfig> {
-    if let Some(profile) = profile {
-        if profile.schema_version != SCHEDULER_AUTOTUNE_SCHEMA_VERSION {
-            bail!(
-                "scheduler profile schema_version mismatch: expected {}, got {}",
-                SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
-                profile.schema_version
-            );
-        }
-    }
-
-    let base = profile
-        .map(|profile| profile.config)
-        .unwrap_or_else(default_scheduler_profile_config);
-    let config = SchedulerServeConfig {
+    base: SchedulerAutotuneProfileConfig,
+) -> SchedulerAutotuneProfileConfig {
+    SchedulerAutotuneProfileConfig {
         prefill_chunk_size: args.prefill_chunk_size.unwrap_or(base.prefill_chunk_size),
         b_max: args.b_max.unwrap_or(base.b_max),
         admission_deadline_ms: args
@@ -169,16 +166,75 @@ fn resolve_scheduler_serve_config(
         decode_cadence_mid_chunk_cap: args
             .decode_cadence_mid_chunk_cap
             .unwrap_or(base.decode_cadence_mid_chunk_cap),
-    };
+    }
+}
 
+fn validate_scheduler_serve_config(config: SchedulerAutotuneProfileConfig) -> Result<()> {
     if config.b_max == 0 {
         bail!("scheduler b_max must be >= 1");
     }
     if config.decode_cadence_mid_chunk_cap == 0 {
         bail!("scheduler decode_cadence_mid_chunk_cap must be >= 1");
     }
+    Ok(())
+}
 
-    Ok(config)
+fn validate_dynamic_rules(profile: &SchedulerAutotuneRuntimeProfile) -> Result<()> {
+    for rule in &profile.rules {
+        if rule.config.b_max != profile.config.b_max
+            || rule.config.admission_deadline_ms != profile.config.admission_deadline_ms
+            || rule.config.admission_queue_max != profile.config.admission_queue_max
+            || rule.config.max_cache_cap != profile.config.max_cache_cap
+        {
+            bail!(
+                "scheduler profile dynamic rules may only vary prefill_chunk_size and decode_cadence_mid_chunk_cap"
+            );
+        }
+        validate_scheduler_serve_config(rule.config)?;
+    }
+    Ok(())
+}
+
+fn resolve_scheduler_runtime_profile(
+    args: &ServeArgs,
+    profile: Option<&SchedulerAutotuneRuntimeProfile>,
+) -> Result<SchedulerAutotuneRuntimeProfile> {
+    if let Some(profile) = profile {
+        if profile.schema_version != SCHEDULER_AUTOTUNE_SCHEMA_VERSION {
+            bail!(
+                "scheduler profile schema_version mismatch: expected {}, got {}",
+                SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+                profile.schema_version
+            );
+        }
+    }
+
+    let mut resolved = profile
+        .cloned()
+        .unwrap_or_else(default_scheduler_runtime_profile);
+    resolved.config = apply_scheduler_cli_overrides(args, resolved.config);
+    for rule in &mut resolved.rules {
+        rule.config = apply_scheduler_cli_overrides(args, rule.config);
+    }
+    validate_scheduler_serve_config(resolved.config)?;
+    validate_dynamic_rules(&resolved)?;
+    Ok(resolved)
+}
+
+#[cfg(test)]
+fn resolve_scheduler_serve_config(
+    args: &ServeArgs,
+    profile: Option<&SchedulerAutotuneRuntimeProfile>,
+) -> Result<SchedulerServeConfig> {
+    let profile = resolve_scheduler_runtime_profile(args, profile)?;
+    Ok(SchedulerServeConfig {
+        prefill_chunk_size: profile.config.prefill_chunk_size,
+        b_max: profile.config.b_max,
+        admission_deadline_ms: profile.config.admission_deadline_ms,
+        admission_queue_max: profile.config.admission_queue_max,
+        max_cache_cap: profile.config.max_cache_cap,
+        decode_cadence_mid_chunk_cap: profile.config.decode_cadence_mid_chunk_cap,
+    })
 }
 
 /// Generic serve helper — shared by all model types that satisfy the
@@ -193,6 +249,7 @@ fn serve_with_model<M>(
     tokenizer: Tokenizer,
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     vision_input: Option<server::VisionInputConfig>,
 ) -> Result<()>
 where
@@ -258,6 +315,7 @@ where
         scheduler_config.admission_queue_max,
         scheduler_config.max_cache_cap,
         scheduler_config.decode_cadence_mid_chunk_cap,
+        scheduler_runtime_profile,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
         vision_input,
@@ -291,12 +349,24 @@ pub fn run(args: ServeArgs) -> Result<()> {
         .as_deref()
         .map(read_scheduler_runtime_profile)
         .transpose()?;
-    let scheduler_config = resolve_scheduler_serve_config(&args, scheduler_profile.as_ref())?;
+    let scheduler_runtime_profile =
+        resolve_scheduler_runtime_profile(&args, scheduler_profile.as_ref())?;
+    let scheduler_config = SchedulerServeConfig {
+        prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
+        b_max: scheduler_runtime_profile.config.b_max,
+        admission_deadline_ms: scheduler_runtime_profile.config.admission_deadline_ms,
+        admission_queue_max: scheduler_runtime_profile.config.admission_queue_max,
+        max_cache_cap: scheduler_runtime_profile.config.max_cache_cap,
+        decode_cadence_mid_chunk_cap: scheduler_runtime_profile
+            .config
+            .decode_cadence_mid_chunk_cap,
+    };
     if let Some(profile) = &scheduler_profile {
         tracing::info!(
-            "ironmlx serve: scheduler profile applied model_name={} hardware_label={}",
+            "ironmlx serve: scheduler profile applied model_name={} hardware_label={} rules={}",
             profile.model_name,
-            profile.hardware_label
+            profile.hardware_label,
+            scheduler_runtime_profile.rules.len()
         );
     }
 
@@ -324,33 +394,75 @@ pub fn run(args: ServeArgs) -> Result<()> {
         crate::models::ModelArchitecture::Qwen35Dense => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
-            serve_with_model(model, tokenizer, &args, scheduler_config, vision_input)
+            serve_with_model(
+                model,
+                tokenizer,
+                &args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                vision_input,
+            )
         }
         crate::models::ModelArchitecture::Qwen35Moe => {
             let model = crate::models::Qwen35MoeModel::from_loader(&loader)
                 .context("Qwen35MoeModel::from_loader")?;
-            serve_with_model(model, tokenizer, &args, scheduler_config, vision_input)
+            serve_with_model(
+                model,
+                tokenizer,
+                &args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                vision_input,
+            )
         }
         crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
-            serve_with_model(model, tokenizer, &args, scheduler_config, vision_input)
+            serve_with_model(
+                model,
+                tokenizer,
+                &args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                vision_input,
+            )
         }
         crate::models::ModelArchitecture::Glm4MoeLite => {
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
                 .context("Glm4MoeLiteModel::from_loader")?;
-            serve_with_model(model, tokenizer, &args, scheduler_config, None)
+            serve_with_model(
+                model,
+                tokenizer,
+                &args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                None,
+            )
         }
         crate::models::ModelArchitecture::Llama => {
             let model = crate::models::LlamaModel::from_loader(&loader)
                 .context("LlamaModel::from_loader")?;
-            serve_with_model(model, tokenizer, &args, scheduler_config, None)
+            serve_with_model(
+                model,
+                tokenizer,
+                &args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                None,
+            )
         }
         crate::models::ModelArchitecture::MiniCpmV46 => {
             // MiniCpmV46Model serves text + single-image VL (vision_input set above).
             let model = crate::models::minicpmv4_6::model_from_loader(&loader)
                 .context("minicpmv4_6::model_from_loader")?;
-            serve_with_model(model, tokenizer, &args, scheduler_config, vision_input)
+            serve_with_model(
+                model,
+                tokenizer,
+                &args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                vision_input,
+            )
         }
     }
 }
@@ -359,10 +471,14 @@ pub fn run(args: ServeArgs) -> Result<()> {
 mod scheduler_profile_tests {
     use crate::core::scheduler_autotune::{
         SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+        SchedulerAutotuneRuntimeRule, SchedulerAutotuneRuntimeRuleCondition,
         SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
 
-    use super::{resolve_scheduler_serve_config, SchedulerServeConfig, ServeArgs};
+    use super::{
+        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config, SchedulerServeConfig,
+        ServeArgs,
+    };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
         SchedulerAutotuneProfileConfig {
@@ -381,6 +497,18 @@ mod scheduler_profile_tests {
             model_name: "test-model".to_string(),
             hardware_label: "test-host".to_string(),
             config: profile_config(),
+            rules: vec![SchedulerAutotuneRuntimeRule {
+                when: SchedulerAutotuneRuntimeRuleCondition {
+                    prompt_len_gte: 8192,
+                    max_new_tokens_gte: 512,
+                    effective_concurrency_gte: 2,
+                },
+                config: SchedulerAutotuneProfileConfig {
+                    prefill_chunk_size: 2048,
+                    decode_cadence_mid_chunk_cap: 512,
+                    ..profile_config()
+                },
+            }],
         }
     }
 
@@ -448,6 +576,24 @@ mod scheduler_profile_tests {
                 decode_cadence_mid_chunk_cap: 512,
             }
         );
+    }
+
+    #[test]
+    fn scheduler_profile_cli_values_override_dynamic_rule_values() {
+        let args = ServeArgs {
+            prefill_chunk_size: Some(256),
+            decode_cadence_mid_chunk_cap: Some(64),
+            ..base_args()
+        };
+
+        let profile =
+            resolve_scheduler_runtime_profile(&args, Some(&runtime_profile())).expect("resolved");
+
+        assert_eq!(profile.config.prefill_chunk_size, 256);
+        assert_eq!(profile.config.decode_cadence_mid_chunk_cap, 64);
+        assert_eq!(profile.rules.len(), 1);
+        assert_eq!(profile.rules[0].config.prefill_chunk_size, 256);
+        assert_eq!(profile.rules[0].config.decode_cadence_mid_chunk_cap, 64);
     }
 }
 

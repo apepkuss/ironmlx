@@ -16,7 +16,7 @@ use crate::core::Model;
 use serde::{Deserialize, Serialize};
 
 const PROMPT_LIMIT_SAMPLES: [usize; 4] = [512, 1024, 2048, 8192];
-pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 2;
+pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptBatchLimit {
@@ -479,6 +479,14 @@ pub struct SchedulerAutotuneRejectedCandidate {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneScenarioOverride {
+    pub scenario: SchedulerAutotuneScenario,
+    pub config: SchedulerAutotuneProfileConfig,
+    pub score: f64,
+    pub baseline_score: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SchedulerAutotuneSelectionProfile {
@@ -523,6 +531,7 @@ pub struct SchedulerAutotuneProfileSelection {
     pub objective: SchedulerAutotuneObjective,
     pub selected: Option<SchedulerAutotuneCandidateScore>,
     pub candidates: Vec<SchedulerAutotuneCandidateScore>,
+    pub scenario_overrides: Vec<SchedulerAutotuneScenarioOverride>,
     pub rejected: Vec<SchedulerAutotuneRejectedCandidate>,
     pub warnings: Vec<SchedulerAutotuneSelectionNote>,
 }
@@ -533,6 +542,56 @@ pub struct SchedulerAutotuneRuntimeProfile {
     pub model_name: String,
     pub hardware_label: String,
     pub config: SchedulerAutotuneProfileConfig,
+    pub rules: Vec<SchedulerAutotuneRuntimeRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneRuntimeRule {
+    pub when: SchedulerAutotuneRuntimeRuleCondition,
+    pub config: SchedulerAutotuneProfileConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneRuntimeRuleCondition {
+    pub prompt_len_gte: usize,
+    pub max_new_tokens_gte: usize,
+    pub effective_concurrency_gte: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerAutotuneRuntimeRequest {
+    pub prompt_len: usize,
+    pub max_new_tokens: usize,
+    pub effective_concurrency: usize,
+}
+
+impl SchedulerAutotuneRuntimeProfile {
+    pub fn select_config(
+        &self,
+        request: SchedulerAutotuneRuntimeRequest,
+    ) -> SchedulerAutotuneProfileConfig {
+        self.rules
+            .iter()
+            .find(|rule| rule.when.matches(request))
+            .map(|rule| rule.config)
+            .unwrap_or(self.config)
+    }
+}
+
+impl SchedulerAutotuneRuntimeRuleCondition {
+    fn matches(self, request: SchedulerAutotuneRuntimeRequest) -> bool {
+        request.prompt_len >= self.prompt_len_gte
+            && request.max_new_tokens >= self.max_new_tokens_gte
+            && request.effective_concurrency >= self.effective_concurrency_gte
+    }
+
+    fn specificity_key(self) -> (usize, usize, usize) {
+        (
+            self.prompt_len_gte,
+            self.max_new_tokens_gte,
+            self.effective_concurrency_gte,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,6 +741,12 @@ pub fn select_scheduler_autotune_profile_with_options(
     let candidates =
         score_complete_candidates(&complete, &required_scenarios, objective, options.profile);
     let selected = candidates.first().cloned();
+    let scenario_overrides = selected
+        .as_ref()
+        .map(|selected| {
+            build_scenario_overrides(&complete, &required_scenarios, objective, &selected.config)
+        })
+        .unwrap_or_default();
     if selected.is_none() {
         warnings.push(selection_note(
             "no_valid_profile",
@@ -697,6 +762,7 @@ pub fn select_scheduler_autotune_profile_with_options(
         objective,
         selected,
         candidates,
+        scenario_overrides,
         rejected,
         warnings,
     }
@@ -766,6 +832,30 @@ impl SchedulerAutotuneProfileSelection {
             .unwrap();
         }
 
+        writeln!(out, "scenario_overrides:").unwrap();
+        if self.scenario_overrides.is_empty() {
+            writeln!(out, "- none").unwrap();
+        } else {
+            for item in &self.scenario_overrides {
+                writeln!(
+                    out,
+                    "- PP>={} TG>={} C>={}: b_max={} chunk={} deadline_ms={} queue_max={} cap={} decode_cadence_cap={} score={:.4} baseline_score={:.4}",
+                    item.scenario.prompt_len,
+                    item.scenario.max_new_tokens,
+                    item.scenario.concurrency,
+                    item.config.b_max,
+                    item.config.prefill_chunk_size,
+                    item.config.admission_deadline_ms,
+                    item.config.admission_queue_max,
+                    item.config.max_cache_cap,
+                    item.config.decode_cadence_mid_chunk_cap,
+                    item.score,
+                    item.baseline_score
+                )
+                .unwrap();
+            }
+        }
+
         writeln!(out, "rejected:").unwrap();
         if self.rejected.is_empty() {
             writeln!(out, "- none").unwrap();
@@ -810,7 +900,26 @@ pub fn build_scheduler_autotune_runtime_profile(
         model_name: selection.model_name.clone(),
         hardware_label: selection.hardware_label.clone(),
         config: selected.config,
+        rules: runtime_rules_from_overrides(&selection.scenario_overrides),
     })
+}
+
+fn runtime_rules_from_overrides(
+    overrides: &[SchedulerAutotuneScenarioOverride],
+) -> Vec<SchedulerAutotuneRuntimeRule> {
+    let mut rules = overrides
+        .iter()
+        .map(|item| SchedulerAutotuneRuntimeRule {
+            when: SchedulerAutotuneRuntimeRuleCondition {
+                prompt_len_gte: item.scenario.prompt_len,
+                max_new_tokens_gte: item.scenario.max_new_tokens,
+                effective_concurrency_gte: item.scenario.concurrency,
+            },
+            config: item.config,
+        })
+        .collect::<Vec<_>>();
+    rules.sort_by_key(|rule| std::cmp::Reverse(rule.when.specificity_key()));
+    rules
 }
 
 fn score_complete_candidates(
@@ -891,6 +1000,90 @@ fn score_complete_candidates(
             .then_with(|| a.config.cmp(&b.config))
     });
     scored
+}
+
+fn build_scenario_overrides(
+    complete: &BTreeMap<
+        SchedulerAutotuneProfileConfig,
+        BTreeMap<SchedulerAutotuneScenario, SchedulerAutotuneMeasurement>,
+    >,
+    required_scenarios: &BTreeSet<SchedulerAutotuneScenario>,
+    objective: SchedulerAutotuneObjective,
+    baseline_config: &SchedulerAutotuneProfileConfig,
+) -> Vec<SchedulerAutotuneScenarioOverride> {
+    let mut overrides = Vec::new();
+    for scenario in required_scenarios {
+        let Some(baseline_row) = complete
+            .get(baseline_config)
+            .and_then(|rows| rows.get(scenario))
+        else {
+            continue;
+        };
+
+        let mut best = ScenarioBest::default();
+        for rows in complete.values() {
+            if let Some(row) = rows.get(scenario) {
+                best.observe(row);
+            }
+        }
+
+        let baseline_score = scenario_score(baseline_row, &best, objective);
+        let mut scenario_winner: Option<(SchedulerAutotuneProfileConfig, f64)> = None;
+        for (config, rows) in complete {
+            if !request_runtime_switchable(baseline_config, config) {
+                continue;
+            }
+            let Some(row) = rows.get(scenario) else {
+                continue;
+            };
+            let score = scenario_score(row, &best, objective);
+            match scenario_winner {
+                Some((winner_config, winner_score))
+                    if score > winner_score
+                        || ((score - winner_score).abs() <= f64::EPSILON
+                            && *config >= winner_config) => {}
+                _ => scenario_winner = Some((*config, score)),
+            }
+        }
+
+        let Some((winner_config, winner_score)) = scenario_winner else {
+            continue;
+        };
+        if winner_config != *baseline_config && winner_score < baseline_score {
+            overrides.push(SchedulerAutotuneScenarioOverride {
+                scenario: scenario.clone(),
+                config: winner_config,
+                score: winner_score,
+                baseline_score,
+            });
+        }
+    }
+    overrides
+}
+
+fn request_runtime_switchable(
+    baseline: &SchedulerAutotuneProfileConfig,
+    candidate: &SchedulerAutotuneProfileConfig,
+) -> bool {
+    baseline.b_max == candidate.b_max
+        && baseline.admission_deadline_ms == candidate.admission_deadline_ms
+        && baseline.admission_queue_max == candidate.admission_queue_max
+        && baseline.max_cache_cap == candidate.max_cache_cap
+}
+
+fn scenario_score(
+    row: &SchedulerAutotuneMeasurement,
+    best: &ScenarioBest,
+    objective: SchedulerAutotuneObjective,
+) -> f64 {
+    let ttft_norm = row.ttft_ms_p95 / nonzero(best.ttft_ms_p95);
+    let itl_norm = row.itl_ms_p95 / nonzero(best.itl_ms_p95);
+    let e2e_norm = row.e2e_s_p95 / nonzero(best.e2e_s_p95);
+    let throughput_norm = nonzero(best.tokens_per_sec) / nonzero(row.tokens_per_sec);
+    objective.ttft_p95_weight * ttft_norm
+        + objective.itl_p95_weight * itl_norm
+        + objective.e2e_p95_weight * e2e_norm
+        + objective.throughput_weight * throughput_norm
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -283,13 +283,16 @@ where
         }
     };
     let input_tokens = prompt_ids.len() as u32;
+    let prompt_len = prompt_ids.len();
+    let scheduler_config = state.scheduler_request_config(prompt_len, max_tokens);
     let stop_token_ids = state.tokenizer.eos_token_ids().to_vec();
     let request = GenerateRequest {
         prompt_ids,
         max_new_tokens: max_tokens,
         sampler,
         stop_token_ids,
-        prefill_chunk_size: state.prefill_chunk_size,
+        prefill_chunk_size: scheduler_config.prefill_chunk_size,
+        decode_cadence_mid_chunk_cap: scheduler_config.decode_cadence_mid_chunk_cap,
         pixel_values,
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size,
@@ -300,9 +303,11 @@ where
         p5h_root_span: None,
     };
 
-    let prompt_len = request.prompt_ids.len();
-    let use_scheduler =
-        super::should_route_to_scheduler::<M>(prompt_len, state.prefill_chunk_size, state.b_max);
+    let use_scheduler = super::should_route_to_scheduler::<M>(
+        prompt_len,
+        scheduler_config.prefill_chunk_size,
+        state.b_max,
+    );
 
     match (stream, use_scheduler) {
         (true, true) => serve_via_scheduler_stream(state, request, model_label, input_tokens).await,

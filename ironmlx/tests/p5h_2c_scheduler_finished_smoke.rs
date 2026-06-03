@@ -50,6 +50,7 @@ fn make_request(prompt_ids: Vec<u32>, stop_token_ids: Vec<u32>) -> GenerateReque
         sampler: Sampler::greedy(),
         stop_token_ids,
         prefill_chunk_size: 256,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,

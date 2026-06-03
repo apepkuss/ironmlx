@@ -1111,8 +1111,9 @@ where
     let effective_chunk_size = cadence_protected_mid_chunk_size(
         requested_chunk_size,
         active_count_before_chunk,
-        decode_cadence_mid_chunk_cap,
+        handle.decode_cadence_mid_chunk_cap,
     );
+    debug_assert!(decode_cadence_mid_chunk_cap > 0);
     handle.chunk_size = effective_chunk_size;
     let chunk_profile = rolling_profile_enabled().then(|| {
         (
@@ -1802,6 +1803,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
@@ -2207,6 +2209,7 @@ mod tests {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 256,
                 pixel_values: None,
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
@@ -2319,6 +2322,7 @@ mod tests {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 256,
                 pixel_values: None,
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,

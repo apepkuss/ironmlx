@@ -68,6 +68,7 @@ fn make_req_with_stop(
         sampler: Sampler::greedy(),
         stop_token_ids,
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -399,7 +400,26 @@ async fn iron_bench_c8_with_queue_no_4xx() {
     // Boot the server on a random port; spawn 8 concurrent HTTP clients
     // hitting /v1/chat/completions for 15s. With b_max=4 + queue_max=32,
     // no HTTP 4xx should occur.
+    use ironmlx::core::scheduler_autotune::{
+        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    };
     use ironmlx::core::server;
+
+    let scheduler_profile = SchedulerAutotuneRuntimeProfile {
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        model_name: "qwen35".to_string(),
+        hardware_label: "test-host".to_string(),
+        config: SchedulerAutotuneProfileConfig {
+            b_max: 4,
+            prefill_chunk_size: 2048,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
+        },
+        rules: Vec::new(),
+    };
 
     let port = 18400 + (std::process::id() % 1000) as u16;
     let model_path = model_path();
@@ -420,6 +440,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             32,    // admission_queue_max
             32768, // max_cache_cap (3f default)
             256,   // decode_cadence_mid_chunk_cap
+            scheduler_profile,
             false, // scheduler_autotune_report
             false, // p5h_measurement_eval_probes (P5h+1 T1)
             None,  // vision_input_override
