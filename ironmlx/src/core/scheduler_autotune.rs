@@ -919,7 +919,76 @@ fn runtime_rules_from_overrides(
         })
         .collect::<Vec<_>>();
     rules.sort_by_key(|rule| std::cmp::Reverse(rule.when.specificity_key()));
+    compress_runtime_rules(&mut rules);
     rules
+}
+
+fn compress_runtime_rules(rules: &mut Vec<SchedulerAutotuneRuntimeRule>) {
+    let probes = runtime_rule_probe_requests(rules);
+    let mut idx = 0;
+    while idx < rules.len() {
+        let mut candidate = rules.clone();
+        candidate.remove(idx);
+        if runtime_rules_equivalent_on_probes(rules, &candidate, &probes) {
+            *rules = candidate;
+        } else {
+            idx += 1;
+        }
+    }
+}
+
+fn runtime_rule_probe_requests(
+    rules: &[SchedulerAutotuneRuntimeRule],
+) -> Vec<SchedulerAutotuneRuntimeRequest> {
+    let mut prompt_lens = BTreeSet::new();
+    let mut max_new_tokens = BTreeSet::new();
+    let mut concurrency = BTreeSet::new();
+    for rule in rules {
+        insert_runtime_probe_values(&mut prompt_lens, rule.when.prompt_len_gte);
+        insert_runtime_probe_values(&mut max_new_tokens, rule.when.max_new_tokens_gte);
+        insert_runtime_probe_values(&mut concurrency, rule.when.effective_concurrency_gte);
+    }
+
+    let mut probes = Vec::new();
+    for prompt_len in prompt_lens {
+        for max_new_tokens in &max_new_tokens {
+            for effective_concurrency in &concurrency {
+                probes.push(SchedulerAutotuneRuntimeRequest {
+                    prompt_len,
+                    max_new_tokens: *max_new_tokens,
+                    effective_concurrency: *effective_concurrency,
+                });
+            }
+        }
+    }
+    probes
+}
+
+fn insert_runtime_probe_values(values: &mut BTreeSet<usize>, threshold: usize) {
+    values.insert(threshold);
+    if threshold > 0 {
+        values.insert(threshold - 1);
+    }
+}
+
+fn runtime_rules_equivalent_on_probes(
+    before: &[SchedulerAutotuneRuntimeRule],
+    after: &[SchedulerAutotuneRuntimeRule],
+    probes: &[SchedulerAutotuneRuntimeRequest],
+) -> bool {
+    probes.iter().all(|request| {
+        runtime_rules_select(before, *request) == runtime_rules_select(after, *request)
+    })
+}
+
+fn runtime_rules_select(
+    rules: &[SchedulerAutotuneRuntimeRule],
+    request: SchedulerAutotuneRuntimeRequest,
+) -> Option<SchedulerAutotuneProfileConfig> {
+    rules
+        .iter()
+        .find(|rule| rule.when.matches(request))
+        .map(|rule| rule.config)
 }
 
 fn score_complete_candidates(

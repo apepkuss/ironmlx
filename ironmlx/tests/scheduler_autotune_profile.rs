@@ -1,9 +1,11 @@
 use ironmlx::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, select_scheduler_autotune_profile,
     select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
-    SchedulerAutotuneMeasurement, SchedulerAutotuneObjective, SchedulerAutotuneProfileConfig,
-    SchedulerAutotuneRuntimeRequest, SchedulerAutotuneSelectionOptions,
-    SchedulerAutotuneSelectionProfile, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    SchedulerAutotuneCandidateScore, SchedulerAutotuneMeasurement, SchedulerAutotuneObjective,
+    SchedulerAutotuneProfileConfig, SchedulerAutotuneProfileSelection,
+    SchedulerAutotuneRuntimeRequest, SchedulerAutotuneScenario, SchedulerAutotuneScenarioOverride,
+    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 
 fn config(
@@ -66,6 +68,55 @@ fn input(measurements: Vec<SchedulerAutotuneMeasurement>) -> SchedulerAutotuneCa
         hardware_label: "test-host".to_string(),
         objective: SchedulerAutotuneObjective::agent_default(),
         measurements,
+    }
+}
+
+fn candidate_score(config: SchedulerAutotuneProfileConfig) -> SchedulerAutotuneCandidateScore {
+    SchedulerAutotuneCandidateScore {
+        config,
+        score: 1.0,
+        scenario_count: 1,
+        mean_ttft_norm: 1.0,
+        mean_itl_norm: 1.0,
+        mean_early_itl_norm: 1.0,
+        mean_e2e_norm: 1.0,
+        mean_throughput_norm: 1.0,
+    }
+}
+
+fn scenario_override(
+    prompt_len: usize,
+    max_new_tokens: usize,
+    concurrency: usize,
+    config: SchedulerAutotuneProfileConfig,
+) -> SchedulerAutotuneScenarioOverride {
+    SchedulerAutotuneScenarioOverride {
+        scenario: SchedulerAutotuneScenario {
+            prompt_len,
+            max_new_tokens,
+            concurrency,
+        },
+        config,
+        score: 1.0,
+        baseline_score: 1.1,
+    }
+}
+
+fn selection_with_overrides(
+    selected_config: SchedulerAutotuneProfileConfig,
+    scenario_overrides: Vec<SchedulerAutotuneScenarioOverride>,
+) -> SchedulerAutotuneProfileSelection {
+    SchedulerAutotuneProfileSelection {
+        diagnose_only: true,
+        model_name: "test-model".to_string(),
+        hardware_label: "test-host".to_string(),
+        selection_profile: SchedulerAutotuneSelectionProfile::AgentLongPrompt,
+        objective: SchedulerAutotuneObjective::agent_default(),
+        selected: Some(candidate_score(selected_config)),
+        candidates: vec![candidate_score(selected_config)],
+        scenario_overrides,
+        rejected: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 
@@ -327,4 +378,116 @@ fn runtime_profile_exports_and_applies_long_tg_concurrent_scenario_override() {
         effective_concurrency: 2,
     });
     assert_eq!(fallback, global);
+}
+
+#[test]
+fn runtime_profile_compresses_equivalent_tg_rules() {
+    let global = config_with_cadence(1, 1024, 5, 128);
+    let pp4096_concurrent = config_with_cadence(1, 2048, 5, 128);
+    let pp8192_concurrent = config_with_cadence(1, 2048, 5, 256);
+    let selection = selection_with_overrides(
+        global,
+        vec![
+            scenario_override(4096, 128, 2, pp4096_concurrent),
+            scenario_override(4096, 512, 2, pp4096_concurrent),
+            scenario_override(8192, 128, 2, pp8192_concurrent),
+            scenario_override(8192, 512, 2, pp8192_concurrent),
+        ],
+    );
+
+    let profile =
+        build_scheduler_autotune_runtime_profile(&selection).expect("expected runtime profile");
+
+    assert_eq!(profile.rules.len(), 2);
+    assert_eq!(profile.rules[0].when.prompt_len_gte, 8192);
+    assert_eq!(profile.rules[0].when.max_new_tokens_gte, 128);
+    assert_eq!(profile.rules[0].config, pp8192_concurrent);
+    assert_eq!(profile.rules[1].when.prompt_len_gte, 4096);
+    assert_eq!(profile.rules[1].when.max_new_tokens_gte, 128);
+    assert_eq!(profile.rules[1].config, pp4096_concurrent);
+
+    assert_eq!(
+        profile.select_config(SchedulerAutotuneRuntimeRequest {
+            prompt_len: 4096,
+            max_new_tokens: 128,
+            effective_concurrency: 2,
+        }),
+        pp4096_concurrent
+    );
+    assert_eq!(
+        profile.select_config(SchedulerAutotuneRuntimeRequest {
+            prompt_len: 4096,
+            max_new_tokens: 512,
+            effective_concurrency: 2,
+        }),
+        pp4096_concurrent
+    );
+    assert_eq!(
+        profile.select_config(SchedulerAutotuneRuntimeRequest {
+            prompt_len: 8192,
+            max_new_tokens: 128,
+            effective_concurrency: 2,
+        }),
+        pp8192_concurrent
+    );
+    assert_eq!(
+        profile.select_config(SchedulerAutotuneRuntimeRequest {
+            prompt_len: 8192,
+            max_new_tokens: 512,
+            effective_concurrency: 2,
+        }),
+        pp8192_concurrent
+    );
+    assert_eq!(
+        profile.select_config(SchedulerAutotuneRuntimeRequest {
+            prompt_len: 4096,
+            max_new_tokens: 512,
+            effective_concurrency: 1,
+        }),
+        global
+    );
+}
+
+#[test]
+fn runtime_profile_keeps_specific_rule_when_intermediate_rule_changes_selection() {
+    let global = config_with_cadence(1, 1024, 5, 128);
+    let low_and_high = config_with_cadence(1, 2048, 5, 128);
+    let intermediate = config_with_cadence(1, 2048, 5, 256);
+    let selection = selection_with_overrides(
+        global,
+        vec![
+            scenario_override(4096, 128, 2, low_and_high),
+            scenario_override(4096, 256, 2, intermediate),
+            scenario_override(4096, 512, 2, low_and_high),
+        ],
+    );
+
+    let profile =
+        build_scheduler_autotune_runtime_profile(&selection).expect("expected runtime profile");
+
+    assert_eq!(profile.rules.len(), 3);
+    assert_eq!(
+        profile.select_config(SchedulerAutotuneRuntimeRequest {
+            prompt_len: 4096,
+            max_new_tokens: 128,
+            effective_concurrency: 2,
+        }),
+        low_and_high
+    );
+    assert_eq!(
+        profile.select_config(SchedulerAutotuneRuntimeRequest {
+            prompt_len: 4096,
+            max_new_tokens: 256,
+            effective_concurrency: 2,
+        }),
+        intermediate
+    );
+    assert_eq!(
+        profile.select_config(SchedulerAutotuneRuntimeRequest {
+            prompt_len: 4096,
+            max_new_tokens: 512,
+            effective_concurrency: 2,
+        }),
+        low_and_high
+    );
 }
