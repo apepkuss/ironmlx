@@ -302,6 +302,38 @@ mod tests {
             "ironmlx",
             "scheduler-autotune",
             "profile",
+            "import",
+            "--model",
+            "/tmp/model",
+            "--profile",
+            "/tmp/scheduler-profile.json",
+        ]);
+
+        match cli.command {
+            Command::SchedulerAutotune(args) => match args.action {
+                Some(super::scheduler_autotune::SchedulerAutotuneAction::Profile(profile)) => {
+                    match profile.action {
+                        super::scheduler_autotune::SchedulerAutotuneProfileAction::Import(
+                            import,
+                        ) => {
+                            assert_eq!(import.model.to_string_lossy(), "/tmp/model");
+                            assert_eq!(
+                                import.profile.to_string_lossy(),
+                                "/tmp/scheduler-profile.json"
+                            );
+                        }
+                        other => panic!("expected profile import action, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Profile action, got {other:?}"),
+            },
+            other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "scheduler-autotune",
+            "profile",
             "remove",
             "test-profile-id",
         ]);

@@ -9,8 +9,8 @@ use super::scheduler_profile_store::SchedulerProfileStore;
 use crate::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
     select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
-    SchedulerAutotuneMergeOptions, SchedulerAutotuneSelectionOptions,
-    SchedulerAutotuneSelectionProfile,
+    SchedulerAutotuneMergeOptions, SchedulerAutotuneRuntimeProfile,
+    SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
 };
 use crate::Result;
 
@@ -96,6 +96,8 @@ pub enum SchedulerAutotuneProfileAction {
     Show(SchedulerAutotuneProfileShowArgs),
     /// Remove one persisted scheduler profile and its JSON file.
     Remove(SchedulerAutotuneProfileRemoveArgs),
+    /// Import one runtime scheduler profile into ~/.ironmlx for one model path.
+    Import(SchedulerAutotuneProfileImportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -108,6 +110,17 @@ pub struct SchedulerAutotuneProfileShowArgs {
 pub struct SchedulerAutotuneProfileRemoveArgs {
     /// Profile id from `scheduler-autotune profile list`.
     pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct SchedulerAutotuneProfileImportArgs {
+    /// Local model directory this runtime profile applies to.
+    #[arg(long)]
+    pub model: PathBuf,
+
+    /// Runtime scheduler profile JSON to import.
+    #[arg(long)]
+    pub profile: PathBuf,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +172,7 @@ fn run_profile(args: SchedulerAutotuneProfileArgs) -> Result<()> {
         SchedulerAutotuneProfileAction::List => run_profile_list(&store),
         SchedulerAutotuneProfileAction::Show(show) => run_profile_show(&store, show),
         SchedulerAutotuneProfileAction::Remove(remove) => run_profile_remove(&store, remove),
+        SchedulerAutotuneProfileAction::Import(import) => run_profile_import(&store, import),
     }
 }
 
@@ -225,6 +239,26 @@ fn run_profile_remove(
     Ok(())
 }
 
+fn run_profile_import(
+    store: &SchedulerProfileStore,
+    args: SchedulerAutotuneProfileImportArgs,
+) -> Result<()> {
+    let path = import_profile(store, args)?;
+    println!("imported: {}", path.display());
+    Ok(())
+}
+
+fn import_profile(
+    store: &SchedulerProfileStore,
+    args: SchedulerAutotuneProfileImportArgs,
+) -> Result<PathBuf> {
+    let raw = std::fs::read_to_string(&args.profile)
+        .with_context(|| format!("reading {}", args.profile.display()))?;
+    let profile: SchedulerAutotuneRuntimeProfile = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing {}", args.profile.display()))?;
+    store.persist_profile(&args.model, &profile)
+}
+
 fn run_select(args: SchedulerAutotuneSelectArgs) -> Result<()> {
     let input = read_calibration(&args.input)?;
     let selection = select_scheduler_autotune_profile_with_options(
@@ -281,4 +315,75 @@ fn read_calibration(path: &Path) -> Result<SchedulerAutotuneCalibrationInput> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{import_profile, SchedulerAutotuneProfileImportArgs};
+    use crate::cli::scheduler_profile_store::SchedulerProfileStore;
+    use crate::core::scheduler_autotune::{
+        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    };
+
+    #[test]
+    fn import_profile_persists_runtime_profile_for_model() {
+        let temp_dir = unique_temp_dir("scheduler-profile-import");
+        let model_dir = temp_dir.join("model");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let profile_path = temp_dir.join("scheduler-profile.json");
+        let profile = runtime_profile();
+        let output = serde_json::to_string_pretty(&profile).expect("serialize profile");
+        std::fs::write(&profile_path, format!("{output}\n")).expect("write profile");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+
+        let stored = import_profile(
+            &store,
+            SchedulerAutotuneProfileImportArgs {
+                model: model_dir.clone(),
+                profile: profile_path,
+            },
+        )
+        .expect("import profile");
+
+        assert_eq!(
+            stored,
+            store.profile_path("GLM-4.7-Flash-4bit", "test-host", &model_dir)
+        );
+        let loaded_path = store
+            .find_profile(&model_dir, "GLM-4.7-Flash-4bit", "test-host")
+            .expect("find profile")
+            .expect("profile should exist");
+        assert_eq!(loaded_path, stored);
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    fn runtime_profile() -> SchedulerAutotuneRuntimeProfile {
+        SchedulerAutotuneRuntimeProfile {
+            schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+            model_name: "GLM-4.7-Flash-4bit".to_string(),
+            hardware_label: "test-host".to_string(),
+            config: SchedulerAutotuneProfileConfig {
+                b_max: 1,
+                prefill_chunk_size: 2048,
+                admission_deadline_ms: 5,
+                admission_queue_max: 32,
+                max_cache_cap: 32768,
+                decode_cadence_mid_chunk_cap: 128,
+            },
+            rules: Vec::new(),
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+    }
 }

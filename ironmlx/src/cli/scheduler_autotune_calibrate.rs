@@ -176,35 +176,35 @@ fn default_candidate_configs() -> Vec<SchedulerAutotuneProfileConfig> {
     vec![
         SchedulerAutotuneProfileConfig {
             b_max: 1,
-            prefill_chunk_size: 2048,
-            admission_deadline_ms: 5,
-            admission_queue_max: 32,
-            max_cache_cap: 32768,
-            decode_cadence_mid_chunk_cap: 256,
-        },
-        SchedulerAutotuneProfileConfig {
-            b_max: 2,
-            prefill_chunk_size: 1024,
-            admission_deadline_ms: 5,
-            admission_queue_max: 32,
-            max_cache_cap: 32768,
-            decode_cadence_mid_chunk_cap: 256,
-        },
-        SchedulerAutotuneProfileConfig {
-            b_max: 2,
-            prefill_chunk_size: 2048,
-            admission_deadline_ms: 5,
-            admission_queue_max: 32,
-            max_cache_cap: 32768,
-            decode_cadence_mid_chunk_cap: 256,
-        },
-        SchedulerAutotuneProfileConfig {
-            b_max: 2,
             prefill_chunk_size: 1024,
             admission_deadline_ms: 5,
             admission_queue_max: 32,
             max_cache_cap: 32768,
             decode_cadence_mid_chunk_cap: 128,
+        },
+        SchedulerAutotuneProfileConfig {
+            b_max: 1,
+            prefill_chunk_size: 1024,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
+        },
+        SchedulerAutotuneProfileConfig {
+            b_max: 1,
+            prefill_chunk_size: 2048,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 128,
+        },
+        SchedulerAutotuneProfileConfig {
+            b_max: 1,
+            prefill_chunk_size: 2048,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
         },
     ]
 }
@@ -975,17 +975,15 @@ mod tests {
             resolved.selection_profile,
             SchedulerAutotuneSelectionProfile::AgentLongPrompt
         );
-        assert_eq!(resolved.candidates.len(), 4);
-        assert!(resolved.candidates.iter().any(|config| config.b_max == 1));
-        assert!(resolved.candidates.iter().any(|config| config.b_max == 2));
-        assert!(resolved
-            .candidates
-            .iter()
-            .any(|config| config.decode_cadence_mid_chunk_cap == 128));
-        assert!(resolved
-            .candidates
-            .iter()
-            .any(|config| config.decode_cadence_mid_chunk_cap == 256));
+        assert_eq!(
+            resolved.candidates,
+            vec![
+                profile_config_with_b_max_chunk_and_cap(1, 1024, 128),
+                profile_config_with_b_max_chunk_and_cap(1, 1024, 256),
+                profile_config_with_b_max_chunk_and_cap(1, 2048, 128),
+                profile_config_with_b_max_chunk_and_cap(1, 2048, 256),
+            ]
+        );
     }
 
     #[test]
@@ -1111,8 +1109,16 @@ mod tests {
         prefill_chunk_size: usize,
         decode_cadence_mid_chunk_cap: usize,
     ) -> SchedulerAutotuneProfileConfig {
+        profile_config_with_b_max_chunk_and_cap(2, prefill_chunk_size, decode_cadence_mid_chunk_cap)
+    }
+
+    fn profile_config_with_b_max_chunk_and_cap(
+        b_max: usize,
+        prefill_chunk_size: usize,
+        decode_cadence_mid_chunk_cap: usize,
+    ) -> SchedulerAutotuneProfileConfig {
         SchedulerAutotuneProfileConfig {
-            b_max: 2,
+            b_max,
             prefill_chunk_size,
             admission_deadline_ms: 5,
             admission_queue_max: 32,
