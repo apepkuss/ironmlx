@@ -37,6 +37,19 @@ struct SchedulerProfileStoreEntry {
     updated_at_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SchedulerProfileStoreRecord {
+    pub(crate) id: String,
+    pub(crate) model_name: String,
+    pub(crate) model_path: String,
+    pub(crate) hardware_label: String,
+    pub(crate) ironmlx_version: String,
+    pub(crate) runtime_schema_version: u32,
+    pub(crate) profile_path: PathBuf,
+    pub(crate) profile_exists: bool,
+    pub(crate) updated_at_unix_ms: u64,
+}
+
 impl SchedulerProfileStore {
     pub(crate) fn default() -> Result<Self> {
         let home = dirs::home_dir().context("locating home directory for ~/.ironmlx")?;
@@ -47,6 +60,10 @@ impl SchedulerProfileStore {
 
     pub(crate) fn from_root(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     pub(crate) fn profile_path(
@@ -126,6 +143,55 @@ impl SchedulerProfileStore {
             .map(|entry| self.root.join(&entry.profile_path)))
     }
 
+    pub(crate) fn list_profiles(&self) -> Result<Vec<SchedulerProfileStoreRecord>> {
+        let index = self.read_index()?;
+        let mut records = index
+            .profiles
+            .iter()
+            .map(|entry| self.entry_to_record(entry))
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            right
+                .updated_at_unix_ms
+                .cmp(&left.updated_at_unix_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(records)
+    }
+
+    pub(crate) fn read_profile(&self, id: &str) -> Result<Option<SchedulerAutotuneRuntimeProfile>> {
+        let Some(record) = self.record_by_id(id)? else {
+            return Ok(None);
+        };
+        if !record.profile_path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&record.profile_path)
+            .with_context(|| format!("reading {}", record.profile_path.display()))?;
+        let profile = serde_json::from_str(&raw)
+            .with_context(|| format!("parsing {}", record.profile_path.display()))?;
+        Ok(Some(profile))
+    }
+
+    pub(crate) fn remove_profile(&self, id: &str) -> Result<Option<SchedulerProfileStoreRecord>> {
+        let mut index = self.read_index()?;
+        let Some(position) = index.profiles.iter().position(|entry| entry.id == id) else {
+            return Ok(None);
+        };
+        let entry = index.profiles.remove(position);
+        let record = self.entry_to_record(&entry);
+        match std::fs::remove_file(&record.profile_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("removing {}", record.profile_path.display()));
+            }
+        }
+        self.write_index(&index)?;
+        Ok(Some(record))
+    }
+
     fn index_path(&self) -> PathBuf {
         self.root.join(INDEX_FILE)
     }
@@ -160,6 +226,30 @@ impl SchedulerProfileStore {
         std::fs::write(&path, format!("{output}\n"))
             .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
+    }
+
+    fn record_by_id(&self, id: &str) -> Result<Option<SchedulerProfileStoreRecord>> {
+        let index = self.read_index()?;
+        Ok(index
+            .profiles
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| self.entry_to_record(entry)))
+    }
+
+    fn entry_to_record(&self, entry: &SchedulerProfileStoreEntry) -> SchedulerProfileStoreRecord {
+        let profile_path = self.root.join(&entry.profile_path);
+        SchedulerProfileStoreRecord {
+            id: entry.id.clone(),
+            model_name: entry.model_name.clone(),
+            model_path: entry.model_path.clone(),
+            hardware_label: entry.hardware_label.clone(),
+            ironmlx_version: entry.ironmlx_version.clone(),
+            runtime_schema_version: entry.runtime_schema_version,
+            profile_exists: profile_path.exists(),
+            profile_path,
+            updated_at_unix_ms: entry.updated_at_unix_ms,
+        }
     }
 }
 
@@ -302,7 +392,14 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hardware_label_from_parts, stable_hex_hash};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::core::scheduler_autotune::{
+        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+    };
+
+    use super::{hardware_label_from_parts, stable_hex_hash, SchedulerProfileStore};
 
     #[test]
     fn hardware_label_from_parts_slugifies_cpu_and_memory() {
@@ -319,5 +416,83 @@ mod tests {
             stable_hex_hash("/tmp/model-a"),
             stable_hex_hash("/tmp/model-b")
         );
+    }
+
+    #[test]
+    fn list_profiles_returns_profile_metadata() {
+        let temp_dir = unique_temp_dir("scheduler-profile-list");
+        let model_dir = temp_dir.join("GLM-4.7-Flash-4bit");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        let stored_path = store
+            .persist_profile(&model_dir, &runtime_profile())
+            .expect("persist profile");
+
+        let records = store.list_profiles().expect("list profiles");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].model_name, "test-model");
+        assert_eq!(records[0].hardware_label, "test-host");
+        assert_eq!(records[0].profile_path, stored_path);
+        assert!(records[0].profile_exists);
+        assert!(!records[0].id.is_empty());
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn read_and_remove_profile_by_id() {
+        let temp_dir = unique_temp_dir("scheduler-profile-remove");
+        let model_dir = temp_dir.join("GLM-4.7-Flash-4bit");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        let stored_path = store
+            .persist_profile(&model_dir, &runtime_profile())
+            .expect("persist profile");
+        let id = store.list_profiles().expect("list profiles")[0].id.clone();
+
+        let loaded = store
+            .read_profile(&id)
+            .expect("read profile")
+            .expect("stored profile should exist");
+        assert_eq!(loaded.model_name, "test-model");
+
+        let removed = store
+            .remove_profile(&id)
+            .expect("remove profile")
+            .expect("profile should be removed");
+        assert_eq!(removed.id, id);
+        assert!(!stored_path.exists());
+        assert!(store
+            .read_profile(&removed.id)
+            .expect("read removed profile")
+            .is_none());
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    fn runtime_profile() -> SchedulerAutotuneRuntimeProfile {
+        SchedulerAutotuneRuntimeProfile {
+            schema_version: crate::core::scheduler_autotune::SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+            model_name: "test-model".to_string(),
+            hardware_label: "test-host".to_string(),
+            config: SchedulerAutotuneProfileConfig {
+                b_max: 2,
+                prefill_chunk_size: 1024,
+                admission_deadline_ms: 7,
+                admission_queue_max: 16,
+                max_cache_cap: 8192,
+                decode_cadence_mid_chunk_cap: 384,
+            },
+            rules: Vec::new(),
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
     }
 }

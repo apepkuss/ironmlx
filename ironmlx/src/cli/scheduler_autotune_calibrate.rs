@@ -313,14 +313,19 @@ pub fn run(args: SchedulerAutotuneCalibrateArgs) -> Result<()> {
     }
     let artifacts = FinalArtifactPaths::new(&resolved.output_dir, Some(resolved.write_profile));
     write_final_outputs(inputs, &artifacts, resolved.selection_profile)?;
-    let stored_runtime_profile = artifacts
-        .runtime_profile
-        .as_ref()
-        .map(|path| {
-            let store = SchedulerProfileStore::default()?;
-            persist_runtime_profile_from_artifact(&store, &resolved.model, path)
-        })
-        .transpose()?;
+    let stored_runtime_profile = artifacts.runtime_profile.as_ref().and_then(|path| {
+        let stored = SchedulerProfileStore::default()
+            .and_then(|store| persist_runtime_profile_from_artifact(&store, &resolved.model, path));
+        match stored {
+            Ok(path) => Some(path),
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to store runtime scheduler profile in ~/.ironmlx: {error:#}"
+                );
+                None
+            }
+        }
+    });
 
     println!("calibration: {}", artifacts.calibration.display());
     println!("selection_json: {}", artifacts.selection_json.display());

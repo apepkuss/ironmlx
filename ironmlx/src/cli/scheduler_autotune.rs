@@ -2,9 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use clap::{Args, Subcommand, ValueEnum};
 
+use super::scheduler_profile_store::SchedulerProfileStore;
 use crate::core::scheduler_autotune::{
     build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
     select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
@@ -43,6 +44,8 @@ pub enum SchedulerAutotuneAction {
     Merge(SchedulerAutotuneMergeArgs),
     /// Run local scheduler/autotune calibration candidates and write a profile.
     Calibrate(Box<super::scheduler_autotune_calibrate::SchedulerAutotuneCalibrateArgs>),
+    /// Inspect or remove persisted local scheduler profiles.
+    Profile(SchedulerAutotuneProfileArgs),
 }
 
 #[derive(Args, Debug)]
@@ -79,6 +82,34 @@ pub struct SchedulerAutotuneMergeArgs {
     pub allow_incomplete_coverage: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct SchedulerAutotuneProfileArgs {
+    #[command(subcommand)]
+    pub action: SchedulerAutotuneProfileAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SchedulerAutotuneProfileAction {
+    /// List persisted scheduler profiles in ~/.ironmlx.
+    List,
+    /// Print one persisted scheduler profile as JSON.
+    Show(SchedulerAutotuneProfileShowArgs),
+    /// Remove one persisted scheduler profile and its JSON file.
+    Remove(SchedulerAutotuneProfileRemoveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SchedulerAutotuneProfileShowArgs {
+    /// Profile id from `scheduler-autotune profile list`.
+    pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct SchedulerAutotuneProfileRemoveArgs {
+    /// Profile id from `scheduler-autotune profile list`.
+    pub id: String,
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerAutotuneOutputFormat {
     Text,
@@ -107,6 +138,7 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
         Some(SchedulerAutotuneAction::Calibrate(calibrate)) => {
             super::scheduler_autotune_calibrate::run(*calibrate)
         }
+        Some(SchedulerAutotuneAction::Profile(profile)) => run_profile(profile),
         None => {
             let input = args
                 .input
@@ -119,6 +151,78 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
             })
         }
     }
+}
+
+fn run_profile(args: SchedulerAutotuneProfileArgs) -> Result<()> {
+    let store = SchedulerProfileStore::default()?;
+    match args.action {
+        SchedulerAutotuneProfileAction::List => run_profile_list(&store),
+        SchedulerAutotuneProfileAction::Show(show) => run_profile_show(&store, show),
+        SchedulerAutotuneProfileAction::Remove(remove) => run_profile_remove(&store, remove),
+    }
+}
+
+fn run_profile_list(store: &SchedulerProfileStore) -> Result<()> {
+    let records = store.list_profiles()?;
+    println!("store: {}", store.root().display());
+    println!("profiles: {}", records.len());
+    if records.is_empty() {
+        return Ok(());
+    }
+    println!(
+        "id\tmodel_name\thardware_label\tstatus\truntime_schema\tironmlx_version\tupdated_at_unix_ms\tmodel_path\tprofile_path"
+    );
+    for record in records {
+        let status = if record.profile_exists {
+            "ok"
+        } else {
+            "missing"
+        };
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            record.id,
+            record.model_name,
+            record.hardware_label,
+            status,
+            record.runtime_schema_version,
+            record.ironmlx_version,
+            record.updated_at_unix_ms,
+            record.model_path,
+            record.profile_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn run_profile_show(
+    store: &SchedulerProfileStore,
+    args: SchedulerAutotuneProfileShowArgs,
+) -> Result<()> {
+    let Some(profile) = store.read_profile(&args.id)? else {
+        bail!(
+            "scheduler profile not found or profile file missing: {}",
+            args.id
+        );
+    };
+    println!("{}", serde_json::to_string_pretty(&profile)?);
+    Ok(())
+}
+
+fn run_profile_remove(
+    store: &SchedulerProfileStore,
+    args: SchedulerAutotuneProfileRemoveArgs,
+) -> Result<()> {
+    let Some(record) = store.remove_profile(&args.id)? else {
+        bail!("scheduler profile not found: {}", args.id);
+    };
+    println!(
+        "removed: {} model_name={} hardware_label={} profile_path={}",
+        record.id,
+        record.model_name,
+        record.hardware_label,
+        record.profile_path.display()
+    );
+    Ok(())
 }
 
 fn run_select(args: SchedulerAutotuneSelectArgs) -> Result<()> {

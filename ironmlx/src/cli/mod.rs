@@ -274,6 +274,57 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_autotune_profile_subcommands_parse_profile_id() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "scheduler-autotune",
+            "profile",
+            "show",
+            "test-profile-id",
+        ]);
+
+        match cli.command {
+            Command::SchedulerAutotune(args) => match args.action {
+                Some(super::scheduler_autotune::SchedulerAutotuneAction::Profile(profile)) => {
+                    match profile.action {
+                        super::scheduler_autotune::SchedulerAutotuneProfileAction::Show(show) => {
+                            assert_eq!(show.id, "test-profile-id");
+                        }
+                        other => panic!("expected profile show action, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Profile action, got {other:?}"),
+            },
+            other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "scheduler-autotune",
+            "profile",
+            "remove",
+            "test-profile-id",
+        ]);
+
+        match cli.command {
+            Command::SchedulerAutotune(args) => match args.action {
+                Some(super::scheduler_autotune::SchedulerAutotuneAction::Profile(profile)) => {
+                    match profile.action {
+                        super::scheduler_autotune::SchedulerAutotuneProfileAction::Remove(
+                            remove,
+                        ) => {
+                            assert_eq!(remove.id, "test-profile-id");
+                        }
+                        other => panic!("expected profile remove action, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Profile action, got {other:?}"),
+            },
+            other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn serve_subcommand_parses_scheduler_profile() {
         let cli = Cli::parse_from([
             "ironmlx",

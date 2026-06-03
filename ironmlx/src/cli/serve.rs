@@ -179,12 +179,38 @@ fn load_scheduler_profile_for_model(
         return Ok(None);
     };
     let model_name = scheduler_profile_model_name(model_dir)?;
-    let Some(path) = store.find_profile(model_dir, &model_name, hardware_label)? else {
+    let Some(path) = (match store.find_profile(model_dir, &model_name, hardware_label) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                "ironmlx serve: scheduler profile store unavailable path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
+                store.root().display(),
+                model_name,
+                hardware_label,
+                error
+            );
+            None
+        }
+    }) else {
         return Ok(None);
     };
 
+    let profile = match read_scheduler_runtime_profile(&path) {
+        Ok(profile) => profile,
+        Err(error) => {
+            tracing::warn!(
+                "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
+                path.display(),
+                model_name,
+                hardware_label,
+                error
+            );
+            return Ok(None);
+        }
+    };
+
     Ok(Some(SchedulerProfileLoad {
-        profile: read_scheduler_runtime_profile(&path)?,
+        profile,
         path,
         auto_loaded: true,
     }))
@@ -395,7 +421,16 @@ pub fn run(args: ServeArgs) -> Result<()> {
     }
 
     let scheduler_profile_store = if args.scheduler_profile.is_none() {
-        Some(SchedulerProfileStore::default()?)
+        match SchedulerProfileStore::default() {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::warn!(
+                    "ironmlx serve: scheduler profile store disabled error={:#}; using CLI/default scheduler config",
+                    error
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -410,6 +445,21 @@ pub fn run(args: ServeArgs) -> Result<()> {
         &args,
         scheduler_profile_load.as_ref().map(|load| &load.profile),
     )?;
+    if scheduler_profile_load.is_none() && args.scheduler_profile.is_none() {
+        match scheduler_profile_store.as_ref() {
+            Some(store) => tracing::info!(
+                "ironmlx serve: no matching scheduler profile found store={} model={} hardware_label={}; using CLI/default scheduler config",
+                store.root().display(),
+                model_dir.display(),
+                scheduler_profile_hardware_label
+            ),
+            None => tracing::info!(
+                "ironmlx serve: no scheduler profile store available model={} hardware_label={}; using CLI/default scheduler config",
+                model_dir.display(),
+                scheduler_profile_hardware_label
+            ),
+        }
+    }
     let scheduler_config = SchedulerServeConfig {
         prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
         b_max: scheduler_runtime_profile.config.b_max,
@@ -726,6 +776,51 @@ mod scheduler_profile_tests {
         assert_eq!(loaded.profile.model_name, "explicit-model");
         assert_eq!(loaded.profile.config.prefill_chunk_size, 4096);
         assert_eq!(loaded.path, explicit_path);
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn serve_ignores_corrupt_profile_store_index_when_cli_profile_absent() {
+        let temp_dir = unique_temp_dir("scheduler-profile-corrupt-index");
+        let model_dir = temp_dir.join("GLM-4.7-Flash-4bit");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let store_root = temp_dir.join("store");
+        std::fs::create_dir_all(&store_root).expect("create store dir");
+        std::fs::write(store_root.join("index.json"), "not json").expect("write corrupt index");
+        let store = SchedulerProfileStore::from_root(store_root);
+        let args = ServeArgs {
+            model: model_dir.to_string_lossy().into_owned(),
+            ..base_args()
+        };
+
+        let loaded = load_scheduler_profile_for_model(&args, &model_dir, Some(&store), "test-host")
+            .expect("corrupt store should fall back");
+
+        assert!(loaded.is_none());
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn serve_ignores_corrupt_auto_loaded_profile_when_cli_profile_absent() {
+        let temp_dir = unique_temp_dir("scheduler-profile-corrupt-profile");
+        let model_dir = temp_dir.join("GLM-4.7-Flash-4bit");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        let stored_path = store
+            .persist_profile(&model_dir, &runtime_profile())
+            .expect("persist profile");
+        std::fs::write(&stored_path, "not json").expect("corrupt stored profile");
+        let args = ServeArgs {
+            model: model_dir.to_string_lossy().into_owned(),
+            ..base_args()
+        };
+
+        let loaded = load_scheduler_profile_for_model(&args, &model_dir, Some(&store), "test-host")
+            .expect("corrupt auto profile should fall back");
+
+        assert!(loaded.is_none());
 
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }
