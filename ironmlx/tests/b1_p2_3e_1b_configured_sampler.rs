@@ -56,6 +56,7 @@ fn make_configured_request(
             .with_seed(42),
         stop_token_ids: stop,
         prefill_chunk_size: 128,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -73,8 +74,16 @@ async fn b1_p2_3e_1b_configured_decode_speedup() {
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
     let stop_tokens = tokenizer.eos_token_ids().to_vec();
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let prompts = [
         "Write a short essay on the history of Italian cuisine.",

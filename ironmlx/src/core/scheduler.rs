@@ -329,6 +329,7 @@ pub struct AdmitMidHandle {
     /// exceed it only when extending a boundary to keep one contiguous image
     /// token run intact.
     pub(crate) chunk_size: i32,
+    pub(crate) decode_cadence_mid_chunk_cap: usize,
     pub(crate) chunk_start: i32,
     /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
     /// `prompt_len` across the chunk loop.
@@ -415,6 +416,9 @@ pub struct RequestState {
     /// `0` is preserved as "disable chunking" and expanded to prompt length
     /// when `admit_mid_begin` initialises `AdmitMidHandle::chunk_size`.
     pub prefill_chunk_size: i32,
+    /// Request-level rolling mid-admit chunk cap selected from the runtime
+    /// scheduler profile.
+    pub decode_cadence_mid_chunk_cap: usize,
     /// KV cache bytes charged to budget at admit time. Released on
     /// row completion / eviction. B1-p2.5.
     pub kv_bytes_admitted: usize,
@@ -754,6 +758,7 @@ impl<M: Model> Scheduler<M> {
             image_spatial_merge_size: req.image_spatial_merge_size,
             image_token_id: req.image_token_id,
             prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(i32::MAX),
+            decode_cadence_mid_chunk_cap: req.decode_cadence_mid_chunk_cap,
             kv_bytes_admitted: requested_bytes,
             #[cfg(feature = "p5h-profile")]
             p5h_trace: req.p5h_trace.clone(),
@@ -2063,6 +2068,7 @@ impl<M: Model> Scheduler<M> {
             image_token_id,
             image_spatial_merge_size,
             prefill_chunk_size,
+            decode_cadence_mid_chunk_cap,
         ) = {
             let state = self.slots[row_idx].as_ref().expect("admit inserted");
             (
@@ -2074,6 +2080,7 @@ impl<M: Model> Scheduler<M> {
                 state.image_token_id,
                 state.image_spatial_merge_size,
                 state.prefill_chunk_size,
+                state.decode_cadence_mid_chunk_cap,
             )
         };
         let prompt_len = prompt_len_usz as i32;
@@ -2152,6 +2159,7 @@ impl<M: Model> Scheduler<M> {
             prompt_ids,
             prompt_len,
             chunk_size,
+            decode_cadence_mid_chunk_cap,
             chunk_start: 0,
             temp_cache,
             is_vl,
@@ -2552,6 +2560,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
@@ -3522,6 +3531,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
@@ -3568,6 +3578,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32), (1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
@@ -3618,6 +3629,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
@@ -3970,6 +3982,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: Some(vec![pv_bf16]),
             image_grid_thw: Some(grids.clone()),
             image_spatial_merge_size: 2,
@@ -4007,6 +4020,7 @@ mod tests {
             sampler: crate::core::sampler::Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
@@ -4048,6 +4062,7 @@ mod tests {
             sampler: crate::core::sampler::Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
@@ -4101,6 +4116,7 @@ mod tests {
             sampler: crate::core::sampler::Sampler::greedy(),
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,

@@ -288,6 +288,7 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
         sampler,
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: args.prefill_chunk_size,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: prepared_images.pixel_values,
         image_grid_thw: prepared_images.image_grid_thw,
         image_spatial_merge_size: prepared_images.image_spatial_merge_size,

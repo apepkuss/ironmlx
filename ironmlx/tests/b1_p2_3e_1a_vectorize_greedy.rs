@@ -47,6 +47,7 @@ fn make_request(prompt_ids: Vec<u32>, max_new: usize, stop_token_ids: Vec<u32>) 
         sampler: Sampler::greedy(),
         stop_token_ids,
         prefill_chunk_size: 128,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -68,8 +69,16 @@ async fn b1_p2_3e_1a_greedy_decode_speedup() {
     // Spawn 4 concurrent greedy admits → decode goes through the
     // all-greedy fast path inside Scheduler::step's sample_batch
     // dispatch.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let prompts = [
         "Explain why the sky appears blue during the day.",

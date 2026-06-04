@@ -343,6 +343,7 @@ fn make_request<M: Model>(
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: args.prefill_chunk_size,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: model.model_meta().spatial_merge_size,

@@ -68,6 +68,7 @@ fn make_req_with_stop(
         sampler: Sampler::greedy(),
         stop_token_ids,
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -86,8 +87,16 @@ async fn queue_drains_fifo_at_bmax2_c4() {
     // complete; queue_depth_peak >= 2 (2 had to queue).
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 8, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        8,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let texts = ["Hello", "World", "Goodbye", "Farewell"];
     let mut replies = Vec::new();
@@ -139,8 +148,16 @@ async fn queue_overflow_returns_err_via_actor() {
     // is ~150 ms/step regardless of Rust opt-level; 1024 tokens ≈ 150s.
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 3, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        3,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     // stop_token_ids: vec![] (disable EOS) so A/B don't short-circuit on
     // "Hello"/"World" + cold GPU; ensures the burst below finds A/B still
@@ -242,9 +259,16 @@ async fn admission_deadline_config_observed() {
     // batch_count should be 1 (not 2).
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let handle =
-        spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(30), 32, 32768, meta)
-            .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(30),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let batch_before = handle.batch_count.load(Ordering::Relaxed);
 
@@ -313,9 +337,16 @@ async fn b_max_config_8_no_queue() {
     // one batch (queue stays empty).
     let (model, tokenizer) = load_fixture();
     let meta = model.lock().await.model_meta();
-    let handle =
-        spawn_scheduler_actor(model.clone(), 8, Duration::from_millis(50), 32, 32768, meta)
-            .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        8,
+        Duration::from_millis(50),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
 
     let texts = ["a", "b", "c", "d", "e", "f"];
     let mut rxs = Vec::new();
@@ -369,7 +400,27 @@ async fn iron_bench_c8_with_queue_no_4xx() {
     // Boot the server on a random port; spawn 8 concurrent HTTP clients
     // hitting /v1/chat/completions for 15s. With b_max=4 + queue_max=32,
     // no HTTP 4xx should occur.
+    use ironmlx::core::scheduler_autotune::{
+        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+        SchedulerAutotuneRuntimeProfileMetadata, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    };
     use ironmlx::core::server;
+
+    let scheduler_profile = SchedulerAutotuneRuntimeProfile {
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        model_name: "qwen35".to_string(),
+        hardware_label: "test-host".to_string(),
+        config: SchedulerAutotuneProfileConfig {
+            b_max: 4,
+            prefill_chunk_size: 2048,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
+        },
+        rules: Vec::new(),
+        metadata: SchedulerAutotuneRuntimeProfileMetadata::synthetic(1811606400000),
+    };
 
     let port = 18400 + (std::process::id() % 1000) as u16;
     let model_path = model_path();
@@ -389,6 +440,9 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             5,     // admission_deadline_ms
             32,    // admission_queue_max
             32768, // max_cache_cap (3f default)
+            256,   // decode_cadence_mid_chunk_cap
+            scheduler_profile,
+            false, // scheduler_autotune_report
             false, // p5h_measurement_eval_probes (P5h+1 T1)
             None,  // vision_input_override
         )

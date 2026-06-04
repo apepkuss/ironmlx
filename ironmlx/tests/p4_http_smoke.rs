@@ -13,9 +13,34 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ironmlx::core::scheduler_autotune::{
+    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+};
 use ironmlx::core::server;
 use ironmlx::core::{Loader, Tokenizer};
 use ironmlx::models::Qwen35Model;
+
+fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
+    SchedulerAutotuneRuntimeProfile {
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        model_name: "qwen3.5-4b".to_string(),
+        hardware_label: "test-host".to_string(),
+        config: SchedulerAutotuneProfileConfig {
+            b_max: 4,
+            prefill_chunk_size: 2048,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
+        },
+        rules: Vec::new(),
+        metadata:
+            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                1811606400000,
+            ),
+    }
+}
 
 async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
     let model_dir = PathBuf::from(
@@ -39,6 +64,9 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             /* admission_deadline_ms */ 5,
             /* admission_queue_max */ 32,
             /* max_cache_cap */ 32768,
+            /* decode_cadence_mid_chunk_cap */ 256,
+            scheduler_profile(),
+            /* scheduler_autotune_report */ false,
             /* p5h_measurement_eval_probes */ false,
             /* vision_input_override */ None,
         )

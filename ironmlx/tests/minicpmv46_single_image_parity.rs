@@ -36,8 +36,7 @@ use ironmlx::models::minicpmv4_6::model::MiniCpmV46Model;
 
 mod common;
 use common::minicpmv46_parity::{
-    checkpoint_dir, diff_at, greedy_argmax, load_npy_in, max_abs_diff, to_f32_vec, top_k,
-    FIXTURE_DIR_VL,
+    checkpoint_dir, diff_at, greedy_argmax, load_npy_in, max_abs_diff, top_k, FIXTURE_DIR_VL,
 };
 
 const PATCH: i32 = 14;

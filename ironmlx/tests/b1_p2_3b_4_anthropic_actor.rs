@@ -21,6 +21,10 @@ use tokio::sync::Mutex;
 
 use ironmlx::core::generate::{GenerateRequest, GenerationStream};
 use ironmlx::core::sampler::Sampler;
+use ironmlx::core::scheduler_autotune::{
+    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+};
 use ironmlx::core::server::scheduler_actor::{
     spawn_scheduler_actor, SchedulerActorHandle, SchedulerCommand,
 };
@@ -118,6 +122,7 @@ fn make_request(
         sampler: Sampler::greedy(),
         stop_token_ids,
         prefill_chunk_size: 256,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -153,8 +158,16 @@ async fn anthropic_actor_b1_text_only_swap() {
     assert!(!baseline.is_empty(), "baseline produced no tokens");
 
     // 2. Route through SchedulerActor.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let admit_before = handle.admit_count.load(Ordering::Relaxed);
 
     let req = make_request(prompt_ids, max_new_tokens, stop_token_ids);
@@ -207,6 +220,7 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
         sampler: Sampler::greedy(),
         stop_token_ids,
         prefill_chunk_size: chunk_size,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -227,8 +241,16 @@ async fn anthropic_actor_long_prompt_routes_to_gs() {
     );
 
     // Verify admit_count doesn't change when GS path is taken.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let before = handle.admit_count.load(Ordering::Relaxed);
 
     // Drop the request — the GS path bypasses the actor; the test only
@@ -256,8 +278,16 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
     let max_new_tokens: usize = 4;
 
     // Construct AppState matching what serve() builds.
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let health_collector = Arc::new(ironmlx::core::server::health::SchedulerHealthCollector {
         start_time: std::time::Instant::now(),
         b_max: 4,
@@ -284,6 +314,24 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         admission_deadline_ms: 5,
         admission_queue_max: 32,
         effective_cap_max: 32768, // 3f
+        scheduler_runtime_profile: Arc::new(SchedulerAutotuneRuntimeProfile {
+            schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+            model_name: "test-model".to_string(),
+            hardware_label: "test-host".to_string(),
+            config: SchedulerAutotuneProfileConfig {
+                b_max: 4,
+                prefill_chunk_size: 256,
+                admission_deadline_ms: 5,
+                admission_queue_max: 32,
+                max_cache_cap: 32768,
+                decode_cadence_mid_chunk_cap: 256,
+            },
+            rules: Vec::new(),
+            metadata:
+                ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                    1811606400000,
+                ),
+        }),
         health_collector,
     };
 

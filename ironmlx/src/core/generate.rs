@@ -43,6 +43,9 @@ pub struct GenerateRequest {
     /// chunks; intermediate chunks update the cache only (no lm_head), the
     /// last chunk runs the full forward + lm_head.
     pub prefill_chunk_size: usize,
+    /// Request-level rolling mid-admit chunk cap used while decode rows are
+    /// active. Selected from the runtime scheduler profile after tokenization.
+    pub decode_cadence_mid_chunk_cap: usize,
     /// Per-image preprocessed vision inputs in prompt order. `None` = text-only.
     ///
     /// Qwen images are fixed-size patch sequences and can be concatenated by
@@ -2088,6 +2091,7 @@ mod tests {
             sampler: Sampler::greedy(),
             stop_token_ids: vec![2_u32],
             prefill_chunk_size: 0,
+            decode_cadence_mid_chunk_cap: 256,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,

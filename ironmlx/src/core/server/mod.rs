@@ -4,6 +4,7 @@
 //! waiting for the lock (P4 contract — multi-stream scheduler is P8b).
 
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -12,6 +13,10 @@ use tokio::sync::Mutex;
 
 use crate::core::model::Model;
 use crate::core::scheduler::DenseVlMethods;
+use crate::core::scheduler_autotune::{
+    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+    SchedulerAutotuneRuntimeRequest,
+};
 use crate::core::tokenizer::Tokenizer;
 use crate::Result;
 
@@ -70,6 +75,9 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// Effective cap_max = min(--max-cache-cap CLI flag, model.config.max_position_embeddings).
     /// Per-request `prompt_len + max_new_tokens` exceeding this returns HTTP 413. B1-p2.3f.
     pub effective_cap_max: usize,
+    /// Runtime scheduler profile. Base config is applied at boot; rules may
+    /// select request-level chunk/cadence settings after tokenization.
+    pub scheduler_runtime_profile: Arc<SchedulerAutotuneRuntimeProfile>,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
     /// wired to the SchedulerActor driver loop + BudgetState. B1-p2.5 G3.
     pub health_collector: Arc<health::SchedulerHealthCollector>,
@@ -88,8 +96,26 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             admission_deadline_ms: self.admission_deadline_ms,
             admission_queue_max: self.admission_queue_max,
             effective_cap_max: self.effective_cap_max,
+            scheduler_runtime_profile: self.scheduler_runtime_profile.clone(),
             health_collector: self.health_collector.clone(),
         }
+    }
+}
+
+impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
+    pub(crate) fn scheduler_request_config(
+        &self,
+        prompt_len: usize,
+        max_new_tokens: usize,
+    ) -> SchedulerAutotuneProfileConfig {
+        let active = self.scheduler_handle.b_active.load(Ordering::Relaxed) as usize;
+        let queued = self.scheduler_handle.b_queued.load(Ordering::Relaxed) as usize;
+        self.scheduler_runtime_profile
+            .select_config(SchedulerAutotuneRuntimeRequest {
+                prompt_len,
+                max_new_tokens,
+                effective_concurrency: active.saturating_add(queued).saturating_add(1),
+            })
     }
 }
 
@@ -115,7 +141,10 @@ pub async fn serve<M>(
     b_max: usize,
     admission_deadline_ms: u64,
     admission_queue_max: usize,
-    max_cache_cap: usize,              // 3f
+    max_cache_cap: usize, // 3f
+    decode_cadence_mid_chunk_cap: usize,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool, // P5h+1 T1
     vision_input_override: Option<VisionInputConfig>,
 ) -> Result<()>
@@ -152,6 +181,28 @@ where
             model_max_context
         );
     }
+    if scheduler_autotune_report {
+        let report = crate::core::scheduler_autotune::build_scheduler_autotune_report(
+            crate::core::scheduler_autotune::SchedulerAutotuneInput {
+                model_name: model_id.clone(),
+                meta,
+                prefill_chunk_size,
+                b_max,
+                admission_deadline_ms,
+                admission_queue_max,
+                requested_max_cache_cap: max_cache_cap,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                total_ram_bytes: crate::core::memory_budget::system_total_ram_bytes(),
+            },
+            crate::core::scheduler_autotune::prompt_batch_limits_for_model::<M>(b_max),
+        );
+        tracing::info!(
+            target: "ironmlx::scheduler_autotune",
+            "\n{}",
+            report.render_text()
+        );
+    }
 
     let scheduler_handle = scheduler_actor::spawn_scheduler_actor(
         model.clone(),
@@ -159,6 +210,7 @@ where
         admission_deadline,
         admission_queue_max,
         effective_cap_max,
+        decode_cadence_mid_chunk_cap,
         meta,
     )?;
     let vision_input = vision_input_override.unwrap_or(VisionInputConfig::Qwen {
@@ -193,6 +245,7 @@ where
         admission_deadline_ms,
         admission_queue_max,
         effective_cap_max, // 3f
+        scheduler_runtime_profile: Arc::new(scheduler_runtime_profile),
         health_collector,
     };
     let app = Router::new()

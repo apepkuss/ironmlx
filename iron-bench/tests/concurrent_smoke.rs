@@ -186,6 +186,14 @@ async fn concurrent_smoke_against_mock_server() {
         cell["itl_ms"]["p99"].is_number(),
         "itl_ms.p99 must be present; cell={cell}"
     );
+    assert!(
+        cell["early_itl_ms"]["p95"].is_number(),
+        "early_itl_ms.p95 must be present; cell={cell}"
+    );
+    assert_eq!(
+        cell["early_itl_ms"]["first_n"], 8,
+        "early_itl first_n must be exported; cell={cell}"
+    );
 
     // Aggregate throughput.
     assert!(

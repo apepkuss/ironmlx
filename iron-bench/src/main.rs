@@ -5,6 +5,7 @@
 //! p95). Engine-neutral; no dependency on ironmlx/mlx crates.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -79,6 +80,34 @@ struct Args {
     #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
     format: OutputFormat,
 
+    /// Scheduler b_max value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_b_max: Option<usize>,
+
+    /// Scheduler prefill_chunk_size value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_prefill_chunk_size: Option<usize>,
+
+    /// Scheduler admission_deadline_ms value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_admission_deadline_ms: Option<u64>,
+
+    /// Scheduler admission_queue_max value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_admission_queue_max: Option<usize>,
+
+    /// Scheduler max_cache_cap value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_max_cache_cap: Option<usize>,
+
+    /// Scheduler decode-cadence mid-admit chunk cap value used by the benchmarked server.
+    #[arg(long)]
+    pub autotune_decode_cadence_mid_chunk_cap: Option<usize>,
+
+    /// Mark exported autotune measurements as memory-budget unsafe.
+    #[arg(long, default_value_t = false)]
+    pub autotune_memory_budget_unsafe: bool,
+
     /// HTTP request timeout (seconds).
     #[arg(long, default_value_t = 300)]
     timeout: u64,
@@ -114,17 +143,167 @@ struct Args {
     pub nonce_seed: Option<u64>,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum OutputFormat {
     Markdown,
     Csv,
     Json,
+    AutotuneJson,
 }
 
 fn parse_target(s: &str) -> std::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(name, url)| (name.into(), url.trim_end_matches('/').into()))
         .ok_or_else(|| format!("expected name=URL, got '{s}'"))
+}
+
+impl Args {
+    fn autotune_export_options(&self) -> Result<Option<report::AutotuneExportOptions>> {
+        if self.format != OutputFormat::AutotuneJson {
+            return Ok(None);
+        }
+
+        if self.target.len() != 1 {
+            anyhow::bail!(
+                "--format autotune-json requires exactly one --target because the calibration schema has no target field"
+            );
+        }
+
+        Ok(Some(report::AutotuneExportOptions {
+            model_name: self.model.clone(),
+            hardware_label: detect_hardware_label(),
+            config: report::AutotuneProfileConfig {
+                b_max: self
+                    .autotune_b_max
+                    .context("--autotune-b-max is required with --format autotune-json")?,
+                prefill_chunk_size: self.autotune_prefill_chunk_size.context(
+                    "--autotune-prefill-chunk-size is required with --format autotune-json",
+                )?,
+                admission_deadline_ms: self.autotune_admission_deadline_ms.context(
+                    "--autotune-admission-deadline-ms is required with --format autotune-json",
+                )?,
+                admission_queue_max: self.autotune_admission_queue_max.context(
+                    "--autotune-admission-queue-max is required with --format autotune-json",
+                )?,
+                max_cache_cap: self
+                    .autotune_max_cache_cap
+                    .context("--autotune-max-cache-cap is required with --format autotune-json")?,
+                decode_cadence_mid_chunk_cap: self
+                    .autotune_decode_cadence_mid_chunk_cap
+                    .context(
+                        "--autotune-decode-cadence-mid-chunk-cap is required with --format autotune-json",
+                    )?,
+            },
+            memory_budget_ok: !self.autotune_memory_budget_unsafe,
+        }))
+    }
+}
+
+fn detect_hardware_label() -> String {
+    hardware_label_from_parts(detect_cpu_label().as_deref(), detect_total_ram_bytes())
+}
+
+fn hardware_label_from_parts(cpu_label: Option<&str>, total_ram_bytes: Option<u64>) -> String {
+    let cpu = cpu_label
+        .map(slugify_hardware_component)
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| slugify_hardware_component(std::env::consts::ARCH));
+
+    match total_ram_bytes {
+        Some(bytes) => format!("{cpu}-{}gb", rounded_gib(bytes)),
+        None => cpu,
+    }
+}
+
+fn slugify_hardware_component(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_separator = false;
+        } else if !last_was_separator && !slug.is_empty() {
+            slug.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.is_empty() {
+        "unknown".to_string()
+    } else {
+        slug
+    }
+}
+
+fn rounded_gib(bytes: u64) -> u64 {
+    let gib = 1024_u64.pow(3);
+    ((bytes + gib / 2) / gib).max(1)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_cpu_label() -> Option<String> {
+    command_output("sysctl", &["-n", "machdep.cpu.brand_string"])
+        .or_else(|| command_output("sysctl", &["-n", "hw.model"]))
+}
+
+#[cfg(target_os = "linux")]
+fn detect_cpu_label() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    raw.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "model name")
+            .then(|| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn detect_cpu_label() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn detect_total_ram_bytes() -> Option<u64> {
+    command_output("sysctl", &["-n", "hw.memsize"])?
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn detect_total_ram_bytes() -> Option<u64> {
+    let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in raw.lines() {
+        let Some(rest) = line.strip_prefix("MemTotal:") else {
+            continue;
+        };
+        let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+        return kb.checked_mul(1024);
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn detect_total_ram_bytes() -> Option<u64> {
+    None
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 #[tokio::main]
@@ -196,6 +375,8 @@ async fn main() -> Result<()> {
             "--nonce-seed is incompatible with --fixed-prompt-file: fixed prompts do not use nonces."
         );
     }
+
+    let autotune_options = args.autotune_export_options()?;
 
     // Load tokenizer.json before building prompt sources so fixed prompts get
     // an accurate local PP label.
@@ -333,6 +514,12 @@ async fn main() -> Result<()> {
                     args.capture_run_timestamps,
                 ),
                 OutputFormat::Json => report::render_json(&seq_cells, &args.target, args.warmup),
+                OutputFormat::AutotuneJson => report::render_autotune_json_sequential(
+                    &seq_cells,
+                    autotune_options
+                        .as_ref()
+                        .expect("autotune options are validated before benchmark execution"),
+                ),
             }
         }
         Some(concurrent) => {
@@ -359,10 +546,126 @@ async fn main() -> Result<()> {
                     args.duration,
                     args.warmup_duration,
                 ),
+                OutputFormat::AutotuneJson => report::render_autotune_json_concurrent(
+                    &conc_cells,
+                    autotune_options
+                        .as_ref()
+                        .expect("autotune options are validated before benchmark execution"),
+                ),
             }
         }
     };
     println!("{out}");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{hardware_label_from_parts, Args, OutputFormat};
+
+    #[test]
+    fn autotune_cli_parses_output_format_and_scheduler_config() {
+        let args = Args::parse_from([
+            "iron-bench",
+            "--target",
+            "ironmlx=http://localhost:8080",
+            "--model-dir",
+            "/tmp/model",
+            "--format",
+            "autotune-json",
+            "--autotune-b-max",
+            "2",
+            "--autotune-prefill-chunk-size",
+            "1024",
+            "--autotune-admission-deadline-ms",
+            "5",
+            "--autotune-admission-queue-max",
+            "32",
+            "--autotune-max-cache-cap",
+            "32768",
+            "--autotune-decode-cadence-mid-chunk-cap",
+            "256",
+        ]);
+
+        assert!(matches!(args.format, OutputFormat::AutotuneJson));
+        assert_eq!(args.autotune_b_max, Some(2));
+        assert_eq!(args.autotune_prefill_chunk_size, Some(1024));
+        assert_eq!(args.autotune_admission_deadline_ms, Some(5));
+        assert_eq!(args.autotune_admission_queue_max, Some(32));
+        assert_eq!(args.autotune_max_cache_cap, Some(32768));
+        assert_eq!(args.autotune_decode_cadence_mid_chunk_cap, Some(256));
+        assert!(!args.autotune_memory_budget_unsafe);
+    }
+
+    #[test]
+    fn autotune_cli_rejects_manual_hardware_label() {
+        let err = Args::try_parse_from([
+            "iron-bench",
+            "--target",
+            "ironmlx=http://localhost:8080",
+            "--model-dir",
+            "/tmp/model",
+            "--format",
+            "autotune-json",
+            "--autotune-hardware-label",
+            "m3-max",
+            "--autotune-b-max",
+            "2",
+            "--autotune-prefill-chunk-size",
+            "1024",
+            "--autotune-admission-deadline-ms",
+            "5",
+            "--autotune-admission-queue-max",
+            "32",
+            "--autotune-max-cache-cap",
+            "32768",
+            "--autotune-decode-cadence-mid-chunk-cap",
+            "256",
+        ])
+        .expect_err("manual hardware labels should be rejected");
+
+        assert!(err.to_string().contains("autotune-hardware-label"));
+    }
+
+    #[test]
+    fn autotune_export_options_generates_hardware_label_when_omitted() {
+        let args = Args::parse_from([
+            "iron-bench",
+            "--target",
+            "ironmlx=http://localhost:8080",
+            "--model-dir",
+            "/tmp/model",
+            "--format",
+            "autotune-json",
+            "--autotune-b-max",
+            "2",
+            "--autotune-prefill-chunk-size",
+            "1024",
+            "--autotune-admission-deadline-ms",
+            "5",
+            "--autotune-admission-queue-max",
+            "32",
+            "--autotune-max-cache-cap",
+            "32768",
+            "--autotune-decode-cadence-mid-chunk-cap",
+            "256",
+        ]);
+
+        let options = args
+            .autotune_export_options()
+            .expect("autotune options should parse")
+            .expect("autotune-json should produce export options");
+
+        assert!(!options.hardware_label.trim().is_empty());
+    }
+
+    #[test]
+    fn hardware_label_from_parts_slugifies_cpu_and_memory() {
+        let label = hardware_label_from_parts(Some("Apple M5 Max"), Some(128 * 1024_u64.pow(3)));
+
+        assert_eq!(label, "apple-m5-max-128gb");
+    }
 }

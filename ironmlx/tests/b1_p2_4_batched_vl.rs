@@ -128,6 +128,7 @@ fn run_b1_baseline(
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values,
         image_grid_thw,
         image_spatial_merge_size: 2,
@@ -211,8 +212,16 @@ async fn batched_vl_b2_full_vl_bit_id() {
     eprintln!("[S1] baseline_a={baseline_a:?}  baseline_b={baseline_b:?}");
 
     // Scheduler B=2
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let req_a = GenerateRequest {
@@ -221,6 +230,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: Some(vec![pv_a]),
         image_grid_thw: Some(grids_a),
         image_spatial_merge_size: 2,
@@ -245,6 +255,7 @@ async fn batched_vl_b2_full_vl_bit_id() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: Some(vec![pv_b]),
         image_grid_thw: Some(grids_b),
         image_spatial_merge_size: 2,
@@ -363,8 +374,16 @@ async fn batched_vl_b2_mixed_text_and_vl() {
 
     eprintln!("[S2] baseline_text={baseline_text:?}  baseline_vl={baseline_vl:?}");
 
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let req_text = GenerateRequest {
@@ -373,6 +392,7 @@ async fn batched_vl_b2_mixed_text_and_vl() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -397,6 +417,7 @@ async fn batched_vl_b2_mixed_text_and_vl() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: Some(vec![pv]),
         image_grid_thw: Some(grids),
         image_spatial_merge_size: 2,
@@ -524,8 +545,16 @@ async fn mid_admit_vl_during_text_decode() {
     );
 
     // b_max=4 so mid-admit VL can fit alongside A+B
-    let handle = spawn_scheduler_actor(model.clone(), 4, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        4,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let (tx_a, rx_a) = oneshot::channel();
@@ -537,6 +566,7 @@ async fn mid_admit_vl_during_text_decode() {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 256,
                 pixel_values: None,
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
@@ -560,6 +590,7 @@ async fn mid_admit_vl_during_text_decode() {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 256,
                 pixel_values: None,
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
@@ -600,6 +631,7 @@ async fn mid_admit_vl_during_text_decode() {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 256,
                 pixel_values: Some(vec![pv]),
                 image_grid_thw: Some(grids),
                 image_spatial_merge_size: 2,
@@ -756,8 +788,16 @@ async fn batched_vl_multi_image_per_row() {
 
     eprintln!("[S4] baseline_0={baseline_0:?}  baseline_1={baseline_1:?}");
 
-    let handle = spawn_scheduler_actor(model.clone(), 2, Duration::from_millis(5), 32, 32768, meta)
-        .expect("spawn");
+    let handle = spawn_scheduler_actor(
+        model.clone(),
+        2,
+        Duration::from_millis(5),
+        32,
+        32768,
+        256,
+        meta,
+    )
+    .expect("spawn");
     let cmd_tx = handle.cmd_tx.clone();
 
     let (tx_0, rx_0) = oneshot::channel();
@@ -769,6 +809,7 @@ async fn batched_vl_multi_image_per_row() {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 256,
                 pixel_values: Some(pixel_values_0),
                 image_grid_thw: Some(grids_0),
                 image_spatial_merge_size: 2,
@@ -792,6 +833,7 @@ async fn batched_vl_multi_image_per_row() {
                 sampler: Sampler::greedy(),
                 stop_token_ids: tokenizer.eos_token_ids().to_vec(),
                 prefill_chunk_size: 0,
+                decode_cadence_mid_chunk_cap: 256,
                 pixel_values: Some(vec![pv_1]),
                 image_grid_thw: Some(grids_1),
                 image_spatial_merge_size: 2,

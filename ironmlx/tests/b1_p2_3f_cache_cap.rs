@@ -71,6 +71,7 @@ async fn admit_long_prompt_pp10k() {
         /* admission_deadline */ Duration::from_millis(5),
         /* admission_queue_max */ 32,
         /* effective_cap_max */ 32768,
+        /* decode_cadence_mid_chunk_cap */ 256,
         meta,
     )
     .expect("spawn");
@@ -82,6 +83,7 @@ async fn admit_long_prompt_pp10k() {
         sampler: Sampler::greedy(),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: 0,
+        decode_cadence_mid_chunk_cap: 256,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
