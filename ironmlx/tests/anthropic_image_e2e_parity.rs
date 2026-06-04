@@ -42,6 +42,10 @@ use std::time::Duration;
 use base64::Engine;
 use ironmlx::core::model::Model;
 use ironmlx::core::scheduler::DenseVlMethods;
+use ironmlx::core::scheduler_autotune::{
+    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
+    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+};
 use ironmlx::core::server::{self, VisionInputConfig};
 use ironmlx::core::{Loader, Tokenizer};
 
@@ -75,6 +79,23 @@ async fn alloc_port() -> u16 {
 // Server boot helper
 // ---------------------------------------------------------------------------
 
+fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
+    SchedulerAutotuneRuntimeProfile {
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        model_name: "e2e".to_string(),
+        hardware_label: "test-host".to_string(),
+        config: SchedulerAutotuneProfileConfig {
+            b_max: 1,
+            prefill_chunk_size: 2048,
+            admission_deadline_ms: 5,
+            admission_queue_max: 32,
+            max_cache_cap: 32768,
+            decode_cadence_mid_chunk_cap: 256,
+        },
+        rules: Vec::new(),
+    }
+}
+
 fn boot<M>(
     model: M,
     tokenizer: Tokenizer,
@@ -96,6 +117,9 @@ where
             /* admission_deadline_ms */ 5,
             /* admission_queue_max */ 32,
             /* max_cache_cap */ 32768,
+            /* decode_cadence_mid_chunk_cap */ 256,
+            scheduler_profile(),
+            /* scheduler_autotune_report */ false,
             /* p5h_measurement_eval_probes */ false,
             /* vision_input_override */ vision,
         )
