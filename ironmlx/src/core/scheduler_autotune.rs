@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 
@@ -16,7 +17,7 @@ use crate::core::Model;
 use serde::{Deserialize, Serialize};
 
 const PROMPT_LIMIT_SAMPLES: [usize; 4] = [512, 1024, 2048, 8192];
-pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 3;
+pub const SCHEDULER_AUTOTUNE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptBatchLimit {
@@ -529,6 +530,7 @@ pub struct SchedulerAutotuneProfileSelection {
     pub hardware_label: String,
     pub selection_profile: SchedulerAutotuneSelectionProfile,
     pub objective: SchedulerAutotuneObjective,
+    pub scenarios: Vec<SchedulerAutotuneScenario>,
     pub selected: Option<SchedulerAutotuneCandidateScore>,
     pub candidates: Vec<SchedulerAutotuneCandidateScore>,
     pub scenario_overrides: Vec<SchedulerAutotuneScenarioOverride>,
@@ -536,13 +538,43 @@ pub struct SchedulerAutotuneProfileSelection {
     pub warnings: Vec<SchedulerAutotuneSelectionNote>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneRuntimeProfileMetadata {
+    pub created_at_unix_ms: u64,
+    pub ironmlx_version: String,
+    pub selection_profile: SchedulerAutotuneSelectionProfile,
+    pub objective: SchedulerAutotuneObjective,
+    pub scenario_coverage: Vec<SchedulerAutotuneScenario>,
+    pub selected_score: f64,
+    pub candidate_count: usize,
+    pub rejected_count: usize,
+    pub selection_warnings: Vec<SchedulerAutotuneSelectionNote>,
+}
+
+impl SchedulerAutotuneRuntimeProfileMetadata {
+    pub fn synthetic(created_at_unix_ms: u64) -> Self {
+        Self {
+            created_at_unix_ms,
+            ironmlx_version: env!("CARGO_PKG_VERSION").to_string(),
+            selection_profile: SchedulerAutotuneSelectionProfile::AgentLongPrompt,
+            objective: SchedulerAutotuneObjective::agent_default(),
+            scenario_coverage: Vec::new(),
+            selected_score: 1.0,
+            candidate_count: 0,
+            rejected_count: 0,
+            selection_warnings: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchedulerAutotuneRuntimeProfile {
     pub schema_version: u32,
     pub model_name: String,
     pub hardware_label: String,
     pub config: SchedulerAutotuneProfileConfig,
     pub rules: Vec<SchedulerAutotuneRuntimeRule>,
+    pub metadata: SchedulerAutotuneRuntimeProfileMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,6 +623,213 @@ impl SchedulerAutotuneRuntimeRuleCondition {
             self.max_new_tokens_gte,
             self.effective_concurrency_gte,
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchedulerAutotuneProfileHealthStatus {
+    Healthy,
+    Warning,
+    Invalid,
+}
+
+impl SchedulerAutotuneProfileHealthStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Warning => "warning",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchedulerAutotuneProfileHealthLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+impl SchedulerAutotuneProfileHealthLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warning => "WARN",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneProfileHealthNote {
+    pub level: SchedulerAutotuneProfileHealthLevel,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerAutotuneProfileHealthReport {
+    pub status: SchedulerAutotuneProfileHealthStatus,
+    pub model_name: String,
+    pub hardware_label: String,
+    pub created_at_unix_ms: u64,
+    pub max_age_days: u64,
+    pub notes: Vec<SchedulerAutotuneProfileHealthNote>,
+}
+
+impl SchedulerAutotuneProfileHealthReport {
+    pub fn render_text(&self) -> String {
+        let mut out = String::new();
+        writeln!(out, "scheduler/autotune profile health").unwrap();
+        writeln!(out, "status: {}", self.status.as_str()).unwrap();
+        writeln!(out, "model: {}", self.model_name).unwrap();
+        writeln!(out, "hardware: {}", self.hardware_label).unwrap();
+        writeln!(out, "created_at_unix_ms: {}", self.created_at_unix_ms).unwrap();
+        writeln!(out, "max_age_days: {}", self.max_age_days).unwrap();
+        writeln!(out, "notes:").unwrap();
+        for note in &self.notes {
+            writeln!(
+                out,
+                "- {} {}: {}",
+                note.level.as_str(),
+                note.code,
+                note.message
+            )
+            .unwrap();
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SchedulerAutotuneProfileHealthInput<'a> {
+    pub profile: &'a SchedulerAutotuneRuntimeProfile,
+    pub expected_model_name: &'a str,
+    pub expected_hardware_label: &'a str,
+    pub current_ironmlx_version: &'a str,
+    pub now_unix_ms: u64,
+    pub max_age_days: u64,
+}
+
+pub fn evaluate_scheduler_autotune_profile_health(
+    input: SchedulerAutotuneProfileHealthInput<'_>,
+) -> SchedulerAutotuneProfileHealthReport {
+    const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
+
+    let profile = input.profile;
+    let mut notes = Vec::new();
+
+    if profile.schema_version != SCHEDULER_AUTOTUNE_SCHEMA_VERSION {
+        notes.push(profile_health_error(
+            "schema_version_mismatch",
+            format!(
+                "profile schema_version={} does not match expected {}",
+                profile.schema_version, SCHEDULER_AUTOTUNE_SCHEMA_VERSION
+            ),
+        ));
+    }
+
+    if profile.hardware_label != input.expected_hardware_label {
+        notes.push(profile_health_error(
+            "hardware_label_mismatch",
+            format!(
+                "profile hardware_label={} does not match current hardware_label={}",
+                profile.hardware_label, input.expected_hardware_label
+            ),
+        ));
+    }
+
+    if profile.model_name != input.expected_model_name {
+        notes.push(profile_health_warning(
+            "model_name_mismatch",
+            format!(
+                "profile model_name={} differs from current model_name={}; exact model path store matches may still be valid",
+                profile.model_name, input.expected_model_name
+            ),
+        ));
+    }
+
+    if profile.metadata.ironmlx_version != input.current_ironmlx_version {
+        notes.push(profile_health_warning(
+            "ironmlx_version_changed",
+            format!(
+                "profile was created by ironmlx {} but current version is {}; recalibration is recommended",
+                profile.metadata.ironmlx_version, input.current_ironmlx_version
+            ),
+        ));
+    }
+
+    let max_age_ms = input.max_age_days.saturating_mul(MS_PER_DAY);
+    if max_age_ms > 0
+        && input
+            .now_unix_ms
+            .saturating_sub(profile.metadata.created_at_unix_ms)
+            > max_age_ms
+    {
+        notes.push(profile_health_warning(
+            "profile_stale",
+            format!(
+                "profile age exceeds {} day(s); rerun scheduler-autotune calibrate for a fresh baseline",
+                input.max_age_days
+            ),
+        ));
+    }
+
+    let scenarios = &profile.metadata.scenario_coverage;
+    if scenarios.is_empty() {
+        notes.push(profile_health_warning(
+            "no_scenario_coverage",
+            "profile metadata has no calibration scenario coverage".to_string(),
+        ));
+    } else {
+        if !scenarios.iter().any(|scenario| scenario.prompt_len >= 1024) {
+            notes.push(profile_health_warning(
+                "no_long_prompt_coverage",
+                "profile has no PP>=1024 calibration scenario; agent workloads commonly use long prompts".to_string(),
+            ));
+        }
+        if !scenarios.iter().any(|scenario| scenario.concurrency > 1) {
+            notes.push(profile_health_warning(
+                "no_concurrent_coverage",
+                "profile has no concurrency>1 calibration scenario; queued-request TTFT was not validated".to_string(),
+            ));
+        }
+    }
+
+    for warning in &profile.metadata.selection_warnings {
+        notes.push(profile_health_warning(
+            format!("selection_warning_{}", warning.code),
+            warning.message.clone(),
+        ));
+    }
+
+    let status = if notes
+        .iter()
+        .any(|note| note.level == SchedulerAutotuneProfileHealthLevel::Error)
+    {
+        SchedulerAutotuneProfileHealthStatus::Invalid
+    } else if notes
+        .iter()
+        .any(|note| note.level == SchedulerAutotuneProfileHealthLevel::Warning)
+    {
+        SchedulerAutotuneProfileHealthStatus::Warning
+    } else {
+        notes.push(profile_health_info(
+            "profile_healthy",
+            "profile metadata matches current model, hardware, version, age, and agent coverage requirements".to_string(),
+        ));
+        SchedulerAutotuneProfileHealthStatus::Healthy
+    };
+
+    SchedulerAutotuneProfileHealthReport {
+        status,
+        model_name: profile.model_name.clone(),
+        hardware_label: profile.hardware_label.clone(),
+        created_at_unix_ms: profile.metadata.created_at_unix_ms,
+        max_age_days: input.max_age_days,
+        notes,
     }
 }
 
@@ -760,6 +999,7 @@ pub fn select_scheduler_autotune_profile_with_options(
         hardware_label: input.hardware_label,
         selection_profile: options.profile,
         objective,
+        scenarios: required_scenarios.iter().cloned().collect(),
         selected,
         candidates,
         scenario_overrides,
@@ -890,6 +1130,13 @@ impl SchedulerAutotuneProfileSelection {
 pub fn build_scheduler_autotune_runtime_profile(
     selection: &SchedulerAutotuneProfileSelection,
 ) -> Result<SchedulerAutotuneRuntimeProfile> {
+    build_scheduler_autotune_runtime_profile_at(selection, unix_time_ms())
+}
+
+pub fn build_scheduler_autotune_runtime_profile_at(
+    selection: &SchedulerAutotuneProfileSelection,
+    created_at_unix_ms: u64,
+) -> Result<SchedulerAutotuneRuntimeProfile> {
     let selected = selection
         .selected
         .as_ref()
@@ -901,6 +1148,17 @@ pub fn build_scheduler_autotune_runtime_profile(
         hardware_label: selection.hardware_label.clone(),
         config: selected.config,
         rules: runtime_rules_from_overrides(&selection.scenario_overrides),
+        metadata: SchedulerAutotuneRuntimeProfileMetadata {
+            created_at_unix_ms,
+            ironmlx_version: env!("CARGO_PKG_VERSION").to_string(),
+            selection_profile: selection.selection_profile,
+            objective: selection.objective,
+            scenario_coverage: selection.scenarios.clone(),
+            selected_score: selected.score,
+            candidate_count: selection.candidates.len(),
+            rejected_count: selection.rejected.len(),
+            selection_warnings: selection.warnings.clone(),
+        },
     })
 }
 
@@ -1301,12 +1559,53 @@ fn selection_note(
     }
 }
 
+fn profile_health_info(
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> SchedulerAutotuneProfileHealthNote {
+    SchedulerAutotuneProfileHealthNote {
+        level: SchedulerAutotuneProfileHealthLevel::Info,
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+fn profile_health_warning(
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> SchedulerAutotuneProfileHealthNote {
+    SchedulerAutotuneProfileHealthNote {
+        level: SchedulerAutotuneProfileHealthLevel::Warning,
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+fn profile_health_error(
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> SchedulerAutotuneProfileHealthNote {
+    SchedulerAutotuneProfileHealthNote {
+        level: SchedulerAutotuneProfileHealthLevel::Error,
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
 fn nonzero(value: f64) -> f64 {
     if value.is_finite() && value > 1e-9 {
         value
     } else {
         1e-9
     }
+}
+
+fn unix_time_ms() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_millis();
+    millis.min(u128::from(u64::MAX)) as u64
 }
 
 fn default_true() -> bool {

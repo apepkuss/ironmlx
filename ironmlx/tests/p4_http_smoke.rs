@@ -35,6 +35,10 @@ fn scheduler_profile() -> SchedulerAutotuneRuntimeProfile {
             decode_cadence_mid_chunk_cap: 256,
         },
         rules: Vec::new(),
+        metadata:
+            ironmlx::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                1811606400000,
+            ),
     }
 }
 

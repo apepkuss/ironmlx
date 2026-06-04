@@ -1,9 +1,13 @@
 use ironmlx::core::scheduler_autotune::{
-    build_scheduler_autotune_runtime_profile, select_scheduler_autotune_profile,
+    build_scheduler_autotune_runtime_profile, build_scheduler_autotune_runtime_profile_at,
+    evaluate_scheduler_autotune_profile_health, select_scheduler_autotune_profile,
     select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
     SchedulerAutotuneCandidateScore, SchedulerAutotuneMeasurement, SchedulerAutotuneObjective,
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneProfileSelection,
-    SchedulerAutotuneRuntimeRequest, SchedulerAutotuneScenario, SchedulerAutotuneScenarioOverride,
+    SchedulerAutotuneProfileConfig, SchedulerAutotuneProfileHealthInput,
+    SchedulerAutotuneProfileHealthLevel, SchedulerAutotuneProfileHealthStatus,
+    SchedulerAutotuneProfileSelection, SchedulerAutotuneRuntimeProfile,
+    SchedulerAutotuneRuntimeProfileMetadata, SchedulerAutotuneRuntimeRequest,
+    SchedulerAutotuneScenario, SchedulerAutotuneScenarioOverride,
     SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
     SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
@@ -71,6 +75,24 @@ fn input(measurements: Vec<SchedulerAutotuneMeasurement>) -> SchedulerAutotuneCa
     }
 }
 
+fn runtime_profile_with_metadata(
+    created_at_unix_ms: u64,
+    scenario_coverage: Vec<SchedulerAutotuneScenario>,
+) -> SchedulerAutotuneRuntimeProfile {
+    let mut metadata = SchedulerAutotuneRuntimeProfileMetadata::synthetic(created_at_unix_ms);
+    metadata.scenario_coverage = scenario_coverage;
+    metadata.candidate_count = 1;
+
+    SchedulerAutotuneRuntimeProfile {
+        schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        model_name: "test-model".to_string(),
+        hardware_label: "test-host".to_string(),
+        config: config(1, 2048, 5),
+        rules: Vec::new(),
+        metadata,
+    }
+}
+
 fn candidate_score(config: SchedulerAutotuneProfileConfig) -> SchedulerAutotuneCandidateScore {
     SchedulerAutotuneCandidateScore {
         config,
@@ -112,6 +134,10 @@ fn selection_with_overrides(
         hardware_label: "test-host".to_string(),
         selection_profile: SchedulerAutotuneSelectionProfile::AgentLongPrompt,
         objective: SchedulerAutotuneObjective::agent_default(),
+        scenarios: scenario_overrides
+            .iter()
+            .map(|item| item.scenario.clone())
+            .collect(),
         selected: Some(candidate_score(selected_config)),
         candidates: vec![candidate_score(selected_config)],
         scenario_overrides,
@@ -285,6 +311,147 @@ fn profile_selection_warns_when_agent_long_prompt_or_concurrency_coverage_is_abs
         .warnings
         .iter()
         .any(|item| item.code == "no_concurrent_coverage"));
+}
+
+#[test]
+fn profile_selection_records_scenario_coverage_for_runtime_metadata() {
+    let selected_config = config(1, 2048, 5);
+    let selection = select_scheduler_autotune_profile(input(vec![
+        measurement(selected_config, 1024, 128, 1, 100.0, 10.0, 2.0, 90.0),
+        measurement(selected_config, 4096, 128, 2, 200.0, 11.0, 4.0, 80.0),
+    ]));
+
+    assert_eq!(selection.scenarios.len(), 2);
+    assert!(selection.scenarios.iter().any(|scenario| {
+        scenario.prompt_len == 4096 && scenario.max_new_tokens == 128 && scenario.concurrency == 2
+    }));
+}
+
+#[test]
+fn runtime_profile_metadata_captures_selection_context() {
+    let selected_config = config(1, 2048, 5);
+    let selection = select_scheduler_autotune_profile(input(vec![
+        measurement(selected_config, 1024, 128, 1, 100.0, 10.0, 2.0, 90.0),
+        measurement(selected_config, 4096, 128, 2, 200.0, 11.0, 4.0, 80.0),
+    ]));
+
+    let profile = build_scheduler_autotune_runtime_profile_at(&selection, 1811606400000)
+        .expect("expected runtime profile");
+
+    assert_eq!(profile.schema_version, SCHEDULER_AUTOTUNE_SCHEMA_VERSION);
+    assert_eq!(profile.metadata.created_at_unix_ms, 1811606400000);
+    assert_eq!(
+        profile.metadata.selection_profile,
+        SchedulerAutotuneSelectionProfile::AgentLongPrompt
+    );
+    assert_eq!(profile.metadata.scenario_coverage.len(), 2);
+    assert_eq!(profile.metadata.candidate_count, 1);
+    assert_eq!(profile.metadata.rejected_count, 0);
+    assert!(profile.metadata.selected_score.is_finite());
+}
+
+#[test]
+fn profile_health_reports_healthy_for_matching_fresh_agent_coverage() {
+    let profile = runtime_profile_with_metadata(
+        1811606400000,
+        vec![
+            SchedulerAutotuneScenario {
+                prompt_len: 1024,
+                max_new_tokens: 128,
+                concurrency: 1,
+            },
+            SchedulerAutotuneScenario {
+                prompt_len: 4096,
+                max_new_tokens: 128,
+                concurrency: 2,
+            },
+        ],
+    );
+
+    let report = evaluate_scheduler_autotune_profile_health(SchedulerAutotuneProfileHealthInput {
+        profile: &profile,
+        expected_model_name: "test-model",
+        expected_hardware_label: "test-host",
+        current_ironmlx_version: env!("CARGO_PKG_VERSION"),
+        now_unix_ms: 1811606400000 + 1000,
+        max_age_days: 30,
+    });
+
+    assert_eq!(report.status, SchedulerAutotuneProfileHealthStatus::Healthy);
+    assert!(report
+        .notes
+        .iter()
+        .all(|note| note.level == SchedulerAutotuneProfileHealthLevel::Info));
+}
+
+#[test]
+fn profile_health_warns_for_stale_version_and_missing_concurrency_coverage() {
+    let mut profile = runtime_profile_with_metadata(
+        1811606400000,
+        vec![SchedulerAutotuneScenario {
+            prompt_len: 1024,
+            max_new_tokens: 128,
+            concurrency: 1,
+        }],
+    );
+    profile.metadata.ironmlx_version = "0.0.0-test".to_string();
+
+    let report = evaluate_scheduler_autotune_profile_health(SchedulerAutotuneProfileHealthInput {
+        profile: &profile,
+        expected_model_name: "other-model-name",
+        expected_hardware_label: "test-host",
+        current_ironmlx_version: env!("CARGO_PKG_VERSION"),
+        now_unix_ms: 1811606400000 + 31 * 24 * 60 * 60 * 1000,
+        max_age_days: 30,
+    });
+
+    assert_eq!(report.status, SchedulerAutotuneProfileHealthStatus::Warning);
+    assert!(report.notes.iter().any(|note| note.code == "profile_stale"));
+    assert!(report
+        .notes
+        .iter()
+        .any(|note| note.code == "ironmlx_version_changed"));
+    assert!(report
+        .notes
+        .iter()
+        .any(|note| note.code == "model_name_mismatch"));
+    assert!(report
+        .notes
+        .iter()
+        .any(|note| note.code == "no_concurrent_coverage"));
+}
+
+#[test]
+fn profile_health_invalidates_schema_and_hardware_mismatch() {
+    let mut profile = runtime_profile_with_metadata(
+        1811606400000,
+        vec![SchedulerAutotuneScenario {
+            prompt_len: 4096,
+            max_new_tokens: 128,
+            concurrency: 2,
+        }],
+    );
+    profile.schema_version = SCHEDULER_AUTOTUNE_SCHEMA_VERSION + 1;
+    profile.hardware_label = "other-host".to_string();
+
+    let report = evaluate_scheduler_autotune_profile_health(SchedulerAutotuneProfileHealthInput {
+        profile: &profile,
+        expected_model_name: "test-model",
+        expected_hardware_label: "test-host",
+        current_ironmlx_version: env!("CARGO_PKG_VERSION"),
+        now_unix_ms: 1811606400000,
+        max_age_days: 30,
+    });
+
+    assert_eq!(report.status, SchedulerAutotuneProfileHealthStatus::Invalid);
+    assert!(report
+        .notes
+        .iter()
+        .any(|note| note.code == "schema_version_mismatch"));
+    assert!(report
+        .notes
+        .iter()
+        .any(|note| note.code == "hardware_label_mismatch"));
 }
 
 #[test]

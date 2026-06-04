@@ -357,6 +357,36 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_autotune_profile_doctor_subcommand_parses_model() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "scheduler-autotune",
+            "profile",
+            "doctor",
+            "--model",
+            "/tmp/model",
+        ]);
+
+        match cli.command {
+            Command::SchedulerAutotune(args) => match args.action {
+                Some(super::scheduler_autotune::SchedulerAutotuneAction::Profile(profile)) => {
+                    match profile.action {
+                        super::scheduler_autotune::SchedulerAutotuneProfileAction::Doctor(
+                            doctor,
+                        ) => {
+                            assert_eq!(doctor.model.to_string_lossy(), "/tmp/model");
+                            assert_eq!(doctor.max_age_days, 30);
+                        }
+                        other => panic!("expected profile doctor action, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Profile action, got {other:?}"),
+            },
+            other => panic!("expected SchedulerAutotune command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn serve_subcommand_parses_scheduler_profile() {
         let cli = Cli::parse_from([
             "ironmlx",

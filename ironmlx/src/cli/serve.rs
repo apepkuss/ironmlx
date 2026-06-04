@@ -1,6 +1,7 @@
 //! `ironmlx serve` — boot HTTP server with OpenAI + Anthropic compatibility.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use clap::Args;
@@ -10,8 +11,10 @@ use super::scheduler_profile_store::{
 };
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
-    SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-    SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+    evaluate_scheduler_autotune_profile_health, SchedulerAutotuneProfileConfig,
+    SchedulerAutotuneProfileHealthInput, SchedulerAutotuneProfileHealthReport,
+    SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeProfile,
+    SchedulerAutotuneRuntimeProfileMetadata, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
 use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
@@ -145,6 +148,7 @@ fn default_scheduler_runtime_profile() -> SchedulerAutotuneRuntimeProfile {
         hardware_label: "local".to_string(),
         config: default_scheduler_profile_config(),
         rules: Vec::new(),
+        metadata: SchedulerAutotuneRuntimeProfileMetadata::synthetic(0),
     }
 }
 
@@ -216,6 +220,64 @@ fn load_scheduler_profile_for_model(
     }))
 }
 
+fn check_loaded_scheduler_profile_health(
+    profile: &SchedulerAutotuneRuntimeProfile,
+    expected_model_name: &str,
+    expected_hardware_label: &str,
+    now_unix_ms: u64,
+) -> Result<SchedulerAutotuneProfileHealthReport> {
+    let report = evaluate_scheduler_autotune_profile_health(SchedulerAutotuneProfileHealthInput {
+        profile,
+        expected_model_name,
+        expected_hardware_label,
+        current_ironmlx_version: env!("CARGO_PKG_VERSION"),
+        now_unix_ms,
+        max_age_days: 30,
+    });
+    if report.status == SchedulerAutotuneProfileHealthStatus::Invalid {
+        bail!("invalid scheduler profile:\n{}", report.render_text());
+    }
+    Ok(report)
+}
+
+fn log_scheduler_profile_health(
+    profile_path: &Path,
+    report: &SchedulerAutotuneProfileHealthReport,
+) {
+    let note_codes = report
+        .notes
+        .iter()
+        .map(|note| note.code.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    match report.status {
+        SchedulerAutotuneProfileHealthStatus::Healthy => {
+            tracing::info!(
+                "ironmlx serve: scheduler profile health status={} path={} notes={}",
+                report.status.as_str(),
+                profile_path.display(),
+                note_codes
+            );
+        }
+        SchedulerAutotuneProfileHealthStatus::Warning => {
+            tracing::warn!(
+                "ironmlx serve: scheduler profile health status={} path={} notes={} recommendation=\"rerun scheduler-autotune calibrate for this model\"",
+                report.status.as_str(),
+                profile_path.display(),
+                note_codes
+            );
+        }
+        SchedulerAutotuneProfileHealthStatus::Invalid => {
+            tracing::warn!(
+                "ironmlx serve: scheduler profile health status={} path={} notes={}",
+                report.status.as_str(),
+                profile_path.display(),
+                note_codes
+            );
+        }
+    }
+}
+
 fn scheduler_profile_model_name(model_dir: &Path) -> Result<String> {
     model_dir
         .file_name()
@@ -225,6 +287,14 @@ fn scheduler_profile_model_name(model_dir: &Path) -> Result<String> {
         .ok_or_else(|| {
             anyhow::anyhow!("--model has no directory name for scheduler profile lookup")
         })
+}
+
+fn unix_time_ms() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_millis();
+    millis.min(u128::from(u64::MAX)) as u64
 }
 
 fn apply_scheduler_cli_overrides(
@@ -435,12 +505,38 @@ pub fn run(args: ServeArgs) -> Result<()> {
         None
     };
     let scheduler_profile_hardware_label = detect_scheduler_profile_hardware_label();
-    let scheduler_profile_load = load_scheduler_profile_for_model(
+    let mut scheduler_profile_load = load_scheduler_profile_for_model(
         &args,
         &model_dir,
         scheduler_profile_store.as_ref(),
         &scheduler_profile_hardware_label,
     )?;
+    let scheduler_profile_model_name = scheduler_profile_model_name(&model_dir)?;
+    let mut discard_auto_profile = false;
+    if let Some(load) = scheduler_profile_load.as_ref() {
+        match check_loaded_scheduler_profile_health(
+            &load.profile,
+            &scheduler_profile_model_name,
+            &scheduler_profile_hardware_label,
+            unix_time_ms(),
+        ) {
+            Ok(report) => log_scheduler_profile_health(&load.path, &report),
+            Err(error) if load.auto_loaded => {
+                tracing::warn!(
+                    "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
+                    load.path.display(),
+                    scheduler_profile_model_name,
+                    scheduler_profile_hardware_label,
+                    error
+                );
+                discard_auto_profile = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if discard_auto_profile {
+        scheduler_profile_load = None;
+    }
     let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
         &args,
         scheduler_profile_load.as_ref().map(|load| &load.profile),
@@ -590,14 +686,16 @@ mod scheduler_profile_tests {
 
     use crate::cli::scheduler_profile_store::SchedulerProfileStore;
     use crate::core::scheduler_autotune::{
-        SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-        SchedulerAutotuneRuntimeRule, SchedulerAutotuneRuntimeRuleCondition,
+        SchedulerAutotuneProfileConfig, SchedulerAutotuneProfileHealthStatus,
+        SchedulerAutotuneRuntimeProfile, SchedulerAutotuneRuntimeRule,
+        SchedulerAutotuneRuntimeRuleCondition, SchedulerAutotuneScenario,
         SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
 
     use super::{
-        load_scheduler_profile_for_model, resolve_scheduler_runtime_profile,
-        resolve_scheduler_serve_config, SchedulerServeConfig, ServeArgs,
+        check_loaded_scheduler_profile_health, load_scheduler_profile_for_model,
+        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config, SchedulerServeConfig,
+        ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -629,6 +727,10 @@ mod scheduler_profile_tests {
                     ..profile_config()
                 },
             }],
+            metadata:
+                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                    1811606400000,
+                ),
         }
     }
 
@@ -714,6 +816,48 @@ mod scheduler_profile_tests {
         assert_eq!(profile.rules.len(), 1);
         assert_eq!(profile.rules[0].config.prefill_chunk_size, 256);
         assert_eq!(profile.rules[0].config.decode_cadence_mid_chunk_cap, 64);
+    }
+
+    #[test]
+    fn scheduler_profile_health_warning_does_not_prevent_profile_resolution() {
+        let mut profile = runtime_profile();
+        profile.metadata.created_at_unix_ms = 1811606400000;
+        profile.metadata.scenario_coverage = vec![SchedulerAutotuneScenario {
+            prompt_len: 1024,
+            max_new_tokens: 128,
+            concurrency: 1,
+        }];
+        let args = base_args();
+
+        let checked = check_loaded_scheduler_profile_health(
+            &profile,
+            "different-model-name",
+            "test-host",
+            1811606400000 + 31 * 24 * 60 * 60 * 1000,
+        )
+        .expect("warning health should not fail");
+
+        assert_eq!(
+            checked.status,
+            SchedulerAutotuneProfileHealthStatus::Warning
+        );
+        assert!(resolve_scheduler_runtime_profile(&args, Some(&profile)).is_ok());
+    }
+
+    #[test]
+    fn scheduler_profile_health_invalid_returns_error() {
+        let mut profile = runtime_profile();
+        profile.hardware_label = "other-host".to_string();
+
+        let error = check_loaded_scheduler_profile_health(
+            &profile,
+            "test-model",
+            "test-host",
+            1811606400000,
+        )
+        .expect_err("invalid health should fail");
+
+        assert!(format!("{error:#}").contains("invalid scheduler profile"));
     }
 
     #[test]

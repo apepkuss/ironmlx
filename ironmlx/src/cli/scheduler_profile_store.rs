@@ -485,6 +485,10 @@ mod tests {
                 decode_cadence_mid_chunk_cap: 384,
             },
             rules: Vec::new(),
+            metadata:
+                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                    1811606400000,
+                ),
         }
     }
 

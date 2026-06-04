@@ -402,7 +402,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
     // no HTTP 4xx should occur.
     use ironmlx::core::scheduler_autotune::{
         SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
-        SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+        SchedulerAutotuneRuntimeProfileMetadata, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
     use ironmlx::core::server;
 
@@ -419,6 +419,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             decode_cadence_mid_chunk_cap: 256,
         },
         rules: Vec::new(),
+        metadata: SchedulerAutotuneRuntimeProfileMetadata::synthetic(1811606400000),
     };
 
     let port = 18400 + (std::process::id() % 1000) as u16;

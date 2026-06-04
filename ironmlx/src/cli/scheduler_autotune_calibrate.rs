@@ -1052,6 +1052,10 @@ mod tests {
             hardware_label: "m5-max-128gb".to_string(),
             config: profile_config(),
             rules: Vec::new(),
+            metadata:
+                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                    1811606400000,
+                ),
         };
         let output = serde_json::to_string_pretty(&runtime_profile).expect("serialize profile");
         std::fs::write(&profile_path, format!("{output}\n")).expect("write profile artifact");

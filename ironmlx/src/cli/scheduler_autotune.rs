@@ -1,15 +1,21 @@
 //! `ironmlx scheduler-autotune` — post-process offline calibration results.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use clap::{Args, Subcommand, ValueEnum};
+use serde::Serialize;
 
-use super::scheduler_profile_store::SchedulerProfileStore;
+use super::scheduler_profile_store::{
+    detect_scheduler_profile_hardware_label, SchedulerProfileStore,
+};
 use crate::core::scheduler_autotune::{
-    build_scheduler_autotune_runtime_profile, merge_scheduler_autotune_calibrations,
-    select_scheduler_autotune_profile_with_options, SchedulerAutotuneCalibrationInput,
-    SchedulerAutotuneMergeOptions, SchedulerAutotuneRuntimeProfile,
+    build_scheduler_autotune_runtime_profile, evaluate_scheduler_autotune_profile_health,
+    merge_scheduler_autotune_calibrations, select_scheduler_autotune_profile_with_options,
+    SchedulerAutotuneCalibrationInput, SchedulerAutotuneMergeOptions,
+    SchedulerAutotuneProfileHealthInput, SchedulerAutotuneProfileHealthReport,
+    SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneSelectionOptions, SchedulerAutotuneSelectionProfile,
 };
 use crate::Result;
@@ -94,6 +100,8 @@ pub enum SchedulerAutotuneProfileAction {
     List,
     /// Print one persisted scheduler profile as JSON.
     Show(SchedulerAutotuneProfileShowArgs),
+    /// Diagnose the matching local scheduler profile for one model.
+    Doctor(SchedulerAutotuneProfileDoctorArgs),
     /// Remove one persisted scheduler profile and its JSON file.
     Remove(SchedulerAutotuneProfileRemoveArgs),
     /// Import one runtime scheduler profile into ~/.ironmlx for one model path.
@@ -104,6 +112,21 @@ pub enum SchedulerAutotuneProfileAction {
 pub struct SchedulerAutotuneProfileShowArgs {
     /// Profile id from `scheduler-autotune profile list`.
     pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct SchedulerAutotuneProfileDoctorArgs {
+    /// Local model directory to match against ~/.ironmlx scheduler profiles.
+    #[arg(long)]
+    pub model: PathBuf,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = SchedulerAutotuneOutputFormat::Text)]
+    pub format: SchedulerAutotuneOutputFormat,
+
+    /// Maximum accepted profile age before warning.
+    #[arg(long, default_value_t = 30)]
+    pub max_age_days: u64,
 }
 
 #[derive(Args, Debug)]
@@ -171,6 +194,7 @@ fn run_profile(args: SchedulerAutotuneProfileArgs) -> Result<()> {
     match args.action {
         SchedulerAutotuneProfileAction::List => run_profile_list(&store),
         SchedulerAutotuneProfileAction::Show(show) => run_profile_show(&store, show),
+        SchedulerAutotuneProfileAction::Doctor(doctor) => run_profile_doctor(&store, doctor),
         SchedulerAutotuneProfileAction::Remove(remove) => run_profile_remove(&store, remove),
         SchedulerAutotuneProfileAction::Import(import) => run_profile_import(&store, import),
     }
@@ -222,6 +246,57 @@ fn run_profile_show(
     Ok(())
 }
 
+fn run_profile_doctor(
+    store: &SchedulerProfileStore,
+    args: SchedulerAutotuneProfileDoctorArgs,
+) -> Result<()> {
+    let model_name = profile_model_name(&args.model)?;
+    let hardware_label = detect_scheduler_profile_hardware_label();
+    let Some(profile_path) = store.find_profile(&args.model, &model_name, &hardware_label)? else {
+        bail!(
+            "no matching scheduler profile found for model={} model_name={} hardware_label={} store={}",
+            args.model.display(),
+            model_name,
+            hardware_label,
+            store.root().display()
+        );
+    };
+    let profile = read_runtime_profile(&profile_path)?;
+    let report = evaluate_scheduler_autotune_profile_health(SchedulerAutotuneProfileHealthInput {
+        profile: &profile,
+        expected_model_name: &model_name,
+        expected_hardware_label: &hardware_label,
+        current_ironmlx_version: env!("CARGO_PKG_VERSION"),
+        now_unix_ms: unix_time_ms(),
+        max_age_days: args.max_age_days,
+    });
+    let recalibrate_command = recalibrate_command(&args.model, report.status);
+
+    match args.format {
+        SchedulerAutotuneOutputFormat::Text => {
+            println!("store: {}", store.root().display());
+            println!("profile_path: {}", profile_path.display());
+            print!("{}", report.render_text());
+            if let Some(command) = recalibrate_command {
+                println!("recalibrate: {command}");
+            }
+        }
+        SchedulerAutotuneOutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&SchedulerAutotuneProfileDoctorOutput {
+                    store: store.root().display().to_string(),
+                    profile_path: profile_path.display().to_string(),
+                    report,
+                    recalibrate_command,
+                })?
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn run_profile_remove(
     store: &SchedulerProfileStore,
     args: SchedulerAutotuneProfileRemoveArgs,
@@ -257,6 +332,14 @@ fn import_profile(
     let profile: SchedulerAutotuneRuntimeProfile = serde_json::from_str(&raw)
         .with_context(|| format!("parsing {}", args.profile.display()))?;
     store.persist_profile(&args.model, &profile)
+}
+
+#[derive(Debug, Serialize)]
+struct SchedulerAutotuneProfileDoctorOutput {
+    store: String,
+    profile_path: String,
+    report: SchedulerAutotuneProfileHealthReport,
+    recalibrate_command: Option<String>,
 }
 
 fn run_select(args: SchedulerAutotuneSelectArgs) -> Result<()> {
@@ -315,6 +398,44 @@ fn read_calibration(path: &Path) -> Result<SchedulerAutotuneCalibrationInput> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn read_runtime_profile(path: &Path) -> Result<SchedulerAutotuneRuntimeProfile> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn profile_model_name(model: &Path) -> Result<String> {
+    model
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow::anyhow!("--model has no directory name for scheduler profile lookup")
+        })
+}
+
+fn recalibrate_command(
+    model: &Path,
+    status: SchedulerAutotuneProfileHealthStatus,
+) -> Option<String> {
+    if status == SchedulerAutotuneProfileHealthStatus::Healthy {
+        return None;
+    }
+    Some(format!(
+        "ironmlx scheduler-autotune calibrate --model {}",
+        model.display()
+    ))
+}
+
+fn unix_time_ms() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_millis();
+    millis.min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
@@ -376,6 +497,10 @@ mod tests {
                 decode_cadence_mid_chunk_cap: 128,
             },
             rules: Vec::new(),
+            metadata:
+                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(
+                    1811606400000,
+                ),
         }
     }
 
