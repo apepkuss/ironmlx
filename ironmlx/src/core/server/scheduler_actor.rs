@@ -31,6 +31,7 @@ use crate::core::model::Model;
 use crate::core::scheduler::{
     AdmitMidHandle, DenseVlMethods, Phase, RequestId, Scheduler, StepEvent,
 };
+use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel};
 use crate::Result;
 
 /// Commands accepted by the actor. 3b-2 ships only [`Admit`]; later
@@ -169,6 +170,115 @@ impl RollingAdmissionPolicy {
     }
 }
 
+#[derive(Clone)]
+struct SchedulerActorMtpCounters {
+    mtp_prefill_count: Arc<AtomicU64>,
+    mtp_step_count: Arc<AtomicU64>,
+}
+
+impl SchedulerActorMtpCounters {
+    fn new(mtp_prefill_count: Arc<AtomicU64>, mtp_step_count: Arc<AtomicU64>) -> Self {
+        Self {
+            mtp_prefill_count,
+            mtp_step_count,
+        }
+    }
+}
+
+trait SchedulerActorMtpMode<M>
+where
+    M: Model + DenseVlMethods,
+{
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>>;
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>>;
+}
+
+struct SchedulerActorNoMtp;
+
+struct SchedulerActorMtp<H> {
+    mtp: H,
+    cfg: MtpSpeculativeConfig,
+}
+
+impl<H> SchedulerActorMtp<H> {
+    fn new(mtp: H, mtp_draft_tokens: usize) -> Self {
+        debug_assert!(mtp_draft_tokens > 0);
+        Self {
+            mtp,
+            cfg: MtpSpeculativeConfig {
+                max_draft_tokens: mtp_draft_tokens,
+            },
+        }
+    }
+}
+
+impl<M> SchedulerActorMtpMode<M> for SchedulerActorNoMtp
+where
+    M: Model + DenseVlMethods,
+{
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        _counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        sched.prefill_admitted(model)
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        _counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        sched.step(model)
+    }
+}
+
+impl<M> SchedulerActorMtpMode<M> for SchedulerActorMtp<M::MtpHead>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel,
+{
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        if sched.mtp_single_active_text_greedy_eligible() {
+            counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
+            sched.prefill_admitted_mtp_single(model, &self.mtp, self.cfg)
+        } else {
+            sched.prefill_admitted(model)
+        }
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        if sched.mtp_stats().is_some() {
+            counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
+            sched.step_mtp_single(model, &self.mtp)
+        } else {
+            sched.step(model)
+        }
+    }
+}
+
 /// P5h+2.c regression counter: incremented every time the actor's Step
 /// branch observes an `Err` whose Debug output contains
 /// `step illegal in Finished phase`. The integration test
@@ -276,6 +386,14 @@ pub struct SchedulerActorHandle {
     /// queue full" Err (queue_max overflow). Doc-hidden.
     #[doc(hidden)]
     pub queue_rejected: Arc<AtomicU64>,
+    /// Count of actor calls to scheduler-internal MTP prefill. Exposed through
+    /// `/healthz.mtp.prefill_count` for server-level diagnostics.
+    #[doc(hidden)]
+    pub mtp_prefill_count: Arc<AtomicU64>,
+    /// Count of actor calls to scheduler-internal MTP step. Exposed through
+    /// `/healthz.mtp.step_count` for server-level diagnostics.
+    #[doc(hidden)]
+    pub mtp_step_count: Arc<AtomicU64>,
     // ── B1-p2.5 G3: /healthz monitoring atomics ──────────────────────────
     /// Live count of in-flight (active) requests in the scheduler slots.
     /// Updated by driver_loop tail on every rolling iteration.
@@ -327,6 +445,61 @@ pub fn spawn_scheduler_actor<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorNoMtp,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_scheduler_actor_with_mtp<M>(
+    model: Arc<Mutex<M>>,
+    mtp: M::MtpHead,
+    mtp_draft_tokens: usize,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M::MtpHead: Send + 'static,
+{
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_scheduler_actor_with_mode<M, A>(
+    model: Arc<Mutex<M>>,
+    mtp_mode: A,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M> + Send + 'static,
+{
     // ── Step 1: Budget validation on the calling thread. ──────────────────
     // No Scheduler / Array is allocated here — just pure arithmetic + RAM
     // check. Returns Err early if the budget is too tight.
@@ -357,6 +530,8 @@ where
     let saturate_triggered = Arc::new(AtomicU64::new(0));
     let queue_depth_peak = Arc::new(AtomicUsize::new(0));
     let queue_rejected = Arc::new(AtomicU64::new(0));
+    let mtp_prefill_count = Arc::new(AtomicU64::new(0));
+    let mtp_step_count = Arc::new(AtomicU64::new(0));
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
@@ -369,6 +544,8 @@ where
     let saturate_triggered_for_task = saturate_triggered.clone();
     let queue_depth_peak_for_task = queue_depth_peak.clone();
     let queue_rejected_for_task = queue_rejected.clone();
+    let mtp_counters_for_task =
+        SchedulerActorMtpCounters::new(mtp_prefill_count.clone(), mtp_step_count.clone());
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
 
@@ -387,6 +564,8 @@ where
         driver_loop(
             scheduler,
             model,
+            mtp_mode,
+            mtp_counters_for_task,
             admission_deadline,
             admission_queue_max,
             cmd_rx,
@@ -408,6 +587,8 @@ where
         saturate_triggered,
         queue_depth_peak,
         queue_rejected: queue_rejected.clone(),
+        mtp_prefill_count,
+        mtp_step_count,
         b_active,
         b_queued,
         // P1.1: alias admission_queue_full_count to queue_rejected Arc —
@@ -420,9 +601,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn driver_loop<M>(
+fn driver_loop<M, A>(
     scheduler: Scheduler<M>,
     model: Arc<Mutex<M>>,
+    mut mtp_mode: A,
+    mtp_counters: SchedulerActorMtpCounters,
     admission_deadline: Duration,
     admission_queue_max: usize,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
@@ -436,6 +619,7 @@ fn driver_loop<M>(
     decode_cadence_mid_chunk_cap: usize,
 ) where
     M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
 {
     // Receive Scheduler ownership from spawn_scheduler_actor (single instance).
     // P0 fix: previously driver_loop called Scheduler::new a second time,
@@ -506,7 +690,7 @@ fn driver_loop<M>(
             .then(|| (sched.active_count(), admission_queue.len(), Instant::now()));
         let prefill_result = {
             let model_lock = model.blocking_lock();
-            sched.prefill_admitted(&model_lock)
+            mtp_mode.prefill_admitted(&mut sched, &model_lock, &mtp_counters)
         };
         match prefill_result {
             Ok(prefill_events) => {
@@ -584,6 +768,8 @@ fn driver_loop<M>(
                     &queue_depth_peak,
                     &queue_rejected,
                     &batch_count,
+                    &mut mtp_mode,
+                    &mtp_counters,
                     b_max,
                     admission_queue_max,
                     admission_deadline,
@@ -696,7 +882,7 @@ fn driver_loop<M>(
                             let _guard =
                                 crate::core::p5h::P5hTraceGuard::enter(ctx.clone(), root.clone());
                             let model_lock = model.blocking_lock();
-                            sched.step(&model_lock)
+                            mtp_mode.step(&mut sched, &model_lock, &mtp_counters)
                         };
                         crate::core::p5h::close_p5h_span(
                             &ctx,
@@ -707,12 +893,12 @@ fn driver_loop<M>(
                         result
                     } else {
                         let model_lock = model.blocking_lock();
-                        sched.step(&model_lock)
+                        mtp_mode.step(&mut sched, &model_lock, &mtp_counters)
                     };
                     #[cfg(not(feature = "p5h-profile"))]
                     let step_result = {
                         let model_lock = model.blocking_lock();
-                        sched.step(&model_lock)
+                        mtp_mode.step(&mut sched, &model_lock, &mtp_counters)
                     };
                     let step_end = step_profile.map(|_| Instant::now());
                     match step_result {
@@ -840,6 +1026,8 @@ fn driver_loop<M>(
                     &queue_depth_peak,
                     &queue_rejected,
                     &batch_count,
+                    &mut mtp_mode,
+                    &mtp_counters,
                     b_max,
                     admission_queue_max,
                     admission_deadline,
@@ -1437,7 +1625,7 @@ fn finalize_finished_batch_if_any<M: Model>(
 /// Added by P5h+2.c. Replaces the existing `if sched.active_count() == 0
 /// { ... }` block at rolling-loop tail to avoid divergent copies.
 #[allow(clippy::too_many_arguments)]
-fn drive_empty_scheduler_handoff<M>(
+fn drive_empty_scheduler_handoff<M, A>(
     sched: &mut Scheduler<M>,
     cmd_rx: &mut mpsc::Receiver<SchedulerCommand>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
@@ -1448,6 +1636,8 @@ fn drive_empty_scheduler_handoff<M>(
     queue_depth_peak: &Arc<AtomicUsize>,
     queue_rejected: &Arc<AtomicU64>,
     batch_count: &Arc<AtomicU64>,
+    mtp_mode: &mut A,
+    mtp_counters: &SchedulerActorMtpCounters,
     b_max: usize,
     admission_queue_max: usize,
     admission_deadline: Duration,
@@ -1455,6 +1645,7 @@ fn drive_empty_scheduler_handoff<M>(
 ) -> RollingControl
 where
     M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
 {
     // P5h+2.c: finalize any Finished batch BEFORE re-admitting. After
     // this, phase is one of {Idle, Decoding}; never Finished. Callers
@@ -1549,7 +1740,7 @@ where
         batch_count.fetch_add(1, Ordering::Relaxed);
         let prefill_result = {
             let model_lock = model.blocking_lock();
-            sched.prefill_admitted(&model_lock)
+            mtp_mode.prefill_admitted(sched, &model_lock, mtp_counters)
         };
         match prefill_result {
             Ok(events) => {
@@ -1616,7 +1807,7 @@ where
             batch_count.fetch_add(1, Ordering::Relaxed);
             let prefill_result = {
                 let model_lock = model.blocking_lock();
-                sched.prefill_admitted(&model_lock)
+                mtp_mode.prefill_admitted(sched, &model_lock, mtp_counters)
             };
             match prefill_result {
                 Ok(events) => {
@@ -1650,10 +1841,15 @@ where
 mod tests {
     use super::*;
 
+    use crate::core::cache::MtpCache;
     use crate::core::generate::{GenerateRequest, IMAGE_TOKEN_ID};
     use crate::core::sampler::Sampler;
+    use crate::core::speculative::MtpSpeculativeModel;
+    use crate::nn::MtpStepOutput;
 
     struct SchedulerActorFakeModel;
+    #[derive(Clone, Copy)]
+    struct SchedulerActorFakeMtpHead;
 
     impl Model for SchedulerActorFakeModel {
         fn make_cache(
@@ -1782,6 +1978,80 @@ mod tests {
         }
     }
 
+    impl MtpSpeculativeModel for SchedulerActorFakeModel {
+        type MtpHead = SchedulerActorFakeMtpHead;
+
+        fn load_mtp_head(&self, _loader: &crate::core::Loader) -> Result<Self::MtpHead> {
+            Ok(SchedulerActorFakeMtpHead)
+        }
+
+        fn make_mtp_cache(
+            &self,
+            _mtp: &Self::MtpHead,
+            batch: i32,
+            cap: i32,
+            dtype: mlx::Dtype,
+        ) -> Result<MtpCache> {
+            MtpCache::new_with_cap(1, batch, 1, 1, 1, dtype, cap)
+        }
+
+        fn project_hidden_on(
+            &self,
+            hidden: &mlx::Array,
+            _target: impl Into<mlx::StreamOrDevice>,
+        ) -> Result<mlx::Array> {
+            let seq = hidden.shape().as_slice()[1] as usize;
+            let tokens: Vec<u32> = if seq == 1 { vec![3] } else { vec![4; seq] };
+            fake_logits_for_tokens(&tokens)
+        }
+
+        fn mtp_forward_hidden_on(
+            &self,
+            _mtp: &Self::MtpHead,
+            hidden_states: &mlx::Array,
+            next_token_ids: &mlx::Array,
+            _position_ids: &mlx::Array,
+            _mask: Option<&mlx::Array>,
+            mtp_cache: Option<&mut MtpCache>,
+            _target: impl Into<mlx::StreamOrDevice>,
+        ) -> Result<mlx::Array> {
+            if let Some(cache) = mtp_cache {
+                let seq = next_token_ids.shape().as_slice()[1];
+                let k = mlx::Array::zeros((1_i32, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
+                    .map_err(|e| anyhow::anyhow!("fake mtp k failed: {e:?}"))?;
+                let v = mlx::Array::zeros((1_i32, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
+                    .map_err(|e| anyhow::anyhow!("fake mtp v failed: {e:?}"))?;
+                cache.layer_mut(0).update_and_fetch(&k, &v, &[seq])?;
+            }
+            Ok(hidden_states.clone())
+        }
+
+        fn mtp_forward_on(
+            &self,
+            mtp: &Self::MtpHead,
+            hidden_states: &mlx::Array,
+            next_token_ids: &mlx::Array,
+            position_ids: &mlx::Array,
+            mask: Option<&mlx::Array>,
+            mtp_cache: Option<&mut MtpCache>,
+            target: impl Into<mlx::StreamOrDevice>,
+        ) -> Result<MtpStepOutput> {
+            let hidden_states = self.mtp_forward_hidden_on(
+                mtp,
+                hidden_states,
+                next_token_ids,
+                position_ids,
+                mask,
+                mtp_cache,
+                target,
+            )?;
+            Ok(MtpStepOutput {
+                hidden_states,
+                logits: fake_logits_for_tokens(&[4])?,
+            })
+        }
+    }
+
     fn fake_logits(batch: usize) -> Result<mlx::Array> {
         let vocab = 8_usize;
         let mut flat = vec![0.0_f32; batch * vocab];
@@ -1794,6 +2064,17 @@ mod tests {
         logits_bv
             .reshape(&[batch as i32, 1, vocab as i32][..])
             .map_err(|e| anyhow::anyhow!("fake logits reshape failed: {e:?}"))
+    }
+
+    fn fake_logits_for_tokens(tokens: &[u32]) -> Result<mlx::Array> {
+        let vocab = 8_usize;
+        let mut flat = vec![0.0_f32; tokens.len() * vocab];
+        for (pos, &token) in tokens.iter().enumerate() {
+            flat[pos * vocab + token as usize] = 100.0;
+        }
+        (&flat[..], &[1_i32, tokens.len() as i32, vocab as i32][..])
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("fake logits Array failed: {e:?}"))
     }
 
     fn mk_req(prompt_token: u32) -> GenerateRequest {
@@ -1825,6 +2106,61 @@ mod tests {
             },
             reply_rx,
         )
+    }
+
+    #[test]
+    fn actor_mtp_mode_prefill_and_step_use_mtp_for_eligible_request() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.admit(mk_req(11)).expect("admit");
+        let counters = SchedulerActorMtpCounters::new(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
+
+        let prefill_events = mode
+            .prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .expect("mtp prefill");
+        assert_eq!(prefill_events.len(), 1);
+        assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 1);
+        assert!(scheduler.mtp_stats().is_some());
+
+        let step_events = mode
+            .step(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .expect("mtp step");
+        assert_eq!(step_events.len(), 1);
+        assert_eq!(counters.mtp_step_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn actor_mtp_mode_prefill_falls_back_for_non_greedy_request() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let mut request = mk_req(11);
+        request.sampler = Sampler::greedy().with_temperature(0.7);
+        scheduler.admit(request).expect("admit");
+        let counters = SchedulerActorMtpCounters::new(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
+
+        let prefill_events = mode
+            .prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .expect("ordinary prefill");
+
+        assert_eq!(prefill_events.len(), 1);
+        assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 0);
+        assert!(scheduler.mtp_stats().is_none());
     }
 
     #[test]
@@ -2086,6 +2422,7 @@ mod tests {
         let mut chunked_req = mk_req(21);
         chunked_req.prompt_ids = (0..1025).collect();
         chunked_req.prefill_chunk_size = 1024;
+        chunked_req.decode_cadence_mid_chunk_cap = 384;
         let _reply_rx = reply_rx;
         let mut queue = VecDeque::from([PendingAdmit {
             request: chunked_req,

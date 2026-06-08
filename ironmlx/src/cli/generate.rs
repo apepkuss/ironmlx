@@ -7,9 +7,13 @@ use anyhow::{anyhow, Context};
 use clap::Args;
 use mlx::Array;
 
-use crate::core::generate::{GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
+use crate::core::generate::{GenerateEvent, GenerateRequest, GenerationStream, IMAGE_TOKEN_ID};
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
+use crate::core::speculative::{
+    resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel,
+    MtpTextGenerationStream,
+};
 use crate::core::{Loader, Message, Model, Tokenizer};
 use crate::models::qwen3_5::image_processor;
 use crate::Result;
@@ -55,6 +59,16 @@ pub struct GenerateArgs {
     /// the full forward + lm_head.
     #[arg(long, default_value_t = 2048)]
     pub prefill_chunk_size: usize,
+
+    /// MTP model directory. When set, generation uses the Qwen MTP head for
+    /// text-only greedy speculative decoding.
+    #[arg(long = "mtp-model-dir")]
+    pub mtp_model_dir: Option<PathBuf>,
+
+    /// Maximum MTP draft tokens per speculative window. If omitted, ironmlx
+    /// picks a model-aware default from local benchmark policy.
+    #[arg(long)]
+    pub mtp_draft_tokens: Option<usize>,
 }
 
 struct PreparedImages {
@@ -244,13 +258,49 @@ fn prepare_images(
     })
 }
 
-fn run_generation_with_model<M: Model + DenseVlMethods>(
+fn ensure_mtp_generation_supported(
+    architecture: crate::models::ModelArchitecture,
+    has_images: bool,
+    args: &GenerateArgs,
+) -> Result<()> {
+    if args.mtp_model_dir.is_none() {
+        return Ok(());
+    }
+    if has_images {
+        return Err(anyhow!(
+            "--mtp-model-dir currently supports text-only generation; remove --image"
+        ));
+    }
+    match architecture {
+        crate::models::ModelArchitecture::Qwen35Dense
+        | crate::models::ModelArchitecture::Qwen35Moe => Ok(()),
+        _ => Err(anyhow!(
+            "--mtp-model-dir currently supports Qwen dense/MoE text models only"
+        )),
+    }
+}
+
+fn build_sampler(args: &GenerateArgs) -> Sampler {
+    let mut sampler = Sampler::greedy();
+    if args.temperature > 0.0 {
+        sampler = sampler.with_temperature(args.temperature);
+    }
+    if args.top_p < 1.0 {
+        sampler = sampler.with_top_p(args.top_p);
+    }
+    if args.seed != 0 {
+        sampler = sampler.with_seed(args.seed);
+    }
+    sampler
+}
+
+fn build_generate_request<M: Model>(
     model: &M,
     tokenizer: &Tokenizer,
     loader: &Loader,
     model_type: &str,
     args: &GenerateArgs,
-) -> Result<()> {
+) -> Result<GenerateRequest> {
     let prepared_images = prepare_images(
         args,
         loader,
@@ -271,21 +321,10 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
     };
     let prompt_ids = tokenizer.encode(&prompt, /* add_special_tokens = */ false)?;
 
-    let mut sampler = Sampler::greedy();
-    if args.temperature > 0.0 {
-        sampler = sampler.with_temperature(args.temperature);
-    }
-    if args.top_p < 1.0 {
-        sampler = sampler.with_top_p(args.top_p);
-    }
-    if args.seed != 0 {
-        sampler = sampler.with_seed(args.seed);
-    }
-
-    let request = GenerateRequest {
+    Ok(GenerateRequest {
         prompt_ids,
         max_new_tokens: args.max_tokens,
-        sampler,
+        sampler: build_sampler(args),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: args.prefill_chunk_size,
         decode_cadence_mid_chunk_cap: 256,
@@ -297,17 +336,15 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
         p5h_trace: None,
         #[cfg(feature = "p5h-profile")]
         p5h_root_span: None,
-    };
+    })
+}
 
-    let has_images = request.pixel_values.is_some();
-    let mut stream = if has_images {
-        GenerationStream::new(model, tokenizer, request)?
-    } else {
-        GenerationStream::new_text_only(model, tokenizer, request)?
-    };
+fn write_generation_events(
+    mut next_token: impl FnMut() -> Result<Option<GenerateEvent>>,
+) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    while let Some(ev) = stream.next_token()? {
+    while let Some(ev) = next_token()? {
         if !ev.text.is_empty() {
             out.write_all(ev.text.as_bytes())?;
             out.flush()?;
@@ -318,6 +355,62 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
     }
     writeln!(out)?;
     Ok(())
+}
+
+fn run_generation_with_model<M: Model + DenseVlMethods>(
+    model: &M,
+    tokenizer: &Tokenizer,
+    loader: &Loader,
+    model_type: &str,
+    args: &GenerateArgs,
+) -> Result<()> {
+    let request = build_generate_request(model, tokenizer, loader, model_type, args)?;
+
+    let has_images = request.pixel_values.is_some();
+    let mut stream = if has_images {
+        GenerationStream::new(model, tokenizer, request)?
+    } else {
+        GenerationStream::new_text_only(model, tokenizer, request)?
+    };
+    write_generation_events(|| stream.next_token())
+}
+
+fn run_generation_with_mtp_model<M: MtpSpeculativeModel>(
+    model: &M,
+    tokenizer: &Tokenizer,
+    loader: &Loader,
+    model_type: &str,
+    args: &GenerateArgs,
+) -> Result<()> {
+    let request = build_generate_request(model, tokenizer, loader, model_type, args)?;
+    if request.pixel_values.is_some() {
+        return Err(anyhow!(
+            "--mtp-model-dir currently supports text-only generation; remove --image"
+        ));
+    }
+    let mtp_dir = args
+        .mtp_model_dir
+        .as_ref()
+        .ok_or_else(|| anyhow!("run_generation_with_mtp_model called without --mtp-model-dir"))?;
+    if !mtp_dir.exists() {
+        return Err(anyhow!(
+            "--mtp-model-dir must point to a local directory (got '{}')",
+            mtp_dir.display()
+        ));
+    }
+    let mtp_loader = Loader::open_mtp(mtp_dir).context("Loader::open_mtp")?;
+    let mtp = model
+        .load_mtp_head(&mtp_loader)
+        .context("loading MTP draft head")?;
+    let draft_tokens = resolve_mtp_draft_tokens(
+        loader.config_raw_value(),
+        args.mtp_draft_tokens
+            .map(MtpDraftTokensArg::Explicit)
+            .unwrap_or(MtpDraftTokensArg::Omitted),
+    );
+    let cfg = MtpSpeculativeConfig::new(draft_tokens, request.sampler)?;
+    let mut stream = MtpTextGenerationStream::new_text_only(model, &mtp, tokenizer, request, cfg)?;
+    write_generation_events(|| stream.next_token())
 }
 
 pub fn run(args: GenerateArgs) -> Result<()> {
@@ -338,17 +431,34 @@ pub fn run(args: GenerateArgs) -> Result<()> {
     let architecture =
         crate::models::ModelArchitecture::from_config_value(loader.config_raw_value())?;
     let model_type = architecture.model_type();
+    ensure_mtp_generation_supported(architecture, !args.images.is_empty(), &args)?;
 
     match architecture {
         crate::models::ModelArchitecture::Qwen35Dense => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
-            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+            if args.mtp_model_dir.is_some() {
+                run_generation_with_mtp_model(&model, &tokenizer, &loader, model_type, &args)
+            } else {
+                run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+            }
         }
         crate::models::ModelArchitecture::Qwen35Moe => {
-            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
-                .context("Qwen35MoeModel::from_loader")?;
-            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+            if args.mtp_model_dir.is_some()
+                && crate::models::is_qwen36_moe_config(loader.config_raw_value())
+            {
+                let model = crate::models::Qwen36MoeModel::from_loader(&loader)
+                    .context("Qwen36MoeModel::from_loader")?;
+                run_generation_with_mtp_model(&model, &tokenizer, &loader, model_type, &args)
+            } else {
+                let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                    .context("Qwen35MoeModel::from_loader")?;
+                if args.mtp_model_dir.is_some() {
+                    run_generation_with_mtp_model(&model, &tokenizer, &loader, model_type, &args)
+                } else {
+                    run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+                }
+            }
         }
         crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
@@ -417,6 +527,72 @@ mod tests {
             "--enable-thinking",
         ]);
         assert!(enabled_cli.args.enable_thinking);
+    }
+
+    #[test]
+    fn mtp_args_default_off_and_parse_explicit_model_dir() {
+        let default_cli =
+            GenerateTestCli::parse_from(["test", "--model", "/tmp/model", "--prompt", "hello"]);
+        assert!(default_cli.args.mtp_model_dir.is_none());
+        assert_eq!(default_cli.args.mtp_draft_tokens, None);
+
+        let enabled_cli = GenerateTestCli::parse_from([
+            "test",
+            "--model",
+            "/tmp/model",
+            "--prompt",
+            "hello",
+            "--mtp-model-dir",
+            "/tmp/mtp",
+            "--mtp-draft-tokens",
+            "6",
+        ]);
+        assert_eq!(
+            enabled_cli.args.mtp_model_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/mtp"))
+        );
+        assert_eq!(enabled_cli.args.mtp_draft_tokens, Some(6));
+    }
+
+    #[test]
+    fn mtp_support_policy_allows_text_qwen_and_rejects_other_modes() {
+        let mut args =
+            GenerateTestCli::parse_from(["test", "--model", "/tmp/model", "--prompt", "hello"])
+                .args;
+
+        assert!(ensure_mtp_generation_supported(
+            crate::models::ModelArchitecture::Gemma4,
+            false,
+            &args
+        )
+        .is_ok());
+
+        args.mtp_model_dir = Some(PathBuf::from("/tmp/mtp"));
+        assert!(ensure_mtp_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Dense,
+            false,
+            &args
+        )
+        .is_ok());
+        assert!(ensure_mtp_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Moe,
+            false,
+            &args
+        )
+        .is_ok());
+
+        let image_err = ensure_mtp_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Dense,
+            true,
+            &args,
+        )
+        .unwrap_err();
+        assert!(image_err.to_string().contains("text-only"));
+
+        let arch_err =
+            ensure_mtp_generation_supported(crate::models::ModelArchitecture::Gemma4, false, &args)
+                .unwrap_err();
+        assert!(arch_err.to_string().contains("Qwen"));
     }
 
     #[test]

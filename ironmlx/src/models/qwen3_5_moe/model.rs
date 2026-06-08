@@ -5,14 +5,15 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
-use crate::core::cache::{GatedDeltaCache, KVCache};
+use crate::core::cache::{GatedDeltaCache, KVCache, MtpCache};
 use crate::core::memory_budget::ModelMeta;
 use crate::core::{Loader, Model};
 use crate::models::vision::{VisionConfig, VisionTower};
-use crate::nn::{AttnKind, LayerCache, Linear};
+use crate::nn::{AttnKind, LayerCache, Linear, MtpStepOutput};
 use crate::Result;
 
 use super::config::Qwen35MoeConfig;
+use super::mtp::Qwen35MoeMtp;
 use super::text_model::Qwen35MoeTextModel;
 
 /// Minimum K/V cache cap consistent with dense Qwen35Model's GPU-perf floor.
@@ -122,6 +123,84 @@ impl Qwen35MoeModel {
         self.vision.as_ref()
     }
 
+    pub fn load_mtp_head(&self, loader: &Loader) -> Result<Qwen35MoeMtp> {
+        let mtp_text_cfg = Qwen35MoeConfig::from_loader(loader)
+            .context("parsing Qwen35 MoE MTP text_config from loader")?;
+        self.config()
+            .ensure_mtp_compatible(&mtp_text_cfg)
+            .context("validating Qwen35 MoE MTP compatibility")?;
+        Qwen35MoeMtp::from_loader(loader, "", mtp_text_cfg.mtp_config()?)
+    }
+
+    pub fn project_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.lm_head.forward_on(hidden, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mtp_forward_hidden_on(
+        &self,
+        mtp: &Qwen35MoeMtp,
+        hidden_states: &Array,
+        next_token_ids: &Array,
+        position_ids: &Array,
+        mask: Option<&Array>,
+        mtp_cache: Option<&mut MtpCache>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        if mtp.config().hidden_size != self.config().hidden_size {
+            return Err(anyhow!(
+                "Qwen35MoeModel::mtp_forward_hidden_on: mtp hidden_size {} != model hidden_size {}",
+                mtp.config().hidden_size,
+                self.config().hidden_size
+            ));
+        }
+        let next_embeds = self.text.embed_on(next_token_ids, target)?;
+        let (cos, sin) = self.text.mrope().cos_sin(position_ids)?;
+        mtp.forward_on(
+            hidden_states,
+            &next_embeds,
+            self.text.mrope(),
+            &cos,
+            &sin,
+            mask,
+            mtp_cache,
+            target,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mtp_forward_on(
+        &self,
+        mtp: &Qwen35MoeMtp,
+        hidden_states: &Array,
+        next_token_ids: &Array,
+        position_ids: &Array,
+        mask: Option<&Array>,
+        mtp_cache: Option<&mut MtpCache>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<MtpStepOutput> {
+        let target = target.into();
+        let mtp_hidden = self.mtp_forward_hidden_on(
+            mtp,
+            hidden_states,
+            next_token_ids,
+            position_ids,
+            mask,
+            mtp_cache,
+            target,
+        )?;
+        let logits = self.project_hidden_on(&mtp_hidden, target)?;
+        Ok(MtpStepOutput {
+            hidden_states: mtp_hidden,
+            logits,
+        })
+    }
+
     /// Conservative weight-bytes estimate for memory budgeting.
     /// Formula:
     ///   attn: 4 * H^2 * L / 2     (Q,K,V,O projections per layer, 4-bit)
@@ -227,7 +306,7 @@ impl Qwen35MoeModel {
                 "slice_last_and_project_lm_head",
                 crate::core::p5h::SpanFields::default,
                 || {
-                    let logits = self.lm_head.forward_on(&last_hidden, target)?;
+                    let logits = self.project_hidden_on(&last_hidden, target)?;
                     // P5h+1 T1: measurement-eval probe.
                     if crate::core::p5h::is_measurement_eval_probes_active() {
                         mlx::transforms::eval(&[&logits])?;
@@ -238,7 +317,7 @@ impl Qwen35MoeModel {
         }
         #[cfg(not(feature = "p5h-profile"))]
         {
-            self.lm_head.forward_on(&last_hidden, target)
+            self.project_hidden_on(&last_hidden, target)
         }
     }
 
@@ -767,6 +846,7 @@ impl crate::core::scheduler::DenseVlMethods for Qwen35MoeModel {
 mod tests {
     use super::*;
     use crate::nn::AttnKind;
+    use serial_test::serial;
 
     fn make_cfg() -> Qwen35MoeConfig {
         Qwen35MoeConfig {
@@ -781,6 +861,7 @@ mod tests {
             attention_bias: false,
             tie_word_embeddings: false,
             full_attention_interval: 2,
+            mtp_num_hidden_layers: 1,
             linear_num_value_heads: 4,
             linear_num_key_heads: 2,
             linear_key_head_dim: 8,
@@ -928,6 +1009,70 @@ mod tests {
             err.to_string().contains("model has no vision_tower"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_forward_projects_every_moe_mtp_position() {
+        use crate::core::generate::build_position_ids;
+        use crate::models::qwen3_5_moe::{Qwen35MoeMtp, Qwen35MoeMtpConfig};
+        use crate::nn::{Linear, RmsNorm};
+
+        let cfg = make_zero_layer_cfg();
+        let model = Qwen35MoeModel::from_cfg_for_test(cfg.clone());
+        let mtp_cfg = Qwen35MoeMtpConfig {
+            hidden_size: cfg.hidden_size,
+            num_mtp_layers: 0,
+            layer: crate::models::qwen3_5_moe::DecoderLayerMoeConfig {
+                hidden_size: cfg.hidden_size,
+                num_heads: cfg.num_attention_heads,
+                num_kv_heads: cfg.num_key_value_heads,
+                head_dim: cfg.effective_head_dim(),
+                rms_norm_eps: cfg.rms_norm_eps,
+                attention_bias: cfg.attention_bias,
+                linear_num_value_heads: cfg.linear_num_value_heads,
+                linear_num_key_heads: cfg.linear_num_key_heads,
+                linear_key_head_dim: cfg.linear_key_head_dim,
+                linear_value_head_dim: cfg.linear_value_head_dim,
+                linear_conv_kernel_dim: cfg.linear_conv_kernel_dim,
+                num_experts: cfg.num_experts,
+                num_experts_per_tok: cfg.num_experts_per_tok,
+                norm_topk_prob: cfg.norm_topk_prob,
+            },
+        };
+        let ones = mlx::ops::constructors::ones((cfg.hidden_size,), Dtype::Float32).unwrap();
+        let fc_weight =
+            mlx::Array::zeros((cfg.hidden_size, 2 * cfg.hidden_size), Dtype::Float32).unwrap();
+        let mtp = Qwen35MoeMtp::from_components(
+            RmsNorm::new(ones.clone(), cfg.rms_norm_eps),
+            RmsNorm::new(ones.clone(), cfg.rms_norm_eps),
+            Linear::new_fp(fc_weight, None),
+            Vec::new(),
+            RmsNorm::new(ones, cfg.rms_norm_eps),
+            mtp_cfg,
+        );
+
+        let hidden = mlx::Array::zeros((1, 2, cfg.hidden_size), Dtype::Float32).unwrap();
+        let next_token_ids: mlx::Array = (&[1_i32, 2][..], &[1_i32, 2][..]).try_into().unwrap();
+        let position_ids = build_position_ids(0, 2).expect("position ids");
+
+        let out = model
+            .mtp_forward_on(
+                &mtp,
+                &hidden,
+                &next_token_ids,
+                &position_ids,
+                None,
+                None,
+                (),
+            )
+            .expect("mtp forward");
+
+        assert_eq!(
+            out.hidden_states.shape().as_slice(),
+            &[1, 2, cfg.hidden_size]
+        );
+        assert_eq!(out.logits.shape().as_slice(), &[1, 2, cfg.vocab_size]);
     }
 
     #[test]

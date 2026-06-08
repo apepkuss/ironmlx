@@ -3,10 +3,10 @@
 use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype, StreamOrDevice};
 
-use crate::core::cache::{GatedDeltaCache, KVCache};
+use crate::core::cache::{GatedDeltaCache, KVCache, MtpCache};
 use crate::core::Loader;
 use crate::models::vision::VisionTower;
-use crate::nn::{AttnKind, LayerCache, Linear};
+use crate::nn::{AttnKind, LayerCache, Linear, Mtp, MtpStepOutput};
 use crate::Result;
 
 use super::config::Qwen35Config;
@@ -187,6 +187,88 @@ impl Qwen35Model {
 
     pub fn text(&self) -> &Qwen35TextModel {
         &self.text
+    }
+
+    pub fn load_mtp_head(&self, loader: &Loader) -> Result<Mtp> {
+        let mtp_text_cfg = Qwen35Config::from_loader(loader)
+            .context("parsing Qwen35 MTP text_config from loader")?;
+        self.config()
+            .ensure_mtp_compatible(&mtp_text_cfg)
+            .context("validating Qwen35 MTP compatibility")?;
+        Mtp::from_loader(loader, "", mtp_text_cfg.mtp_config()?)
+    }
+
+    pub fn project_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        match &self.lm_head {
+            Some(head) => head.forward_on(hidden, target),
+            None => self.text.as_output_on(hidden, target),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mtp_forward_hidden_on(
+        &self,
+        mtp: &Mtp,
+        hidden_states: &Array,
+        next_token_ids: &Array,
+        position_ids: &Array,
+        mask: Option<&Array>,
+        mtp_cache: Option<&mut MtpCache>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        if mtp.config().hidden_size != self.config().hidden_size {
+            return Err(anyhow!(
+                "Qwen35Model::mtp_forward_hidden_on: mtp hidden_size {} != model hidden_size {}",
+                mtp.config().hidden_size,
+                self.config().hidden_size
+            ));
+        }
+        let next_embeds = self.text.embed_on(next_token_ids, target)?;
+        let (cos, sin) = self.text.mrope().cos_sin(position_ids)?;
+        mtp.forward_on(
+            hidden_states,
+            &next_embeds,
+            self.text.mrope(),
+            &cos,
+            &sin,
+            mask,
+            mtp_cache,
+            target,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mtp_forward_on(
+        &self,
+        mtp: &Mtp,
+        hidden_states: &Array,
+        next_token_ids: &Array,
+        position_ids: &Array,
+        mask: Option<&Array>,
+        mtp_cache: Option<&mut MtpCache>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<MtpStepOutput> {
+        let target = target.into();
+        let mtp_hidden = self.mtp_forward_hidden_on(
+            mtp,
+            hidden_states,
+            next_token_ids,
+            position_ids,
+            mask,
+            mtp_cache,
+            target,
+        )?;
+        let logits = self.project_hidden_on(&mtp_hidden, target)?;
+        Ok(MtpStepOutput {
+            hidden_states: mtp_hidden,
+            logits,
+        })
     }
 
     /// Forward to last-position logits `[B, 1, vocab_size]`.
@@ -632,10 +714,7 @@ impl Qwen35Model {
             }
             _ => hidden.clone(),
         };
-        match &self.lm_head {
-            Some(head) => head.forward_on(&last_hidden, target),
-            None => self.text.as_output_on(&last_hidden, target),
-        }
+        self.project_hidden_on(&last_hidden, target)
     }
 
     /// Construct a per-layer cache list matching this model's hybrid topology.
@@ -816,6 +895,7 @@ mod tests {
     use super::*;
     use crate::nn::AttnKind;
     use mlx::Dtype;
+    use serial_test::serial;
 
     fn make_cfg() -> Qwen35Config {
         // 4 layers, full_attention_interval=2 → layers {1, 3} are Full.
@@ -831,6 +911,7 @@ mod tests {
             attention_bias: false,
             tie_word_embeddings: true,
             full_attention_interval: 2,
+            mtp_num_hidden_layers: 1,
             linear_num_value_heads: 4,
             linear_num_key_heads: 2,
             linear_key_head_dim: 8,
@@ -876,6 +957,68 @@ mod tests {
             matches!(cache[3], LayerCache::Full(_)),
             "layer 3 should be Full"
         );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_forward_projects_every_mtp_position() {
+        use crate::core::generate::build_position_ids;
+        use crate::nn::{DecoderLayerConfig, Linear, Mtp, MtpConfig, RmsNorm};
+
+        let cfg = make_cfg();
+        let model = Qwen35Model::from_cfg_for_test(cfg.clone());
+        let layer_cfg = DecoderLayerConfig {
+            hidden_size: cfg.hidden_size,
+            intermediate_size: cfg.intermediate_size,
+            num_heads: cfg.num_attention_heads,
+            num_kv_heads: cfg.num_key_value_heads,
+            head_dim: cfg.effective_head_dim(),
+            rms_norm_eps: cfg.rms_norm_eps,
+            attention_bias: cfg.attention_bias,
+            linear_num_value_heads: cfg.linear_num_value_heads,
+            linear_num_key_heads: cfg.linear_num_key_heads,
+            linear_key_head_dim: cfg.linear_key_head_dim,
+            linear_value_head_dim: cfg.linear_value_head_dim,
+            linear_conv_kernel_dim: cfg.linear_conv_kernel_dim,
+        };
+        let mtp_cfg = MtpConfig {
+            hidden_size: cfg.hidden_size,
+            num_mtp_layers: 0,
+            layer: layer_cfg,
+        };
+        let ones = mlx::ops::constructors::ones((cfg.hidden_size,), Dtype::Float32).unwrap();
+        let fc_weight =
+            mlx::Array::zeros((cfg.hidden_size, 2 * cfg.hidden_size), Dtype::Float32).unwrap();
+        let mtp = Mtp::from_components(
+            RmsNorm::new(ones.clone(), cfg.rms_norm_eps),
+            RmsNorm::new(ones.clone(), cfg.rms_norm_eps),
+            Linear::new_fp(fc_weight, None),
+            Vec::new(),
+            RmsNorm::new(ones, cfg.rms_norm_eps),
+            mtp_cfg,
+        );
+
+        let hidden = mlx::Array::zeros((1, 2, cfg.hidden_size), Dtype::Float32).unwrap();
+        let next_token_ids: mlx::Array = (&[1_i32, 2][..], &[1_i32, 2][..]).try_into().unwrap();
+        let position_ids = build_position_ids(0, 2).expect("position ids");
+
+        let out = model
+            .mtp_forward_on(
+                &mtp,
+                &hidden,
+                &next_token_ids,
+                &position_ids,
+                None,
+                None,
+                (),
+            )
+            .expect("mtp forward");
+
+        assert_eq!(
+            out.hidden_states.shape().as_slice(),
+            &[1, 2, cfg.hidden_size]
+        );
+        assert_eq!(out.logits.shape().as_slice(), &[1, 2, cfg.vocab_size]);
     }
 
     /// Integration test: text-only `forward_vl` (pixel_values=None) must produce

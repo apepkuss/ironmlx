@@ -36,6 +36,21 @@ pub struct MlaLatentCache {
     dtype: Dtype,
 }
 
+/// Lightweight checkpoint for [`MlaLatentCache`] rollback.
+///
+/// MLA latent cache is KV-like: stale latent rows past logical offsets are
+/// ignored by masks, so rollback only needs offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MlaLatentCacheSnapshot {
+    offsets: Vec<i32>,
+}
+
+impl MlaLatentCacheSnapshot {
+    pub fn offsets(&self) -> &[i32] {
+        &self.offsets
+    }
+}
+
 impl MlaLatentCache {
     /// Construct a fresh cache. `c_kv` / `k_pe` are allocated lazily on first
     /// `update_and_fetch_on`. `cap` is the hard maximum sequence length.
@@ -98,6 +113,63 @@ impl MlaLatentCache {
         for o in &mut self.offsets {
             *o = 0;
         }
+        Ok(())
+    }
+
+    /// Capture the current logical cache position. No latent buffers are copied.
+    pub fn snapshot(&self) -> MlaLatentCacheSnapshot {
+        MlaLatentCacheSnapshot {
+            offsets: self.offsets.clone(),
+        }
+    }
+
+    /// Restore logical offsets from a prior checkpoint.
+    pub fn restore(&mut self, snapshot: &MlaLatentCacheSnapshot) -> Result<()> {
+        self.restore_offsets(snapshot.offsets())
+    }
+
+    /// Set logical offsets directly. Intended for rollback/truncation to an
+    /// accepted prefix. Does not clear or copy latent buffers.
+    pub fn restore_offsets(&mut self, offsets: &[i32]) -> Result<()> {
+        if offsets.len() != self.batch as usize {
+            return Err(anyhow!(
+                "MlaLatentCache::restore_offsets: offsets.len()={} != batch={}",
+                offsets.len(),
+                self.batch
+            ));
+        }
+        for (i, &off) in offsets.iter().enumerate() {
+            if off < 0 {
+                return Err(anyhow!(
+                    "MlaLatentCache::restore_offsets: offsets[{i}] = {off} must be >= 0"
+                ));
+            }
+            if off > self.cap {
+                return Err(anyhow!(
+                    "MlaLatentCache::restore_offsets: offsets[{i}] = {off} > cap {}",
+                    self.cap
+                ));
+            }
+        }
+        let max_off = offsets.iter().copied().max().unwrap_or(0);
+        if max_off > 0 {
+            let c_cap = self
+                .c_kv
+                .as_ref()
+                .map(|a| a.shape().as_slice()[2])
+                .unwrap_or(0);
+            let k_cap = self
+                .k_pe
+                .as_ref()
+                .map(|a| a.shape().as_slice()[2])
+                .unwrap_or(0);
+            if max_off > c_cap || max_off > k_cap {
+                return Err(anyhow!(
+                    "MlaLatentCache::restore_offsets: max offset {max_off} exceeds allocated c_kv/k_pe capacity {c_cap}/{k_cap}"
+                ));
+            }
+        }
+        self.offsets.clone_from_slice(offsets);
         Ok(())
     }
 
@@ -498,6 +570,27 @@ mod tests {
         assert_eq!(kv_f2.shape().as_slice(), &[1, 1, 3, 512]);
         assert_eq!(pe_f2.shape().as_slice(), &[1, 1, 3, 64]);
         assert_eq!(c.offsets(), &[3]);
+    }
+
+    #[test]
+    fn snapshot_restore_offsets_only() {
+        let mut c = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8).with_step(8);
+        let c_kv = make_input(3, 4);
+        let k_pe = make_input(3, 2);
+        c.update_and_fetch_on(&c_kv, &k_pe, &[3], ()).unwrap();
+        let snapshot = c.snapshot();
+        assert_eq!(snapshot.offsets(), &[3]);
+
+        let c_kv2 = make_input(2, 4);
+        let k_pe2 = make_input(2, 2);
+        c.update_and_fetch_on(&c_kv2, &k_pe2, &[2], ()).unwrap();
+        assert_eq!(c.offsets(), &[5]);
+
+        c.restore(&snapshot).expect("restore snapshot");
+        assert_eq!(c.offsets(), &[3]);
+
+        c.restore_offsets(&[4]).expect("restore accepted prefix");
+        assert_eq!(c.offsets(), &[4]);
     }
 
     #[test]

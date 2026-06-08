@@ -44,12 +44,62 @@ pub struct MemoryInfo {
 }
 
 #[derive(Debug, Serialize)]
+pub struct MtpHealthInfo {
+    pub enabled: bool,
+    pub draft_tokens: Option<usize>,
+    pub prefill_count: u64,
+    pub step_count: u64,
+}
+
+#[derive(Clone)]
+pub struct MtpHealthConfig {
+    enabled: bool,
+    draft_tokens: Option<usize>,
+    prefill_count: Arc<AtomicU64>,
+    step_count: Arc<AtomicU64>,
+}
+
+impl MtpHealthConfig {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            draft_tokens: None,
+            prefill_count: Arc::new(AtomicU64::new(0)),
+            step_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn enabled(
+        draft_tokens: usize,
+        prefill_count: Arc<AtomicU64>,
+        step_count: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            enabled: true,
+            draft_tokens: Some(draft_tokens),
+            prefill_count,
+            step_count,
+        }
+    }
+
+    fn snapshot(&self) -> MtpHealthInfo {
+        MtpHealthInfo {
+            enabled: self.enabled,
+            draft_tokens: self.draft_tokens,
+            prefill_count: self.prefill_count.load(Ordering::Relaxed),
+            step_count: self.step_count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct HealthSnapshot {
     pub status: HealthStatus,
     pub uptime_secs: u64,
     pub model: ModelInfo,
     pub scheduler: SchedulerInfo,
     pub memory: MemoryInfo,
+    pub mtp: MtpHealthInfo,
     pub version: &'static str,
 }
 
@@ -65,6 +115,7 @@ pub struct SchedulerHealthCollector {
     pub memory_budget_exceeded_count: Arc<AtomicU64>,
     pub kv_cache_active_bytes: Arc<AtomicUsize>,
     pub kv_cache_soft_limit_bytes: usize,
+    pub mtp: MtpHealthConfig,
 }
 
 impl SchedulerHealthCollector {
@@ -107,6 +158,7 @@ impl SchedulerHealthCollector {
                 kv_cache_active_bytes: kv_active,
                 kv_cache_soft_limit_bytes: self.kv_cache_soft_limit_bytes,
             },
+            mtp: self.mtp.snapshot(),
             version: env!("CARGO_PKG_VERSION"),
         }
     }
@@ -181,6 +233,8 @@ pub fn system_free_ram_bytes() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
+    use std::sync::Arc;
 
     #[test]
     fn classify_healthy_when_all_green() {
@@ -204,5 +258,57 @@ mod tests {
     fn classify_degraded_when_budget_near_soft_limit() {
         let s = classify_status(0, 32, 8 * 1024 * 1024 * 1024, 9_500_000, 10_000_000);
         assert!(matches!(s, HealthStatus::Degraded));
+    }
+
+    fn test_collector(mtp: MtpHealthConfig) -> SchedulerHealthCollector {
+        SchedulerHealthCollector {
+            start_time: Instant::now(),
+            b_max: 1,
+            queue_max: 8,
+            model_name: "test-model".to_string(),
+            max_position_embeddings: 4096,
+            b_active: Arc::new(AtomicU64::new(0)),
+            b_queued: Arc::new(AtomicU64::new(0)),
+            admission_queue_full_count: Arc::new(AtomicU64::new(0)),
+            memory_budget_exceeded_count: Arc::new(AtomicU64::new(0)),
+            kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),
+            kv_cache_soft_limit_bytes: 1,
+            mtp,
+        }
+    }
+
+    #[test]
+    fn snapshot_mtp_reports_disabled_config() {
+        let snapshot = test_collector(MtpHealthConfig::disabled()).snapshot();
+
+        assert!(!snapshot.mtp.enabled);
+        assert_eq!(snapshot.mtp.draft_tokens, None);
+        assert_eq!(snapshot.mtp.prefill_count, 0);
+        assert_eq!(snapshot.mtp.step_count, 0);
+    }
+
+    #[test]
+    fn snapshot_mtp_reports_enabled_config_and_live_counters() {
+        let prefill_count = Arc::new(AtomicU64::new(7));
+        let step_count = Arc::new(AtomicU64::new(11));
+        let snapshot = test_collector(MtpHealthConfig::enabled(
+            2,
+            prefill_count.clone(),
+            step_count.clone(),
+        ))
+        .snapshot();
+
+        assert!(snapshot.mtp.enabled);
+        assert_eq!(snapshot.mtp.draft_tokens, Some(2));
+        assert_eq!(snapshot.mtp.prefill_count, 7);
+        assert_eq!(snapshot.mtp.step_count, 11);
+
+        prefill_count.store(13, Ordering::Relaxed);
+        step_count.store(17, Ordering::Relaxed);
+        let snapshot =
+            test_collector(MtpHealthConfig::enabled(2, prefill_count, step_count)).snapshot();
+
+        assert_eq!(snapshot.mtp.prefill_count, 13);
+        assert_eq!(snapshot.mtp.step_count, 17);
     }
 }

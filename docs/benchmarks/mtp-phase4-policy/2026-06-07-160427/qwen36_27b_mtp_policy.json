@@ -1,0 +1,214 @@
+{
+  "meta": {
+    "backend": "ironmlx-core",
+    "mode": "scheduler-text",
+    "model_dir": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.6-27B-4bit/snapshots/c000ac2c2057d94be3fa931000c31723aac53282",
+    "mtp_model_dir": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.6-27B-MTP-4bit/snapshots/83795d546e9d328160e593fb0bf10b2bf2fe637e",
+    "mtp_draft_tokens": 2,
+    "prompt_file": "docs/benchmarks/mtp-phase4-policy/2026-06-07-160427/fixed_prompt.txt",
+    "prompt_tokens": 67,
+    "max_tokens": 64,
+    "prefill_chunk_size": 2048,
+    "b_max": 1,
+    "effective_cap_max": 256,
+    "warmup_runs": 1,
+    "measured_runs": 5,
+    "load_ms": 608.53175
+  },
+  "summary": {
+    "runs": 5,
+    "valid_runs": 5,
+    "ttft_ms": {
+      "p50": 224.688041,
+      "p95": 235.2693828,
+      "mean": 227.7163496
+    },
+    "e2e_ms": {
+      "p50": 1545.568791,
+      "p95": 1576.456908,
+      "mean": 1540.2941414
+    },
+    "decode_time_ms": {
+      "p50": 1320.8807499999998,
+      "p95": 1341.7519998000002,
+      "mean": 1312.5777917999999
+    },
+    "generation_tps": {
+      "p50": 47.695448661811454,
+      "p95": 49.29868473250844,
+      "mean": 48.017762532745266
+    }
+  },
+  "warmups": [
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 321.104125,
+      "e2e_ms": 1320.244542,
+      "decode_time_ms": 999.1404169999998,
+      "generated_tokens": 64,
+      "generation_tps": 63.054200318672535,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": {
+        "windows": 21,
+        "drafted_tokens": 42,
+        "accepted_draft_tokens": 42,
+        "rollback_count": 0,
+        "mtp_cache_reuse_count": 21,
+        "mtp_cache_reused_tokens": 42,
+        "draft_budget_reductions": 0,
+        "draft_budget_increases": 0,
+        "acceptance_rate": 1.0,
+        "draft_forward_us": 1840,
+        "verify_forward_us": 25639,
+        "projection_us": 2,
+        "sampling_us": 1044358,
+        "main_rollback_us": 0,
+        "mtp_cache_commit_us": 239424,
+        "mtp_cache_restore_us": 0
+      }
+    }
+  ],
+  "records": [
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 221.610291,
+      "e2e_ms": 1507.131625,
+      "decode_time_ms": 1285.521334,
+      "generated_tokens": 64,
+      "generation_tps": 49.0073547079694,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": {
+        "windows": 24,
+        "drafted_tokens": 45,
+        "accepted_draft_tokens": 39,
+        "rollback_count": 5,
+        "mtp_cache_reuse_count": 19,
+        "mtp_cache_reused_tokens": 37,
+        "draft_budget_reductions": 1,
+        "draft_budget_increases": 1,
+        "acceptance_rate": 0.8666666666666667,
+        "draft_forward_us": 1347,
+        "verify_forward_us": 33496,
+        "projection_us": 2,
+        "sampling_us": 1205530,
+        "main_rollback_us": 269,
+        "mtp_cache_commit_us": 260848,
+        "mtp_cache_restore_us": 0
+      }
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 222.309125,
+      "e2e_ms": 1498.3485,
+      "decode_time_ms": 1276.039375,
+      "generated_tokens": 64,
+      "generation_tps": 49.3715172386432,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": {
+        "windows": 24,
+        "drafted_tokens": 45,
+        "accepted_draft_tokens": 39,
+        "rollback_count": 5,
+        "mtp_cache_reuse_count": 19,
+        "mtp_cache_reused_tokens": 37,
+        "draft_budget_reductions": 1,
+        "draft_budget_increases": 1,
+        "acceptance_rate": 0.8666666666666667,
+        "draft_forward_us": 1377,
+        "verify_forward_us": 33786,
+        "projection_us": 1,
+        "sampling_us": 1196604,
+        "main_rollback_us": 257,
+        "mtp_cache_commit_us": 260242,
+        "mtp_cache_restore_us": 0
+      }
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 224.688041,
+      "e2e_ms": 1545.568791,
+      "decode_time_ms": 1320.8807499999998,
+      "generated_tokens": 64,
+      "generation_tps": 47.695448661811454,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": {
+        "windows": 24,
+        "drafted_tokens": 45,
+        "accepted_draft_tokens": 39,
+        "rollback_count": 5,
+        "mtp_cache_reuse_count": 19,
+        "mtp_cache_reused_tokens": 37,
+        "draft_budget_reductions": 1,
+        "draft_budget_increases": 1,
+        "acceptance_rate": 0.8666666666666667,
+        "draft_forward_us": 2215,
+        "verify_forward_us": 45538,
+        "projection_us": 3,
+        "sampling_us": 1220744,
+        "main_rollback_us": 314,
+        "mtp_cache_commit_us": 269514,
+        "mtp_cache_restore_us": 1
+      }
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 235.457541,
+      "e2e_ms": 1573.134208,
+      "decode_time_ms": 1337.676667,
+      "generated_tokens": 64,
+      "generation_tps": 47.09658286952837,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": {
+        "windows": 24,
+        "drafted_tokens": 45,
+        "accepted_draft_tokens": 39,
+        "rollback_count": 5,
+        "mtp_cache_reuse_count": 19,
+        "mtp_cache_reused_tokens": 37,
+        "draft_budget_reductions": 1,
+        "draft_budget_increases": 1,
+        "acceptance_rate": 0.8666666666666667,
+        "draft_forward_us": 2097,
+        "verify_forward_us": 45217,
+        "projection_us": 11,
+        "sampling_us": 1244227,
+        "main_rollback_us": 394,
+        "mtp_cache_commit_us": 273485,
+        "mtp_cache_restore_us": 1
+      }
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 234.51675,
+      "e2e_ms": 1577.287583,
+      "decode_time_ms": 1342.770833,
+      "generated_tokens": 64,
+      "generation_tps": 46.917909185773915,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": {
+        "windows": 24,
+        "drafted_tokens": 45,
+        "accepted_draft_tokens": 39,
+        "rollback_count": 5,
+        "mtp_cache_reuse_count": 19,
+        "mtp_cache_reused_tokens": 37,
+        "draft_budget_reductions": 1,
+        "draft_budget_increases": 1,
+        "acceptance_rate": 0.8666666666666667,
+        "draft_forward_us": 2052,
+        "verify_forward_us": 35932,
+        "projection_us": 13,
+        "sampling_us": 1254916,
+        "main_rollback_us": 284,
+        "mtp_cache_commit_us": 277824,
+        "mtp_cache_restore_us": 0
+      }
+    }
+  ]
+}

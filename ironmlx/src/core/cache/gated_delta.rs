@@ -18,6 +18,25 @@ pub struct GatedDeltaCache {
     cap: i32,
 }
 
+/// Lightweight checkpoint for [`GatedDeltaCache`] rollback.
+///
+/// Unlike KV caches, GatedDelta state cannot be restored by offsets alone:
+/// speculative suffixes update both the convolution window and recurrent
+/// state. Cloning MLX arrays here preserves handles to the pre-verify state
+/// without copying dense KV history.
+#[derive(Clone)]
+pub struct GatedDeltaCacheSnapshot {
+    offsets: Vec<i32>,
+    conv_state: Array,
+    recurrent_state: Array,
+}
+
+impl GatedDeltaCacheSnapshot {
+    pub fn offsets(&self) -> &[i32] {
+        &self.offsets
+    }
+}
+
 impl GatedDeltaCache {
     /// Allocate a fresh cache.
     ///
@@ -152,6 +171,77 @@ impl GatedDeltaCache {
         Ok(())
     }
 
+    /// Capture offsets plus recurrent/conv state handles for rollback.
+    pub fn snapshot(&self) -> GatedDeltaCacheSnapshot {
+        GatedDeltaCacheSnapshot {
+            offsets: self.offsets.clone(),
+            conv_state: self.conv_state.clone(),
+            recurrent_state: self.recurrent_state.clone(),
+        }
+    }
+
+    /// Restore offsets and recurrent/conv states from a prior checkpoint.
+    pub fn restore(&mut self, snapshot: &GatedDeltaCacheSnapshot) -> Result<()> {
+        if snapshot.offsets.len() != self.offsets.len() {
+            return Err(anyhow!(
+                "GatedDeltaCache::restore: snapshot offsets len {} != B {}",
+                snapshot.offsets.len(),
+                self.offsets.len()
+            ));
+        }
+        for (i, &off) in snapshot.offsets.iter().enumerate() {
+            if off < 0 {
+                return Err(anyhow!(
+                    "GatedDeltaCache::restore: snapshot offsets[{i}] = {off} must be >= 0"
+                ));
+            }
+            if off > self.cap {
+                return Err(anyhow!(
+                    "GatedDeltaCache::restore: snapshot offsets[{i}] = {off} > cap {}",
+                    self.cap
+                ));
+            }
+        }
+
+        let self_conv = self.conv_state.shape();
+        let snap_conv = snapshot.conv_state.shape();
+        if self_conv.as_slice() != snap_conv.as_slice() {
+            return Err(anyhow!(
+                "GatedDeltaCache::restore: conv_state shape mismatch self {:?} snapshot {:?}",
+                self_conv.as_slice(),
+                snap_conv.as_slice()
+            ));
+        }
+        let self_rec = self.recurrent_state.shape();
+        let snap_rec = snapshot.recurrent_state.shape();
+        if self_rec.as_slice() != snap_rec.as_slice() {
+            return Err(anyhow!(
+                "GatedDeltaCache::restore: recurrent_state shape mismatch self {:?} snapshot {:?}",
+                self_rec.as_slice(),
+                snap_rec.as_slice()
+            ));
+        }
+        if self.conv_state.dtype() != snapshot.conv_state.dtype() {
+            return Err(anyhow!(
+                "GatedDeltaCache::restore: conv_state dtype mismatch self {:?} snapshot {:?}",
+                self.conv_state.dtype(),
+                snapshot.conv_state.dtype()
+            ));
+        }
+        if self.recurrent_state.dtype() != snapshot.recurrent_state.dtype() {
+            return Err(anyhow!(
+                "GatedDeltaCache::restore: recurrent_state dtype mismatch self {:?} snapshot {:?}",
+                self.recurrent_state.dtype(),
+                snapshot.recurrent_state.dtype()
+            ));
+        }
+
+        self.offsets.clone_from_slice(&snapshot.offsets);
+        self.conv_state = snapshot.conv_state.clone();
+        self.recurrent_state = snapshot.recurrent_state.clone();
+        Ok(())
+    }
+
     /// Copy a single row's full SSM state from `src` into `self` at
     /// `dst_row`. The destination's `conv_state[dst_row, :, :]` and
     /// `recurrent_state[dst_row, :, :, :]` slabs are overwritten;
@@ -273,10 +363,16 @@ impl GatedDeltaCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mlx::Dtype;
+    use mlx::{Array, Dtype};
 
     fn make_cache_b(b: i32, cap: i32) -> GatedDeltaCache {
         GatedDeltaCache::new_with_cap(b, 4, 8, 4, 8, 8, Dtype::Bfloat16, cap).expect("cache new")
+    }
+
+    fn filled_f32(shape: &[i32], value: f32) -> Array {
+        let n: usize = shape.iter().map(|d| *d as usize).product();
+        let data = vec![value; n];
+        (&data[..], shape).try_into().unwrap()
     }
 
     #[test]
@@ -374,6 +470,30 @@ mod tests {
         // Shapes preserved.
         assert_eq!(c.conv_state().shape().as_slice(), &[2, 3, 8]);
         assert_eq!(c.recurrent_state().shape().as_slice(), &[2, 4, 8, 8]);
+    }
+
+    #[test]
+    fn gdcache_snapshot_restore_offsets_and_states() {
+        let mut c =
+            GatedDeltaCache::new_with_cap(2, 4, 8, 4, 8, 8, Dtype::Float32, 16).expect("new");
+        c.update_conv(filled_f32(&[2, 3, 8], 1.0));
+        c.update_recurrent(filled_f32(&[2, 4, 8, 8], 2.0));
+        c.advance(&[3, 5]).expect("advance snapshot state");
+        let snapshot = c.snapshot();
+        assert_eq!(snapshot.offsets(), &[3, 5]);
+
+        c.update_conv(filled_f32(&[2, 3, 8], 9.0));
+        c.update_recurrent(filled_f32(&[2, 4, 8, 8], 10.0));
+        c.advance(&[2, 2]).expect("advance speculative suffix");
+        assert_eq!(c.offsets(), &[5, 7]);
+
+        c.restore(&snapshot).expect("restore snapshot");
+        assert_eq!(c.offsets(), &[3, 5]);
+
+        let conv: Vec<f32> = c.conv_state().to_vec().unwrap();
+        assert!(conv.iter().all(|&v| (v - 1.0).abs() < 1e-6));
+        let recurrent: Vec<f32> = c.recurrent_state().to_vec().unwrap();
+        assert!(recurrent.iter().all(|&v| (v - 2.0).abs() < 1e-6));
     }
 
     #[test]

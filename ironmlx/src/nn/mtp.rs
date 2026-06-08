@@ -47,6 +47,12 @@ pub struct Mtp {
     cfg: MtpConfig,
 }
 
+/// Model-level result for one MTP draft step.
+pub struct MtpStepOutput {
+    pub hidden_states: Array,
+    pub logits: Array,
+}
+
 impl Mtp {
     /// Test/composition seam: build an `Mtp` from pre-built sub-modules.
     ///
@@ -217,17 +223,21 @@ impl Mtp {
     /// - `{prefix}.layers.{0..N-1}.{...}`               (per [`DecoderLayer::from_loader`])
     /// - `{prefix}.norm.weight`                         `[hidden_size]`
     pub fn from_loader(loader: &Loader, prefix: &str, cfg: MtpConfig) -> Result<Self> {
-        let pre_fc_norm_hidden = RmsNorm::from_loader(
-            loader,
-            &format!("{prefix}.pre_fc_norm_hidden"),
-            cfg.layer.rms_norm_eps,
-        )?;
+        let key = |leaf: &str| -> String {
+            if prefix.is_empty() {
+                leaf.to_owned()
+            } else {
+                format!("{prefix}.{leaf}")
+            }
+        };
+        let pre_fc_norm_hidden =
+            RmsNorm::from_loader(loader, &key("pre_fc_norm_hidden"), cfg.layer.rms_norm_eps)?;
         let pre_fc_norm_embedding = RmsNorm::from_loader(
             loader,
-            &format!("{prefix}.pre_fc_norm_embedding"),
+            &key("pre_fc_norm_embedding"),
             cfg.layer.rms_norm_eps,
         )?;
-        let fc = Linear::from_loader(loader, &format!("{prefix}.fc"))?;
+        let fc = Linear::from_loader(loader, &key("fc"))?;
 
         // Validate fc weight shape. Unlike attention projections (where reshape /
         // matmul on downstream consumers will surface mismatches), the fc layer's
@@ -238,20 +248,21 @@ impl Mtp {
         let expected_out = cfg.hidden_size as usize;
         if fc.in_features() != expected_in || fc.out_features() != expected_out {
             return Err(anyhow!(
-                "Mtp.fc weight shape mismatch under prefix '{prefix}.fc': \
+                "Mtp.fc weight shape mismatch under prefix '{}': \
                  expected [in={expected_in}, out={expected_out}], got [in={}, out={}]",
+                key("fc"),
                 fc.in_features(),
                 fc.out_features(),
             ));
         }
 
-        let norm = RmsNorm::from_loader(loader, &format!("{prefix}.norm"), cfg.layer.rms_norm_eps)?;
+        let norm = RmsNorm::from_loader(loader, &key("norm"), cfg.layer.rms_norm_eps)?;
 
         let mut layers = Vec::with_capacity(cfg.num_mtp_layers as usize);
         for i in 0..cfg.num_mtp_layers {
             layers.push(DecoderLayer::from_loader(
                 loader,
-                &format!("{prefix}.layers.{i}"),
+                &key(&format!("layers.{i}")),
                 cfg.layer,
                 AttnKind::Full,
             )?);

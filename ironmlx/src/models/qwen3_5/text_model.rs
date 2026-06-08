@@ -103,6 +103,10 @@ impl Qwen35TextModel {
         self.layers.len()
     }
 
+    pub fn mrope(&self) -> &Mrope {
+        &self.mrope
+    }
+
     /// Embed token ids to hidden states `[B, S, hidden_size]`.
     ///
     /// Thin wrapper around `embed_tokens.forward_on` exposed for the VL path so

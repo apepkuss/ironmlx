@@ -8,11 +8,12 @@
 use anyhow::Context;
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::MtpCache;
 use crate::core::memory_budget::ModelMeta;
 use crate::core::{Loader, Model};
-use crate::models::qwen3_5_moe::Qwen35MoeModel;
+use crate::models::qwen3_5_moe::{Qwen35MoeModel, Qwen35MoeMtp};
 use crate::models::vision::VisionTower;
-use crate::nn::LayerCache;
+use crate::nn::{LayerCache, MtpStepOutput};
 use crate::Result;
 
 use super::config::Qwen36MoeConfig;
@@ -46,6 +47,62 @@ impl Qwen36MoeModel {
 
     pub fn vision(&self) -> Option<&VisionTower> {
         self.inner.vision()
+    }
+
+    pub fn load_mtp_head(&self, loader: &Loader) -> Result<Qwen35MoeMtp> {
+        self.inner.load_mtp_head(loader)
+    }
+
+    pub fn project_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.inner.project_hidden_on(hidden, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mtp_forward_hidden_on(
+        &self,
+        mtp: &Qwen35MoeMtp,
+        hidden_states: &Array,
+        next_token_ids: &Array,
+        position_ids: &Array,
+        mask: Option<&Array>,
+        mtp_cache: Option<&mut MtpCache>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.inner.mtp_forward_hidden_on(
+            mtp,
+            hidden_states,
+            next_token_ids,
+            position_ids,
+            mask,
+            mtp_cache,
+            target,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mtp_forward_on(
+        &self,
+        mtp: &Qwen35MoeMtp,
+        hidden_states: &Array,
+        next_token_ids: &Array,
+        position_ids: &Array,
+        mask: Option<&Array>,
+        mtp_cache: Option<&mut MtpCache>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<MtpStepOutput> {
+        self.inner.mtp_forward_on(
+            mtp,
+            hidden_states,
+            next_token_ids,
+            position_ids,
+            mask,
+            mtp_cache,
+            target,
+        )
     }
 
     pub fn compute_vision_embeds(
@@ -422,6 +479,7 @@ mod tests {
             attention_bias: false,
             tie_word_embeddings: false,
             full_attention_interval: 2,
+            mtp_num_hidden_layers: 1,
             linear_num_value_heads: 4,
             linear_num_key_heads: 2,
             linear_key_head_dim: 8,

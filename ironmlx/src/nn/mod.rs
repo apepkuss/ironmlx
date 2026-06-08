@@ -21,12 +21,14 @@ pub mod self_qmm;
 
 pub use attention::{Attention, AttentionConfig};
 pub use conv::{Conv1d, Conv1dConfig};
-pub use decoder_layer::{AttnKind, AttnPath, DecoderLayer, DecoderLayerConfig, LayerCache};
+pub use decoder_layer::{
+    AttnKind, AttnPath, DecoderLayer, DecoderLayerConfig, LayerCache, LayerCacheSnapshot,
+};
 pub use embedding::Embedding;
 pub use gated_attention::{GatedAttention, GatedAttentionConfig};
 pub use gated_delta_net::{GatedDeltaNet, GatedDeltaNetConfig};
 pub use linear::Linear;
 pub use mlp::Mlp;
 pub use mrope::Mrope;
-pub use mtp::{Mtp, MtpConfig};
+pub use mtp::{Mtp, MtpConfig, MtpStepOutput};
 pub use norm::{LayerNorm, RmsNorm, RmsNormGated};

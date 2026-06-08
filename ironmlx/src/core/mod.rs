@@ -10,6 +10,7 @@ pub mod sampler;
 pub mod scheduler;
 pub mod scheduler_autotune;
 pub mod server;
+pub mod speculative;
 pub mod tokenizer;
 
 #[cfg(feature = "p5h-profile")]

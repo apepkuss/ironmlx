@@ -8,12 +8,28 @@
 use anyhow::anyhow;
 use mlx::Dtype;
 
-use crate::core::cache::KVCache;
+use crate::core::cache::{KVCache, KVCacheSnapshot};
 use crate::Result;
 
 /// KV caches for the layers of an MTP head.
 pub struct MtpCache {
     layers: Vec<KVCache>,
+}
+
+/// Lightweight checkpoint for [`MtpCache`] rollback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MtpCacheSnapshot {
+    layers: Vec<KVCacheSnapshot>,
+}
+
+impl MtpCacheSnapshot {
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn layer(&self, idx: usize) -> &KVCacheSnapshot {
+        &self.layers[idx]
+    }
 }
 
 impl MtpCache {
@@ -74,6 +90,28 @@ impl MtpCache {
         }
     }
 
+    /// Capture every MTP layer's logical KV position. No K/V buffers are copied.
+    pub fn snapshot(&self) -> MtpCacheSnapshot {
+        MtpCacheSnapshot {
+            layers: self.layers.iter().map(KVCache::snapshot).collect(),
+        }
+    }
+
+    /// Restore every MTP layer's logical KV position from a prior checkpoint.
+    pub fn restore(&mut self, snapshot: &MtpCacheSnapshot) -> Result<()> {
+        if snapshot.layers.len() != self.layers.len() {
+            return Err(anyhow!(
+                "MtpCache::restore: snapshot layers {} != cache layers {}",
+                snapshot.layers.len(),
+                self.layers.len()
+            ));
+        }
+        for (layer, layer_snapshot) in self.layers.iter_mut().zip(snapshot.layers.iter()) {
+            layer.restore(layer_snapshot)?;
+        }
+        Ok(())
+    }
+
     /// Returns layer 0's offset (the maximum offset across rows in the
     /// lockstep-uniform case).
     ///
@@ -123,5 +161,27 @@ mod tests {
         assert_eq!(cache.layer(0).offsets(), &[0]);
         assert_eq!(cache.layer(1).offsets(), &[0]);
         assert_eq!(cache.offset(), 0);
+    }
+
+    #[test]
+    fn mtp_cache_snapshot_restore_all_layers() {
+        let mut cache = make_cache(2);
+        let k4: mlx::Array = mlx::Array::zeros((1, 2, 4, 8), Dtype::Bfloat16).unwrap();
+        let v4: mlx::Array = mlx::Array::zeros((1, 2, 4, 8), Dtype::Bfloat16).unwrap();
+        cache.layer_mut(0).update_and_fetch(&k4, &v4, &[4]).unwrap();
+        cache.layer_mut(1).update_and_fetch(&k4, &v4, &[4]).unwrap();
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.num_layers(), 2);
+        assert_eq!(snapshot.layer(0).offsets(), &[4]);
+        assert_eq!(snapshot.layer(1).offsets(), &[4]);
+
+        cache.layer_mut(0).update_and_fetch(&k4, &v4, &[4]).unwrap();
+        cache.layer_mut(1).update_and_fetch(&k4, &v4, &[4]).unwrap();
+        assert_eq!(cache.layer(0).offsets(), &[8]);
+        assert_eq!(cache.layer(1).offsets(), &[8]);
+
+        cache.restore(&snapshot).expect("restore mtp snapshot");
+        assert_eq!(cache.layer(0).offsets(), &[4]);
+        assert_eq!(cache.layer(1).offsets(), &[4]);
     }
 }

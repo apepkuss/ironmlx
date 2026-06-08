@@ -17,6 +17,7 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeRequest,
 };
+use crate::core::speculative::MtpSpeculativeModel;
 use crate::core::tokenizer::Tokenizer;
 use crate::Result;
 
@@ -130,6 +131,85 @@ pub(crate) fn should_route_to_scheduler<M: Model>(
     M::fresh_prefill_batch_limit(prompt_len, b_max) < b_max
 }
 
+trait SchedulerActorSpawner<M>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(
+        self,
+        model: Arc<Mutex<M>>,
+        b_max: usize,
+        admission_deadline: std::time::Duration,
+        admission_queue_max: usize,
+        effective_cap_max: usize,
+        decode_cadence_mid_chunk_cap: usize,
+        meta: crate::core::memory_budget::ModelMeta,
+    ) -> Result<scheduler_actor::SchedulerActorHandle>;
+}
+
+struct PlainSchedulerActorSpawner;
+
+impl<M> SchedulerActorSpawner<M> for PlainSchedulerActorSpawner
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    fn spawn(
+        self,
+        model: Arc<Mutex<M>>,
+        b_max: usize,
+        admission_deadline: std::time::Duration,
+        admission_queue_max: usize,
+        effective_cap_max: usize,
+        decode_cadence_mid_chunk_cap: usize,
+        meta: crate::core::memory_budget::ModelMeta,
+    ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        Ok(scheduler_actor::spawn_scheduler_actor(
+            model,
+            b_max,
+            admission_deadline,
+            admission_queue_max,
+            effective_cap_max,
+            decode_cadence_mid_chunk_cap,
+            meta,
+        )?)
+    }
+}
+
+struct MtpSchedulerActorSpawner<H> {
+    mtp: H,
+    mtp_draft_tokens: usize,
+}
+
+impl<M> SchedulerActorSpawner<M> for MtpSchedulerActorSpawner<M::MtpHead>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M::MtpHead: Send + 'static,
+{
+    fn spawn(
+        self,
+        model: Arc<Mutex<M>>,
+        b_max: usize,
+        admission_deadline: std::time::Duration,
+        admission_queue_max: usize,
+        effective_cap_max: usize,
+        decode_cadence_mid_chunk_cap: usize,
+        meta: crate::core::memory_budget::ModelMeta,
+    ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        Ok(scheduler_actor::spawn_scheduler_actor_with_mtp(
+            model,
+            self.mtp,
+            self.mtp_draft_tokens,
+            b_max,
+            admission_deadline,
+            admission_queue_max,
+            effective_cap_max,
+            decode_cadence_mid_chunk_cap,
+            meta,
+        )?)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn serve<M>(
     model: M,
@@ -150,6 +230,101 @@ pub async fn serve<M>(
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
+{
+    serve_inner(
+        model,
+        tokenizer,
+        model_id,
+        host,
+        port,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        p5h_measurement_eval_probes,
+        vision_input_override,
+        None,
+        PlainSchedulerActorSpawner,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_mtp<M>(
+    model: M,
+    mtp: M::MtpHead,
+    mtp_draft_tokens: usize,
+    tokenizer: Tokenizer,
+    model_id: String,
+    host: &str,
+    port: u16,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    p5h_measurement_eval_probes: bool,
+    vision_input_override: Option<VisionInputConfig>,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M::MtpHead: Send + 'static,
+{
+    serve_inner(
+        model,
+        tokenizer,
+        model_id,
+        host,
+        port,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        p5h_measurement_eval_probes,
+        vision_input_override,
+        Some(mtp_draft_tokens),
+        MtpSchedulerActorSpawner {
+            mtp,
+            mtp_draft_tokens,
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_inner<M, S>(
+    model: M,
+    tokenizer: Tokenizer,
+    model_id: String,
+    host: &str,
+    port: u16,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    p5h_measurement_eval_probes: bool,
+    vision_input_override: Option<VisionInputConfig>,
+    mtp_health_draft_tokens: Option<usize>,
+    scheduler_actor_spawner: S,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+    S: SchedulerActorSpawner<M>,
 {
     // P5h+1 T1: install the measurement-eval-probes flag in the global
     // BEFORE the SchedulerActor / GenerationStream code paths run. Setter
@@ -204,7 +379,7 @@ where
         );
     }
 
-    let scheduler_handle = scheduler_actor::spawn_scheduler_actor(
+    let scheduler_handle = scheduler_actor_spawner.spawn(
         model.clone(),
         b_max,
         admission_deadline,
@@ -217,22 +392,23 @@ where
         spatial_merge_size: meta.spatial_merge_size,
     });
 
-    // B1-p2.5 G3: Build SchedulerHealthCollector from shared Arc atomics
-    // exposed by SchedulerActorHandle. max_position_embeddings already resolved
-    // into model_max_context above (i32 → usize). Re-read from model_max_context.
-    let health_collector = Arc::new(health::SchedulerHealthCollector {
-        start_time: std::time::Instant::now(),
+    let mtp_health = mtp_health_draft_tokens
+        .map(|draft_tokens| {
+            health::MtpHealthConfig::enabled(
+                draft_tokens,
+                scheduler_handle.mtp_prefill_count.clone(),
+                scheduler_handle.mtp_step_count.clone(),
+            )
+        })
+        .unwrap_or_else(health::MtpHealthConfig::disabled);
+    let health_collector = build_health_collector(
+        model_id.clone(),
+        model_max_context,
         b_max,
-        queue_max: admission_queue_max,
-        model_name: model_id.clone(),
-        max_position_embeddings: model_max_context as i32,
-        b_active: scheduler_handle.b_active.clone(),
-        b_queued: scheduler_handle.b_queued.clone(),
-        admission_queue_full_count: scheduler_handle.admission_queue_full_count.clone(),
-        memory_budget_exceeded_count: scheduler_handle.memory_budget_exceeded_count.clone(),
-        kv_cache_active_bytes: scheduler_handle.kv_cache_active_bytes.clone(),
-        kv_cache_soft_limit_bytes: scheduler_handle.kv_cache_soft_limit_bytes,
-    });
+        admission_queue_max,
+        &scheduler_handle,
+        mtp_health,
+    );
 
     let state = AppState {
         model,
@@ -266,6 +442,30 @@ where
     Ok(())
 }
 
+fn build_health_collector(
+    model_id: String,
+    model_max_context: usize,
+    b_max: usize,
+    admission_queue_max: usize,
+    scheduler_handle: &scheduler_actor::SchedulerActorHandle,
+    mtp: health::MtpHealthConfig,
+) -> Arc<health::SchedulerHealthCollector> {
+    Arc::new(health::SchedulerHealthCollector {
+        start_time: std::time::Instant::now(),
+        b_max,
+        queue_max: admission_queue_max,
+        model_name: model_id,
+        max_position_embeddings: model_max_context as i32,
+        b_active: scheduler_handle.b_active.clone(),
+        b_queued: scheduler_handle.b_queued.clone(),
+        admission_queue_full_count: scheduler_handle.admission_queue_full_count.clone(),
+        memory_budget_exceeded_count: scheduler_handle.memory_budget_exceeded_count.clone(),
+        kv_cache_active_bytes: scheduler_handle.kv_cache_active_bytes.clone(),
+        kv_cache_soft_limit_bytes: scheduler_handle.kv_cache_soft_limit_bytes,
+        mtp,
+    })
+}
+
 /// GET /healthz — returns a JSON HealthSnapshot. Reads only Arc atomics;
 /// no lock contention with the model or SchedulerActor. B1-p2.5 G3.
 async fn healthz_handler<M>(
@@ -280,9 +480,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
     use std::time::Duration;
 
     use mlx::{Array, Dtype, StreamOrDevice};
+    use tokio::sync::mpsc;
     use tokio::time::sleep;
 
     use crate::nn::LayerCache;
@@ -411,6 +613,71 @@ mod tests {
         assert!(should_route_to_scheduler::<LimitedRouteModel>(
             4096, 2048, 4
         ));
+    }
+
+    fn test_scheduler_handle() -> scheduler_actor::SchedulerActorHandle {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let queue_rejected = Arc::new(AtomicU64::new(0));
+        scheduler_actor::SchedulerActorHandle {
+            cmd_tx,
+            admit_count: Arc::new(AtomicU64::new(0)),
+            batch_count: Arc::new(AtomicU64::new(0)),
+            saturate_triggered: Arc::new(AtomicU64::new(0)),
+            queue_depth_peak: Arc::new(AtomicUsize::new(0)),
+            queue_rejected: queue_rejected.clone(),
+            mtp_prefill_count: Arc::new(AtomicU64::new(0)),
+            mtp_step_count: Arc::new(AtomicU64::new(0)),
+            b_active: Arc::new(AtomicU64::new(0)),
+            b_queued: Arc::new(AtomicU64::new(0)),
+            admission_queue_full_count: queue_rejected,
+            memory_budget_exceeded_count: Arc::new(AtomicU64::new(0)),
+            kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),
+            kv_cache_soft_limit_bytes: 1,
+        }
+    }
+
+    #[test]
+    fn health_collector_mtp_disabled_without_server_mtp_config() {
+        let handle = test_scheduler_handle();
+        let collector = build_health_collector(
+            "test-model".to_string(),
+            4096,
+            1,
+            8,
+            &handle,
+            health::MtpHealthConfig::disabled(),
+        );
+        let snapshot = collector.snapshot();
+
+        assert!(!snapshot.mtp.enabled);
+        assert_eq!(snapshot.mtp.draft_tokens, None);
+        assert_eq!(snapshot.mtp.prefill_count, 0);
+        assert_eq!(snapshot.mtp.step_count, 0);
+    }
+
+    #[test]
+    fn health_collector_mtp_enabled_uses_scheduler_actor_counters() {
+        let handle = test_scheduler_handle();
+        handle.mtp_prefill_count.store(3, Ordering::Relaxed);
+        handle.mtp_step_count.store(5, Ordering::Relaxed);
+        let collector = build_health_collector(
+            "test-model".to_string(),
+            4096,
+            1,
+            8,
+            &handle,
+            health::MtpHealthConfig::enabled(
+                2,
+                handle.mtp_prefill_count.clone(),
+                handle.mtp_step_count.clone(),
+            ),
+        );
+        let snapshot = collector.snapshot();
+
+        assert!(snapshot.mtp.enabled);
+        assert_eq!(snapshot.mtp.draft_tokens, Some(2));
+        assert_eq!(snapshot.mtp.prefill_count, 3);
+        assert_eq!(snapshot.mtp.step_count, 5);
     }
 
     /// Verify two concurrent task acquisitions of the same Mutex serialize.

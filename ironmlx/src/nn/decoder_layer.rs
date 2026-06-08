@@ -15,8 +15,9 @@
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::cache::{GatedDeltaCache, KVCache};
+use crate::core::cache::{GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot};
 use crate::core::Loader;
+use crate::models::glm4_moe_lite::mla_cache::MlaLatentCacheSnapshot;
 use crate::nn::{
     GatedAttention, GatedAttentionConfig, GatedDeltaNet, GatedDeltaNetConfig, Mlp, Mrope, RmsNorm,
 };
@@ -68,6 +69,14 @@ pub enum LayerCache {
     Mla(crate::models::glm4_moe_lite::mla_cache::MlaLatentCache),
 }
 
+/// Per-layer cache checkpoint used by speculative decoding rollback.
+#[doc(hidden)]
+pub enum LayerCacheSnapshot {
+    Full(KVCacheSnapshot),
+    Linear(GatedDeltaCacheSnapshot),
+    Mla(MlaLatentCacheSnapshot),
+}
+
 impl LayerCache {
     /// Reset to empty state (offset → 0; recurrent state cleared). Preserves
     /// any underlying Array allocations so the next batch can reuse them.
@@ -79,6 +88,33 @@ impl LayerCache {
             }
             LayerCache::Linear(gd) => gd.reset(),
             LayerCache::Mla(c) => c.reset(),
+        }
+    }
+
+    /// Capture a lightweight rollback checkpoint for this layer cache.
+    pub fn snapshot(&self) -> LayerCacheSnapshot {
+        match self {
+            LayerCache::Full(kv) => LayerCacheSnapshot::Full(kv.snapshot()),
+            LayerCache::Linear(gd) => LayerCacheSnapshot::Linear(gd.snapshot()),
+            LayerCache::Mla(c) => LayerCacheSnapshot::Mla(c.snapshot()),
+        }
+    }
+
+    /// Restore this layer cache from a matching checkpoint.
+    pub fn restore(&mut self, snapshot: &LayerCacheSnapshot) -> anyhow::Result<()> {
+        match (self, snapshot) {
+            (LayerCache::Full(kv), LayerCacheSnapshot::Full(s)) => kv.restore(s),
+            (LayerCache::Linear(gd), LayerCacheSnapshot::Linear(s)) => gd.restore(s),
+            (LayerCache::Mla(c), LayerCacheSnapshot::Mla(s)) => c.restore(s),
+            (LayerCache::Full(_), _) => {
+                anyhow::bail!("LayerCache::restore: Full cache received non-Full snapshot")
+            }
+            (LayerCache::Linear(_), _) => {
+                anyhow::bail!("LayerCache::restore: Linear cache received non-Linear snapshot")
+            }
+            (LayerCache::Mla(_), _) => {
+                anyhow::bail!("LayerCache::restore: Mla cache received non-Mla snapshot")
+            }
         }
     }
 }
@@ -400,6 +436,7 @@ mod tests {
     use super::*;
     use mlx::{Array, Dtype};
 
+    use crate::core::cache::{GatedDeltaCache, KVCache};
     use crate::nn::Linear;
     use serial_test::serial;
 
@@ -496,6 +533,32 @@ mod tests {
         assert_eq!(kept.num_heads, cfg.num_heads);
         assert_eq!(kept.num_kv_heads, cfg.num_kv_heads);
         assert_eq!(kept.head_dim, cfg.head_dim);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn layer_cache_snapshot_restore_full_and_kind_mismatch() {
+        let mut full = LayerCache::Full(KVCache::new(1, 2, 8, 8, Dtype::Float32, 16).with_step(16));
+        let k: Array = Array::zeros((1, 2, 4, 8), Dtype::Float32).unwrap();
+        let v: Array = Array::zeros((1, 2, 4, 8), Dtype::Float32).unwrap();
+        if let LayerCache::Full(kv) = &mut full {
+            kv.update_and_fetch(&k, &v, &[4]).unwrap();
+        }
+        let snapshot = full.snapshot();
+        if let LayerCache::Full(kv) = &mut full {
+            kv.update_and_fetch(&k, &v, &[4]).unwrap();
+            assert_eq!(kv.offsets(), &[8]);
+        }
+
+        full.restore(&snapshot).expect("restore full snapshot");
+        if let LayerCache::Full(kv) = &full {
+            assert_eq!(kv.offsets(), &[4]);
+        }
+
+        let mut linear = LayerCache::Linear(
+            GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Float32, 16).unwrap(),
+        );
+        assert!(linear.restore(&snapshot).is_err());
     }
 
     fn build_inputs_fp32(cfg: DecoderLayerConfig) -> (Array, Mrope, Array, Array) {

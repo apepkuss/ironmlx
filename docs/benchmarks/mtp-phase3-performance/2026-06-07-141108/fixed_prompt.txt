@@ -1,0 +1,1 @@
+You are benchmarking an MLX inference engine. Explain speculative decoding, scheduler fairness, cache rollback, and token verification in concise technical prose. Use concrete terms such as draft token, accepted token, mismatch, rollback, prefill, decode, latency, and throughput. Keep the answer focused on engineering tradeoffs rather than marketing language.
