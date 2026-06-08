@@ -102,6 +102,10 @@ impl Qwen35MoeTextModel {
         self.layers.len()
     }
 
+    pub fn mrope(&self) -> &Mrope {
+        &self.mrope
+    }
+
     /// Embed token ids to hidden states `[B, S, hidden_size]`.
     pub fn embed_on(&self, input_ids: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         self.embed_tokens.forward_on(input_ids, target)

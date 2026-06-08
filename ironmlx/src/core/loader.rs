@@ -69,6 +69,12 @@ pub struct Loader {
     model_dir: std::path::PathBuf,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SanitizeMode {
+    Text { keep_vision_tower: bool },
+    Mtp,
+}
+
 impl Loader {
     /// Open a directory containing `config.json`, `tokenizer_config.json`,
     /// and `model.safetensors` (single-file) or `model.safetensors.index.json`
@@ -77,17 +83,35 @@ impl Loader {
     /// `vision_tower.*` keys are **dropped** during sanitize — use
     /// [`Loader::open_multimodal`] when the vision encoder weights are needed.
     pub fn open(model_dir: &Path) -> Result<Self> {
-        Self::open_impl(model_dir, false)
+        Self::open_impl(
+            model_dir,
+            SanitizeMode::Text {
+                keep_vision_tower: false,
+            },
+        )
     }
 
     /// Like [`Loader::open`] but retains `vision_tower.*` keys so that the
     /// VisionTower can load its weights from the same Loader instance.
     /// Used for multimodal (VL) inference paths.
     pub fn open_multimodal(model_dir: &Path) -> Result<Self> {
-        Self::open_impl(model_dir, true)
+        Self::open_impl(
+            model_dir,
+            SanitizeMode::Text {
+                keep_vision_tower: true,
+            },
+        )
     }
 
-    fn open_impl(model_dir: &Path, keep_vision_tower: bool) -> Result<Self> {
+    /// Open a standalone Qwen MTP draft-head checkpoint.
+    ///
+    /// These repositories are not full language models: their weights live at
+    /// root paths such as `fc.weight`, `layers.0.*`, and `norm.weight`.
+    pub fn open_mtp(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(model_dir, SanitizeMode::Mtp)
+    }
+
+    fn open_impl(model_dir: &Path, sanitize_mode: SanitizeMode) -> Result<Self> {
         let config_path = model_dir.join("config.json");
         let config_raw: serde_json::Value = serde_json::from_reader(
             std::fs::File::open(&config_path)
@@ -127,7 +151,12 @@ impl Loader {
 
         let mut tensors = load_safetensors(model_dir)?;
 
-        Self::sanitize(&mut tensors, &config_raw, keep_vision_tower)?;
+        match sanitize_mode {
+            SanitizeMode::Text { keep_vision_tower } => {
+                Self::sanitize(&mut tensors, &config_raw, keep_vision_tower)?;
+            }
+            SanitizeMode::Mtp => Self::sanitize_mtp(&mut tensors, &config_raw)?,
+        }
 
         // Eagerly evaluate all tensors on the loading thread so that no lazy
         // stream-tagged computation remains in the weight arrays.  This
@@ -298,29 +327,47 @@ impl Loader {
 
         // 4. RMSNorm +1.0 shift if triggered.
         if should_shift_norm {
-            const NORM_SUFFIXES: &[&str] = &[
-                ".input_layernorm.weight",
-                ".post_attention_layernorm.weight",
-                ".q_norm.weight",
-                ".k_norm.weight",
-            ];
-            const NORM_EXACT: &[&str] = &["model.norm.weight"];
-            let keys_to_shift: Vec<String> = weights
-                .iter()
-                .filter(|(k, v)| {
-                    v.shape().as_slice().len() == 1
-                        && (NORM_SUFFIXES.iter().any(|s| k.ends_with(s))
-                            || NORM_EXACT.iter().any(|s| k == s))
-                })
-                .map(|(k, _)| k.clone())
-                .collect();
-            for k in keys_to_shift {
-                let v = weights.get(&k).expect("key just collected").clone();
-                let shifted = &v + 1.0_f32;
-                weights.insert(k, shifted);
-            }
+            shift_offset_gamma_norms(weights, &["model.norm.weight"])?;
         }
         Ok(())
+    }
+
+    /// Sanitize a standalone Qwen MTP draft-head checkpoint.
+    ///
+    /// New mlx-community MTP repos store the MTP head at root paths, not under
+    /// `mtp.*`; these root keys must be retained. Qwen's offset-gamma RmsNorm
+    /// convention still applies to every MTP norm tensor.
+    fn sanitize_mtp(
+        weights: &mut HashMap<String, Array>,
+        config_raw: &serde_json::Value,
+    ) -> Result<()> {
+        let model_type = config_raw
+            .get("model_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("MTP config.json missing model_type"))?;
+        if model_type != "qwen3_5_mtp" {
+            return Err(anyhow!(
+                "Loader::open_mtp expected model_type=qwen3_5_mtp, got {model_type}"
+            ));
+        }
+
+        weights.retain(|k, _| {
+            !k.starts_with("vision_tower.")
+                && !k.starts_with("audio_tower.")
+                && !k.starts_with("embed_vision.")
+                && !k.starts_with("embed_audio.")
+                && !k.starts_with("vit_merger.")
+                && !k.starts_with("merger.")
+        });
+
+        shift_offset_gamma_norms(
+            weights,
+            &[
+                "pre_fc_norm_hidden.weight",
+                "pre_fc_norm_embedding.weight",
+                "norm.weight",
+            ],
+        )
     }
 
     /// Tokenizer config (chat template, eos token, etc.).
@@ -407,6 +454,29 @@ fn normalize_quant_prefix(key: &str) -> String {
     key.strip_prefix("language_model.")
         .unwrap_or(key)
         .to_owned()
+}
+
+fn shift_offset_gamma_norms(weights: &mut HashMap<String, Array>, exact: &[&str]) -> Result<()> {
+    const NORM_SUFFIXES: &[&str] = &[
+        ".input_layernorm.weight",
+        ".post_attention_layernorm.weight",
+        ".q_norm.weight",
+        ".k_norm.weight",
+    ];
+    let keys_to_shift: Vec<String> = weights
+        .iter()
+        .filter(|(k, v)| {
+            v.shape().as_slice().len() == 1
+                && (NORM_SUFFIXES.iter().any(|s| k.ends_with(s)) || exact.iter().any(|s| k == s))
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in keys_to_shift {
+        let v = weights.get(&k).expect("key just collected").clone();
+        let shifted = &v + 1.0_f32;
+        weights.insert(k, shifted);
+    }
+    Ok(())
 }
 
 fn is_qwen35_offset_gamma_model(config_raw: &serde_json::Value) -> bool {
@@ -616,6 +686,44 @@ mod tests {
         let v: Vec<f32> = shifted.to_vec().unwrap();
         for x in v {
             assert!((x - 1.5).abs() < 1e-6, "expected 1.5 (0.5+1.0), got {x}");
+        }
+    }
+
+    #[test]
+    fn sanitize_mtp_root_weights_preserves_root_keys_and_shifts_norms() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let norm: Array = (&[0.25_f32; 4][..], (4_i32,)).try_into().unwrap();
+        for key in [
+            "pre_fc_norm_hidden.weight",
+            "pre_fc_norm_embedding.weight",
+            "norm.weight",
+            "layers.0.input_layernorm.weight",
+            "layers.0.post_attention_layernorm.weight",
+            "layers.0.self_attn.q_norm.weight",
+            "layers.0.self_attn.k_norm.weight",
+        ] {
+            w.insert(key.to_owned(), norm.clone());
+        }
+        let fc: Array = (&[2.0_f32; 8][..], &[2_i32, 4][..]).try_into().unwrap();
+        w.insert("fc.weight".to_owned(), fc);
+
+        Loader::sanitize_mtp(&mut w, &serde_json::json!({"model_type": "qwen3_5_mtp"})).unwrap();
+
+        assert!(w.contains_key("fc.weight"));
+        for key in [
+            "pre_fc_norm_hidden.weight",
+            "pre_fc_norm_embedding.weight",
+            "norm.weight",
+            "layers.0.input_layernorm.weight",
+            "layers.0.post_attention_layernorm.weight",
+            "layers.0.self_attn.q_norm.weight",
+            "layers.0.self_attn.k_norm.weight",
+        ] {
+            let shifted = w.get(key).unwrap();
+            let values: Vec<f32> = shifted.to_vec().unwrap();
+            for x in values {
+                assert!((x - 1.25).abs() < 1e-6, "{key} should be shifted, got {x}");
+            }
         }
     }
 

@@ -1,0 +1,2 @@
+target,pp_target,tg_target,run_idx,ttft_ms,tg_tps,tpot_ms,pp_tps,e2e_s,prompt_tokens_local,prompt_tokens_server,completion_tokens_server,cached_tokens,finish_reason
+qwen36_35b_a3b_mtp,128,32,0,129.603,131.858,7.829,987.635,0.372288,128,,,,length

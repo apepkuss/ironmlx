@@ -16,6 +16,7 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeProfileMetadata, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
+use crate::core::speculative::MtpSpeculativeModel;
 use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
 
@@ -95,6 +96,16 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = false)]
     pub scheduler_autotune_report: bool,
 
+    /// Optional local MTP model directory. When set, MTP is enabled only for
+    /// Qwen dense/MoE text requests served with --b-max 1.
+    #[arg(long = "mtp-model-dir")]
+    pub mtp_model_dir: Option<PathBuf>,
+
+    /// Maximum MTP draft tokens per speculative window. If omitted, ironmlx
+    /// picks a model-aware default from local benchmark policy.
+    #[arg(long = "mtp-draft-tokens")]
+    pub mtp_draft_tokens: Option<usize>,
+
     /// P5h+1 T1 measurement probe: force selected span bodies (Lane A
     /// `first_token_sampling_materialize_and_sample` + the ROI substep
     /// closures under GatedAttention / GatedDeltaNet / SparseMoeBlock +
@@ -128,6 +139,12 @@ impl Default for SchedulerServeConfig {
             decode_cadence_mid_chunk_cap: DEFAULT_DECODE_CADENCE_MID_CHUNK_CAP,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServeMtpConfig {
+    model_dir: PathBuf,
+    draft_tokens: usize,
 }
 
 fn default_scheduler_profile_config() -> SchedulerAutotuneProfileConfig {
@@ -341,6 +358,45 @@ fn validate_dynamic_rules(profile: &SchedulerAutotuneRuntimeProfile) -> Result<(
     Ok(())
 }
 
+fn resolve_serve_mtp_config(
+    args: &ServeArgs,
+    architecture: crate::models::ModelArchitecture,
+    raw_config: &serde_json::Value,
+    scheduler_config: SchedulerServeConfig,
+) -> Result<Option<ServeMtpConfig>> {
+    let Some(model_dir) = args.mtp_model_dir.as_ref() else {
+        return Ok(None);
+    };
+    if scheduler_config.b_max != 1 {
+        bail!("ironmlx serve --mtp-model-dir currently requires --b-max 1");
+    }
+    match architecture {
+        crate::models::ModelArchitecture::Qwen35Dense
+        | crate::models::ModelArchitecture::Qwen35Moe => {}
+        _ => bail!("ironmlx serve --mtp-model-dir currently supports Qwen dense/MoE models only"),
+    }
+    if !model_dir.exists() {
+        bail!(
+            "--mtp-model-dir must point to a local directory (got '{}')",
+            model_dir.display()
+        );
+    }
+    let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
+        raw_config,
+        args.mtp_draft_tokens
+            .map(crate::core::speculative::MtpDraftTokensArg::Explicit)
+            .unwrap_or(crate::core::speculative::MtpDraftTokensArg::Omitted),
+    );
+    crate::core::speculative::MtpSpeculativeConfig::new(
+        draft_tokens,
+        crate::core::sampler::Sampler::greedy(),
+    )?;
+    Ok(Some(ServeMtpConfig {
+        model_dir: model_dir.clone(),
+        draft_tokens,
+    }))
+}
+
 fn resolve_scheduler_runtime_profile(
     args: &ServeArgs,
     profile: Option<&SchedulerAutotuneRuntimeProfile>,
@@ -390,17 +446,7 @@ fn resolve_scheduler_serve_config(
 /// `SchedulerActor<M>`. The trait name is historical; both dense and MoE
 /// Qwen3.5 variants implement it so the same OpenAI VL route can serve either
 /// checkpoint family.
-fn serve_with_model<M>(
-    model: M,
-    tokenizer: Tokenizer,
-    args: &ServeArgs,
-    scheduler_config: SchedulerServeConfig,
-    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
-    vision_input: Option<server::VisionInputConfig>,
-) -> Result<()>
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
+fn validate_p5h_scheduler_config(scheduler_config: SchedulerServeConfig) {
     #[cfg(feature = "p5h-profile")]
     {
         assert!(
@@ -420,7 +466,11 @@ where
             );
         }
     }
+    #[cfg(not(feature = "p5h-profile"))]
+    let _ = scheduler_config;
+}
 
+fn log_scheduler_mode(scheduler_config: SchedulerServeConfig) {
     // Surface b_max at boot so operators can confirm whether single-request
     // optimized mode (default) or multi-request batching is active without
     // having to inspect process args.
@@ -436,21 +486,100 @@ where
             scheduler_config.b_max,
         );
     }
+}
 
-    let model_id = args.model.clone();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+fn p5h_measurement_eval_probes_arg(args: &ServeArgs) -> bool {
+    #[cfg(feature = "p5h-profile")]
+    {
+        args.p5h_measurement_eval_probes
+    }
+    #[cfg(not(feature = "p5h-profile"))]
+    {
+        let _ = args;
+        false
+    }
+}
+
+fn serve_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("tokio::Runtime::new")?;
+        .context("tokio::Runtime::new")
+}
+
+fn serve_with_model<M>(
+    model: M,
+    tokenizer: Tokenizer,
+    args: &ServeArgs,
+    scheduler_config: SchedulerServeConfig,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    vision_input: Option<server::VisionInputConfig>,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    validate_p5h_scheduler_config(scheduler_config);
+    log_scheduler_mode(scheduler_config);
+
+    let model_id = args.model.clone();
+    let runtime = serve_runtime()?;
     // P5h+1 T1: derive measurement-eval-probes flag (feature-gated CLI arg);
     // feature-off builds always pass `false` so the receiver-side `set_*`
     // call site can remain unconditional in signature.
-    #[cfg(feature = "p5h-profile")]
-    let p5h_measurement_eval_probes = args.p5h_measurement_eval_probes;
-    #[cfg(not(feature = "p5h-profile"))]
-    let p5h_measurement_eval_probes = false;
+    let p5h_measurement_eval_probes = p5h_measurement_eval_probes_arg(args);
     runtime.block_on(server::serve(
         model,
+        tokenizer,
+        model_id,
+        &args.host,
+        args.port,
+        scheduler_config.prefill_chunk_size,
+        scheduler_config.b_max,
+        scheduler_config.admission_deadline_ms,
+        scheduler_config.admission_queue_max,
+        scheduler_config.max_cache_cap,
+        scheduler_config.decode_cadence_mid_chunk_cap,
+        scheduler_runtime_profile,
+        args.scheduler_autotune_report,
+        p5h_measurement_eval_probes,
+        vision_input,
+    ))
+}
+
+fn serve_with_mtp_model<M>(
+    model: M,
+    tokenizer: Tokenizer,
+    mtp_config: ServeMtpConfig,
+    args: &ServeArgs,
+    scheduler_config: SchedulerServeConfig,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    vision_input: Option<server::VisionInputConfig>,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M::MtpHead: Send + 'static,
+{
+    validate_p5h_scheduler_config(scheduler_config);
+    log_scheduler_mode(scheduler_config);
+    tracing::info!(
+        "ironmlx serve: MTP enabled model_dir={} draft_tokens={}",
+        mtp_config.model_dir.display(),
+        mtp_config.draft_tokens
+    );
+
+    let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)
+        .with_context(|| format!("Loader::open_mtp {}", mtp_config.model_dir.display()))?;
+    let mtp = model
+        .load_mtp_head(&mtp_loader)
+        .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
+
+    let model_id = args.model.clone();
+    let runtime = serve_runtime()?;
+    let p5h_measurement_eval_probes = p5h_measurement_eval_probes_arg(args);
+    runtime.block_on(server::serve_with_mtp(
+        model,
+        mtp,
+        mtp_config.draft_tokens,
         tokenizer,
         model_id,
         &args.host,
@@ -586,6 +715,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let mtp_config = resolve_serve_mtp_config(
+        &args,
+        architecture,
+        loader.config_raw_value(),
+        scheduler_config,
+    )?;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
     let vision_input = match architecture {
         crate::models::ModelArchitecture::Gemma4 => {
@@ -606,26 +741,50 @@ pub fn run(args: ServeArgs) -> Result<()> {
         crate::models::ModelArchitecture::Qwen35Dense => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
                 .context("Qwen35Model::from_loader")?;
-            serve_with_model(
-                model,
-                tokenizer,
-                &args,
-                scheduler_config,
-                scheduler_runtime_profile,
-                vision_input,
-            )
+            if let Some(mtp_config) = mtp_config.clone() {
+                serve_with_mtp_model(
+                    model,
+                    tokenizer,
+                    mtp_config,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                )
+            } else {
+                serve_with_model(
+                    model,
+                    tokenizer,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                )
+            }
         }
         crate::models::ModelArchitecture::Qwen35Moe => {
             let model = crate::models::Qwen35MoeModel::from_loader(&loader)
                 .context("Qwen35MoeModel::from_loader")?;
-            serve_with_model(
-                model,
-                tokenizer,
-                &args,
-                scheduler_config,
-                scheduler_runtime_profile,
-                vision_input,
-            )
+            if let Some(mtp_config) = mtp_config.clone() {
+                serve_with_mtp_model(
+                    model,
+                    tokenizer,
+                    mtp_config,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                )
+            } else {
+                serve_with_model(
+                    model,
+                    tokenizer,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                )
+            }
         }
         crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
@@ -694,8 +853,8 @@ mod scheduler_profile_tests {
 
     use super::{
         check_loaded_scheduler_profile_health, load_scheduler_profile_for_model,
-        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config, SchedulerServeConfig,
-        ServeArgs,
+        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
+        resolve_serve_mtp_config, SchedulerServeConfig, ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -747,9 +906,22 @@ mod scheduler_profile_tests {
             decode_cadence_mid_chunk_cap: None,
             scheduler_profile: None,
             scheduler_autotune_report: false,
+            mtp_model_dir: None,
+            mtp_draft_tokens: None,
             #[cfg(feature = "p5h-profile")]
             p5h_measurement_eval_probes: false,
         }
+    }
+
+    fn qwen36_dense_27b_raw_config() -> serde_json::Value {
+        serde_json::json!({
+            "model_type": "qwen3_5",
+            "text_config": {
+                "model_type": "qwen3_5_text",
+                "hidden_size": 5120,
+                "num_hidden_layers": 64
+            }
+        })
     }
 
     #[test]
@@ -816,6 +988,141 @@ mod scheduler_profile_tests {
         assert_eq!(profile.rules.len(), 1);
         assert_eq!(profile.rules[0].config.prefill_chunk_size, 256);
         assert_eq!(profile.rules[0].config.decode_cadence_mid_chunk_cap, 64);
+    }
+
+    #[test]
+    fn serve_mtp_args_default_off() {
+        let args = base_args();
+
+        assert!(args.mtp_model_dir.is_none());
+        assert_eq!(args.mtp_draft_tokens, None);
+    }
+
+    #[test]
+    fn serve_mtp_config_accepts_qwen_single_request_window() {
+        let temp_dir = unique_temp_dir("serve-mtp-ok");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+        args.mtp_draft_tokens = Some(2);
+
+        let cfg = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
+            SchedulerServeConfig {
+                b_max: 1,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("resolve")
+        .expect("enabled");
+
+        assert_eq!(cfg.model_dir, temp_dir);
+        assert_eq!(cfg.draft_tokens, 2);
+        std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_mtp_config_accepts_qwen36_default_draft_tokens() {
+        let temp_dir = unique_temp_dir("serve-mtp-qwen36-default");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+
+        let cfg = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &qwen36_dense_27b_raw_config(),
+            SchedulerServeConfig {
+                b_max: 1,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("resolve")
+        .expect("enabled");
+
+        assert_eq!(cfg.model_dir, temp_dir);
+        assert_eq!(cfg.draft_tokens, 2);
+        std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_mtp_config_rejects_batched_scheduler() {
+        let temp_dir = unique_temp_dir("serve-mtp-bmax");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+
+        let err = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
+            SchedulerServeConfig {
+                b_max: 2,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect_err("b_max > 1 must be rejected");
+
+        assert!(err.to_string().contains("--b-max 1"));
+        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_mtp_config_rejects_non_qwen_architecture() {
+        let temp_dir = unique_temp_dir("serve-mtp-non-qwen");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+
+        let err = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Llama,
+            &serde_json::json!({"model_type": "llama"}),
+            SchedulerServeConfig {
+                b_max: 1,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect_err("non-Qwen must be rejected");
+
+        assert!(err.to_string().contains("Qwen"));
+        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_mtp_config_rejects_missing_dir_and_zero_draft_tokens() {
+        let mut args = base_args();
+        args.mtp_model_dir = Some(PathBuf::from("/tmp/ironmlx-missing-mtp-dir"));
+        let missing = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
+            SchedulerServeConfig {
+                b_max: 1,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect_err("missing dir");
+        assert!(missing.to_string().contains("local directory"));
+
+        let temp_dir = unique_temp_dir("serve-mtp-zero-draft");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        args.mtp_model_dir = Some(temp_dir.clone());
+        args.mtp_draft_tokens = Some(0);
+        let zero = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
+            SchedulerServeConfig {
+                b_max: 1,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect_err("zero draft tokens");
+        assert!(zero.to_string().contains("max_draft_tokens must be > 0"));
+        std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 
     #[test]

@@ -1,0 +1,112 @@
+{
+  "meta": {
+    "backend": "ironmlx-core",
+    "mode": "scheduler-text",
+    "model_dir": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.6-35B-A3B-4bit/snapshots/38740b847e4cb78f352aba30aa41c76e08e6eb46",
+    "mtp_model_dir": null,
+    "mtp_draft_tokens": null,
+    "prompt_file": "docs/benchmarks/mtp-phase2-llamacpp-parity/2026-06-07-122931/fixed_prompt.txt",
+    "prompt_tokens": 67,
+    "max_tokens": 64,
+    "prefill_chunk_size": 2048,
+    "b_max": 1,
+    "effective_cap_max": 256,
+    "warmup_runs": 1,
+    "measured_runs": 5,
+    "load_ms": 933.2585
+  },
+  "summary": {
+    "runs": 5,
+    "valid_runs": 5,
+    "ttft_ms": {
+      "p50": 71.05012500000001,
+      "p95": 71.1560664,
+      "mean": 71.0016918
+    },
+    "e2e_ms": {
+      "p50": 571.537541,
+      "p95": 573.5277414,
+      "mean": 571.8440664
+    },
+    "decode_time_ms": {
+      "p50": 500.48741600000005,
+      "p95": 502.371675,
+      "mean": 500.8423746
+    },
+    "generation_tps": {
+      "p50": 125.87729078886571,
+      "p95": 126.00703346712658,
+      "mean": 125.78859097682209
+    }
+  },
+  "warmups": [
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 538.46275,
+      "e2e_ms": 1048.712458,
+      "decode_time_ms": 510.24970799999994,
+      "generated_tokens": 64,
+      "generation_tps": 123.46895845749314,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    }
+  ],
+  "records": [
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 71.181208,
+      "e2e_ms": 573.875708,
+      "decode_time_ms": 502.69450000000006,
+      "generated_tokens": 64,
+      "generation_tps": 125.32462559268103,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 71.0555,
+      "e2e_ms": 572.1358749999999,
+      "decode_time_ms": 501.08037499999995,
+      "generated_tokens": 64,
+      "generation_tps": 125.72833250553867,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 70.861459,
+      "e2e_ms": 570.8317499999999,
+      "decode_time_ms": 499.970291,
+      "generated_tokens": 64,
+      "generation_tps": 126.00748711286928,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 70.860167,
+      "e2e_ms": 570.839458,
+      "decode_time_ms": 499.97929100000005,
+      "generated_tokens": 64,
+      "generation_tps": 126.00521888415574,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 71.05012500000001,
+      "e2e_ms": 571.537541,
+      "decode_time_ms": 500.48741600000005,
+      "generated_tokens": 64,
+      "generation_tps": 125.87729078886571,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    }
+  ]
+}

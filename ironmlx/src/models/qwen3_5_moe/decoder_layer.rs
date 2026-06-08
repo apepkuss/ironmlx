@@ -4,7 +4,7 @@
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::Loader;
+use crate::core::{cache::KVCache, Loader};
 use crate::nn::{
     AttnKind, AttnPath, GatedAttention, GatedAttentionConfig, GatedDeltaNet, GatedDeltaNetConfig,
     LayerCache, Mrope, RmsNorm,
@@ -346,5 +346,54 @@ impl DecoderLayerMoe {
             let ffn_out = self.ffn.forward_on(&normed_post, target, layer_idx)?;
             Ok(&h + &ffn_out)
         }
+    }
+
+    /// Helper for [`super::mtp::Qwen35MoeMtp`]: MTP layers are always full attention,
+    /// so accept a raw KV cache slot and reject Linear-attention layers explicitly.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_on_full_kv(
+        &self,
+        x: &Array,
+        mrope: &Mrope,
+        cos: &Array,
+        sin: &Array,
+        mask: Option<&Array>,
+        cache: Option<&mut KVCache>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+
+        if x.ndim() != 3 {
+            return Err(anyhow!(
+                "DecoderLayerMoe::forward_on_full_kv: x must be rank-3 [B, S, hidden_size], got rank {}",
+                x.ndim()
+            ));
+        }
+        let dims_borrow = x.shape();
+        let dims = dims_borrow.as_slice();
+        if dims[2] != self.cfg.hidden_size {
+            return Err(anyhow!(
+                "DecoderLayerMoe::forward_on_full_kv: x last-axis = {} but cfg.hidden_size = {}",
+                dims[2],
+                self.cfg.hidden_size
+            ));
+        }
+
+        let normed_in = self.input_layernorm.forward_on(x, target)?;
+        let attn_out = match &self.attn {
+            AttnPath::Full(a) => a.forward_on(
+                &normed_in, mrope, cos, sin, mask, None, None, cache, target, -1,
+            )?,
+            AttnPath::Linear(_) => {
+                return Err(anyhow!(
+                    "DecoderLayerMoe::forward_on_full_kv: called on Linear layer (MTP requires Full)"
+                ));
+            }
+        };
+        let h = x + &attn_out;
+
+        let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
+        let ffn_out = self.ffn.forward_on(&normed_post, target, -1)?;
+        Ok(&h + &ffn_out)
     }
 }

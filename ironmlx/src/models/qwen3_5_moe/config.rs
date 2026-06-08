@@ -8,6 +8,9 @@ use crate::models::vision::VisionConfig;
 use crate::nn::AttnKind;
 use crate::Result;
 
+use super::decoder_layer::DecoderLayerMoeConfig;
+use super::mtp::Qwen35MoeMtpConfig;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RopeParams {
     #[serde(default = "default_partial_rotary_factor")]
@@ -29,6 +32,9 @@ fn default_max_position_embeddings() -> i32 {
 }
 fn default_norm_topk_prob() -> bool {
     true
+}
+fn default_mtp_num_hidden_layers() -> i32 {
+    0
 }
 
 impl Default for RopeParams {
@@ -69,6 +75,8 @@ pub struct Qwen35MoeConfig {
     #[serde(default)]
     pub tie_word_embeddings: bool,
     pub full_attention_interval: i32,
+    #[serde(default = "default_mtp_num_hidden_layers")]
+    pub mtp_num_hidden_layers: i32,
     #[serde(default)]
     pub linear_num_value_heads: i32,
     #[serde(default)]
@@ -132,6 +140,85 @@ impl Qwen35MoeConfig {
         } else {
             AttnKind::Linear
         }
+    }
+
+    pub fn mtp_config(&self) -> Result<Qwen35MoeMtpConfig> {
+        if self.mtp_num_hidden_layers <= 0 {
+            return Err(anyhow!(
+                "Qwen35MoeConfig::mtp_config: mtp_num_hidden_layers must be > 0, got {}",
+                self.mtp_num_hidden_layers
+            ));
+        }
+        let head_dim = self.effective_head_dim();
+        Ok(Qwen35MoeMtpConfig {
+            hidden_size: self.hidden_size,
+            num_mtp_layers: self.mtp_num_hidden_layers,
+            layer: DecoderLayerMoeConfig {
+                hidden_size: self.hidden_size,
+                num_heads: self.num_attention_heads,
+                num_kv_heads: self.num_key_value_heads,
+                head_dim,
+                rms_norm_eps: self.rms_norm_eps,
+                attention_bias: self.attention_bias,
+                linear_num_value_heads: self.linear_num_value_heads,
+                linear_num_key_heads: self.linear_num_key_heads,
+                linear_key_head_dim: self.linear_key_head_dim,
+                linear_value_head_dim: self.linear_value_head_dim,
+                linear_conv_kernel_dim: self.linear_conv_kernel_dim,
+                num_experts: self.num_experts,
+                num_experts_per_tok: self.num_experts_per_tok,
+                norm_topk_prob: self.norm_topk_prob,
+            },
+        })
+    }
+
+    pub fn ensure_mtp_compatible(&self, mtp: &Qwen35MoeConfig) -> Result<()> {
+        macro_rules! check_eq {
+            ($field:ident) => {
+                if self.$field != mtp.$field {
+                    return Err(anyhow!(
+                        "Qwen35MoeConfig::ensure_mtp_compatible: {} mismatch target={} mtp={}",
+                        stringify!($field),
+                        self.$field,
+                        mtp.$field
+                    ));
+                }
+            };
+        }
+
+        check_eq!(hidden_size);
+        check_eq!(num_attention_heads);
+        check_eq!(num_key_value_heads);
+        check_eq!(vocab_size);
+        check_eq!(attention_bias);
+        check_eq!(tie_word_embeddings);
+        check_eq!(full_attention_interval);
+        check_eq!(linear_num_value_heads);
+        check_eq!(linear_num_key_heads);
+        check_eq!(linear_key_head_dim);
+        check_eq!(linear_value_head_dim);
+        check_eq!(linear_conv_kernel_dim);
+        check_eq!(num_experts);
+        check_eq!(num_experts_per_tok);
+        check_eq!(norm_topk_prob);
+        check_eq!(moe_intermediate_size);
+        check_eq!(shared_expert_intermediate_size);
+
+        if self.effective_head_dim() != mtp.effective_head_dim() {
+            return Err(anyhow!(
+                "Qwen35MoeConfig::ensure_mtp_compatible: head_dim mismatch target={} mtp={}",
+                self.effective_head_dim(),
+                mtp.effective_head_dim()
+            ));
+        }
+        if (self.rms_norm_eps - mtp.rms_norm_eps).abs() > f32::EPSILON {
+            return Err(anyhow!(
+                "Qwen35MoeConfig::ensure_mtp_compatible: rms_norm_eps mismatch target={} mtp={}",
+                self.rms_norm_eps,
+                mtp.rms_norm_eps
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -257,5 +344,23 @@ mod tests {
             .filter(|i| matches!(cfg.layer_kind(*i), AttnKind::Linear))
             .count();
         assert_eq!(linear_count, 30);
+    }
+
+    #[test]
+    fn mtp_config_preserves_moe_layer_dimensions() {
+        let mut v = realistic_text_config_json();
+        v["mtp_num_hidden_layers"] = serde_json::json!(2);
+        let cfg: Qwen35MoeConfig = serde_json::from_value(v).expect("parse");
+
+        let mtp_cfg = cfg.mtp_config().expect("mtp config");
+
+        assert_eq!(mtp_cfg.hidden_size, cfg.hidden_size);
+        assert_eq!(mtp_cfg.num_mtp_layers, 2);
+        assert_eq!(mtp_cfg.layer.hidden_size, cfg.hidden_size);
+        assert_eq!(mtp_cfg.layer.num_heads, cfg.num_attention_heads);
+        assert_eq!(mtp_cfg.layer.num_kv_heads, cfg.num_key_value_heads);
+        assert_eq!(mtp_cfg.layer.num_experts, cfg.num_experts);
+        assert_eq!(mtp_cfg.layer.num_experts_per_tok, cfg.num_experts_per_tok);
+        assert_eq!(mtp_cfg.layer.norm_topk_prob, cfg.norm_topk_prob);
     }
 }

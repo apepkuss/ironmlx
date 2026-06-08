@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context};
 use serde::Deserialize;
 
 use crate::core::Loader;
-use crate::nn::AttnKind;
+use crate::nn::{AttnKind, DecoderLayerConfig, MtpConfig};
 use crate::Result;
 
 /// RoPE-related fields parsed out of `text_config.rope_parameters`.
@@ -27,6 +27,10 @@ fn default_max_position_embeddings() -> i32 {
     // Conservative fallback for older / non-Qwen3 configs that omit the field.
     // Production Qwen3.5 configs always declare it (262144 for 4B variant).
     32768
+}
+
+fn default_mtp_num_hidden_layers() -> i32 {
+    0
 }
 
 fn default_rope_theta() -> f32 {
@@ -68,6 +72,8 @@ pub struct Qwen35Config {
     #[serde(default)]
     pub tie_word_embeddings: bool,
     pub full_attention_interval: i32,
+    #[serde(default = "default_mtp_num_hidden_layers")]
+    pub mtp_num_hidden_layers: i32,
     // Linear-attn fields. Default to 0 if absent (non-hybrid Qwen3 variants).
     #[serde(default)]
     pub linear_num_value_heads: i32,
@@ -135,6 +141,79 @@ impl Qwen35Config {
         } else {
             AttnKind::Linear
         }
+    }
+
+    pub fn mtp_config(&self) -> Result<MtpConfig> {
+        if self.mtp_num_hidden_layers <= 0 {
+            return Err(anyhow!(
+                "Qwen35Config::mtp_config: mtp_num_hidden_layers must be > 0, got {}",
+                self.mtp_num_hidden_layers
+            ));
+        }
+        let head_dim = self.effective_head_dim();
+        Ok(MtpConfig {
+            hidden_size: self.hidden_size,
+            num_mtp_layers: self.mtp_num_hidden_layers,
+            layer: DecoderLayerConfig {
+                hidden_size: self.hidden_size,
+                intermediate_size: self.intermediate_size,
+                num_heads: self.num_attention_heads,
+                num_kv_heads: self.num_key_value_heads,
+                head_dim,
+                rms_norm_eps: self.rms_norm_eps,
+                attention_bias: self.attention_bias,
+                linear_num_value_heads: self.linear_num_value_heads,
+                linear_num_key_heads: self.linear_num_key_heads,
+                linear_key_head_dim: self.linear_key_head_dim,
+                linear_value_head_dim: self.linear_value_head_dim,
+                linear_conv_kernel_dim: self.linear_conv_kernel_dim,
+            },
+        })
+    }
+
+    pub fn ensure_mtp_compatible(&self, mtp: &Qwen35Config) -> Result<()> {
+        macro_rules! check_eq {
+            ($field:ident) => {
+                if self.$field != mtp.$field {
+                    return Err(anyhow!(
+                        "Qwen35Config::ensure_mtp_compatible: {} mismatch target={} mtp={}",
+                        stringify!($field),
+                        self.$field,
+                        mtp.$field
+                    ));
+                }
+            };
+        }
+
+        check_eq!(hidden_size);
+        check_eq!(intermediate_size);
+        check_eq!(num_attention_heads);
+        check_eq!(num_key_value_heads);
+        check_eq!(vocab_size);
+        check_eq!(attention_bias);
+        check_eq!(tie_word_embeddings);
+        check_eq!(full_attention_interval);
+        check_eq!(linear_num_value_heads);
+        check_eq!(linear_num_key_heads);
+        check_eq!(linear_key_head_dim);
+        check_eq!(linear_value_head_dim);
+        check_eq!(linear_conv_kernel_dim);
+
+        if self.effective_head_dim() != mtp.effective_head_dim() {
+            return Err(anyhow!(
+                "Qwen35Config::ensure_mtp_compatible: head_dim mismatch target={} mtp={}",
+                self.effective_head_dim(),
+                mtp.effective_head_dim()
+            ));
+        }
+        if (self.rms_norm_eps - mtp.rms_norm_eps).abs() > f32::EPSILON {
+            return Err(anyhow!(
+                "Qwen35Config::ensure_mtp_compatible: rms_norm_eps mismatch target={} mtp={}",
+                self.rms_norm_eps,
+                mtp.rms_norm_eps
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -243,5 +322,22 @@ mod tests {
             .filter(|i| matches!(cfg.layer_kind(*i), AttnKind::Linear))
             .count();
         assert_eq!(linear_count, 24);
+    }
+
+    #[test]
+    fn mtp_config_uses_declared_mtp_layer_count_and_full_attention_shape() {
+        let mut v = realistic_text_config_json();
+        v["mtp_num_hidden_layers"] = serde_json::json!(2);
+        let cfg: Qwen35Config = serde_json::from_value(v).expect("parse");
+
+        let mtp_cfg = cfg.mtp_config().expect("mtp config");
+
+        assert_eq!(mtp_cfg.hidden_size, cfg.hidden_size);
+        assert_eq!(mtp_cfg.num_mtp_layers, 2);
+        assert_eq!(mtp_cfg.layer.hidden_size, cfg.hidden_size);
+        assert_eq!(mtp_cfg.layer.intermediate_size, cfg.intermediate_size);
+        assert_eq!(mtp_cfg.layer.num_heads, cfg.num_attention_heads);
+        assert_eq!(mtp_cfg.layer.num_kv_heads, cfg.num_key_value_heads);
+        assert_eq!(mtp_cfg.layer.head_dim, cfg.effective_head_dim());
     }
 }

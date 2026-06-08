@@ -1,0 +1,112 @@
+{
+  "meta": {
+    "backend": "ironmlx-core",
+    "mode": "scheduler-text",
+    "model_dir": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.6-35B-A3B-4bit/snapshots/38740b847e4cb78f352aba30aa41c76e08e6eb46",
+    "mtp_model_dir": null,
+    "mtp_draft_tokens": null,
+    "prompt_file": "/Users/xin/workspace/ironmlx-backend-mtp-phase3-performance/docs/benchmarks/mtp-phase3-performance/2026-06-07-141108/fixed_prompt.txt",
+    "prompt_tokens": 67,
+    "max_tokens": 64,
+    "prefill_chunk_size": 2048,
+    "b_max": 1,
+    "effective_cap_max": 256,
+    "warmup_runs": 1,
+    "measured_runs": 5,
+    "load_ms": 1110.826583
+  },
+  "summary": {
+    "runs": 5,
+    "valid_runs": 5,
+    "ttft_ms": {
+      "p50": 70.982291,
+      "p95": 71.24600860000001,
+      "mean": 70.9821082
+    },
+    "e2e_ms": {
+      "p50": 572.239833,
+      "p95": 580.9041579999999,
+      "mean": 574.3807166
+    },
+    "decode_time_ms": {
+      "p50": 501.154084,
+      "p95": 510.07319979999994,
+      "mean": 503.3986084
+    },
+    "generation_tps": {
+      "p50": 125.70984056871418,
+      "p95": 125.78630468436928,
+      "mean": 125.15863740161949
+    }
+  },
+  "warmups": [
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 489.849084,
+      "e2e_ms": 993.3267500000001,
+      "decode_time_ms": 503.47766600000006,
+      "generated_tokens": 64,
+      "generation_tps": 125.12968152196048,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    }
+  ],
+  "records": [
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 70.793125,
+      "e2e_ms": 582.890458,
+      "decode_time_ms": 512.0973329999999,
+      "generated_tokens": 64,
+      "generation_tps": 123.02348780246432,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 71.020875,
+      "e2e_ms": 571.848292,
+      "decode_time_ms": 500.827417,
+      "generated_tokens": 64,
+      "generation_tps": 125.79183539386783,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 71.30229200000001,
+      "e2e_ms": 572.239833,
+      "decode_time_ms": 500.93754099999995,
+      "generated_tokens": 64,
+      "generation_tps": 125.76418184637514,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 70.81195799999999,
+      "e2e_ms": 571.966042,
+      "decode_time_ms": 501.154084,
+      "generated_tokens": 64,
+      "generation_tps": 125.70984056871418,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    },
+    {
+      "mode": "scheduler-text",
+      "ttft_ms": 70.982291,
+      "e2e_ms": 572.9589579999999,
+      "decode_time_ms": 501.9766669999999,
+      "generated_tokens": 64,
+      "generation_tps": 125.50384139667594,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    }
+  ]
+}

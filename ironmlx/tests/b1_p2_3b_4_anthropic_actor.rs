@@ -300,6 +300,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         memory_budget_exceeded_count: handle.memory_budget_exceeded_count.clone(),
         kv_cache_active_bytes: handle.kv_cache_active_bytes.clone(),
         kv_cache_soft_limit_bytes: handle.kv_cache_soft_limit_bytes,
+        mtp: ironmlx::core::server::health::MtpHealthConfig::disabled(),
     });
     let state = AppState {
         model: model.clone(),

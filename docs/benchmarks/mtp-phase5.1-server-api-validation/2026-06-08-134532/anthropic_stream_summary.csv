@@ -1,0 +1,4 @@
+model,port,expected_draft_tokens,initial_enabled,initial_draft_tokens,initial_prefill_count,initial_step_count,anthropic_stream_status,anthropic_stream_time_s,message_start_count,content_block_start_count,content_block_delta_count,content_block_stop_count,message_delta_count,message_stop_count,error_event_count,after_stream_prefill_count,after_stream_step_count
+qwen35_4b,18161,1,true,1,0,0,200,0.086167,1,1,8,1,1,1,0,1,7
+qwen36_27b,18162,2,true,2,0,0,200,0.267942,1,1,8,1,1,1,0,1,7
+qwen36_35b_a3b,18163,2,true,2,0,0,200,0.453162,1,1,8,1,1,1,0,1,7

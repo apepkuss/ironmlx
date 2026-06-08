@@ -33,6 +33,22 @@ pub struct KVCache {
     dtype: Dtype,
 }
 
+/// Lightweight checkpoint for [`KVCache`] rollback.
+///
+/// This intentionally stores only logical offsets. The dense K/V buffers may
+/// retain stale data past those offsets; callers already mask positions above
+/// each row's logical length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KVCacheSnapshot {
+    offsets: Vec<i32>,
+}
+
+impl KVCacheSnapshot {
+    pub fn offsets(&self) -> &[i32] {
+        &self.offsets
+    }
+}
+
 impl KVCache {
     /// Construct a fresh cache. Keys/values are allocated lazily on first
     /// `update_and_fetch`.
@@ -105,6 +121,64 @@ impl KVCache {
         for o in &mut self.offsets {
             *o = 0;
         }
+    }
+
+    /// Capture the current logical cache position. No K/V buffers are copied.
+    pub fn snapshot(&self) -> KVCacheSnapshot {
+        KVCacheSnapshot {
+            offsets: self.offsets.clone(),
+        }
+    }
+
+    /// Restore logical offsets from a prior checkpoint.
+    ///
+    /// This is the cheap rollback path used by speculative decoding: stale
+    /// K/V data beyond restored offsets is left in-place and ignored by masks.
+    pub fn restore(&mut self, snapshot: &KVCacheSnapshot) -> Result<()> {
+        self.restore_offsets(snapshot.offsets())
+    }
+
+    /// Set logical offsets directly. Intended for rollback/truncation to an
+    /// accepted prefix. Does not clear or copy K/V buffers.
+    pub fn restore_offsets(&mut self, offsets: &[i32]) -> Result<()> {
+        if offsets.len() != self.batch as usize {
+            anyhow::bail!(
+                "KVCache::restore_offsets: offsets.len()={} != batch={}",
+                offsets.len(),
+                self.batch,
+            );
+        }
+        for (i, &off) in offsets.iter().enumerate() {
+            if off < 0 {
+                anyhow::bail!("KVCache::restore_offsets: offsets[{i}] = {off} must be >= 0");
+            }
+            if off > self.cap {
+                anyhow::bail!(
+                    "KVCache::restore_offsets: offsets[{i}] = {off} > cap {}",
+                    self.cap,
+                );
+            }
+        }
+        let max_off = offsets.iter().copied().max().unwrap_or(0);
+        if max_off > 0 {
+            let key_cap = self
+                .keys
+                .as_ref()
+                .map(|a| a.shape().as_slice()[2])
+                .unwrap_or(0);
+            let value_cap = self
+                .values
+                .as_ref()
+                .map(|a| a.shape().as_slice()[2])
+                .unwrap_or(0);
+            if max_off > key_cap || max_off > value_cap {
+                anyhow::bail!(
+                    "KVCache::restore_offsets: max offset {max_off} exceeds allocated key/value capacity {key_cap}/{value_cap}",
+                );
+            }
+        }
+        self.offsets.clone_from_slice(offsets);
+        Ok(())
     }
 
     /// Append `(k, v)` and return slices covering all cached tokens.
@@ -597,6 +671,44 @@ mod tests {
         assert_eq!(c.offsets(), &[8, 8]);
         c.reset();
         assert_eq!(c.offsets(), &[0, 0]);
+    }
+
+    #[test]
+    fn kvcache_snapshot_restore_offsets_only() {
+        let mut c = make_cache_b(2, 1024);
+        let (k1, v1) = make_kv_b(2, 8);
+        c.update_and_fetch(&k1, &v1, &[4, 8]).unwrap();
+        let snapshot = c.snapshot();
+        assert_eq!(snapshot.offsets(), &[4, 8]);
+
+        let (k2, v2) = make_kv_b(2, 4);
+        c.update_and_fetch(&k2, &v2, &[4, 4]).unwrap();
+        assert_eq!(c.offsets(), &[8, 12]);
+
+        c.restore(&snapshot).expect("restore snapshot");
+        assert_eq!(c.offsets(), &[4, 8]);
+
+        c.restore_offsets(&[5, 9]).expect("restore accepted prefix");
+        assert_eq!(c.offsets(), &[5, 9]);
+    }
+
+    #[test]
+    fn kvcache_restore_offsets_validates_shape_and_capacity() {
+        let mut c = make_cache_b(2, 16);
+        let (k, v) = make_kv_b(2, 4);
+        c.update_and_fetch(&k, &v, &[4, 4]).unwrap();
+
+        let bad_len = c.restore_offsets(&[1, 1, 1]);
+        assert!(bad_len.is_err());
+
+        let beyond_cap = c.restore_offsets(&[17, 0]);
+        assert!(beyond_cap.is_err());
+
+        let mut c_large = make_cache_b(2, 1024);
+        let (k2, v2) = make_kv_b(2, 4);
+        c_large.update_and_fetch(&k2, &v2, &[4, 4]).unwrap();
+        let beyond_allocated = c_large.restore_offsets(&[300, 0]);
+        assert!(beyond_allocated.is_err());
     }
 
     #[test]
