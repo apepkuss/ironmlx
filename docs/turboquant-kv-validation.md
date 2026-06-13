@@ -233,3 +233,91 @@ Packed KV is therefore a useful intermediate step, but it is not yet the
 preferred default for memory savings. The next optimization candidate is a
 packed-attention path that can consume TurboQuant cache blocks without
 materializing the full dense prefix per step.
+
+## 2026-06-13 Mainline Final Confirmation
+
+Raw artifacts are stored under:
+
+```text
+docs/benchmarks/turboquant-kv/2026-06-13-final-confirmation/
+```
+
+This run was executed after the TurboQuant work was squash-merged into
+`codex/scheduler-autotune-v2` at commit
+`a7c632d8837d98988a0ab89b34f4d2cc5ebdeeae`, then recorded in commit
+`c1f3f35d902660f634c94e72d61883036c1ac97c`. It used:
+
+```bash
+STAMP=2026-06-13-final-confirmation \
+KV_QUANTS=none,turbo3,turbo4,k3v4 \
+MAX_TOKENS=32 \
+BENCH_MAX_TOKENS=32 \
+RUNS=1 \
+WARMUP_RUNS=0 \
+MLX_DIR=$HOME/.local/mlx \
+bash scripts/turboquant_kv_long_context_validate.sh
+```
+
+The matrix covered the same 4k, 8k, 16k, and 32k generated prompts. `turbo3`
+was included as a K3V3 smoke path; `turbo4` is K4V4; `k3v4` is the mixed K3V4
+mode.
+
+Logits replay, 32 replay tokens:
+
+| context | kv | exact-prefix tokens | first mismatch step | argmax matches | min cosine |
+| --- | --- | ---: | --- | ---: | ---: |
+| `ctx-4k` | `turbo3` | 32 | none | 32/32 | 0.962342000 |
+| `ctx-4k` | `turbo4` | 24 | 24 | 31/32 | 0.989537000 |
+| `ctx-4k` | `k3v4` | 32 | none | 32/32 | 0.965126160 |
+| `ctx-8k` | `turbo3` | 32 | none | 32/32 | 0.943033930 |
+| `ctx-8k` | `turbo4` | 32 | none | 32/32 | 0.985397500 |
+| `ctx-8k` | `k3v4` | 32 | none | 32/32 | 0.961921500 |
+| `ctx-16k` | `turbo3` | 32 | none | 32/32 | 0.940926600 |
+| `ctx-16k` | `turbo4` | 32 | none | 32/32 | 0.987300460 |
+| `ctx-16k` | `k3v4` | 30 | 30 | 31/32 | 0.956303660 |
+| `ctx-32k` | `turbo3` | 32 | none | 32/32 | 0.944042400 |
+| `ctx-32k` | `turbo4` | 32 | none | 32/32 | 0.984870800 |
+| `ctx-32k` | `k3v4` | 30 | 30 | 31/32 | 0.974615300 |
+
+Core generation, 32 generated tokens:
+
+| context | kv | e2e p50 ms | tps p50 | peak footprint GiB | exact-prefix vs none |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `ctx-4k` | `none` | 1,294.41 | 143.69 | 5.759 | 32 |
+| `ctx-4k` | `turbo3` | 1,316.01 | 121.57 | 5.743 | 32 |
+| `ctx-4k` | `turbo4` | 1,338.93 | 120.92 | 5.751 | 32 |
+| `ctx-4k` | `k3v4` | 1,313.81 | 121.85 | 5.746 | 24 |
+| `ctx-8k` | `none` | 2,499.77 | 134.51 | 7.357 | 32 |
+| `ctx-8k` | `turbo3` | 2,677.11 | 103.02 | 7.327 | 32 |
+| `ctx-8k` | `turbo4` | 2,750.04 | 104.87 | 7.344 | 32 |
+| `ctx-8k` | `k3v4` | 2,784.11 | 101.95 | 7.334 | 32 |
+| `ctx-16k` | `none` | 5,555.41 | 119.97 | 11.377 | 32 |
+| `ctx-16k` | `turbo3` | 5,888.77 | 78.47 | 11.513 | 32 |
+| `ctx-16k` | `turbo4` | 5,850.03 | 80.94 | 11.555 | 32 |
+| `ctx-16k` | `k3v4` | 5,887.82 | 84.80 | 11.533 | 30 |
+| `ctx-32k` | `none` | 14,679.74 | 103.73 | 29.196 | 32 |
+| `ctx-32k` | `turbo3` | 15,547.30 | 54.63 | 30.204 | 32 |
+| `ctx-32k` | `turbo4` | 15,316.02 | 56.19 | 30.411 | 32 |
+| `ctx-32k` | `k3v4` | 15,131.22 | 57.72 | 30.293 | 30 |
+
+All 16 measured core-generation records generated the expected checksum prefix.
+Compared with the packed KV gate, the final mainline 32k throughput improved for
+the retained TurboQuant modes: `turbo4` moved from 47.19 to 56.19 tok/s, and
+`k3v4` moved from 47.25 to 57.72 tok/s in these single-run measurements.
+
+## Current Recommendation
+
+Keep `none` as the default unless the caller explicitly requests TurboQuant KV.
+
+For quality-sensitive TurboQuant use, prefer `turbo4` / K4V4. It has the best
+logits stability in the final long-context matrix, including full 32-token
+replay matches at 8k, 16k, and 32k.
+
+Keep `k3v4` as the main long-context and memory-pressure candidate. It produced
+the expected checksum at every context length and had the best 32k TurboQuant
+throughput in the final confirmation run, but it still diverged from the
+baseline token stream at token 30 in the 16k and 32k logits replay.
+
+Treat `turbo3` / K3V3 as experimental. It passed the final K3V3 smoke path in
+this run, but its cosine similarity remained lower than `turbo4` throughout the
+long-context matrix.
