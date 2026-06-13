@@ -1,0 +1,139 @@
+{
+  "meta": {
+    "backend": "ironmlx-core",
+    "mode": "gs-text",
+    "model_dir": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/32f3e8ecf65426fc3306969496342d504bfa13f3",
+    "mtp_model_dir": null,
+    "mtp_draft_tokens": null,
+    "prompt_file": "docs/benchmarks/turboquant-kv/2026-06-10-packed-kv-long-context/prompts/ctx-32k.txt",
+    "prompt_tokens": 37383,
+    "max_tokens": 32,
+    "prefill_chunk_size": 2048,
+    "kv_quant": "k3v4",
+    "b_max": 1,
+    "effective_cap_max": 37415,
+    "warmup_runs": 1,
+    "measured_runs": 1,
+    "load_ms": 292.96450000000004
+  },
+  "summary": {
+    "runs": 1,
+    "valid_runs": 1,
+    "ttft_ms": {
+      "p50": 11559.770792,
+      "p95": 11559.770792,
+      "mean": 11559.770792
+    },
+    "e2e_ms": {
+      "p50": 12117.742959,
+      "p95": 12117.742959,
+      "mean": 12117.742959
+    },
+    "decode_time_ms": {
+      "p50": 557.9721669999999,
+      "p95": 557.9721669999999,
+      "mean": 557.9721669999999
+    },
+    "generation_tps": {
+      "p50": 55.558326800913726,
+      "p95": 55.558326800913726,
+      "mean": 55.558326800913726
+    }
+  },
+  "warmups": [
+    {
+      "mode": "gs-text",
+      "ttft_ms": 11357.142,
+      "e2e_ms": 12617.656584,
+      "decode_time_ms": 1260.5145840000005,
+      "generated_tokens": 32,
+      "generated_token_ids": [
+        33371,
+        26490,
+        3150,
+        28,
+        15,
+        15,
+        22,
+        15,
+        19,
+        8029,
+        28,
+        15,
+        22,
+        13053,
+        28,
+        15,
+        23,
+        20956,
+        28,
+        16,
+        21,
+        271,
+        248068,
+        198,
+        760,
+        1156,
+        6587,
+        728,
+        310,
+        9307,
+        1248,
+        61485
+      ],
+      "generated_text": "CHECKSUM record=00704 alpha=07 beta=08 gamma=16\n\n<think>\nThe user wants me to validate long-context",
+      "generation_tps": 24.59313076856871,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    }
+  ],
+  "records": [
+    {
+      "mode": "gs-text",
+      "ttft_ms": 11559.770792,
+      "e2e_ms": 12117.742959,
+      "decode_time_ms": 557.9721669999999,
+      "generated_tokens": 32,
+      "generated_token_ids": [
+        33371,
+        26490,
+        3150,
+        28,
+        15,
+        15,
+        22,
+        15,
+        19,
+        8029,
+        28,
+        15,
+        22,
+        13053,
+        28,
+        15,
+        23,
+        20956,
+        28,
+        16,
+        21,
+        271,
+        248068,
+        198,
+        760,
+        1156,
+        6587,
+        728,
+        310,
+        9307,
+        279,
+        81726
+      ],
+      "generated_text": "CHECKSUM record=00704 alpha=07 beta=08 gamma=16\n\n<think>\nThe user wants me to validate the KV",
+      "generation_tps": 55.558326800913726,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    }
+  ]
+}

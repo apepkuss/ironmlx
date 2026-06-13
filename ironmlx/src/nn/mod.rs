@@ -22,7 +22,8 @@ pub mod self_qmm;
 pub use attention::{Attention, AttentionConfig};
 pub use conv::{Conv1d, Conv1dConfig};
 pub use decoder_layer::{
-    AttnKind, AttnPath, DecoderLayer, DecoderLayerConfig, LayerCache, LayerCacheSnapshot,
+    enable_turboquant_kv_caches, AttnKind, AttnPath, DecoderLayer, DecoderLayerConfig, LayerCache,
+    LayerCacheSnapshot,
 };
 pub use embedding::Embedding;
 pub use gated_attention::{GatedAttention, GatedAttentionConfig};

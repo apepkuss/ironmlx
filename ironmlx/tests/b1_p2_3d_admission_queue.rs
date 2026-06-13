@@ -69,6 +69,7 @@ fn make_req_with_stop(
         stop_token_ids,
         prefill_chunk_size: 0,
         decode_cadence_mid_chunk_cap: 256,
+        kv_cache_turboquant_bits: None,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
@@ -441,6 +442,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             32,    // admission_queue_max
             32768, // max_cache_cap (3f default)
             256,   // decode_cadence_mid_chunk_cap
+            None,  // kv_cache_turboquant_bits
             scheduler_profile,
             false, // scheduler_autotune_report
             false, // p5h_measurement_eval_probes (P5h+1 T1)

@@ -5,10 +5,13 @@
 
 mod generate;
 mod info;
+mod kv_quant;
 mod scheduler_autotune;
 mod scheduler_autotune_calibrate;
 mod scheduler_profile_store;
 mod serve;
+
+pub(crate) use kv_quant::KvQuantArg;
 
 use clap::{Parser, Subcommand};
 
@@ -52,7 +55,7 @@ impl Cli {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command};
+    use super::{Cli, Command, KvQuantArg};
 
     #[test]
     fn scheduler_autotune_subcommand_parses_input_and_json_format() {
@@ -395,6 +398,8 @@ mod tests {
             "/tmp/model",
             "--scheduler-profile",
             "scheduler-profile.json",
+            "--kv-quant",
+            "turbo4",
         ]);
 
         match cli.command {
@@ -407,8 +412,49 @@ mod tests {
                         .to_string_lossy(),
                     "scheduler-profile.json"
                 );
+                assert_eq!(args.kv_quant, KvQuantArg::Turbo4);
             }
             other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_subcommand_parses_k3v4_kv_quant() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--kv-quant",
+            "k3v4",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.kv_quant, KvQuantArg::K3V4);
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_subcommand_parses_k3v4_kv_quant() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "generate",
+            "--model",
+            "/tmp/model",
+            "--prompt",
+            "hello",
+            "--kv-quant",
+            "k3v4",
+        ]);
+
+        match cli.command {
+            Command::Generate(args) => {
+                assert_eq!(args.kv_quant, KvQuantArg::K3V4);
+            }
+            other => panic!("expected Generate command, got {other:?}"),
         }
     }
 }

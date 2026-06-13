@@ -1,0 +1,91 @@
+{
+  "meta": {
+    "backend": "ironmlx-core",
+    "mode": "gs-text",
+    "model_dir": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/32f3e8ecf65426fc3306969496342d504bfa13f3",
+    "mtp_model_dir": null,
+    "mtp_draft_tokens": null,
+    "prompt_file": "docs/benchmarks/turboquant-kv/2026-06-10-packed-kv-long-context/prompts/ctx-32k.txt",
+    "prompt_tokens": 37383,
+    "max_tokens": 8,
+    "prefill_chunk_size": 2048,
+    "kv_quant": "k3v4",
+    "b_max": 1,
+    "effective_cap_max": 37391,
+    "warmup_runs": 1,
+    "measured_runs": 1,
+    "load_ms": 279.980166
+  },
+  "summary": {
+    "runs": 1,
+    "valid_runs": 1,
+    "ttft_ms": {
+      "p50": 12092.09875,
+      "p95": 12092.09875,
+      "mean": 12092.09875
+    },
+    "e2e_ms": {
+      "p50": 12243.305542,
+      "p95": 12243.305542,
+      "mean": 12243.305542
+    },
+    "decode_time_ms": {
+      "p50": 151.20679200000086,
+      "p95": 151.20679200000086,
+      "mean": 151.20679200000086
+    },
+    "generation_tps": {
+      "p50": 46.29421673068733,
+      "p95": 46.29421673068733,
+      "mean": 46.29421673068733
+    }
+  },
+  "warmups": [
+    {
+      "mode": "gs-text",
+      "ttft_ms": 11361.033042000001,
+      "e2e_ms": 11512.212291999998,
+      "decode_time_ms": 151.1792499999974,
+      "generated_tokens": 8,
+      "generated_token_ids": [
+        33371,
+        26490,
+        3150,
+        28,
+        15,
+        15,
+        22,
+        15
+      ],
+      "generated_text": "CHECKSUM record=0070",
+      "generation_tps": 46.30265066138455,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    }
+  ],
+  "records": [
+    {
+      "mode": "gs-text",
+      "ttft_ms": 12092.09875,
+      "e2e_ms": 12243.305542,
+      "decode_time_ms": 151.20679200000086,
+      "generated_tokens": 8,
+      "generated_token_ids": [
+        33371,
+        26490,
+        3150,
+        28,
+        15,
+        15,
+        22,
+        15
+      ],
+      "generated_text": "CHECKSUM record=0070",
+      "generation_tps": 46.29421673068733,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null
+    }
+  ]
+}

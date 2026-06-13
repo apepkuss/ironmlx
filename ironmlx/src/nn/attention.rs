@@ -206,8 +206,9 @@ impl Attention {
         };
 
         // Route post-RoPE K/V through KV cache when provided; otherwise pass
-        // through unchanged. SDPA always consumes the full K/V history.
-        let (k_full, v_full) = match cache {
+        // through unchanged. Decode-time TurboQuant caches can answer SDPA
+        // directly from packed K/V; other cases read the dense history.
+        let out = match cache {
             Some(c) => {
                 let lens_owned: Vec<i32>;
                 let lens_ref: &[i32] = match per_row_lens {
@@ -219,29 +220,45 @@ impl Attention {
                         &lens_owned
                     }
                 };
-                c.update_and_fetch_on(&k, &v, lens_ref, target)?
+                if let Some(out) = c.try_update_and_attend_decode_on(
+                    &q, &k, &v, lens_ref, self.scale, mask, target,
+                )? {
+                    out
+                } else {
+                    let (k_full, v_full) =
+                        c.update_and_fetch_for_attention_on(&k, &v, lens_ref, target)?;
+                    match mask {
+                        None => mlx::fast::scaled_dot_product_attention_on(
+                            &q, &k_full, &v_full, self.scale, "causal", None, None, target,
+                        )?,
+                        Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                            &q,
+                            &k_full,
+                            &v_full,
+                            self.scale,
+                            "",
+                            Some(m),
+                            None,
+                            target,
+                        )?,
+                    }
+                }
             }
-            None => (k, v),
-        };
-
-        // Fused SDPA. mlx fast SDPA accepts either a string mask_mode
-        // ("causal") with no mask_arr, or an explicit array mask
-        // broadcast-compatible with [B, N, T_q, T_kv]. Pick based on
-        // whether the caller passed an explicit attention_mask.
-        let out = match mask {
-            None => mlx::fast::scaled_dot_product_attention_on(
-                &q, &k_full, &v_full, self.scale, "causal", None, None, target,
-            )?,
-            Some(m) => mlx::fast::scaled_dot_product_attention_on(
-                &q,
-                &k_full,
-                &v_full,
-                self.scale,
-                "",
-                Some(m),
-                None,
-                target,
-            )?,
+            None => match mask {
+                None => mlx::fast::scaled_dot_product_attention_on(
+                    &q, &k, &v, self.scale, "causal", None, None, target,
+                )?,
+                Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                    &q,
+                    &k,
+                    &v,
+                    self.scale,
+                    "",
+                    Some(m),
+                    None,
+                    target,
+                )?,
+            },
         };
 
         // Reshape back: [batch, heads, seq, head_dim] -> [batch, seq, hidden].
@@ -256,10 +273,19 @@ impl Attention {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cache::TurboQuantKVBits;
     use crate::nn::Linear;
     use mlx::ops::constructors;
     use mlx::{Array, Dtype};
     use serial_test::serial;
+
+    fn identity(size: i32) -> Array {
+        let mut data = vec![0.0_f32; (size * size) as usize];
+        for i in 0..size as usize {
+            data[i * size as usize + i] = 1.0;
+        }
+        (data.as_slice(), (size, size)).try_into().unwrap()
+    }
 
     /// Risk #1 mitigation (b1-p2.3c-2 spec §9): verify mlx fast SDPA accepts
     /// a `[B, 1, 1, K]` additive bf16 mask passed via the existing
@@ -367,5 +393,79 @@ mod tests {
         assert_eq!(out.dtype(), Dtype::Bfloat16);
         // Verify cache write happened.
         assert_eq!(cache.offsets(), &[4, 4]);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn attention_uses_turboquant_cache_read_when_enabled() {
+        let cfg = AttentionConfig {
+            num_heads: 1,
+            num_kv_heads: 1,
+            head_dim: 8,
+            rms_norm_eps: 1e-6,
+            has_qk_norm: false,
+        };
+        let attn = Attention {
+            q_proj: Linear::new_fp(identity(8), None),
+            k_proj: Linear::new_fp(identity(8), None),
+            v_proj: Linear::new_fp(identity(8), None),
+            o_proj: Linear::new_fp(identity(8), None),
+            q_norm: None,
+            k_norm: None,
+            cfg,
+            scale: 1.0 / 8.0_f32.sqrt(),
+        };
+        let mrope = Mrope::new(8, 1e7, 1.0, &[2, 1, 1], true).unwrap();
+        let x_data: Vec<f32> = (0..16).map(|i| ((i as f32) * 0.37).sin() * 1.5).collect();
+        let x: Array = (x_data.as_slice(), (1_i32, 2_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let cos = constructors::ones((1_i32, 2, 8), Dtype::Float32).unwrap();
+        let sin = Array::zeros((1_i32, 2, 8), Dtype::Float32).unwrap();
+
+        let mut dense_cache = KVCache::new(1, 1, 8, 8, Dtype::Float32, 16).with_step(16);
+        let mut turbo_cache = KVCache::new(1, 1, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable turboquant");
+
+        let dense = attn
+            .forward_on(
+                &x,
+                &mrope,
+                &cos,
+                &sin,
+                None,
+                None,
+                Some(&[2]),
+                Some(&mut dense_cache),
+                (),
+            )
+            .expect("dense attention");
+        let turbo = attn
+            .forward_on(
+                &x,
+                &mrope,
+                &cos,
+                &sin,
+                None,
+                None,
+                Some(&[2]),
+                Some(&mut turbo_cache),
+                (),
+            )
+            .expect("turbo attention");
+
+        let dense = dense.to_vec::<f32>().unwrap();
+        let turbo = turbo.to_vec::<f32>().unwrap();
+        let max_diff = dense
+            .iter()
+            .zip(turbo.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1.0e-4,
+            "attention output should reflect TurboQuant materialized K/V, max_diff={max_diff}"
+        );
     }
 }

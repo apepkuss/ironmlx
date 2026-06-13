@@ -65,6 +65,7 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             /* admission_queue_max */ 32,
             /* max_cache_cap */ 32768,
             /* decode_cadence_mid_chunk_cap */ 256,
+            /* kv_cache_turboquant_bits */ None,
             scheduler_profile(),
             /* scheduler_autotune_report */ false,
             /* p5h_measurement_eval_probes */ false,

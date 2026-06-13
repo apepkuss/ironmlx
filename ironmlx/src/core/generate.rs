@@ -9,11 +9,12 @@ use std::{sync::OnceLock, time::Instant};
 use anyhow::anyhow;
 use mlx::{Array, Dtype};
 
+use crate::core::cache::TurboQuantKVBits;
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
-use crate::nn::LayerCache;
+use crate::nn::{enable_turboquant_kv_caches, LayerCache};
 use crate::Result;
 
 /// Process-lifetime gate: only the FIRST `GenerationStream` constructed in
@@ -46,6 +47,8 @@ pub struct GenerateRequest {
     /// Request-level rolling mid-admit chunk cap used while decode rows are
     /// active. Selected from the runtime scheduler profile after tokenization.
     pub decode_cadence_mid_chunk_cap: usize,
+    /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
+    pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     /// Per-image preprocessed vision inputs in prompt order. `None` = text-only.
     ///
     /// Qwen images are fixed-size patch sequences and can be concatenated by
@@ -1124,6 +1127,9 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         )?;
         #[cfg(not(feature = "p5h-profile"))]
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
+        if let Some(bits) = request.kv_cache_turboquant_bits {
+            enable_turboquant_kv_caches(&mut cache, bits)?;
+        }
 
         let dummy_position_ids = if model.requires_position_ids() {
             None
@@ -1579,6 +1585,9 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = Dtype::Bfloat16;
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
+        if let Some(bits) = request.kv_cache_turboquant_bits {
+            enable_turboquant_kv_caches(&mut cache, bits)?;
+        }
         let dummy_position_ids = if model.requires_position_ids() {
             None
         } else {
@@ -2092,6 +2101,7 @@ mod tests {
             stop_token_ids: vec![2_u32],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,

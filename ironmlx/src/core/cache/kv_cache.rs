@@ -9,6 +9,7 @@ use mlx::ops::indexing::{slice_strided_on, slice_update_on};
 use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use super::{TurboQuantKVBits, TurboQuantKVCache};
 use crate::Result;
 
 /// Per-layer KV cache for full-attention layers.
@@ -31,6 +32,7 @@ pub struct KVCache {
     head_dim: i32,
     v_head_dim: i32,
     dtype: Dtype,
+    turboquant: Option<TurboQuantKVCache>,
 }
 
 /// Lightweight checkpoint for [`KVCache`] rollback.
@@ -74,6 +76,7 @@ impl KVCache {
             head_dim,
             v_head_dim,
             dtype,
+            turboquant: None,
         }
     }
 
@@ -82,7 +85,86 @@ impl KVCache {
     pub fn with_step(mut self, step: i32) -> Self {
         assert!(step > 0, "KVCache step must be positive (got {step})");
         self.step = step;
+        if let Some(tq) = &mut self.turboquant {
+            tq.set_step(step);
+        }
         self
+    }
+
+    /// Enable TurboQuant packed storage for this cache.
+    ///
+    /// Once enabled, long-lived full-attention K/V history is stored in the
+    /// packed TurboQuant buffers. Dense K/V buffers are released after any
+    /// existing prefix has been copied into the packed representation.
+    pub fn with_turboquant(mut self, bits: TurboQuantKVBits) -> Result<Self> {
+        self.enable_turboquant(bits)?;
+        Ok(self)
+    }
+
+    pub fn enable_turboquant(&mut self, bits: TurboQuantKVBits) -> Result<()> {
+        let mut turboquant = TurboQuantKVCache::new(
+            self.batch,
+            self.n_kv_heads,
+            self.head_dim,
+            self.v_head_dim,
+            self.cap,
+            self.step,
+            bits,
+        )?;
+        let max_off = self.offsets.iter().copied().max().unwrap_or(0);
+        if max_off > 0 {
+            let keys_full = self.keys.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("KVCache::enable_turboquant: keys are unallocated")
+            })?;
+            let values_full = self.values.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("KVCache::enable_turboquant: values are unallocated")
+            })?;
+            let k_slice = slice_strided_on(
+                keys_full,
+                [0_i32, 0, 0, 0],
+                [self.batch, self.n_kv_heads, max_off, self.head_dim],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            let v_slice = slice_strided_on(
+                values_full,
+                [0_i32, 0, 0, 0],
+                [self.batch, self.n_kv_heads, max_off, self.v_head_dim],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            turboquant.update_from_dense_on(&k_slice, &v_slice, ())?;
+        }
+        self.turboquant = Some(turboquant);
+        self.keys = None;
+        self.values = None;
+        Ok(())
+    }
+
+    pub fn turboquant(&self) -> Option<&TurboQuantKVCache> {
+        self.turboquant.as_ref()
+    }
+
+    pub(crate) fn turboquant_pre_rotated_decode_query_signs(
+        &self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        mask_arr: Option<&Array>,
+    ) -> Option<&Array> {
+        let tq = self.turboquant.as_ref()?;
+        if self.supports_turboquant_pre_rotated_decode_attention(
+            queries,
+            k,
+            v,
+            per_row_lens,
+            mask_arr,
+        ) {
+            Some(tq.key_signs())
+        } else {
+            None
+        }
     }
 
     /// Per-row write offsets (length == batch). Row `i`'s next K/V write
@@ -107,6 +189,9 @@ impl KVCache {
     pub fn grow_cap(&mut self, new_cap: i32) {
         if new_cap > self.cap {
             self.cap = new_cap;
+            if let Some(tq) = &mut self.turboquant {
+                tq.grow_cap(new_cap);
+            }
         }
     }
 
@@ -120,6 +205,9 @@ impl KVCache {
     pub fn reset(&mut self) {
         for o in &mut self.offsets {
             *o = 0;
+        }
+        if let Some(tq) = &mut self.turboquant {
+            tq.clear();
         }
     }
 
@@ -161,16 +249,22 @@ impl KVCache {
         }
         let max_off = offsets.iter().copied().max().unwrap_or(0);
         if max_off > 0 {
-            let key_cap = self
-                .keys
-                .as_ref()
-                .map(|a| a.shape().as_slice()[2])
-                .unwrap_or(0);
-            let value_cap = self
-                .values
-                .as_ref()
-                .map(|a| a.shape().as_slice()[2])
-                .unwrap_or(0);
+            let (key_cap, value_cap) = if let Some(tq) = &self.turboquant {
+                let cap = tq.capacity();
+                (cap, cap)
+            } else {
+                let key_cap = self
+                    .keys
+                    .as_ref()
+                    .map(|a| a.shape().as_slice()[2])
+                    .unwrap_or(0);
+                let value_cap = self
+                    .values
+                    .as_ref()
+                    .map(|a| a.shape().as_slice()[2])
+                    .unwrap_or(0);
+                (key_cap, value_cap)
+            };
             if max_off > key_cap || max_off > value_cap {
                 anyhow::bail!(
                     "KVCache::restore_offsets: max offset {max_off} exceeds allocated key/value capacity {key_cap}/{value_cap}",
@@ -191,6 +285,118 @@ impl KVCache {
         self.update_and_fetch_on(k, v, per_row_lens, ())
     }
 
+    pub fn update_and_fetch_for_attention(
+        &mut self,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+    ) -> Result<(Array, Array)> {
+        self.update_and_fetch_for_attention_on(k, v, per_row_lens, ())
+    }
+
+    pub fn update_and_fetch_for_attention_on(
+        &mut self,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array)> {
+        let target: StreamOrDevice = target.into();
+        self.update_and_fetch_on(k, v, per_row_lens, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_update_and_attend_decode(
+        &mut self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        scale: f32,
+        mask_arr: Option<&Array>,
+    ) -> Result<Option<Array>> {
+        self.try_update_and_attend_decode_on(queries, k, v, per_row_lens, scale, mask_arr, ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_update_and_attend_decode_on(
+        &mut self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        scale: f32,
+        mask_arr: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Option<Array>> {
+        if self.turboquant.is_none()
+            || !self.supports_turboquant_decode_attention(queries, k, v, per_row_lens, mask_arr)
+        {
+            return Ok(None);
+        }
+
+        let target = target.into();
+        let output_dtype = queries.dtype();
+        let tq = self
+            .turboquant
+            .as_mut()
+            .expect("checked turboquant is some");
+        Ok(Some(tq.update_and_attend_decode_on(
+            queries,
+            k,
+            v,
+            &mut self.offsets,
+            per_row_lens,
+            scale,
+            mask_arr,
+            output_dtype,
+            target,
+        )?))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_update_and_attend_decode_pre_rotated_on(
+        &mut self,
+        q_rot: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        scale: f32,
+        mask_arr: Option<&Array>,
+        output_dtype: Dtype,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Option<Array>> {
+        if self.turboquant.is_none()
+            || !self.supports_turboquant_pre_rotated_decode_attention_rotated(
+                q_rot,
+                k,
+                v,
+                per_row_lens,
+                mask_arr,
+                output_dtype,
+            )
+        {
+            return Ok(None);
+        }
+
+        let target = target.into();
+        let tq = self
+            .turboquant
+            .as_mut()
+            .expect("checked turboquant is some");
+        Ok(Some(tq.update_and_attend_decode_pre_rotated_on(
+            q_rot,
+            k,
+            v,
+            &mut self.offsets,
+            per_row_lens,
+            scale,
+            mask_arr,
+            output_dtype,
+            target,
+        )?))
+    }
+
     /// Stream-targeted variant.
     pub fn update_and_fetch_on(
         &mut self,
@@ -200,6 +406,16 @@ impl KVCache {
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, Array)> {
         let target: StreamOrDevice = target.into();
+        if let Some(tq) = &mut self.turboquant {
+            return tq.update_and_fetch_on(
+                k,
+                v,
+                &mut self.offsets,
+                per_row_lens,
+                self.dtype,
+                target,
+            );
+        }
 
         // Validate per_row_lens. (Spec §4.7 invariants 3-5.)
         if per_row_lens.len() != self.batch as usize {
@@ -304,6 +520,216 @@ impl KVCache {
         Ok((k_slice, v_slice))
     }
 
+    fn supports_turboquant_decode_attention(
+        &self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        mask_arr: Option<&Array>,
+    ) -> bool {
+        if self.v_head_dim != self.head_dim
+            || per_row_lens.len() != self.batch as usize
+            || !matches!(
+                queries.dtype(),
+                Dtype::Float32 | Dtype::Float16 | Dtype::Bfloat16
+            )
+        {
+            return false;
+        }
+        let q_shape = queries.shape();
+        let q_dims = q_shape.as_slice();
+        let k_shape = k.shape();
+        let k_dims = k_shape.as_slice();
+        let v_shape = v.shape();
+        let v_dims = v_shape.as_slice();
+        if q_dims.len() != 4 || k_dims.len() != 4 || v_dims.len() != 4 {
+            return false;
+        }
+        if q_dims[0] != self.batch
+            || q_dims[2] != 1
+            || q_dims[3] != self.head_dim
+            || q_dims[1] % self.n_kv_heads != 0
+        {
+            return false;
+        }
+        if k_dims != [self.batch, self.n_kv_heads, 1, self.head_dim]
+            || v_dims != [self.batch, self.n_kv_heads, 1, self.v_head_dim]
+        {
+            return false;
+        }
+        if per_row_lens.iter().any(|&n| n != 1) {
+            return false;
+        }
+        let max_off_after = self
+            .offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .max()
+            .unwrap_or(0);
+        if max_off_after > self.cap {
+            return false;
+        }
+        let ragged = self
+            .offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .any(|off| off != max_off_after);
+        if ragged && mask_arr.is_none() {
+            return false;
+        }
+        if let Some(mask) = mask_arr {
+            let mask_shape = mask.shape();
+            let mask_dims = mask_shape.as_slice();
+            if mask_dims.len() != 4
+                || mask_dims[0] != self.batch
+                || mask_dims[2] != 1
+                || mask_dims[3] != max_off_after
+                || !(mask_dims[1] == 1 || mask_dims[1] == q_dims[1])
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn supports_turboquant_pre_rotated_decode_attention(
+        &self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        mask_arr: Option<&Array>,
+    ) -> bool {
+        if self.v_head_dim != self.head_dim
+            || per_row_lens.len() != self.batch as usize
+            || !matches!(
+                queries.dtype(),
+                Dtype::Float32 | Dtype::Float16 | Dtype::Bfloat16
+            )
+        {
+            return false;
+        }
+        let q_shape = queries.shape();
+        let q_dims = q_shape.as_slice();
+        let k_shape = k.shape();
+        let k_dims = k_shape.as_slice();
+        let v_shape = v.shape();
+        let v_dims = v_shape.as_slice();
+        if q_dims.len() != 4 || k_dims.len() != 4 || v_dims.len() != 4 {
+            return false;
+        }
+        if q_dims[0] != self.batch
+            || q_dims[2] != 1
+            || q_dims[3] != self.head_dim
+            || q_dims[1] % self.n_kv_heads != 0
+        {
+            return false;
+        }
+        self.supports_turboquant_pre_rotated_decode_common(
+            q_dims[1],
+            k_dims,
+            v_dims,
+            per_row_lens,
+            mask_arr,
+        )
+    }
+
+    fn supports_turboquant_pre_rotated_decode_attention_rotated(
+        &self,
+        q_rot: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        mask_arr: Option<&Array>,
+        output_dtype: Dtype,
+    ) -> bool {
+        if self.v_head_dim != self.head_dim
+            || per_row_lens.len() != self.batch as usize
+            || q_rot.dtype() != Dtype::Float32
+            || !matches!(
+                output_dtype,
+                Dtype::Float32 | Dtype::Float16 | Dtype::Bfloat16
+            )
+        {
+            return false;
+        }
+        let q_shape = q_rot.shape();
+        let q_dims = q_shape.as_slice();
+        let k_shape = k.shape();
+        let k_dims = k_shape.as_slice();
+        let v_shape = v.shape();
+        let v_dims = v_shape.as_slice();
+        if q_dims.len() != 3 || k_dims.len() != 4 || v_dims.len() != 4 {
+            return false;
+        }
+        if q_dims[0] != self.batch || q_dims[2] != self.head_dim || q_dims[1] % self.n_kv_heads != 0
+        {
+            return false;
+        }
+        self.supports_turboquant_pre_rotated_decode_common(
+            q_dims[1],
+            k_dims,
+            v_dims,
+            per_row_lens,
+            mask_arr,
+        )
+    }
+
+    fn supports_turboquant_pre_rotated_decode_common(
+        &self,
+        q_heads: i32,
+        k_dims: &[i32],
+        v_dims: &[i32],
+        per_row_lens: &[i32],
+        mask_arr: Option<&Array>,
+    ) -> bool {
+        if k_dims != [self.batch, self.n_kv_heads, 1, self.head_dim]
+            || v_dims != [self.batch, self.n_kv_heads, 1, self.v_head_dim]
+        {
+            return false;
+        }
+        if per_row_lens.iter().any(|&n| n != 1) {
+            return false;
+        }
+        let max_off_after = self
+            .offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .max()
+            .unwrap_or(0);
+        if max_off_after > self.cap
+            || max_off_after < mlx::fast::TURBOQUANT_PARALLEL_DECODE_SEQ_THRESHOLD
+        {
+            return false;
+        }
+        let ragged = self
+            .offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .any(|off| off != max_off_after);
+        if ragged && mask_arr.is_none() {
+            return false;
+        }
+        if let Some(mask) = mask_arr {
+            let mask_shape = mask.shape();
+            let mask_dims = mask_shape.as_slice();
+            if mask_dims.len() != 4
+                || mask_dims[0] != self.batch
+                || mask_dims[2] != 1
+                || mask_dims[3] != max_off_after
+                || !(mask_dims[1] == 1 || mask_dims[1] == q_heads)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Copy a single row's cache state from `src` into `self` at
     /// `dst_row`. The destination slot's K/V at positions
     /// `[0..src.offsets[src_row]]` is overwritten; positions beyond
@@ -350,6 +776,19 @@ impl KVCache {
                 src_off,
                 self.cap,
             );
+        }
+
+        let dst_offsets = self.offsets.clone();
+        match (&mut self.turboquant, &src.turboquant) {
+            (Some(dst_tq), Some(src_tq)) => {
+                dst_tq.adopt_row_from(src_tq, &dst_offsets, dst_row, src_row, src_off)?;
+                self.offsets[dst_row] = src_off;
+                return Ok(());
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                anyhow::bail!("KVCache::adopt_row_from: TurboQuant cache kind mismatch");
+            }
+            (None, None) => {}
         }
 
         if src_off > 0 {
@@ -599,6 +1038,45 @@ impl KVCache {
 mod tests {
     use super::*;
 
+    fn wht_inplace(x: &mut [f32]) {
+        let n = x.len();
+        let mut h = 1;
+        while h < n {
+            let mut i = 0;
+            while i < n {
+                for j in i..i + h {
+                    let a = x[j];
+                    let b = x[j + h];
+                    x[j] = a + b;
+                    x[j + h] = a - b;
+                }
+                i += h * 2;
+            }
+            h *= 2;
+        }
+
+        let scale = 1.0 / (n as f32).sqrt();
+        for value in x {
+            *value *= scale;
+        }
+    }
+
+    fn reference_query_turbo_rotate(input: &[f32], head_dim: usize, signs: &[f32]) -> Vec<f32> {
+        let vector_count = input.len() / head_dim;
+        let mut out = vec![0.0_f32; input.len()];
+        for vec_idx in 0..vector_count {
+            let start = vec_idx * head_dim;
+            let mut values: Vec<f32> = input[start..start + head_dim]
+                .iter()
+                .zip(signs.iter())
+                .map(|(&x, &sign)| x * sign)
+                .collect();
+            wht_inplace(&mut values);
+            out[start..start + head_dim].copy_from_slice(&values);
+        }
+        out
+    }
+
     fn make_cache_b(batch: i32, cap: i32) -> KVCache {
         KVCache::new(batch, 4, 256, 256, Dtype::Float32, cap)
     }
@@ -807,6 +1285,466 @@ mod tests {
         let (k, v) = make_kv_b(1, 8);
         let (kf, _vf) = c.update_and_fetch(&k, &v, &[8]).unwrap();
         assert_eq!(kf.shape().as_slice(), &[1, 4, 8, 256]);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_disabled_by_default() {
+        let c = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16);
+        assert!(c.turboquant().is_none());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_write_records_packed_shapes() {
+        let mut c = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(TurboQuantKVBits::K3V3)
+            .expect("enable turboquant");
+        let k_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.031).sin())
+            .collect();
+        let v_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.047).cos())
+            .collect();
+        let k: Array = (k_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+
+        let (kf, vf) = c.update_and_fetch(&k, &v, &[4]).expect("update");
+
+        assert_eq!(c.offsets(), &[4]);
+        assert_eq!(kf.shape().as_slice(), &[1, 2, 4, 8]);
+        assert_eq!(vf.shape().as_slice(), &[1, 2, 4, 8]);
+        let tq = c.turboquant().expect("turboquant cache");
+        assert_eq!(tq.bits(), TurboQuantKVBits::K3V3);
+        assert_eq!(tq.head_dim(), 8);
+        assert_eq!(tq.v_head_dim(), 8);
+        assert_eq!(
+            tq.k_packed().expect("k packed").shape().as_slice(),
+            &[1, 2, 16, 1]
+        );
+        assert_eq!(
+            tq.v_packed().expect("v packed").shape().as_slice(),
+            &[1, 2, 16, 1]
+        );
+        assert_eq!(
+            tq.k_norms().expect("k norms").shape().as_slice(),
+            &[1, 2, 16]
+        );
+        assert_eq!(
+            tq.v_norms().expect("v norms").shape().as_slice(),
+            &[1, 2, 16]
+        );
+        assert_eq!(tq.k_packed().expect("k packed").dtype(), Dtype::Uint32);
+        assert_eq!(tq.k_norms().expect("k norms").dtype(), Dtype::Float32);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_update_does_not_retain_dense_buffers() {
+        let mut c = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable turboquant");
+        let k_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.071).sin())
+            .collect();
+        let v_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.083).cos())
+            .collect();
+        let k: Array = (k_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+
+        let (kf, vf) = c
+            .update_and_fetch_for_attention(&k, &v, &[4])
+            .expect("turboquant attention update");
+
+        assert_eq!(c.offsets(), &[4]);
+        assert_eq!(kf.shape().as_slice(), &[1, 2, 4, 8]);
+        assert_eq!(vf.shape().as_slice(), &[1, 2, 4, 8]);
+        assert!(c.keys.is_none(), "TurboQuant cache must not retain dense K");
+        assert!(
+            c.values.is_none(),
+            "TurboQuant cache must not retain dense V"
+        );
+        let tq = c.turboquant().expect("turboquant cache");
+        assert_eq!(
+            tq.k_packed().expect("k packed").shape().as_slice(),
+            &[1, 2, 16, 1]
+        );
+        assert_eq!(
+            tq.v_packed().expect("v packed").shape().as_slice(),
+            &[1, 2, 16, 1]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_restore_offsets_uses_packed_capacity() {
+        let mut c = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable turboquant");
+        let k_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.091).sin())
+            .collect();
+        let v_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.103).cos())
+            .collect();
+        let k: Array = (k_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+
+        c.update_and_fetch(&k, &v, &[4]).expect("turboquant update");
+        c.restore_offsets(&[2]).expect("restore packed prefix");
+
+        assert_eq!(c.offsets(), &[2]);
+        assert!(
+            c.keys.is_none(),
+            "TurboQuant restore must not allocate dense K"
+        );
+        assert!(
+            c.values.is_none(),
+            "TurboQuant restore must not allocate dense V"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_pre_rotated_decode_matches_regular_decode() {
+        let mut regular = KVCache::new(1, 1, 8, 8, Dtype::Float32, 256)
+            .with_step(128)
+            .with_turboquant(TurboQuantKVBits::K3V4)
+            .expect("enable regular turboquant");
+        let mut pre_rotated = KVCache::new(1, 1, 8, 8, Dtype::Float32, 256)
+            .with_step(128)
+            .with_turboquant(TurboQuantKVBits::K3V4)
+            .expect("enable pre-rotated turboquant");
+
+        let prefix_k_data: Vec<f32> = (0..(127 * 8)).map(|i| ((i as f32) * 0.017).sin()).collect();
+        let prefix_v_data: Vec<f32> = (0..(127 * 8)).map(|i| ((i as f32) * 0.019).cos()).collect();
+        let prefix_k: Array = (prefix_k_data.as_slice(), (1_i32, 1_i32, 127_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let prefix_v: Array = (prefix_v_data.as_slice(), (1_i32, 1_i32, 127_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        regular
+            .update_and_fetch(&prefix_k, &prefix_v, &[127])
+            .expect("regular prefix");
+        pre_rotated
+            .update_and_fetch(&prefix_k, &prefix_v, &[127])
+            .expect("pre-rotated prefix");
+
+        let q_data: Vec<f32> = (0..16).map(|i| ((i as f32) * 0.029).sin()).collect();
+        let q: Array = (q_data.as_slice(), (1_i32, 2_i32, 1_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let k_step_data: Vec<f32> = (0..8).map(|i| ((i as f32) * 0.031).cos()).collect();
+        let v_step_data: Vec<f32> = (0..8).map(|i| ((i as f32) * 0.037).sin()).collect();
+        let k_step: Array = (k_step_data.as_slice(), (1_i32, 1_i32, 1_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let v_step: Array = (v_step_data.as_slice(), (1_i32, 1_i32, 1_i32, 8_i32))
+            .try_into()
+            .unwrap();
+
+        let signs = pre_rotated
+            .turboquant_pre_rotated_decode_query_signs(&q, &k_step, &v_step, &[1], None)
+            .expect("threshold reached at 128");
+        let signs_data = signs.to_vec::<f32>().expect("signs to_vec");
+        let q_rot_data = reference_query_turbo_rotate(&q_data, 8, &signs_data);
+        let q_rot: Array = (q_rot_data.as_slice(), (1_i32, 2_i32, 8_i32))
+            .try_into()
+            .unwrap();
+
+        let expected = regular
+            .try_update_and_attend_decode_on(&q, &k_step, &v_step, &[1], 0.25, None, ())
+            .expect("regular decode")
+            .expect("regular turboquant decode");
+        let actual = pre_rotated
+            .try_update_and_attend_decode_pre_rotated_on(
+                &q_rot,
+                &k_step,
+                &v_step,
+                &[1],
+                0.25,
+                None,
+                Dtype::Float32,
+                (),
+            )
+            .expect("pre-rotated decode")
+            .expect("pre-rotated turboquant decode");
+
+        assert_eq!(regular.offsets(), &[128]);
+        assert_eq!(pre_rotated.offsets(), &[128]);
+        assert_eq!(actual.shape().as_slice(), expected.shape().as_slice());
+        let expected = expected.to_vec::<f32>().expect("expected to_vec");
+        let actual = actual.to_vec::<f32>().expect("actual to_vec");
+        for (idx, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (a - e).abs() <= 1.0e-5,
+                "attn[{idx}] mismatch: actual={a} expected={e}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_adopt_row_from_preserves_existing_packed_rows_when_growing() {
+        let mut src_short = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(4)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable short src turboquant");
+        let short_k_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| 0.5 + ((i as f32) * 0.071).sin())
+            .collect();
+        let short_v_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| 0.25 + ((i as f32) * 0.083).cos())
+            .collect();
+        let short_k: Array = (short_k_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let short_v: Array = (short_v_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        src_short
+            .update_and_fetch(&short_k, &short_v, &[4])
+            .expect("short src update");
+
+        let mut src_long = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(4)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable long src turboquant");
+        let long_k_data: Vec<f32> = (0..(1 * 2 * 8 * 8))
+            .map(|i| 1.0 + ((i as f32) * 0.097).sin())
+            .collect();
+        let long_v_data: Vec<f32> = (0..(1 * 2 * 8 * 8))
+            .map(|i| 1.0 + ((i as f32) * 0.109).cos())
+            .collect();
+        let long_k: Array = (long_k_data.as_slice(), (1_i32, 2_i32, 8_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let long_v: Array = (long_v_data.as_slice(), (1_i32, 2_i32, 8_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        src_long
+            .update_and_fetch(&long_k, &long_v, &[8])
+            .expect("long src update");
+
+        let mut dst = KVCache::new(2, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(4)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable dst turboquant");
+        dst.adopt_row_from(&src_short, 0, 0)
+            .expect("adopt short row");
+        let (row0_before, _) = dst
+            .turboquant()
+            .expect("dst turboquant")
+            .materialize_prefix_on(4, Dtype::Float32, ())
+            .expect("materialize row0 before grow");
+
+        dst.adopt_row_from(&src_long, 1, 0).expect("adopt long row");
+
+        assert_eq!(dst.offsets(), &[4, 8]);
+        assert!(
+            dst.keys.is_none(),
+            "TurboQuant adopt must not allocate dense K"
+        );
+        assert!(
+            dst.values.is_none(),
+            "TurboQuant adopt must not allocate dense V"
+        );
+        let (rows_after, _) = dst
+            .turboquant()
+            .expect("dst turboquant")
+            .materialize_prefix_on(8, Dtype::Float32, ())
+            .expect("materialize rows after grow");
+        let before = row0_before.to_vec::<f32>().expect("row0 before to_vec");
+        let after = rows_after.to_vec::<f32>().expect("rows after to_vec");
+        let before_row_stride = 2 * 4 * 8;
+        let after_row_stride = 2 * 8 * 8;
+        for head in 0..2 {
+            for seq in 0..4 {
+                for dim in 0..8 {
+                    let before_idx = head * 4 * 8 + seq * 8 + dim;
+                    let after_idx = head * 8 * 8 + seq * 8 + dim;
+                    assert_eq!(
+                        before[before_idx], after[after_idx],
+                        "row 0 packed payload changed at h={head} seq={seq} dim={dim}"
+                    );
+                }
+            }
+        }
+        assert_eq!(before.len(), 2 * before_row_stride);
+        assert_eq!(after.len(), 2 * after_row_stride);
+    }
+
+    #[test]
+    fn kvcache_turboquant_rejects_invalid_configuration() {
+        let bad_bits = TurboQuantKVBits::new(2, 4);
+        assert!(bad_bits.is_err());
+
+        let bad_k_dim =
+            KVCache::new(1, 2, 7, 8, Dtype::Float32, 16).with_turboquant(TurboQuantKVBits::K3V3);
+        assert!(bad_k_dim.is_err());
+
+        let bad_v_dim =
+            KVCache::new(1, 2, 8, 7, Dtype::Float32, 16).with_turboquant(TurboQuantKVBits::K3V3);
+        assert!(bad_v_dim.is_err());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_attention_read_returns_dense_when_turboquant_disabled() {
+        let mut c = KVCache::new(1, 1, 8, 8, Dtype::Float32, 16).with_step(16);
+        let k_data: Vec<f32> = (0..16).map(|i| (i as f32) * 0.125 - 1.0).collect();
+        let v_data: Vec<f32> = (0..16).map(|i| 1.0 - (i as f32) * 0.0625).collect();
+        let k: Array = (k_data.as_slice(), (1_i32, 1_i32, 2_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 1_i32, 2_i32, 8_i32))
+            .try_into()
+            .unwrap();
+
+        let (k_read, v_read) = c
+            .update_and_fetch_for_attention(&k, &v, &[2])
+            .expect("attention read");
+
+        assert_eq!(k_read.to_vec::<f32>().unwrap(), k_data);
+        assert_eq!(v_read.to_vec::<f32>().unwrap(), v_data);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_attention_read_materializes_turboquant_packed_cache_when_enabled() {
+        let mut c = KVCache::new(1, 1, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable turboquant");
+        let k_data: Vec<f32> = (0..16).map(|i| ((i as f32) * 0.173).sin() * 1.7).collect();
+        let v_data: Vec<f32> = (0..16).map(|i| ((i as f32) * 0.219).cos() * 1.3).collect();
+        let k: Array = (k_data.as_slice(), (1_i32, 1_i32, 2_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 1_i32, 2_i32, 8_i32))
+            .try_into()
+            .unwrap();
+
+        let (k_read, v_read) = c
+            .update_and_fetch_for_attention(&k, &v, &[2])
+            .expect("attention read");
+        let (k_mat, v_mat) = c
+            .turboquant()
+            .expect("turboquant cache")
+            .materialize_prefix_on(2, Dtype::Float32, ())
+            .expect("materialize");
+
+        assert_eq!(k_read.shape().as_slice(), &[1, 1, 2, 8]);
+        assert_eq!(v_read.shape().as_slice(), &[1, 1, 2, 8]);
+        assert_eq!(k_read.dtype(), Dtype::Float32);
+        assert_eq!(v_read.dtype(), Dtype::Float32);
+        assert_eq!(
+            k_read.to_vec::<f32>().unwrap(),
+            k_mat.to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            v_read.to_vec::<f32>().unwrap(),
+            v_mat.to_vec::<f32>().unwrap()
+        );
+
+        let max_dense_diff = k_read
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .zip(k_data.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_dense_diff > 1.0e-4,
+            "TurboQuant read should consume quantized packed cache, not exact dense K"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_decode_attention_uses_packed_path() {
+        let mut c = KVCache::new(1, 1, 64, 64, Dtype::Float32, 8)
+            .with_step(8)
+            .with_turboquant(TurboQuantKVBits::K3V4)
+            .expect("enable turboquant");
+        let prefix_k_data: Vec<f32> = (0..(4 * 64))
+            .map(|i| ((i as f32) * 0.031).sin() * 0.9)
+            .collect();
+        let prefix_v_data: Vec<f32> = (0..(4 * 64))
+            .map(|i| ((i as f32) * 0.047).cos() * 1.1)
+            .collect();
+        let prefix_k: Array = (prefix_k_data.as_slice(), (1_i32, 1_i32, 4_i32, 64_i32))
+            .try_into()
+            .unwrap();
+        let prefix_v: Array = (prefix_v_data.as_slice(), (1_i32, 1_i32, 4_i32, 64_i32))
+            .try_into()
+            .unwrap();
+        c.update_and_fetch(&prefix_k, &prefix_v, &[4])
+            .expect("prefix update");
+
+        let q_data: Vec<f32> = (0..(2 * 64))
+            .map(|i| ((i as f32) * 0.053).sin() * 0.7)
+            .collect();
+        let decode_k_data: Vec<f32> = (0..64).map(|i| ((i as f32) * 0.071).cos() * 0.8).collect();
+        let decode_v_data: Vec<f32> = (0..64).map(|i| ((i as f32) * 0.083).sin() * 1.2).collect();
+        let q: Array = (q_data.as_slice(), (1_i32, 2_i32, 1_i32, 64_i32))
+            .try_into()
+            .unwrap();
+        let decode_k: Array = (decode_k_data.as_slice(), (1_i32, 1_i32, 1_i32, 64_i32))
+            .try_into()
+            .unwrap();
+        let decode_v: Array = (decode_v_data.as_slice(), (1_i32, 1_i32, 1_i32, 64_i32))
+            .try_into()
+            .unwrap();
+        let scale = (64_f32).sqrt().recip();
+
+        let actual = c
+            .try_update_and_attend_decode(&q, &decode_k, &decode_v, &[1], scale, None)
+            .expect("decode attention")
+            .expect("turboquant packed path");
+
+        assert_eq!(c.offsets(), &[5]);
+        assert!(c.keys.is_none(), "packed decode must not allocate dense K");
+        assert!(
+            c.values.is_none(),
+            "packed decode must not allocate dense V"
+        );
+
+        let (k_ref, v_ref) = c
+            .turboquant()
+            .expect("turboquant cache")
+            .materialize_prefix_on(5, Dtype::Float32, ())
+            .expect("materialize reference");
+        let expected =
+            mlx::fast::scaled_dot_product_attention(&q, &k_ref, &v_ref, scale, "", None, None)
+                .expect("dense reference");
+
+        assert_eq!(actual.shape().as_slice(), &[1, 2, 1, 64]);
+        let actual = actual.to_vec::<f32>().unwrap();
+        let expected = expected.to_vec::<f32>().unwrap();
+        for (idx, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1.0e-3,
+                "idx={idx} actual={actual} expected={expected}"
+            );
+        }
     }
 
     #[test]

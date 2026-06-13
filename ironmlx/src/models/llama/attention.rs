@@ -122,26 +122,36 @@ impl LlamaAttention {
             target,
         )?;
 
-        // Write post-RoPE K/V into the cache and fetch the full history.
-        let (k_full, v_full) = cache.update_and_fetch_on(&k, &v, per_row_lens, target)?;
-
-        // Fused SDPA. GQA (num_heads > num_kv_heads) head expansion is handled
-        // inside the kernel. `None` → implicit causal; `Some(m)` → explicit
-        // additive mask.
-        let out = match mask {
-            None => mlx::fast::scaled_dot_product_attention_on(
-                &q, &k_full, &v_full, self.scale, "causal", None, None, target,
-            )?,
-            Some(m) => mlx::fast::scaled_dot_product_attention_on(
-                &q,
-                &k_full,
-                &v_full,
-                self.scale,
-                "",
-                Some(m),
-                None,
-                target,
-            )?,
+        // Write post-RoPE K/V into the cache. Decode-time TurboQuant caches
+        // can answer SDPA directly from packed K/V.
+        let out = if let Some(out) = cache.try_update_and_attend_decode_on(
+            &q,
+            &k,
+            &v,
+            per_row_lens,
+            self.scale,
+            mask,
+            target,
+        )? {
+            out
+        } else {
+            let (k_full, v_full) =
+                cache.update_and_fetch_for_attention_on(&k, &v, per_row_lens, target)?;
+            match mask {
+                None => mlx::fast::scaled_dot_product_attention_on(
+                    &q, &k_full, &v_full, self.scale, "causal", None, None, target,
+                )?,
+                Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                    &q,
+                    &k_full,
+                    &v_full,
+                    self.scale,
+                    "",
+                    Some(m),
+                    None,
+                    target,
+                )?,
+            }
         };
 
         // [B, heads, S, head_dim] → [B, S, hidden].

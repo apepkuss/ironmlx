@@ -11,7 +11,7 @@ use crate::core::generate::{build_position_ids, GenerateEvent, GenerateRequest};
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::core::{Loader, Model, Sampler};
 use crate::models::{Qwen35Model, Qwen35MoeModel, Qwen35MoeMtp, Qwen36MoeModel};
-use crate::nn::{LayerCache, LayerCacheSnapshot, Mtp, MtpStepOutput};
+use crate::nn::{enable_turboquant_kv_caches, LayerCache, LayerCacheSnapshot, Mtp, MtpStepOutput};
 use crate::Result;
 
 /// Runtime limits for a single-request MTP speculative generation stream.
@@ -725,6 +725,9 @@ where
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = Dtype::Bfloat16;
         let mut cache = model.make_cache(1, cap, dtype)?;
+        if let Some(bits) = request.kv_cache_turboquant_bits {
+            enable_turboquant_kv_caches(&mut cache, bits)?;
+        }
         let mut mtp_cache = model.make_mtp_cache(mtp, 1, cap, dtype)?;
         let dummy_position_ids = if model.requires_position_ids() {
             None

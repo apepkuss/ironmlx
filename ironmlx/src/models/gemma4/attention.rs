@@ -407,7 +407,8 @@ impl Gemma4Attention {
                                 &lens_owned
                             }
                         };
-                        let (keys, values) = c.update_and_fetch_on(&k, &v, lens, target)?;
+                        let (keys, values) =
+                            c.update_and_fetch_for_attention_on(&k, &v, lens, target)?;
                         profile::eval_layer(
                             "gemma4_attn_cache_update_fetch",
                             self.layer_idx,

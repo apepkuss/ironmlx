@@ -18,6 +18,8 @@ use crate::core::{Loader, Message, Model, Tokenizer};
 use crate::models::qwen3_5::image_processor;
 use crate::Result;
 
+use super::KvQuantArg;
+
 #[derive(Args, Debug)]
 pub struct GenerateArgs {
     #[arg(long)]
@@ -69,6 +71,10 @@ pub struct GenerateArgs {
     /// picks a model-aware default from local benchmark policy.
     #[arg(long)]
     pub mtp_draft_tokens: Option<usize>,
+
+    /// KV cache quantization used by attention reads: none, turbo3, turbo4, or k3v4.
+    #[arg(long = "kv-quant", value_enum, default_value = "none")]
+    pub kv_quant: KvQuantArg,
 }
 
 struct PreparedImages {
@@ -328,6 +334,7 @@ fn build_generate_request<M: Model>(
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: args.prefill_chunk_size,
         decode_cadence_mid_chunk_cap: 256,
+        kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
         pixel_values: prepared_images.pixel_values,
         image_grid_thw: prepared_images.image_grid_thw,
         image_spatial_merge_size: prepared_images.image_spatial_merge_size,

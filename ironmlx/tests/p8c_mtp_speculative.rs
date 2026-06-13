@@ -296,6 +296,7 @@ fn mtp_stream_rolls_back_and_replays_accepted_prefix_after_partial_reject() {
         stop_token_ids: vec![127],
         prefill_chunk_size: 0,
         decode_cadence_mid_chunk_cap: 256,
+        kv_cache_turboquant_bits: None,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,
