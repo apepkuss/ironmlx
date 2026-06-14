@@ -8,6 +8,7 @@ use crate::{Array, Dtype, Error, MetalKernel, Result, Shape, StreamOrDevice};
 pub const TURBOQUANT_PARALLEL_DECODE_SEQ_THRESHOLD: i32 = 128;
 const PARALLEL_DECODE_V_CHUNK_SIZE: i32 = 256;
 const QK_SIMDGROUPS_PER_THREADGROUP: i32 = 4;
+const QK_POSITIONS_PER_SIMDGROUP: i32 = 2;
 const V_CHUNK_DIMS_PER_THREADGROUP: i32 = 16;
 
 #[derive(Clone, Copy)]
@@ -378,39 +379,61 @@ const TURBOQUANT_QK_DECODE_SOURCE: &str = r#"
 uint tile_idx = threadgroup_position_in_grid.y;
 uint sgid = simdgroup_index_in_threadgroup;
 uint lane = thread_index_in_simdgroup;
-uint group_idx = tile_idx * QK_SIMDGROUPS + sgid;
-if (group_idx >= TOTAL_SCORES) {
+uint block_idx = tile_idx * QK_SIMDGROUPS + sgid;
+uint blocks_per_head = (SEQ_LEN + QK_POSITIONS_PER_SIMDGROUP - 1) / QK_POSITIONS_PER_SIMDGROUP;
+uint total_blocks = BATCH * Q_HEADS * blocks_per_head;
+if (block_idx >= total_blocks) {
     return;
 }
 
-uint pos = group_idx % SEQ_LEN;
-uint q_head = (group_idx / SEQ_LEN) % Q_HEADS;
-uint batch = group_idx / (SEQ_LEN * Q_HEADS);
+uint pos_block = block_idx % blocks_per_head;
+uint q_head = (block_idx / blocks_per_head) % Q_HEADS;
+uint batch = block_idx / (blocks_per_head * Q_HEADS);
 uint kv_head = q_head / Q_PER_KV;
+uint pos_base = pos_block * QK_POSITIONS_PER_SIMDGROUP;
 
 uint q_base = (batch * Q_HEADS + q_head) * HEAD_DIM;
-uint k_vec = ((batch * KV_HEADS + kv_head) * SEQ_LEN + pos);
-float k_norm = (float)k_norms[k_vec];
+thread float acc[QK_POSITIONS_PER_SIMDGROUP];
+for (uint i = 0; i < QK_POSITIONS_PER_SIMDGROUP; ++i) {
+    acc[i] = 0.0f;
+}
 
-float acc = 0.0f;
 for (uint dim = lane; dim < HEAD_DIM; dim += 32) {
+    float q_value = (float)q_rot[q_base + dim];
     uint k_word_idx = dim / K_VALUES_PER_WORD;
     uint k_word_offset = dim - k_word_idx * K_VALUES_PER_WORD;
-    uint k_word = k_packed[k_vec * K_PACKED_DIM + k_word_idx];
-    uint k_idx = (k_word >> (k_word_offset * K_BITS)) & ((1u << K_BITS) - 1u);
-    acc += (float)q_rot[q_base + dim] * (float)k_codebook[k_idx];
+    for (uint i = 0; i < QK_POSITIONS_PER_SIMDGROUP; ++i) {
+        uint pos = pos_base + i;
+        if (pos < SEQ_LEN) {
+            uint k_vec = ((batch * KV_HEADS + kv_head) * SEQ_LEN + pos);
+            uint k_word = k_packed[k_vec * K_PACKED_DIM + k_word_idx];
+            uint k_idx = (k_word >> (k_word_offset * K_BITS)) & ((1u << K_BITS) - 1u);
+            acc[i] += q_value * (float)k_codebook[k_idx];
+        }
+    }
 }
-float score = simd_sum(acc) * k_norm;
+
+thread float score_acc[QK_POSITIONS_PER_SIMDGROUP];
+for (uint i = 0; i < QK_POSITIONS_PER_SIMDGROUP; ++i) {
+    score_acc[i] = simd_sum(acc[i]);
+}
 
 if (lane == 0) {
-    float mask_value = 0.0f;
-    if (HAS_MASK) {
-        uint mask_head = MASK_HEADS == 1 ? 0 : q_head;
-        uint mask_idx = ((batch * MASK_HEADS + mask_head) * SEQ_LEN + pos);
-        mask_value = (float)mask_arr[mask_idx];
+    for (uint i = 0; i < QK_POSITIONS_PER_SIMDGROUP; ++i) {
+        uint pos = pos_base + i;
+        if (pos < SEQ_LEN) {
+            uint k_vec = ((batch * KV_HEADS + kv_head) * SEQ_LEN + pos);
+            float score = score_acc[i] * (float)k_norms[k_vec];
+            float mask_value = 0.0f;
+            if (HAS_MASK) {
+                uint mask_head = MASK_HEADS == 1 ? 0 : q_head;
+                uint mask_idx = ((batch * MASK_HEADS + mask_head) * SEQ_LEN + pos);
+                mask_value = (float)mask_arr[mask_idx];
+            }
+            uint score_idx = ((batch * Q_HEADS + q_head) * SEQ_LEN + pos);
+            scores[score_idx] = score * (float)scale_arr + mask_value;
+        }
     }
-    uint score_idx = ((batch * Q_HEADS + q_head) * SEQ_LEN + pos);
-    scores[score_idx] = score * (float)scale_arr + mask_value;
 }
 "#;
 
@@ -1727,24 +1750,27 @@ fn turboquant_sdpa_decode_parallel_dispatch_rotated(
 ) -> Result<Array> {
     let scale_arr: Array = (&[scale][..], &[][..]).try_into()?;
     let scores_shape = Shape::from(vec![batch, q_heads, 1, seq_len]);
-    let qk_total_scores = batch * q_heads * seq_len;
-    let qk_score_tiles =
-        (qk_total_scores + QK_SIMDGROUPS_PER_THREADGROUP - 1) / QK_SIMDGROUPS_PER_THREADGROUP;
+    let qk_blocks_per_head =
+        (seq_len + QK_POSITIONS_PER_SIMDGROUP - 1) / QK_POSITIONS_PER_SIMDGROUP;
+    let qk_total_blocks = batch * q_heads * qk_blocks_per_head;
+    let qk_block_tiles =
+        (qk_total_blocks + QK_SIMDGROUPS_PER_THREADGROUP - 1) / QK_SIMDGROUPS_PER_THREADGROUP;
     let mut score_outputs = cached_turboquant_qk_decode_kernel()?
         .dispatch_builder()
         .inputs(&[q_rot, k_packed, k_norms, k_codebook, &scale_arr, mask_input])
         .output_shapes(&[scores_shape])
         .output_dtypes(&[Dtype::Float32])
-        .grid(32, qk_score_tiles * QK_SIMDGROUPS_PER_THREADGROUP, 1)
+        .grid(32, qk_block_tiles * QK_SIMDGROUPS_PER_THREADGROUP, 1)
         .threadgroup(32, QK_SIMDGROUPS_PER_THREADGROUP, 1)
         .stream(target)
+        .template_int("BATCH", batch)
         .template_int("HEAD_DIM", head_dim)
         .template_int("Q_HEADS", q_heads)
         .template_int("KV_HEADS", kv_heads)
         .template_int("Q_PER_KV", q_per_kv)
         .template_int("SEQ_LEN", seq_len)
-        .template_int("TOTAL_SCORES", qk_total_scores)
         .template_int("QK_SIMDGROUPS", QK_SIMDGROUPS_PER_THREADGROUP)
+        .template_int("QK_POSITIONS_PER_SIMDGROUP", QK_POSITIONS_PER_SIMDGROUP)
         .template_int("K_BITS", i32::from(k_bits))
         .template_int("K_VALUES_PER_WORD", k_values_per_word)
         .template_int("K_PACKED_DIM", k_packed_dim)
@@ -1946,25 +1972,28 @@ fn turboquant_sdpa_decode_parallel_dispatch_rotated_profiled(
     let v_chunks = (seq_len + PARALLEL_DECODE_V_CHUNK_SIZE - 1) / PARALLEL_DECODE_V_CHUNK_SIZE;
     let scale_arr: Array = (&[scale][..], &[][..]).try_into()?;
     let scores_shape = Shape::from(vec![batch, q_heads, 1, seq_len]);
-    let qk_total_scores = batch * q_heads * seq_len;
-    let qk_score_tiles =
-        (qk_total_scores + QK_SIMDGROUPS_PER_THREADGROUP - 1) / QK_SIMDGROUPS_PER_THREADGROUP;
+    let qk_blocks_per_head =
+        (seq_len + QK_POSITIONS_PER_SIMDGROUP - 1) / QK_POSITIONS_PER_SIMDGROUP;
+    let qk_total_blocks = batch * q_heads * qk_blocks_per_head;
+    let qk_block_tiles =
+        (qk_total_blocks + QK_SIMDGROUPS_PER_THREADGROUP - 1) / QK_SIMDGROUPS_PER_THREADGROUP;
     let qk_start = profile.start();
     let mut score_outputs = cached_turboquant_qk_decode_kernel()?
         .dispatch_builder()
         .inputs(&[q_rot, k_packed, k_norms, k_codebook, &scale_arr, mask_input])
         .output_shapes(&[scores_shape])
         .output_dtypes(&[Dtype::Float32])
-        .grid(32, qk_score_tiles * QK_SIMDGROUPS_PER_THREADGROUP, 1)
+        .grid(32, qk_block_tiles * QK_SIMDGROUPS_PER_THREADGROUP, 1)
         .threadgroup(32, QK_SIMDGROUPS_PER_THREADGROUP, 1)
         .stream(target)
+        .template_int("BATCH", batch)
         .template_int("HEAD_DIM", head_dim)
         .template_int("Q_HEADS", q_heads)
         .template_int("KV_HEADS", kv_heads)
         .template_int("Q_PER_KV", q_per_kv)
         .template_int("SEQ_LEN", seq_len)
-        .template_int("TOTAL_SCORES", qk_total_scores)
         .template_int("QK_SIMDGROUPS", QK_SIMDGROUPS_PER_THREADGROUP)
+        .template_int("QK_POSITIONS_PER_SIMDGROUP", QK_POSITIONS_PER_SIMDGROUP)
         .template_int("K_BITS", i32::from(k_bits))
         .template_int("K_VALUES_PER_WORD", k_values_per_word)
         .template_int("K_PACKED_DIM", k_packed_dim)
@@ -2134,5 +2163,10 @@ mod tests {
     #[test]
     fn weighted_v_dim_group_tuning_constant_matches_retained_variant() {
         assert_eq!(V_CHUNK_DIMS_PER_THREADGROUP, 16);
+    }
+
+    #[test]
+    fn qk_positions_per_simdgroup_tuning_constant_matches_candidate() {
+        assert_eq!(QK_POSITIONS_PER_SIMDGROUP, 2);
     }
 }
