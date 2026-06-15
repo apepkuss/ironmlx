@@ -263,6 +263,8 @@ impl Loader {
                     && !k.starts_with("audio_tower.")
                     && !k.starts_with("embed_vision.")
                     && !k.starts_with("embed_audio.")
+                    && !k.starts_with("model.encoder.vision_tower.")
+                    && !k.starts_with("model.encoder.embed_vision.")
                     && !k.starts_with("vit_merger.")
                     && !k.starts_with("merger.")
             });
@@ -825,6 +827,32 @@ mod tests {
             w.contains_key("model.embed_tokens.weight"),
             "plain model.* key must be preserved"
         );
+    }
+
+    #[test]
+    fn sanitize_drops_diffusion_gemma_encoder_vision_keys_for_text_only() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+        w.insert(
+            "model.encoder.vision_tower.encoder.layers.0.weight".into(),
+            arr.clone(),
+        );
+        w.insert(
+            "model.encoder.embed_vision.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        w.insert(
+            "model.encoder.language_model.layers.0.layer_scalar".into(),
+            arr.clone(),
+        );
+        w.insert("model.decoder.embed_tokens.weight".into(), arr.clone());
+
+        Loader::sanitize(&mut w, &empty_text_config(), false).unwrap();
+
+        assert!(!w.contains_key("model.encoder.vision_tower.encoder.layers.0.weight"));
+        assert!(!w.contains_key("model.encoder.embed_vision.embedding_projection.weight"));
+        assert!(w.contains_key("model.encoder.language_model.layers.0.layer_scalar"));
+        assert!(w.contains_key("model.decoder.embed_tokens.weight"));
     }
 
     #[test]

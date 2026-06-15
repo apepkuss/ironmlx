@@ -25,6 +25,7 @@
 //!   implemented; image inputs are out of scope.
 
 pub mod architecture;
+pub mod diffusion_gemma;
 pub mod gemma4;
 pub mod glm4_moe_lite;
 pub mod llama;
@@ -35,6 +36,10 @@ pub mod qwen3_6_moe;
 pub mod vision;
 
 pub use architecture::ModelArchitecture;
+pub use diffusion_gemma::{
+    DiffusionGemmaConfig, DiffusionGemmaGenerationConfig, DiffusionGemmaModel,
+    DiffusionGemmaTextConfig,
+};
 pub use gemma4::{Gemma4Config, Gemma4Model, Gemma4TextConfig};
 pub use glm4_moe_lite::{Glm4MoeLiteConfig, Glm4MoeLiteModel};
 pub use llama::{LlamaConfig, LlamaModel};

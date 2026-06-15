@@ -181,6 +181,33 @@ impl Embedding {
             )?),
         }
     }
+
+    /// Return a dense `[vocab, dim]` embedding table for diffusion
+    /// self-conditioning (`probs @ weight`). Quantized checkpoints are
+    /// dequantized by the caller's stream once per generation request.
+    pub(crate) fn dense_weight_on(&self, target: impl Into<StreamOrDevice>) -> Result<Array> {
+        let target = target.into();
+        match &self.inner {
+            EmbeddingImpl::Fp { weight } => Ok(weight.clone()),
+            EmbeddingImpl::Quant {
+                weight,
+                scales,
+                biases,
+                group_size,
+                bits,
+            } => Ok(mlx::quantization::dequantize_on(
+                weight,
+                scales,
+                biases.as_ref(),
+                Some(*group_size),
+                Some(*bits),
+                "affine",
+                None,
+                None,
+                target,
+            )?),
+        }
+    }
 }
 
 fn qembedding_decode_on(
