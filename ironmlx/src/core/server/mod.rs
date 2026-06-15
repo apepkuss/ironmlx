@@ -11,6 +11,7 @@ use anyhow::Context;
 use axum::{routing::get, routing::post, Router};
 use tokio::sync::Mutex;
 
+use crate::core::cache::TurboQuantKVBits;
 use crate::core::model::Model;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
@@ -79,6 +80,8 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// Runtime scheduler profile. Base config is applied at boot; rules may
     /// select request-level chunk/cadence settings after tokenization.
     pub scheduler_runtime_profile: Arc<SchedulerAutotuneRuntimeProfile>,
+    /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
+    pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
     /// wired to the SchedulerActor driver loop + BudgetState. B1-p2.5 G3.
     pub health_collector: Arc<health::SchedulerHealthCollector>,
@@ -98,6 +101,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             admission_queue_max: self.admission_queue_max,
             effective_cap_max: self.effective_cap_max,
             scheduler_runtime_profile: self.scheduler_runtime_profile.clone(),
+            kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
             health_collector: self.health_collector.clone(),
         }
     }
@@ -223,6 +227,7 @@ pub async fn serve<M>(
     admission_queue_max: usize,
     max_cache_cap: usize, // 3f
     decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool, // P5h+1 T1
@@ -243,6 +248,7 @@ where
         admission_queue_max,
         max_cache_cap,
         decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
         scheduler_runtime_profile,
         scheduler_autotune_report,
         p5h_measurement_eval_probes,
@@ -268,6 +274,7 @@ pub async fn serve_with_mtp<M>(
     admission_queue_max: usize,
     max_cache_cap: usize,
     decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool,
@@ -289,6 +296,7 @@ where
         admission_queue_max,
         max_cache_cap,
         decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
         scheduler_runtime_profile,
         scheduler_autotune_report,
         p5h_measurement_eval_probes,
@@ -315,6 +323,7 @@ async fn serve_inner<M, S>(
     admission_queue_max: usize,
     max_cache_cap: usize,
     decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool,
@@ -422,6 +431,7 @@ where
         admission_queue_max,
         effective_cap_max, // 3f
         scheduler_runtime_profile: Arc::new(scheduler_runtime_profile),
+        kv_cache_turboquant_bits,
         health_collector,
     };
     let app = Router::new()

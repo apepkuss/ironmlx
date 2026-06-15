@@ -293,6 +293,7 @@ where
         stop_token_ids,
         prefill_chunk_size: scheduler_config.prefill_chunk_size,
         decode_cadence_mid_chunk_cap: scheduler_config.decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits: state.kv_cache_turboquant_bits,
         pixel_values,
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size,

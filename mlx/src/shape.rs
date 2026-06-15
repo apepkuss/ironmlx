@@ -192,7 +192,7 @@ mod tests {
         fn take<S: IntoShape>(s: S) -> Shape {
             s.into_shape()
         }
-        assert_eq!(take(()).as_slice(), &[]);
+        assert_eq!(take(()).as_slice(), &[] as &[i32]);
         assert_eq!(take(5).as_slice(), &[5]);
         assert_eq!(take((2, 3)).as_slice(), &[2, 3]);
         assert_eq!(take([2, 3, 4]).as_slice(), &[2, 3, 4]);

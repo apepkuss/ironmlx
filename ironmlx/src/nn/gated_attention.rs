@@ -17,6 +17,74 @@ use crate::core::Loader;
 use crate::nn::{Linear, Mrope, RmsNorm};
 use crate::Result;
 
+#[derive(Clone, Copy)]
+struct DecodeAttentionTurboProfileEvent {
+    stage: &'static str,
+    elapsed_us: u128,
+    layer_idx: i32,
+    batch: i32,
+    seq: i32,
+    q_heads: i32,
+    kv_heads: i32,
+    head_dim: i32,
+}
+
+#[derive(Clone, Copy)]
+struct DecodeAttentionTurboProfileShape {
+    layer_idx: i32,
+    batch: i32,
+    seq: i32,
+    q_heads: i32,
+    kv_heads: i32,
+    head_dim: i32,
+}
+
+fn format_decode_attention_turbo_profile_line(event: DecodeAttentionTurboProfileEvent) -> String {
+    format!(
+        "{{\"event\":\"turboquant_gated_attention_stage\",\"stage\":\"{}\",\"elapsed_us\":{},\"layer_idx\":{},\"batch\":{},\"seq\":{},\"q_heads\":{},\"kv_heads\":{},\"head_dim\":{}}}",
+        event.stage,
+        event.elapsed_us,
+        event.layer_idx,
+        event.batch,
+        event.seq,
+        event.q_heads,
+        event.kv_heads,
+        event.head_dim,
+    )
+}
+
+fn profile_decode_attention_turbo_stage(
+    stage: &'static str,
+    arrays: &[&Array],
+    shape: DecodeAttentionTurboProfileShape,
+) -> Result<()> {
+    if shape.seq != 1 || std::env::var_os("IRONMLX_TURBOQUANT_ATTN_PROFILE").is_none() {
+        return Ok(());
+    }
+
+    let start = std::time::Instant::now();
+    mlx::transforms::eval(arrays).map_err(|e| anyhow::anyhow!("{e}"))?;
+    eprintln!(
+        "{}",
+        format_decode_attention_turbo_profile_line(DecodeAttentionTurboProfileEvent {
+            stage,
+            elapsed_us: start.elapsed().as_micros(),
+            layer_idx: shape.layer_idx,
+            batch: shape.batch,
+            seq: shape.seq,
+            q_heads: shape.q_heads,
+            kv_heads: shape.kv_heads,
+            head_dim: shape.head_dim,
+        })
+    );
+    Ok(())
+}
+
+#[cfg(feature = "p5h-profile")]
+type PreRotatedDecode = (Array, Array);
+#[cfg(feature = "p5h-profile")]
+type MropeApplyOutput = (Array, Array, Option<PreRotatedDecode>);
+
 /// Configuration for [`GatedAttention`].
 ///
 /// Notably differs from [`crate::nn::AttentionConfig`] by:
@@ -176,6 +244,15 @@ impl GatedAttention {
         let h_q = self.cfg.num_heads;
         let h_kv = self.cfg.num_kv_heads;
         let d = self.cfg.head_dim;
+        let profile_shape = DecodeAttentionTurboProfileShape {
+            layer_idx,
+            batch,
+            seq,
+            q_heads: h_q,
+            kv_heads: h_kv,
+            head_dim: d,
+        };
+        profile_decode_attention_turbo_stage("decode_attention_input", &[x], profile_shape)?;
 
         #[cfg(feature = "p5h-profile")]
         {
@@ -198,9 +275,14 @@ impl GatedAttention {
                     let q_full = self.q_proj.forward_on(x, target)?; // [B, S, Hq*D*2]
                     let k = self.k_proj.forward_on(x, target)?; // [B, S, Hkv*D]
                     let v = self.v_proj.forward_on(x, target)?; // [B, S, Hkv*D]
-                                                                // P5h+1 T1: measurement-eval probe (defaults OFF in
-                                                                // production). Forces lazy graph to materialize within
-                                                                // this substep so inclusive_us reflects true cost.
+                    profile_decode_attention_turbo_stage(
+                        "decode_qkv_proj",
+                        &[&q_full, &k, &v],
+                        profile_shape,
+                    )?;
+                    // P5h+1 T1: measurement-eval probe (defaults OFF in
+                    // production). Forces lazy graph to materialize within
+                    // this substep so inclusive_us reflects true cost.
                     if crate::core::p5h::is_measurement_eval_probes_active() {
                         mlx::transforms::eval(&[&q_full, &k, &v])?;
                     }
@@ -238,6 +320,11 @@ impl GatedAttention {
                         let v = v
                             .reshape_on((batch, seq, h_kv, d), target)?
                             .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+                        profile_decode_attention_turbo_stage(
+                            "decode_q_split_norm_reshape",
+                            &[&queries, &k, &v, &gate_flat],
+                            profile_shape,
+                        )?;
                         // P5h+1 T1: measurement-eval probe.
                         if crate::core::p5h::is_measurement_eval_probes_active() {
                             mlx::transforms::eval(&[&queries, &k, &v, &gate_flat])?;
@@ -247,42 +334,80 @@ impl GatedAttention {
                 )?;
 
             // Substep 3: mrope_apply — fused MetalKernel rotates Q + K (P3b1).
-            let (queries, k) = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "mrope_apply",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<(Array, Array)> {
-                    let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
-                    // P5h+1 T1: measurement-eval probe.
-                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&queries, &k])?;
-                    }
-                    Ok((queries, k))
-                },
-            )?;
+            // When TurboQuant packed parallel decode is available, this substep
+            // instead produces the pre-rotated query consumed directly by packed
+            // decode and keeps the original Q/K as a fallback input.
+            let (queries, k, pre_rotated_decode) =
+                crate::core::p5h::try_with_p5h_span_from_current_trace(
+                    "mrope_apply",
+                    || crate::core::p5h::SpanFields {
+                        layer_idx: Some(layer_idx),
+                        ..Default::default()
+                    },
+                    || -> Result<MropeApplyOutput> {
+                        let pre_rotated = match cache.as_deref() {
+                            Some(c) => {
+                                let lens_owned: Vec<i32>;
+                                let lens_ref: &[i32] = match per_row_lens {
+                                    Some(l) => l,
+                                    None => {
+                                        lens_owned = vec![seq; batch as usize];
+                                        &lens_owned
+                                    }
+                                };
+                                match c.turboquant_pre_rotated_decode_query_signs(
+                                    &queries, &k, &v, lens_ref, mask,
+                                ) {
+                                    Some(signs) => Some(mrope.apply_decode_query_turbo_rotation(
+                                        &queries, &k, cos, sin, signs,
+                                    )?),
+                                    None => None,
+                                }
+                            }
+                            None => None,
+                        };
+
+                        if let Some((queries_tq, k_rot)) = pre_rotated {
+                            if crate::core::p5h::is_measurement_eval_probes_active() {
+                                mlx::transforms::eval(&[&queries_tq, &k_rot])?;
+                            }
+                            return Ok((queries, k, Some((queries_tq, k_rot))));
+                        }
+
+                        let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+                        // P5h+1 T1: measurement-eval probe.
+                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                            mlx::transforms::eval(&[&queries, &k])?;
+                        }
+                        Ok((queries, k, None))
+                    },
+                )?;
 
             // Substep 4: kv_mask_update — (a) zero out K, V at pad positions via
             // the batched-prefill validity mask (broadcasts [B, T] -> [B, 1, T, 1])
             // so decode-time cache reads see zero contribution at pad slots;
-            // (b) cache.update_and_fetch_on returns (k_full, v_full).
-            let (k_full, v_full) = crate::core::p5h::try_with_p5h_span_from_current_trace(
+            // (b) the cache path either returns dense (k_full, v_full), or
+            // produces packed TurboQuant decode attention directly.
+            let mut packed_attn_out: Option<Array> = None;
+            let mut dense_queries_override: Option<Array> = None;
+            let dense_kv = crate::core::p5h::try_with_p5h_span_from_current_trace(
                 "kv_mask_update",
                 || crate::core::p5h::SpanFields {
                     layer_idx: Some(layer_idx),
                     ..Default::default()
                 },
-                || -> Result<(Array, Array)> {
-                    let (k, v) = if let Some(vm) = kv_validity_mask {
-                        let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
-                        let vm_broadcast =
-                            vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
-                        let k_masked = &k * &vm_broadcast;
-                        let v_masked = &v * &vm_broadcast;
-                        (k_masked, v_masked)
-                    } else {
-                        (k, v)
+                || -> Result<Option<(Array, Array)>> {
+                    let mask_kv = |k: Array, v: Array| -> Result<(Array, Array)> {
+                        if let Some(vm) = kv_validity_mask {
+                            let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
+                            let vm_broadcast =
+                                vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
+                            let k_masked = &k * &vm_broadcast;
+                            let v_masked = &v * &vm_broadcast;
+                            Ok((k_masked, v_masked))
+                        } else {
+                            Ok((k, v))
+                        }
                     };
                     let out = match cache {
                         Some(c) => {
@@ -296,7 +421,7 @@ impl GatedAttention {
                                     &lens_owned
                                 }
                             };
-                            // T4.3: wrap KVCache::update_and_fetch_on in a
+                            // T4.3: wrap KVCache attention-read update in a
                             // `cache_state_update` tree span. Parent: the
                             // enclosing `kv_mask_update` substep span. Caller-
                             // site wrap so `layer_idx` is available for
@@ -307,25 +432,76 @@ impl GatedAttention {
                                     layer_idx: Some(layer_idx),
                                     ..Default::default()
                                 },
-                                || -> Result<(Array, Array)> {
-                                    let (k_full, v_full) =
-                                        c.update_and_fetch_on(&k, &v, lens_ref, target)?;
-                                    // P5h+1 T1: measurement-eval probe.
-                                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                                        mlx::transforms::eval(&[&k_full, &v_full])?;
+                                || -> Result<Option<(Array, Array)>> {
+                                    let had_pre_rotated = pre_rotated_decode.is_some();
+                                    if let Some((queries_tq, k_tq)) = pre_rotated_decode {
+                                        let (k_tq, v_tq) = mask_kv(k_tq, v.clone())?;
+                                        if let Some(out) = c
+                                            .try_update_and_attend_decode_pre_rotated_on(
+                                                &queries_tq,
+                                                &k_tq,
+                                                &v_tq,
+                                                lens_ref,
+                                                self.scale,
+                                                mask,
+                                                queries.dtype(),
+                                                target,
+                                            )?
+                                        {
+                                            if crate::core::p5h::is_measurement_eval_probes_active()
+                                            {
+                                                mlx::transforms::eval(&[&out])?;
+                                            }
+                                            packed_attn_out = Some(out);
+                                            return Ok(None);
+                                        }
                                     }
-                                    Ok((k_full, v_full))
+
+                                    let (queries_regular, k_regular) = if had_pre_rotated {
+                                        mrope.apply(&queries, &k, cos, sin)?
+                                    } else {
+                                        (queries.clone(), k.clone())
+                                    };
+                                    let (k, v) = mask_kv(k_regular, v)?;
+                                    if let Some(out) = c.try_update_and_attend_decode_on(
+                                        &queries_regular,
+                                        &k,
+                                        &v,
+                                        lens_ref,
+                                        self.scale,
+                                        mask,
+                                        target,
+                                    )? {
+                                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                                            mlx::transforms::eval(&[&out])?;
+                                        }
+                                        packed_attn_out = Some(out);
+                                        Ok(None)
+                                    } else {
+                                        let (k_full, v_full) = c
+                                            .update_and_fetch_for_attention_on(
+                                                &k, &v, lens_ref, target,
+                                            )?;
+                                        // P5h+1 T1: measurement-eval probe.
+                                        if crate::core::p5h::is_measurement_eval_probes_active() {
+                                            mlx::transforms::eval(&[&k_full, &v_full])?;
+                                        }
+                                        dense_queries_override = Some(queries_regular);
+                                        Ok(Some((k_full, v_full)))
+                                    }
                                 },
                             )?
                         }
-                        None => (k, v),
+                        None => Some(mask_kv(k, v)?),
                     };
                     // P5h+1 T1: measurement-eval probe for the kv_mask_update
                     // substep itself (separate from the nested cache_state_update
                     // probe above; this captures the masked k/v tensors as
                     // returned to the SDPA caller).
                     if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&out.0, &out.1])?;
+                        if let Some((ref k_full, ref v_full)) = out {
+                            mlx::transforms::eval(&[k_full, v_full])?;
+                        }
                     }
                     Ok(out)
                 },
@@ -341,20 +517,34 @@ impl GatedAttention {
                     ..Default::default()
                 },
                 || -> Result<Array> {
-                    let out = match mask {
-                        None => mlx::fast::scaled_dot_product_attention_on(
-                            &queries, &k_full, &v_full, self.scale, "causal", None, None, target,
-                        )?,
-                        Some(m) => mlx::fast::scaled_dot_product_attention_on(
-                            &queries,
-                            &k_full,
-                            &v_full,
-                            self.scale,
-                            "",
-                            Some(m),
-                            None,
-                            target,
-                        )?,
+                    let out = if let Some(out) = packed_attn_out {
+                        out
+                    } else {
+                        let (k_full, v_full) =
+                            dense_kv.expect("dense K/V must exist when packed attention misses");
+                        let queries_for_sdpa = dense_queries_override.as_ref().unwrap_or(&queries);
+                        match mask {
+                            None => mlx::fast::scaled_dot_product_attention_on(
+                                queries_for_sdpa,
+                                &k_full,
+                                &v_full,
+                                self.scale,
+                                "causal",
+                                None,
+                                None,
+                                target,
+                            )?,
+                            Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                                queries_for_sdpa,
+                                &k_full,
+                                &v_full,
+                                self.scale,
+                                "",
+                                Some(m),
+                                None,
+                                target,
+                            )?,
+                        }
                     };
                     // P5h+1 T1: measurement-eval probe.
                     if crate::core::p5h::is_measurement_eval_probes_active() {
@@ -415,6 +605,11 @@ impl GatedAttention {
             let q_full = self.q_proj.forward_on(x, target)?; // [B, S, Hq*D*2]
             let k = self.k_proj.forward_on(x, target)?; // [B, S, Hkv*D]
             let v = self.v_proj.forward_on(x, target)?; // [B, S, Hkv*D]
+            profile_decode_attention_turbo_stage(
+                "decode_qkv_proj",
+                &[&q_full, &k, &v],
+                profile_shape,
+            )?;
 
             // Step 2: per-head reshape Q to [B, S, Hq, D*2], then split last axis into
             // (queries [B,S,Hq,D], gate [B,S,Hq,D]). Per-head reshape BEFORE split is
@@ -443,31 +638,29 @@ impl GatedAttention {
             let v = v
                 .reshape_on((batch, seq, h_kv, d), target)?
                 .transpose_axes_on(&[0, 2, 1, 3][..], target)?;
+            profile_decode_attention_turbo_stage(
+                "decode_q_split_norm_reshape",
+                &[&queries, &k, &v, &gate_flat],
+                profile_shape,
+            )?;
 
-            // Step 5: rotate Q + K via fused MetalKernel (P3b1).
-            let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
-
-            // Step 5b (batched prefill): zero out K, V at pad positions before
-            // writing to the cache. The [B, T] boolean validity mask broadcasts
-            // to [B, num_kv_heads=1 dim, T, head_dim=1 dim] for the multiply.
-            // Decode-time reads of the cache then see zero K, V at pad slots →
-            // zero attention contribution → no contamination of real outputs.
-            let (k, v) = if let Some(vm) = kv_validity_mask {
-                let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
-                let vm_broadcast = vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
-                let k_masked = &k * &vm_broadcast;
-                let v_masked = &v * &vm_broadcast;
-                (k_masked, v_masked)
-            } else {
-                (k, v)
+            let mask_kv = |k: Array, v: Array| -> Result<(Array, Array)> {
+                if let Some(vm) = kv_validity_mask {
+                    let vm_dtype = mlx::ops::cast::astype(vm, k.dtype())?;
+                    let vm_broadcast = vm_dtype.reshape_on((batch, 1_i32, seq, 1_i32), target)?;
+                    let k_masked = &k * &vm_broadcast;
+                    let v_masked = &v * &vm_broadcast;
+                    Ok((k_masked, v_masked))
+                } else {
+                    Ok((k, v))
+                }
             };
 
-            // Step 6: KV cache route + SDPA. The explicit array mask (when
-            // provided by the batched-prefill caller) routes via mask_mode=""
-            // + mask_arr=Some; otherwise the kernel runs in "causal" mode
-            // (lower-right alignment) which is correct for the single-stream
-            // path and for decode-time (T_q=1) calls.
-            let (k_full, v_full) = match cache {
+            // Step 5/6: MRoPE + KV cache route + SDPA. Decode-time TurboQuant
+            // caches can answer SDPA directly from packed K/V. When the packed
+            // parallel decode path is available, use the decode-only MRoPE +
+            // query TurboQuant rotation kernel and skip the standalone q_rotate.
+            let attn_out = match cache {
                 Some(c) => {
                     let lens_owned: Vec<i32>;
                     let lens_ref: &[i32] = match per_row_lens {
@@ -479,24 +672,100 @@ impl GatedAttention {
                             &lens_owned
                         }
                     };
-                    c.update_and_fetch_on(&k, &v, lens_ref, target)?
+
+                    if let Some(signs) = c
+                        .turboquant_pre_rotated_decode_query_signs(&queries, &k, &v, lens_ref, mask)
+                    {
+                        let (queries_tq, k_tq) = mrope
+                            .apply_decode_query_turbo_rotation(&queries, &k, cos, sin, signs)?;
+                        let (k_tq, v_tq) = mask_kv(k_tq, v.clone())?;
+                        if let Some(out) = c.try_update_and_attend_decode_pre_rotated_on(
+                            &queries_tq,
+                            &k_tq,
+                            &v_tq,
+                            lens_ref,
+                            self.scale,
+                            mask,
+                            queries.dtype(),
+                            target,
+                        )? {
+                            out
+                        } else {
+                            let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+                            let (k, v) = mask_kv(k, v)?;
+                            if let Some(out) = c.try_update_and_attend_decode_on(
+                                &queries, &k, &v, lens_ref, self.scale, mask, target,
+                            )? {
+                                out
+                            } else {
+                                let (k_full, v_full) =
+                                    c.update_and_fetch_for_attention_on(&k, &v, lens_ref, target)?;
+                                match mask {
+                                    None => mlx::fast::scaled_dot_product_attention_on(
+                                        &queries, &k_full, &v_full, self.scale, "causal", None,
+                                        None, target,
+                                    )?,
+                                    Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                                        &queries,
+                                        &k_full,
+                                        &v_full,
+                                        self.scale,
+                                        "",
+                                        Some(m),
+                                        None,
+                                        target,
+                                    )?,
+                                }
+                            }
+                        }
+                    } else {
+                        let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+                        let (k, v) = mask_kv(k, v)?;
+                        if let Some(out) = c.try_update_and_attend_decode_on(
+                            &queries, &k, &v, lens_ref, self.scale, mask, target,
+                        )? {
+                            out
+                        } else {
+                            let (k_full, v_full) =
+                                c.update_and_fetch_for_attention_on(&k, &v, lens_ref, target)?;
+                            match mask {
+                                None => mlx::fast::scaled_dot_product_attention_on(
+                                    &queries, &k_full, &v_full, self.scale, "causal", None, None,
+                                    target,
+                                )?,
+                                Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                                    &queries,
+                                    &k_full,
+                                    &v_full,
+                                    self.scale,
+                                    "",
+                                    Some(m),
+                                    None,
+                                    target,
+                                )?,
+                            }
+                        }
+                    }
                 }
-                None => (k, v),
-            };
-            let attn_out = match mask {
-                None => mlx::fast::scaled_dot_product_attention_on(
-                    &queries, &k_full, &v_full, self.scale, "causal", None, None, target,
-                )?,
-                Some(m) => mlx::fast::scaled_dot_product_attention_on(
-                    &queries,
-                    &k_full,
-                    &v_full,
-                    self.scale,
-                    "",
-                    Some(m),
-                    None,
-                    target,
-                )?,
+                None => {
+                    let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+                    let (k, v) = mask_kv(k, v)?;
+                    match mask {
+                        None => mlx::fast::scaled_dot_product_attention_on(
+                            &queries, &k, &v, self.scale, "causal", None, None, target,
+                        )?,
+                        Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                            &queries,
+                            &k,
+                            &v,
+                            self.scale,
+                            "",
+                            Some(m),
+                            None,
+                            target,
+                        )?,
+                    }
+                }
             };
 
             // Step 7: reshape attn out [B, Hq, S, D] -> [B, S, Hq*D], apply sigmoid gate,
@@ -517,9 +786,29 @@ impl GatedAttention {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cache::{KVCache, TurboQuantKVBits};
     use mlx::ops::constructors;
     use mlx::{Array, Dtype};
     use serial_test::serial;
+
+    #[test]
+    fn format_decode_attention_turbo_profile_line_is_stable_json() {
+        let line = format_decode_attention_turbo_profile_line(DecodeAttentionTurboProfileEvent {
+            stage: "decode_qkv_proj",
+            elapsed_us: 42,
+            layer_idx: 3,
+            batch: 1,
+            seq: 1,
+            q_heads: 16,
+            kv_heads: 4,
+            head_dim: 256,
+        });
+
+        assert_eq!(
+            line,
+            "{\"event\":\"turboquant_gated_attention_stage\",\"stage\":\"decode_qkv_proj\",\"elapsed_us\":42,\"layer_idx\":3,\"batch\":1,\"seq\":1,\"q_heads\":16,\"kv_heads\":4,\"head_dim\":256}"
+        );
+    }
 
     /// Build a small synthetic GatedAttention for unit tests.
     /// B=1, S=4, Hq=4, Hkv=2, D=8, hidden=32; partial=1.0 → rot_dim=8.
@@ -668,6 +957,58 @@ mod tests {
         assert_eq!(out.shape().as_slice(), &[1, 4, 32]);
         let v: Vec<f32> = out.to_vec().unwrap();
         assert!(v.iter().all(|x| x.is_finite()), "non-finite output element");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn forward_decode_with_turboquant_cache_uses_packed_attention_path() {
+        let attn = small_gated_attention();
+        let mrope = Mrope::new(8, 1e7, 1.0, &[2, 1, 1], true).unwrap();
+        let mut cache = KVCache::new(1, 2, 8, 8, Dtype::Float32, 8)
+            .with_step(8)
+            .with_turboquant(TurboQuantKVBits::K3V4)
+            .expect("enable turboquant");
+
+        let prefix = Array::zeros((1_i32, 4, 32), Dtype::Float32).unwrap();
+        let prefix_cos = constructors::ones((1_i32, 4, 8), Dtype::Float32).unwrap();
+        let prefix_sin = Array::zeros((1_i32, 4, 8), Dtype::Float32).unwrap();
+        attn.forward_on(
+            &prefix,
+            &mrope,
+            &prefix_cos,
+            &prefix_sin,
+            None,
+            None,
+            Some(&[4]),
+            Some(&mut cache),
+            (),
+            0,
+        )
+        .expect("prefix forward");
+        assert_eq!(cache.offsets(), &[4]);
+
+        let decode = Array::zeros((1_i32, 1, 32), Dtype::Float32).unwrap();
+        let decode_cos = constructors::ones((1_i32, 1, 8), Dtype::Float32).unwrap();
+        let decode_sin = Array::zeros((1_i32, 1, 8), Dtype::Float32).unwrap();
+        let out = attn
+            .forward_on(
+                &decode,
+                &mrope,
+                &decode_cos,
+                &decode_sin,
+                None,
+                None,
+                Some(&[1]),
+                Some(&mut cache),
+                (),
+                0,
+            )
+            .expect("decode forward with turboquant cache");
+
+        assert_eq!(cache.offsets(), &[5]);
+        assert!(cache.turboquant().is_some());
+        assert_eq!(out.shape().as_slice(), &[1, 1, 32]);
+        assert_eq!(out.dtype(), Dtype::Float32);
     }
 
     #[test]

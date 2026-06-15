@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["mlx-sys", "mlx", "ironmlx", "iron-bench", "ironmlx-bench-kernel"]
+members = [
+    "mlx-sys",
+    "mlx",
+    "ironmlx",
+    "iron-bench",
+    "ironmlx-bench-kernel",
+    "turboquant",
+]
 
 [workspace.package]
 version = "0.0.1"

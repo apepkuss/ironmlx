@@ -67,6 +67,7 @@ fn make_request(
         stop_token_ids,
         prefill_chunk_size,
         decode_cadence_mid_chunk_cap: 256,
+        kv_cache_turboquant_bits: None,
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: 2,

@@ -59,7 +59,7 @@ pub enum SchedulerError {
     },
 }
 
-use crate::core::cache::MtpCache;
+use crate::core::cache::{MtpCache, TurboQuantKVBits};
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
     build_per_row_decode_mask, build_position_ids, build_position_ids_batched,
@@ -75,7 +75,7 @@ use crate::core::speculative::{
     sample_logits_positions, slice_hidden_position, verify_input, zero_hidden_like_position,
     MtpDraftResult, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
 };
-use crate::nn::LayerCache;
+use crate::nn::{enable_turboquant_kv_caches, LayerCache};
 
 /// T4.5: process-wide once-only guard for the first-eval diagnostic span.
 ///
@@ -436,6 +436,8 @@ pub struct RequestState {
     /// Request-level rolling mid-admit chunk cap selected from the runtime
     /// scheduler profile.
     pub decode_cadence_mid_chunk_cap: usize,
+    /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
+    pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     /// KV cache bytes charged to budget at admit time. Released on
     /// row completion / eviction. B1-p2.5.
     pub kv_bytes_admitted: usize,
@@ -708,6 +710,44 @@ impl<M: Model> Scheduler<M> {
         Ok(position_ids)
     }
 
+    fn kv_cache_turboquant_bits_for_rows(
+        &self,
+        rows: &[usize],
+    ) -> Result<Option<TurboQuantKVBits>> {
+        let mut bits = None;
+        for &row in rows {
+            let Some(state) = self.slots.get(row).and_then(Option::as_ref) else {
+                continue;
+            };
+            if let Some(row_bits) = state.kv_cache_turboquant_bits {
+                if let Some(existing) = bits {
+                    anyhow::ensure!(
+                        existing == row_bits,
+                        "scheduler batch mixes TurboQuant KV configs: {existing} and {row_bits}"
+                    );
+                } else {
+                    bits = Some(row_bits);
+                }
+            }
+        }
+        Ok(bits)
+    }
+
+    fn make_model_cache(
+        &self,
+        model: &M,
+        batch: i32,
+        cap: i32,
+        dtype: Dtype,
+        turboquant_bits: Option<TurboQuantKVBits>,
+    ) -> Result<Vec<LayerCache>> {
+        let mut cache = model.make_cache(batch, cap, dtype)?;
+        if let Some(bits) = turboquant_bits {
+            enable_turboquant_kv_caches(&mut cache, bits)?;
+        }
+        Ok(cache)
+    }
+
     fn mtp_position_ids(&mut self, model: &M, start_pos: i32, len: i32) -> Result<Array> {
         if model.requires_position_ids() {
             build_position_ids(start_pos, len)
@@ -789,6 +829,7 @@ impl<M: Model> Scheduler<M> {
             image_token_id: req.image_token_id,
             prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(i32::MAX),
             decode_cadence_mid_chunk_cap: req.decode_cadence_mid_chunk_cap,
+            kv_cache_turboquant_bits: req.kv_cache_turboquant_bits,
             kv_bytes_admitted: requested_bytes,
             #[cfg(feature = "p5h-profile")]
             p5h_trace: req.p5h_trace.clone(),
@@ -988,7 +1029,9 @@ impl<M: Model> Scheduler<M> {
             .ok_or_else(|| anyhow!("rebuild_cache_layout: cache absent"))?;
         let old_rows = std::mem::take(&mut self.cache_rows);
         let (cap, dtype) = cache_cap_and_dtype(&old_cache)?;
-        let mut new_cache = model.make_cache(target_rows.len() as i32, cap, dtype)?;
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(target_rows)?;
+        let mut new_cache =
+            self.make_model_cache(model, target_rows.len() as i32, cap, dtype, turboquant_bits)?;
 
         for (dst_row, &slot_row) in target_rows.iter().enumerate() {
             let src_row = old_rows
@@ -1043,7 +1086,9 @@ impl<M: Model> Scheduler<M> {
         }
         target_rows.sort_unstable();
 
-        let mut new_cache = model.make_cache(target_rows.len() as i32, cap, dtype)?;
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&target_rows)?;
+        let mut new_cache =
+            self.make_model_cache(model, target_rows.len() as i32, cap, dtype, turboquant_bits)?;
         for (dst_row, &slot_row) in target_rows.iter().enumerate() {
             if slot_row == temp_slot_row {
                 adopt_cache_row_layers(
@@ -1225,7 +1270,8 @@ impl<M: Model> Scheduler<M> {
                 "prefill_admitted_mtp_single: cache already allocated before prefill"
             ));
         }
-        self.cache = Some(model.make_cache(1, cap, dtype)?);
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
+        self.cache = Some(self.make_model_cache(model, 1, cap, dtype, turboquant_bits)?);
         self.cache_rows = vec![row_idx];
 
         let mut mtp_cache = model.make_mtp_cache(mtp, 1, cap, dtype)?;
@@ -1816,7 +1862,9 @@ impl<M: Model> Scheduler<M> {
                 "prefill_admitted: cache already allocated before prefill"
             ));
         }
-        self.cache = Some(model.make_cache(b as i32, cap, Dtype::Bfloat16)?);
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&prefill_rows)?;
+        self.cache =
+            Some(self.make_model_cache(model, b as i32, cap, Dtype::Bfloat16, turboquant_bits)?);
         self.cache_rows = prefill_rows.clone();
         let dummy_position_ids = if model.requires_position_ids() {
             None
@@ -2731,7 +2779,8 @@ impl<M: Model> Scheduler<M> {
                 .unwrap_or(Dtype::Bfloat16)
         };
 
-        let temp_cache = model.make_cache(1, cap_for_temp, dtype)?;
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
+        let temp_cache = self.make_model_cache(model, 1, cap_for_temp, dtype, turboquant_bits)?;
 
         let is_vl = pixel_values.is_some();
         let position_ids_required = model.requires_position_ids();
@@ -3174,6 +3223,7 @@ mod tests {
     use crate::core::cache::MtpCache;
     use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel};
     use crate::nn::MtpStepOutput;
+    use serial_test::serial;
 
     /// Concrete scheduler type for unit tests — pinned to `Qwen35Model` so
     /// `Scheduler::new` calls don't need turbofish at every site.
@@ -3189,6 +3239,7 @@ mod tests {
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
@@ -4565,6 +4616,62 @@ mod tests {
         assert_eq!((events[0].id, events[0].token), (id, 3));
     }
 
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_enables_turboquant_cache_from_request() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut req = mk_req(vec![1, 2, 3]);
+        req.kv_cache_turboquant_bits = Some(crate::core::cache::TurboQuantKVBits::K3V4);
+        let id = s.admit(req).expect("admit");
+
+        let model = StepDecodeMaskModel::default();
+        let events = s.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, id);
+        let cache = s.cache.as_ref().expect("scheduler cache");
+        match &cache[0] {
+            LayerCache::Full(kv) => {
+                let tq = kv.turboquant().expect("turboquant cache");
+                assert_eq!(tq.bits(), crate::core::cache::TurboQuantKVBits::K3V4);
+                assert_eq!(tq.key_bits(), 3);
+                assert_eq!(tq.value_bits(), 4);
+            }
+            _ => panic!("expected full-attention cache"),
+        }
+    }
+
+    #[cfg(not(feature = "p5h-profile"))]
+    #[test]
+    fn prefill_admitted_rejects_mixed_turboquant_kv_configs() {
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut req_k3v4 = mk_req(vec![1, 2, 3]);
+        req_k3v4.kv_cache_turboquant_bits = Some(crate::core::cache::TurboQuantKVBits::K3V4);
+        let mut req_k4v4 = mk_req(vec![4, 5, 6]);
+        req_k4v4.kv_cache_turboquant_bits = Some(crate::core::cache::TurboQuantKVBits::K4V4);
+        s.admit(req_k3v4).expect("admit K3V4");
+        s.admit(req_k4v4).expect("admit K4V4");
+
+        let model = StepDecodeMaskModel::default();
+        let err = s
+            .prefill_admitted(&model)
+            .expect_err("mixed TurboQuant KV configs should fail");
+
+        assert!(err
+            .to_string()
+            .contains("scheduler batch mixes TurboQuant KV configs"));
+    }
+
     // Multi-row prefill test (2 active rows) — incompatible with the
     // p5h-profile single-row invariant (see
     // prefill_admitted_compacts_sparse_initial_rows). Default-feature only.
@@ -4766,6 +4873,7 @@ mod tests {
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
@@ -4813,6 +4921,7 @@ mod tests {
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32), (1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
@@ -4864,6 +4973,7 @@ mod tests {
             stop_token_ids: vec![2],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: Some(vec![pixel_values]),
             image_grid_thw: Some(vec![(1_i32, 2_i32, 2_i32)]),
             image_spatial_merge_size: 2,
@@ -5217,6 +5327,7 @@ mod tests {
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: Some(vec![pv_bf16]),
             image_grid_thw: Some(grids.clone()),
             image_spatial_merge_size: 2,
@@ -5255,6 +5366,7 @@ mod tests {
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
@@ -5297,6 +5409,7 @@ mod tests {
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,
@@ -5351,6 +5464,7 @@ mod tests {
             stop_token_ids: vec![],
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: None,
             image_grid_thw: None,
             image_spatial_merge_size: 2,

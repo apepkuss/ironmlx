@@ -15,13 +15,74 @@
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::cache::{GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot};
+use crate::core::cache::{
+    GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot, TurboQuantKVBits,
+};
 use crate::core::Loader;
 use crate::models::glm4_moe_lite::mla_cache::MlaLatentCacheSnapshot;
 use crate::nn::{
     GatedAttention, GatedAttentionConfig, GatedDeltaNet, GatedDeltaNetConfig, Mlp, Mrope, RmsNorm,
 };
 use crate::Result;
+
+#[derive(Clone, Copy)]
+struct DecodeLayerTurboProfileEvent {
+    stage: &'static str,
+    elapsed_us: u128,
+    layer_idx: i32,
+    attn_kind: &'static str,
+    batch: i32,
+    seq: i32,
+    hidden_size: i32,
+}
+
+#[derive(Clone, Copy)]
+struct DecodeLayerTurboProfileShape {
+    layer_idx: i32,
+    attn_kind: &'static str,
+    batch: i32,
+    seq: i32,
+    hidden_size: i32,
+}
+
+fn format_decode_layer_turbo_profile_line(event: DecodeLayerTurboProfileEvent) -> String {
+    format!(
+        "{{\"event\":\"turboquant_decoder_layer_stage\",\"stage\":\"{}\",\"elapsed_us\":{},\"layer_idx\":{},\"attn_kind\":\"{}\",\"batch\":{},\"seq\":{},\"hidden_size\":{}}}",
+        event.stage,
+        event.elapsed_us,
+        event.layer_idx,
+        event.attn_kind,
+        event.batch,
+        event.seq,
+        event.hidden_size,
+    )
+}
+
+fn profile_decode_layer_turbo_stage(
+    stage: &'static str,
+    arrays: &[&Array],
+    shape: DecodeLayerTurboProfileShape,
+) -> Result<()> {
+    if shape.seq != 1 || std::env::var_os("IRONMLX_TURBOQUANT_ATTN_PROFILE").is_none() {
+        return Ok(());
+    }
+
+    let start = std::time::Instant::now();
+    mlx::transforms::eval(arrays).map_err(|e| anyhow!("{e}"))?;
+    eprintln!(
+        "{}",
+        format_decode_layer_turbo_profile_line(DecodeLayerTurboProfileEvent {
+            stage,
+            elapsed_us: start.elapsed().as_micros(),
+            layer_idx: shape.layer_idx,
+            attn_kind: shape.attn_kind,
+            batch: shape.batch,
+            seq: shape.seq,
+            hidden_size: shape.hidden_size,
+        })
+    );
+    Ok(())
+}
 
 /// Which attention path a [`DecoderLayer`] uses. Selected per layer index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +139,13 @@ pub enum LayerCacheSnapshot {
 }
 
 impl LayerCache {
+    pub fn enable_turboquant(&mut self, bits: TurboQuantKVBits) -> anyhow::Result<()> {
+        if let LayerCache::Full(kv) = self {
+            kv.enable_turboquant(bits)?;
+        }
+        Ok(())
+    }
+
     /// Reset to empty state (offset → 0; recurrent state cleared). Preserves
     /// any underlying Array allocations so the next batch can reuse them.
     pub fn reset(&mut self) -> anyhow::Result<()> {
@@ -117,6 +185,16 @@ impl LayerCache {
             }
         }
     }
+}
+
+pub fn enable_turboquant_kv_caches(
+    caches: &mut [LayerCache],
+    bits: TurboQuantKVBits,
+) -> anyhow::Result<()> {
+    for cache in caches {
+        cache.enable_turboquant(bits)?;
+    }
+    Ok(())
 }
 
 /// One decoder block. Full or linear attention selected at construction.
@@ -246,10 +324,51 @@ impl DecoderLayer {
         cache: Option<&mut LayerCache>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
+        self.forward_on_with_layer_idx(
+            x,
+            mrope,
+            cos,
+            sin,
+            full_attn_mask,
+            linear_attn_mask,
+            per_row_lens,
+            cache,
+            target,
+            -1,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_on_with_layer_idx(
+        &self,
+        x: &Array,
+        mrope: &Mrope,
+        cos: &Array,
+        sin: &Array,
+        full_attn_mask: Option<&Array>,
+        linear_attn_mask: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
+        cache: Option<&mut LayerCache>,
+        target: impl Into<StreamOrDevice>,
+        layer_idx: i32,
+    ) -> Result<Array> {
         let target = target.into();
 
         // Pre-flight (existing P3b4 invariants).
         self.preflight_x(x, "DecoderLayer::forward_on")?;
+        let dims_owned = x.shape();
+        let dims = dims_owned.as_slice();
+        let profile_shape = DecodeLayerTurboProfileShape {
+            layer_idx,
+            attn_kind: match self.kind() {
+                AttnKind::Full => "full",
+                AttnKind::Linear => "linear",
+            },
+            batch: dims[0],
+            seq: dims[1],
+            hidden_size: dims[2],
+        };
+        profile_decode_layer_turbo_stage("decode_layer_input", &[x], profile_shape)?;
 
         // Block 1: input_layernorm + attn dispatch + residual
         //
@@ -265,9 +384,7 @@ impl DecoderLayer {
         // semantics are identical to what linear attention uses; reusing it
         // avoids defining a third mask. See `attention::forward_on` for
         // details.
-        // Dense `DecoderLayer` is not yet on the P5h decoder-layer instrumentation
-        // path (T0a wraps only `DecoderLayerMoe`); pass `layer_idx = -1` to
-        // satisfy the unconditional callee signatures per spec § 2.5a.
+        profile_decode_layer_turbo_stage("decode_input_norm", &[&normed_in], profile_shape)?;
         let attn = match (&self.attn, cache) {
             (AttnPath::Full(a), Some(LayerCache::Full(kv))) => a.forward_on(
                 &normed_in,
@@ -279,7 +396,7 @@ impl DecoderLayer {
                 per_row_lens,
                 Some(kv),
                 target,
-                -1,
+                layer_idx,
             )?,
             (AttnPath::Full(a), None) => a.forward_on(
                 &normed_in,
@@ -291,7 +408,7 @@ impl DecoderLayer {
                 per_row_lens,
                 None,
                 target,
-                -1,
+                layer_idx,
             )?,
             (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => a.forward_on(
                 &normed_in,
@@ -299,11 +416,16 @@ impl DecoderLayer {
                 per_row_lens,
                 Some(gdc),
                 target,
-                -1,
+                layer_idx,
             )?,
-            (AttnPath::Linear(a), None) => {
-                a.forward_on(&normed_in, linear_attn_mask, per_row_lens, None, target, -1)?
-            }
+            (AttnPath::Linear(a), None) => a.forward_on(
+                &normed_in,
+                linear_attn_mask,
+                per_row_lens,
+                None,
+                target,
+                layer_idx,
+            )?,
             (AttnPath::Full(_), Some(LayerCache::Linear(_))) => {
                 return Err(anyhow!(
                     "DecoderLayer::forward_on: Full attn layer received Linear cache (kind mismatch)"
@@ -320,12 +442,22 @@ impl DecoderLayer {
                 ));
             }
         };
+        profile_decode_layer_turbo_stage("decode_attention_path", &[&attn], profile_shape)?;
         let h = x + &attn;
+        profile_decode_layer_turbo_stage("decode_attention_residual", &[&h], profile_shape)?;
 
         // Block 2: post_norm + mlp + residual
         let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
+        profile_decode_layer_turbo_stage(
+            "decode_post_attention_norm",
+            &[&normed_post],
+            profile_shape,
+        )?;
         let mlp_out = self.mlp.forward_on(&normed_post, target)?;
-        Ok(&h + &mlp_out)
+        profile_decode_layer_turbo_stage("decode_mlp_path", &[&mlp_out], profile_shape)?;
+        let out = &h + &mlp_out;
+        profile_decode_layer_turbo_stage("decode_layer_output", &[&out], profile_shape)?;
+        Ok(out)
     }
 
     /// Production constructor. `kind` selects which attention path to load
@@ -439,6 +571,24 @@ mod tests {
     use crate::core::cache::{GatedDeltaCache, KVCache};
     use crate::nn::Linear;
     use serial_test::serial;
+
+    #[test]
+    fn format_decode_layer_turbo_profile_line_is_stable_json() {
+        let line = format_decode_layer_turbo_profile_line(DecodeLayerTurboProfileEvent {
+            stage: "decode_input_norm",
+            elapsed_us: 42,
+            layer_idx: 7,
+            attn_kind: "full",
+            batch: 1,
+            seq: 1,
+            hidden_size: 2560,
+        });
+
+        assert_eq!(
+            line,
+            "{\"event\":\"turboquant_decoder_layer_stage\",\"stage\":\"decode_input_norm\",\"elapsed_us\":42,\"layer_idx\":7,\"attn_kind\":\"full\",\"batch\":1,\"seq\":1,\"hidden_size\":2560}"
+        );
+    }
 
     fn rand_w(shape: &[i32], dtype: Dtype) -> Array {
         let n: usize = shape.iter().map(|d| *d as usize).product();
@@ -808,5 +958,40 @@ mod tests {
         // dispatch arm itself is exercised in T4 (Qwen35Model assembly tests);
         // here we only confirm the LayerCache::Full discriminator compiles.
         let _ = LayerCache::Full;
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn enable_turboquant_kv_caches_only_updates_full_layers() {
+        let mut caches = vec![
+            LayerCache::Full(KVCache::new(1, 1, 8, 8, Dtype::Bfloat16, 16)),
+            LayerCache::Linear(
+                GatedDeltaCache::new_with_cap(
+                    /* batch */ 1,
+                    /* kernel_size */ 4,
+                    /* conv_dim */ 16,
+                    /* num_v_heads */ 4,
+                    /* head_v_dim */ 8,
+                    /* head_k_dim */ 8,
+                    Dtype::Bfloat16,
+                    /* cap */ 16,
+                )
+                .expect("GatedDeltaCache::new_with_cap"),
+            ),
+        ];
+
+        enable_turboquant_kv_caches(&mut caches, TurboQuantKVBits::K3V3)
+            .expect("enable turboquant");
+
+        match &caches[0] {
+            LayerCache::Full(kv) => {
+                assert_eq!(
+                    kv.turboquant().expect("turboquant cache").bits(),
+                    TurboQuantKVBits::K3V3
+                )
+            }
+            _ => panic!("expected Full layer"),
+        }
+        assert!(matches!(caches[1], LayerCache::Linear(_)));
     }
 }

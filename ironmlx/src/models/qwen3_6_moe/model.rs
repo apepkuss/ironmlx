@@ -629,6 +629,7 @@ mod tests {
             stop_token_ids: tokenizer.eos_token_ids().to_vec(),
             prefill_chunk_size: 0,
             decode_cadence_mid_chunk_cap: 256,
+            kv_cache_turboquant_bits: None,
             pixel_values: pixel_values.map(|pv| vec![pv]),
             image_grid_thw,
             image_spatial_merge_size,

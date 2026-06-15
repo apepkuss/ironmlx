@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
+use ironmlx::core::cache::TurboQuantKVBits;
 use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::speculative::{
     resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel,
@@ -66,6 +67,10 @@ struct Args {
     #[arg(long, default_value_t = 2048)]
     prefill_chunk_size: usize,
 
+    /// KV cache quantization used by attention reads.
+    #[arg(long = "kv-quant", value_enum, default_value_t = KvQuantBenchArg::None)]
+    kv_quant: KvQuantBenchArg,
+
     /// Scheduler batch capacity, only used by scheduler-text mode.
     #[arg(long, default_value_t = 1)]
     b_max: usize,
@@ -93,6 +98,30 @@ enum BenchMode {
     Scheduler,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
+enum KvQuantBenchArg {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "turbo3")]
+    Turbo3,
+    #[serde(rename = "turbo4")]
+    Turbo4,
+    #[value(name = "k3v4")]
+    #[serde(rename = "k3v4")]
+    K3V4,
+}
+
+impl KvQuantBenchArg {
+    fn turboquant_bits(self) -> Option<TurboQuantKVBits> {
+        match self {
+            Self::None => None,
+            Self::Turbo3 => Some(TurboQuantKVBits::K3V3),
+            Self::Turbo4 => Some(TurboQuantKVBits::K4V4),
+            Self::K3V4 => Some(TurboQuantKVBits::K3V4),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct BenchOutput {
     meta: Meta,
@@ -112,6 +141,7 @@ struct Meta {
     prompt_tokens: usize,
     max_tokens: usize,
     prefill_chunk_size: usize,
+    kv_quant: KvQuantBenchArg,
     b_max: usize,
     effective_cap_max: usize,
     warmup_runs: usize,
@@ -143,10 +173,17 @@ struct Record {
     e2e_ms: f64,
     decode_time_ms: f64,
     generated_tokens: usize,
+    generated_token_ids: Vec<u32>,
+    generated_text: String,
     generation_tps: f64,
     finish_reason: Option<&'static str>,
     valid: bool,
     mtp_stats: Option<MtpRecordStats>,
+}
+
+struct GeneratedOutput {
+    token_ids: Vec<u32>,
+    text: String,
 }
 
 #[derive(Serialize)]
@@ -366,6 +403,7 @@ where
             prompt_tokens: prompt_ids.len(),
             max_tokens: args.max_tokens,
             prefill_chunk_size: args.prefill_chunk_size,
+            kv_quant: args.kv_quant,
             b_max: args.b_max,
             effective_cap_max,
             warmup_runs: args.warmup_runs,
@@ -470,6 +508,7 @@ where
             prompt_tokens: prompt_ids.len(),
             max_tokens: args.max_tokens,
             prefill_chunk_size: args.prefill_chunk_size,
+            kv_quant: args.kv_quant,
             b_max: args.b_max,
             effective_cap_max,
             warmup_runs: args.warmup_runs,
@@ -560,14 +599,16 @@ where
     let started = Instant::now();
     let mut stream = GenerationStream::new_text_only(model, tokenizer, request)?;
     let mut first_ms = None;
-    let mut generated = 0_usize;
+    let mut generated_token_ids = Vec::with_capacity(args.max_tokens);
+    let mut generated_text = String::new();
     let mut finish_reason = None;
 
     while let Some(event) = stream.next_token()? {
         if first_ms.is_none() {
             first_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
         }
-        generated += 1;
+        generated_token_ids.push(event.token);
+        generated_text.push_str(&event.text);
         finish_reason = event.finish_reason;
         if finish_reason.is_some() {
             break;
@@ -580,7 +621,10 @@ where
         args.mode,
         ttft_ms,
         e2e_ms,
-        generated,
+        GeneratedOutput {
+            token_ids: generated_token_ids,
+            text: generated_text,
+        },
         finish_reason,
         args.max_tokens,
         None,
@@ -603,25 +647,31 @@ where
     let started = Instant::now();
     let _request_id = scheduler.admit(request)?;
     let first_events = scheduler.prefill_admitted(model)?;
-    let mut generated = first_events.len();
+    let mut generated_token_ids: Vec<u32> = first_events.iter().map(|event| event.token).collect();
     let mut finish_reason = first_events.first().and_then(|event| event.finish_reason);
     let ttft_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-    while finish_reason.is_none() && generated < args.max_tokens {
+    while finish_reason.is_none() && generated_token_ids.len() < args.max_tokens {
         let events = scheduler.step(model)?;
         if events.is_empty() {
             break;
         }
-        generated += events.len();
+        generated_token_ids.extend(events.iter().map(|event| event.token));
         finish_reason = events.first().and_then(|event| event.finish_reason);
     }
     mlx::transforms::synchronize()?;
     let e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let generated_text = tokenizer
+        .decode(&generated_token_ids, true)
+        .unwrap_or_default();
     Ok(make_record(
         args.mode,
         ttft_ms,
         e2e_ms,
-        generated,
+        GeneratedOutput {
+            token_ids: generated_token_ids,
+            text: generated_text,
+        },
         finish_reason,
         args.max_tokens,
         None,
@@ -644,14 +694,16 @@ where
     let started = Instant::now();
     let mut stream = MtpTextGenerationStream::new_text_only(model, mtp, tokenizer, request, cfg)?;
     let mut first_ms = None;
-    let mut generated = 0_usize;
+    let mut generated_token_ids = Vec::with_capacity(args.max_tokens);
+    let mut generated_text = String::new();
     let mut finish_reason = None;
 
     while let Some(event) = stream.next_token()? {
         if first_ms.is_none() {
             first_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
         }
-        generated += 1;
+        generated_token_ids.push(event.token);
+        generated_text.push_str(&event.text);
         finish_reason = event.finish_reason;
         if finish_reason.is_some() {
             break;
@@ -665,7 +717,10 @@ where
         args.mode,
         ttft_ms,
         e2e_ms,
-        generated,
+        GeneratedOutput {
+            token_ids: generated_token_ids,
+            text: generated_text,
+        },
         finish_reason,
         args.max_tokens,
         Some(mtp_stats),
@@ -691,20 +746,23 @@ where
     let started = Instant::now();
     let _request_id = scheduler.admit(request)?;
     let first_events = scheduler.prefill_admitted_mtp_single(model, mtp, cfg)?;
-    let mut generated = first_events.len();
+    let mut generated_token_ids: Vec<u32> = first_events.iter().map(|event| event.token).collect();
     let mut finish_reason = first_events.first().and_then(|event| event.finish_reason);
     let ttft_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-    while finish_reason.is_none() && generated < args.max_tokens {
+    while finish_reason.is_none() && generated_token_ids.len() < args.max_tokens {
         let events = scheduler.step_mtp_single(model, mtp)?;
         if events.is_empty() {
             break;
         }
-        generated += events.len();
+        generated_token_ids.extend(events.iter().map(|event| event.token));
         finish_reason = events.first().and_then(|event| event.finish_reason);
     }
     mlx::transforms::synchronize()?;
     let e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let generated_text = tokenizer
+        .decode(&generated_token_ids, true)
+        .unwrap_or_default();
     let mtp_stats = scheduler
         .mtp_stats()
         .ok_or_else(|| anyhow!("scheduler MTP run produced no MTP stats"))?
@@ -713,7 +771,10 @@ where
         args.mode,
         ttft_ms,
         e2e_ms,
-        generated,
+        GeneratedOutput {
+            token_ids: generated_token_ids,
+            text: generated_text,
+        },
         finish_reason,
         args.max_tokens,
         Some(mtp_stats),
@@ -733,6 +794,7 @@ fn make_request<M: Model>(
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
         prefill_chunk_size: args.prefill_chunk_size,
         decode_cadence_mid_chunk_cap: 256,
+        kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
         pixel_values: None,
         image_grid_thw: None,
         image_spatial_merge_size: model.model_meta().spatial_merge_size,
@@ -751,12 +813,13 @@ fn make_record(
     mode: BenchMode,
     ttft_ms: f64,
     e2e_ms: f64,
-    generated_tokens: usize,
+    generated: GeneratedOutput,
     finish_reason: Option<&'static str>,
     max_tokens: usize,
     mtp_stats: Option<MtpRecordStats>,
 ) -> Record {
     let decode_time_ms = (e2e_ms - ttft_ms).max(0.0);
+    let generated_tokens = generated.token_ids.len();
     let generation_tps = if decode_time_ms > 0.0 {
         generated_tokens.saturating_sub(1) as f64 / (decode_time_ms / 1000.0)
     } else {
@@ -768,6 +831,8 @@ fn make_record(
         e2e_ms,
         decode_time_ms,
         generated_tokens,
+        generated_token_ids: generated.token_ids,
+        generated_text: generated.text,
         generation_tps,
         finish_reason,
         valid: finish_reason == Some("length") && generated_tokens >= max_tokens,
@@ -879,6 +944,27 @@ mod tests {
     }
 
     #[test]
+    fn kv_quant_parses_k3v4_for_core_bench() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--kv-quant",
+            "k3v4",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        assert_eq!(
+            args.kv_quant.turboquant_bits(),
+            Some(TurboQuantKVBits::K3V4)
+        );
+    }
+
+    #[test]
     fn mtp_text_requires_mtp_model_dir() {
         let args = parse_args(&[
             "ironmlx-core-bench",
@@ -966,7 +1052,10 @@ mod tests {
             BenchMode::Scheduler,
             1.0,
             3.0,
-            4,
+            GeneratedOutput {
+                token_ids: vec![101, 102, 103, 104],
+                text: "bench text".to_string(),
+            },
             Some("length"),
             4,
             Some(MtpRecordStats {
@@ -991,6 +1080,8 @@ mod tests {
 
         assert_eq!(record.mode, BenchMode::Scheduler);
         assert!(record.valid);
+        assert_eq!(record.generated_token_ids, vec![101, 102, 103, 104]);
+        assert_eq!(record.generated_text, "bench text");
         let stats = record.mtp_stats.expect("scheduler MTP stats");
         assert_eq!(stats.windows, 1);
         assert_eq!(stats.rollback_count, 1);

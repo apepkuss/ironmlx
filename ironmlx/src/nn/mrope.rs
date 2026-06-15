@@ -8,7 +8,7 @@
 //! only Qwen3.5 model assembly (P3) provides. P3 wires real position streams
 //! into attention and asserts numerical agreement against a reference.
 
-use std::sync::OnceLock;
+use std::{sync::OnceLock, time::Instant};
 
 use mlx::compile::{compile, CompiledFn, ShapeMode};
 use mlx::ops::cast::astype;
@@ -19,6 +19,30 @@ use mlx::{Array, Dtype, MetalKernel};
 use smallvec::SmallVec;
 
 use crate::Result;
+
+#[derive(Clone, Copy)]
+struct DecodeQueryTurboProfileEvent {
+    stage: &'static str,
+    elapsed_us: u128,
+    batch: i32,
+    q_heads: i32,
+    kv_heads: i32,
+    head_dim: i32,
+    rot_dim: i32,
+}
+
+fn format_decode_query_turbo_profile_line(event: DecodeQueryTurboProfileEvent) -> String {
+    format!(
+        "{{\"event\":\"turboquant_mrope_stage\",\"stage\":\"{}\",\"elapsed_us\":{},\"batch\":{},\"q_heads\":{},\"kv_heads\":{},\"head_dim\":{},\"rot_dim\":{}}}",
+        event.stage,
+        event.elapsed_us,
+        event.batch,
+        event.q_heads,
+        event.kv_heads,
+        event.head_dim,
+        event.rot_dim
+    )
+}
 
 /// Multimodal Rotary Positional Embedding state.
 ///
@@ -47,6 +71,9 @@ pub struct Mrope {
     /// Lazily-built `MetalKernel` for the fused (q, k, cos, sin) -> (q', k')
     /// apply path.
     apply_kernel: OnceLock<MetalKernel>,
+    /// Lazily-built decode-only kernel for fused MRoPE plus TurboQuant query
+    /// sign/WHT rotation.
+    decode_query_turbo_kernel: OnceLock<MetalKernel>,
 }
 
 impl Mrope {
@@ -102,6 +129,7 @@ impl Mrope {
             head_dim,
             cos_sin_compiled: OnceLock::new(),
             apply_kernel: OnceLock::new(),
+            decode_query_turbo_kernel: OnceLock::new(),
         })
     }
 
@@ -397,6 +425,161 @@ impl Mrope {
         Ok((q_rot, k_rot))
     }
 
+    /// Decode-only fused path for TurboQuant attention.
+    ///
+    /// `q: [B, Hq, 1, HEAD_DIM]`, `k: [B, Hkv, 1, HEAD_DIM]`,
+    /// `cos/sin: [B, 1, ROTARY_DIM]` fp32, `query_signs: [HEAD_DIM]`.
+    ///
+    /// Returns:
+    /// - `q_turbo_rotated: [B, Hq, HEAD_DIM]` fp32, computed as
+    ///   `WHT(query_signs * MRoPE(q)) / sqrt(HEAD_DIM)`.
+    /// - `k_rot: [B, Hkv, 1, HEAD_DIM]` with the same dtype as `k`.
+    pub fn apply_decode_query_turbo_rotation(
+        &self,
+        q: &Array,
+        k: &Array,
+        cos: &Array,
+        sin: &Array,
+        query_signs: &Array,
+    ) -> Result<(Array, Array)> {
+        if !self.interleaved {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation: split-half (interleaved=false) layout is not implemented; only interleaved=true is supported (Qwen3.5)"
+            ));
+        }
+
+        let q_shape = q.shape();
+        let k_shape = k.shape();
+        let q_dims = q_shape.as_slice();
+        let k_dims = k_shape.as_slice();
+        if q_dims.len() != 4 || k_dims.len() != 4 {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation expects rank-4 q/k; got q.ndim={}, k.ndim={}",
+                q_dims.len(),
+                k_dims.len()
+            ));
+        }
+        if q_dims[2] != 1 || k_dims[2] != 1 {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation expects decode seq=1; got q.seq={}, k.seq={}",
+                q_dims[2],
+                k_dims[2]
+            ));
+        }
+        if q_dims[0] != k_dims[0] {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation: q.batch={} != k.batch={}",
+                q_dims[0],
+                k_dims[0]
+            ));
+        }
+        if q_dims[3] != self.head_dim || k_dims[3] != self.head_dim {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation: q.head_dim={} k.head_dim={} != configured {}",
+                q_dims[3],
+                k_dims[3],
+                self.head_dim
+            ));
+        }
+
+        let b = q_dims[0];
+        let hq = q_dims[1];
+        let hkv = k_dims[1];
+        let expected_cs_shape = [b, 1, self.rot_dim];
+        if cos.shape().as_slice() != expected_cs_shape {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation: cos.shape={:?} != expected [B={}, S=1, ROT_DIM={}]",
+                cos.shape().as_slice(),
+                b,
+                self.rot_dim
+            ));
+        }
+        if sin.shape().as_slice() != expected_cs_shape {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation: sin.shape={:?} != expected [B={}, S=1, ROT_DIM={}]",
+                sin.shape().as_slice(),
+                b,
+                self.rot_dim
+            ));
+        }
+        if cos.dtype() != Dtype::Float32 || sin.dtype() != Dtype::Float32 {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation: cos.dtype={:?} sin.dtype={:?}; both must be Float32",
+                cos.dtype(),
+                sin.dtype()
+            ));
+        }
+        if query_signs.shape().as_slice() != [self.head_dim] {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation: query_signs.shape={:?} != expected [HEAD_DIM={}]",
+                query_signs.shape().as_slice(),
+                self.head_dim
+            ));
+        }
+        if query_signs.dtype() != Dtype::Float32 {
+            return Err(anyhow::anyhow!(
+                "Mrope::apply_decode_query_turbo_rotation: query_signs.dtype={:?}; expected Float32",
+                query_signs.dtype()
+            ));
+        }
+
+        let profile_enabled = std::env::var_os("IRONMLX_TURBOQUANT_ATTN_PROFILE").is_some();
+        if profile_enabled {
+            let start = Instant::now();
+            mlx::transforms::eval(&[q, k, cos, sin, query_signs])
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            eprintln!(
+                "{}",
+                format_decode_query_turbo_profile_line(DecodeQueryTurboProfileEvent {
+                    stage: "decode_query_turbo_inputs",
+                    elapsed_us: start.elapsed().as_micros(),
+                    batch: b,
+                    q_heads: hq,
+                    kv_heads: hkv,
+                    head_dim: self.head_dim,
+                    rot_dim: self.rot_dim,
+                })
+            );
+        }
+
+        let kernel = self.decode_query_turbo_kernel.get_or_init(|| {
+            self.build_decode_query_turbo_kernel()
+                .expect("build_decode_query_turbo_kernel cannot fail at first call")
+        });
+
+        let profile_start = profile_enabled.then(Instant::now);
+        let q_output_shape = mlx::Shape::from(vec![b, hq, self.head_dim]);
+        let mut outputs = kernel
+            .dispatch_builder()
+            .inputs(&[q, k, cos, sin, query_signs])
+            .output_shapes(&[q_output_shape, k.shape().clone()])
+            .output_dtypes(&[Dtype::Float32, k.dtype()])
+            .grid(b * (hq + hkv) * self.head_dim, 1, 1)
+            .threadgroup(self.head_dim, 1, 1)
+            .template_int("HEAD_DIM", self.head_dim)
+            .template_int("ROTARY_DIM", self.rot_dim)
+            .dispatch()?;
+
+        let q_turbo_rot = outputs.take_at(0)?;
+        let k_rot = outputs.take_at(0)?;
+        if let Some(start) = profile_start {
+            mlx::transforms::eval(&[&q_turbo_rot, &k_rot]).map_err(|e| anyhow::anyhow!("{e}"))?;
+            eprintln!(
+                "{}",
+                format_decode_query_turbo_profile_line(DecodeQueryTurboProfileEvent {
+                    stage: "decode_query_turbo_rotation",
+                    elapsed_us: start.elapsed().as_micros(),
+                    batch: b,
+                    q_heads: hq,
+                    kv_heads: hkv,
+                    head_dim: self.head_dim,
+                    rot_dim: self.rot_dim,
+                })
+            );
+        }
+        Ok((q_turbo_rot, k_rot))
+    }
+
     /// Lazily build the fused Q+K rotary `MetalKernel`. Templated on
     /// `HEAD_DIM` and `ROTARY_DIM` so Metal's compiler unrolls the rotate
     /// loop and folds index arithmetic. MLX auto-injects `q_shape` / `k_shape`
@@ -502,12 +685,177 @@ impl Mrope {
             .atomic_outputs(false)
             .build()?)
     }
+
+    fn build_decode_query_turbo_kernel(&self) -> Result<mlx::MetalKernel> {
+        let src = r#"
+        constexpr uint ROT_HALF = ROTARY_DIM / 2;
+
+        uint group_idx = threadgroup_position_in_grid.x;
+        uint lid = thread_index_in_threadgroup;
+
+        uint B   = (uint)q_shape[0];
+        uint Hq  = (uint)q_shape[1];
+        uint Hkv = (uint)k_shape[1];
+
+        threadgroup float values[HEAD_DIM];
+
+        if (group_idx < B * Hq) {
+            uint b = group_idx / Hq;
+            uint h = group_idx - b * Hq;
+            uint base = (b * Hq + h) * HEAD_DIM;
+            uint cs_base = b * ROTARY_DIM;
+
+            float rotated;
+            if (lid < ROTARY_DIM) {
+                float c = cos[cs_base + lid];
+                float si = sin[cs_base + lid];
+                float x_self = float(q[base + lid]);
+                float x_pair = (lid < ROT_HALF)
+                    ? float(q[base + lid + ROT_HALF])
+                    : float(q[base + lid - ROT_HALF]);
+                rotated = (lid < ROT_HALF)
+                    ? (x_self * c - x_pair * si)
+                    : (x_self * c + x_pair * si);
+            } else {
+                rotated = float(q[base + lid]);
+            }
+
+            values[lid] = rotated * (float)query_signs[lid];
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            for (uint width = 1; width < HEAD_DIM; width <<= 1) {
+                uint pair = lid;
+                if (pair < HEAD_DIM / 2) {
+                    uint block = pair / width;
+                    uint offset = pair - block * width;
+                    uint left = block * width * 2 + offset;
+                    uint right = left + width;
+                    float a = values[left];
+                    float b_val = values[right];
+                    values[left] = a + b_val;
+                    values[right] = a - b_val;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+
+            q_out[base + lid] = values[lid] / sqrt((float)HEAD_DIM);
+        } else {
+            uint k_group = group_idx - B * Hq;
+            uint b = k_group / Hkv;
+            uint h = k_group - b * Hkv;
+            uint base = (b * Hkv + h) * HEAD_DIM;
+            uint cs_base = b * ROTARY_DIM;
+
+            float rotated;
+            if (lid < ROTARY_DIM) {
+                float c = cos[cs_base + lid];
+                float si = sin[cs_base + lid];
+                float x_self = float(k[base + lid]);
+                float x_pair = (lid < ROT_HALF)
+                    ? float(k[base + lid + ROT_HALF])
+                    : float(k[base + lid - ROT_HALF]);
+                rotated = (lid < ROT_HALF)
+                    ? (x_self * c - x_pair * si)
+                    : (x_self * c + x_pair * si);
+            } else {
+                rotated = float(k[base + lid]);
+            }
+
+            k_out[base + lid] = static_cast<__typeof__(*k_out)>(rotated);
+        }
+        "#;
+
+        Ok(
+            mlx::MetalKernel::builder("ironmlx_mrope_decode_query_turbo_rotation")
+                .inputs(&["q", "k", "cos", "sin", "query_signs"])
+                .outputs(&["q_out", "k_out"])
+                .source(src)
+                .ensure_row_contiguous(true)
+                .atomic_outputs(false)
+                .build()?,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    fn wht_inplace(x: &mut [f32]) {
+        let n = x.len();
+        let mut h = 1;
+        while h < n {
+            let mut i = 0;
+            while i < n {
+                for j in i..i + h {
+                    let a = x[j];
+                    let b = x[j + h];
+                    x[j] = a + b;
+                    x[j + h] = a - b;
+                }
+                i += h * 2;
+            }
+            h *= 2;
+        }
+
+        let scale = 1.0 / (n as f32).sqrt();
+        for value in x {
+            *value *= scale;
+        }
+    }
+
+    fn reference_query_turbo_rotate(input: &[f32], head_dim: usize, signs: &[f32]) -> Vec<f32> {
+        let vector_count = input.len() / head_dim;
+        let mut out = vec![0.0_f32; input.len()];
+        for vec_idx in 0..vector_count {
+            let start = vec_idx * head_dim;
+            let mut values: Vec<f32> = input[start..start + head_dim]
+                .iter()
+                .zip(signs.iter())
+                .map(|(&x, &sign)| x * sign)
+                .collect();
+            wht_inplace(&mut values);
+            out[start..start + head_dim].copy_from_slice(&values);
+        }
+        out
+    }
+
+    #[test]
+    fn format_decode_query_turbo_profile_line_is_stable_json() {
+        let line = format_decode_query_turbo_profile_line(DecodeQueryTurboProfileEvent {
+            stage: "decode_query_turbo_rotation",
+            elapsed_us: 1234,
+            batch: 1,
+            q_heads: 16,
+            kv_heads: 4,
+            head_dim: 256,
+            rot_dim: 64,
+        });
+
+        assert_eq!(
+            line,
+            "{\"event\":\"turboquant_mrope_stage\",\"stage\":\"decode_query_turbo_rotation\",\"elapsed_us\":1234,\"batch\":1,\"q_heads\":16,\"kv_heads\":4,\"head_dim\":256,\"rot_dim\":64}"
+        );
+    }
+
+    #[test]
+    fn format_decode_query_turbo_profile_line_supports_input_stage() {
+        let line = format_decode_query_turbo_profile_line(DecodeQueryTurboProfileEvent {
+            stage: "decode_query_turbo_inputs",
+            elapsed_us: 77,
+            batch: 1,
+            q_heads: 16,
+            kv_heads: 4,
+            head_dim: 256,
+            rot_dim: 64,
+        });
+
+        assert_eq!(
+            line,
+            "{\"event\":\"turboquant_mrope_stage\",\"stage\":\"decode_query_turbo_inputs\",\"elapsed_us\":77,\"batch\":1,\"q_heads\":16,\"kv_heads\":4,\"head_dim\":256,\"rot_dim\":64}"
+        );
+    }
 
     #[test]
     #[serial(mlx_metal)]
@@ -698,6 +1046,62 @@ mod tests {
         // Both must produce the right shape under GQA.
         assert_eq!(q_rot.shape().as_slice(), &[1, 64, 2, 256]);
         assert_eq!(k_rot.shape().as_slice(), &[1, 8, 2, 256]);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn apply_decode_query_turbo_rotation_matches_apply_plus_wht() {
+        let mrope = Mrope::new(8, 10000.0, 1.0, &[2, 1, 1], true).unwrap();
+
+        let q_data: Vec<f32> = (0..16).map(|i| (i as f32 - 7.5) * 0.25).collect();
+        let k_data: Vec<f32> = (0..8).map(|i| (i as f32 - 3.5) * -0.2).collect();
+        let q: Array = (q_data.as_slice(), (1_i32, 2, 1, 8)).try_into().unwrap();
+        let k: Array = (k_data.as_slice(), (1_i32, 1, 1, 8)).try_into().unwrap();
+
+        let cos: Array = (
+            &[0.5_f32, 1.0, 0.25, -0.5, 0.5, 1.0, 0.25, -0.5][..],
+            (1_i32, 1, 8),
+        )
+            .try_into()
+            .unwrap();
+        let sin: Array = (
+            &[1.0_f32, 0.0, 0.75, 0.25, 1.0, 0.0, 0.75, 0.25][..],
+            (1_i32, 1, 8),
+        )
+            .try_into()
+            .unwrap();
+        let signs_data = vec![1.0_f32, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0];
+        let signs: Array = (signs_data.as_slice(), (8_i32,)).try_into().unwrap();
+
+        let (q_rope, expected_k) = mrope.apply(&q, &k, &cos, &sin).expect("apply");
+        let expected_q =
+            reference_query_turbo_rotate(&q_rope.to_vec::<f32>().unwrap(), 8, &signs_data);
+
+        let (actual_q, actual_k) = mrope
+            .apply_decode_query_turbo_rotation(&q, &k, &cos, &sin, &signs)
+            .expect("decode fused apply");
+
+        assert_eq!(actual_q.shape().as_slice(), &[1, 2, 8]);
+        assert_eq!(actual_k.shape().as_slice(), &[1, 1, 1, 8]);
+        assert_eq!(actual_q.dtype(), Dtype::Float32);
+        assert_eq!(actual_k.dtype(), Dtype::Float32);
+
+        let actual_q = actual_q.to_vec::<f32>().unwrap();
+        for (idx, (&a, &e)) in actual_q.iter().zip(expected_q.iter()).enumerate() {
+            assert!(
+                (a - e).abs() <= 1.0e-5,
+                "q[{idx}] mismatch: actual={a} expected={e}"
+            );
+        }
+
+        let actual_k = actual_k.to_vec::<f32>().unwrap();
+        let expected_k = expected_k.to_vec::<f32>().unwrap();
+        for (idx, (&a, &e)) in actual_k.iter().zip(expected_k.iter()).enumerate() {
+            assert!(
+                (a - e).abs() <= 1.0e-5,
+                "k[{idx}] mismatch: actual={a} expected={e}"
+            );
+        }
     }
 
     #[test]

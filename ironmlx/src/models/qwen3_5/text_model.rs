@@ -145,8 +145,8 @@ impl Qwen35TextModel {
         let mut x = hidden.clone();
         match cache {
             Some(c) => {
-                for (layer, cell) in self.layers.iter().zip(c.iter_mut()) {
-                    x = layer.forward_on(
+                for (i, (layer, cell)) in self.layers.iter().zip(c.iter_mut()).enumerate() {
+                    x = layer.forward_on_with_layer_idx(
                         &x,
                         &self.mrope,
                         &cos,
@@ -156,12 +156,13 @@ impl Qwen35TextModel {
                         per_row_lens,
                         Some(cell),
                         target,
+                        i as i32,
                     )?;
                 }
             }
             None => {
-                for layer in &self.layers {
-                    x = layer.forward_on(
+                for (i, layer) in self.layers.iter().enumerate() {
+                    x = layer.forward_on_with_layer_idx(
                         &x,
                         &self.mrope,
                         &cos,
@@ -171,6 +172,7 @@ impl Qwen35TextModel {
                         per_row_lens,
                         None,
                         target,
+                        i as i32,
                     )?;
                 }
             }

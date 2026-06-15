@@ -9,6 +9,7 @@ use clap::Args;
 use super::scheduler_profile_store::{
     detect_scheduler_profile_hardware_label, SchedulerProfileStore,
 };
+use super::KvQuantArg;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     evaluate_scheduler_autotune_profile_health, SchedulerAutotuneProfileConfig,
@@ -105,6 +106,10 @@ pub struct ServeArgs {
     /// picks a model-aware default from local benchmark policy.
     #[arg(long = "mtp-draft-tokens")]
     pub mtp_draft_tokens: Option<usize>,
+
+    /// KV cache quantization used by attention reads: none, turbo3, turbo4, or k3v4.
+    #[arg(long = "kv-quant", value_enum, default_value = "none")]
+    pub kv_quant: KvQuantArg,
 
     /// P5h+1 T1 measurement probe: force selected span bodies (Lane A
     /// `first_token_sampling_materialize_and_sample` + the ROI substep
@@ -539,6 +544,7 @@ where
         scheduler_config.admission_queue_max,
         scheduler_config.max_cache_cap,
         scheduler_config.decode_cadence_mid_chunk_cap,
+        args.kv_quant.turboquant_bits(),
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
@@ -590,6 +596,7 @@ where
         scheduler_config.admission_queue_max,
         scheduler_config.max_cache_cap,
         scheduler_config.decode_cadence_mid_chunk_cap,
+        args.kv_quant.turboquant_bits(),
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
@@ -854,7 +861,7 @@ mod scheduler_profile_tests {
     use super::{
         check_loaded_scheduler_profile_health, load_scheduler_profile_for_model,
         resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
-        resolve_serve_mtp_config, SchedulerServeConfig, ServeArgs,
+        resolve_serve_mtp_config, KvQuantArg, SchedulerServeConfig, ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -908,6 +915,7 @@ mod scheduler_profile_tests {
             scheduler_autotune_report: false,
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            kv_quant: KvQuantArg::None,
             #[cfg(feature = "p5h-profile")]
             p5h_measurement_eval_probes: false,
         }
