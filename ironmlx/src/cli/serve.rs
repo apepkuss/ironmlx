@@ -720,6 +720,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
 
     let model_type = read_model_type(&model_dir)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
+    if architecture == crate::models::ModelArchitecture::DiffusionGemma {
+        return Err(anyhow::anyhow!(
+            "ironmlx serve does not yet support DiffusionGemma's serial block-diffusion lane; use `ironmlx generate` for text-only DiffusionGemma"
+        ));
+    }
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     let mtp_config = resolve_serve_mtp_config(
@@ -842,6 +847,9 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 vision_input,
             )
         }
+        crate::models::ModelArchitecture::DiffusionGemma => unreachable!(
+            "DiffusionGemma serve is rejected before loading because it is not a causal LM scheduler model"
+        ),
     }
 }
 

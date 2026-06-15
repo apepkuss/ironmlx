@@ -298,6 +298,9 @@ fn main() -> Result<()> {
             let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
             run_for_model(&model, &tokenizer, &args, load_ms)
         }
+        ModelArchitecture::DiffusionGemma => Err(anyhow!(
+            "ironmlx-core-bench measures causal prefill/decode models; DiffusionGemma uses block diffusion"
+        )),
     }
 }
 

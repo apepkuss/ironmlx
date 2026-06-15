@@ -343,23 +343,31 @@ pub struct VisionModel {
 
 impl VisionModel {
     pub fn from_loader(loader: &Loader, cfg: Gemma4VisionConfig) -> Result<Self> {
+        Self::from_loader_with_prefix(loader, cfg, "vision_tower")
+    }
+
+    pub(crate) fn from_loader_with_prefix(
+        loader: &Loader,
+        cfg: Gemma4VisionConfig,
+        prefix: &str,
+    ) -> Result<Self> {
         let patch_embedder =
-            VisionPatchEmbedder::from_loader(loader, "vision_tower.patch_embedder", &cfg)?;
+            VisionPatchEmbedder::from_loader(loader, &format!("{prefix}.patch_embedder"), &cfg)?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
         for i in 0..cfg.num_hidden_layers as usize {
             layers.push(VisionBlock::from_loader(
                 loader,
-                &format!("vision_tower.encoder.layers.{i}"),
+                &format!("{prefix}.encoder.layers.{i}"),
                 &cfg,
             )?);
         }
         let std_bias = if cfg.standardize {
-            loader.tensor_opt("vision_tower.std_bias").cloned()
+            loader.tensor_opt(&format!("{prefix}.std_bias")).cloned()
         } else {
             None
         };
         let std_scale = if cfg.standardize {
-            loader.tensor_opt("vision_tower.std_scale").cloned()
+            loader.tensor_opt(&format!("{prefix}.std_scale")).cloned()
         } else {
             None
         };

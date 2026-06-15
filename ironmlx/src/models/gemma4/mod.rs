@@ -15,7 +15,7 @@ mod ops;
 mod profile;
 mod rope;
 mod text_model;
-mod vision;
+pub(crate) mod vision;
 
 pub use config::{
     Gemma4Config, Gemma4LayerKind, Gemma4RopeParams, Gemma4TextConfig, Gemma4VisionConfig,

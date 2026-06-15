@@ -252,7 +252,7 @@ impl Gemma4Config {
 }
 
 impl Gemma4VisionConfig {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.model_type != "gemma4_vision" {
             return Err(anyhow!(
                 "Gemma4VisionConfig: expected model_type=gemma4_vision, got `{}`",

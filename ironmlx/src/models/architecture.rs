@@ -25,11 +25,15 @@ pub enum ModelArchitecture {
     /// vision tower + resampler are NOT yet supported, so image inputs are out
     /// of scope (text-only).
     MiniCpmV46,
+    /// DiffusionGemma block-diffusion architecture (`model_type =
+    /// "diffusion_gemma"`). Text-only support uses a dedicated serial
+    /// canvas-denoising generation path rather than the causal-LM scheduler.
+    DiffusionGemma,
 }
 
 impl ModelArchitecture {
     pub const EXPECTED_MODEL_TYPES: &'static str =
-        "'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', 'llama', or 'minicpmv4_6'";
+        "'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma'";
 
     pub fn from_config_value(raw: &Value) -> Result<Self> {
         let model_type = raw
@@ -47,6 +51,7 @@ impl ModelArchitecture {
             "glm4_moe_lite" => Ok(Self::Glm4MoeLite),
             "llama" => Ok(Self::Llama),
             "minicpmv4_6" => Ok(Self::MiniCpmV46),
+            "diffusion_gemma" => Ok(Self::DiffusionGemma),
             other => Err(anyhow!(
                 "unsupported model_type: {other} (expected {})",
                 Self::EXPECTED_MODEL_TYPES
@@ -62,6 +67,7 @@ impl ModelArchitecture {
             Self::Glm4MoeLite => "glm4_moe_lite",
             Self::Llama => "llama",
             Self::MiniCpmV46 => "minicpmv4_6",
+            Self::DiffusionGemma => "diffusion_gemma",
         }
     }
 }

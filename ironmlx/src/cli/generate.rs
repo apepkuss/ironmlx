@@ -121,6 +121,10 @@ fn gemma4_placeholder(token_count: usize) -> String {
     out
 }
 
+fn diffusion_gemma_placeholder(token_count: usize) -> String {
+    gemma4_placeholder(token_count)
+}
+
 fn inject_image_placeholders(prompt: &str, placeholders: &[String]) -> Result<String> {
     if placeholders.is_empty() {
         return Ok(prompt.to_owned());
@@ -199,6 +203,31 @@ fn prepare_images(
             all_pixel_values.push(processed.pixel_values);
             grids.push((1, processed.grid_h, processed.grid_w));
             placeholders.push(gemma4_placeholder(processed.soft_tokens));
+        }
+        (
+            vision_config.pooling_kernel_size,
+            tokenizer
+                .token_to_id("<|image|>")
+                .map(|id| id as i32)
+                .or(cfg.image_token_id)
+                .unwrap_or(258_880),
+        )
+    } else if model_type == "diffusion_gemma" {
+        let cfg = crate::models::DiffusionGemmaConfig::from_loader(loader)
+            .context("DiffusionGemmaConfig::from_loader")?;
+        let vision_config = cfg
+            .vision_config
+            .as_ref()
+            .ok_or_else(|| anyhow!("DiffusionGemma config has no vision_config"))?;
+        for path in &args.images {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading --image {}", path.display()))?;
+            let processed =
+                crate::models::gemma4::image_processor::preprocess(&bytes, vision_config)
+                    .with_context(|| format!("preprocessing --image {}", path.display()))?;
+            all_pixel_values.push(processed.pixel_values);
+            grids.push((1, processed.grid_h, processed.grid_w));
+            placeholders.push(diffusion_gemma_placeholder(processed.soft_tokens));
         }
         (
             vision_config.pooling_kernel_size,
@@ -420,6 +449,88 @@ fn run_generation_with_mtp_model<M: MtpSpeculativeModel>(
     write_generation_events(|| stream.next_token())
 }
 
+fn run_diffusion_gemma_generation(
+    model: &crate::models::DiffusionGemmaModel,
+    tokenizer: &Tokenizer,
+    loader: &Loader,
+    args: &GenerateArgs,
+) -> Result<()> {
+    if args.mtp_model_dir.is_some() {
+        return Err(anyhow!(
+            "--mtp-model-dir is not supported for DiffusionGemma block diffusion"
+        ));
+    }
+    let default_spatial_merge_size = model
+        .config
+        .vision_config
+        .as_ref()
+        .map(|vc| vc.pooling_kernel_size)
+        .unwrap_or(3);
+    let prepared_images = prepare_images(
+        args,
+        loader,
+        tokenizer,
+        "diffusion_gemma",
+        default_spatial_merge_size,
+    )?;
+    let prompt_content = inject_image_placeholders(&args.prompt, &prepared_images.placeholders)?;
+    let prompt = if args.chat && tokenizer.has_chat_template() {
+        let messages = vec![Message {
+            role: "user".into(),
+            content: prompt_content,
+        }];
+        let extra_kwargs = serde_json::json!({"enable_thinking": args.enable_thinking});
+        tokenizer.apply_chat_template(&messages, true, Some(&extra_kwargs))?
+    } else {
+        prompt_content
+    };
+    let prompt_ids = tokenizer.encode(&prompt, /* add_special_tokens = */ false)?;
+    let generation_config = crate::models::DiffusionGemmaGenerationConfig::from_loader(loader)
+        .context("DiffusionGemmaGenerationConfig::from_loader")?;
+    let events = match (
+        prepared_images.pixel_values.as_deref(),
+        prepared_images.image_grid_thw.as_deref(),
+    ) {
+        (Some(pixel_values), Some(image_grid_thw)) => {
+            crate::models::diffusion_gemma::generate_image_text(
+                model,
+                tokenizer,
+                &prompt_ids,
+                pixel_values,
+                image_grid_thw,
+                prepared_images.image_token_id,
+                &generation_config,
+                args.max_tokens,
+                args.temperature,
+                args.seed,
+            )?
+        }
+        _ => crate::models::diffusion_gemma::generate_text(
+            model,
+            tokenizer,
+            &prompt_ids,
+            &generation_config,
+            args.max_tokens,
+            args.temperature,
+            args.seed,
+        )?,
+    };
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for ev in events {
+        if !ev.text.is_empty() {
+            out.write_all(ev.text.as_bytes())?;
+            out.flush()?;
+        }
+        if ev.finish_reason.is_some() {
+            break;
+        }
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
 pub fn run(args: GenerateArgs) -> Result<()> {
     let model_dir = PathBuf::from(&args.model);
     if !model_dir.exists() {
@@ -487,6 +598,11 @@ pub fn run(args: GenerateArgs) -> Result<()> {
                 .context("minicpmv4_6::model_from_loader")?;
             run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
+        crate::models::ModelArchitecture::DiffusionGemma => {
+            let model = crate::models::DiffusionGemmaModel::from_loader(&loader)
+                .context("DiffusionGemmaModel::from_loader")?;
+            run_diffusion_gemma_generation(&model, &tokenizer, &loader, &args)
+        }
     }
 }
 
@@ -517,6 +633,14 @@ mod tests {
         // Verify the canonical fn builds the correct <image>...<|image_pad|>...</image> string.
         let s = crate::models::minicpmv4_6::image_placeholder_string(3);
         assert_eq!(s, "<image><|image_pad|><|image_pad|><|image_pad|></image>");
+    }
+
+    #[test]
+    fn diffusion_gemma_placeholder_wraps_image_soft_tokens() {
+        assert_eq!(
+            diffusion_gemma_placeholder(2),
+            "<|image><|image|><|image|><image|>"
+        );
     }
 
     #[test]

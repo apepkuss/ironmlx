@@ -109,6 +109,28 @@ fn minicpmv46_round_trips_model_type_string() {
 }
 
 #[test]
+fn diffusion_gemma_declared_model_type_maps_to_execution_architecture() {
+    let diffusion_gemma = json!({
+        "model_type": "diffusion_gemma",
+        "architectures": ["DiffusionGemmaForBlockDiffusion"],
+        "canvas_length": 256,
+        "text_config": { "model_type": "diffusion_gemma_text" }
+    });
+    assert_eq!(
+        ModelArchitecture::from_config_value(&diffusion_gemma).unwrap(),
+        ModelArchitecture::DiffusionGemma
+    );
+}
+
+#[test]
+fn diffusion_gemma_round_trips_model_type_string() {
+    assert_eq!(
+        ModelArchitecture::DiffusionGemma.model_type(),
+        "diffusion_gemma"
+    );
+}
+
+#[test]
 fn unsupported_model_type_reports_supported_architectures() {
     let config = json!({ "model_type": "qwen2_vl" });
 
@@ -116,6 +138,6 @@ fn unsupported_model_type_reports_supported_architectures() {
 
     assert_eq!(
         err.to_string(),
-        "unsupported model_type: qwen2_vl (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', 'llama', or 'minicpmv4_6')"
+        "unsupported model_type: qwen2_vl (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma')"
     );
 }
