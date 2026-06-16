@@ -8,9 +8,13 @@ use crate::{Array, Dtype, Error, MetalKernel, Result, Shape, StreamOrDevice};
 pub const TURBOQUANT_PARALLEL_DECODE_SEQ_THRESHOLD: i32 = 128;
 const PARALLEL_DECODE_V_CHUNK_SIZE: i32 = 256;
 const QK_SIMDGROUPS_PER_THREADGROUP: i32 = 4;
-const QK_POSITIONS_PER_SIMDGROUP: i32 = 2;
+const QK_POSITIONS_PER_SIMDGROUP: i32 = 4;
 const V_CHUNK_DIMS_PER_THREADGROUP: i32 = 16;
 const V_Q_HEADS_PER_THREADGROUP: i32 = 4;
+
+fn weighted_v_chunk_branchless_shape_supported(q_per_kv: i32, head_dim: i32) -> bool {
+    q_per_kv == V_Q_HEADS_PER_THREADGROUP && head_dim % V_CHUNK_DIMS_PER_THREADGROUP == 0
+}
 
 #[derive(Clone, Copy)]
 struct TurboquantAttnProfileEvent<'a> {
@@ -571,6 +575,82 @@ if (sgid == 0) {
 }
 "#;
 
+const TURBOQUANT_WEIGHTED_V_CHUNK_BRANCHLESS_SOURCE: &str = r#"
+uint group_idx = threadgroup_position_in_grid.x;
+uint lid = thread_index_in_threadgroup;
+uint sgid = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+
+uint dim_group = group_idx % V_DIM_GROUPS;
+uint chunk = (group_idx / V_DIM_GROUPS) % V_CHUNKS;
+uint kv_head = (group_idx / (V_DIM_GROUPS * V_CHUNKS)) % KV_HEADS;
+uint batch = group_idx / (V_DIM_GROUPS * V_CHUNKS * KV_HEADS);
+uint pos = chunk * V_CHUNK_SIZE + lid;
+uint dim_base = dim_group * V_DIMS_PER_GROUP;
+
+threadgroup float scratch[V_Q_HEADS_PER_GROUP * V_DIMS_PER_GROUP * V_CHUNK_SIMDGROUPS];
+
+thread float acc[V_Q_HEADS_PER_GROUP * V_DIMS_PER_GROUP];
+#pragma clang loop unroll(full)
+for (uint q = 0; q < V_Q_HEADS_PER_GROUP; ++q) {
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < V_DIMS_PER_GROUP; ++i) {
+        acc[q * V_DIMS_PER_GROUP + i] = 0.0f;
+    }
+}
+if (pos < SEQ_LEN) {
+    uint v_vec = ((batch * KV_HEADS + kv_head) * SEQ_LEN + pos);
+    float v_norm = (float)v_norms[v_vec];
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < V_DIMS_PER_GROUP; ++i) {
+        uint dim = dim_base + i;
+        uint v_word_idx = dim / V_VALUES_PER_WORD;
+        uint v_word_offset = dim - v_word_idx * V_VALUES_PER_WORD;
+        uint v_word = v_packed[v_vec * V_PACKED_DIM + v_word_idx];
+        uint v_idx = (v_word >> (v_word_offset * V_BITS)) & ((1u << V_BITS) - 1u);
+        float v_value = v_norm * (float)v_codebook[v_idx];
+        #pragma clang loop unroll(full)
+        for (uint q = 0; q < V_Q_HEADS_PER_GROUP; ++q) {
+            uint q_head = kv_head * Q_PER_KV + q;
+            uint weight_idx = ((batch * Q_HEADS + q_head) * SEQ_LEN + pos);
+            float weight = (float)weights[weight_idx];
+            acc[q * V_DIMS_PER_GROUP + i] = weight * v_value;
+        }
+    }
+}
+
+#pragma clang loop unroll(full)
+for (uint q = 0; q < V_Q_HEADS_PER_GROUP; ++q) {
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < V_DIMS_PER_GROUP; ++i) {
+        float simd_acc = simd_sum(acc[q * V_DIMS_PER_GROUP + i]);
+        if (lane == 0) {
+            uint scratch_idx = ((q * V_DIMS_PER_GROUP + i) * V_CHUNK_SIMDGROUPS + sgid);
+            scratch[scratch_idx] = simd_acc;
+        }
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+if (sgid == 0) {
+    #pragma clang loop unroll(full)
+    for (uint q = 0; q < V_Q_HEADS_PER_GROUP; ++q) {
+        uint q_head = kv_head * Q_PER_KV + q;
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < V_DIMS_PER_GROUP; ++i) {
+            uint dim = dim_base + i;
+            uint scratch_idx = ((q * V_DIMS_PER_GROUP + i) * V_CHUNK_SIMDGROUPS + lane);
+            float chunk_acc = lane < V_CHUNK_SIMDGROUPS ? scratch[scratch_idx] : 0.0f;
+            chunk_acc = simd_sum(chunk_acc);
+            if (lane == 0) {
+                uint partial_idx = (((batch * Q_HEADS + q_head) * V_CHUNKS + chunk) * HEAD_DIM + dim);
+                v_partial[partial_idx] = chunk_acc;
+            }
+        }
+    }
+}
+"#;
+
 const TURBOQUANT_WEIGHTED_V_REDUCE_SOURCE: &str = r#"
 uint group_idx = threadgroup_position_in_grid.x;
 uint lid = thread_index_in_threadgroup;
@@ -734,6 +814,22 @@ fn cached_turboquant_weighted_v_chunk_kernel() -> Result<&'static MetalKernel> {
         .inputs(&["weights", "v_packed", "v_norms", "v_codebook"])
         .outputs(&["v_partial"])
         .source(TURBOQUANT_WEIGHTED_V_CHUNK_SOURCE)
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()?;
+    Ok(CELL.get_or_init(|| kernel))
+}
+
+fn cached_turboquant_weighted_v_chunk_branchless_kernel() -> Result<&'static MetalKernel> {
+    static CELL: OnceLock<MetalKernel> = OnceLock::new();
+    if let Some(kernel) = CELL.get() {
+        return Ok(kernel);
+    }
+
+    let kernel = MetalKernel::builder("mlx_fast_turboquant_weighted_v_chunk_branchless")
+        .inputs(&["weights", "v_packed", "v_norms", "v_codebook"])
+        .outputs(&["v_partial"])
+        .source(TURBOQUANT_WEIGHTED_V_CHUNK_BRANCHLESS_SOURCE)
         .ensure_row_contiguous(true)
         .atomic_outputs(false)
         .build()?;
@@ -1829,8 +1925,19 @@ fn turboquant_sdpa_decode_parallel_dispatch_rotated(
     let v_chunks = (seq_len + PARALLEL_DECODE_V_CHUNK_SIZE - 1) / PARALLEL_DECODE_V_CHUNK_SIZE;
     let v_dim_groups = (head_dim + V_CHUNK_DIMS_PER_THREADGROUP - 1) / V_CHUNK_DIMS_PER_THREADGROUP;
     let v_q_groups_per_kv = (q_per_kv + V_Q_HEADS_PER_THREADGROUP - 1) / V_Q_HEADS_PER_THREADGROUP;
+    let use_branchless_weighted_v = weighted_v_chunk_branchless_shape_supported(q_per_kv, head_dim);
+    let weighted_v_chunk_kernel = if use_branchless_weighted_v {
+        cached_turboquant_weighted_v_chunk_branchless_kernel()?
+    } else {
+        cached_turboquant_weighted_v_chunk_kernel()?
+    };
+    let weighted_v_q_groups_per_kv = if use_branchless_weighted_v {
+        1
+    } else {
+        v_q_groups_per_kv
+    };
     let partial_shape = Shape::from(vec![batch, q_heads, v_chunks, head_dim]);
-    let mut partial_outputs = cached_turboquant_weighted_v_chunk_kernel()?
+    let mut partial_outputs = weighted_v_chunk_kernel
         .dispatch_builder()
         .inputs(&[&weights, v_packed, v_norms, v_codebook])
         .output_shapes(&[partial_shape])
@@ -1838,7 +1945,7 @@ fn turboquant_sdpa_decode_parallel_dispatch_rotated(
         .grid(
             batch
                 * kv_heads
-                * v_q_groups_per_kv
+                * weighted_v_q_groups_per_kv
                 * v_chunks
                 * v_dim_groups
                 * PARALLEL_DECODE_V_CHUNK_SIZE,
@@ -1860,7 +1967,7 @@ fn turboquant_sdpa_decode_parallel_dispatch_rotated(
         .template_int("V_CHUNK_SIMDGROUPS", PARALLEL_DECODE_V_CHUNK_SIZE / 32)
         .template_int("V_DIM_GROUPS", v_dim_groups)
         .template_int("V_DIMS_PER_GROUP", V_CHUNK_DIMS_PER_THREADGROUP)
-        .template_int("Q_GROUPS_PER_KV", v_q_groups_per_kv)
+        .template_int("Q_GROUPS_PER_KV", weighted_v_q_groups_per_kv)
         .template_int("V_Q_HEADS_PER_GROUP", V_Q_HEADS_PER_THREADGROUP)
         .dispatch()?;
     let v_partial = partial_outputs.take_at(0)?;
@@ -2066,9 +2173,20 @@ fn turboquant_sdpa_decode_parallel_dispatch_rotated_profiled(
 
     let v_dim_groups = (head_dim + V_CHUNK_DIMS_PER_THREADGROUP - 1) / V_CHUNK_DIMS_PER_THREADGROUP;
     let v_q_groups_per_kv = (q_per_kv + V_Q_HEADS_PER_THREADGROUP - 1) / V_Q_HEADS_PER_THREADGROUP;
+    let use_branchless_weighted_v = weighted_v_chunk_branchless_shape_supported(q_per_kv, head_dim);
+    let weighted_v_chunk_kernel = if use_branchless_weighted_v {
+        cached_turboquant_weighted_v_chunk_branchless_kernel()?
+    } else {
+        cached_turboquant_weighted_v_chunk_kernel()?
+    };
+    let weighted_v_q_groups_per_kv = if use_branchless_weighted_v {
+        1
+    } else {
+        v_q_groups_per_kv
+    };
     let partial_shape = Shape::from(vec![batch, q_heads, v_chunks, head_dim]);
     let weighted_v_chunk_start = profile.start();
-    let mut partial_outputs = cached_turboquant_weighted_v_chunk_kernel()?
+    let mut partial_outputs = weighted_v_chunk_kernel
         .dispatch_builder()
         .inputs(&[&weights, v_packed, v_norms, v_codebook])
         .output_shapes(&[partial_shape])
@@ -2076,7 +2194,7 @@ fn turboquant_sdpa_decode_parallel_dispatch_rotated_profiled(
         .grid(
             batch
                 * kv_heads
-                * v_q_groups_per_kv
+                * weighted_v_q_groups_per_kv
                 * v_chunks
                 * v_dim_groups
                 * PARALLEL_DECODE_V_CHUNK_SIZE,
@@ -2098,7 +2216,7 @@ fn turboquant_sdpa_decode_parallel_dispatch_rotated_profiled(
         .template_int("V_CHUNK_SIMDGROUPS", PARALLEL_DECODE_V_CHUNK_SIZE / 32)
         .template_int("V_DIM_GROUPS", v_dim_groups)
         .template_int("V_DIMS_PER_GROUP", V_CHUNK_DIMS_PER_THREADGROUP)
-        .template_int("Q_GROUPS_PER_KV", v_q_groups_per_kv)
+        .template_int("Q_GROUPS_PER_KV", weighted_v_q_groups_per_kv)
         .template_int("V_Q_HEADS_PER_GROUP", V_Q_HEADS_PER_THREADGROUP)
         .dispatch()?;
     let v_partial = partial_outputs.take_at(0)?;
@@ -2206,11 +2324,18 @@ mod tests {
 
     #[test]
     fn qk_positions_per_simdgroup_tuning_constant_matches_candidate() {
-        assert_eq!(QK_POSITIONS_PER_SIMDGROUP, 2);
+        assert_eq!(QK_POSITIONS_PER_SIMDGROUP, 4);
     }
 
     #[test]
     fn weighted_v_q_head_group_tuning_constant_matches_candidate() {
         assert_eq!(V_Q_HEADS_PER_THREADGROUP, 4);
+    }
+
+    #[test]
+    fn weighted_v_chunk_branchless_shape_requires_full_q_and_dim_groups() {
+        assert!(weighted_v_chunk_branchless_shape_supported(4, 256));
+        assert!(!weighted_v_chunk_branchless_shape_supported(3, 256));
+        assert!(!weighted_v_chunk_branchless_shape_supported(4, 260));
     }
 }
