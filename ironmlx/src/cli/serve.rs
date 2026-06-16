@@ -604,6 +604,26 @@ where
     ))
 }
 
+fn serve_with_diffusion_gemma_model(
+    model: crate::models::DiffusionGemmaModel,
+    tokenizer: Tokenizer,
+    generation_config: crate::models::DiffusionGemmaGenerationConfig,
+    args: &ServeArgs,
+    vision_input: server::VisionInputConfig,
+) -> Result<()> {
+    let model_id = args.model.clone();
+    let runtime = serve_runtime()?;
+    runtime.block_on(server::diffusion_gemma::serve_diffusion_gemma(
+        model,
+        tokenizer,
+        generation_config,
+        model_id,
+        &args.host,
+        args.port,
+        vision_input,
+    ))
+}
+
 fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
     let config_path = model_dir.join("config.json");
     let raw = std::fs::read_to_string(&config_path)
@@ -720,11 +740,6 @@ pub fn run(args: ServeArgs) -> Result<()> {
 
     let model_type = read_model_type(&model_dir)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
-    if architecture == crate::models::ModelArchitecture::DiffusionGemma {
-        return Err(anyhow::anyhow!(
-            "ironmlx serve does not yet support DiffusionGemma's serial block-diffusion lane; use `ironmlx generate` for text-only DiffusionGemma"
-        ));
-    }
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     let mtp_config = resolve_serve_mtp_config(
@@ -847,9 +862,30 @@ pub fn run(args: ServeArgs) -> Result<()> {
                 vision_input,
             )
         }
-        crate::models::ModelArchitecture::DiffusionGemma => unreachable!(
-            "DiffusionGemma serve is rejected before loading because it is not a causal LM scheduler model"
-        ),
+        crate::models::ModelArchitecture::DiffusionGemma => {
+            let cfg = crate::models::DiffusionGemmaConfig::from_loader(&loader)
+                .context("DiffusionGemmaConfig::from_loader")?;
+            let vision_config = cfg
+                .vision_config
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("DiffusionGemma config has no vision_config"))?;
+            let image_token_id = cfg.image_token_id;
+            let generation_config =
+                crate::models::DiffusionGemmaGenerationConfig::from_loader(&loader)
+                    .context("DiffusionGemmaGenerationConfig::from_loader")?;
+            let model = crate::models::DiffusionGemmaModel::from_loader(&loader)
+                .context("DiffusionGemmaModel::from_loader")?;
+            serve_with_diffusion_gemma_model(
+                model,
+                tokenizer,
+                generation_config,
+                &args,
+                server::VisionInputConfig::DiffusionGemma {
+                    vision_config,
+                    image_token_id,
+                },
+            )
+        }
     }
 }
 

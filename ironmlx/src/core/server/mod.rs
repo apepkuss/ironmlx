@@ -24,6 +24,7 @@ use crate::Result;
 
 pub mod anthropic;
 pub mod chat_format;
+pub mod diffusion_gemma;
 pub mod health;
 pub(crate) mod openai;
 pub mod scheduler_actor;
@@ -36,6 +37,10 @@ pub enum VisionInputConfig {
     },
     Gemma4 {
         vision_config: crate::models::gemma4::Gemma4VisionConfig,
+    },
+    DiffusionGemma {
+        vision_config: crate::models::gemma4::Gemma4VisionConfig,
+        image_token_id: Option<i32>,
     },
     MiniCpmV46 {
         /// Effective image-token downsample = 4 (VitMerger 2×2 × Merger 2×2).
