@@ -19,6 +19,9 @@ pub struct DiffusionGemmaGenerateEvent {
     pub finish_reason: Option<&'static str>,
 }
 
+pub type DiffusionGemmaEventSink<'a> =
+    &'a mut dyn FnMut(DiffusionGemmaGenerateEvent) -> Result<bool>;
+
 struct DiffusionGemmaMultimodalInput<'a> {
     pixel_values: &'a [Array],
     image_grid_thw: &'a [(i32, i32, i32)],
@@ -34,6 +37,34 @@ pub fn generate_text(
     temperature: f32,
     seed: u64,
 ) -> Result<Vec<DiffusionGemmaGenerateEvent>> {
+    let mut events = Vec::new();
+    generate_text_with_events(
+        model,
+        tokenizer,
+        prompt_ids,
+        generation_config,
+        max_new_tokens,
+        temperature,
+        seed,
+        &mut |event| {
+            events.push(event);
+            Ok(true)
+        },
+    )?;
+    Ok(events)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_text_with_events(
+    model: &DiffusionGemmaModel,
+    tokenizer: &Tokenizer,
+    prompt_ids: &[u32],
+    generation_config: &DiffusionGemmaGenerationConfig,
+    max_new_tokens: usize,
+    temperature: f32,
+    seed: u64,
+    emit: DiffusionGemmaEventSink<'_>,
+) -> Result<()> {
     generate_impl(
         model,
         tokenizer,
@@ -43,6 +74,7 @@ pub fn generate_text(
         temperature,
         seed,
         None,
+        emit,
     )
 }
 
@@ -59,6 +91,40 @@ pub fn generate_image_text(
     temperature: f32,
     seed: u64,
 ) -> Result<Vec<DiffusionGemmaGenerateEvent>> {
+    let mut events = Vec::new();
+    generate_image_text_with_events(
+        model,
+        tokenizer,
+        prompt_ids,
+        pixel_values,
+        image_grid_thw,
+        image_token_id,
+        generation_config,
+        max_new_tokens,
+        temperature,
+        seed,
+        &mut |event| {
+            events.push(event);
+            Ok(true)
+        },
+    )?;
+    Ok(events)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_image_text_with_events(
+    model: &DiffusionGemmaModel,
+    tokenizer: &Tokenizer,
+    prompt_ids: &[u32],
+    pixel_values: &[Array],
+    image_grid_thw: &[(i32, i32, i32)],
+    image_token_id: i32,
+    generation_config: &DiffusionGemmaGenerationConfig,
+    max_new_tokens: usize,
+    temperature: f32,
+    seed: u64,
+    emit: DiffusionGemmaEventSink<'_>,
+) -> Result<()> {
     generate_impl(
         model,
         tokenizer,
@@ -72,6 +138,7 @@ pub fn generate_image_text(
             image_grid_thw,
             image_token_id,
         }),
+        emit,
     )
 }
 
@@ -85,7 +152,8 @@ fn generate_impl(
     temperature: f32,
     seed: u64,
     multimodal: Option<DiffusionGemmaMultimodalInput<'_>>,
-) -> Result<Vec<DiffusionGemmaGenerateEvent>> {
+    emit: DiffusionGemmaEventSink<'_>,
+) -> Result<()> {
     if prompt_ids.is_empty() {
         return Err(anyhow!(
             "DiffusionGemma text generation requires a non-empty prompt"
@@ -96,7 +164,7 @@ fn generate_impl(
     }
     let target = StreamOrDevice::default();
     if max_new_tokens == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let max_denoising_steps = generation_config.max_denoising_steps;
     let entropy_bound = generation_config.entropy_bound()?;
@@ -141,7 +209,6 @@ fn generate_impl(
     let mut current_canvas: Option<Array> = None;
     let mut generated = 0usize;
     let mut detok = tokenizer.decode_stream(true);
-    let mut events = Vec::new();
 
     while generated < max_new_tokens {
         if let Some(canvas) = current_canvas.as_ref() {
@@ -231,31 +298,34 @@ fn generate_impl(
         for token in token_ids {
             generated += 1;
             if stop_ids.contains(&token) {
-                events.push(DiffusionGemmaGenerateEvent {
+                let keep_going = emit(DiffusionGemmaGenerateEvent {
                     token,
                     text: String::new(),
                     finish_reason: Some("stop"),
-                });
-                return Ok(events);
+                })?;
+                let _ = keep_going;
+                return Ok(());
             }
             let text = detok.step(token)?.unwrap_or_default();
-            events.push(DiffusionGemmaGenerateEvent {
+            if !emit(DiffusionGemmaGenerateEvent {
                 token,
                 text,
                 finish_reason: None,
-            });
+            })? {
+                return Ok(());
+            }
             if generated >= max_new_tokens {
                 break;
             }
         }
     }
 
-    events.push(DiffusionGemmaGenerateEvent {
+    let _ = emit(DiffusionGemmaGenerateEvent {
         token: 0,
         text: String::new(),
         finish_reason: Some("length"),
-    });
-    Ok(events)
+    })?;
+    Ok(())
 }
 
 pub(crate) fn multimodal_token_type_ids(prompt_ids: &[u32], image_token_id: u32) -> Vec<i32> {
