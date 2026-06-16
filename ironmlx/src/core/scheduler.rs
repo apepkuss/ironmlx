@@ -3191,8 +3191,13 @@ impl<M: crate::core::model::Model> Scheduler<M> {
         )>,
     > {
         let active: Vec<&RequestState> = self.slots.iter().filter_map(|s| s.as_ref()).collect();
-        if allow_multi_row && active.len() > 1 {
-            return Ok(None);
+        if active.len() > 1 {
+            let has_request_root_profile = active
+                .iter()
+                .any(|state| state.p5h_trace.is_some() || state.p5h_root_span.is_some());
+            if allow_multi_row || !has_request_root_profile {
+                return Ok(None);
+            }
         }
         anyhow::ensure!(
             active.len() == 1,
@@ -3685,6 +3690,7 @@ mod tests {
             self.decode_lens_seen.lock().unwrap().clone()
         }
 
+        #[cfg(not(feature = "p5h-profile"))]
         fn decode_mask_seen(&self) -> Vec<bool> {
             self.decode_mask_seen.lock().unwrap().clone()
         }
@@ -4548,8 +4554,30 @@ mod tests {
     fn p5h_scheduler_decode_multi_row_escape_hatch_skips_legacy_request_root() {
         let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
             .expect("scheduler startup");
-        let _id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
-        let _id_1 = s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+        let id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        let id_1 = s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+        let ctx_0 = crate::core::p5h::P5hTraceContext {
+            request_id: "p5h-test-0".to_string(),
+            prompt_tokens: 3,
+            routing_path: "scheduler",
+        };
+        let ctx_1 = crate::core::p5h::P5hTraceContext {
+            request_id: "p5h-test-1".to_string(),
+            prompt_tokens: 3,
+            routing_path: "scheduler",
+        };
+        let root_0 = crate::core::p5h::open_p5h_span(&ctx_0, None, "request_root");
+        let root_1 = crate::core::p5h::open_p5h_span(&ctx_1, None, "request_root");
+        {
+            let state = s.get_mut(id_0).expect("state 0");
+            state.p5h_trace = Some(ctx_0.clone());
+            state.p5h_root_span = Some(root_0.clone());
+        }
+        {
+            let state = s.get_mut(id_1).expect("state 1");
+            state.p5h_trace = Some(ctx_1.clone());
+            state.p5h_root_span = Some(root_1.clone());
+        }
 
         let err = s
             .cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(false)
@@ -4559,6 +4587,33 @@ mod tests {
         let skipped = s
             .cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(true)
             .expect("escape hatch should skip legacy request-root profiling");
+        assert!(skipped.is_none());
+
+        crate::core::p5h::close_p5h_span(
+            &ctx_0,
+            root_0,
+            crate::core::p5h::monotonic_ns_public(),
+            crate::core::p5h::SpanFields::default(),
+        );
+        crate::core::p5h::close_p5h_span(
+            &ctx_1,
+            root_1,
+            crate::core::p5h::monotonic_ns_public(),
+            crate::core::p5h::SpanFields::default(),
+        );
+    }
+
+    #[cfg(feature = "p5h-profile")]
+    #[test]
+    fn p5h_request_root_noops_for_multi_row_without_trace() {
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
+        let _id_0 = s.admit(mk_req(vec![1, 2, 3])).expect("admit 0");
+        let _id_1 = s.admit(mk_req(vec![4, 5, 6])).expect("admit 1");
+
+        let skipped = s
+            .cloned_active_row_p5h_trace_and_root_with_multi_row_escape_hatch(false)
+            .expect("multi-row requests without p5h trace should not open request-root spans");
         assert!(skipped.is_none());
     }
 
