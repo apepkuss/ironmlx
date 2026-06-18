@@ -3,6 +3,7 @@ mod config;
 mod generation;
 mod model;
 mod moe;
+mod ops;
 mod rope;
 
 pub use config::{DiffusionGemmaConfig, DiffusionGemmaGenerationConfig, DiffusionGemmaTextConfig};

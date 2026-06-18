@@ -24,6 +24,15 @@ pub struct Stream {
     pub device: Device,
 }
 
+/// MLX thread-local stream token. MLX resolves this to a concrete [`Stream`]
+/// for the current thread when an op is dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ThreadLocalStream {
+    pub index: i32,
+    pub device: Device,
+}
+
 impl From<mlx_sys::stream::ffi::Stream> for Stream {
     fn from(s: mlx_sys::stream::ffi::Stream) -> Self {
         Stream {
@@ -33,8 +42,26 @@ impl From<mlx_sys::stream::ffi::Stream> for Stream {
     }
 }
 
+impl From<mlx_sys::stream::ffi::Stream> for ThreadLocalStream {
+    fn from(s: mlx_sys::stream::ffi::Stream) -> Self {
+        ThreadLocalStream {
+            index: s.index,
+            device: s.device.into(),
+        }
+    }
+}
+
 impl From<Stream> for mlx_sys::stream::ffi::Stream {
     fn from(s: Stream) -> Self {
+        mlx_sys::stream::ffi::Stream {
+            index: s.index,
+            device: s.device.into(),
+        }
+    }
+}
+
+impl From<ThreadLocalStream> for mlx_sys::stream::ffi::Stream {
+    fn from(s: ThreadLocalStream) -> Self {
         mlx_sys::stream::ffi::Stream {
             index: s.index,
             device: s.device.into(),
@@ -53,6 +80,18 @@ pub fn new_stream(d: Device) -> Result<Stream> {
     mlx_sys::stream::ffi::new_stream(d.into())
         .map(Into::into)
         .map_err(Error::from)
+}
+
+/// Create a thread-local stream token on the given device.
+pub fn new_thread_local_stream(d: Device) -> Result<ThreadLocalStream> {
+    mlx_sys::stream::ffi::new_thread_local_stream(d.into())
+        .map(Into::into)
+        .map_err(Error::from)
+}
+
+/// Resolve a [`ThreadLocalStream`] to the current thread's concrete stream.
+pub fn stream_from_thread_local_stream(s: ThreadLocalStream) -> Stream {
+    mlx_sys::stream::ffi::stream_from_thread_local_stream(s.into()).into()
 }
 
 /// Make the stream the default for its device on the current thread.
@@ -90,6 +129,8 @@ pub enum StreamOrDevice {
     Default,
     /// Use the specified stream.
     Stream(Stream),
+    /// Use a stream token that resolves to one concrete stream per thread.
+    ThreadLocalStream(ThreadLocalStream),
     /// Use the default stream of the specified device.
     Device(crate::Device),
 }
@@ -97,6 +138,12 @@ pub enum StreamOrDevice {
 impl From<Stream> for StreamOrDevice {
     fn from(s: Stream) -> Self {
         StreamOrDevice::Stream(s)
+    }
+}
+
+impl From<ThreadLocalStream> for StreamOrDevice {
+    fn from(s: ThreadLocalStream) -> Self {
+        StreamOrDevice::ThreadLocalStream(s)
     }
 }
 
@@ -123,6 +170,9 @@ impl StreamOrDevice {
             StreamOrDevice::Default => (false, false, 0, 0),
             StreamOrDevice::Device(d) => (true, true, d.device_type as u8, 0),
             StreamOrDevice::Stream(s) => (true, false, s.device.device_type as u8, s.index),
+            StreamOrDevice::ThreadLocalStream(s) => {
+                (true, false, s.device.device_type as u8, -s.index - 1)
+            }
         }
     }
 }
@@ -183,5 +233,19 @@ mod tests {
         assert!(!dev_only);
         assert_eq!(dt, s.device.device_type as u8);
         assert_eq!(idx, s.index);
+    }
+
+    #[test]
+    fn encode_thread_local_stream_uses_negative_index() {
+        let s = ThreadLocalStream {
+            index: 4,
+            device: crate::Device::gpu(0),
+        };
+        let target = StreamOrDevice::ThreadLocalStream(s);
+        let (has, dev_only, dt, idx) = target.encode();
+        assert!(has);
+        assert!(!dev_only);
+        assert_eq!(dt, crate::DeviceType::Gpu as u8);
+        assert_eq!(idx, -5);
     }
 }

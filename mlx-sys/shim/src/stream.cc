@@ -5,6 +5,7 @@
 // full type definitions.
 #include "mlx-sys/src/bridge/stream.rs.h"
 
+#include "mlx/memory.h"
 #include "mlx/transforms.h"
 
 namespace cxx_mlx {
@@ -43,6 +44,10 @@ mlx::core::Stream to_mlx(Stream s) {
   return mlx::core::Stream(s.index, to_mlx(s.device));
 }
 
+mlx::core::ThreadLocalStream to_mlx_thread_local(Stream s) {
+  return mlx::core::ThreadLocalStream(s.index, to_mlx(s.device));
+}
+
 Stream from_mlx(const mlx::core::Stream& s) {
   return Stream{s.index, from_mlx(s.device)};
 }
@@ -75,6 +80,14 @@ Stream default_stream(Device d) {
 
 Stream new_stream(Device d) {
   return from_mlx(mlx::core::new_stream(to_mlx(d)));
+}
+
+Stream new_thread_local_stream(Device d) {
+  return from_mlx(mlx::core::new_thread_local_stream(to_mlx(d)));
+}
+
+Stream stream_from_thread_local_stream(Stream s) {
+  return from_mlx(mlx::core::stream_from_thread_local_stream(to_mlx_thread_local(s)));
 }
 
 void set_default_stream(Stream s) {
@@ -121,6 +134,14 @@ void synchronize() {
 
 void synchronize_stream(Stream s) {
   mlx::core::synchronize(to_mlx(s));
+}
+
+void synchronize_thread_local_stream(Stream s) {
+  mlx::core::synchronize(to_mlx_thread_local(s));
+}
+
+void clear_cache() {
+  mlx::core::clear_cache();
 }
 
 }  // namespace cxx_mlx

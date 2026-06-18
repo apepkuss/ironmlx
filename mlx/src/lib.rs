@@ -53,10 +53,12 @@ pub use error::{Error, Result};
 pub use fast::{DispatchBuilder, MetalKernel, MetalKernelBuilder, Set, TemplateArg, Unset};
 pub use shape::{IntoShape, Shape};
 pub use stream::{
-    clear_streams, default_stream, get_streams, new_stream, set_default_stream, Stream,
-    StreamOrDevice,
+    clear_streams, default_stream, get_streams, new_stream, new_thread_local_stream,
+    set_default_stream, stream_from_thread_local_stream, Stream, StreamOrDevice, ThreadLocalStream,
 };
-pub use transforms::eval;
+pub use transforms::{
+    clear_cache, eval, synchronize, synchronize_stream, synchronize_thread_local_stream,
+};
 
 // Re-export `paste` privately so the `op_with_stream!` macro can reach it
 // via `$crate::__paste` in any downstream module without forcing users to

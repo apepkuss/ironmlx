@@ -1,4 +1,7 @@
+use std::sync::OnceLock;
+
 use anyhow::{anyhow, Context};
+use mlx::compile::CompiledFn;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
@@ -9,6 +12,7 @@ use crate::Result;
 use super::attention::{DiffusionGemmaAttention, LayerKv};
 use super::config::{DiffusionGemmaConfig, DiffusionGemmaLayerKind, DiffusionGemmaTextConfig};
 use super::moe::{DiffusionGemmaExperts, DiffusionGemmaRouter};
+use super::ops;
 
 pub struct DiffusionGemmaCache {
     layers: Vec<Option<LayerKv>>,
@@ -22,6 +26,11 @@ pub struct DiffusionGemmaModel {
     self_conditioning: SelfConditioning,
     vision: Option<DiffusionGemmaVision>,
     embed_scale: f32,
+    logit_softcap: OnceLock<CompiledFn>,
+    entropy_probs_chain: OnceLock<CompiledFn>,
+    entropy_transfer_mask_chain: OnceLock<CompiledFn>,
+    stable_confidence_chain: OnceLock<CompiledFn>,
+    soft_embedding_weight: OnceLock<Array>,
 }
 
 pub(super) struct DiffusionGemmaEncoderInputs<'a> {
@@ -57,6 +66,7 @@ struct GeGluMlp {
     gate: Linear,
     up: Linear,
     down: Linear,
+    geglu: OnceLock<CompiledFn>,
 }
 
 struct SelfConditioning {
@@ -65,6 +75,7 @@ struct SelfConditioning {
     up: Linear,
     down: Linear,
     eps: f32,
+    geglu: OnceLock<CompiledFn>,
 }
 
 impl DiffusionGemmaCache {
@@ -80,6 +91,13 @@ impl DiffusionGemmaCache {
             .and_then(|kv| kv.as_ref())
             .map(|kv| kv.keys.shape_at(2))
             .unwrap_or(0)
+    }
+
+    fn append_arrays<'a>(&'a self, arrays: &mut Vec<&'a Array>) {
+        for kv in self.layers.iter().flatten() {
+            arrays.push(&kv.keys);
+            arrays.push(&kv.values);
+        }
     }
 }
 
@@ -129,6 +147,11 @@ impl DiffusionGemmaModel {
             self_conditioning,
             vision,
             embed_scale,
+            logit_softcap: OnceLock::new(),
+            entropy_probs_chain: OnceLock::new(),
+            entropy_transfer_mask_chain: OnceLock::new(),
+            stable_confidence_chain: OnceLock::new(),
+            soft_embedding_weight: OnceLock::new(),
         })
     }
 
@@ -191,7 +214,7 @@ impl DiffusionGemmaModel {
             input_ids.clone()
         };
         let mut h = self.embed_tokens.forward_on(&embed_input_ids, target)?;
-        h = &h * self.embed_scale;
+        h = ops::mul_scalar_like_on(&h, self.embed_scale, target)?;
         match (inputs.pixel_values, inputs.image_grid_thw) {
             (Some(pixels), Some(grids)) if !pixels.is_empty() => {
                 let vision_embeds = self
@@ -247,7 +270,11 @@ impl DiffusionGemmaModel {
             h = next_h;
         }
         let h = self.norm.forward_on(&h, target)?;
-        mlx::transforms::eval(&[&h]).context("DiffusionGemmaModel: eval encoder hidden")?;
+        let mut eval_arrays = Vec::with_capacity(1 + self.layers.len() * 2);
+        eval_arrays.push(&h);
+        cache.append_arrays(&mut eval_arrays);
+        mlx::transforms::eval(&eval_arrays)
+            .context("DiffusionGemmaModel: eval encoder hidden/cache")?;
         Ok(())
     }
 
@@ -267,17 +294,63 @@ impl DiffusionGemmaModel {
         h = self.norm.forward_on(&h, target)?;
         let mut logits = self.embed_tokens.as_output_on(&h, target)?;
         if let Some(c) = self.config.text_config.final_logit_softcapping {
-            logits = softcap_on(&logits, c, target)?;
+            logits = self.logit_softcap_on(&logits, c)?;
         }
         Ok(logits)
     }
 
     pub fn soft_embedding_weight_on(&self, target: impl Into<StreamOrDevice>) -> Result<Array> {
-        self.embed_tokens.dense_weight_on(target)
+        let target = target.into();
+        if let Some(weight) = self.soft_embedding_weight.get() {
+            return Ok(weight.clone());
+        }
+
+        let mut weight = self.embed_tokens.dense_weight_on(target)?;
+        if weight.dtype() != Dtype::Bfloat16 {
+            weight = weight.astype_on(Dtype::Bfloat16, target)?;
+        }
+        mlx::transforms::eval(&[&weight])
+            .context("DiffusionGemmaModel: eval dense self-conditioning embedding table")?;
+        if self.soft_embedding_weight.set(weight.clone()).is_ok() {
+            Ok(weight)
+        } else {
+            Ok(self
+                .soft_embedding_weight
+                .get()
+                .expect("DiffusionGemma soft embedding cache was set")
+                .clone())
+        }
     }
 
     pub fn embed_scale(&self) -> f32 {
         self.embed_scale
+    }
+
+    pub(super) fn entropy_probs_chain(&self) -> &CompiledFn {
+        self.entropy_probs_chain
+            .get_or_init(ops::build_entropy_probs_chain)
+    }
+
+    pub(super) fn entropy_transfer_mask_chain(&self) -> &CompiledFn {
+        self.entropy_transfer_mask_chain
+            .get_or_init(ops::build_entropy_transfer_mask_chain)
+    }
+
+    pub(super) fn stable_confidence_chain(&self) -> &CompiledFn {
+        self.stable_confidence_chain
+            .get_or_init(ops::build_stable_confidence_chain)
+    }
+
+    fn logit_softcap_on(&self, logits: &Array, softcap: f32) -> Result<Array> {
+        if softcap <= 0.0 {
+            return Err(anyhow!(
+                "DiffusionGemma logit softcap must be > 0, got {softcap}"
+            ));
+        }
+        let func = self
+            .logit_softcap
+            .get_or_init(|| ops::build_logit_softcap(softcap));
+        ops::invoke_logit_softcap(func, logits)
     }
 
     fn image_token_id(&self) -> i32 {
@@ -386,7 +459,7 @@ impl DiffusionGemmaModel {
         target: StreamOrDevice,
     ) -> Result<Array> {
         let mut inputs = self.embed_tokens.forward_on(canvas_ids, target)?;
-        inputs = &inputs * self.embed_scale;
+        inputs = ops::mul_scalar_like_on(&inputs, self.embed_scale, target)?;
         let signal = match self_conditioning_embeddings {
             Some(sc) => sc.astype_on(inputs.dtype(), target)?,
             None => mlx::ops::constructors::zeros_like_on(&inputs, target)?,
@@ -528,14 +601,14 @@ impl GeGluMlp {
             gate: Linear::from_loader(loader, &format!("{prefix}.gate_proj"))?,
             up: Linear::from_loader(loader, &format!("{prefix}.up_proj"))?,
             down: Linear::from_loader(loader, &format!("{prefix}.down_proj"))?,
+            geglu: OnceLock::new(),
         })
     }
 
     fn forward_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
         let gate = self.gate.forward_on(x, target)?;
         let up = self.up.forward_on(x, target)?;
-        let gate = crate::nn::gelu_tanh(&gate, target)?;
-        let h = &gate * &up;
+        let h = ops::invoke_geglu_tanh(self.geglu.get_or_init(ops::build_geglu_tanh), &gate, &up)?;
         self.down.forward_on(&h, target)
     }
 }
@@ -552,6 +625,7 @@ impl SelfConditioning {
             up: Linear::from_loader(loader, &format!("{prefix}.up_proj"))?,
             down: Linear::from_loader(loader, &format!("{prefix}.down_proj"))?,
             eps: cfg.rms_norm_eps,
+            geglu: OnceLock::new(),
         })
     }
 
@@ -559,18 +633,12 @@ impl SelfConditioning {
         let normed = self.pre_norm.forward_on(signal, target)?;
         let gate = self.gate.forward_on(&normed, target)?;
         let up = self.up.forward_on(&normed, target)?;
-        let gate = crate::nn::gelu_tanh(&gate, target)?;
-        let signal = self.down.forward_on(&(&gate * &up), target)?;
+        let geglu =
+            ops::invoke_geglu_tanh(self.geglu.get_or_init(ops::build_geglu_tanh), &gate, &up)?;
+        let signal = self.down.forward_on(&geglu, target)?;
         let h = inputs + &signal;
         Ok(mlx::fast::rms_norm_on(&h, None, self.eps, target)?)
     }
-}
-
-fn softcap_on(x: &Array, cap: f32, target: StreamOrDevice) -> Result<Array> {
-    let cap_arr: Array = (&[cap][..], ()).try_into()?;
-    let y = x.try_div_on(&cap_arr, target)?;
-    let y = y.tanh_on(target)?;
-    Ok(&y * cap)
 }
 
 fn build_encoder_mask(

@@ -639,7 +639,7 @@ async fn generate_completion(
     request: PreparedRequest,
     max_tokens: usize,
     temperature: f32,
-    seed: u64,
+    seed: Option<u64>,
     default_finish: &'static str,
 ) -> std::result::Result<CompletionParts, CompletionError> {
     let lane_guard = state.lane.clone().enter().await?;
@@ -682,6 +682,7 @@ async fn generate_completion(
                 );
             }
         };
+        mlx::transforms::clear_cache();
         Ok(collect_events(events, default_finish))
     })
     .await
@@ -697,7 +698,7 @@ fn run_generation_with_events(
     request: PreparedRequest,
     max_tokens: usize,
     temperature: f32,
-    seed: u64,
+    seed: Option<u64>,
     emit: crate::models::diffusion_gemma::DiffusionGemmaEventSink<'_>,
 ) -> std::result::Result<(), String> {
     match (
@@ -742,7 +743,7 @@ async fn openai_stream_completion(
     request: PreparedRequest,
     max_tokens: usize,
     temperature: f32,
-    seed: u64,
+    seed: Option<u64>,
     model_label: String,
 ) -> Response {
     let lane_guard = match state.lane.clone().enter().await {
@@ -910,7 +911,7 @@ async fn anthropic_stream_completion(
                 request,
                 max_tokens,
                 temperature,
-                0,
+                None,
                 &mut emit,
             )
         };
@@ -964,7 +965,7 @@ pub async fn openai_chat_completions(
     let stream = req.stream;
     let max_tokens = req.max_tokens;
     let temperature = req.temperature.unwrap_or(0.0);
-    let seed = req.seed.unwrap_or(0);
+    let seed = req.seed;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let (prepared, prompt_tokens) = match prepare_openai_request(&state, req).await {
         Ok(t) => t,
@@ -1034,7 +1035,7 @@ pub async fn anthropic_messages(
     }
 
     let completion =
-        match generate_completion(state, prepared, max_tokens, temperature, 0, "stop").await {
+        match generate_completion(state, prepared, max_tokens, temperature, None, "stop").await {
             Ok(c) => c,
             Err(err) => return err.into_response(),
         };

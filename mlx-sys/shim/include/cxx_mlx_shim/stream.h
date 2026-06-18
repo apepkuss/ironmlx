@@ -31,6 +31,8 @@ int32_t device_count(int32_t t);
 // === Stream ===
 Stream default_stream(Device d);
 Stream new_stream(Device d);
+Stream new_thread_local_stream(Device d);
+Stream stream_from_thread_local_stream(Stream s);
 void set_default_stream(Stream s);
 rust::Vec<Stream> get_streams();
 void clear_streams();
@@ -40,5 +42,7 @@ void eval_many(rust::Slice<const MlxArray* const> arrays);
 void async_eval_many(rust::Slice<const MlxArray* const> arrays);
 void synchronize();
 void synchronize_stream(Stream s);
+void synchronize_thread_local_stream(Stream s);
+void clear_cache();
 
 }  // namespace cxx_mlx

@@ -54,6 +54,7 @@ inline std::optional<mlx::core::Dtype> opt_dtype(bool has, uint8_t v) {
 //   has_target=false                       -> std::monostate (use MLX default)
 //   has_target=true,  is_device_only=true  -> Device only
 //   has_target=true,  is_device_only=false -> Stream(idx, Device(device_type, 0))
+//   ... with stream_index < 0              -> ThreadLocalStream(-idx - 1, Device)
 //
 // device_type: 0=cpu, 1=gpu (matches mlx::core::Device::DeviceType).
 
@@ -77,6 +78,9 @@ inline mlx::core::StreamOrDevice decode_stream_or_device(
   auto dev = decode_device(device_type);
   if (is_device_only) {
     return dev;
+  }
+  if (stream_index < 0) {
+    return mlx::core::ThreadLocalStream((-stream_index) - 1, dev);
   }
   return mlx::core::Stream(stream_index, dev);
 }
