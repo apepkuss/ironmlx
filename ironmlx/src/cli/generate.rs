@@ -502,7 +502,7 @@ fn run_diffusion_gemma_generation(
                 &generation_config,
                 args.max_tokens,
                 args.temperature,
-                args.seed,
+                Some(args.seed),
             )?
         }
         _ => crate::models::diffusion_gemma::generate_text(
@@ -512,7 +512,7 @@ fn run_diffusion_gemma_generation(
             &generation_config,
             args.max_tokens,
             args.temperature,
-            args.seed,
+            Some(args.seed),
         )?,
     };
 

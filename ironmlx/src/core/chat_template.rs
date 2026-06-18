@@ -32,12 +32,27 @@ pub struct Message {
 /// Compiled jinja chat template.
 pub struct ChatTemplate {
     env: Environment<'static>,
+    special_tokens: ChatTemplateSpecialTokens,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ChatTemplateSpecialTokens {
+    pub bos_token: Option<String>,
+    pub eos_token: Option<String>,
+    pub pad_token: Option<String>,
 }
 
 impl ChatTemplate {
     /// Compile a jinja source string. Registers a `raise_exception`
     /// helper that always returns an error (matches HF semantics).
     pub fn new(jinja_source: &str) -> Result<Self> {
+        Self::new_with_special_tokens(jinja_source, ChatTemplateSpecialTokens::default())
+    }
+
+    pub fn new_with_special_tokens(
+        jinja_source: &str,
+        special_tokens: ChatTemplateSpecialTokens,
+    ) -> Result<Self> {
         let mut env = Environment::new();
         env.add_function(
             "raise_exception",
@@ -103,7 +118,10 @@ impl ChatTemplate {
         });
         env.add_template_owned("chat", jinja_source.to_owned())
             .map_err(|e| anyhow::anyhow!("compile chat template: {e}"))?;
-        Ok(Self { env })
+        Ok(Self {
+            env,
+            special_tokens,
+        })
     }
 
     /// Render `messages` through the template. `add_generation_prompt` is
@@ -128,6 +146,25 @@ impl ChatTemplate {
             "messages": messages,
             "add_generation_prompt": add_generation_prompt,
         });
+        let dst = ctx.as_object_mut().expect("ctx initialized as object");
+        if let Some(token) = &self.special_tokens.bos_token {
+            dst.insert(
+                "bos_token".to_owned(),
+                serde_json::Value::String(token.clone()),
+            );
+        }
+        if let Some(token) = &self.special_tokens.eos_token {
+            dst.insert(
+                "eos_token".to_owned(),
+                serde_json::Value::String(token.clone()),
+            );
+        }
+        if let Some(token) = &self.special_tokens.pad_token {
+            dst.insert(
+                "pad_token".to_owned(),
+                serde_json::Value::String(token.clone()),
+            );
+        }
         if let Some(extra) = extra_kwargs {
             let extra_obj = extra.as_object().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -141,9 +178,11 @@ impl ChatTemplate {
                     }
                 )
             })?;
-            let dst = ctx.as_object_mut().expect("ctx initialized as object");
             for (k, v) in extra_obj {
-                if k == "messages" || k == "add_generation_prompt" {
+                if matches!(
+                    k.as_str(),
+                    "messages" | "add_generation_prompt" | "bos_token" | "eos_token" | "pad_token"
+                ) {
                     continue;
                 }
                 dst.insert(k.clone(), v.clone());
@@ -212,6 +251,26 @@ mod tests {
         // {"enable_thinking": true} → defined+true → THINK branch (else arm).
         let kw = serde_json::json!({"enable_thinking": true});
         assert_eq!(t.render(&[], false, Some(&kw)).unwrap(), "THINK");
+    }
+
+    #[test]
+    fn special_tokens_are_available_to_templates() {
+        let src = r#"{{ bos_token }}{{ messages[0].content }}{{ eos_token }}"#;
+        let t = ChatTemplate::new_with_special_tokens(
+            src,
+            ChatTemplateSpecialTokens {
+                bos_token: Some("<bos>".to_owned()),
+                eos_token: Some("<eos>".to_owned()),
+                pad_token: Some("<pad>".to_owned()),
+            },
+        )
+        .unwrap();
+        let msgs = vec![Message {
+            role: "user".into(),
+            content: "hi".into(),
+        }];
+
+        assert_eq!(t.render(&msgs, false, None).unwrap(), "<bos>hi<eos>");
     }
 
     #[test]

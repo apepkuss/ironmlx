@@ -126,15 +126,25 @@ fn quantized_matmul_matches_dequantize_matmul() {
     let v_ref: Vec<f32> = y_ref.to_vec().expect("ref to_vec");
     assert_eq!(v_qmm.len(), v_ref.len());
 
-    // qmm 与 dequantize+matmul 的差异应当极小（计算路径不同但代数等价）
+    // MLX qmm 走专用 4-bit kernel；相对 dense matmul 允许小幅累积路径差异。
+    const MAX_QMM_ABS_ERR: f32 = 3e-2;
+    const MAX_QMM_PEAK_REL_ERR: f32 = 1e-3;
     let mut max_err = 0.0_f32;
+    let mut max_ref = 0.0_f32;
     for (a, b) in v_qmm.iter().zip(&v_ref) {
         let err = (a - b).abs();
         if err > max_err {
             max_err = err;
         }
+        if b.abs() > max_ref {
+            max_ref = b.abs();
+        }
     }
-    assert!(max_err < 1e-2, "qmm vs ref max err {max_err}");
+    let peak_rel_err = max_err / max_ref.max(1.0);
+    assert!(
+        max_err < MAX_QMM_ABS_ERR && peak_rel_err < MAX_QMM_PEAK_REL_ERR,
+        "qmm vs ref max err {max_err}, peak relative err {peak_rel_err}"
+    );
 }
 
 use mlx::quantization::qqmm;

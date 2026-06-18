@@ -64,6 +64,8 @@ mod ffi_bridge {
         // === Stream lifecycle ===
         fn default_stream(d: Device) -> Stream;
         fn new_stream(d: Device) -> Result<Stream>;
+        fn new_thread_local_stream(d: Device) -> Result<Stream>;
+        fn stream_from_thread_local_stream(s: Stream) -> Stream;
         fn set_default_stream(s: Stream);
         fn get_streams() -> Vec<Stream>;
         fn clear_streams();
@@ -73,6 +75,8 @@ mod ffi_bridge {
         unsafe fn async_eval_many(arrays: &[*const MlxArray]) -> Result<()>;
         fn synchronize() -> Result<()>;
         fn synchronize_stream(s: Stream) -> Result<()>;
+        fn synchronize_thread_local_stream(s: Stream) -> Result<()>;
+        fn clear_cache();
     }
 }
 
@@ -81,9 +85,10 @@ mod ffi_bridge {
 #[allow(clippy::missing_safety_doc)]
 pub mod ffi {
     pub use super::ffi_bridge::{
-        async_eval_many, clear_streams, default_device, default_stream, device_count, eval_many,
-        get_streams, is_available, new_stream, set_default_device, set_default_stream, synchronize,
-        synchronize_stream, Device, MlxArray, Stream,
+        async_eval_many, clear_cache, clear_streams, default_device, default_stream, device_count,
+        eval_many, get_streams, is_available, new_stream, new_thread_local_stream,
+        set_default_device, set_default_stream, stream_from_thread_local_stream, synchronize,
+        synchronize_stream, synchronize_thread_local_stream, Device, MlxArray, Stream,
     };
     pub use super::DeviceType;
 }

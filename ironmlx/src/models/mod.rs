@@ -37,8 +37,8 @@ pub mod vision;
 
 pub use architecture::ModelArchitecture;
 pub use diffusion_gemma::{
-    DiffusionGemmaConfig, DiffusionGemmaGenerationConfig, DiffusionGemmaModel,
-    DiffusionGemmaTextConfig,
+    DiffusionGemmaConfig, DiffusionGemmaGenerateEvent, DiffusionGemmaGenerationConfig,
+    DiffusionGemmaModel, DiffusionGemmaTextConfig,
 };
 pub use gemma4::{Gemma4Config, Gemma4Model, Gemma4TextConfig};
 pub use glm4_moe_lite::{Glm4MoeLiteConfig, Glm4MoeLiteModel};

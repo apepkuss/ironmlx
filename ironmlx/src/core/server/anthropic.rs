@@ -105,7 +105,7 @@ enum AnthropicContent {
 
 /// Anthropic message (private wire type; not shared with the OpenAI endpoint).
 #[derive(Debug, Deserialize)]
-struct AnthropicMessage {
+pub(crate) struct AnthropicMessage {
     role: String,
     content: AnthropicContent,
 }
@@ -114,7 +114,7 @@ struct AnthropicMessage {
 pub struct MessagesRequest {
     #[serde(default)]
     pub model: Option<String>,
-    messages: Vec<AnthropicMessage>,
+    pub(crate) messages: Vec<AnthropicMessage>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
     #[serde(default)]
@@ -195,7 +195,7 @@ fn format_event(event_type: &str, payload: &serde_json::Value) -> Bytes {
 /// Decode Anthropic native content blocks into the wire-agnostic
 /// `DecodedMessage` list. base64 source is decoded in-process (no network);
 /// `media_type` is informational and not validated.
-fn decode_anthropic_messages(
+pub(crate) fn decode_anthropic_messages(
     messages: Vec<AnthropicMessage>,
 ) -> anyhow::Result<Vec<DecodedMessage>> {
     let mut out: Vec<DecodedMessage> = Vec::with_capacity(messages.len());

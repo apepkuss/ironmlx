@@ -67,6 +67,17 @@ pub fn derive_image_token_and_merge(
                 .unwrap_or(258_880),
             vision_config.pooling_kernel_size,
         ),
+        VisionInputConfig::DiffusionGemma {
+            vision_config,
+            image_token_id,
+        } => (
+            tokenizer
+                .token_to_id("<|image|>")
+                .map(|id| id as i32)
+                .or(*image_token_id)
+                .unwrap_or(258_880),
+            vision_config.pooling_kernel_size,
+        ),
         VisionInputConfig::MiniCpmV46 { spatial_merge_size } => (
             tokenizer
                 .token_to_id("<|image_pad|>")
@@ -97,6 +108,9 @@ pub fn expand_decoded_messages(
     let spatial_merge_size = match vision_input {
         VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
         VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
+        VisionInputConfig::DiffusionGemma { vision_config, .. } => {
+            vision_config.pooling_kernel_size
+        }
         VisionInputConfig::MiniCpmV46 { spatial_merge_size } => *spatial_merge_size,
     };
     if spatial_merge_size <= 0 {
@@ -122,6 +136,13 @@ pub fn expand_decoded_messages(
                         grid_thw.push((1, gh, gw));
                     }
                     VisionInputConfig::Gemma4 { vision_config } => {
+                        let processed =
+                            gemma4::image_processor::preprocess(img_bytes, vision_config)?;
+                        placeholders.push(gemma4_placeholder(processed.soft_tokens));
+                        grid_thw.push((1, processed.grid_h, processed.grid_w));
+                        all_pixel_values.push(processed.pixel_values);
+                    }
+                    VisionInputConfig::DiffusionGemma { vision_config, .. } => {
                         let processed =
                             gemma4::image_processor::preprocess(img_bytes, vision_config)?;
                         placeholders.push(gemma4_placeholder(processed.soft_tokens));
@@ -304,6 +325,42 @@ mod tests {
             derive_image_token_and_merge(&VisionInputConfig::Gemma4 { vision_config }, &tok);
         assert_eq!(merge, 3, "Gemma4 pooling_kernel_size");
         assert_eq!(tok_id, 88_888, "Gemma4 image token id");
+
+        let vision_config = crate::models::gemma4::Gemma4VisionConfig {
+            model_type: "gemma4_vision".to_string(),
+            hidden_size: 1152,
+            intermediate_size: 4304,
+            num_hidden_layers: 27,
+            num_attention_heads: 16,
+            num_key_value_heads: 16,
+            head_dim: 72,
+            global_head_dim: None,
+            hidden_activation: "gelu_pytorch_tanh".to_string(),
+            rms_norm_eps: 1e-6,
+            max_position_embeddings: 8192,
+            attention_bias: false,
+            attention_dropout: 0.0,
+            layer_types: None,
+            rope_parameters: None,
+            default_output_length: 256,
+            patch_size: 14,
+            position_embedding_size: 8192,
+            pooling_kernel_size: 5,
+            use_clipped_linears: false,
+            standardize: false,
+        };
+        let (tok_id, merge) = derive_image_token_and_merge(
+            &VisionInputConfig::DiffusionGemma {
+                vision_config,
+                image_token_id: Some(77_777),
+            },
+            &tok,
+        );
+        assert_eq!(merge, 5, "DiffusionGemma pooling_kernel_size");
+        assert_eq!(
+            tok_id, 88_888,
+            "DiffusionGemma tokenizer image token id wins"
+        );
     }
 
     /// Restored from the deleted `openai.rs` tests: `expand_decoded_messages`

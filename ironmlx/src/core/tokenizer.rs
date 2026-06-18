@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::anyhow;
 
-use crate::core::chat_template::{ChatTemplate, Message};
+use crate::core::chat_template::{ChatTemplate, ChatTemplateSpecialTokens, Message};
 use crate::core::loader::{EosTokenId, Loader, TokenizerConfig};
 use crate::Result;
 
@@ -97,7 +97,14 @@ impl Tokenizer {
         let inner = tokenizers::Tokenizer::from_file(tokenizer_json)
             .map_err(|e| anyhow!("tokenizers::from_file: {e}"))?;
         let chat = match cfg.chat_template.as_deref() {
-            Some(src) => Some(ChatTemplate::new(src)?),
+            Some(src) => Some(ChatTemplate::new_with_special_tokens(
+                src,
+                ChatTemplateSpecialTokens {
+                    bos_token: cfg.bos_token.clone(),
+                    eos_token: cfg.eos_token.clone(),
+                    pad_token: cfg.pad_token.clone(),
+                },
+            )?),
             None => None,
         };
         let eos_token_ids = resolve_eos_token_ids(&inner, cfg);

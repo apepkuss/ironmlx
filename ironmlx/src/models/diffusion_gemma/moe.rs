@@ -1,4 +1,7 @@
+use std::sync::OnceLock;
+
 use anyhow::{anyhow, Context};
+use mlx::compile::CompiledFn;
 use mlx::ops::indexing::{slice_on, take_along_axis_on, take_on};
 use mlx::ops::sort::{argpartition_on, argsort_on};
 use mlx::{Array, StreamOrDevice};
@@ -6,6 +9,8 @@ use mlx::{Array, StreamOrDevice};
 use crate::core::Loader;
 use crate::nn::Linear;
 use crate::Result;
+
+use super::ops;
 
 const SORTED_ROUTING_MIN_BS_K: i32 = 64;
 const MAX_EXACT_U32_IN_F32: i32 = 1 << 24;
@@ -30,6 +35,7 @@ pub struct DiffusionGemmaExperts {
     group_size: i32,
     bits: i32,
     moe_intermediate: i32,
+    geglu: OnceLock<CompiledFn>,
 }
 
 impl DiffusionGemmaRouter {
@@ -63,7 +69,7 @@ impl DiffusionGemmaRouter {
 
     pub fn route_on(&self, x: &Array, target: StreamOrDevice) -> Result<(Array, Array)> {
         let x = mlx::fast::rms_norm_on(x, None, self.eps, target)?;
-        let scale: Array = (&[self.hidden_root][..], ()).try_into()?;
+        let scale = ops::scalar_array_like_on(self.hidden_root, &x, target)?;
         let x = &(&x * &self.scale) * &scale;
         let logits = self.proj.forward_on(&x, target)?;
         let part = argpartition_on(&logits, -self.top_k, -1, target)
@@ -124,6 +130,7 @@ impl DiffusionGemmaExperts {
             group_size: qmeta.group_size,
             bits: qmeta.bits,
             moe_intermediate: shape[1] / 2,
+            geglu: OnceLock::new(),
         })
     }
 
@@ -209,7 +216,8 @@ impl DiffusionGemmaExperts {
             (gate, up, inds.clone(), false, None)
         };
 
-        let act = geglu_on(&gate, &up, target)?;
+        let act =
+            ops::invoke_geglu_tanh(self.geglu.get_or_init(ops::build_geglu_tanh), &gate, &up)?;
         let down_raw = mlx::quantization::gather_quantized_matmul_on(
             &act,
             &self.down_weight,
@@ -238,11 +246,6 @@ impl DiffusionGemmaExperts {
         let weighted = &down * &weights;
         Ok(mlx::ops::sum_on(&weighted, -2_i32, false, target)?)
     }
-}
-
-fn geglu_on(gate: &Array, up: &Array, target: StreamOrDevice) -> Result<Array> {
-    let gate = crate::nn::activations::gelu_tanh(gate, target)?;
-    Ok(&gate * up)
 }
 
 fn sorted_token_indices_from_sort_perm(

@@ -4,13 +4,14 @@
 //!
 //! - [`synchronize`] — block on the current thread's default stream
 //! - [`synchronize_stream`] — block on a specific stream
+//! - [`synchronize_thread_local_stream`] — block on a thread-local stream token
 //! - [`eval`] — synchronously evaluate a batch of arrays (block until done)
 //! - [`async_eval`] — submit a batch of arrays for async evaluation (returns
 //!   immediately; subsequent reads block until materialized)
 //! - [`async_eval_fut`] — submit + return a runtime-agnostic Future that
 //!   resolves when the batch completes
 
-use crate::{Array, Error, Result, Stream};
+use crate::{Array, Error, Result, Stream, ThreadLocalStream};
 
 /// Block the current thread until all queued work on the current thread's
 /// **default stream** completes. To synchronize on a specific stream
@@ -25,6 +26,21 @@ pub fn synchronize() -> Result<()> {
 /// is currently the default.
 pub fn synchronize_stream(s: Stream) -> Result<()> {
     mlx_sys::stream::ffi::synchronize_stream(s.into()).map_err(Error::from)
+}
+
+/// Block until all queued work on the current thread's concrete stream for a
+/// thread-local stream token completes.
+pub fn synchronize_thread_local_stream(s: ThreadLocalStream) -> Result<()> {
+    mlx_sys::stream::ffi::synchronize_thread_local_stream(s.into()).map_err(Error::from)
+}
+
+/// Clear MLX's memory cache.
+///
+/// This releases cached allocator buffers; it does not clear compiled function
+/// graphs. Use sparingly in long-running services where request-local temporary
+/// buffers can otherwise accumulate and affect later requests.
+pub fn clear_cache() {
+    mlx_sys::stream::ffi::clear_cache();
 }
 
 /// Evaluate multiple arrays in one call. Blocks the current thread until
