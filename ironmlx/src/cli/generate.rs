@@ -415,6 +415,20 @@ fn scheduler_step_event_to_generate_event(
     })
 }
 
+fn mtp_scheduler_effective_cap_for_cli(request_cap: usize, model_max_context: i32) -> usize {
+    let request_cap =
+        request_cap.max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize);
+    let headroom_cap =
+        ((request_cap as f64) / crate::core::memory_budget::SOFT_LIMIT_FRAC).ceil() as usize;
+    let headroom_cap = headroom_cap.max(request_cap);
+    let model_max_context = usize::try_from(model_max_context).unwrap_or(0);
+    if model_max_context == 0 {
+        headroom_cap
+    } else {
+        headroom_cap.min(model_max_context)
+    }
+}
+
 fn run_generation_with_mtp_scheduler_model<M>(
     model: &M,
     mtp: &M::MtpHead,
@@ -425,13 +439,16 @@ fn run_generation_with_mtp_scheduler_model<M>(
 where
     M: MtpSpeculativeModel + DenseVlMethods,
 {
-    let effective_cap = request
+    let request_cap = request
         .prompt_ids
         .len()
         .saturating_add(request.max_new_tokens)
         .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize);
-    let mut scheduler = Scheduler::<M>::new(1, effective_cap, model.model_meta())
-        .context("creating MTP generation scheduler")?;
+    let meta = model.model_meta();
+    let effective_cap =
+        mtp_scheduler_effective_cap_for_cli(request_cap, meta.max_position_embeddings);
+    let mut scheduler =
+        Scheduler::<M>::new(1, effective_cap, meta).context("creating MTP generation scheduler")?;
     scheduler
         .admit(request)
         .context("admitting MTP generation request")?;
@@ -741,6 +758,22 @@ mod tests {
             Some(std::path::Path::new("/tmp/mtp"))
         );
         assert_eq!(enabled_cli.args.mtp_draft_tokens, Some(6));
+    }
+
+    #[test]
+    fn mtp_scheduler_effective_cap_for_cli_leaves_soft_limit_headroom() {
+        let cap = mtp_scheduler_effective_cap_for_cli(365, 1_000);
+        assert_eq!(cap, 430);
+        assert!(
+            ((cap as f64) * crate::core::memory_budget::SOFT_LIMIT_FRAC) >= 365.0,
+            "cap={cap} should leave enough soft-limit budget for request"
+        );
+
+        let min_cap = mtp_scheduler_effective_cap_for_cli(1, 1_000);
+        assert_eq!(min_cap, 302);
+
+        let clamped = mtp_scheduler_effective_cap_for_cli(900, 1_000);
+        assert_eq!(clamped, 1_000);
     }
 
     #[test]
