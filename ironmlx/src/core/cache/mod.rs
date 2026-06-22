@@ -14,6 +14,7 @@ pub use paged_kv::PagedKVCache;
 pub use prefix_store::{
     PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixKeySpec,
     PagedPrefixLayer, PagedPrefixLoadStatus, PagedPrefixStore, PrefixLayerKind, PrefixLayerPayload,
-    PrefixLayerSpec, PrefixMtpLayerPayload, PrefixMtpLayerSpec, PrefixTensorSpec,
+    PrefixLayerSpec, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertResult,
+    PrefixLruInsertStatus, PrefixMtpLayerPayload, PrefixMtpLayerSpec, PrefixTensorSpec,
 };
 pub use turboquant_kv::{TurboQuantKVBits, TurboQuantKVCache};

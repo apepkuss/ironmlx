@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::core::cache::PagedPrefixCacheConfig;
+use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig};
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::scheduler::{
@@ -456,6 +456,7 @@ where
         decode_cadence_mid_chunk_cap,
         meta,
         None,
+        None,
     )
 }
 
@@ -469,6 +470,7 @@ pub fn spawn_scheduler_actor_with_paged_prefix_cache<M>(
     decode_cadence_mid_chunk_cap: usize,
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: PagedPrefixCacheConfig,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -483,6 +485,7 @@ where
         decode_cadence_mid_chunk_cap,
         meta,
         Some(paged_prefix_cache),
+        prefix_lru_cache,
     )
 }
 
@@ -498,6 +501,7 @@ pub fn spawn_scheduler_actor_with_mtp<M>(
     decode_cadence_mid_chunk_cap: usize,
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
@@ -513,6 +517,7 @@ where
         decode_cadence_mid_chunk_cap,
         meta,
         paged_prefix_cache,
+        prefix_lru_cache,
     )
 }
 
@@ -527,6 +532,7 @@ fn spawn_scheduler_actor_with_mode<M, A>(
     decode_cadence_mid_chunk_cap: usize,
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -581,6 +587,7 @@ where
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
     let paged_prefix_cache_for_task = paged_prefix_cache.clone();
+    let prefix_lru_cache_for_task = prefix_lru_cache;
 
     // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
     //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
@@ -598,6 +605,11 @@ where
             scheduler
                 .enable_paged_prefix_cache(config)
                 .expect("paged prefix cache config was validated before actor spawn");
+        }
+        if let Some(config) = prefix_lru_cache_for_task {
+            scheduler
+                .enable_prefix_lru_cache(config)
+                .expect("prefix LRU cache config was validated before actor spawn");
         }
         driver_loop(
             scheduler,
@@ -2203,6 +2215,7 @@ mod tests {
             256,
             crate::core::memory_budget::test_meta_qwen35(),
             Some(config),
+            None,
         )
         .expect("spawn mtp actor with prefix cache");
 
