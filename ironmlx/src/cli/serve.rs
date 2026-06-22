@@ -132,6 +132,12 @@ pub struct ServeArgs {
     #[arg(long = "paged-prefix-cache-max-pages")]
     pub paged_prefix_cache_max_pages: Option<i32>,
 
+    /// Maximum bytes for the in-process cross-request prefix LRU cache. Disabled
+    /// by default; initial support requires --paged-prefix-cache-dir so L1 can
+    /// share the same paged prefix cache key and restore semantics.
+    #[arg(long = "prefix-lru-cache-max-bytes")]
+    pub prefix_lru_cache_max_bytes: Option<usize>,
+
     /// P5h+1 T1 measurement probe: force selected span bodies (Lane A
     /// `first_token_sampling_materialize_and_sample` + the ROI substep
     /// closures under GatedAttention / GatedDeltaNet / SparseMoeBlock +
@@ -176,6 +182,19 @@ fn resolve_paged_prefix_cache_config(
     };
     crate::core::cache::PagedPrefixCacheConfig::new(root, args.model.clone(), block_size, max_pages)
         .map(Some)
+}
+
+fn resolve_prefix_lru_cache_config(
+    args: &ServeArgs,
+    paged_prefix_cache: Option<&crate::core::cache::PagedPrefixCacheConfig>,
+) -> Result<Option<crate::core::cache::PrefixLruCacheConfig>> {
+    let Some(max_bytes) = args.prefix_lru_cache_max_bytes else {
+        return Ok(None);
+    };
+    if paged_prefix_cache.is_none() {
+        bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
+    }
+    crate::core::cache::PrefixLruCacheConfig::new(max_bytes).map(Some)
 }
 
 fn expand_home_path(path: &Path) -> Result<PathBuf> {
@@ -594,12 +613,19 @@ where
 
     let model_id = args.model.clone();
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config)?;
+    let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
     if let Some(config) = &paged_prefix_cache {
         tracing::info!(
             "ironmlx serve: paged SSD prefix cache enabled dir={} block_size={} max_pages={}",
             config.root.display(),
             config.block_size,
             config.max_pages
+        );
+    }
+    if let Some(config) = &prefix_lru_cache {
+        tracing::info!(
+            "ironmlx serve: prefix LRU cache enabled max_bytes={}",
+            config.max_bytes
         );
     }
     let runtime = serve_runtime()?;
@@ -621,6 +647,7 @@ where
         scheduler_config.decode_cadence_mid_chunk_cap,
         args.kv_quant.turboquant_bits(),
         paged_prefix_cache,
+        prefix_lru_cache,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
@@ -657,6 +684,13 @@ where
 
     let model_id = args.model.clone();
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config)?;
+    let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
+    if let Some(config) = &prefix_lru_cache {
+        tracing::info!(
+            "ironmlx serve: prefix LRU cache enabled max_bytes={}",
+            config.max_bytes
+        );
+    }
     let runtime = serve_runtime()?;
     let p5h_measurement_eval_probes = p5h_measurement_eval_probes_arg(args);
     runtime.block_on(server::serve_with_mtp(
@@ -675,6 +709,7 @@ where
         scheduler_config.decode_cadence_mid_chunk_cap,
         args.kv_quant.turboquant_bits(),
         paged_prefix_cache,
+        prefix_lru_cache,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
@@ -982,9 +1017,9 @@ mod scheduler_profile_tests {
 
     use super::{
         check_loaded_scheduler_profile_health, load_scheduler_profile_for_model,
-        resolve_paged_prefix_cache_config, resolve_scheduler_runtime_profile,
-        resolve_scheduler_serve_config, resolve_serve_mtp_config, KvQuantArg, SchedulerServeConfig,
-        ServeArgs,
+        resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
+        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
+        resolve_serve_mtp_config, KvQuantArg, SchedulerServeConfig, ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -1042,6 +1077,7 @@ mod scheduler_profile_tests {
             paged_prefix_cache_dir: None,
             paged_prefix_cache_block_size: 16,
             paged_prefix_cache_max_pages: None,
+            prefix_lru_cache_max_bytes: None,
             #[cfg(feature = "p5h-profile")]
             p5h_measurement_eval_probes: false,
         }
@@ -1251,6 +1287,66 @@ mod scheduler_profile_tests {
             .join("cache")
             .join("paged_prefix_cache");
         assert_eq!(cfg.root, expected);
+    }
+
+    #[test]
+    fn serve_prefix_lru_cache_requires_paged_prefix_cache() {
+        let mut args = base_args();
+        args.prefix_lru_cache_max_bytes = Some(1024);
+
+        let err =
+            resolve_prefix_lru_cache_config(&args, None).expect_err("L1 requires paged SSD cache");
+
+        assert!(err
+            .to_string()
+            .contains("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir"));
+    }
+
+    #[test]
+    fn serve_prefix_lru_cache_rejects_zero_capacity() {
+        let prefix_dir = unique_temp_dir("serve-prefix-lru-zero");
+        let mut args = base_args();
+        args.paged_prefix_cache_dir = Some(prefix_dir.clone());
+        args.prefix_lru_cache_max_bytes = Some(0);
+        let paged_prefix_cache = resolve_paged_prefix_cache_config(
+            &args,
+            SchedulerServeConfig {
+                b_max: 2,
+                max_cache_cap: 128,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("prefix config");
+
+        let err = resolve_prefix_lru_cache_config(&args, paged_prefix_cache.as_ref())
+            .expect_err("zero capacity");
+
+        assert!(err.to_string().contains("max_bytes must be > 0"));
+        std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn serve_prefix_lru_cache_accepts_paged_prefix_cache() {
+        let prefix_dir = unique_temp_dir("serve-prefix-lru");
+        let mut args = base_args();
+        args.paged_prefix_cache_dir = Some(prefix_dir.clone());
+        args.prefix_lru_cache_max_bytes = Some(4096);
+        let paged_prefix_cache = resolve_paged_prefix_cache_config(
+            &args,
+            SchedulerServeConfig {
+                b_max: 2,
+                max_cache_cap: 128,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("prefix config");
+
+        let cfg = resolve_prefix_lru_cache_config(&args, paged_prefix_cache.as_ref())
+            .expect("L1 config")
+            .expect("enabled");
+
+        assert_eq!(cfg.max_bytes, 4096);
+        std::fs::remove_dir_all(prefix_dir).ok();
     }
 
     #[test]

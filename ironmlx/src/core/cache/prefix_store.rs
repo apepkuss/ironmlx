@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -88,7 +88,7 @@ impl PrefixMtpLayerSpec {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagedPrefixKeySpec {
     pub model_id: String,
     pub token_ids: Vec<i32>,
@@ -295,6 +295,208 @@ impl PagedPrefixCacheConfig {
             );
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixLruCacheConfig {
+    pub max_bytes: usize,
+}
+
+impl PrefixLruCacheConfig {
+    pub fn new(max_bytes: usize) -> Result<Self> {
+        let config = Self { max_bytes };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.max_bytes == 0 {
+            anyhow::bail!("PrefixLruCacheConfig: max_bytes must be > 0");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixLruInsertStatus {
+    Stored,
+    Replaced,
+    SkippedOversized,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrefixLruInsertResult {
+    pub key: String,
+    pub status: PrefixLruInsertStatus,
+    pub stats: PagedPrefixEntryStats,
+}
+
+#[derive(Debug, Clone)]
+struct PrefixLruEntry {
+    spec: PagedPrefixKeySpec,
+    entry: PagedPrefixEntry,
+    stats: PagedPrefixEntryStats,
+    generation: u64,
+}
+
+#[derive(Debug)]
+pub struct PrefixLruCache {
+    max_bytes: usize,
+    total_bytes: usize,
+    generation: u64,
+    entries: HashMap<String, PrefixLruEntry>,
+    recency: VecDeque<(String, u64)>,
+}
+
+impl PrefixLruCache {
+    pub fn new(config: PrefixLruCacheConfig) -> Result<Self> {
+        config.validate()?;
+        Ok(Self {
+            max_bytes: config.max_bytes,
+            total_bytes: 0,
+            generation: 0,
+            entries: HashMap::new(),
+            recency: VecDeque::new(),
+        })
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn cached_lengths_descending(&self, max_cached_len: usize) -> Vec<i32> {
+        let mut lengths = self
+            .entries
+            .values()
+            .filter_map(|entry| {
+                let cached_len = entry.spec.cached_len;
+                if cached_len > 0 && cached_len as usize <= max_cached_len {
+                    Some(cached_len)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        lengths.sort_unstable_by(|a, b| b.cmp(a));
+        lengths.dedup();
+        lengths
+    }
+
+    pub fn load_observed(&mut self, spec: &PagedPrefixKeySpec) -> Result<PagedPrefixLoadResult> {
+        let key = PagedPrefixStore::key_for(spec);
+        let Some(entry) = self.entries.get(&key) else {
+            return Ok(PagedPrefixLoadResult {
+                key,
+                status: PagedPrefixLoadStatus::MissingEntry,
+                entry: None,
+                stats: None,
+            });
+        };
+        if entry.spec != *spec {
+            return Ok(PagedPrefixLoadResult {
+                key,
+                status: PagedPrefixLoadStatus::MetadataMismatch,
+                entry: None,
+                stats: Some(entry.stats),
+            });
+        }
+        let cached_entry = entry.entry.clone();
+        let stats = entry.stats;
+        self.touch(&key);
+        Ok(PagedPrefixLoadResult {
+            key,
+            status: PagedPrefixLoadStatus::Hit,
+            entry: Some(cached_entry),
+            stats: Some(stats),
+        })
+    }
+
+    pub fn insert(
+        &mut self,
+        spec: PagedPrefixKeySpec,
+        entry: PagedPrefixEntry,
+    ) -> Result<PrefixLruInsertResult> {
+        let validator = PagedPrefixStore::new(Path::new(""));
+        validator.validate_spec(&spec)?;
+        validator.validate_entry(&spec, &entry)?;
+
+        let key = PagedPrefixStore::key_for(&spec);
+        let stats = entry.observability_stats(spec.cached_len);
+        if stats.payload_bytes > self.max_bytes {
+            return Ok(PrefixLruInsertResult {
+                key,
+                status: PrefixLruInsertStatus::SkippedOversized,
+                stats,
+            });
+        }
+
+        let status = if let Some(previous) = self.entries.remove(&key) {
+            self.total_bytes = self
+                .total_bytes
+                .saturating_sub(previous.stats.payload_bytes);
+            PrefixLruInsertStatus::Replaced
+        } else {
+            PrefixLruInsertStatus::Stored
+        };
+        let generation = self.next_generation();
+        self.total_bytes = self.total_bytes.saturating_add(stats.payload_bytes);
+        self.entries.insert(
+            key.clone(),
+            PrefixLruEntry {
+                spec,
+                entry,
+                stats,
+                generation,
+            },
+        );
+        self.recency.push_back((key.clone(), generation));
+        self.evict_to_capacity();
+
+        Ok(PrefixLruInsertResult { key, status, stats })
+    }
+
+    fn next_generation(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    fn touch(&mut self, key: &str) {
+        let generation = self.next_generation();
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.generation = generation;
+            self.recency.push_back((key.to_owned(), generation));
+        }
+    }
+
+    fn evict_to_capacity(&mut self) {
+        while self.total_bytes > self.max_bytes {
+            let Some((key, generation)) = self.recency.pop_front() else {
+                break;
+            };
+            let is_current = self
+                .entries
+                .get(&key)
+                .is_some_and(|entry| entry.generation == generation);
+            if !is_current {
+                continue;
+            }
+            if let Some(entry) = self.entries.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.stats.payload_bytes);
+            }
+        }
     }
 }
 
@@ -1181,6 +1383,114 @@ mod tests {
         assert_eq!(stats.full_paged_pages, 1);
         assert_eq!(stats.payload_bytes, 32);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn single_full_paged_entry(seed: f32) -> PagedPrefixEntry {
+        let k_pages: Array = (
+            &[seed, seed + 1.0, seed + 2.0, seed + 3.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        let v_pages: Array = (
+            &[seed + 10.0, seed + 11.0, seed + 12.0, seed + 13.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        PagedPrefixEntry {
+            main_layers: vec![PrefixLayerPayload::FullPaged { k_pages, v_pages }],
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_lru_cache_hits_and_evicts_least_recent_entry() {
+        let mut cache =
+            PrefixLruCache::new(PrefixLruCacheConfig::new(64).expect("config")).expect("cache");
+        let entry1 = single_full_paged_entry(1.0);
+        let entry2 = single_full_paged_entry(2.0);
+        let entry3 = single_full_paged_entry(3.0);
+        let spec1 = spec(vec![1, 2], 2, None, entry1.main_layer_specs(), vec![], None);
+        let spec2 = spec(vec![3, 4], 2, None, entry2.main_layer_specs(), vec![], None);
+        let spec3 = spec(vec![5, 6], 2, None, entry3.main_layer_specs(), vec![], None);
+
+        cache.insert(spec1.clone(), entry1).expect("insert spec1");
+        cache.insert(spec2.clone(), entry2).expect("insert spec2");
+        assert_eq!(cache.total_bytes(), 64);
+        assert_eq!(
+            cache.load_observed(&spec1).expect("load spec1").status,
+            PagedPrefixLoadStatus::Hit
+        );
+
+        cache.insert(spec3.clone(), entry3).expect("insert spec3");
+
+        assert_eq!(
+            cache.load_observed(&spec1).expect("reload spec1").status,
+            PagedPrefixLoadStatus::Hit
+        );
+        assert_eq!(
+            cache.load_observed(&spec2).expect("reload spec2").status,
+            PagedPrefixLoadStatus::MissingEntry
+        );
+        assert_eq!(
+            cache.load_observed(&spec3).expect("reload spec3").status,
+            PagedPrefixLoadStatus::Hit
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_lru_cache_cached_lengths_descending_filters_to_usable_lengths() {
+        let mut cache =
+            PrefixLruCache::new(PrefixLruCacheConfig::new(96).expect("config")).expect("cache");
+        let entry2 = single_full_paged_entry(2.0);
+        let entry4 = single_full_paged_entry(4.0);
+        let entry6 = single_full_paged_entry(6.0);
+        cache
+            .insert(
+                spec(vec![1, 2], 2, None, entry2.main_layer_specs(), vec![], None),
+                entry2,
+            )
+            .expect("insert len2");
+        cache
+            .insert(
+                spec(
+                    vec![1, 2, 3, 4],
+                    4,
+                    None,
+                    entry4.main_layer_specs(),
+                    vec![],
+                    None,
+                ),
+                entry4,
+            )
+            .expect("insert len4");
+        cache
+            .insert(
+                spec(
+                    vec![1, 2, 3, 4, 5, 6],
+                    6,
+                    None,
+                    entry6.main_layer_specs(),
+                    vec![],
+                    None,
+                ),
+                entry6,
+            )
+            .expect("insert len6");
+
+        assert_eq!(cache.cached_lengths_descending(10), vec![6, 4, 2]);
+        assert_eq!(cache.cached_lengths_descending(5), vec![4, 2]);
+        assert_eq!(cache.cached_lengths_descending(1), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn prefix_lru_cache_config_rejects_zero_capacity() {
+        let err = PrefixLruCacheConfig::new(0).expect_err("zero capacity");
+        assert!(err.to_string().contains("max_bytes must be > 0"));
     }
 
     #[test]

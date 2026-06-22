@@ -11,7 +11,7 @@ use anyhow::Context;
 use axum::{routing::get, routing::post, Router};
 use tokio::sync::Mutex;
 
-use crate::core::cache::{PagedPrefixCacheConfig, TurboQuantKVBits};
+use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits};
 use crate::core::model::Model;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
@@ -169,6 +169,7 @@ where
 
 struct PlainSchedulerActorSpawner {
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
 }
 
 impl<M> SchedulerActorSpawner<M> for PlainSchedulerActorSpawner
@@ -200,6 +201,7 @@ where
                     decode_cadence_mid_chunk_cap,
                     meta,
                     config,
+                    self.prefix_lru_cache,
                 )?,
             )
         } else {
@@ -220,6 +222,7 @@ struct MtpSchedulerActorSpawner<H> {
     mtp: H,
     mtp_draft_tokens: usize,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
 }
 
 impl<M> SchedulerActorSpawner<M> for MtpSchedulerActorSpawner<M::MtpHead>
@@ -252,6 +255,7 @@ where
             decode_cadence_mid_chunk_cap,
             meta,
             self.paged_prefix_cache,
+            self.prefix_lru_cache,
         )?)
     }
 }
@@ -271,6 +275,7 @@ pub async fn serve<M>(
     decode_cadence_mid_chunk_cap: usize,
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool, // P5h+1 T1
@@ -297,7 +302,10 @@ where
         p5h_measurement_eval_probes,
         vision_input_override,
         None,
-        PlainSchedulerActorSpawner { paged_prefix_cache },
+        PlainSchedulerActorSpawner {
+            paged_prefix_cache,
+            prefix_lru_cache,
+        },
     )
     .await
 }
@@ -319,6 +327,7 @@ pub async fn serve_with_mtp<M>(
     decode_cadence_mid_chunk_cap: usize,
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool,
@@ -350,6 +359,7 @@ where
             mtp,
             mtp_draft_tokens,
             paged_prefix_cache,
+            prefix_lru_cache,
         },
     )
     .await
