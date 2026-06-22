@@ -59,7 +59,10 @@ pub enum SchedulerError {
     },
 }
 
-use crate::core::cache::{MtpCache, TurboQuantKVBits};
+use crate::core::cache::{
+    MtpCache, PagedPrefixCacheConfig, PagedPrefixEntryStats, PagedPrefixLoadStatus,
+    PagedPrefixStore, PrefixMtpLayerSpec, PrefixTensorSpec, TurboQuantKVBits,
+};
 use crate::core::generate::{
     build_batch_attention_mask, build_batch_linear_mask, build_decode_position_ids,
     build_per_row_decode_mask, build_position_ids, build_position_ids_batched,
@@ -75,7 +78,11 @@ use crate::core::speculative::{
     sample_logits_positions, slice_hidden_position, verify_input, zero_hidden_like_position,
     MtpDraftResult, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
 };
-use crate::nn::{enable_turboquant_kv_caches, LayerCache};
+use crate::nn::{
+    enable_paged_kv_caches, enable_turboquant_kv_caches, prefix_entry_for_row,
+    prefix_key_spec_for_caches, restore_prefix_entry_for_row, restore_prefix_entry_for_rows,
+    LayerCache,
+};
 
 /// T4.5: process-wide once-only guard for the first-eval diagnostic span.
 ///
@@ -97,12 +104,16 @@ static FIRST_EVAL_AMORTIZED_COST_FIRED: std::sync::OnceLock<()> = std::sync::Onc
 type GridThwSlice<'a> = Option<&'a [(i32, i32, i32)]>;
 type PixelValuesSlice<'a> = Option<&'a [Array]>;
 
-struct SchedulerMtpState {
-    cfg: MtpSpeculativeConfig,
+struct SchedulerMtpRowState {
     mtp_cache: MtpCache,
     pending_tokens: VecDeque<u32>,
     last_hidden: Array,
     adaptive_draft_tokens: usize,
+}
+
+struct SchedulerMtpState {
+    cfg: MtpSpeculativeConfig,
+    rows: HashMap<usize, SchedulerMtpRowState>,
     stats: MtpSpeculativeStats,
 }
 
@@ -351,6 +362,7 @@ pub struct AdmitMidHandle {
     /// B=1 temp KV cache; `temp_cache.offsets[0]` advances from `0` to
     /// `prompt_len` across the chunk loop.
     pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
+    pub(crate) prefix_fingerprint: Option<String>,
     pub(crate) is_vl: bool,
     pub(crate) image_token_id: i32,
     /// Whether `position_ids_full` holds real full-prompt MRoPE ids. When
@@ -476,6 +488,62 @@ fn first_full_layer_offsets(cache: &[LayerCache]) -> Result<&[i32]> {
         })
 }
 
+fn cache_row_cached_len(cache: &[LayerCache], row: usize) -> Result<Option<i32>> {
+    if cache.is_empty() {
+        return Ok(None);
+    }
+
+    let mut cached_len = None;
+    for (idx, layer) in cache.iter().enumerate() {
+        let layer_offsets = match layer {
+            LayerCache::Full(kv) => kv.offsets(),
+            LayerCache::Linear(gd) => gd.offsets(),
+            LayerCache::Mla(mla) => mla.offsets(),
+        };
+        let layer_cached_len = *layer_offsets.get(row).ok_or_else(|| {
+            anyhow!(
+                "cache_row_cached_len: row {} out of range for layer {}",
+                row,
+                idx
+            )
+        })?;
+        if let Some(expected) = cached_len {
+            if layer_cached_len != expected {
+                anyhow::bail!(
+                    "cache_row_cached_len: layer {idx} cached_len {layer_cached_len} != layer0 {expected}"
+                );
+            }
+        } else {
+            cached_len = Some(layer_cached_len);
+        }
+    }
+    Ok(cached_len)
+}
+
+fn mtp_cache_row_cached_len(mtp_cache: &MtpCache, row: usize) -> Result<i32> {
+    let mut cached_len = None;
+    for idx in 0..mtp_cache.num_layers() {
+        let layer = mtp_cache.layer(idx);
+        let layer_cached_len = *layer.offsets().get(row).ok_or_else(|| {
+            anyhow!(
+                "mtp_cache_row_cached_len: row {} out of range for layer {}",
+                row,
+                idx
+            )
+        })?;
+        if let Some(expected) = cached_len {
+            if layer_cached_len != expected {
+                anyhow::bail!(
+                    "mtp_cache_row_cached_len: layer {idx} cached_len {layer_cached_len} != layer0 {expected}"
+                );
+            }
+        } else {
+            cached_len = Some(layer_cached_len);
+        }
+    }
+    Ok(cached_len.unwrap_or(0))
+}
+
 fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
     let mut linear_cap = None;
     for layer in cache {
@@ -523,6 +591,1757 @@ fn adopt_cache_row_layers(
     Ok(())
 }
 
+fn update_prefix_fingerprint_hash(hash: &mut u64, bytes: &[u8]) {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    for &byte in bytes {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn update_prefix_fingerprint_i32(hash: &mut u64, value: i32) {
+    update_prefix_fingerprint_hash(hash, &value.to_le_bytes());
+}
+
+fn update_prefix_fingerprint_usize(hash: &mut u64, value: usize) {
+    update_prefix_fingerprint_hash(hash, &value.to_le_bytes());
+}
+
+fn update_prefix_fingerprint_str(hash: &mut u64, value: &str) {
+    update_prefix_fingerprint_usize(hash, value.len());
+    update_prefix_fingerprint_hash(hash, value.as_bytes());
+}
+
+fn generate_request_from_state(state: &RequestState) -> Result<GenerateRequest> {
+    Ok(GenerateRequest {
+        prompt_ids: state.prompt_ids.clone(),
+        max_new_tokens: state.max_new_tokens,
+        sampler: state.sampler,
+        stop_token_ids: state.stop_token_ids.clone(),
+        prefill_chunk_size: usize::try_from(state.prefill_chunk_size)
+            .map_err(|_| anyhow!("generate_request_from_state: negative prefill_chunk_size"))?,
+        decode_cadence_mid_chunk_cap: state.decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits: state.kv_cache_turboquant_bits,
+        pixel_values: state.pixel_values.clone(),
+        image_grid_thw: state.image_grid_thw.clone(),
+        image_spatial_merge_size: state.image_spatial_merge_size,
+        image_token_id: state.image_token_id,
+        #[cfg(feature = "p5h-profile")]
+        p5h_trace: state.p5h_trace.clone(),
+        #[cfg(feature = "p5h-profile")]
+        p5h_root_span: state.p5h_root_span.clone(),
+    })
+}
+
+fn add_mtp_stats(dst: &mut MtpSpeculativeStats, src: MtpSpeculativeStats) {
+    dst.windows = dst.windows.saturating_add(src.windows);
+    dst.drafted_tokens = dst.drafted_tokens.saturating_add(src.drafted_tokens);
+    dst.accepted_draft_tokens = dst
+        .accepted_draft_tokens
+        .saturating_add(src.accepted_draft_tokens);
+    dst.rollback_count = dst.rollback_count.saturating_add(src.rollback_count);
+    dst.mtp_cache_reuse_count = dst
+        .mtp_cache_reuse_count
+        .saturating_add(src.mtp_cache_reuse_count);
+    dst.mtp_cache_reused_tokens = dst
+        .mtp_cache_reused_tokens
+        .saturating_add(src.mtp_cache_reused_tokens);
+    dst.draft_budget_reductions = dst
+        .draft_budget_reductions
+        .saturating_add(src.draft_budget_reductions);
+    dst.draft_budget_increases = dst
+        .draft_budget_increases
+        .saturating_add(src.draft_budget_increases);
+    dst.draft_forward_us = dst.draft_forward_us.saturating_add(src.draft_forward_us);
+    dst.verify_forward_us = dst.verify_forward_us.saturating_add(src.verify_forward_us);
+    dst.projection_us = dst.projection_us.saturating_add(src.projection_us);
+    dst.sampling_us = dst.sampling_us.saturating_add(src.sampling_us);
+    dst.main_rollback_us = dst.main_rollback_us.saturating_add(src.main_rollback_us);
+    dst.mtp_cache_commit_us = dst
+        .mtp_cache_commit_us
+        .saturating_add(src.mtp_cache_commit_us);
+    dst.mtp_cache_restore_us = dst
+        .mtp_cache_restore_us
+        .saturating_add(src.mtp_cache_restore_us);
+}
+
+fn paged_prefix_fingerprint_for_request(
+    pixel_values: Option<&[Array]>,
+    image_grid_thw: Option<&[(i32, i32, i32)]>,
+    image_token_id: i32,
+    image_spatial_merge_size: i32,
+) -> Result<Option<String>> {
+    let Some(pixel_values) = pixel_values else {
+        return Ok(None);
+    };
+    let grids = image_grid_thw.ok_or_else(|| {
+        anyhow!("paged prefix cache VL fingerprint: pixel_values present but grid_thw is None")
+    })?;
+
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    update_prefix_fingerprint_str(&mut hash, "ironmlx-vl-prefix-v1");
+    update_prefix_fingerprint_i32(&mut hash, image_token_id);
+    update_prefix_fingerprint_i32(&mut hash, image_spatial_merge_size);
+    update_prefix_fingerprint_usize(&mut hash, grids.len());
+    for &(t, h, w) in grids {
+        update_prefix_fingerprint_i32(&mut hash, t);
+        update_prefix_fingerprint_i32(&mut hash, h);
+        update_prefix_fingerprint_i32(&mut hash, w);
+    }
+
+    update_prefix_fingerprint_usize(&mut hash, pixel_values.len());
+    for pixel_array in pixel_values {
+        update_prefix_fingerprint_str(&mut hash, &pixel_array.dtype().to_string());
+        let shape = pixel_array.shape();
+        update_prefix_fingerprint_usize(&mut hash, shape.as_slice().len());
+        for &dim in shape.as_slice() {
+            update_prefix_fingerprint_i32(&mut hash, dim);
+        }
+        let values = mlx::ops::astype(pixel_array, Dtype::Float32)?.to_vec::<f32>()?;
+        update_prefix_fingerprint_usize(&mut hash, values.len());
+        for value in values {
+            update_prefix_fingerprint_hash(&mut hash, &value.to_bits().to_le_bytes());
+        }
+    }
+
+    Ok(Some(format!("vl:{hash:016x}")))
+}
+
+fn try_restore_paged_prefix_for_prompt(
+    config: Option<&PagedPrefixCacheConfig>,
+    cache: &mut [LayerCache],
+    prompt_ids: &[u32],
+    fingerprint: Option<&str>,
+) -> Result<Option<i32>> {
+    try_restore_paged_prefix_for_prompt_row(config, cache, 0, prompt_ids, fingerprint)
+}
+
+fn paged_prefix_restore_candidates(
+    store: &PagedPrefixStore,
+    prompt_len: usize,
+) -> Result<Vec<(usize, i32)>> {
+    if prompt_len <= 1 {
+        return Ok(Vec::new());
+    }
+    let max_cached_len = i32::try_from(prompt_len - 1)
+        .map_err(|_| anyhow!("paged prefix restore length exceeds i32"))?;
+    let cached_lengths = store.cached_lengths_descending(max_cached_len)?;
+    let mut candidates = Vec::with_capacity(cached_lengths.len());
+    for cached_len in cached_lengths {
+        let restore_len = usize::try_from(cached_len)
+            .map_err(|_| anyhow!("paged prefix cached length must be positive"))?;
+        candidates.push((restore_len, cached_len));
+    }
+    Ok(candidates)
+}
+
+fn try_restore_paged_prefix_for_prompt_row(
+    config: Option<&PagedPrefixCacheConfig>,
+    cache: &mut [LayerCache],
+    cache_row: usize,
+    prompt_ids: &[u32],
+    fingerprint: Option<&str>,
+) -> Result<Option<i32>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    if prompt_ids.len() <= 1 {
+        return Ok(None);
+    }
+    let store = config.store();
+    for (restore_len, cached_len) in paged_prefix_restore_candidates(&store, prompt_ids.len())? {
+        let Some(spec) = prefix_key_spec_for_caches(
+            &config.model_id,
+            &prompt_ids[..restore_len],
+            cached_len,
+            fingerprint,
+            config.block_size,
+            cache,
+        )?
+        else {
+            return Ok(None);
+        };
+        let load_start = Instant::now();
+        let observed = store.load_observed(&spec)?;
+        let load_us = load_start.elapsed().as_micros();
+        if observed.status != PagedPrefixLoadStatus::Hit {
+            tracing::trace!(
+                "paged SSD prefix cache miss: row={} tokens={} key={} status={:?} load_us={}",
+                cache_row,
+                restore_len,
+                observed.key,
+                observed.status,
+                load_us
+            );
+            continue;
+        };
+        let key = observed.key;
+        let stats = observed
+            .stats
+            .unwrap_or_else(|| empty_prefix_stats(cached_len));
+        let entry = observed
+            .entry
+            .ok_or_else(|| anyhow!("paged prefix observed hit without entry"))?;
+        restore_prefix_entry_for_row(cache, &entry, cache_row, cached_len)?;
+        log_paged_prefix_hit("hit", &key, cache_row, None, restore_len, stats, load_us);
+        return Ok(Some(cached_len));
+    }
+    Ok(None)
+}
+
+fn try_restore_paged_prefix_for_prompt_rows(
+    config: Option<&PagedPrefixCacheConfig>,
+    cache: &mut [LayerCache],
+    cache_rows: &[usize],
+    prompt_ids: &[u32],
+    fingerprint: Option<&str>,
+) -> Result<Option<i32>> {
+    if cache_rows.is_empty() {
+        return Ok(None);
+    }
+    if cache_rows.len() == 1 {
+        return try_restore_paged_prefix_for_prompt_row(
+            config,
+            cache,
+            cache_rows[0],
+            prompt_ids,
+            fingerprint,
+        );
+    }
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    if prompt_ids.len() <= 1 {
+        return Ok(None);
+    }
+    let store = config.store();
+    for (restore_len, cached_len) in paged_prefix_restore_candidates(&store, prompt_ids.len())? {
+        let Some(spec) = prefix_key_spec_for_caches(
+            &config.model_id,
+            &prompt_ids[..restore_len],
+            cached_len,
+            fingerprint,
+            config.block_size,
+            cache,
+        )?
+        else {
+            return Ok(None);
+        };
+        let load_start = Instant::now();
+        let observed = store.load_observed(&spec)?;
+        let load_us = load_start.elapsed().as_micros();
+        if observed.status != PagedPrefixLoadStatus::Hit {
+            tracing::trace!(
+                "paged SSD prefix cache miss: rows={:?} tokens={} key={} status={:?} load_us={}",
+                cache_rows,
+                restore_len,
+                observed.key,
+                observed.status,
+                load_us
+            );
+            continue;
+        };
+        let key = observed.key;
+        let stats = observed
+            .stats
+            .unwrap_or_else(|| empty_prefix_stats(cached_len));
+        let entry = observed
+            .entry
+            .ok_or_else(|| anyhow!("paged prefix observed hit without entry"))?;
+        restore_prefix_entry_for_rows(cache, &entry, cache_rows, cached_len)?;
+        for (idx, &cache_row) in cache_rows.iter().enumerate() {
+            let row_load_us = if idx == 0 { load_us } else { 0 };
+            log_paged_prefix_hit(
+                "hit",
+                &key,
+                cache_row,
+                None,
+                restore_len,
+                stats,
+                row_load_us,
+            );
+        }
+        return Ok(Some(cached_len));
+    }
+    Ok(None)
+}
+
+fn try_save_paged_prefix_for_prompt(
+    config: Option<&PagedPrefixCacheConfig>,
+    cache: &[LayerCache],
+    prompt_ids: &[u32],
+    fingerprint: Option<&str>,
+) -> Result<Option<String>> {
+    try_save_paged_prefix_for_prompt_row(config, cache, 0, prompt_ids, fingerprint)
+}
+
+fn try_save_paged_prefix_for_prompt_row(
+    config: Option<&PagedPrefixCacheConfig>,
+    cache: &[LayerCache],
+    cache_row: usize,
+    prompt_ids: &[u32],
+    fingerprint: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    if prompt_ids.is_empty() {
+        return Ok(None);
+    }
+    let Some(cached_len) = cache_row_cached_len(cache, cache_row)? else {
+        return Ok(None);
+    };
+    if cached_len == 0 {
+        return Ok(None);
+    }
+    if cached_len != prompt_ids.len() as i32 {
+        anyhow::bail!(
+            "try_save_paged_prefix_for_prompt: cache cached_len {cached_len} != token length {}",
+            prompt_ids.len()
+        );
+    }
+    let Some(spec) = prefix_key_spec_for_caches(
+        &config.model_id,
+        prompt_ids,
+        cached_len,
+        fingerprint,
+        config.block_size,
+        cache,
+    )?
+    else {
+        return Ok(None);
+    };
+    let store = config.store();
+    if let Some(key) = store.matching_entry_key(&spec)? {
+        tracing::trace!(
+            "paged SSD prefix cache save skipped: row={} tokens={} key={} status=already_present",
+            cache_row,
+            prompt_ids.len(),
+            key
+        );
+        return Ok(None);
+    }
+    let Some((entry, cached_len)) = prefix_entry_for_row(cache, cache_row)? else {
+        return Ok(None);
+    };
+    if cached_len == 0 {
+        return Ok(None);
+    }
+    if cached_len != prompt_ids.len() as i32 {
+        anyhow::bail!(
+            "try_save_paged_prefix_for_prompt: cache cached_len {cached_len} != token length {}",
+            prompt_ids.len()
+        );
+    }
+    let stats = entry.observability_stats(cached_len);
+    let save_start = Instant::now();
+    let (key, saved) = store.save_if_absent(&spec, &entry)?;
+    let save_us = save_start.elapsed().as_micros();
+    if !saved {
+        tracing::trace!(
+            "paged SSD prefix cache save skipped: row={} tokens={} key={} status=already_present",
+            cache_row,
+            prompt_ids.len(),
+            key
+        );
+        return Ok(None);
+    }
+    log_paged_prefix_save("saved", &key, cache_row, None, stats, save_us);
+    Ok(Some(key))
+}
+
+fn mtp_layer_specs_for_cache(mtp_cache: &MtpCache, cached_len: i32) -> Vec<PrefixMtpLayerSpec> {
+    (0..mtp_cache.num_layers())
+        .map(|idx| {
+            let layer = mtp_cache.layer(idx);
+            PrefixMtpLayerSpec {
+                k: PrefixTensorSpec {
+                    dtype: layer.dtype(),
+                    shape: vec![1_i32, layer.n_kv_heads(), cached_len, layer.head_dim()],
+                },
+                v: PrefixTensorSpec {
+                    dtype: layer.dtype(),
+                    shape: vec![1_i32, layer.n_kv_heads(), cached_len, layer.v_head_dim()],
+                },
+            }
+        })
+        .collect()
+}
+
+fn mtp_last_hidden_spec(dtype: Dtype, hidden_size: i32) -> PrefixTensorSpec {
+    PrefixTensorSpec {
+        dtype,
+        shape: vec![1_i32, 1_i32, hidden_size],
+    }
+}
+
+fn try_restore_paged_prefix_for_prompt_with_mtp(
+    config: Option<&PagedPrefixCacheConfig>,
+    main_cache: &mut [LayerCache],
+    mtp_cache: &mut MtpCache,
+    prompt_ids: &[u32],
+    hidden_size: i32,
+    hidden_dtype: Dtype,
+    fingerprint: Option<&str>,
+) -> Result<Option<(i32, Array)>> {
+    try_restore_paged_prefix_for_prompt_with_mtp_row(
+        config,
+        main_cache,
+        0,
+        mtp_cache,
+        0,
+        prompt_ids,
+        hidden_size,
+        hidden_dtype,
+        fingerprint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_restore_paged_prefix_for_prompt_with_mtp_row(
+    config: Option<&PagedPrefixCacheConfig>,
+    main_cache: &mut [LayerCache],
+    main_cache_row: usize,
+    mtp_cache: &mut MtpCache,
+    mtp_cache_row: usize,
+    prompt_ids: &[u32],
+    hidden_size: i32,
+    hidden_dtype: Dtype,
+    fingerprint: Option<&str>,
+) -> Result<Option<(i32, Array)>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    if prompt_ids.len() <= 1 {
+        return Ok(None);
+    }
+    let store = config.store();
+    for (restore_len, cached_len) in paged_prefix_restore_candidates(&store, prompt_ids.len())? {
+        let Some(mut spec) = prefix_key_spec_for_caches(
+            &config.model_id,
+            &prompt_ids[..restore_len],
+            cached_len,
+            fingerprint,
+            config.block_size,
+            main_cache,
+        )?
+        else {
+            return Ok(None);
+        };
+        spec.mtp_layers = mtp_layer_specs_for_cache(mtp_cache, cached_len);
+        spec.mtp_last_hidden = Some(mtp_last_hidden_spec(hidden_dtype, hidden_size));
+        let load_start = Instant::now();
+        let observed = store.load_observed(&spec)?;
+        let load_us = load_start.elapsed().as_micros();
+        if observed.status != PagedPrefixLoadStatus::Hit {
+            tracing::trace!(
+                "paged SSD prefix cache MTP miss: main_row={} mtp_row={} tokens={} key={} status={:?} load_us={}",
+                main_cache_row,
+                mtp_cache_row,
+                restore_len,
+                observed.key,
+                observed.status,
+                load_us
+            );
+            continue;
+        };
+        let key = observed.key;
+        let stats = observed
+            .stats
+            .unwrap_or_else(|| empty_prefix_stats(cached_len));
+        let entry = observed
+            .entry
+            .ok_or_else(|| anyhow!("paged prefix observed MTP hit without entry"))?;
+        restore_prefix_entry_for_row(main_cache, &entry, main_cache_row, cached_len)?;
+        mtp_cache.restore_prefix_layers_for_row_on(
+            &entry.mtp_layers,
+            mtp_cache_row,
+            cached_len,
+            (),
+        )?;
+        let last_hidden = entry
+            .mtp_last_hidden
+            .ok_or_else(|| anyhow!("paged prefix MTP hit missing last_hidden"))?;
+        log_paged_prefix_hit(
+            "MTP hit",
+            &key,
+            main_cache_row,
+            Some(mtp_cache_row),
+            restore_len,
+            stats,
+            load_us,
+        );
+        return Ok(Some((cached_len, last_hidden)));
+    }
+    Ok(None)
+}
+
+fn try_save_paged_prefix_for_prompt_with_mtp(
+    config: Option<&PagedPrefixCacheConfig>,
+    main_cache: &[LayerCache],
+    mtp_cache: &MtpCache,
+    last_hidden: &Array,
+    prompt_ids: &[u32],
+    fingerprint: Option<&str>,
+) -> Result<Option<String>> {
+    try_save_paged_prefix_for_prompt_with_mtp_row(
+        config,
+        main_cache,
+        0,
+        mtp_cache,
+        0,
+        last_hidden,
+        prompt_ids,
+        fingerprint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_save_paged_prefix_for_prompt_with_mtp_row(
+    config: Option<&PagedPrefixCacheConfig>,
+    main_cache: &[LayerCache],
+    main_cache_row: usize,
+    mtp_cache: &MtpCache,
+    mtp_cache_row: usize,
+    last_hidden: &Array,
+    prompt_ids: &[u32],
+    fingerprint: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    if prompt_ids.is_empty() {
+        return Ok(None);
+    }
+    let Some(cached_len) = cache_row_cached_len(main_cache, main_cache_row)? else {
+        return Ok(None);
+    };
+    if cached_len == 0 {
+        return Ok(None);
+    }
+    if cached_len != prompt_ids.len() as i32 {
+        anyhow::bail!(
+            "try_save_paged_prefix_for_prompt_with_mtp: main row {main_cache_row} cached_len {cached_len} != token length {}",
+            prompt_ids.len()
+        );
+    }
+    let mtp_cached_len = mtp_cache_row_cached_len(mtp_cache, mtp_cache_row)?;
+    if mtp_cached_len != cached_len {
+        anyhow::bail!(
+            "try_save_paged_prefix_for_prompt_with_mtp: MTP row {mtp_cache_row} cached_len {mtp_cached_len} != main {cached_len}"
+        );
+    }
+    let Some(mut spec) = prefix_key_spec_for_caches(
+        &config.model_id,
+        prompt_ids,
+        cached_len,
+        fingerprint,
+        config.block_size,
+        main_cache,
+    )?
+    else {
+        return Ok(None);
+    };
+    spec.mtp_layers = mtp_layer_specs_for_cache(mtp_cache, cached_len);
+    spec.mtp_last_hidden = Some(PrefixTensorSpec::from_array(last_hidden));
+    let store = config.store();
+    if let Some(key) = store.matching_entry_key(&spec)? {
+        tracing::trace!(
+            "paged SSD prefix cache MTP save skipped: main_row={} mtp_row={} tokens={} key={} status=already_present",
+            main_cache_row,
+            mtp_cache_row,
+            prompt_ids.len(),
+            key
+        );
+        return Ok(None);
+    }
+    let Some((mut entry, cached_len)) = prefix_entry_for_row(main_cache, main_cache_row)? else {
+        return Ok(None);
+    };
+    if cached_len == 0 {
+        return Ok(None);
+    }
+    if cached_len != prompt_ids.len() as i32 {
+        anyhow::bail!(
+            "try_save_paged_prefix_for_prompt_with_mtp: main row {main_cache_row} cached_len {cached_len} != token length {}",
+            prompt_ids.len()
+        );
+    }
+    let (mtp_layers, mtp_cached_len) = mtp_cache.prefix_layers_for_row_on(mtp_cache_row, ())?;
+    if mtp_cached_len != cached_len {
+        anyhow::bail!(
+            "try_save_paged_prefix_for_prompt_with_mtp: MTP row {mtp_cache_row} cached_len {mtp_cached_len} != main {cached_len}"
+        );
+    }
+    entry.mtp_layers = mtp_layers;
+    entry.mtp_last_hidden = Some(last_hidden.clone());
+
+    spec.mtp_layers = entry.mtp_layer_specs();
+    spec.mtp_last_hidden = entry.mtp_last_hidden_spec();
+    let stats = entry.observability_stats(cached_len);
+    let save_start = Instant::now();
+    let (key, saved) = store.save_if_absent(&spec, &entry)?;
+    let save_us = save_start.elapsed().as_micros();
+    if !saved {
+        tracing::trace!(
+            "paged SSD prefix cache MTP save skipped: main_row={} mtp_row={} tokens={} key={} status=already_present",
+            main_cache_row,
+            mtp_cache_row,
+            prompt_ids.len(),
+            key
+        );
+        return Ok(None);
+    }
+    log_paged_prefix_save(
+        "MTP saved",
+        &key,
+        main_cache_row,
+        Some(mtp_cache_row),
+        stats,
+        save_us,
+    );
+    Ok(Some(key))
+}
+
+fn empty_prefix_stats(cached_len: i32) -> PagedPrefixEntryStats {
+    PagedPrefixEntryStats {
+        cached_len,
+        ..PagedPrefixEntryStats::default()
+    }
+}
+
+fn log_paged_prefix_hit(
+    label: &str,
+    key: &str,
+    main_row: usize,
+    mtp_row: Option<usize>,
+    restored_tokens: usize,
+    stats: PagedPrefixEntryStats,
+    load_us: u128,
+) {
+    match mtp_row {
+        Some(mtp_row) => tracing::info!(
+            "paged SSD prefix cache {label}: key={} main_row={} mtp_row={} tokens={} restored={} load_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
+            key,
+            main_row,
+            mtp_row,
+            stats.cached_len,
+            restored_tokens,
+            load_us,
+            stats.payload_bytes,
+            stats.tensor_count,
+            stats.main_layers,
+            stats.full_paged_layers,
+            stats.linear_layers,
+            stats.mla_layers,
+            stats.mtp_layers,
+            stats.full_paged_pages,
+        ),
+        None => tracing::info!(
+            "paged SSD prefix cache {label}: key={} row={} tokens={} restored={} load_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
+            key,
+            main_row,
+            stats.cached_len,
+            restored_tokens,
+            load_us,
+            stats.payload_bytes,
+            stats.tensor_count,
+            stats.main_layers,
+            stats.full_paged_layers,
+            stats.linear_layers,
+            stats.mla_layers,
+            stats.mtp_layers,
+            stats.full_paged_pages,
+        ),
+    }
+}
+
+fn log_paged_prefix_save(
+    label: &str,
+    key: &str,
+    main_row: usize,
+    mtp_row: Option<usize>,
+    stats: PagedPrefixEntryStats,
+    save_us: u128,
+) {
+    match mtp_row {
+        Some(mtp_row) => tracing::info!(
+            "paged SSD prefix cache {label}: key={} main_row={} mtp_row={} tokens={} save_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
+            key,
+            main_row,
+            mtp_row,
+            stats.cached_len,
+            save_us,
+            stats.payload_bytes,
+            stats.tensor_count,
+            stats.main_layers,
+            stats.full_paged_layers,
+            stats.linear_layers,
+            stats.mla_layers,
+            stats.mtp_layers,
+            stats.full_paged_pages,
+        ),
+        None => tracing::info!(
+            "paged SSD prefix cache {label}: key={} row={} tokens={} save_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
+            key,
+            main_row,
+            stats.cached_len,
+            save_us,
+            stats.payload_bytes,
+            stats.tensor_count,
+            stats.main_layers,
+            stats.full_paged_layers,
+            stats.linear_layers,
+            stats.mla_layers,
+            stats.mtp_layers,
+            stats.full_paged_pages,
+        ),
+    }
+}
+
+fn forward_single_text_suffix<M: Model>(
+    model: &M,
+    cache: &mut [LayerCache],
+    prompt_ids: &[u32],
+    start_pos: i32,
+    end_pos: i32,
+    dummy_position_ids: Option<&Array>,
+) -> Result<Array> {
+    if start_pos < 0 || start_pos >= end_pos {
+        anyhow::bail!("forward_single_text_suffix: invalid range [{start_pos}, {end_pos})");
+    }
+    let last_pos = end_pos - 1;
+    if start_pos < last_pos {
+        let prefix_ids = &prompt_ids[start_pos as usize..last_pos as usize];
+        let prefix_len = last_pos - start_pos;
+        let prefix_arr: Array = (prefix_ids, &[1_i32, prefix_len][..]).try_into()?;
+        let prefix_position_ids = if let Some(dummy) = dummy_position_ids {
+            dummy.clone()
+        } else {
+            build_position_ids(start_pos, prefix_len)?
+        };
+        let prefix_hidden = model.forward_text_hidden(
+            &prefix_arr,
+            &prefix_position_ids,
+            None,
+            None,
+            Some(&mut *cache),
+            mlx::StreamOrDevice::default(),
+        )?;
+        mlx::transforms::eval(&[&prefix_hidden])?;
+    }
+
+    let last_ids = &prompt_ids[last_pos as usize..end_pos as usize];
+    let last_arr: Array = (last_ids, &[1_i32, 1_i32][..]).try_into()?;
+    let last_position_ids = if let Some(dummy) = dummy_position_ids {
+        dummy.clone()
+    } else {
+        build_position_ids(last_pos, 1)?
+    };
+    model.forward_on(
+        &last_arr,
+        &last_position_ids,
+        None,
+        None,
+        Some(cache),
+        mlx::StreamOrDevice::default(),
+    )
+}
+
+fn maybe_build_sparse_decode_mask(
+    cache: &[LayerCache],
+    per_row_lens: &[i32],
+) -> Result<Option<Array>> {
+    let Some(pre_offsets) = cache.iter().find_map(|c| match c {
+        LayerCache::Full(kv) => Some(kv.offsets()),
+        LayerCache::Mla(mla) => Some(mla.offsets()),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        pre_offsets.len() == per_row_lens.len(),
+        "maybe_build_sparse_decode_mask: offset rows {} != per_row_lens {}",
+        pre_offsets.len(),
+        per_row_lens.len()
+    );
+    let mask_row_lens: Vec<i32> = pre_offsets
+        .iter()
+        .zip(per_row_lens.iter())
+        .map(|(&offset, &new_len)| {
+            if offset == 0 && new_len == 0 {
+                1
+            } else {
+                offset + new_len
+            }
+        })
+        .collect();
+    let max_real_len = mask_row_lens
+        .iter()
+        .copied()
+        .max()
+        .expect("per_row_lens is non-empty");
+    maybe_build_decode_mask(&mask_row_lens, max_real_len)
+}
+
+fn concat_logits_rows(logit_rows: Vec<Array>) -> Result<Array> {
+    let mut rows = Vec::with_capacity(logit_rows.len());
+    for row in logit_rows {
+        let shape = row.shape();
+        let shape = shape.as_slice();
+        anyhow::ensure!(
+            shape.len() == 1,
+            "concat_logits_rows: expected rank-1 row logits, got rank {}",
+            shape.len()
+        );
+        rows.push(row.reshape(&[1_i32, 1_i32, shape[0]][..])?);
+    }
+    let refs: Vec<&Array> = rows.iter().collect();
+    mlx::ops::shape::concatenate(&refs, 0).map_err(anyhow::Error::from)
+}
+
+fn prefix_restore_groups(
+    prompt_ids: &[Vec<u32>],
+    fingerprints: Option<&[Option<String>]>,
+) -> Result<Vec<Vec<usize>>> {
+    if let Some(fingerprints) = fingerprints {
+        anyhow::ensure!(
+            fingerprints.len() == prompt_ids.len(),
+            "prefix_restore_groups: fingerprints rows {} != prompt rows {}",
+            fingerprints.len(),
+            prompt_ids.len()
+        );
+    }
+
+    let mut groups = Vec::new();
+    let mut grouped = vec![false; prompt_ids.len()];
+    for row in 0..prompt_ids.len() {
+        if grouped[row] {
+            continue;
+        }
+        let row_fingerprint = fingerprints.and_then(|values| values[row].as_deref());
+        let mut group = vec![row];
+        grouped[row] = true;
+        for other in row + 1..prompt_ids.len() {
+            if grouped[other] || prompt_ids[other] != prompt_ids[row] {
+                continue;
+            }
+            let other_fingerprint = fingerprints.and_then(|values| values[other].as_deref());
+            if other_fingerprint != row_fingerprint {
+                continue;
+            }
+            grouped[other] = true;
+            group.push(other);
+        }
+        groups.push(group);
+    }
+    Ok(groups)
+}
+
+struct BatchedTextPrefixReplay<'a> {
+    prompt_ids: &'a [Vec<u32>],
+    dummy_position_ids: Option<&'a Array>,
+    prefix_cache_config: Option<&'a PagedPrefixCacheConfig>,
+}
+
+fn batched_text_input_ids(
+    prompt_ids: &[Vec<u32>],
+    per_row_lens: &[i32],
+    max_len: usize,
+) -> Result<Array> {
+    anyhow::ensure!(
+        prompt_ids.len() == per_row_lens.len(),
+        "batched_text_input_ids: prompt rows {} != lens {}",
+        prompt_ids.len(),
+        per_row_lens.len()
+    );
+    let b = prompt_ids.len();
+    let mut flat = vec![0_i32; b * max_len];
+    for (row, ids) in prompt_ids.iter().enumerate() {
+        let len = usize::try_from(per_row_lens[row])
+            .map_err(|_| anyhow!("batched_text_input_ids: negative row length"))?;
+        anyhow::ensure!(
+            len <= ids.len(),
+            "batched_text_input_ids: row {row} len {len} exceeds prompt len {}",
+            ids.len()
+        );
+        anyhow::ensure!(
+            len <= max_len,
+            "batched_text_input_ids: row {row} len {len} exceeds max_len {max_len}"
+        );
+        for col in 0..len {
+            flat[row * max_len + col] = ids[col] as i32;
+        }
+    }
+    (&flat[..], &[b as i32, max_len as i32][..])
+        .try_into()
+        .map_err(anyhow::Error::from)
+}
+
+fn try_save_batched_text_prefix_row(
+    prefix_cache_config: Option<&PagedPrefixCacheConfig>,
+    cache: &[LayerCache],
+    row: usize,
+    prompt_ids: &[u32],
+    label: &str,
+) {
+    match try_save_paged_prefix_for_prompt_row(prefix_cache_config, cache, row, prompt_ids, None) {
+        Ok(Some(key)) => {
+            tracing::debug!(
+                "paged SSD prefix cache saved batched text {label}: row={row} key={key}"
+            );
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(
+                "paged SSD prefix cache batched text {label} save skipped: row={row} {err:#}"
+            );
+        }
+    }
+}
+
+fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
+    model: &M,
+    cache: &mut [LayerCache],
+    prompt_ids: &[Vec<u32>],
+    prefix_cache_config: Option<&PagedPrefixCacheConfig>,
+) -> Result<Array> {
+    let b = prompt_ids.len();
+    anyhow::ensure!(
+        b > 0,
+        "forward_batched_text_cold_miss_with_paged_prefix: empty batch"
+    );
+    anyhow::ensure!(
+        prompt_ids.iter().all(|ids| ids.len() > 1),
+        "forward_batched_text_cold_miss_with_paged_prefix: prompt length must be > 1"
+    );
+
+    let mut prefix_lens = Vec::with_capacity(b);
+    for ids in prompt_ids {
+        prefix_lens.push(
+            i32::try_from(ids.len() - 1)
+                .map_err(|_| anyhow!("batched text prefix length exceeds i32"))?,
+        );
+    }
+    let max_prefix_len = prefix_lens
+        .iter()
+        .copied()
+        .max()
+        .expect("batch is non-empty");
+    let prefix_input_ids =
+        batched_text_input_ids(prompt_ids, &prefix_lens, max_prefix_len as usize)?;
+    let attention_mask = build_batch_attention_mask(&prefix_lens, max_prefix_len, Dtype::Bfloat16)?;
+    let linear_attention_mask = build_batch_linear_mask(&prefix_lens, max_prefix_len)?;
+    let position_ids = build_position_ids_batched(&prefix_lens, max_prefix_len)?;
+    let prefix_logits = model.batched_prefill(
+        &prefix_input_ids,
+        &position_ids,
+        &attention_mask,
+        &linear_attention_mask,
+        &prefix_lens,
+        Some(&mut *cache),
+        mlx::StreamOrDevice::default(),
+    )?;
+    mlx::transforms::eval(&[&prefix_logits])?;
+
+    for (row, ids) in prompt_ids.iter().enumerate() {
+        try_save_batched_text_prefix_row(
+            prefix_cache_config,
+            cache,
+            row,
+            &ids[..ids.len() - 1],
+            "prefix",
+        );
+    }
+
+    let last_tokens: Vec<i32> = prompt_ids
+        .iter()
+        .map(|ids| ids.last().copied().expect("prompt len > 1") as i32)
+        .collect();
+    let last_input_ids: Array = (&last_tokens[..], &[b as i32, 1_i32][..]).try_into()?;
+    let per_row_lens = vec![1_i32; b];
+    let position_ids = build_decode_position_ids(&prefix_lens)?;
+    let decode_mask = maybe_build_sparse_decode_mask(cache, &per_row_lens)?;
+    let logits = model.forward_on(
+        &last_input_ids,
+        &position_ids,
+        Some(&per_row_lens),
+        decode_mask.as_ref(),
+        Some(&mut *cache),
+        mlx::StreamOrDevice::default(),
+    )?;
+    mlx::transforms::eval(&[&logits])?;
+
+    for (row, ids) in prompt_ids.iter().enumerate() {
+        try_save_batched_text_prefix_row(prefix_cache_config, cache, row, ids, "prompt");
+    }
+
+    Ok(logits)
+}
+
+fn forward_batched_text_with_paged_prefix<M: Model>(
+    model: &M,
+    cache: &mut [LayerCache],
+    input: BatchedTextPrefixReplay<'_>,
+) -> Result<Array> {
+    let BatchedTextPrefixReplay {
+        prompt_ids,
+        dummy_position_ids,
+        prefix_cache_config,
+    } = input;
+    anyhow::ensure!(
+        !prompt_ids.is_empty(),
+        "forward_batched_text_with_paged_prefix: empty batch"
+    );
+    let b = prompt_ids.len();
+    let mut replay_from = vec![0_usize; b];
+    for group in prefix_restore_groups(prompt_ids, None)? {
+        let first_row = group[0];
+        let restored = try_restore_paged_prefix_for_prompt_rows(
+            prefix_cache_config,
+            cache,
+            &group,
+            &prompt_ids[first_row],
+            None,
+        )?
+        .unwrap_or(0) as usize;
+        for row in group {
+            replay_from[row] = restored;
+        }
+    }
+
+    if dummy_position_ids.is_none()
+        && replay_from.iter().all(|&pos| pos == 0)
+        && prompt_ids.iter().all(|ids| ids.len() > 1)
+    {
+        return forward_batched_text_cold_miss_with_paged_prefix(
+            model,
+            cache,
+            prompt_ids,
+            prefix_cache_config,
+        );
+    }
+
+    let max_len = prompt_ids.iter().map(Vec::len).max().unwrap_or(0);
+    let mut final_logits: Vec<Option<Array>> = (0..b).map(|_| None).collect();
+
+    for pos in 0..max_len {
+        let mut token_flat = vec![0_i32; b];
+        let mut per_row_lens = vec![0_i32; b];
+        let mut per_row_pos = vec![0_i32; b];
+        let mut has_active = false;
+
+        for (row, ids) in prompt_ids.iter().enumerate() {
+            if pos < replay_from[row] || pos >= ids.len() {
+                continue;
+            }
+            token_flat[row] = ids[pos] as i32;
+            per_row_lens[row] = 1;
+            per_row_pos[row] = pos as i32;
+            has_active = true;
+        }
+        if !has_active {
+            continue;
+        }
+
+        let input_ids: Array = (&token_flat[..], &[b as i32, 1_i32][..]).try_into()?;
+        let position_ids = if let Some(dummy) = dummy_position_ids {
+            dummy.clone()
+        } else {
+            build_decode_position_ids(&per_row_pos)?
+        };
+        let decode_mask = maybe_build_sparse_decode_mask(cache, &per_row_lens)?;
+        let logits = model.forward_on(
+            &input_ids,
+            &position_ids,
+            Some(&per_row_lens),
+            decode_mask.as_ref(),
+            Some(&mut *cache),
+            mlx::StreamOrDevice::default(),
+        )?;
+        mlx::transforms::eval(&[&logits])?;
+
+        for (row, ids) in prompt_ids.iter().enumerate() {
+            if per_row_lens[row] == 0 {
+                continue;
+            }
+            if ids.len() > 1 && pos + 2 == ids.len() {
+                match try_save_paged_prefix_for_prompt_row(
+                    prefix_cache_config,
+                    cache,
+                    row,
+                    &ids[..ids.len() - 1],
+                    None,
+                ) {
+                    Ok(Some(key)) => {
+                        tracing::debug!(
+                            "paged SSD prefix cache saved batched text prefix: row={row} key={key}"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            "paged SSD prefix cache batched text prefix save skipped: row={row} {err:#}"
+                        );
+                    }
+                }
+            }
+            if pos + 1 == ids.len() {
+                match try_save_paged_prefix_for_prompt_row(
+                    prefix_cache_config,
+                    cache,
+                    row,
+                    ids,
+                    None,
+                ) {
+                    Ok(Some(key)) => {
+                        tracing::debug!(
+                            "paged SSD prefix cache saved batched text prompt: row={row} key={key}"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            "paged SSD prefix cache batched text prompt save skipped: row={row} {err:#}"
+                        );
+                    }
+                }
+                final_logits[row] = Some(slice_logits_row(&logits, row)?);
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(b);
+    for (row, logits) in final_logits.into_iter().enumerate() {
+        rows.push(logits.ok_or_else(|| {
+            anyhow!("forward_batched_text_with_paged_prefix: missing final logits for row {row}")
+        })?);
+    }
+    concat_logits_rows(rows)
+}
+
+fn build_vl_position_stream(
+    prompt_ids: &[i32],
+    grid_thw: GridThwSlice<'_>,
+    image_token_id: i32,
+    image_spatial_merge_size: i32,
+) -> Result<Vec<i32>> {
+    let len = prompt_ids.len();
+    anyhow::ensure!(!prompt_ids.is_empty(), "VL prefix replay: empty prompt row");
+    match grid_thw {
+        Some(grids) if !grids.is_empty() => {
+            let position_ids =
+                build_position_ids_vl(prompt_ids, grids, image_token_id, image_spatial_merge_size)?;
+            position_ids
+                .to_vec::<i32>()
+                .map_err(|e| anyhow!("VL prefix replay position_ids to_vec failed: {e}"))
+        }
+        _ => {
+            let mut flat = vec![0_i32; 3 * len];
+            for col in 0..len {
+                flat[col] = col as i32;
+                flat[len + col] = col as i32;
+                flat[2 * len + col] = col as i32;
+            }
+            Ok(flat)
+        }
+    }
+}
+
+struct BatchedVlPrefixReplay<'a> {
+    prompt_ids: &'a [Vec<i32>],
+    pixel_values: &'a [PixelValuesSlice<'a>],
+    grid_thw: &'a [GridThwSlice<'a>],
+    image_token_id: i32,
+    image_spatial_merge_size: i32,
+    dummy_position_ids: Option<&'a Array>,
+    prefix_cache_config: Option<&'a PagedPrefixCacheConfig>,
+}
+
+fn batched_vl_input_ids(
+    prompt_ids: &[Vec<i32>],
+    per_row_lens: &[i32],
+    max_len: usize,
+) -> Result<Array> {
+    anyhow::ensure!(
+        prompt_ids.len() == per_row_lens.len(),
+        "batched_vl_input_ids: prompt rows {} != lens {}",
+        prompt_ids.len(),
+        per_row_lens.len()
+    );
+    let b = prompt_ids.len();
+    let mut flat = vec![0_i32; b * max_len];
+    for (row, ids) in prompt_ids.iter().enumerate() {
+        let len = usize::try_from(per_row_lens[row])
+            .map_err(|_| anyhow!("batched_vl_input_ids: negative row length"))?;
+        anyhow::ensure!(
+            len <= ids.len(),
+            "batched_vl_input_ids: row {row} len {len} exceeds prompt len {}",
+            ids.len()
+        );
+        anyhow::ensure!(
+            len <= max_len,
+            "batched_vl_input_ids: row {row} len {len} exceeds max_len {max_len}"
+        );
+        for col in 0..len {
+            flat[row * max_len + col] = ids[col];
+        }
+    }
+    (&flat[..], &[b as i32, max_len as i32][..])
+        .try_into()
+        .map_err(anyhow::Error::from)
+}
+
+fn batched_vl_last_position_ids(
+    prompt_ids: &[Vec<i32>],
+    grid_thw: &[GridThwSlice<'_>],
+    image_token_id: i32,
+    image_spatial_merge_size: i32,
+) -> Result<Array> {
+    let b = prompt_ids.len();
+    anyhow::ensure!(
+        grid_thw.len() == b,
+        "batched_vl_last_position_ids: grid rows {} != batch {b}",
+        grid_thw.len()
+    );
+    let mut flat = vec![0_i32; 3 * b];
+    for row in 0..b {
+        let ids = &prompt_ids[row];
+        anyhow::ensure!(
+            !ids.is_empty(),
+            "batched_vl_last_position_ids: row {row} has empty prompt"
+        );
+        let row_stream =
+            build_vl_position_stream(ids, grid_thw[row], image_token_id, image_spatial_merge_size)?;
+        let pos = ids.len() - 1;
+        for stream in 0..3 {
+            flat[stream * b + row] = row_stream[stream * ids.len() + pos];
+        }
+    }
+    (&flat[..], &[3_i32, b as i32, 1_i32][..])
+        .try_into()
+        .map_err(anyhow::Error::from)
+}
+
+fn try_save_batched_vl_prefix_row(
+    prefix_cache_config: Option<&PagedPrefixCacheConfig>,
+    cache: &[LayerCache],
+    row: usize,
+    prompt_ids: &[u32],
+    fingerprint: Option<&str>,
+    label: &str,
+) {
+    match try_save_paged_prefix_for_prompt_row(
+        prefix_cache_config,
+        cache,
+        row,
+        prompt_ids,
+        fingerprint,
+    ) {
+        Ok(Some(key)) => {
+            tracing::debug!("paged SSD prefix cache saved batched VL {label}: row={row} key={key}");
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(
+                "paged SSD prefix cache batched VL {label} save skipped: row={row} {err:#}"
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
+    model: &M,
+    cache: &mut [LayerCache],
+    prompt_ids: &[Vec<i32>],
+    prompt_ids_u32: &[Vec<u32>],
+    pixel_values: &[PixelValuesSlice<'_>],
+    grid_thw: &[GridThwSlice<'_>],
+    image_token_id: i32,
+    image_spatial_merge_size: i32,
+    dummy_position_ids: Option<&Array>,
+    prefix_cache_config: Option<&PagedPrefixCacheConfig>,
+    fingerprints: &[Option<String>],
+) -> Result<Array> {
+    let b = prompt_ids.len();
+    anyhow::ensure!(
+        b > 0,
+        "forward_batched_vl_cold_miss_with_paged_prefix: empty batch"
+    );
+    anyhow::ensure!(
+        prompt_ids.iter().all(|ids| ids.len() > 1),
+        "forward_batched_vl_cold_miss_with_paged_prefix: prompt length must be > 1"
+    );
+    anyhow::ensure!(
+        prompt_ids_u32.len() == b
+            && pixel_values.len() == b
+            && grid_thw.len() == b
+            && fingerprints.len() == b,
+        "forward_batched_vl_cold_miss_with_paged_prefix: per-row inputs must match batch"
+    );
+
+    let mut prefix_lens = Vec::with_capacity(b);
+    for ids in prompt_ids {
+        prefix_lens.push(
+            i32::try_from(ids.len() - 1)
+                .map_err(|_| anyhow!("batched VL prefix length exceeds i32"))?,
+        );
+    }
+    let max_prefix_len = prefix_lens
+        .iter()
+        .copied()
+        .max()
+        .expect("batch is non-empty");
+    let max_prefix_len_usize = usize::try_from(max_prefix_len)
+        .map_err(|_| anyhow!("batched VL max prefix length is negative"))?;
+    let prefix_input_ids = batched_vl_input_ids(prompt_ids, &prefix_lens, max_prefix_len_usize)?;
+    let prefix_prompt_refs: Vec<&[i32]> = prompt_ids
+        .iter()
+        .zip(prefix_lens.iter())
+        .map(|(ids, &len)| &ids[..len as usize])
+        .collect();
+    let prefix_position_ids = if let Some(dummy) = dummy_position_ids {
+        dummy.clone()
+    } else {
+        build_position_ids_vl_batched(
+            &prefix_prompt_refs,
+            grid_thw,
+            image_token_id,
+            image_spatial_merge_size,
+            max_prefix_len,
+        )?
+    };
+    let attention_mask = build_batch_attention_mask(&prefix_lens, max_prefix_len, Dtype::Bfloat16)?;
+    let linear_attention_mask = build_batch_linear_mask(&prefix_lens, max_prefix_len)?;
+    let prefix_logits = model.batched_prefill_vl(
+        &prefix_input_ids,
+        &prefix_position_ids,
+        &attention_mask,
+        &linear_attention_mask,
+        &prefix_lens,
+        pixel_values,
+        grid_thw,
+        image_token_id,
+        Some(&mut *cache),
+        mlx::StreamOrDevice::default(),
+    )?;
+    mlx::transforms::eval(&[&prefix_logits])?;
+
+    for row in 0..b {
+        try_save_batched_vl_prefix_row(
+            prefix_cache_config,
+            cache,
+            row,
+            &prompt_ids_u32[row][..prompt_ids_u32[row].len() - 1],
+            fingerprints[row].as_deref(),
+            "prefix",
+        );
+    }
+
+    let last_tokens: Vec<i32> = prompt_ids
+        .iter()
+        .map(|ids| ids.last().copied().expect("prompt len > 1"))
+        .collect();
+    let last_input_ids: Array = (&last_tokens[..], &[b as i32, 1_i32][..]).try_into()?;
+    let per_row_lens = vec![1_i32; b];
+    let position_ids = if let Some(dummy) = dummy_position_ids {
+        dummy.clone()
+    } else {
+        batched_vl_last_position_ids(
+            prompt_ids,
+            grid_thw,
+            image_token_id,
+            image_spatial_merge_size,
+        )?
+    };
+    let decode_mask = maybe_build_sparse_decode_mask(cache, &per_row_lens)?;
+    let logits = model.forward_vl_chunk(
+        &last_input_ids,
+        &position_ids,
+        Some(&per_row_lens),
+        decode_mask.as_ref(),
+        Some(&mut *cache),
+        None,
+        image_token_id,
+        mlx::StreamOrDevice::default(),
+    )?;
+    mlx::transforms::eval(&[&logits])?;
+
+    for row in 0..b {
+        try_save_batched_vl_prefix_row(
+            prefix_cache_config,
+            cache,
+            row,
+            &prompt_ids_u32[row],
+            fingerprints[row].as_deref(),
+            "prompt",
+        );
+    }
+
+    Ok(logits)
+}
+
+fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
+    model: &M,
+    cache: &mut [LayerCache],
+    input: BatchedVlPrefixReplay<'_>,
+) -> Result<Array> {
+    let BatchedVlPrefixReplay {
+        prompt_ids,
+        pixel_values,
+        grid_thw,
+        image_token_id,
+        image_spatial_merge_size,
+        dummy_position_ids,
+        prefix_cache_config,
+    } = input;
+    let b = prompt_ids.len();
+    anyhow::ensure!(b > 0, "forward_batched_vl_with_paged_prefix: empty batch");
+    anyhow::ensure!(
+        pixel_values.len() == b,
+        "forward_batched_vl_with_paged_prefix: pixel_values rows {} != batch {b}",
+        pixel_values.len()
+    );
+    anyhow::ensure!(
+        grid_thw.len() == b,
+        "forward_batched_vl_with_paged_prefix: grid_thw rows {} != batch {b}",
+        grid_thw.len()
+    );
+
+    let prompt_ids_u32: Vec<Vec<u32>> = prompt_ids
+        .iter()
+        .map(|ids| ids.iter().map(|&tok| tok as u32).collect())
+        .collect();
+    let mut fingerprints = Vec::with_capacity(b);
+    for row in 0..b {
+        let fingerprint = if prefix_cache_config.is_some() {
+            paged_prefix_fingerprint_for_request(
+                pixel_values[row],
+                grid_thw[row],
+                image_token_id,
+                image_spatial_merge_size,
+            )?
+        } else {
+            None
+        };
+        fingerprints.push(fingerprint);
+    }
+
+    let mut replay_from = vec![0_usize; b];
+    for group in prefix_restore_groups(&prompt_ids_u32, Some(&fingerprints))? {
+        let first_row = group[0];
+        let restored = try_restore_paged_prefix_for_prompt_rows(
+            prefix_cache_config,
+            cache,
+            &group,
+            &prompt_ids_u32[first_row],
+            fingerprints[first_row].as_deref(),
+        )?
+        .unwrap_or(0) as usize;
+        for row in group {
+            replay_from[row] = restored;
+        }
+    }
+
+    if replay_from.iter().all(|&pos| pos == 0)
+        && prompt_ids.iter().all(|ids| ids.len() > 1)
+        && prompt_ids
+            .iter()
+            .all(|ids| ids.last().copied() != Some(image_token_id))
+    {
+        return forward_batched_vl_cold_miss_with_paged_prefix(
+            model,
+            cache,
+            prompt_ids,
+            &prompt_ids_u32,
+            pixel_values,
+            grid_thw,
+            image_token_id,
+            image_spatial_merge_size,
+            dummy_position_ids,
+            prefix_cache_config,
+            &fingerprints,
+        );
+    }
+
+    let position_streams = if dummy_position_ids.is_some() {
+        Vec::new()
+    } else {
+        let mut streams = Vec::with_capacity(b);
+        for row in 0..b {
+            streams.push(build_vl_position_stream(
+                &prompt_ids[row],
+                grid_thw[row],
+                image_token_id,
+                image_spatial_merge_size,
+            )?);
+        }
+        streams
+    };
+
+    let mut vision_embeds_full = Vec::with_capacity(b);
+    for row in 0..b {
+        let embeds = match (pixel_values[row], grid_thw[row]) {
+            (Some(pv), Some(grids)) if !grids.is_empty() => {
+                Some(model.compute_vision_embeds(pv, grids, mlx::StreamOrDevice::default())?)
+            }
+            (Some(_), None) => {
+                anyhow::bail!(
+                    "forward_batched_vl_with_paged_prefix: row {row} has pixel_values but grid_thw is None"
+                );
+            }
+            _ => None,
+        };
+        vision_embeds_full.push(embeds);
+    }
+
+    let max_len = prompt_ids.iter().map(Vec::len).max().unwrap_or(0);
+    let mut final_logits: Vec<Option<Array>> = (0..b).map(|_| None).collect();
+
+    for pos in 0..max_len {
+        let mut token_flat = vec![0_i32; b];
+        let mut per_row_lens = vec![0_i32; b];
+        let mut has_active = false;
+
+        for row in 0..b {
+            let ids = &prompt_ids[row];
+            if pos < replay_from[row] || pos >= ids.len() {
+                continue;
+            }
+            token_flat[row] = ids[pos];
+            per_row_lens[row] = 1;
+            has_active = true;
+        }
+        if !has_active {
+            continue;
+        }
+
+        let input_ids: Array = (&token_flat[..], &[b as i32, 1_i32][..]).try_into()?;
+        let position_ids = if let Some(dummy) = dummy_position_ids {
+            dummy.clone()
+        } else {
+            let mut flat = vec![0_i32; 3 * b];
+            for row in 0..b {
+                if per_row_lens[row] == 0 {
+                    continue;
+                }
+                let row_len = prompt_ids[row].len();
+                let row_stream = &position_streams[row];
+                for stream in 0..3 {
+                    flat[stream * b + row] = row_stream[stream * row_len + pos];
+                }
+            }
+            (&flat[..], &[3_i32, b as i32, 1_i32][..]).try_into()?
+        };
+
+        let mut vision_slices = Vec::new();
+        for row in 0..b {
+            if per_row_lens[row] == 0 || token_flat[row] != image_token_id {
+                continue;
+            }
+            let embeds = vision_embeds_full[row].as_ref().ok_or_else(|| {
+                anyhow!(
+                    "forward_batched_vl_with_paged_prefix: row {row} image token without vision embeds"
+                )
+            })?;
+            let image_row = prompt_ids[row][..pos]
+                .iter()
+                .filter(|&&tok| tok == image_token_id)
+                .count();
+            vision_slices.push(slice_vision_embeds_rows(embeds, image_row, image_row + 1)?);
+        }
+        let vision_embeds_slice = match vision_slices.len() {
+            0 => None,
+            1 => vision_slices.pop(),
+            _ => {
+                let refs: Vec<&Array> = vision_slices.iter().collect();
+                Some(
+                    mlx::ops::shape::concatenate(&refs, 0)
+                        .map_err(|e| anyhow!("VL prefix replay vision concatenate failed: {e}"))?,
+                )
+            }
+        };
+
+        let decode_mask = maybe_build_sparse_decode_mask(cache, &per_row_lens)?;
+        let logits = model.forward_vl_chunk(
+            &input_ids,
+            &position_ids,
+            Some(&per_row_lens),
+            decode_mask.as_ref(),
+            Some(&mut *cache),
+            vision_embeds_slice.as_ref(),
+            image_token_id,
+            mlx::StreamOrDevice::default(),
+        )?;
+        mlx::transforms::eval(&[&logits])?;
+
+        for row in 0..b {
+            if per_row_lens[row] == 0 {
+                continue;
+            }
+            let ids = &prompt_ids[row];
+            let ids_u32 = &prompt_ids_u32[row];
+            let fingerprint = fingerprints[row].as_deref();
+            if ids.len() > 1 && pos + 2 == ids.len() {
+                match try_save_paged_prefix_for_prompt_row(
+                    prefix_cache_config,
+                    cache,
+                    row,
+                    &ids_u32[..ids_u32.len() - 1],
+                    fingerprint,
+                ) {
+                    Ok(Some(key)) => {
+                        tracing::debug!(
+                            "paged SSD prefix cache saved batched VL prefix: row={row} key={key}"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            "paged SSD prefix cache batched VL prefix save skipped: row={row} {err:#}"
+                        );
+                    }
+                }
+            }
+            if pos + 1 == ids.len() {
+                match try_save_paged_prefix_for_prompt_row(
+                    prefix_cache_config,
+                    cache,
+                    row,
+                    ids_u32,
+                    fingerprint,
+                ) {
+                    Ok(Some(key)) => {
+                        tracing::debug!(
+                            "paged SSD prefix cache saved batched VL prompt: row={row} key={key}"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            "paged SSD prefix cache batched VL prompt save skipped: row={row} {err:#}"
+                        );
+                    }
+                }
+                final_logits[row] = Some(slice_logits_row(&logits, row)?);
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(b);
+    for (row, logits) in final_logits.into_iter().enumerate() {
+        rows.push(logits.ok_or_else(|| {
+            anyhow!("forward_batched_vl_with_paged_prefix: missing final logits for row {row}")
+        })?);
+    }
+    concat_logits_rows(rows)
+}
+
+fn count_image_pad_i32(tokens: &[i32], image_token_id: i32) -> usize {
+    tokens.iter().filter(|&&tok| tok == image_token_id).count()
+}
+
+fn slice_vision_embeds_for_image_pads(
+    vision_embeds_full: Option<&Array>,
+    start: usize,
+    count: usize,
+) -> Result<Option<Array>> {
+    if count == 0 {
+        return Ok(None);
+    }
+    let ve_full = vision_embeds_full
+        .ok_or_else(|| anyhow!("slice_vision_embeds_for_image_pads: image pads without embeds"))?;
+    Ok(Some(slice_vision_embeds_rows(
+        ve_full,
+        start,
+        start + count,
+    )?))
+}
+
+struct SingleVlSuffixInput<'a> {
+    prompt_ids: &'a [i32],
+    start_pos: i32,
+    end_pos: i32,
+    position_ids_full: &'a Array,
+    position_ids_is_dummy: bool,
+    vision_embeds_full: Option<&'a Array>,
+    image_token_id: i32,
+}
+
+fn forward_single_vl_suffix<M: Model + DenseVlMethods>(
+    model: &M,
+    cache: &mut [LayerCache],
+    input: SingleVlSuffixInput<'_>,
+) -> Result<Array> {
+    let SingleVlSuffixInput {
+        prompt_ids,
+        start_pos,
+        end_pos,
+        position_ids_full,
+        position_ids_is_dummy,
+        vision_embeds_full,
+        image_token_id,
+    } = input;
+    if start_pos < 0 || start_pos >= end_pos {
+        anyhow::bail!("forward_single_vl_suffix: invalid range [{start_pos}, {end_pos})");
+    }
+    let last_pos = end_pos - 1;
+    let image_pads_before = count_image_pad_i32(&prompt_ids[..start_pos as usize], image_token_id);
+    let mut image_pad_cursor = image_pads_before;
+
+    if start_pos < last_pos {
+        let prefix_ids = &prompt_ids[start_pos as usize..last_pos as usize];
+        let prefix_len = last_pos - start_pos;
+        let prefix_arr: Array = (prefix_ids, &[1_i32, prefix_len][..]).try_into()?;
+        let prefix_position_ids = if position_ids_is_dummy {
+            position_ids_full.clone()
+        } else {
+            slice_pos_ids_axis2(position_ids_full, start_pos, last_pos)?
+        };
+        let prefix_image_pads = count_image_pad_i32(prefix_ids, image_token_id);
+        let prefix_vision_embeds = slice_vision_embeds_for_image_pads(
+            vision_embeds_full,
+            image_pad_cursor,
+            prefix_image_pads,
+        )?;
+        image_pad_cursor += prefix_image_pads;
+        let prefix_hidden = model.forward_vl_hidden(
+            &prefix_arr,
+            &prefix_position_ids,
+            None,
+            None,
+            Some(&mut *cache),
+            prefix_vision_embeds.as_ref(),
+            image_token_id,
+            mlx::StreamOrDevice::default(),
+        )?;
+        mlx::transforms::eval(&[&prefix_hidden])?;
+    }
+
+    let last_ids = &prompt_ids[last_pos as usize..end_pos as usize];
+    let last_arr: Array = (last_ids, &[1_i32, 1_i32][..]).try_into()?;
+    let last_position_ids = if position_ids_is_dummy {
+        position_ids_full.clone()
+    } else {
+        slice_pos_ids_axis2(position_ids_full, last_pos, end_pos)?
+    };
+    let last_image_pads = count_image_pad_i32(last_ids, image_token_id);
+    let last_vision_embeds =
+        slice_vision_embeds_for_image_pads(vision_embeds_full, image_pad_cursor, last_image_pads)?;
+
+    model.forward_vl_chunk(
+        &last_arr,
+        &last_position_ids,
+        None,
+        None,
+        Some(cache),
+        last_vision_embeds.as_ref(),
+        image_token_id,
+        mlx::StreamOrDevice::default(),
+    )
+}
+
 /// Fixed-capacity scheduler holding up to `b_max` in-flight requests.
 ///
 /// 3a is single-threaded only — no `Send + Sync` impls. A later sub-phase
@@ -541,8 +2360,7 @@ pub struct Scheduler<M: Model> {
     /// Reusable placeholder for models that derive positions internally and
     /// do not consume caller-built MRoPE position ids.
     dummy_position_ids: Option<Array>,
-    /// Optional single-request MTP runtime state. Present only for the
-    /// `b_max=1` scheduler-internal MTP path.
+    /// Optional row-scoped MTP runtime state for active speculative rows.
     mtp_state: Option<SchedulerMtpState>,
     poisoned: bool,
     /// Upper bound on `prompt_len + max_new_tokens` per request, computed
@@ -563,6 +2381,10 @@ pub struct Scheduler<M: Model> {
     /// Count of admits rejected by the memory budget gate. Used by T3
     /// /healthz. (B1-p2.5)
     pub(crate) memory_budget_exceeded_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Optional paged SSD prefix cache. When set, full-attention KV caches use
+    /// paged storage; text-only single-row prefill can restore/save prompt
+    /// prefixes through the on-disk store.
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     _marker: PhantomData<fn(&M) -> ()>,
 }
 
@@ -655,8 +2477,15 @@ impl<M: Model> Scheduler<M> {
             budget_state,
             meta,
             memory_budget_exceeded_count,
+            paged_prefix_cache: None,
             _marker: PhantomData,
         })
+    }
+
+    pub fn enable_paged_prefix_cache(&mut self, config: PagedPrefixCacheConfig) -> Result<()> {
+        config.validate()?;
+        self.paged_prefix_cache = Some(config);
+        Ok(())
     }
 
     /// Seed the PRNG state for `row_idx` from `seed`.
@@ -741,7 +2570,13 @@ impl<M: Model> Scheduler<M> {
         dtype: Dtype,
         turboquant_bits: Option<TurboQuantKVBits>,
     ) -> Result<Vec<LayerCache>> {
+        if self.paged_prefix_cache.is_some() && turboquant_bits.is_some() {
+            anyhow::bail!("paged SSD prefix cache is mutually exclusive with TurboQuant KV cache");
+        }
         let mut cache = model.make_cache(batch, cap, dtype)?;
+        if let Some(config) = &self.paged_prefix_cache {
+            enable_paged_kv_caches(&mut cache, config.block_size, config.max_pages)?;
+        }
         if let Some(bits) = turboquant_bits {
             enable_turboquant_kv_caches(&mut cache, bits)?;
         }
@@ -889,21 +2724,18 @@ impl<M: Model> Scheduler<M> {
         self.slots.iter().filter_map(|s| s.as_ref()).collect()
     }
 
-    pub(crate) fn mtp_single_active_text_greedy_eligible(&self) -> bool {
-        if self.b_max != 1 {
-            return false;
+    pub(crate) fn mtp_batch_active_greedy_eligible(&self) -> bool {
+        let mut saw_active = false;
+        for state in self.slots.iter().filter_map(|slot| slot.as_ref()) {
+            saw_active = true;
+            if state.finished
+                || !state.generated_tokens.is_empty()
+                || !state.sampler.is_pipelinable()
+            {
+                return false;
+            }
         }
-        let mut active = self.slots.iter().filter_map(|slot| slot.as_ref());
-        let Some(state) = active.next() else {
-            return false;
-        };
-        if active.next().is_some() {
-            return false;
-        }
-        !state.finished
-            && state.pixel_values.is_none()
-            && state.image_grid_thw.is_none()
-            && state.sampler.is_pipelinable()
+        saw_active
     }
 
     /// Look up by id. `None` if the id was never admitted or has been evicted.
@@ -1236,15 +3068,21 @@ impl<M: Model> Scheduler<M> {
             ));
         }
         let row_idx = active_rows[0];
-        let (id, prompt_ids, max_new_tokens, sampler, stop_token_ids, prefill_chunk_size) = {
+        let (
+            id,
+            prompt_ids,
+            max_new_tokens,
+            sampler,
+            stop_token_ids,
+            prefill_chunk_size,
+            pixel_values,
+            image_grid_thw,
+            image_spatial_merge_size,
+            image_token_id,
+        ) = {
             let state = self.slots[row_idx]
                 .as_ref()
                 .expect("active row implies slot is Some");
-            if state.pixel_values.is_some() {
-                return Err(anyhow!(
-                    "prefill_admitted_mtp_single supports text-only requests"
-                ));
-            }
             (
                 state.id,
                 state.prompt_ids.clone(),
@@ -1252,6 +3090,10 @@ impl<M: Model> Scheduler<M> {
                 state.sampler,
                 state.stop_token_ids.clone(),
                 state.prefill_chunk_size,
+                state.pixel_values.clone(),
+                state.image_grid_thw.clone(),
+                state.image_spatial_merge_size,
+                state.image_token_id,
             )
         };
         if prompt_ids.is_empty() {
@@ -1259,12 +3101,54 @@ impl<M: Model> Scheduler<M> {
                 "prefill_admitted_mtp_single: prompt_ids cannot be empty"
             ));
         }
+        if pixel_values.is_none() && image_grid_thw.is_some() {
+            return Err(anyhow!(
+                "prefill_admitted_mtp_single: image_grid_thw present but pixel_values is None"
+            ));
+        }
         MtpSpeculativeConfig::new(cfg.max_draft_tokens, sampler)?;
+        let is_vl = pixel_values.is_some();
+        let prompt_ids_i32: Vec<i32> = if is_vl {
+            prompt_ids.iter().map(|&t| t as i32).collect()
+        } else {
+            Vec::new()
+        };
+        let prefix_fingerprint = if self.paged_prefix_cache.is_some() {
+            paged_prefix_fingerprint_for_request(
+                pixel_values.as_deref(),
+                image_grid_thw.as_deref(),
+                image_token_id,
+                image_spatial_merge_size,
+            )?
+        } else {
+            None
+        };
+        let vl_position_ids_full = if is_vl {
+            if model.requires_position_ids() {
+                let grids = image_grid_thw.as_deref().ok_or_else(|| {
+                    anyhow!(
+                        "prefill_admitted_mtp_single: pixel_values present but grid_thw is None"
+                    )
+                })?;
+                Some(build_position_ids_vl(
+                    &prompt_ids_i32,
+                    grids,
+                    image_token_id,
+                    image_spatial_merge_size,
+                )?)
+            } else {
+                Some(self.reusable_dummy_position_ids()?)
+            }
+        } else {
+            None
+        };
+        let vl_position_ids_is_dummy = is_vl && !model.requires_position_ids();
+        let mut vl_vision_embeds_full: Option<Array> = None;
 
         let prompt_len = prompt_ids.len();
         let cap =
             (prompt_len.saturating_add(max_new_tokens) as i32).max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
-        let dtype = Dtype::Bfloat16;
+        let dtype = model.cache_dtype();
         if self.cache.is_some() {
             return Err(anyhow!(
                 "prefill_admitted_mtp_single: cache already allocated before prefill"
@@ -1276,33 +3160,114 @@ impl<M: Model> Scheduler<M> {
 
         let mut mtp_cache = model.make_mtp_cache(mtp, 1, cap, dtype)?;
         let prompt_len_i32 = prompt_len as i32;
-        let mut pos = 0_i32;
         let mut stats = MtpSpeculativeStats::default();
         let mut last_prompt_hidden = None;
         let mut mtp_prev_hidden: Option<Array> = None;
+        let mut pos = 0_i32;
+        if let Some((restore_len, restored_last_hidden)) =
+            try_restore_paged_prefix_for_prompt_with_mtp(
+                self.paged_prefix_cache.as_ref(),
+                self.cache
+                    .as_mut()
+                    .ok_or_else(|| {
+                        anyhow!("prefill_admitted_mtp_single: cache absent after allocate")
+                    })?
+                    .as_mut_slice(),
+                &mut mtp_cache,
+                &prompt_ids,
+                model.mtp_hidden_size(mtp),
+                model.mtp_hidden_dtype(mtp),
+                prefix_fingerprint.as_deref(),
+            )?
+        {
+            pos = restore_len;
+            mtp_prev_hidden = Some(restored_last_hidden);
+        }
+        let mut image_pad_cursor = if is_vl {
+            count_image_pad_i32(&prompt_ids_i32[..pos as usize], image_token_id)
+        } else {
+            0
+        };
         while pos < prompt_len_i32 {
             let remaining = prompt_len_i32 - pos;
-            let n = if prefill_chunk_size == 0 {
+            let mut n = if prefill_chunk_size == 0 {
                 remaining
             } else {
                 remaining.min(prefill_chunk_size.max(1))
             };
+            if self.paged_prefix_cache.is_some()
+                && pos + n == prompt_len_i32
+                && pos < prompt_len_i32 - 1
+            {
+                n = prompt_len_i32 - 1 - pos;
+            }
             let chunk_ids = &prompt_ids[pos as usize..(pos as usize + n as usize)];
-            let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
-            let chunk_pos_ids = self.mtp_position_ids(model, pos, n)?;
-            let hidden = {
-                let cache = self
-                    .cache
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("prefill_admitted_mtp_single: cache absent"))?;
-                model.forward_text_hidden(
-                    &chunk_arr,
-                    &chunk_pos_ids,
-                    None,
-                    None,
-                    Some(cache.as_mut_slice()),
-                    mlx::StreamOrDevice::default(),
-                )?
+            let (hidden, chunk_pos_ids) = if is_vl {
+                let chunk_ids_i32 = &prompt_ids_i32[pos as usize..(pos as usize + n as usize)];
+                let chunk_arr: Array = (chunk_ids_i32, &[1_i32, n][..]).try_into()?;
+                let position_ids_full = vl_position_ids_full.as_ref().ok_or_else(|| {
+                    anyhow!("prefill_admitted_mtp_single: VL position ids absent")
+                })?;
+                let chunk_pos_ids = if vl_position_ids_is_dummy {
+                    position_ids_full.clone()
+                } else {
+                    slice_pos_ids_axis2(position_ids_full, pos, pos + n)?
+                };
+                let chunk_image_pads = count_image_pad_i32(chunk_ids_i32, image_token_id);
+                if chunk_image_pads > 0 && vl_vision_embeds_full.is_none() {
+                    let pv = pixel_values.as_deref().ok_or_else(|| {
+                        anyhow!("prefill_admitted_mtp_single: image pads without pixel_values")
+                    })?;
+                    let grids = image_grid_thw.as_deref().ok_or_else(|| {
+                        anyhow!("prefill_admitted_mtp_single: image pads without grid_thw")
+                    })?;
+                    vl_vision_embeds_full = Some(model.compute_vision_embeds(
+                        pv,
+                        grids,
+                        mlx::StreamOrDevice::default(),
+                    )?);
+                }
+                let chunk_vision_embeds = slice_vision_embeds_for_image_pads(
+                    vl_vision_embeds_full.as_ref(),
+                    image_pad_cursor,
+                    chunk_image_pads,
+                )?;
+                image_pad_cursor += chunk_image_pads;
+                let hidden = {
+                    let cache = self
+                        .cache
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("prefill_admitted_mtp_single: cache absent"))?;
+                    model.forward_vl_hidden(
+                        &chunk_arr,
+                        &chunk_pos_ids,
+                        None,
+                        None,
+                        Some(cache.as_mut_slice()),
+                        chunk_vision_embeds.as_ref(),
+                        image_token_id,
+                        mlx::StreamOrDevice::default(),
+                    )?
+                };
+                (hidden, chunk_pos_ids)
+            } else {
+                let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
+                let chunk_pos_ids = self.mtp_position_ids(model, pos, n)?;
+                let hidden = {
+                    let cache = self
+                        .cache
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("prefill_admitted_mtp_single: cache absent"))?;
+                    model.forward_text_hidden(
+                        &chunk_arr,
+                        &chunk_pos_ids,
+                        None,
+                        None,
+                        Some(cache.as_mut_slice()),
+                        mlx::StreamOrDevice::default(),
+                    )?
+                };
+                (hidden, chunk_pos_ids)
             };
             let prev_hidden = match mtp_prev_hidden.as_ref() {
                 Some(hidden) => hidden.clone(),
@@ -1322,10 +3287,29 @@ impl<M: Model> Scheduler<M> {
             add_elapsed_us(&mut stats.mtp_cache_commit_us, commit_start);
             let chunk_last_hidden = slice_hidden_position(&hidden, n - 1)?;
             mtp_prev_hidden = Some(chunk_last_hidden.clone());
-            if pos + n == prompt_len_i32 {
+            let new_pos = pos + n;
+            if let Some(cache) = self.cache.as_ref() {
+                match try_save_paged_prefix_for_prompt_with_mtp(
+                    self.paged_prefix_cache.as_ref(),
+                    cache,
+                    &mtp_cache,
+                    &chunk_last_hidden,
+                    &prompt_ids[..new_pos as usize],
+                    prefix_fingerprint.as_deref(),
+                ) {
+                    Ok(Some(key)) => {
+                        tracing::debug!("paged SSD prefix cache MTP saved: key={key}");
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!("paged SSD prefix cache MTP save skipped: {err:#}");
+                    }
+                }
+            }
+            if new_pos == prompt_len_i32 {
                 last_prompt_hidden = Some(chunk_last_hidden);
             }
-            pos += n;
+            pos = new_pos;
         }
         let last_prompt_hidden = last_prompt_hidden
             .ok_or_else(|| anyhow!("prefill_admitted_mtp_single produced no prompt hidden"))?;
@@ -1367,10 +3351,15 @@ impl<M: Model> Scheduler<M> {
         };
         self.mtp_state = Some(SchedulerMtpState {
             cfg,
-            mtp_cache,
-            pending_tokens: VecDeque::new(),
-            last_hidden: last_prompt_hidden,
-            adaptive_draft_tokens: cfg.max_draft_tokens,
+            rows: HashMap::from([(
+                row_idx,
+                SchedulerMtpRowState {
+                    mtp_cache,
+                    pending_tokens: VecDeque::new(),
+                    last_hidden: last_prompt_hidden,
+                    adaptive_draft_tokens: cfg.max_draft_tokens,
+                },
+            )]),
             stats,
         });
 
@@ -1383,6 +3372,349 @@ impl<M: Model> Scheduler<M> {
             token: first_token,
             finish_reason,
         }])
+    }
+
+    pub fn prefill_admitted_mtp_batch(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+        cfg: MtpSpeculativeConfig,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel + DenseVlMethods,
+    {
+        self.ensure_not_poisoned()?;
+        match self.prefill_admitted_mtp_batch_inner(model, mtp, cfg) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                if !matches!(self.phase, Phase::Decoding | Phase::Finished) {
+                    self.phase = Phase::Finished;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn prefill_admitted_mtp_batch_inner(
+        &mut self,
+        model: &M,
+        mtp: &M::MtpHead,
+        cfg: MtpSpeculativeConfig,
+    ) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel + DenseVlMethods,
+    {
+        match self.phase {
+            Phase::Idle | Phase::Admitting => {}
+            Phase::Decoding | Phase::Finished => {
+                return Err(anyhow!(
+                    "prefill_admitted_mtp_batch illegal in {:?} phase: call evict_all first",
+                    self.phase
+                ));
+            }
+        }
+        if self.cache.is_some() {
+            return Err(anyhow!(
+                "prefill_admitted_mtp_batch: cache already allocated before prefill"
+            ));
+        }
+
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| slot.as_ref().map(|_| row))
+            .collect();
+        if active_rows.is_empty() {
+            return Err(anyhow!(
+                "prefill_admitted_mtp_batch requires at least one admitted request"
+            ));
+        }
+        for &row_idx in &active_rows {
+            let state = self.slots[row_idx]
+                .as_ref()
+                .expect("active row implies slot is Some");
+            if state.finished || !state.generated_tokens.is_empty() {
+                return Err(anyhow!(
+                    "prefill_admitted_mtp_batch requires fresh admitted rows"
+                ));
+            }
+            if state.prompt_ids.is_empty() {
+                return Err(anyhow!(
+                    "prefill_admitted_mtp_batch: prompt_ids cannot be empty"
+                ));
+            }
+            MtpSpeculativeConfig::new(cfg.max_draft_tokens, state.sampler)?;
+        }
+
+        let mut temp_rows = Vec::with_capacity(active_rows.len());
+        let mut row_states = HashMap::with_capacity(active_rows.len());
+        let mut stats = MtpSpeculativeStats::default();
+        let mut events = Vec::with_capacity(active_rows.len());
+        let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
+        let dtype = model.cache_dtype();
+
+        for &row_idx in &active_rows {
+            let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
+            let event = temp
+                .prefill_admitted_mtp_single(model, mtp, cfg)
+                .map_err(|err| anyhow!("prefill_admitted_mtp_batch row {row_idx}: {err:#}"))?;
+            let temp_cache = temp.cache.take().ok_or_else(|| {
+                anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp cache absent")
+            })?;
+            let (cap, _) = cache_cap_and_dtype(&temp_cache)?;
+            final_cap = final_cap.max(cap);
+            let mut temp_mtp_state = temp.mtp_state.take().ok_or_else(|| {
+                anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp MTP state absent")
+            })?;
+            add_mtp_stats(&mut stats, temp_mtp_state.stats);
+            let row_state = temp_mtp_state.rows.remove(&0).ok_or_else(|| {
+                anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp row state absent")
+            })?;
+            row_states.insert(row_idx, row_state);
+            let temp_slot = temp.slots[0].as_ref().ok_or_else(|| {
+                anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp slot absent")
+            })?;
+            let slot = self.slots[row_idx]
+                .as_mut()
+                .expect("active row implies slot is Some");
+            slot.generated_tokens = temp_slot.generated_tokens.clone();
+            slot.real_len = temp_slot.real_len;
+            slot.finished = temp_slot.finished;
+            slot.finish_reason = temp_slot.finish_reason;
+            temp_rows.push((row_idx, temp_cache));
+            events.extend(event);
+        }
+
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&active_rows)?;
+        let mut final_cache = self.make_model_cache(
+            model,
+            active_rows.len() as i32,
+            final_cap,
+            dtype,
+            turboquant_bits,
+        )?;
+        for (dst_row, &slot_row) in active_rows.iter().enumerate() {
+            let (_, temp_cache) = temp_rows
+                .iter()
+                .find(|(row, _)| *row == slot_row)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "prefill_admitted_mtp_batch: missing temp cache for slot row {slot_row}"
+                    )
+                })?;
+            adopt_cache_row_layers(
+                &mut final_cache,
+                temp_cache,
+                dst_row,
+                0,
+                "prefill_admitted_mtp_batch",
+            )?;
+        }
+
+        let all_finished = active_rows.iter().all(|&row| {
+            self.slots[row]
+                .as_ref()
+                .expect("active row implies slot is Some")
+                .finished
+        });
+        self.cache = Some(final_cache);
+        self.cache_rows = active_rows;
+        self.phase = if all_finished {
+            Phase::Finished
+        } else {
+            Phase::Decoding
+        };
+        self.mtp_state = Some(SchedulerMtpState {
+            cfg,
+            rows: row_states,
+            stats,
+        });
+
+        Ok(events)
+    }
+
+    fn temp_mtp_scheduler_for_row(&self, row_idx: usize) -> Result<Scheduler<M>> {
+        let state = self.slots[row_idx]
+            .as_ref()
+            .ok_or_else(|| anyhow!("temp_mtp_scheduler_for_row: row slot absent"))?;
+        let mut temp = Scheduler::<M>::new(1, self.effective_cap_max, self.meta)
+            .map_err(anyhow::Error::from)?;
+        if let Some(config) = self.paged_prefix_cache.as_ref() {
+            temp.enable_paged_prefix_cache(config.clone())?;
+        }
+        let temp_id = temp.admit(generate_request_from_state(state)?)?;
+        {
+            let temp_state = temp.slots[0]
+                .as_mut()
+                .ok_or_else(|| anyhow!("temp_mtp_scheduler_for_row: temp slot absent"))?;
+            temp_state.id = state.id;
+            temp_state.generated_tokens = state.generated_tokens.clone();
+            temp_state.real_len = state.real_len;
+            temp_state.finished = state.finished;
+            temp_state.finish_reason = state.finish_reason;
+        }
+        anyhow::ensure!(
+            temp_id == RequestId(0),
+            "temp_mtp_scheduler_for_row: unexpected temp id {}",
+            temp_id.0
+        );
+        Ok(temp)
+    }
+
+    fn install_temp_mtp_step_result(
+        &mut self,
+        model: &M,
+        row_idx: usize,
+        mut temp: Scheduler<M>,
+    ) -> Result<(SchedulerMtpRowState, MtpSpeculativeStats)> {
+        let temp_cache = temp
+            .cache
+            .take()
+            .ok_or_else(|| anyhow!("install_temp_mtp_step_result: temp cache absent"))?;
+        self.install_cache_with_temp_row(model, &temp_cache, row_idx)?;
+        let temp_slot = temp.slots[0]
+            .as_ref()
+            .ok_or_else(|| anyhow!("install_temp_mtp_step_result: temp slot absent"))?;
+        let slot = self.slots[row_idx]
+            .as_mut()
+            .ok_or_else(|| anyhow!("install_temp_mtp_step_result: row slot absent"))?;
+        slot.generated_tokens = temp_slot.generated_tokens.clone();
+        slot.real_len = temp_slot.real_len;
+        slot.finished = temp_slot.finished;
+        slot.finish_reason = temp_slot.finish_reason;
+
+        let mut mtp_state = temp
+            .mtp_state
+            .take()
+            .ok_or_else(|| anyhow!("install_temp_mtp_step_result: temp MTP state absent"))?;
+        let row_state = mtp_state
+            .rows
+            .remove(&0)
+            .ok_or_else(|| anyhow!("install_temp_mtp_step_result: temp row state absent"))?;
+        Ok((row_state, mtp_state.stats))
+    }
+
+    fn build_temp_mtp_step_scheduler(
+        &mut self,
+        model: &M,
+        row_idx: usize,
+        cfg: MtpSpeculativeConfig,
+        stats: MtpSpeculativeStats,
+        row_state: SchedulerMtpRowState,
+    ) -> Result<Scheduler<M>> {
+        let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("build_temp_mtp_step_scheduler: main cache absent"))?;
+        let compact_row = self
+            .cache_rows
+            .iter()
+            .position(|&row| row == row_idx)
+            .ok_or_else(|| {
+                anyhow!(
+                    "build_temp_mtp_step_scheduler: slot row {row_idx} missing from layout {:?}",
+                    self.cache_rows
+                )
+            })?;
+        let (cap, dtype) = cache_cap_and_dtype(cache)?;
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
+        let mut temp_cache = self.make_model_cache(model, 1, cap, dtype, turboquant_bits)?;
+        adopt_cache_row_layers(
+            &mut temp_cache,
+            cache,
+            0,
+            compact_row,
+            "build_temp_mtp_step_scheduler",
+        )?;
+        temp.cache = Some(temp_cache);
+        temp.cache_rows = vec![0];
+        temp.phase = Phase::Decoding;
+        temp.mtp_state = Some(SchedulerMtpState {
+            cfg,
+            rows: HashMap::from([(0, row_state)]),
+            stats,
+        });
+        Ok(temp)
+    }
+
+    pub fn step_mtp_batch(&mut self, model: &M, mtp: &M::MtpHead) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel,
+    {
+        self.ensure_not_poisoned()?;
+        match self.step_mtp_batch_inner(model, mtp) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn step_mtp_batch_inner(&mut self, model: &M, mtp: &M::MtpHead) -> Result<Vec<StepEvent>>
+    where
+        M: MtpSpeculativeModel,
+    {
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "step_mtp_batch illegal in {:?} phase: call prefill_admitted_mtp_batch first",
+                self.phase
+            ));
+        }
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| matches!(slot, Some(state) if !state.finished).then_some(row))
+            .collect();
+        if active_rows.is_empty() {
+            self.phase = Phase::Finished;
+            return Ok(Vec::new());
+        }
+
+        let mut mtp_state = self
+            .mtp_state
+            .take()
+            .ok_or_else(|| anyhow!("step_mtp_batch: MTP state absent"))?;
+        let cfg = mtp_state.cfg;
+        let mut events = Vec::with_capacity(active_rows.len());
+
+        for row_idx in active_rows {
+            let row_state = mtp_state
+                .rows
+                .remove(&row_idx)
+                .ok_or_else(|| anyhow!("step_mtp_batch: row {row_idx} MTP state absent"))?;
+            let mut temp = self.build_temp_mtp_step_scheduler(
+                model,
+                row_idx,
+                cfg,
+                mtp_state.stats,
+                row_state,
+            )?;
+            let row_events = temp
+                .step_mtp_single(model, mtp)
+                .map_err(|err| anyhow!("step_mtp_batch row {row_idx}: {err:#}"))?;
+            let (row_state, stats) = self.install_temp_mtp_step_result(model, row_idx, temp)?;
+            mtp_state.stats = stats;
+            mtp_state.rows.insert(row_idx, row_state);
+            events.extend(row_events);
+        }
+
+        let any_unfinished = self
+            .slots
+            .iter()
+            .any(|slot| matches!(slot, Some(state) if !state.finished));
+        self.phase = if any_unfinished {
+            Phase::Decoding
+        } else {
+            Phase::Finished
+        };
+        self.mtp_state = Some(mtp_state);
+
+        Ok(events)
     }
 
     fn step_mtp_single_inner(&mut self, model: &M, mtp: &M::MtpHead) -> Result<Vec<StepEvent>>
@@ -1408,6 +3740,9 @@ impl<M: Model> Scheduler<M> {
             .mtp_state
             .as_ref()
             .ok_or_else(|| anyhow!("step_mtp_single: MTP state absent"))?
+            .rows
+            .get(&row_idx)
+            .ok_or_else(|| anyhow!("step_mtp_single: row MTP state absent"))?
             .pending_tokens
             .is_empty()
         {
@@ -1420,6 +3755,9 @@ impl<M: Model> Scheduler<M> {
                 .as_mut()
                 .ok_or_else(|| anyhow!("step_mtp_single: MTP state absent"))?;
             mtp_state
+                .rows
+                .get_mut(&row_idx)
+                .ok_or_else(|| anyhow!("step_mtp_single: row MTP state absent"))?
                 .pending_tokens
                 .pop_front()
                 .ok_or_else(|| anyhow!("step_mtp_single: pending token queue is empty"))?
@@ -1446,6 +3784,7 @@ impl<M: Model> Scheduler<M> {
         } else if self
             .mtp_state
             .as_ref()
+            .and_then(|state| state.rows.get(&row_idx))
             .is_some_and(|state| state.pending_tokens.is_empty())
         {
             self.fill_mtp_window_single(row_idx, model, mtp)?;
@@ -1466,7 +3805,19 @@ impl<M: Model> Scheduler<M> {
             .mtp_state
             .take()
             .ok_or_else(|| anyhow!("fill_mtp_window_single: MTP state absent"))?;
-        let result = self.fill_mtp_window_single_with_state(row_idx, &mut mtp_state, model, mtp);
+        let mut row_state = mtp_state
+            .rows
+            .remove(&row_idx)
+            .ok_or_else(|| anyhow!("fill_mtp_window_single: row MTP state absent"))?;
+        let result = self.fill_mtp_window_single_with_state(
+            row_idx,
+            mtp_state.cfg,
+            &mut mtp_state.stats,
+            &mut row_state,
+            model,
+            mtp,
+        );
+        mtp_state.rows.insert(row_idx, row_state);
         self.mtp_state = Some(mtp_state);
         result
     }
@@ -1474,7 +3825,9 @@ impl<M: Model> Scheduler<M> {
     fn fill_mtp_window_single_with_state(
         &mut self,
         row_idx: usize,
-        mtp_state: &mut SchedulerMtpState,
+        cfg: MtpSpeculativeConfig,
+        stats: &mut MtpSpeculativeStats,
+        row_state: &mut SchedulerMtpRowState,
         model: &M,
         mtp: &M::MtpHead,
     ) -> Result<()>
@@ -1505,13 +3858,14 @@ impl<M: Model> Scheduler<M> {
         history.extend_from_slice(&prompt_ids);
         history.extend_from_slice(&generated_tokens);
 
-        let draft_budget = mtp_state
+        let draft_budget = row_state
             .adaptive_draft_tokens
-            .clamp(1, mtp_state.cfg.max_draft_tokens)
+            .clamp(1, cfg.max_draft_tokens)
             .min(remaining);
         let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
         let draft_result = self.draft_mtp_tokens_single(
-            mtp_state,
+            stats,
+            row_state,
             model,
             mtp,
             current_token,
@@ -1527,7 +3881,7 @@ impl<M: Model> Scheduler<M> {
             self.mtp_position_ids(model, verify_start_pos, verify_input.len() as i32)?;
         let verify_arr: Array =
             (&verify_input[..], &[1_i32, verify_input.len() as i32][..]).try_into()?;
-        let pre_window_hidden = mtp_state.last_hidden.clone();
+        let pre_window_hidden = row_state.last_hidden.clone();
 
         let base_snapshot = {
             let cache = self
@@ -1551,30 +3905,30 @@ impl<M: Model> Scheduler<M> {
                 mlx::StreamOrDevice::default(),
             )?
         };
-        add_elapsed_us(&mut mtp_state.stats.verify_forward_us, verify_forward_start);
+        add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
         let projection_start = Instant::now();
         let verified_logits =
             model.project_hidden_on(&verified_hidden, mlx::StreamOrDevice::default())?;
-        add_elapsed_us(&mut mtp_state.stats.projection_us, projection_start);
+        add_elapsed_us(&mut stats.projection_us, projection_start);
         let sampling_start = Instant::now();
         let verified_tokens =
             sample_logits_positions(&verified_logits, sampler, &history, &mut compact_prng)?;
-        add_elapsed_us(&mut mtp_state.stats.sampling_us, sampling_start);
+        add_elapsed_us(&mut stats.sampling_us, sampling_start);
         self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
 
         let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
-        mtp_state.stats.windows += 1;
-        mtp_state.stats.drafted_tokens += draft_tokens.len();
-        mtp_state.stats.accepted_draft_tokens += resolution.accepted_draft_len;
+        stats.windows += 1;
+        stats.drafted_tokens += draft_tokens.len();
+        stats.accepted_draft_tokens += resolution.accepted_draft_len;
         if resolution.needs_rollback {
-            mtp_state.stats.rollback_count += 1;
+            stats.rollback_count += 1;
         }
         adjust_mtp_draft_budget(
-            mtp_state.cfg.max_draft_tokens,
-            &mut mtp_state.adaptive_draft_tokens,
+            cfg.max_draft_tokens,
+            &mut row_state.adaptive_draft_tokens,
             draft_tokens.len(),
             resolution.accepted_draft_len,
-            &mut mtp_state.stats,
+            stats,
         );
 
         let (accepted_input, accepted_hidden, accepted_position_ids, accepted_last_hidden) =
@@ -1587,7 +3941,7 @@ impl<M: Model> Scheduler<M> {
                         .ok_or_else(|| anyhow!("fill_mtp_window_single: main cache absent"))?;
                     restore_layer_cache(cache.as_mut_slice(), &base_snapshot)?;
                 }
-                add_elapsed_us(&mut mtp_state.stats.main_rollback_us, rollback_start);
+                add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
                 let replay_len = resolution.accepted_verify_input_len;
                 let replay_input = &verify_input[..replay_len];
                 let replay_arr: Array =
@@ -1609,7 +3963,7 @@ impl<M: Model> Scheduler<M> {
                         mlx::StreamOrDevice::default(),
                     )?
                 };
-                add_elapsed_us(&mut mtp_state.stats.verify_forward_us, replay_forward_start);
+                add_elapsed_us(&mut stats.verify_forward_us, replay_forward_start);
                 let last_hidden = slice_hidden_position(&replay_hidden, replay_len as i32 - 1)?;
                 (
                     replay_input.to_vec(),
@@ -1631,41 +3985,39 @@ impl<M: Model> Scheduler<M> {
 
         if resolution.needs_rollback {
             let restore_start = Instant::now();
-            mtp_state.mtp_cache.restore(&draft_result.cache_snapshot)?;
-            add_elapsed_us(&mut mtp_state.stats.mtp_cache_restore_us, restore_start);
+            row_state.mtp_cache.restore(&draft_result.cache_snapshot)?;
+            add_elapsed_us(&mut stats.mtp_cache_restore_us, restore_start);
             let commit_start = Instant::now();
             commit_mtp_cache_hidden_prefix(
                 model,
                 mtp,
-                &mut mtp_state.mtp_cache,
+                &mut row_state.mtp_cache,
                 &pre_window_hidden,
                 &accepted_input,
                 &accepted_hidden,
                 &accepted_position_ids,
                 mlx::StreamOrDevice::default(),
             )?;
-            add_elapsed_us(&mut mtp_state.stats.mtp_cache_commit_us, commit_start);
+            add_elapsed_us(&mut stats.mtp_cache_commit_us, commit_start);
         } else {
             let commit_start = Instant::now();
             commit_mtp_cache_hidden_tail(
                 model,
                 mtp,
-                &mut mtp_state.mtp_cache,
+                &mut row_state.mtp_cache,
                 &pre_window_hidden,
                 &accepted_input,
                 &accepted_hidden,
                 &accepted_position_ids,
                 mlx::StreamOrDevice::default(),
             )?;
-            add_elapsed_us(&mut mtp_state.stats.mtp_cache_commit_us, commit_start);
-            mtp_state.stats.mtp_cache_reuse_count =
-                mtp_state.stats.mtp_cache_reuse_count.saturating_add(1);
-            mtp_state.stats.mtp_cache_reused_tokens = mtp_state
-                .stats
+            add_elapsed_us(&mut stats.mtp_cache_commit_us, commit_start);
+            stats.mtp_cache_reuse_count = stats.mtp_cache_reuse_count.saturating_add(1);
+            stats.mtp_cache_reused_tokens = stats
                 .mtp_cache_reused_tokens
                 .saturating_add(accepted_input.len().saturating_sub(1));
         }
-        mtp_state.last_hidden = accepted_last_hidden;
+        row_state.last_hidden = accepted_last_hidden;
 
         let mut tokens_to_append = resolution.tokens_to_append;
         if let Some(stop_idx) = tokens_to_append
@@ -1675,14 +4027,15 @@ impl<M: Model> Scheduler<M> {
             tokens_to_append.truncate(stop_idx + 1);
         }
         tokens_to_append.truncate(remaining);
-        mtp_state.pending_tokens.extend(tokens_to_append);
+        row_state.pending_tokens.extend(tokens_to_append);
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     fn draft_mtp_tokens_single(
         &mut self,
-        mtp_state: &mut SchedulerMtpState,
+        stats: &mut MtpSpeculativeStats,
+        row_state: &mut SchedulerMtpRowState,
         model: &M,
         mtp: &M::MtpHead,
         current_token: u32,
@@ -1694,10 +4047,10 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel,
     {
-        let mtp_snapshot = mtp_state.mtp_cache.snapshot();
+        let mtp_snapshot = row_state.mtp_cache.snapshot();
         let mut draft_tokens = Vec::with_capacity(draft_budget);
         let mut draft_history = history.to_vec();
-        let mut input_hidden = mtp_state.last_hidden.clone();
+        let mut input_hidden = row_state.last_hidden.clone();
         let mut input_token = current_token;
         let start_pos = (history.len() - 1) as i32;
 
@@ -1711,14 +4064,14 @@ impl<M: Model> Scheduler<M> {
                 &token_arr,
                 &position_ids,
                 None,
-                Some(&mut mtp_state.mtp_cache),
+                Some(&mut row_state.mtp_cache),
                 mlx::StreamOrDevice::default(),
             )?;
-            add_elapsed_us(&mut mtp_state.stats.draft_forward_us, draft_forward_start);
+            add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
             let sampling_start = Instant::now();
             let sampled =
                 sample_logits_positions(&output.logits, sampler, &draft_history, prng_state)?;
-            add_elapsed_us(&mut mtp_state.stats.sampling_us, sampling_start);
+            add_elapsed_us(&mut stats.sampling_us, sampling_start);
             let next_token = *sampled
                 .first()
                 .ok_or_else(|| anyhow!("draft_mtp_tokens_single: MTP draft produced no token"))?;
@@ -1854,8 +4207,6 @@ impl<M: Model> Scheduler<M> {
         });
 
         // Allocate the compact cache exactly to the occupied scheduler rows.
-        // TODO: when a non-bf16 model lands, expose dtype via the `Model`
-        // trait and thread it here.
         let cap = self.prefill_cache_cap();
         if self.cache.is_some() {
             return Err(anyhow!(
@@ -1863,14 +4214,20 @@ impl<M: Model> Scheduler<M> {
             ));
         }
         let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&prefill_rows)?;
-        self.cache =
-            Some(self.make_model_cache(model, b as i32, cap, Dtype::Bfloat16, turboquant_bits)?);
+        self.cache = Some(self.make_model_cache(
+            model,
+            b as i32,
+            cap,
+            model.cache_dtype(),
+            turboquant_bits,
+        )?);
         self.cache_rows = prefill_rows.clone();
         let dummy_position_ids = if model.requires_position_ids() {
             None
         } else {
             Some(self.reusable_dummy_position_ids()?)
         };
+        let paged_prefix_cache_config = self.paged_prefix_cache.clone();
 
         // Run prefill. Capture [B, 1, vocab] logits (sequence axis already
         // collapsed via slice_last_and_project) for first-token sampling.
@@ -2008,7 +4365,38 @@ impl<M: Model> Scheduler<M> {
                             mlx::StreamOrDevice::default(),
                         )?)
                     };
-                    if max_len > 1 {
+                    let prompt_ids_u32: Vec<u32> =
+                        per_row_ids_i32[0].iter().map(|&tok| tok as u32).collect();
+                    let vl_prefix_fingerprint = if paged_prefix_cache_config.is_some() {
+                        paged_prefix_fingerprint_for_request(
+                            per_row_pv[0],
+                            per_row_grids[0],
+                            img_token_id,
+                            merge_size,
+                        )?
+                    } else {
+                        None
+                    };
+                    if let Some(start_pos) = try_restore_paged_prefix_for_prompt(
+                        paged_prefix_cache_config.as_ref(),
+                        prefill_cache,
+                        &prompt_ids_u32,
+                        vl_prefix_fingerprint.as_deref(),
+                    )? {
+                        forward_single_vl_suffix(
+                            model,
+                            prefill_cache,
+                            SingleVlSuffixInput {
+                                prompt_ids: &per_row_ids_i32[0],
+                                start_pos,
+                                end_pos: max_len,
+                                position_ids_full: &position_ids_full,
+                                position_ids_is_dummy: dummy_position_ids.is_some(),
+                                vision_embeds_full: vision_embeds_full.as_ref(),
+                                image_token_id: img_token_id,
+                            },
+                        )?
+                    } else if max_len > 1 {
                         let prefix_len = max_len - 1;
                         let prefix_input_ids = mlx::ops::indexing::slice_strided(
                             &input_ids,
@@ -2078,6 +4466,25 @@ impl<M: Model> Scheduler<M> {
                         // slice_update/concatenate cache writes it depends on via attention.
                         mlx::transforms::eval(&[&prefix_hidden])?;
 
+                        match try_save_paged_prefix_for_prompt(
+                            paged_prefix_cache_config.as_ref(),
+                            prefill_cache,
+                            &prompt_ids_u32[..prefix_len as usize],
+                            vl_prefix_fingerprint.as_deref(),
+                        ) {
+                            Ok(Some(key)) => {
+                                tracing::debug!(
+                                    "paged SSD prefix cache saved VL prefix: key={key}"
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                tracing::warn!(
+                                    "paged SSD prefix cache VL prefix save skipped: {err:#}"
+                                );
+                            }
+                        }
+
                         model.forward_vl_chunk(
                             &last_input_ids,
                             &last_position_ids,
@@ -2100,6 +4507,20 @@ impl<M: Model> Scheduler<M> {
                             mlx::StreamOrDevice::default(),
                         )?
                     }
+                } else if paged_prefix_cache_config.is_some() {
+                    forward_batched_vl_with_paged_prefix(
+                        model,
+                        prefill_cache,
+                        BatchedVlPrefixReplay {
+                            prompt_ids: &per_row_ids_i32,
+                            pixel_values: &per_row_pv,
+                            grid_thw: &per_row_grids,
+                            image_token_id: img_token_id,
+                            image_spatial_merge_size: merge_size,
+                            dummy_position_ids: dummy_position_ids.as_ref(),
+                            prefix_cache_config: paged_prefix_cache_config.as_ref(),
+                        },
+                    )?
                 } else {
                     let attention_mask =
                         build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
@@ -2130,7 +4551,25 @@ impl<M: Model> Scheduler<M> {
                     )?
                 }
             } else if b == 1 {
-                if max_len > 1 {
+                let prompt_ids = &self.slots[prefill_rows[0]]
+                    .as_ref()
+                    .expect("prefill_rows contain only occupied slots")
+                    .prompt_ids;
+                if let Some(start_pos) = try_restore_paged_prefix_for_prompt(
+                    paged_prefix_cache_config.as_ref(),
+                    prefill_cache,
+                    prompt_ids,
+                    None,
+                )? {
+                    forward_single_text_suffix(
+                        model,
+                        prefill_cache,
+                        prompt_ids,
+                        start_pos,
+                        max_len,
+                        dummy_position_ids.as_ref(),
+                    )?
+                } else if max_len > 1 {
                     let prefix_len = max_len - 1;
                     let prefix_input_ids = mlx::ops::indexing::slice_strided(
                         &input_ids,
@@ -2155,6 +4594,21 @@ impl<M: Model> Scheduler<M> {
                     // chunk reads the shared cache (see the VL split site above for the
                     // all-NaN read-after-write rationale; same b==1 split-prefill hazard).
                     mlx::transforms::eval(&[&prefix_hidden])?;
+
+                    match try_save_paged_prefix_for_prompt(
+                        paged_prefix_cache_config.as_ref(),
+                        prefill_cache,
+                        &prompt_ids[..prefix_len as usize],
+                        None,
+                    ) {
+                        Ok(Some(key)) => {
+                            tracing::debug!("paged SSD prefix cache saved prefix: key={key}");
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!("paged SSD prefix cache prefix save skipped: {err:#}");
+                        }
+                    }
 
                     let last_input_ids = mlx::ops::indexing::slice_strided(
                         &input_ids,
@@ -2190,6 +4644,26 @@ impl<M: Model> Scheduler<M> {
                         mlx::StreamOrDevice::default(),
                     )?
                 }
+            } else if paged_prefix_cache_config.is_some() {
+                let per_row_prompt_ids: Vec<Vec<u32>> = prefill_rows
+                    .iter()
+                    .map(|&row| {
+                        self.slots[row]
+                            .as_ref()
+                            .expect("prefill_rows contain only occupied slots")
+                            .prompt_ids
+                            .clone()
+                    })
+                    .collect();
+                forward_batched_text_with_paged_prefix(
+                    model,
+                    prefill_cache,
+                    BatchedTextPrefixReplay {
+                        prompt_ids: &per_row_prompt_ids,
+                        dummy_position_ids: dummy_position_ids.as_ref(),
+                        prefix_cache_config: paged_prefix_cache_config.as_ref(),
+                    },
+                )?
             } else {
                 let attention_mask =
                     build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
@@ -2239,6 +4713,40 @@ impl<M: Model> Scheduler<M> {
         }
 
         let logits = logits_result?;
+        if b == 1 {
+            let (prompt_ids, prefix_fingerprint) = {
+                let state = self.slots[prefill_rows[0]]
+                    .as_ref()
+                    .expect("prefill_rows contain only occupied slots");
+                let prefix_fingerprint = if paged_prefix_cache_config.is_some() {
+                    paged_prefix_fingerprint_for_request(
+                        state.pixel_values.as_deref(),
+                        state.image_grid_thw.as_deref(),
+                        state.image_token_id,
+                        state.image_spatial_merge_size,
+                    )?
+                } else {
+                    None
+                };
+                (state.prompt_ids.clone(), prefix_fingerprint)
+            };
+            if let Some(cache) = self.cache.as_ref() {
+                match try_save_paged_prefix_for_prompt(
+                    paged_prefix_cache_config.as_ref(),
+                    cache,
+                    &prompt_ids,
+                    prefix_fingerprint.as_deref(),
+                ) {
+                    Ok(Some(key)) => {
+                        tracing::debug!("paged SSD prefix cache saved: key={key}");
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!("paged SSD prefix cache save skipped: {err:#}");
+                    }
+                }
+            }
+        }
 
         // After per-row prefill, row i's cache is filled up to position
         // prompt_lens[i] - 1. The first decode step must use position
@@ -2780,9 +5288,27 @@ impl<M: Model> Scheduler<M> {
         };
 
         let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
-        let temp_cache = self.make_model_cache(model, 1, cap_for_temp, dtype, turboquant_bits)?;
+        let mut temp_cache =
+            self.make_model_cache(model, 1, cap_for_temp, dtype, turboquant_bits)?;
 
         let is_vl = pixel_values.is_some();
+        let prefix_fingerprint = if self.paged_prefix_cache.is_some() {
+            paged_prefix_fingerprint_for_request(
+                pixel_values.as_deref(),
+                image_grid_thw.as_deref(),
+                image_token_id,
+                image_spatial_merge_size,
+            )?
+        } else {
+            None
+        };
+        let prefix_restored_start = try_restore_paged_prefix_for_prompt(
+            self.paged_prefix_cache.as_ref(),
+            &mut temp_cache,
+            &prompt_ids,
+            prefix_fingerprint.as_deref(),
+        )?
+        .unwrap_or(0);
         let position_ids_required = model.requires_position_ids();
 
         let chunk_size = if prefill_chunk_size == 0 {
@@ -2824,6 +5350,14 @@ impl<M: Model> Scheduler<M> {
         } else {
             None
         };
+        let image_pad_consumed = if is_vl {
+            count_image_pad(
+                &prompt_ids[..prefix_restored_start as usize],
+                image_token_id,
+            )
+        } else {
+            0
+        };
 
         Ok(AdmitMidHandle {
             request_id: id,
@@ -2832,14 +5366,15 @@ impl<M: Model> Scheduler<M> {
             prompt_len,
             chunk_size,
             decode_cadence_mid_chunk_cap,
-            chunk_start: 0,
+            chunk_start: prefix_restored_start,
             temp_cache,
+            prefix_fingerprint,
             is_vl,
             image_token_id,
             position_ids_required,
             position_ids_full,
             vision_embeds_full,
-            image_pad_consumed: 0,
+            image_pad_consumed,
             last_logits: None,
         })
     }
@@ -2868,7 +5403,7 @@ impl<M: Model> Scheduler<M> {
             .chunk_start
             .saturating_add(handle.chunk_size)
             .min(handle.prompt_len);
-        let chunk_end = if handle.is_vl {
+        let mut chunk_end = if handle.is_vl {
             extend_vl_chunk_end_for_image_pad(
                 &handle.prompt_ids,
                 handle.image_token_id,
@@ -2878,6 +5413,12 @@ impl<M: Model> Scheduler<M> {
         } else {
             base_chunk_end
         };
+        if self.paged_prefix_cache.is_some()
+            && chunk_end == handle.prompt_len
+            && handle.chunk_start < handle.prompt_len - 1
+        {
+            chunk_end = handle.prompt_len - 1;
+        }
         let is_last = chunk_end == handle.prompt_len;
         let chunk_len = chunk_end - handle.chunk_start;
         if chunk_len <= 0 {
@@ -3027,6 +5568,23 @@ impl<M: Model> Scheduler<M> {
 
         if let Some(logits) = result_logits {
             handle.last_logits = Some(logits);
+        } else {
+            match try_save_paged_prefix_for_prompt(
+                self.paged_prefix_cache.as_ref(),
+                &handle.temp_cache,
+                &handle.prompt_ids[..chunk_end as usize],
+                handle.prefix_fingerprint.as_deref(),
+            ) {
+                Ok(Some(key)) => {
+                    tracing::debug!(
+                        "paged SSD prefix cache saved during mid-admit chunk: key={key}"
+                    );
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!("paged SSD prefix cache mid-admit chunk save skipped: {err:#}");
+                }
+            }
         }
         handle.chunk_start = chunk_end;
         Ok(is_last)
@@ -3049,6 +5607,7 @@ impl<M: Model> Scheduler<M> {
             request_id: id,
             row_idx,
             temp_cache,
+            prefix_fingerprint,
             last_logits,
             prompt_ids,
             ..
@@ -3056,6 +5615,21 @@ impl<M: Model> Scheduler<M> {
 
         let logits = last_logits
             .ok_or_else(|| anyhow!("admit_mid_finalize: last_logits absent (no chunks ran?)"))?;
+
+        match try_save_paged_prefix_for_prompt(
+            self.paged_prefix_cache.as_ref(),
+            &temp_cache,
+            &prompt_ids,
+            prefix_fingerprint.as_deref(),
+        ) {
+            Ok(Some(key)) => {
+                tracing::debug!("paged SSD prefix cache saved during mid-admit: key={key}");
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!("paged SSD prefix cache mid-admit save skipped: {err:#}");
+            }
+        }
 
         self.install_cache_with_temp_row(model, &temp_cache, row_idx)?;
 
@@ -3651,6 +6225,10 @@ mod tests {
     struct StepDecodeMaskModel {
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_mask_seen: std::sync::Mutex<Vec<bool>>,
+        forward_seq_lens: std::sync::Mutex<Vec<i32>>,
+        hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
+        batched_prefill_batches: std::sync::Mutex<Vec<i32>>,
+        batched_prefill_lens: std::sync::Mutex<Vec<Vec<i32>>>,
     }
 
     impl StepDecodeMaskModel {
@@ -3690,6 +6268,22 @@ mod tests {
             self.decode_lens_seen.lock().unwrap().clone()
         }
 
+        fn forward_seq_lens(&self) -> Vec<i32> {
+            self.forward_seq_lens.lock().unwrap().clone()
+        }
+
+        fn hidden_seq_lens(&self) -> Vec<i32> {
+            self.hidden_seq_lens.lock().unwrap().clone()
+        }
+
+        fn batched_prefill_batches(&self) -> Vec<i32> {
+            self.batched_prefill_batches.lock().unwrap().clone()
+        }
+
+        fn batched_prefill_lens(&self) -> Vec<Vec<i32>> {
+            self.batched_prefill_lens.lock().unwrap().clone()
+        }
+
         #[cfg(not(feature = "p5h-profile"))]
         fn decode_mask_seen(&self) -> Vec<bool> {
             self.decode_mask_seen.lock().unwrap().clone()
@@ -3717,6 +6311,9 @@ mod tests {
             cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            self.forward_seq_lens.lock().unwrap().push(dims[1]);
             if let Some(lens) = per_row_lens {
                 self.decode_lens_seen.lock().unwrap().push(lens.to_vec());
             }
@@ -3725,7 +6322,7 @@ mod tests {
                 .unwrap()
                 .push(decode_mask.is_some());
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
-            fake_logits_for_batch(input_ids.shape().as_slice()[0])
+            fake_logits_for_batch(dims[0])
         }
 
         fn batched_prefill(
@@ -3738,6 +6335,14 @@ mod tests {
             cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
+            self.batched_prefill_batches
+                .lock()
+                .unwrap()
+                .push(input_ids.shape().as_slice()[0]);
+            self.batched_prefill_lens
+                .lock()
+                .unwrap()
+                .push(per_row_lens.to_vec());
             Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
             fake_logits_for_batch(input_ids.shape().as_slice()[0])
         }
@@ -3754,6 +6359,7 @@ mod tests {
             Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
             let dims = input_ids.shape();
             let dims = dims.as_slice();
+            self.hidden_seq_lens.lock().unwrap().push(dims[1]);
             mlx::Array::zeros((dims[0], dims[1], 4_i32), mlx::Dtype::Float32)
                 .map_err(|e| anyhow::anyhow!("fake hidden failed: {e:?}"))
         }
@@ -3770,55 +6376,75 @@ mod tests {
     impl DenseVlMethods for StepDecodeMaskModel {
         fn batched_prefill_vl(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
-            _per_row_lens: &[i32],
+            per_row_lens: &[i32],
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("step decode-mask regression is text-only")
+            self.batched_prefill_batches
+                .lock()
+                .unwrap()
+                .push(input_ids.shape().as_slice()[0]);
+            self.batched_prefill_lens
+                .lock()
+                .unwrap()
+                .push(per_row_lens.to_vec());
+            Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
+            fake_logits_for_batch(input_ids.shape().as_slice()[0])
         }
 
         fn compute_vision_embeds(
             &self,
             _pixel_values: &[mlx::Array],
-            _grid_thw: &[(i32, i32, i32)],
+            grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("step decode-mask regression is text-only")
+            let rows = grid_thw.len().max(1) as i32;
+            mlx::Array::zeros((rows, 1_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake vision embeds failed: {e:?}"))
         }
 
         fn forward_vl_chunk(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
-            _per_row_lens: Option<&[i32]>,
+            per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("step decode-mask regression is text-only")
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            self.forward_seq_lens.lock().unwrap().push(dims[1]);
+            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            fake_logits_for_batch(dims[0])
         }
 
         fn forward_vl_hidden(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
-            _per_row_lens: Option<&[i32]>,
+            per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("step decode-mask regression is text-only")
+            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            self.hidden_seq_lens.lock().unwrap().push(dims[1]);
+            mlx::Array::zeros((dims[0], dims[1], 4_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake vl hidden failed: {e:?}"))
         }
     }
 
@@ -3828,20 +6454,37 @@ mod tests {
     #[derive(Default)]
     struct ScriptedMtpSchedulerModel {
         first_token: u32,
+        first_token_calls_remaining: std::sync::Mutex<usize>,
         draft_tokens: std::sync::Mutex<VecDeque<u32>>,
         verify_sequences: std::sync::Mutex<VecDeque<Vec<u32>>>,
         mtp_hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
+        vl_hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
+        vl_hidden_vision_present: std::sync::Mutex<Vec<bool>>,
+        vision_grid_lens: std::sync::Mutex<Vec<usize>>,
         project_calls: std::sync::Mutex<usize>,
         fail_mtp_cache: bool,
     }
 
     impl ScriptedMtpSchedulerModel {
         fn new(first_token: u32, draft_tokens: Vec<u32>, verify_sequences: Vec<Vec<u32>>) -> Self {
+            Self::new_with_first_token_calls(first_token, 1, draft_tokens, verify_sequences)
+        }
+
+        fn new_with_first_token_calls(
+            first_token: u32,
+            first_token_calls: usize,
+            draft_tokens: Vec<u32>,
+            verify_sequences: Vec<Vec<u32>>,
+        ) -> Self {
             Self {
                 first_token,
+                first_token_calls_remaining: std::sync::Mutex::new(first_token_calls),
                 draft_tokens: std::sync::Mutex::new(draft_tokens.into()),
                 verify_sequences: std::sync::Mutex::new(verify_sequences.into()),
                 mtp_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
+                vl_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
+                vl_hidden_vision_present: std::sync::Mutex::new(Vec::new()),
+                vision_grid_lens: std::sync::Mutex::new(Vec::new()),
                 project_calls: std::sync::Mutex::new(0),
                 fail_mtp_cache: false,
             }
@@ -3850,9 +6493,13 @@ mod tests {
         fn with_mtp_cache_failure(first_token: u32) -> Self {
             Self {
                 first_token,
+                first_token_calls_remaining: std::sync::Mutex::new(1),
                 draft_tokens: std::sync::Mutex::new(VecDeque::new()),
                 verify_sequences: std::sync::Mutex::new(VecDeque::new()),
                 mtp_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
+                vl_hidden_seq_lens: std::sync::Mutex::new(Vec::new()),
+                vl_hidden_vision_present: std::sync::Mutex::new(Vec::new()),
+                vision_grid_lens: std::sync::Mutex::new(Vec::new()),
                 project_calls: std::sync::Mutex::new(0),
                 fail_mtp_cache: true,
             }
@@ -3860,6 +6507,18 @@ mod tests {
 
         fn mtp_hidden_seq_lens(&self) -> Vec<i32> {
             self.mtp_hidden_seq_lens.lock().unwrap().clone()
+        }
+
+        fn vl_hidden_seq_lens(&self) -> Vec<i32> {
+            self.vl_hidden_seq_lens.lock().unwrap().clone()
+        }
+
+        fn vl_hidden_vision_present(&self) -> Vec<bool> {
+            self.vl_hidden_vision_present.lock().unwrap().clone()
+        }
+
+        fn vision_grid_lens(&self) -> Vec<usize> {
+            self.vision_grid_lens.lock().unwrap().clone()
         }
 
         fn bump_first_full_cache(
@@ -3980,55 +6639,73 @@ mod tests {
     impl DenseVlMethods for ScriptedMtpSchedulerModel {
         fn batched_prefill_vl(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
-            _per_row_lens: &[i32],
+            per_row_lens: &[i32],
             _per_row_pixel_values: &[Option<&[mlx::Array]>],
             _per_row_grid_thw: &[Option<&[(i32, i32, i32)]>],
             _image_token_id: i32,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("scripted MTP scheduler tests are text-only")
+            Self::bump_first_full_cache(cache, input_ids, Some(per_row_lens))?;
+            fake_logits_for_token_sequence(&[self.first_token])
         }
 
         fn compute_vision_embeds(
             &self,
             _pixel_values: &[mlx::Array],
-            _grid_thw: &[(i32, i32, i32)],
+            grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("scripted MTP scheduler tests are text-only")
+            self.vision_grid_lens.lock().unwrap().push(grid_thw.len());
+            let rows: i32 = grid_thw
+                .iter()
+                .map(|&(t, h, w)| t * (h / 2).max(1) * (w / 2).max(1))
+                .sum::<i32>()
+                .max(1);
+            mlx::Array::zeros((rows, 1_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake vision embeds failed: {e:?}"))
         }
 
         fn forward_vl_chunk(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
-            _per_row_lens: Option<&[i32]>,
+            per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
             _vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("scripted MTP scheduler tests are text-only")
+            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            fake_logits_for_token_sequence(&[self.first_token])
         }
 
         fn forward_vl_hidden(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
-            _per_row_lens: Option<&[i32]>,
+            per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
-            _vision_embeds_slice: Option<&mlx::Array>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
+            vision_embeds_slice: Option<&mlx::Array>,
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
-            unreachable!("scripted MTP scheduler tests are text-only")
+            Self::bump_first_full_cache(cache, input_ids, per_row_lens)?;
+            let dims = input_ids.shape();
+            let dims = dims.as_slice();
+            self.vl_hidden_seq_lens.lock().unwrap().push(dims[1]);
+            self.vl_hidden_vision_present
+                .lock()
+                .unwrap()
+                .push(vision_embeds_slice.is_some());
+            mlx::Array::zeros((dims[0], dims[1], 4_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake vl hidden failed: {e:?}"))
         }
     }
 
@@ -4059,7 +6736,9 @@ mod tests {
         ) -> crate::Result<mlx::Array> {
             let seq = hidden.shape().as_slice()[1] as usize;
             let mut calls = self.project_calls.lock().unwrap();
-            let tokens = if *calls == 0 {
+            let mut first_token_calls_remaining = self.first_token_calls_remaining.lock().unwrap();
+            let tokens = if seq == 1 && *first_token_calls_remaining > 0 {
+                *first_token_calls_remaining -= 1;
                 vec![self.first_token]
             } else {
                 self.verify_sequences
@@ -4075,6 +6754,14 @@ mod tests {
                 "project logits sequence length must match hidden seq"
             );
             fake_logits_for_token_sequence(&tokens)
+        }
+
+        fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {
+            4
+        }
+
+        fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> mlx::Dtype {
+            mlx::Dtype::Float32
         }
 
         fn mtp_forward_hidden_on(
@@ -4141,16 +6828,180 @@ mod tests {
         req
     }
 
+    fn mtp_vl_req(prompt_ids: Vec<u32>, max_new_tokens: usize) -> GenerateRequest {
+        let mut req = mtp_req(prompt_ids, max_new_tokens);
+        req.pixel_values = Some(vec![
+            mlx::Array::zeros((1_i32, 1_i32), mlx::Dtype::Float32).unwrap()
+        ]);
+        req.image_grid_thw = Some(vec![(1, 2, 2)]);
+        req
+    }
+
     fn mtp_cache_offset(s: &Scheduler<ScriptedMtpSchedulerModel>) -> i32 {
         s.mtp_state
             .as_ref()
             .expect("scheduler MTP state")
+            .rows
+            .get(&0)
+            .expect("row 0 MTP state")
             .mtp_cache
             .offset()
     }
 
     #[test]
-    fn mtp_single_eligibility_accepts_single_text_greedy_request() {
+    #[serial(mlx_metal)]
+    fn mtp_prefill_uses_paged_ssd_prefix_cache_on_exact_hit() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-mtp-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "mtp-test", 2, 32)
+            .expect("prefix config");
+
+        let mut warm = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        warm.enable_paged_prefix_cache(config.clone())
+            .expect("enable prefix cache");
+        let warm_id = warm
+            .admit(mtp_req(vec![1, 2, 3, 4], 1))
+            .expect("admit warm MTP");
+        let warm_model = ScriptedMtpSchedulerModel::new(5, Vec::new(), Vec::new());
+        let warm_cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+        let warm_events = warm
+            .prefill_admitted_mtp_single(&warm_model, &FakeMtpHead, warm_cfg)
+            .expect("warm MTP prefill");
+        assert_eq!(
+            warm_events,
+            vec![StepEvent {
+                id: warm_id,
+                token: 5,
+                finish_reason: Some("length")
+            }]
+        );
+        assert_eq!(
+            warm_model.mtp_hidden_seq_lens(),
+            vec![3, 1],
+            "warm MTP prefill should split N-1 prefix before the final token"
+        );
+        assert!(
+            std::fs::read_dir(&root)
+                .expect("prefix cache dir")
+                .next()
+                .is_some(),
+            "warm MTP prefill should save prefix entries"
+        );
+
+        let mut hit = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        hit.enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let hit_id = hit
+            .admit(mtp_req(vec![1, 2, 3, 4], 1))
+            .expect("admit hit MTP");
+        let hit_model = ScriptedMtpSchedulerModel::new(5, Vec::new(), Vec::new());
+        let hit_cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+        let hit_events = hit
+            .prefill_admitted_mtp_single(&hit_model, &FakeMtpHead, hit_cfg)
+            .expect("hit MTP prefill");
+        assert_eq!(
+            hit_events,
+            vec![StepEvent {
+                id: hit_id,
+                token: 5,
+                finish_reason: Some("length")
+            }]
+        );
+        assert_eq!(
+            hit_model.mtp_hidden_seq_lens(),
+            vec![1],
+            "exact MTP prefix hit should restore N-1 main/MTP cache state and compute only the final token"
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_batch_prefill_uses_paged_ssd_prefix_cache_on_exact_hits() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-mtp-batch-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            crate::core::cache::PagedPrefixCacheConfig::new(&root, "mtp-batch-test", 2, 64)
+                .expect("prefix config");
+
+        for prompt in [vec![1, 2, 3, 4], vec![9, 8, 7]] {
+            let mut warm = Scheduler::<ScriptedMtpSchedulerModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            warm.enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            warm.admit(mtp_req(prompt, 1)).expect("admit warm MTP");
+            let warm_model = ScriptedMtpSchedulerModel::new(5, Vec::new(), Vec::new());
+            let warm_cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+            warm.prefill_admitted_mtp_single(&warm_model, &FakeMtpHead, warm_cfg)
+                .expect("warm MTP prefill");
+        }
+
+        let mut hit = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        hit.enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let id0 = hit
+            .admit(mtp_req(vec![1, 2, 3, 4], 1))
+            .expect("admit first hit MTP");
+        let id1 = hit
+            .admit(mtp_req(vec![9, 8, 7], 1))
+            .expect("admit second hit MTP");
+        let hit_model =
+            ScriptedMtpSchedulerModel::new_with_first_token_calls(5, 2, Vec::new(), Vec::new());
+        let hit_cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+        let hit_events = hit
+            .prefill_admitted_mtp_batch(&hit_model, &FakeMtpHead, hit_cfg)
+            .expect("hit MTP batch prefill");
+
+        assert_eq!(
+            hit_events,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 5,
+                    finish_reason: Some("length")
+                },
+                StepEvent {
+                    id: id1,
+                    token: 5,
+                    finish_reason: Some("length")
+                }
+            ]
+        );
+        assert_eq!(
+            hit_model.mtp_hidden_seq_lens(),
+            vec![1, 1],
+            "exact MTP prefix hits should restore each row's N-1 main/MTP cache state and compute only final tokens"
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    fn mtp_batch_eligibility_accepts_single_text_greedy_request() {
         let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
             16,
@@ -4161,24 +7012,20 @@ mod tests {
             .admit(mtp_req(vec![1, 2], 4))
             .expect("admit text greedy");
 
-        assert!(scheduler.mtp_single_active_text_greedy_eligible());
+        assert!(scheduler.mtp_batch_active_greedy_eligible());
     }
 
     #[test]
-    fn mtp_single_eligibility_rejects_vl_and_non_greedy_requests() {
+    fn mtp_batch_eligibility_accepts_vl_and_rejects_non_greedy_requests() {
         let mut vl_scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
             16,
             crate::core::memory_budget::test_meta_qwen35(),
         )
         .expect("scheduler");
-        let mut vl = mtp_req(vec![1, 2], 4);
-        vl.pixel_values = Some(vec![
-            mlx::Array::zeros((1_i32, 1_i32), mlx::Dtype::Float32).unwrap()
-        ]);
-        vl.image_grid_thw = Some(vec![(1, 1, 1)]);
+        let vl = mtp_vl_req(vec![1, 248056, 2], 4);
         vl_scheduler.admit(vl).expect("admit vl");
-        assert!(!vl_scheduler.mtp_single_active_text_greedy_eligible());
+        assert!(vl_scheduler.mtp_batch_active_greedy_eligible());
 
         let mut sampling_scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
@@ -4189,7 +7036,7 @@ mod tests {
         let mut sampled = mtp_req(vec![1, 2], 4);
         sampled.sampler = Sampler::greedy().with_temperature(0.7);
         sampling_scheduler.admit(sampled).expect("admit sampled");
-        assert!(!sampling_scheduler.mtp_single_active_text_greedy_eligible());
+        assert!(!sampling_scheduler.mtp_batch_active_greedy_eligible());
     }
 
     #[test]
@@ -4211,29 +7058,155 @@ mod tests {
     }
 
     #[test]
-    fn mtp_prefill_rejects_vl_request() {
+    fn mtp_prefill_vl_uses_paged_ssd_prefix_cache_on_exact_hit() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-mtp-vl-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "mtp-vl-test", 2, 32)
+            .expect("prefix config");
+        let prompt = vec![1, 248056, 2, 3];
+
+        let mut warm = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        warm.enable_paged_prefix_cache(config.clone())
+            .expect("enable prefix cache");
+        let warm_id = warm
+            .admit(mtp_vl_req(prompt.clone(), 1))
+            .expect("admit warm VL MTP");
+        let warm_model = ScriptedMtpSchedulerModel::new(5, Vec::new(), Vec::new());
+        let warm_cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+        let warm_events = warm
+            .prefill_admitted_mtp_single(&warm_model, &FakeMtpHead, warm_cfg)
+            .expect("warm VL MTP prefill");
+        assert_eq!(
+            warm_events,
+            vec![StepEvent {
+                id: warm_id,
+                token: 5,
+                finish_reason: Some("length")
+            }]
+        );
+        assert_eq!(warm_model.vision_grid_lens(), vec![1]);
+        assert_eq!(
+            warm_model.vl_hidden_seq_lens(),
+            vec![3, 1],
+            "warm VL MTP prefill should split N-1 prefix before the final token"
+        );
+        assert_eq!(
+            warm_model.vl_hidden_vision_present(),
+            vec![true, false],
+            "only the prefix chunk should carry the image embedding slice"
+        );
+        assert_eq!(warm_model.mtp_hidden_seq_lens(), vec![3, 1]);
+
         let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
             1,
             32768,
             crate::core::memory_budget::test_meta_qwen35(),
         )
         .expect("scheduler startup");
-        let mut req = mtp_req(vec![1, 2, 3], 4);
-        req.pixel_values = Some(vec![
-            mlx::Array::zeros((1_i32, 1_i32), mlx::Dtype::Float32).unwrap()
-        ]);
-        req.image_grid_thw = Some(vec![(1, 1, 1)]);
-        s.admit(req).expect("admit");
-
-        let model = ScriptedMtpSchedulerModel::new(3, vec![4], vec![vec![4, 5]]);
+        s.enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let hit_id = s.admit(mtp_vl_req(prompt, 1)).expect("admit hit VL MTP");
+        let model = ScriptedMtpSchedulerModel::new(5, Vec::new(), Vec::new());
         let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
-        let err = s
+        let hit_events = s
             .prefill_admitted_mtp_single(&model, &FakeMtpHead, cfg)
-            .expect_err("VL request must reject scheduler MTP");
-        assert!(
-            err.to_string().contains("text-only"),
-            "unexpected err: {err}"
+            .expect("hit VL MTP prefill");
+        assert_eq!(
+            hit_events,
+            vec![StepEvent {
+                id: hit_id,
+                token: 5,
+                finish_reason: Some("length")
+            }]
         );
+        assert_eq!(
+            model.vl_hidden_seq_lens(),
+            vec![1],
+            "exact VL MTP prefix hit should restore N-1 main/MTP cache state and compute only the final token"
+        );
+        assert_eq!(model.vl_hidden_vision_present(), vec![false]);
+        assert_eq!(model.mtp_hidden_seq_lens(), vec![1]);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_batch_prefill_vl_uses_paged_ssd_prefix_cache_on_exact_hits() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-mtp-vl-batch-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            crate::core::cache::PagedPrefixCacheConfig::new(&root, "mtp-vl-batch-test", 2, 64)
+                .expect("prefix config");
+        let prompts = [vec![1, 248056, 2, 3], vec![4, 248056, 5]];
+
+        for prompt in prompts.iter().cloned() {
+            let mut warm = Scheduler::<ScriptedMtpSchedulerModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            warm.enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            warm.admit(mtp_vl_req(prompt, 1))
+                .expect("admit warm VL MTP");
+            let warm_model = ScriptedMtpSchedulerModel::new(5, Vec::new(), Vec::new());
+            let warm_cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+            warm.prefill_admitted_mtp_single(&warm_model, &FakeMtpHead, warm_cfg)
+                .expect("warm VL MTP prefill");
+        }
+
+        let mut hit = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        hit.enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let id0 = hit
+            .admit(mtp_vl_req(prompts[0].clone(), 1))
+            .expect("admit first VL hit");
+        let id1 = hit
+            .admit(mtp_vl_req(prompts[1].clone(), 1))
+            .expect("admit second VL hit");
+        let hit_model =
+            ScriptedMtpSchedulerModel::new_with_first_token_calls(5, 2, Vec::new(), Vec::new());
+        let hit_cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+        let hit_events = hit
+            .prefill_admitted_mtp_batch(&hit_model, &FakeMtpHead, hit_cfg)
+            .expect("hit VL MTP batch prefill");
+
+        assert_eq!(
+            hit_events,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 5,
+                    finish_reason: Some("length")
+                },
+                StepEvent {
+                    id: id1,
+                    token: 5,
+                    finish_reason: Some("length")
+                }
+            ]
+        );
+        assert_eq!(hit_model.vl_hidden_seq_lens(), vec![1, 1]);
+        assert_eq!(hit_model.vl_hidden_vision_present(), vec![false, false]);
+        assert_eq!(hit_model.mtp_hidden_seq_lens(), vec![1, 1]);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
     #[test]
@@ -4373,7 +7346,12 @@ mod tests {
 
         let mtp_state = s.mtp_state.as_ref().expect("scheduler MTP state");
         assert_eq!(
-            mtp_state.adaptive_draft_tokens, 1,
+            mtp_state
+                .rows
+                .get(&0)
+                .expect("row 0 MTP state")
+                .adaptive_draft_tokens,
+            1,
             "a first-token mismatch should reduce the next draft budget to one"
         );
         assert_eq!(mtp_state.stats.draft_budget_reductions, 1);
@@ -4426,6 +7404,85 @@ mod tests {
             }]
         );
         assert_eq!(s.get(id).unwrap().generated_tokens, vec![3, 4]);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_batch_step_emits_pending_tokens_for_each_unfinished_row() {
+        let mut s = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let id0 = s.admit(mtp_req(vec![1, 2], 3)).expect("admit row 0");
+        let id1 = s.admit(mtp_req(vec![10, 11], 3)).expect("admit row 1");
+        let model = ScriptedMtpSchedulerModel::new_with_first_token_calls(
+            3,
+            2,
+            vec![4, 6],
+            vec![vec![4, 5], vec![6, 7]],
+        );
+        let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+
+        let first = s
+            .prefill_admitted_mtp_batch(&model, &FakeMtpHead, cfg)
+            .expect("mtp batch prefill");
+        assert_eq!(
+            first,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 3,
+                    finish_reason: None
+                },
+                StepEvent {
+                    id: id1,
+                    token: 3,
+                    finish_reason: None
+                }
+            ]
+        );
+
+        let step_1 = s
+            .step_mtp_batch(&model, &FakeMtpHead)
+            .expect("first batch MTP step");
+        assert_eq!(
+            step_1,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 4,
+                    finish_reason: None
+                },
+                StepEvent {
+                    id: id1,
+                    token: 6,
+                    finish_reason: None
+                }
+            ]
+        );
+
+        let step_2 = s
+            .step_mtp_batch(&model, &FakeMtpHead)
+            .expect("second batch MTP step");
+        assert_eq!(
+            step_2,
+            vec![
+                StepEvent {
+                    id: id0,
+                    token: 5,
+                    finish_reason: Some("length")
+                },
+                StepEvent {
+                    id: id1,
+                    token: 7,
+                    finish_reason: Some("length")
+                }
+            ]
+        );
+        assert_eq!(s.get(id0).unwrap().generated_tokens, vec![3, 4, 5]);
+        assert_eq!(s.get(id1).unwrap().generated_tokens, vec![3, 6, 7]);
     }
 
     #[test]
@@ -4699,6 +7756,427 @@ mod tests {
             }
             _ => panic!("expected full-attention cache"),
         }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_uses_paged_ssd_prefix_cache_on_exact_hit() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-scheduler-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "step-test", 2, 32)
+            .expect("prefix config");
+
+        let mut warm = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        warm.enable_paged_prefix_cache(config.clone())
+            .expect("enable prefix cache");
+        warm.admit(mk_req(vec![1, 2, 3, 4])).expect("admit warm");
+        let warm_model = StepDecodeMaskModel::default();
+        warm.prefill_admitted(&warm_model).expect("warm prefill");
+        assert_eq!(warm_model.hidden_seq_lens(), vec![3]);
+        assert_eq!(warm_model.forward_seq_lens(), vec![1]);
+        assert!(
+            std::fs::read_dir(&root)
+                .expect("prefix cache dir")
+                .next()
+                .is_some(),
+            "warm prefill should save a prefix cache entry"
+        );
+
+        let mut hit = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        hit.enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        hit.admit(mk_req(vec![1, 2, 3, 4])).expect("admit hit");
+        let hit_model = StepDecodeMaskModel::default();
+        hit.prefill_admitted(&hit_model).expect("hit prefill");
+
+        assert_eq!(
+            hit_model.hidden_seq_lens(),
+            Vec::<i32>::new(),
+            "exact cache hit should restore prompt prefix instead of recomputing it"
+        );
+        assert_eq!(hit_model.forward_seq_lens(), vec![1]);
+        match &hit.cache.as_ref().expect("cache")[0] {
+            LayerCache::Full(kv) => assert!(kv.paged().is_some()),
+            _ => panic!("expected full-attention cache"),
+        }
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_batched_text_uses_paged_ssd_prefix_cache_on_exact_hits() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-batch-text-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "step-test", 2, 32)
+            .expect("prefix config");
+        let prompts = [vec![1, 2, 3, 4], vec![5, 6, 7, 8]];
+
+        for prompt in prompts.iter() {
+            let mut warm = Scheduler::<StepDecodeMaskModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            warm.enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            warm.admit(mk_req(prompt.clone())).expect("admit warm");
+            let warm_model = StepDecodeMaskModel::default();
+            warm.prefill_admitted(&warm_model).expect("warm prefill");
+        }
+
+        let mut hit = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        hit.enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let id_0 = hit.admit(mk_req(prompts[0].clone())).expect("admit hit 0");
+        let id_1 = hit.admit(mk_req(prompts[1].clone())).expect("admit hit 1");
+        let hit_model = StepDecodeMaskModel::default();
+        let events = hit.prefill_admitted(&hit_model).expect("hit prefill");
+
+        assert_eq!(
+            hit_model.batched_prefill_batches(),
+            Vec::<i32>::new(),
+            "fully hit batch should not recompute full prompts through batched_prefill"
+        );
+        assert_eq!(hit_model.batched_prefill_lens(), Vec::<Vec<i32>>::new());
+        assert_eq!(
+            hit_model.hidden_seq_lens(),
+            Vec::<i32>::new(),
+            "fully hit batch should restore prefixes instead of recomputing them"
+        );
+        assert_eq!(hit_model.forward_seq_lens(), vec![1]);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, id_0);
+        assert_eq!(events[1].id, id_1);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_batched_text_paged_prefix_cold_miss_uses_batched_prefill() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-batch-text-cold-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "step-test", 2, 32)
+            .expect("prefix config");
+
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let id_0 = scheduler.admit(mk_req(vec![1, 2, 3, 4])).expect("admit 0");
+        let id_1 = scheduler.admit(mk_req(vec![5, 6, 7, 8])).expect("admit 1");
+        let model = StepDecodeMaskModel::default();
+        let events = scheduler.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.batched_prefill_batches(), vec![2]);
+        assert_eq!(model.batched_prefill_lens(), vec![vec![3, 3]]);
+        assert_eq!(
+            model.forward_seq_lens(),
+            vec![1],
+            "cold paged-prefix batch should only decode the final token after batched prefix prefill"
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, id_0);
+        assert_eq!(events[1].id, id_1);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    fn prefix_restore_groups_coalesce_identical_text_prompts() {
+        let prompts = vec![
+            vec![1_u32, 2, 3, 4],
+            vec![9_u32, 8, 7],
+            vec![1_u32, 2, 3, 4],
+            vec![9_u32, 8, 7],
+        ];
+
+        assert_eq!(
+            prefix_restore_groups(&prompts, None).expect("groups"),
+            vec![vec![0, 2], vec![1, 3]]
+        );
+    }
+
+    #[test]
+    fn prefix_restore_groups_keep_different_vl_fingerprints_apart() {
+        let prompts = vec![
+            vec![1_u32, 2, 3],
+            vec![1_u32, 2, 3],
+            vec![1_u32, 2, 3],
+            vec![4_u32, 5, 6],
+        ];
+        let fingerprints = vec![
+            Some("vl:a".to_owned()),
+            Some("vl:b".to_owned()),
+            Some("vl:a".to_owned()),
+            Some("vl:a".to_owned()),
+        ];
+
+        assert_eq!(
+            prefix_restore_groups(&prompts, Some(&fingerprints)).expect("groups"),
+            vec![vec![0, 2], vec![1], vec![3]]
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_batched_vl_uses_fingerprinted_paged_ssd_prefix_cache_on_exact_hits() {
+        use crate::core::generate::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        fn vl_req_with_pixel(value: f32) -> GenerateRequest {
+            let pixel_values: mlx::Array = (&[value; 4][..], &[1_i32, 4][..])
+                .try_into()
+                .expect("pixel_values");
+            let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
+            let mut vl_req = mk_req(vec![1, IMAGE_TOKEN_ID as u32, 2]);
+            vl_req.pixel_values = Some(vec![pixel_values]);
+            vl_req.image_grid_thw = Some(vec![(1_i32, 2_i32, 2_i32)]);
+            vl_req.image_spatial_merge_size = 2;
+            vl_req.image_token_id = IMAGE_TOKEN_ID;
+            vl_req
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-batch-vl-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "vl-test", 2, 32)
+            .expect("prefix config");
+
+        for pixel in [0.0_f32, 1.0_f32] {
+            let mut warm = Scheduler::<StepDecodeMaskModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            warm.enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            warm.admit(vl_req_with_pixel(pixel)).expect("admit warm");
+            let warm_model = StepDecodeMaskModel::default();
+            warm.prefill_admitted(&warm_model).expect("warm prefill");
+        }
+
+        let mut hit = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        hit.enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        hit.admit(vl_req_with_pixel(0.0)).expect("admit hit 0");
+        hit.admit(vl_req_with_pixel(1.0)).expect("admit hit 1");
+        let hit_model = StepDecodeMaskModel::default();
+        hit.prefill_admitted(&hit_model).expect("hit prefill");
+
+        assert_eq!(
+            hit_model.batched_prefill_batches(),
+            Vec::<i32>::new(),
+            "fully hit VL batch should not recompute full prompts through batched_prefill_vl"
+        );
+        assert_eq!(
+            hit_model.hidden_seq_lens(),
+            Vec::<i32>::new(),
+            "fully hit VL batch should restore prefixes instead of recomputing them"
+        );
+        assert_eq!(hit_model.forward_seq_lens(), vec![1]);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_batched_vl_paged_prefix_cold_miss_uses_batched_prefill() {
+        use crate::core::generate::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        fn vl_req_with_pixel(value: f32) -> GenerateRequest {
+            let pixel_values: mlx::Array = (&[value; 4][..], &[1_i32, 4][..])
+                .try_into()
+                .expect("pixel_values");
+            let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
+            let mut vl_req = mk_req(vec![1, IMAGE_TOKEN_ID as u32, 2]);
+            vl_req.pixel_values = Some(vec![pixel_values]);
+            vl_req.image_grid_thw = Some(vec![(1_i32, 2_i32, 2_i32)]);
+            vl_req.image_spatial_merge_size = 2;
+            vl_req.image_token_id = IMAGE_TOKEN_ID;
+            vl_req
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-batch-vl-cold-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "vl-test", 2, 32)
+            .expect("prefix config");
+
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let id_0 = scheduler.admit(vl_req_with_pixel(0.0)).expect("admit vl 0");
+        let id_1 = scheduler.admit(vl_req_with_pixel(1.0)).expect("admit vl 1");
+        let model = StepDecodeMaskModel::default();
+        let events = scheduler.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(model.batched_prefill_batches(), vec![2]);
+        assert_eq!(model.batched_prefill_lens(), vec![vec![2, 2]]);
+        assert_eq!(
+            model.hidden_seq_lens(),
+            Vec::<i32>::new(),
+            "cold paged-prefix VL batch should use batched_prefill_vl, not per-row hidden replay"
+        );
+        assert_eq!(
+            model.forward_seq_lens(),
+            vec![1],
+            "cold paged-prefix VL batch should only decode the final token after batched prefix prefill"
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, id_0);
+        assert_eq!(events[1].id, id_1);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn admit_mid_vl_saves_fingerprinted_paged_prefix_cache() {
+        use crate::core::generate::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        fn vl_req_with_pixel(value: f32) -> GenerateRequest {
+            let pixel_values: mlx::Array = (&[value; 4][..], &[1_i32, 4][..])
+                .try_into()
+                .expect("pixel_values");
+            let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
+            let mut vl_req = mk_req(vec![1, IMAGE_TOKEN_ID as u32, 2]);
+            vl_req.pixel_values = Some(vec![pixel_values]);
+            vl_req.image_grid_thw = Some(vec![(1_i32, 2_i32, 2_i32)]);
+            vl_req.image_spatial_merge_size = 2;
+            vl_req.image_token_id = IMAGE_TOKEN_ID;
+            vl_req
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-vl-mid-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "vl-test", 2, 32)
+            .expect("prefix config");
+
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        s.enable_paged_prefix_cache(config.clone())
+            .expect("enable prefix cache");
+
+        s.admit(mk_req(vec![1, 2, 3])).expect("admit active");
+        let model = StepDecodeMaskModel::default();
+        s.prefill_admitted(&model).expect("prefill active");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let mut handle = s
+            .admit_mid_begin(vl_req_with_pixel(0.0), &model)
+            .expect("admit_mid_begin");
+        assert!(!s
+            .admit_mid_chunk(&mut handle, &model)
+            .expect("VL prefix mid-admit chunk"));
+        assert!(s
+            .admit_mid_chunk(&mut handle, &model)
+            .expect("VL final mid-admit chunk"));
+        s.admit_mid_finalize(handle, &model)
+            .expect("finalize VL mid-admit");
+
+        let entry_count = std::fs::read_dir(&root)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert!(entry_count > 0, "VL mid-admit should write prefix entries");
+
+        let mut same_image_hit = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        same_image_hit
+            .enable_paged_prefix_cache(config.clone())
+            .expect("enable prefix cache");
+        same_image_hit
+            .admit(vl_req_with_pixel(0.0))
+            .expect("admit same-image hit");
+        let same_image_model = StepDecodeMaskModel::default();
+        same_image_hit
+            .prefill_admitted(&same_image_model)
+            .expect("same-image prefill");
+        assert_eq!(
+            same_image_model.hidden_seq_lens(),
+            Vec::<i32>::new(),
+            "same VL image should restore the cached prefix"
+        );
+        assert_eq!(same_image_model.forward_seq_lens(), vec![1]);
+
+        let mut different_image_miss = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        different_image_miss
+            .enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        different_image_miss
+            .admit(vl_req_with_pixel(1.0))
+            .expect("admit different-image miss");
+        let different_image_model = StepDecodeMaskModel::default();
+        different_image_miss
+            .prefill_admitted(&different_image_model)
+            .expect("different-image prefill");
+        assert_eq!(
+            different_image_model.hidden_seq_lens(),
+            vec![2],
+            "different VL image must miss despite identical token ids"
+        );
+        assert_eq!(different_image_model.forward_seq_lens(), vec![1]);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
     #[cfg(not(feature = "p5h-profile"))]

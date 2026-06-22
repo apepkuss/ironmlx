@@ -438,6 +438,62 @@ mod tests {
     }
 
     #[test]
+    fn serve_subcommand_parses_paged_prefix_cache() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--paged-prefix-cache-block-size",
+            "32",
+            "--paged-prefix-cache-max-pages",
+            "4096",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(
+                    args.paged_prefix_cache_dir
+                        .as_ref()
+                        .expect("prefix cache dir")
+                        .to_string_lossy(),
+                    "/tmp/prefix-cache"
+                );
+                assert_eq!(args.paged_prefix_cache_block_size, 32);
+                assert_eq!(args.paged_prefix_cache_max_pages, Some(4096));
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_subcommand_accepts_default_paged_prefix_cache_dir() {
+        let cli = Cli::try_parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--paged-prefix-cache-dir",
+        ])
+        .expect("parse serve with default prefix cache dir");
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(
+                    args.paged_prefix_cache_dir
+                        .as_ref()
+                        .expect("prefix cache dir")
+                        .to_string_lossy(),
+                    "~/.ironmlx/cache/paged_prefix_cache"
+                );
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn generate_subcommand_parses_k3v4_kv_quant() {
         let cli = Cli::parse_from([
             "ironmlx",

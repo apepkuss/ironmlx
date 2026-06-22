@@ -11,7 +11,7 @@ use anyhow::Context;
 use axum::{routing::get, routing::post, Router};
 use tokio::sync::Mutex;
 
-use crate::core::cache::TurboQuantKVBits;
+use crate::core::cache::{PagedPrefixCacheConfig, TurboQuantKVBits};
 use crate::core::model::Model;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
@@ -52,7 +52,8 @@ pub enum VisionInputConfig {
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
 ///
 /// 3b-2 adds `scheduler_handle`; short prompts, including VL prompts, route
-/// through the SchedulerActor, while long prompts fall back to GenerationStream.
+/// through the SchedulerActor. Long text prompts keep using GenerationStream
+/// unless model limits or paged prefix cache require SchedulerActor features.
 ///
 /// P5a-T5: AppState is now generic over `M: Model + DenseVlMethods + Send +
 /// 'static`. CLI call sites pass either `Qwen35Model` or `Qwen35MoeModel`
@@ -73,6 +74,8 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// SchedulerActor handle. Routed to by short-prompt requests. See
     /// `serve_via_scheduler_*` in `openai.rs`.
     pub scheduler_handle: scheduler_actor::SchedulerActorHandle,
+    /// True when the SchedulerActor was started with paged SSD prefix cache.
+    pub paged_prefix_cache_enabled: bool,
     /// Maximum concurrent in-flight requests routed to the SchedulerActor.
     pub b_max: usize,
     /// Admission-window deadline (milliseconds) — drain-window timeout.
@@ -101,6 +104,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             prefill_chunk_size: self.prefill_chunk_size,
             vision_input: self.vision_input.clone(),
             scheduler_handle: self.scheduler_handle.clone(),
+            paged_prefix_cache_enabled: self.paged_prefix_cache_enabled,
             b_max: self.b_max,
             admission_deadline_ms: self.admission_deadline_ms,
             admission_queue_max: self.admission_queue_max,
@@ -133,7 +137,11 @@ pub(crate) fn should_route_to_scheduler<M: Model>(
     prompt_len: usize,
     prefill_chunk_size: usize,
     b_max: usize,
+    paged_prefix_cache_enabled: bool,
 ) -> bool {
+    if paged_prefix_cache_enabled {
+        return true;
+    }
     if prefill_chunk_size == 0 || prompt_len <= prefill_chunk_size {
         return true;
     }
@@ -144,6 +152,8 @@ trait SchedulerActorSpawner<M>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    fn paged_prefix_cache_enabled(&self) -> bool;
+
     #[allow(clippy::too_many_arguments)]
     fn spawn(
         self,
@@ -157,12 +167,18 @@ where
     ) -> Result<scheduler_actor::SchedulerActorHandle>;
 }
 
-struct PlainSchedulerActorSpawner;
+struct PlainSchedulerActorSpawner {
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+}
 
 impl<M> SchedulerActorSpawner<M> for PlainSchedulerActorSpawner
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    fn paged_prefix_cache_enabled(&self) -> bool {
+        self.paged_prefix_cache.is_some()
+    }
+
     fn spawn(
         self,
         model: Arc<Mutex<M>>,
@@ -173,21 +189,37 @@ where
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
-        Ok(scheduler_actor::spawn_scheduler_actor(
-            model,
-            b_max,
-            admission_deadline,
-            admission_queue_max,
-            effective_cap_max,
-            decode_cadence_mid_chunk_cap,
-            meta,
-        )?)
+        if let Some(config) = self.paged_prefix_cache {
+            Ok(
+                scheduler_actor::spawn_scheduler_actor_with_paged_prefix_cache(
+                    model,
+                    b_max,
+                    admission_deadline,
+                    admission_queue_max,
+                    effective_cap_max,
+                    decode_cadence_mid_chunk_cap,
+                    meta,
+                    config,
+                )?,
+            )
+        } else {
+            Ok(scheduler_actor::spawn_scheduler_actor(
+                model,
+                b_max,
+                admission_deadline,
+                admission_queue_max,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                meta,
+            )?)
+        }
     }
 }
 
 struct MtpSchedulerActorSpawner<H> {
     mtp: H,
     mtp_draft_tokens: usize,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
 }
 
 impl<M> SchedulerActorSpawner<M> for MtpSchedulerActorSpawner<M::MtpHead>
@@ -195,6 +227,10 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
+    fn paged_prefix_cache_enabled(&self) -> bool {
+        self.paged_prefix_cache.is_some()
+    }
+
     fn spawn(
         self,
         model: Arc<Mutex<M>>,
@@ -215,6 +251,7 @@ where
             effective_cap_max,
             decode_cadence_mid_chunk_cap,
             meta,
+            self.paged_prefix_cache,
         )?)
     }
 }
@@ -233,6 +270,7 @@ pub async fn serve<M>(
     max_cache_cap: usize, // 3f
     decode_cadence_mid_chunk_cap: usize,
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool, // P5h+1 T1
@@ -259,7 +297,7 @@ where
         p5h_measurement_eval_probes,
         vision_input_override,
         None,
-        PlainSchedulerActorSpawner,
+        PlainSchedulerActorSpawner { paged_prefix_cache },
     )
     .await
 }
@@ -280,6 +318,7 @@ pub async fn serve_with_mtp<M>(
     max_cache_cap: usize,
     decode_cadence_mid_chunk_cap: usize,
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     p5h_measurement_eval_probes: bool,
@@ -310,6 +349,7 @@ where
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens,
+            paged_prefix_cache,
         },
     )
     .await
@@ -393,6 +433,7 @@ where
         );
     }
 
+    let paged_prefix_cache_enabled = scheduler_actor_spawner.paged_prefix_cache_enabled();
     let scheduler_handle = scheduler_actor_spawner.spawn(
         model.clone(),
         b_max,
@@ -431,6 +472,7 @@ where
         prefill_chunk_size,
         vision_input,
         scheduler_handle,
+        paged_prefix_cache_enabled,
         b_max,
         admission_deadline_ms,
         admission_queue_max,
@@ -619,14 +661,21 @@ mod tests {
     #[test]
     fn route_keeps_unlimited_model_long_prompt_on_generation_stream() {
         assert!(!should_route_to_scheduler::<DefaultRouteModel>(
-            4096, 2048, 4
+            4096, 2048, 4, false
         ));
     }
 
     #[test]
     fn route_uses_scheduler_for_model_limited_chunked_long_prompt() {
         assert!(should_route_to_scheduler::<LimitedRouteModel>(
-            4096, 2048, 4
+            4096, 2048, 4, false
+        ));
+    }
+
+    #[test]
+    fn route_uses_scheduler_for_long_prompt_when_paged_prefix_cache_enabled() {
+        assert!(should_route_to_scheduler::<DefaultRouteModel>(
+            4096, 2048, 4, true,
         ));
     }
 

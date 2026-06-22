@@ -8,7 +8,7 @@
 //! logits`), matching Qwen3.5's lm_head-tied configuration.
 
 use anyhow::anyhow;
-use mlx::{Array, MetalKernel, Shape, StreamOrDevice};
+use mlx::{Array, Dtype, MetalKernel, Shape, StreamOrDevice};
 use std::sync::OnceLock;
 
 use crate::core::Loader;
@@ -74,6 +74,15 @@ impl Embedding {
             Ok(Embedding {
                 inner: EmbeddingImpl::Fp { weight },
             })
+        }
+    }
+
+    pub fn output_dtype(&self) -> Dtype {
+        match &self.inner {
+            EmbeddingImpl::Fp { weight } => weight.dtype(),
+            EmbeddingImpl::Quant { scales, biases, .. } => {
+                biases.as_ref().map_or(scales.dtype(), Array::dtype)
+            }
         }
     }
 

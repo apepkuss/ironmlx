@@ -443,6 +443,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             32768, // max_cache_cap (3f default)
             256,   // decode_cadence_mid_chunk_cap
             None,  // kv_cache_turboquant_bits
+            None,  // paged_prefix_cache
             scheduler_profile,
             false, // scheduler_autotune_report
             false, // p5h_measurement_eval_probes (P5h+1 T1)

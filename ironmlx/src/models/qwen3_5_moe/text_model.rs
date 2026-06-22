@@ -4,7 +4,7 @@
 //! and shared across all layers.
 
 use anyhow::anyhow;
-use mlx::{Array, StreamOrDevice};
+use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
 use crate::nn::{Embedding, LayerCache, Mrope, RmsNorm};
@@ -100,6 +100,10 @@ impl Qwen35MoeTextModel {
 
     pub fn num_layers(&self) -> usize {
         self.layers.len()
+    }
+
+    pub fn hidden_dtype(&self) -> Dtype {
+        self.embed_tokens.output_dtype()
     }
 
     pub fn mrope(&self) -> &Mrope {

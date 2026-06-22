@@ -13,6 +13,29 @@ use tokenizers::Tokenizer;
 use crate::client::{run_chat_completion, RequestResult};
 use crate::prompt::PromptSource;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixCacheProbe {
+    Disabled,
+    Enabled,
+}
+
+impl PrefixCacheProbe {
+    pub fn from_enabled(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+
+    fn stable_nonce(self, nonce_seed_override: Option<u64>) -> Option<u64> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled => Some(nonce_seed_override.unwrap_or(0)),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CellResult {
     pub target_name: String,
@@ -76,12 +99,13 @@ pub async fn run_cell(
     capture_run_timestamps: bool,
     inter_run_cooldown_secs: u64,
     nonce_seed_override: Option<u64>,
+    prefix_cache_probe: PrefixCacheProbe,
     tokenizer: &Tokenizer,
 ) -> Result<CellResult> {
     let pp = prompt_source.target_tokens();
     eprintln!("[{target_name}] PP={pp} TG={tg}: warmup x{warmup} ...");
     for w in 0..warmup {
-        let nonce = warmup_nonce(nonce_seed_override, w);
+        let nonce = warmup_nonce(prefix_cache_probe, nonce_seed_override, w);
         let (prompt, _) = prompt_source.render(tokenizer, nonce)?;
         let _ =
             run_chat_completion(client, target_url, model, &prompt, tg, capture_request_id).await?;
@@ -90,7 +114,7 @@ pub async fn run_cell(
     eprintln!("[{target_name}] PP={pp} TG={tg}: timed runs x{runs} ...");
     let mut outcomes = Vec::with_capacity(runs);
     for i in 0..runs {
-        let nonce = measured_nonce(nonce_seed_override, i);
+        let nonce = measured_nonce(prefix_cache_probe, nonce_seed_override, i);
         let (prompt, prompt_tokens_local) = prompt_source.render(tokenizer, nonce)?;
         let run_start_unix_ns = if capture_run_timestamps {
             Some(now_unix_ns())
@@ -160,6 +184,7 @@ pub async fn run_cell_concurrent(
     duration: std::time::Duration,
     concurrent: usize,
     capture_request_id: bool,
+    prefix_cache_probe: PrefixCacheProbe,
     tokenizer: std::sync::Arc<Tokenizer>,
 ) -> Result<ConcurrentCellResult> {
     use std::time::Instant;
@@ -180,7 +205,7 @@ pub async fn run_cell_concurrent(
             let url = target_url.to_string();
             let model_w = model.to_string();
             warmup_handles.push(tokio::spawn(async move {
-                let mut nonce = nonce_seed() ^ ((worker_id as u64) << 48);
+                let mut nonce = worker_nonce(prefix_cache_probe, worker_id, 0);
                 while Instant::now() < warmup_deadline {
                     let (prompt, _) = prompt_source_w.render(&tokenizer_w, nonce)?;
                     let _ = crate::client::run_chat_completion(
@@ -192,7 +217,7 @@ pub async fn run_cell_concurrent(
                         capture_request_id,
                     )
                     .await?;
-                    nonce = nonce.wrapping_add(1);
+                    nonce = next_worker_nonce(prefix_cache_probe, nonce);
                 }
                 Ok::<(), anyhow::Error>(())
             }));
@@ -219,7 +244,7 @@ pub async fn run_cell_concurrent(
             // Distinct nonce space per worker: high 16 bits = worker_id,
             // low 48 bits = wrapping counter. No collisions across workers
             // until each worker has fired 2^48 requests (effectively never).
-            let mut nonce = nonce_seed() ^ ((worker_id as u64) << 48);
+            let mut nonce = worker_nonce(prefix_cache_probe, worker_id, 0);
             while Instant::now() < timed_deadline {
                 let (prompt, prompt_local) = prompt_source_w.render(&tokenizer_w, nonce)?;
                 let result = crate::client::run_chat_completion(
@@ -236,7 +261,7 @@ pub async fn run_cell_concurrent(
                     prompt_tokens_local: prompt_local,
                     result,
                 });
-                nonce = nonce.wrapping_add(1);
+                nonce = next_worker_nonce(prefix_cache_probe, nonce);
             }
             Ok::<Vec<RequestOutcome>, anyhow::Error>(outcomes)
         }));
@@ -279,12 +304,40 @@ fn nonce_seed() -> u64 {
         .unwrap_or(0)
 }
 
-fn warmup_nonce(nonce_seed_override: Option<u64>, warmup_idx: usize) -> u64 {
+fn warmup_nonce(
+    prefix_cache_probe: PrefixCacheProbe,
+    nonce_seed_override: Option<u64>,
+    warmup_idx: usize,
+) -> u64 {
+    if let Some(nonce) = prefix_cache_probe.stable_nonce(nonce_seed_override) {
+        return nonce;
+    }
     nonce_seed_override.unwrap_or_else(nonce_seed) ^ (warmup_idx as u64)
 }
 
-fn measured_nonce(nonce_seed_override: Option<u64>, run_idx: usize) -> u64 {
+fn measured_nonce(
+    prefix_cache_probe: PrefixCacheProbe,
+    nonce_seed_override: Option<u64>,
+    run_idx: usize,
+) -> u64 {
+    if let Some(nonce) = prefix_cache_probe.stable_nonce(nonce_seed_override) {
+        return nonce;
+    }
     nonce_seed_override.unwrap_or_else(nonce_seed) ^ ((run_idx as u64) << 8)
+}
+
+fn worker_nonce(prefix_cache_probe: PrefixCacheProbe, worker_id: usize, counter: u64) -> u64 {
+    if let Some(nonce) = prefix_cache_probe.stable_nonce(None) {
+        return nonce;
+    }
+    nonce_seed() ^ ((worker_id as u64) << 48) ^ counter
+}
+
+fn next_worker_nonce(prefix_cache_probe: PrefixCacheProbe, nonce: u64) -> u64 {
+    match prefix_cache_probe {
+        PrefixCacheProbe::Disabled => nonce.wrapping_add(1),
+        PrefixCacheProbe::Enabled => nonce,
+    }
 }
 
 /// Unix-ns wall-clock for `--capture-run-timestamps`. Fail-soft to 0 on clock
@@ -299,21 +352,34 @@ fn now_unix_ns() -> u64 {
 
 #[cfg(test)]
 mod tests_nonce_seed {
-    use super::{measured_nonce, warmup_nonce};
+    use super::{measured_nonce, warmup_nonce, PrefixCacheProbe};
 
     #[test]
     fn fixed_seed_measured_nonce_sequence_keeps_run_variation() {
+        let probe = PrefixCacheProbe::Disabled;
         let seed = Some(20260526_u64);
-        assert_eq!(measured_nonce(seed, 0), 20260526);
-        assert_eq!(measured_nonce(seed, 1), 20260526 ^ (1_u64 << 8));
-        assert_eq!(measured_nonce(seed, 14), 20260526 ^ (14_u64 << 8));
+        assert_eq!(measured_nonce(probe, seed, 0), 20260526);
+        assert_eq!(measured_nonce(probe, seed, 1), 20260526 ^ (1_u64 << 8));
+        assert_eq!(measured_nonce(probe, seed, 14), 20260526 ^ (14_u64 << 8));
     }
 
     #[test]
     fn fixed_seed_warmup_nonce_sequence_uses_warmup_index() {
+        let probe = PrefixCacheProbe::Disabled;
         let seed = Some(42_u64);
-        assert_eq!(warmup_nonce(seed, 0), 42);
-        assert_eq!(warmup_nonce(seed, 1), 43);
-        assert_eq!(warmup_nonce(seed, 7), 45);
+        assert_eq!(warmup_nonce(probe, seed, 0), 42);
+        assert_eq!(warmup_nonce(probe, seed, 1), 43);
+        assert_eq!(warmup_nonce(probe, seed, 7), 45);
+    }
+
+    #[test]
+    fn prefix_cache_probe_reuses_one_nonce_for_warmup_and_measured_runs() {
+        let probe = PrefixCacheProbe::Enabled;
+        let seed = Some(42_u64);
+
+        assert_eq!(warmup_nonce(probe, seed, 0), 42);
+        assert_eq!(warmup_nonce(probe, seed, 7), 42);
+        assert_eq!(measured_nonce(probe, seed, 0), 42);
+        assert_eq!(measured_nonce(probe, seed, 14), 42);
     }
 }

@@ -5,7 +5,7 @@
 //! caches. Logit projection (tied or via lm_head) lives in [`super::Qwen35Model`].
 
 use anyhow::anyhow;
-use mlx::{Array, StreamOrDevice};
+use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
 use crate::nn::{DecoderLayer, DecoderLayerConfig, Embedding, LayerCache, Mrope, RmsNorm};
@@ -101,6 +101,10 @@ impl Qwen35TextModel {
 
     pub fn num_layers(&self) -> usize {
         self.layers.len()
+    }
+
+    pub fn hidden_dtype(&self) -> Dtype {
+        self.embed_tokens.output_dtype()
     }
 
     pub fn mrope(&self) -> &Mrope {

@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::core::cache::PagedPrefixCacheConfig;
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::scheduler::{
@@ -256,9 +257,9 @@ where
         model: &M,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>> {
-        if sched.mtp_single_active_text_greedy_eligible() {
+        if sched.mtp_batch_active_greedy_eligible() {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
-            sched.prefill_admitted_mtp_single(model, &self.mtp, self.cfg)
+            sched.prefill_admitted_mtp_batch(model, &self.mtp, self.cfg)
         } else {
             sched.prefill_admitted(model)
         }
@@ -272,7 +273,7 @@ where
     ) -> Result<Vec<StepEvent>> {
         if sched.mtp_stats().is_some() {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
-            sched.step_mtp_single(model, &self.mtp)
+            sched.step_mtp_batch(model, &self.mtp)
         } else {
             sched.step(model)
         }
@@ -454,6 +455,34 @@ where
         effective_cap_max,
         decode_cadence_mid_chunk_cap,
         meta,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_scheduler_actor_with_paged_prefix_cache<M>(
+    model: Arc<Mutex<M>>,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: PagedPrefixCacheConfig,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorNoMtp,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        Some(paged_prefix_cache),
     )
 }
 
@@ -468,6 +497,7 @@ pub fn spawn_scheduler_actor_with_mtp<M>(
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
     meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
@@ -482,6 +512,7 @@ where
         effective_cap_max,
         decode_cadence_mid_chunk_cap,
         meta,
+        paged_prefix_cache,
     )
 }
 
@@ -495,6 +526,7 @@ fn spawn_scheduler_actor_with_mode<M, A>(
     effective_cap_max: usize,
     decode_cadence_mid_chunk_cap: usize,
     meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -548,12 +580,13 @@ where
         SchedulerActorMtpCounters::new(mtp_prefill_count.clone(), mtp_step_count.clone());
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
+    let paged_prefix_cache_for_task = paged_prefix_cache.clone();
 
     // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
     //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
     //    worker thread's Metal Stream. Thread affinity preserved.
     tokio::task::spawn_blocking(move || {
-        let scheduler = Scheduler::<M>::new_with_state(
+        let mut scheduler = Scheduler::<M>::new_with_state(
             b_max,
             effective_cap_max,
             driver_budget_state,
@@ -561,6 +594,11 @@ where
             meta,
         )
         .expect("budget already validated above; new_with_state must not fail");
+        if let Some(config) = paged_prefix_cache_for_task {
+            scheduler
+                .enable_paged_prefix_cache(config)
+                .expect("paged prefix cache config was validated before actor spawn");
+        }
         driver_loop(
             scheduler,
             model,
@@ -1926,7 +1964,7 @@ mod tests {
     impl DenseVlMethods for SchedulerActorFakeModel {
         fn batched_prefill_vl(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
@@ -1937,21 +1975,27 @@ mod tests {
             _cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
-            unreachable!("scheduler_actor policy unit tests are text-only")
+            fake_logits(input_ids.shape().as_slice()[0] as usize)
         }
 
         fn compute_vision_embeds(
             &self,
             _pixel_values: &[mlx::Array],
-            _grid_thw: &[(i32, i32, i32)],
+            grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
-            unreachable!("scheduler_actor policy unit tests are text-only")
+            let rows: i32 = grid_thw
+                .iter()
+                .map(|&(t, h, w)| t * (h / 2).max(1) * (w / 2).max(1))
+                .sum::<i32>()
+                .max(1);
+            mlx::Array::zeros((rows, 1_i32), mlx::Dtype::Float32)
+                .map_err(|e| anyhow::anyhow!("fake vision embeds Array failed: {e:?}"))
         }
 
         fn forward_vl_chunk(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
@@ -1960,12 +2004,12 @@ mod tests {
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
-            unreachable!("scheduler_actor policy unit tests are text-only")
+            fake_logits(input_ids.shape().as_slice()[0] as usize)
         }
 
         fn forward_vl_hidden(
             &self,
-            _input_ids: &mlx::Array,
+            input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
@@ -1974,7 +2018,14 @@ mod tests {
             _image_token_id: i32,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
-            unreachable!("scheduler_actor policy unit tests are text-only")
+            let shape = input_ids.shape();
+            let b = shape.as_slice()[0] as usize;
+            let s = shape.as_slice()[1] as usize;
+            let hidden = 4_usize;
+            let flat = vec![0.0_f32; b * s * hidden];
+            (&flat[..], &[b as i32, s as i32, hidden as i32][..])
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("fake VL hidden Array failed: {e:?}"))
         }
     }
 
@@ -2003,6 +2054,14 @@ mod tests {
             let seq = hidden.shape().as_slice()[1] as usize;
             let tokens: Vec<u32> = if seq == 1 { vec![3] } else { vec![4; seq] };
             fake_logits_for_tokens(&tokens)
+        }
+
+        fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {
+            4
+        }
+
+        fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> mlx::Dtype {
+            mlx::Dtype::Float32
         }
 
         fn mtp_forward_hidden_on(
@@ -2097,6 +2156,17 @@ mod tests {
         }
     }
 
+    fn mk_vl_req() -> GenerateRequest {
+        let mut req = mk_req(11);
+        req.prompt_ids = vec![11, IMAGE_TOKEN_ID as u32, 12];
+        req.max_new_tokens = 1;
+        req.pixel_values = Some(vec![
+            mlx::Array::zeros((1_i32, 1_i32), mlx::Dtype::Float32).unwrap()
+        ]);
+        req.image_grid_thw = Some(vec![(1, 2, 2)]);
+        req
+    }
+
     fn queued_pending(prompt_token: u32) -> (PendingAdmit, oneshot::Receiver<Result<AdmitReply>>) {
         let (reply_tx, reply_rx) = oneshot::channel();
         (
@@ -2107,6 +2177,38 @@ mod tests {
             },
             reply_rx,
         )
+    }
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_mtp_actor_accepts_paged_prefix_cache_config() {
+        let root = unique_temp_dir("actor-mtp-prefix");
+        let config = PagedPrefixCacheConfig::new(&root, "fake-qwen", 16, 8).expect("prefix config");
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+        let handle = spawn_scheduler_actor_with_mtp(
+            model,
+            SchedulerActorFakeMtpHead,
+            1,
+            2,
+            Duration::from_millis(1),
+            1,
+            32,
+            256,
+            crate::core::memory_budget::test_meta_qwen35(),
+            Some(config),
+        )
+        .expect("spawn mtp actor with prefix cache");
+
+        assert_eq!(handle.mtp_prefill_count.load(Ordering::Relaxed), 0);
+        drop(handle);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -2136,6 +2238,30 @@ mod tests {
             .expect("mtp step");
         assert_eq!(step_events.len(), 1);
         assert_eq!(counters.mtp_step_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn actor_mtp_mode_prefill_uses_mtp_for_eligible_vl_request() {
+        let mut scheduler = Scheduler::<SchedulerActorFakeModel>::new(
+            1,
+            32,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.admit(mk_vl_req()).expect("admit");
+        let counters = SchedulerActorMtpCounters::new(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
+
+        let prefill_events = mode
+            .prefill_admitted(&mut scheduler, &SchedulerActorFakeModel, &counters)
+            .expect("VL MTP prefill");
+
+        assert_eq!(prefill_events.len(), 1);
+        assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 1);
+        assert!(scheduler.mtp_stats().is_some());
     }
 
     #[test]

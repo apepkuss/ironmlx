@@ -42,7 +42,7 @@ struct Args {
     mode: BenchMode,
 
     /// MTP model directory, required by mtp-text mode and optional for
-    /// scheduler-text single-request windows.
+    /// scheduler-text mode.
     #[arg(long = "mtp-model-dir")]
     mtp_model_dir: Option<PathBuf>,
 
@@ -318,11 +318,6 @@ fn validate_args(args: &Args) -> Result<()> {
         }
         BenchMode::Scheduler => {
             if let Some(mtp_dir) = args.mtp_model_dir.as_ref() {
-                if args.b_max != 1 {
-                    return Err(anyhow!(
-                        "--mode scheduler-text with --mtp-model-dir currently requires --b-max 1"
-                    ));
-                }
                 validate_mtp_dir(mtp_dir)?;
                 if let Some(draft_tokens) = args.mtp_draft_tokens {
                     MtpSpeculativeConfig::new(draft_tokens, Sampler::greedy())?;
@@ -332,7 +327,7 @@ fn validate_args(args: &Args) -> Result<()> {
         BenchMode::Gs => {
             if args.mtp_model_dir.is_some() {
                 return Err(anyhow!(
-                    "--mtp-model-dir is only supported with mtp-text or scheduler-text --b-max 1"
+                    "--mtp-model-dir is only supported with mtp-text or scheduler-text"
                 ));
             }
         }
@@ -573,7 +568,7 @@ where
             if let Some(mtp) = mtp {
                 let mtp_draft_tokens = mtp_draft_tokens
                     .ok_or_else(|| anyhow!("scheduler MTP run missing resolved draft tokens"))?;
-                run_scheduler_mtp_single_request(
+                run_scheduler_mtp(
                     model,
                     mtp,
                     tokenizer,
@@ -730,7 +725,7 @@ where
     ))
 }
 
-fn run_scheduler_mtp_single_request<M>(
+fn run_scheduler_mtp<M>(
     model: &M,
     mtp: &M::MtpHead,
     tokenizer: &Tokenizer,
@@ -742,19 +737,19 @@ fn run_scheduler_mtp_single_request<M>(
 where
     M: MtpSpeculativeModel + DenseVlMethods,
 {
-    let mut scheduler =
-        Scheduler::<M>::new(1, effective_cap_max, model.model_meta()).context("Scheduler::new")?;
+    let mut scheduler = Scheduler::<M>::new(args.b_max, effective_cap_max, model.model_meta())
+        .context("Scheduler::new")?;
     let request = make_request(model, tokenizer, prompt_ids, args);
     let cfg = MtpSpeculativeConfig::new(mtp_draft_tokens, request.sampler)?;
     let started = Instant::now();
     let _request_id = scheduler.admit(request)?;
-    let first_events = scheduler.prefill_admitted_mtp_single(model, mtp, cfg)?;
+    let first_events = scheduler.prefill_admitted_mtp_batch(model, mtp, cfg)?;
     let mut generated_token_ids: Vec<u32> = first_events.iter().map(|event| event.token).collect();
     let mut finish_reason = first_events.first().and_then(|event| event.finish_reason);
     let ttft_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     while finish_reason.is_none() && generated_token_ids.len() < args.max_tokens {
-        let events = scheduler.step_mtp_single(model, mtp)?;
+        let events = scheduler.step_mtp_batch(model, mtp)?;
         if events.is_empty() {
             break;
         }
@@ -1027,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_text_rejects_mtp_model_dir_for_batched_scheduler() {
+    fn scheduler_text_allows_mtp_model_dir_for_batched_scheduler() {
         let mtp_dir = temp_mtp_dir("scheduler-batch");
         let args = parse_args(&[
             "ironmlx-core-bench",
@@ -1044,9 +1039,9 @@ mod tests {
             "--out",
             "/tmp/out.json",
         ]);
-        let err = validate_args(&args).unwrap_err();
+        let result = validate_args(&args);
         std::fs::remove_dir_all(mtp_dir).ok();
-        assert!(err.to_string().contains("--b-max 1"));
+        assert!(result.is_ok(), "unexpected validate error: {result:?}");
     }
 
     #[test]

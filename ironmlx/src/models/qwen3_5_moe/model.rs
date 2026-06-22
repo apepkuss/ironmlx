@@ -119,6 +119,10 @@ impl Qwen35MoeModel {
         &self.text
     }
 
+    pub fn hidden_dtype(&self) -> Dtype {
+        self.text.hidden_dtype()
+    }
+
     pub fn vision(&self) -> Option<&VisionTower> {
         self.vision.as_ref()
     }

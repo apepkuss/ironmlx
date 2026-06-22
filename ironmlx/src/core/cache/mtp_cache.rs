@@ -6,9 +6,9 @@
 //! validated by the consumer ([`crate::nn::Mtp::forward_on`]) at forward time.
 
 use anyhow::anyhow;
-use mlx::Dtype;
+use mlx::{Dtype, StreamOrDevice};
 
-use crate::core::cache::{KVCache, KVCacheSnapshot};
+use crate::core::cache::{KVCache, KVCacheSnapshot, PrefixMtpLayerPayload};
 use crate::Result;
 
 /// KV caches for the layers of an MTP head.
@@ -112,6 +112,57 @@ impl MtpCache {
         Ok(())
     }
 
+    pub fn prefix_layers_for_row_on(
+        &self,
+        row: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Vec<PrefixMtpLayerPayload>, i32)> {
+        let target = target.into();
+        let mut payloads = Vec::with_capacity(self.layers.len());
+        let mut cached_len: Option<i32> = None;
+        for (idx, layer) in self.layers.iter().enumerate() {
+            let (k, v, layer_cached_len) = layer.dense_prefix_layer_for_row_on(row, target)?;
+            if let Some(expected) = cached_len {
+                if layer_cached_len != expected {
+                    return Err(anyhow!(
+                        "MtpCache::prefix_layers_for_row_on: layer {idx} cached_len {layer_cached_len} != layer0 {expected}"
+                    ));
+                }
+            } else {
+                cached_len = Some(layer_cached_len);
+            }
+            payloads.push(PrefixMtpLayerPayload { k, v });
+        }
+        Ok((payloads, cached_len.unwrap_or(0)))
+    }
+
+    pub fn restore_prefix_layers_for_row_on(
+        &mut self,
+        layers: &[PrefixMtpLayerPayload],
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let target = target.into();
+        if layers.len() != self.layers.len() {
+            return Err(anyhow!(
+                "MtpCache::restore_prefix_layers_for_row_on: payload layers {} != cache layers {}",
+                layers.len(),
+                self.layers.len()
+            ));
+        }
+        for (idx, (cache_layer, payload)) in self.layers.iter_mut().zip(layers.iter()).enumerate() {
+            cache_layer
+                .restore_dense_prefix_layer_for_row_on(
+                    &payload.k, &payload.v, row, cached_len, target,
+                )
+                .map_err(|err| {
+                    anyhow!("MtpCache::restore_prefix_layers_for_row_on: layer {idx}: {err:#}")
+                })?;
+        }
+        Ok(())
+    }
+
     /// Returns layer 0's offset (the maximum offset across rows in the
     /// lockstep-uniform case).
     ///
@@ -183,5 +234,42 @@ mod tests {
         cache.restore(&snapshot).expect("restore mtp snapshot");
         assert_eq!(cache.layer(0).offsets(), &[4]);
         assert_eq!(cache.layer(1).offsets(), &[4]);
+    }
+
+    #[test]
+    fn mtp_cache_prefix_layers_round_trip_dense_kv() {
+        let mut src = MtpCache::new_with_cap(1, 1, 1, 1, 1, Dtype::Float32, 8).expect("src");
+        let k: mlx::Array = (&[1.0_f32, 2.0, 3.0][..], (1_i32, 1_i32, 3_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let v: mlx::Array = (&[10.0_f32, 20.0, 30.0][..], (1_i32, 1_i32, 3_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        src.layer_mut(0)
+            .update_and_fetch(&k, &v, &[3])
+            .expect("fill src");
+
+        let (layers, cached_len) = src.prefix_layers_for_row_on(0, ()).expect("export");
+
+        let mut dst = MtpCache::new_with_cap(1, 1, 1, 1, 1, Dtype::Float32, 8).expect("dst");
+        dst.restore_prefix_layers_for_row_on(&layers, 0, cached_len, ())
+            .expect("restore");
+        assert_eq!(dst.offset(), 3);
+
+        let k_next: mlx::Array = (&[4.0_f32][..], (1_i32, 1_i32, 1_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let v_next: mlx::Array = (&[40.0_f32][..], (1_i32, 1_i32, 1_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let (k_full, v_full) = dst
+            .layer_mut(0)
+            .update_and_fetch(&k_next, &v_next, &[1])
+            .expect("append after restore");
+        assert_eq!(k_full.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            v_full.to_vec::<f32>().unwrap(),
+            vec![10.0, 20.0, 30.0, 40.0]
+        );
     }
 }

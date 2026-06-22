@@ -1,0 +1,740 @@
+//! Real-checkpoint matrix E2E for paged SSD prefix cache.
+//!
+//! These tests intentionally run the public `ironmlx serve` CLI and are ignored
+//! by default because they require local checkpoint snapshots.
+//!
+//! ```text
+//! MLX_DIR=$HOME/.local/mlx \
+//! QWEN35_MODEL=/path/to/Qwen3.5-4B-MLX-4bit/snapshots/<sha> \
+//! GLM47_MODEL_DIR=/path/to/GLM-4.7-Flash-4bit/snapshots/<sha> \
+//! cargo test --release -p ironmlx --test paged_prefix_matrix_e2e \
+//!   -- --ignored --test-threads=1 --nocapture
+//! ```
+
+use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use base64::Engine;
+use ironmlx::core::scheduler::DenseVlMethods;
+use ironmlx::core::server::chat_format::render_and_encode;
+use ironmlx::core::server::vision::{expand_decoded_messages, DecodedMessage, DecodedPart};
+use ironmlx::core::server::VisionInputConfig;
+use ironmlx::core::{Loader, Model, Tokenizer};
+use ironmlx::nn::enable_paged_kv_caches;
+use mlx::Dtype;
+
+struct ServerProcess {
+    child: Child,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    drainer: Option<JoinHandle<()>>,
+}
+
+impl ServerProcess {
+    fn spawn(model_dir: &Path, cache_dir: &Path, port: u16) -> Self {
+        let bin = env!("CARGO_BIN_EXE_ironmlx");
+        let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR must be set");
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
+        cmd.args([
+            "serve",
+            "--model",
+            model_dir.to_str().expect("model path must be valid UTF-8"),
+            "--paged-prefix-cache-dir",
+            cache_dir
+                .to_str()
+                .expect("prefix cache path must be valid UTF-8"),
+            "--paged-prefix-cache-block-size",
+            "16",
+            "--paged-prefix-cache-max-pages",
+            "4096",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--b-max",
+            "2",
+            "--admission-deadline-ms",
+            "200",
+            "--admission-queue-max",
+            "8",
+            "--prefill-chunk-size",
+            "0",
+            "--max-cache-cap",
+            "4096",
+        ]);
+        cmd.env("MLX_DIR", mlx_dir);
+        cmd.env("RUST_LOG", "ironmlx=debug,warn");
+        cmd.stderr(Stdio::piped());
+        cmd.stdout(Stdio::null());
+        let mut child = cmd.spawn().expect("spawn ironmlx serve");
+        let stderr = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stderr_pipe = child.stderr.take().expect("server stderr");
+        let stderr_for_thread = Arc::clone(&stderr);
+        let drainer = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr_pipe);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => stderr_for_thread
+                        .lock()
+                        .expect("stderr lock")
+                        .extend_from_slice(line.as_bytes()),
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            child,
+            stderr,
+            drainer: Some(drainer),
+        }
+    }
+
+    fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr.lock().expect("stderr lock")).to_string()
+    }
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(drainer) = self.drainer.take() {
+            let _ = drainer.join();
+        }
+    }
+}
+
+fn unique_temp_dir(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("ironmlx-{name}-{}-{nanos}", std::process::id()))
+}
+
+async fn alloc_port() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
+}
+
+fn snapshot_from_env_or_default(env_name: &str, repo_dir: &str) -> PathBuf {
+    if let Ok(path) = std::env::var(env_name) {
+        let path = PathBuf::from(path);
+        assert!(
+            path.exists(),
+            "{env_name} does not exist: {}",
+            path.display()
+        );
+        return path;
+    }
+    let home = std::env::var("HOME").expect("HOME env");
+    let snapshots = PathBuf::from(home)
+        .join(".ironmlx/models")
+        .join(repo_dir)
+        .join("snapshots");
+    let first = std::fs::read_dir(&snapshots)
+        .unwrap_or_else(|err| panic!("read {}: {err}", snapshots.display()))
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .unwrap_or_else(|| panic!("no snapshot dirs under {}", snapshots.display()));
+    assert!(first.join("config.json").exists(), "missing config.json");
+    first
+}
+
+fn qwen35_model_dir() -> PathBuf {
+    snapshot_from_env_or_default("QWEN35_MODEL", "models--mlx-community--Qwen3.5-4B-MLX-4bit")
+}
+
+fn glm47_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "GLM47_MODEL_DIR",
+        "models--mlx-community--GLM-4.7-Flash-4bit",
+    )
+}
+
+fn minicpmv46_model_dir() -> PathBuf {
+    snapshot_from_env_or_default(
+        "MINICPMV46_MODEL",
+        "models--mlx-community--MiniCPM-V-4.6-4bit",
+    )
+}
+
+fn gemma4_model_dir() -> PathBuf {
+    snapshot_from_env_or_default("GEMMA4_MODEL", "models--mlx-community--gemma-4-e4b-it-4bit")
+}
+
+fn coco_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("p6_qwen35_vl")
+        .join("coco_sample.jpg")
+}
+
+fn image_data_url(path: &Path) -> String {
+    let bytes = std::fs::read(path).expect("read image fixture");
+    format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+fn write_flipped_image(src: &Path, dst: &Path) {
+    let img = image::open(src).expect("open source image");
+    let flipped =
+        image::DynamicImage::ImageRgba8(image::imageops::flip_horizontal(&img.to_rgba8()));
+    flipped
+        .save_with_format(dst, image::ImageFormat::Jpeg)
+        .expect("write flipped image");
+}
+
+fn text_body(prompt: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": "paged-prefix-matrix",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 3,
+        "temperature": 0.0,
+        "stream": false
+    })
+}
+
+fn vl_body(image_path: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "model": "paged-prefix-matrix",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe the image."},
+                {"type": "image_url", "image_url": {"url": image_data_url(image_path)}}
+            ]
+        }],
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "stream": false
+    })
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .no_proxy()
+        .build()
+        .expect("reqwest client")
+}
+
+async fn wait_ready(client: &reqwest::Client, port: u16, server: &mut ServerProcess) {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    loop {
+        match client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => return,
+            _ => {}
+        }
+        if let Some(status) = server.child.try_wait().expect("server try_wait") {
+            panic!(
+                "ironmlx serve exited before ready: {status}; stderr:\n{}",
+                server.stderr_text()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server did not become ready; stderr:\n{}",
+            server.stderr_text()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn post_chat(
+    client: &reqwest::Client,
+    port: u16,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .expect("chat completion send");
+    let status = resp.status();
+    let text = resp.text().await.expect("chat completion body");
+    assert_eq!(status, 200, "chat completion failed: {text}");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("chat completion json");
+    assert!(
+        json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .len()
+            > 0,
+        "assistant content must not be empty: {json}"
+    );
+    assert!(
+        json["usage"]["prompt_tokens"].as_u64().unwrap_or_default() > 0,
+        "prompt token count must be present: {json}"
+    );
+    json
+}
+
+fn count_log(text: &str, needle: &str) -> usize {
+    text.match_indices(needle).count()
+}
+
+async fn wait_log_count(server: &ServerProcess, needle: &str, min_count: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let text = server.stderr_text();
+        if count_log(&text, needle) >= min_count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "log needle {needle:?} did not reach {min_count}; stderr:\n{text}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn cache_entry_dirs(cache_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for entry in std::fs::read_dir(cache_dir).expect("read prefix cache dir") {
+        let path = entry.expect("cache dir entry").path();
+        if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+    dirs
+}
+
+fn cache_metadata(cache_dir: &Path) -> Vec<serde_json::Value> {
+    cache_entry_dirs(cache_dir)
+        .into_iter()
+        .map(|entry| {
+            let meta_path = entry.join("meta.json");
+            serde_json::from_slice(&std::fs::read(&meta_path).expect("read cache meta"))
+                .unwrap_or_else(|err| panic!("cache meta json {}: {err}", meta_path.display()))
+        })
+        .collect()
+}
+
+fn cache_main_layer_kinds(cache_dir: &Path) -> BTreeSet<String> {
+    let mut kinds = BTreeSet::new();
+    for meta in cache_metadata(cache_dir) {
+        let layers = meta["main_layers"]
+            .as_array()
+            .expect("main_layers must be an array");
+        assert!(!layers.is_empty(), "main_layers must not be empty: {meta}");
+        for layer in layers {
+            kinds.insert(layer["kind"].as_str().expect("main layer kind").to_owned());
+        }
+    }
+    kinds
+}
+
+fn assert_cache_kinds(cache_dir: &Path, expected: &[&str]) {
+    let kinds = cache_main_layer_kinds(cache_dir);
+    for kind in expected {
+        assert!(
+            kinds.contains(*kind),
+            "expected prefix cache kind {kind:?}; actual kinds={kinds:?}"
+        );
+    }
+}
+
+fn assert_has_vl_fingerprint(cache_dir: &Path) {
+    let metas = cache_metadata(cache_dir);
+    assert!(
+        metas.iter().any(|meta| !meta["fingerprint_hash"].is_null()),
+        "expected at least one VL prefix cache entry with fingerprint_hash: {metas:?}"
+    );
+}
+
+fn greedy_argmax(logits: &mlx::Array) -> u32 {
+    let f32_logits = logits.astype(Dtype::Float32).expect("astype f32");
+    let values = f32_logits.to_vec::<f32>().expect("logits to_vec");
+    values
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(idx, _)| idx as u32)
+        .expect("non-empty logits")
+}
+
+fn slice_vision_rows(embeds: &mlx::Array, start: i32, end: i32) -> mlx::Array {
+    let shape = embeds.shape();
+    let dims = shape.as_slice();
+    assert_eq!(dims.len(), 2, "vision embeds must be [N,H], got {dims:?}");
+    mlx::ops::indexing::slice_strided(
+        embeds,
+        &[start, 0_i32][..],
+        &[end, dims[1]][..],
+        &[1_i32, 1][..],
+    )
+    .expect("slice vision rows")
+}
+
+fn gemma4_prompt_inputs(
+    tokenizer: &Tokenizer,
+    vision: &VisionInputConfig,
+) -> (Vec<i32>, Vec<mlx::Array>, Vec<(i32, i32, i32)>, i32) {
+    let image_token_id =
+        ironmlx::core::server::vision::derive_image_token_and_merge(vision, tokenizer).0;
+    let bytes = std::fs::read(coco_path()).expect("read image fixture");
+    let messages = vec![DecodedMessage {
+        role: "user".to_owned(),
+        parts: vec![
+            DecodedPart::Text("Describe the image.".to_owned()),
+            DecodedPart::Image(bytes),
+        ],
+    }];
+    let (flat_messages, pixel_values, grid_thw) =
+        expand_decoded_messages(messages, vision).expect("expand Gemma4 VL messages");
+    let prompt_ids = render_and_encode(tokenizer, &flat_messages, None)
+        .expect("render/tokenize Gemma4 prompt")
+        .into_iter()
+        .map(|id| id as i32)
+        .collect::<Vec<_>>();
+    (
+        prompt_ids,
+        pixel_values.expect("Gemma4 prompt has image"),
+        grid_thw,
+        image_token_id,
+    )
+}
+
+fn gemma4_split_prefill_argmax(
+    model: &ironmlx::models::Gemma4Model,
+    prompt_ids: &[i32],
+    pixel_values: &[mlx::Array],
+    grid_thw: &[(i32, i32, i32)],
+    image_token_id: i32,
+    paged: bool,
+) -> u32 {
+    let cap = i32::try_from(prompt_ids.len() + 16).expect("prompt len fits i32");
+    let mut cache = model
+        .make_cache(1, cap, model.cache_dtype())
+        .expect("make Gemma4 cache");
+    if paged {
+        enable_paged_kv_caches(&mut cache, 16, 4096).expect("enable paged KV cache");
+    }
+
+    let vision_embeds = model
+        .compute_vision_embeds(pixel_values, grid_thw, mlx::StreamOrDevice::default())
+        .expect("compute Gemma4 vision embeds");
+    let prefix_len = prompt_ids.len() - 1;
+    let prefix_ids = &prompt_ids[..prefix_len];
+    let last_ids = &prompt_ids[prefix_len..];
+    let prefix_image_pads = prefix_ids
+        .iter()
+        .filter(|&&tok| tok == image_token_id)
+        .count() as i32;
+    let last_image_pads = last_ids
+        .iter()
+        .filter(|&&tok| tok == image_token_id)
+        .count() as i32;
+    let prefix_vision =
+        (prefix_image_pads > 0).then(|| slice_vision_rows(&vision_embeds, 0, prefix_image_pads));
+    let last_vision = (last_image_pads > 0).then(|| {
+        slice_vision_rows(
+            &vision_embeds,
+            prefix_image_pads,
+            prefix_image_pads + last_image_pads,
+        )
+    });
+
+    let prefix_input: mlx::Array = (prefix_ids, &[1_i32, prefix_len as i32][..])
+        .try_into()
+        .expect("prefix input");
+    let prefix_pos_data = vec![0_i32; prefix_len];
+    let prefix_pos: mlx::Array = (prefix_pos_data.as_slice(), &[1_i32, prefix_len as i32][..])
+        .try_into()
+        .expect("prefix dummy pos");
+    let prefix_hidden = model
+        .forward_vl_hidden(
+            &prefix_input,
+            &prefix_pos,
+            None,
+            None,
+            Some(&mut cache),
+            prefix_vision.as_ref(),
+            image_token_id,
+            mlx::StreamOrDevice::default(),
+        )
+        .expect("Gemma4 prefix hidden");
+    mlx::transforms::eval(&[&prefix_hidden]).expect("eval prefix hidden");
+
+    let last_input: mlx::Array = (last_ids, &[1_i32, 1_i32][..])
+        .try_into()
+        .expect("last input");
+    let last_pos: mlx::Array = (&[0_i32][..], &[1_i32, 1_i32][..])
+        .try_into()
+        .expect("last dummy pos");
+    let logits = model
+        .forward_vl_chunk(
+            &last_input,
+            &last_pos,
+            None,
+            None,
+            Some(&mut cache),
+            last_vision.as_ref(),
+            image_token_id,
+            mlx::StreamOrDevice::default(),
+        )
+        .expect("Gemma4 last logits");
+    mlx::transforms::eval(&[&logits]).expect("eval last logits");
+    greedy_argmax(&logits)
+}
+
+async fn run_text_exact_hit_case(model_dir: PathBuf, expected_kinds: &[&str], prompt: &str) {
+    let cache_dir = unique_temp_dir("text-prefix-matrix");
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+    let port = alloc_port().await;
+    let mut server = ServerProcess::spawn(&model_dir, &cache_dir, port);
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+
+    let body = text_body(prompt);
+    let warm = post_chat(&client, port, body.clone()).await;
+    assert_cache_kinds(&cache_dir, expected_kinds);
+
+    let (hit_a, hit_b) = tokio::join!(
+        post_chat(&client, port, body.clone()),
+        post_chat(&client, port, body.clone())
+    );
+    assert_eq!(
+        hit_a["usage"]["prompt_tokens"],
+        warm["usage"]["prompt_tokens"]
+    );
+    assert_eq!(
+        hit_b["usage"]["prompt_tokens"],
+        warm["usage"]["prompt_tokens"]
+    );
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        2,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_cache_kinds(&cache_dir, expected_kinds);
+
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+}
+
+async fn run_text_restart_persistence_case(
+    model_dir: PathBuf,
+    expected_kinds: &[&str],
+    prompt: &str,
+) {
+    let cache_dir = unique_temp_dir("text-prefix-restart");
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+    let client = client();
+    let body = text_body(prompt);
+
+    let warm_prompt_tokens = {
+        let port = alloc_port().await;
+        let mut server = ServerProcess::spawn(&model_dir, &cache_dir, port);
+        wait_ready(&client, port, &mut server).await;
+        let warm = post_chat(&client, port, body.clone()).await;
+        assert_cache_kinds(&cache_dir, expected_kinds);
+        warm["usage"]["prompt_tokens"].clone()
+    };
+
+    let port = alloc_port().await;
+    let mut server = ServerProcess::spawn(&model_dir, &cache_dir, port);
+    wait_ready(&client, port, &mut server).await;
+    let hit = post_chat(&client, port, body).await;
+    assert_eq!(hit["usage"]["prompt_tokens"], warm_prompt_tokens);
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        1,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_cache_kinds(&cache_dir, expected_kinds);
+
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+}
+
+async fn run_vl_exact_hit_and_image_miss_case(
+    label: &str,
+    model_dir: PathBuf,
+    expected_kinds: &[&str],
+) {
+    let cache_dir = unique_temp_dir(&format!("{label}-vl-prefix"));
+    let image_dir = unique_temp_dir(&format!("{label}-vl-prefix-images"));
+    std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
+    std::fs::create_dir_all(&image_dir).expect("create image temp dir");
+    let coco = coco_path();
+    let flipped = image_dir.join("coco_flipped.jpg");
+    write_flipped_image(&coco, &flipped);
+
+    let port = alloc_port().await;
+    let mut server = ServerProcess::spawn(&model_dir, &cache_dir, port);
+    let client = client();
+    wait_ready(&client, port, &mut server).await;
+
+    let body = vl_body(&coco);
+    let warm = post_chat(&client, port, body.clone()).await;
+    assert_cache_kinds(&cache_dir, expected_kinds);
+    assert_has_vl_fingerprint(&cache_dir);
+
+    let (hit_a, hit_b) = tokio::join!(
+        post_chat(&client, port, body.clone()),
+        post_chat(&client, port, body.clone())
+    );
+    assert_eq!(
+        hit_a["usage"]["prompt_tokens"],
+        warm["usage"]["prompt_tokens"]
+    );
+    assert_eq!(
+        hit_b["usage"]["prompt_tokens"],
+        warm["usage"]["prompt_tokens"]
+    );
+    wait_log_count(
+        &server,
+        "paged SSD prefix cache hit",
+        2,
+        Duration::from_secs(10),
+    )
+    .await;
+    let hits_before_negative = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+
+    let negative = post_chat(&client, port, vl_body(&flipped)).await;
+    assert_eq!(
+        negative["usage"]["prompt_tokens"], warm["usage"]["prompt_tokens"],
+        "flipped image keeps the same prompt shape, so a miss proves image fingerprinting"
+    );
+    let final_logs = server.stderr_text();
+    assert_eq!(
+        count_log(&final_logs, "paged SSD prefix cache hit"),
+        hits_before_negative,
+        "different image must not hit an existing VL prefix cache entry; stderr:\n{final_logs}"
+    );
+    assert_has_vl_fingerprint(&cache_dir);
+
+    std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
+    std::fs::remove_dir_all(&image_dir).expect("cleanup image temp dir");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN35_MODEL/MLX_DIR or default local Qwen3.5 checkpoint"]
+async fn qwen35_text_linear_paged_prefix_cache_batched_exact_hit() {
+    run_text_exact_hit_case(
+        qwen35_model_dir(),
+        &["full_paged", "linear"],
+        "For prefix cache validation, answer with one concise sentence about deterministic reuse.",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN35_MODEL/MLX_DIR or default local Qwen3.5 checkpoint"]
+async fn qwen35_text_paged_prefix_cache_persists_across_server_restart() {
+    run_text_restart_persistence_case(
+        qwen35_model_dir(),
+        &["full_paged", "linear"],
+        "For restart persistence validation, answer with one concise sentence about deterministic reuse.",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GLM47_MODEL_DIR/MLX_DIR or default local GLM checkpoint"]
+async fn glm47_mla_paged_prefix_cache_batched_exact_hit() {
+    run_text_exact_hit_case(
+        glm47_model_dir(),
+        &["mla"],
+        "For MLA prefix cache validation, answer with one concise sentence.",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN35_MODEL/MLX_DIR or default local Qwen3.5 checkpoint"]
+async fn qwen35_vl_paged_prefix_cache_exact_hit_and_image_miss_without_mtp() {
+    run_vl_exact_hit_and_image_miss_case("qwen35", qwen35_model_dir(), &["full_paged", "linear"])
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires MINICPMV46_MODEL/MLX_DIR or default local MiniCPM-V checkpoint"]
+async fn minicpmv46_vl_paged_prefix_cache_exact_hit_and_image_miss() {
+    run_vl_exact_hit_and_image_miss_case(
+        "minicpmv46",
+        minicpmv46_model_dir(),
+        &["full_paged", "linear"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires GEMMA4_MODEL/MLX_DIR or default local Gemma4 checkpoint"]
+async fn gemma4_vl_paged_prefix_cache_exact_hit_and_image_miss() {
+    run_vl_exact_hit_and_image_miss_case("gemma4", gemma4_model_dir(), &["full_paged"]).await;
+}
+
+#[test]
+#[ignore = "requires GEMMA4_MODEL/MLX_DIR or default local Gemma4 checkpoint"]
+fn gemma4_vl_split_prefill_paged_kv_matches_dense_argmax() {
+    let model_dir = gemma4_model_dir();
+    let loader = Loader::open_multimodal(&model_dir).expect("open Gemma4 loader");
+    let tokenizer = Tokenizer::from_loader(&loader).expect("Gemma4 tokenizer");
+    let cfg = ironmlx::models::Gemma4Config::from_loader(&loader).expect("Gemma4 config");
+    let vision = VisionInputConfig::Gemma4 {
+        vision_config: cfg
+            .vision_config
+            .clone()
+            .expect("Gemma4 checkpoint must include vision config"),
+    };
+    let model = ironmlx::models::Gemma4Model::from_loader(&loader).expect("Gemma4 model");
+    let (prompt_ids, pixel_values, grid_thw, image_token_id) =
+        gemma4_prompt_inputs(&tokenizer, &vision);
+
+    let dense = gemma4_split_prefill_argmax(
+        &model,
+        &prompt_ids,
+        &pixel_values,
+        &grid_thw,
+        image_token_id,
+        false,
+    );
+    let paged = gemma4_split_prefill_argmax(
+        &model,
+        &prompt_ids,
+        &pixel_values,
+        &grid_thw,
+        image_token_id,
+        true,
+    );
+    let eos = tokenizer.eos_token_ids();
+    eprintln!(
+        "Gemma4 split-prefill argmax dense={dense} paged={paged} eos={eos:?} dense_text={:?} paged_text={:?}",
+        tokenizer.decode(&[dense], false).unwrap_or_default(),
+        tokenizer.decode(&[paged], false).unwrap_or_default(),
+    );
+    assert!(
+        !eos.contains(&dense),
+        "dense split-prefill unexpectedly produced EOS token {dense}"
+    );
+    assert_eq!(
+        paged, dense,
+        "Gemma4 paged KV split-prefill must preserve dense greedy argmax"
+    );
+}

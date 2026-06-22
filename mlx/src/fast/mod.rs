@@ -13,9 +13,13 @@
 //! variants delegate to `*_on(.., ())`.
 
 pub mod metal_kernel;
+mod paged_attention;
 mod turboquant;
 
 pub use metal_kernel::{DispatchBuilder, MetalKernel, MetalKernelBuilder, Set, TemplateArg, Unset};
+pub use paged_attention::{
+    paged_scaled_dot_product_attention_decode, paged_scaled_dot_product_attention_decode_on,
+};
 pub use turboquant::{
     turbo_dequantize, turbo_dequantize_on, turbo_quantize, turbo_quantize_on,
     turboquant_sdpa_decode, turboquant_sdpa_decode_on, turboquant_sdpa_decode_parallel,
