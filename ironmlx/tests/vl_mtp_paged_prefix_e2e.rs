@@ -9,6 +9,9 @@
 //! cargo test --release -p ironmlx --test vl_mtp_paged_prefix_e2e \
 //!   -- --ignored --test-threads=1 --nocapture
 //! ```
+//!
+//! The Qwen3.6 MoE variant uses `QWEN36_MOE_MODEL` and
+//! `QWEN36_MOE_MTP_MODEL`.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -330,14 +333,19 @@ fn assert_cache_entries_have_mtp_payload(cache_dir: &Path) {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires QWEN35_MODEL, QWEN35_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
-async fn qwen35_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss() {
-    let model_dir = PathBuf::from(std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL must be set"));
-    let mtp_model_dir =
-        PathBuf::from(std::env::var("QWEN35_MTP_MODEL").expect("QWEN35_MTP_MODEL must be set"));
-    let cache_dir = unique_temp_dir("vl-mtp-prefix-cache");
-    let image_dir = unique_temp_dir("vl-mtp-prefix-images");
+async fn run_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss(
+    model_env: &str,
+    mtp_model_env: &str,
+    temp_suffix: &str,
+) {
+    let model_dir = PathBuf::from(
+        std::env::var(model_env).unwrap_or_else(|_| panic!("{model_env} must be set")),
+    );
+    let mtp_model_dir = PathBuf::from(
+        std::env::var(mtp_model_env).unwrap_or_else(|_| panic!("{mtp_model_env} must be set")),
+    );
+    let cache_dir = unique_temp_dir(&format!("vl-mtp-prefix-cache-{temp_suffix}"));
+    let image_dir = unique_temp_dir(&format!("vl-mtp-prefix-images-{temp_suffix}"));
     std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
     std::fs::create_dir_all(&image_dir).expect("create image temp dir");
     let coco = coco_path();
@@ -422,4 +430,26 @@ async fn qwen35_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss() {
 
     std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
     std::fs::remove_dir_all(&image_dir).expect("cleanup image temp dir");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN35_MODEL, QWEN35_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+async fn qwen35_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss() {
+    run_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss(
+        "QWEN35_MODEL",
+        "QWEN35_MTP_MODEL",
+        "qwen35",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires QWEN36_MOE_MODEL, QWEN36_MOE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+async fn qwen36_moe_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss() {
+    run_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss(
+        "QWEN36_MOE_MODEL",
+        "QWEN36_MOE_MTP_MODEL",
+        "qwen36-moe",
+    )
+    .await;
 }

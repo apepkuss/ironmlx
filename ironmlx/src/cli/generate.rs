@@ -1,5 +1,6 @@
 //! `ironmlx generate` — single-prompt CLI generation backed by core::generate.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -14,7 +15,7 @@ use crate::core::speculative::{
     resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel,
     MtpTextGenerationStream,
 };
-use crate::core::{Loader, Message, Model, Tokenizer};
+use crate::core::{Loader, Message, Model, Phase, Scheduler, StepEvent, Tokenizer};
 use crate::models::qwen3_5::image_processor;
 use crate::Result;
 
@@ -63,7 +64,7 @@ pub struct GenerateArgs {
     pub prefill_chunk_size: usize,
 
     /// MTP model directory. When set, generation uses the Qwen MTP head for
-    /// text-only greedy speculative decoding.
+    /// greedy speculative decoding on Qwen text and Qwen VL requests.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
 
@@ -295,22 +296,17 @@ fn prepare_images(
 
 fn ensure_mtp_generation_supported(
     architecture: crate::models::ModelArchitecture,
-    has_images: bool,
+    _has_images: bool,
     args: &GenerateArgs,
 ) -> Result<()> {
     if args.mtp_model_dir.is_none() {
         return Ok(());
     }
-    if has_images {
-        return Err(anyhow!(
-            "--mtp-model-dir currently supports text-only generation; remove --image"
-        ));
-    }
     match architecture {
         crate::models::ModelArchitecture::Qwen35Dense
         | crate::models::ModelArchitecture::Qwen35Moe => Ok(()),
         _ => Err(anyhow!(
-            "--mtp-model-dir currently supports Qwen dense/MoE text models only"
+            "--mtp-model-dir currently supports Qwen dense/MoE generation only"
         )),
     }
 }
@@ -407,19 +403,80 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
     write_generation_events(|| stream.next_token())
 }
 
-fn run_generation_with_mtp_model<M: MtpSpeculativeModel>(
+fn scheduler_step_event_to_generate_event(
+    ev: StepEvent,
+    detok: &mut crate::core::tokenizer::DecodeStream<'_>,
+) -> Result<GenerateEvent> {
+    let text = detok.step(ev.token)?.unwrap_or_default();
+    Ok(GenerateEvent {
+        token: ev.token,
+        text,
+        finish_reason: ev.finish_reason,
+    })
+}
+
+fn run_generation_with_mtp_scheduler_model<M>(
+    model: &M,
+    mtp: &M::MtpHead,
+    tokenizer: &Tokenizer,
+    request: GenerateRequest,
+    cfg: MtpSpeculativeConfig,
+) -> Result<()>
+where
+    M: MtpSpeculativeModel + DenseVlMethods,
+{
+    let effective_cap = request
+        .prompt_ids
+        .len()
+        .saturating_add(request.max_new_tokens)
+        .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize);
+    let mut scheduler = Scheduler::<M>::new(1, effective_cap, model.model_meta())
+        .context("creating MTP generation scheduler")?;
+    scheduler
+        .admit(request)
+        .context("admitting MTP generation request")?;
+
+    let mut pending = VecDeque::<StepEvent>::new();
+    let mut did_prefill = false;
+    let mut finished = false;
+    let mut detok = tokenizer.decode_stream(/* skip_special */ true);
+    write_generation_events(|| {
+        if finished {
+            return Ok(None);
+        }
+        loop {
+            if let Some(ev) = pending.pop_front() {
+                let finish_reason = ev.finish_reason;
+                let event = scheduler_step_event_to_generate_event(ev, &mut detok)?;
+                if finish_reason.is_some() {
+                    finished = true;
+                }
+                return Ok(Some(event));
+            }
+            if !did_prefill {
+                pending.extend(scheduler.prefill_admitted_mtp_single(model, mtp, cfg)?);
+                did_prefill = true;
+            } else if scheduler.phase() == Phase::Decoding {
+                pending.extend(scheduler.step_mtp_single(model, mtp)?);
+            } else {
+                finished = true;
+                return Ok(None);
+            }
+        }
+    })
+}
+
+fn run_generation_with_mtp_model<M>(
     model: &M,
     tokenizer: &Tokenizer,
     loader: &Loader,
     model_type: &str,
     args: &GenerateArgs,
-) -> Result<()> {
+) -> Result<()>
+where
+    M: MtpSpeculativeModel + DenseVlMethods,
+{
     let request = build_generate_request(model, tokenizer, loader, model_type, args)?;
-    if request.pixel_values.is_some() {
-        return Err(anyhow!(
-            "--mtp-model-dir currently supports text-only generation; remove --image"
-        ));
-    }
     let mtp_dir = args
         .mtp_model_dir
         .as_ref()
@@ -441,8 +498,13 @@ fn run_generation_with_mtp_model<M: MtpSpeculativeModel>(
             .unwrap_or(MtpDraftTokensArg::Omitted),
     );
     let cfg = MtpSpeculativeConfig::new(draft_tokens, request.sampler)?;
-    let mut stream = MtpTextGenerationStream::new_text_only(model, &mtp, tokenizer, request, cfg)?;
-    write_generation_events(|| stream.next_token())
+    if request.pixel_values.is_some() {
+        run_generation_with_mtp_scheduler_model(model, &mtp, tokenizer, request, cfg)
+    } else {
+        let mut stream =
+            MtpTextGenerationStream::new_text_only(model, &mtp, tokenizer, request, cfg)?;
+        write_generation_events(|| stream.next_token())
+    }
 }
 
 fn run_diffusion_gemma_generation(
@@ -682,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn mtp_support_policy_allows_text_qwen_and_rejects_other_modes() {
+    fn mtp_support_policy_allows_qwen_text_and_vl_and_rejects_other_architectures() {
         let mut args =
             GenerateTestCli::parse_from(["test", "--model", "/tmp/model", "--prompt", "hello"])
                 .args;
@@ -707,14 +769,18 @@ mod tests {
             &args
         )
         .is_ok());
-
-        let image_err = ensure_mtp_generation_supported(
+        assert!(ensure_mtp_generation_supported(
             crate::models::ModelArchitecture::Qwen35Dense,
             true,
             &args,
         )
-        .unwrap_err();
-        assert!(image_err.to_string().contains("text-only"));
+        .is_ok());
+        assert!(ensure_mtp_generation_supported(
+            crate::models::ModelArchitecture::Qwen35Moe,
+            true,
+            &args
+        )
+        .is_ok());
 
         let arch_err =
             ensure_mtp_generation_supported(crate::models::ModelArchitecture::Gemma4, false, &args)
