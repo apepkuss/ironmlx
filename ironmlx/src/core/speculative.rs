@@ -126,6 +126,10 @@ pub trait MtpSpeculativeModel: Model {
         dtype: Dtype,
     ) -> Result<MtpCache>;
 
+    fn mtp_hidden_size(&self, mtp: &Self::MtpHead) -> i32;
+
+    fn mtp_hidden_dtype(&self, mtp: &Self::MtpHead) -> Dtype;
+
     fn project_hidden_on(&self, hidden: &Array, target: impl Into<StreamOrDevice>)
         -> Result<Array>;
 
@@ -186,6 +190,14 @@ impl MtpSpeculativeModel for Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         Qwen35Model::project_hidden_on(self, hidden, target)
+    }
+
+    fn mtp_hidden_size(&self, mtp: &Self::MtpHead) -> i32 {
+        mtp.config().hidden_size
+    }
+
+    fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> Dtype {
+        self.hidden_dtype()
     }
 
     fn mtp_forward_on(
@@ -267,6 +279,14 @@ impl MtpSpeculativeModel for Qwen35MoeModel {
         Qwen35MoeModel::project_hidden_on(self, hidden, target)
     }
 
+    fn mtp_hidden_size(&self, mtp: &Self::MtpHead) -> i32 {
+        mtp.config().hidden_size
+    }
+
+    fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> Dtype {
+        self.hidden_dtype()
+    }
+
     fn mtp_forward_on(
         &self,
         mtp: &Self::MtpHead,
@@ -344,6 +364,14 @@ impl MtpSpeculativeModel for Qwen36MoeModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         Qwen36MoeModel::project_hidden_on(self, hidden, target)
+    }
+
+    fn mtp_hidden_size(&self, mtp: &Self::MtpHead) -> i32 {
+        mtp.config().hidden_size
+    }
+
+    fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> Dtype {
+        self.hidden_dtype()
     }
 
     fn mtp_forward_on(
@@ -723,7 +751,7 @@ where
         let prompt_len = request.prompt_ids.len();
         let cap = ((prompt_len + request.max_new_tokens) as i32)
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
-        let dtype = Dtype::Bfloat16;
+        let dtype = model.cache_dtype();
         let mut cache = model.make_cache(1, cap, dtype)?;
         if let Some(bits) = request.kv_cache_turboquant_bits {
             enable_turboquant_kv_caches(&mut cache, bits)?;

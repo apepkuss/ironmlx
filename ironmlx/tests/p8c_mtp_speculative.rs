@@ -207,6 +207,14 @@ impl MtpSpeculativeModel for FakeMtpModel {
         Ok((&flat[..], &[1_i32, seq as i32, 128_i32][..]).try_into()?)
     }
 
+    fn mtp_hidden_size(&self, _mtp: &Self::MtpHead) -> i32 {
+        4
+    }
+
+    fn mtp_hidden_dtype(&self, _mtp: &Self::MtpHead) -> Dtype {
+        Dtype::Float32
+    }
+
     fn mtp_forward_hidden_on(
         &self,
         _mtp: &Self::MtpHead,

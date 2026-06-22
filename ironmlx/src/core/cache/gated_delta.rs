@@ -6,7 +6,7 @@
 
 use anyhow::anyhow;
 use mlx::ops::indexing::{slice_strided_on, slice_update_on};
-use mlx::{Array, Dtype};
+use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::Result;
 
@@ -239,6 +239,121 @@ impl GatedDeltaCache {
         self.offsets.clone_from_slice(&snapshot.offsets);
         self.conv_state = snapshot.conv_state.clone();
         self.recurrent_state = snapshot.recurrent_state.clone();
+        Ok(())
+    }
+
+    pub fn prefix_state_for_row_on(
+        &self,
+        row: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array, i32)> {
+        let target = target.into();
+        let conv_dims = self.conv_state.shape();
+        let conv_dims = conv_dims.as_slice();
+        let rec_dims = self.recurrent_state.shape();
+        let rec_dims = rec_dims.as_slice();
+        if row >= self.offsets.len() {
+            anyhow::bail!(
+                "GatedDeltaCache::prefix_state_for_row_on: row {} >= B {}",
+                row,
+                self.offsets.len()
+            );
+        }
+        let conv_state = slice_strided_on(
+            &self.conv_state,
+            [row as i32, 0, 0],
+            [row as i32 + 1, conv_dims[1], conv_dims[2]],
+            [1_i32, 1, 1],
+            target,
+        )?;
+        let recurrent_state = slice_strided_on(
+            &self.recurrent_state,
+            [row as i32, 0, 0, 0],
+            [row as i32 + 1, rec_dims[1], rec_dims[2], rec_dims[3]],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        Ok((conv_state, recurrent_state, self.offsets[row]))
+    }
+
+    pub fn restore_prefix_state_for_row_on(
+        &mut self,
+        conv_state: &Array,
+        recurrent_state: &Array,
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let target = target.into();
+        if row >= self.offsets.len() {
+            anyhow::bail!(
+                "GatedDeltaCache::restore_prefix_state_for_row_on: row {} >= B {}",
+                row,
+                self.offsets.len()
+            );
+        }
+        if cached_len < 0 || cached_len > self.cap {
+            anyhow::bail!(
+                "GatedDeltaCache::restore_prefix_state_for_row_on: cached_len {cached_len} outside [0, {}]",
+                self.cap
+            );
+        }
+        let self_conv = self.conv_state.shape();
+        let self_conv = self_conv.as_slice();
+        let conv_shape = conv_state.shape();
+        let conv_shape = conv_shape.as_slice();
+        if conv_shape != [1_i32, self_conv[1], self_conv[2]] {
+            anyhow::bail!(
+                "GatedDeltaCache::restore_prefix_state_for_row_on: conv_state shape {:?} incompatible with [1,{},{}]",
+                conv_shape,
+                self_conv[1],
+                self_conv[2]
+            );
+        }
+        if conv_state.dtype() != self.conv_state.dtype() {
+            anyhow::bail!(
+                "GatedDeltaCache::restore_prefix_state_for_row_on: conv_state dtype {} != {}",
+                conv_state.dtype(),
+                self.conv_state.dtype()
+            );
+        }
+        let self_rec = self.recurrent_state.shape();
+        let self_rec = self_rec.as_slice();
+        let rec_shape = recurrent_state.shape();
+        let rec_shape = rec_shape.as_slice();
+        if rec_shape != [1_i32, self_rec[1], self_rec[2], self_rec[3]] {
+            anyhow::bail!(
+                "GatedDeltaCache::restore_prefix_state_for_row_on: recurrent_state shape {:?} incompatible with [1,{},{},{}]",
+                rec_shape,
+                self_rec[1],
+                self_rec[2],
+                self_rec[3]
+            );
+        }
+        if recurrent_state.dtype() != self.recurrent_state.dtype() {
+            anyhow::bail!(
+                "GatedDeltaCache::restore_prefix_state_for_row_on: recurrent_state dtype {} != {}",
+                recurrent_state.dtype(),
+                self.recurrent_state.dtype()
+            );
+        }
+        self.conv_state = slice_update_on(
+            &self.conv_state,
+            conv_state,
+            [row as i32, 0, 0],
+            [row as i32 + 1, self_conv[1], self_conv[2]],
+            [1_i32, 1, 1],
+            target,
+        )?;
+        self.recurrent_state = slice_update_on(
+            &self.recurrent_state,
+            recurrent_state,
+            [row as i32, 0, 0, 0],
+            [row as i32 + 1, self_rec[1], self_rec[2], self_rec[3]],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        self.offsets[row] = cached_len;
         Ok(())
     }
 
@@ -641,5 +756,46 @@ mod tests {
                 && (msg_b.contains("mismatch") || msg_b.contains("shape")),
             "msg should mention recurrent_state shape mismatch; got: {msg_b}"
         );
+    }
+
+    #[test]
+    fn gdcache_prefix_state_round_trips_single_row() {
+        let mut src =
+            GatedDeltaCache::new_with_cap(2, 4, 8, 4, 8, 8, Dtype::Float32, 16).expect("src");
+        let mut conv_data = vec![0.0_f32; 2 * 3 * 8];
+        for value in conv_data.iter_mut().skip(3 * 8) {
+            *value = 7.0;
+        }
+        let conv: Array = (&conv_data[..], &[2_i32, 3, 8][..]).try_into().unwrap();
+        let mut rec_data = vec![0.0_f32; 2 * 4 * 8 * 8];
+        for value in rec_data.iter_mut().skip(4 * 8 * 8) {
+            *value = 11.0;
+        }
+        let recurrent: Array = (&rec_data[..], &[2_i32, 4, 8, 8][..]).try_into().unwrap();
+        src.update_conv(conv);
+        src.update_recurrent(recurrent);
+        src.advance(&[0, 5]).expect("advance row 1");
+
+        let (conv_row, recurrent_row, cached_len) =
+            src.prefix_state_for_row_on(1, ()).expect("export row");
+
+        let mut dst =
+            GatedDeltaCache::new_with_cap(1, 4, 8, 4, 8, 8, Dtype::Float32, 16).expect("dst");
+        dst.restore_prefix_state_for_row_on(&conv_row, &recurrent_row, 0, cached_len, ())
+            .expect("restore row");
+
+        assert_eq!(dst.offsets(), &[5]);
+        assert!(dst
+            .conv_state()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|&v| v == 7.0));
+        assert!(dst
+            .recurrent_state()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|&v| v == 11.0));
     }
 }

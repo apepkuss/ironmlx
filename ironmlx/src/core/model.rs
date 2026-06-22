@@ -13,6 +13,11 @@ use crate::Result;
 pub trait Model {
     fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>>;
 
+    /// Dtype expected by this model's KV cache tensors.
+    fn cache_dtype(&self) -> Dtype {
+        Dtype::Bfloat16
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn forward_on(
         &self,

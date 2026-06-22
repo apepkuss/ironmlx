@@ -313,6 +313,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
             spatial_merge_size: 2,
         },
         scheduler_handle: handle.clone(),
+        paged_prefix_cache_enabled: false,
         b_max: 4,
         admission_deadline_ms: 5,
         admission_queue_max: 32,

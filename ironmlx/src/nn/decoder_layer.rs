@@ -16,7 +16,9 @@ use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
 use crate::core::cache::{
-    GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot, TurboQuantKVBits,
+    GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot, PagedPrefixEntry,
+    PagedPrefixKeySpec, PagedPrefixLayer, PrefixLayerKind, PrefixLayerPayload, PrefixLayerSpec,
+    PrefixTensorSpec, TurboQuantKVBits,
 };
 use crate::core::Loader;
 use crate::models::glm4_moe_lite::mla_cache::MlaLatentCacheSnapshot;
@@ -146,6 +148,13 @@ impl LayerCache {
         Ok(())
     }
 
+    pub fn enable_paged_kv(&mut self, block_size: i32, max_pages: i32) -> anyhow::Result<()> {
+        if let LayerCache::Full(kv) = self {
+            kv.enable_paged(block_size, max_pages)?;
+        }
+        Ok(())
+    }
+
     /// Reset to empty state (offset → 0; recurrent state cleared). Preserves
     /// any underlying Array allocations so the next batch can reuse them.
     pub fn reset(&mut self) -> anyhow::Result<()> {
@@ -193,6 +202,451 @@ pub fn enable_turboquant_kv_caches(
 ) -> anyhow::Result<()> {
     for cache in caches {
         cache.enable_turboquant(bits)?;
+    }
+    Ok(())
+}
+
+pub fn enable_paged_kv_caches(
+    caches: &mut [LayerCache],
+    block_size: i32,
+    max_pages: i32,
+) -> anyhow::Result<()> {
+    for cache in caches {
+        cache.enable_paged_kv(block_size, max_pages)?;
+    }
+    Ok(())
+}
+
+pub fn prefix_key_spec_for_caches(
+    model_id: &str,
+    token_ids: &[u32],
+    cached_len: i32,
+    fingerprint: Option<&str>,
+    block_size: i32,
+    caches: &[LayerCache],
+) -> anyhow::Result<Option<PagedPrefixKeySpec>> {
+    if caches.is_empty() {
+        return Ok(None);
+    }
+    if cached_len <= 0 {
+        return Ok(None);
+    }
+    let token_len = i32::try_from(token_ids.len())
+        .map_err(|_| anyhow::anyhow!("paged prefix token length exceeds i32"))?;
+    if token_len != cached_len {
+        anyhow::bail!(
+            "prefix_key_spec_for_caches: token length {token_len} != cached_len {cached_len}"
+        );
+    }
+    if block_size <= 0 {
+        anyhow::bail!("prefix_key_spec_for_caches: block_size must be > 0");
+    }
+
+    let mut main_layers = Vec::with_capacity(caches.len());
+    for cache in caches {
+        match cache {
+            LayerCache::Full(kv) => {
+                let Some(paged) = kv.paged() else {
+                    return Ok(None);
+                };
+                if paged.block_size() != block_size {
+                    anyhow::bail!(
+                        "prefix_key_spec_for_caches: full-attention block_size {} != configured {}",
+                        paged.block_size(),
+                        block_size
+                    );
+                }
+                let page_count = (cached_len + block_size - 1) / block_size;
+                main_layers.push(PrefixLayerSpec {
+                    kind: PrefixLayerKind::FullPaged,
+                    tensors: vec![
+                        PrefixTensorSpec {
+                            dtype: kv.dtype(),
+                            shape: vec![page_count, kv.n_kv_heads(), block_size, kv.head_dim()],
+                        },
+                        PrefixTensorSpec {
+                            dtype: kv.dtype(),
+                            shape: vec![page_count, kv.n_kv_heads(), block_size, kv.v_head_dim()],
+                        },
+                    ],
+                });
+            }
+            LayerCache::Linear(gd) => {
+                let conv_shape = gd.conv_state().shape();
+                let conv_shape = conv_shape.as_slice();
+                let rec_shape = gd.recurrent_state().shape();
+                let rec_shape = rec_shape.as_slice();
+                main_layers.push(PrefixLayerSpec {
+                    kind: PrefixLayerKind::Linear,
+                    tensors: vec![
+                        PrefixTensorSpec {
+                            dtype: gd.conv_state().dtype(),
+                            shape: vec![1_i32, conv_shape[1], conv_shape[2]],
+                        },
+                        PrefixTensorSpec {
+                            dtype: gd.recurrent_state().dtype(),
+                            shape: vec![1_i32, rec_shape[1], rec_shape[2], rec_shape[3]],
+                        },
+                    ],
+                });
+            }
+            LayerCache::Mla(mla) => {
+                main_layers.push(PrefixLayerSpec {
+                    kind: PrefixLayerKind::Mla,
+                    tensors: vec![
+                        PrefixTensorSpec {
+                            dtype: mla.dtype(),
+                            shape: vec![1_i32, 1, cached_len, mla.kv_lora()],
+                        },
+                        PrefixTensorSpec {
+                            dtype: mla.dtype(),
+                            shape: vec![1_i32, 1, cached_len, mla.rope()],
+                        },
+                    ],
+                });
+            }
+        }
+    }
+
+    Ok(Some(PagedPrefixKeySpec {
+        model_id: model_id.to_owned(),
+        token_ids: token_ids.iter().map(|&id| id as i32).collect(),
+        cached_len,
+        fingerprint: fingerprint.map(str::to_owned),
+        block_size,
+        main_layers,
+        mtp_layers: vec![],
+        mtp_last_hidden: None,
+    }))
+}
+
+pub fn prefix_entry_for_row(
+    caches: &[LayerCache],
+    row: usize,
+) -> anyhow::Result<Option<(PagedPrefixEntry, i32)>> {
+    if caches.is_empty() {
+        return Ok(None);
+    }
+    let mut layers = Vec::with_capacity(caches.len());
+    let mut cached_len: Option<i32> = None;
+    for (idx, cache) in caches.iter().enumerate() {
+        let (payload, layer_cached_len) = match cache {
+            LayerCache::Full(kv) => {
+                if kv.paged().is_none() {
+                    return Ok(None);
+                }
+                let layer_cached_len = *kv.offsets().get(row).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "prefix_entry_for_row: full cache row {} out of range for layer {}",
+                        row,
+                        idx
+                    )
+                })?;
+                let layer = kv.paged_prefix_layer_for_row_on(row, ())?;
+                (
+                    PrefixLayerPayload::FullPaged {
+                        k_pages: layer.k_pages,
+                        v_pages: layer.v_pages,
+                    },
+                    layer_cached_len,
+                )
+            }
+            LayerCache::Linear(gd) => {
+                let (conv_state, recurrent_state, layer_cached_len) =
+                    gd.prefix_state_for_row_on(row, ())?;
+                (
+                    PrefixLayerPayload::Linear {
+                        conv_state,
+                        recurrent_state,
+                    },
+                    layer_cached_len,
+                )
+            }
+            LayerCache::Mla(mla) => {
+                let (c_kv, k_pe, layer_cached_len) = mla.prefix_latent_for_row_on(row, ())?;
+                (PrefixLayerPayload::Mla { c_kv, k_pe }, layer_cached_len)
+            }
+        };
+        if let Some(expected) = cached_len {
+            if layer_cached_len != expected {
+                anyhow::bail!(
+                    "prefix_entry_for_row: layer {idx} cached_len {layer_cached_len} != layer0 {expected}"
+                );
+            }
+        } else {
+            cached_len = Some(layer_cached_len);
+        }
+        layers.push(payload);
+    }
+
+    Ok(Some((
+        PagedPrefixEntry {
+            main_layers: layers,
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+        },
+        cached_len.unwrap_or(0),
+    )))
+}
+
+pub fn restore_prefix_entry_for_row(
+    caches: &mut [LayerCache],
+    entry: &PagedPrefixEntry,
+    row: usize,
+    cached_len: i32,
+) -> anyhow::Result<()> {
+    if caches.len() != entry.main_layers.len() {
+        anyhow::bail!(
+            "restore_prefix_entry_for_row: cache layer count {} != stored layers {}",
+            caches.len(),
+            entry.main_layers.len()
+        );
+    }
+    for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
+        match (cache, layer) {
+            (LayerCache::Full(kv), PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
+                let layer = PagedPrefixLayer {
+                    k_pages: k_pages.clone(),
+                    v_pages: v_pages.clone(),
+                };
+                kv.restore_paged_prefix_layer_for_row_on(&layer, row, cached_len, ())?;
+            }
+            (
+                LayerCache::Linear(gd),
+                PrefixLayerPayload::Linear {
+                    conv_state,
+                    recurrent_state,
+                },
+            ) => {
+                gd.restore_prefix_state_for_row_on(
+                    conv_state,
+                    recurrent_state,
+                    row,
+                    cached_len,
+                    (),
+                )?;
+            }
+            (LayerCache::Mla(mla), PrefixLayerPayload::Mla { c_kv, k_pe }) => {
+                mla.restore_prefix_latent_for_row_on(c_kv, k_pe, row, cached_len, ())?;
+            }
+            (LayerCache::Full(_), _) => {
+                anyhow::bail!(
+                    "restore_prefix_entry_for_row: layer {idx} expected FullPaged payload"
+                )
+            }
+            (LayerCache::Linear(_), _) => {
+                anyhow::bail!("restore_prefix_entry_for_row: layer {idx} expected Linear payload")
+            }
+            (LayerCache::Mla(_), _) => {
+                anyhow::bail!("restore_prefix_entry_for_row: layer {idx} expected Mla payload")
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn restore_prefix_entry_for_rows(
+    caches: &mut [LayerCache],
+    entry: &PagedPrefixEntry,
+    rows: &[usize],
+    cached_len: i32,
+) -> anyhow::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if rows.len() == 1 {
+        return restore_prefix_entry_for_row(caches, entry, rows[0], cached_len);
+    }
+    if caches.len() != entry.main_layers.len() {
+        anyhow::bail!(
+            "restore_prefix_entry_for_rows: cache layer count {} != stored layers {}",
+            caches.len(),
+            entry.main_layers.len()
+        );
+    }
+    for (idx, &row) in rows.iter().enumerate() {
+        if rows[..idx].contains(&row) {
+            anyhow::bail!("restore_prefix_entry_for_rows: duplicate row {row}");
+        }
+    }
+    for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
+        match (cache, layer) {
+            (LayerCache::Full(kv), PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
+                let layer = PagedPrefixLayer {
+                    k_pages: k_pages.clone(),
+                    v_pages: v_pages.clone(),
+                };
+                kv.restore_paged_prefix_layer_for_rows_on(&layer, rows, cached_len, ())?;
+            }
+            (
+                LayerCache::Linear(gd),
+                PrefixLayerPayload::Linear {
+                    conv_state,
+                    recurrent_state,
+                },
+            ) => {
+                for &row in rows {
+                    gd.restore_prefix_state_for_row_on(
+                        conv_state,
+                        recurrent_state,
+                        row,
+                        cached_len,
+                        (),
+                    )?;
+                }
+            }
+            (LayerCache::Mla(mla), PrefixLayerPayload::Mla { c_kv, k_pe }) => {
+                for &row in rows {
+                    mla.restore_prefix_latent_for_row_on(c_kv, k_pe, row, cached_len, ())?;
+                }
+            }
+            (LayerCache::Full(_), _) => {
+                anyhow::bail!(
+                    "restore_prefix_entry_for_rows: layer {idx} expected FullPaged payload"
+                )
+            }
+            (LayerCache::Linear(_), _) => {
+                anyhow::bail!("restore_prefix_entry_for_rows: layer {idx} expected Linear payload")
+            }
+            (LayerCache::Mla(_), _) => {
+                anyhow::bail!("restore_prefix_entry_for_rows: layer {idx} expected Mla payload")
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn paged_prefix_key_spec_for_full_caches(
+    model_id: &str,
+    token_ids: &[u32],
+    caches: &[LayerCache],
+) -> anyhow::Result<Option<PagedPrefixKeySpec>> {
+    if caches.is_empty() {
+        return Ok(None);
+    }
+    let mut first: Option<&KVCache> = None;
+    for cache in caches {
+        let LayerCache::Full(kv) = cache else {
+            return Ok(None);
+        };
+        if kv.paged().is_none() {
+            return Ok(None);
+        }
+        if let Some(base) = first {
+            if kv.n_kv_heads() != base.n_kv_heads()
+                || kv.head_dim() != base.head_dim()
+                || kv.v_head_dim() != base.v_head_dim()
+                || kv.dtype() != base.dtype()
+                || kv.paged().map(|p| p.block_size()) != base.paged().map(|p| p.block_size())
+            {
+                anyhow::bail!("paged prefix cache requires uniform full-attention KV layout");
+            }
+        } else {
+            first = Some(kv);
+        }
+    }
+    let Some(base) = first else {
+        return Ok(None);
+    };
+    let paged = base
+        .paged()
+        .expect("paged checked above for every full-attention cache");
+    let cached_len = i32::try_from(token_ids.len())
+        .map_err(|_| anyhow::anyhow!("paged prefix token length exceeds i32"))?;
+    let page_count = (cached_len + paged.block_size() - 1) / paged.block_size();
+    let main_layers = (0..caches.len())
+        .map(|_| PrefixLayerSpec {
+            kind: PrefixLayerKind::FullPaged,
+            tensors: vec![
+                PrefixTensorSpec {
+                    dtype: base.dtype(),
+                    shape: vec![
+                        page_count,
+                        base.n_kv_heads(),
+                        paged.block_size(),
+                        base.head_dim(),
+                    ],
+                },
+                PrefixTensorSpec {
+                    dtype: base.dtype(),
+                    shape: vec![
+                        page_count,
+                        base.n_kv_heads(),
+                        paged.block_size(),
+                        base.v_head_dim(),
+                    ],
+                },
+            ],
+        })
+        .collect();
+    Ok(Some(PagedPrefixKeySpec {
+        model_id: model_id.to_owned(),
+        token_ids: token_ids.iter().map(|&id| id as i32).collect(),
+        cached_len,
+        fingerprint: None,
+        block_size: paged.block_size(),
+        main_layers,
+        mtp_layers: vec![],
+        mtp_last_hidden: None,
+    }))
+}
+
+pub fn paged_prefix_layers_for_row(
+    caches: &[LayerCache],
+    row: usize,
+) -> anyhow::Result<Option<PagedPrefixEntry>> {
+    if caches.is_empty() {
+        return Ok(None);
+    }
+    let mut layers = Vec::with_capacity(caches.len());
+    for cache in caches {
+        let LayerCache::Full(kv) = cache else {
+            return Ok(None);
+        };
+        if kv.paged().is_none() {
+            return Ok(None);
+        }
+        let layer = kv.paged_prefix_layer_for_row_on(row, ())?;
+        layers.push(PrefixLayerPayload::FullPaged {
+            k_pages: layer.k_pages,
+            v_pages: layer.v_pages,
+        });
+    }
+    Ok(Some(PagedPrefixEntry {
+        main_layers: layers,
+        mtp_layers: vec![],
+        mtp_last_hidden: None,
+    }))
+}
+
+pub fn restore_paged_prefix_layers_for_row(
+    caches: &mut [LayerCache],
+    entry: &PagedPrefixEntry,
+    row: usize,
+    prefix_len: i32,
+) -> anyhow::Result<()> {
+    if caches.len() != entry.main_layers.len() {
+        anyhow::bail!(
+            "restore_paged_prefix_layers_for_row: cache layer count {} != stored layers {}",
+            caches.len(),
+            entry.main_layers.len()
+        );
+    }
+    if !entry.mtp_layers.is_empty() || entry.mtp_last_hidden.is_some() {
+        anyhow::bail!("restore_paged_prefix_layers_for_row: unexpected MTP payload");
+    }
+    for (cache, layer) in caches.iter_mut().zip(entry.main_layers.iter()) {
+        let LayerCache::Full(kv) = cache else {
+            anyhow::bail!("restore_paged_prefix_layers_for_row: non-Full cache layer");
+        };
+        let PrefixLayerPayload::FullPaged { k_pages, v_pages } = layer else {
+            anyhow::bail!("restore_paged_prefix_layers_for_row: non-Full payload");
+        };
+        let layer = PagedPrefixLayer {
+            k_pages: k_pages.clone(),
+            v_pages: v_pages.clone(),
+        };
+        kv.restore_paged_prefix_layer_for_row_on(&layer, row, prefix_len, ())?;
     }
     Ok(())
 }

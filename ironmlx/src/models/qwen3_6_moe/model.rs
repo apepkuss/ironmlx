@@ -45,6 +45,10 @@ impl Qwen36MoeModel {
         self.inner.text()
     }
 
+    pub fn hidden_dtype(&self) -> Dtype {
+        self.inner.hidden_dtype()
+    }
+
     pub fn vision(&self) -> Option<&VisionTower> {
         self.inner.vision()
     }

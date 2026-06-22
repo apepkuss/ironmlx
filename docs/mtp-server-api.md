@@ -8,11 +8,17 @@ accept per-request MTP parameters.
 
 ## Current constraints
 
-- MTP is supported only for Qwen dense/MoE text models.
-- `ironmlx serve --mtp-model-dir` requires `--b-max 1`.
-- MTP runs only for scheduler-eligible single active text greedy requests.
-- Vision requests, non-greedy sampling, unsupported architectures, and other
-  non-eligible requests fall back to the regular scheduler path.
+- MTP is supported only for Qwen dense/MoE main models with a matching Qwen MTP
+  head.
+- `ironmlx serve --mtp-model-dir` supports `--b-max N` for `N >= 1`.
+- MTP runs only for scheduler-eligible greedy requests. Qwen VL requests are
+  eligible after the vision prefill path has produced the text-backbone state;
+  non-greedy sampling, unsupported architectures, and other non-eligible
+  requests fall back to the regular scheduler path.
+- `--paged-prefix-cache-dir` can be combined with `--mtp-model-dir`; repeated
+  eligible text or Qwen VL prompts restore both the main paged prefix cache and
+  the MTP draft cache state. Passing `--paged-prefix-cache-dir` without a value
+  uses `~/.ironmlx/cache/paged_prefix_cache`.
 - `--mtp-draft-tokens` is a startup-level setting. If omitted, the Phase 4
   model-aware default policy chooses the draft depth.
 

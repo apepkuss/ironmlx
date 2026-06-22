@@ -27,6 +27,7 @@ const DEFAULT_ADMISSION_DEADLINE_MS: u64 = 5;
 const DEFAULT_ADMISSION_QUEUE_MAX: usize = 32;
 const DEFAULT_MAX_CACHE_CAP: usize = 32768;
 const DEFAULT_DECODE_CADENCE_MID_CHUNK_CAP: usize = 256;
+const DEFAULT_PAGED_PREFIX_CACHE_DIR: &str = "~/.ironmlx/cache/paged_prefix_cache";
 
 #[derive(Args, Debug)]
 pub struct ServeArgs {
@@ -98,7 +99,7 @@ pub struct ServeArgs {
     pub scheduler_autotune_report: bool,
 
     /// Optional local MTP model directory. When set, MTP is enabled only for
-    /// Qwen dense/MoE text requests served with --b-max 1.
+    /// greedy Qwen dense/MoE scheduler requests.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
 
@@ -111,6 +112,26 @@ pub struct ServeArgs {
     #[arg(long = "kv-quant", value_enum, default_value = "none")]
     pub kv_quant: KvQuantArg,
 
+    /// Enable paged SSD prefix cache under this directory. This also switches
+    /// full-attention KV caches to paged storage and decode to the paged
+    /// attention kernel when supported. When passed without a value, defaults
+    /// to ~/.ironmlx/cache/paged_prefix_cache.
+    #[arg(
+        long = "paged-prefix-cache-dir",
+        num_args = 0..=1,
+        default_missing_value = DEFAULT_PAGED_PREFIX_CACHE_DIR
+    )]
+    pub paged_prefix_cache_dir: Option<PathBuf>,
+
+    /// Tokens per physical K/V page for --paged-prefix-cache-dir.
+    #[arg(long = "paged-prefix-cache-block-size", default_value_t = 16)]
+    pub paged_prefix_cache_block_size: i32,
+
+    /// Maximum physical pages per full-attention layer cache. If omitted,
+    /// defaults to ceil(b_max * max_cache_cap / block_size).
+    #[arg(long = "paged-prefix-cache-max-pages")]
+    pub paged_prefix_cache_max_pages: Option<i32>,
+
     /// P5h+1 T1 measurement probe: force selected span bodies (Lane A
     /// `first_token_sampling_materialize_and_sample` + the ROI substep
     /// closures under GatedAttention / GatedDeltaNet / SparseMoeBlock +
@@ -121,6 +142,54 @@ pub struct ServeArgs {
     #[cfg(feature = "p5h-profile")]
     #[arg(long, default_value_t = false)]
     pub p5h_measurement_eval_probes: bool,
+}
+
+fn resolve_paged_prefix_cache_config(
+    args: &ServeArgs,
+    scheduler_config: SchedulerServeConfig,
+) -> Result<Option<crate::core::cache::PagedPrefixCacheConfig>> {
+    let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
+        return Ok(None);
+    };
+    if args.kv_quant.turboquant_bits().is_some() {
+        bail!("--paged-prefix-cache-dir is mutually exclusive with --kv-quant");
+    }
+    let root = expand_home_path(root)?;
+    let block_size = args.paged_prefix_cache_block_size;
+    if block_size <= 0 {
+        bail!("--paged-prefix-cache-block-size must be > 0");
+    }
+    let max_pages = match args.paged_prefix_cache_max_pages {
+        Some(max_pages) => {
+            if max_pages <= 0 {
+                bail!("--paged-prefix-cache-max-pages must be > 0");
+            }
+            max_pages
+        }
+        None => {
+            let tokens = scheduler_config
+                .max_cache_cap
+                .saturating_mul(scheduler_config.b_max);
+            let pages = tokens.div_ceil(block_size as usize).max(1);
+            i32::try_from(pages).context("derived paged prefix cache max_pages exceeds i32")?
+        }
+    };
+    crate::core::cache::PagedPrefixCacheConfig::new(root, args.model.clone(), block_size, max_pages)
+        .map(Some)
+}
+
+fn expand_home_path(path: &Path) -> Result<PathBuf> {
+    let Some(raw) = path.to_str() else {
+        return Ok(path.to_path_buf());
+    };
+    let Some(rest) = raw.strip_prefix('~') else {
+        return Ok(path.to_path_buf());
+    };
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return Ok(path.to_path_buf());
+    }
+    let home = dirs::home_dir().context("locating home directory for ~")?;
+    Ok(home.join(rest.strip_prefix('/').unwrap_or(rest)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,14 +436,11 @@ fn resolve_serve_mtp_config(
     args: &ServeArgs,
     architecture: crate::models::ModelArchitecture,
     raw_config: &serde_json::Value,
-    scheduler_config: SchedulerServeConfig,
+    _scheduler_config: SchedulerServeConfig,
 ) -> Result<Option<ServeMtpConfig>> {
     let Some(model_dir) = args.mtp_model_dir.as_ref() else {
         return Ok(None);
     };
-    if scheduler_config.b_max != 1 {
-        bail!("ironmlx serve --mtp-model-dir currently requires --b-max 1");
-    }
     match architecture {
         crate::models::ModelArchitecture::Qwen35Dense
         | crate::models::ModelArchitecture::Qwen35Moe => {}
@@ -527,6 +593,15 @@ where
     log_scheduler_mode(scheduler_config);
 
     let model_id = args.model.clone();
+    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config)?;
+    if let Some(config) = &paged_prefix_cache {
+        tracing::info!(
+            "ironmlx serve: paged SSD prefix cache enabled dir={} block_size={} max_pages={}",
+            config.root.display(),
+            config.block_size,
+            config.max_pages
+        );
+    }
     let runtime = serve_runtime()?;
     // P5h+1 T1: derive measurement-eval-probes flag (feature-gated CLI arg);
     // feature-off builds always pass `false` so the receiver-side `set_*`
@@ -545,6 +620,7 @@ where
         scheduler_config.max_cache_cap,
         scheduler_config.decode_cadence_mid_chunk_cap,
         args.kv_quant.turboquant_bits(),
+        paged_prefix_cache,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
@@ -580,6 +656,7 @@ where
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
 
     let model_id = args.model.clone();
+    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config)?;
     let runtime = serve_runtime()?;
     let p5h_measurement_eval_probes = p5h_measurement_eval_probes_arg(args);
     runtime.block_on(server::serve_with_mtp(
@@ -597,6 +674,7 @@ where
         scheduler_config.max_cache_cap,
         scheduler_config.decode_cadence_mid_chunk_cap,
         args.kv_quant.turboquant_bits(),
+        paged_prefix_cache,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         p5h_measurement_eval_probes,
@@ -904,8 +982,9 @@ mod scheduler_profile_tests {
 
     use super::{
         check_loaded_scheduler_profile_health, load_scheduler_profile_for_model,
-        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
-        resolve_serve_mtp_config, KvQuantArg, SchedulerServeConfig, ServeArgs,
+        resolve_paged_prefix_cache_config, resolve_scheduler_runtime_profile,
+        resolve_scheduler_serve_config, resolve_serve_mtp_config, KvQuantArg, SchedulerServeConfig,
+        ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -960,6 +1039,9 @@ mod scheduler_profile_tests {
             mtp_model_dir: None,
             mtp_draft_tokens: None,
             kv_quant: KvQuantArg::None,
+            paged_prefix_cache_dir: None,
+            paged_prefix_cache_block_size: 16,
+            paged_prefix_cache_max_pages: None,
             #[cfg(feature = "p5h-profile")]
             p5h_measurement_eval_probes: false,
         }
@@ -1100,13 +1182,13 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_mtp_config_rejects_batched_scheduler() {
+    fn serve_mtp_config_accepts_batched_scheduler() {
         let temp_dir = unique_temp_dir("serve-mtp-bmax");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
         let mut args = base_args();
         args.mtp_model_dir = Some(temp_dir.clone());
 
-        let err = resolve_serve_mtp_config(
+        let cfg = resolve_serve_mtp_config(
             &args,
             crate::models::ModelArchitecture::Qwen35Dense,
             &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
@@ -1115,10 +1197,60 @@ mod scheduler_profile_tests {
                 ..SchedulerServeConfig::default()
             },
         )
-        .expect_err("b_max > 1 must be rejected");
+        .expect("resolve")
+        .expect("enabled");
 
-        assert!(err.to_string().contains("--b-max 1"));
-        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+        assert_eq!(cfg.model_dir, temp_dir);
+        std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_paged_prefix_cache_accepts_mtp_config() {
+        let temp_dir = unique_temp_dir("serve-mtp-prefix");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let prefix_dir = unique_temp_dir("serve-prefix-mtp");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+        args.paged_prefix_cache_dir = Some(prefix_dir.clone());
+
+        let cfg = resolve_paged_prefix_cache_config(
+            &args,
+            SchedulerServeConfig {
+                b_max: 2,
+                max_cache_cap: 128,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("prefix config")
+        .expect("enabled");
+
+        assert_eq!(cfg.root, prefix_dir);
+        std::fs::remove_dir_all(temp_dir).expect("cleanup mtp dir");
+        std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn serve_paged_prefix_cache_expands_default_home_dir() {
+        let mut args = base_args();
+        args.paged_prefix_cache_dir = Some(PathBuf::from("~/.ironmlx/cache/paged_prefix_cache"));
+
+        let cfg = resolve_paged_prefix_cache_config(
+            &args,
+            SchedulerServeConfig {
+                b_max: 2,
+                max_cache_cap: 128,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("prefix config")
+        .expect("enabled");
+
+        let expected = dirs::home_dir()
+            .expect("home dir")
+            .join(".ironmlx")
+            .join("cache")
+            .join("paged_prefix_cache");
+        assert_eq!(cfg.root, expected);
     }
 
     #[test]

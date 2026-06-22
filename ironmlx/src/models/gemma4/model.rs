@@ -431,6 +431,10 @@ impl Model for Gemma4Model {
         Gemma4Model::make_cache(self, batch, cap, dtype)
     }
 
+    fn cache_dtype(&self) -> Dtype {
+        Dtype::Float32
+    }
+
     fn forward_on(
         &self,
         input_ids: &Array,

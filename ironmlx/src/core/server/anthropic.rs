@@ -308,6 +308,7 @@ where
         prompt_len,
         scheduler_config.prefill_chunk_size,
         state.b_max,
+        state.paged_prefix_cache_enabled,
     );
 
     match (stream, use_scheduler) {

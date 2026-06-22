@@ -420,6 +420,19 @@ pub fn render_markdown(
     out
 }
 
+pub fn render_markdown_with_prefix_cache_probe(
+    cells: &[CellResult],
+    targets: &[(String, String)],
+    warmup: usize,
+) -> String {
+    let mut out = render_markdown(cells, targets, warmup);
+    out.push_str("\n## Prefix Cache Probe\n\n");
+    out.push_str(
+        "Enabled: synthetic prompts are reused within each cell. With warmup=0, run 0 is the cold/miss candidate and later runs are warm-hit candidates. With warmup>0, measured runs are warm-hit candidates.\n",
+    );
+    out
+}
+
 pub fn render_markdown_concurrent(
     cells: &[crate::runner::ConcurrentCellResult],
     targets: &[(String, String)],
@@ -526,6 +539,21 @@ pub fn render_markdown_concurrent(
     out
 }
 
+pub fn render_markdown_concurrent_with_prefix_cache_probe(
+    cells: &[crate::runner::ConcurrentCellResult],
+    targets: &[(String, String)],
+    concurrent: usize,
+    duration: u64,
+    warmup_duration: u64,
+) -> String {
+    let mut out = render_markdown_concurrent(cells, targets, concurrent, duration, warmup_duration);
+    out.push_str("\n## Prefix Cache Probe\n\n");
+    out.push_str(
+        "Enabled: all workers reuse the same synthetic prompt within each cell, so concurrent TTFT reflects shared-prefix contention and warm-hit behavior when the server prefix cache is enabled.\n",
+    );
+    out
+}
+
 /// CSV output: one row per timed run. Stable column order.
 ///
 /// When `capture_request_id` is true, an extra `request_id` column is appended
@@ -574,6 +602,33 @@ pub fn render_csv(
             }
             out.push('\n');
         }
+    }
+    out
+}
+
+pub fn render_csv_with_prefix_cache_probe(
+    cells: &[CellResult],
+    capture_request_id: bool,
+    capture_run_timestamps: bool,
+    warmup: usize,
+) -> String {
+    let base = render_csv(cells, capture_request_id, capture_run_timestamps);
+    let mut out = String::new();
+    for (line_idx, line) in base.lines().enumerate() {
+        if line_idx == 0 {
+            out.push_str(line);
+            out.push_str(",prefix_cache_probe,prefix_cache_probe_phase\n");
+            continue;
+        }
+        let run_idx = line
+            .split(',')
+            .nth(3)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        out.push_str(line);
+        out.push_str(",true,");
+        out.push_str(prefix_cache_probe_phase(warmup, run_idx));
+        out.push('\n');
     }
     out
 }
@@ -633,6 +688,23 @@ pub fn render_csv_concurrent(cells: &[crate::runner::ConcurrentCellResult]) -> S
             )
             .unwrap();
         }
+    }
+    out
+}
+
+pub fn render_csv_concurrent_with_prefix_cache_probe(
+    cells: &[crate::runner::ConcurrentCellResult],
+) -> String {
+    let base = render_csv_concurrent(cells);
+    let mut out = String::new();
+    for (line_idx, line) in base.lines().enumerate() {
+        out.push_str(line);
+        if line_idx == 0 {
+            out.push_str(",prefix_cache_probe");
+        } else {
+            out.push_str(",true");
+        }
+        out.push('\n');
     }
     out
 }
@@ -778,6 +850,36 @@ pub fn render_json(cells: &[CellResult], targets: &[(String, String)], warmup: u
     serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".into())
 }
 
+pub fn render_json_with_prefix_cache_probe(
+    cells: &[CellResult],
+    targets: &[(String, String)],
+    warmup: usize,
+) -> String {
+    let raw = render_json(cells, targets, warmup);
+    let mut root: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(metadata) = root
+        .get_mut("metadata")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        metadata.insert("prefix_cache_probe".into(), serde_json::Value::from(true));
+    }
+    if let Some(raw_runs) = root
+        .get_mut("raw_runs")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for row in raw_runs {
+            let run_idx = row
+                .get("run_idx")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            row["prefix_cache_probe_phase"] =
+                serde_json::Value::from(prefix_cache_probe_phase(warmup, run_idx));
+        }
+    }
+    serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".into())
+}
+
 pub fn render_json_concurrent(
     cells: &[crate::runner::ConcurrentCellResult],
     targets: &[(String, String)],
@@ -838,6 +940,28 @@ pub fn render_json_concurrent(
     });
 
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
+pub fn render_json_concurrent_with_prefix_cache_probe(
+    cells: &[crate::runner::ConcurrentCellResult],
+    targets: &[(String, String)],
+    concurrent: usize,
+    duration: u64,
+    warmup_duration: u64,
+) -> String {
+    let raw = render_json_concurrent(cells, targets, concurrent, duration, warmup_duration);
+    let mut root: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    root["prefix_cache_probe"] = serde_json::Value::from(true);
+    serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn prefix_cache_probe_phase(warmup: usize, run_idx: usize) -> &'static str {
+    if warmup > 0 || run_idx > 0 {
+        "warm_hit_candidate"
+    } else {
+        "cold_or_miss_candidate"
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1074,6 +1198,61 @@ mod tests {
             csv, expected,
             "default-off CSV must be byte-identical to the pre-flag golden \
              — drift in any column/value/order fails this gate"
+        );
+    }
+
+    #[test]
+    fn csv_prefix_cache_probe_appends_phase_columns() {
+        let cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 128,
+            tg_target: 64,
+            runs: vec![
+                fake_outcome(0, 50.0, 500.0, 64),
+                fake_outcome(1, 10.0, 500.0, 64),
+            ],
+        };
+        let csv = render_csv_with_prefix_cache_probe(&[cell], false, false, 0);
+        let header = csv.lines().next().expect("header line");
+        assert!(
+            header.ends_with(",prefix_cache_probe,prefix_cache_probe_phase"),
+            "header should append prefix-cache probe columns, got: {header}"
+        );
+        let rows: Vec<&str> = csv.lines().skip(1).collect();
+        assert!(
+            rows[0].ends_with(",true,cold_or_miss_candidate"),
+            "run 0 without warmup should be labeled cold/miss candidate, got: {}",
+            rows[0]
+        );
+        assert!(
+            rows[1].ends_with(",true,warm_hit_candidate"),
+            "run 1 should be labeled warm-hit candidate, got: {}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn json_prefix_cache_probe_records_metadata_and_run_phase() {
+        let cell = CellResult {
+            target_name: "ironmlx".into(),
+            target_url: "http://localhost:8080".into(),
+            pp_target: 128,
+            tg_target: 64,
+            runs: vec![fake_outcome(0, 50.0, 500.0, 64)],
+        };
+        let raw = render_json_with_prefix_cache_probe(
+            &[cell],
+            &[("ironmlx".to_string(), "http://localhost:8080".to_string())],
+            1,
+        );
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+
+        assert_eq!(json["metadata"]["prefix_cache_probe"], true);
+        assert_eq!(json["metadata"]["warmup"], 1);
+        assert_eq!(
+            json["raw_runs"][0]["prefix_cache_probe_phase"],
+            "warm_hit_candidate"
         );
     }
 

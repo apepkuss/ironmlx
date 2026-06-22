@@ -9,7 +9,7 @@ use mlx::ops::indexing::{slice_strided_on, slice_update_on};
 use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
-use super::{TurboQuantKVBits, TurboQuantKVCache};
+use super::{PagedKVCache, PagedPrefixLayer, TurboQuantKVBits, TurboQuantKVCache};
 use crate::Result;
 
 /// Per-layer KV cache for full-attention layers.
@@ -32,7 +32,8 @@ pub struct KVCache {
     head_dim: i32,
     v_head_dim: i32,
     dtype: Dtype,
-    turboquant: Option<TurboQuantKVCache>,
+    turboquant: Option<Box<TurboQuantKVCache>>,
+    paged: Option<Box<PagedKVCache>>,
 }
 
 /// Lightweight checkpoint for [`KVCache`] rollback.
@@ -77,6 +78,7 @@ impl KVCache {
             v_head_dim,
             dtype,
             turboquant: None,
+            paged: None,
         }
     }
 
@@ -102,6 +104,9 @@ impl KVCache {
     }
 
     pub fn enable_turboquant(&mut self, bits: TurboQuantKVBits) -> Result<()> {
+        if self.paged.is_some() {
+            anyhow::bail!("KVCache::enable_turboquant: paged KV cache is already enabled");
+        }
         let mut turboquant = TurboQuantKVCache::new(
             self.batch,
             self.n_kv_heads,
@@ -135,14 +140,303 @@ impl KVCache {
             )?;
             turboquant.update_from_dense_on(&k_slice, &v_slice, ())?;
         }
-        self.turboquant = Some(turboquant);
+        self.turboquant = Some(Box::new(turboquant));
+        self.keys = None;
+        self.values = None;
+        Ok(())
+    }
+
+    /// Enable paged K/V storage for full-attention layers.
+    ///
+    /// Paged mode is mutually exclusive with TurboQuant. Existing dense
+    /// prefix data, if any, is copied into pages and dense buffers are then
+    /// released; future prefill reads materialize dense K/V on demand while
+    /// decode uses the paged attention kernel directly.
+    pub fn with_paged(mut self, block_size: i32, max_pages: i32) -> Result<Self> {
+        self.enable_paged(block_size, max_pages)?;
+        Ok(self)
+    }
+
+    pub fn enable_paged(&mut self, block_size: i32, max_pages: i32) -> Result<()> {
+        if self.turboquant.is_some() {
+            anyhow::bail!("KVCache::enable_paged: TurboQuant KV cache is already enabled");
+        }
+        let mut paged = PagedKVCache::new(
+            self.batch,
+            self.n_kv_heads,
+            self.head_dim,
+            self.v_head_dim,
+            self.dtype,
+            self.cap,
+            block_size,
+            max_pages,
+        )?;
+        let max_off = self.offsets.iter().copied().max().unwrap_or(0);
+        if max_off > 0 {
+            let keys_full = self
+                .keys
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("KVCache::enable_paged: keys are unallocated"))?;
+            let values_full = self
+                .values
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("KVCache::enable_paged: values are unallocated"))?;
+            let k_slice = slice_strided_on(
+                keys_full,
+                [0_i32, 0, 0, 0],
+                [self.batch, self.n_kv_heads, max_off, self.head_dim],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            let v_slice = slice_strided_on(
+                values_full,
+                [0_i32, 0, 0, 0],
+                [self.batch, self.n_kv_heads, max_off, self.v_head_dim],
+                [1_i32, 1, 1, 1],
+                (),
+            )?;
+            let mut paged_offsets = vec![0_i32; self.batch as usize];
+            paged.update_and_fetch_on(&k_slice, &v_slice, &mut paged_offsets, &self.offsets, ())?;
+        }
+        self.paged = Some(Box::new(paged));
         self.keys = None;
         self.values = None;
         Ok(())
     }
 
     pub fn turboquant(&self) -> Option<&TurboQuantKVCache> {
-        self.turboquant.as_ref()
+        self.turboquant.as_deref()
+    }
+
+    pub fn paged(&self) -> Option<&PagedKVCache> {
+        self.paged.as_deref()
+    }
+
+    pub fn batch(&self) -> i32 {
+        self.batch
+    }
+
+    pub fn n_kv_heads(&self) -> i32 {
+        self.n_kv_heads
+    }
+
+    pub fn head_dim(&self) -> i32 {
+        self.head_dim
+    }
+
+    pub fn v_head_dim(&self) -> i32 {
+        self.v_head_dim
+    }
+
+    pub fn paged_prefix_layer_for_row_on(
+        &self,
+        row: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<PagedPrefixLayer> {
+        let paged = self.paged.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("KVCache::paged_prefix_layer_for_row_on: paged KV is not enabled")
+        })?;
+        let (k_pages, v_pages) = paged.prefix_pages_for_row_on(&self.offsets, row, target)?;
+        Ok(PagedPrefixLayer { k_pages, v_pages })
+    }
+
+    pub fn materialize_current_paged_prefix_on(
+        &self,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array)> {
+        let paged = self.paged.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("KVCache::materialize_current_paged_prefix_on: paged KV is not enabled")
+        })?;
+        let max_off = self.offsets.iter().copied().max().unwrap_or(0);
+        paged.materialize_prefix_on(&self.offsets, max_off, target)
+    }
+
+    pub fn restore_paged_prefix_layer_for_row_on(
+        &mut self,
+        layer: &PagedPrefixLayer,
+        row: usize,
+        prefix_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let paged = self.paged.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "KVCache::restore_paged_prefix_layer_for_row_on: paged KV is not enabled"
+            )
+        })?;
+        paged.restore_prefix_pages_for_row_on(
+            &layer.k_pages,
+            &layer.v_pages,
+            &mut self.offsets,
+            row,
+            prefix_len,
+            target,
+        )
+    }
+
+    pub fn restore_paged_prefix_layer_for_rows_on(
+        &mut self,
+        layer: &PagedPrefixLayer,
+        rows: &[usize],
+        prefix_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let paged = self.paged.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "KVCache::restore_paged_prefix_layer_for_rows_on: paged KV is not enabled"
+            )
+        })?;
+        paged.restore_prefix_pages_for_rows_on(
+            &layer.k_pages,
+            &layer.v_pages,
+            &mut self.offsets,
+            rows,
+            prefix_len,
+            target,
+        )
+    }
+
+    pub fn dense_prefix_layer_for_row_on(
+        &self,
+        row: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array, i32)> {
+        let target = target.into();
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "KVCache::dense_prefix_layer_for_row_on: row {} >= batch {}",
+                row,
+                self.batch
+            );
+        }
+        if self.turboquant.is_some() || self.paged.is_some() {
+            anyhow::bail!(
+                "KVCache::dense_prefix_layer_for_row_on: dense prefix export requires dense KV storage"
+            );
+        }
+        let cached_len = self.offsets[row];
+        if cached_len == 0 {
+            let k = Array::zeros_on(
+                (1_i32, self.n_kv_heads, 0_i32, self.head_dim),
+                self.dtype,
+                target,
+            )?;
+            let v = Array::zeros_on(
+                (1_i32, self.n_kv_heads, 0_i32, self.v_head_dim),
+                self.dtype,
+                target,
+            )?;
+            return Ok((k, v, 0));
+        }
+        let keys_full = self.keys.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("KVCache::dense_prefix_layer_for_row_on: keys are unallocated")
+        })?;
+        let values_full = self.values.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("KVCache::dense_prefix_layer_for_row_on: values are unallocated")
+        })?;
+        let k = slice_strided_on(
+            keys_full,
+            [row as i32, 0, 0, 0],
+            [row as i32 + 1, self.n_kv_heads, cached_len, self.head_dim],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        let v = slice_strided_on(
+            values_full,
+            [row as i32, 0, 0, 0],
+            [row as i32 + 1, self.n_kv_heads, cached_len, self.v_head_dim],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        Ok((k, v, cached_len))
+    }
+
+    pub fn restore_dense_prefix_layer_for_row_on(
+        &mut self,
+        k: &Array,
+        v: &Array,
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let target = target.into();
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "KVCache::restore_dense_prefix_layer_for_row_on: row {} >= batch {}",
+                row,
+                self.batch
+            );
+        }
+        if self.turboquant.is_some() || self.paged.is_some() {
+            anyhow::bail!(
+                "KVCache::restore_dense_prefix_layer_for_row_on: dense prefix restore requires dense KV storage"
+            );
+        }
+        if cached_len < 0 || cached_len > self.cap {
+            anyhow::bail!(
+                "KVCache::restore_dense_prefix_layer_for_row_on: cached_len {cached_len} outside [0, {}]",
+                self.cap
+            );
+        }
+        let k_shape = k.shape();
+        let k_shape = k_shape.as_slice();
+        if k_shape != [1_i32, self.n_kv_heads, cached_len, self.head_dim] {
+            anyhow::bail!(
+                "KVCache::restore_dense_prefix_layer_for_row_on: K shape {:?} incompatible with [1,{},{cached_len},{}]",
+                k_shape,
+                self.n_kv_heads,
+                self.head_dim
+            );
+        }
+        let v_shape = v.shape();
+        let v_shape = v_shape.as_slice();
+        if v_shape != [1_i32, self.n_kv_heads, cached_len, self.v_head_dim] {
+            anyhow::bail!(
+                "KVCache::restore_dense_prefix_layer_for_row_on: V shape {:?} incompatible with [1,{},{cached_len},{}]",
+                v_shape,
+                self.n_kv_heads,
+                self.v_head_dim
+            );
+        }
+        if k.dtype() != self.dtype || v.dtype() != self.dtype {
+            anyhow::bail!(
+                "KVCache::restore_dense_prefix_layer_for_row_on: dtype mismatch K={} V={} expected {}",
+                k.dtype(),
+                v.dtype(),
+                self.dtype
+            );
+        }
+        if cached_len > 0 {
+            let current_capacity = self
+                .keys
+                .as_ref()
+                .map(|a| a.shape().as_slice()[2])
+                .unwrap_or(0);
+            if cached_len > current_capacity {
+                let target_capacity =
+                    ((cached_len + self.step - 1) / self.step * self.step).min(self.cap);
+                self.grow_to(target_capacity, target)?;
+            }
+            let keys_full = self.keys.as_ref().expect("grow_to allocated keys");
+            let values_full = self.values.as_ref().expect("grow_to allocated values");
+            self.keys = Some(slice_update_on(
+                keys_full,
+                k,
+                [row as i32, 0, 0, 0],
+                [row as i32 + 1, self.n_kv_heads, cached_len, self.head_dim],
+                [1_i32, 1, 1, 1],
+                target,
+            )?);
+            self.values = Some(slice_update_on(
+                values_full,
+                v,
+                [row as i32, 0, 0, 0],
+                [row as i32 + 1, self.n_kv_heads, cached_len, self.v_head_dim],
+                [1_i32, 1, 1, 1],
+                target,
+            )?);
+        }
+        self.offsets[row] = cached_len;
+        Ok(())
     }
 
     pub(crate) fn turboquant_pre_rotated_decode_query_signs(
@@ -192,6 +486,9 @@ impl KVCache {
             if let Some(tq) = &mut self.turboquant {
                 tq.grow_cap(new_cap);
             }
+            if let Some(paged) = &mut self.paged {
+                paged.grow_cap(new_cap);
+            }
         }
     }
 
@@ -208,6 +505,9 @@ impl KVCache {
         }
         if let Some(tq) = &mut self.turboquant {
             tq.clear();
+        }
+        if let Some(paged) = &mut self.paged {
+            paged.clear();
         }
     }
 
@@ -246,6 +546,10 @@ impl KVCache {
                     self.cap,
                 );
             }
+        }
+        if let Some(paged) = &mut self.paged {
+            paged.restore_offsets(&mut self.offsets, offsets)?;
+            return Ok(());
         }
         let max_off = offsets.iter().copied().max().unwrap_or(0);
         if max_off > 0 {
@@ -329,6 +633,25 @@ impl KVCache {
         mask_arr: Option<&Array>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Option<Array>> {
+        if self.paged.is_some()
+            && self.supports_paged_decode_attention(queries, k, v, per_row_lens, mask_arr)
+        {
+            let paged = match self.paged.as_mut() {
+                Some(paged) => paged,
+                None => unreachable!("paged cache presence checked before decode dispatch"),
+            };
+            let target = target.into();
+            return Ok(Some(paged.update_and_attend_decode_on(
+                queries,
+                k,
+                v,
+                &mut self.offsets,
+                per_row_lens,
+                scale,
+                target,
+            )?));
+        }
+
         if self.turboquant.is_none()
             || !self.supports_turboquant_decode_attention(queries, k, v, per_row_lens, mask_arr)
         {
@@ -406,6 +729,9 @@ impl KVCache {
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, Array)> {
         let target: StreamOrDevice = target.into();
+        if let Some(paged) = &mut self.paged {
+            return paged.update_and_fetch_on(k, v, &mut self.offsets, per_row_lens, target);
+        }
         if let Some(tq) = &mut self.turboquant {
             return tq.update_and_fetch_on(
                 k,
@@ -518,6 +844,60 @@ impl KVCache {
             target,
         )?;
         Ok((k_slice, v_slice))
+    }
+
+    fn supports_paged_decode_attention(
+        &self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        _mask_arr: Option<&Array>,
+    ) -> bool {
+        if self.v_head_dim != self.head_dim
+            || per_row_lens.len() != self.batch as usize
+            || !matches!(
+                queries.dtype(),
+                Dtype::Float32 | Dtype::Float16 | Dtype::Bfloat16
+            )
+        {
+            return false;
+        }
+        let q_shape = queries.shape();
+        let q_dims = q_shape.as_slice();
+        let k_shape = k.shape();
+        let k_dims = k_shape.as_slice();
+        let v_shape = v.shape();
+        let v_dims = v_shape.as_slice();
+        if q_dims.len() != 4 || k_dims.len() != 4 || v_dims.len() != 4 {
+            return false;
+        }
+        if q_dims[0] != self.batch
+            || q_dims[2] != 1
+            || q_dims[3] != self.head_dim
+            || q_dims[1] % self.n_kv_heads != 0
+        {
+            return false;
+        }
+        if k_dims != [self.batch, self.n_kv_heads, 1, self.head_dim]
+            || v_dims != [self.batch, self.n_kv_heads, 1, self.v_head_dim]
+        {
+            return false;
+        }
+        if per_row_lens.iter().any(|&n| n != 1) {
+            return false;
+        }
+        let max_off_after = self
+            .offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .max()
+            .unwrap_or(0);
+        if max_off_after > self.cap {
+            return false;
+        }
+        true
     }
 
     fn supports_turboquant_decode_attention(
@@ -776,6 +1156,24 @@ impl KVCache {
                 src_off,
                 self.cap,
             );
+        }
+
+        match (&mut self.paged, &src.paged) {
+            (Some(dst_paged), Some(src_paged)) => {
+                dst_paged.adopt_row_from_on(
+                    src_paged,
+                    &mut self.offsets,
+                    &src.offsets,
+                    dst_row,
+                    src_row,
+                    (),
+                )?;
+                return Ok(());
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                anyhow::bail!("KVCache::adopt_row_from: paged cache kind mismatch");
+            }
+            (None, None) => {}
         }
 
         let dst_offsets = self.offsets.clone();
@@ -1603,6 +2001,204 @@ mod tests {
         let bad_v_dim =
             KVCache::new(1, 2, 8, 7, Dtype::Float32, 16).with_turboquant(TurboQuantKVBits::K3V3);
         assert!(bad_v_dim.is_err());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_paged_rejects_turboquant_coexistence() {
+        let mut turbo = KVCache::new(1, 1, 8, 8, Dtype::Float32, 16)
+            .with_turboquant(TurboQuantKVBits::K4V4)
+            .expect("enable turboquant");
+        assert!(turbo.enable_paged(4, 4).is_err());
+
+        let mut paged = KVCache::new(1, 1, 8, 8, Dtype::Float32, 16);
+        paged.enable_paged(4, 4).expect("enable paged");
+        assert!(paged.enable_turboquant(TurboQuantKVBits::K4V4).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_paged_prefill_materializes_dense_without_retaining_dense_buffers() {
+        let mut c = KVCache::new(1, 1, 2, 2, Dtype::Float32, 8);
+        c.enable_paged(2, 4).expect("enable paged");
+        let k_data: Vec<f32> = (0..10).map(|i| i as f32 + 1.0).collect();
+        let v_data: Vec<f32> = k_data.iter().map(|x| x * 10.0).collect();
+        let k: Array = (k_data.as_slice(), (1_i32, 1_i32, 5_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 1_i32, 5_i32, 2_i32))
+            .try_into()
+            .unwrap();
+
+        let (k_read, v_read) = c
+            .update_and_fetch_for_attention(&k, &v, &[5])
+            .expect("paged prefill");
+
+        assert_eq!(c.offsets(), &[5]);
+        assert!(c.keys.is_none());
+        assert!(c.values.is_none());
+        assert_eq!(c.paged().expect("paged").allocated_pages(), 3);
+        assert_eq!(k_read.to_vec::<f32>().unwrap(), k_data);
+        assert_eq!(v_read.to_vec::<f32>().unwrap(), v_data);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_paged_decode_attention_matches_dense_sdpa() {
+        let mut dense = KVCache::new(2, 1, 4, 4, Dtype::Float32, 8).with_step(8);
+        let mut paged = KVCache::new(2, 1, 4, 4, Dtype::Float32, 8).with_step(8);
+        paged.enable_paged(2, 8).expect("enable paged");
+
+        let prefix_k_data: Vec<f32> = (0..(2 * 1 * 4 * 4))
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.03)
+            .collect();
+        let prefix_v_data: Vec<f32> = (0..(2 * 1 * 4 * 4))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.025)
+            .collect();
+        let prefix_k: Array = (prefix_k_data.as_slice(), (2_i32, 1_i32, 4_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        let prefix_v: Array = (prefix_v_data.as_slice(), (2_i32, 1_i32, 4_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        dense
+            .update_and_fetch_for_attention(&prefix_k, &prefix_v, &[4, 2])
+            .expect("dense prefix");
+        paged
+            .update_and_fetch_for_attention(&prefix_k, &prefix_v, &[4, 2])
+            .expect("paged prefix");
+
+        let q_data: Vec<f32> = (0..(2 * 2 * 4))
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.02)
+            .collect();
+        let step_k_data: Vec<f32> = (0..(2 * 1 * 1 * 4))
+            .map(|i| ((i % 13) as f32 - 6.0) * 0.04)
+            .collect();
+        let step_v_data: Vec<f32> = (0..(2 * 1 * 1 * 4))
+            .map(|i| ((i % 11) as f32 - 5.0) * 0.05)
+            .collect();
+        let q: Array = (q_data.as_slice(), (2_i32, 2_i32, 1_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        let step_k: Array = (step_k_data.as_slice(), (2_i32, 1_i32, 1_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        let step_v: Array = (step_v_data.as_slice(), (2_i32, 1_i32, 1_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        let scale = 0.5_f32;
+
+        let actual = paged
+            .try_update_and_attend_decode(&q, &step_k, &step_v, &[1, 1], scale, None)
+            .expect("paged decode")
+            .expect("paged path");
+        let (k_ref, v_ref) = dense
+            .update_and_fetch_for_attention(&step_k, &step_v, &[1, 1])
+            .expect("dense decode write");
+        let mask =
+            crate::core::generate::build_per_row_decode_mask(dense.offsets(), 5, Dtype::Float32)
+                .expect("mask");
+        let expected = mlx::fast::scaled_dot_product_attention(
+            &q,
+            &k_ref,
+            &v_ref,
+            scale,
+            "",
+            Some(&mask),
+            None,
+        )
+        .expect("dense sdpa");
+
+        assert_eq!(paged.offsets(), dense.offsets());
+        assert!(paged.keys.is_none());
+        assert!(paged.values.is_none());
+        let actual = actual.to_vec::<f32>().unwrap();
+        let expected = expected.to_vec::<f32>().unwrap();
+        for (idx, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!((a - e).abs() <= 1.0e-4, "idx={idx} actual={a} expected={e}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_paged_decode_attention_accepts_scheduler_decode_mask() {
+        let mut dense = KVCache::new(2, 1, 4, 4, Dtype::Float32, 8).with_step(8);
+        let mut paged = KVCache::new(2, 1, 4, 4, Dtype::Float32, 8).with_step(8);
+        paged.enable_paged(2, 8).expect("enable paged");
+
+        let prefix_k_data: Vec<f32> = (0..(2 * 1 * 4 * 4))
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.03)
+            .collect();
+        let prefix_v_data: Vec<f32> = (0..(2 * 1 * 4 * 4))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.025)
+            .collect();
+        let prefix_k: Array = (prefix_k_data.as_slice(), (2_i32, 1_i32, 4_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        let prefix_v: Array = (prefix_v_data.as_slice(), (2_i32, 1_i32, 4_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        dense
+            .update_and_fetch_for_attention(&prefix_k, &prefix_v, &[4, 2])
+            .expect("dense prefix");
+        paged
+            .update_and_fetch_for_attention(&prefix_k, &prefix_v, &[4, 2])
+            .expect("paged prefix");
+
+        let q_data: Vec<f32> = (0..(2 * 2 * 4))
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.02)
+            .collect();
+        let step_k_data: Vec<f32> = (0..(2 * 1 * 1 * 4))
+            .map(|i| ((i % 13) as f32 - 6.0) * 0.04)
+            .collect();
+        let step_v_data: Vec<f32> = (0..(2 * 1 * 1 * 4))
+            .map(|i| ((i % 11) as f32 - 5.0) * 0.05)
+            .collect();
+        let q: Array = (q_data.as_slice(), (2_i32, 2_i32, 1_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        let step_k: Array = (step_k_data.as_slice(), (2_i32, 1_i32, 1_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        let step_v: Array = (step_v_data.as_slice(), (2_i32, 1_i32, 1_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        let scale = 0.5_f32;
+        let mask = crate::core::generate::build_per_row_decode_mask(&[5, 3], 5, Dtype::Float32)
+            .expect("scheduler decode mask");
+
+        let actual = paged
+            .try_update_and_attend_decode(&q, &step_k, &step_v, &[1, 1], scale, Some(&mask))
+            .expect("masked paged decode dispatch")
+            .expect("paged path with scheduler decode mask");
+        let (k_ref, v_ref) = dense
+            .update_and_fetch_for_attention(&step_k, &step_v, &[1, 1])
+            .expect("dense decode write");
+        let expected = mlx::fast::scaled_dot_product_attention(
+            &q,
+            &k_ref,
+            &v_ref,
+            scale,
+            "",
+            Some(&mask),
+            None,
+        )
+        .expect("dense sdpa");
+
+        assert_eq!(paged.offsets(), dense.offsets());
+        assert!(
+            paged.keys.is_none(),
+            "paged decode must not allocate dense K"
+        );
+        assert!(
+            paged.values.is_none(),
+            "paged decode must not allocate dense V"
+        );
+        let actual = actual.to_vec::<f32>().unwrap();
+        let expected = expected.to_vec::<f32>().unwrap();
+        for (idx, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!((a - e).abs() <= 1.0e-4, "idx={idx} actual={a} expected={e}");
+        }
     }
 
     #[test]

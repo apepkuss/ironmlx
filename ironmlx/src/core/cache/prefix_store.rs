@@ -1,0 +1,1478 @@
+use std::collections::HashMap;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+use mlx::{Array, Dtype};
+use serde::{Deserialize, Serialize};
+
+use crate::Result;
+
+const SCHEMA_VERSION: u32 = 2;
+const META_FILE: &str = "meta.json";
+const PAYLOAD_FILE: &str = "payload.safetensors";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixLayerKind {
+    FullPaged,
+    Linear,
+    Mla,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixTensorSpec {
+    pub dtype: Dtype,
+    pub shape: Vec<i32>,
+}
+
+impl PrefixTensorSpec {
+    pub fn from_array(array: &Array) -> Self {
+        Self {
+            dtype: array.dtype(),
+            shape: array.shape().as_slice().to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixLayerSpec {
+    pub kind: PrefixLayerKind,
+    pub tensors: Vec<PrefixTensorSpec>,
+}
+
+impl PrefixLayerSpec {
+    pub fn from_payload(payload: &PrefixLayerPayload) -> Self {
+        match payload {
+            PrefixLayerPayload::FullPaged { k_pages, v_pages } => Self {
+                kind: PrefixLayerKind::FullPaged,
+                tensors: vec![
+                    PrefixTensorSpec::from_array(k_pages),
+                    PrefixTensorSpec::from_array(v_pages),
+                ],
+            },
+            PrefixLayerPayload::Linear {
+                conv_state,
+                recurrent_state,
+            } => Self {
+                kind: PrefixLayerKind::Linear,
+                tensors: vec![
+                    PrefixTensorSpec::from_array(conv_state),
+                    PrefixTensorSpec::from_array(recurrent_state),
+                ],
+            },
+            PrefixLayerPayload::Mla { c_kv, k_pe } => Self {
+                kind: PrefixLayerKind::Mla,
+                tensors: vec![
+                    PrefixTensorSpec::from_array(c_kv),
+                    PrefixTensorSpec::from_array(k_pe),
+                ],
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixMtpLayerSpec {
+    pub k: PrefixTensorSpec,
+    pub v: PrefixTensorSpec,
+}
+
+impl PrefixMtpLayerSpec {
+    pub fn from_payload(payload: &PrefixMtpLayerPayload) -> Self {
+        Self {
+            k: PrefixTensorSpec::from_array(&payload.k),
+            v: PrefixTensorSpec::from_array(&payload.v),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PagedPrefixKeySpec {
+    pub model_id: String,
+    pub token_ids: Vec<i32>,
+    pub cached_len: i32,
+    pub fingerprint: Option<String>,
+    pub block_size: i32,
+    pub main_layers: Vec<PrefixLayerSpec>,
+    pub mtp_layers: Vec<PrefixMtpLayerSpec>,
+    pub mtp_last_hidden: Option<PrefixTensorSpec>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PagedPrefixLayer {
+    pub k_pages: Array,
+    pub v_pages: Array,
+}
+
+#[derive(Debug, Clone)]
+pub enum PrefixLayerPayload {
+    FullPaged {
+        k_pages: Array,
+        v_pages: Array,
+    },
+    Linear {
+        conv_state: Array,
+        recurrent_state: Array,
+    },
+    Mla {
+        c_kv: Array,
+        k_pe: Array,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct PrefixMtpLayerPayload {
+    pub k: Array,
+    pub v: Array,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PagedPrefixEntry {
+    pub main_layers: Vec<PrefixLayerPayload>,
+    pub mtp_layers: Vec<PrefixMtpLayerPayload>,
+    pub mtp_last_hidden: Option<Array>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PagedPrefixEntryStats {
+    pub cached_len: i32,
+    pub main_layers: usize,
+    pub full_paged_layers: usize,
+    pub linear_layers: usize,
+    pub mla_layers: usize,
+    pub mtp_layers: usize,
+    pub full_paged_pages: usize,
+    pub tensor_count: usize,
+    pub payload_bytes: usize,
+}
+
+impl PagedPrefixEntry {
+    pub fn main_layer_specs(&self) -> Vec<PrefixLayerSpec> {
+        self.main_layers
+            .iter()
+            .map(PrefixLayerSpec::from_payload)
+            .collect()
+    }
+
+    pub fn mtp_layer_specs(&self) -> Vec<PrefixMtpLayerSpec> {
+        self.mtp_layers
+            .iter()
+            .map(PrefixMtpLayerSpec::from_payload)
+            .collect()
+    }
+
+    pub fn mtp_last_hidden_spec(&self) -> Option<PrefixTensorSpec> {
+        self.mtp_last_hidden
+            .as_ref()
+            .map(PrefixTensorSpec::from_array)
+    }
+
+    pub fn observability_stats(&self, cached_len: i32) -> PagedPrefixEntryStats {
+        let mut stats = PagedPrefixEntryStats {
+            cached_len,
+            main_layers: self.main_layers.len(),
+            mtp_layers: self.mtp_layers.len(),
+            ..PagedPrefixEntryStats::default()
+        };
+        for layer in &self.main_layers {
+            match layer {
+                PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
+                    stats.full_paged_layers += 1;
+                    stats.full_paged_pages += first_dim_usize(k_pages);
+                    stats.tensor_count += 2;
+                    stats.payload_bytes = stats
+                        .payload_bytes
+                        .saturating_add(tensor_payload_bytes(k_pages))
+                        .saturating_add(tensor_payload_bytes(v_pages));
+                }
+                PrefixLayerPayload::Linear {
+                    conv_state,
+                    recurrent_state,
+                } => {
+                    stats.linear_layers += 1;
+                    stats.tensor_count += 2;
+                    stats.payload_bytes = stats
+                        .payload_bytes
+                        .saturating_add(tensor_payload_bytes(conv_state))
+                        .saturating_add(tensor_payload_bytes(recurrent_state));
+                }
+                PrefixLayerPayload::Mla { c_kv, k_pe } => {
+                    stats.mla_layers += 1;
+                    stats.tensor_count += 2;
+                    stats.payload_bytes = stats
+                        .payload_bytes
+                        .saturating_add(tensor_payload_bytes(c_kv))
+                        .saturating_add(tensor_payload_bytes(k_pe));
+                }
+            }
+        }
+        for layer in &self.mtp_layers {
+            stats.tensor_count += 2;
+            stats.payload_bytes = stats
+                .payload_bytes
+                .saturating_add(tensor_payload_bytes(&layer.k))
+                .saturating_add(tensor_payload_bytes(&layer.v));
+        }
+        if let Some(last_hidden) = &self.mtp_last_hidden {
+            stats.tensor_count += 1;
+            stats.payload_bytes = stats
+                .payload_bytes
+                .saturating_add(tensor_payload_bytes(last_hidden));
+        }
+        stats
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PagedPrefixStore {
+    root: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagedPrefixLoadStatus {
+    Hit,
+    MissingEntry,
+    InvalidMetadata,
+    MetadataMismatch,
+    PayloadReadFailed,
+    PayloadInvalid,
+    EntryInvalid,
+}
+
+#[derive(Debug, Clone)]
+pub struct PagedPrefixLoadResult {
+    pub key: String,
+    pub status: PagedPrefixLoadStatus,
+    pub entry: Option<PagedPrefixEntry>,
+    pub stats: Option<PagedPrefixEntryStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PagedPrefixCacheConfig {
+    pub root: PathBuf,
+    pub model_id: String,
+    pub block_size: i32,
+    pub max_pages: i32,
+}
+
+impl PagedPrefixCacheConfig {
+    pub fn new(
+        root: impl AsRef<Path>,
+        model_id: impl Into<String>,
+        block_size: i32,
+        max_pages: i32,
+    ) -> Result<Self> {
+        let config = Self {
+            root: root.as_ref().to_path_buf(),
+            model_id: model_id.into(),
+            block_size,
+            max_pages,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn store(&self) -> PagedPrefixStore {
+        PagedPrefixStore::new(&self.root)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.model_id.is_empty() {
+            anyhow::bail!("PagedPrefixCacheConfig: model_id must not be empty");
+        }
+        if self.block_size <= 0 {
+            anyhow::bail!(
+                "PagedPrefixCacheConfig: block_size must be > 0, got {}",
+                self.block_size
+            );
+        }
+        if self.max_pages <= 0 {
+            anyhow::bail!(
+                "PagedPrefixCacheConfig: max_pages must be > 0, got {}",
+                self.max_pages
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TensorSpecMetadata {
+    dtype: String,
+    shape: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LayerSpecMetadata {
+    kind: PrefixLayerKind,
+    tensors: Vec<TensorSpecMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MtpLayerSpecMetadata {
+    k: TensorSpecMetadata,
+    v: TensorSpecMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct KeyMaterial<'a> {
+    schema_version: u32,
+    model_id: &'a str,
+    token_ids: &'a [i32],
+    cached_len: i32,
+    fingerprint: Option<&'a str>,
+    block_size: i32,
+    main_layers: Vec<LayerSpecMetadata>,
+    mtp_layers: Vec<MtpLayerSpecMetadata>,
+    mtp_last_hidden: Option<TensorSpecMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PrefixMetadata {
+    schema_version: u32,
+    key: String,
+    model_id: String,
+    token_hash: String,
+    token_count: usize,
+    cached_len: i32,
+    fingerprint_hash: Option<String>,
+    block_size: i32,
+    main_layers: Vec<LayerSpecMetadata>,
+    mtp_layers: Vec<MtpLayerSpecMetadata>,
+    mtp_last_hidden: Option<TensorSpecMetadata>,
+}
+
+impl PagedPrefixStore {
+    pub fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+        }
+    }
+
+    pub fn key_for(spec: &PagedPrefixKeySpec) -> String {
+        let material = KeyMaterial {
+            schema_version: SCHEMA_VERSION,
+            model_id: &spec.model_id,
+            token_ids: &spec.token_ids,
+            cached_len: spec.cached_len,
+            fingerprint: spec.fingerprint.as_deref(),
+            block_size: spec.block_size,
+            main_layers: layer_metadata(&spec.main_layers),
+            mtp_layers: mtp_layer_metadata(&spec.mtp_layers),
+            mtp_last_hidden: spec.mtp_last_hidden.as_ref().map(tensor_metadata),
+        };
+        let json = serde_json::to_string(&material)
+            .expect("PagedPrefixStore::key_for serializes fixed metadata");
+        stable_hex_hash(&json)
+    }
+
+    pub fn save(&self, spec: &PagedPrefixKeySpec, entry: &PagedPrefixEntry) -> Result<String> {
+        self.validate_spec(spec)?;
+        self.validate_entry(spec, entry)?;
+
+        let key = Self::key_for(spec);
+        let metadata = metadata_for(spec, &key)?;
+        let final_dir = self.root.join(&key);
+        let tmp_dir = self
+            .root
+            .join(format!(".tmp-{key}-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&self.root)
+            .with_context(|| format!("create prefix cache root {}", self.root.display()))?;
+        fs::create_dir_all(&tmp_dir)
+            .with_context(|| format!("create temporary prefix cache dir {}", tmp_dir.display()))?;
+
+        let save_result = (|| -> Result<()> {
+            let meta_path = tmp_dir.join(META_FILE);
+            let payload_path = tmp_dir.join(PAYLOAD_FILE);
+            let meta_bytes =
+                serde_json::to_vec_pretty(&metadata).context("serialize paged prefix metadata")?;
+            fs::write(&meta_path, meta_bytes)
+                .with_context(|| format!("write prefix cache metadata {}", meta_path.display()))?;
+
+            let mut tensors = HashMap::new();
+            insert_entry_tensors(entry, &mut tensors);
+            let mut safetensors_meta = HashMap::new();
+            safetensors_meta.insert("ironmlx.prefix_cache.key".to_owned(), key.clone());
+            safetensors_meta.insert(
+                "ironmlx.prefix_cache.schema_version".to_owned(),
+                SCHEMA_VERSION.to_string(),
+            );
+            let payload_path = payload_path.to_string_lossy().into_owned();
+            mlx::io::save_safetensors(&payload_path, &tensors, &safetensors_meta)
+                .with_context(|| format!("save prefix cache payload {payload_path}"))?;
+            Ok(())
+        })();
+
+        if let Err(err) = save_result {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            return Err(err);
+        }
+
+        if final_dir.exists() {
+            fs::remove_dir_all(&final_dir)
+                .with_context(|| format!("replace prefix cache dir {}", final_dir.display()))?;
+        }
+        fs::rename(&tmp_dir, &final_dir).with_context(|| {
+            format!(
+                "install prefix cache entry {} -> {}",
+                tmp_dir.display(),
+                final_dir.display()
+            )
+        })?;
+        Ok(key)
+    }
+
+    pub fn save_if_absent(
+        &self,
+        spec: &PagedPrefixKeySpec,
+        entry: &PagedPrefixEntry,
+    ) -> Result<(String, bool)> {
+        self.validate_spec(spec)?;
+        self.validate_entry(spec, entry)?;
+
+        let key = Self::key_for(spec);
+        if self.entry_metadata_matches(spec, &key)? {
+            return Ok((key, false));
+        }
+        self.save(spec, entry).map(|key| (key, true))
+    }
+
+    pub fn matching_entry_key(&self, spec: &PagedPrefixKeySpec) -> Result<Option<String>> {
+        self.validate_spec(spec)?;
+        let key = Self::key_for(spec);
+        if self.entry_metadata_matches(spec, &key)? {
+            Ok(Some(key))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn cached_lengths_descending(&self, max_cached_len: i32) -> Result<Vec<i32>> {
+        if max_cached_len <= 0 {
+            return Ok(Vec::new());
+        }
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read prefix cache root {}", self.root.display()));
+            }
+        };
+        let mut lengths = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("read prefix cache root {}", self.root.display()))?;
+            let entry_path = entry.path();
+            let file_type = entry.file_type().with_context(|| {
+                format!("read prefix cache entry type {}", entry_path.display())
+            })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let meta_path = entry_path.join(META_FILE);
+            let Some(metadata) = fs::read(&meta_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<PrefixMetadata>(&bytes).ok())
+            else {
+                continue;
+            };
+            if metadata.schema_version == SCHEMA_VERSION
+                && metadata.cached_len > 0
+                && metadata.cached_len <= max_cached_len
+            {
+                lengths.push(metadata.cached_len);
+            }
+        }
+        lengths.sort_unstable_by(|left, right| right.cmp(left));
+        lengths.dedup();
+        Ok(lengths)
+    }
+
+    pub fn load(&self, spec: &PagedPrefixKeySpec) -> Result<Option<PagedPrefixEntry>> {
+        Ok(self.load_observed(spec)?.entry)
+    }
+
+    pub fn load_observed(&self, spec: &PagedPrefixKeySpec) -> Result<PagedPrefixLoadResult> {
+        self.validate_spec(spec)?;
+        let key = Self::key_for(spec);
+        let entry_dir = self.root.join(&key);
+        if !entry_dir.is_dir() {
+            return Ok(PagedPrefixLoadResult {
+                key,
+                status: PagedPrefixLoadStatus::MissingEntry,
+                entry: None,
+                stats: None,
+            });
+        }
+
+        let metadata = metadata_for(spec, &key)?;
+        let meta_path = entry_dir.join(META_FILE);
+        let actual_metadata = match fs::read(&meta_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PrefixMetadata>(&bytes).ok())
+        {
+            Some(meta) => meta,
+            None => {
+                return Ok(PagedPrefixLoadResult {
+                    key,
+                    status: PagedPrefixLoadStatus::InvalidMetadata,
+                    entry: None,
+                    stats: None,
+                });
+            }
+        };
+        if actual_metadata != metadata {
+            return Ok(PagedPrefixLoadResult {
+                key,
+                status: PagedPrefixLoadStatus::MetadataMismatch,
+                entry: None,
+                stats: None,
+            });
+        }
+
+        let payload_path = entry_dir.join(PAYLOAD_FILE);
+        let payload_path_string = payload_path.to_string_lossy().into_owned();
+        let (mut tensors, _metadata) = match mlx::io::load_safetensors(&payload_path_string) {
+            Ok(loaded) => loaded,
+            Err(_) => {
+                return Ok(PagedPrefixLoadResult {
+                    key,
+                    status: PagedPrefixLoadStatus::PayloadReadFailed,
+                    entry: None,
+                    stats: None,
+                });
+            }
+        };
+        let entry = match entry_from_tensors(spec, &mut tensors) {
+            Ok(entry) => entry,
+            Err(_) => {
+                return Ok(PagedPrefixLoadResult {
+                    key,
+                    status: PagedPrefixLoadStatus::PayloadInvalid,
+                    entry: None,
+                    stats: None,
+                });
+            }
+        };
+        if !tensors.is_empty() {
+            return Ok(PagedPrefixLoadResult {
+                key,
+                status: PagedPrefixLoadStatus::PayloadInvalid,
+                entry: None,
+                stats: None,
+            });
+        }
+        if self.validate_entry(spec, &entry).is_err() {
+            return Ok(PagedPrefixLoadResult {
+                key,
+                status: PagedPrefixLoadStatus::EntryInvalid,
+                entry: None,
+                stats: None,
+            });
+        }
+        let stats = entry.observability_stats(spec.cached_len);
+        Ok(PagedPrefixLoadResult {
+            key,
+            status: PagedPrefixLoadStatus::Hit,
+            entry: Some(entry),
+            stats: Some(stats),
+        })
+    }
+
+    fn entry_metadata_matches(&self, spec: &PagedPrefixKeySpec, key: &str) -> Result<bool> {
+        let entry_dir = self.root.join(key);
+        if !entry_dir.is_dir() {
+            return Ok(false);
+        }
+        if !entry_dir.join(PAYLOAD_FILE).is_file() {
+            return Ok(false);
+        }
+        let meta_path = entry_dir.join(META_FILE);
+        let Some(actual_metadata) = fs::read(&meta_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PrefixMetadata>(&bytes).ok())
+        else {
+            return Ok(false);
+        };
+        Ok(actual_metadata == metadata_for(spec, key)?)
+    }
+
+    fn validate_spec(&self, spec: &PagedPrefixKeySpec) -> Result<()> {
+        if spec.model_id.is_empty() {
+            anyhow::bail!("PagedPrefixStore: model_id must not be empty");
+        }
+        if spec.block_size <= 0 {
+            anyhow::bail!(
+                "PagedPrefixStore: block_size must be > 0, got {}",
+                spec.block_size
+            );
+        }
+        if spec.cached_len <= 0 {
+            anyhow::bail!(
+                "PagedPrefixStore: cached_len must be > 0, got {}",
+                spec.cached_len
+            );
+        }
+        if spec.token_ids.len() != spec.cached_len as usize {
+            anyhow::bail!(
+                "PagedPrefixStore: token_ids.len()={} != cached_len {}",
+                spec.token_ids.len(),
+                spec.cached_len
+            );
+        }
+        if spec
+            .fingerprint
+            .as_ref()
+            .is_some_and(|fingerprint| fingerprint.is_empty())
+        {
+            anyhow::bail!("PagedPrefixStore: fingerprint must not be empty when present");
+        }
+        if spec.main_layers.is_empty() && spec.mtp_layers.is_empty() {
+            anyhow::bail!("PagedPrefixStore: entry must contain at least one cache layer");
+        }
+        if spec.mtp_layers.is_empty() && spec.mtp_last_hidden.is_some() {
+            anyhow::bail!("PagedPrefixStore: mtp_last_hidden cannot be present without mtp_layers");
+        }
+        if !spec.mtp_layers.is_empty() && spec.mtp_last_hidden.is_none() {
+            anyhow::bail!("PagedPrefixStore: mtp_layers require mtp_last_hidden");
+        }
+        for (idx, layer) in spec.main_layers.iter().enumerate() {
+            validate_layer_spec(idx, layer, spec.block_size)?;
+        }
+        for (idx, layer) in spec.mtp_layers.iter().enumerate() {
+            validate_tensor_spec(&format!("mtp layer {idx} K"), &layer.k)?;
+            validate_tensor_spec(&format!("mtp layer {idx} V"), &layer.v)?;
+        }
+        if let Some(last_hidden) = &spec.mtp_last_hidden {
+            validate_tensor_spec("mtp last_hidden", last_hidden)?;
+        }
+        Ok(())
+    }
+
+    fn validate_entry(&self, spec: &PagedPrefixKeySpec, entry: &PagedPrefixEntry) -> Result<()> {
+        if entry.main_layers.len() != spec.main_layers.len() {
+            anyhow::bail!(
+                "PagedPrefixStore: main layer count {} != spec {}",
+                entry.main_layers.len(),
+                spec.main_layers.len()
+            );
+        }
+        if entry.mtp_layers.len() != spec.mtp_layers.len() {
+            anyhow::bail!(
+                "PagedPrefixStore: MTP layer count {} != spec {}",
+                entry.mtp_layers.len(),
+                spec.mtp_layers.len()
+            );
+        }
+        for (idx, (layer_spec, payload)) in spec
+            .main_layers
+            .iter()
+            .zip(entry.main_layers.iter())
+            .enumerate()
+        {
+            validate_layer_payload(idx, layer_spec, payload)?;
+        }
+        for (idx, (layer_spec, payload)) in spec
+            .mtp_layers
+            .iter()
+            .zip(entry.mtp_layers.iter())
+            .enumerate()
+        {
+            validate_tensor_payload(&format!("mtp layer {idx} K"), &layer_spec.k, &payload.k)?;
+            validate_tensor_payload(&format!("mtp layer {idx} V"), &layer_spec.v, &payload.v)?;
+        }
+        match (&spec.mtp_last_hidden, &entry.mtp_last_hidden) {
+            (Some(tensor_spec), Some(payload)) => {
+                validate_tensor_payload("mtp last_hidden", tensor_spec, payload)?;
+            }
+            (None, None) => {}
+            (Some(_), None) => anyhow::bail!("PagedPrefixStore: missing mtp_last_hidden payload"),
+            (None, Some(_)) => {
+                anyhow::bail!("PagedPrefixStore: unexpected mtp_last_hidden payload")
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_layer_spec(idx: usize, spec: &PrefixLayerSpec, block_size: i32) -> Result<()> {
+    if spec.tensors.len() != 2 {
+        anyhow::bail!(
+            "PagedPrefixStore: layer {idx} kind {:?} must describe exactly 2 tensors, got {}",
+            spec.kind,
+            spec.tensors.len()
+        );
+    }
+    for (tensor_idx, tensor) in spec.tensors.iter().enumerate() {
+        validate_tensor_spec(&format!("layer {idx} tensor {tensor_idx}"), tensor)?;
+    }
+    if spec.kind == PrefixLayerKind::FullPaged {
+        for (name, tensor) in ["K", "V"].iter().zip(spec.tensors.iter()) {
+            let dims = tensor.shape.as_slice();
+            if dims.len() != 4
+                || dims[0] < 0
+                || dims[1] <= 0
+                || dims[2] != block_size
+                || dims[3] <= 0
+            {
+                anyhow::bail!(
+                    "PagedPrefixStore: FullPaged layer {idx} {name} shape {:?} incompatible with [pages,heads,{block_size},dim]",
+                    dims
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_tensor_spec(name: &str, spec: &PrefixTensorSpec) -> Result<()> {
+    if spec.shape.iter().any(|&dim| dim < 0) {
+        anyhow::bail!(
+            "PagedPrefixStore: {name} shape {:?} contains a negative dimension",
+            spec.shape
+        );
+    }
+    Ok(())
+}
+
+fn validate_layer_payload(
+    idx: usize,
+    spec: &PrefixLayerSpec,
+    payload: &PrefixLayerPayload,
+) -> Result<()> {
+    match (spec.kind, payload) {
+        (PrefixLayerKind::FullPaged, PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
+            validate_tensor_payload(&format!("layer {idx} full K"), &spec.tensors[0], k_pages)?;
+            validate_tensor_payload(&format!("layer {idx} full V"), &spec.tensors[1], v_pages)?;
+        }
+        (
+            PrefixLayerKind::Linear,
+            PrefixLayerPayload::Linear {
+                conv_state,
+                recurrent_state,
+            },
+        ) => {
+            validate_tensor_payload(
+                &format!("layer {idx} linear conv_state"),
+                &spec.tensors[0],
+                conv_state,
+            )?;
+            validate_tensor_payload(
+                &format!("layer {idx} linear recurrent_state"),
+                &spec.tensors[1],
+                recurrent_state,
+            )?;
+        }
+        (PrefixLayerKind::Mla, PrefixLayerPayload::Mla { c_kv, k_pe }) => {
+            validate_tensor_payload(&format!("layer {idx} MLA c_kv"), &spec.tensors[0], c_kv)?;
+            validate_tensor_payload(&format!("layer {idx} MLA k_pe"), &spec.tensors[1], k_pe)?;
+        }
+        _ => anyhow::bail!(
+            "PagedPrefixStore: layer {idx} payload kind does not match {:?}",
+            spec.kind
+        ),
+    }
+    Ok(())
+}
+
+fn validate_tensor_payload(name: &str, spec: &PrefixTensorSpec, tensor: &Array) -> Result<()> {
+    if tensor.dtype() != spec.dtype {
+        anyhow::bail!(
+            "PagedPrefixStore: {name} dtype {} != expected {}",
+            tensor.dtype(),
+            spec.dtype
+        );
+    }
+    let shape = tensor.shape();
+    if shape.as_slice() != spec.shape.as_slice() {
+        anyhow::bail!(
+            "PagedPrefixStore: {name} shape {:?} != expected {:?}",
+            shape.as_slice(),
+            spec.shape
+        );
+    }
+    Ok(())
+}
+
+fn metadata_for(spec: &PagedPrefixKeySpec, key: &str) -> Result<PrefixMetadata> {
+    Ok(PrefixMetadata {
+        schema_version: SCHEMA_VERSION,
+        key: key.to_owned(),
+        model_id: spec.model_id.clone(),
+        token_hash: token_hash(&spec.token_ids)?,
+        token_count: spec.token_ids.len(),
+        cached_len: spec.cached_len,
+        fingerprint_hash: spec
+            .fingerprint
+            .as_ref()
+            .map(|fingerprint| stable_hex_hash(fingerprint)),
+        block_size: spec.block_size,
+        main_layers: layer_metadata(&spec.main_layers),
+        mtp_layers: mtp_layer_metadata(&spec.mtp_layers),
+        mtp_last_hidden: spec.mtp_last_hidden.as_ref().map(tensor_metadata),
+    })
+}
+
+fn token_hash(token_ids: &[i32]) -> Result<String> {
+    let json = serde_json::to_string(token_ids).context("serialize prefix token ids")?;
+    Ok(stable_hex_hash(&json))
+}
+
+fn layer_metadata(layers: &[PrefixLayerSpec]) -> Vec<LayerSpecMetadata> {
+    layers
+        .iter()
+        .map(|layer| LayerSpecMetadata {
+            kind: layer.kind,
+            tensors: layer.tensors.iter().map(tensor_metadata).collect(),
+        })
+        .collect()
+}
+
+fn mtp_layer_metadata(layers: &[PrefixMtpLayerSpec]) -> Vec<MtpLayerSpecMetadata> {
+    layers
+        .iter()
+        .map(|layer| MtpLayerSpecMetadata {
+            k: tensor_metadata(&layer.k),
+            v: tensor_metadata(&layer.v),
+        })
+        .collect()
+}
+
+fn tensor_metadata(spec: &PrefixTensorSpec) -> TensorSpecMetadata {
+    TensorSpecMetadata {
+        dtype: spec.dtype.to_string(),
+        shape: spec.shape.clone(),
+    }
+}
+
+fn insert_entry_tensors(entry: &PagedPrefixEntry, tensors: &mut HashMap<String, Array>) {
+    for (idx, layer) in entry.main_layers.iter().enumerate() {
+        match layer {
+            PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
+                tensors.insert(main_full_k_name(idx), k_pages.clone());
+                tensors.insert(main_full_v_name(idx), v_pages.clone());
+            }
+            PrefixLayerPayload::Linear {
+                conv_state,
+                recurrent_state,
+            } => {
+                tensors.insert(main_linear_conv_name(idx), conv_state.clone());
+                tensors.insert(main_linear_recurrent_name(idx), recurrent_state.clone());
+            }
+            PrefixLayerPayload::Mla { c_kv, k_pe } => {
+                tensors.insert(main_mla_c_kv_name(idx), c_kv.clone());
+                tensors.insert(main_mla_k_pe_name(idx), k_pe.clone());
+            }
+        }
+    }
+    for (idx, layer) in entry.mtp_layers.iter().enumerate() {
+        tensors.insert(mtp_k_name(idx), layer.k.clone());
+        tensors.insert(mtp_v_name(idx), layer.v.clone());
+    }
+    if let Some(last_hidden) = &entry.mtp_last_hidden {
+        tensors.insert(mtp_last_hidden_name(), last_hidden.clone());
+    }
+}
+
+fn entry_from_tensors(
+    spec: &PagedPrefixKeySpec,
+    tensors: &mut HashMap<String, Array>,
+) -> Result<PagedPrefixEntry> {
+    let mut main_layers = Vec::with_capacity(spec.main_layers.len());
+    for (idx, layer_spec) in spec.main_layers.iter().enumerate() {
+        let layer = match layer_spec.kind {
+            PrefixLayerKind::FullPaged => PrefixLayerPayload::FullPaged {
+                k_pages: take_tensor(tensors, main_full_k_name(idx))?,
+                v_pages: take_tensor(tensors, main_full_v_name(idx))?,
+            },
+            PrefixLayerKind::Linear => PrefixLayerPayload::Linear {
+                conv_state: take_tensor(tensors, main_linear_conv_name(idx))?,
+                recurrent_state: take_tensor(tensors, main_linear_recurrent_name(idx))?,
+            },
+            PrefixLayerKind::Mla => PrefixLayerPayload::Mla {
+                c_kv: take_tensor(tensors, main_mla_c_kv_name(idx))?,
+                k_pe: take_tensor(tensors, main_mla_k_pe_name(idx))?,
+            },
+        };
+        main_layers.push(layer);
+    }
+
+    let mut mtp_layers = Vec::with_capacity(spec.mtp_layers.len());
+    for idx in 0..spec.mtp_layers.len() {
+        mtp_layers.push(PrefixMtpLayerPayload {
+            k: take_tensor(tensors, mtp_k_name(idx))?,
+            v: take_tensor(tensors, mtp_v_name(idx))?,
+        });
+    }
+
+    let mtp_last_hidden = if spec.mtp_last_hidden.is_some() {
+        Some(take_tensor(tensors, mtp_last_hidden_name())?)
+    } else {
+        None
+    };
+
+    Ok(PagedPrefixEntry {
+        main_layers,
+        mtp_layers,
+        mtp_last_hidden,
+    })
+}
+
+fn take_tensor(tensors: &mut HashMap<String, Array>, name: String) -> Result<Array> {
+    tensors
+        .remove(&name)
+        .ok_or_else(|| anyhow::anyhow!("PagedPrefixStore: missing tensor {name}"))
+}
+
+fn first_dim_usize(array: &Array) -> usize {
+    array
+        .shape()
+        .as_slice()
+        .first()
+        .copied()
+        .and_then(|dim| usize::try_from(dim).ok())
+        .unwrap_or(0)
+}
+
+fn tensor_payload_bytes(array: &Array) -> usize {
+    tensor_element_count(array).saturating_mul(dtype_size_bytes(array.dtype()))
+}
+
+fn tensor_element_count(array: &Array) -> usize {
+    let mut elements = 1_usize;
+    for &dim in array.shape().as_slice() {
+        let Ok(dim) = usize::try_from(dim) else {
+            return 0;
+        };
+        elements = elements.saturating_mul(dim);
+    }
+    elements
+}
+
+fn dtype_size_bytes(dtype: Dtype) -> usize {
+    match dtype {
+        Dtype::Bool | Dtype::Uint8 | Dtype::Int8 => 1,
+        Dtype::Uint16 | Dtype::Int16 | Dtype::Float16 | Dtype::Bfloat16 => 2,
+        Dtype::Uint32 | Dtype::Int32 | Dtype::Float32 => 4,
+        Dtype::Uint64 | Dtype::Int64 | Dtype::Float64 | Dtype::Complex64 => 8,
+        _ => 0,
+    }
+}
+
+fn main_full_k_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_full_k_pages")
+}
+
+fn main_full_v_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_full_v_pages")
+}
+
+fn main_linear_conv_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_linear_conv_state")
+}
+
+fn main_linear_recurrent_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_linear_recurrent_state")
+}
+
+fn main_mla_c_kv_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_mla_c_kv")
+}
+
+fn main_mla_k_pe_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_mla_k_pe")
+}
+
+fn mtp_k_name(layer_idx: usize) -> String {
+    format!("mtp_{layer_idx:04}_k")
+}
+
+fn mtp_v_name(layer_idx: usize) -> String {
+    format!("mtp_{layer_idx:04}_v")
+}
+
+fn mtp_last_hidden_name() -> String {
+    "mtp_last_hidden".to_owned()
+}
+
+fn stable_hex_hash(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mlx::{Array, Dtype};
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("ironmlx-{name}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn tensor_spec(array: &Array) -> PrefixTensorSpec {
+        PrefixTensorSpec::from_array(array)
+    }
+
+    fn spec(
+        tokens: Vec<i32>,
+        cached_len: i32,
+        fingerprint: Option<&str>,
+        main_layers: Vec<PrefixLayerSpec>,
+        mtp_layers: Vec<PrefixMtpLayerSpec>,
+        mtp_last_hidden: Option<PrefixTensorSpec>,
+    ) -> PagedPrefixKeySpec {
+        PagedPrefixKeySpec {
+            model_id: "qwen3-test".to_owned(),
+            token_ids: tokens,
+            cached_len,
+            fingerprint: fingerprint.map(ToOwned::to_owned),
+            block_size: 2,
+            main_layers,
+            mtp_layers,
+            mtp_last_hidden,
+        }
+    }
+
+    #[test]
+    fn prefix_key_includes_cached_len_and_fingerprint() {
+        let layer = PrefixLayerSpec {
+            kind: PrefixLayerKind::FullPaged,
+            tensors: vec![
+                PrefixTensorSpec {
+                    dtype: Dtype::Float32,
+                    shape: vec![2, 1, 2, 2],
+                },
+                PrefixTensorSpec {
+                    dtype: Dtype::Float32,
+                    shape: vec![2, 1, 2, 2],
+                },
+            ],
+        };
+        let a = spec(vec![1, 2, 3], 3, None, vec![layer.clone()], vec![], None);
+        let b = spec(vec![1, 2, 3], 3, None, vec![layer.clone()], vec![], None);
+        let shorter = spec(vec![1, 2], 2, None, vec![layer.clone()], vec![], None);
+        let vl_a = spec(
+            vec![1, 2, 3],
+            3,
+            Some("vl:image-a"),
+            vec![layer.clone()],
+            vec![],
+            None,
+        );
+        let vl_b = spec(
+            vec![1, 2, 3],
+            3,
+            Some("vl:image-b"),
+            vec![layer],
+            vec![],
+            None,
+        );
+        assert_eq!(PagedPrefixStore::key_for(&a), PagedPrefixStore::key_for(&b));
+        assert_ne!(
+            PagedPrefixStore::key_for(&a),
+            PagedPrefixStore::key_for(&shorter)
+        );
+        assert_ne!(
+            PagedPrefixStore::key_for(&a),
+            PagedPrefixStore::key_for(&vl_a)
+        );
+        assert_ne!(
+            PagedPrefixStore::key_for(&vl_a),
+            PagedPrefixStore::key_for(&vl_b)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_entry_observability_stats_count_layers_pages_tensors_and_bytes() {
+        let k_pages: Array = (&[1.0_f32; 8][..], (2_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v_pages: Array = (&[2.0_f32; 8][..], (2_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let conv_state: Array = (&[3.0_f32; 4][..], (1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let recurrent_state: Array = (&[4.0_f32; 4][..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let mtp_k: Array = (&[5.0_f32; 3][..], (1_i32, 1_i32, 3_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let mtp_v: Array = (&[6.0_f32; 3][..], (1_i32, 1_i32, 3_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let mtp_last_hidden: Array = (&[7.0_f32; 2][..], (1_i32, 1_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let entry = PagedPrefixEntry {
+            main_layers: vec![
+                PrefixLayerPayload::FullPaged { k_pages, v_pages },
+                PrefixLayerPayload::Linear {
+                    conv_state,
+                    recurrent_state,
+                },
+            ],
+            mtp_layers: vec![PrefixMtpLayerPayload { k: mtp_k, v: mtp_v }],
+            mtp_last_hidden: Some(mtp_last_hidden),
+        };
+
+        let stats = entry.observability_stats(3);
+
+        assert_eq!(stats.cached_len, 3);
+        assert_eq!(stats.main_layers, 2);
+        assert_eq!(stats.full_paged_layers, 1);
+        assert_eq!(stats.linear_layers, 1);
+        assert_eq!(stats.mla_layers, 0);
+        assert_eq!(stats.mtp_layers, 1);
+        assert_eq!(stats.full_paged_pages, 2);
+        assert_eq!(stats.tensor_count, 7);
+        assert_eq!(stats.payload_bytes, 128);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_load_observed_reports_hit_stats_and_miss_reason() {
+        let root = temp_root("prefix-store-observed");
+        let store = PagedPrefixStore::new(&root);
+        let k_pages: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v_pages: Array = (
+            &[10.0_f32, 20.0, 30.0, 40.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        let entry = PagedPrefixEntry {
+            main_layers: vec![PrefixLayerPayload::FullPaged {
+                k_pages: k_pages.clone(),
+                v_pages: v_pages.clone(),
+            }],
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+        };
+        let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
+        let missed = store.load_observed(&wanted).expect("miss load");
+        assert_eq!(missed.status, PagedPrefixLoadStatus::MissingEntry);
+        assert!(missed.entry.is_none());
+        assert!(missed.stats.is_none());
+
+        let key = store.save(&wanted, &entry).expect("save");
+        let hit = store.load_observed(&wanted).expect("hit load");
+
+        assert_eq!(hit.key, key);
+        assert_eq!(hit.status, PagedPrefixLoadStatus::Hit);
+        assert!(hit.entry.is_some());
+        let stats = hit.stats.expect("hit stats");
+        assert_eq!(stats.cached_len, 2);
+        assert_eq!(stats.full_paged_layers, 1);
+        assert_eq!(stats.full_paged_pages, 1);
+        assert_eq!(stats.payload_bytes, 32);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_cached_lengths_descending_filters_to_usable_lengths() {
+        let root = temp_root("prefix-store-cached-lengths");
+        let store = PagedPrefixStore::new(&root);
+        let k_pages: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v_pages: Array = (
+            &[10.0_f32, 20.0, 30.0, 40.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        let entry = PagedPrefixEntry {
+            main_layers: vec![PrefixLayerPayload::FullPaged {
+                k_pages: k_pages.clone(),
+                v_pages: v_pages.clone(),
+            }],
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+        };
+
+        let len2 = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
+        let len4 = spec(
+            vec![1, 2, 3, 4],
+            4,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        store.save(&len2, &entry).expect("save len2");
+        store.save(&len4, &entry).expect("save len4");
+
+        assert_eq!(
+            store.cached_lengths_descending(10).expect("cached lengths"),
+            vec![4, 2]
+        );
+        assert_eq!(
+            store
+                .cached_lengths_descending(3)
+                .expect("filtered cached lengths"),
+            vec![2]
+        );
+        assert_eq!(
+            store
+                .cached_lengths_descending(1)
+                .expect("no usable cached lengths"),
+            Vec::<i32>::new()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_save_if_absent_skips_existing_matching_entry() {
+        let root = temp_root("prefix-store-save-if-absent");
+        let store = PagedPrefixStore::new(&root);
+        let k_pages: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v_pages: Array = (
+            &[10.0_f32, 20.0, 30.0, 40.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        let entry = PagedPrefixEntry {
+            main_layers: vec![PrefixLayerPayload::FullPaged {
+                k_pages: k_pages.clone(),
+                v_pages: v_pages.clone(),
+            }],
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+        };
+        let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
+
+        let (first_key, first_saved) = store.save_if_absent(&wanted, &entry).expect("first save");
+        let payload_path = root.join(&first_key).join(PAYLOAD_FILE);
+        let payload_before = std::fs::read(&payload_path).expect("payload before");
+        let (second_key, second_saved) =
+            store.save_if_absent(&wanted, &entry).expect("second save");
+
+        assert_eq!(second_key, first_key);
+        assert!(first_saved);
+        assert!(!second_saved);
+        assert_eq!(
+            std::fs::read(&payload_path).expect("payload after"),
+            payload_before
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_save_if_absent_rewrites_metadata_mismatch() {
+        let root = temp_root("prefix-store-save-if-absent-mismatch");
+        let store = PagedPrefixStore::new(&root);
+        let k_pages: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v_pages: Array = (
+            &[10.0_f32, 20.0, 30.0, 40.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        let entry = PagedPrefixEntry {
+            main_layers: vec![PrefixLayerPayload::FullPaged {
+                k_pages: k_pages.clone(),
+                v_pages: v_pages.clone(),
+            }],
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+        };
+        let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
+        let key = store.save(&wanted, &entry).expect("save");
+        let meta_path = root.join(&key).join(META_FILE);
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        meta["block_size"] = serde_json::json!(4);
+        std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+
+        let (rewritten_key, saved) = store.save_if_absent(&wanted, &entry).expect("rewrite");
+        let loaded = store.load(&wanted).expect("load").expect("cache hit");
+
+        assert_eq!(rewritten_key, key);
+        assert!(saved);
+        assert_eq!(loaded.main_layers.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_round_trips_mixed_payloads() {
+        let root = temp_root("prefix-store-roundtrip");
+        let store = PagedPrefixStore::new(&root);
+        let k_data: Vec<f32> = (0..8).map(|i| i as f32 + 1.0).collect();
+        let v_data: Vec<f32> = k_data.iter().map(|v| v * 10.0).collect();
+        let k_pages: Array = (k_data.as_slice(), (2_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v_pages: Array = (v_data.as_slice(), (2_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let conv_state: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let recurrent_state: Array = (&[5.0_f32, 6.0, 7.0, 8.0][..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let c_kv: Array = (
+            &[9.0_f32, 10.0, 11.0, 12.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        let k_pe: Array = (&[13.0_f32, 14.0][..], (1_i32, 1_i32, 2_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let mtp_k: Array = (&[15.0_f32, 16.0, 17.0][..], (1_i32, 1_i32, 3_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let mtp_v: Array = (&[18.0_f32, 19.0, 20.0][..], (1_i32, 1_i32, 3_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let mtp_last_hidden: Array = (&[21.0_f32, 22.0][..], (1_i32, 1_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let entry = PagedPrefixEntry {
+            main_layers: vec![
+                PrefixLayerPayload::FullPaged {
+                    k_pages: k_pages.clone(),
+                    v_pages: v_pages.clone(),
+                },
+                PrefixLayerPayload::Linear {
+                    conv_state: conv_state.clone(),
+                    recurrent_state: recurrent_state.clone(),
+                },
+                PrefixLayerPayload::Mla {
+                    c_kv: c_kv.clone(),
+                    k_pe: k_pe.clone(),
+                },
+            ],
+            mtp_layers: vec![PrefixMtpLayerPayload {
+                k: mtp_k.clone(),
+                v: mtp_v.clone(),
+            }],
+            mtp_last_hidden: Some(mtp_last_hidden.clone()),
+        };
+        let spec = spec(
+            vec![1, 2, 3],
+            3,
+            Some("vl:fingerprint"),
+            entry.main_layer_specs(),
+            entry.mtp_layer_specs(),
+            Some(tensor_spec(&mtp_last_hidden)),
+        );
+        let key = store.save(&spec, &entry).expect("save");
+
+        let loaded = store.load(&spec).expect("load").expect("cache hit");
+
+        assert_eq!(key, PagedPrefixStore::key_for(&spec));
+        assert_eq!(loaded.main_layers.len(), 3);
+        match &loaded.main_layers[0] {
+            PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
+                assert_eq!(k_pages.to_vec::<f32>().unwrap(), k_data);
+                assert_eq!(v_pages.to_vec::<f32>().unwrap(), v_data);
+            }
+            other => panic!("expected full paged layer, got {other:?}"),
+        }
+        match &loaded.main_layers[1] {
+            PrefixLayerPayload::Linear {
+                conv_state,
+                recurrent_state,
+            } => {
+                assert_eq!(
+                    conv_state.to_vec::<f32>().unwrap(),
+                    vec![1.0, 2.0, 3.0, 4.0]
+                );
+                assert_eq!(
+                    recurrent_state.to_vec::<f32>().unwrap(),
+                    vec![5.0, 6.0, 7.0, 8.0]
+                );
+            }
+            other => panic!("expected linear layer, got {other:?}"),
+        }
+        match &loaded.main_layers[2] {
+            PrefixLayerPayload::Mla { c_kv, k_pe } => {
+                assert_eq!(c_kv.to_vec::<f32>().unwrap(), vec![9.0, 10.0, 11.0, 12.0]);
+                assert_eq!(k_pe.to_vec::<f32>().unwrap(), vec![13.0, 14.0]);
+            }
+            other => panic!("expected MLA layer, got {other:?}"),
+        }
+        assert_eq!(loaded.mtp_layers.len(), 1);
+        assert_eq!(
+            loaded.mtp_layers[0].k.to_vec::<f32>().unwrap(),
+            vec![15.0, 16.0, 17.0]
+        );
+        assert_eq!(
+            loaded.mtp_layers[0].v.to_vec::<f32>().unwrap(),
+            vec![18.0, 19.0, 20.0]
+        );
+        assert_eq!(
+            loaded
+                .mtp_last_hidden
+                .as_ref()
+                .expect("last hidden")
+                .to_vec::<f32>()
+                .unwrap(),
+            vec![21.0, 22.0]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_rejects_metadata_mismatch() {
+        let root = temp_root("prefix-store-mismatch");
+        let store = PagedPrefixStore::new(&root);
+        let k_pages: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        let v_pages: Array = (
+            &[10.0_f32, 20.0, 30.0, 40.0][..],
+            (1_i32, 1_i32, 2_i32, 2_i32),
+        )
+            .try_into()
+            .unwrap();
+        let entry = PagedPrefixEntry {
+            main_layers: vec![PrefixLayerPayload::FullPaged {
+                k_pages: k_pages.clone(),
+                v_pages: v_pages.clone(),
+            }],
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+        };
+        let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
+        let key = store.save(&wanted, &entry).expect("save");
+        let meta_path = root.join(key).join("meta.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        meta["block_size"] = serde_json::json!(4);
+        std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+
+        let loaded = store.load(&wanted).expect("load");
+
+        assert!(loaded.is_none(), "tampered metadata must miss");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -189,6 +189,10 @@ impl Qwen35Model {
         &self.text
     }
 
+    pub fn hidden_dtype(&self) -> Dtype {
+        self.text.hidden_dtype()
+    }
+
     pub fn load_mtp_head(&self, loader: &Loader) -> Result<Mtp> {
         let mtp_text_cfg = Qwen35Config::from_loader(loader)
             .context("parsing Qwen35 MTP text_config from loader")?;

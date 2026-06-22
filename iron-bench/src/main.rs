@@ -141,6 +141,12 @@ struct Args {
     /// varying nonce by warmup/run index.
     #[arg(long)]
     pub nonce_seed: Option<u64>,
+
+    /// Reuse the same prompt text for all requests in each cell so server-side
+    /// prefix caches can be measured. Default off: synthetic prompts vary by
+    /// run to avoid accidental cache hits in normal PP benchmarks.
+    #[arg(long, default_value_t = false)]
+    pub prefix_cache_probe: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,7 +382,12 @@ async fn main() -> Result<()> {
         );
     }
 
+    if args.prefix_cache_probe && args.format == OutputFormat::AutotuneJson {
+        anyhow::bail!("--prefix-cache-probe is incompatible with --format autotune-json");
+    }
+
     let autotune_options = args.autotune_export_options()?;
+    let prefix_cache_probe = runner::PrefixCacheProbe::from_enabled(args.prefix_cache_probe);
 
     // Load tokenizer.json before building prompt sources so fixed prompts get
     // an accurate local PP label.
@@ -458,6 +469,7 @@ async fn main() -> Result<()> {
                         args.capture_run_timestamps,
                         args.inter_run_cooldown_secs,
                         args.nonce_seed,
+                        prefix_cache_probe,
                         &tokenizer,
                     )
                     .await?;
@@ -483,6 +495,7 @@ async fn main() -> Result<()> {
                         std::time::Duration::from_secs(args.duration),
                         concurrent,
                         args.capture_server_request_id,
+                        prefix_cache_probe,
                         tokenizer_arc.clone(),
                     )
                     .await?;
@@ -506,14 +519,43 @@ async fn main() -> Result<()> {
                 .collect();
             match args.format {
                 OutputFormat::Markdown => {
-                    report::render_markdown(&seq_cells, &args.target, args.warmup)
+                    if args.prefix_cache_probe {
+                        report::render_markdown_with_prefix_cache_probe(
+                            &seq_cells,
+                            &args.target,
+                            args.warmup,
+                        )
+                    } else {
+                        report::render_markdown(&seq_cells, &args.target, args.warmup)
+                    }
                 }
-                OutputFormat::Csv => report::render_csv(
-                    &seq_cells,
-                    args.capture_server_request_id,
-                    args.capture_run_timestamps,
-                ),
-                OutputFormat::Json => report::render_json(&seq_cells, &args.target, args.warmup),
+                OutputFormat::Csv => {
+                    if args.prefix_cache_probe {
+                        report::render_csv_with_prefix_cache_probe(
+                            &seq_cells,
+                            args.capture_server_request_id,
+                            args.capture_run_timestamps,
+                            args.warmup,
+                        )
+                    } else {
+                        report::render_csv(
+                            &seq_cells,
+                            args.capture_server_request_id,
+                            args.capture_run_timestamps,
+                        )
+                    }
+                }
+                OutputFormat::Json => {
+                    if args.prefix_cache_probe {
+                        report::render_json_with_prefix_cache_probe(
+                            &seq_cells,
+                            &args.target,
+                            args.warmup,
+                        )
+                    } else {
+                        report::render_json(&seq_cells, &args.target, args.warmup)
+                    }
+                }
                 OutputFormat::AutotuneJson => report::render_autotune_json_sequential(
                     &seq_cells,
                     autotune_options
@@ -531,21 +573,51 @@ async fn main() -> Result<()> {
                 })
                 .collect();
             match args.format {
-                OutputFormat::Markdown => report::render_markdown_concurrent(
-                    &conc_cells,
-                    &args.target,
-                    concurrent,
-                    args.duration,
-                    args.warmup_duration,
-                ),
-                OutputFormat::Csv => report::render_csv_concurrent(&conc_cells),
-                OutputFormat::Json => report::render_json_concurrent(
-                    &conc_cells,
-                    &args.target,
-                    concurrent,
-                    args.duration,
-                    args.warmup_duration,
-                ),
+                OutputFormat::Markdown => {
+                    if args.prefix_cache_probe {
+                        report::render_markdown_concurrent_with_prefix_cache_probe(
+                            &conc_cells,
+                            &args.target,
+                            concurrent,
+                            args.duration,
+                            args.warmup_duration,
+                        )
+                    } else {
+                        report::render_markdown_concurrent(
+                            &conc_cells,
+                            &args.target,
+                            concurrent,
+                            args.duration,
+                            args.warmup_duration,
+                        )
+                    }
+                }
+                OutputFormat::Csv => {
+                    if args.prefix_cache_probe {
+                        report::render_csv_concurrent_with_prefix_cache_probe(&conc_cells)
+                    } else {
+                        report::render_csv_concurrent(&conc_cells)
+                    }
+                }
+                OutputFormat::Json => {
+                    if args.prefix_cache_probe {
+                        report::render_json_concurrent_with_prefix_cache_probe(
+                            &conc_cells,
+                            &args.target,
+                            concurrent,
+                            args.duration,
+                            args.warmup_duration,
+                        )
+                    } else {
+                        report::render_json_concurrent(
+                            &conc_cells,
+                            &args.target,
+                            concurrent,
+                            args.duration,
+                            args.warmup_duration,
+                        )
+                    }
+                }
                 OutputFormat::AutotuneJson => report::render_autotune_json_concurrent(
                     &conc_cells,
                     autotune_options
@@ -660,6 +732,20 @@ mod tests {
             .expect("autotune-json should produce export options");
 
         assert!(!options.hardware_label.trim().is_empty());
+    }
+
+    #[test]
+    fn cli_parses_prefix_cache_probe_flag() {
+        let args = Args::parse_from([
+            "iron-bench",
+            "--target",
+            "ironmlx=http://localhost:8080",
+            "--model-dir",
+            "/tmp/model",
+            "--prefix-cache-probe",
+        ]);
+
+        assert!(args.prefix_cache_probe);
     }
 
     #[test]

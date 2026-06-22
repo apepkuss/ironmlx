@@ -1118,7 +1118,7 @@ impl<'m, M: crate::core::Model + DenseVlMethods> GenerationStream<'m, M> {
         // standalone regression.
         let cap = ((prompt_len + request.max_new_tokens) as i32)
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
-        let dtype = Dtype::Bfloat16;
+        let dtype = model.cache_dtype();
         #[cfg(feature = "p5h-profile")]
         let mut cache = crate::core::p5h::try_with_p5h_span_from_current_trace(
             "gs_kv_cache_alloc",
@@ -1583,7 +1583,7 @@ impl<'m, M: crate::core::Model> GenerationStream<'m, M> {
 
         let cap = ((prompt_len + request.max_new_tokens) as i32)
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
-        let dtype = Dtype::Bfloat16;
+        let dtype = model.cache_dtype();
         let mut cache = model.make_cache(/* batch */ 1, cap, dtype)?;
         if let Some(bits) = request.kv_cache_turboquant_bits {
             enable_turboquant_kv_caches(&mut cache, bits)?;

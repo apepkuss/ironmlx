@@ -342,6 +342,7 @@ impl Gemma4Attention {
         )?;
 
         let t0 = Instant::now();
+        let mut paged_decode_out: Option<Array> = None;
         let kv = match shared_kv {
             Some(kv) => {
                 profile::log_layer(
@@ -407,8 +408,17 @@ impl Gemma4Attention {
                                 &lens_owned
                             }
                         };
-                        let (keys, values) =
-                            c.update_and_fetch_for_attention_on(&k, &v, lens, target)?;
+                        let maybe_paged_out = if c.paged().is_some() {
+                            c.try_update_and_attend_decode_on(&q, &k, &v, lens, 1.0, mask, target)?
+                        } else {
+                            None
+                        };
+                        let (keys, values) = if maybe_paged_out.is_some() {
+                            c.materialize_current_paged_prefix_on(target)?
+                        } else {
+                            c.update_and_fetch_for_attention_on(&k, &v, lens, target)?
+                        };
+                        paged_decode_out = maybe_paged_out;
                         profile::eval_layer(
                             "gemma4_attn_cache_update_fetch",
                             self.layer_idx,
@@ -434,23 +444,27 @@ impl Gemma4Attention {
         )?;
 
         let t0 = Instant::now();
-        let out = match mask {
-            Some(m) => mlx::fast::scaled_dot_product_attention_on(
-                &q,
-                &kv.keys,
-                &kv.values,
-                1.0,
-                "",
-                Some(m),
-                None,
-                target,
-            )?,
-            None if single_row_decode => mlx::fast::scaled_dot_product_attention_on(
-                &q, &kv.keys, &kv.values, 1.0, "", None, None, target,
-            )?,
-            None => mlx::fast::scaled_dot_product_attention_on(
-                &q, &kv.keys, &kv.values, 1.0, "causal", None, None, target,
-            )?,
+        let out = if let Some(out) = paged_decode_out {
+            out
+        } else {
+            match mask {
+                Some(m) => mlx::fast::scaled_dot_product_attention_on(
+                    &q,
+                    &kv.keys,
+                    &kv.values,
+                    1.0,
+                    "",
+                    Some(m),
+                    None,
+                    target,
+                )?,
+                None if single_row_decode => mlx::fast::scaled_dot_product_attention_on(
+                    &q, &kv.keys, &kv.values, 1.0, "", None, None, target,
+                )?,
+                None => mlx::fast::scaled_dot_product_attention_on(
+                    &q, &kv.keys, &kv.values, 1.0, "causal", None, None, target,
+                )?,
+            }
         };
         profile::eval_layer(
             "gemma4_attn_sdpa",

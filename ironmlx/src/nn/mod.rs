@@ -22,8 +22,11 @@ pub mod self_qmm;
 pub use attention::{Attention, AttentionConfig};
 pub use conv::{Conv1d, Conv1dConfig};
 pub use decoder_layer::{
-    enable_turboquant_kv_caches, AttnKind, AttnPath, DecoderLayer, DecoderLayerConfig, LayerCache,
-    LayerCacheSnapshot,
+    enable_paged_kv_caches, enable_turboquant_kv_caches, paged_prefix_key_spec_for_full_caches,
+    paged_prefix_layers_for_row, prefix_entry_for_row, prefix_key_spec_for_caches,
+    restore_paged_prefix_layers_for_row, restore_prefix_entry_for_row,
+    restore_prefix_entry_for_rows, AttnKind, AttnPath, DecoderLayer, DecoderLayerConfig,
+    LayerCache, LayerCacheSnapshot,
 };
 pub use embedding::Embedding;
 pub use gated_attention::{GatedAttention, GatedAttentionConfig};

@@ -94,6 +94,14 @@ impl MlaLatentCache {
         self.dtype
     }
 
+    pub fn kv_lora(&self) -> i32 {
+        self.kv_lora
+    }
+
+    pub fn rope(&self) -> i32 {
+        self.rope
+    }
+
     /// Raise `self.cap` to `new_cap` if larger; no-op otherwise. Mirrors
     /// [`KVCache::grow_cap`](crate::core::cache::KVCache::grow_cap): the
     /// physical buffers are not reallocated here — they remain at their
@@ -170,6 +178,130 @@ impl MlaLatentCache {
             }
         }
         self.offsets.clone_from_slice(offsets);
+        Ok(())
+    }
+
+    pub fn prefix_latent_for_row_on(
+        &self,
+        row: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array, i32)> {
+        let target = target.into();
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "MlaLatentCache::prefix_latent_for_row_on: row {} >= batch {}",
+                row,
+                self.batch
+            );
+        }
+        let cached_len = self.offsets[row];
+        if cached_len == 0 {
+            let c_kv = Array::zeros_on((1_i32, 1_i32, 0_i32, self.kv_lora), self.dtype, target)?;
+            let k_pe = Array::zeros_on((1_i32, 1_i32, 0_i32, self.rope), self.dtype, target)?;
+            return Ok((c_kv, k_pe, 0));
+        }
+        let c_kv_full = self.c_kv.as_ref().ok_or_else(|| {
+            anyhow!("MlaLatentCache::prefix_latent_for_row_on: c_kv is unallocated")
+        })?;
+        let k_pe_full = self.k_pe.as_ref().ok_or_else(|| {
+            anyhow!("MlaLatentCache::prefix_latent_for_row_on: k_pe is unallocated")
+        })?;
+        let c_kv = slice_strided_on(
+            c_kv_full,
+            [row as i32, 0, 0, 0],
+            [row as i32 + 1, 1, cached_len, self.kv_lora],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        let k_pe = slice_strided_on(
+            k_pe_full,
+            [row as i32, 0, 0, 0],
+            [row as i32 + 1, 1, cached_len, self.rope],
+            [1_i32, 1, 1, 1],
+            target,
+        )?;
+        Ok((c_kv, k_pe, cached_len))
+    }
+
+    pub fn restore_prefix_latent_for_row_on(
+        &mut self,
+        c_kv: &Array,
+        k_pe: &Array,
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let target = target.into();
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "MlaLatentCache::restore_prefix_latent_for_row_on: row {} >= batch {}",
+                row,
+                self.batch
+            );
+        }
+        if cached_len < 0 || cached_len > self.cap {
+            anyhow::bail!(
+                "MlaLatentCache::restore_prefix_latent_for_row_on: cached_len {cached_len} outside [0, {}]",
+                self.cap
+            );
+        }
+        let c_shape = c_kv.shape();
+        let c_shape = c_shape.as_slice();
+        if c_shape != [1_i32, 1, cached_len, self.kv_lora] {
+            anyhow::bail!(
+                "MlaLatentCache::restore_prefix_latent_for_row_on: c_kv shape {:?} incompatible with [1,1,{cached_len},{}]",
+                c_shape,
+                self.kv_lora
+            );
+        }
+        let k_shape = k_pe.shape();
+        let k_shape = k_shape.as_slice();
+        if k_shape != [1_i32, 1, cached_len, self.rope] {
+            anyhow::bail!(
+                "MlaLatentCache::restore_prefix_latent_for_row_on: k_pe shape {:?} incompatible with [1,1,{cached_len},{}]",
+                k_shape,
+                self.rope
+            );
+        }
+        if c_kv.dtype() != self.dtype || k_pe.dtype() != self.dtype {
+            anyhow::bail!(
+                "MlaLatentCache::restore_prefix_latent_for_row_on: dtype mismatch c_kv={} k_pe={} expected {}",
+                c_kv.dtype(),
+                k_pe.dtype(),
+                self.dtype
+            );
+        }
+        if cached_len > 0 {
+            let current_capacity = self
+                .c_kv
+                .as_ref()
+                .map(|a| a.shape().as_slice()[2])
+                .unwrap_or(0);
+            if cached_len > current_capacity {
+                let target_capacity =
+                    ((cached_len + self.step - 1) / self.step * self.step).min(self.cap);
+                self.grow_to(target_capacity, target)?;
+            }
+            let c_kv_full = self.c_kv.as_ref().expect("grow_to allocated c_kv");
+            let k_pe_full = self.k_pe.as_ref().expect("grow_to allocated k_pe");
+            self.c_kv = Some(slice_update_on(
+                c_kv_full,
+                c_kv,
+                [row as i32, 0, 0, 0],
+                [row as i32 + 1, 1, cached_len, self.kv_lora],
+                [1_i32, 1, 1, 1],
+                target,
+            )?);
+            self.k_pe = Some(slice_update_on(
+                k_pe_full,
+                k_pe,
+                [row as i32, 0, 0, 0],
+                [row as i32 + 1, 1, cached_len, self.rope],
+                [1_i32, 1, 1, 1],
+                target,
+            )?);
+        }
+        self.offsets[row] = cached_len;
         Ok(())
     }
 
@@ -718,6 +850,47 @@ mod tests {
         for v in pe.iter().take(3 * 2).skip(2 * 2) {
             assert_eq!(*v, 9.0, "appended k_pe token 2 must be 9.0");
         }
+    }
+
+    #[test]
+    fn prefix_latent_round_trips_single_row() {
+        let mut src = MlaLatentCache::new(2, 4, 2, Dtype::Float32, 8).with_step(8);
+        let c_kv: Array = {
+            let mut d = vec![0.0_f32; 2 * 1 * 3 * 4];
+            for value in d.iter_mut().skip(3 * 4) {
+                *value = 5.0;
+            }
+            (&d[..], (2_i32, 1, 3, 4)).try_into().unwrap()
+        };
+        let k_pe: Array = {
+            let mut d = vec![0.0_f32; 2 * 1 * 3 * 2];
+            for value in d.iter_mut().skip(3 * 2) {
+                *value = 6.0;
+            }
+            (&d[..], (2_i32, 1, 3, 2)).try_into().unwrap()
+        };
+        src.update_and_fetch_on(&c_kv, &k_pe, &[0, 3], ())
+            .expect("fill row 1");
+
+        let (c_kv_row, k_pe_row, cached_len) =
+            src.prefix_latent_for_row_on(1, ()).expect("export row");
+
+        let mut dst = MlaLatentCache::new(1, 4, 2, Dtype::Float32, 8).with_step(8);
+        dst.restore_prefix_latent_for_row_on(&c_kv_row, &k_pe_row, 0, cached_len, ())
+            .expect("restore row");
+
+        assert_eq!(dst.offsets(), &[3]);
+        let append_kv: Array = (&[8.0_f32; 4][..], (1_i32, 1, 1, 4)).try_into().unwrap();
+        let append_pe: Array = (&[9.0_f32; 2][..], (1_i32, 1, 1, 2)).try_into().unwrap();
+        let (fetched_kv, fetched_pe) = dst
+            .update_and_fetch_on(&append_kv, &append_pe, &[1], ())
+            .expect("append after restore");
+        let kv = fetched_kv.to_vec::<f32>().unwrap();
+        assert!(kv.iter().take(3 * 4).all(|&v| v == 5.0));
+        assert!(kv.iter().skip(3 * 4).all(|&v| v == 8.0));
+        let pe = fetched_pe.to_vec::<f32>().unwrap();
+        assert!(pe.iter().take(3 * 2).all(|&v| v == 6.0));
+        assert!(pe.iter().skip(3 * 2).all(|&v| v == 9.0));
     }
 
     #[test]

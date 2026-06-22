@@ -37,6 +37,9 @@ vllm-mlx, llama.cpp, third-party cloud providers — at the same external bounda
   the tens of thousands. Always disabled so both engines stream token-by-token under the
   same protocol.
 - **Warmup excluded** — first N=1 run materializes MLX compile graphs / KV caches; not counted.
+- **Prefix-cache probe is explicit** — `--prefix-cache-probe` disables per-run
+  nonce variation within a cell so server-side prefix caches can be measured.
+  Default benchmarks still vary prompts to avoid accidental cache hits.
 
 ## Usage
 
@@ -53,6 +56,45 @@ cargo run --release -p iron-bench -- \
 
 `--target name=URL` can be repeated for any number of endpoints. `--prompt-len` is
 comma-separated; iron-bench iterates `prompt_len × target` cells.
+
+## Prefix-cache probe
+
+Use `--prefix-cache-probe` only when the server is intentionally configured with
+a prefix cache, such as ironmlx `--paged-prefix-cache-dir`. The flag reuses the
+same synthetic prompt within each cell.
+
+Sequential cold/write plus warm-hit probe:
+
+```sh
+cargo run --release -p iron-bench -- \
+  --target ironmlx=http://localhost:8080 \
+  --model-dir /path/to/Qwen3.5-4B-MLX-4bit/snapshot \
+  --prompt-len 2048 \
+  --max-tokens 16 \
+  --runs 3 --warmup 0 \
+  --prefix-cache-probe \
+  --format csv
+```
+
+In CSV/JSON output, run 0 is marked `cold_or_miss_candidate`; later measured
+runs are marked `warm_hit_candidate`. With `--warmup > 0`, all measured runs
+are marked `warm_hit_candidate`.
+
+B>1 shared-prefix probe:
+
+```sh
+cargo run --release -p iron-bench -- \
+  --target ironmlx=http://localhost:8080 \
+  --model-dir /path/to/Qwen3.5-4B-MLX-4bit/snapshot \
+  --prompt-len 2048 \
+  --max-tokens 16 \
+  --concurrent 2 --duration 30 --warmup-duration 5 \
+  --prefix-cache-probe \
+  --format json
+```
+
+In concurrent mode, all workers reuse the same synthetic prompt within each
+cell. This is useful for measuring shared-prefix TTFT and cache-path contention.
 
 ### Profile: qwen3.5-moe (Qwen3.5-35B-A3B-4bit MoE)
 

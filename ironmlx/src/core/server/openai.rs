@@ -385,14 +385,16 @@ where
     let prompt_len = prompt_ids.len();
     let scheduler_config = state.scheduler_request_config(prompt_len, max_tokens);
 
-    // Routing: short-prompt and model-limited chunked long-prompt requests
-    // use SchedulerActor; other chunked long prompts keep using GenerationStream.
+    // Routing: short-prompt, paged-prefix-cache, and model-limited chunked
+    // long-prompt requests use SchedulerActor; other chunked long prompts keep
+    // using GenerationStream.
     // B1-p2.4: VL fallback removed — VL requests now route through Scheduler
     // via Scheduler::admit/admit_mid + batched_prefill_vl.
     let use_scheduler = super::should_route_to_scheduler::<M>(
         prompt_len,
         scheduler_config.prefill_chunk_size,
         state.b_max,
+        state.paged_prefix_cache_enabled,
     );
 
     // Per Codex plan review v16 P1 #2 + v17 P1 #1 + v18 P1 #1: p5h state ONLY
