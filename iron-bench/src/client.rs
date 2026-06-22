@@ -51,7 +51,7 @@ pub struct RequestResult {
     pub finish_reason: String,
     #[allow(dead_code)]
     pub content_chars: usize,
-    /// Server-emitted X-Ironmlx-Request-Id header value (P5h correlation).
+    /// Server-emitted X-Ironmlx-Request-Id header value.
     /// `None` when `--capture-server-request-id` flag is off OR the server
     /// did not emit the header (e.g., legacy server build).
     pub request_id: Option<String>,

@@ -3,7 +3,7 @@
 //! This binary isolates the exact `gather_quantized_matmul_on` shapes used by
 //! `glm4_moe_lite` single-token decode routed experts. It intentionally uses
 //! the real checkpoint tensors, not synthetic quantized weights, so the numbers
-//! can be compared with p5h decode attribution.
+//! can be compared with decode attribution runs.
 
 use std::path::PathBuf;
 use std::time::Instant;

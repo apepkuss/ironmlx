@@ -1,6 +1,5 @@
 # Qwen3.6 Performance Phase 5 MLX QMM Root Cause
 
-**Goal:** Close the remaining long-prefill `GatedDeltaNet` performance gap with evidence instead of continuing the failed P5h-style guess-and-patch loop.
 
 **Artifact root:** `/tmp/ironmlx-qwen36-perf-phase5-latest`
 

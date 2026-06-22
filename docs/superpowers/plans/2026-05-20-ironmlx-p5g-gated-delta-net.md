@@ -4,7 +4,6 @@
 
 **Goal:** Profile GatedDeltaNet (`ironmlx/src/nn/gated_delta_net.rs`) per § 3.2 3-layer protocol via HTTP-path harness, then promote ≥ 1 profile-driven op-level optimization via § 7.3 ship metrics (long-prompt geomean prefill +5% AND per-PP regression < 2% AND decode TG regression < 2%) without changing GatedDeltaNet public API or touching dense / MTP / GatedAttention / SparseMoeBlock paths.
 
-**Architecture:** Profile-first. T0 instruments GatedDeltaNet (prefix-parsed layer_idx, mode-gated by `IRONMLX_P5G_PROFILE_MODE`, `OnceLock<ProfileMode>` cached) and runs 4-phase HTTP harness (Phase A whole-prefill baseline + B Layer 1 boundary-isolated + C Layer 2 per-step breakdown + D Layer 3 shape-preserving cost ablation). T0.d locks § 7.2 target. T1-T3 implement op-level candidates by T0.c ranking, each independently ship-or-revert by § 7.3 metrics relative to its starting HEAD. T4 closes-out with 3-way bench + sweep_full + report + P5h scope quantification. Scope gate: if T0/T1 requires Metal kernel rewrite → pause for Boss decision.
 
 **Tech Stack:** Rust 1.94 / cxx-mlx Rust/C++ FFI / Apple Silicon Metal (M5 Max 128 GB) / Qwen3.5-35B-A3B-4bit MoE. iron-bench Rust HTTP harness for ship validation.
 
@@ -2667,7 +2666,6 @@ Substitute throughout:
 
 ## Task 4: P5g Close-Out
 
-**Goal:** Run full validation (sweep_full 19/19 + 3-way bench + clippy + fmt + integration tests), write self-contained `reports/p5g-final-results.md`, quantify P5h scope drivers, commit.
 
 **Files:**
 - Create: `reports/p5g-final-results.md`
@@ -2874,7 +2872,6 @@ Create the report (template):
 
 > **Self-contained for offline code-level analysis.** Embeds all
 > bench data, T0 profile + ablation findings, T1-T3 outcomes, and
-> P5h scope drivers.
 
 | Field | Value |
 |---|---|
@@ -2935,7 +2932,6 @@ Per § 7.3:
   - fmt --check: clean
   - sentinel + batched + http_smoke: ALL PASS
 
-## §5 P5h scope drivers (P5g close-out per § 7.4)
 
 Residual gap to omlx+10% target per PP (after P5g):
 
@@ -2948,7 +2944,6 @@ Residual gap to omlx+10% target per PP (after P5g):
 | 8192 | <fill> | <fill> | <%> | GatedAttention O(S²) dominant |
 | 16384 | <fill> | <fill> | <%> | GatedAttention long-context + chunk count |
 
-## §6 P5h candidate ranking (post-P5g)
 
 1. **GatedAttention optimization** (full attn, T0 profile 6.5%
    at PP=2048; PP=16384 likely 30%+; SDPA dispatch tuning, KV layout)
@@ -2956,17 +2951,12 @@ Residual gap to omlx+10% target per PP (after P5g):
    exploration at PP=4096-16384)
 3. **Router bypass conditional** (if Scheduler admission > 50ms
    measured by P5g instrumentation)
-4. **Multi-request batching (P5h/P6+ deferred)** per Boss 2026-05-19
    directive; --b-max N > 1 functional, awaits multi-user scenario
 5. **Metal kernel rewrite for GatedDeltaNet** — only if P5g op-level
    was insufficient (P5g scope gate verdict: <triggered/not triggered>)
 
 ## §7 Out of scope (still deferred)
 
-- GatedAttention (P5h)
-- Long-prompt chunk-size sweep (P5h)
-- Router bypass (P5h conditional)
-- Multi-request batching default change (P5h/P6+ per Boss directive)
 - omlx PagedCache style port (out per [feedback_design_philosophy])
 - mlx::compile wrap (still blocked by 4 safe-wrapper API gaps from P5e T2)
 ```
@@ -2993,7 +2983,6 @@ source /tmp/p5g-env.sh
 cd "$REPO"
 git add reports/p5g-final-results.md
 git commit -m "$(cat <<'EOF'
-chore(p5g-t4): P5g close-out — GatedDeltaNet refactor + P5h scope
 
 P5g (GatedDeltaNet deep refactor) complete. Branch ironmlx-p5g-perf
 ready for merge consideration.
@@ -3023,7 +3012,6 @@ Validation:
     reports/p5g-final-results.md
   - clippy + fmt + release build: clean
 
-P5h scope quantified in reports/p5g-final-results.md § 5-§ 6:
   1. GatedAttention optimization (primary; full attn O(S²))
   2. Long-prompt chunk-size sweep (PP=4096-16384)
   3. Router bypass (conditional on Scheduler admit overhead)
@@ -3032,7 +3020,6 @@ P5h scope quantified in reports/p5g-final-results.md § 5-§ 6:
      scope gate verdict: <triggered/not triggered>)
 
 Per memory[no-spec-from-competitors]: omlx remains observation
-only; P5h design path independent.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -3066,8 +3053,5 @@ All of the following must be true at HEAD:
 - [ ] `QWEN35_MODEL=<snap> ./scripts/sweep/sweep_full.sh`: 19/19 PASS
 - [ ] `reports/p5g-t0-gated-delta-profile.md`, `reports/p5g-final-results.md` written with real numbers (no `<fill>` placeholders)
 - [ ] Spec § 7.2 final target locked (no "TBD by T0.a" or `<fill>` left)
-- [ ] At least 1 of T1/T2/T3 promoted per § 7.3 ship metrics (OR P5g closes with documented "no promote — Layer 3 upper bounds insufficient; P5h scope refresh")
 - [ ] Multi-request batching capability preserved: `--b-max N > 1` boots functional server with explicit flag (unchanged from P5f)
 - [ ] Profile feature truly gated: default `cargo build --release` and `cargo test` (no `--features p5g-profile`) produce zero `[p5g-profile]` log lines
-
-After acceptance, branch is ready for Boss decision on merge timing + P5h spec writing.

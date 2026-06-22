@@ -280,58 +280,14 @@ where
     }
 }
 
-/// P5h+2.c regression counter: incremented every time the actor's Step
-/// branch observes an `Err` whose Debug output contains
-/// `step illegal in Finished phase`. The integration test
-/// `ironmlx/tests/p5h_2c_scheduler_finished_smoke.rs` resets this counter
-/// at test start, runs 3× `max_new_tokens=1` admit cmds, and asserts it
-/// stays at 0 (proving the pre-event finalization hook eliminated the
-/// bug surface).
-///
-/// Gated under `cfg(feature = "p5h-profile")` so default release builds
-/// pay zero cost. `cfg(test)` items are not visible to `ironmlx/tests/*`
-/// integration targets (library compiles as a dependency), which is why
-/// the feature flag is required instead of `cfg(test)`.
-#[cfg(feature = "p5h-profile")]
-#[doc(hidden)]
-pub static STEP_ILLEGAL_FINISHED_PHASE_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(feature = "p5h-profile")]
-static P5H_SCHEDULER_DECODE_PROFILE_STEP_ID: AtomicU64 = AtomicU64::new(1);
-
-#[cfg(feature = "p5h-profile")]
-fn scheduler_decode_profile_context(global_step: u64) -> crate::core::p5h::P5hTraceContext {
-    crate::core::p5h::P5hTraceContext {
-        request_id: format!("scheduler-decode-profile-{global_step}"),
-        prompt_tokens: 0,
-        routing_path: "scheduler",
-    }
-}
-
-#[cfg(feature = "p5h-profile")]
-fn scheduler_decode_profile_span_fields(
-    seq: u32,
-    config: crate::core::p5h::P5hDecodeProfileConfig,
-) -> crate::core::p5h::SpanFields {
-    crate::core::p5h::SpanFields {
-        seq: Some(seq),
-        mode: Some(if config.eval_probes {
-            "decode_probe"
-        } else {
-            "decode_trace"
-        }),
-        ..Default::default()
-    }
-}
-
 /// Result returned by [`drive_empty_scheduler_handoff`] encoding what the
 /// caller's rolling loop should do next. Matches the existing `continue
 /// 'rolling` / `break 'rolling` / `continue 'outer` / `return` patterns
 /// without exposing label control to the helper.
 ///
-/// Added by P5h+2.c to make the empty-batch handoff path reusable from
-/// (a) the existing post-step empty-handoff site and (b) the new
-/// pre-event Finished-batch finalization at the rolling-loop top.
+/// Keeps the empty-batch handoff path reusable from both the existing
+/// post-step empty-handoff site and the pre-event Finished-batch
+/// finalization at the rolling-loop top.
 enum RollingControl {
     /// Re-enter the rolling loop (a new batch was admitted + prefilled).
     ContinueRolling,
@@ -682,7 +638,7 @@ fn driver_loop<M, A>(
     let rt = tokio::runtime::Handle::current();
 
     'outer: loop {
-        // P5h+2.c defensive: ensure scheduler is in Phase::Idle before
+        // Defensive: ensure scheduler is in Phase::Idle before
         // blocking on next admit. Most error paths already call evict_all,
         // but this guards any future code path that leaves phase=Finished.
         // If finalize fails, the actor cannot safely admit more requests
@@ -796,7 +752,7 @@ fn driver_loop<M, A>(
         let mut admission_policy = RollingAdmissionPolicy::default();
         admission_policy.record_admission_work();
         'rolling: loop {
-            // P5h+2.c: pre-event Finished-batch finalization + handoff. If
+            // Pre-event Finished-batch finalization + handoff. If
             // previous iteration's prefill_admitted/step left phase=Finished
             // (e.g. max_tokens=1 workload), handle the completed batch BEFORE
             // dispatching another event. Per Codex Q6: biased select may pick
@@ -917,35 +873,6 @@ fn driver_loop<M, A>(
                             Instant::now(),
                         )
                     });
-                    #[cfg(feature = "p5h-profile")]
-                    let step_result = if let Some(config) =
-                        crate::core::p5h::decode_profile_config_from_env()
-                    {
-                        crate::core::p5h::set_measurement_eval_probes_active(config.eval_probes);
-                        let global_step =
-                            P5H_SCHEDULER_DECODE_PROFILE_STEP_ID.fetch_add(1, Ordering::Relaxed);
-                        let seq = u32::try_from(global_step).unwrap_or(u32::MAX);
-                        let ctx = scheduler_decode_profile_context(global_step);
-                        let root =
-                            crate::core::p5h::open_p5h_span(&ctx, None, "decode_step_scheduler");
-                        let result = {
-                            let _guard =
-                                crate::core::p5h::P5hTraceGuard::enter(ctx.clone(), root.clone());
-                            let model_lock = model.blocking_lock();
-                            mtp_mode.step(&mut sched, &model_lock, &mtp_counters)
-                        };
-                        crate::core::p5h::close_p5h_span(
-                            &ctx,
-                            root,
-                            crate::core::p5h::monotonic_ns_public(),
-                            scheduler_decode_profile_span_fields(seq, config),
-                        );
-                        result
-                    } else {
-                        let model_lock = model.blocking_lock();
-                        mtp_mode.step(&mut sched, &model_lock, &mtp_counters)
-                    };
-                    #[cfg(not(feature = "p5h-profile"))]
                     let step_result = {
                         let model_lock = model.blocking_lock();
                         mtp_mode.step(&mut sched, &model_lock, &mtp_counters)
@@ -1023,11 +950,6 @@ fn driver_loop<M, A>(
                                 );
                             }
                             tracing::error!("[SchedulerActor] step error: {e:?}");
-                            #[cfg(feature = "p5h-profile")]
-                            if format!("{e:?}").contains("step illegal in Finished phase") {
-                                STEP_ILLEGAL_FINISHED_PHASE_HIT_COUNT
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
                             if let Err(evict_err) = sched.evict_all() {
                                 tracing::warn!(
                                     "[SchedulerActor] evict_all after step error also failed: \
@@ -1059,7 +981,7 @@ fn driver_loop<M, A>(
             // inline (mirrors the existing post-empty path but pulls the
             // first admit from the queue instead of cmd_rx).
             //
-            // P5h+2.c: extracted into `drive_empty_scheduler_handoff` so the
+            // Extracted into `drive_empty_scheduler_handoff` so the
             // same logic backs the pre-event Finished-batch finalization hook
             // at the rolling-loop top. The helper finalizes any leftover
             // `Phase::Finished` state first, then performs the queued-admit
@@ -1620,8 +1542,8 @@ fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSend
 /// Returns `Err` if `evict_all` failed (caller should reject queued
 /// admits + `continue 'outer` per existing pattern).
 ///
-/// Added by P5h+2.c. The `Phase::Finished` state arises naturally when
-/// `prefill_admitted` completes a batch where every request has
+/// The `Phase::Finished` state arises naturally when `prefill_admitted`
+/// completes a batch where every request has
 /// `max_new_tokens=1` (the prefill samples first+last token in one
 /// pass), which is the standard `iron-bench --max-tokens 1` perf
 /// measurement workload.
@@ -1648,7 +1570,7 @@ fn finalize_finished_batch_if_any<M: Model>(
 /// (or a single pending `cmd_rx.try_recv` admit) into a fresh batch, run
 /// `prefill_admitted`, and return how the caller's rolling loop should
 /// proceed. Lifts the existing empty-batch transition logic at the
-/// rolling-loop tail so it can also be invoked from the new pre-event
+/// rolling-loop tail so it can also be invoked from the pre-event
 /// Finished-batch finalization at the rolling-loop top.
 ///
 /// This helper is the single empty-batch handoff path. It first calls
@@ -1672,8 +1594,8 @@ fn finalize_finished_batch_if_any<M: Model>(
 /// - Any `finalize`, legacy reset, or `prefill_admitted` failure →
 ///   reject queued admits, clear `event_txs`, returns `ContinueOuter`.
 ///
-/// Added by P5h+2.c. Replaces the existing `if sched.active_count() == 0
-/// { ... }` block at rolling-loop tail to avoid divergent copies.
+/// Replaces the previous `if sched.active_count() == 0 { ... }` block
+/// at rolling-loop tail to avoid divergent copies.
 #[allow(clippy::too_many_arguments)]
 fn drive_empty_scheduler_handoff<M, A>(
     sched: &mut Scheduler<M>,
@@ -1697,7 +1619,7 @@ where
     M: Model + DenseVlMethods + Send + 'static,
     A: SchedulerActorMtpMode<M>,
 {
-    // P5h+2.c: finalize any Finished batch BEFORE re-admitting. After
+    // Finalize any Finished batch BEFORE re-admitting. After
     // this, phase is one of {Idle, Decoding}; never Finished. Callers
     // must not separately finalize.
     match finalize_finished_batch_if_any(sched, event_txs) {
@@ -2161,10 +2083,6 @@ mod tests {
             image_grid_thw: None,
             image_spatial_merge_size: 2,
             image_token_id: IMAGE_TOKEN_ID,
-            #[cfg(feature = "p5h-profile")]
-            p5h_trace: None,
-            #[cfg(feature = "p5h-profile")]
-            p5h_root_span: None,
         }
     }
 
@@ -2349,34 +2267,6 @@ mod tests {
         assert_eq!(cadence_protected_mid_chunk_size(1024, 2, 384), 384);
         assert_eq!(cadence_protected_mid_chunk_size(1024, 1, 384), 1024);
         assert_eq!(cadence_protected_mid_chunk_size(128, 2, 384), 128);
-    }
-
-    #[cfg(feature = "p5h-profile")]
-    #[test]
-    fn scheduler_decode_profile_context_marks_scheduler_route() {
-        let ctx = scheduler_decode_profile_context(42);
-
-        assert_eq!(ctx.request_id, "scheduler-decode-profile-42");
-        assert_eq!(ctx.prompt_tokens, 0);
-        assert_eq!(ctx.routing_path, "scheduler");
-    }
-
-    #[cfg(feature = "p5h-profile")]
-    #[test]
-    fn scheduler_decode_profile_fields_mark_trace_or_probe_mode() {
-        let trace = scheduler_decode_profile_span_fields(
-            7,
-            crate::core::p5h::P5hDecodeProfileConfig { eval_probes: false },
-        );
-        let probe = scheduler_decode_profile_span_fields(
-            8,
-            crate::core::p5h::P5hDecodeProfileConfig { eval_probes: true },
-        );
-
-        assert_eq!(trace.seq, Some(7));
-        assert_eq!(trace.mode, Some("decode_trace"));
-        assert_eq!(probe.seq, Some(8));
-        assert_eq!(probe.mode, Some("decode_probe"));
     }
 
     #[test]
@@ -2692,10 +2582,6 @@ mod tests {
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
-                #[cfg(feature = "p5h-profile")]
-                p5h_trace: None,
-                #[cfg(feature = "p5h-profile")]
-                p5h_root_span: None,
             }
         };
 
@@ -2806,10 +2692,6 @@ mod tests {
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
-                #[cfg(feature = "p5h-profile")]
-                p5h_trace: None,
-                #[cfg(feature = "p5h-profile")]
-                p5h_root_span: None,
             }
         };
 

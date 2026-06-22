@@ -37,7 +37,7 @@ Expected: a docs-only commit on `codex/turboquant-mrope-qrotate-fusion`.
 Run:
 
 ```bash
-MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --features p5h-profile --bin ironmlx-core-bench
+MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --bin ironmlx-core-bench
 ```
 
 Expected: release profile bench build succeeds.
@@ -156,7 +156,7 @@ Expected: PASS; packed decode output remains close to dense reference and does n
 Run:
 
 ```bash
-MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --features p5h-profile --bin ironmlx-core-bench
+MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --bin ironmlx-core-bench
 ```
 
 Expected: build succeeds.

@@ -564,8 +564,7 @@ pub fn render_markdown_concurrent_with_prefix_cache_probe(
 /// `run_end_unix_ns` columns are appended (empty string when None). Both
 /// flags compose: when both are on, `request_id` precedes the timestamp
 /// columns. Downstream parsers MUST use header names (csv.DictReader), not
-/// fixed positions. Flag-off-both output is byte-identical to the pre-P5h
-/// schema.
+/// fixed positions. Flag-off-both output is byte-identical to the base schema.
 pub fn render_csv(
     cells: &[CellResult],
     capture_request_id: bool,

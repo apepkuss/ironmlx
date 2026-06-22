@@ -630,10 +630,6 @@ fn decode_anthropic_messages(messages: Vec<AnthropicMessage>) -> anyhow::Result<
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size,
         image_token_id,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     };
 ```
 
@@ -856,7 +852,6 @@ where
             model, tokenizer, "e2e".to_string(), "127.0.0.1", port,
             /* prefill_chunk_size */ 2048, /* b_max */ 1,
             /* admission_deadline_ms */ 5, /* admission_queue_max */ 32,
-            /* max_cache_cap */ 32768, /* p5h_measurement_eval_probes */ false,
             vision,
         ).await
     })

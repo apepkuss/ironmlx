@@ -3,7 +3,7 @@
 //! This binary isolates the real-checkpoint shapes used by the absorbed MLA
 //! decode path. It keeps cache contents synthetic, but uses the real quantized
 //! projection weights so the subpath timings can be compared with mlx-lm and
-//! p5h decode attribution.
+//! decode attribution runs.
 
 use std::path::PathBuf;
 use std::time::Instant;

@@ -278,7 +278,6 @@ pub async fn serve<M>(
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
-    p5h_measurement_eval_probes: bool, // P5h+1 T1
     vision_input_override: Option<VisionInputConfig>,
 ) -> Result<()>
 where
@@ -299,7 +298,6 @@ where
         kv_cache_turboquant_bits,
         scheduler_runtime_profile,
         scheduler_autotune_report,
-        p5h_measurement_eval_probes,
         vision_input_override,
         None,
         PlainSchedulerActorSpawner {
@@ -330,7 +328,6 @@ pub async fn serve_with_mtp<M>(
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
-    p5h_measurement_eval_probes: bool,
     vision_input_override: Option<VisionInputConfig>,
 ) -> Result<()>
 where
@@ -352,7 +349,6 @@ where
         kv_cache_turboquant_bits,
         scheduler_runtime_profile,
         scheduler_autotune_report,
-        p5h_measurement_eval_probes,
         vision_input_override,
         Some(mtp_draft_tokens),
         MtpSchedulerActorSpawner {
@@ -381,7 +377,6 @@ async fn serve_inner<M, S>(
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
-    p5h_measurement_eval_probes: bool,
     vision_input_override: Option<VisionInputConfig>,
     mtp_health_draft_tokens: Option<usize>,
     scheduler_actor_spawner: S,
@@ -390,15 +385,6 @@ where
     M: Model + DenseVlMethods + Send + 'static,
     S: SchedulerActorSpawner<M>,
 {
-    // P5h+1 T1: install the measurement-eval-probes flag in the global
-    // BEFORE the SchedulerActor / GenerationStream code paths run. Setter
-    // is feature-gated; feature-off builds discard the boolean to keep the
-    // CLI plumbing uniform without requiring `#[cfg]` at the call site.
-    #[cfg(feature = "p5h-profile")]
-    crate::core::p5h::set_measurement_eval_probes_active(p5h_measurement_eval_probes);
-    #[cfg(not(feature = "p5h-profile"))]
-    let _ = p5h_measurement_eval_probes;
-
     let model = Arc::new(Mutex::new(model));
     let admission_deadline = std::time::Duration::from_millis(admission_deadline_ms);
 

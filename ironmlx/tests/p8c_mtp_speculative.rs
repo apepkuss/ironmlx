@@ -309,10 +309,6 @@ fn mtp_stream_rolls_back_and_replays_accepted_prefix_after_partial_reject() {
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: 248056,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     };
     let cfg = MtpSpeculativeConfig::new(2, request.sampler).unwrap();
     let mut stream =

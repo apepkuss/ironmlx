@@ -134,10 +134,6 @@ fn run_b1_baseline(
         image_grid_thw,
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     };
     let mut stream = GenerationStream::new(model, tokenizer, request).expect("GS new");
     let mut tokens: Vec<u32> = Vec::new();
@@ -237,10 +233,6 @@ async fn batched_vl_b2_full_vl_bit_id() {
         image_grid_thw: Some(grids_a),
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     };
     let (tx_a, rx_a) = oneshot::channel();
     cmd_tx
@@ -263,10 +255,6 @@ async fn batched_vl_b2_full_vl_bit_id() {
         image_grid_thw: Some(grids_b),
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     };
     let (tx_b, rx_b) = oneshot::channel();
     cmd_tx
@@ -401,10 +389,6 @@ async fn batched_vl_b2_mixed_text_and_vl() {
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     };
     let (tx_t, rx_t) = oneshot::channel();
     cmd_tx
@@ -427,10 +411,6 @@ async fn batched_vl_b2_mixed_text_and_vl() {
         image_grid_thw: Some(grids),
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     };
     let (tx_v, rx_v) = oneshot::channel();
     cmd_tx
@@ -577,10 +557,6 @@ async fn mid_admit_vl_during_text_decode() {
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
-                #[cfg(feature = "p5h-profile")]
-                p5h_trace: None,
-                #[cfg(feature = "p5h-profile")]
-                p5h_root_span: None,
             },
             reply_tx: tx_a,
         })
@@ -602,10 +578,6 @@ async fn mid_admit_vl_during_text_decode() {
                 image_grid_thw: None,
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
-                #[cfg(feature = "p5h-profile")]
-                p5h_trace: None,
-                #[cfg(feature = "p5h-profile")]
-                p5h_root_span: None,
             },
             reply_tx: tx_b,
         })
@@ -644,10 +616,6 @@ async fn mid_admit_vl_during_text_decode() {
                 image_grid_thw: Some(grids),
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
-                #[cfg(feature = "p5h-profile")]
-                p5h_trace: None,
-                #[cfg(feature = "p5h-profile")]
-                p5h_root_span: None,
             },
             reply_tx: tx_v,
         })
@@ -823,10 +791,6 @@ async fn batched_vl_multi_image_per_row() {
                 image_grid_thw: Some(grids_0),
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
-                #[cfg(feature = "p5h-profile")]
-                p5h_trace: None,
-                #[cfg(feature = "p5h-profile")]
-                p5h_root_span: None,
             },
             reply_tx: tx_0,
         })
@@ -848,10 +812,6 @@ async fn batched_vl_multi_image_per_row() {
                 image_grid_thw: Some(grids_1),
                 image_spatial_merge_size: 2,
                 image_token_id: IMAGE_TOKEN_ID,
-                #[cfg(feature = "p5h-profile")]
-                p5h_trace: None,
-                #[cfg(feature = "p5h-profile")]
-                p5h_root_span: None,
             },
             reply_tx: tx_1,
         })

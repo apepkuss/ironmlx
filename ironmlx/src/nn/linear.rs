@@ -233,11 +233,11 @@ impl Linear {
                 // acceptance gate test point (M=2048, N=9216, K=2560 gate_up
                 // shape; 1.32× e2e vs MLX per [project-p8a-stage9-findings]),
                 // which is the empirically validated lower bound for
-                // self_qmm beneficial regime. P5i.c Phase B feasibility gate
-                // (2026-05-27) empirically refuted the prior `>= 32` threshold
-                // by measuring 3× substep regression + 1.75-7.52% e2e
-                // regression at PP=128/512 (M=128/512) when
-                // IRONMLX_USE_SELF_QMM=1; per-dispatch overhead (kernel
+                // self_qmm beneficial regime. Later small-M measurements
+                // empirically refuted the prior `>= 32` threshold by measuring
+                // 3× substep regression + 1.75-7.52% e2e regression at
+                // PP=128/512 (M=128/512) when IRONMLX_USE_SELF_QMM=1;
+                // per-dispatch overhead (kernel
                 // launch + threadgroup setup + smem staging + encoder cost)
                 // dominates at small M.
                 //
@@ -312,8 +312,8 @@ impl Linear {
 /// `self_qmm_enabled` argument; tests pass an explicit boolean.
 ///
 /// Threshold is `2048` per the P8a Stage 9 acceptance gate test point
-/// + P5i.c Phase B empirical refutation of the prior `32` threshold (see
-///   `LinearImpl::Quant` branch comment above for full rationale).
+/// plus empirical refutation of the prior `32` threshold (see the
+/// `LinearImpl::Quant` branch comment above for full rationale).
 #[inline]
 fn should_dispatch_self_qmm(self_qmm_enabled: bool, m_total: i32) -> bool {
     self_qmm_enabled && m_total >= 2048
@@ -410,13 +410,12 @@ mod tests {
         assert_eq!(lin.out_features(), out as usize);
     }
 
-    /// Regression guard for the P8a Stage 9 + P5i.c Phase B threshold
-    /// `m_total >= 2048`. Phase B feasibility gate (2026-05-27) empirically
-    /// refuted the prior `m_total >= 32` threshold via 3× substep regression
-    /// + 1.75-7.52% e2e regression at PP=128/512 when
-    /// `IRONMLX_USE_SELF_QMM=1`. This test guards against accidental
-    /// lowering of the threshold below the empirically validated lower
-    /// bound (Stage 9 acceptance test point M=2048).
+    /// Regression guard for the `m_total >= 2048` threshold. Small-M
+    /// measurements empirically refuted the prior `m_total >= 32` threshold
+    /// via 3× substep regression + 1.75-7.52% e2e regression at PP=128/512
+    /// when `IRONMLX_USE_SELF_QMM=1`. This test guards against accidental
+    /// lowering of the threshold below the empirically validated lower bound
+    /// (Stage 9 acceptance test point M=2048).
     #[test]
     fn self_qmm_dispatch_threshold_is_2048_when_env_enabled() {
         // Env disabled → never dispatch self_qmm, regardless of M.

@@ -111,4 +111,3 @@ attribution rather than retuning qk blindly.
 - `MLX_DIR=$HOME/.local/mlx cargo +nightly fmt --all -- --check`
 - `MLX_DIR=$HOME/.local/mlx cargo +nightly clippy --all-features --workspace -- -D warnings`
 - `MLX_DIR=$HOME/.local/mlx cargo build --release`
-- `MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --features p5h-profile --bin ironmlx-core-bench`

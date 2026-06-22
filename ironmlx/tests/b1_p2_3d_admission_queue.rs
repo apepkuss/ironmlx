@@ -74,10 +74,6 @@ fn make_req_with_stop(
         image_grid_thw: None,
         image_spatial_merge_size: 2,
         image_token_id: IMAGE_TOKEN_ID,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     }
 }
 
@@ -444,9 +440,9 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             256,   // decode_cadence_mid_chunk_cap
             None,  // kv_cache_turboquant_bits
             None,  // paged_prefix_cache
+            None,  // prefix_lru_cache
             scheduler_profile,
             false, // scheduler_autotune_report
-            false, // p5h_measurement_eval_probes (P5h+1 T1)
             None,  // vision_input_override
         )
         .await

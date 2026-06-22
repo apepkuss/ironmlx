@@ -114,8 +114,8 @@ struct Args {
 
     /// Capture X-Ironmlx-Request-Id response header from each request and
     /// add a request_id column to CSV output. Default off — flag-off state
-    /// is byte-identical to non-P5h iron-bench output (per P5h spec § 2.5a
-    /// Join key). Markdown + JSON outputs are unaffected by this flag.
+    /// is byte-identical to the base iron-bench output. Markdown + JSON
+    /// outputs are unaffected by this flag.
     #[arg(long, default_value_t = false)]
     pub capture_server_request_id: bool,
 
@@ -123,22 +123,21 @@ struct Args {
     /// output. When off, CSV is byte-identical to current output. When
     /// combined with `--capture-server-request-id`, both column families
     /// appear; downstream parsers MUST use header names (csv::DictReader),
-    /// not fixed positions. Per P5h+2.b spec § 6.
+    /// not fixed positions.
     #[arg(long, default_value_t = false)]
     pub capture_run_timestamps: bool,
 
     /// Sleep N seconds between measured runs in sequential (v1) mode.
     /// Does NOT sleep during preheat or warmup; does NOT sleep after the
-    /// final measured run. Default 0 (no behavior change).
-    /// Per P5h+2.d spec § 3.1 — production-grade flag for any sweep where
-    /// thermal isolation between consecutive measured runs matters.
+    /// final measured run. Default 0 (no behavior change). Use this for
+    /// sweeps where thermal isolation between measured runs matters.
     #[arg(long, default_value_t = 0u64)]
     pub inter_run_cooldown_secs: u64,
 
     /// Override the synthetic-prompt nonce seed in sequential mode. When
-    /// unset, nonce generation remains time-based. Used by P5h+2.e T2.A to
-    /// make measured prompt sequences reproducible across repeats while still
-    /// varying nonce by warmup/run index.
+    /// unset, nonce generation remains time-based. Makes measured prompt
+    /// sequences reproducible across repeats while still varying nonce by
+    /// warmup/run index.
     #[arg(long)]
     pub nonce_seed: Option<u64>,
 
@@ -318,8 +317,8 @@ async fn main() -> Result<()> {
 
     if args.capture_run_timestamps && args.concurrent.is_some() {
         // Concurrent CSV (render_csv_concurrent) has a different header schema
-        // with no run_start/run_end columns. P5h+2.b timestamp capture targets
-        // sequential mode only (per spec § 6 + memory [feedback_serial_perf_experiments]).
+        // with no run_start/run_end columns, so timestamp capture targets
+        // sequential mode only.
         anyhow::bail!(
             "--capture-run-timestamps is incompatible with --concurrent: \
              run_start_unix_ns/run_end_unix_ns are defined only for v1 sequential CSV rows."
@@ -327,27 +326,22 @@ async fn main() -> Result<()> {
     }
 
     if args.capture_server_request_id {
-        // Per Codex plan review v21 P2 #2: reject concurrent mode entirely.
         // The concurrent CSV path (render_csv_concurrent) has a different
-        // header schema with no request_id column, and P5h sweeps are
-        // serial-only per memory [feedback_serial_perf_experiments].
+        // header schema with no request_id column.
         if args.concurrent.is_some() {
             anyhow::bail!(
                 "--capture-server-request-id is incompatible with --concurrent \
-                 (per P5h plan v21 P2 #2): concurrent CSV has a different header \
-                 schema with no request_id column, and P5h sweeps are serial-only. \
-                 Drop --concurrent for P5h sweeps."
+                 because concurrent CSV has no request_id column."
             );
         }
-        // Per Codex plan review v20 P1 #2: reject nonzero sequential warmup.
+        // Keep request-id captures joinable by ensuring every server-side
+        // request id also appears in the emitted sequential CSV.
         if args.warmup != 0 {
             anyhow::bail!(
                 "--capture-server-request-id is incompatible with --warmup > 0 \
-                 (per P5h plan v20 P1 #2): warmup RequestResults are discarded \
-                 by runner.rs, but the server still emits [p5h-profile] log \
-                 lines + X-Ironmlx-Request-Id headers for warmup requests, so \
-                 warmup request_ids will be server-side orphans and the \
-                 aggregator's 100% join gate will hard-fail. Use --warmup 0."
+                 because warmup RequestResults are discarded by runner.rs while \
+                 the server still emits X-Ironmlx-Request-Id headers for warmup \
+                 requests. Use --warmup 0."
             );
         }
         // Defense-in-depth — redundant given the concurrent gate above, but
@@ -355,7 +349,7 @@ async fn main() -> Result<()> {
         if args.concurrent.is_some() && args.warmup_duration != 0 {
             anyhow::bail!(
                 "--capture-server-request-id is incompatible with --warmup-duration > 0 \
-                 (per P5h plan v20 P1 #2)."
+                 when concurrent mode is enabled."
             );
         }
     }
@@ -363,9 +357,9 @@ async fn main() -> Result<()> {
     if args.concurrent.is_some() && args.inter_run_cooldown_secs != 0 {
         anyhow::bail!(
             "--inter-run-cooldown-secs is incompatible with concurrent (v2) mode \
-             (per P5h+2.d spec § 3.1): cooldown semantics are defined only for \
-             the sequential measured-run loop. Set --inter-run-cooldown-secs 0 \
-             when using --concurrent."
+             because cooldown semantics are defined only for the sequential \
+             measured-run loop. Set --inter-run-cooldown-secs 0 when using \
+             --concurrent."
         );
     }
 

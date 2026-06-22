@@ -298,10 +298,6 @@ where
         image_grid_thw: image_grid_thw_opt,
         image_spatial_merge_size,
         image_token_id,
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     };
 
     let use_scheduler = super::should_route_to_scheduler::<M>(

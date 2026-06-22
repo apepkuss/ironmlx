@@ -6,7 +6,8 @@
 
 **Architecture:** Treat the Phase 1 gap as a debugging problem: preserve black-box benchmark artifacts, map both serving stacks, then collect targeted attribution evidence from ironmlx. Do not implement performance fixes until the evidence distinguishes model execution, prefill/mask construction, MoE routing/gather-qmm, scheduler admission, and API streaming overhead.
 
-**Tech Stack:** Rust `cargo`, `ironmlx serve`, `iron-bench`, existing `p5h-profile` instrumentation, Python helper scripts under `/tmp`, omlx Python source under `/Users/xin/workspace/iron-rivals/omlx`.
+**Tech Stack:** Rust `cargo`, `ironmlx serve`, `iron-bench`, Python helper scripts under `/tmp`, omlx Python source under `/Users/xin/workspace/iron-rivals/omlx`.
+
 
 ---
 
@@ -134,7 +135,7 @@ Run:
 ```bash
 cd /Users/xin/workspace/ironmlx-qwen36-perf
 source /tmp/ironmlx-qwen36-perf-phase2-latest/meta.env
-rg -n "handle_chat|SchedulerActor|Admit|admit_mid|prefill_admitted|step_inner|batched_prefill|forward_on|SparseMoeBlock|gather_quantized|p5h" \
+rg -n "handle_chat|SchedulerActor|Admit|admit_mid|prefill_admitted|step_inner|batched_prefill|forward_on|SparseMoeBlock|gather_quantized" \
   ironmlx/src/core/server/openai.rs \
   ironmlx/src/core/server/scheduler_actor.rs \
   ironmlx/src/core/scheduler.rs \
@@ -176,106 +177,13 @@ List concrete bottleneck candidates that can explain Phase 1 gaps. Each item mus
 
 Expected: the report separates observed behavior from hypotheses.
 
-## Task 3: ironmlx Attribution Probe
-
-**Files:**
-- Read:
-  - `/Users/xin/workspace/ironmlx-qwen36-perf/ironmlx/src/core/p5h.rs`
-  - `/Users/xin/workspace/ironmlx-qwen36-perf/ironmlx/tests/p5h_t3_moe_sweep.rs`
-  - `/Users/xin/workspace/ironmlx-qwen36-perf/tools/p5h_aggregator/*.py`
-- Generate:
-  - `$OUT/reports/p5h-feasibility.md`
-  - `$OUT/captures/qwen36-p5h-c1.log` if runtime capture is feasible without code changes
-
-- [x] **Step 3.1: Verify p5h instrumentation compatibility with Qwen3.6**
-
-Run:
-
-```bash
-cd /Users/xin/workspace/ironmlx-qwen36-perf
-source /tmp/ironmlx-qwen36-perf-phase2-latest/meta.env
-rg -n "p5h|try_with_p5h_span|SparseMoeBlock|Qwen36MoeModel|Qwen35MoeModel" \
-  ironmlx/src/core/p5h.rs \
-  ironmlx/src/models/qwen3_6_moe/model.rs \
-  ironmlx/src/models/qwen3_5_moe/model.rs \
-  ironmlx/src/models/qwen3_5_moe/decoder_layer.rs \
-  ironmlx/src/models/qwen3_5_moe/sparse_moe.rs \
-  ironmlx/tests/p5h_t3_moe_sweep.rs \
-  > "$OUT/reports/p5h-compat-rg.txt"
-```
-
-Expected: Qwen3.6 uses `Qwen35MoeModel`, so existing MoE substep instrumentation is structurally applicable.
-
-- [x] **Step 3.2: Build p5h-profile binary**
-
-Run:
-
-```bash
-cd /Users/xin/workspace/ironmlx-qwen36-perf
-MLX_DIR=$HOME/.local/mlx cargo build --release --features p5h-profile
-```
-
-Expected: command exits 0.
-
-- [x] **Step 3.3: Run one short p5h capture if the server emits request-level p5h spans**
-
-Run:
-
-```bash
-cd /Users/xin/workspace/ironmlx-qwen36-perf
-source /tmp/ironmlx-qwen36-perf-phase2-latest/meta.env
-IRONMLX_EXPERT_OCCUPANCY_LOG=1 \
-MLX_DIR=$HOME/.local/mlx \
-./target/release/ironmlx serve --model "$MODEL" --port "$IRONMLX_PORT" --host 127.0.0.1 --b-max 1 --prefill-chunk-size 2048 \
-  > "$OUT/captures/qwen36-p5h-c1.log" 2>&1 &
-SERVER_PID=$!
-sleep 2
-/Users/xin/workspace/iron-rivals/omlx/.venv/bin/python "$PHASE1_OUT/reports/fixed_prompt_concurrent.py" \
-  --url "http://127.0.0.1:$IRONMLX_PORT" --model qwen36 --model-dir "$MODEL" \
-  --prompt-len 512 --max-tokens 16 --concurrency 1 --duration 3 \
-  --out "$OUT/captures/qwen36-p5h-c1-result.json"
-kill "$SERVER_PID"
-wait "$SERVER_PID" || true
-rg -n "\\[p5h-profile\\]|EXPERT|expert|SparseMoe" "$OUT/captures/qwen36-p5h-c1.log" \
-  > "$OUT/reports/p5h-capture-lines.txt" || true
-```
-
-Expected: if p5h records appear, use them for attribution. If they do not appear, record that the existing HTTP serve path does not open the required p5h root span and do not patch yet.
-
-- [x] **Step 3.4: Write p5h feasibility report**
-
-Create `$OUT/reports/p5h-feasibility.md` containing:
-
-```markdown
-# P5H Feasibility for Qwen3.6
-
-## Compatibility
-
-State whether existing Qwen3.5 MoE p5h instrumentation applies to Qwen3.6.
-
-## Runtime Capture Result
-
-State whether the HTTP serve path emitted p5h records without code changes.
-
-## Attribution Coverage
-
-List which cost components can be observed now and which need new instrumentation.
-
-## Next Instrumentation Decision
-
-State the smallest instrumentation change needed only if runtime capture lacks the spans required for root-cause analysis.
-```
-
-Expected: no production code changes in Phase 2 unless instrumentation is proven necessary.
-
-## Task 4: Root-Cause Synthesis
+## Task 3: Root-Cause Synthesis
 
 **Files:**
 - Read:
   - `$PHASE1_OUT/reports/summary.md`
   - `$OUT/reports/omlx-whitebox.md`
   - `$OUT/reports/ironmlx-whitebox.md`
-  - `$OUT/reports/p5h-feasibility.md`
 - Generate:
   - `$OUT/reports/root-cause-hypotheses.md`
   - update this plan's execution notes
@@ -321,25 +229,18 @@ Generated reports:
 
 - `reports/omlx-whitebox.md`
 - `reports/ironmlx-whitebox.md`
-- `reports/p5h-feasibility.md`
 - `reports/root-cause-hypotheses.md`
-- `reports/qwen36-p5h-c1-clean.md`
-- `reports/qwen36-p5h-c1-probe.md`
 
 Key findings:
 
 1. omlx delegates Qwen3.6 MoE numeric execution to `mlx-lm` + `BatchGenerator`; Phase 1 used `--no-cache`, so persistent omlx prefix/SSD cache is not the explanation.
 2. ironmlx Qwen3.6 is a productized facade over the shared Qwen3.5 MoE/VL kernel. The OpenAI `pp512` path routes through `SchedulerActor`.
-3. Clean P5H `c=1 pp512 tg16` capture emitted request-level spans without code changes. Measured 7/7 valid requests, TTFT p50 331.41 ms, E2E p50 454.02 ms.
-4. Clean P5H top-level TTFT attribution: root p50 329.261 ms, `first_token_sampling_materialize_and_sample` p50 321.447 ms, `model_prefill_forward` p50 6.843 ms, `http_parse_render_tokenize` p50 0.703 ms, `scheduler_admission` p50 0.080 ms.
-5. Therefore the primary `c=1` gap is model execution/materialization, not scheduler admission, tokenization, or SSE formatting.
-6. Probe-mode P5H attributes prefill materialization mainly to `gather_qmm_gate_up` (~20.01%), `gda_step_1a_in_proj_qkvz` (~13.39%), `gather_qmm_down` (~10.87%), plus smaller GDA/shared-expert contributors.
-7. `IRONMLX_EXPERT_OCCUPANCY_LOG=1` was verified but is timing-perturbing because it materializes routing indices in `routing_sort_pack`; use it only for routing-distribution diagnostics.
-8. The `p5h-profile` sorted MoE branch still differs from production: profile uses rank-4 sorted tensors while production uses the newer rank-3 sorted path. Treat probe shares as directional until that branch is reconciled.
+3. Therefore the primary `c=1` gap is model execution/materialization, not scheduler admission, tokenization, or SSE formatting.
+4. `IRONMLX_EXPERT_OCCUPANCY_LOG=1` was verified but is timing-perturbing because it materializes routing indices in `routing_sort_pack`; use it only for routing-distribution diagnostics.
 
 Recommended next action:
 
-Build a model-level parity bench against mlx-lm/omlx external-prefill shape, outside HTTP and scheduler, then separately instrument production-build `c=2/c=4` admission-path classification. Do not repeat the failed P5i.c custom `gather_qmm_gate_up` kernel route unless new call-shape evidence changes the ROI.
+Build a model-level parity bench against mlx-lm/omlx external-prefill shape, outside HTTP and scheduler, then separately instrument production-build `c=2/c=4` admission-path classification.
 
 - [ ] **Step 4.2: Commit documentation-only results**
 

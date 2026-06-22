@@ -123,10 +123,8 @@ impl DecoderLayerMoe {
     /// Mirrors `nn::DecoderLayer::forward_on` exactly except FFN is SparseMoeBlock.
     ///
     /// `layer_idx` — index of this decoder block in the model stack. Threaded
-    /// unconditionally (default build + p5h-profile build) into all attention
-    /// and FFN callees so they can construct P5h `SpanFields { layer_idx }`
-    /// without their callers needing to know the index. Non-decoder callers
-    /// (CLI / standalone tests) pass `-1` (spec § 2.5a).
+    /// into attention and FFN callees for layer-aware diagnostics. Non-decoder
+    /// callers (CLI / standalone tests) pass `-1`.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on(
         &self,
@@ -150,135 +148,6 @@ impl DecoderLayerMoe {
             ));
         }
 
-        #[cfg(feature = "p5h-profile")]
-        {
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "decoder_layer_N",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<Array> {
-                    // (1) input_norm
-                    let normed_in = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                        "input_norm",
-                        || crate::core::p5h::SpanFields {
-                            layer_idx: Some(layer_idx),
-                            ..Default::default()
-                        },
-                        || self.input_layernorm.forward_on(x, target),
-                    )?;
-
-                    // (2) attention_path WRAPPER (GDN substeps emit inside the
-                    // GatedDeltaNet body; full-attn substeps to be filled by T2).
-                    let attn = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                        "attention_path",
-                        || crate::core::p5h::SpanFields {
-                            layer_idx: Some(layer_idx),
-                            ..Default::default()
-                        },
-                        || -> Result<Array> {
-                            match (&self.attn, cache) {
-                                (AttnPath::Full(a), Some(LayerCache::Full(kv))) => a.forward_on(
-                                    &normed_in,
-                                    mrope,
-                                    cos,
-                                    sin,
-                                    full_attn_mask,
-                                    linear_attn_mask,
-                                    per_row_lens,
-                                    Some(kv),
-                                    target,
-                                    layer_idx,
-                                ),
-                                (AttnPath::Full(a), None) => a.forward_on(
-                                    &normed_in,
-                                    mrope,
-                                    cos,
-                                    sin,
-                                    full_attn_mask,
-                                    linear_attn_mask,
-                                    per_row_lens,
-                                    None,
-                                    target,
-                                    layer_idx,
-                                ),
-                                (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => a
-                                    .forward_on(
-                                        &normed_in,
-                                        linear_attn_mask,
-                                        per_row_lens,
-                                        Some(gdc),
-                                        target,
-                                        layer_idx,
-                                    ),
-                                (AttnPath::Linear(a), None) => a.forward_on(
-                                    &normed_in,
-                                    linear_attn_mask,
-                                    per_row_lens,
-                                    None,
-                                    target,
-                                    layer_idx,
-                                ),
-                                (AttnPath::Full(_), Some(LayerCache::Linear(_))) => Err(anyhow!(
-                                    "DecoderLayerMoe::forward_on: Full attn layer received Linear cache (kind mismatch)"
-                                )),
-                                (AttnPath::Linear(_), Some(LayerCache::Full(_))) => Err(anyhow!(
-                                    "DecoderLayerMoe::forward_on: Linear attn layer received Full cache (kind mismatch)"
-                                )),
-                                (_, Some(LayerCache::Mla(_))) => Err(anyhow!(
-                                    "DecoderLayerMoe::forward_on: received Mla cache (kind mismatch)"
-                                )),
-                            }
-                        },
-                    )?;
-
-                    // (3) residual_overhead — residual add 1 (x + attn).
-                    let h = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                        "residual_overhead",
-                        || crate::core::p5h::SpanFields {
-                            layer_idx: Some(layer_idx),
-                            ..Default::default()
-                        },
-                        || -> Result<Array> { Ok(x + &attn) },
-                    )?;
-
-                    // (4) post_attention_norm
-                    let normed_post = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                        "post_attention_norm",
-                        || crate::core::p5h::SpanFields {
-                            layer_idx: Some(layer_idx),
-                            ..Default::default()
-                        },
-                        || self.post_attention_layernorm.forward_on(&h, target),
-                    )?;
-
-                    // (5) mlp_path WRAPPER (8 MoE substeps to be filled by T3).
-                    let ffn_out = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                        "mlp_path",
-                        || crate::core::p5h::SpanFields {
-                            layer_idx: Some(layer_idx),
-                            ..Default::default()
-                        },
-                        || self.ffn.forward_on(&normed_post, target, layer_idx),
-                    )?;
-
-                    // (6) residual_overhead — residual add 2 (h + ffn_out). Same
-                    // span name as (3); distinct span_id under the same
-                    // decoder_layer_N parent.
-                    crate::core::p5h::try_with_p5h_span_from_current_trace(
-                        "residual_overhead",
-                        || crate::core::p5h::SpanFields {
-                            layer_idx: Some(layer_idx),
-                            ..Default::default()
-                        },
-                        || -> Result<Array> { Ok(&h + &ffn_out) },
-                    )
-                },
-            )
-        }
-
-        #[cfg(not(feature = "p5h-profile"))]
         {
             // Block 1: input_layernorm + attn dispatch + residual
             let normed_in = self.input_layernorm.forward_on(x, target)?;

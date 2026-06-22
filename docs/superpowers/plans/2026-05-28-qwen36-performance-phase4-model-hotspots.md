@@ -16,9 +16,9 @@ The gap is therefore not primarily HTTP, SSE, admission, or scheduler split-pref
 
 ## Evidence
 
-### P5H/P5G Directional Profile
+### Directional Profile
 
-P5H measurement-eval probes ranked MoE `gather_qmm_gate_up`, GDN projection/norm/kernel spans, and attention as large contributors. This ranking is useful directionally, but the forced `eval` probes split the lazy graph and can exaggerate intermediate costs.
+Earlier measurement-eval probes ranked MoE `gather_qmm_gate_up`, GDN projection/norm/kernel spans, and attention as large contributors. This ranking is useful directionally, but the forced `eval` probes split the lazy graph and can exaggerate intermediate costs.
 
 P5G layer1 on Qwen3.6 GDN showed large boundary totals:
 
@@ -162,10 +162,8 @@ Direct self_qmm diagnostics under the same Rust harness:
 
 Conclusion: the root is now narrowed below `Linear::forward_on`: Rust direct calls to `mlx::quantization::quantized_matmul_on` are already ~1.8-2.2x slower than MLX/Python for long-prefill GDN projection shapes, while decode is at parity. The Rust shim calls the same `mlx::core::quantized_matmul` entry point with default target encoding; no large Rust wrapper, slice, norm, or self_qmm-threshold explanation remains. Do not lower the production self_qmm threshold based on these data.
 
-## Lessons From P5h/P5i
 
-- Do not continue the prior custom `gather_qmm_gate_up` kernel line: earlier P5i/P5i.c experiments showed that path underperformed MLX's steel implementation.
-- Do not optimize based only on forced-eval subspan totals. Full-path MLX microbenches show MoE is effectively at parity despite P5H ranking it highly.
+- Do not optimize based only on forced-eval subspan totals. Full-path MLX microbenches show MoE is effectively at parity despite earlier probe rankings.
 - Treat GDN as the next high-signal target. The Rust core microbench now confirms the gap is in long-prefill `GatedDeltaNet`, not in MoE, projection fusion, HTTP, scheduler, or cache-state eval.
 - Do not lower the existing self_qmm dispatch threshold as a quick fix: focused qkvz/out diagnostics show no qkvz gain and clear decode regressions.
 

@@ -30,22 +30,6 @@ use crate::models::glm4_moe_lite::config::Glm4MoeLiteConfig;
 use crate::models::qwen3_5_moe::sparse_moe::RoutedExperts;
 use crate::nn::{Linear, Mlp};
 
-#[cfg(feature = "p5h-profile")]
-fn p5h_layer_fields(layer_idx: i32) -> crate::core::p5h::SpanFields {
-    crate::core::p5h::SpanFields {
-        layer_idx: Some(layer_idx),
-        ..Default::default()
-    }
-}
-
-#[cfg(feature = "p5h-profile")]
-fn p5h_eval(arrays: &[&Array]) -> Result<()> {
-    if crate::core::p5h::is_measurement_eval_probes_active() {
-        mlx::transforms::eval(arrays)?;
-    }
-    Ok(())
-}
-
 /// noaux_tc router: sigmoid scores + additive selection bias → top-k experts.
 ///
 /// Mirrors mlx_lm `group_expert_select` for the `n_group == 1` path (no group
@@ -234,7 +218,7 @@ impl Glm4MoeBlock {
     /// Forward pass: `[B, S, H]` → `[B, S, H]`.
     ///
     /// `layer_idx` is accepted to mirror the Qwen `SparseMoeBlock::forward_on`
-    /// signature shape (consumed by p5h spans there); inert here.
+    /// signature shape; inert here.
     pub fn forward_on(&self, x: &Array, target: StreamOrDevice, layer_idx: i32) -> Result<Array> {
         self.forward_on_with_mode(x, target, layer_idx, GlmMoeBlockMode::Full)
     }
@@ -263,77 +247,6 @@ impl Glm4MoeBlock {
         let flat =
             reshape_on(x, [bs, h], target).context("Glm4MoeBlock: reshape [B,S,H] → [BS,H]")?;
 
-        #[cfg(feature = "p5h-profile")]
-        {
-            let routed = if mode.include_routed() {
-                let (inds, weights) = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_moe_router_noaux_topk",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<(Array, Array)> {
-                        let (inds, weights) = if mode == GlmMoeBlockMode::RoutedFixedOnly {
-                            fixed_route(bs, self.k, self.scale)?
-                        } else {
-                            let logits = self
-                                .gate
-                                .forward_on(&flat, target)
-                                .context("Glm4MoeBlock: router gate forward")?; // [BS, E]
-                            noaux_tc_route(
-                                &logits, &self.bias, self.k, self.norm, self.scale, target,
-                            )?
-                        };
-                        p5h_eval(&[&inds, &weights])?;
-                        Ok((inds, weights))
-                    },
-                )?;
-
-                Some(crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_moe_routed_experts",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<Array> {
-                        let routed = self
-                            .experts
-                            .apply_experts_cast_output(&flat, &inds, &weights, target, layer_idx)
-                            .context("Glm4MoeBlock: routed experts")?;
-                        p5h_eval(&[&routed])?;
-                        Ok(routed)
-                    },
-                )?) // [BS, H]
-            } else {
-                None
-            };
-
-            let shared = if mode.include_shared() {
-                Some(crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_moe_shared_expert",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<Array> {
-                        let shared = self
-                            .shared
-                            .forward_on(&flat, target)
-                            .context("Glm4MoeBlock: shared expert forward")?;
-                        p5h_eval(&[&shared])?;
-                        Ok(shared)
-                    },
-                )?) // [BS, H] (UNGATED)
-            } else {
-                None
-            };
-
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "glm_moe_output_sum",
-                || p5h_layer_fields(layer_idx),
-                || -> Result<Array> {
-                    let out_flat = combine_moe_outputs(routed, shared, target)
-                        .context("Glm4MoeBlock: combine outputs")?; // [BS, H]
-                    let out = reshape_on(&out_flat, [b, s, h], target)
-                        .context("Glm4MoeBlock: reshape [BS,H] → [B,S,H]")?;
-                    p5h_eval(&[&out])?;
-                    Ok(out)
-                },
-            )
-        }
-
-        #[cfg(not(feature = "p5h-profile"))]
         {
             let routed = if mode.include_routed() {
                 let (inds, weights) = if mode == GlmMoeBlockMode::RoutedFixedOnly {
