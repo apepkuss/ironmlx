@@ -126,7 +126,7 @@ Expected: PASS.
 Run:
 
 ```bash
-MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --features p5h-profile --bin ironmlx-core-bench
+MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --bin ironmlx-core-bench
 ```
 
 Expected: exit `0`.

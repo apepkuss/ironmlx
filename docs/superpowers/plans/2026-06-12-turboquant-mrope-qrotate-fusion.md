@@ -113,7 +113,6 @@ The predicate must include the existing TurboQuant decode checks and require
 
 - [ ] **Step 3: Wire GatedAttention**
 
-In both `p5h-profile` and non-profile branches:
 - after q/k/v reshape and q/k norm, ask the cache for fused decode signs;
 - if available, call `mrope.apply_decode_query_turbo_rotation`;
 - route the pre-rotated query into `try_update_and_attend_decode_pre_rotated_on`;

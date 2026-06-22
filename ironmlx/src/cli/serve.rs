@@ -137,17 +137,6 @@ pub struct ServeArgs {
     /// share the same paged prefix cache key and restore semantics.
     #[arg(long = "prefix-lru-cache-max-bytes")]
     pub prefix_lru_cache_max_bytes: Option<usize>,
-
-    /// P5h+1 T1 measurement probe: force selected span bodies (Lane A
-    /// `first_token_sampling_materialize_and_sample` + the ROI substep
-    /// closures under GatedAttention / GatedDeltaNet / SparseMoeBlock +
-    /// `slice_last_and_project_lm_head` + `cache_state_update`) to call
-    /// `mlx::transforms::eval` on returned `Array` value(s) before the
-    /// span closes. Measurement-only: defaults OFF so production lazy-graph
-    /// semantics are preserved. Use ONLY for P5h+1 attribution sweeps.
-    #[cfg(feature = "p5h-profile")]
-    #[arg(long, default_value_t = false)]
-    pub p5h_measurement_eval_probes: bool,
 }
 
 fn resolve_paged_prefix_cache_config(
@@ -512,7 +501,6 @@ fn resolve_scheduler_runtime_profile(
     validate_dynamic_rules(&resolved)?;
     Ok(resolved)
 }
-
 #[cfg(test)]
 fn resolve_scheduler_serve_config(
     args: &ServeArgs,
@@ -536,30 +524,6 @@ fn resolve_scheduler_serve_config(
 /// `SchedulerActor<M>`. The trait name is historical; both dense and MoE
 /// Qwen3.5 variants implement it so the same OpenAI VL route can serve either
 /// checkpoint family.
-fn validate_p5h_scheduler_config(scheduler_config: SchedulerServeConfig) {
-    #[cfg(feature = "p5h-profile")]
-    {
-        assert!(
-            scheduler_config.b_max == 1 || crate::core::p5h::scheduler_decode_allow_multi_row(),
-            "p5h-profile feature requires --b-max 1 for legacy request-root attribution \
-             (single-active-row invariant per § 2.5a). Got --b-max {}. \
-             Set IRONMLX_P5H_SCHEDULER_DECODE_ALLOW_MULTI_ROW=1 only for experimental \
-             unary scheduler decode attribution, or rebuild without --features p5h-profile \
-             to use ordinary multi-row batching.",
-            scheduler_config.b_max,
-        );
-        if scheduler_config.b_max != 1 {
-            tracing::warn!(
-                "p5h-profile multi-row escape hatch enabled for scheduler decode attribution; \
-                 use unary/non-streaming clients so legacy streaming request-root p5h trees do \
-                 not enter their single-active-row prefill path"
-            );
-        }
-    }
-    #[cfg(not(feature = "p5h-profile"))]
-    let _ = scheduler_config;
-}
-
 fn log_scheduler_mode(scheduler_config: SchedulerServeConfig) {
     // Surface b_max at boot so operators can confirm whether single-request
     // optimized mode (default) or multi-request batching is active without
@@ -575,18 +539,6 @@ fn log_scheduler_mode(scheduler_config: SchedulerServeConfig) {
              pass --b-max 1 to switch to single-request optimized mode)",
             scheduler_config.b_max,
         );
-    }
-}
-
-fn p5h_measurement_eval_probes_arg(args: &ServeArgs) -> bool {
-    #[cfg(feature = "p5h-profile")]
-    {
-        args.p5h_measurement_eval_probes
-    }
-    #[cfg(not(feature = "p5h-profile"))]
-    {
-        let _ = args;
-        false
     }
 }
 
@@ -608,7 +560,6 @@ fn serve_with_model<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    validate_p5h_scheduler_config(scheduler_config);
     log_scheduler_mode(scheduler_config);
 
     let model_id = args.model.clone();
@@ -629,10 +580,6 @@ where
         );
     }
     let runtime = serve_runtime()?;
-    // P5h+1 T1: derive measurement-eval-probes flag (feature-gated CLI arg);
-    // feature-off builds always pass `false` so the receiver-side `set_*`
-    // call site can remain unconditional in signature.
-    let p5h_measurement_eval_probes = p5h_measurement_eval_probes_arg(args);
     runtime.block_on(server::serve(
         model,
         tokenizer,
@@ -650,7 +597,6 @@ where
         prefix_lru_cache,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
-        p5h_measurement_eval_probes,
         vision_input,
     ))
 }
@@ -668,7 +614,6 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
-    validate_p5h_scheduler_config(scheduler_config);
     log_scheduler_mode(scheduler_config);
     tracing::info!(
         "ironmlx serve: MTP enabled model_dir={} draft_tokens={}",
@@ -692,7 +637,6 @@ where
         );
     }
     let runtime = serve_runtime()?;
-    let p5h_measurement_eval_probes = p5h_measurement_eval_probes_arg(args);
     runtime.block_on(server::serve_with_mtp(
         model,
         mtp,
@@ -712,7 +656,6 @@ where
         prefix_lru_cache,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
-        p5h_measurement_eval_probes,
         vision_input,
     ))
 }
@@ -1078,8 +1021,6 @@ mod scheduler_profile_tests {
             paged_prefix_cache_block_size: 16,
             paged_prefix_cache_max_pages: None,
             prefix_lru_cache_max_bytes: None,
-            #[cfg(feature = "p5h-profile")]
-            p5h_measurement_eval_probes: false,
         }
     }
 
@@ -1562,14 +1503,5 @@ mod scheduler_profile_tests {
             .expect("system time before unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}-{nanos}"))
-    }
-}
-
-#[cfg(test)]
-#[cfg(feature = "p5h-profile")]
-mod tests {
-    #[test]
-    fn p5h_scheduler_decode_multi_row_escape_hatch_is_owned_by_p5h_config() {
-        assert!(crate::core::p5h::scheduler_decode_allow_multi_row_from_env_value(Some("1")));
     }
 }

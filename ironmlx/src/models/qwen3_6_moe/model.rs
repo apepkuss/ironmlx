@@ -641,10 +641,6 @@ mod tests {
                 .token_to_id("<|image_pad|>")
                 .map(|id| id as i32)
                 .unwrap_or(crate::core::generate::IMAGE_TOKEN_ID),
-            #[cfg(feature = "p5h-profile")]
-            p5h_trace: None,
-            #[cfg(feature = "p5h-profile")]
-            p5h_root_span: None,
         }
     }
 

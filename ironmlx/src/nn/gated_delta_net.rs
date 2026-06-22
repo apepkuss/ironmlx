@@ -40,23 +40,6 @@ pub(crate) enum ProfileMode {
     AblateComputeG,
     AblateConv,
     AblateTArr,
-    // P5h T0b H2: in-place real vs substitute timing for Steps 2b/5/7c.
-    // Forward path produces the real outputs (no behavior change); per step
-    // the real output and a freshly-built substitute are each independently
-    // eval-timed and emitted as paired records.
-    H2Measure,
-    // P5h T0b H3: same Step 2b passthrough as AblateConv, but Step 2c still
-    // performs the real cache update from conv_input tail. Tests whether
-    // skipping conv_state update accounts for AblateConv's downstream cost.
-    AblateConvWithManualCacheUpdate,
-    // P5h T0b H4: tight Step 7d kernel materialization timer on top of the
-    // production (real compute_g) path. Cache update stays outside the inner
-    // timer but inside Step 7's outer block.
-    H4MeasurePhaseA,
-    // P5h T0b H4: tight Step 7d timer on top of the AblateComputeG path
-    // (g substituted by zeros). Combined with H4MeasurePhaseA isolates
-    // kernel-output variance attributable to g's input value pattern.
-    H4MeasureAblateComputeG,
 }
 
 #[cfg(feature = "p5g-profile")]
@@ -69,10 +52,6 @@ impl ProfileMode {
             ProfileMode::AblateComputeG => "ablate-compute-g",
             ProfileMode::AblateConv => "ablate-conv",
             ProfileMode::AblateTArr => "ablate-t-arr",
-            ProfileMode::H2Measure => "h2-measure",
-            ProfileMode::AblateConvWithManualCacheUpdate => "ablate-conv-with-manual-cache-update",
-            ProfileMode::H4MeasurePhaseA => "h4-measure-phase-a",
-            ProfileMode::H4MeasureAblateComputeG => "h4-measure-ablate-compute-g",
         }
     }
 }
@@ -89,14 +68,6 @@ pub(crate) fn profile_mode() -> ProfileMode {
             Ok(s) if s == ProfileMode::AblateComputeG.as_str() => ProfileMode::AblateComputeG,
             Ok(s) if s == ProfileMode::AblateConv.as_str() => ProfileMode::AblateConv,
             Ok(s) if s == ProfileMode::AblateTArr.as_str() => ProfileMode::AblateTArr,
-            Ok(s) if s == ProfileMode::H2Measure.as_str() => ProfileMode::H2Measure,
-            Ok(s) if s == ProfileMode::AblateConvWithManualCacheUpdate.as_str() => {
-                ProfileMode::AblateConvWithManualCacheUpdate
-            }
-            Ok(s) if s == ProfileMode::H4MeasurePhaseA.as_str() => ProfileMode::H4MeasurePhaseA,
-            Ok(s) if s == ProfileMode::H4MeasureAblateComputeG.as_str() => {
-                ProfileMode::H4MeasureAblateComputeG
-            }
             _ => ProfileMode::Off,
         },
     )
@@ -303,11 +274,7 @@ impl GatedDeltaNet {
         layer_idx: i32,
     ) -> Result<Array> {
         let target = target.into();
-        // `layer_idx` is consumed by P5h SpanFields constructions in the
-        // p5h-profile feature path (each of the 11 substeps below). In the
-        // default build the parameter is unused at body level — silence the
-        // unused-variable warning.
-        #[cfg(not(feature = "p5h-profile"))]
+        // Signature parity with other layer-aware forward paths.
         let _ = layer_idx;
 
         // Pre-flight validation. Match P3b1 Mrope's "explicit bounds > trust caller"
@@ -399,22 +366,6 @@ impl GatedDeltaNet {
             Vec::new()
         };
 
-        // P5h T0b H2 per-step (real_us, substitute_us) pairs for Steps 2b/5/7c.
-        // None outside H2Measure mode — gate exit emission on Option::is_some().
-        // Each pair is filled in the corresponding step body when in H2Measure mode.
-        #[cfg(feature = "p5g-profile")]
-        let mut _p5h_t0b_h2_step_2b: Option<(u64, u64)> = None;
-        #[cfg(feature = "p5g-profile")]
-        let mut _p5h_t0b_h2_step_5: Option<(u64, u64)> = None;
-        #[cfg(feature = "p5g-profile")]
-        let mut _p5h_t0b_h2_step_7c: Option<(u64, u64)> = None;
-
-        // P5h T0b H4 Step 7d tight kernel-materialization timer (us). Fires
-        // under H4MeasurePhaseA or H4MeasureAblateComputeG only. Cache update
-        // (c.update_recurrent + c.advance) is excluded from this timer.
-        #[cfg(feature = "p5g-profile")]
-        let mut _p5h_t0b_h4_step_7d: Option<u64> = None;
-
         // Step 1: reference-equivalent input projections.
         // Step 1a: in_proj_qkv + in_proj_z, then mask-zero qkv at pad
         // positions. The mask multiply stays bundled with qkv projection
@@ -450,33 +401,6 @@ impl GatedDeltaNet {
             None
         };
         let (qkv, z) = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_1a_in_proj_qkvz",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<(Array, Array)> {
-                        let qkv = self.in_proj_qkv.forward_on(x, target)?;
-                        let z = self.in_proj_z.forward_on(x, target)?;
-                        let qkv = if let Some(m) = mask {
-                            let m_dtype = mlx::ops::cast::astype(m, qkv.dtype())?;
-                            let m_broadcast = m_dtype.reshape_on((batch, seq, 1), target)?;
-                            &qkv * &m_broadcast
-                        } else {
-                            qkv
-                        };
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&qkv, &z])?;
-                        }
-                        Ok((qkv, z))
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 let qkv = self.in_proj_qkv.forward_on(x, target)?;
                 let z = self.in_proj_z.forward_on(x, target)?;
@@ -511,26 +435,6 @@ impl GatedDeltaNet {
             None
         };
         let (b, a) = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_1b_in_proj_ba",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<(Array, Array)> {
-                        let b = self.in_proj_b.forward_on(x, target)?;
-                        let a = self.in_proj_a.forward_on(x, target)?;
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&b, &a])?;
-                        }
-                        Ok((b, a))
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 let b = self.in_proj_b.forward_on(x, target)?;
                 let a = self.in_proj_a.forward_on(x, target)?;
@@ -552,18 +456,8 @@ impl GatedDeltaNet {
         // gated on ablate_conv below. Step 2a + 2b Layer 2 timers still fire to record
         // the no-op pass-through cost.
         //
-        // P5h T0b H3: split into two booleans so AblateConvWithManualCacheUpdate
-        // can take the Step 2b passthrough while still running the real Step 2c
-        // cache update.
-        //   * ablate_conv_step_2b — true under {AblateConv, AblateConvWithManualCacheUpdate}.
-        //     Bypasses concat + conv1d + silu (Steps 2a/2b body); conv_out = qkv.clone().
-        //   * ablate_conv_step_2c — true ONLY under AblateConv. Skips update_conv.
-        // Existing AblateConv behavior is preserved (both flags true).
         #[cfg(feature = "p5g-profile")]
-        let ablate_conv_step_2b = matches!(
-            _p5g_mode,
-            ProfileMode::AblateConv | ProfileMode::AblateConvWithManualCacheUpdate
-        );
+        let ablate_conv_step_2b = matches!(_p5g_mode, ProfileMode::AblateConv);
         #[cfg(not(feature = "p5g-profile"))]
         let ablate_conv_step_2b = false;
 
@@ -586,42 +480,7 @@ impl GatedDeltaNet {
         };
         let conv_input = {
             // Step 2a is skipped only when Step 2c is ALSO skipped (i.e. nothing
-            // reads conv_input downstream). Under AblateConvWithManualCacheUpdate
-            // Step 2c needs the real concatenated conv_input, so we run the real
-            // concat even though Step 2b bypasses conv1d.
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_2a_prepend_conv_state",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<Array> {
-                        let out = if ablate_conv_step_2c {
-                            // ablate-conv early path: skip concat entirely; conv_input is unused.
-                            qkv.clone()
-                        } else {
-                            match cache.as_deref_mut() {
-                                Some(c) => concatenate(&[c.conv_state(), &qkv], 1)?,
-                                None => {
-                                    let zeros = Array::zeros(
-                                        (batch, self.cfg.conv_kernel_size - 1, self.cfg.conv_dim()),
-                                        qkv.dtype(),
-                                    )?;
-                                    concatenate(&[&zeros, &qkv], 1)?
-                                }
-                            }
-                        };
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&out])?;
-                        }
-                        Ok(out)
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
+            // reads conv_input downstream).
             {
                 if ablate_conv_step_2c {
                     qkv.clone()
@@ -657,45 +516,9 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        // P5h T0b H2: separate timer for the real-body wall time. Started here
-        // BEFORE the body so the timer captures construction + eval (apples to
-        // apples with the substitute timer below which also covers construction).
-        #[cfg(feature = "p5g-profile")]
-        let _p5h_t0b_h2_start_2b_real = if matches!(_p5g_mode, ProfileMode::H2Measure) {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
         // ablate-conv early path: bypass conv1d + silu entirely; conv_out = qkv passthrough.
         // Under AblateConv, conv_state is NOT updated (Step 2c skips update below).
-        // Under AblateConvWithManualCacheUpdate, the bypass is the SAME but Step 2c
-        // still runs the real cache update from conv_input tail. Diagnostic only.
         let conv_out = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_2b_conv1d_silu",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<Array> {
-                        let out = if ablate_conv_step_2b {
-                            qkv.clone()
-                        } else {
-                            let conv_out = self.conv1d.forward_on(&conv_input, target)?;
-                            let conv_sig = conv_out.sigmoid()?;
-                            &conv_out * &conv_sig
-                        };
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&out])?;
-                        }
-                        Ok(out)
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 if ablate_conv_step_2b {
                     qkv.clone()
@@ -714,21 +537,6 @@ impl GatedDeltaNet {
                     mlx::transforms::eval(&[&conv_out])?;
                 }
                 _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
-            }
-        }
-        // P5h T0b H2: under H2Measure, eval the real conv_out and capture its
-        // wall time, then build the substitute (qkv.clone()) and eval it. The
-        // substitute is discarded; forward continues using the real conv_out.
-        #[cfg(feature = "p5g-profile")]
-        {
-            if let Some(start_real) = _p5h_t0b_h2_start_2b_real {
-                mlx::transforms::eval(&[&conv_out])?;
-                let real_us = start_real.elapsed().as_micros() as u64;
-                let start_sub = std::time::Instant::now();
-                let substitute = qkv.clone();
-                mlx::transforms::eval(&[&substitute])?;
-                let substitute_us = start_sub.elapsed().as_micros() as u64;
-                _p5h_t0b_h2_step_2b = Some((real_us, substitute_us));
             }
         }
 
@@ -756,91 +564,9 @@ impl GatedDeltaNet {
         // (3.45x decode slowdown root cause, take_along_axis fusable fast path,
         // bounds-check argument, and ablate-conv stale-data skip).
         {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_2c_update_conv_state",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<()> {
-                        if let Some(c) = cache.as_deref_mut() {
-                            if !ablate_conv_step_2c {
-                                let n_keep = self.cfg.conv_kernel_size - 1;
-                                let conv_input_dims = conv_input.shape();
-                                let total_len = conv_input_dims.as_slice()[1];
-                                let conv_dim = self.cfg.conv_dim();
-                                let new_conv_state = match per_row_lens {
-                                    Some(lens)
-                                        if batch > 1
-                                            && !lens.iter().all(|&l| l + n_keep == total_len) =>
-                                    {
-                                        if lens.len() as i32 != batch {
-                                            return Err(anyhow!(
-                                                "GatedDeltaNet::forward_on: per_row_lens.len()={} != batch={}",
-                                                lens.len(),
-                                                batch
-                                            ));
-                                        }
-                                        let mut idx_flat: Vec<u32> =
-                                            Vec::with_capacity((batch * n_keep) as usize);
-                                        for &l in lens {
-                                            for j in 0..n_keep {
-                                                idx_flat.push((l + j) as u32);
-                                            }
-                                        }
-                                        let idx: Array =
-                                            (&idx_flat[..], &[batch, n_keep, 1_i32][..])
-                                                .try_into()
-                                                .map_err(|e| {
-                                                    anyhow!(
-                                                "GatedDeltaNet::forward_on: idx try_into Array failed: {e:?}"
-                                            )
-                                                })?;
-                                        mlx::ops::indexing::take_along_axis_on(
-                                            &conv_input,
-                                            &idx,
-                                            1,
-                                            target,
-                                        )?
-                                    }
-                                    _ => mlx::ops::indexing::slice(
-                                        &conv_input,
-                                        vec![0_i32, total_len - n_keep, 0].as_slice(),
-                                        vec![batch, total_len, conv_dim].as_slice(),
-                                    )?,
-                                };
-                                // T4.3: wrap GatedDeltaCache::update_conv field
-                                // assignment in `cache_state_update` child span
-                                // (parent: `gda_step_2c_update_conv_state`).
-                                // The assignment itself is ~0us (Arc share); the
-                                // span exists to attribute the mutation cost
-                                // explicitly in the T5 tree so the substep's
-                                // residual reflects only the new_conv_state
-                                // build (slice / take_along_axis).
-                                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                                    "cache_state_update",
-                                    || crate::core::p5h::SpanFields {
-                                        layer_idx: Some(layer_idx),
-                                        ..Default::default()
-                                    },
-                                    || {
-                                        c.update_conv(new_conv_state);
-                                    },
-                                );
-                            }
-                        }
-                        Ok(())
-                    },
-                )?;
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 // ablate-conv: conv was replaced with qkv passthrough, so conv_state
                 // would receive stale data. Skip the update entirely.
-                // AblateConvWithManualCacheUpdate (H3): keep the real update so we
-                // can isolate cache-staleness cost from the passthrough body cost.
                 // (ablate_conv_step_2c is defined above at Step 2a entry; no
                 // re-check needed.)
                 if let Some(c) = cache.as_deref_mut() {
@@ -919,8 +645,6 @@ impl GatedDeltaNet {
                 // construction and the real cost was mis-attributed to downstream steps.
                 // Under AblateConv the cache block was skipped, so conv_state() still
                 // holds the old (already-materialized) value — eval is a no-op there.
-                // Under AblateConvWithManualCacheUpdate (H3) the update DID run, so
-                // eval here forces materialization of the manually-restored cache state.
                 if let Some(c) = cache.as_deref() {
                     mlx::transforms::eval(&[c.conv_state()])?;
                 }
@@ -938,41 +662,6 @@ impl GatedDeltaNet {
             None
         };
         let (q_per_head, k_per_head, v_per_head) = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_3_split_reshape_per_head",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<(Array, Array, Array)> {
-                        let split_at = vec![self.cfg.key_dim(), 2 * self.cfg.key_dim()];
-                        let parts = mlx::ops::shape::split_at_on(&conv_out, &split_at, -1, target)?;
-                        let q_flat = &parts[0];
-                        let k_flat = &parts[1];
-                        let v_flat = &parts[2];
-                        let q_per_head = q_flat.reshape_on(
-                            (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
-                            target,
-                        )?;
-                        let k_per_head = k_flat.reshape_on(
-                            (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
-                            target,
-                        )?;
-                        let v_per_head = v_flat.reshape_on(
-                            (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
-                            target,
-                        )?;
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&q_per_head, &k_per_head, &v_per_head])?;
-                        }
-                        Ok((q_per_head, k_per_head, v_per_head))
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 let split_at = vec![self.cfg.key_dim(), 2 * self.cfg.key_dim()];
                 let parts = mlx::ops::shape::split_at_on(&conv_out, &split_at, -1, target)?;
@@ -1012,29 +701,6 @@ impl GatedDeltaNet {
             None
         };
         let (q_scaled, k_scaled) = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_4_qk_rmsnorm",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<(Array, Array)> {
-                        let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
-                        let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
-                        let q_scaled = &q_normed * (inv_scale * inv_scale);
-                        let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
-                        let k_scaled = &k_normed * inv_scale;
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&q_scaled, &k_scaled])?;
-                        }
-                        Ok((q_scaled, k_scaled))
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
                 let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
@@ -1061,10 +727,7 @@ impl GatedDeltaNet {
         // dtype (inner.exp() is f32) and shape ([B, S, num_v_heads]).
         // Step 5 Layer 2 timer still fires to record the no-op pass-through cost.
         #[cfg(feature = "p5g-profile")]
-        let ablate_compute_g = matches!(
-            _p5g_mode,
-            ProfileMode::AblateComputeG | ProfileMode::H4MeasureAblateComputeG
-        );
+        let ablate_compute_g = matches!(_p5g_mode, ProfileMode::AblateComputeG);
         #[cfg(not(feature = "p5g-profile"))]
         let ablate_compute_g = false;
 
@@ -1074,48 +737,7 @@ impl GatedDeltaNet {
         } else {
             None
         };
-        // P5h T0b H2: real-body timer for Step 5 (compute_g chain).
-        #[cfg(feature = "p5g-profile")]
-        let _p5h_t0b_h2_start_5_real = if matches!(_p5g_mode, ProfileMode::H2Measure) {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
         let g = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_5_compute_g",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<Array> {
-                        let g = if ablate_compute_g {
-                            // see cfg-off arm below for design rationale
-                            mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?
-                        } else {
-                            let x_sp = &a + &self.dt_bias;
-                            let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
-                            let zeros = a.zeros_like()?;
-                            let safe = zeros.logaddexp(&x_sp)?;
-                            let cond = x_sp.greater(&twenty)?;
-                            let sp = cond.where_(&x_sp, &safe)?;
-                            let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
-                            let exp_alog = a_log_f32.exp()?;
-                            let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
-                            let inner = &neg_exp_alog * &sp;
-                            inner.exp()?
-                        };
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&g])?;
-                        }
-                        Ok(g)
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 if ablate_compute_g {
                     // ablate-compute-g early path: bypass softplus/exp/mul/exp chain.
@@ -1148,21 +770,6 @@ impl GatedDeltaNet {
                 _p5g_step_elapsed.push(start.elapsed().as_micros() as u64);
             }
         }
-        // P5h T0b H2: under H2Measure, eval the real g (real compute_g chain)
-        // and capture its wall time, then build the substitute
-        // (zeros_like(a) cast to Float32) and eval it. Substitute discarded.
-        #[cfg(feature = "p5g-profile")]
-        {
-            if let Some(start_real) = _p5h_t0b_h2_start_5_real {
-                mlx::transforms::eval(&[&g])?;
-                let real_us = start_real.elapsed().as_micros() as u64;
-                let start_sub = std::time::Instant::now();
-                let substitute = mlx::ops::cast::astype(&a.zeros_like()?, Dtype::Float32)?;
-                mlx::transforms::eval(&[&substitute])?;
-                let substitute_us = start_sub.elapsed().as_micros() as u64;
-                _p5h_t0b_h2_step_5 = Some((real_us, substitute_us));
-            }
-        }
 
         // Step 6: beta = sigmoid(b)
         #[cfg(feature = "p5g-profile")]
@@ -1172,25 +779,6 @@ impl GatedDeltaNet {
             None
         };
         let beta = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_6_sigmoid_beta",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<Array> {
-                        let beta = b.sigmoid_on(target)?;
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&beta])?;
-                        }
-                        Ok(beta)
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 b.sigmoid_on(target)?
             }
@@ -1213,272 +801,6 @@ impl GatedDeltaNet {
         };
 
         let y = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_7_kernel_and_cache_update",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<Array> {
-                        // P5h+1 T1.5 (Codex B-lite): the kernel-dispatch +
-                        // materialize work (Steps 7a-7d) moves into a dedicated
-                        // child span so the parent `gda_step_7_kernel_and_cache_
-                        // update` becomes a thin wrapper with only two leaf
-                        // children (kernel_dispatch_and_materialize +
-                        // cache_state_update). Prior to this split the kernel
-                        // self-time accumulated inside the parent and was
-                        // synthesized as an `unattributed_*` residual leaf in
-                        // the aggregator — accounting for 88-98% of total
-                        // unattributed time per PP and pushing coverage_pct to
-                        // 0.92-0.94 (below the 0.95 close-gate threshold).
-                        let (y, new_state) =
-                            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                                "gda_step_7_kernel_dispatch_and_materialize",
-                                || crate::core::p5h::SpanFields {
-                                    layer_idx: Some(layer_idx),
-                                    ..Default::default()
-                                },
-                                || -> Result<(Array, Array)> {
-                                    // Step 7a: build/get the appropriate kernel.
-                                    // Initial chunks start from an all-zero
-                                    // recurrent state; use a dedicated kernel
-                                    // that initializes registers to zero rather
-                                    // than reading a large fp32 zero buffer.
-                                    let zero_state = match cache.as_deref() {
-                                        Some(c) => c.offsets().iter().all(|&o| o == 0),
-                                        None => true,
-                                    };
-                                    let kernel = match (mask.is_some(), zero_state) {
-                                        (true, true) => {
-                                            self.kernel_zero_state_masked.get_or_init(|| {
-                                                build_gated_delta_zero_state_kernel(true)
-                                                    .expect("build zero-state masked kernel")
-                                            })
-                                        }
-                                        (false, true) => {
-                                            self.kernel_zero_state_no_mask.get_or_init(|| {
-                                                build_gated_delta_zero_state_kernel(false)
-                                                    .expect("build zero-state no-mask kernel")
-                                            })
-                                        }
-                                        (true, false) => self.kernel_masked.get_or_init(|| {
-                                            build_gated_delta_kernel(true)
-                                                .expect("build masked kernel")
-                                        }),
-                                        (false, false) => self.kernel_no_mask.get_or_init(|| {
-                                            build_gated_delta_kernel(false)
-                                                .expect("build no-mask kernel")
-                                        }),
-                                    };
-
-                                    // Step 7b: get state_in only after the
-                                    // stream has already advanced. See cfg-off
-                                    // arm below for Arc-share / cache-slot
-                                    // rationale.
-                                    let state_in = if zero_state {
-                                        None
-                                    } else {
-                                        Some(
-                                            cache
-                                                .as_deref()
-                                                .expect("nonzero GDN state requires cache to exist")
-                                                .recurrent_state()
-                                                .clone(),
-                                        )
-                                    };
-
-                                    // Step 7c: T as 0-dim int32 array.
-                                    // see cfg-off arm below for ablate-t-arr
-                                    // cache rationale.
-                                    #[cfg(feature = "p5g-profile")]
-                                    let t_arr: Array =
-                                        if matches!(_p5g_mode, ProfileMode::AblateTArr) {
-                                            let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
-                                                std::sync::Mutex::new(
-                                                    std::collections::HashMap::new(),
-                                                )
-                                            });
-                                            let mut guard = cache.lock().unwrap();
-                                            if let Some(arr) = guard.get(&seq) {
-                                                arr.clone()
-                                            } else {
-                                                let arr: Array = (&[seq][..], ()).try_into()?;
-                                                guard.insert(seq, arr.clone());
-                                                arr
-                                            }
-                                        } else if matches!(_p5g_mode, ProfileMode::H2Measure) {
-                                            // P5h T0b H2: time real construct,
-                                            // then time substitute
-                                            // (T_ARR_ABLATION_CACHE Mutex lookup
-                                            // pattern). The Mutex lock is itself a
-                                            // wall-time signal that's being
-                                            // measured. Forward continues using
-                                            // the real t_arr.
-                                            let start_real = std::time::Instant::now();
-                                            let real_t_arr: Array = (&[seq][..], ()).try_into()?;
-                                            mlx::transforms::eval(&[&real_t_arr])?;
-                                            let real_us = start_real.elapsed().as_micros() as u64;
-                                            let start_sub = std::time::Instant::now();
-                                            let cache = T_ARR_ABLATION_CACHE.get_or_init(|| {
-                                                std::sync::Mutex::new(
-                                                    std::collections::HashMap::new(),
-                                                )
-                                            });
-                                            let mut guard = cache.lock().unwrap();
-                                            let substitute: Array =
-                                                if let Some(arr) = guard.get(&seq) {
-                                                    arr.clone()
-                                                } else {
-                                                    let arr: Array = (&[seq][..], ()).try_into()?;
-                                                    guard.insert(seq, arr.clone());
-                                                    arr
-                                                };
-                                            drop(guard);
-                                            mlx::transforms::eval(&[&substitute])?;
-                                            let substitute_us =
-                                                start_sub.elapsed().as_micros() as u64;
-                                            _p5h_t0b_h2_step_7c = Some((real_us, substitute_us));
-                                            real_t_arr
-                                        } else {
-                                            (&[seq][..], ()).try_into()?
-                                        };
-                                    #[cfg(not(feature = "p5g-profile"))]
-                                    let t_arr: Array = (&[seq][..], ()).try_into()?;
-
-                                    let in_dtype = x.dtype();
-                                    let st_dtype = Dtype::Float32;
-                                    let y_shape = Shape::from(vec![
-                                        batch,
-                                        seq,
-                                        self.cfg.num_v_heads,
-                                        self.cfg.head_v_dim,
-                                    ]);
-                                    let state_shape = Shape::from(vec![
-                                        batch,
-                                        self.cfg.num_v_heads,
-                                        self.cfg.head_v_dim,
-                                        self.cfg.head_k_dim,
-                                    ]);
-
-                                    // Step 7d: dispatch
-                                    let mut kernel_inputs: Vec<&Array> =
-                                        vec![&q_scaled, &k_scaled, &v_per_head, &g, &beta];
-                                    if let Some(state_in) = state_in.as_ref() {
-                                        kernel_inputs.push(state_in);
-                                    }
-                                    kernel_inputs.push(&t_arr);
-                                    if let Some(m) = mask {
-                                        kernel_inputs.push(m);
-                                    }
-
-                                    // P5h T0b H4: tight Step 7d timer fires
-                                    // under H4MeasurePhaseA /
-                                    // H4MeasureAblateComputeG. Covers
-                                    // dispatch_builder...dispatch + take_at(0)
-                                    // x2 + eval. Cache update (Step 7e) stays
-                                    // OUTSIDE this timer (and OUTSIDE this
-                                    // sub-span).
-                                    #[cfg(feature = "p5g-profile")]
-                                    let _p5h_t0b_h4_start_7d = if matches!(
-                                        _p5g_mode,
-                                        ProfileMode::H4MeasurePhaseA
-                                            | ProfileMode::H4MeasureAblateComputeG
-                                    ) {
-                                        Some(std::time::Instant::now())
-                                    } else {
-                                        None
-                                    };
-
-                                    let mut outputs = kernel
-                                        .dispatch_builder()
-                                        .inputs(&kernel_inputs)
-                                        .output_shapes(&[y_shape, state_shape])
-                                        .output_dtypes(&[in_dtype, st_dtype])
-                                        .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
-                                        .threadgroup(32, 4, 1)
-                                        .template_int("Dk", self.cfg.head_k_dim)
-                                        .template_int("Dv", self.cfg.head_v_dim)
-                                        .template_int("Hk", self.cfg.num_k_heads)
-                                        .template_int("Hv", self.cfg.num_v_heads)
-                                        .template_dtype("InT", in_dtype)
-                                        .template_dtype("StT", st_dtype)
-                                        .stream(target)
-                                        .dispatch()?;
-
-                                    let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
-                                    let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
-
-                                    // P5h T0b H4: force-eval both kernel
-                                    // outputs to materialize before capturing
-                                    // elapsed; without this the timer
-                                    // measures only graph construction.
-                                    #[cfg(feature = "p5g-profile")]
-                                    {
-                                        if let Some(start) = _p5h_t0b_h4_start_7d {
-                                            mlx::transforms::eval(&[&y, &new_state])?;
-                                            _p5h_t0b_h4_step_7d =
-                                                Some(start.elapsed().as_micros() as u64);
-                                        }
-                                    }
-
-                                    // P5h+1 T1: measurement-eval probe for
-                                    // BOTH kernel outputs. T1.5 (Codex B-lite)
-                                    // eval(&[&y, &new_state]) — eval'ing
-                                    // `new_state` here (rather than letting it
-                                    // materialize lazily in the subsequent
-                                    // cache_state_update child) keeps the
-                                    // dispatch+take_at materialization cost
-                                    // attributed to THIS sub-span instead of
-                                    // bleeding into cache_state_update.
-                                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                                        mlx::transforms::eval(&[&y, &new_state])?;
-                                    }
-                                    Ok((y, new_state))
-                                },
-                            )?;
-
-                        // Step 7e: update cache recurrent_state, advance offset.
-                        // T4.3: wrap the GatedDeltaCache::update_recurrent +
-                        // advance pair in a `cache_state_update` child span
-                        // (parent: `gda_step_7_kernel_and_cache_update`).
-                        // Both operations are CPU-only (Arc share / per-row
-                        // offset increment); the span exists to attribute the
-                        // mutation cost explicitly in the T5 tree, separating
-                        // it from the kernel dispatch + state construction
-                        // cost (now owned by the sibling
-                        // `gda_step_7_kernel_dispatch_and_materialize`
-                        // sub-span per P5h+1 T1.5).
-                        if let Some(c) = cache.as_deref_mut() {
-                            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                                "cache_state_update",
-                                || crate::core::p5h::SpanFields {
-                                    layer_idx: Some(layer_idx),
-                                    ..Default::default()
-                                },
-                                || -> Result<()> {
-                                    c.update_recurrent(new_state);
-                                    let lens_owned: Vec<i32>;
-                                    let lens_ref: &[i32] = match per_row_lens {
-                                        Some(l) => l,
-                                        None => {
-                                            // Non-batched single-stream caller:
-                                            // lockstep-equivalent uniform.
-                                            lens_owned = vec![seq; batch as usize];
-                                            &lens_owned
-                                        }
-                                    };
-                                    c.advance(lens_ref)?;
-                                    Ok(())
-                                },
-                            )?;
-                        }
-                        Ok(y)
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 // Step 7a: build/get the appropriate kernel. The initial
                 // prefill chunk has a logically all-zero recurrent state; use
@@ -1539,31 +861,6 @@ impl GatedDeltaNet {
                         guard.insert(seq, arr.clone());
                         arr
                     }
-                } else if matches!(_p5g_mode, ProfileMode::H2Measure) {
-                    // P5h T0b H2: time real construct, then time substitute
-                    // (T_ARR_ABLATION_CACHE Mutex lookup pattern). The Mutex
-                    // lock is itself a wall-time signal that's being measured.
-                    // Forward continues using the real t_arr.
-                    let start_real = std::time::Instant::now();
-                    let real_t_arr: Array = (&[seq][..], ()).try_into()?;
-                    mlx::transforms::eval(&[&real_t_arr])?;
-                    let real_us = start_real.elapsed().as_micros() as u64;
-                    let start_sub = std::time::Instant::now();
-                    let cache = T_ARR_ABLATION_CACHE
-                        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-                    let mut guard = cache.lock().unwrap();
-                    let substitute: Array = if let Some(arr) = guard.get(&seq) {
-                        arr.clone()
-                    } else {
-                        let arr: Array = (&[seq][..], ()).try_into()?;
-                        guard.insert(seq, arr.clone());
-                        arr
-                    };
-                    drop(guard);
-                    mlx::transforms::eval(&[&substitute])?;
-                    let substitute_us = start_sub.elapsed().as_micros() as u64;
-                    _p5h_t0b_h2_step_7c = Some((real_us, substitute_us));
-                    real_t_arr
                 } else {
                     (&[seq][..], ()).try_into()?
                 };
@@ -1593,19 +890,6 @@ impl GatedDeltaNet {
                     kernel_inputs.push(m);
                 }
 
-                // P5h T0b H4: tight Step 7d timer fires under H4MeasurePhaseA /
-                // H4MeasureAblateComputeG. Covers dispatch_builder...dispatch +
-                // take_at(0)x2 + eval. Cache update (Step 7e) stays OUTSIDE.
-                #[cfg(feature = "p5g-profile")]
-                let _p5h_t0b_h4_start_7d = if matches!(
-                    _p5g_mode,
-                    ProfileMode::H4MeasurePhaseA | ProfileMode::H4MeasureAblateComputeG
-                ) {
-                    Some(std::time::Instant::now())
-                } else {
-                    None
-                };
-
                 let mut outputs = kernel
                     .dispatch_builder()
                     .inputs(&kernel_inputs)
@@ -1624,16 +908,6 @@ impl GatedDeltaNet {
 
                 let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
                 let new_state = outputs.take_at(0)?; // [B, Hv, Dv, Dk]
-
-                // P5h T0b H4: force-eval both kernel outputs to materialize
-                // before capturing elapsed.
-                #[cfg(feature = "p5g-profile")]
-                {
-                    if let Some(start) = _p5h_t0b_h4_start_7d {
-                        mlx::transforms::eval(&[&y, &new_state])?;
-                        _p5h_t0b_h4_step_7d = Some(start.elapsed().as_micros() as u64);
-                    }
-                }
 
                 // Step 7e: update cache recurrent_state, advance offset
                 if let Some(c) = cache.as_deref_mut() {
@@ -1686,32 +960,6 @@ impl GatedDeltaNet {
 
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
         let out = {
-            #[cfg(feature = "p5h-profile")]
-            {
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gda_step_8_norm_proj",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<Array> {
-                        let z_per_head = z.reshape_on(
-                            (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
-                            target,
-                        )?;
-                        let normed = self.norm.forward_on(&y, Some(&z_per_head), target)?;
-                        let normed_flat =
-                            normed.reshape_on((batch, seq, self.cfg.value_dim()), target)?;
-                        let out = self.out_proj.forward_on(&normed_flat, target)?;
-                        // P5h+1 T1: measurement-eval probe.
-                        if crate::core::p5h::is_measurement_eval_probes_active() {
-                            mlx::transforms::eval(&[&out])?;
-                        }
-                        Ok(out)
-                    },
-                )?
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 let z_per_head = z.reshape_on(
                     (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
@@ -1782,70 +1030,6 @@ impl GatedDeltaNet {
                     offset_after,
                     elapsed_us,
                     breakdown_suffix
-                );
-            }
-        }
-
-        // P5h T0b H2 emission: one record per step (2b, 5, 7c) with the paired
-        // (real_us, substitute_us) measurements. Only fires when the
-        // corresponding step actually captured a pair (i.e. _p5g_mode ==
-        // H2Measure). Field names + order match the harness parser exactly.
-        #[cfg(feature = "p5g-profile")]
-        {
-            let layer = self.profile_layer_idx.unwrap_or(-1);
-            if let Some((r2b, s2b)) = _p5h_t0b_h2_step_2b {
-                tracing::info!(
-                    "[p5h-t0b-h2] mode={} step=step_2b layer={} batch={} \
-                     seq={} real_us={} substitute_us={}",
-                    _p5g_mode.as_str(),
-                    layer,
-                    batch,
-                    seq,
-                    r2b,
-                    s2b
-                );
-            }
-            if let Some((r5, s5)) = _p5h_t0b_h2_step_5 {
-                tracing::info!(
-                    "[p5h-t0b-h2] mode={} step=step_5_compute_g layer={} \
-                     batch={} seq={} real_us={} substitute_us={}",
-                    _p5g_mode.as_str(),
-                    layer,
-                    batch,
-                    seq,
-                    r5,
-                    s5
-                );
-            }
-            if let Some((r7c, s7c)) = _p5h_t0b_h2_step_7c {
-                tracing::info!(
-                    "[p5h-t0b-h2] mode={} step=step_7c_t_arr layer={} \
-                     batch={} seq={} real_us={} substitute_us={}",
-                    _p5g_mode.as_str(),
-                    layer,
-                    batch,
-                    seq,
-                    r7c,
-                    s7c
-                );
-            }
-        }
-
-        // P5h T0b H4 emission: one record per forward with the tight Step 7d
-        // dispatch+take+eval wall time. Only fires under H4MeasurePhaseA /
-        // H4MeasureAblateComputeG (the only modes that set _p5h_t0b_h4_step_7d).
-        #[cfg(feature = "p5g-profile")]
-        {
-            if let Some(t7d) = _p5h_t0b_h4_step_7d {
-                let layer = self.profile_layer_idx.unwrap_or(-1);
-                tracing::info!(
-                    "[p5h-t0b-h4] mode={} step=step_7d_dispatch_materialize layer={} \
-                     batch={} seq={} elapsed_us={}",
-                    _p5g_mode.as_str(),
-                    layer,
-                    batch,
-                    seq,
-                    t7d
                 );
             }
         }

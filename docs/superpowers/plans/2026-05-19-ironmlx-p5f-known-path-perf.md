@@ -4,7 +4,6 @@
 
 **Goal:** Deliver sanity-verified 2.44-3.21× single-request prefill speedup (PP=128/512) via CLI default `b_max=1` (T1), plus 1.9-2.5× long-prompt prefill speedup (PP=4096+) via GenerationStream single-shot fallback when KV budget allows (T2). Multi-request `--b-max N>1` capability preserved.
 
-**Architecture:** Two orthogonal optimizations: T1 changes one CLI default value (no Scheduler / KVCache / forward path edits); T2 adds memory-budget-aware dispatch in `GenerationStream::new_text_only` prefill loop (replaces always-chunked-when-PP-exceeds-prefill_chunk_size with try-single-shot-if-budget-allows). Both ship independently. Multi-request batching is deferred to P5h/P6+ per Boss directive (preserved as `--b-max N > 1` opt-in).
 
 **Tech Stack:** Rust 1.94 / mlx (cxx-mlx wrapper) / Apple Silicon Metal (M5 Max 128 GB) / MoE Qwen3.5-35B-A3B-4bit. iron-bench Rust HTTP harness for end-to-end perf validation.
 
@@ -500,7 +499,6 @@ chat / agent serve, P5d/e/f bench scenarios).
 
 Multi-request batching capability is preserved (Scheduler / KVCache
 / forward path unchanged): users explicitly pass --b-max N > 1 to
-enable. Future phases (P5h / P6+) will revisit default value when
 multi-user / agent-fleet scenarios become primary.
 
 Startup INFO log:
@@ -1194,14 +1192,12 @@ Ranked by expected impact on residual gap:
 
 3. **Router bypass for single-request idle server** (if Scheduler admission/queue overhead > 50ms — needs measurement)
 
-4. **Multi-request batching enhancement (P5h / P6+, separate phase)**
    - Per Boss directive: this capability must NOT be lost in the roadmap
    - Future work items: PagedCache evaluation, ragged batching, dynamic b_max, admit_mid efficiency
    - Trigger: when ironmlx enters multi-user / agent-fleet deployment
 
 ## §8 Out of P5f scope (deferred capabilities)
 
-- **Multi-request batching default re-evaluation**: `--b-max N > 1` works today via explicit flag. The default-to-1 choice is single-request optimal; multi-request deployment will revisit default selection in P5h / P6+.
 - **omlx-style PagedCache**: not aligned with current ironmlx design ([feedback_design_philosophy]). Reconsider only if multi-request scaling shows demand.
 - **mlx::compile wrap**: still blocked by 4 safe-wrapper API gaps from P5e T2.
 - **Sorted-routing micro-opt** (cache token_idx, put_along_axis): ROI < 2%, not P5f scope.
@@ -1254,7 +1250,6 @@ P5g scope is now quantified in reports/p5f-final-results.md §6/§7:
   3. Router bypass evaluation (conditional)
 
 Multi-request batching is explicitly preserved in roadmap (§7 item 4)
-per Boss directive — never lost, just deferred to P5h / P6+.
 
 Per [feedback_no_spec_from_competitors]: omlx remains observation only;
 P5g design path is independent of omlx.patches.

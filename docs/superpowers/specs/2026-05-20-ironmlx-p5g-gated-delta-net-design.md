@@ -10,8 +10,6 @@
 | 硬件 | M5 Max + 128 GB unified |
 | 验证模型 | `mlx-community/Qwen3.5-35B-A3B-4bit`（PP=128/512/2048/4096/8192/16384） |
 | 验收 | profile-driven 优化项至少 1 个 ship 满足 § 7.3 端到端 ship 指标（**geometric mean prefill > 5% on PP=2048/4096/8192/16384 AND 各档单点 regression < 2%**）；全 PP 段无 prefill/decode regression > 2%；sentinel + batched + http_smoke + sweep_full 全 PASS。 |
-| 显式 out-of-scope | GatedAttention 优化（留 P5h）；long-prompt chunk-size sweep（P5h）；router bypass（P5h 条件性）；multi-request batching（P5h/P6+ per Boss 2026-05-19 directive）；Metal kernel rewrite（优先 op-level，profile 不够再 expand）。 |
-| 性能目标 | **TBD by T0.a** — final target 待 T0.a 实测当前 HEAD GatedDeltaNet boundary-isolated occupancy estimate + T0.c shape-preserving ablation upper bound 后由 § 7.2 锁定。**不外推 P5e 旧数据**（P5e T0 instrumented direct call + 921 tok/s 基线跟 P5f HTTP 1844 tok/s baseline 测量路径不同）。Ship 决策按 § 7.3 端到端 iron-bench benchmark：长 prompt geometric mean prefill > 5% AND 各档 regression < 2%。P5f+P5g+P5h+ 联合追"全 PP 段 omlx+10%" ultimate target，P5g 单 phase 不强求达成。 |
 
 ## § 1 调研依据与决策摘要
 
@@ -85,7 +83,6 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 
 ### 1.4 Boss 决策记录（2026-05-20 brainstorming）
 
-- **Scope（Q1）**：聚焦 GatedDeltaNet only；GatedAttention / chunk sweep / router bypass 留 P5h
 - **Process（Q2）**：Profile-first — P5g T0 instrument per-op timing 验证 hot points 估计占比；T1-T3 优化项由 profile 数据决定，不预设
 - **Branch（Q3）**：新开 `ironmlx-p5g-perf` 从 `d74c405` 分叉
 
@@ -119,7 +116,6 @@ P5g profile-first 决策 (§ 2) 要求 **measurement 验证** static-code 假设
 │   ├─ 4-way bench (ironmlx / mlx-lm / omlx)                 │
 │   ├─ sweep_full 19/19                                      │
 │   ├─ reports/p5g-final-results.md (self-contained)         │
-│   └─ quantify P5h scope drivers (residual gap attribution) │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -350,7 +346,6 @@ C1 (compute_g) / C2 (stateful conv) / C3 (conv1d+silu) 都不在 top-3。Step 5 
 | ablate-conv (~C2/C3) | -7.81% | -7.54% | -4.97% | -1.36% |
 | ablate-t-arr (~C4) | -10.59% | -7.74% | -7.83% | -4.38% |
 
-**全部 negative** — 所有 ablation 都比 Phase A 慢。Plan § 7.1 "Phase D = clean ablation reading / candidate upper-bound cut" 的假设**被实测推翻**。可能根因 (待 P5h 优先级，不阻塞 T1): (a) GPU thermal drift across 24 spawns; (b) substitute 自身有成本 (`zeros_like+astype`、`HashMap+Mutex`、`qkv.clone()` 不必比原 op 便宜); (c) cache state divergence (AblateConv 不更新 conv_state 让下游 kernel 走 slow path); (d) kernel template variance。
 
 **结论**:
 - **§ 4.1 C1-C4 prior ranking retired** — 不能基于 Phase D upper-bound 给 C1-C4 排序 / 作 T1 选择依据。C1-C4 实际 attack 面合计约 16-20% of GDN (按 Phase C 实测)，远小于 #1 in_proj_qkvz 的 44-46%。
@@ -441,7 +436,6 @@ T0 v2 实测后此节的 ablation-based ceiling 公式失效。Phase D 实测全
 
 - **Phase B GDN occupancy 实测**: PP=2048 = 40.8%, PP=4096 = 45.6%, PP=8192 = 43.8%, PP=16384 = 38.3%. **远超 § 7.1 假设 15-30% 区间** + § 7.1 sanity gate ≥ 10%。
 - **Ceiling 数学结构改用 Phase C 实测 step ranking** 替代 Phase D 上界估算 — T1-T3 端到端 ROI 仍以 § 7.3 ship 指标为准 (this section 不预设具体 cut)。
-- **Provisional target 暂保留 § 7.2 TBD** — 等 T1 outcome 后更新。如 T1 fused input projection promote 1-3% (预期下限)，P5g 整体目标缩水到 +3-5% prefill geomean (vs spec § 1.1 omlx+10%)；如 T1 revert，P5g 整体目标无法靠 GDN 内优化达成，需重排候选或转 P5h。
 
 § 7.1 prior table (假设性 occupancy × cut) 保留作历史 reference，**T1 决策不再基于此表**。
 
@@ -464,20 +458,14 @@ P5g 只优化 GatedDeltaNet — 物理上的 end-to-end wall-time 减少上限�
 
 P5g 整体 outcome: **no GDN-internal optimization promoted**. T1 (C5 fused input projection) revert per § 7.3 (geomean +0.5% threshold + PP=16384 < 2% regression bound; T1 实测 -0.12% geomean + -2.15% PP=16384). T2/T3 跳过，转 T4 close-out per § 7.3 success bar:
 
-> "P5g 整体 success bar: T1-T3 中至少 1 个满足以上 ship 指标 promote。否则 P5g close-out 报告标 'no optimization promoted; T0 数据 + Layer 3 upper bound 数据归 P5h scope refresh'。"
 
 **P5g final target lock**: P5g ship state = P5f baseline (no regression, no promotion). 3-way bench (ironmlx / omlx / mlx-lm) 在 T4 close-out 验证 P5g 仍跟 P5f baseline 一致 (± 2% noise floor)。详细数据见 `reports/p5g-final-results.md`。
 
-**P5h scope drivers** (T0 v2 + T1 attempt 锁出的方向, per § 7.4):
 
 1. **Step 7 Metal kernel rewrite** (gated_delta_step kernel; spec § 4.1 Scope gate trigger) — 16-17% of GDN 时间未被任何 op-level 改造覆盖。P5g op-level 已尝试 Step 1 (Linear fuse — saturated) + Step 5 / 2 / 7c (Phase D 反常无 ROI 信号),剩下唯一未触碰的高占比 sub-step。Kernel rewrite 需独立 phase scope。
 2. **Step 8 out_proj** (Linear quantized matmul, ~10-15% of GDN) — 与 in_proj_qkvz 同 family (4-bit quant), T1 已证 Linear-family saturated at op-level。若要继续 attack out_proj,只能走 kernel-level (同 driver #1)。
-3. **Phase D ablation 反常根因** — 三个 ablation 全 negative (vs Phase A pp_tps)，不符合 plan § 7.1 "ablation = upper-bound cut" 假设。可能 cause: GPU thermal drift across 24 spawns, substitute 自身成本超过原 op, cache state divergence, kernel template variance。Investigation 优先级 P5h: phase order randomized sanity → 看 ablation 是否回到 positive。
-4. **GDN 占比的真实数学结构** — T0 v2 实测 38-46% (vs spec § 1.3 prior 20%) — GDN 是 prefill primary cost slot。这数字本身有用作 P5h prioritization input。
 
-§ 7.1 prior table (假设性 occupancy × cut) 完全 invalidated by T0 v2 measurement —— 保留作历史 reference,P5h 不基于此推导 target。
 
-**Aborted T1-T3 fuel for P5h**:
 - C5 fused input projection 完整实施 + measured + reverted (audit trail in commit `68545b2`).
 - T0 v2 raw data + aggregator output (committed to git as part of T4 close-out report `/reports/p5g-final-results.md`).
 - 3-way bench data 在 T4 close-out 显示 P5g state vs omlx vs mlx-lm (验证 ship state == P5f baseline)。
@@ -499,17 +487,13 @@ Promote (ship) 决策**唯一**指标 — 端到端 iron-bench benchmark。**Pro
 - `sweep_full.sh` 19/19 PASS (Qwen3.5-4B-MLX-4bit, 全集成测试套)
 - 4-way bench (ironmlx / mlx-lm / omlx HTTP iron-bench, 6 PP × 5 runs) — 单独执行，**不**包含在 `sweep_full.sh` 内
 
-P5g 整体 success bar: T1-T3 中**至少 1 个**满足以上 ship 指标 promote。否则 P5g close-out 报告标 "no optimization promoted; T0 数据 + Layer 3 upper bound 数据归 P5h scope refresh"。
 
 T4 close-out 额外补 full-PP decode TG sweep (含 PP=512/4096/8192) 验证 ship 指标 "any PP decode regression < 2%" 在全 PP 范围确认。
 
 ### 7.4 P5g close-out 必须
 
-Quantify P5h scope drivers — 报告里明确 "剩余 gap 来自 GatedAttention 长 prompt O(S²) / chunk-size 调优空间 / Scheduler admission overhead 残余 / 其他"。包含数据：T0.a 实测的当前 HEAD GatedDeltaNet 占比、T0.c ablation 估的可达 cut、T1-T3 实际 promote 的 end-to-end ROI。
 
-## § 8 P5h preview / Future phases（out of P5g scope）
 
-P5g close-out 输出会驱动 P5h scope。当前已知候选：
 
 1. **GatedAttention 优化** (full attn, 10/40 layers, long-prompt O(S²))
    - 长 prompt 时占比放大 (PP=16384 可能 30%+)
@@ -517,19 +501,15 @@ P5g close-out 输出会驱动 P5h scope。当前已知候选：
 2. **Long-prompt chunk-size sweep** (PP=4096-16384, NOT bypass chunking)
    - 扫 `prefill_chunk_size = 512/1024/1536/2048/3072/4096` 找曲线
 3. **Router bypass single-request idle server** — 条件性 (admit overhead > 50ms 测出)
-4. **Multi-request batching (P5h/P6+ deferred)** — per Boss 2026-05-19 directive
    - `--b-max N > 1` 已 functional, 等多用户场景启用
 5. **Metal kernel rewrite for GatedDeltaNet** — 若 P5g op-level 优化不足，expand 到 kernel level
 
 ## § 9 Out of Scope / Non-Goals
 
-- 不动 GatedAttention（留 P5h）
 - 不动 SparseMoeBlock（P5e 已优化, sorted routing shipped）
 - 不动 Scheduler / KVCache / forward orchestration（P5f 已 ship）
 - 不抄 omlx.patches.gated_delta_advance 实现（per [feedback_no_spec_from_competitors]）
 - 不引入 PagedCache 化（[feedback_design_philosophy] 不对齐 omlx）
-- 不做 long-prompt chunk-size sweep（P5h scope）
-- 不做 router bypass（P5h 条件性）
 - 不做 multi-request batching feature changes（保留 `--b-max N > 1` 不变）
 
 ## § 10 Task decomposition（writing-plans 阶段细化）
@@ -599,7 +579,6 @@ T4: P5g close-out
       没覆盖的 PP, 验证 § 7.3 "any PP decode regression < 2%")
     - 写 reports/p5g-final-results.md (self-contained for offline analysis)
     - sweep_full 19/19 (Qwen3.5-4B-MLX-4bit)
-    - quantify P5h scope drivers (per § 7.4)
     - commit
 ```
 

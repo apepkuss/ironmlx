@@ -385,7 +385,6 @@ reshape (&routed + &shared) back to [B,S,H]
 h = x + attn.forward_on(input_layernorm(x), offset, cache, per_row_lens, mask, target)
 out = h + match ffn { Dense(m)=>m.forward_on(post_attention_layernorm(h),target), Moe(b)=>b.forward_on(post_attention_layernorm(h),target,layer_idx) }
 ```
-Wrap attn/ffn in `try_with_p5h_span_from_current_trace` under `#[cfg(feature="p5h-profile")]` (mirror `qwen3_5_moe/decoder_layer.rs`); plain path under `#[cfg(not(...))]`.
 
 - [ ] **Step 2: Complete `Glm4MoeLiteModel`** — fields `embed_tokens: Embedding`, `layers: Vec<Glm4DecoderLayer>`, `norm: RmsNorm`, `lm_head: Linear` (separate; `tie_word_embeddings=false`), `cfg`. Methods:
 - `make_cache(batch,cap,dtype)`: `Ok((0..n).map(|_| LayerCache::Mla(MlaLatentCache::new(batch, cfg.kv_lora_rank, cfg.qk_rope_head_dim, dtype, cap).with_step(cap))).collect())`.

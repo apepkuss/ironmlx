@@ -146,7 +146,8 @@ fn profile_decode_attention_turbo_stage(
 
 - [ ] **Step 2: Add probes to both cfg paths**
 
-In both `#[cfg(feature = "p5h-profile")]` and `#[cfg(not(feature = "p5h-profile"))]` paths:
+
+In the current decode attention path:
 
 - after reading `batch/seq/h_q/h_kv/d`, call `profile_decode_attention_turbo_stage("decode_attention_input", &[x], ...)`
 - after `q_proj/k_proj/v_proj`, call `profile_decode_attention_turbo_stage("decode_qkv_proj", &[&q_full, &k, &v], ...)`
@@ -175,7 +176,7 @@ Expected: both tests pass.
 Run:
 
 ```bash
-MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --features p5h-profile --bin ironmlx-core-bench
+MLX_DIR=$HOME/.local/mlx cargo build --release -p ironmlx --bin ironmlx-core-bench
 ```
 
 Expected: build succeeds.

@@ -27,22 +27,6 @@ use super::config::Glm4MoeLiteConfig;
 use super::mla_cache::MlaLatentCache;
 use super::rope::{Glm4Rope, RopeOffset};
 
-#[cfg(feature = "p5h-profile")]
-fn p5h_layer_fields(layer_idx: i32) -> crate::core::p5h::SpanFields {
-    crate::core::p5h::SpanFields {
-        layer_idx: Some(layer_idx),
-        ..Default::default()
-    }
-}
-
-#[cfg(feature = "p5h-profile")]
-fn p5h_eval(arrays: &[&Array]) -> Result<()> {
-    if crate::core::p5h::is_measurement_eval_probes_active() {
-        mlx::transforms::eval(arrays)?;
-    }
-    Ok(())
-}
-
 /// Per-head stacked quantized linear (mirrors omlx `QuantizedMultiLinear`).
 ///
 /// Weight is `[H, out, in/8]` (4-bit packed) with per-group `scales` and
@@ -365,36 +349,10 @@ impl MlaAttention {
         let l = s[1];
 
         // Shared prefix: q/kv down+up projections, latent split + norm, RoPE.
-        #[cfg(feature = "p5h-profile")]
-        let (q_nope, q_pe, c_kv_n, k_pe) = {
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "glm_mla_project_qkv",
-                || p5h_layer_fields(layer_idx),
-                || -> Result<(Array, Array, Array, Array)> {
-                    let out = self.project_qkv_with_offset(x, offset, target)?;
-                    p5h_eval(&[&out.0, &out.1, &out.2, &out.3])?;
-                    Ok(out)
-                },
-            )?
-        };
-        #[cfg(not(feature = "p5h-profile"))]
         let (q_nope, q_pe, c_kv_n, k_pe) = self.project_qkv_with_offset(x, offset, target)?;
 
         // Append the new latent + k_pe and fetch the full history.
         // kv_latent: [B,1,Lc,kv_lora]; k_pe_all: [B,1,Lc,qk_rope].
-        #[cfg(feature = "p5h-profile")]
-        let (kv_latent, k_pe_all) = {
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "glm_mla_cache_update_fetch",
-                || p5h_layer_fields(layer_idx),
-                || -> Result<(Array, Array)> {
-                    let out = cache.update_and_fetch_on(&c_kv_n, &k_pe, per_row_lens, target)?;
-                    p5h_eval(&[&out.0, &out.1])?;
-                    Ok(out)
-                },
-            )?
-        };
-        #[cfg(not(feature = "p5h-profile"))]
         let (kv_latent, k_pe_all) =
             cache.update_and_fetch_on(&c_kv_n, &k_pe, per_row_lens, target)?;
 
@@ -402,28 +360,6 @@ impl MlaAttention {
         // q_pe [B,H,L,qk_rope]; swapaxes(-1,-2) on the single-kv-head k_pe_all
         // [B,1,Lc,qk_rope] -> [B,1,qk_rope,Lc]; matmul broadcasts the kv head
         // across all H query heads -> pe_scores [B,H,L,Lc].
-        #[cfg(feature = "p5h-profile")]
-        let pe_scores = {
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "glm_mla_rope_scores",
-                || p5h_layer_fields(layer_idx),
-                || -> Result<Array> {
-                    let q_pe_scaled = mlx::ops::binary::multiply_on(
-                        &q_pe,
-                        &self.scale_array_like(&q_pe, target)?,
-                        target,
-                    )?;
-                    let k_pe_t = k_pe_all.transpose_axes_on(&[0, 1, 3, 2][..], target)?;
-                    let mut pe_scores = q_pe_scaled.matmul_on(&k_pe_t, target)?;
-                    if let Some(m) = mask {
-                        pe_scores = mlx::ops::binary::add_on(&pe_scores, m, target)?;
-                    }
-                    p5h_eval(&[&pe_scores])?;
-                    Ok(pe_scores)
-                },
-            )?
-        };
-        #[cfg(not(feature = "p5h-profile"))]
         let pe_scores = {
             let q_pe_scaled = mlx::ops::binary::multiply_on(
                 &q_pe,
@@ -446,19 +382,6 @@ impl MlaAttention {
         let out = out
             .transpose_axes_on(&[0, 2, 1, 3][..], target)?
             .reshape_on((b, l, self.n_heads * self.v_head), target)?;
-        #[cfg(feature = "p5h-profile")]
-        {
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "o_proj",
-                || p5h_layer_fields(layer_idx),
-                || -> Result<Array> {
-                    let out = self.o_proj.forward_on(&out, target)?;
-                    p5h_eval(&[&out])?;
-                    Ok(out)
-                },
-            )
-        }
-        #[cfg(not(feature = "p5h-profile"))]
         {
             self.o_proj.forward_on(&out, target)
         }
@@ -497,7 +420,6 @@ impl MlaAttention {
         layer_idx: i32,
     ) -> Result<Array> {
         let target = target.into();
-        #[cfg(not(feature = "p5h-profile"))]
         let _ = layer_idx;
         // SDPA requires the `mask_arr` dtype to promote to the attention output
         // dtype (q/k/v promoted type). The RoPE score path keeps its scale in
@@ -513,46 +435,6 @@ impl MlaAttention {
         if decode {
             // DECODE: fold the query into latent space, attend against the
             // cached latent (K = V = kv_latent), then un-fold the output.
-            #[cfg(feature = "p5h-profile")]
-            {
-                let q_lat = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_mla_embed_q",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<Array> {
-                        let q_lat = self.embed_q.apply(q_nope, true, target)?;
-                        p5h_eval(&[&q_lat])?;
-                        Ok(q_lat)
-                    },
-                )?; // [B,H,L,kv_lora]
-                let o = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_mla_sdpa",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<Array> {
-                        let o = mlx::fast::scaled_dot_product_attention_on(
-                            &q_lat,
-                            kv_latent,
-                            kv_latent,
-                            self.scale,
-                            "",
-                            Some(&pe_scores),
-                            None,
-                            target,
-                        )?;
-                        p5h_eval(&[&o])?;
-                        Ok(o)
-                    },
-                )?; // [B,H,L,kv_lora]
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_mla_unembed_out",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<Array> {
-                        let out = self.unembed_out.apply(&o, true, target)?;
-                        p5h_eval(&[&out])?;
-                        Ok(out)
-                    },
-                ) // [B,H,L,v_head]
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 let q_lat = self.embed_q.apply(q_nope, true, target)?; // [B,H,L,kv_lora]
                 let o = mlx::fast::scaled_dot_product_attention_on(
@@ -571,46 +453,6 @@ impl MlaAttention {
             // PREFILL: un-fold the cached latent into per-head K (qk_nope) and
             // V (v_head). SDPA tolerates V last-dim != Q/K last-dim (MLX only
             // enforces q==k last dim + k==v head-count).
-            #[cfg(feature = "p5h-profile")]
-            {
-                let k = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_mla_prefill_unfold_k",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<Array> {
-                        let k = self.embed_q.apply(kv_latent, false, target)?;
-                        p5h_eval(&[&k])?;
-                        Ok(k)
-                    },
-                )?; // [B,H,Lc,qk_nope]
-                let v = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_mla_prefill_unfold_v",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<Array> {
-                        let v = self.unembed_out.apply(kv_latent, true, target)?;
-                        p5h_eval(&[&v])?;
-                        Ok(v)
-                    },
-                )?; // [B,H,Lc,v_head]
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "glm_mla_sdpa",
-                    || p5h_layer_fields(layer_idx),
-                    || -> Result<Array> {
-                        let out = mlx::fast::scaled_dot_product_attention_on(
-                            q_nope,
-                            &k,
-                            &v,
-                            self.scale,
-                            "",
-                            Some(&pe_scores),
-                            None,
-                            target,
-                        )?;
-                        p5h_eval(&[&out])?;
-                        Ok(out)
-                    },
-                ) // [B,H,L,v_head]
-            }
-            #[cfg(not(feature = "p5h-profile"))]
             {
                 let k = self.embed_q.apply(kv_latent, false, target)?; // [B,H,Lc,qk_nope]
                 let v = self.unembed_out.apply(kv_latent, true, target)?; // [B,H,Lc,v_head]

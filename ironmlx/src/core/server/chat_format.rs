@@ -148,56 +148,6 @@ pub fn render_and_encode(
     tokenizer.encode(&prompt, /* add_special_tokens = */ false)
 }
 
-/// P5h T4.4 variant of [`render_and_encode`] that ALSO returns the
-/// monotonic-ns timestamps bracketing the `tokenizer.encode(...)` call,
-/// so the openai.rs handler can retroactively open a `tokenizer_encode`
-/// child span under the already-closed `http_parse_render_tokenize`
-/// span. Per § 2.5a step 1 the http_parse_render_tokenize span's
-/// start_ns is captured BEFORE the P5hTraceContext exists (because the
-/// ctx is built from `prompt_len`, which is the encode result), so the
-/// encode child span has to be opened/closed retroactively using
-/// explicit timestamps via `open_p5h_span_at` / `close_p5h_span`.
-///
-/// Returns `(prompt_ids, encode_start_ns, encode_end_ns)`. The render
-/// (apply_chat_template) cost remains inside the parent
-/// `http_parse_render_tokenize` exclusive residual.
-#[cfg(feature = "p5h-profile")]
-pub fn render_and_encode_with_encode_timing(
-    tokenizer: &Tokenizer,
-    messages: &[ChatMessage],
-    chat_template_kwargs: Option<&serde_json::Value>,
-) -> Result<(Vec<u32>, u64, u64)> {
-    if !tokenizer.has_chat_template() {
-        return Err(anyhow!(
-            "tokenizer has no chat_template — cannot serve /v1/chat/completions or /v1/messages"
-        ));
-    }
-    let internal: Vec<Message> = messages
-        .iter()
-        .map(|m| {
-            let text = match &m.content {
-                Content::Text(t) => t.clone(),
-                Content::Parts(_) => m
-                    .content
-                    .to_flat_string(&mut std::collections::VecDeque::new()),
-            };
-            Message {
-                role: m.role.clone(),
-                content: text,
-            }
-        })
-        .collect();
-    let prompt = tokenizer.apply_chat_template(
-        &internal,
-        /* add_generation_prompt = */ true,
-        chat_template_kwargs,
-    )?;
-    let encode_start_ns = crate::core::p5h::monotonic_ns_public();
-    let ids = tokenizer.encode(&prompt, /* add_special_tokens = */ false)?;
-    let encode_end_ns = crate::core::p5h::monotonic_ns_public();
-    Ok((ids, encode_start_ns, encode_end_ns))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

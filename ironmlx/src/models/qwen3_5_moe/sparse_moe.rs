@@ -141,94 +141,16 @@ fn router_topk_scores_and_indices(
     Ok((scores, inds_u32))
 }
 
-#[cfg(feature = "p5h-profile")]
-fn expert_occupancy_log_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IRONMLX_EXPERT_OCCUPANCY_LOG")
-            .ok()
-            .as_deref()
-            == Some("1")
-    })
-}
-
-#[cfg(feature = "p5h-profile")]
-fn p5i_c_gate_up_child_spans_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IRONMLX_P5I_C_GATE_UP_CHILD_SPANS")
-            .ok()
-            .as_deref()
-            == Some("1")
-    })
-}
-
-#[cfg(feature = "p5h-profile")]
-fn with_p5i_c_gate_up_child_span<T>(
-    enabled: bool,
-    span_name: &'static str,
-    layer_idx: i32,
-    body: impl FnOnce() -> T,
-) -> T {
-    if enabled {
-        crate::core::p5h::try_with_p5h_span_from_current_trace(
-            span_name,
-            || crate::core::p5h::SpanFields {
-                layer_idx: Some(layer_idx),
-                ..Default::default()
-            },
-            body,
-        )
-    } else {
-        body()
-    }
-}
-
-#[cfg(feature = "p5h-profile")]
-fn glm_routed_experts_child_spans_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IRONMLX_GLM_ROUTED_EXPERTS_CHILD_SPANS")
-            .ok()
-            .as_deref()
-            == Some("1")
-    })
-}
-
 fn with_glm_routed_experts_child_span<T>(
     enabled: bool,
     span_name: &'static str,
     layer_idx: i32,
     body: impl FnOnce() -> T,
 ) -> T {
-    #[cfg(feature = "p5h-profile")]
-    {
-        if enabled {
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                span_name,
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                body,
-            )
-        } else {
-            body()
-        }
-    }
-    #[cfg(not(feature = "p5h-profile"))]
     {
         let _ = (enabled, span_name, layer_idx);
         body()
     }
-}
-
-#[cfg(feature = "p5h-profile")]
-fn eval_glm_routed_experts_child(arrays: &[&Array]) -> Result<()> {
-    if crate::core::p5h::is_measurement_eval_probes_active() {
-        mlx::transforms::eval(arrays)?;
-    }
-    Ok(())
 }
 
 /// Source legacy gate + up weights, consumed once during lazy fused-weight
@@ -261,8 +183,8 @@ struct FusedGateUp {
 ///   gate_up (fused, lazy): weight `[E, 2I, H/8]`, scales/biases `[E, 2I, H/64]`
 ///   down:    weight `[E, H, I/8]`, scales/biases `[E, H, I/64]`
 ///
-/// P5i.a T2: gate_proj + up_proj weights are concatenated along the
-/// intermediate axis (axis=1) on the first forward call so a single
+/// Gate_proj + up_proj weights are concatenated along the intermediate
+/// axis (axis=1) on the first forward call so a single
 /// `gather_qmm` call replaces the prior two-call (gate then up). The fused
 /// output is sliced along the last dim into gate_out / up_out before
 /// SwiGLU. 4-bit affine quantization is per-row along intermediate (groups
@@ -389,8 +311,8 @@ impl RoutedExperts {
     /// underlying `concatenate_on` calls — typically
     /// `StreamOrDevice::default()` from the scheduler driver thread.
     ///
-    /// P5i.a T2: 4-bit affine quantization stores per-(expert,row) scale +
-    /// bias with groups along the K=last axis only; stacking along the
+    /// 4-bit affine quantization stores per-(expert,row) scale + bias with
+    /// groups along the K=last axis only; stacking along the
     /// intermediate axis is a mathematically exact row-wise rearrangement
     /// that preserves every per-row scale/bias. Single gather_qmm output
     /// is later sliced into (gate_out, up_out) along the last dim before
@@ -444,8 +366,8 @@ impl RoutedExperts {
             (None, None) => None,
             _ => unreachable!("biases symmetry validated in from_loader"),
         };
-        // P5i.a Codex P2 #2: `concatenate_on` returns a lazy MLX graph that
-        // still references the source `gate_*` / `up_*` arrays. Dropping
+        // `concatenate_on` returns a lazy MLX graph that still references the
+        // source `gate_*` / `up_*` arrays. Dropping
         // `source` here without first materializing the fused tensors would
         // leave the source arrays alive (held by the lazy graph) and the
         // ~16 GB MoE weight doubling would NOT be avoided. Eval forces MLX
@@ -557,9 +479,6 @@ impl RoutedExperts {
         let k = ivec[1];
         let bs_k = bs * k;
         let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
-        #[cfg(feature = "p5h-profile")]
-        let child_spans_enabled = glm_routed_experts_child_spans_enabled();
-        #[cfg(not(feature = "p5h-profile"))]
         let child_spans_enabled = false;
 
         let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) =
@@ -648,10 +567,6 @@ impl RoutedExperts {
                         (gate_out, up_out, inds.clone(), false, None)
                     };
 
-                    #[cfg(feature = "p5h-profile")]
-                    {
-                        eval_glm_routed_experts_child(&[&result.0, &result.1])?;
-                    }
                     Ok(result)
                 },
             )?;
@@ -664,10 +579,6 @@ impl RoutedExperts {
             layer_idx,
             || -> Result<Array> {
                 let act = invoke_swiglu(self.swiglu(), &gate_out, &up_out)?;
-                #[cfg(feature = "p5h-profile")]
-                {
-                    eval_glm_routed_experts_child(&[&act])?;
-                }
                 Ok(act)
             },
         )?;
@@ -708,10 +619,6 @@ impl RoutedExperts {
                     mlx::ops::shape::squeeze_on(&down_out_raw, &[-2_i32][..], target)
                         .context("RoutedExperts::apply_experts: squeeze down_proj dim -2")?
                 };
-                #[cfg(feature = "p5h-profile")]
-                {
-                    eval_glm_routed_experts_child(&[&down_out])?;
-                }
                 Ok(down_out)
             },
         )?;
@@ -731,10 +638,6 @@ impl RoutedExperts {
                     out = out.astype_on(down_out.dtype(), target).context(
                         "RoutedExperts::apply_experts: cast weighted sum to expert dtype",
                     )?;
-                }
-                #[cfg(feature = "p5h-profile")]
-                {
-                    eval_glm_routed_experts_child(&[&out])?;
                 }
                 Ok(out)
             },
@@ -767,12 +670,6 @@ pub struct SparseMoeBlock {
     num_experts_per_tok: i32,
     /// Whether selected expert scores are renormalized across top-k.
     norm_topk_prob: bool,
-    /// Compiled SwiGLU closure for the per-substep `swiglu_activation` span.
-    /// Only the p5h-profile path activates SwiGLU inline here; the production
-    /// path routes through `RoutedExperts::apply_experts` (which owns its own
-    /// compiled closure).
-    #[cfg(feature = "p5h-profile")]
-    swiglu: std::sync::OnceLock<CompiledFn>,
 }
 
 impl SparseMoeBlock {
@@ -806,19 +703,7 @@ impl SparseMoeBlock {
             shared_expert_gate,
             num_experts_per_tok,
             norm_topk_prob,
-            #[cfg(feature = "p5h-profile")]
-            swiglu: std::sync::OnceLock::new(),
         })
-    }
-
-    #[cfg(feature = "p5h-profile")]
-    fn swiglu(&self) -> &CompiledFn {
-        self.swiglu.get_or_init(build_swiglu)
-    }
-
-    #[cfg(feature = "p5h-profile")]
-    fn swiglu_on(&self, gate: &Array, up: &Array) -> Result<Array> {
-        invoke_swiglu(self.swiglu(), gate, up)
     }
 
     /// Forward pass: `[B, S, H]` → `[B, S, H]`.
@@ -826,9 +711,8 @@ impl SparseMoeBlock {
     /// Stream-targeted. Caller is responsible for passing the correct stream;
     /// `()` selects the MLX default stream.
     ///
-    /// `layer_idx` — index of the enclosing decoder block. Consumed under
-    /// `#[cfg(feature = "p5h-profile")]` by the 8 MoE substep spans
-    /// (router_logits_softmax_topk … moe_output_sum); inert otherwise.
+    /// `layer_idx` — index of the enclosing decoder block. Kept in the
+    /// signature for parity with other layer-aware forward paths.
     pub fn forward_on(&self, x: &Array, target: StreamOrDevice, layer_idx: i32) -> Result<Array> {
         let dims = x.shape();
         let dvec = dims.as_slice();
@@ -848,504 +732,8 @@ impl SparseMoeBlock {
         let flat_x = mlx::ops::shape::reshape(x, [bs, h])
             .context("SparseMoeBlock: reshape [B,S,H] → [BS,H]")?;
 
-        #[cfg(feature = "p5h-profile")]
         {
-            let bs_k = bs * k;
-            let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
-            // T3.2: 8-substep instrumentation, all under the `mlp_path` wrapper
-            // opened by DecoderLayerMoe::forward_on (T0a.11 step 1) per
-            // decoder_layer.rs:249. Substep names per spec § 3 T3 lines 886-894
-            // ("Mirrors T2 with the 8-step MoE breakdown", plan line 4641).
-            //
-            // The `try_` variant no-ops when no active P5H_CURRENT_TRACE
-            // (CLI / standalone tests path) per Codex v12 P1 #1.
-            //
-            // Sorted vs default routing dispatch: `use_sorted = bs_k >=
-            // SORTED_ROUTING_MIN_BS_K`. The `routing_sort_pack` and
-            // `gather_qmm_gate_up` spans emit on BOTH branches — on the
-            // default broadcast branch `routing_sort_pack` wraps a no-op
-            // closure (inclusive_us ≈ 0) per spec hard-rule #9, and the
-            // gather_qmm_gate_up closure absorbs the default-branch
-            // expand_dims as part of gather_qmm input shaping. Span count
-            // is invariant across branches.
-
-            // P5i.c Phase 1 Stage α: capture gate_up child-span opt-in flag
-            // once per forward pass (OnceLock cached; env var read only once).
-            let gate_up_child_spans_enabled = p5i_c_gate_up_child_spans_enabled();
-
-            // Substep 1: router_logits_softmax_topk — Linear(hidden→E) +
-            // top-k selection + checkpoint-controlled score normalization +
-            // cast indices to uint32 for downstream gather_qmm.
-            //
-            // argpartition is preferable to topk: we don't need the top-k
-            // elements sorted internally (each is independently weight-summed
-            // via gather_qmm); we only need to know which k indices to gather.
-            // MLX argpartition is a single pass; values recovered via
-            // take_along_axis. argpartition kth=-(k) places the top-k in the
-            // last k positions; we slice [BS, E] → [BS, k] keeping the last k.
-            let (scores, inds_u32) = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "router_logits_softmax_topk",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<(Array, Array)> {
-                    let logits = self.router_gate.forward_on(&flat_x, target)?; // [BS, E]
-                    let (scores, inds_u32) = router_topk_scores_and_indices(
-                        &logits,
-                        k,
-                        num_experts,
-                        self.norm_topk_prob,
-                        target,
-                    )?;
-                    // P5h+1 T1: measurement-eval probe.
-                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&scores, &inds_u32])?;
-                    }
-                    Ok((scores, inds_u32))
-                },
-            )?;
-
-            // Substep 2: routing_sort_pack — sorted branch does the real
-            // argsort + token_idx build + physical gather; default branch
-            // emits a zero-cost no-op span per spec hard-rule #9 so the
-            // span sequence is invariant across branches.
-            //
-            // Sorted-flat path (BS*k >= SORTED_ROUTING_MIN_BS_K): pre-sort
-            // tokens by expert id and pass `sorted_indices=true`, matching
-            // MLX-LM `SwitchGLU` for `indices.size >= 64`. We physically gather
-            // `flat_x` rows by the sorted token id so each
-            // (token, expert-slot) is its own x-row; this changes x.shape from
-            // [BS,1,1,H] to [BS*k,1,1,H] and `rhs_indices` from [BS,k] to
-            // [BS*k,1] but keeps the GatherQMM output semantics identical
-            // (B = BS*k either way). After down_proj we invert the permutation
-            // (substep 6) to restore original token/k order.
-            //
-            // Returns `Some((sorted_x_4d, sorted_topk_2d, sort_perm))` on the
-            // sorted branch; `None` on the default branch.
-            let sort_pack_state = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "routing_sort_pack",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<Option<(Array, Array, Array)>> {
-                    if !use_sorted {
-                        // Default broadcast branch: no sort/pack work happens
-                        // here. Zero-cost span emit per hard-rule #9. No
-                        // arrays produced -> nothing to eval probe.
-                        return Ok(None);
-                    }
-                    // --- Sorted routing path. ---
-                    let flat_topk = mlx::ops::shape::reshape(&inds_u32, [bs_k])
-                        .context("SparseMoeBlock: reshape inds_u32 to [BS*k]")?;
-                    // argsort returns the permutation that sorts flat_topk
-                    // ascending by expert id. Stable per MLX semantics. Uint32.
-                    let sort_perm = argsort_on(&flat_topk, -1_i32, target)
-                        .context("SparseMoeBlock: argsort flat_topk")?; // [BS*k]
-                    let sorted_topk_1d = take_along_axis_on(&flat_topk, &sort_perm, -1_i32, target)
-                        .context("SparseMoeBlock: take_along_axis sort flat_topk")?;
-                    // gather_qmm expects rhs_indices rank-2 to match x rank-4.
-                    let sorted_topk_2d =
-                        mlx::ops::shape::reshape(&sorted_topk_1d, [bs_k, 1_i32])
-                            .context("SparseMoeBlock: reshape sorted_topk to [BS*k, 1]")?;
-                    let sorted_token_idx =
-                        sorted_token_indices_from_sort_perm(&sort_perm, k, bs_k, target)?;
-                    // Physically gather flat_x rows in sorted order.
-                    // flat_x: [BS, H], sorted_token_idx: [BS*k] -> [BS*k, H].
-                    let sorted_x_2d = take_on(&flat_x, &sorted_token_idx, 0_i32, target)
-                        .context("SparseMoeBlock: take flat_x by sorted_token_idx")?;
-                    // Promote to rank-4 [BS*k, 1, 1, H] for gather_qmm (r+2 with r=2).
-                    let sorted_x_4d = mlx::ops::shape::expand_dims_on(
-                        &sorted_x_2d,
-                        &[-2_i32, -3_i32][..],
-                        target,
-                    )
-                    .context("SparseMoeBlock: expand_dims sorted_x → [BS*k,1,1,H]")?;
-                    // P5h+1 T1: measurement-eval probe (sorted branch only;
-                    // default broadcast branch already returned None above).
-                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&sorted_x_4d, &sorted_topk_2d, &sort_perm])?;
-                    }
-                    if expert_occupancy_log_enabled() {
-                        let expert_ids = sorted_topk_2d
-                            .to_vec::<u32>()
-                            .context("SparseMoeBlock: expert occupancy to_vec")?;
-                        let num_experts_usize = usize::try_from(num_experts)
-                            .context("SparseMoeBlock: num_experts usize conversion")?;
-                        let mut counts = vec![0_usize; num_experts_usize];
-                        for expert_id in expert_ids {
-                            let expert = expert_id as usize;
-                            if expert >= counts.len() {
-                                return Err(anyhow!(
-                                    "SparseMoeBlock: expert occupancy id {expert} out of range \
-                                     0..{}",
-                                    counts.len()
-                                ));
-                            }
-                            counts[expert] += 1;
-                        }
-                        let nonempty_experts = counts.iter().filter(|count| **count > 0).count();
-                        let max_tokens_per_expert = counts.iter().copied().max().unwrap_or(0);
-                        let mut nonempty_counts: Vec<usize> =
-                            counts.iter().copied().filter(|count| *count > 0).collect();
-                        nonempty_counts.sort_unstable();
-                        let p95_tokens_per_expert = if nonempty_counts.is_empty() {
-                            0
-                        } else {
-                            let idx = ((nonempty_counts.len() * 95).saturating_sub(1)) / 100;
-                            nonempty_counts[idx]
-                        };
-                        let total_routes = counts.iter().sum::<usize>() as f64;
-                        let entropy_bits = if total_routes > 0.0 {
-                            counts
-                                .iter()
-                                .filter(|count| **count > 0)
-                                .map(|count| {
-                                    let p = *count as f64 / total_routes;
-                                    -p * p.log2()
-                                })
-                                .sum::<f64>()
-                        } else {
-                            0.0
-                        };
-                        let mut top5: Vec<(usize, usize)> = counts
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(expert, count)| (*count > 0).then_some((expert, *count)))
-                            .collect();
-                        top5.sort_by(|left, right| {
-                            right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
-                        });
-                        top5.truncate(5);
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        std::hash::Hash::hash(&top5, &mut hasher);
-                        let top5_hash = std::hash::Hasher::finish(&hasher);
-                        tracing::info!(
-                            target: "moe_expert_occupancy",
-                            "[p5h+2-e moe_occupancy] layer={layer_idx} bs={bs} k={k} \
-                             bs_k={bs_k} nonempty_experts={nonempty_experts} \
-                             max_tokens_per_expert={max_tokens_per_expert} \
-                             p95_tokens_per_expert={p95_tokens_per_expert} \
-                             entropy_bits={entropy_bits:.6} top5_hash={top5_hash:016x} \
-                             top5={top5:?}"
-                        );
-                    }
-                    Ok(Some((sorted_x_4d, sorted_topk_2d, sort_perm)))
-                },
-            )?;
-
-            // Substep 3: gather_qmm_gate_up — gate_proj + up_proj quantized
-            // matmuls. Default branch absorbs the [BS,1,1,H] expand_dims on
-            // flat_x (gather_qmm input shaping). Sorted branch reuses the
-            // pre-packed sorted_x_4d + sorted_topk_2d from substep 2.
-            //
-            // Returns `(gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt)`
-            // where rhs_idx_used + sorted_flag flow into substep 5 (down)
-            // and sort_perm_opt flows into substep 6 (unsort).
-            let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) =
-                crate::core::p5h::try_with_p5h_span_from_current_trace(
-                    "gather_qmm_gate_up",
-                    || crate::core::p5h::SpanFields {
-                        layer_idx: Some(layer_idx),
-                        ..Default::default()
-                    },
-                    || -> Result<(Array, Array, Array, bool, Option<Array>)> {
-                        // P5i.a T2: single fused gate+up gather_qmm + slice.
-                        // Fused weights lazily built on first forward (worker
-                        // thread) for correct Metal stream binding.
-                        let i = self.routed.moe_intermediate;
-                        let fused = self.routed.fused_gate_up(target)?;
-                        if let Some((sorted_x_4d, sorted_topk_2d, sort_perm)) = sort_pack_state {
-                            let bs_k_local = sorted_topk_2d.shape().as_slice()[0];
-                            // Phase 1 Stage α: cost decomposition sub-spans (sorted branch).
-                            let gate_up_out = with_p5i_c_gate_up_child_span(
-                                gate_up_child_spans_enabled,
-                                "gate_up_gather_qmm_call",
-                                layer_idx,
-                                || -> Result<Array> {
-                                    mlx::quantization::gather_quantized_matmul_on(
-                                        &sorted_x_4d,
-                                        &fused.weight,
-                                        &fused.scales,
-                                        fused.biases.as_ref(),
-                                        None,
-                                        Some(&sorted_topk_2d),
-                                        true,
-                                        Some(self.routed.group_size),
-                                        Some(self.routed.bits),
-                                        "affine",
-                                        /* sorted_indices */ true,
-                                        target,
-                                    )
-                                    .context(
-                                        "SparseMoeBlock: gate_up gather_qmm (sorted, p5h-profile)",
-                                    )
-                                },
-                            )?;
-                            let (gate_out, up_out) = with_p5i_c_gate_up_child_span(
-                                gate_up_child_spans_enabled,
-                                "gate_up_slice_outputs",
-                                layer_idx,
-                                || -> Result<(Array, Array)> {
-                                    let gate_out = slice_on(
-                                        &gate_up_out,
-                                        [0_i32, 0, 0, 0],
-                                        [bs_k_local, 1, 1, i],
-                                        target,
-                                    )
-                                    .context(
-                                        "SparseMoeBlock: slice gate_out (sorted, p5h-profile)",
-                                    )?;
-                                    let up_out = slice_on(
-                                        &gate_up_out,
-                                        [0_i32, 0, 0, i],
-                                        [bs_k_local, 1, 1, 2 * i],
-                                        target,
-                                    )
-                                    .context(
-                                        "SparseMoeBlock: slice up_out (sorted, p5h-profile)",
-                                    )?;
-                                    Ok((gate_out, up_out))
-                                },
-                            )?;
-                            // P5h+1 T1: measurement-eval probe (sorted branch).
-                            if crate::core::p5h::is_measurement_eval_probes_active() {
-                                mlx::transforms::eval(&[
-                                    &gate_out,
-                                    &up_out,
-                                    &sorted_topk_2d,
-                                    &sort_perm,
-                                ])?;
-                            }
-                            Ok((gate_out, up_out, sorted_topk_2d, true, Some(sort_perm)))
-                        } else {
-                            // --- Default broadcast path. ---
-                            // Phase 1 Stage α: cost decomposition sub-spans (default branch).
-                            let x_in = with_p5i_c_gate_up_child_span(
-                                gate_up_child_spans_enabled,
-                                "gate_up_input_shape_prep",
-                                layer_idx,
-                                || -> Result<Array> {
-                                    mlx::ops::shape::expand_dims_on(
-                                        &flat_x,
-                                        &[-2_i32, -3_i32][..],
-                                        target,
-                                    )
-                                    .context("SparseMoeBlock: expand_dims flat_x → [BS,1,1,H]")
-                                },
-                            )?;
-                            let gate_up_out = with_p5i_c_gate_up_child_span(
-                                gate_up_child_spans_enabled,
-                                "gate_up_gather_qmm_call",
-                                layer_idx,
-                                || -> Result<Array> {
-                                    mlx::quantization::gather_quantized_matmul_on(
-                                        &x_in,
-                                        &fused.weight,
-                                        &fused.scales,
-                                        fused.biases.as_ref(),
-                                        None,
-                                        Some(&inds_u32),
-                                        true,
-                                        Some(self.routed.group_size),
-                                        Some(self.routed.bits),
-                                        "affine",
-                                        /* sorted_indices */ false,
-                                        target,
-                                    )
-                                    .context(
-                                        "SparseMoeBlock: gate_up gather_qmm (default, p5h-profile)",
-                                    )
-                                },
-                            )?;
-                            let (gate_out, up_out) = with_p5i_c_gate_up_child_span(
-                                gate_up_child_spans_enabled,
-                                "gate_up_slice_outputs",
-                                layer_idx,
-                                || -> Result<(Array, Array)> {
-                                    let gate_out = slice_on(
-                                        &gate_up_out,
-                                        [0_i32, 0, 0, 0],
-                                        [bs, k, 1, i],
-                                        target,
-                                    )
-                                    .context(
-                                        "SparseMoeBlock: slice gate_out (default, p5h-profile)",
-                                    )?;
-                                    let up_out = slice_on(
-                                        &gate_up_out,
-                                        [0_i32, 0, 0, i],
-                                        [bs, k, 1, 2 * i],
-                                        target,
-                                    )
-                                    .context(
-                                        "SparseMoeBlock: slice up_out (default, p5h-profile)",
-                                    )?;
-                                    Ok((gate_out, up_out))
-                                },
-                            )?;
-                            // P5h+1 T1: measurement-eval probe (default branch).
-                            if crate::core::p5h::is_measurement_eval_probes_active() {
-                                mlx::transforms::eval(&[&gate_out, &up_out, &inds_u32])?;
-                            }
-                            Ok((gate_out, up_out, inds_u32, false, None))
-                        }
-                    },
-                )?;
-
-            // Substep 4: swiglu_activation — silu(gate) * up.
-            // gate_out, up_out shapes:
-            //   sorted path:  [BS*k, 1, 1, moe_inter]
-            //   default path: [BS, k, 1, moe_inter]
-            // Both element-wise — same code path.
-            let act = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "swiglu_activation",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<Array> {
-                    let act = self.swiglu_on(&gate_out, &up_out)?;
-                    // P5h+1 T1: measurement-eval probe.
-                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&act])?;
-                    }
-                    Ok(act)
-                },
-            )?;
-
-            // Substep 5: gather_qmm_down — down_proj quantized matmul.
-            // Output shape:
-            //   sorted path:  [BS*k, 1, 1, H]  (in sorted order)
-            //   default path: [BS, k, 1, H]    (in original order)
-            let down_out_4d = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "gather_qmm_down",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<Array> {
-                    let down_out = mlx::quantization::gather_quantized_matmul_on(
-                        &act,
-                        &self.routed.down_weight,
-                        &self.routed.down_scales,
-                        self.routed.down_biases.as_ref(),
-                        None,
-                        Some(&rhs_idx_used),
-                        true,
-                        Some(self.routed.group_size),
-                        Some(self.routed.bits),
-                        "affine",
-                        sorted_flag,
-                        target,
-                    )
-                    .context("SparseMoeBlock: down_proj gather_qmm")?;
-                    // P5h+1 T1: measurement-eval probe.
-                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&down_out])?;
-                    }
-                    Ok(down_out)
-                },
-            )?;
-
-            // Substep 6: routing_unsort_weighted_reduce — unpack (sorted
-            // branch: argsort inv_perm + take + reshape; default branch:
-            // squeeze) into [BS, k, H], then weight by router scores
-            // and reduce across k → [BS, H].
-            let routed_y = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "routing_unsort_weighted_reduce",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<Array> {
-                    let down_out = if let Some(sort_perm) = sort_perm_opt {
-                        // Sorted path: invert the permutation to restore
-                        // original token/k order. inv_perm = argsort(sort_perm).
-                        let inv_perm = argsort_on(&sort_perm, -1_i32, target)
-                            .context("SparseMoeBlock: argsort inv permutation")?;
-                        // Reshape over squeeze: dims are statically known
-                        // singletons here, so reshape becomes a graph metadata
-                        // change with no op-node, cheaper than invoking squeeze.
-                        let down_out_2d = mlx::ops::shape::reshape(&down_out_4d, [bs_k, h])
-                            .context("SparseMoeBlock: reshape sorted down_out to [BS*k, H]")?;
-                        let unsorted_2d = take_on(&down_out_2d, &inv_perm, 0_i32, target)
-                            .context("SparseMoeBlock: take inv_perm to restore order")?;
-                        mlx::ops::shape::reshape(&unsorted_2d, [bs, k, h])
-                            .context("SparseMoeBlock: reshape unsorted to [BS, k, H]")?
-                    } else {
-                        mlx::ops::shape::squeeze_on(&down_out_4d, &[-2_i32][..], target)
-                            .context("SparseMoeBlock: squeeze down_proj dim -2")?
-                    };
-                    // scores: [BS, k] -> [BS, k, 1] for broadcast.
-                    let scores_unsq = mlx::ops::shape::expand_dims_on(&scores, -1_i32, target)
-                        .context("SparseMoeBlock: expand scores dim")?;
-                    let weighted = &down_out * &scores_unsq;
-                    let routed_y = mlx::ops::sum_on(&weighted, -2_i32, false, target)
-                        .context("SparseMoeBlock: sum across k")?;
-                    // P5h+1 T1: measurement-eval probe.
-                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&routed_y])?;
-                    }
-                    Ok(routed_y)
-                },
-            )?;
-
-            // Substep 7: shared_expert — independent LinearMLP + sigmoid gate
-            // operating on the unpacked flat_x (NOT the sorted slabs).
-            let shared_gated = crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "shared_expert",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<Array> {
-                    let shared_y = self
-                        .shared_expert
-                        .forward_on(&flat_x, target)
-                        .context("SparseMoeBlock: shared_expert forward")?; // [BS, H]
-                    let gate_logit = self
-                        .shared_expert_gate
-                        .forward_on(&flat_x, target)
-                        .context("SparseMoeBlock: shared_expert_gate forward")?; // [BS, 1]
-                    let gate_sig2 = gate_logit
-                        .sigmoid_on(target)
-                        .context("SparseMoeBlock: shared gate sigmoid")?; // [BS, 1]
-                    let shared_gated = &shared_y * &gate_sig2; // [BS, H]
-                                                               // P5h+1 T1: measurement-eval probe.
-                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&shared_gated])?;
-                    }
-                    Ok(shared_gated)
-                },
-            )?;
-
-            // Substep 8: moe_output_sum — combine routed + shared and reshape
-            // back to [B, S, H].
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "moe_output_sum",
-                || crate::core::p5h::SpanFields {
-                    layer_idx: Some(layer_idx),
-                    ..Default::default()
-                },
-                || -> Result<Array> {
-                    let out_flat = &routed_y + &shared_gated; // [BS, H]
-                    let out = mlx::ops::shape::reshape(&out_flat, [b, s, h])
-                        .context("SparseMoeBlock: reshape [BS,H] → [B,S,H]")?;
-                    // P5h+1 T1: measurement-eval probe.
-                    if crate::core::p5h::is_measurement_eval_probes_active() {
-                        mlx::transforms::eval(&[&out])?;
-                    }
-                    Ok(out)
-                },
-            )
-        }
-
-        #[cfg(not(feature = "p5h-profile"))]
-        {
-            // Production build: layer_idx is signature-only plumbing (consumed
-            // only by the p5h-profile substep spans above).
+            // Signature parity with other layer-aware forward paths.
             let _ = layer_idx;
 
             // (1) Router: Linear -> [BS, E], then top-k expert selection.

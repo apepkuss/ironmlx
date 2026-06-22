@@ -221,7 +221,6 @@ layer 1..46 用本 block；layer 0 是 Dense FFN（`first_k_dense_replace=1`，�
 | 多 EOS | `core/tokenizer.rs:177-192`、`core/loader.rs:32-40` | `[154820,154827,154829]`→`EosTokenId::Multi`，端到端已支持。 |
 | lm_head | `tie_word_embeddings=false` | 独立 `lm_head.weight[154880,256]`。 |
 | MTP | checkpoint 无 mtp 张量 | 确认 loader `mtp.*` strip 在缺失时不报错；model 代码不依赖（§10）。 |
-| P5h 插桩 | `core/p5h.rs`、`sparse_moe.rs:562-583`(8 substep 范式) | `MlaAttention::forward_on`、`MlaLatentCache::update_and_fetch_on`、`Glm4MoeBlock` 包 `try_with_p5h_span_from_current_trace`，`cfg(feature="p5h-profile")` 门控，关闭时 no-op。decode/prefill substep 名分离。 |
 | Model 结构 | 新 `glm4_moe_lite/model.rs` | embed_tokens、47 层（0 dense，1..46 MoE）、norm、lm_head。impl `Model`：`make_cache`→`Vec<LayerCache>`（每层 `LayerCache::Mla(MlaLatentCache)`）、`forward_on`、`num_hidden_layers=47`。position_ids 需求待核实：GLM 用简单 rope+offset，可能不需要 Qwen mrope 式 position_ids（rope offset 取每行 cache 长度）→ §10。 |
 
 ---
@@ -265,5 +264,4 @@ layer 1..46 用本 block；layer 0 是 Dense FFN（`first_k_dense_replace=1`，�
 ## 11. 参考文件（绝对路径）
 
 - MLX：`/Users/xin/workspace/iron-rivals/mlx/mlx/backend/metal/scaled_dot_product_attention.cpp`（use_fallback 591-640）、`mlx/fast.cpp`（SDPA 校验 677-702、fallback 724-733）、`mlx/src/fast/mod.rs`（rope_on:94、rope_with_array_offset_on:144）、`mlx/ops.cpp`（quantized_matmul 批量广播 40-43）、`mlx/backend/metal/quantized.cpp`（批量 `_batch_1` 142-214）。
-- ironmlx：`nn/mrope.rs`（split-half shader 408-504、guard 287-291）、`models/gemma4/rope.rs`、`models/qwen3_5_moe/sparse_moe.rs`（RoutedExperts 233-332、SparseMoeBlock 434-508、p5h 562-583）、`nn/decoder_layer.rs`（AttnPath/LayerCache 53-91）、`core/cache/kv_cache.rs`、`cli/serve.rs`(154-205)、`bin/ironmlx-core-bench.rs`(139-162)、`core/loader.rs`（sanitize 217-320、EosTokenId 32-40）。
 - 论文：DeepSeek-V2 arXiv:2405.04434 §2.1（MLA + 矩阵吸收）、DeepSeek-V3 arXiv:2412.19437 §2.1.2（noaux_tc，Eq 12-16）。

@@ -148,7 +148,6 @@ enum AnthropicContent {
 1. 遍历 messages，对每个 `Image { source: Base64 { data, .. } }`，`base64::decode(data)` → 字节（无网络），构造 `DecodedMessage`。`media_type` **不强校验**，仅信息性；实际格式由下游 image crate 解码时自识别。
 2. 调 `vision::expand_decoded_messages` → flat 文本 + pixel_values + grid_thw。
 3. `render_and_encode` → prompt_ids。
-4. `GenerateRequest` 改为传**真值** `pixel_values` / `image_grid_thw` / `image_token_id` / `image_spatial_merge_size`（现状硬塞 `None` 的 `anthropic.rs:238-243` 删除），其余字段（含 `#[cfg(feature="p5h-profile")]` 的 `p5h_*`）保持现状。
 5. 路由（`should_route_to_scheduler` + stream/unary 四分支）不变——图像在 prefill 阶段处理，与流式无关，故 streaming 与 unary 自动同时支持。
 
 **副作用清理**：`anthropic.rs:176-190` 那段「检测 `ImageUrl` 返回 400」整段删除——私有类型本身不认 OpenAI `image_url`，误发会自然 serde 400（§4）。

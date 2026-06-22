@@ -25,7 +25,6 @@ Profiling build:
 
 ```bash
 MLX_DIR=/Users/xin/.local/mlx \
-  cargo build --release -p ironmlx --features p5h-profile --bins
 ```
 
 Profiling server:
@@ -43,7 +42,6 @@ MLX_DIR=/Users/xin/.local/mlx \
 ```
 
 The first profiling attempt inherited `RUST_LOG=warn`, which correctly served
-requests but suppressed `[p5h-profile]` info logs. The recorded p5h run above
 therefore uses explicit `RUST_LOG=ironmlx=info,warn`.
 
 After profiling, the local binary was restored to the normal release build:
@@ -60,26 +58,21 @@ Fixed prompt: `pp512 tg16`, text-only OpenAI streaming endpoint.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | ironmlx release | 1 | 1 | 42/42 | 241.93 ms | 243.31 ms | 357.81 ms | 359.27 ms | 44.71 tok/s |
 | ironmlx release | 1 | 4 | 35/35 | 249.61 ms | 250.65 ms | 434.08 ms | 437.04 ms | 36.82 tok/s |
-| ironmlx p5h-profile | 1 | 1 | 7/7 | 256.79 ms | 501.00 ms | 380.51 ms | 627.90 ms | 121.21 decode tok/s p50 |
 | omlx | 1 | 1 | 45/45 | 212.60 ms | 214.91 ms | 336.35 ms | 348.62 ms | 47.20 tok/s |
 
 Notes:
 
-- `p5h-profile` is an attribution build with thousands of info-span log writes
   per request. Use it for shape attribution, not as the production latency
   number.
 - The normal release `b_max=1` run is the production single-request reference.
 - `b_max=4` still helps the high-concurrency Phase 7 result, but it hurts
   single-request decode/E2E in this workload.
 
-## P5h Attribution
 
 Input:
 
 - server log:
-  `/tmp/ironmlx-qwen36-perf-phase8-c1-attribution-latest/ironmlx/server_p5h_info.log`
 - joined bench CSV:
-  `/tmp/ironmlx-qwen36-perf-phase8-c1-attribution-latest/ironmlx/fixed_pp512_tg16_p5h_info.csv`
 
 Aggregator result:
 
@@ -140,5 +133,4 @@ headline suggested.
 3. Run an omlx white-box design pass focused on first-token graph shape, not a
    Python-to-Rust translation.
 4. Promote the temporary fixed-prompt harness into a maintained perf tool with
-   optional request-id capture, so future p5h and black-box runs share one
    source of truth.

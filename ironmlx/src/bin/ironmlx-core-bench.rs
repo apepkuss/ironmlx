@@ -800,10 +800,6 @@ fn make_request<M: Model>(
             .token_to_id("<|image_pad|>")
             .map(|id| id as i32)
             .unwrap_or(248_056),
-        #[cfg(feature = "p5h-profile")]
-        p5h_trace: None,
-        #[cfg(feature = "p5h-profile")]
-        p5h_root_span: None,
     }
 }
 

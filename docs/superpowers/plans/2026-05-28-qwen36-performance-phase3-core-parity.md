@@ -32,12 +32,11 @@
 - `scheduler-text` TTFT p50: ~321.7 ms
 - `scheduler-text` E2E p50: ~443.5 ms
 
-Interpretation: oMLX HTTP `c=1 pp512 tg16` TTFT p50 (~221.9 ms) is close to mlx-lm direct execution plus API overhead. ironmlx's in-process core TTFT is already ~322-326 ms, matching the Phase 1/2 HTTP/P5H behavior. The single-request gap is therefore inside the Qwen3.6 MoE model graph/materialization, not HTTP parsing, SSE, scheduler admission, or the scheduler's prefix+last-token split.
+Interpretation: oMLX HTTP `c=1 pp512 tg16` TTFT p50 (~221.9 ms) is close to mlx-lm direct execution plus API overhead. ironmlx's in-process core TTFT is already ~322-326 ms, matching the Phase 1/2 HTTP behavior. The single-request gap is therefore inside the Qwen3.6 MoE model graph/materialization, not HTTP parsing, SSE, scheduler admission, or the scheduler's prefix+last-token split.
 
 Next optimization target: model-kernel call shape, especially MoE routed expert sort/gather/scatter, fused gate+up gather-qmm, down gather-qmm, GatedDeltaNet fused projections/conv/kernel/norm path, and materialization boundaries against mlx-lm's `SwitchGLU` + `GatedDeltaNet` reference shape.
 
 ## Guardrails
 
 - Do not optimize yet; first establish whether the gap is in ironmlx `GenerationStream`, production scheduler split-prefill, or both.
-- Treat `p5h-profile` probe timings as directional because sorted MoE profile mode differs from the current production rank-3 sorted path.
 - If adding Rust code, run the required Rust validation gate before committing.

@@ -50,14 +50,6 @@ use super::mla_cache::MlaLatentCache;
 const LONG_PREFILL_BATCH_LIMIT_THRESHOLD: usize = 1024;
 const LONG_PREFILL_BATCH_LIMIT: usize = 2;
 
-#[cfg(feature = "p5h-profile")]
-fn p5h_eval(arrays: &[&Array]) -> Result<()> {
-    if crate::core::p5h::is_measurement_eval_probes_active() {
-        mlx::transforms::eval(arrays)?;
-    }
-    Ok(())
-}
-
 pub struct Glm4MoeLiteModel {
     embed_tokens: Embedding,
     layers: Vec<Glm4DecoderLayer>,
@@ -384,19 +376,6 @@ impl Glm4MoeLiteModel {
         } else {
             hidden
         };
-        #[cfg(feature = "p5h-profile")]
-        {
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "slice_last_and_project_lm_head",
-                crate::core::p5h::SpanFields::default,
-                || -> Result<Array> {
-                    let logits = self.lm_head.forward_on(&last_hidden, target)?;
-                    p5h_eval(&[&logits])?;
-                    Ok(logits)
-                },
-            )
-        }
-        #[cfg(not(feature = "p5h-profile"))]
         {
             self.lm_head.forward_on(&last_hidden, target)
         }
@@ -427,19 +406,6 @@ impl Glm4MoeLiteModel {
         )?;
         let last_positions: Vec<i32> = per_row_lens.iter().map(|&l| l - 1).collect();
         let last_hidden = per_row_slice_last(&hidden, &last_positions, target)?;
-        #[cfg(feature = "p5h-profile")]
-        {
-            crate::core::p5h::try_with_p5h_span_from_current_trace(
-                "slice_last_and_project_lm_head",
-                crate::core::p5h::SpanFields::default,
-                || -> Result<Array> {
-                    let logits = self.lm_head.forward_on(&last_hidden, target)?;
-                    p5h_eval(&[&logits])?;
-                    Ok(logits)
-                },
-            )
-        }
-        #[cfg(not(feature = "p5h-profile"))]
         {
             self.lm_head.forward_on(&last_hidden, target)
         }

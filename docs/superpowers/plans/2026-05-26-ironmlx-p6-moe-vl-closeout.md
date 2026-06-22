@@ -124,8 +124,6 @@ so they do not get confused with MoE VL regressions.
 
 | Command | Failure | Classification |
 | --- | --- | --- |
-| `MLX_DIR=$HOME/.local/mlx cargo test --workspace` | `mlx` crate test `p2c_io` link failure due missing `gguf_*` symbols; reproduced on clean `ironmlx-p5h+2-e-pp128-investigation` baseline | dependency/environment link issue |
-| `MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx` | `tests/p3b1_mrope.rs` has 3 fixture shape failures (`expected [1,8,32]`, got `[1,8,64]`) | documented existing HEAD baseline issue in `docs/p5h+2-c-close-out.md` |
 | `item3_semantic_check.py` | not run because `/tmp/p6vl_test_imgs` fixture directory is absent | missing external fixture |
 
 ## Repro Script

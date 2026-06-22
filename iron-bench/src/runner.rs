@@ -52,10 +52,10 @@ pub struct RunOutcome {
     pub prompt_tokens_local: usize,
     pub result: RequestResult,
     /// Unix-ns wall-clock at request-send start. `Some` iff
-    /// `--capture-run-timestamps` was passed (P5h+2.b spec § 6).
+    /// `--capture-run-timestamps` was passed.
     pub run_start_unix_ns: Option<u64>,
     /// Unix-ns wall-clock at response-complete. `Some` iff
-    /// `--capture-run-timestamps` was passed (P5h+2.b spec § 6).
+    /// `--capture-run-timestamps` was passed.
     pub run_end_unix_ns: Option<u64>,
 }
 

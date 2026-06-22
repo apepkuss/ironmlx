@@ -78,7 +78,6 @@
 
 ### 1.4 Boss 决策记录
 
-- **Phase 达成强度（brainstorming Q1）**：选项 2 — P5f 分批推进，允许 P5g/P5h；P5f 攻 known-path，P5g 攻 deep refactor。
 - **T1 实现策略（brainstorming Q2）**：选项 a — Scheduler 内部 fast path（active_count==1 时构造 [1, T_active]），不引入 router bypass（保留架构 evolution 选项）。
 - **T2 chunked prefill 范围（brainstorming Q3）**：Single-shot fallback when KV budget allows（不做 mlx::compile graph 复用）。
 - **T0 instrumented profile（brainstorming Q4）**：不单独做；现有 P5e three-way bench + b_max=1 sanity + P5e T0 profile 数据足够定位 T1/T2 scope。
@@ -354,7 +353,6 @@ P5f close-out 输出会驱动 P5g scope。当前已知候选（实施前 deps：
 4. **解耦 prefill_chunk_size 三身任**（scheduler chunk vs GS chunk vs 路由阈值）
    - 跟 (3) 一起做更顺手
 
-### Multi-request batching support (P5h / P6+，必须保留)
 
 Boss 决策（2026-05-19 brainstorming）：T1 选 Option 1 (CLI default `b_max=1`) 把 single-request
 做最优作为 default；**multi-request batching feature 不能丢失**，需在未来计划中保留：
@@ -388,7 +386,6 @@ runtime batch 切换是 architectural change。Boss 决策回退到 Option 1 (CL
 - 不做 router bypass for single-request idle server（条件性留 P5g）
 - 不做 PagedCache 化（不对齐 omlx 实现选择，per `feedback_design_philosophy`；multi-request 未来再评估）
 - 不做 mlx::compile wrap（P5e T2 已验证 4 个 API gap 阻断；留待"compile-everywhere"专项 task）
-- 不做 MoE pad-row skip / ragged batch path（multi-request batching feature 一部分，留 P5h/P6+）
 - 不做 sorted-routing 微优化（cache token_idx, put_along_axis — ROI 小 < 2%）
 - 不调整 `SORTED_ROUTING_MIN_BS_K` 阈值（512 已对齐 MLX fast-path floor，无 evidence 要改）
 - 不做 GatedDeltaNet / GatedAttention 算法优化（P5g 主战场）
@@ -434,7 +431,6 @@ T3: P5f close-out
     - 写 reports/p5f-final-results.md（self-contained for chatgpt 分析）
         - 含 P5f vs T0 baseline + omlx target gap table
         - 量化 P5g scope (per-PP 残余 gap 归因: GatedDeltaNet / Attn / 其他)
-        - 显式记录 multi-request batching 是 deferred capability (P5h/P6+)
     - sweep_full 19/19 PASS
     - commit
 ```
