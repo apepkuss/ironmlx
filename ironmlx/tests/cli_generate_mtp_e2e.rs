@@ -18,11 +18,45 @@ fn coco_path() -> PathBuf {
         .join("coco_sample.jpg")
 }
 
-#[test]
-#[ignore = "requires QWEN35_MODEL, QWEN35_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
-fn qwen35_vl_generate_with_mtp_accepts_image_request() {
-    let model_dir = require_env_path("QWEN35_MODEL");
-    let mtp_model_dir = require_env_path("QWEN35_MTP_MODEL");
+fn run_text_generate_smoke(model_env: &str, mtp_model_env: &str) {
+    let model_dir = require_env_path(model_env);
+    let mtp_model_dir = require_env_path(mtp_model_env);
+    let output = Command::new(env!("CARGO_BIN_EXE_ironmlx"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .arg("generate")
+        .arg("--model")
+        .arg(&model_dir)
+        .arg("--mtp-model-dir")
+        .arg(&mtp_model_dir)
+        .arg("--mtp-draft-tokens")
+        .arg("1")
+        .arg("--prompt")
+        .arg("Answer with exactly one word: OK")
+        .arg("--max-tokens")
+        .arg("1")
+        .arg("--temperature")
+        .arg("0")
+        .output()
+        .expect("run ironmlx generate");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "generate exited with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
+    assert!(
+        !stdout.trim().is_empty(),
+        "generate should emit at least one token; stderr:\n{stderr}"
+    );
+}
+
+fn run_vl_generate_smoke(model_env: &str, mtp_model_env: &str) {
+    let model_dir = require_env_path(model_env);
+    let mtp_model_dir = require_env_path(mtp_model_env);
     let output = Command::new(env!("CARGO_BIN_EXE_ironmlx"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .arg("generate")
@@ -56,4 +90,34 @@ fn qwen35_vl_generate_with_mtp_accepts_image_request() {
         !stdout.trim().is_empty(),
         "generate should emit at least one token; stderr:\n{stderr}"
     );
+}
+
+#[test]
+#[ignore = "requires QWEN35_MODEL, QWEN35_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+fn qwen35_text_generate_with_mtp_accepts_request() {
+    run_text_generate_smoke("QWEN35_MODEL", "QWEN35_MTP_MODEL");
+}
+
+#[test]
+#[ignore = "requires QWEN36_DENSE_MODEL, QWEN36_DENSE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+fn qwen36_dense_text_generate_with_mtp_accepts_request() {
+    run_text_generate_smoke("QWEN36_DENSE_MODEL", "QWEN36_DENSE_MTP_MODEL");
+}
+
+#[test]
+#[ignore = "requires QWEN36_MOE_MODEL, QWEN36_MOE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+fn qwen36_moe_text_generate_with_mtp_accepts_request() {
+    run_text_generate_smoke("QWEN36_MOE_MODEL", "QWEN36_MOE_MTP_MODEL");
+}
+
+#[test]
+#[ignore = "requires QWEN35_MODEL, QWEN35_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+fn qwen35_vl_generate_with_mtp_accepts_image_request() {
+    run_vl_generate_smoke("QWEN35_MODEL", "QWEN35_MTP_MODEL");
+}
+
+#[test]
+#[ignore = "requires QWEN36_MOE_MODEL, QWEN36_MOE_MTP_MODEL, and MLX_DIR pointing to real local checkpoints"]
+fn qwen36_moe_vl_generate_with_mtp_accepts_image_request() {
+    run_vl_generate_smoke("QWEN36_MOE_MODEL", "QWEN36_MOE_MTP_MODEL");
 }

@@ -49,7 +49,10 @@ MTP is exposed in two product entry points:
     "enabled": true,
     "draft_tokens": 2,
     "prefill_count": 7,
-    "step_count": 42
+    "step_count": 42,
+    "fallback_prefill_count": 1,
+    "drafted_tokens": 84,
+    "accepted_draft_tokens": 63
   }
 }
 ```
@@ -61,6 +64,12 @@ Field meanings:
   disabled.
 - `prefill_count`: number of scheduler MTP prefill calls observed by the server.
 - `step_count`: number of scheduler MTP decode-step calls observed by the server.
+- `fallback_prefill_count`: number of MTP-enabled prefill calls that used the
+  ordinary scheduler path because the active batch was not MTP-eligible.
+- `drafted_tokens`: latest cumulative number of draft tokens proposed by the
+  scheduler MTP path.
+- `accepted_draft_tokens`: latest cumulative number of proposed draft tokens
+  accepted by the main-model verification path.
 
 When MTP is disabled, the shape remains stable:
 
@@ -70,7 +79,10 @@ When MTP is disabled, the shape remains stable:
     "enabled": false,
     "draft_tokens": null,
     "prefill_count": 0,
-    "step_count": 0
+    "step_count": 0,
+    "fallback_prefill_count": 0,
+    "drafted_tokens": 0,
+    "accepted_draft_tokens": 0
   }
 }
 ```
@@ -98,9 +110,18 @@ MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
 
 MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx \
   core::server::anthropic::tests::messages_routes_streaming_and_unary_scheduler_requests
+
+MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --lib actor_mtp_mode -- --nocapture
+
+MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --lib health_collector_mtp -- --nocapture
+
+MLX_DIR=$HOME/.local/mlx cargo test -p ironmlx --test cli_generate_mtp_e2e -- --list
 ```
 
-Real-checkpoint VL + MTP + paged-prefix validation remains ignored by default:
+Real-checkpoint CLI validation remains ignored by default. See
+[`docs/mtp-acceptance.md`](mtp-acceptance.md) for the full text/VL matrix.
+
+VL + MTP + paged-prefix validation remains ignored by default:
 
 ```sh
 MLX_DIR=$HOME/.local/mlx \

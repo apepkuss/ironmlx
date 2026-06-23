@@ -32,7 +32,7 @@ use crate::core::model::Model;
 use crate::core::scheduler::{
     AdmitMidHandle, DenseVlMethods, Phase, RequestId, Scheduler, StepEvent,
 };
-use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel};
+use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats};
 use crate::Result;
 
 /// Commands accepted by the actor. 3b-2 ships only [`Admit`]; later
@@ -175,13 +175,34 @@ impl RollingAdmissionPolicy {
 struct SchedulerActorMtpCounters {
     mtp_prefill_count: Arc<AtomicU64>,
     mtp_step_count: Arc<AtomicU64>,
+    mtp_prefill_fallback_count: Arc<AtomicU64>,
+    mtp_drafted_tokens: Arc<AtomicU64>,
+    mtp_accepted_draft_tokens: Arc<AtomicU64>,
 }
 
 impl SchedulerActorMtpCounters {
-    fn new(mtp_prefill_count: Arc<AtomicU64>, mtp_step_count: Arc<AtomicU64>) -> Self {
+    fn new(
+        mtp_prefill_count: Arc<AtomicU64>,
+        mtp_step_count: Arc<AtomicU64>,
+        mtp_prefill_fallback_count: Arc<AtomicU64>,
+        mtp_drafted_tokens: Arc<AtomicU64>,
+        mtp_accepted_draft_tokens: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             mtp_prefill_count,
             mtp_step_count,
+            mtp_prefill_fallback_count,
+            mtp_drafted_tokens,
+            mtp_accepted_draft_tokens,
+        }
+    }
+
+    fn store_stats(&self, stats: Option<MtpSpeculativeStats>) {
+        if let Some(stats) = stats {
+            self.mtp_drafted_tokens
+                .store(stats.drafted_tokens as u64, Ordering::Relaxed);
+            self.mtp_accepted_draft_tokens
+                .store(stats.accepted_draft_tokens as u64, Ordering::Relaxed);
         }
     }
 }
@@ -259,8 +280,13 @@ where
     ) -> Result<Vec<StepEvent>> {
         if sched.mtp_batch_active_greedy_eligible() {
             counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
-            sched.prefill_admitted_mtp_batch(model, &self.mtp, self.cfg)
+            let events = sched.prefill_admitted_mtp_batch(model, &self.mtp, self.cfg)?;
+            counters.store_stats(sched.mtp_stats());
+            Ok(events)
         } else {
+            counters
+                .mtp_prefill_fallback_count
+                .fetch_add(1, Ordering::Relaxed);
             sched.prefill_admitted(model)
         }
     }
@@ -273,7 +299,9 @@ where
     ) -> Result<Vec<StepEvent>> {
         if sched.mtp_stats().is_some() {
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
-            sched.step_mtp_batch(model, &self.mtp)
+            let events = sched.step_mtp_batch(model, &self.mtp)?;
+            counters.store_stats(sched.mtp_stats());
+            Ok(events)
         } else {
             sched.step(model)
         }
@@ -351,6 +379,16 @@ pub struct SchedulerActorHandle {
     /// `/healthz.mtp.step_count` for server-level diagnostics.
     #[doc(hidden)]
     pub mtp_step_count: Arc<AtomicU64>,
+    /// Count of MTP-enabled prefill calls that fell back to the ordinary
+    /// scheduler path because the active batch was not MTP-eligible.
+    #[doc(hidden)]
+    pub mtp_fallback_prefill_count: Arc<AtomicU64>,
+    /// Latest cumulative scheduler MTP drafted-token count.
+    #[doc(hidden)]
+    pub mtp_drafted_tokens: Arc<AtomicU64>,
+    /// Latest cumulative scheduler MTP accepted-draft-token count.
+    #[doc(hidden)]
+    pub mtp_accepted_draft_tokens: Arc<AtomicU64>,
     // ── B1-p2.5 G3: /healthz monitoring atomics ──────────────────────────
     /// Live count of in-flight (active) requests in the scheduler slots.
     /// Updated by driver_loop tail on every rolling iteration.
@@ -526,6 +564,9 @@ where
     let queue_rejected = Arc::new(AtomicU64::new(0));
     let mtp_prefill_count = Arc::new(AtomicU64::new(0));
     let mtp_step_count = Arc::new(AtomicU64::new(0));
+    let mtp_fallback_prefill_count = Arc::new(AtomicU64::new(0));
+    let mtp_drafted_tokens = Arc::new(AtomicU64::new(0));
+    let mtp_accepted_draft_tokens = Arc::new(AtomicU64::new(0));
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
@@ -538,8 +579,13 @@ where
     let saturate_triggered_for_task = saturate_triggered.clone();
     let queue_depth_peak_for_task = queue_depth_peak.clone();
     let queue_rejected_for_task = queue_rejected.clone();
-    let mtp_counters_for_task =
-        SchedulerActorMtpCounters::new(mtp_prefill_count.clone(), mtp_step_count.clone());
+    let mtp_counters_for_task = SchedulerActorMtpCounters::new(
+        mtp_prefill_count.clone(),
+        mtp_step_count.clone(),
+        mtp_fallback_prefill_count.clone(),
+        mtp_drafted_tokens.clone(),
+        mtp_accepted_draft_tokens.clone(),
+    );
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
     let paged_prefix_cache_for_task = paged_prefix_cache.clone();
@@ -595,6 +641,9 @@ where
         queue_rejected: queue_rejected.clone(),
         mtp_prefill_count,
         mtp_step_count,
+        mtp_fallback_prefill_count,
+        mtp_drafted_tokens,
+        mtp_accepted_draft_tokens,
         b_active,
         b_queued,
         // P1.1: alias admission_queue_full_count to queue_rejected Arc —
@@ -2154,6 +2203,9 @@ mod tests {
         let counters = SchedulerActorMtpCounters::new(
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
         let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
 
@@ -2162,6 +2214,10 @@ mod tests {
             .expect("mtp prefill");
         assert_eq!(prefill_events.len(), 1);
         assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters.mtp_prefill_fallback_count.load(Ordering::Relaxed),
+            0
+        );
         assert!(scheduler.mtp_stats().is_some());
 
         let step_events = mode
@@ -2169,6 +2225,11 @@ mod tests {
             .expect("mtp step");
         assert_eq!(step_events.len(), 1);
         assert_eq!(counters.mtp_step_count.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.mtp_drafted_tokens.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters.mtp_accepted_draft_tokens.load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -2183,6 +2244,9 @@ mod tests {
         let counters = SchedulerActorMtpCounters::new(
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
         let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
 
@@ -2192,6 +2256,10 @@ mod tests {
 
         assert_eq!(prefill_events.len(), 1);
         assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters.mtp_prefill_fallback_count.load(Ordering::Relaxed),
+            0
+        );
         assert!(scheduler.mtp_stats().is_some());
     }
 
@@ -2209,6 +2277,9 @@ mod tests {
         let counters = SchedulerActorMtpCounters::new(
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
         let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
 
@@ -2218,6 +2289,15 @@ mod tests {
 
         assert_eq!(prefill_events.len(), 1);
         assert_eq!(counters.mtp_prefill_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            counters.mtp_prefill_fallback_count.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(counters.mtp_drafted_tokens.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            counters.mtp_accepted_draft_tokens.load(Ordering::Relaxed),
+            0
+        );
         assert!(scheduler.mtp_stats().is_none());
     }
 

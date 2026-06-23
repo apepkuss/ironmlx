@@ -49,6 +49,9 @@ pub struct MtpHealthInfo {
     pub draft_tokens: Option<usize>,
     pub prefill_count: u64,
     pub step_count: u64,
+    pub fallback_prefill_count: u64,
+    pub drafted_tokens: u64,
+    pub accepted_draft_tokens: u64,
 }
 
 #[derive(Clone)]
@@ -57,6 +60,9 @@ pub struct MtpHealthConfig {
     draft_tokens: Option<usize>,
     prefill_count: Arc<AtomicU64>,
     step_count: Arc<AtomicU64>,
+    fallback_prefill_count: Arc<AtomicU64>,
+    drafted_tokens: Arc<AtomicU64>,
+    accepted_draft_tokens: Arc<AtomicU64>,
 }
 
 impl MtpHealthConfig {
@@ -66,6 +72,9 @@ impl MtpHealthConfig {
             draft_tokens: None,
             prefill_count: Arc::new(AtomicU64::new(0)),
             step_count: Arc::new(AtomicU64::new(0)),
+            fallback_prefill_count: Arc::new(AtomicU64::new(0)),
+            drafted_tokens: Arc::new(AtomicU64::new(0)),
+            accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -73,12 +82,18 @@ impl MtpHealthConfig {
         draft_tokens: usize,
         prefill_count: Arc<AtomicU64>,
         step_count: Arc<AtomicU64>,
+        fallback_prefill_count: Arc<AtomicU64>,
+        drafted_tokens: Arc<AtomicU64>,
+        accepted_draft_tokens: Arc<AtomicU64>,
     ) -> Self {
         Self {
             enabled: true,
             draft_tokens: Some(draft_tokens),
             prefill_count,
             step_count,
+            fallback_prefill_count,
+            drafted_tokens,
+            accepted_draft_tokens,
         }
     }
 
@@ -88,6 +103,9 @@ impl MtpHealthConfig {
             draft_tokens: self.draft_tokens,
             prefill_count: self.prefill_count.load(Ordering::Relaxed),
             step_count: self.step_count.load(Ordering::Relaxed),
+            fallback_prefill_count: self.fallback_prefill_count.load(Ordering::Relaxed),
+            drafted_tokens: self.drafted_tokens.load(Ordering::Relaxed),
+            accepted_draft_tokens: self.accepted_draft_tokens.load(Ordering::Relaxed),
         }
     }
 }
@@ -285,16 +303,25 @@ mod tests {
         assert_eq!(snapshot.mtp.draft_tokens, None);
         assert_eq!(snapshot.mtp.prefill_count, 0);
         assert_eq!(snapshot.mtp.step_count, 0);
+        assert_eq!(snapshot.mtp.fallback_prefill_count, 0);
+        assert_eq!(snapshot.mtp.drafted_tokens, 0);
+        assert_eq!(snapshot.mtp.accepted_draft_tokens, 0);
     }
 
     #[test]
     fn snapshot_mtp_reports_enabled_config_and_live_counters() {
         let prefill_count = Arc::new(AtomicU64::new(7));
         let step_count = Arc::new(AtomicU64::new(11));
+        let fallback_prefill_count = Arc::new(AtomicU64::new(13));
+        let drafted_tokens = Arc::new(AtomicU64::new(17));
+        let accepted_draft_tokens = Arc::new(AtomicU64::new(19));
         let snapshot = test_collector(MtpHealthConfig::enabled(
             2,
             prefill_count.clone(),
             step_count.clone(),
+            fallback_prefill_count.clone(),
+            drafted_tokens.clone(),
+            accepted_draft_tokens.clone(),
         ))
         .snapshot();
 
@@ -302,13 +329,29 @@ mod tests {
         assert_eq!(snapshot.mtp.draft_tokens, Some(2));
         assert_eq!(snapshot.mtp.prefill_count, 7);
         assert_eq!(snapshot.mtp.step_count, 11);
+        assert_eq!(snapshot.mtp.fallback_prefill_count, 13);
+        assert_eq!(snapshot.mtp.drafted_tokens, 17);
+        assert_eq!(snapshot.mtp.accepted_draft_tokens, 19);
 
         prefill_count.store(13, Ordering::Relaxed);
         step_count.store(17, Ordering::Relaxed);
-        let snapshot =
-            test_collector(MtpHealthConfig::enabled(2, prefill_count, step_count)).snapshot();
+        fallback_prefill_count.store(23, Ordering::Relaxed);
+        drafted_tokens.store(29, Ordering::Relaxed);
+        accepted_draft_tokens.store(31, Ordering::Relaxed);
+        let snapshot = test_collector(MtpHealthConfig::enabled(
+            2,
+            prefill_count,
+            step_count,
+            fallback_prefill_count,
+            drafted_tokens,
+            accepted_draft_tokens,
+        ))
+        .snapshot();
 
         assert_eq!(snapshot.mtp.prefill_count, 13);
         assert_eq!(snapshot.mtp.step_count, 17);
+        assert_eq!(snapshot.mtp.fallback_prefill_count, 23);
+        assert_eq!(snapshot.mtp.drafted_tokens, 29);
+        assert_eq!(snapshot.mtp.accepted_draft_tokens, 31);
     }
 }
