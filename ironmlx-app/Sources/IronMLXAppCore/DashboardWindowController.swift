@@ -17,7 +17,7 @@ public final class DashboardWindowController {
     private var window: NSWindow?
     private var webView: WKWebView?
     private var bridge: DashboardBridge?
-    private var closeDelegate: WindowChromeDelegate?
+    private var windowDelegate: DashboardWindowDelegate?
 
     public init(configStore: AppConfigStore, backend: BackendProcessManager) {
         self.configStore = configStore
@@ -26,6 +26,7 @@ public final class DashboardWindowController {
 
     public func show(route: DashboardInitialRoute = .status) {
         if let window {
+            windowDelegate?.cancelPendingHideAfterFullScreenExit()
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             apply(route: route)
@@ -68,16 +69,23 @@ public final class DashboardWindowController {
         window.center()
         window.contentView = webView
         window.isReleasedWhenClosed = false
-        let closeDelegate = WindowChromeDelegate { [weak self] in
-            self?.window?.orderOut(nil)
-            return false
-        }
-        window.delegate = closeDelegate
+        let windowDelegate = DashboardWindowDelegate(
+            isFullScreen: { [weak window] in
+                window?.styleMask.contains(.fullScreen) == true
+            },
+            exitFullScreen: { [weak window] in
+                window?.toggleFullScreen(nil)
+            },
+            hideWindow: { [weak window] in
+                window?.orderOut(nil)
+            }
+        )
+        window.delegate = windowDelegate
 
         self.window = window
         self.webView = webView
         self.bridge = bridge
-        self.closeDelegate = closeDelegate
+        self.windowDelegate = windowDelegate
 
         if let htmlURL = Bundle.module.url(forResource: "dashboard2", withExtension: "html") {
             webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
@@ -202,14 +210,41 @@ public final class DashboardWindowController {
     """
 }
 
-private final class WindowChromeDelegate: NSObject, NSWindowDelegate {
-    private let shouldClose: () -> Bool
+final class DashboardWindowDelegate: NSObject, NSWindowDelegate {
+    private let isFullScreen: () -> Bool
+    private let exitFullScreen: () -> Void
+    private let hideWindow: () -> Void
+    private var shouldHideAfterFullScreenExit = false
 
-    init(_ shouldClose: @escaping () -> Bool) {
-        self.shouldClose = shouldClose
+    init(
+        isFullScreen: @escaping () -> Bool,
+        exitFullScreen: @escaping () -> Void,
+        hideWindow: @escaping () -> Void
+    ) {
+        self.isFullScreen = isFullScreen
+        self.exitFullScreen = exitFullScreen
+        self.hideWindow = hideWindow
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        shouldClose()
+        if isFullScreen() {
+            shouldHideAfterFullScreenExit = true
+            exitFullScreen()
+        } else {
+            hideWindow()
+        }
+        return false
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard shouldHideAfterFullScreenExit else {
+            return
+        }
+        shouldHideAfterFullScreenExit = false
+        hideWindow()
+    }
+
+    func cancelPendingHideAfterFullScreenExit() {
+        shouldHideAfterFullScreenExit = false
     }
 }

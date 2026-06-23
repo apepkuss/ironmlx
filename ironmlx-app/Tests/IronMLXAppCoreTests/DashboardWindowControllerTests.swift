@@ -11,6 +11,78 @@ import Testing
 }
 
 @MainActor
+@Test func dashboardWindowDelegateHidesRegularWindowInsteadOfClosing() {
+    var hideWindowCalls = 0
+    var exitFullScreenCalls = 0
+    let delegate = DashboardWindowDelegate(
+        isFullScreen: { false },
+        exitFullScreen: { exitFullScreenCalls += 1 },
+        hideWindow: { hideWindowCalls += 1 }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+        styleMask: DashboardWindowController.dashboardWindowStyleMask,
+        backing: .buffered,
+        defer: true
+    )
+
+    #expect(!delegate.windowShouldClose(window))
+    #expect(hideWindowCalls == 1)
+    #expect(exitFullScreenCalls == 0)
+}
+
+@MainActor
+@Test func dashboardWindowDelegateExitsFullScreenBeforeHiding() {
+    var isFullScreen = true
+    var hideWindowCalls = 0
+    var exitFullScreenCalls = 0
+    let delegate = DashboardWindowDelegate(
+        isFullScreen: { isFullScreen },
+        exitFullScreen: { exitFullScreenCalls += 1 },
+        hideWindow: { hideWindowCalls += 1 }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+        styleMask: DashboardWindowController.dashboardWindowStyleMask,
+        backing: .buffered,
+        defer: true
+    )
+
+    #expect(!delegate.windowShouldClose(window))
+    #expect(exitFullScreenCalls == 1)
+    #expect(hideWindowCalls == 0)
+
+    isFullScreen = false
+    delegate.windowDidExitFullScreen(
+        Notification(name: NSWindow.didExitFullScreenNotification, object: window)
+    )
+    #expect(hideWindowCalls == 1)
+}
+
+@MainActor
+@Test func dashboardWindowDelegateCanCancelPendingFullScreenHide() {
+    var hideWindowCalls = 0
+    let delegate = DashboardWindowDelegate(
+        isFullScreen: { true },
+        exitFullScreen: {},
+        hideWindow: { hideWindowCalls += 1 }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+        styleMask: DashboardWindowController.dashboardWindowStyleMask,
+        backing: .buffered,
+        defer: true
+    )
+
+    #expect(!delegate.windowShouldClose(window))
+    delegate.cancelPendingHideAfterFullScreenExit()
+    delegate.windowDidExitFullScreen(
+        Notification(name: NSWindow.didExitFullScreenNotification, object: window)
+    )
+    #expect(hideWindowCalls == 0)
+}
+
+@MainActor
 @Test func dashboardBootstrapIncludesPersistedRuntimeSettings() throws {
     let script = try DashboardWindowController.bootstrapScript(
         config: AppConfig(
