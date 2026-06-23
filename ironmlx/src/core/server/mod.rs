@@ -449,6 +449,9 @@ where
                 draft_tokens,
                 scheduler_handle.mtp_prefill_count.clone(),
                 scheduler_handle.mtp_step_count.clone(),
+                scheduler_handle.mtp_fallback_prefill_count.clone(),
+                scheduler_handle.mtp_drafted_tokens.clone(),
+                scheduler_handle.mtp_accepted_draft_tokens.clone(),
             )
         })
         .unwrap_or_else(health::MtpHealthConfig::disabled);
@@ -687,6 +690,9 @@ mod tests {
             queue_rejected: queue_rejected.clone(),
             mtp_prefill_count: Arc::new(AtomicU64::new(0)),
             mtp_step_count: Arc::new(AtomicU64::new(0)),
+            mtp_fallback_prefill_count: Arc::new(AtomicU64::new(0)),
+            mtp_drafted_tokens: Arc::new(AtomicU64::new(0)),
+            mtp_accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
             b_active: Arc::new(AtomicU64::new(0)),
             b_queued: Arc::new(AtomicU64::new(0)),
             admission_queue_full_count: queue_rejected,
@@ -713,6 +719,9 @@ mod tests {
         assert_eq!(snapshot.mtp.draft_tokens, None);
         assert_eq!(snapshot.mtp.prefill_count, 0);
         assert_eq!(snapshot.mtp.step_count, 0);
+        assert_eq!(snapshot.mtp.fallback_prefill_count, 0);
+        assert_eq!(snapshot.mtp.drafted_tokens, 0);
+        assert_eq!(snapshot.mtp.accepted_draft_tokens, 0);
     }
 
     #[test]
@@ -720,6 +729,13 @@ mod tests {
         let handle = test_scheduler_handle();
         handle.mtp_prefill_count.store(3, Ordering::Relaxed);
         handle.mtp_step_count.store(5, Ordering::Relaxed);
+        handle
+            .mtp_fallback_prefill_count
+            .store(7, Ordering::Relaxed);
+        handle.mtp_drafted_tokens.store(11, Ordering::Relaxed);
+        handle
+            .mtp_accepted_draft_tokens
+            .store(13, Ordering::Relaxed);
         let collector = build_health_collector(
             "test-model".to_string(),
             4096,
@@ -730,6 +746,9 @@ mod tests {
                 2,
                 handle.mtp_prefill_count.clone(),
                 handle.mtp_step_count.clone(),
+                handle.mtp_fallback_prefill_count.clone(),
+                handle.mtp_drafted_tokens.clone(),
+                handle.mtp_accepted_draft_tokens.clone(),
             ),
         );
         let snapshot = collector.snapshot();
@@ -738,6 +757,9 @@ mod tests {
         assert_eq!(snapshot.mtp.draft_tokens, Some(2));
         assert_eq!(snapshot.mtp.prefill_count, 3);
         assert_eq!(snapshot.mtp.step_count, 5);
+        assert_eq!(snapshot.mtp.fallback_prefill_count, 7);
+        assert_eq!(snapshot.mtp.drafted_tokens, 11);
+        assert_eq!(snapshot.mtp.accepted_draft_tokens, 13);
     }
 
     /// Verify two concurrent task acquisitions of the same Mutex serialize.

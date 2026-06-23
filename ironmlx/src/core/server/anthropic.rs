@@ -181,6 +181,23 @@ fn build_sampler(req: &MessagesRequest) -> Sampler {
     s
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessagesRoute {
+    SchedulerStream,
+    GenerationStreamStream,
+    SchedulerUnary,
+    GenerationStreamUnary,
+}
+
+fn messages_route(stream: bool, use_scheduler: bool) -> MessagesRoute {
+    match (stream, use_scheduler) {
+        (true, true) => MessagesRoute::SchedulerStream,
+        (true, false) => MessagesRoute::GenerationStreamStream,
+        (false, true) => MessagesRoute::SchedulerUnary,
+        (false, false) => MessagesRoute::GenerationStreamUnary,
+    }
+}
+
 fn format_event(event_type: &str, payload: &serde_json::Value) -> Bytes {
     let mut buf = String::new();
     buf.push_str("event: ");
@@ -307,11 +324,19 @@ where
         state.paged_prefix_cache_enabled,
     );
 
-    match (stream, use_scheduler) {
-        (true, true) => serve_via_scheduler_stream(state, request, model_label, input_tokens).await,
-        (true, false) => serve_via_gs_stream(state, request, model_label, input_tokens).await,
-        (false, true) => serve_via_scheduler_unary(state, request, model_label, input_tokens).await,
-        (false, false) => serve_via_gs_unary(state, request, model_label, input_tokens).await,
+    match messages_route(stream, use_scheduler) {
+        MessagesRoute::SchedulerStream => {
+            serve_via_scheduler_stream(state, request, model_label, input_tokens).await
+        }
+        MessagesRoute::GenerationStreamStream => {
+            serve_via_gs_stream(state, request, model_label, input_tokens).await
+        }
+        MessagesRoute::SchedulerUnary => {
+            serve_via_scheduler_unary(state, request, model_label, input_tokens).await
+        }
+        MessagesRoute::GenerationStreamUnary => {
+            serve_via_gs_unary(state, request, model_label, input_tokens).await
+        }
     }
 }
 
@@ -761,6 +786,20 @@ mod tests {
         assert!(s.starts_with("event: message_stop\ndata: "));
         assert!(s.ends_with("\n\n"));
         assert!(s.contains("\"type\":\"message_stop\""));
+    }
+
+    #[test]
+    fn messages_routes_streaming_and_unary_scheduler_requests() {
+        assert_eq!(messages_route(true, true), MessagesRoute::SchedulerStream);
+        assert_eq!(messages_route(false, true), MessagesRoute::SchedulerUnary);
+        assert_eq!(
+            messages_route(true, false),
+            MessagesRoute::GenerationStreamStream
+        );
+        assert_eq!(
+            messages_route(false, false),
+            MessagesRoute::GenerationStreamUnary
+        );
     }
 
     #[test]

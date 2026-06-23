@@ -229,6 +229,20 @@ struct ServeMtpConfig {
     draft_tokens: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QwenMoeServeModel {
+    Qwen35,
+    Qwen36,
+}
+
+fn qwen_moe_serve_model(raw_config: &serde_json::Value) -> QwenMoeServeModel {
+    if crate::models::is_qwen36_moe_config(raw_config) {
+        QwenMoeServeModel::Qwen36
+    } else {
+        QwenMoeServeModel::Qwen35
+    }
+}
+
 fn default_scheduler_profile_config() -> SchedulerAutotuneProfileConfig {
     SchedulerAutotuneProfileConfig {
         b_max: DEFAULT_B_MAX,
@@ -846,27 +860,55 @@ pub fn run(args: ServeArgs) -> Result<()> {
             }
         }
         crate::models::ModelArchitecture::Qwen35Moe => {
-            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
-                .context("Qwen35MoeModel::from_loader")?;
-            if let Some(mtp_config) = mtp_config.clone() {
-                serve_with_mtp_model(
-                    model,
-                    tokenizer,
-                    mtp_config,
-                    &args,
-                    scheduler_config,
-                    scheduler_runtime_profile,
-                    vision_input,
-                )
-            } else {
-                serve_with_model(
-                    model,
-                    tokenizer,
-                    &args,
-                    scheduler_config,
-                    scheduler_runtime_profile,
-                    vision_input,
-                )
+            match qwen_moe_serve_model(loader.config_raw_value()) {
+                QwenMoeServeModel::Qwen35 => {
+                    let model = crate::models::Qwen35MoeModel::from_loader(&loader)
+                        .context("Qwen35MoeModel::from_loader")?;
+                    if let Some(mtp_config) = mtp_config.clone() {
+                        serve_with_mtp_model(
+                            model,
+                            tokenizer,
+                            mtp_config,
+                            &args,
+                            scheduler_config,
+                            scheduler_runtime_profile,
+                            vision_input,
+                        )
+                    } else {
+                        serve_with_model(
+                            model,
+                            tokenizer,
+                            &args,
+                            scheduler_config,
+                            scheduler_runtime_profile,
+                            vision_input,
+                        )
+                    }
+                }
+                QwenMoeServeModel::Qwen36 => {
+                    let model = crate::models::Qwen36MoeModel::from_loader(&loader)
+                        .context("Qwen36MoeModel::from_loader")?;
+                    if let Some(mtp_config) = mtp_config.clone() {
+                        serve_with_mtp_model(
+                            model,
+                            tokenizer,
+                            mtp_config,
+                            &args,
+                            scheduler_config,
+                            scheduler_runtime_profile,
+                            vision_input,
+                        )
+                    } else {
+                        serve_with_model(
+                            model,
+                            tokenizer,
+                            &args,
+                            scheduler_config,
+                            scheduler_runtime_profile,
+                            vision_input,
+                        )
+                    }
+                }
             }
         }
         crate::models::ModelArchitecture::Gemma4 => {
@@ -960,9 +1002,9 @@ mod scheduler_profile_tests {
 
     use super::{
         check_loaded_scheduler_profile_health, load_scheduler_profile_for_model,
-        resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
+        qwen_moe_serve_model, resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
         resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
-        resolve_serve_mtp_config, KvQuantArg, SchedulerServeConfig, ServeArgs,
+        resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel, SchedulerServeConfig, ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -1033,6 +1075,57 @@ mod scheduler_profile_tests {
                 "num_hidden_layers": 64
             }
         })
+    }
+
+    fn qwen36_moe_raw_config() -> serde_json::Value {
+        let num_hidden_layers = 2;
+        let mut quant = serde_json::Map::new();
+        quant.insert("bits".to_owned(), serde_json::json!(4));
+        quant.insert("group_size".to_owned(), serde_json::json!(64));
+        quant.insert("mode".to_owned(), serde_json::json!("affine"));
+        for layer in 0..num_hidden_layers {
+            quant.insert(
+                format!("language_model.model.layers.{layer}.mlp.gate"),
+                serde_json::json!({"bits": 8, "group_size": 64}),
+            );
+            quant.insert(
+                format!("language_model.model.layers.{layer}.mlp.shared_expert_gate"),
+                serde_json::json!({"bits": 8, "group_size": 64}),
+            );
+        }
+        serde_json::json!({
+            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "model_type": "qwen3_5_moe",
+            "image_token_id": 248056,
+            "vision_config": {},
+            "text_config": {
+                "num_hidden_layers": num_hidden_layers,
+                "num_experts": 256,
+                "num_experts_per_tok": 8
+            },
+            "quantization": serde_json::Value::Object(quant),
+        })
+    }
+
+    #[test]
+    fn serve_qwen_moe_dispatch_preserves_qwen36_checkpoint_identity() {
+        assert_eq!(
+            qwen_moe_serve_model(&qwen36_moe_raw_config()),
+            QwenMoeServeModel::Qwen36
+        );
+        assert_eq!(
+            qwen_moe_serve_model(&serde_json::json!({
+                "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+                "model_type": "qwen3_5_moe",
+                "text_config": {
+                    "num_hidden_layers": 2,
+                    "num_experts": 64,
+                    "num_experts_per_tok": 4
+                },
+                "quantization": {"bits": 4, "group_size": 64}
+            })),
+            QwenMoeServeModel::Qwen35
+        );
     }
 
     #[test]

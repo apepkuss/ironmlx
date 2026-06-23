@@ -273,6 +273,23 @@ fn build_sampler(req: &ChatRequest) -> Sampler {
     s
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatCompletionsRoute {
+    SchedulerStream,
+    GenerationStreamStream,
+    SchedulerUnary,
+    GenerationStreamUnary,
+}
+
+fn chat_completions_route(stream: bool, use_scheduler: bool) -> ChatCompletionsRoute {
+    match (stream, use_scheduler) {
+        (true, true) => ChatCompletionsRoute::SchedulerStream,
+        (true, false) => ChatCompletionsRoute::GenerationStreamStream,
+        (false, true) => ChatCompletionsRoute::SchedulerUnary,
+        (false, false) => ChatCompletionsRoute::GenerationStreamUnary,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handler (Step 19.3)
 // ---------------------------------------------------------------------------
@@ -369,13 +386,19 @@ where
         image_token_id,
     };
 
-    match (stream, use_scheduler) {
-        (true, true) => serve_via_scheduler_stream(state, request, model_label).await,
-        (true, false) => serve_via_gs_stream(state, request, model_label).await,
-        (false, true) => {
+    match chat_completions_route(stream, use_scheduler) {
+        ChatCompletionsRoute::SchedulerStream => {
+            serve_via_scheduler_stream(state, request, model_label).await
+        }
+        ChatCompletionsRoute::GenerationStreamStream => {
+            serve_via_gs_stream(state, request, model_label).await
+        }
+        ChatCompletionsRoute::SchedulerUnary => {
             serve_via_scheduler_unary(state, request, model_label, prompt_tokens).await
         }
-        (false, false) => serve_via_gs_unary(state, request, model_label, prompt_tokens).await,
+        ChatCompletionsRoute::GenerationStreamUnary => {
+            serve_via_gs_unary(state, request, model_label, prompt_tokens).await
+        }
     }
 }
 
@@ -792,6 +815,26 @@ mod tests {
         assert!(s.starts_with("data: "), "missing prefix: {s:?}");
         assert!(s.ends_with("\n\n"), "missing terminator: {s:?}");
         assert!(s.contains("\"a\":1"), "payload not embedded: {s:?}");
+    }
+
+    #[test]
+    fn chat_completions_routes_streaming_and_unary_scheduler_requests() {
+        assert_eq!(
+            chat_completions_route(true, true),
+            ChatCompletionsRoute::SchedulerStream
+        );
+        assert_eq!(
+            chat_completions_route(false, true),
+            ChatCompletionsRoute::SchedulerUnary
+        );
+        assert_eq!(
+            chat_completions_route(true, false),
+            ChatCompletionsRoute::GenerationStreamStream
+        );
+        assert_eq!(
+            chat_completions_route(false, false),
+            ChatCompletionsRoute::GenerationStreamUnary
+        );
     }
 
     #[test]
