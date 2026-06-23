@@ -1068,16 +1068,13 @@ pub async fn serve_diffusion_gemma(
     port: u16,
     vision_input: VisionInputConfig,
 ) -> Result<()> {
-    let state = DiffusionGemmaAppState {
-        model: Arc::new(Mutex::new(model)),
-        tokenizer: Arc::new(tokenizer),
+    let state = build_diffusion_gemma_app_state(
+        model,
+        tokenizer,
         generation_config,
         model_id,
         vision_input,
-        lane: Arc::new(DiffusionGemmaLane::new(
-            DEFAULT_DIFFUSION_GEMMA_QUEUE_CAPACITY,
-        )),
-    };
+    );
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(diffusion_gemma_healthz))
@@ -1094,6 +1091,25 @@ pub async fn serve_diffusion_gemma(
         .with_context(|| format!("binding {addr}"))?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+pub(crate) fn build_diffusion_gemma_app_state(
+    model: DiffusionGemmaModel,
+    tokenizer: Tokenizer,
+    generation_config: DiffusionGemmaGenerationConfig,
+    model_id: String,
+    vision_input: VisionInputConfig,
+) -> DiffusionGemmaAppState {
+    DiffusionGemmaAppState {
+        model: Arc::new(Mutex::new(model)),
+        tokenizer: Arc::new(tokenizer),
+        generation_config,
+        model_id,
+        vision_input,
+        lane: Arc::new(DiffusionGemmaLane::new(
+            DEFAULT_DIFFUSION_GEMMA_QUEUE_CAPACITY,
+        )),
+    }
 }
 
 async fn diffusion_gemma_healthz(State(state): State<DiffusionGemmaAppState>) -> Response {

@@ -404,7 +404,7 @@ mod tests {
 
         match cli.command {
             Command::Serve(args) => {
-                assert_eq!(args.model, "/tmp/model");
+                assert_eq!(args.model.as_deref(), Some("/tmp/model"));
                 assert_eq!(
                     args.scheduler_profile
                         .as_ref()
