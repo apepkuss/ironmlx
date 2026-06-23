@@ -362,6 +362,7 @@ pub struct EnginePagedPrefixCacheSettings {
     pub root: PathBuf,
     pub block_size: i32,
     pub max_pages: Option<i32>,
+    pub max_disk_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -393,11 +394,12 @@ impl EnginePoolRuntimeConfig {
                 i32::try_from(pages).context("derived paged prefix cache max_pages exceeds i32")?
             }
         };
-        PagedPrefixCacheConfig::new(
+        PagedPrefixCacheConfig::new_with_max_disk_bytes(
             &settings.root,
             model_id.to_string(),
             settings.block_size,
             max_pages,
+            settings.max_disk_bytes,
         )
         .map(Some)
     }
@@ -1143,16 +1145,26 @@ impl EngineVariant {
 
     fn loaded_health(&self) -> LoadedEngineHealth {
         match self {
-            Self::Qwen35(state) => LoadedEngineHealth::Causal(state.health_collector.snapshot()),
-            Self::Qwen35Moe(state) => LoadedEngineHealth::Causal(state.health_collector.snapshot()),
-            Self::Qwen36Moe(state) => LoadedEngineHealth::Causal(state.health_collector.snapshot()),
-            Self::Gemma4(state) => LoadedEngineHealth::Causal(state.health_collector.snapshot()),
-            Self::Glm4MoeLite(state) => {
-                LoadedEngineHealth::Causal(state.health_collector.snapshot())
+            Self::Qwen35(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
             }
-            Self::Llama(state) => LoadedEngineHealth::Causal(state.health_collector.snapshot()),
+            Self::Qwen35Moe(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
+            }
+            Self::Qwen36Moe(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
+            }
+            Self::Gemma4(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
+            }
+            Self::Glm4MoeLite(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
+            }
+            Self::Llama(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
+            }
             Self::MiniCpmV46(state) => {
-                LoadedEngineHealth::Causal(state.health_collector.snapshot())
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
             }
             Self::DiffusionGemma(state) => {
                 let stats = state.lane.stats();
@@ -1771,7 +1783,7 @@ struct EngineModelHealth {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum LoadedEngineHealth {
-    Causal(health::HealthSnapshot),
+    Causal(Box<health::HealthSnapshot>),
     DiffusionGemma {
         scheduler: &'static str,
         active_requests: usize,

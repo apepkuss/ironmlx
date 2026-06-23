@@ -1,0 +1,176 @@
+import Foundation
+
+public struct AppConfig: Codable, Equatable {
+    public var host: String
+    public var port: UInt16
+    public var lastModel: String?
+    public var language: String
+    public var theme: String?
+    public var logLevel: String?
+    public var memLimitTotal: Int?
+    public var memLimitModel: Int?
+    public var memTotalAuto: Bool?
+    public var memTotal: Int?
+    public var memModelAuto: Bool?
+    public var hotCache: Int?
+    public var coldCache: Int?
+    public var cacheEnable: Bool?
+    public var cacheDir: String?
+    public var kvQuant: String?
+    public var maxSequences: Int?
+    public var maxModels: Int?
+    public var initCacheBlocks: Int?
+    public var modelTtlMinutes: Int?
+    public var distributedBackend: String?
+    public var parallelMode: String?
+    public var prefillChunkSize: Int?
+    public var bMax: Int?
+    public var admissionDeadlineMs: Int?
+    public var admissionQueueMax: Int?
+    public var maxCacheCap: Int?
+    public var decodeCadenceMidChunkCap: Int?
+    public var schedulerProfile: String?
+    public var schedulerAutotuneReport: Bool?
+
+    public init(
+        host: String = "127.0.0.1",
+        port: UInt16 = 9068,
+        lastModel: String? = nil,
+        language: String = "en",
+        theme: String? = nil,
+        logLevel: String? = nil,
+        memLimitTotal: Int? = nil,
+        memLimitModel: Int? = nil,
+        memTotalAuto: Bool? = nil,
+        memTotal: Int? = nil,
+        memModelAuto: Bool? = nil,
+        hotCache: Int? = nil,
+        coldCache: Int? = nil,
+        cacheEnable: Bool? = nil,
+        cacheDir: String? = nil,
+        kvQuant: String? = nil,
+        maxSequences: Int? = nil,
+        maxModels: Int? = nil,
+        initCacheBlocks: Int? = nil,
+        modelTtlMinutes: Int? = nil,
+        distributedBackend: String? = nil,
+        parallelMode: String? = nil,
+        prefillChunkSize: Int? = nil,
+        bMax: Int? = nil,
+        admissionDeadlineMs: Int? = nil,
+        admissionQueueMax: Int? = nil,
+        maxCacheCap: Int? = nil,
+        decodeCadenceMidChunkCap: Int? = nil,
+        schedulerProfile: String? = nil,
+        schedulerAutotuneReport: Bool? = nil
+    ) {
+        self.host = host
+        self.port = port
+        self.lastModel = lastModel
+        self.language = language
+        self.theme = theme
+        self.logLevel = logLevel
+        self.memLimitTotal = memLimitTotal
+        self.memLimitModel = memLimitModel
+        self.memTotalAuto = memTotalAuto
+        self.memTotal = memTotal
+        self.memModelAuto = memModelAuto
+        self.hotCache = hotCache
+        self.coldCache = coldCache
+        self.cacheEnable = cacheEnable
+        self.cacheDir = cacheDir
+        self.kvQuant = kvQuant
+        self.maxSequences = maxSequences
+        self.maxModels = maxModels
+        self.initCacheBlocks = initCacheBlocks
+        self.modelTtlMinutes = modelTtlMinutes
+        self.distributedBackend = distributedBackend
+        self.parallelMode = parallelMode
+        self.prefillChunkSize = prefillChunkSize
+        self.bMax = bMax
+        self.admissionDeadlineMs = admissionDeadlineMs
+        self.admissionQueueMax = admissionQueueMax
+        self.maxCacheCap = maxCacheCap
+        self.decodeCadenceMidChunkCap = decodeCadenceMidChunkCap
+        self.schedulerProfile = schedulerProfile
+        self.schedulerAutotuneReport = schedulerAutotuneReport
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case host
+        case port
+        case lastModel = "last_model"
+        case language
+        case theme
+        case logLevel = "log_level"
+        case memLimitTotal = "mem_limit_total"
+        case memLimitModel = "mem_limit_model"
+        case memTotalAuto = "mem_total_auto"
+        case memTotal = "mem_total"
+        case memModelAuto = "mem_model_auto"
+        case hotCache = "hot_cache"
+        case coldCache = "cold_cache"
+        case cacheEnable = "cache_enable"
+        case cacheDir = "cache_dir"
+        case kvQuant = "kv_quant"
+        case maxSequences = "max_sequences"
+        case maxModels = "max_models"
+        case initCacheBlocks = "init_cache_blocks"
+        case modelTtlMinutes = "model_ttl_minutes"
+        case distributedBackend = "distributed_backend"
+        case parallelMode = "parallel_mode"
+        case prefillChunkSize = "prefill_chunk_size"
+        case bMax = "b_max"
+        case admissionDeadlineMs = "admission_deadline_ms"
+        case admissionQueueMax = "admission_queue_max"
+        case maxCacheCap = "max_cache_cap"
+        case decodeCadenceMidChunkCap = "decode_cadence_mid_chunk_cap"
+        case schedulerProfile = "scheduler_profile"
+        case schedulerAutotuneReport = "scheduler_autotune_report"
+    }
+}
+
+public final class AppConfigStore: @unchecked Sendable {
+    public static let shared = AppConfigStore()
+
+    public let url: URL
+    private let fileManager: FileManager
+
+    public init(
+        url: URL = AppConfigStore.defaultConfigURL(),
+        fileManager: FileManager = .default
+    ) {
+        self.url = url
+        self.fileManager = fileManager
+    }
+
+    public func load() -> AppConfig {
+        guard let data = try? Data(contentsOf: url) else {
+            return AppConfig()
+        }
+        return (try? JSONDecoder().decode(AppConfig.self, from: data)) ?? AppConfig()
+    }
+
+    public func save(_ config: AppConfig) {
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(config)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            IronMLXAppLogger.error("Failed to save ironmlx app config: \(error)")
+        }
+    }
+
+    public static func defaultConfigURL() -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home
+            .appendingPathComponent(".ironmlx", isDirectory: true)
+            .appendingPathComponent("config", isDirectory: true)
+            .appendingPathComponent("app_config.json")
+    }
+}

@@ -41,6 +41,12 @@ pub struct MemoryInfo {
     pub free_ram_bytes: usize,
     pub kv_cache_active_bytes: usize,
     pub kv_cache_soft_limit_bytes: usize,
+    pub mlx_total_bytes: Option<usize>,
+    pub mlx_max_recommended_bytes: Option<usize>,
+    pub mlx_active_bytes: usize,
+    pub mlx_cache_bytes: usize,
+    pub mlx_peak_bytes: usize,
+    pub mlx_memory_limit_bytes: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +124,7 @@ pub struct HealthSnapshot {
     pub scheduler: SchedulerInfo,
     pub memory: MemoryInfo,
     pub mtp: MtpHealthInfo,
+    pub device_name: Option<String>,
     pub version: &'static str,
 }
 
@@ -146,6 +153,7 @@ impl SchedulerHealthCollector {
         let admission_full = self.admission_queue_full_count.load(Ordering::Relaxed);
         let mb_exceeded = self.memory_budget_exceeded_count.load(Ordering::Relaxed);
         let kv_active = self.kv_cache_active_bytes.load(Ordering::Relaxed);
+        let mlx_memory = mlx::memory::snapshot();
 
         let status = classify_status(
             b_queued,
@@ -175,8 +183,15 @@ impl SchedulerHealthCollector {
                 free_ram_bytes,
                 kv_cache_active_bytes: kv_active,
                 kv_cache_soft_limit_bytes: self.kv_cache_soft_limit_bytes,
+                mlx_total_bytes: mlx_memory.total_bytes,
+                mlx_max_recommended_bytes: mlx_memory.max_recommended_bytes,
+                mlx_active_bytes: mlx_memory.active_bytes,
+                mlx_cache_bytes: mlx_memory.cache_bytes,
+                mlx_peak_bytes: mlx_memory.peak_bytes,
+                mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
             },
             mtp: self.mtp.snapshot(),
+            device_name: mlx_memory.device_name,
             version: env!("CARGO_PKG_VERSION"),
         }
     }
@@ -353,5 +368,57 @@ mod tests {
         assert_eq!(snapshot.mtp.fallback_prefill_count, 23);
         assert_eq!(snapshot.mtp.drafted_tokens, 29);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 31);
+    }
+
+    #[test]
+    fn health_memory_serializes_mlx_allocator_fields() {
+        let snapshot = HealthSnapshot {
+            status: HealthStatus::Healthy,
+            uptime_secs: 7,
+            model: ModelInfo {
+                name: "test-model".to_string(),
+                max_position_embeddings: 4096,
+            },
+            scheduler: SchedulerInfo {
+                b_max: 8,
+                b_active: 1,
+                b_queued: 0,
+                queue_max: 16,
+                admission_queue_full_count: 0,
+                memory_budget_exceeded_count: 0,
+            },
+            memory: MemoryInfo {
+                total_ram_bytes: 64,
+                free_ram_bytes: 32,
+                kv_cache_active_bytes: 16,
+                kv_cache_soft_limit_bytes: 24,
+                mlx_total_bytes: Some(55),
+                mlx_max_recommended_bytes: Some(66),
+                mlx_active_bytes: 11,
+                mlx_cache_bytes: 22,
+                mlx_peak_bytes: 33,
+                mlx_memory_limit_bytes: 44,
+            },
+            mtp: MtpHealthInfo {
+                enabled: false,
+                draft_tokens: None,
+                prefill_count: 0,
+                step_count: 0,
+                fallback_prefill_count: 0,
+                drafted_tokens: 0,
+                accepted_draft_tokens: 0,
+            },
+            device_name: Some("Apple Test GPU".to_string()),
+            version: "test",
+        };
+
+        let value = serde_json::to_value(snapshot).expect("serialize health snapshot");
+        assert_eq!(value["memory"]["mlx_total_bytes"], 55);
+        assert_eq!(value["memory"]["mlx_max_recommended_bytes"], 66);
+        assert_eq!(value["memory"]["mlx_active_bytes"], 11);
+        assert_eq!(value["memory"]["mlx_cache_bytes"], 22);
+        assert_eq!(value["memory"]["mlx_peak_bytes"], 33);
+        assert_eq!(value["memory"]["mlx_memory_limit_bytes"], 44);
+        assert_eq!(value["device_name"], "Apple Test GPU");
     }
 }

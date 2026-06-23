@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use mlx::{Array, Dtype};
@@ -228,6 +229,7 @@ impl PagedPrefixEntry {
 #[derive(Debug, Clone)]
 pub struct PagedPrefixStore {
     root: PathBuf,
+    max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +257,7 @@ pub struct PagedPrefixCacheConfig {
     pub model_id: String,
     pub block_size: i32,
     pub max_pages: i32,
+    pub max_disk_bytes: Option<usize>,
 }
 
 impl PagedPrefixCacheConfig {
@@ -264,18 +267,29 @@ impl PagedPrefixCacheConfig {
         block_size: i32,
         max_pages: i32,
     ) -> Result<Self> {
+        Self::new_with_max_disk_bytes(root, model_id, block_size, max_pages, None)
+    }
+
+    pub fn new_with_max_disk_bytes(
+        root: impl AsRef<Path>,
+        model_id: impl Into<String>,
+        block_size: i32,
+        max_pages: i32,
+        max_disk_bytes: Option<usize>,
+    ) -> Result<Self> {
         let config = Self {
             root: root.as_ref().to_path_buf(),
             model_id: model_id.into(),
             block_size,
             max_pages,
+            max_disk_bytes,
         };
         config.validate()?;
         Ok(config)
     }
 
     pub fn store(&self) -> PagedPrefixStore {
-        PagedPrefixStore::new(&self.root)
+        PagedPrefixStore::new(&self.root).with_optional_max_bytes(self.max_disk_bytes)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -293,6 +307,9 @@ impl PagedPrefixCacheConfig {
                 "PagedPrefixCacheConfig: max_pages must be > 0, got {}",
                 self.max_pages
             );
+        }
+        if self.max_disk_bytes == Some(0) {
+            anyhow::bail!("PagedPrefixCacheConfig: max_disk_bytes must be > 0");
         }
         Ok(())
     }
@@ -550,7 +567,18 @@ impl PagedPrefixStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            max_bytes: None,
         }
+    }
+
+    pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
+    fn with_optional_max_bytes(mut self, max_bytes: Option<usize>) -> Self {
+        self.max_bytes = max_bytes;
+        self
     }
 
     pub fn key_for(spec: &PagedPrefixKeySpec) -> String {
@@ -573,6 +601,15 @@ impl PagedPrefixStore {
     pub fn save(&self, spec: &PagedPrefixKeySpec, entry: &PagedPrefixEntry) -> Result<String> {
         self.validate_spec(spec)?;
         self.validate_entry(spec, entry)?;
+
+        if let Some(max_bytes) = self.max_bytes {
+            let payload_bytes = entry.observability_stats(spec.cached_len).payload_bytes;
+            if payload_bytes > max_bytes {
+                anyhow::bail!(
+                    "PagedPrefixStore: entry payload_bytes {payload_bytes} exceeds max_bytes {max_bytes}"
+                );
+            }
+        }
 
         let key = Self::key_for(spec);
         let metadata = metadata_for(spec, &key)?;
@@ -623,6 +660,9 @@ impl PagedPrefixStore {
                 final_dir.display()
             )
         })?;
+        if let Some(max_bytes) = self.max_bytes {
+            self.evict_to_disk_capacity(&key, max_bytes)?;
+        }
         Ok(key)
     }
 
@@ -802,6 +842,79 @@ impl PagedPrefixStore {
         Ok(actual_metadata == metadata_for(spec, key)?)
     }
 
+    fn evict_to_disk_capacity(&self, keep_key: &str, max_bytes: usize) -> Result<()> {
+        let mut entries = self.disk_entries()?;
+        let mut total_bytes = entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
+        if total_bytes <= max_bytes as u64 {
+            return Ok(());
+        }
+
+        entries.sort_by(|left, right| {
+            left.modified
+                .cmp(&right.modified)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        for entry in entries {
+            if entry.key == keep_key {
+                continue;
+            }
+            fs::remove_dir_all(&entry.path)
+                .with_context(|| format!("evict prefix cache entry {}", entry.path.display()))?;
+            total_bytes = total_bytes.saturating_sub(entry.bytes);
+            if total_bytes <= max_bytes as u64 {
+                break;
+            }
+        }
+
+        if total_bytes > max_bytes as u64 {
+            anyhow::bail!(
+                "PagedPrefixStore: retained entry exceeds max_bytes {max_bytes}; total_bytes={total_bytes}"
+            );
+        }
+        Ok(())
+    }
+
+    fn disk_entries(&self) -> Result<Vec<PrefixDiskEntry>> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read prefix cache root {}", self.root.display()));
+            }
+        };
+        let mut result = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("read prefix cache root {}", self.root.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("read prefix cache entry type {}", path.display()))?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if key.starts_with(".tmp-") {
+                continue;
+            }
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("read prefix cache metadata {}", path.display()))?;
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            let bytes = directory_disk_bytes(&path)?;
+            result.push(PrefixDiskEntry {
+                key,
+                path,
+                bytes,
+                modified,
+            });
+        }
+        Ok(result)
+    }
+
     fn validate_spec(&self, spec: &PagedPrefixKeySpec) -> Result<()> {
         if spec.model_id.is_empty() {
             anyhow::bail!("PagedPrefixStore: model_id must not be empty");
@@ -898,6 +1011,35 @@ impl PagedPrefixStore {
         }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+struct PrefixDiskEntry {
+    key: String,
+    path: PathBuf,
+    bytes: u64,
+    modified: SystemTime,
+}
+
+fn directory_disk_bytes(path: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    for entry in
+        fs::read_dir(path).with_context(|| format!("read prefix cache entry {}", path.display()))?
+    {
+        let entry = entry.with_context(|| format!("read prefix cache entry {}", path.display()))?;
+        let metadata = entry.metadata().with_context(|| {
+            format!(
+                "read prefix cache entry metadata {}",
+                entry.path().display()
+            )
+        })?;
+        if metadata.is_dir() {
+            total = total.saturating_add(directory_disk_bytes(&entry.path())?);
+        } else {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 fn validate_layer_spec(idx: usize, spec: &PrefixLayerSpec, block_size: i32) -> Result<()> {
@@ -1545,6 +1687,47 @@ mod tests {
             Vec::<i32>::new()
         );
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn directory_size(path: &std::path::Path) -> u64 {
+        let mut total = 0_u64;
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let metadata = entry.metadata().unwrap();
+            if metadata.is_dir() {
+                total += directory_size(&entry.path());
+            } else {
+                total += metadata.len();
+            }
+        }
+        total
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_evicts_old_entries_to_ssd_capacity() {
+        let root = temp_root("prefix-store-ssd-capacity");
+        let entry1 = single_full_paged_entry(1.0);
+        let entry2 = single_full_paged_entry(2.0);
+        let spec1 = spec(vec![1, 2], 2, None, entry1.main_layer_specs(), vec![], None);
+        let spec2 = spec(vec![3, 4], 2, None, entry2.main_layer_specs(), vec![], None);
+
+        let unlimited = PagedPrefixStore::new(&root);
+        let key1 = unlimited.save(&spec1, &entry1).expect("save first entry");
+        let first_entry_bytes = directory_size(&root.join(&key1));
+        let limited = PagedPrefixStore::new(&root).with_max_bytes(first_entry_bytes as usize + 1);
+        let key2 = limited.save(&spec2, &entry2).expect("save second entry");
+
+        assert!(
+            !root.join(&key1).exists(),
+            "oldest entry should be evicted when the SSD cache exceeds its limit"
+        );
+        assert!(root.join(&key2).exists(), "newly saved entry should remain");
+        assert!(
+            directory_size(&root) <= first_entry_bytes + 1,
+            "SSD cache directory should stay within the configured capacity"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

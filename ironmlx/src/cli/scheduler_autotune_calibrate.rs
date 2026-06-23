@@ -482,7 +482,7 @@ fn build_serve_invocation(
             port.to_string(),
             "--prefill-chunk-size".to_string(),
             config.prefill_chunk_size.to_string(),
-            "--b-max".to_string(),
+            "--max-sequences".to_string(),
             config.b_max.to_string(),
             "--admission-deadline-ms".to_string(),
             config.admission_deadline_ms.to_string(),
@@ -781,7 +781,7 @@ mod tests {
 
         assert_eq!(command.program.to_string_lossy(), "/tmp/ironmlx");
         assert!(command.args.contains(&"serve".to_string()));
-        assert!(command.args.contains(&"--b-max".to_string()));
+        assert!(command.args.contains(&"--max-sequences".to_string()));
         assert!(command.args.contains(&"2".to_string()));
         assert!(command.args.contains(&"--prefill-chunk-size".to_string()));
         assert!(command.args.contains(&"1024".to_string()));

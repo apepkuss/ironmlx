@@ -8,8 +8,8 @@ mod info;
 mod kv_quant;
 mod scheduler_autotune;
 mod scheduler_autotune_calibrate;
-mod scheduler_profile_store;
-mod serve;
+pub(crate) mod scheduler_profile_store;
+pub(crate) mod serve;
 
 pub(crate) use kv_quant::KvQuantArg;
 
@@ -469,6 +469,28 @@ mod tests {
     }
 
     #[test]
+    fn serve_subcommand_parses_ssd_prefix_cache_max_gb() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--ssd-prefix-cache-max-gb",
+            "10",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.ssd_prefix_cache_max_gb, Some(10));
+                assert_eq!(args.paged_prefix_cache_max_pages, None);
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn serve_subcommand_accepts_default_paged_prefix_cache_dir() {
         let cli = Cli::try_parse_from([
             "ironmlx",
@@ -488,6 +510,19 @@ mod tests {
                         .to_string_lossy(),
                     "~/.ironmlx/cache/paged_prefix_cache"
                 );
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_subcommand_allows_app_daemon_without_model() {
+        let cli = Cli::parse_from(["ironmlx", "serve", "--port", "9068"]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.model, None);
+                assert_eq!(args.port, 9068);
             }
             other => panic!("expected Serve command, got {other:?}"),
         }

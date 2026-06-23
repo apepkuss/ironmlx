@@ -56,6 +56,7 @@ fn main() {
         "src/bridge/fast.rs",
         "src/bridge/io.rs",
         "src/bridge/metal.rs",
+        "src/bridge/memory.rs",
         "src/bridge/quantization.rs",
         "src/bridge/random.rs",
     ])
@@ -67,6 +68,7 @@ fn main() {
     .file("shim/src/fast.cc")
     .file("shim/src/io.cc")
     .file("shim/src/metal.cc")
+    .file("shim/src/memory.cc")
     .file("shim/src/quantization.cc")
     .file("shim/src/random.cc")
     .include("shim/include")

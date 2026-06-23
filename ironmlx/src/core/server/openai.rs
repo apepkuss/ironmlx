@@ -30,7 +30,7 @@ use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::core::server::vision::{expand_decoded_messages, DecodedMessage, DecodedPart};
 use crate::core::server::VisionInputConfig;
 
-use super::AppState;
+use super::{AppState, SamplingDefaults};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,6 +93,10 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<i32>,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
     #[serde(default)]
     pub seed: Option<u64>,
     /// HuggingFace `apply_chat_template` extra kwargs — passed through as
@@ -255,16 +259,26 @@ fn gen_id() -> String {
     format!("chatcmpl-{}", now_unix())
 }
 
-fn build_sampler(req: &ChatRequest) -> Sampler {
+fn build_sampler(req: &ChatRequest, defaults: SamplingDefaults) -> Sampler {
     let mut s = Sampler::greedy();
-    if let Some(t) = req.temperature {
+    if let Some(t) = req.temperature.or(defaults.temperature) {
         if t > 0.0 {
             s = s.with_temperature(t);
         }
     }
-    if let Some(p) = req.top_p {
-        if p < 1.0 {
+    if let Some(p) = req.top_p.or(defaults.top_p) {
+        if p > 0.0 && p <= 1.0 {
             s = s.with_top_p(p);
+        }
+    }
+    if let Some(k) = req.top_k.or(defaults.top_k) {
+        if k > 0 {
+            s = s.with_top_k(k);
+        }
+    }
+    if let Some(penalty) = req.repetition_penalty.or(defaults.repetition_penalty) {
+        if penalty > 0.0 && penalty != 1.0 {
+            s = s.with_repetition_penalty(penalty);
         }
     }
     if let Some(seed) = req.seed {
@@ -301,12 +315,19 @@ pub async fn chat_completions<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    chat_completions_with_state(state, req).await
+}
+
+pub(crate) async fn chat_completions_with_state<M>(state: AppState<M>, req: ChatRequest) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     // Extract fields we need after consuming req.messages.
     let stream = req.stream;
 
     let max_tokens = req.max_tokens;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let sampler = build_sampler(&req);
+    let sampler = build_sampler(&req, state.sampling_defaults);
     let chat_template_kwargs = req.chat_template_kwargs;
 
     // Build a per-request reqwest client for image fetching.
@@ -908,6 +929,54 @@ mod tests {
         assert!(s.contains("\"prompt_tokens\":5"));
         assert!(s.contains("\"completion_tokens\":1"));
         assert!(s.contains("\"total_tokens\":6"));
+    }
+
+    #[test]
+    fn build_sampler_uses_model_defaults_when_request_omits_sampling_params() {
+        let req: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "max_tokens": 8
+        }))
+        .expect("chat request");
+        let defaults = super::super::SamplingDefaults {
+            temperature: Some(0.7),
+            top_p: Some(0.8),
+            top_k: Some(40),
+            repetition_penalty: Some(1.1),
+        };
+
+        let sampler = build_sampler(&req, defaults);
+
+        assert_eq!(sampler.temperature, 0.7);
+        assert_eq!(sampler.top_p, Some(0.8));
+        assert_eq!(sampler.top_k, Some(40));
+        assert_eq!(sampler.repetition_penalty, Some(1.1));
+    }
+
+    #[test]
+    fn build_sampler_prefers_request_values_over_model_defaults() {
+        let req: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "max_tokens": 8,
+            "temperature": 0.2,
+            "top_p": 0.6,
+            "top_k": 16,
+            "repetition_penalty": 1.05
+        }))
+        .expect("chat request");
+        let defaults = super::super::SamplingDefaults {
+            temperature: Some(0.7),
+            top_p: Some(0.8),
+            top_k: Some(40),
+            repetition_penalty: Some(1.1),
+        };
+
+        let sampler = build_sampler(&req, defaults);
+
+        assert_eq!(sampler.temperature, 0.2);
+        assert_eq!(sampler.top_p, Some(0.6));
+        assert_eq!(sampler.top_k, Some(16));
+        assert_eq!(sampler.repetition_penalty, Some(1.05));
     }
 
     #[tokio::test]

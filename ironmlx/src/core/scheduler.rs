@@ -2869,7 +2869,9 @@ impl<M: Model> Scheduler<M> {
         turboquant_bits: Option<TurboQuantKVBits>,
     ) -> Result<Vec<LayerCache>> {
         if self.paged_prefix_cache.is_some() && turboquant_bits.is_some() {
-            anyhow::bail!("paged SSD prefix cache is mutually exclusive with TurboQuant KV cache");
+            anyhow::bail!(
+                "cache_turboquant_conflict: paged SSD prefix cache is mutually exclusive with TurboQuant KV cache"
+            );
         }
         let mut cache = model.make_cache(batch, cap, dtype)?;
         if let Some(config) = &self.paged_prefix_cache {

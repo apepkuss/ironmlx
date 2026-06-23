@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::{routing::get, routing::post, Router};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits};
@@ -27,9 +28,31 @@ pub mod chat_format;
 pub mod diffusion_gemma;
 pub mod engine;
 pub mod health;
+pub mod model_manager;
 pub(crate) mod openai;
 pub mod scheduler_actor;
 pub mod vision;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct SamplingDefaults {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<i32>,
+    pub repetition_penalty: Option<f32>,
+}
+
+impl SamplingDefaults {
+    pub fn merge_with_override(self, override_defaults: Self) -> Self {
+        Self {
+            temperature: override_defaults.temperature.or(self.temperature),
+            top_p: override_defaults.top_p.or(self.top_p),
+            top_k: override_defaults.top_k.or(self.top_k),
+            repetition_penalty: override_defaults
+                .repetition_penalty
+                .or(self.repetition_penalty),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub enum VisionInputConfig {
@@ -89,6 +112,9 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// Runtime scheduler profile. Base config is applied at boot; rules may
     /// select request-level chunk/cadence settings after tokenization.
     pub scheduler_runtime_profile: Arc<SchedulerAutotuneRuntimeProfile>,
+    /// Model-level default sampling configuration. Request-level sampling
+    /// fields still take precedence.
+    pub sampling_defaults: SamplingDefaults,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
@@ -111,6 +137,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             admission_queue_max: self.admission_queue_max,
             effective_cap_max: self.effective_cap_max,
             scheduler_runtime_profile: self.scheduler_runtime_profile.clone(),
+            sampling_defaults: self.sampling_defaults,
             kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
             health_collector: self.health_collector.clone(),
         }
@@ -118,6 +145,11 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
 }
 
 impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
+    pub(crate) fn with_sampling_defaults(mut self, sampling_defaults: SamplingDefaults) -> Self {
+        self.sampling_defaults = sampling_defaults;
+        self
+    }
+
     pub(crate) fn scheduler_request_config(
         &self,
         prompt_len: usize,
@@ -569,6 +601,7 @@ where
         admission_queue_max,
         effective_cap_max, // 3f
         scheduler_runtime_profile: Arc::new(scheduler_runtime_profile),
+        sampling_defaults: SamplingDefaults::default(),
         kv_cache_turboquant_bits,
         health_collector,
     })

@@ -75,7 +75,7 @@ pub struct GenerateArgs {
 
     /// KV cache quantization used by attention reads: none, turbo3, turbo4, or k3v4.
     #[arg(long = "kv-quant", value_enum, default_value = "none")]
-    pub kv_quant: KvQuantArg,
+    pub(crate) kv_quant: KvQuantArg,
 }
 
 struct PreparedImages {
