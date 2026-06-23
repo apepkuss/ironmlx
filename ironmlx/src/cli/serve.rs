@@ -33,8 +33,16 @@ const DEFAULT_PAGED_PREFIX_CACHE_DIR: &str = "~/.ironmlx/cache/paged_prefix_cach
 pub struct ServeArgs {
     /// Local directory containing config.json + model.safetensors + tokenizer.json.
     /// HF repo-id resolution is deferred to a future phase; pass a local path for now.
-    #[arg(long)]
-    pub model: String,
+    #[arg(
+        long,
+        required_unless_present = "model_manifest",
+        conflicts_with = "model_manifest"
+    )]
+    pub model: Option<String>,
+
+    /// JSON manifest describing one or more model engines for runtime routing.
+    #[arg(long = "model-manifest", conflicts_with = "model")]
+    pub model_manifest: Option<PathBuf>,
 
     /// Bind port.
     #[arg(long, default_value_t = 8080)]
@@ -142,6 +150,7 @@ pub struct ServeArgs {
 fn resolve_paged_prefix_cache_config(
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
+    model_id: &str,
 ) -> Result<Option<crate::core::cache::PagedPrefixCacheConfig>> {
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
@@ -169,8 +178,39 @@ fn resolve_paged_prefix_cache_config(
             i32::try_from(pages).context("derived paged prefix cache max_pages exceeds i32")?
         }
     };
-    crate::core::cache::PagedPrefixCacheConfig::new(root, args.model.clone(), block_size, max_pages)
-        .map(Some)
+    crate::core::cache::PagedPrefixCacheConfig::new(
+        root,
+        model_id.to_string(),
+        block_size,
+        max_pages,
+    )
+    .map(Some)
+}
+
+fn resolve_engine_paged_prefix_cache_settings(
+    args: &ServeArgs,
+) -> Result<Option<server::engine::EnginePagedPrefixCacheSettings>> {
+    let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
+        return Ok(None);
+    };
+    if args.kv_quant.turboquant_bits().is_some() {
+        bail!("--paged-prefix-cache-dir is mutually exclusive with --kv-quant");
+    }
+    let root = expand_home_path(root)?;
+    let block_size = args.paged_prefix_cache_block_size;
+    if block_size <= 0 {
+        bail!("--paged-prefix-cache-block-size must be > 0");
+    }
+    if let Some(max_pages) = args.paged_prefix_cache_max_pages {
+        if max_pages <= 0 {
+            bail!("--paged-prefix-cache-max-pages must be > 0");
+        }
+    }
+    Ok(Some(server::engine::EnginePagedPrefixCacheSettings {
+        root,
+        block_size,
+        max_pages: args.paged_prefix_cache_max_pages,
+    }))
 }
 
 fn resolve_prefix_lru_cache_config(
@@ -284,7 +324,21 @@ fn load_scheduler_profile_for_model(
     store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
 ) -> Result<Option<SchedulerProfileLoad>> {
-    if let Some(path) = args.scheduler_profile.as_deref() {
+    load_scheduler_profile_for_model_with_explicit(
+        args.scheduler_profile.as_deref(),
+        model_dir,
+        store,
+        hardware_label,
+    )
+}
+
+fn load_scheduler_profile_for_model_with_explicit(
+    explicit_profile: Option<&Path>,
+    model_dir: &Path,
+    store: Option<&SchedulerProfileStore>,
+    hardware_label: &str,
+) -> Result<Option<SchedulerProfileLoad>> {
+    if let Some(path) = explicit_profile {
         return Ok(Some(SchedulerProfileLoad {
             path: path.to_path_buf(),
             profile: read_scheduler_runtime_profile(path)?,
@@ -563,6 +617,12 @@ fn serve_runtime() -> Result<tokio::runtime::Runtime> {
         .context("tokio::Runtime::new")
 }
 
+fn single_model_id(args: &ServeArgs) -> Result<String> {
+    args.model
+        .clone()
+        .context("--model is required when --model-manifest is not set")
+}
+
 fn serve_with_model<M>(
     model: M,
     tokenizer: Tokenizer,
@@ -576,8 +636,8 @@ where
 {
     log_scheduler_mode(scheduler_config);
 
-    let model_id = args.model.clone();
-    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config)?;
+    let model_id = single_model_id(args)?;
+    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
     if let Some(config) = &paged_prefix_cache {
         tracing::info!(
@@ -641,8 +701,8 @@ where
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
 
-    let model_id = args.model.clone();
-    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config)?;
+    let model_id = single_model_id(args)?;
+    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
     if let Some(config) = &prefix_lru_cache {
         tracing::info!(
@@ -681,7 +741,7 @@ fn serve_with_diffusion_gemma_model(
     args: &ServeArgs,
     vision_input: server::VisionInputConfig,
 ) -> Result<()> {
-    let model_id = args.model.clone();
+    let model_id = single_model_id(args)?;
     let runtime = serve_runtime()?;
     runtime.block_on(server::diffusion_gemma::serve_diffusion_gemma(
         model,
@@ -707,12 +767,173 @@ fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))
 }
 
+fn read_engine_pool_manifest(path: &Path) -> Result<server::engine::EnginePoolManifest> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn resolve_engine_pool_scheduler_profile(
+    args: &ServeArgs,
+    model_dir: &Path,
+    manifest_profile: Option<&Path>,
+    store: Option<&SchedulerProfileStore>,
+    hardware_label: &str,
+) -> Result<SchedulerAutotuneRuntimeProfile> {
+    let explicit_profile = manifest_profile.or(args.scheduler_profile.as_deref());
+    let mut scheduler_profile_load = load_scheduler_profile_for_model_with_explicit(
+        explicit_profile,
+        model_dir,
+        store,
+        hardware_label,
+    )?;
+    let scheduler_profile_model_name = scheduler_profile_model_name(model_dir)?;
+    let mut discard_auto_profile = false;
+    if let Some(load) = scheduler_profile_load.as_ref() {
+        match check_loaded_scheduler_profile_health(
+            &load.profile,
+            &scheduler_profile_model_name,
+            hardware_label,
+            unix_time_ms(),
+        ) {
+            Ok(report) => log_scheduler_profile_health(&load.path, &report),
+            Err(error) if load.auto_loaded => {
+                tracing::warn!(
+                    "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
+                    load.path.display(),
+                    scheduler_profile_model_name,
+                    hardware_label,
+                    error
+                );
+                discard_auto_profile = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if discard_auto_profile {
+        scheduler_profile_load = None;
+    }
+    resolve_scheduler_runtime_profile(
+        args,
+        scheduler_profile_load.as_ref().map(|load| &load.profile),
+    )
+}
+
+fn build_engine_model_config_for_pool(
+    args: &ServeArgs,
+    model: server::engine::EngineModelManifest,
+    scheduler_profile_store: Option<&SchedulerProfileStore>,
+    hardware_label: &str,
+) -> Result<server::engine::EngineModelConfig> {
+    let mtp = model
+        .mtp_model_dir
+        .map(|model_dir| server::engine::EngineMtpSettings {
+            model_dir,
+            draft_tokens: model.mtp_draft_tokens,
+        });
+    if model.load_policy == server::engine::EngineLoadPolicy::Disabled {
+        return Ok(server::engine::EngineModelConfig {
+            id: model.id,
+            path: model.path,
+            load_policy: model.load_policy,
+            default: model.default,
+            scheduler_runtime_profile: default_scheduler_runtime_profile(),
+            mtp,
+        });
+    }
+    if !model.path.exists() {
+        bail!(
+            "engine model `{}` path must point to a local directory (got '{}')",
+            model.id,
+            model.path.display()
+        );
+    }
+    if model.mtp_draft_tokens.is_some() && mtp.is_none() {
+        bail!(
+            "engine model `{}` sets mtp_draft_tokens without mtp_model_dir",
+            model.id
+        );
+    }
+    let scheduler_runtime_profile = resolve_engine_pool_scheduler_profile(
+        args,
+        &model.path,
+        model.scheduler_profile.as_deref(),
+        scheduler_profile_store,
+        hardware_label,
+    )?;
+    Ok(server::engine::EngineModelConfig {
+        id: model.id,
+        path: model.path,
+        load_policy: model.load_policy,
+        default: model.default,
+        scheduler_runtime_profile,
+        mtp,
+    })
+}
+
+fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
+    if args.mtp_model_dir.is_some() || args.mtp_draft_tokens.is_some() {
+        bail!("--model-manifest uses per-model mtp_model_dir / mtp_draft_tokens entries; do not pass global MTP flags");
+    }
+    if args.prefix_lru_cache_max_bytes.is_some() && args.paged_prefix_cache_dir.is_none() {
+        bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
+    }
+
+    let manifest = read_engine_pool_manifest(manifest_path)?;
+    let _registry = server::engine::EngineRegistry::new(manifest.clone())?;
+    let scheduler_profile_store = if args.scheduler_profile.is_none() {
+        match SchedulerProfileStore::default() {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::warn!(
+                    "ironmlx serve: scheduler profile store disabled error={:#}; using CLI/default scheduler config",
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let hardware_label = detect_scheduler_profile_hardware_label();
+    let mut models = Vec::with_capacity(manifest.models.len());
+    for model in manifest.models {
+        models.push(build_engine_model_config_for_pool(
+            &args,
+            model,
+            scheduler_profile_store.as_ref(),
+            &hardware_label,
+        )?);
+    }
+    let paged_prefix_cache = resolve_engine_paged_prefix_cache_settings(&args)?;
+    let runtime_config = server::engine::EnginePoolRuntimeConfig {
+        host: args.host,
+        port: args.port,
+        kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
+        scheduler_autotune_report: args.scheduler_autotune_report,
+        paged_prefix_cache,
+        prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
+    };
+    let config = server::engine::EnginePoolConfig {
+        default_model: manifest.default_model,
+        max_loaded_models: manifest.max_loaded_models,
+        models,
+    };
+    let runtime = serve_runtime()?;
+    runtime.block_on(server::engine::serve_engine_pool(config, runtime_config))
+}
+
 pub fn run(args: ServeArgs) -> Result<()> {
-    let model_dir = PathBuf::from(&args.model);
+    if let Some(manifest_path) = args.model_manifest.clone() {
+        return run_engine_pool(args, &manifest_path);
+    }
+
+    let model_arg = single_model_id(&args)?;
+    let model_dir = PathBuf::from(&model_arg);
     if !model_dir.exists() {
         return Err(anyhow::anyhow!(
             "--model must point to a local directory (got '{}'); HF hub auto-download is deferred",
-            args.model
+            model_arg
         ));
     }
 
@@ -999,10 +1220,12 @@ mod scheduler_profile_tests {
         SchedulerAutotuneRuntimeRuleCondition, SchedulerAutotuneScenario,
         SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
+    use crate::core::server::engine::{EngineLoadPolicy, EngineModelManifest};
 
     use super::{
-        check_loaded_scheduler_profile_health, load_scheduler_profile_for_model,
-        qwen_moe_serve_model, resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
+        build_engine_model_config_for_pool, check_loaded_scheduler_profile_health,
+        load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
+        resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
         resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
         resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel, SchedulerServeConfig, ServeArgs,
     };
@@ -1045,7 +1268,8 @@ mod scheduler_profile_tests {
 
     fn base_args() -> ServeArgs {
         ServeArgs {
-            model: "/tmp/model".to_string(),
+            model: Some("/tmp/model".to_string()),
+            model_manifest: None,
             port: 8080,
             host: "127.0.0.1".to_string(),
             prefill_chunk_size: None,
@@ -1064,6 +1288,78 @@ mod scheduler_profile_tests {
             paged_prefix_cache_max_pages: None,
             prefix_lru_cache_max_bytes: None,
         }
+    }
+
+    #[test]
+    fn serve_engine_pool_manifest_parses_load_policies() {
+        let temp_dir = unique_temp_dir("serve-engine-pool-manifest");
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let manifest_path = temp_dir.join("models.json");
+        std::fs::write(
+            &manifest_path,
+            r#"{
+                "default_model": "alpha",
+                "max_loaded_models": 1,
+                "models": [
+                    {"id": "alpha", "path": "/models/alpha"},
+                    {"id": "beta", "path": "/models/beta", "load_policy": "preload"}
+                ]
+            }"#,
+        )
+        .expect("write manifest");
+
+        let manifest = read_engine_pool_manifest(&manifest_path).expect("manifest");
+
+        assert_eq!(manifest.default_model.as_deref(), Some("alpha"));
+        assert_eq!(manifest.max_loaded_models, Some(1));
+        assert_eq!(manifest.models[0].id, "alpha");
+        assert_eq!(manifest.models[0].load_policy, EngineLoadPolicy::Lazy);
+        assert_eq!(manifest.models[1].load_policy, EngineLoadPolicy::Preload);
+        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_paged_prefix_cache_uses_engine_model_id_namespace() {
+        let prefix_dir = unique_temp_dir("serve-prefix-engine-id");
+        let mut args = base_args();
+        args.paged_prefix_cache_dir = Some(prefix_dir.clone());
+
+        let cfg = resolve_paged_prefix_cache_config(
+            &args,
+            SchedulerServeConfig {
+                b_max: 2,
+                max_cache_cap: 128,
+                ..SchedulerServeConfig::default()
+            },
+            "manifest-alpha",
+        )
+        .expect("prefix config")
+        .expect("enabled");
+
+        assert_eq!(cfg.model_id, "manifest-alpha");
+        std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn serve_engine_pool_skips_disabled_model_scheduler_profile_resolution() {
+        let args = base_args();
+        let manifest_model = EngineModelManifest {
+            id: "disabled-exp".to_string(),
+            path: PathBuf::from("/tmp/ironmlx-disabled-model-does-not-exist"),
+            load_policy: EngineLoadPolicy::Disabled,
+            default: false,
+            scheduler_profile: Some(PathBuf::from(
+                "/tmp/ironmlx-disabled-profile-does-not-exist.json",
+            )),
+            mtp_model_dir: None,
+            mtp_draft_tokens: None,
+        };
+
+        let config = build_engine_model_config_for_pool(&args, manifest_model, None, "test-host")
+            .expect("disabled models must not resolve scheduler profiles");
+
+        assert_eq!(config.id, "disabled-exp");
+        assert_eq!(config.load_policy, EngineLoadPolicy::Disabled);
     }
 
     fn qwen36_dense_27b_raw_config() -> serde_json::Value {
@@ -1290,6 +1586,7 @@ mod scheduler_profile_tests {
                 max_cache_cap: 128,
                 ..SchedulerServeConfig::default()
             },
+            "/tmp/model",
         )
         .expect("prefix config")
         .expect("enabled");
@@ -1311,6 +1608,7 @@ mod scheduler_profile_tests {
                 max_cache_cap: 128,
                 ..SchedulerServeConfig::default()
             },
+            "/tmp/model",
         )
         .expect("prefix config")
         .expect("enabled");
@@ -1349,6 +1647,7 @@ mod scheduler_profile_tests {
                 max_cache_cap: 128,
                 ..SchedulerServeConfig::default()
             },
+            "/tmp/model",
         )
         .expect("prefix config");
 
@@ -1372,6 +1671,7 @@ mod scheduler_profile_tests {
                 max_cache_cap: 128,
                 ..SchedulerServeConfig::default()
             },
+            "/tmp/model",
         )
         .expect("prefix config");
 
@@ -1491,7 +1791,7 @@ mod scheduler_profile_tests {
             .persist_profile(&model_dir, &runtime_profile())
             .expect("persist profile");
         let args = ServeArgs {
-            model: model_dir.to_string_lossy().into_owned(),
+            model: Some(model_dir.to_string_lossy().into_owned()),
             ..base_args()
         };
 
@@ -1529,7 +1829,7 @@ mod scheduler_profile_tests {
         let output = serde_json::to_string_pretty(&explicit_profile).expect("serialize profile");
         std::fs::write(&explicit_path, format!("{output}\n")).expect("write explicit profile");
         let args = ServeArgs {
-            model: model_dir.to_string_lossy().into_owned(),
+            model: Some(model_dir.to_string_lossy().into_owned()),
             scheduler_profile: Some(explicit_path.clone()),
             ..base_args()
         };
@@ -1555,7 +1855,7 @@ mod scheduler_profile_tests {
         std::fs::write(store_root.join("index.json"), "not json").expect("write corrupt index");
         let store = SchedulerProfileStore::from_root(store_root);
         let args = ServeArgs {
-            model: model_dir.to_string_lossy().into_owned(),
+            model: Some(model_dir.to_string_lossy().into_owned()),
             ..base_args()
         };
 
@@ -1578,7 +1878,7 @@ mod scheduler_profile_tests {
             .expect("persist profile");
         std::fs::write(&stored_path, "not json").expect("corrupt stored profile");
         let args = ServeArgs {
-            model: model_dir.to_string_lossy().into_owned(),
+            model: Some(model_dir.to_string_lossy().into_owned()),
             ..base_args()
         };
 

@@ -25,6 +25,7 @@ use crate::Result;
 pub mod anthropic;
 pub mod chat_format;
 pub mod diffusion_gemma;
+pub mod engine;
 pub mod health;
 pub(crate) mod openai;
 pub mod scheduler_actor;
@@ -362,12 +363,103 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn serve_inner<M, S>(
+pub(crate) async fn build_plain_app_state<M>(
     model: M,
     tokenizer: Tokenizer,
     model_id: String,
-    host: &str,
-    port: u16,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    vision_input_override: Option<VisionInputConfig>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+) -> Result<AppState<M>>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    build_app_state(
+        model,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        vision_input_override,
+        None,
+        PlainSchedulerActorSpawner {
+            paged_prefix_cache,
+            prefix_lru_cache,
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_mtp_app_state<M>(
+    model: M,
+    mtp: M::MtpHead,
+    mtp_draft_tokens: usize,
+    tokenizer: Tokenizer,
+    model_id: String,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    vision_input_override: Option<VisionInputConfig>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+) -> Result<AppState<M>>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M::MtpHead: Send + 'static,
+{
+    build_app_state(
+        model,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        vision_input_override,
+        Some(mtp_draft_tokens),
+        MtpSchedulerActorSpawner {
+            mtp,
+            mtp_draft_tokens,
+            paged_prefix_cache,
+            prefix_lru_cache,
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_app_state<M, S>(
+    model: M,
+    tokenizer: Tokenizer,
+    model_id: String,
     prefill_chunk_size: usize,
     b_max: usize,
     admission_deadline_ms: u64,
@@ -380,7 +472,7 @@ async fn serve_inner<M, S>(
     vision_input_override: Option<VisionInputConfig>,
     mtp_health_draft_tokens: Option<usize>,
     scheduler_actor_spawner: S,
-) -> Result<()>
+) -> Result<AppState<M>>
 where
     M: Model + DenseVlMethods + Send + 'static,
     S: SchedulerActorSpawner<M>,
@@ -464,7 +556,7 @@ where
         mtp_health,
     );
 
-    let state = AppState {
+    Ok(AppState {
         model,
         tokenizer: Arc::new(tokenizer),
         model_id,
@@ -479,7 +571,51 @@ where
         scheduler_runtime_profile: Arc::new(scheduler_runtime_profile),
         kv_cache_turboquant_bits,
         health_collector,
-    };
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_inner<M, S>(
+    model: M,
+    tokenizer: Tokenizer,
+    model_id: String,
+    host: &str,
+    port: u16,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    vision_input_override: Option<VisionInputConfig>,
+    mtp_health_draft_tokens: Option<usize>,
+    scheduler_actor_spawner: S,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+    S: SchedulerActorSpawner<M>,
+{
+    let state = build_app_state(
+        model,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        vision_input_override,
+        mtp_health_draft_tokens,
+        scheduler_actor_spawner,
+    )
+    .await?;
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(healthz_handler))
