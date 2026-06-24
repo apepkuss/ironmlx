@@ -109,16 +109,16 @@ import Testing
     #expect(config.arguments.suffix(2) == ["--kv-quant", "k3v4"])
 }
 
-@Test func backendLaunchOptionsRejectCacheAndKVQuantConflict() {
+@Test func backendLaunchOptionsAllowCacheAndKVQuantTogether() {
     let options = BackendLaunchOptions(
         config: AppConfig(cacheEnable: true, cacheDir: "/tmp/cache", kvQuant: "k3v4")
     )
 
-    #expect(options.validationError == .prefixCacheConflictsWithKVQuant)
-    #expect(options.isValid == false)
+    #expect(options.validationError == nil)
+    #expect(options.isValid == true)
 }
 
-@Test func serveArgumentsOmitConflictingCacheAndKVQuantFlags() {
+@Test func serveArgumentsIncludeCacheAndKVQuantFlagsTogether() {
     let options = BackendLaunchOptions(
         config: AppConfig(cacheEnable: true, cacheDir: "/tmp/cache", kvQuant: "k3v4")
     )
@@ -129,10 +129,11 @@ import Testing
         options: options
     )
 
-    #expect(!config.arguments.contains("--paged-prefix-cache-dir"))
-    #expect(!config.arguments.contains("--prefix-lru-cache-max-bytes"))
-    #expect(!config.arguments.contains("--ssd-prefix-cache-max-gb"))
-    #expect(!config.arguments.contains("--kv-quant"))
+    #expect(config.arguments.contains("--paged-prefix-cache-dir"))
+    #expect(config.arguments.contains("/tmp/cache"))
+    #expect(config.arguments.contains("--prefix-lru-cache-max-bytes"))
+    #expect(config.arguments.contains("--ssd-prefix-cache-max-gb"))
+    #expect(config.arguments.suffix(2) == ["--kv-quant", "k3v4"])
 }
 
 @Test func serveArgumentsIncludeManualHotCacheLimit() {

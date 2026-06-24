@@ -2868,17 +2868,11 @@ impl<M: Model> Scheduler<M> {
         dtype: Dtype,
         turboquant_bits: Option<TurboQuantKVBits>,
     ) -> Result<Vec<LayerCache>> {
-        if self.paged_prefix_cache.is_some() && turboquant_bits.is_some() {
-            anyhow::bail!(
-                "cache_turboquant_conflict: paged SSD prefix cache is mutually exclusive with TurboQuant KV cache"
-            );
-        }
         let mut cache = model.make_cache(batch, cap, dtype)?;
-        if let Some(config) = &self.paged_prefix_cache {
-            enable_paged_kv_caches(&mut cache, config.block_size, config.max_pages)?;
-        }
         if let Some(bits) = turboquant_bits {
             enable_turboquant_kv_caches(&mut cache, bits)?;
+        } else if let Some(config) = &self.paged_prefix_cache {
+            enable_paged_kv_caches(&mut cache, config.block_size, config.max_pages)?;
         }
         Ok(cache)
     }
@@ -7727,6 +7721,61 @@ mod tests {
             }
             _ => panic!("expected full-attention cache"),
         }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_combines_paged_prefix_cache_with_turboquant_runtime_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-turboquant-scheduler-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "step-test", 2, 32)
+            .expect("prefix config");
+
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        s.enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let mut req = mk_req(vec![1, 2, 3, 4]);
+        req.kv_cache_turboquant_bits = Some(crate::core::cache::TurboQuantKVBits::K3V4);
+        let id = s.admit(req).expect("admit");
+
+        let model = StepDecodeMaskModel::default();
+        let events = s.prefill_admitted(&model).expect("prefill");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, id);
+        assert_eq!(model.hidden_seq_lens(), vec![3]);
+        assert_eq!(model.forward_seq_lens(), vec![1]);
+        match &s.cache.as_ref().expect("scheduler cache")[0] {
+            LayerCache::Full(kv) => {
+                let tq = kv.turboquant().expect("turboquant cache");
+                assert_eq!(tq.bits(), crate::core::cache::TurboQuantKVBits::K3V4);
+                assert!(
+                    kv.paged().is_none(),
+                    "TurboQuant runtime KV should not also switch to paged storage"
+                );
+                assert_eq!(
+                    kv.prefix_cache_profile(),
+                    Some("turboquant-k3v4".to_string())
+                );
+            }
+            _ => panic!("expected full-attention cache"),
+        }
+        assert!(
+            std::fs::read_dir(&root)
+                .expect("prefix cache dir")
+                .next()
+                .is_some(),
+            "prefill should save a packed prefix cache entry for TurboQuant"
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
     #[test]

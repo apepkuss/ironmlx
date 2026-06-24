@@ -17,4 +17,4 @@ pub use prefix_store::{
     PrefixLayerSpec, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertResult,
     PrefixLruInsertStatus, PrefixMtpLayerPayload, PrefixMtpLayerSpec, PrefixTensorSpec,
 };
-pub use turboquant_kv::{TurboQuantKVBits, TurboQuantKVCache};
+pub use turboquant_kv::{TurboQuantKVBits, TurboQuantKVCache, TurboQuantPrefixLayer};

@@ -13,7 +13,7 @@
 //! `GatedDeltaCache`. Both are wrapped uniformly via [`LayerCache`].
 
 use anyhow::anyhow;
-use mlx::{Array, StreamOrDevice};
+use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{
     GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot, PagedPrefixEntry,
@@ -243,33 +243,79 @@ pub fn prefix_key_spec_for_caches(
     }
 
     let mut main_layers = Vec::with_capacity(caches.len());
+    let mut kv_cache_profile: Option<String> = None;
     for cache in caches {
         match cache {
             LayerCache::Full(kv) => {
-                let Some(paged) = kv.paged() else {
+                if let Some(paged) = kv.paged() {
+                    remember_kv_cache_profile(&mut kv_cache_profile, kv.prefix_cache_profile())?;
+                    if paged.block_size() != block_size {
+                        anyhow::bail!(
+                            "prefix_key_spec_for_caches: full-attention block_size {} != configured {}",
+                            paged.block_size(),
+                            block_size
+                        );
+                    }
+                    let page_count = (cached_len + block_size - 1) / block_size;
+                    main_layers.push(PrefixLayerSpec {
+                        kind: PrefixLayerKind::FullPaged,
+                        tensors: vec![
+                            PrefixTensorSpec {
+                                dtype: kv.dtype(),
+                                shape: vec![page_count, kv.n_kv_heads(), block_size, kv.head_dim()],
+                            },
+                            PrefixTensorSpec {
+                                dtype: kv.dtype(),
+                                shape: vec![
+                                    page_count,
+                                    kv.n_kv_heads(),
+                                    block_size,
+                                    kv.v_head_dim(),
+                                ],
+                            },
+                        ],
+                    });
+                } else if let Some(tq) = kv.turboquant() {
+                    let profile = kv.prefix_cache_profile().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "prefix_key_spec_for_caches: TurboQuant cache missing prefix profile"
+                        )
+                    })?;
+                    remember_kv_cache_profile(&mut kv_cache_profile, Some(profile))?;
+                    main_layers.push(PrefixLayerSpec {
+                        kind: PrefixLayerKind::FullTurboQuantPacked,
+                        tensors: vec![
+                            PrefixTensorSpec {
+                                dtype: Dtype::Uint32,
+                                shape: vec![
+                                    1_i32,
+                                    kv.n_kv_heads(),
+                                    cached_len,
+                                    tq.packed_head_dim(),
+                                ],
+                            },
+                            PrefixTensorSpec {
+                                dtype: Dtype::Float32,
+                                shape: vec![1_i32, kv.n_kv_heads(), cached_len],
+                            },
+                            PrefixTensorSpec {
+                                dtype: Dtype::Uint32,
+                                shape: vec![
+                                    1_i32,
+                                    kv.n_kv_heads(),
+                                    cached_len,
+                                    tq.packed_v_head_dim(),
+                                ],
+                            },
+                            PrefixTensorSpec {
+                                dtype: Dtype::Float32,
+                                shape: vec![1_i32, kv.n_kv_heads(), cached_len],
+                            },
+                        ],
+                    });
+                } else {
                     return Ok(None);
-                };
-                if paged.block_size() != block_size {
-                    anyhow::bail!(
-                        "prefix_key_spec_for_caches: full-attention block_size {} != configured {}",
-                        paged.block_size(),
-                        block_size
-                    );
                 }
-                let page_count = (cached_len + block_size - 1) / block_size;
-                main_layers.push(PrefixLayerSpec {
-                    kind: PrefixLayerKind::FullPaged,
-                    tensors: vec![
-                        PrefixTensorSpec {
-                            dtype: kv.dtype(),
-                            shape: vec![page_count, kv.n_kv_heads(), block_size, kv.head_dim()],
-                        },
-                        PrefixTensorSpec {
-                            dtype: kv.dtype(),
-                            shape: vec![page_count, kv.n_kv_heads(), block_size, kv.v_head_dim()],
-                        },
-                    ],
-                });
             }
             LayerCache::Linear(gd) => {
                 let conv_shape = gd.conv_state().shape();
@@ -314,10 +360,29 @@ pub fn prefix_key_spec_for_caches(
         cached_len,
         fingerprint: fingerprint.map(str::to_owned),
         block_size,
+        kv_cache_profile,
         main_layers,
         mtp_layers: vec![],
         mtp_last_hidden: None,
     }))
+}
+
+fn remember_kv_cache_profile(
+    current: &mut Option<String>,
+    next: Option<String>,
+) -> anyhow::Result<()> {
+    match (current.as_ref(), next) {
+        (None, Some(profile)) => {
+            *current = Some(profile);
+        }
+        (Some(current), Some(next)) if current != &next => {
+            anyhow::bail!(
+                "prefix_key_spec_for_caches: mixed KV cache profiles {current} and {next}"
+            );
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 pub fn prefix_entry_for_row(
@@ -332,9 +397,6 @@ pub fn prefix_entry_for_row(
     for (idx, cache) in caches.iter().enumerate() {
         let (payload, layer_cached_len) = match cache {
             LayerCache::Full(kv) => {
-                if kv.paged().is_none() {
-                    return Ok(None);
-                }
                 let layer_cached_len = *kv.offsets().get(row).ok_or_else(|| {
                     anyhow::anyhow!(
                         "prefix_entry_for_row: full cache row {} out of range for layer {}",
@@ -342,14 +404,30 @@ pub fn prefix_entry_for_row(
                         idx
                     )
                 })?;
-                let layer = kv.paged_prefix_layer_for_row_on(row, ())?;
-                (
-                    PrefixLayerPayload::FullPaged {
-                        k_pages: layer.k_pages,
-                        v_pages: layer.v_pages,
-                    },
-                    layer_cached_len,
-                )
+                if kv.paged().is_some() {
+                    let layer = kv.paged_prefix_layer_for_row_on(row, ())?;
+                    (
+                        PrefixLayerPayload::FullPaged {
+                            k_pages: layer.k_pages,
+                            v_pages: layer.v_pages,
+                        },
+                        layer_cached_len,
+                    )
+                } else if kv.turboquant().is_some() {
+                    let (layer, packed_cached_len) =
+                        kv.turboquant_prefix_layer_for_row_on(row, ())?;
+                    (
+                        PrefixLayerPayload::FullTurboQuantPacked {
+                            k_packed: layer.k_packed,
+                            k_norms: layer.k_norms,
+                            v_packed: layer.v_packed,
+                            v_norms: layer.v_norms,
+                        },
+                        packed_cached_len,
+                    )
+                } else {
+                    return Ok(None);
+                }
             }
             LayerCache::Linear(gd) => {
                 let (conv_state, recurrent_state, layer_cached_len) =
@@ -412,6 +490,23 @@ pub fn restore_prefix_entry_for_row(
                 kv.restore_paged_prefix_layer_for_row_on(&layer, row, cached_len, ())?;
             }
             (
+                LayerCache::Full(kv),
+                PrefixLayerPayload::FullTurboQuantPacked {
+                    k_packed,
+                    k_norms,
+                    v_packed,
+                    v_norms,
+                },
+            ) => {
+                let layer = crate::core::cache::TurboQuantPrefixLayer {
+                    k_packed: k_packed.clone(),
+                    k_norms: k_norms.clone(),
+                    v_packed: v_packed.clone(),
+                    v_norms: v_norms.clone(),
+                };
+                kv.restore_turboquant_prefix_layer_for_row_on(&layer, row, cached_len, ())?;
+            }
+            (
                 LayerCache::Linear(gd),
                 PrefixLayerPayload::Linear {
                     conv_state,
@@ -431,7 +526,7 @@ pub fn restore_prefix_entry_for_row(
             }
             (LayerCache::Full(_), _) => {
                 anyhow::bail!(
-                    "restore_prefix_entry_for_row: layer {idx} expected FullPaged payload"
+                    "restore_prefix_entry_for_row: layer {idx} expected FullPaged or FullTurboQuantPacked payload"
                 )
             }
             (LayerCache::Linear(_), _) => {
@@ -479,6 +574,25 @@ pub fn restore_prefix_entry_for_rows(
                 kv.restore_paged_prefix_layer_for_rows_on(&layer, rows, cached_len, ())?;
             }
             (
+                LayerCache::Full(kv),
+                PrefixLayerPayload::FullTurboQuantPacked {
+                    k_packed,
+                    k_norms,
+                    v_packed,
+                    v_norms,
+                },
+            ) => {
+                let layer = crate::core::cache::TurboQuantPrefixLayer {
+                    k_packed: k_packed.clone(),
+                    k_norms: k_norms.clone(),
+                    v_packed: v_packed.clone(),
+                    v_norms: v_norms.clone(),
+                };
+                for &row in rows {
+                    kv.restore_turboquant_prefix_layer_for_row_on(&layer, row, cached_len, ())?;
+                }
+            }
+            (
                 LayerCache::Linear(gd),
                 PrefixLayerPayload::Linear {
                     conv_state,
@@ -502,7 +616,7 @@ pub fn restore_prefix_entry_for_rows(
             }
             (LayerCache::Full(_), _) => {
                 anyhow::bail!(
-                    "restore_prefix_entry_for_rows: layer {idx} expected FullPaged payload"
+                    "restore_prefix_entry_for_rows: layer {idx} expected FullPaged or FullTurboQuantPacked payload"
                 )
             }
             (LayerCache::Linear(_), _) => {
@@ -585,6 +699,7 @@ pub fn paged_prefix_key_spec_for_full_caches(
         cached_len,
         fingerprint: None,
         block_size: paged.block_size(),
+        kv_cache_profile: None,
         main_layers,
         mtp_layers: vec![],
         mtp_last_hidden: None,
@@ -1022,7 +1137,7 @@ mod tests {
     use super::*;
     use mlx::{Array, Dtype};
 
-    use crate::core::cache::{GatedDeltaCache, KVCache};
+    use crate::core::cache::{GatedDeltaCache, KVCache, PagedPrefixStore};
     use crate::nn::Linear;
     use serial_test::serial;
 
@@ -1447,5 +1562,114 @@ mod tests {
             _ => panic!("expected Full layer"),
         }
         assert!(matches!(caches[1], LayerCache::Linear(_)));
+    }
+
+    fn turboquant_full_cache(bits: TurboQuantKVBits) -> LayerCache {
+        let mut kv = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(bits)
+            .expect("enable turboquant");
+        let k_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.019).sin())
+            .collect();
+        let v_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.023).cos())
+            .collect();
+        let k: Array = (k_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        kv.update_and_fetch(&k, &v, &[4])
+            .expect("write turboquant prefix");
+        LayerCache::Full(kv)
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_key_spec_for_turboquant_full_cache_uses_packed_profile() {
+        let caches_k3v3 = vec![turboquant_full_cache(TurboQuantKVBits::K3V3)];
+        let spec_k3v3 =
+            prefix_key_spec_for_caches("model", &[1, 2, 3, 4], 4, None, 16, &caches_k3v3)
+                .expect("prefix spec")
+                .expect("TurboQuant prefix spec");
+
+        assert_eq!(
+            spec_k3v3.main_layers[0].kind,
+            PrefixLayerKind::FullTurboQuantPacked
+        );
+        assert_eq!(spec_k3v3.main_layers[0].tensors[0].shape, vec![1, 2, 4, 1]);
+        assert_eq!(spec_k3v3.main_layers[0].tensors[1].shape, vec![1, 2, 4]);
+        assert_eq!(spec_k3v3.main_layers[0].tensors[2].shape, vec![1, 2, 4, 1]);
+        assert_eq!(spec_k3v3.main_layers[0].tensors[3].shape, vec![1, 2, 4]);
+
+        let caches_k3v4 = vec![turboquant_full_cache(TurboQuantKVBits::K3V4)];
+        let spec_k3v4 =
+            prefix_key_spec_for_caches("model", &[1, 2, 3, 4], 4, None, 16, &caches_k3v4)
+                .expect("prefix spec")
+                .expect("TurboQuant prefix spec");
+
+        assert_ne!(
+            PagedPrefixStore::key_for(&spec_k3v3),
+            PagedPrefixStore::key_for(&spec_k3v4)
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_entry_for_turboquant_full_cache_exports_packed_payload() {
+        let caches = vec![turboquant_full_cache(TurboQuantKVBits::K3V4)];
+
+        let (entry, cached_len) = prefix_entry_for_row(&caches, 0)
+            .expect("prefix entry")
+            .expect("TurboQuant prefix entry");
+
+        assert_eq!(cached_len, 4);
+        let PrefixLayerPayload::FullTurboQuantPacked {
+            k_packed,
+            k_norms,
+            v_packed,
+            v_norms,
+        } = &entry.main_layers[0]
+        else {
+            panic!("expected packed TurboQuant full-attention payload");
+        };
+        assert_eq!(k_packed.shape().as_slice(), &[1, 2, 4, 1]);
+        assert_eq!(k_norms.shape().as_slice(), &[1, 2, 4]);
+        assert_eq!(v_packed.shape().as_slice(), &[1, 2, 4, 1]);
+        assert_eq!(v_norms.shape().as_slice(), &[1, 2, 4]);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn restore_prefix_entry_for_turboquant_full_cache_uses_packed_payload() {
+        let caches = vec![turboquant_full_cache(TurboQuantKVBits::K3V4)];
+        let (entry, cached_len) = prefix_entry_for_row(&caches, 0)
+            .expect("prefix entry")
+            .expect("TurboQuant prefix entry");
+        let mut restored = vec![LayerCache::Full(
+            KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+                .with_step(16)
+                .with_turboquant(TurboQuantKVBits::K3V4)
+                .expect("enable restore turboquant"),
+        )];
+
+        restore_prefix_entry_for_row(&mut restored, &entry, 0, cached_len)
+            .expect("restore packed TurboQuant prefix");
+
+        let LayerCache::Full(kv) = &restored[0] else {
+            panic!("expected full cache");
+        };
+        assert_eq!(kv.offsets(), &[4]);
+        let tq = kv.turboquant().expect("turboquant cache");
+        assert_eq!(
+            tq.k_packed().expect("K packed").shape().as_slice(),
+            &[1, 2, 16, 1]
+        );
+        assert_eq!(
+            tq.k_norms().expect("K norms").shape().as_slice(),
+            &[1, 2, 16]
+        );
     }
 }

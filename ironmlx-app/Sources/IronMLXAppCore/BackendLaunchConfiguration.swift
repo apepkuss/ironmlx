@@ -1,17 +1,12 @@
 import Foundation
 
 public enum BackendLaunchValidationError: Error, Equatable, LocalizedError {
-    case prefixCacheConflictsWithKVQuant
-
     public var errorDescription: String? {
         message
     }
 
     public var message: String {
-        switch self {
-        case .prefixCacheConflictsWithKVQuant:
-            return "Prefix cache and TurboQuant KV cache compression cannot be enabled at the same time."
-        }
+        switch self {}
     }
 }
 
@@ -128,25 +123,11 @@ public struct BackendLaunchOptions: Equatable {
     }
 
     public var validationError: BackendLaunchValidationError? {
-        if hasPrefixCacheEnabled && hasTurboQuantEnabled {
-            return .prefixCacheConflictsWithKVQuant
-        }
         return nil
     }
 
     public var isValid: Bool {
         validationError == nil
-    }
-
-    private var hasPrefixCacheEnabled: Bool {
-        pagedPrefixCacheDir != nil || prefixLruCacheMaxBytes != nil || ssdPrefixCacheMaxGB != nil
-    }
-
-    private var hasTurboQuantEnabled: Bool {
-        guard let kvQuant else {
-            return false
-        }
-        return kvQuant != "none"
     }
 
     private static func normalizedPath(_ value: String?) -> String? {
@@ -195,15 +176,12 @@ public struct BackendLaunchConfiguration: Equatable {
         if options.schedulerAutotuneReport {
             arguments.append("--scheduler-autotune-report")
         }
-        let hasConfigurationConflict = options.validationError != nil
-        if !hasConfigurationConflict, let pagedPrefixCacheDir = options.pagedPrefixCacheDir {
+        if let pagedPrefixCacheDir = options.pagedPrefixCacheDir {
             arguments += ["--paged-prefix-cache-dir", pagedPrefixCacheDir]
         }
-        if !hasConfigurationConflict {
-            appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
-            appendIntegerFlag("--ssd-prefix-cache-max-gb", options.ssdPrefixCacheMaxGB, to: &arguments)
-        }
-        if !hasConfigurationConflict, let kvQuant = options.kvQuant {
+        appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
+        appendIntegerFlag("--ssd-prefix-cache-max-gb", options.ssdPrefixCacheMaxGB, to: &arguments)
+        if let kvQuant = options.kvQuant {
             arguments += ["--kv-quant", kvQuant]
         }
         return arguments

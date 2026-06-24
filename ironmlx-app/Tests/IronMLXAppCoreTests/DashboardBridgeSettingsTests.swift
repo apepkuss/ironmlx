@@ -26,7 +26,7 @@ import Testing
 }
 
 @MainActor
-@Test func dashboardSettingsPayloadRejectsCacheAndKVQuantConflict() throws {
+@Test func dashboardSettingsPayloadAllowsCacheAndKVQuantTogether() throws {
     let existing = AppConfig(cacheEnable: true, kvQuant: "none")
     let json = """
     {
@@ -36,7 +36,9 @@ import Testing
     }
     """
 
-    #expect(throws: DashboardBridge.SettingsValidationError.prefixCacheConflictsWithKVQuant) {
-        try DashboardBridge.config(applyingSettingsJSON: json, to: existing)
-    }
+    let config = try DashboardBridge.config(applyingSettingsJSON: json, to: existing)
+
+    #expect(config.cacheEnable == true)
+    #expect(config.cacheDir == "/tmp/cache")
+    #expect(config.kvQuant == "k3v4")
 }

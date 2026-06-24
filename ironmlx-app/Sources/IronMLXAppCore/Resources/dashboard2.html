@@ -2360,7 +2360,7 @@
         <div class="settings-row-right"><input type="text" value="~/.ironmlx/cache/paged_prefix_cache" style="min-width:260px;" id="cfg-cache-dir"></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="kv_quant">KV Cache Compression</div><div class="settings-row-desc" data-i18n="kv_quant_desc">Compress KV cache to reduce memory usage. It cannot be enabled together with Prefix/SSD Cache. Save settings and restart the backend to apply changes.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="kv_quant">KV Cache Compression</div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.</div></div>
         <div class="settings-row-right"><select id="cfg-kv-quant" style="min-width:160px;"><option value="none" data-i18n="kv_quant_off">Off</option><option value="turbo3">TurboQuant K3V3</option><option value="turbo4">TurboQuant K4V4</option><option value="k3v4">TurboQuant K3V4</option></select></div>
       </div>
     </div>
@@ -2769,14 +2769,7 @@
       cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Maximum disk usage for the SSD Prefix Cache. The upper limit is adjusted from available disk space.",
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
-      kv_quant: "KV Cache Compression", kv_quant_desc: "Compress KV cache to reduce memory usage. It cannot be enabled together with Prefix/SSD Cache. Save settings and restart the backend to apply changes.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload idle non-pinned models after this many minutes. 0 = disabled.", minutes: "minutes",
-      cache_turboquant_conflict_title: "Choose cache strategy",
-      cache_turboquant_conflict_message: "Prefix/SSD Cache and TurboQuant KV Cache Compression cannot be enabled at the same time.\n\nChoose which strategy to keep for the next backend restart.",
-      cache_turboquant_conflict_use_cache: "Use Cache",
-      cache_turboquant_conflict_use_turboquant: "Use TurboQuant",
-      cache_turboquant_conflict_keep_cache_toast: "KV Cache Compression has been set to Off. Click Save Settings to apply.",
-      cache_turboquant_conflict_keep_turboquant_toast: "Cache has been disabled. Click Save Settings to apply.",
-      err_cache_turboquant_conflict: "Prefix/SSD Cache and TurboQuant KV Cache Compression cannot be enabled at the same time. Choose one strategy and save settings.",
+      kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload idle non-pinned models after this many minutes. 0 = disabled.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
       max_models: "Max Loaded Models", max_models_desc: "Maximum number of models kept loaded in GPU memory simultaneously. Exceeding triggers LRU eviction of the least-recently-used non-pinned model. Keep this low (1–2) on 16–32 GB machines.",
@@ -3020,14 +3013,7 @@
       cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用，最大值会根据磁盘可用空间动态调整。如需禁用，请关闭【启用缓存】。",
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
-      kv_quant: "KV 缓存压缩", kv_quant_desc: "压缩 KV 缓存以降低内存占用。该功能不能与 Prefix/SSD 缓存同时启用。保存设置并重启服务后生效。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "闲置超过指定分钟数后自动卸载非固定模型。0 = 不启用。", minutes: "分钟",
-      cache_turboquant_conflict_title: "选择缓存策略",
-      cache_turboquant_conflict_message: "Prefix/SSD 缓存与 TurboQuant KV 缓存压缩不能同时启用。\n\n请选择重启后端服务时要保留的策略。",
-      cache_turboquant_conflict_use_cache: "使用缓存",
-      cache_turboquant_conflict_use_turboquant: "使用 TurboQuant",
-      cache_turboquant_conflict_keep_cache_toast: "已将 KV 缓存压缩设为无压缩。点击【保存设置】后生效。",
-      cache_turboquant_conflict_keep_turboquant_toast: "已关闭缓存。点击【保存设置】后生效。",
-      err_cache_turboquant_conflict: "Prefix/SSD 缓存与 TurboQuant KV 缓存压缩不能同时启用。请选择一种策略后保存设置。",
+      kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "闲置超过指定分钟数后自动卸载非固定模型。0 = 不启用。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
       max_models: "最大加载模型数", max_models_desc: "同时保留在 GPU 内存中的模型数量上限。超过则按 LRU 淘汰最久未使用的非固定模型。16–32 GB 设备建议设为 1–2。",
@@ -3253,13 +3239,6 @@
       cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用，最大值會根據磁碟可用空間動態調整。如需停用，請關閉【啟用快取】。",
       auto: "自動",
       cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
-      cache_turboquant_conflict_title: "選擇快取策略",
-      cache_turboquant_conflict_message: "Prefix/SSD 快取與 TurboQuant KV 快取壓縮不能同時啟用。\n\n請選擇重啟後端服務時要保留的策略。",
-      cache_turboquant_conflict_use_cache: "使用快取",
-      cache_turboquant_conflict_use_turboquant: "使用 TurboQuant",
-      cache_turboquant_conflict_keep_cache_toast: "已將 KV 快取壓縮設為無壓縮。點擊【儲存設定】後生效。",
-      cache_turboquant_conflict_keep_turboquant_toast: "已關閉快取。點擊【儲存設定】後生效。",
-      err_cache_turboquant_conflict: "Prefix/SSD 快取與 TurboQuant KV 快取壓縮不能同時啟用。請選擇一種策略後儲存設定。",
       advanced: "進階", batch_processing: "批次處理",
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
       max_models: "最大載入模型數", max_models_desc: "同時保留在 GPU 記憶體中的模型數量上限。超過則按 LRU 淘汰最久未使用的非釘選模型。16–32 GB 裝置建議設為 1–2。",
@@ -3485,13 +3464,6 @@
       cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。上限はディスク空き容量に応じて調整されます。無効にするにはキャッシュをオフにします。",
       auto: "自動",
       cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
-      cache_turboquant_conflict_title: "キャッシュ戦略を選択",
-      cache_turboquant_conflict_message: "Prefix/SSDキャッシュとTurboQuant KVキャッシュ圧縮は同時に有効化できません。\n\n次回のバックエンド再起動で保持する戦略を選択してください。",
-      cache_turboquant_conflict_use_cache: "キャッシュを使用",
-      cache_turboquant_conflict_use_turboquant: "TurboQuantを使用",
-      cache_turboquant_conflict_keep_cache_toast: "KVキャッシュ圧縮を無効にしました。設定を保存すると反映されます。",
-      cache_turboquant_conflict_keep_turboquant_toast: "キャッシュを無効にしました。設定を保存すると反映されます。",
-      err_cache_turboquant_conflict: "Prefix/SSDキャッシュとTurboQuant KVキャッシュ圧縮は同時に有効化できません。どちらか一方を選択して設定を保存してください。",
       advanced: "詳細設定", batch_processing: "バッチ処理",
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
       max_models: "最大ロードモデル数", max_models_desc: "GPU メモリに同時に保持するモデル数の上限。超過すると最も長く未使用（ピン留めなし）のモデルを LRU で解放します。16–32 GB 環境では 1–2 を推奨。",
@@ -3717,13 +3689,6 @@
       cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다. 상한은 디스크 여유 공간에 따라 조정됩니다. 비활성화하려면 캐시 활성화를 끄세요.",
       auto: "자동",
       cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
-      cache_turboquant_conflict_title: "캐시 전략 선택",
-      cache_turboquant_conflict_message: "Prefix/SSD 캐시와 TurboQuant KV 캐시 압축은 동시에 활성화할 수 없습니다.\n\n다음 백엔드 재시작 시 유지할 전략을 선택하세요.",
-      cache_turboquant_conflict_use_cache: "캐시 사용",
-      cache_turboquant_conflict_use_turboquant: "TurboQuant 사용",
-      cache_turboquant_conflict_keep_cache_toast: "KV 캐시 압축을 끔으로 설정했습니다. 설정 저장을 누르면 적용됩니다.",
-      cache_turboquant_conflict_keep_turboquant_toast: "캐시를 비활성화했습니다. 설정 저장을 누르면 적용됩니다.",
-      err_cache_turboquant_conflict: "Prefix/SSD 캐시와 TurboQuant KV 캐시 압축은 동시에 활성화할 수 없습니다. 하나의 전략을 선택한 뒤 설정을 저장하세요.",
       advanced: "고급", batch_processing: "배치 처리",
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
       max_models: "최대 로드 모델 수", max_models_desc: "GPU 메모리에 동시에 보관하는 모델 수 상한. 초과 시 가장 오래 사용되지 않은 비고정 모델을 LRU 방식으로 해제합니다. 16–32 GB 환경에서는 1–2 권장.",
@@ -4065,45 +4030,6 @@
     });
   }
 
-  function showCacheTurboQuantConflictDialog() {
-    return new Promise(function(resolve) {
-      const dict = I18N[currentLang] || I18N.en;
-      const overlay = document.getElementById('confirm-modal');
-      const titleEl = document.getElementById('confirm-modal-title');
-      const msgEl = document.getElementById('confirm-modal-message');
-      const cancelBtn = document.getElementById('confirm-modal-cancel');
-      const confirmBtn = document.getElementById('confirm-modal-confirm');
-
-      titleEl.textContent = dict.cache_turboquant_conflict_title || 'Choose cache strategy';
-      titleEl.style.display = 'block';
-      msgEl.textContent = dict.cache_turboquant_conflict_message ||
-        'Prefix/SSD Cache and TurboQuant KV Cache Compression cannot be enabled at the same time.';
-      cancelBtn.textContent = dict.cache_turboquant_conflict_use_turboquant || 'Use TurboQuant';
-      confirmBtn.textContent = dict.cache_turboquant_conflict_use_cache || 'Use Cache';
-      confirmBtn.className = 'btn-primary';
-
-      function close(result) {
-        overlay.classList.remove('open');
-        cancelBtn.onclick = null;
-        confirmBtn.onclick = null;
-        overlay.onclick = null;
-        document.removeEventListener('keydown', onKey);
-        resolve(result);
-      }
-      function onKey(e) {
-        if (e.key === 'Escape') close(null);
-        else if (e.key === 'Enter') close('cache');
-      }
-      cancelBtn.onclick = function() { close('turboquant'); };
-      confirmBtn.onclick = function() { close('cache'); };
-      overlay.onclick = function(e) { if (e.target === overlay) close(null); };
-      document.addEventListener('keydown', onKey);
-
-      overlay.classList.add('open');
-      setTimeout(function() { confirmBtn.focus(); }, 0);
-    });
-  }
-
   function toggleModelLoad(modelId, btn) {
     const isLoaded = btn.classList.contains('action-unload');
     if (isLoaded) {
@@ -4210,11 +4136,6 @@
     const dict = I18N[currentLang] || I18N.en;
     const text = String(message || '').trim();
     if (!text) return dict.download_generic_failed || 'Operation failed.';
-
-    if (/cache_turboquant_conflict/i.test(text) || /paged-prefix-cache-dir is mutually exclusive with --kv-quant/i.test(text) || /paged SSD prefix cache is mutually exclusive with TurboQuant KV cache/i.test(text)) {
-      return dict.err_cache_turboquant_conflict ||
-        'Prefix/SSD Cache and TurboQuant KV Cache Compression cannot be enabled at the same time. Choose one strategy and save settings.';
-    }
 
     if (/^memory budget exceeded\b/i.test(text)) {
       const maxSequences = (text.match(new RegExp('b' + '_max=(\\d+)')) || [])[1] || '--';
@@ -5808,46 +5729,6 @@
     return 'none';
   }
 
-  function isTurboQuantEnabled(value) {
-    return normalizeKVQuantValue(value) !== 'none';
-  }
-
-  function isCacheTurboQuantConflictActive() {
-    const cacheToggle = document.getElementById('cfg-cache-enable');
-    const kvQuantSelect = document.getElementById('cfg-kv-quant');
-    return !!(cacheToggle && cacheToggle.checked && kvQuantSelect && isTurboQuantEnabled(kvQuantSelect.value));
-  }
-
-  let cacheTurboQuantConflictDialogOpen = false;
-  async function resolveCacheTurboQuantConflict(showResolutionToast) {
-    if (showResolutionToast === undefined) showResolutionToast = true;
-    if (!isCacheTurboQuantConflictActive()) return true;
-    if (cacheTurboQuantConflictDialogOpen) return false;
-    cacheTurboQuantConflictDialogOpen = true;
-    const choice = await showCacheTurboQuantConflictDialog();
-    cacheTurboQuantConflictDialogOpen = false;
-    const dict = I18N[currentLang] || I18N.en;
-    const cacheToggle = document.getElementById('cfg-cache-enable');
-    const kvQuantSelect = document.getElementById('cfg-kv-quant');
-    if (choice === 'cache') {
-      if (kvQuantSelect) kvQuantSelect.value = 'none';
-      if (typeof syncCacheUI === 'function') syncCacheUI();
-      if (showResolutionToast) {
-        showToast(dict.cache_turboquant_conflict_keep_cache_toast || 'KV Cache Compression has been set to Off. Click Save Settings to apply.', 'info');
-      }
-      return true;
-    }
-    if (choice === 'turboquant') {
-      if (cacheToggle) cacheToggle.checked = false;
-      if (typeof syncCacheUI === 'function') syncCacheUI();
-      if (showResolutionToast) {
-        showToast(dict.cache_turboquant_conflict_keep_turboquant_toast || 'Cache has been disabled. Click Save Settings to apply.', 'info');
-      }
-      return true;
-    }
-    return false;
-  }
-
   function setTextInput(id, value, fallback) {
     const el = document.getElementById(id);
     if (!el) return;
@@ -5987,17 +5868,10 @@
     setSelectInput('cfg-distributed-backend', appConfig.distributed_backend, 'auto');
     setSelectInput('cfg-parallel-mode', appConfig.parallel_mode, 'auto');
     refreshSettingsDerivedUI();
-    setTimeout(function() { resolveCacheTurboQuantConflict(); }, 0);
   }
 
   // ── Save Settings ──
   async function saveSettings() {
-    const conflictResolved = await resolveCacheTurboQuantConflict(false);
-    if (!conflictResolved && isCacheTurboQuantConflictActive()) {
-      const dict = I18N[currentLang] || I18N.en;
-      showToast(dict.err_cache_turboquant_conflict || 'Prefix/SSD Cache and TurboQuant KV Cache Compression cannot be enabled at the same time. Choose one strategy and save settings.', 'warn');
-      return;
-    }
     const themeActive = document.querySelector('#theme-select .seg-btn.active');
     const memTotalAuto = checkedInputValue('cfg-mem-total-auto', true);
     const memModelAuto = checkedInputValue('cfg-mem-model-auto', true);
@@ -6692,14 +6566,7 @@
       hotCacheSlider.dispatchEvent(new Event('input'));
       hotCacheAuto.dispatchEvent(new Event('change'));
     }
-    resolveCacheTurboQuantConflict();
   });
-  const kvQuantSelect = document.getElementById('cfg-kv-quant');
-  if (kvQuantSelect) {
-    kvQuantSelect.addEventListener('change', function() {
-      resolveCacheTurboQuantConflict();
-    });
-  }
   coldCacheSlider.addEventListener('input', syncCacheUI);
   cacheDirInput.addEventListener('change', requestColdCacheCapacity);
   cacheDirInput.addEventListener('blur', requestColdCacheCapacity);

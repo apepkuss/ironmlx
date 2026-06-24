@@ -217,6 +217,16 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "cfgKvQuant.value = normalizeKVQuantValue(window.__IRONMLX_KV_QUANT__)"))
 }
 
+@Test func dashboardKVQuantDescriptionExplainsTurboQuantTradeoffsWithoutRestartText() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。"))
+    #expect(!dashboardHTML(html, contains: "kv_quant_desc: \"压缩运行时 KV 缓存以降低内存占用。可与 Prefix/SSD 缓存同时使用。保存设置并重启服务后生效。\""))
+}
+
 @Test func dashboardRuntimeSettingsInputsUsePersistedConfig() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",

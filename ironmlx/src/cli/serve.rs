@@ -120,10 +120,12 @@ pub struct ServeArgs {
     #[arg(long = "kv-quant", value_enum, default_value = "none")]
     pub(crate) kv_quant: KvQuantArg,
 
-    /// Enable paged SSD prefix cache under this directory. This also switches
-    /// full-attention KV caches to paged storage and decode to the paged
-    /// attention kernel when supported. When passed without a value, defaults
-    /// to ~/.ironmlx/cache/paged_prefix_cache.
+    /// Enable paged SSD prefix cache under this directory. Without --kv-quant,
+    /// this also switches full-attention KV caches to paged storage and decode
+    /// to the paged attention kernel when supported. With TurboQuant, runtime
+    /// K/V stays quantized while prefix cache entries are persisted as packed
+    /// TurboQuant tensors. When passed without a value, defaults to
+    /// ~/.ironmlx/cache/paged_prefix_cache.
     #[arg(
         long = "paged-prefix-cache-dir",
         num_args = 0..=1,
@@ -160,11 +162,6 @@ pub(crate) fn resolve_paged_prefix_cache_config(
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
     };
-    if args.kv_quant.turboquant_bits().is_some() {
-        bail!(
-            "cache_turboquant_conflict: --paged-prefix-cache-dir is mutually exclusive with --kv-quant"
-        );
-    }
     let root = expand_home_path(root)?;
     let block_size = args.paged_prefix_cache_block_size;
     if block_size <= 0 {
@@ -215,11 +212,6 @@ fn resolve_engine_paged_prefix_cache_settings(
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
     };
-    if args.kv_quant.turboquant_bits().is_some() {
-        bail!(
-            "cache_turboquant_conflict: --paged-prefix-cache-dir is mutually exclusive with --kv-quant"
-        );
-    }
     let root = expand_home_path(root)?;
     let block_size = args.paged_prefix_cache_block_size;
     if block_size <= 0 {
@@ -1846,13 +1838,13 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_paged_prefix_cache_rejects_turboquant_with_stable_error_code() {
-        let prefix_dir = unique_temp_dir("serve-prefix-kv-quant-conflict");
+    fn serve_paged_prefix_cache_accepts_turboquant() {
+        let prefix_dir = unique_temp_dir("serve-prefix-kv-quant");
         let mut args = base_args();
         args.paged_prefix_cache_dir = Some(prefix_dir.clone());
         args.kv_quant = KvQuantArg::K3V4;
 
-        let err = resolve_paged_prefix_cache_config(
+        let cfg = resolve_paged_prefix_cache_config(
             &args,
             SchedulerServeConfig {
                 b_max: 2,
@@ -1861,9 +1853,10 @@ mod scheduler_profile_tests {
             },
             "/tmp/model",
         )
-        .expect_err("paged prefix cache must reject TurboQuant");
+        .expect("paged prefix cache should allow TurboQuant")
+        .expect("paged prefix cache enabled");
 
-        assert!(err.to_string().contains("cache_turboquant_conflict"));
+        assert_eq!(cfg.model_id, "/tmp/model");
         std::fs::remove_dir_all(prefix_dir).ok();
     }
 

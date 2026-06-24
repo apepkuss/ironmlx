@@ -4,10 +4,6 @@ import WebKit
 
 @MainActor
 public final class DashboardBridge: NSObject, WKScriptMessageHandler {
-    public enum SettingsValidationError: Error, Equatable {
-        case prefixCacheConflictsWithKVQuant
-    }
-
     private weak var webView: WKWebView?
     private let configStore: AppConfigStore
     private let backend: BackendProcessManager
@@ -564,9 +560,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let config: AppConfig
         do {
             config = try Self.config(applyingSettingsJSON: json, to: configStore.load())
-        } catch SettingsValidationError.prefixCacheConflictsWithKVQuant {
-            sendJavaScript("onSettingsSaved(\(Self.jsStringLiteral("{\"status\":\"error\",\"code\":\"cache_turboquant_conflict\"}")))")
-            return
         } catch {
             return
         }
@@ -630,10 +623,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             config.schedulerProfile = trimmed.isEmpty ? nil : trimmed
         }
         config.schedulerAutotuneReport = boolValue(object, "scheduler_autotune_report") ?? config.schedulerAutotuneReport
-        let launchOptions = BackendLaunchOptions(config: config)
-        if launchOptions.validationError == .prefixCacheConflictsWithKVQuant {
-            throw SettingsValidationError.prefixCacheConflictsWithKVQuant
-        }
         return config
     }
 

@@ -9,7 +9,9 @@ use mlx::ops::indexing::{slice_strided_on, slice_update_on};
 use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
-use super::{PagedKVCache, PagedPrefixLayer, TurboQuantKVBits, TurboQuantKVCache};
+use super::{
+    PagedKVCache, PagedPrefixLayer, TurboQuantKVBits, TurboQuantKVCache, TurboQuantPrefixLayer,
+};
 use crate::Result;
 
 /// Per-layer KV cache for full-attention layers.
@@ -208,6 +210,10 @@ impl KVCache {
         self.turboquant.as_deref()
     }
 
+    pub fn prefix_cache_profile(&self) -> Option<String> {
+        self.turboquant.as_ref().map(|tq| tq.bits().cache_profile())
+    }
+
     pub fn paged(&self) -> Option<&PagedKVCache> {
         self.paged.as_deref()
     }
@@ -308,7 +314,7 @@ impl KVCache {
                 self.batch
             );
         }
-        if self.turboquant.is_some() || self.paged.is_some() {
+        if self.paged.is_some() {
             anyhow::bail!(
                 "KVCache::dense_prefix_layer_for_row_on: dense prefix export requires dense KV storage"
             );
@@ -326,6 +332,25 @@ impl KVCache {
                 target,
             )?;
             return Ok((k, v, 0));
+        }
+        if let Some(tq) = &self.turboquant {
+            let (keys_full, values_full) =
+                tq.materialize_prefix_on(cached_len, self.dtype, target)?;
+            let k = slice_strided_on(
+                &keys_full,
+                [row as i32, 0, 0, 0],
+                [row as i32 + 1, self.n_kv_heads, cached_len, self.head_dim],
+                [1_i32, 1, 1, 1],
+                target,
+            )?;
+            let v = slice_strided_on(
+                &values_full,
+                [row as i32, 0, 0, 0],
+                [row as i32 + 1, self.n_kv_heads, cached_len, self.v_head_dim],
+                [1_i32, 1, 1, 1],
+                target,
+            )?;
+            return Ok((k, v, cached_len));
         }
         let keys_full = self.keys.as_ref().ok_or_else(|| {
             anyhow::anyhow!("KVCache::dense_prefix_layer_for_row_on: keys are unallocated")
@@ -350,6 +375,44 @@ impl KVCache {
         Ok((k, v, cached_len))
     }
 
+    pub fn turboquant_prefix_layer_for_row_on(
+        &self,
+        row: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(TurboQuantPrefixLayer, i32)> {
+        let tq = self.turboquant.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "KVCache::turboquant_prefix_layer_for_row_on: TurboQuant is not enabled"
+            )
+        })?;
+        if self.paged.is_some() {
+            anyhow::bail!(
+                "KVCache::turboquant_prefix_layer_for_row_on: paged KV storage is not compatible with TurboQuant packed prefixes"
+            );
+        }
+        tq.prefix_layer_for_row_on(&self.offsets, row, target)
+    }
+
+    pub fn restore_turboquant_prefix_layer_for_row_on(
+        &mut self,
+        layer: &TurboQuantPrefixLayer,
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        let tq = self.turboquant.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "KVCache::restore_turboquant_prefix_layer_for_row_on: TurboQuant is not enabled"
+            )
+        })?;
+        if self.paged.is_some() {
+            anyhow::bail!(
+                "KVCache::restore_turboquant_prefix_layer_for_row_on: paged KV storage is not compatible with TurboQuant packed prefixes"
+            );
+        }
+        tq.restore_packed_prefix_for_row_on(layer, &mut self.offsets, row, cached_len, target)
+    }
+
     pub fn restore_dense_prefix_layer_for_row_on(
         &mut self,
         k: &Array,
@@ -366,7 +429,7 @@ impl KVCache {
                 self.batch
             );
         }
-        if self.turboquant.is_some() || self.paged.is_some() {
+        if self.paged.is_some() {
             anyhow::bail!(
                 "KVCache::restore_dense_prefix_layer_for_row_on: dense prefix restore requires dense KV storage"
             );
@@ -404,6 +467,10 @@ impl KVCache {
                 v.dtype(),
                 self.dtype
             );
+        }
+        if let Some(tq) = &mut self.turboquant {
+            tq.restore_dense_prefix_for_row_on(k, v, &mut self.offsets, row, cached_len, target)?;
+            return Ok(());
         }
         if cached_len > 0 {
             let current_capacity = self
@@ -1782,6 +1849,66 @@ mod tests {
             tq.v_packed().expect("v packed").shape().as_slice(),
             &[1, 2, 16, 1]
         );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn kvcache_turboquant_exports_and_restores_packed_prefix() {
+        let mut source = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(TurboQuantKVBits::K3V4)
+            .expect("enable turboquant");
+        let k_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.037).sin())
+            .collect();
+        let v_data: Vec<f32> = (0..(1 * 2 * 4 * 8))
+            .map(|i| ((i as f32) * 0.041).cos())
+            .collect();
+        let k: Array = (k_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        let v: Array = (v_data.as_slice(), (1_i32, 2_i32, 4_i32, 8_i32))
+            .try_into()
+            .unwrap();
+
+        source
+            .update_and_fetch(&k, &v, &[4])
+            .expect("turboquant source update");
+        let (prefix, cached_len) = source
+            .turboquant_prefix_layer_for_row_on(0, ())
+            .expect("export packed prefix from TurboQuant");
+
+        assert_eq!(cached_len, 4);
+        assert_eq!(prefix.k_packed.shape().as_slice(), &[1, 2, 4, 1]);
+        assert_eq!(prefix.k_norms.shape().as_slice(), &[1, 2, 4]);
+        assert_eq!(prefix.v_packed.shape().as_slice(), &[1, 2, 4, 1]);
+        assert_eq!(prefix.v_norms.shape().as_slice(), &[1, 2, 4]);
+        assert_eq!(prefix.k_packed.dtype(), Dtype::Uint32);
+        assert_eq!(prefix.k_norms.dtype(), Dtype::Float32);
+
+        let mut restored = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(TurboQuantKVBits::K3V4)
+            .expect("enable restore turboquant");
+        restored
+            .restore_turboquant_prefix_layer_for_row_on(&prefix, 0, cached_len, ())
+            .expect("restore packed prefix into TurboQuant");
+
+        assert_eq!(restored.offsets(), &[4]);
+        assert!(restored.keys.is_none());
+        assert!(restored.values.is_none());
+        let tq = restored.turboquant().expect("restored turboquant");
+        assert_eq!(tq.bits(), TurboQuantKVBits::K3V4);
+        assert_eq!(
+            tq.k_packed().expect("restored K packed").shape().as_slice(),
+            &[1, 2, 16, 1]
+        );
+        let (roundtrip, roundtrip_len) = restored
+            .turboquant_prefix_layer_for_row_on(0, ())
+            .expect("re-export restored prefix");
+        assert_eq!(roundtrip_len, 4);
+        assert_eq!(roundtrip.k_packed.shape().as_slice(), &[1, 2, 4, 1]);
+        assert_eq!(roundtrip.v_packed.shape().as_slice(), &[1, 2, 4, 1]);
     }
 
     #[test]

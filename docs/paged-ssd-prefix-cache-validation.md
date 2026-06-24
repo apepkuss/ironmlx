@@ -48,7 +48,9 @@ ironmlx serve \
   --b-max 2
 ```
 
-`--paged-prefix-cache-dir` remains mutually exclusive with TurboQuant KV cache.
+`--paged-prefix-cache-dir` can be combined with TurboQuant KV cache. In that
+mode, runtime K/V remains quantized and persisted prefix entries store packed
+TurboQuant tensors instead of round-tripping through dense K/V tensors.
 
 ## Observability
 
