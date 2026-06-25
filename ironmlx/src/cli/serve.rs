@@ -10,6 +10,7 @@ use super::scheduler_profile_store::{
     detect_scheduler_profile_hardware_label, SchedulerProfileStore,
 };
 use super::KvQuantArg;
+use crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     evaluate_scheduler_autotune_profile_health, SchedulerAutotuneProfileConfig,
@@ -134,7 +135,7 @@ pub struct ServeArgs {
     pub paged_prefix_cache_dir: Option<PathBuf>,
 
     /// Tokens per physical K/V page for --paged-prefix-cache-dir.
-    #[arg(long = "paged-prefix-cache-block-size", default_value_t = 16)]
+    #[arg(long = "paged-prefix-cache-block-size", default_value_t = DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE)]
     pub paged_prefix_cache_block_size: i32,
 
     /// Maximum physical pages per full-attention layer cache. If omitted,
@@ -152,6 +153,18 @@ pub struct ServeArgs {
     /// share the same paged prefix cache key and restore semantics.
     #[arg(long = "prefix-lru-cache-max-bytes")]
     pub prefix_lru_cache_max_bytes: Option<usize>,
+
+    /// Enable experimental Active KV Cache offload. Eligible decode requests may
+    /// still be parked to SSD when the scheduler is full; paged full-attention
+    /// KV caches also use transparent hot/cold page residency so older decode
+    /// pages can be offloaded and streamed back in chunks during attention.
+    #[arg(long = "active-kv-offload", default_value_t = false)]
+    pub active_kv_offload: bool,
+
+    /// Directory used by --active-kv-offload for temporary request KV payloads.
+    /// Defaults to ~/.ironmlx/cache/active_kv_offload when offload is enabled.
+    #[arg(long = "active-kv-offload-dir")]
+    pub active_kv_offload_dir: Option<PathBuf>,
 }
 
 pub(crate) fn resolve_paged_prefix_cache_config(
@@ -242,6 +255,19 @@ pub(crate) fn resolve_prefix_lru_cache_config(
         bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
     }
     crate::core::cache::PrefixLruCacheConfig::new(max_bytes).map(Some)
+}
+
+pub(crate) fn resolve_active_kv_offload_config(
+    args: &ServeArgs,
+) -> Result<crate::core::cache::ActiveKvOffloadConfig> {
+    if !args.active_kv_offload {
+        return Ok(crate::core::cache::ActiveKvOffloadConfig::disabled());
+    }
+    let root = match args.active_kv_offload_dir.as_ref() {
+        Some(root) => expand_home_path(root)?,
+        None => crate::core::cache::default_active_kv_offload_dir(),
+    };
+    Ok(crate::core::cache::ActiveKvOffloadConfig::enabled(root))
 }
 
 fn expand_home_path(path: &Path) -> Result<PathBuf> {
@@ -780,6 +806,7 @@ where
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
+    let active_kv_offload = resolve_active_kv_offload_config(args)?;
     if let Some(config) = &paged_prefix_cache {
         tracing::info!(
             "ironmlx serve: paged SSD prefix cache enabled dir={} block_size={} max_pages={}",
@@ -810,6 +837,7 @@ where
         args.kv_quant.turboquant_bits(),
         paged_prefix_cache,
         prefix_lru_cache,
+        active_kv_offload,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
@@ -845,6 +873,7 @@ where
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
+    let active_kv_offload = resolve_active_kv_offload_config(args)?;
     if let Some(config) = &prefix_lru_cache {
         tracing::info!(
             "ironmlx serve: prefix LRU cache enabled max_bytes={}",
@@ -869,6 +898,7 @@ where
         args.kv_quant.turboquant_bits(),
         paged_prefix_cache,
         prefix_lru_cache,
+        active_kv_offload,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
@@ -1047,6 +1077,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
         )?);
     }
     let paged_prefix_cache = resolve_engine_paged_prefix_cache_settings(&args)?;
+    let active_kv_offload = resolve_active_kv_offload_config(&args)?;
     let runtime_config = server::engine::EnginePoolRuntimeConfig {
         host: args.host,
         port: args.port,
@@ -1054,6 +1085,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
         scheduler_autotune_report: args.scheduler_autotune_report,
         paged_prefix_cache,
         prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
+        active_kv_offload,
     };
     let config = server::engine::EnginePoolConfig {
         default_model: manifest.default_model,
@@ -1385,9 +1417,10 @@ mod scheduler_profile_tests {
     use super::{
         build_engine_model_config_for_pool, check_loaded_scheduler_profile_health,
         load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
-        resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
-        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
-        resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel, SchedulerServeConfig, ServeArgs,
+        resolve_active_kv_offload_config, resolve_paged_prefix_cache_config,
+        resolve_prefix_lru_cache_config, resolve_scheduler_runtime_profile,
+        resolve_scheduler_serve_config, resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel,
+        SchedulerServeConfig, ServeArgs,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -1444,10 +1477,13 @@ mod scheduler_profile_tests {
             mtp_draft_tokens: None,
             kv_quant: KvQuantArg::None,
             paged_prefix_cache_dir: None,
-            paged_prefix_cache_block_size: 16,
+            paged_prefix_cache_block_size:
+                crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
             paged_prefix_cache_max_pages: None,
             ssd_prefix_cache_max_gb: None,
             prefix_lru_cache_max_bytes: None,
+            active_kv_offload: false,
+            active_kv_offload_dir: None,
         }
     }
 
@@ -1499,6 +1535,46 @@ mod scheduler_profile_tests {
 
         assert_eq!(cfg.model_id, "manifest-alpha");
         std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn serve_active_kv_offload_disabled_by_default() {
+        let args = base_args();
+
+        let cfg = resolve_active_kv_offload_config(&args).expect("active kv config");
+
+        assert!(!cfg.enabled);
+        assert_eq!(
+            cfg.root,
+            crate::core::cache::default_active_kv_offload_dir()
+        );
+    }
+
+    #[test]
+    fn serve_active_kv_offload_uses_default_dir_when_enabled() {
+        let mut args = base_args();
+        args.active_kv_offload = true;
+
+        let cfg = resolve_active_kv_offload_config(&args).expect("active kv config");
+
+        assert!(cfg.enabled);
+        assert_eq!(
+            cfg.root,
+            crate::core::cache::default_active_kv_offload_dir()
+        );
+    }
+
+    #[test]
+    fn serve_active_kv_offload_uses_custom_dir() {
+        let root = unique_temp_dir("serve-active-kv-root");
+        let mut args = base_args();
+        args.active_kv_offload = true;
+        args.active_kv_offload_dir = Some(root.clone());
+
+        let cfg = resolve_active_kv_offload_config(&args).expect("active kv config");
+
+        assert!(cfg.enabled);
+        assert_eq!(cfg.root, root);
     }
 
     #[test]
@@ -1674,6 +1750,19 @@ mod scheduler_profile_tests {
         };
 
         assert_eq!(args.b_max, Some(4));
+    }
+
+    #[test]
+    fn serve_paged_prefix_block_size_defaults_to_capacity_friendly_page_size() {
+        let cli = crate::cli::Cli::parse_from(["ironmlx", "serve", "--model", "/tmp/model"]);
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(
+            args.paged_prefix_cache_block_size,
+            crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE
+        );
     }
 
     #[test]

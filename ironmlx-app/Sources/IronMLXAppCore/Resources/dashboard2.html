@@ -194,6 +194,19 @@
     outline: none;
   }
 
+  .profile-help-trigger.warning {
+    border-color: var(--border);
+    background: var(--bg);
+    color: var(--text-secondary);
+  }
+
+  .profile-help-trigger.warning:hover,
+  .profile-help-trigger.warning:focus {
+    border-color: #ff9500;
+    background: rgba(255, 149, 0, 0.08);
+    color: #ff9500;
+  }
+
   .profile-help-tooltip {
     position: absolute;
     top: 26px;
@@ -215,6 +228,16 @@
     transition: opacity 0.15s, transform 0.15s;
   }
 
+  .profile-help-tooltip-fixed {
+    position: fixed;
+    top: var(--profile-tooltip-top, 16px);
+    left: var(--profile-tooltip-left, 50vw);
+    width: min(340px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    transform: translate(-50%, -4px);
+  }
+
   .profile-help-tooltip-title {
     display: block;
     color: var(--text);
@@ -231,10 +254,15 @@
     margin-top: 6px;
   }
 
-  .profile-help:hover .profile-help-tooltip,
-  .profile-help:focus-within .profile-help-tooltip {
+  .profile-help:not(.profile-help-fixed):hover .profile-help-tooltip,
+  .profile-help:not(.profile-help-fixed):focus-within .profile-help-tooltip {
     opacity: 1;
     transform: translateX(-50%) translateY(0);
+  }
+
+  .profile-help-fixed.is-open .profile-help-tooltip-fixed {
+    opacity: 1;
+    transform: translate(-50%, 0);
   }
 
   .profile-progress {
@@ -1605,6 +1633,7 @@
       <div class="stat-card"><div class="stat-label" data-i18n="total_tokens">Total Tokens</div><div class="stat-value" id="stat-total-tokens" style="font-size:14px;">0</div></div>
       <div class="stat-card"><div class="stat-label" data-i18n="cached_tokens">Cached Tokens</div><div class="stat-value" id="stat-cached-tokens" style="font-size:14px;">0</div></div>
       <div class="stat-card"><div class="stat-label" data-i18n="cache_efficiency">Cache Efficiency</div><div class="stat-value" id="stat-cache-efficiency" style="font-size:14px;">--</div></div>
+      <div class="stat-card"><div class="stat-label" data-i18n="active_kv_status">Active KV Offload</div><div class="stat-value" id="stat-active-kv" style="font-size:13px;">--</div></div>
     </div>
 
     <!-- GPU Memory Chart -->
@@ -2360,6 +2389,25 @@
         <div class="settings-row-right"><input type="text" value="~/.ironmlx/cache/paged_prefix_cache" style="min-width:260px;" id="cfg-cache-dir"></div>
       </div>
       <div class="settings-row">
+        <div class="settings-row-left">
+          <div class="settings-row-label" style="display:flex;align-items:center;gap:6px;">
+            <span data-i18n="active_kv_offload">Active KV Cache Offload</span>
+            <span class="profile-help profile-help-fixed">
+              <button type="button" class="profile-help-trigger warning" id="active-kv-help-trigger" aria-describedby="active-kv-help-tooltip" aria-label="Active KV offload help">!</button>
+              <span class="profile-help-tooltip profile-help-tooltip-fixed" id="active-kv-help-tooltip" role="tooltip">
+                <span class="profile-help-tooltip-title" data-i18n="active_kv_offload_help_title">Experimental cache residency</span>
+                <span class="profile-help-tooltip-body" data-i18n="active_kv_offload_help_body">Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.</span>
+                <span class="profile-help-tooltip-flow" data-i18n="active_kv_offload_help_trigger">Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.</span>
+                <span class="profile-help-tooltip-flow" data-i18n="active_kv_offload_help_applicable">Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, and MLA.</span>
+                <span class="profile-help-tooltip-flow" data-i18n="active_kv_offload_help_not_applicable">Not applicable: GatedDelta/Linear and MTP speculative side cache.</span>
+              </span>
+            </span>
+          </div>
+          <div class="settings-row-desc" data-i18n="active_kv_offload_desc">Experimental. Use SSD-backed residency for active KV Cache when requests need to be parked and restored.</div>
+        </div>
+        <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-active-kv-offload"><span class="toggle-slider"></span></label></div>
+      </div>
+      <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="kv_quant">KV Cache Compression</div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.</div></div>
         <div class="settings-row-right"><select id="cfg-kv-quant" style="min-width:160px;"><option value="none" data-i18n="kv_quant_off">Off</option><option value="turbo3">TurboQuant K3V3</option><option value="turbo4">TurboQuant K4V4</option><option value="k3v4">TurboQuant K3V4</option></select></div>
       </div>
@@ -2643,6 +2691,7 @@
       endpoints_unavailable: "Server endpoint info unavailable (backend not reachable).",
       server_status: "Server Status", running: "Running", uptime: "Uptime", model: "Model",
       total_tokens: "Total Tokens", cached_tokens: "Cached Tokens", cache_efficiency: "Cache Efficiency",
+      active_kv_status: "Active KV Offload", active_kv_enabled: "On", active_kv_disabled: "Off", active_kv_parked: "parked {value}", active_kv_swaps: "swaps {out}/{in}", active_kv_errors: "errors {value}",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage and download models.", model_manager: "Model Manager", model_download: "Model Download",
       col_model: "Model \u25B2", col_type: "Type", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Ready",
@@ -2769,6 +2818,7 @@
       cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Maximum disk usage for the SSD Prefix Cache. The upper limit is adjusted from available disk space.",
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
+      active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Use SSD-backed residency for active KV Cache when requests need to be parked and restored.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, and MLA.", active_kv_offload_help_not_applicable: "Not applicable: GatedDelta/Linear and MTP speculative side cache.",
       kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload idle non-pinned models after this many minutes. 0 = disabled.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
@@ -2887,6 +2937,7 @@
       endpoints_unavailable: "无法获取服务端点信息（后端不可达）。",
       server_status: "服务器状态", running: "运行中", uptime: "运行时间", model: "模型",
       total_tokens: "处理 Tokens", cached_tokens: "缓存 Tokens", cache_efficiency: "缓存命中率",
+      active_kv_status: "Active KV 分层卸载", active_kv_enabled: "开启", active_kv_disabled: "关闭", active_kv_parked: "暂停 {value}", active_kv_swaps: "换出/换入 {out}/{in}", active_kv_errors: "错误 {value}",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理和下载模型。", model_manager: "模型管理", model_download: "模型下载",
       col_model: "模型 \u25B2", col_type: "类型", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "就绪",
@@ -3013,6 +3064,7 @@
       cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用，最大值会根据磁盘可用空间动态调整。如需禁用，请关闭【启用缓存】。",
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
+      active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。需要暂停并恢复请求时，将活跃 KV Cache 临时驻留到本地 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不适用：GatedDelta/Linear、MTP speculative side cache。",
       kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "闲置超过指定分钟数后自动卸载非固定模型。0 = 不启用。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
@@ -3130,6 +3182,8 @@
       endpoints_hint_lan: "⚠ 服務目前無驗證，請僅在可信網路（家 / 辦公室 Wi-Fi）啟用。",
       endpoints_unavailable: "無法取得服務端點資訊（後端不可達）。",
       server_status: "伺服器狀態", running: "執行中", uptime: "執行時間", model: "模型",
+      total_tokens: "處理 Tokens", cached_tokens: "快取 Tokens", cache_efficiency: "快取命中率",
+      active_kv_status: "Active KV 分層卸載", active_kv_enabled: "開啟", active_kv_disabled: "關閉", active_kv_parked: "暫停 {value}", active_kv_swaps: "換出/換入 {out}/{in}", active_kv_errors: "錯誤 {value}",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
       models_subtitle: "管理和下載模型。", model_manager: "模型管理", model_download: "模型下載",
       col_model: "模型 \u25B2", col_type: "類型", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "就緒",
@@ -3239,6 +3293,7 @@
       cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用，最大值會根據磁碟可用空間動態調整。如需停用，請關閉【啟用快取】。",
       auto: "自動",
       cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
+      active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。需要暫停並恢復請求時，將活躍 KV Cache 暫時駐留到本地 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不適用：GatedDelta/Linear、MTP speculative side cache。",
       advanced: "進階", batch_processing: "批次處理",
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
       max_models: "最大載入模型數", max_models_desc: "同時保留在 GPU 記憶體中的模型數量上限。超過則按 LRU 淘汰最久未使用的非釘選模型。16–32 GB 裝置建議設為 1–2。",
@@ -3355,6 +3410,8 @@
       endpoints_hint_lan: "⚠ このサーバーには認証がありません。信頼できるネットワーク（自宅 / 職場 Wi-Fi）でのみ有効にしてください。",
       endpoints_unavailable: "サーバーエンドポイント情報を取得できません（バックエンド未到達）。",
       server_status: "サーバーステータス", running: "実行中", uptime: "稼働時間", model: "モデル",
+      total_tokens: "処理 Tokens", cached_tokens: "キャッシュ Tokens", cache_efficiency: "キャッシュヒット率",
+      active_kv_status: "Active KV オフロード", active_kv_enabled: "オン", active_kv_disabled: "オフ", active_kv_parked: "一時停止 {value}", active_kv_swaps: "退避/復元 {out}/{in}", active_kv_errors: "エラー {value}",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
       models_subtitle: "モデルの管理とダウンロード。", model_manager: "モデル管理", model_download: "モデルダウンロード",
       col_model: "モデル \u25B2", col_type: "タイプ", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "準備完了",
@@ -3464,6 +3521,7 @@
       cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。上限はディスク空き容量に応じて調整されます。無効にするにはキャッシュをオフにします。",
       auto: "自動",
       cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
+      active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。リクエストの一時停止と復元が必要な場合、Active KV Cache を一時的にローカル SSD に退避します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "非対象: GatedDelta/Linear、MTP speculative side cache。",
       advanced: "詳細設定", batch_processing: "バッチ処理",
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
       max_models: "最大ロードモデル数", max_models_desc: "GPU メモリに同時に保持するモデル数の上限。超過すると最も長く未使用（ピン留めなし）のモデルを LRU で解放します。16–32 GB 環境では 1–2 を推奨。",
@@ -3580,6 +3638,8 @@
       endpoints_hint_lan: "⚠ 이 서버는 인증이 없습니다. 신뢰할 수 있는 네트워크(가정 / 사무실 Wi-Fi)에서만 사용하세요.",
       endpoints_unavailable: "서버 엔드포인트 정보를 가져올 수 없습니다 (백엔드 연결 불가).",
       server_status: "서버 상태", running: "실행 중", uptime: "가동 시간", model: "모델",
+      total_tokens: "처리 Tokens", cached_tokens: "캐시 Tokens", cache_efficiency: "캐시 적중률",
+      active_kv_status: "Active KV 오프로드", active_kv_enabled: "켜짐", active_kv_disabled: "꺼짐", active_kv_parked: "일시 중지 {value}", active_kv_swaps: "내보내기/복원 {out}/{in}", active_kv_errors: "오류 {value}",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
       models_subtitle: "모델 관리 및 다운로드.", model_manager: "모델 관리", model_download: "모델 다운로드",
       col_model: "모델 \u25B2", col_type: "유형", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "준비됨",
@@ -3689,6 +3749,7 @@
       cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다. 상한은 디스크 여유 공간에 따라 조정됩니다. 비활성화하려면 캐시 활성화를 끄세요.",
       auto: "자동",
       cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
+      active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 요청을 일시 중지하고 복원해야 할 때 Active KV Cache를 로컬 SSD에 임시 저장합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA.", active_kv_offload_help_not_applicable: "비대상: GatedDelta/Linear, MTP speculative side cache.",
       advanced: "고급", batch_processing: "배치 처리",
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
       max_models: "최대 로드 모델 수", max_models_desc: "GPU 메모리에 동시에 보관하는 모델 수 상한. 초과 시 가장 오래 사용되지 않은 비고정 모델을 LRU 방식으로 해제합니다. 16–32 GB 환경에서는 1–2 권장.",
@@ -5856,6 +5917,7 @@
     setNumberInput('cfg-cold-cache', clampColdCacheLimit(appConfig.cold_cache && appConfig.cold_cache > 0 ? appConfig.cold_cache : 10), 10);
     setCheckboxInput('cfg-cache-enable', appConfig.cache_enable, true);
     setTextInput('cfg-cache-dir', appConfig.cache_dir, '~/.ironmlx/cache/paged_prefix_cache');
+    setCheckboxInput('cfg-active-kv-offload', appConfig.active_kv_offload, false);
     const cfgKvQuant = document.getElementById('cfg-kv-quant');
     if (cfgKvQuant) cfgKvQuant.value = normalizeKVQuantValue(window.__IRONMLX_KV_QUANT__);
     if (cfgKvQuant && appConfig.kv_quant !== undefined && appConfig.kv_quant !== null) {
@@ -5897,6 +5959,7 @@
       cold_cache: coldCache,
       cache_enable: checkedInputValue('cfg-cache-enable', true),
       cache_dir: document.getElementById('cfg-cache-dir').value,
+      active_kv_offload: checkedInputValue('cfg-active-kv-offload', false),
       kv_quant: normalizeKVQuantValue(document.getElementById('cfg-kv-quant').value),
       max_sequences: Math.max(1, numberInputValue('cfg-max-sequences', 1)),
       max_models: Math.max(1, numberInputValue('cfg-max-models', 3)),
@@ -5947,7 +6010,7 @@
     'cfg-cold-cache',
     'cfg-max-sequences', 'cfg-max-models',
     'cfg-init-cache-blocks',
-    'cfg-cache-enable', 'cfg-cache-dir',
+    'cfg-cache-enable', 'cfg-cache-dir', 'cfg-active-kv-offload',
     'cfg-kv-quant', 'cfg-model-ttl',
     'cfg-distributed-backend', 'cfg-parallel-mode'
   ];
@@ -6243,9 +6306,38 @@
     document.getElementById('stat-server-status').style.color = 'var(--text-tertiary)';
     document.getElementById('stat-uptime').textContent = '--';
     document.getElementById('stat-model').textContent = '--';
+    const activeKvEl = document.getElementById('stat-active-kv');
+    if (activeKvEl) activeKvEl.textContent = '--';
     document.getElementById('gpu-active-val').textContent = '-- MB';
     document.getElementById('gpu-peak-val').textContent = '-- MB';
     document.getElementById('gpu-cache-val').textContent = '-- MB';
+  }
+
+  function updateActiveKvStatus(info) {
+    const el = document.getElementById('stat-active-kv');
+    if (!el) return;
+    const dict = I18N[currentLang] || I18N.en;
+    if (!info || !info.enabled) {
+      el.textContent = dict.active_kv_disabled || 'Off';
+      el.style.color = 'var(--text-tertiary)';
+      return;
+    }
+    const parked = Number(info.parked_requests || 0);
+    const swapOut = Number(info.swap_out_count || 0);
+    const swapIn = Number(info.swap_in_count || 0);
+    const errors = Number(info.swap_error_count || 0);
+    const parts = [
+      dict.active_kv_enabled || 'On',
+      (dict.active_kv_parked || 'parked {value}').replace('{value}', parked.toLocaleString()),
+      (dict.active_kv_swaps || 'swaps {out}/{in}')
+        .replace('{out}', swapOut.toLocaleString())
+        .replace('{in}', swapIn.toLocaleString())
+    ];
+    if (errors > 0) {
+      parts.push((dict.active_kv_errors || 'errors {value}').replace('{value}', errors.toLocaleString()));
+    }
+    el.textContent = parts.join(' · ');
+    el.style.color = errors > 0 ? '#ff9500' : 'var(--text)';
   }
 
   function initStatusPolling() {
@@ -6348,6 +6440,7 @@
         if (data.cache_hit_rate !== undefined) {
           document.getElementById('stat-cache-efficiency').textContent = (data.cache_hit_rate * 100).toFixed(1) + '%';
         }
+        updateActiveKvStatus(data.active_kv_offload);
       } else if (path === '/admin/api/models/local') {
         onLocalModelsResult(jsonStr);
       } else if (path === '/admin/api/cache/capacity') {
@@ -6787,8 +6880,65 @@
     });
   }
 
+  function setupFixedTooltips() {
+    const viewportMargin = 16;
+    const triggerGap = 8;
+    document.querySelectorAll('.profile-help-fixed').forEach(function(wrapper) {
+      const trigger = wrapper.querySelector('.profile-help-trigger');
+      const tooltip = wrapper.querySelector('.profile-help-tooltip-fixed');
+      if (!trigger || !tooltip) return;
+
+      function positionTooltip() {
+        const triggerRect = trigger.getBoundingClientRect();
+        const tooltipWidth = Math.min(340, Math.max(0, window.innerWidth - viewportMargin * 2));
+        const left = Math.min(
+          Math.max(triggerRect.left + triggerRect.width / 2, viewportMargin + tooltipWidth / 2),
+          window.innerWidth - viewportMargin - tooltipWidth / 2
+        );
+        tooltip.style.setProperty('--profile-tooltip-left', left + 'px');
+
+        const availableHeight = Math.max(0, window.innerHeight - viewportMargin * 2);
+        const tooltipHeight = Math.min(tooltip.scrollHeight, availableHeight);
+        const belowTop = triggerRect.bottom + triggerGap;
+        const aboveTop = triggerRect.top - tooltipHeight - triggerGap;
+        let top = belowTop;
+        if (belowTop + tooltipHeight > window.innerHeight - viewportMargin && aboveTop >= viewportMargin) {
+          top = aboveTop;
+        } else if (belowTop + tooltipHeight > window.innerHeight - viewportMargin) {
+          top = viewportMargin;
+        }
+        tooltip.style.setProperty('--profile-tooltip-top', top + 'px');
+      }
+
+      function showTooltip() {
+        positionTooltip();
+        wrapper.classList.add('is-open');
+        requestAnimationFrame(positionTooltip);
+      }
+
+      function hideTooltip() {
+        wrapper.classList.remove('is-open');
+      }
+
+      trigger.addEventListener('mouseenter', showTooltip);
+      trigger.addEventListener('mouseleave', hideTooltip);
+      trigger.addEventListener('focus', showTooltip);
+      trigger.addEventListener('blur', hideTooltip);
+      window.addEventListener('resize', function() {
+        if (wrapper.classList.contains('is-open')) positionTooltip();
+      });
+      const content = document.querySelector('.content');
+      if (content) {
+        content.addEventListener('scroll', function() {
+          if (wrapper.classList.contains('is-open')) positionTooltip();
+        }, { passive: true });
+      }
+    });
+  }
+
   (function initDashboardAppShell() {
     setLanguage(window.__APP_LANGUAGE__ || 'en');
+    setupFixedTooltips();
     initStatusPolling();
   })();
 </script>

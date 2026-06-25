@@ -28,6 +28,7 @@ public struct BackendLaunchOptions: Equatable {
     public var pagedPrefixCacheDir: String?
     public var prefixLruCacheMaxBytes: Int?
     public var ssdPrefixCacheMaxGB: Int?
+    public var activeKvOffload: Bool
 
     public init(
         prefillChunkSize: Int? = nil,
@@ -41,7 +42,8 @@ public struct BackendLaunchOptions: Equatable {
         kvQuant: String? = nil,
         pagedPrefixCacheDir: String? = nil,
         prefixLruCacheMaxBytes: Int? = nil,
-        ssdPrefixCacheMaxGB: Int? = nil
+        ssdPrefixCacheMaxGB: Int? = nil,
+        activeKvOffload: Bool = false
     ) {
         self.prefillChunkSize = prefillChunkSize
         self.bMax = bMax
@@ -55,6 +57,7 @@ public struct BackendLaunchOptions: Equatable {
         self.pagedPrefixCacheDir = Self.normalizedPath(pagedPrefixCacheDir)
         self.prefixLruCacheMaxBytes = prefixLruCacheMaxBytes
         self.ssdPrefixCacheMaxGB = ssdPrefixCacheMaxGB
+        self.activeKvOffload = activeKvOffload
     }
 
     public init(
@@ -83,7 +86,8 @@ public struct BackendLaunchOptions: Equatable {
             kvQuant: config.kvQuant,
             pagedPrefixCacheDir: prefixCacheDir,
             prefixLruCacheMaxBytes: prefixLruCacheMaxBytes,
-            ssdPrefixCacheMaxGB: ssdPrefixCacheMaxGB
+            ssdPrefixCacheMaxGB: ssdPrefixCacheMaxGB,
+            activeKvOffload: config.activeKvOffload == true
         )
     }
 
@@ -183,6 +187,9 @@ public struct BackendLaunchConfiguration: Equatable {
         appendIntegerFlag("--ssd-prefix-cache-max-gb", options.ssdPrefixCacheMaxGB, to: &arguments)
         if let kvQuant = options.kvQuant {
             arguments += ["--kv-quant", kvQuant]
+        }
+        if options.activeKvOffload {
+            arguments.append("--active-kv-offload")
         }
         return arguments
     }

@@ -12,7 +12,9 @@ use axum::{routing::get, routing::post, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits};
+use crate::core::cache::{
+    ActiveKvOffloadConfig, PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits,
+};
 use crate::core::model::Model;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
@@ -203,6 +205,7 @@ where
 struct PlainSchedulerActorSpawner {
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
 }
 
 impl<M> SchedulerActorSpawner<M> for PlainSchedulerActorSpawner
@@ -224,6 +227,22 @@ where
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         if let Some(config) = self.paged_prefix_cache {
+            if self.active_kv_offload.enabled {
+                return Ok(
+                    scheduler_actor::spawn_scheduler_actor_with_paged_prefix_cache_and_active_kv(
+                        model,
+                        b_max,
+                        admission_deadline,
+                        admission_queue_max,
+                        effective_cap_max,
+                        decode_cadence_mid_chunk_cap,
+                        meta,
+                        config,
+                        self.prefix_lru_cache,
+                        self.active_kv_offload,
+                    )?,
+                );
+            }
             Ok(
                 scheduler_actor::spawn_scheduler_actor_with_paged_prefix_cache(
                     model,
@@ -235,6 +254,19 @@ where
                     meta,
                     config,
                     self.prefix_lru_cache,
+                )?,
+            )
+        } else if self.active_kv_offload.enabled {
+            Ok(
+                scheduler_actor::spawn_scheduler_actor_with_active_kv_offload(
+                    model,
+                    b_max,
+                    admission_deadline,
+                    admission_queue_max,
+                    effective_cap_max,
+                    decode_cadence_mid_chunk_cap,
+                    meta,
+                    self.active_kv_offload,
                 )?,
             )
         } else {
@@ -256,6 +288,7 @@ struct MtpSchedulerActorSpawner<H> {
     mtp_draft_tokens: usize,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
 }
 
 impl<M> SchedulerActorSpawner<M> for MtpSchedulerActorSpawner<M::MtpHead>
@@ -277,19 +310,38 @@ where
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
-        Ok(scheduler_actor::spawn_scheduler_actor_with_mtp(
-            model,
-            self.mtp,
-            self.mtp_draft_tokens,
-            b_max,
-            admission_deadline,
-            admission_queue_max,
-            effective_cap_max,
-            decode_cadence_mid_chunk_cap,
-            meta,
-            self.paged_prefix_cache,
-            self.prefix_lru_cache,
-        )?)
+        if self.active_kv_offload.enabled {
+            Ok(
+                scheduler_actor::spawn_scheduler_actor_with_mtp_and_active_kv(
+                    model,
+                    self.mtp,
+                    self.mtp_draft_tokens,
+                    b_max,
+                    admission_deadline,
+                    admission_queue_max,
+                    effective_cap_max,
+                    decode_cadence_mid_chunk_cap,
+                    meta,
+                    self.paged_prefix_cache,
+                    self.prefix_lru_cache,
+                    self.active_kv_offload,
+                )?,
+            )
+        } else {
+            Ok(scheduler_actor::spawn_scheduler_actor_with_mtp(
+                model,
+                self.mtp,
+                self.mtp_draft_tokens,
+                b_max,
+                admission_deadline,
+                admission_queue_max,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                meta,
+                self.paged_prefix_cache,
+                self.prefix_lru_cache,
+            )?)
+        }
     }
 }
 
@@ -309,6 +361,7 @@ pub async fn serve<M>(
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
@@ -336,6 +389,7 @@ where
         PlainSchedulerActorSpawner {
             paged_prefix_cache,
             prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -359,6 +413,7 @@ pub async fn serve_with_mtp<M>(
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
@@ -389,6 +444,7 @@ where
             mtp_draft_tokens,
             paged_prefix_cache,
             prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -411,6 +467,7 @@ pub(crate) async fn build_plain_app_state<M>(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<AppState<M>>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -433,6 +490,7 @@ where
         PlainSchedulerActorSpawner {
             paged_prefix_cache,
             prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -457,6 +515,7 @@ pub(crate) async fn build_mtp_app_state<M>(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<AppState<M>>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
@@ -482,6 +541,7 @@ where
             mtp_draft_tokens,
             paged_prefix_cache,
             prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -688,6 +748,7 @@ fn build_health_collector(
         kv_cache_active_bytes: scheduler_handle.kv_cache_active_bytes.clone(),
         kv_cache_soft_limit_bytes: scheduler_handle.kv_cache_soft_limit_bytes,
         mtp,
+        active_kv_offload: scheduler_handle.active_kv_offload.clone(),
     })
 }
 
@@ -868,6 +929,9 @@ mod tests {
             memory_budget_exceeded_count: Arc::new(AtomicU64::new(0)),
             kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),
             kv_cache_soft_limit_bytes: 1,
+            active_kv_offload: crate::core::cache::ActiveKvOffloadSharedStats::new(
+                &crate::core::cache::ActiveKvOffloadConfig::disabled(),
+            ),
         }
     }
 

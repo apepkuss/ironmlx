@@ -17,6 +17,7 @@ public struct AppConfig: Codable, Equatable {
     public var cacheEnable: Bool?
     public var cacheDir: String?
     public var kvQuant: String?
+    public var activeKvOffload: Bool?
     public var maxSequences: Int?
     public var maxModels: Int?
     public var initCacheBlocks: Int?
@@ -49,6 +50,7 @@ public struct AppConfig: Codable, Equatable {
         cacheEnable: Bool? = nil,
         cacheDir: String? = nil,
         kvQuant: String? = nil,
+        activeKvOffload: Bool? = nil,
         maxSequences: Int? = nil,
         maxModels: Int? = nil,
         initCacheBlocks: Int? = nil,
@@ -80,6 +82,7 @@ public struct AppConfig: Codable, Equatable {
         self.cacheEnable = cacheEnable
         self.cacheDir = cacheDir
         self.kvQuant = kvQuant
+        self.activeKvOffload = activeKvOffload
         self.maxSequences = maxSequences
         self.maxModels = maxModels
         self.initCacheBlocks = initCacheBlocks
@@ -113,6 +116,7 @@ public struct AppConfig: Codable, Equatable {
         case cacheEnable = "cache_enable"
         case cacheDir = "cache_dir"
         case kvQuant = "kv_quant"
+        case activeKvOffload = "active_kv_offload"
         case maxSequences = "max_sequences"
         case maxModels = "max_models"
         case initCacheBlocks = "init_cache_blocks"

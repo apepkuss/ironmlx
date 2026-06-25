@@ -42,3 +42,17 @@ import Testing
     #expect(config.cacheDir == "/tmp/cache")
     #expect(config.kvQuant == "k3v4")
 }
+
+@MainActor
+@Test func dashboardSettingsPayloadParsesActiveKVOffloadToggle() throws {
+    let existing = AppConfig(activeKvOffload: false)
+    let json = """
+    {
+      "active_kv_offload": true
+    }
+    """
+
+    let config = try DashboardBridge.config(applyingSettingsJSON: json, to: existing)
+
+    #expect(config.activeKvOffload == true)
+}

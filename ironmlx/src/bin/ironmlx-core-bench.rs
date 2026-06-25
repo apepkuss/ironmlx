@@ -8,7 +8,11 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
-use ironmlx::core::cache::TurboQuantKVBits;
+use ironmlx::core::cache::{
+    ActiveKvOffloadConfig, ActiveKvOffloadHealth, ActiveKvOffloadSharedStats,
+    ActiveKvOffloadStatus, PagedPrefixCacheConfig, TurboQuantKVBits,
+    DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
+};
 use ironmlx::core::scheduler::DenseVlMethods;
 use ironmlx::core::speculative::{
     resolve_mtp_draft_tokens, MtpDraftTokensArg, MtpSpeculativeConfig, MtpSpeculativeModel,
@@ -71,8 +75,46 @@ struct Args {
     #[arg(long = "kv-quant", value_enum, default_value_t = KvQuantBenchArg::None)]
     kv_quant: KvQuantBenchArg,
 
-    /// Scheduler batch capacity, only used by scheduler-text mode.
-    #[arg(long, default_value_t = 1)]
+    /// Enable paged full-attention KV storage and paged SSD prefix cache under
+    /// this directory. Required when benchmarking --active-kv-offload hot/cold
+    /// page tiering.
+    #[arg(long = "paged-prefix-cache-dir")]
+    paged_prefix_cache_dir: Option<PathBuf>,
+
+    /// Tokens per physical K/V page for --paged-prefix-cache-dir.
+    #[arg(long = "paged-prefix-cache-block-size", default_value_t = DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE)]
+    paged_prefix_cache_block_size: i32,
+
+    /// Maximum physical pages per full-attention layer cache. If omitted,
+    /// defaults to ceil(b_max * effective_cap_max / block_size).
+    #[arg(long = "paged-prefix-cache-max-pages")]
+    paged_prefix_cache_max_pages: Option<i32>,
+
+    /// Enable experimental Active KV Cache offload for scheduler-text
+    /// benchmarks. This benchmark requires paged KV and kv-quant=none so the
+    /// measured path is transparent hot/cold page residency.
+    #[arg(long = "active-kv-offload", default_value_t = false)]
+    active_kv_offload: bool,
+
+    /// Directory used by --active-kv-offload for temporary benchmark payloads.
+    /// If omitted, a unique directory under std::env::temp_dir() is used.
+    #[arg(long = "active-kv-offload-dir")]
+    active_kv_offload_dir: Option<PathBuf>,
+
+    /// Force Active KV hot/cold resident window size in physical pages.
+    /// Intended for benchmark stress runs; omitted means budget-based sizing.
+    #[arg(long = "active-kv-hot-window-pages")]
+    active_kv_hot_window_pages: Option<i32>,
+
+    /// Force Active KV streaming chunk size in physical pages.
+    /// Intended for benchmark stress runs; omitted means the production default.
+    #[arg(long = "active-kv-chunk-pages")]
+    active_kv_chunk_pages: Option<i32>,
+
+    /// Scheduler batch capacity, only used by scheduler-text mode. The default
+    /// leaves enough admission headroom for a full-cap single benchmark request
+    /// under the scheduler's 85% soft memory limit.
+    #[arg(long, default_value_t = 2)]
     b_max: usize,
 
     /// Scheduler effective cap max. Defaults to prompt_len + max_tokens,
@@ -142,6 +184,13 @@ struct Meta {
     max_tokens: usize,
     prefill_chunk_size: usize,
     kv_quant: KvQuantBenchArg,
+    paged_prefix_cache_dir: Option<String>,
+    paged_prefix_cache_block_size: i32,
+    paged_prefix_cache_max_pages: Option<i32>,
+    active_kv_offload: bool,
+    active_kv_offload_dir: Option<String>,
+    active_kv_hot_window_pages: Option<i32>,
+    active_kv_chunk_pages: Option<i32>,
     b_max: usize,
     effective_cap_max: usize,
     warmup_runs: usize,
@@ -179,6 +228,7 @@ struct Record {
     finish_reason: Option<&'static str>,
     valid: bool,
     mtp_stats: Option<MtpRecordStats>,
+    active_kv_stats: Option<ActiveKvRecordStats>,
 }
 
 struct GeneratedOutput {
@@ -204,6 +254,76 @@ struct MtpRecordStats {
     main_rollback_us: u64,
     mtp_cache_commit_us: u64,
     mtp_cache_restore_us: u64,
+}
+
+#[derive(Serialize)]
+struct ActiveKvRecordStats {
+    enabled: bool,
+    status: ActiveKvOffloadStatus,
+    active: bool,
+    degraded: bool,
+    mode: &'static str,
+    storage_dir: String,
+    resident_pages: usize,
+    offloaded_pages: usize,
+    loading_pages: usize,
+    dirty_pages: usize,
+    parked_requests: usize,
+    offloaded_bytes: usize,
+    swap_out_count: u64,
+    swap_in_count: u64,
+    stream_read_count: u64,
+    swap_error_count: u64,
+    last_swap_out_us: u64,
+    last_swap_in_us: u64,
+}
+
+impl From<ActiveKvOffloadHealth> for ActiveKvRecordStats {
+    fn from(health: ActiveKvOffloadHealth) -> Self {
+        Self {
+            enabled: health.enabled,
+            status: health.status,
+            active: health.active,
+            degraded: health.degraded,
+            mode: health.mode,
+            storage_dir: health.storage_dir.display().to_string(),
+            resident_pages: health.resident_pages,
+            offloaded_pages: health.offloaded_pages,
+            loading_pages: health.loading_pages,
+            dirty_pages: health.dirty_pages,
+            parked_requests: health.parked_requests,
+            offloaded_bytes: health.offloaded_bytes,
+            swap_out_count: health.swap_out_count,
+            swap_in_count: health.swap_in_count,
+            stream_read_count: health.stream_read_count,
+            swap_error_count: health.swap_error_count,
+            last_swap_out_us: health.last_swap_out_us,
+            last_swap_in_us: health.last_swap_in_us,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BenchSchedulerFeatures {
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+}
+
+#[derive(Clone, Copy)]
+struct SchedulerBenchConfig<'a> {
+    features: &'a BenchSchedulerFeatures,
+    effective_cap_max: usize,
+}
+
+struct RecordInput {
+    mode: BenchMode,
+    ttft_ms: f64,
+    e2e_ms: f64,
+    generated: GeneratedOutput,
+    finish_reason: Option<&'static str>,
+    max_tokens: usize,
+    mtp_stats: Option<MtpRecordStats>,
+    active_kv_stats: Option<ActiveKvRecordStats>,
 }
 
 impl From<MtpSpeculativeStats> for MtpRecordStats {
@@ -305,6 +425,65 @@ fn main() -> Result<()> {
 }
 
 fn validate_args(args: &Args) -> Result<()> {
+    if args.paged_prefix_cache_block_size <= 0 {
+        return Err(anyhow!(
+            "--paged-prefix-cache-block-size must be > 0, got {}",
+            args.paged_prefix_cache_block_size
+        ));
+    }
+    if let Some(max_pages) = args.paged_prefix_cache_max_pages {
+        if max_pages <= 0 {
+            return Err(anyhow!(
+                "--paged-prefix-cache-max-pages must be > 0, got {max_pages}"
+            ));
+        }
+    }
+    if args.active_kv_offload_dir.is_some() && !args.active_kv_offload {
+        return Err(anyhow!(
+            "--active-kv-offload-dir requires --active-kv-offload"
+        ));
+    }
+    if args.active_kv_hot_window_pages.is_some() && !args.active_kv_offload {
+        return Err(anyhow!(
+            "--active-kv-hot-window-pages requires --active-kv-offload"
+        ));
+    }
+    if args.active_kv_chunk_pages.is_some() && !args.active_kv_offload {
+        return Err(anyhow!(
+            "--active-kv-chunk-pages requires --active-kv-offload"
+        ));
+    }
+    if let Some(hot_window_pages) = args.active_kv_hot_window_pages {
+        if hot_window_pages <= 0 {
+            return Err(anyhow!(
+                "--active-kv-hot-window-pages must be > 0, got {hot_window_pages}"
+            ));
+        }
+    }
+    if let Some(chunk_pages) = args.active_kv_chunk_pages {
+        if chunk_pages <= 0 {
+            return Err(anyhow!(
+                "--active-kv-chunk-pages must be > 0, got {chunk_pages}"
+            ));
+        }
+    }
+    if args.active_kv_offload {
+        if args.mode != BenchMode::Scheduler {
+            return Err(anyhow!(
+                "--active-kv-offload is only supported with --mode scheduler-text"
+            ));
+        }
+        if args.paged_prefix_cache_dir.is_none() {
+            return Err(anyhow!(
+                "--active-kv-offload hot/cold benchmark requires --paged-prefix-cache-dir"
+            ));
+        }
+        if args.kv_quant != KvQuantBenchArg::None {
+            return Err(anyhow!(
+                "--active-kv-offload hot/cold benchmark requires --kv-quant none"
+            ));
+        }
+    }
     match args.mode {
         BenchMode::Mtp => {
             let mtp_dir = args
@@ -333,6 +512,107 @@ fn validate_args(args: &Args) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn resolve_scheduler_features(
+    args: &Args,
+    effective_cap_max: usize,
+) -> Result<BenchSchedulerFeatures> {
+    let paged_prefix_cache = resolve_paged_prefix_cache(args, effective_cap_max)?;
+    let active_kv_offload = resolve_active_kv_offload(args)?;
+    Ok(BenchSchedulerFeatures {
+        paged_prefix_cache,
+        active_kv_offload,
+    })
+}
+
+fn resolve_paged_prefix_cache(
+    args: &Args,
+    effective_cap_max: usize,
+) -> Result<Option<PagedPrefixCacheConfig>> {
+    let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
+        return Ok(None);
+    };
+    let root = expand_home_path(root)?;
+    let block_size = args.paged_prefix_cache_block_size;
+    if block_size <= 0 {
+        return Err(anyhow!(
+            "--paged-prefix-cache-block-size must be > 0, got {block_size}"
+        ));
+    }
+    let max_pages = match args.paged_prefix_cache_max_pages {
+        Some(max_pages) if max_pages > 0 => max_pages,
+        Some(max_pages) => {
+            return Err(anyhow!(
+                "--paged-prefix-cache-max-pages must be > 0, got {max_pages}"
+            ));
+        }
+        None => default_paged_prefix_cache_max_pages(args, effective_cap_max)?,
+    };
+    PagedPrefixCacheConfig::new(&root, bench_model_id(args), block_size, max_pages).map(Some)
+}
+
+fn resolve_active_kv_offload(args: &Args) -> Result<ActiveKvOffloadConfig> {
+    if !args.active_kv_offload {
+        return Ok(ActiveKvOffloadConfig::disabled());
+    }
+    let root = match args.active_kv_offload_dir.as_ref() {
+        Some(root) => expand_home_path(root)?,
+        None => default_bench_active_kv_offload_dir(),
+    };
+    Ok(ActiveKvOffloadConfig::enabled(root)
+        .with_hot_window_pages_override(args.active_kv_hot_window_pages)
+        .with_chunk_pages_override(args.active_kv_chunk_pages))
+}
+
+fn default_paged_prefix_cache_max_pages(args: &Args, effective_cap_max: usize) -> Result<i32> {
+    let block_size = usize::try_from(args.paged_prefix_cache_block_size)
+        .context("--paged-prefix-cache-block-size must fit usize")?;
+    let total_tokens = args
+        .b_max
+        .checked_mul(effective_cap_max)
+        .context("b_max * effective_cap_max overflowed while resolving paged prefix max pages")?;
+    let pages = ceil_div_usize(total_tokens, block_size).max(1);
+    i32::try_from(pages).context("--paged-prefix-cache-max-pages exceeds i32::MAX")
+}
+
+fn ceil_div_usize(lhs: usize, rhs: usize) -> usize {
+    debug_assert!(rhs > 0);
+    lhs / rhs + usize::from(!lhs.is_multiple_of(rhs))
+}
+
+fn bench_model_id(args: &Args) -> String {
+    args.model
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| args.model.display().to_string())
+}
+
+fn default_bench_active_kv_offload_dir() -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "ironmlx-core-bench-active-kv-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+fn expand_home_path(path: &Path) -> Result<PathBuf> {
+    let Some(raw) = path.to_str() else {
+        return Ok(path.to_path_buf());
+    };
+    let Some(rest) = raw.strip_prefix('~') else {
+        return Ok(path.to_path_buf());
+    };
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return Ok(path.to_path_buf());
+    }
+    let home = dirs::home_dir().context("locating home directory for ~")?;
+    Ok(home.join(rest.strip_prefix('/').unwrap_or(rest)))
 }
 
 fn validate_mtp_dir(mtp_dir: &Path) -> Result<()> {
@@ -367,6 +647,11 @@ where
             .saturating_add(args.max_tokens)
             .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize)
     });
+    let scheduler_features = resolve_scheduler_features(args, effective_cap_max)?;
+    let scheduler_config = SchedulerBenchConfig {
+        features: &scheduler_features,
+        effective_cap_max,
+    };
 
     let mut warmups = Vec::with_capacity(args.warmup_runs);
     for _ in 0..args.warmup_runs {
@@ -375,7 +660,7 @@ where
             tokenizer,
             &prompt_ids,
             args,
-            effective_cap_max,
+            scheduler_config,
         )?);
     }
 
@@ -386,7 +671,7 @@ where
             tokenizer,
             &prompt_ids,
             args,
-            effective_cap_max,
+            scheduler_config,
         )?);
     }
 
@@ -402,6 +687,27 @@ where
             max_tokens: args.max_tokens,
             prefill_chunk_size: args.prefill_chunk_size,
             kv_quant: args.kv_quant,
+            paged_prefix_cache_dir: scheduler_features
+                .paged_prefix_cache
+                .as_ref()
+                .map(|config| config.root.display().to_string()),
+            paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
+            paged_prefix_cache_max_pages: scheduler_features
+                .paged_prefix_cache
+                .as_ref()
+                .map(|config| config.max_pages),
+            active_kv_offload: scheduler_features.active_kv_offload.enabled,
+            active_kv_offload_dir: scheduler_features.active_kv_offload.enabled.then(|| {
+                scheduler_features
+                    .active_kv_offload
+                    .root
+                    .display()
+                    .to_string()
+            }),
+            active_kv_hot_window_pages: scheduler_features
+                .active_kv_offload
+                .hot_window_pages_override,
+            active_kv_chunk_pages: scheduler_features.active_kv_offload.chunk_pages_override,
             b_max: args.b_max,
             effective_cap_max,
             warmup_runs: args.warmup_runs,
@@ -441,6 +747,11 @@ where
             .saturating_add(args.max_tokens)
             .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize)
     });
+    let scheduler_features = resolve_scheduler_features(args, effective_cap_max)?;
+    let scheduler_config = SchedulerBenchConfig {
+        features: &scheduler_features,
+        effective_cap_max,
+    };
 
     let mtp_draft_tokens = args.mtp_model_dir.as_ref().map(|_| {
         resolve_mtp_draft_tokens(
@@ -474,8 +785,8 @@ where
             tokenizer,
             &prompt_ids,
             args,
+            scheduler_config,
             mtp_draft_tokens,
-            effective_cap_max,
         )?);
     }
 
@@ -487,8 +798,8 @@ where
             tokenizer,
             &prompt_ids,
             args,
+            scheduler_config,
             mtp_draft_tokens,
-            effective_cap_max,
         )?);
     }
 
@@ -507,6 +818,27 @@ where
             max_tokens: args.max_tokens,
             prefill_chunk_size: args.prefill_chunk_size,
             kv_quant: args.kv_quant,
+            paged_prefix_cache_dir: scheduler_features
+                .paged_prefix_cache
+                .as_ref()
+                .map(|config| config.root.display().to_string()),
+            paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
+            paged_prefix_cache_max_pages: scheduler_features
+                .paged_prefix_cache
+                .as_ref()
+                .map(|config| config.max_pages),
+            active_kv_offload: scheduler_features.active_kv_offload.enabled,
+            active_kv_offload_dir: scheduler_features.active_kv_offload.enabled.then(|| {
+                scheduler_features
+                    .active_kv_offload
+                    .root
+                    .display()
+                    .to_string()
+            }),
+            active_kv_hot_window_pages: scheduler_features
+                .active_kv_offload
+                .hot_window_pages_override,
+            active_kv_chunk_pages: scheduler_features.active_kv_offload.chunk_pages_override,
             b_max: args.b_max,
             effective_cap_max,
             warmup_runs: args.warmup_runs,
@@ -528,7 +860,7 @@ fn run_once<M>(
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],
     args: &Args,
-    effective_cap_max: usize,
+    scheduler_config: SchedulerBenchConfig<'_>,
 ) -> Result<Record>
 where
     M: Model + DenseVlMethods,
@@ -538,9 +870,7 @@ where
         BenchMode::Mtp => Err(anyhow!(
             "mtp-text mode is only supported for Qwen dense/MoE text models"
         )),
-        BenchMode::Scheduler => {
-            run_scheduler(model, tokenizer, prompt_ids, args, effective_cap_max)
-        }
+        BenchMode::Scheduler => run_scheduler(model, tokenizer, prompt_ids, args, scheduler_config),
     }
 }
 
@@ -550,8 +880,8 @@ fn run_once_qwen<M>(
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],
     args: &Args,
+    scheduler_config: SchedulerBenchConfig<'_>,
     mtp_draft_tokens: Option<usize>,
-    effective_cap_max: usize,
 ) -> Result<Record>
 where
     M: MtpSpeculativeModel + DenseVlMethods,
@@ -574,11 +904,11 @@ where
                     tokenizer,
                     prompt_ids,
                     args,
+                    scheduler_config,
                     mtp_draft_tokens,
-                    effective_cap_max,
                 )
             } else {
-                run_scheduler(model, tokenizer, prompt_ids, args, effective_cap_max)
+                run_scheduler(model, tokenizer, prompt_ids, args, scheduler_config)
             }
         }
     }
@@ -615,18 +945,19 @@ where
     mlx::transforms::synchronize()?;
     let e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
     let ttft_ms = first_ms.ok_or_else(|| anyhow!("generation stream produced no tokens"))?;
-    Ok(make_record(
-        args.mode,
+    Ok(make_record(RecordInput {
+        mode: args.mode,
         ttft_ms,
         e2e_ms,
-        GeneratedOutput {
+        generated: GeneratedOutput {
             token_ids: generated_token_ids,
             text: generated_text,
         },
         finish_reason,
-        args.max_tokens,
-        None,
-    ))
+        max_tokens: args.max_tokens,
+        mtp_stats: None,
+        active_kv_stats: None,
+    }))
 }
 
 fn run_scheduler<M>(
@@ -634,17 +965,23 @@ fn run_scheduler<M>(
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],
     args: &Args,
-    effective_cap_max: usize,
+    scheduler_config: SchedulerBenchConfig<'_>,
 ) -> Result<Record>
 where
     M: Model + DenseVlMethods,
 {
-    let mut scheduler = Scheduler::<M>::new(args.b_max, effective_cap_max, model.model_meta())
-        .context("Scheduler::new")?;
+    let mut scheduler = Scheduler::<M>::new(
+        args.b_max,
+        scheduler_config.effective_cap_max,
+        model.model_meta(),
+    )
+    .context("Scheduler::new")?;
+    let active_kv_stats = configure_scheduler_features(&mut scheduler, scheduler_config.features)?;
     let request = make_request(model, tokenizer, prompt_ids, args);
     let started = Instant::now();
     let _request_id = scheduler.admit(request)?;
     let first_events = scheduler.prefill_admitted(model)?;
+    refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
     let mut generated_token_ids: Vec<u32> = first_events.iter().map(|event| event.token).collect();
     let mut finish_reason = first_events.first().and_then(|event| event.finish_reason);
     let ttft_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -654,26 +991,31 @@ where
         if events.is_empty() {
             break;
         }
+        refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
         generated_token_ids.extend(events.iter().map(|event| event.token));
         finish_reason = events.first().and_then(|event| event.finish_reason);
     }
     mlx::transforms::synchronize()?;
+    refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
     let e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
     let generated_text = tokenizer
         .decode(&generated_token_ids, true)
         .unwrap_or_default();
-    Ok(make_record(
-        args.mode,
+    Ok(make_record(RecordInput {
+        mode: args.mode,
         ttft_ms,
         e2e_ms,
-        GeneratedOutput {
+        generated: GeneratedOutput {
             token_ids: generated_token_ids,
             text: generated_text,
         },
         finish_reason,
-        args.max_tokens,
-        None,
-    ))
+        max_tokens: args.max_tokens,
+        mtp_stats: None,
+        active_kv_stats: active_kv_stats
+            .as_ref()
+            .map(|stats| ActiveKvRecordStats::from(stats.snapshot())),
+    }))
 }
 
 fn run_mtp_generation_stream<M>(
@@ -711,18 +1053,19 @@ where
     let e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
     let ttft_ms = first_ms.ok_or_else(|| anyhow!("MTP generation stream produced no tokens"))?;
     let mtp_stats = stream.stats().into();
-    Ok(make_record(
-        args.mode,
+    Ok(make_record(RecordInput {
+        mode: args.mode,
         ttft_ms,
         e2e_ms,
-        GeneratedOutput {
+        generated: GeneratedOutput {
             token_ids: generated_token_ids,
             text: generated_text,
         },
         finish_reason,
-        args.max_tokens,
-        Some(mtp_stats),
-    ))
+        max_tokens: args.max_tokens,
+        mtp_stats: Some(mtp_stats),
+        active_kv_stats: None,
+    }))
 }
 
 fn run_scheduler_mtp<M>(
@@ -731,19 +1074,25 @@ fn run_scheduler_mtp<M>(
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],
     args: &Args,
+    scheduler_config: SchedulerBenchConfig<'_>,
     mtp_draft_tokens: usize,
-    effective_cap_max: usize,
 ) -> Result<Record>
 where
     M: MtpSpeculativeModel + DenseVlMethods,
 {
-    let mut scheduler = Scheduler::<M>::new(args.b_max, effective_cap_max, model.model_meta())
-        .context("Scheduler::new")?;
+    let mut scheduler = Scheduler::<M>::new(
+        args.b_max,
+        scheduler_config.effective_cap_max,
+        model.model_meta(),
+    )
+    .context("Scheduler::new")?;
+    let active_kv_stats = configure_scheduler_features(&mut scheduler, scheduler_config.features)?;
     let request = make_request(model, tokenizer, prompt_ids, args);
     let cfg = MtpSpeculativeConfig::new(mtp_draft_tokens, request.sampler)?;
     let started = Instant::now();
     let _request_id = scheduler.admit(request)?;
     let first_events = scheduler.prefill_admitted_mtp_batch(model, mtp, cfg)?;
+    refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
     let mut generated_token_ids: Vec<u32> = first_events.iter().map(|event| event.token).collect();
     let mut finish_reason = first_events.first().and_then(|event| event.finish_reason);
     let ttft_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -753,10 +1102,12 @@ where
         if events.is_empty() {
             break;
         }
+        refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
         generated_token_ids.extend(events.iter().map(|event| event.token));
         finish_reason = events.first().and_then(|event| event.finish_reason);
     }
     mlx::transforms::synchronize()?;
+    refresh_active_kv_stats(&scheduler, active_kv_stats.as_ref());
     let e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
     let generated_text = tokenizer
         .decode(&generated_token_ids, true)
@@ -765,18 +1116,49 @@ where
         .mtp_stats()
         .ok_or_else(|| anyhow!("scheduler MTP run produced no MTP stats"))?
         .into();
-    Ok(make_record(
-        args.mode,
+    Ok(make_record(RecordInput {
+        mode: args.mode,
         ttft_ms,
         e2e_ms,
-        GeneratedOutput {
+        generated: GeneratedOutput {
             token_ids: generated_token_ids,
             text: generated_text,
         },
         finish_reason,
-        args.max_tokens,
-        Some(mtp_stats),
-    ))
+        max_tokens: args.max_tokens,
+        mtp_stats: Some(mtp_stats),
+        active_kv_stats: active_kv_stats
+            .as_ref()
+            .map(|stats| ActiveKvRecordStats::from(stats.snapshot())),
+    }))
+}
+
+fn configure_scheduler_features<M: Model>(
+    scheduler: &mut Scheduler<M>,
+    features: &BenchSchedulerFeatures,
+) -> Result<Option<ActiveKvOffloadSharedStats>> {
+    if let Some(config) = features.paged_prefix_cache.as_ref() {
+        scheduler
+            .enable_paged_prefix_cache(config.clone())
+            .context("enabling benchmark paged prefix cache")?;
+    }
+    if !features.active_kv_offload.enabled {
+        return Ok(None);
+    }
+    let stats = ActiveKvOffloadSharedStats::new(&features.active_kv_offload);
+    scheduler
+        .enable_active_kv_offload(features.active_kv_offload.clone(), stats.clone())
+        .context("enabling benchmark active KV offload")?;
+    Ok(Some(stats))
+}
+
+fn refresh_active_kv_stats<M: Model>(
+    scheduler: &Scheduler<M>,
+    stats: Option<&ActiveKvOffloadSharedStats>,
+) {
+    if stats.is_some() {
+        scheduler.refresh_active_kv_residency_stats();
+    }
 }
 
 fn make_request<M: Model>(
@@ -803,15 +1185,17 @@ fn make_request<M: Model>(
     }
 }
 
-fn make_record(
-    mode: BenchMode,
-    ttft_ms: f64,
-    e2e_ms: f64,
-    generated: GeneratedOutput,
-    finish_reason: Option<&'static str>,
-    max_tokens: usize,
-    mtp_stats: Option<MtpRecordStats>,
-) -> Record {
+fn make_record(input: RecordInput) -> Record {
+    let RecordInput {
+        mode,
+        ttft_ms,
+        e2e_ms,
+        generated,
+        finish_reason,
+        max_tokens,
+        mtp_stats,
+        active_kv_stats,
+    } = input;
     let decode_time_ms = (e2e_ms - ttft_ms).max(0.0);
     let generated_tokens = generated.token_ids.len();
     let generation_tps = if decode_time_ms > 0.0 {
@@ -831,6 +1215,7 @@ fn make_record(
         finish_reason,
         valid: finish_reason == Some("length") && generated_tokens >= max_tokens,
         mtp_stats,
+        active_kv_stats,
     }
 }
 
@@ -897,6 +1282,20 @@ mod tests {
     }
 
     #[test]
+    fn active_kv_record_stats_preserve_health_status_flags() {
+        let stats = ActiveKvOffloadSharedStats::new(&ActiveKvOffloadConfig::enabled(
+            std::env::temp_dir().join("ironmlx-core-bench-active-kv-status"),
+        ));
+        stats.record_error();
+
+        let record = ActiveKvRecordStats::from(stats.snapshot());
+
+        assert!(record.enabled);
+        assert_eq!(record.status, ActiveKvOffloadStatus::Degraded);
+        assert!(record.degraded);
+    }
+
+    #[test]
     fn clap_lists_mtp_text_mode() {
         let mut command = Args::command();
         let help = command.render_long_help().to_string();
@@ -956,6 +1355,214 @@ mod tests {
             args.kv_quant.turboquant_bits(),
             Some(TurboQuantKVBits::K3V4)
         );
+    }
+
+    #[test]
+    fn clap_lists_active_kv_and_paged_prefix_options() {
+        let mut command = Args::command();
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("--active-kv-offload"));
+        assert!(help.contains("--active-kv-hot-window-pages"));
+        assert!(help.contains("--active-kv-chunk-pages"));
+        assert!(help.contains("--paged-prefix-cache-dir"));
+    }
+
+    #[test]
+    fn active_kv_offload_parses_with_paged_prefix_cache() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--active-kv-offload",
+            "--active-kv-offload-dir",
+            "/tmp/active-kv",
+            "--active-kv-hot-window-pages",
+            "4",
+            "--active-kv-chunk-pages",
+            "8",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        assert_eq!(
+            args.paged_prefix_cache_dir,
+            Some(PathBuf::from("/tmp/prefix-cache"))
+        );
+        assert!(args.active_kv_offload);
+        assert_eq!(
+            args.active_kv_offload_dir,
+            Some(PathBuf::from("/tmp/active-kv"))
+        );
+        assert_eq!(args.active_kv_hot_window_pages, Some(4));
+        assert_eq!(args.active_kv_chunk_pages, Some(8));
+    }
+
+    #[test]
+    fn scheduler_b_max_defaults_to_two_for_admission_headroom() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        assert_eq!(args.b_max, 2);
+        assert_eq!(args.paged_prefix_cache_block_size, 128);
+    }
+
+    #[test]
+    fn active_kv_offload_requires_scheduler_text_mode() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "gs-text",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--active-kv-offload",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        let err = validate_args(&args).unwrap_err();
+        assert!(err.to_string().contains("scheduler-text"));
+    }
+
+    #[test]
+    fn active_kv_offload_requires_paged_prefix_cache() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--active-kv-offload",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        let err = validate_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--paged-prefix-cache-dir"));
+    }
+
+    #[test]
+    fn active_kv_hot_window_pages_requires_active_kv_offload() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--active-kv-hot-window-pages",
+            "4",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        let err = validate_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--active-kv-offload"));
+    }
+
+    #[test]
+    fn active_kv_hot_window_pages_must_be_positive() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--active-kv-offload",
+            "--active-kv-hot-window-pages",
+            "0",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        let err = validate_args(&args).unwrap_err();
+        assert!(err.to_string().contains("must be > 0"));
+    }
+
+    #[test]
+    fn active_kv_chunk_pages_requires_active_kv_offload() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--active-kv-chunk-pages",
+            "8",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        let err = validate_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--active-kv-offload"));
+    }
+
+    #[test]
+    fn active_kv_chunk_pages_must_be_positive() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--active-kv-offload",
+            "--active-kv-chunk-pages",
+            "0",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        let err = validate_args(&args).unwrap_err();
+        assert!(err.to_string().contains("must be > 0"));
+    }
+
+    #[test]
+    fn active_kv_offload_rejects_turboquant_because_hot_cold_uses_paged_kv() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "scheduler-text",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--active-kv-offload",
+            "--kv-quant",
+            "k3v4",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        let err = validate_args(&args).unwrap_err();
+        assert!(err.to_string().contains("--kv-quant none"));
     }
 
     #[test]
@@ -1042,17 +1649,17 @@ mod tests {
 
     #[test]
     fn scheduler_text_mtp_keeps_scheduler_mode_stats_contract() {
-        let record = make_record(
-            BenchMode::Scheduler,
-            1.0,
-            3.0,
-            GeneratedOutput {
+        let record = make_record(RecordInput {
+            mode: BenchMode::Scheduler,
+            ttft_ms: 1.0,
+            e2e_ms: 3.0,
+            generated: GeneratedOutput {
                 token_ids: vec![101, 102, 103, 104],
                 text: "bench text".to_string(),
             },
-            Some("length"),
-            4,
-            Some(MtpRecordStats {
+            finish_reason: Some("length"),
+            max_tokens: 4,
+            mtp_stats: Some(MtpRecordStats {
                 windows: 1,
                 drafted_tokens: 2,
                 accepted_draft_tokens: 1,
@@ -1070,7 +1677,8 @@ mod tests {
                 mtp_cache_commit_us: 0,
                 mtp_cache_restore_us: 0,
             }),
-        );
+            active_kv_stats: None,
+        });
 
         assert_eq!(record.mode, BenchMode::Scheduler);
         assert!(record.valid);

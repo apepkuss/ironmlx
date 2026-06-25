@@ -61,8 +61,10 @@ pub enum SchedulerError {
 }
 
 use crate::core::cache::{
-    MtpCache, PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats,
-    PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig,
+    timed, ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, ActiveKvOffloadStore,
+    ActiveKvResidencySummary, ActiveKvStoredPayload, MtpCache, PagedKvHotColdConfig,
+    PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixLoadStatus,
+    PagedPrefixStore, PrefixLayerPayload, PrefixLruCache, PrefixLruCacheConfig,
     PrefixLruInsertStatus, PrefixMtpLayerSpec, PrefixTensorSpec, TurboQuantKVBits,
 };
 use crate::core::generate::{
@@ -81,9 +83,9 @@ use crate::core::speculative::{
     MtpDraftResult, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
 };
 use crate::nn::{
-    enable_paged_kv_caches, enable_turboquant_kv_caches, prefix_entry_for_row,
-    prefix_key_spec_for_caches, restore_prefix_entry_for_row, restore_prefix_entry_for_rows,
-    LayerCache,
+    enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
+    prefix_entry_for_row, prefix_key_spec_for_caches, restore_prefix_entry_for_row,
+    restore_prefix_entry_for_rows, LayerCache,
 };
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
@@ -370,7 +372,7 @@ pub struct AdmitMidHandle {
 /// Fields are chosen to cover B1-p2.3b–3e needs without a later refactor.
 /// VL fields (`pixel_values`, `image_grid_thw`, etc.) are intentionally
 /// omitted from 3a — they get added in B1-p2.4 when VL B>1 lands.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RequestState {
     /// Opaque token returned by [`Scheduler::admit`].
     pub id: RequestId,
@@ -430,6 +432,16 @@ pub struct RequestState {
     /// KV cache bytes charged to budget at admit time. Released on
     /// row completion / eviction. B1-p2.5.
     pub kv_bytes_admitted: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveKvParkedRequest {
+    pub id: RequestId,
+    pub payload: ActiveKvStoredPayload,
+    state: RequestState,
+    prng_key: [u32; 2],
+    cache_cap: i32,
+    cache_dtype: Dtype,
 }
 
 /// Read pre-write per-row offsets from the first cache layer that tracks
@@ -527,6 +539,127 @@ fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
     linear_cap
         .map(|cap| (cap, Dtype::Bfloat16))
         .ok_or_else(|| anyhow!("cache_cap_and_dtype: cache has no layers"))
+}
+
+fn active_kv_entry_supported(entry: &PagedPrefixEntry) -> bool {
+    entry.mtp_layers.is_empty()
+        && entry.mtp_last_hidden.is_none()
+        && entry.main_layers.iter().all(|layer| {
+            matches!(
+                layer,
+                PrefixLayerPayload::FullDense { .. }
+                    | PrefixLayerPayload::FullPaged { .. }
+                    | PrefixLayerPayload::FullTurboQuantPacked { .. }
+                    | PrefixLayerPayload::Mla { .. }
+            )
+        })
+}
+
+#[allow(clippy::manual_div_ceil)]
+fn default_active_kv_hot_window_pages(block_size: i32) -> i32 {
+    let block_size = block_size.max(1);
+    ((1024 + block_size - 1) / block_size).max(2)
+}
+
+#[allow(clippy::manual_div_ceil)]
+fn active_kv_budget_pages_for(
+    block_size: i32,
+    cache_cap: i32,
+    batch: i32,
+    soft_limit_bytes: usize,
+    bytes_per_token: usize,
+) -> i32 {
+    let block_size = block_size.max(1);
+    let cache_cap = cache_cap.max(1);
+    let cache_cap_pages = ((cache_cap + block_size - 1) / block_size).max(1);
+
+    let batch = usize::try_from(batch.max(1)).unwrap_or(1);
+    let bytes_per_token = bytes_per_token.max(1);
+    let budget_tokens_per_row = soft_limit_bytes / bytes_per_token / batch;
+    let budget_tokens_per_row = i32::try_from(budget_tokens_per_row)
+        .unwrap_or(i32::MAX)
+        .max(1);
+
+    ((budget_tokens_per_row + block_size - 1) / block_size).clamp(1, cache_cap_pages)
+}
+
+#[allow(clippy::manual_div_ceil)]
+fn active_kv_hot_window_pages_for_budget(
+    block_size: i32,
+    cache_cap: i32,
+    batch: i32,
+    soft_limit_bytes: usize,
+    bytes_per_token: usize,
+) -> i32 {
+    let block_size = block_size.max(1);
+    let cache_cap = cache_cap.max(1);
+    let cache_cap_pages = ((cache_cap + block_size - 1) / block_size).max(1);
+    let floor_pages = default_active_kv_hot_window_pages(block_size).min(cache_cap_pages);
+    let budget_pages = active_kv_budget_pages_for(
+        block_size,
+        cache_cap,
+        batch,
+        soft_limit_bytes,
+        bytes_per_token,
+    );
+
+    budget_pages.clamp(floor_pages, cache_cap_pages)
+}
+
+#[cfg(test)]
+#[allow(clippy::manual_div_ceil)]
+fn default_active_kv_chunk_pages(block_size: i32) -> i32 {
+    const TARGET_TOKENS: i32 = 2048;
+    const MIN_CHUNK_PAGES: i32 = 4;
+    const MAX_CHUNK_PAGES: i32 = 16;
+
+    let block_size = block_size.max(1);
+    ((TARGET_TOKENS + block_size - 1) / block_size).clamp(MIN_CHUNK_PAGES, MAX_CHUNK_PAGES)
+}
+
+#[allow(clippy::manual_div_ceil)]
+fn active_kv_chunk_pages_for_budget(
+    block_size: i32,
+    cache_cap: i32,
+    batch: i32,
+    soft_limit_bytes: usize,
+    bytes_per_token: usize,
+    hot_window_pages: i32,
+) -> i32 {
+    let block_size = block_size.max(1);
+    let cache_cap = cache_cap.max(1);
+    let cache_cap_pages = ((cache_cap + block_size - 1) / block_size).max(1);
+    let budget_pages = active_kv_budget_pages_for(
+        block_size,
+        cache_cap,
+        batch,
+        soft_limit_bytes,
+        bytes_per_token,
+    );
+    let hot_window_pages = hot_window_pages.clamp(0, cache_cap_pages);
+    let remaining_budget_pages = budget_pages.saturating_sub(hot_window_pages).max(1);
+    let remaining_cache_pages = cache_cap_pages.saturating_sub(hot_window_pages).max(1);
+
+    remaining_budget_pages.min(remaining_cache_pages)
+}
+
+fn cached_token_prefix_for_state(state: &RequestState, cached_len: i32) -> Result<Vec<u32>> {
+    anyhow::ensure!(
+        cached_len >= 0,
+        "cached_token_prefix_for_state: cached_len {cached_len} is negative"
+    );
+    let cached_len = usize::try_from(cached_len)
+        .map_err(|_| anyhow!("cached_token_prefix_for_state: cached_len overflow"))?;
+    let mut tokens = Vec::with_capacity(state.prompt_ids.len() + state.generated_tokens.len());
+    tokens.extend_from_slice(&state.prompt_ids);
+    tokens.extend_from_slice(&state.generated_tokens);
+    anyhow::ensure!(
+        cached_len <= tokens.len(),
+        "cached_token_prefix_for_state: cached_len {cached_len} exceeds available tokens {}",
+        tokens.len()
+    );
+    tokens.truncate(cached_len);
+    Ok(tokens)
 }
 
 fn adopt_cache_row_layers(
@@ -2669,6 +2802,13 @@ pub struct Scheduler<M: Model> {
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     /// Optional process-local hot prefix cache layered above the SSD store.
     prefix_lru_cache: Option<PrefixLruCacheHandle>,
+    /// Optional request-level Active KV offload store. Disabled by default.
+    active_kv_store: Option<ActiveKvOffloadStore>,
+    /// Active KV runtime config. Also drives transparent paged hot/cold tiering
+    /// when paged full-attention KV storage is active.
+    active_kv_config: ActiveKvOffloadConfig,
+    /// Shared Active KV metrics used by `/healthz` and Dashboard status.
+    active_kv_stats: Option<ActiveKvOffloadSharedStats>,
     _marker: PhantomData<fn(&M) -> ()>,
 }
 
@@ -2684,6 +2824,7 @@ impl<M: Model> std::fmt::Debug for Scheduler<M> {
             .field("has_dummy_position_ids", &self.dummy_position_ids.is_some())
             .field("has_mtp_state", &self.mtp_state.is_some())
             .field("has_prefix_lru_cache", &self.prefix_lru_cache.is_some())
+            .field("has_active_kv_store", &self.active_kv_store.is_some())
             .field("poisoned", &self.poisoned)
             .finish()
     }
@@ -2764,6 +2905,9 @@ impl<M: Model> Scheduler<M> {
             memory_budget_exceeded_count,
             paged_prefix_cache: None,
             prefix_lru_cache: None,
+            active_kv_store: None,
+            active_kv_config: ActiveKvOffloadConfig::disabled(),
+            active_kv_stats: None,
             _marker: PhantomData,
         })
     }
@@ -2782,8 +2926,224 @@ impl<M: Model> Scheduler<M> {
         Ok(())
     }
 
+    pub fn enable_active_kv_offload(
+        &mut self,
+        config: ActiveKvOffloadConfig,
+        stats: ActiveKvOffloadSharedStats,
+    ) -> Result<()> {
+        if !config.enabled {
+            self.active_kv_store = None;
+            self.active_kv_config = config;
+            self.active_kv_stats = Some(stats);
+            return Ok(());
+        }
+        self.active_kv_store = Some(ActiveKvOffloadStore::new(config.clone())?);
+        self.active_kv_config = config;
+        self.active_kv_stats = Some(stats);
+        Ok(())
+    }
+
+    pub fn active_kv_offload_enabled(&self) -> bool {
+        self.active_kv_store.is_some()
+    }
+
+    pub fn refresh_active_kv_residency_stats(&self) {
+        let Some(stats) = self.active_kv_stats.as_ref() else {
+            return;
+        };
+        let mut summary = ActiveKvResidencySummary::default();
+        if let Some(cache) = &self.cache {
+            for layer in cache {
+                let LayerCache::Full(kv) = layer else {
+                    continue;
+                };
+                let Some(layer_summary) = kv.paged_hot_cold_summary() else {
+                    continue;
+                };
+                summary.resident_pages += layer_summary.resident_pages;
+                summary.offloaded_pages += layer_summary.offloaded_pages;
+                summary.loading_pages += layer_summary.loading_pages;
+                summary.dirty_pages += layer_summary.dirty_pages;
+                summary.offloaded_bytes = summary
+                    .offloaded_bytes
+                    .saturating_add(layer_summary.offloaded_bytes);
+                summary.swap_out_count = summary
+                    .swap_out_count
+                    .saturating_add(layer_summary.swap_out_count);
+                summary.swap_in_count = summary
+                    .swap_in_count
+                    .saturating_add(layer_summary.swap_in_count);
+                summary.stream_read_count = summary
+                    .stream_read_count
+                    .saturating_add(layer_summary.stream_read_count);
+            }
+        }
+        stats.set_residency_summary(summary);
+    }
+
+    pub fn discard_active_kv_request(&self, parked: &ActiveKvParkedRequest) -> Result<()> {
+        let Some(store) = self.active_kv_store.as_ref() else {
+            return Ok(());
+        };
+        store.remove(&parked.payload)
+    }
+
     fn share_prefix_lru_cache(&mut self, prefix_lru_cache: PrefixLruCacheHandle) {
         self.prefix_lru_cache = Some(prefix_lru_cache);
+    }
+
+    pub fn park_active_kv_request(
+        &mut self,
+        id: RequestId,
+        model: &M,
+    ) -> Result<Option<ActiveKvParkedRequest>> {
+        self.ensure_not_poisoned()?;
+        let Some(store) = self.active_kv_store.clone() else {
+            return Ok(None);
+        };
+        let stats = self.active_kv_stats.clone();
+        let row_idx = self
+            .slots
+            .iter()
+            .position(|slot| matches!(slot, Some(state) if state.id == id))
+            .ok_or_else(|| anyhow!("request id {} not found", id.0))?;
+        if self
+            .mtp_state
+            .as_ref()
+            .is_some_and(|mtp_state| mtp_state.rows.contains_key(&row_idx))
+        {
+            return Ok(None);
+        }
+        let state = self.slots[row_idx]
+            .as_ref()
+            .expect("row_idx found an occupied slot");
+        if state.finished || state.generated_tokens.is_empty() {
+            return Ok(None);
+        }
+        let Some(cache) = self.cache.as_ref() else {
+            return Ok(None);
+        };
+        let Some(cache_row) = self.cache_rows.iter().position(|&row| row == row_idx) else {
+            return Ok(None);
+        };
+        let (cache_cap, cache_dtype) = cache_cap_and_dtype(cache)?;
+        let Some((entry, cached_len)) = prefix_entry_for_row(cache, cache_row)? else {
+            return Ok(None);
+        };
+        if cached_len <= 0 || !active_kv_entry_supported(&entry) {
+            return Ok(None);
+        }
+        let cached_token_ids = cached_token_prefix_for_state(state, cached_len)?;
+        let prng_key = self.prng_key_for_row(row_idx)?;
+
+        let (payload, elapsed_us) =
+            timed(|| store.save(id.0, &cached_token_ids, cached_len, &entry))?;
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| {
+                (row != row_idx
+                    && matches!(
+                        slot,
+                        Some(state) if !state.finished && !state.generated_tokens.is_empty()
+                    ))
+                .then_some(row)
+            })
+            .collect();
+        if let Err(err) = self.rebuild_cache_layout(model, &active_rows) {
+            let _ = store.remove(&payload);
+            if let Some(stats) = &stats {
+                stats.record_error();
+            }
+            return Err(err);
+        }
+
+        let state = self.slots[row_idx]
+            .take()
+            .expect("row_idx still occupied after cache layout rebuild");
+        self.budget_state.release(state.kv_bytes_admitted);
+        if let Some(stats) = &stats {
+            stats.record_swap_out(payload.stats, elapsed_us);
+        }
+        Ok(Some(ActiveKvParkedRequest {
+            id,
+            payload,
+            state,
+            prng_key,
+            cache_cap,
+            cache_dtype,
+        }))
+    }
+
+    pub fn restore_active_kv_request(
+        &mut self,
+        parked: &ActiveKvParkedRequest,
+        model: &M,
+    ) -> Result<RequestId> {
+        self.ensure_not_poisoned()?;
+        anyhow::ensure!(
+            self.slots
+                .iter()
+                .all(|slot| !matches!(slot, Some(state) if state.id == parked.id)),
+            "request id {} is already active",
+            parked.id.0
+        );
+        let Some(store) = self.active_kv_store.clone() else {
+            anyhow::bail!("active KV offload is not enabled");
+        };
+        let stats = self.active_kv_stats.clone();
+        let row_idx = self
+            .slots
+            .iter()
+            .position(|slot| slot.is_none())
+            .ok_or_else(|| anyhow!("active KV restore: scheduler full"))?;
+        if let Err((active, requested, soft_limit)) =
+            self.budget_state.try_admit(parked.state.kv_bytes_admitted)
+        {
+            if let Some(stats) = &stats {
+                stats.record_error();
+            }
+            return Err(anyhow::Error::new(SchedulerError::MemoryBudgetExceeded {
+                active_bytes: active,
+                requested_bytes: requested,
+                soft_limit_bytes: soft_limit,
+            }));
+        }
+
+        let (entry, elapsed_us) = timed(|| store.load(&parked.payload))?;
+        let mut state = parked.state.clone();
+        state.row_idx = row_idx;
+        self.slots[row_idx] = Some(state);
+        let install_result = self
+            .install_active_kv_payload(
+                row_idx,
+                &entry,
+                parked.payload.cached_len,
+                parked.cache_cap,
+                parked.cache_dtype,
+                model,
+            )
+            .and_then(|_| self.write_row_prng_host(row_idx, parked.prng_key));
+        if let Err(err) = install_result {
+            if let Some(state) = self.slots[row_idx].take() {
+                self.budget_state.release(state.kv_bytes_admitted);
+            }
+            if let Some(stats) = &stats {
+                stats.record_error();
+            }
+            return Err(err);
+        }
+        if matches!(self.phase, Phase::Idle | Phase::Finished) {
+            self.phase = Phase::Decoding;
+        }
+        if let Err(err) = store.remove(&parked.payload) {
+            tracing::warn!("active KV restored but payload cleanup failed: {err:#}");
+        }
+        if let Some(stats) = &stats {
+            stats.record_swap_in(parked.payload.stats, elapsed_us);
+        }
+        Ok(parked.id)
     }
 
     /// Seed the PRNG state for `row_idx` from `seed`.
@@ -2819,6 +3179,29 @@ impl<M: Model> Scheduler<M> {
         let mut host: Vec<u32> = self.prng_state.to_vec()?;
         host[row_idx * 2] = key_host[0];
         host[row_idx * 2 + 1] = key_host[1];
+        self.prng_state = (host.as_slice(), &[b_max as i32, 2_i32][..]).try_into()?;
+        Ok(())
+    }
+
+    fn prng_key_for_row(&self, row_idx: usize) -> Result<[u32; 2]> {
+        let b_max = self.prng_state.shape().as_slice()[0] as usize;
+        anyhow::ensure!(
+            row_idx < b_max,
+            "prng_key_for_row: row_idx={row_idx} >= b_max={b_max}"
+        );
+        let host: Vec<u32> = self.prng_state.to_vec()?;
+        Ok([host[row_idx * 2], host[row_idx * 2 + 1]])
+    }
+
+    fn write_row_prng_host(&mut self, row_idx: usize, row_key: [u32; 2]) -> Result<()> {
+        let b_max = self.prng_state.shape().as_slice()[0] as usize;
+        anyhow::ensure!(
+            row_idx < b_max,
+            "write_row_prng_host: row_idx={row_idx} >= b_max={b_max}"
+        );
+        let mut host: Vec<u32> = self.prng_state.to_vec()?;
+        host[row_idx * 2] = row_key[0];
+        host[row_idx * 2 + 1] = row_key[1];
         self.prng_state = (host.as_slice(), &[b_max as i32, 2_i32][..]).try_into()?;
         Ok(())
     }
@@ -2873,6 +3256,42 @@ impl<M: Model> Scheduler<M> {
             enable_turboquant_kv_caches(&mut cache, bits)?;
         } else if let Some(config) = &self.paged_prefix_cache {
             enable_paged_kv_caches(&mut cache, config.block_size, config.max_pages)?;
+            if self.active_kv_config.enabled {
+                let active_kv_soft_limit = self.budget_state.soft_limit();
+                let active_kv_bytes_per_token =
+                    crate::core::memory_budget::kv_bytes_per_token(&self.meta);
+                let hot_window_pages = self
+                    .active_kv_config
+                    .hot_window_pages_override
+                    .unwrap_or_else(|| {
+                        active_kv_hot_window_pages_for_budget(
+                            config.block_size,
+                            cap,
+                            batch,
+                            active_kv_soft_limit,
+                            active_kv_bytes_per_token,
+                        )
+                    });
+                let chunk_pages = self
+                    .active_kv_config
+                    .chunk_pages_override
+                    .unwrap_or_else(|| {
+                        active_kv_chunk_pages_for_budget(
+                            config.block_size,
+                            cap,
+                            batch,
+                            active_kv_soft_limit,
+                            active_kv_bytes_per_token,
+                            hot_window_pages,
+                        )
+                    });
+                let hot_cold = PagedKvHotColdConfig::new(
+                    self.active_kv_config.root.clone(),
+                    hot_window_pages,
+                    chunk_pages,
+                )?;
+                enable_paged_hot_cold_tiering_caches(&mut cache, hot_cold)?;
+            }
         }
         Ok(cache)
     }
@@ -3238,6 +3657,71 @@ impl<M: Model> Scheduler<M> {
                     "install_cache_with_temp_row",
                 )?;
             }
+        }
+
+        self.cache = Some(new_cache);
+        self.cache_rows = target_rows;
+        Ok(())
+    }
+
+    fn install_active_kv_payload(
+        &mut self,
+        slot_row: usize,
+        entry: &PagedPrefixEntry,
+        cached_len: i32,
+        parked_cache_cap: i32,
+        parked_cache_dtype: Dtype,
+        model: &M,
+    ) -> Result<()> {
+        let old_cache = self.cache.take();
+        let old_rows = std::mem::take(&mut self.cache_rows);
+        let (cap, dtype) = if let Some(cache) = old_cache.as_ref() {
+            let (old_cap, old_dtype) = cache_cap_and_dtype(cache)?;
+            (old_cap.max(parked_cache_cap), old_dtype)
+        } else {
+            (parked_cache_cap, parked_cache_dtype)
+        };
+        let mut target_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| {
+                matches!(slot, Some(state) if !state.finished && !state.generated_tokens.is_empty())
+                    .then_some(row)
+            })
+            .collect();
+        if !target_rows.contains(&slot_row) {
+            target_rows.push(slot_row);
+        }
+        target_rows.sort_unstable();
+
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&target_rows)?;
+        let mut new_cache =
+            self.make_model_cache(model, target_rows.len() as i32, cap, dtype, turboquant_bits)?;
+        for (dst_row, &target_slot_row) in target_rows.iter().enumerate() {
+            if target_slot_row == slot_row {
+                restore_prefix_entry_for_row(&mut new_cache, entry, dst_row, cached_len)?;
+                continue;
+            }
+            let old_cache = old_cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("install_active_kv_payload: active rows without cache"))?;
+            let src_row = old_rows
+                .iter()
+                .position(|&row| row == target_slot_row)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "install_active_kv_payload: slot row {target_slot_row} missing from old layout {:?}",
+                        old_rows
+                    )
+                })?;
+            adopt_cache_row_layers(
+                &mut new_cache,
+                old_cache,
+                dst_row,
+                src_row,
+                "install_active_kv_payload",
+            )?;
         }
 
         self.cache = Some(new_cache);
@@ -5856,6 +6340,94 @@ mod tests {
     /// `Scheduler::new` calls don't need turbofish at every site.
     type TestScheduler = Scheduler<crate::models::qwen3_5::Qwen35Model>;
 
+    #[test]
+    fn active_kv_default_streaming_chunk_targets_two_thousand_tokens_with_page_bound() {
+        assert_eq!(default_active_kv_chunk_pages(128), 16);
+        assert_eq!(default_active_kv_chunk_pages(256), 8);
+        assert_eq!(default_active_kv_chunk_pages(16), 16);
+        assert_eq!(default_active_kv_chunk_pages(0), 16);
+    }
+
+    #[test]
+    fn active_kv_hot_window_keeps_full_cache_resident_when_budget_allows() {
+        let bytes_per_token = 1024;
+        let cache_cap = 8192;
+        let soft_limit = cache_cap as usize * bytes_per_token;
+
+        assert_eq!(
+            active_kv_hot_window_pages_for_budget(128, cache_cap, 1, soft_limit, bytes_per_token),
+            64
+        );
+    }
+
+    #[test]
+    fn active_kv_hot_window_respects_budget_and_floor() {
+        let bytes_per_token = 1024;
+        let cache_cap = 8192;
+
+        assert_eq!(
+            active_kv_hot_window_pages_for_budget(
+                128,
+                cache_cap,
+                1,
+                2048 * bytes_per_token,
+                bytes_per_token
+            ),
+            16
+        );
+        assert_eq!(
+            active_kv_hot_window_pages_for_budget(
+                128,
+                cache_cap,
+                1,
+                128 * bytes_per_token,
+                bytes_per_token
+            ),
+            default_active_kv_hot_window_pages(128)
+        );
+    }
+
+    #[test]
+    fn active_kv_hot_window_splits_budget_across_cache_rows() {
+        let bytes_per_token = 1024;
+        let cache_cap = 8192;
+
+        assert_eq!(
+            active_kv_hot_window_pages_for_budget(
+                128,
+                cache_cap,
+                2,
+                8192 * bytes_per_token,
+                bytes_per_token
+            ),
+            32
+        );
+    }
+
+    #[test]
+    fn active_kv_chunk_pages_uses_remaining_budget_after_hot_window() {
+        let bytes_per_token = 1024;
+        let cache_cap = 32768;
+        let soft_limit = cache_cap as usize * bytes_per_token;
+
+        assert_eq!(
+            active_kv_chunk_pages_for_budget(128, cache_cap, 1, soft_limit, bytes_per_token, 8,),
+            248
+        );
+    }
+
+    #[test]
+    fn active_kv_chunk_pages_stays_minimal_when_hot_window_consumes_budget() {
+        let bytes_per_token = 1024;
+        let cache_cap = 32768;
+        let soft_limit = 4096 * bytes_per_token;
+
+        assert_eq!(
+            active_kv_chunk_pages_for_budget(128, cache_cap, 1, soft_limit, bytes_per_token, 32,),
+            1
+        );
+    }
+
     /// Helper: build a minimal `GenerateRequest` for tests. Uses
     /// `Sampler::greedy()` and an arbitrary 4-token prompt unless overridden.
     fn mk_req(prompt_ids: Vec<u32>) -> GenerateRequest {
@@ -7668,6 +8240,53 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
         assert_eq!((events[1].id, events[1].token), (id_2, 4));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn active_kv_offload_parks_and_restores_prefilled_request() {
+        let model = StepDecodeMaskModel::default();
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-active-kv-scheduler-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::ActiveKvOffloadConfig::enabled(root.clone());
+        let stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&config);
+        let mut s = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            64,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        s.enable_active_kv_offload(config, stats.clone())
+            .expect("enable active KV offload");
+
+        let id = s.admit(mk_req(vec![1, 2, 3, 4])).expect("admit");
+        let prefill_events = s.prefill_admitted(&model).expect("prefill");
+        assert_eq!(prefill_events.len(), 1);
+
+        let parked = s
+            .park_active_kv_request(id, &model)
+            .expect("park request")
+            .expect("request should be eligible for active KV offload");
+        assert_eq!(s.active_count(), 0);
+        assert!(parked.payload.path.exists());
+        assert_eq!(stats.snapshot().swap_out_count, 1);
+
+        let restored_id = s
+            .restore_active_kv_request(&parked, &model)
+            .expect("restore request");
+        assert_eq!(restored_id, id);
+        assert_eq!(s.active_count(), 1);
+        assert_eq!(s.get(id).expect("restored state").generated_tokens.len(), 1);
+
+        let decode_events = s.step(&model).expect("step after restore");
+        assert_eq!(decode_events.len(), 1);
+        assert_eq!(decode_events[0].id, id);
+        assert_eq!(stats.snapshot().swap_in_count, 1);
+        assert!(!parked.payload.path.exists());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

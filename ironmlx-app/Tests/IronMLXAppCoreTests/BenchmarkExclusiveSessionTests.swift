@@ -189,6 +189,24 @@ private func healthSnapshot(active: Int, queued: Int) -> HealthzSnapshot {
             mlxPeakBytes: 0,
             mlxMemoryLimitBytes: 0
         ),
+        activeKvOffload: .init(
+            enabled: false,
+            mode: "disabled",
+            storageDir: nil,
+            residentPages: 0,
+            offloadedPages: 0,
+            loadingPages: 0,
+            dirtyPages: 0,
+            parkedRequests: 0,
+            offloadedBytes: 0,
+            swapOutCount: 0,
+            swapInCount: 0,
+            swapErrorCount: 0,
+            lastSwapOutUs: 0,
+            lastSwapInUs: 0,
+            supportedCacheKinds: [],
+            notApplicableCacheKinds: []
+        ),
         deviceName: "Apple Test",
         version: "test"
     )

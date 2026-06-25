@@ -606,6 +606,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         config.cacheEnable = boolValue(object, "cache_enable") ?? config.cacheEnable
         config.cacheDir = stringValue(object, "cache_dir") ?? config.cacheDir
         config.kvQuant = stringValue(object, "kv_quant") ?? config.kvQuant
+        config.activeKvOffload = boolValue(object, "active_kv_offload") ?? config.activeKvOffload
         config.maxSequences = intValue(object, "max_sequences") ?? config.maxSequences
         config.bMax = nil
         config.maxModels = intValue(object, "max_models") ?? config.maxModels

@@ -26,11 +26,13 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig};
+use crate::core::cache::{
+    ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, PagedPrefixCacheConfig, PrefixLruCacheConfig,
+};
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::scheduler::{
-    AdmitMidHandle, DenseVlMethods, Phase, RequestId, Scheduler, StepEvent,
+    ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Phase, RequestId, Scheduler, StepEvent,
 };
 use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats};
 use crate::Result;
@@ -408,6 +410,8 @@ pub struct SchedulerActorHandle {
     pub kv_cache_active_bytes: Arc<AtomicUsize>,
     /// KV cache soft limit in bytes (computed at startup; static for lifetime).
     pub kv_cache_soft_limit_bytes: usize,
+    /// Shared Active KV offload metrics and runtime status.
+    pub active_kv_offload: ActiveKvOffloadSharedStats,
 }
 
 /// Spawn the driver task and return a handle. The driver runs on
@@ -451,6 +455,36 @@ where
         meta,
         None,
         None,
+        ActiveKvOffloadConfig::disabled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_scheduler_actor_with_active_kv_offload<M>(
+    model: Arc<Mutex<M>>,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorNoMtp,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        None,
+        None,
+        active_kv_offload,
     )
 }
 
@@ -480,6 +514,38 @@ where
         meta,
         Some(paged_prefix_cache),
         prefix_lru_cache,
+        ActiveKvOffloadConfig::disabled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_scheduler_actor_with_paged_prefix_cache_and_active_kv<M>(
+    model: Arc<Mutex<M>>,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: PagedPrefixCacheConfig,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorNoMtp,
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        Some(paged_prefix_cache),
+        prefix_lru_cache,
+        active_kv_offload,
     )
 }
 
@@ -512,6 +578,41 @@ where
         meta,
         paged_prefix_cache,
         prefix_lru_cache,
+        ActiveKvOffloadConfig::disabled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_scheduler_actor_with_mtp_and_active_kv<M>(
+    model: Arc<Mutex<M>>,
+    mtp: M::MtpHead,
+    mtp_draft_tokens: usize,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
+where
+    M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
+    M::MtpHead: Send + 'static,
+{
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        active_kv_offload,
     )
 }
 
@@ -527,6 +628,7 @@ fn spawn_scheduler_actor_with_mode<M, A>(
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -570,6 +672,7 @@ where
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
+    let active_kv_stats = ActiveKvOffloadSharedStats::new(&active_kv_offload);
 
     // Clone Arcs for the driver thread.
     let driver_budget_state = budget_state.clone();
@@ -590,6 +693,8 @@ where
     let b_queued_for_task = b_queued.clone();
     let paged_prefix_cache_for_task = paged_prefix_cache.clone();
     let prefix_lru_cache_for_task = prefix_lru_cache;
+    let active_kv_offload_for_task = active_kv_offload.clone();
+    let active_kv_stats_for_task = active_kv_stats.clone();
 
     // ── Step 3: Spawn driver — Scheduler::new_with_state constructed INSIDE
     //    spawn_blocking so MLX Array fields (prng_state) are allocated on the
@@ -613,11 +718,15 @@ where
                 .enable_prefix_lru_cache(config)
                 .expect("prefix LRU cache config was validated before actor spawn");
         }
+        scheduler
+            .enable_active_kv_offload(active_kv_offload_for_task, active_kv_stats_for_task.clone())
+            .expect("active KV offload config was validated before actor spawn");
         driver_loop(
             scheduler,
             model,
             mtp_mode,
             mtp_counters_for_task,
+            active_kv_stats_for_task,
             admission_deadline,
             admission_queue_max,
             cmd_rx,
@@ -652,6 +761,7 @@ where
         memory_budget_exceeded_count,
         kv_cache_active_bytes,
         kv_cache_soft_limit_bytes,
+        active_kv_offload: active_kv_stats,
     })
 }
 
@@ -661,6 +771,7 @@ fn driver_loop<M, A>(
     model: Arc<Mutex<M>>,
     mut mtp_mode: A,
     mtp_counters: SchedulerActorMtpCounters,
+    active_kv_stats: ActiveKvOffloadSharedStats,
     admission_deadline: Duration,
     admission_queue_max: usize,
     mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
@@ -684,6 +795,7 @@ fn driver_loop<M, A>(
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
     let mut in_flight_mid_admit: Option<AdmitMidHandle> = None;
+    let mut parked_active_kv: VecDeque<ActiveKvParkedRequest> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();
 
     'outer: loop {
@@ -699,6 +811,13 @@ fn driver_loop<M, A>(
                     "[SchedulerActor] outer-loop finalize failed: {e:?}; \
                      actor cannot reset Finished batch safely — terminating"
                 );
+                cleanup_parked_active_kv_requests(
+                    &sched,
+                    &mut parked_active_kv,
+                    &mut event_txs,
+                    &active_kv_stats,
+                    "outer-loop finalize failed",
+                );
                 event_txs.clear();
                 return;
             }
@@ -709,6 +828,13 @@ fn driver_loop<M, A>(
         // admission queue is invariantly empty here (any queue elements were
         // drained inside the rolling loop before reaching this point).
         let Some(first_cmd) = rt.block_on(cmd_rx.recv()) else {
+            cleanup_parked_active_kv_requests(
+                &sched,
+                &mut parked_active_kv,
+                &mut event_txs,
+                &active_kv_stats,
+                "scheduler command channel closed",
+            );
             return; // cmd_rx closed; all senders dropped.
         };
         let fresh_batch_limit = fresh_prefill_batch_limit_for_command::<M>(&first_cmd, b_max);
@@ -784,6 +910,13 @@ fn driver_loop<M, A>(
                          {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                     );
                 }
+                cleanup_parked_active_kv_requests(
+                    &sched,
+                    &mut parked_active_kv,
+                    &mut event_txs,
+                    &active_kv_stats,
+                    "scheduler poisoned after prefill error",
+                );
                 event_txs.clear();
                 // Anything queued during the failed-batch window has nowhere
                 // to land — reject with Err so callers see a clear error
@@ -825,6 +958,8 @@ fn driver_loop<M, A>(
                     &batch_count,
                     &mut mtp_mode,
                     &mtp_counters,
+                    &mut parked_active_kv,
+                    &active_kv_stats,
                     b_max,
                     admission_queue_max,
                     admission_deadline,
@@ -860,6 +995,13 @@ fn driver_loop<M, A>(
 
             match evt {
                 RollingEvent::Shutdown => {
+                    cleanup_parked_active_kv_requests(
+                        &sched,
+                        &mut parked_active_kv,
+                        &mut event_txs,
+                        &active_kv_stats,
+                        "scheduler shutting down",
+                    );
                     event_txs.clear();
                     // Reject any queued admits — callers shouldn't hang.
                     while let Some(pending) = admission_queue.pop_front() {
@@ -875,14 +1017,57 @@ fn driver_loop<M, A>(
                         sched.active_count(),
                         b_max,
                     ) {
-                        // Rolling admission limit reached — queue for a later decode turn.
-                        enqueue_or_reject(
-                            cmd,
-                            &mut admission_queue,
-                            admission_queue_max,
-                            &queue_depth_peak,
-                            &queue_rejected,
+                        let mut pending_cmd = Some(cmd);
+                        let can_start_after_park = can_start_rolling_mid_admit_for_command::<M>(
+                            pending_cmd.as_ref().expect("pending command present"),
+                            sched.active_count().saturating_sub(1),
+                            b_max,
                         );
+                        if in_flight_mid_admit.is_none()
+                            && can_start_after_park
+                            && try_park_one_active_kv_request(
+                                &mut sched,
+                                &model,
+                                &mut parked_active_kv,
+                                &active_kv_stats,
+                            )
+                        {
+                            if sched.active_count() == 0 {
+                                enqueue_or_reject(
+                                    pending_cmd.take().expect("pending command present"),
+                                    &mut admission_queue,
+                                    admission_queue_max,
+                                    &queue_depth_peak,
+                                    &queue_rejected,
+                                );
+                                admission_policy.record_admission_work();
+                            } else if start_mid_admit_one_chunk(
+                                pending_cmd.take().expect("pending command present"),
+                                &mut in_flight_mid_admit,
+                                &mut sched,
+                                &mut event_txs,
+                                &admit_count,
+                                &model,
+                                MidAdmitProfileContext {
+                                    source: RollingMidAdmitSource::Direct,
+                                    queue_wait_ms: None,
+                                    queue_len: admission_queue.len(),
+                                },
+                                decode_cadence_mid_chunk_cap,
+                            ) {
+                                admission_policy.record_admission_work();
+                            }
+                        }
+                        if let Some(cmd) = pending_cmd {
+                            // Rolling admission limit reached — queue for a later decode turn.
+                            enqueue_or_reject(
+                                cmd,
+                                &mut admission_queue,
+                                admission_queue_max,
+                                &queue_depth_peak,
+                                &queue_rejected,
+                            );
+                        }
                     } else if start_mid_admit_one_chunk(
                         cmd,
                         &mut in_flight_mid_admit,
@@ -963,6 +1148,17 @@ fn driver_loop<M, A>(
                             // requests wait for the next decode turn so
                             // active streams keep making progress.
                             if in_flight_mid_admit.is_none()
+                                && !admission_queue.is_empty()
+                                && sched.active_count() >= b_max
+                            {
+                                let _ = try_park_one_active_kv_request(
+                                    &mut sched,
+                                    &model,
+                                    &mut parked_active_kv,
+                                    &active_kv_stats,
+                                );
+                            }
+                            if in_flight_mid_admit.is_none()
                                 && drain_admission_queue(
                                     &mut admission_queue,
                                     &mut in_flight_mid_admit,
@@ -1006,6 +1202,13 @@ fn driver_loop<M, A>(
                                 );
                             }
                             in_flight_mid_admit = None;
+                            cleanup_parked_active_kv_requests(
+                                &sched,
+                                &mut parked_active_kv,
+                                &mut event_txs,
+                                &active_kv_stats,
+                                "scheduler poisoned after step error",
+                            );
                             event_txs.clear();
                             while let Some(pending) = admission_queue.pop_front() {
                                 let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
@@ -1021,6 +1224,8 @@ fn driver_loop<M, A>(
             // B1-p2.5 G3: update /healthz live counters at tail of every rolling step.
             b_active.store(sched.active_count() as u64, Ordering::Relaxed);
             b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
+            sched.refresh_active_kv_residency_stats();
+            active_kv_stats.set_parked_requests(parked_active_kv.len());
 
             // ===== Exit rolling loop when active_count == 0 AND queue empty. =====
             // Spec §9 R1: if `active_count() == 0` but admission_queue is
@@ -1049,6 +1254,8 @@ fn driver_loop<M, A>(
                     &batch_count,
                     &mut mtp_mode,
                     &mtp_counters,
+                    &mut parked_active_kv,
+                    &active_kv_stats,
                     b_max,
                     admission_queue_max,
                     admission_deadline,
@@ -1075,6 +1282,13 @@ fn driver_loop<M, A>(
             }
         }
         in_flight_mid_admit = None;
+        cleanup_parked_active_kv_requests(
+            &sched,
+            &mut parked_active_kv,
+            &mut event_txs,
+            &active_kv_stats,
+            "scheduler outer loop reset",
+        );
         event_txs.clear();
     }
 }
@@ -1512,6 +1726,9 @@ where
     if sched.phase() != Phase::Decoding {
         return false;
     }
+    if sched.active_count() == 0 {
+        return false;
+    }
     if in_flight_mid_admit.is_some() {
         return false;
     }
@@ -1580,6 +1797,127 @@ fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSend
     }
 }
 
+fn try_park_one_active_kv_request<M>(
+    sched: &mut Scheduler<M>,
+    model: &Arc<Mutex<M>>,
+    parked_active_kv: &mut VecDeque<ActiveKvParkedRequest>,
+    active_kv_stats: &ActiveKvOffloadSharedStats,
+) -> bool
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if !sched.active_kv_offload_enabled() || sched.phase() != Phase::Decoding {
+        return false;
+    }
+    let candidate_ids: Vec<RequestId> = sched
+        .active()
+        .into_iter()
+        .filter(|state| !state.finished && !state.generated_tokens.is_empty())
+        .map(|state| state.id)
+        .collect();
+    if candidate_ids.is_empty() {
+        return false;
+    }
+    let model_lock = model.blocking_lock();
+    for id in candidate_ids {
+        match sched.park_active_kv_request(id, &model_lock) {
+            Ok(Some(parked)) => {
+                tracing::info!(
+                    "[active-kv-offload] event=park request_id={} parked_queue_len={}",
+                    parked.id.0,
+                    parked_active_kv.len() + 1
+                );
+                parked_active_kv.push_back(parked);
+                active_kv_stats.set_parked_requests(parked_active_kv.len());
+                return true;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                active_kv_stats.record_error();
+                tracing::warn!(
+                    "[active-kv-offload] event=park_error request_id={} error={err:#}",
+                    id.0
+                );
+            }
+        }
+    }
+    false
+}
+
+fn try_restore_one_active_kv_request<M>(
+    sched: &mut Scheduler<M>,
+    model: &Arc<Mutex<M>>,
+    parked_active_kv: &mut VecDeque<ActiveKvParkedRequest>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    active_kv_stats: &ActiveKvOffloadSharedStats,
+) -> bool
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if !sched.active_kv_offload_enabled() || sched.active_count() >= sched.b_max() {
+        return false;
+    }
+
+    while sched.active_count() < sched.b_max() {
+        let Some(parked) = parked_active_kv.pop_front() else {
+            active_kv_stats.set_parked_requests(0);
+            return false;
+        };
+        let model_lock = model.blocking_lock();
+        match sched.restore_active_kv_request(&parked, &model_lock) {
+            Ok(id) => {
+                tracing::info!(
+                    "[active-kv-offload] event=restore request_id={} parked_queue_len={}",
+                    id.0,
+                    parked_active_kv.len()
+                );
+                active_kv_stats.set_parked_requests(parked_active_kv.len());
+                return true;
+            }
+            Err(err) => {
+                active_kv_stats.record_error();
+                tracing::warn!(
+                    "[active-kv-offload] event=restore_error request_id={} error={err:#}",
+                    parked.id.0
+                );
+                if let Err(cleanup_err) = sched.discard_active_kv_request(&parked) {
+                    active_kv_stats.record_error();
+                    tracing::warn!(
+                        "[active-kv-offload] event=restore_error_cleanup_failed request_id={} error={cleanup_err:#}",
+                        parked.id.0
+                    );
+                }
+                event_txs.remove(&parked.id);
+                active_kv_stats.set_parked_requests(parked_active_kv.len());
+            }
+        }
+    }
+    false
+}
+
+fn cleanup_parked_active_kv_requests<M>(
+    sched: &Scheduler<M>,
+    parked_active_kv: &mut VecDeque<ActiveKvParkedRequest>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    active_kv_stats: &ActiveKvOffloadSharedStats,
+    reason: &str,
+) where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    while let Some(parked) = parked_active_kv.pop_front() {
+        if let Err(err) = sched.discard_active_kv_request(&parked) {
+            active_kv_stats.record_error();
+            tracing::warn!(
+                "[active-kv-offload] event=cleanup_error request_id={} reason={} error={err:#}",
+                parked.id.0,
+                reason
+            );
+        }
+        event_txs.remove(&parked.id);
+    }
+    active_kv_stats.set_parked_requests(0);
+}
+
 /// Finalize a `Phase::Finished` batch: evict slots + release budget +
 /// reset to `Phase::Idle`, then close per-request event channels.
 ///
@@ -1603,9 +1941,12 @@ fn finalize_finished_batch_if_any<M: Model>(
     if sched.phase() != Phase::Finished {
         return Ok(false);
     }
+    let evicted_ids: Vec<RequestId> = sched.active().into_iter().map(|state| state.id).collect();
     match sched.evict_all() {
         Ok(()) => {
-            event_txs.clear();
+            for id in evicted_ids {
+                event_txs.remove(&id);
+            }
             Ok(true)
         }
         Err(e) => {
@@ -1659,6 +2000,8 @@ fn drive_empty_scheduler_handoff<M, A>(
     batch_count: &Arc<AtomicU64>,
     mtp_mode: &mut A,
     mtp_counters: &SchedulerActorMtpCounters,
+    parked_active_kv: &mut VecDeque<ActiveKvParkedRequest>,
+    active_kv_stats: &ActiveKvOffloadSharedStats,
     b_max: usize,
     admission_queue_max: usize,
     admission_deadline: Duration,
@@ -1674,6 +2017,13 @@ where
     match finalize_finished_batch_if_any(sched, event_txs) {
         Ok(_) => {}
         Err(_e) => {
+            cleanup_parked_active_kv_requests(
+                sched,
+                parked_active_kv,
+                event_txs,
+                active_kv_stats,
+                "scheduler poisoned during Finished-batch finalize",
+            );
             while let Some(pending) = admission_queue.pop_front() {
                 let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
                     "scheduler poisoned during Finished-batch finalize"
@@ -1702,7 +2052,9 @@ where
                 event_txs.clear();
                 return RollingControl::ContinueOuter;
             }
-            event_txs.clear();
+            // Preserve parked Active KV request event channels. At this point
+            // active_count is zero; stale finished-batch channels were already
+            // removed by gc/finalize paths.
         }
         // Pop first queued admit as the new batch's first admit.
         let pending = admission_queue
@@ -1788,6 +2140,11 @@ where
         }
         return RollingControl::ContinueRolling;
     }
+
+    if try_restore_one_active_kv_request(sched, model, parked_active_kv, event_txs, active_kv_stats)
+    {
+        return RollingControl::ContinueRolling;
+    }
     // Queue empty + no active rows — same logic as pre-3d.
     match cmd_rx.try_recv() {
         Ok(cmd) => {
@@ -1803,7 +2160,9 @@ where
                     event_txs.clear();
                     return RollingControl::ContinueOuter;
                 }
-                event_txs.clear();
+                // Preserve parked Active KV request event channels. At this
+                // point active_count is zero; stale finished-batch channels
+                // were already removed by gc/finalize paths.
             }
             handle_admit(cmd, sched, event_txs, admit_count);
             if sched.active_count() == 0 {
@@ -1871,6 +2230,60 @@ mod tests {
     struct SchedulerActorFakeModel;
     #[derive(Clone, Copy)]
     struct SchedulerActorFakeMtpHead;
+    static FAKE_MODEL_FORWARD_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn maybe_delay_fake_forward() {
+        let delay_ms = FAKE_MODEL_FORWARD_DELAY_MS.load(Ordering::Relaxed);
+        if delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+    }
+
+    struct FakeForwardDelayGuard;
+
+    impl FakeForwardDelayGuard {
+        fn set(delay_ms: u64) -> Self {
+            FAKE_MODEL_FORWARD_DELAY_MS.store(delay_ms, Ordering::Relaxed);
+            Self
+        }
+    }
+
+    impl Drop for FakeForwardDelayGuard {
+        fn drop(&mut self) {
+            FAKE_MODEL_FORWARD_DELAY_MS.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn write_fake_full_kv(
+        input_ids: &mlx::Array,
+        per_row_lens: Option<&[i32]>,
+        cache: Option<&mut [crate::nn::LayerCache]>,
+    ) -> Result<()> {
+        let Some(cache) = cache else {
+            return Ok(());
+        };
+        let Some(crate::nn::LayerCache::Full(kv)) = cache.first_mut() else {
+            return Ok(());
+        };
+        let shape = input_ids.shape();
+        let dims = shape.as_slice();
+        let batch = dims[0];
+        let seq = dims[1];
+        let owned_lens;
+        let lens = match per_row_lens {
+            Some(lens) => lens,
+            None => {
+                owned_lens = vec![seq; batch as usize];
+                &owned_lens
+            }
+        };
+        let k = mlx::Array::zeros((batch, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
+            .map_err(|e| anyhow::anyhow!("fake full k failed: {e:?}"))?;
+        let v = mlx::Array::zeros((batch, 1_i32, seq, 1_i32), mlx::Dtype::Bfloat16)
+            .map_err(|e| anyhow::anyhow!("fake full v failed: {e:?}"))?;
+        kv.update_and_fetch(&k, &v, lens)?;
+        Ok(())
+    }
 
     impl Model for SchedulerActorFakeModel {
         fn make_cache(
@@ -1890,9 +2303,11 @@ mod tests {
             _position_ids: &mlx::Array,
             _per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
+            write_fake_full_kv(input_ids, _per_row_lens, cache)?;
+            maybe_delay_fake_forward();
             fake_logits(input_ids.shape().as_slice()[0] as usize)
         }
 
@@ -1902,10 +2317,11 @@ mod tests {
             _position_ids: &mlx::Array,
             _attention_mask: &mlx::Array,
             _linear_attention_mask: &mlx::Array,
-            _per_row_lens: &[i32],
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            per_row_lens: &[i32],
+            cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
+            write_fake_full_kv(input_ids, Some(per_row_lens), cache)?;
             fake_logits(input_ids.shape().as_slice()[0] as usize)
         }
 
@@ -2187,6 +2603,100 @@ mod tests {
         .expect("spawn mtp actor with prefix cache");
 
         assert_eq!(handle.mtp_prefill_count.load(Ordering::Relaxed), 0);
+        drop(handle);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_active_kv_offload_parks_and_restores_full_slot_request() {
+        let root = unique_temp_dir("actor-active-kv");
+        let _delay_guard = FakeForwardDelayGuard::set(25);
+        let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+        let handle = spawn_scheduler_actor_with_active_kv_offload(
+            model,
+            1,
+            Duration::from_millis(1),
+            4,
+            32,
+            256,
+            crate::core::memory_budget::test_meta_qwen35(),
+            ActiveKvOffloadConfig::enabled(root.clone()),
+        )
+        .expect("spawn actor with active kv offload");
+
+        let (reply_tx_1, reply_rx_1) = oneshot::channel();
+        let mut request_1 = mk_req(11);
+        request_1.max_new_tokens = 4;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_1,
+                reply_tx: reply_tx_1,
+            })
+            .await
+            .expect("send first request");
+        let mut events_1 = reply_rx_1
+            .await
+            .expect("first reply")
+            .expect("first admit")
+            .event_rx;
+        let first_event = tokio::time::timeout(Duration::from_secs(2), events_1.recv())
+            .await
+            .expect("first event timeout")
+            .expect("first event");
+        assert_eq!(first_event.finish_reason, None);
+
+        let (reply_tx_2, reply_rx_2) = oneshot::channel();
+        let mut request_2 = mk_req(22);
+        request_2.max_new_tokens = 1;
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: request_2,
+                reply_tx: reply_tx_2,
+            })
+            .await
+            .expect("send second request");
+        let mut events_2 = tokio::time::timeout(Duration::from_secs(2), reply_rx_2)
+            .await
+            .expect("second reply timeout")
+            .expect("second reply")
+            .expect("second admit")
+            .event_rx;
+
+        let mut second_finished = false;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events_2.recv())
+            .await
+            .expect("second event timeout")
+        {
+            if event.finish_reason.is_some() {
+                second_finished = true;
+                break;
+            }
+        }
+        assert!(
+            second_finished,
+            "second request should finish while first is parked"
+        );
+
+        let mut first_finished = false;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events_1.recv())
+            .await
+            .expect("restored first event timeout")
+        {
+            if event.finish_reason.is_some() {
+                first_finished = true;
+                break;
+            }
+        }
+        assert!(first_finished, "first request should restore and finish");
+
+        let health = handle.active_kv_offload.snapshot();
+        assert!(health.swap_out_count >= 1, "expected at least one swap out");
+        assert!(health.swap_in_count >= 1, "expected at least one swap in");
+        assert_eq!(health.swap_error_count, 0);
+        assert_eq!(health.parked_requests, 0);
+
         drop(handle);
         std::fs::remove_dir_all(root).ok();
     }

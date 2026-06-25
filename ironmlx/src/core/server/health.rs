@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+use crate::core::cache::{ActiveKvOffloadHealth, ActiveKvOffloadSharedStats};
 use crate::core::memory_budget::system_total_ram_bytes;
 
 #[derive(Debug, Serialize)]
@@ -124,6 +125,7 @@ pub struct HealthSnapshot {
     pub scheduler: SchedulerInfo,
     pub memory: MemoryInfo,
     pub mtp: MtpHealthInfo,
+    pub active_kv_offload: ActiveKvOffloadHealth,
     pub device_name: Option<String>,
     pub version: &'static str,
 }
@@ -141,6 +143,7 @@ pub struct SchedulerHealthCollector {
     pub kv_cache_active_bytes: Arc<AtomicUsize>,
     pub kv_cache_soft_limit_bytes: usize,
     pub mtp: MtpHealthConfig,
+    pub active_kv_offload: ActiveKvOffloadSharedStats,
 }
 
 impl SchedulerHealthCollector {
@@ -155,13 +158,17 @@ impl SchedulerHealthCollector {
         let kv_active = self.kv_cache_active_bytes.load(Ordering::Relaxed);
         let mlx_memory = mlx::memory::snapshot();
 
-        let status = classify_status(
+        let active_kv_offload = self.active_kv_offload.snapshot();
+        let mut status = classify_status(
             b_queued,
             self.queue_max,
             free_ram_bytes,
             kv_active,
             self.kv_cache_soft_limit_bytes,
         );
+        if active_kv_offload.degraded {
+            status = HealthStatus::Degraded;
+        }
 
         HealthSnapshot {
             status,
@@ -191,6 +198,7 @@ impl SchedulerHealthCollector {
                 mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
             },
             mtp: self.mtp.snapshot(),
+            active_kv_offload,
             device_name: mlx_memory.device_name,
             version: env!("CARGO_PKG_VERSION"),
         }
@@ -294,6 +302,16 @@ mod tests {
     }
 
     fn test_collector(mtp: MtpHealthConfig) -> SchedulerHealthCollector {
+        test_collector_with_active_kv(
+            mtp,
+            ActiveKvOffloadSharedStats::new(&crate::core::cache::ActiveKvOffloadConfig::disabled()),
+        )
+    }
+
+    fn test_collector_with_active_kv(
+        mtp: MtpHealthConfig,
+        active_kv_offload: ActiveKvOffloadSharedStats,
+    ) -> SchedulerHealthCollector {
         SchedulerHealthCollector {
             start_time: Instant::now(),
             b_max: 1,
@@ -307,6 +325,7 @@ mod tests {
             kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),
             kv_cache_soft_limit_bytes: 1,
             mtp,
+            active_kv_offload,
         }
     }
 
@@ -371,6 +390,21 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_degraded_when_active_kv_reports_error() {
+        let active_kv_offload = ActiveKvOffloadSharedStats::new(
+            &crate::core::cache::ActiveKvOffloadConfig::enabled(std::env::temp_dir()),
+        );
+        active_kv_offload.record_error();
+
+        let snapshot =
+            test_collector_with_active_kv(MtpHealthConfig::disabled(), active_kv_offload)
+                .snapshot();
+
+        assert!(matches!(snapshot.status, HealthStatus::Degraded));
+        assert!(snapshot.active_kv_offload.degraded);
+    }
+
+    #[test]
     fn health_memory_serializes_mlx_allocator_fields() {
         let snapshot = HealthSnapshot {
             status: HealthStatus::Healthy,
@@ -408,6 +442,7 @@ mod tests {
                 drafted_tokens: 0,
                 accepted_draft_tokens: 0,
             },
+            active_kv_offload: ActiveKvOffloadHealth::disabled(),
             device_name: Some("Apple Test GPU".to_string()),
             version: "test",
         };

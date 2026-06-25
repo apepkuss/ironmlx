@@ -345,7 +345,7 @@ impl GatedAttention {
                         } else {
                             let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
                             let (k, v) = mask_kv(k, v)?;
-                            if let Some(out) = c.try_update_and_attend_decode_on(
+                            if let Some(out) = c.try_update_and_attend_on(
                                 &queries, &k, &v, lens_ref, self.scale, mask, target,
                             )? {
                                 out
@@ -373,7 +373,7 @@ impl GatedAttention {
                     } else {
                         let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
                         let (k, v) = mask_kv(k, v)?;
-                        if let Some(out) = c.try_update_and_attend_decode_on(
+                        if let Some(out) = c.try_update_and_attend_on(
                             &queries, &k, &v, lens_ref, self.scale, mask, target,
                         )? {
                             out

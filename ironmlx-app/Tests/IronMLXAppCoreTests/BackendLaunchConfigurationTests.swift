@@ -97,6 +97,30 @@ import Testing
     #expect(config.arguments.contains("turbo4"))
 }
 
+@Test func serveArgumentsOmitActiveKVOffloadByDefault() {
+    let options = BackendLaunchOptions(config: AppConfig())
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: options
+    )
+
+    #expect(!config.arguments.contains("--active-kv-offload"))
+}
+
+@Test func serveArgumentsIncludeActiveKVOffloadWhenEnabled() {
+    let options = BackendLaunchOptions(config: AppConfig(activeKvOffload: true))
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: options
+    )
+
+    #expect(config.arguments.contains("--active-kv-offload"))
+}
+
 @Test func serveArgumentsMapLegacyAdaptiveKVQuantToK3V4() {
     let options = BackendLaunchOptions(config: AppConfig(cacheEnable: false, kvQuant: "adaptive"))
     let config = BackendLaunchConfiguration(

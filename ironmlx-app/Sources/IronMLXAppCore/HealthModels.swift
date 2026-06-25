@@ -6,6 +6,7 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
     public var model: ModelInfo
     public var scheduler: SchedulerInfo
     public var memory: MemoryInfo
+    public var activeKvOffload: ActiveKvOffloadInfo
     public var deviceName: String?
     public var version: String
 
@@ -15,6 +16,7 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
         case model
         case scheduler
         case memory
+        case activeKvOffload = "active_kv_offload"
         case deviceName = "device_name"
         case version
     }
@@ -72,6 +74,44 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
             case mlxMemoryLimitBytes = "mlx_memory_limit_bytes"
         }
     }
+
+    public struct ActiveKvOffloadInfo: Codable, Equatable, Sendable {
+        public var enabled: Bool
+        public var mode: String
+        public var storageDir: String?
+        public var residentPages: UInt64
+        public var offloadedPages: UInt64
+        public var loadingPages: UInt64
+        public var dirtyPages: UInt64
+        public var parkedRequests: UInt64
+        public var offloadedBytes: UInt64
+        public var swapOutCount: UInt64
+        public var swapInCount: UInt64
+        public var swapErrorCount: UInt64
+        public var lastSwapOutUs: UInt64
+        public var lastSwapInUs: UInt64
+        public var supportedCacheKinds: [String]
+        public var notApplicableCacheKinds: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case enabled
+            case mode
+            case storageDir = "storage_dir"
+            case residentPages = "resident_pages"
+            case offloadedPages = "offloaded_pages"
+            case loadingPages = "loading_pages"
+            case dirtyPages = "dirty_pages"
+            case parkedRequests = "parked_requests"
+            case offloadedBytes = "offloaded_bytes"
+            case swapOutCount = "swap_out_count"
+            case swapInCount = "swap_in_count"
+            case swapErrorCount = "swap_error_count"
+            case lastSwapOutUs = "last_swap_out_us"
+            case lastSwapInUs = "last_swap_in_us"
+            case supportedCacheKinds = "supported_cache_kinds"
+            case notApplicableCacheKinds = "not_applicable_cache_kinds"
+        }
+    }
 }
 
 public struct LegacyHealthStatus: Codable, Equatable, Sendable {
@@ -81,6 +121,7 @@ public struct LegacyHealthStatus: Codable, Equatable, Sendable {
     public var totalTokens: UInt64
     public var cachedTokens: UInt64
     public var cacheHitRate: Double
+    public var activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo
     public var deviceName: String?
 
     enum CodingKeys: String, CodingKey {
@@ -90,6 +131,7 @@ public struct LegacyHealthStatus: Codable, Equatable, Sendable {
         case totalTokens = "total_tokens"
         case cachedTokens = "cached_tokens"
         case cacheHitRate = "cache_hit_rate"
+        case activeKvOffload = "active_kv_offload"
         case deviceName = "device_name"
     }
 }
@@ -135,6 +177,7 @@ public struct LegacyHealthAdapter {
             totalTokens: 0,
             cachedTokens: 0,
             cacheHitRate: 0,
+            activeKvOffload: snapshot.activeKvOffload,
             deviceName: snapshot.deviceName
         )
     }

@@ -491,6 +491,33 @@ mod tests {
     }
 
     #[test]
+    fn serve_subcommand_parses_active_kv_offload() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--active-kv-offload",
+            "--active-kv-offload-dir",
+            "/tmp/active-kv",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert!(args.active_kv_offload);
+                assert_eq!(
+                    args.active_kv_offload_dir
+                        .as_ref()
+                        .expect("active kv offload dir")
+                        .to_string_lossy(),
+                    "/tmp/active-kv"
+                );
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn serve_subcommand_accepts_default_paged_prefix_cache_dir() {
         let cli = Cli::try_parse_from([
             "ironmlx",

@@ -10,13 +10,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const META_FILE: &str = "meta.json";
 const PAYLOAD_FILE: &str = "payload.safetensors";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrefixLayerKind {
+    FullDense,
     FullPaged,
     FullTurboQuantPacked,
     Linear,
@@ -47,6 +48,13 @@ pub struct PrefixLayerSpec {
 impl PrefixLayerSpec {
     pub fn from_payload(payload: &PrefixLayerPayload) -> Self {
         match payload {
+            PrefixLayerPayload::FullDense { k, v } => Self {
+                kind: PrefixLayerKind::FullDense,
+                tensors: vec![
+                    PrefixTensorSpec::from_array(k),
+                    PrefixTensorSpec::from_array(v),
+                ],
+            },
             PrefixLayerPayload::FullPaged { k_pages, v_pages } => Self {
                 kind: PrefixLayerKind::FullPaged,
                 tensors: vec![
@@ -125,6 +133,10 @@ pub struct PagedPrefixLayer {
 
 #[derive(Debug, Clone)]
 pub enum PrefixLayerPayload {
+    FullDense {
+        k: Array,
+        v: Array,
+    },
     FullPaged {
         k_pages: Array,
         v_pages: Array,
@@ -162,6 +174,7 @@ pub struct PagedPrefixEntry {
 pub struct PagedPrefixEntryStats {
     pub cached_len: i32,
     pub main_layers: usize,
+    pub full_dense_layers: usize,
     pub full_paged_layers: usize,
     pub linear_layers: usize,
     pub mla_layers: usize,
@@ -201,6 +214,14 @@ impl PagedPrefixEntry {
         };
         for layer in &self.main_layers {
             match layer {
+                PrefixLayerPayload::FullDense { k, v } => {
+                    stats.full_dense_layers += 1;
+                    stats.tensor_count += 2;
+                    stats.payload_bytes = stats
+                        .payload_bytes
+                        .saturating_add(tensor_payload_bytes(k))
+                        .saturating_add(tensor_payload_bytes(v));
+                }
                 PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
                     stats.full_paged_layers += 1;
                     stats.full_paged_pages += first_dim_usize(k_pages);
@@ -286,6 +307,8 @@ pub struct PagedPrefixLoadResult {
     pub entry: Option<PagedPrefixEntry>,
     pub stats: Option<PagedPrefixEntryStats>,
 }
+
+pub const DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE: i32 = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagedPrefixCacheConfig {
@@ -1098,6 +1121,23 @@ fn validate_layer_spec(
         validate_tensor_spec(&format!("layer {idx} tensor {tensor_idx}"), tensor)?;
     }
     match spec.kind {
+        PrefixLayerKind::FullDense => {
+            require_tensor_count(idx, spec, 2)?;
+            for (name, tensor) in ["K", "V"].iter().zip(spec.tensors.iter()) {
+                let dims = tensor.shape.as_slice();
+                if dims.len() != 4
+                    || dims[0] != 1
+                    || dims[1] <= 0
+                    || dims[2] != cached_len
+                    || dims[3] <= 0
+                {
+                    anyhow::bail!(
+                        "PagedPrefixStore: FullDense layer {idx} {name} shape {:?} incompatible with [1,heads,{cached_len},dim]",
+                        dims
+                    );
+                }
+            }
+        }
         PrefixLayerKind::FullPaged => {
             require_tensor_count(idx, spec, 2)?;
             for (name, tensor) in ["K", "V"].iter().zip(spec.tensors.iter()) {
@@ -1200,6 +1240,10 @@ fn validate_layer_payload(
     payload: &PrefixLayerPayload,
 ) -> Result<()> {
     match (spec.kind, payload) {
+        (PrefixLayerKind::FullDense, PrefixLayerPayload::FullDense { k, v }) => {
+            validate_tensor_payload(&format!("layer {idx} dense K"), &spec.tensors[0], k)?;
+            validate_tensor_payload(&format!("layer {idx} dense V"), &spec.tensors[1], v)?;
+        }
         (PrefixLayerKind::FullPaged, PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
             validate_tensor_payload(&format!("layer {idx} full K"), &spec.tensors[0], k_pages)?;
             validate_tensor_payload(&format!("layer {idx} full V"), &spec.tensors[1], v_pages)?;
@@ -1338,6 +1382,10 @@ fn tensor_metadata(spec: &PrefixTensorSpec) -> TensorSpecMetadata {
 fn insert_entry_tensors(entry: &PagedPrefixEntry, tensors: &mut HashMap<String, Array>) {
     for (idx, layer) in entry.main_layers.iter().enumerate() {
         match layer {
+            PrefixLayerPayload::FullDense { k, v } => {
+                tensors.insert(main_dense_k_name(idx), k.clone());
+                tensors.insert(main_dense_v_name(idx), v.clone());
+            }
             PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
                 tensors.insert(main_full_k_name(idx), k_pages.clone());
                 tensors.insert(main_full_v_name(idx), v_pages.clone());
@@ -1382,6 +1430,10 @@ fn entry_from_tensors(
     let mut main_layers = Vec::with_capacity(spec.main_layers.len());
     for (idx, layer_spec) in spec.main_layers.iter().enumerate() {
         let layer = match layer_spec.kind {
+            PrefixLayerKind::FullDense => PrefixLayerPayload::FullDense {
+                k: take_tensor(tensors, main_dense_k_name(idx))?,
+                v: take_tensor(tensors, main_dense_v_name(idx))?,
+            },
             PrefixLayerKind::FullPaged => PrefixLayerPayload::FullPaged {
                 k_pages: take_tensor(tensors, main_full_k_name(idx))?,
                 v_pages: take_tensor(tensors, main_full_v_name(idx))?,
@@ -1464,6 +1516,14 @@ fn dtype_size_bytes(dtype: Dtype) -> usize {
         Dtype::Uint64 | Dtype::Int64 | Dtype::Float64 | Dtype::Complex64 => 8,
         _ => 0,
     }
+}
+
+fn main_dense_k_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_dense_k")
+}
+
+fn main_dense_v_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_dense_v")
 }
 
 fn main_full_k_name(layer_idx: usize) -> String {

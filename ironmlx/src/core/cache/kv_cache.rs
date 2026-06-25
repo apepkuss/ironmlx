@@ -10,7 +10,8 @@ use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use super::{
-    PagedKVCache, PagedPrefixLayer, TurboQuantKVBits, TurboQuantKVCache, TurboQuantPrefixLayer,
+    PagedKVCache, PagedKvHotColdConfig, PagedKvHotColdSummary, PagedPrefixLayer, TurboQuantKVBits,
+    TurboQuantKVCache, TurboQuantPrefixLayer,
 };
 use crate::Result;
 
@@ -206,6 +207,13 @@ impl KVCache {
         Ok(())
     }
 
+    pub fn enable_paged_hot_cold_tiering(&mut self, config: PagedKvHotColdConfig) -> Result<()> {
+        let paged = self.paged.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("KVCache::enable_paged_hot_cold_tiering: paged KV is not enabled")
+        })?;
+        paged.enable_hot_cold_tiering(config)
+    }
+
     pub fn turboquant(&self) -> Option<&TurboQuantKVCache> {
         self.turboquant.as_deref()
     }
@@ -216,6 +224,12 @@ impl KVCache {
 
     pub fn paged(&self) -> Option<&PagedKVCache> {
         self.paged.as_deref()
+    }
+
+    pub fn paged_hot_cold_summary(&self) -> Option<PagedKvHotColdSummary> {
+        self.paged
+            .as_ref()
+            .and_then(|paged| paged.hot_cold_summary())
     }
 
     pub fn batch(&self) -> i32 {
@@ -677,6 +691,50 @@ impl KVCache {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn try_update_and_attend_on(
+        &mut self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        scale: f32,
+        mask_arr: Option<&Array>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Option<Array>> {
+        let target = target.into();
+        if let Some(out) = self.try_update_and_attend_decode_on(
+            queries,
+            k,
+            v,
+            per_row_lens,
+            scale,
+            mask_arr,
+            target,
+        )? {
+            return Ok(Some(out));
+        }
+        if self.paged.is_some()
+            && self.supports_paged_prefill_attention(queries, k, v, per_row_lens, mask_arr)
+        {
+            let paged = match self.paged.as_mut() {
+                Some(paged) => paged,
+                None => unreachable!("paged cache presence checked before prefill dispatch"),
+            };
+            return Ok(Some(paged.update_and_attend_prefill_on(
+                queries,
+                k,
+                v,
+                &mut self.offsets,
+                per_row_lens,
+                scale,
+                mask_arr,
+                target,
+            )?));
+        }
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn try_update_and_attend_decode(
         &mut self,
         queries: &Array,
@@ -963,6 +1021,85 @@ impl KVCache {
             .unwrap_or(0);
         if max_off_after > self.cap {
             return false;
+        }
+        true
+    }
+
+    fn supports_paged_prefill_attention(
+        &self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        mask_arr: Option<&Array>,
+    ) -> bool {
+        if self.v_head_dim != self.head_dim
+            || per_row_lens.len() != self.batch as usize
+            || !matches!(
+                queries.dtype(),
+                Dtype::Float32 | Dtype::Float16 | Dtype::Bfloat16
+            )
+        {
+            return false;
+        }
+        let Some(paged) = self.paged.as_ref() else {
+            return false;
+        };
+        let q_shape = queries.shape();
+        let q_dims = q_shape.as_slice();
+        let k_shape = k.shape();
+        let k_dims = k_shape.as_slice();
+        let v_shape = v.shape();
+        let v_dims = v_shape.as_slice();
+        if q_dims.len() != 4 || k_dims.len() != 4 || v_dims.len() != 4 {
+            return false;
+        }
+        if q_dims[0] != self.batch
+            || q_dims[2] <= 1
+            || q_dims[2] != k_dims[2]
+            || q_dims[3] != self.head_dim
+            || q_dims[1] % self.n_kv_heads != 0
+        {
+            return false;
+        }
+        if k_dims != [self.batch, self.n_kv_heads, q_dims[2], self.head_dim]
+            || v_dims != [self.batch, self.n_kv_heads, q_dims[2], self.v_head_dim]
+        {
+            return false;
+        }
+        if per_row_lens.iter().any(|&n| n <= 0 || n > q_dims[2]) {
+            return false;
+        }
+        let max_off_after = self
+            .offsets
+            .iter()
+            .zip(per_row_lens.iter())
+            .map(|(o, n)| o + n)
+            .max()
+            .unwrap_or(0);
+        if max_off_after > self.cap
+            || !paged.hot_cold_needs_streaming_after(&self.offsets, per_row_lens)
+        {
+            return false;
+        }
+        match mask_arr {
+            Some(mask) => {
+                let mask_shape = mask.shape();
+                let mask_dims = mask_shape.as_slice();
+                if mask_dims.len() != 4
+                    || !(mask_dims[0] == 1 || mask_dims[0] == self.batch)
+                    || !(mask_dims[1] == 1 || mask_dims[1] == q_dims[1])
+                    || mask_dims[2] != q_dims[2]
+                    || mask_dims[3] != max_off_after
+                {
+                    return false;
+                }
+            }
+            None => {
+                if per_row_lens.iter().any(|&n| n != q_dims[2]) {
+                    return false;
+                }
+            }
         }
         true
     }

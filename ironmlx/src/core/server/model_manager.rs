@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::cli::serve::{
-    read_model_type, resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
-    resolve_scheduler_for_model, ResolvedSchedulerRuntime, SchedulerProfileSource, ServeArgs,
+    read_model_type, resolve_active_kv_offload_config, resolve_paged_prefix_cache_config,
+    resolve_prefix_lru_cache_config, resolve_scheduler_for_model, ResolvedSchedulerRuntime,
+    SchedulerProfileSource, ServeArgs,
 };
 use crate::core::{Loader, Tokenizer};
 use crate::models::ModelArchitecture;
@@ -666,6 +667,7 @@ async fn load_runtime(
     let kv_cache_turboquant_bits = args.kv_quant.turboquant_bits();
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
+    let active_kv_offload = resolve_active_kv_offload_config(args)?;
     let runtime = match architecture {
         ModelArchitecture::Qwen35Dense => {
             let model = crate::models::Qwen35Model::from_loader(&loader)
@@ -686,6 +688,7 @@ async fn load_runtime(
                 vision_input,
                 paged_prefix_cache.clone(),
                 prefix_lru_cache,
+                active_kv_offload.clone(),
             )
             .await?
             .with_sampling_defaults(sampling_defaults);
@@ -710,6 +713,7 @@ async fn load_runtime(
                 vision_input,
                 paged_prefix_cache.clone(),
                 prefix_lru_cache,
+                active_kv_offload.clone(),
             )
             .await?
             .with_sampling_defaults(sampling_defaults);
@@ -734,6 +738,7 @@ async fn load_runtime(
                 vision_input,
                 paged_prefix_cache.clone(),
                 prefix_lru_cache,
+                active_kv_offload.clone(),
             )
             .await?
             .with_sampling_defaults(sampling_defaults);
@@ -758,6 +763,7 @@ async fn load_runtime(
                 None,
                 paged_prefix_cache.clone(),
                 prefix_lru_cache,
+                active_kv_offload.clone(),
             )
             .await?
             .with_sampling_defaults(sampling_defaults);
@@ -782,6 +788,7 @@ async fn load_runtime(
                 None,
                 paged_prefix_cache.clone(),
                 prefix_lru_cache,
+                active_kv_offload.clone(),
             )
             .await?
             .with_sampling_defaults(sampling_defaults);
@@ -806,6 +813,7 @@ async fn load_runtime(
                 vision_input,
                 paged_prefix_cache,
                 prefix_lru_cache,
+                active_kv_offload,
             )
             .await?
             .with_sampling_defaults(sampling_defaults);
@@ -1125,6 +1133,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut memory_budget_exceeded_count = 0;
     let mut kv_cache_active_bytes = 0;
     let mut kv_cache_soft_limit_bytes = 0;
+    let mut active_kv_snapshots = Vec::new();
 
     for snapshot in snapshots {
         if !snapshot.model.name.is_empty() {
@@ -1140,9 +1149,13 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         memory_budget_exceeded_count += snapshot.scheduler.memory_budget_exceeded_count;
         kv_cache_active_bytes += snapshot.memory.kv_cache_active_bytes;
         kv_cache_soft_limit_bytes += snapshot.memory.kv_cache_soft_limit_bytes;
+        active_kv_snapshots.push(snapshot.active_kv_offload);
     }
 
-    let status = match classify_status(
+    let active_kv_offload =
+        crate::core::cache::ActiveKvOffloadHealth::aggregate(active_kv_snapshots);
+
+    let mut status = match classify_status(
         b_queued,
         queue_max,
         free_ram_bytes,
@@ -1152,6 +1165,9 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         HealthStatus::Healthy => HealthStatus::Healthy,
         HealthStatus::Degraded | HealthStatus::Down => HealthStatus::Degraded,
     };
+    if active_kv_offload.degraded {
+        status = HealthStatus::Degraded;
+    }
 
     HealthSnapshot {
         status,
@@ -1189,6 +1205,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             drafted_tokens: 0,
             accepted_draft_tokens: 0,
         },
+        active_kv_offload,
         device_name: mlx_memory.device_name,
         version: env!("CARGO_PKG_VERSION"),
     }

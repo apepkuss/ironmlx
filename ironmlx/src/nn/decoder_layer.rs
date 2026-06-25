@@ -16,9 +16,9 @@ use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{
-    GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot, PagedPrefixEntry,
-    PagedPrefixKeySpec, PagedPrefixLayer, PrefixLayerKind, PrefixLayerPayload, PrefixLayerSpec,
-    PrefixTensorSpec, TurboQuantKVBits,
+    GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot, PagedKvHotColdConfig,
+    PagedPrefixEntry, PagedPrefixKeySpec, PagedPrefixLayer, PrefixLayerKind, PrefixLayerPayload,
+    PrefixLayerSpec, PrefixTensorSpec, TurboQuantKVBits,
 };
 use crate::core::Loader;
 use crate::models::glm4_moe_lite::mla_cache::MlaLatentCacheSnapshot;
@@ -155,6 +155,16 @@ impl LayerCache {
         Ok(())
     }
 
+    pub fn enable_paged_hot_cold_tiering(
+        &mut self,
+        config: PagedKvHotColdConfig,
+    ) -> anyhow::Result<()> {
+        if let LayerCache::Full(kv) = self {
+            kv.enable_paged_hot_cold_tiering(config)?;
+        }
+        Ok(())
+    }
+
     /// Reset to empty state (offset → 0; recurrent state cleared). Preserves
     /// any underlying Array allocations so the next batch can reuse them.
     pub fn reset(&mut self) -> anyhow::Result<()> {
@@ -213,6 +223,16 @@ pub fn enable_paged_kv_caches(
 ) -> anyhow::Result<()> {
     for cache in caches {
         cache.enable_paged_kv(block_size, max_pages)?;
+    }
+    Ok(())
+}
+
+pub fn enable_paged_hot_cold_tiering_caches(
+    caches: &mut [LayerCache],
+    config: PagedKvHotColdConfig,
+) -> anyhow::Result<()> {
+    for cache in caches {
+        cache.enable_paged_hot_cold_tiering(config.clone())?;
     }
     Ok(())
 }
@@ -426,7 +446,8 @@ pub fn prefix_entry_for_row(
                         packed_cached_len,
                     )
                 } else {
-                    return Ok(None);
+                    let (k, v, layer_cached_len) = kv.dense_prefix_layer_for_row_on(row, ())?;
+                    (PrefixLayerPayload::FullDense { k, v }, layer_cached_len)
                 }
             }
             LayerCache::Linear(gd) => {
@@ -482,6 +503,9 @@ pub fn restore_prefix_entry_for_row(
     }
     for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
         match (cache, layer) {
+            (LayerCache::Full(kv), PrefixLayerPayload::FullDense { k, v }) => {
+                kv.restore_dense_prefix_layer_for_row_on(k, v, row, cached_len, ())?;
+            }
             (LayerCache::Full(kv), PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
                 let layer = PagedPrefixLayer {
                     k_pages: k_pages.clone(),
@@ -526,7 +550,7 @@ pub fn restore_prefix_entry_for_row(
             }
             (LayerCache::Full(_), _) => {
                 anyhow::bail!(
-                    "restore_prefix_entry_for_row: layer {idx} expected FullPaged or FullTurboQuantPacked payload"
+                    "restore_prefix_entry_for_row: layer {idx} expected FullDense, FullPaged, or FullTurboQuantPacked payload"
                 )
             }
             (LayerCache::Linear(_), _) => {
@@ -566,6 +590,11 @@ pub fn restore_prefix_entry_for_rows(
     }
     for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
         match (cache, layer) {
+            (LayerCache::Full(kv), PrefixLayerPayload::FullDense { k, v }) => {
+                for &row in rows {
+                    kv.restore_dense_prefix_layer_for_row_on(k, v, row, cached_len, ())?;
+                }
+            }
             (LayerCache::Full(kv), PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
                 let layer = PagedPrefixLayer {
                     k_pages: k_pages.clone(),
@@ -616,7 +645,7 @@ pub fn restore_prefix_entry_for_rows(
             }
             (LayerCache::Full(_), _) => {
                 anyhow::bail!(
-                    "restore_prefix_entry_for_rows: layer {idx} expected FullPaged or FullTurboQuantPacked payload"
+                    "restore_prefix_entry_for_rows: layer {idx} expected FullDense, FullPaged, or FullTurboQuantPacked payload"
                 )
             }
             (LayerCache::Linear(_), _) => {

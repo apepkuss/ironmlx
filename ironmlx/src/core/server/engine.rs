@@ -15,7 +15,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
-use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits};
+use crate::core::cache::{
+    ActiveKvOffloadConfig, PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits,
+};
 use crate::core::model::Model;
 use crate::core::sampler::Sampler;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
@@ -373,6 +375,7 @@ pub struct EnginePoolRuntimeConfig {
     pub scheduler_autotune_report: bool,
     pub paged_prefix_cache: Option<EnginePagedPrefixCacheSettings>,
     pub prefix_lru_cache_max_bytes: Option<usize>,
+    pub active_kv_offload: ActiveKvOffloadConfig,
 }
 
 impl EnginePoolRuntimeConfig {
@@ -1530,6 +1533,7 @@ where
         vision_input,
         paged_prefix_cache,
         prefix_lru_cache,
+        runtime.active_kv_offload.clone(),
     )
     .await
 }
@@ -1573,6 +1577,7 @@ where
         vision_input,
         paged_prefix_cache,
         prefix_lru_cache,
+        runtime.active_kv_offload.clone(),
     )
     .await
 }
@@ -1850,6 +1855,7 @@ mod tests {
             scheduler_autotune_report: false,
             paged_prefix_cache: None,
             prefix_lru_cache_max_bytes: None,
+            active_kv_offload: crate::core::cache::ActiveKvOffloadConfig::disabled(),
         }
     }
 
