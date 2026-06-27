@@ -106,6 +106,24 @@ public struct BackendAPIClient: Sendable {
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
     }
 
+    public func registerModel(
+        model: String,
+        modelDir: String,
+        setDefault: Bool = false,
+        maxCacheCap: Int? = nil,
+        samplingDefaults: BackendSamplingDefaults = .empty
+    ) async throws -> BackendModelAdminResponse {
+        let request = BackendLoadModelRequest(
+            model: model,
+            modelDir: modelDir,
+            setDefault: setDefault,
+            maxCacheCap: maxCacheCap,
+            samplingDefaults: samplingDefaults
+        )
+        let data = try await postJSON(path: "/admin/api/models/register", body: request)
+        return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
+    }
+
     public func unloadModel(model: String, modelDir: String? = nil) async throws -> BackendModelAdminResponse {
         let request = BackendUnloadModelRequest(model: model, modelDir: modelDir)
         let data = try await postJSON(path: "/admin/api/models/unload", body: request)
@@ -230,16 +248,20 @@ public struct BackendSetDefaultModelRequest: Codable, Equatable, Sendable {
 public struct BackendModelAdminResponse: Codable, Equatable, Sendable {
     public var success: Bool
     public var status: String
+    public var code: String?
     public var model: String?
     public var loadedModels: [BackendLoadedModelInfo]
+    public var warningCode: String?
     public var warning: String?
     public var error: String?
 
     enum CodingKeys: String, CodingKey {
         case success
         case status
+        case code
         case model
         case loadedModels = "loaded_models"
+        case warningCode = "warning_code"
         case warning
         case error
     }

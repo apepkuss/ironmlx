@@ -112,7 +112,7 @@ public final class DashboardWindowController {
         return """
         window.__IRONMLX_APP_CONFIG__ = \(configJSON);
         window.__IRONMLX_PORT__ = \(config.port);
-        window.__DEFAULT_MODEL__ = \(DashboardBridge.jsStringLiteral(config.lastModel ?? ""));
+        window.__DEFAULT_MODEL__ = \(DashboardBridge.jsStringLiteral(config.defaultModel ?? ""));
         window.__APP_LANGUAGE__ = \(DashboardBridge.jsStringLiteral(config.language));
         window.__IRONMLX_KV_QUANT__ = \(DashboardBridge.jsStringLiteral(BackendLaunchOptions.normalizedKVQuant(config.kvQuant) ?? "none"));
         window.__IRONMLX_AUTO_HOT_CACHE_BYTES__ = \(automaticHotCacheBytes);

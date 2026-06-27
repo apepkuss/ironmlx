@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use axum::{
@@ -30,7 +33,9 @@ use crate::models::{
 };
 use crate::Result;
 
-use super::{anthropic, diffusion_gemma, health, openai, AppState, VisionInputConfig};
+use super::{
+    anthropic, diffusion_gemma, health, openai, AppState, SamplingDefaults, VisionInputConfig,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -232,6 +237,95 @@ impl EngineRegistry {
         })
     }
 
+    pub fn empty(max_loaded_models: Option<usize>) -> Result<Self, EngineRegistryError> {
+        if max_loaded_models == Some(0) {
+            return Err(EngineRegistryError::InvalidMaxLoadedModels);
+        }
+        Ok(Self {
+            models: Vec::new(),
+            index: HashMap::new(),
+            default_model: None,
+            max_loaded_models,
+        })
+    }
+
+    pub fn upsert_model(
+        &mut self,
+        mut model: EngineModelManifest,
+        set_default: bool,
+    ) -> Result<(), EngineRegistryError> {
+        if model.id.is_empty() {
+            return Err(EngineRegistryError::EmptyModelId);
+        }
+        let was_current_default = self.default_model.as_deref() == Some(model.id.as_str());
+        let becomes_default = set_default || self.default_model.is_none() || was_current_default;
+        model.default = becomes_default;
+        if becomes_default {
+            for existing in &mut self.models {
+                existing.default = false;
+            }
+        }
+        match self.index.get(&model.id).copied() {
+            Some(idx) => {
+                self.models[idx] = model.clone();
+            }
+            None => {
+                let idx = self.models.len();
+                self.index.insert(model.id.clone(), idx);
+                self.models.push(model.clone());
+            }
+        }
+        if becomes_default {
+            self.default_model = Some(model.id);
+        }
+        Ok(())
+    }
+
+    pub fn remove_model(&mut self, id: &str) -> bool {
+        let Some(idx) = self.index.remove(id) else {
+            return false;
+        };
+        self.models.remove(idx);
+        self.index.clear();
+        for (idx, model) in self.models.iter().enumerate() {
+            self.index.insert(model.id.clone(), idx);
+        }
+        if self.default_model.as_deref() == Some(id) {
+            self.default_model = self.servable_models().first().map(|model| model.id.clone());
+        }
+        true
+    }
+
+    pub fn set_default_model(&mut self, id: &str) -> Result<(), EngineRegistryError> {
+        let Some(model) = self.model(id) else {
+            return Err(EngineRegistryError::UnknownModel { id: id.to_string() });
+        };
+        if model.load_policy == EngineLoadPolicy::Disabled {
+            return Err(EngineRegistryError::ModelDisabled { id: id.to_string() });
+        }
+        for model in &mut self.models {
+            model.default = model.id == id;
+        }
+        self.default_model = Some(id.to_string());
+        Ok(())
+    }
+
+    fn restore_default_model(
+        &mut self,
+        default_model: Option<String>,
+    ) -> Result<(), EngineRegistryError> {
+        match default_model {
+            Some(id) if self.model(&id).is_some() => self.set_default_model(&id),
+            Some(_) | None => {
+                for model in &mut self.models {
+                    model.default = false;
+                }
+                self.default_model = None;
+                Ok(())
+            }
+        }
+    }
+
     pub fn resolve_model_id(&self, requested: Option<&str>) -> Result<&str, EngineRegistryError> {
         if let Some(requested) = requested.filter(|value| !value.is_empty()) {
             let Some(model) = self.model(requested) else {
@@ -270,6 +364,14 @@ impl EngineRegistry {
             .collect()
     }
 
+    pub fn servable_models_owned(&self) -> Vec<EngineModelManifest> {
+        self.models
+            .iter()
+            .filter(|model| model.load_policy != EngineLoadPolicy::Disabled)
+            .cloned()
+            .collect()
+    }
+
     pub fn model(&self, id: &str) -> Option<&EngineModelManifest> {
         self.index.get(id).map(|idx| &self.models[*idx])
     }
@@ -301,6 +403,7 @@ pub struct EngineModelConfig {
     pub default: bool,
     pub scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     pub mtp: Option<EngineMtpSettings>,
+    pub sampling_defaults: SamplingDefaults,
 }
 
 impl EngineModelConfig {
@@ -339,24 +442,29 @@ impl EnginePoolConfig {
 
     fn validate_enabled_model_architectures(&self) -> Result<()> {
         for model in &self.models {
-            if model.load_policy == EngineLoadPolicy::Disabled {
-                continue;
-            }
-            let config_path = model.path.join("config.json");
-            let raw = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("reading {}", config_path.display()))?;
-            let config: serde_json::Value = serde_json::from_str(&raw)
-                .with_context(|| format!("parsing {}", config_path.display()))?;
-            ModelArchitecture::from_config_value(&config).with_context(|| {
-                format!(
-                    "engine model `{}` has unsupported architecture in {}",
-                    model.id,
-                    config_path.display()
-                )
-            })?;
+            validate_engine_model_config(model)?;
         }
         Ok(())
     }
+}
+
+fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
+    if model.load_policy == EngineLoadPolicy::Disabled {
+        return Ok(());
+    }
+    let config_path = model.path.join("config.json");
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let config: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
+    ModelArchitecture::from_config_value(&config).with_context(|| {
+        format!(
+            "engine model `{}` has unsupported architecture in {}",
+            model.id,
+            config_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -375,6 +483,7 @@ pub struct EnginePoolRuntimeConfig {
     pub scheduler_autotune_report: bool,
     pub paged_prefix_cache: Option<EnginePagedPrefixCacheSettings>,
     pub prefix_lru_cache_max_bytes: Option<usize>,
+    pub model_ttl: Option<Duration>,
     pub active_kv_offload: ActiveKvOffloadConfig,
 }
 
@@ -426,15 +535,27 @@ pub struct EnginePoolState {
     inner: Arc<EnginePoolInner>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EngineLoadedModelInfo {
+    pub id: String,
+    pub path: String,
+    pub architecture: String,
+    pub is_default: bool,
+    pub max_position_embeddings: i32,
+}
+
 struct EnginePoolInner {
-    registry: EngineRegistry,
-    slots: HashMap<String, Arc<EngineSlot>>,
+    registry: Mutex<EngineRegistry>,
+    slots: Mutex<HashMap<String, Arc<EngineSlot>>>,
+    runtime: EnginePoolRuntimeConfig,
+    capacity_policy: EnginePoolCapacityPolicy,
     load_gate: Mutex<()>,
 }
 
 struct EngineSlot {
     model: EngineModelConfig,
     runtime: EnginePoolRuntimeConfig,
+    active_requests: Arc<AtomicUsize>,
     state: Mutex<EngineSlotState>,
     notify: Notify,
 }
@@ -457,6 +578,11 @@ enum EngineSlotState {
         load_attempts: u64,
         request_count: u64,
     },
+    Draining {
+        started_unix_ms: u64,
+        load_attempts: u64,
+        request_count: u64,
+    },
     Failed {
         last_error: String,
         failed_unix_ms: u64,
@@ -470,16 +596,18 @@ enum EngineUnloadReason {
     Startup,
     Evicted,
     Manual,
+    Ttl,
     CapacityRejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum EngineRuntimeState {
+pub(crate) enum EngineRuntimeState {
     Disabled,
     Unloaded,
     Loading,
     Loaded,
+    Draining,
     Failed,
     Missing,
 }
@@ -490,10 +618,45 @@ enum EngineLoadTrigger {
     Control,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnginePoolCapacityPolicy {
+    EvictLruIdle,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnginePoolCapacityDecision {
+    Continue,
+    Reject,
+    TryEvictLruIdle,
+}
+
+fn decide_engine_pool_capacity(
+    policy: EnginePoolCapacityPolicy,
+    max_loaded_models: usize,
+    loaded_count: usize,
+) -> EnginePoolCapacityDecision {
+    if loaded_count < max_loaded_models {
+        return EnginePoolCapacityDecision::Continue;
+    }
+    match policy {
+        EnginePoolCapacityPolicy::EvictLruIdle => EnginePoolCapacityDecision::TryEvictLruIdle,
+        EnginePoolCapacityPolicy::Reject => EnginePoolCapacityDecision::Reject,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EvictionCandidate {
     id: String,
     last_used_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelTtlCandidate {
+    id: String,
+    state: EngineRuntimeState,
+    active_requests: usize,
+    last_used_unix_ms: Option<u64>,
 }
 
 fn select_lru_eviction_candidate(mut candidates: Vec<EvictionCandidate>) -> Option<String> {
@@ -503,6 +666,31 @@ fn select_lru_eviction_candidate(mut candidates: Vec<EvictionCandidate>) -> Opti
             .then_with(|| left.id.cmp(&right.id))
     });
     candidates.into_iter().next().map(|candidate| candidate.id)
+}
+
+fn select_model_ttl_unload_candidates(
+    mut candidates: Vec<ModelTtlCandidate>,
+    now_unix_ms: u64,
+    ttl: Duration,
+) -> Vec<String> {
+    let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+    candidates.sort_by(|left, right| left.id.cmp(&right.id));
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.state == EngineRuntimeState::Loaded
+                && candidate.active_requests == 0
+                && candidate
+                    .last_used_unix_ms
+                    .is_some_and(|last_used| now_unix_ms.saturating_sub(last_used) >= ttl_ms)
+        })
+        .map(|candidate| candidate.id)
+        .collect()
+}
+
+fn model_ttl_sweep_interval(ttl: Duration) -> Duration {
+    let seconds = ttl.as_secs().saturating_div(4).clamp(5, 60);
+    Duration::from_secs(seconds)
 }
 
 fn unix_time_ms() -> u64 {
@@ -519,6 +707,7 @@ impl EngineSlotState {
             Self::Unloaded { load_attempts, .. }
             | Self::Loading { load_attempts, .. }
             | Self::Loaded { load_attempts, .. }
+            | Self::Draining { load_attempts, .. }
             | Self::Failed { load_attempts, .. } => *load_attempts,
         }
     }
@@ -575,6 +764,22 @@ impl EngineSlotState {
                 load_attempts: *load_attempts,
                 request_count: *request_count,
             },
+            Self::Draining {
+                started_unix_ms,
+                load_attempts,
+                request_count,
+            } => EngineSlotRuntimeSnapshot {
+                state: EngineRuntimeState::Draining,
+                unload_reason: Some(EngineUnloadReason::Manual),
+                last_error: None,
+                changed_unix_ms: Some(*started_unix_ms),
+                load_started_unix_ms: None,
+                loaded_unix_ms: None,
+                last_used_unix_ms: None,
+                failed_unix_ms: None,
+                load_attempts: *load_attempts,
+                request_count: *request_count,
+            },
             Self::Failed {
                 last_error,
                 failed_unix_ms,
@@ -621,6 +826,42 @@ enum EngineVariant {
     DiffusionGemma(diffusion_gemma::DiffusionGemmaAppState),
 }
 
+struct EngineLease {
+    engine: Arc<EngineVariant>,
+    active_requests: Option<Arc<AtomicUsize>>,
+}
+
+impl std::fmt::Debug for EngineLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineLease").finish_non_exhaustive()
+    }
+}
+
+impl EngineLease {
+    fn new(engine: Arc<EngineVariant>, active_requests: Option<Arc<AtomicUsize>>) -> Self {
+        Self {
+            engine,
+            active_requests,
+        }
+    }
+
+    async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
+        self.engine.openai_chat_completions(req).await
+    }
+
+    async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
+        self.engine.anthropic_messages(req).await
+    }
+}
+
+impl Drop for EngineLease {
+    fn drop(&mut self) {
+        if let Some(active_requests) = &self.active_requests {
+            active_requests.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
 impl EnginePoolState {
     pub async fn new(config: EnginePoolConfig, runtime: EnginePoolRuntimeConfig) -> Result<Self> {
         let registry = EngineRegistry::new(config.registry_manifest())?;
@@ -630,6 +871,7 @@ impl EnginePoolState {
             let slot = Arc::new(EngineSlot {
                 model: model.clone(),
                 runtime: runtime.clone(),
+                active_requests: Arc::new(AtomicUsize::new(0)),
                 state: Mutex::new(EngineSlotState::Unloaded {
                     reason: EngineUnloadReason::Startup,
                     last_error: None,
@@ -642,8 +884,10 @@ impl EnginePoolState {
         }
         let state = Self {
             inner: Arc::new(EnginePoolInner {
-                registry,
-                slots,
+                registry: Mutex::new(registry),
+                slots: Mutex::new(slots),
+                runtime,
+                capacity_policy: EnginePoolCapacityPolicy::EvictLruIdle,
                 load_gate: Mutex::new(()),
             }),
         };
@@ -651,16 +895,82 @@ impl EnginePoolState {
         Ok(state)
     }
 
+    pub fn new_dynamic(
+        runtime: EnginePoolRuntimeConfig,
+        max_loaded_models: Option<usize>,
+    ) -> Result<Self> {
+        let registry = EngineRegistry::empty(max_loaded_models)?;
+        Ok(Self {
+            inner: Arc::new(EnginePoolInner {
+                registry: Mutex::new(registry),
+                slots: Mutex::new(HashMap::new()),
+                runtime,
+                capacity_policy: EnginePoolCapacityPolicy::Reject,
+                load_gate: Mutex::new(()),
+            }),
+        })
+    }
+
+    pub(crate) fn start_model_ttl_sweeper(&self) {
+        let Some(ttl) = self.inner.runtime.model_ttl else {
+            return;
+        };
+        let pool = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(model_ttl_sweep_interval(ttl));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let unloaded = pool.unload_expired_model_ttl_once(unix_time_ms()).await;
+                if !unloaded.is_empty() {
+                    tracing::info!(
+                        "ironmlx EnginePool TTL unloaded idle models count={} ids={}",
+                        unloaded.len(),
+                        unloaded.join(",")
+                    );
+                }
+            }
+        });
+    }
+
+    pub(crate) async fn unload_expired_model_ttl_once(&self, now_unix_ms: u64) -> Vec<String> {
+        let Some(ttl) = self.inner.runtime.model_ttl else {
+            return Vec::new();
+        };
+        let slots_snapshot = self.inner.slots.lock().await.clone();
+        let mut candidates = Vec::with_capacity(slots_snapshot.len());
+        for (id, slot) in &slots_snapshot {
+            if slot.model.load_policy == EngineLoadPolicy::Preload {
+                continue;
+            }
+            candidates.push(slot.model_ttl_candidate(id).await);
+        }
+        let ids = select_model_ttl_unload_candidates(candidates, now_unix_ms, ttl);
+        let mut unloaded = Vec::new();
+        for id in ids {
+            let Some(slot) = slots_snapshot.get(&id) else {
+                continue;
+            };
+            if slot.unload_if_ttl_expired(now_unix_ms, ttl).await {
+                unloaded.push(id);
+            }
+        }
+        unloaded
+    }
+
     async fn preload(&self) -> Result<()> {
-        for model in self.inner.registry.models() {
+        let models = self.inner.registry.lock().await.models().to_vec();
+        for model in models {
             if model.load_policy != EngineLoadPolicy::Preload {
                 continue;
             }
-            let slot = self
-                .inner
-                .slots
-                .get(&model.id)
-                .with_context(|| format!("missing engine slot `{}`", model.id))?;
+            let slot = {
+                let slots = self.inner.slots.lock().await;
+                slots
+                    .get(&model.id)
+                    .cloned()
+                    .with_context(|| format!("missing engine slot `{}`", model.id))?
+            };
             slot.ensure_loaded(&self.inner, EngineLoadTrigger::Control)
                 .await
                 .with_context(|| {
@@ -674,13 +984,21 @@ impl EnginePoolState {
         Ok(())
     }
 
-    async fn resolve_engine(&self, requested: Option<&str>) -> Result<(&str, Arc<EngineVariant>)> {
-        let model_id = self.inner.registry.resolve_model_id(requested)?;
-        let slot = self
+    async fn resolve_engine(&self, requested: Option<&str>) -> Result<(String, EngineLease)> {
+        let model_id = self
             .inner
-            .slots
-            .get(model_id)
-            .with_context(|| format!("missing engine slot `{model_id}`"))?;
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(requested)?
+            .to_string();
+        let slot = {
+            let slots = self.inner.slots.lock().await;
+            slots
+                .get(&model_id)
+                .cloned()
+                .with_context(|| format!("missing engine slot `{model_id}`"))?
+        };
         let engine = slot
             .ensure_loaded(&self.inner, EngineLoadTrigger::Request)
             .await
@@ -688,13 +1006,45 @@ impl EnginePoolState {
         Ok((model_id, engine))
     }
 
-    async fn load_model(&self, requested: &str) -> Result<EngineModelControlResult> {
-        let model_id = self.inner.registry.resolve_model_id(Some(requested))?;
-        let slot = self
+    pub(crate) async fn app_openai_chat_completions(
+        &self,
+        mut req: openai::ChatRequest,
+    ) -> Result<Response> {
+        let requested = req.model.as_deref().filter(|model| !model.is_empty());
+        let (model_id, engine) = self.resolve_engine(requested).await?;
+        if req.model.is_none() {
+            req.model = Some(model_id);
+        }
+        Ok(engine.openai_chat_completions(req).await)
+    }
+
+    pub(crate) async fn app_anthropic_messages(
+        &self,
+        mut req: anthropic::MessagesRequest,
+    ) -> Result<Response> {
+        let requested = req.model.as_deref().filter(|model| !model.is_empty());
+        let (model_id, engine) = self.resolve_engine(requested).await?;
+        if req.model.is_none() {
+            req.model = Some(model_id);
+        }
+        Ok(engine.anthropic_messages(req).await)
+    }
+
+    pub(crate) async fn load_model(&self, requested: &str) -> Result<EngineModelControlResult> {
+        let model_id = self
             .inner
-            .slots
-            .get(model_id)
-            .with_context(|| format!("missing engine slot `{model_id}`"))?;
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(requested))?
+            .to_string();
+        let slot = {
+            let slots = self.inner.slots.lock().await;
+            slots
+                .get(&model_id)
+                .cloned()
+                .with_context(|| format!("missing engine slot `{model_id}`"))?
+        };
         slot.ensure_loaded(&self.inner, EngineLoadTrigger::Control)
             .await
             .with_context(|| format!("loading engine model `{model_id}`"))?;
@@ -702,20 +1052,251 @@ impl EnginePoolState {
     }
 
     async fn unload_model(&self, requested: &str) -> Result<EngineModelControlResult> {
-        let model_id = self.inner.registry.resolve_model_id(Some(requested))?;
-        let slot = self
+        let model_id = self
             .inner
-            .slots
-            .get(model_id)
-            .with_context(|| format!("missing engine slot `{model_id}`"))?;
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(requested))?
+            .to_string();
+        let slot = {
+            let slots = self.inner.slots.lock().await;
+            slots
+                .get(&model_id)
+                .cloned()
+                .with_context(|| format!("missing engine slot `{model_id}`"))?
+        };
         slot.unload().await?;
         Ok(slot.control_result().await)
     }
 
+    pub(crate) async fn reload_dynamic_model(
+        &self,
+        model: EngineModelConfig,
+        set_default: bool,
+    ) -> Result<EngineModelControlResult> {
+        validate_engine_model_config(&model)?;
+        let model_id = model.id.clone();
+        let new_slot = Arc::new(EngineSlot {
+            model: model.clone(),
+            runtime: self.inner.runtime.clone(),
+            active_requests: Arc::new(AtomicUsize::new(0)),
+            state: Mutex::new(EngineSlotState::Unloaded {
+                reason: EngineUnloadReason::Startup,
+                last_error: None,
+                changed_unix_ms: unix_time_ms(),
+                load_attempts: 0,
+            }),
+            notify: Notify::new(),
+        });
+
+        let old_slot = self.inner.slots.lock().await.remove(&model_id);
+        let previous_default = self
+            .inner
+            .registry
+            .lock()
+            .await
+            .default_model()
+            .map(str::to_string);
+        let was_previous_default = previous_default.as_deref() == Some(model_id.as_str());
+        {
+            let mut registry = self.inner.registry.lock().await;
+            registry.remove_model(&model_id);
+            registry.upsert_model(model.manifest_view(), set_default || was_previous_default)?;
+        }
+        self.inner
+            .slots
+            .lock()
+            .await
+            .insert(model_id.clone(), new_slot.clone());
+
+        match new_slot
+            .ensure_loaded(&self.inner, EngineLoadTrigger::Control)
+            .await
+        {
+            Ok(_) => Ok(new_slot.control_result().await),
+            Err(error) => {
+                self.inner.slots.lock().await.remove(&model_id);
+                {
+                    let mut registry = self.inner.registry.lock().await;
+                    registry.remove_model(&model_id);
+                    if let Some(old_slot) = old_slot.as_ref() {
+                        registry
+                            .upsert_model(old_slot.model.manifest_view(), was_previous_default)?;
+                    }
+                    registry.restore_default_model(previous_default)?;
+                }
+                if let Some(old_slot) = old_slot {
+                    self.inner.slots.lock().await.insert(model_id, old_slot);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn register_dynamic_model(
+        &self,
+        model: EngineModelConfig,
+        set_default: bool,
+    ) -> Result<EngineModelControlResult> {
+        validate_engine_model_config(&model)?;
+        let model_id = model.id.clone();
+        let previous_default = self
+            .inner
+            .registry
+            .lock()
+            .await
+            .default_model()
+            .map(str::to_string);
+        let existing_slot = self.inner.slots.lock().await.get(&model_id).cloned();
+        let slot = match existing_slot {
+            Some(existing) if existing.is_loaded_or_loading().await => existing,
+            _ => {
+                let slot = Arc::new(EngineSlot {
+                    model: model.clone(),
+                    runtime: self.inner.runtime.clone(),
+                    active_requests: Arc::new(AtomicUsize::new(0)),
+                    state: Mutex::new(EngineSlotState::Unloaded {
+                        reason: EngineUnloadReason::Startup,
+                        last_error: None,
+                        changed_unix_ms: unix_time_ms(),
+                        load_attempts: 0,
+                    }),
+                    notify: Notify::new(),
+                });
+                self.inner
+                    .slots
+                    .lock()
+                    .await
+                    .insert(model_id.clone(), slot.clone());
+                slot
+            }
+        };
+        {
+            let mut registry = self.inner.registry.lock().await;
+            registry.upsert_model(model.manifest_view(), set_default)?;
+            if previous_default.is_none() && !set_default {
+                registry.restore_default_model(None)?;
+            }
+        }
+        Ok(slot.control_result().await)
+    }
+
+    pub(crate) async fn unload_dynamic_model(
+        &self,
+        requested: &str,
+    ) -> Result<EngineModelControlResult> {
+        let model_id = self
+            .inner
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(requested))?
+            .to_string();
+        let slot = {
+            let slots = self.inner.slots.lock().await;
+            slots
+                .get(&model_id)
+                .cloned()
+                .with_context(|| format!("missing engine slot `{model_id}`"))?
+        };
+        slot.unload().await?;
+        Ok(slot.control_result().await)
+    }
+
+    pub(crate) async fn set_default_model(&self, requested: &str) -> Result<()> {
+        self.inner
+            .registry
+            .lock()
+            .await
+            .set_default_model(requested)?;
+        Ok(())
+    }
+
+    pub(crate) async fn is_model_registered(&self, id: &str) -> bool {
+        self.inner.registry.lock().await.model(id).is_some()
+    }
+
+    pub(crate) async fn is_model_loaded(&self, id: &str) -> bool {
+        let slot = self.inner.slots.lock().await.get(id).cloned();
+        match slot {
+            Some(slot) => matches!(&*slot.state.lock().await, EngineSlotState::Loaded { .. }),
+            None => false,
+        }
+    }
+
+    pub(crate) async fn pending_requests(&self, id: &str) -> Option<usize> {
+        let slot = self.inner.slots.lock().await.get(id).cloned();
+        match slot {
+            Some(slot) => slot.pending_requests().await,
+            None => None,
+        }
+    }
+
+    pub(crate) async fn loaded_model_infos(&self) -> Vec<EngineLoadedModelInfo> {
+        let default_model = self
+            .inner
+            .registry
+            .lock()
+            .await
+            .default_model()
+            .map(str::to_string);
+        let slots = self.inner.slots.lock().await.clone();
+        let mut models = Vec::new();
+        for (id, slot) in slots {
+            let loaded = {
+                let state = slot.state.lock().await;
+                match &*state {
+                    EngineSlotState::Loaded { engine, .. } => Some(engine.clone()),
+                    _ => None,
+                }
+            };
+            let Some(engine) = loaded else {
+                continue;
+            };
+            let health = engine.loaded_health();
+            models.push(EngineLoadedModelInfo {
+                id: id.clone(),
+                path: slot.model.path.to_string_lossy().into_owned(),
+                architecture: engine.architecture().to_string(),
+                is_default: default_model.as_deref() == Some(id.as_str()),
+                max_position_embeddings: health.max_position_embeddings(),
+            });
+        }
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
+
+    pub(crate) async fn loaded_causal_health_snapshots(&self) -> Vec<health::HealthSnapshot> {
+        let slots = self.inner.slots.lock().await.clone();
+        let mut snapshots = Vec::new();
+        for slot in slots.values() {
+            let loaded = {
+                let state = slot.state.lock().await;
+                match &*state {
+                    EngineSlotState::Loaded { engine, .. } => Some(engine.clone()),
+                    _ => None,
+                }
+            };
+            let Some(engine) = loaded else {
+                continue;
+            };
+            if let LoadedEngineHealth::Causal(snapshot) = engine.loaded_health() {
+                snapshots.push(*snapshot);
+            }
+        }
+        snapshots
+    }
+
     async fn model_list(&self) -> OpenAiModelList {
         let mut data = Vec::new();
-        for model in self.inner.registry.servable_models() {
-            let snapshot = match self.inner.slots.get(&model.id) {
+        let models = self.inner.registry.lock().await.servable_models_owned();
+        for model in models {
+            let slot = {
+                let slots = self.inner.slots.lock().await;
+                slots.get(&model.id).cloned()
+            };
+            let snapshot = match slot {
                 Some(slot) => slot.runtime_snapshot().await,
                 None => EngineSlotRuntimeSnapshot {
                     state: EngineRuntimeState::Missing,
@@ -756,8 +1337,17 @@ impl EnginePoolState {
 
     async fn health_snapshot(&self) -> EnginePoolHealth {
         let mut models = Vec::new();
-        for model in self.inner.registry.models() {
-            let Some(slot) = self.inner.slots.get(&model.id) else {
+        let registry = self.inner.registry.lock().await;
+        let default_model = registry.default_model().map(str::to_string);
+        let max_loaded_models = registry.max_loaded_models();
+        let registry_models = registry.models().to_vec();
+        drop(registry);
+        for model in registry_models {
+            let slot = {
+                let slots = self.inner.slots.lock().await;
+                slots.get(&model.id).cloned()
+            };
+            let Some(slot) = slot else {
                 models.push(EngineModelHealth {
                     id: model.id.clone(),
                     load_policy: model.load_policy,
@@ -792,8 +1382,8 @@ impl EnginePoolState {
         EnginePoolHealth {
             status,
             mode: "engine_pool",
-            default_model: self.inner.registry.default_model().map(str::to_string),
-            max_loaded_models: self.inner.registry.max_loaded_models(),
+            default_model,
+            max_loaded_models,
             loaded_models,
             models,
             version: env!("CARGO_PKG_VERSION"),
@@ -803,12 +1393,18 @@ impl EnginePoolState {
 
 impl EnginePoolInner {
     async fn ensure_capacity_for(&self, target_id: &str) -> Result<()> {
-        let Some(max_loaded_models) = self.registry.max_loaded_models() else {
+        let Some(max_loaded_models) = self.registry.lock().await.max_loaded_models() else {
             return Ok(());
         };
         let loaded_count = self.loaded_count().await;
-        if loaded_count < max_loaded_models {
-            return Ok(());
+        match decide_engine_pool_capacity(self.capacity_policy, max_loaded_models, loaded_count) {
+            EnginePoolCapacityDecision::Continue => return Ok(()),
+            EnginePoolCapacityDecision::Reject => {
+                bail!(
+                    "engine pool capacity reached: max_loaded_models={max_loaded_models}, unload an existing model before loading `{target_id}`"
+                );
+            }
+            EnginePoolCapacityDecision::TryEvictLruIdle => {}
         }
         if self.evict_lru_idle_engine(target_id).await? {
             return Ok(());
@@ -820,8 +1416,12 @@ impl EnginePoolInner {
 
     async fn loaded_count(&self) -> usize {
         let mut loaded = 0;
-        for slot in self.slots.values() {
-            if matches!(&*slot.state.lock().await, EngineSlotState::Loaded { .. }) {
+        let slots = self.slots.lock().await;
+        for slot in slots.values() {
+            if matches!(
+                &*slot.state.lock().await,
+                EngineSlotState::Loaded { .. } | EngineSlotState::Draining { .. }
+            ) {
                 loaded += 1;
             }
         }
@@ -830,7 +1430,8 @@ impl EnginePoolInner {
 
     async fn evict_lru_idle_engine(&self, target_id: &str) -> Result<bool> {
         let mut candidates = Vec::new();
-        for (id, slot) in &self.slots {
+        let slots_snapshot = self.slots.lock().await.clone();
+        for (id, slot) in &slots_snapshot {
             if id == target_id || slot.model.load_policy == EngineLoadPolicy::Preload {
                 continue;
             }
@@ -843,7 +1444,7 @@ impl EnginePoolInner {
             else {
                 continue;
             };
-            if Arc::strong_count(engine) == 1 {
+            if slot.active_requests.load(Ordering::SeqCst) == 0 && Arc::strong_count(engine) == 1 {
                 candidates.push(EvictionCandidate {
                     id: id.clone(),
                     last_used_unix_ms: *last_used_unix_ms,
@@ -854,7 +1455,7 @@ impl EnginePoolInner {
         let Some(evict_id) = select_lru_eviction_candidate(candidates) else {
             return Ok(false);
         };
-        let Some(slot) = self.slots.get(&evict_id) else {
+        let Some(slot) = self.slots.lock().await.get(&evict_id).cloned() else {
             return Ok(false);
         };
         let mut guard = slot.state.lock().await;
@@ -862,7 +1463,7 @@ impl EnginePoolInner {
         let EngineSlotState::Loaded { engine, .. } = &*guard else {
             return Ok(false);
         };
-        if Arc::strong_count(engine) != 1 {
+        if slot.active_requests.load(Ordering::SeqCst) != 0 || Arc::strong_count(engine) != 1 {
             return Ok(false);
         }
         *guard = EngineSlotState::Unloaded {
@@ -882,11 +1483,20 @@ impl EnginePoolInner {
 }
 
 impl EngineSlot {
+    async fn is_loaded_or_loading(&self) -> bool {
+        matches!(
+            &*self.state.lock().await,
+            EngineSlotState::Loaded { .. }
+                | EngineSlotState::Loading { .. }
+                | EngineSlotState::Draining { .. }
+        )
+    }
+
     async fn ensure_loaded(
         &self,
         pool: &EnginePoolInner,
         trigger: EngineLoadTrigger,
-    ) -> Result<Arc<EngineVariant>> {
+    ) -> Result<EngineLease> {
         if self.model.load_policy == EngineLoadPolicy::Disabled {
             bail!("engine model `{}` is disabled", self.model.id);
         }
@@ -901,13 +1511,31 @@ impl EngineSlot {
                         request_count,
                         ..
                     } => {
-                        if trigger == EngineLoadTrigger::Request {
+                        let active_requests = if trigger == EngineLoadTrigger::Request {
                             *last_used_unix_ms = unix_time_ms();
                             *request_count = request_count.saturating_add(1);
-                        }
-                        return Ok(engine.clone());
+                            self.active_requests.fetch_add(1, Ordering::SeqCst);
+                            Some(self.active_requests.clone())
+                        } else {
+                            None
+                        };
+                        return Ok(EngineLease::new(engine.clone(), active_requests));
                     }
                     EngineSlotState::Loading { .. } => Some(self.notify.notified()),
+                    EngineSlotState::Draining { .. } => {
+                        if self.active_requests.load(Ordering::SeqCst) == 0 {
+                            let load_attempts = state.load_attempts();
+                            *state = EngineSlotState::Unloaded {
+                                reason: EngineUnloadReason::Manual,
+                                last_error: None,
+                                changed_unix_ms: unix_time_ms(),
+                                load_attempts,
+                            };
+                            None
+                        } else {
+                            bail!("engine model `{}` is currently unloading", self.model.id);
+                        }
+                    }
                     EngineSlotState::Failed { last_error, .. }
                         if trigger == EngineLoadTrigger::Request =>
                     {
@@ -934,14 +1562,31 @@ impl EngineSlot {
                         request_count,
                         ..
                     } => {
-                        if trigger == EngineLoadTrigger::Request {
+                        let active_requests = if trigger == EngineLoadTrigger::Request {
                             *last_used_unix_ms = unix_time_ms();
                             *request_count = request_count.saturating_add(1);
-                        }
-                        return Ok(engine.clone());
+                            self.active_requests.fetch_add(1, Ordering::SeqCst);
+                            Some(self.active_requests.clone())
+                        } else {
+                            None
+                        };
+                        return Ok(EngineLease::new(engine.clone(), active_requests));
                     }
                     EngineSlotState::Loading { .. } => {
                         continue;
+                    }
+                    EngineSlotState::Draining { .. } => {
+                        if self.active_requests.load(Ordering::SeqCst) == 0 {
+                            let load_attempts = state.load_attempts();
+                            *state = EngineSlotState::Unloaded {
+                                reason: EngineUnloadReason::Manual,
+                                last_error: None,
+                                changed_unix_ms: unix_time_ms(),
+                                load_attempts,
+                            };
+                        } else {
+                            bail!("engine model `{}` is currently unloading", self.model.id);
+                        }
                     }
                     EngineSlotState::Failed { last_error, .. }
                         if trigger == EngineLoadTrigger::Request =>
@@ -985,6 +1630,12 @@ impl EngineSlot {
                     let engine = Arc::new(engine);
                     let now = unix_time_ms();
                     let mut state = self.state.lock().await;
+                    let active_requests = if trigger == EngineLoadTrigger::Request {
+                        self.active_requests.fetch_add(1, Ordering::SeqCst);
+                        Some(self.active_requests.clone())
+                    } else {
+                        None
+                    };
                     *state = EngineSlotState::Loaded {
                         engine: engine.clone(),
                         loaded_unix_ms: now,
@@ -997,7 +1648,7 @@ impl EngineSlot {
                         },
                     };
                     self.notify.notify_waiters();
-                    return Ok(engine);
+                    return Ok(EngineLease::new(engine, active_requests));
                 }
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -1014,7 +1665,47 @@ impl EngineSlot {
         }
     }
 
-    async fn unload(&self) -> Result<()> {
+    async fn model_ttl_candidate(&self, id: &str) -> ModelTtlCandidate {
+        let snapshot = self.runtime_snapshot().await;
+        ModelTtlCandidate {
+            id: id.to_string(),
+            state: snapshot.state,
+            active_requests: self.active_requests.load(Ordering::SeqCst),
+            last_used_unix_ms: snapshot.last_used_unix_ms,
+        }
+    }
+
+    async fn unload_if_ttl_expired(&self, now_unix_ms: u64, ttl: Duration) -> bool {
+        if self.model.load_policy == EngineLoadPolicy::Preload
+            || self.active_requests.load(Ordering::SeqCst) > 0
+        {
+            return false;
+        }
+        let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+        let mut state = self.state.lock().await;
+        let load_attempts = state.load_attempts();
+        let EngineSlotState::Loaded {
+            last_used_unix_ms, ..
+        } = &*state
+        else {
+            return false;
+        };
+        if now_unix_ms.saturating_sub(*last_used_unix_ms) < ttl_ms
+            || self.active_requests.load(Ordering::SeqCst) > 0
+        {
+            return false;
+        }
+        *state = EngineSlotState::Unloaded {
+            reason: EngineUnloadReason::Ttl,
+            last_error: None,
+            changed_unix_ms: now_unix_ms,
+            load_attempts,
+        };
+        self.notify.notify_waiters();
+        true
+    }
+
+    async fn unload(self: &Arc<Self>) -> Result<()> {
         if self.model.load_policy == EngineLoadPolicy::Preload {
             bail!(
                 "engine model `{}` uses preload policy and cannot be unloaded",
@@ -1028,13 +1719,26 @@ impl EngineSlot {
         let mut state = self.state.lock().await;
         let load_attempts = state.load_attempts();
         match &*state {
-            EngineSlotState::Loaded { engine, .. } => {
-                if Arc::strong_count(engine) != 1 {
-                    bail!("engine model `{}` is currently in use", self.model.id);
+            EngineSlotState::Loaded { request_count, .. } => {
+                if self.active_requests.load(Ordering::SeqCst) > 0 {
+                    *state = EngineSlotState::Draining {
+                        started_unix_ms: unix_time_ms(),
+                        load_attempts,
+                        request_count: *request_count,
+                    };
+                    self.notify.notify_waiters();
+                    self.schedule_finish_draining();
+                    return Ok(());
                 }
             }
             EngineSlotState::Loading { .. } => {
                 bail!("engine model `{}` is currently loading", self.model.id);
+            }
+            EngineSlotState::Draining { .. } => {
+                if self.active_requests.load(Ordering::SeqCst) > 0 {
+                    self.schedule_finish_draining();
+                    return Ok(());
+                }
             }
             EngineSlotState::Unloaded { .. } | EngineSlotState::Failed { .. } => {}
         }
@@ -1046,6 +1750,29 @@ impl EngineSlot {
         };
         self.notify.notify_waiters();
         Ok(())
+    }
+
+    fn schedule_finish_draining(self: &Arc<Self>) {
+        let slot = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                if slot.active_requests.load(Ordering::SeqCst) == 0 {
+                    let mut state = slot.state.lock().await;
+                    if matches!(&*state, EngineSlotState::Draining { .. }) {
+                        let load_attempts = state.load_attempts();
+                        *state = EngineSlotState::Unloaded {
+                            reason: EngineUnloadReason::Manual,
+                            last_error: None,
+                            changed_unix_ms: unix_time_ms(),
+                            load_attempts,
+                        };
+                        slot.notify.notify_waiters();
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
     }
 
     async fn runtime_snapshot(&self) -> EngineSlotRuntimeSnapshot {
@@ -1064,6 +1791,17 @@ impl EngineSlot {
             };
         }
         self.state.lock().await.runtime_snapshot()
+    }
+
+    async fn pending_requests(&self) -> Option<usize> {
+        let engine = {
+            let state = self.state.lock().await;
+            match &*state {
+                EngineSlotState::Loaded { engine, .. } => Some(engine.clone()),
+                _ => None,
+            }
+        };
+        engine.map(|engine| engine.pending_requests())
     }
 
     async fn control_result(&self) -> EngineModelControlResult {
@@ -1180,6 +1918,48 @@ impl EngineVariant {
             }
         }
     }
+
+    fn architecture(&self) -> &'static str {
+        match self {
+            Self::Qwen35(_) => "qwen3_5",
+            Self::Qwen35Moe(_) => "qwen3_5_moe",
+            Self::Qwen36Moe(_) => "qwen3_6_moe",
+            Self::Gemma4(_) => "gemma4",
+            Self::Glm4MoeLite(_) => "glm4_moe_lite",
+            Self::Llama(_) => "llama",
+            Self::MiniCpmV46(_) => "minicpmv4_6",
+            Self::DiffusionGemma(_) => "diffusion_gemma",
+        }
+    }
+
+    fn pending_requests(&self) -> usize {
+        match self {
+            Self::Qwen35(state) => causal_pending_requests(state),
+            Self::Qwen35Moe(state) => causal_pending_requests(state),
+            Self::Qwen36Moe(state) => causal_pending_requests(state),
+            Self::Gemma4(state) => causal_pending_requests(state),
+            Self::Glm4MoeLite(state) => causal_pending_requests(state),
+            Self::Llama(state) => causal_pending_requests(state),
+            Self::MiniCpmV46(state) => causal_pending_requests(state),
+            Self::DiffusionGemma(state) => {
+                let stats = state.lane.stats();
+                stats.active_requests.saturating_add(stats.queued_requests)
+            }
+        }
+    }
+}
+
+fn causal_pending_requests<M>(state: &AppState<M>) -> usize
+where
+    M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
+{
+    let snapshot = state.health_collector.snapshot();
+    let model_locked = usize::from(state.model.try_lock().is_err());
+    snapshot
+        .scheduler
+        .b_active
+        .saturating_add(snapshot.scheduler.b_queued)
+        .saturating_add(model_locked)
 }
 
 #[derive(Debug)]
@@ -1517,7 +2297,7 @@ where
     M: Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
 {
     let profile = model.scheduler_runtime_profile.clone();
-    super::build_plain_app_state(
+    let state = super::build_plain_app_state(
         model_impl,
         tokenizer,
         model.id.clone(),
@@ -1535,7 +2315,8 @@ where
         prefix_lru_cache,
         runtime.active_kv_offload.clone(),
     )
-    .await
+    .await?;
+    Ok(state.with_sampling_defaults(model.sampling_defaults))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1559,7 +2340,7 @@ where
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
     let profile = model.scheduler_runtime_profile.clone();
-    super::build_mtp_app_state(
+    let state = super::build_mtp_app_state(
         model_impl,
         mtp,
         mtp_config.draft_tokens,
@@ -1579,7 +2360,8 @@ where
         prefix_lru_cache,
         runtime.active_kv_offload.clone(),
     )
-    .await
+    .await?;
+    Ok(state.with_sampling_defaults(model.sampling_defaults))
 }
 
 pub async fn serve_engine_pool(
@@ -1589,6 +2371,7 @@ pub async fn serve_engine_pool(
     let host = runtime.host.clone();
     let port = runtime.port;
     let state = EnginePoolState::new(config, runtime).await?;
+    state.start_model_ttl_sweeper();
     let app = engine_pool_router().with_state(state);
 
     let addr: SocketAddr = format!("{host}:{port}")
@@ -1739,10 +2522,10 @@ struct OpenAiModelInfo {
 }
 
 #[derive(Debug, Serialize)]
-struct EngineModelControlResult {
-    id: String,
+pub(crate) struct EngineModelControlResult {
+    pub(crate) id: String,
     load_policy: EngineLoadPolicy,
-    state: EngineRuntimeState,
+    pub(crate) state: EngineRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     unload_reason: Option<EngineUnloadReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1797,21 +2580,34 @@ enum LoadedEngineHealth {
     },
 }
 
+impl LoadedEngineHealth {
+    fn max_position_embeddings(&self) -> i32 {
+        match self {
+            Self::Causal(snapshot) => snapshot.model.max_position_embeddings,
+            Self::DiffusionGemma { .. } => 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use crate::core::scheduler_autotune::{
         SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
         SchedulerAutotuneRuntimeProfileMetadata, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
     };
+    use crate::core::server::SamplingDefaults;
 
     use super::{
-        EngineLoadPolicy, EngineModelConfig, EngineModelManifest, EnginePoolConfig,
-        EnginePoolManifest, EnginePoolRuntimeConfig, EnginePoolState, EngineRegistry,
-        EngineRegistryError,
+        decide_engine_pool_capacity, unix_time_ms, EngineLoadPolicy, EngineLoadTrigger,
+        EngineModelConfig, EngineModelManifest, EnginePoolCapacityDecision,
+        EnginePoolCapacityPolicy, EnginePoolConfig, EnginePoolManifest, EnginePoolRuntimeConfig,
+        EnginePoolState, EngineRegistry, EngineRegistryError, EngineRuntimeState, EngineSlot,
+        EngineSlotState, ModelTtlCandidate,
     };
+    use tokio::sync::{Mutex, Notify};
 
     fn model(id: &str) -> EngineModelManifest {
         EngineModelManifest {
@@ -1855,6 +2651,7 @@ mod tests {
             scheduler_autotune_report: false,
             paged_prefix_cache: None,
             prefix_lru_cache_max_bytes: None,
+            model_ttl: None,
             active_kv_offload: crate::core::cache::ActiveKvOffloadConfig::disabled(),
         }
     }
@@ -1867,6 +2664,7 @@ mod tests {
             default: false,
             scheduler_runtime_profile: runtime_profile(),
             mtp: None,
+            sampling_defaults: SamplingDefaults::default(),
         }
     }
 
@@ -2050,6 +2848,183 @@ mod tests {
     }
 
     #[test]
+    fn registry_dynamic_upsert_does_not_replace_existing_default_without_explicit_request() {
+        let mut registry = EngineRegistry::empty(None).expect("registry");
+
+        registry.upsert_model(model("alpha"), false).expect("alpha");
+        registry.upsert_model(model("beta"), false).expect("beta");
+
+        assert_eq!(registry.default_model(), Some("alpha"));
+        assert!(registry.model("alpha").expect("alpha").default);
+        assert!(!registry.model("beta").expect("beta").default);
+    }
+
+    #[test]
+    fn registry_dynamic_upsert_preserves_current_default_when_replacing_same_model() {
+        let mut registry = EngineRegistry::empty(None).expect("registry");
+
+        registry.upsert_model(model("alpha"), false).expect("alpha");
+        registry
+            .upsert_model(model("alpha"), false)
+            .expect("replace alpha");
+
+        assert_eq!(registry.default_model(), Some("alpha"));
+        assert!(registry.model("alpha").expect("alpha").default);
+    }
+
+    #[test]
+    fn dynamic_engine_pool_rejects_capacity_instead_of_evicting_models() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+
+        assert_eq!(pool.inner.capacity_policy, EnginePoolCapacityPolicy::Reject);
+    }
+
+    #[test]
+    fn dynamic_engine_pool_capacity_decision_rejects_when_full() {
+        assert_eq!(
+            decide_engine_pool_capacity(EnginePoolCapacityPolicy::Reject, 3, 3),
+            EnginePoolCapacityDecision::Reject
+        );
+    }
+
+    #[test]
+    fn manifest_engine_pool_capacity_decision_keeps_lru_eviction_when_full() {
+        assert_eq!(
+            decide_engine_pool_capacity(EnginePoolCapacityPolicy::EvictLruIdle, 3, 3),
+            EnginePoolCapacityDecision::TryEvictLruIdle
+        );
+    }
+
+    #[test]
+    fn engine_pool_capacity_decision_continues_when_below_capacity() {
+        assert_eq!(
+            decide_engine_pool_capacity(EnginePoolCapacityPolicy::Reject, 3, 2),
+            EnginePoolCapacityDecision::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_register_adds_lazy_unloaded_model_without_loading() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+        let model_dir = write_minimal_model_config("qwen3_5");
+        let config = model_config("alpha", &model_dir, EngineLoadPolicy::Lazy);
+
+        let result = pool
+            .register_dynamic_model(config, false)
+            .await
+            .expect("register dynamic model");
+
+        assert_eq!(result.id, "alpha");
+        assert_eq!(result.state, EngineRuntimeState::Unloaded);
+        assert_eq!(result.load_attempts, 0);
+        assert!(pool.loaded_model_infos().await.is_empty());
+        assert_eq!(pool.inner.registry.lock().await.default_model(), None);
+        assert!(
+            !pool
+                .inner
+                .registry
+                .lock()
+                .await
+                .model("alpha")
+                .expect("registered model")
+                .default
+        );
+
+        let list = pool.model_list().await;
+        assert_eq!(list.data.len(), 1);
+        assert_eq!(list.data[0].id, "alpha");
+        assert_eq!(list.data[0].state, EngineRuntimeState::Unloaded);
+    }
+
+    #[tokio::test]
+    async fn dynamic_unload_keeps_model_registered_for_lazy_reload() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+        let model_dir = write_minimal_model_config("qwen3_5");
+        let config = model_config("alpha", &model_dir, EngineLoadPolicy::Lazy);
+        pool.register_dynamic_model(config, true)
+            .await
+            .expect("register dynamic model");
+
+        let result = pool
+            .unload_dynamic_model("alpha")
+            .await
+            .expect("unload dynamic model");
+
+        assert_eq!(result.id, "alpha");
+        assert_eq!(result.state, EngineRuntimeState::Unloaded);
+        assert_eq!(
+            pool.inner
+                .registry
+                .lock()
+                .await
+                .resolve_model_id(Some("alpha"))
+                .expect("registered model"),
+            "alpha"
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_model_rejects_new_request_until_unload_finishes() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+        let model_dir = write_minimal_model_config("qwen3_5");
+        let slot = EngineSlot {
+            model: model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
+            runtime: runtime_config(),
+            active_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+            state: Mutex::new(EngineSlotState::Draining {
+                started_unix_ms: unix_time_ms(),
+                load_attempts: 1,
+                request_count: 1,
+            }),
+            notify: Notify::new(),
+        };
+
+        let error = slot
+            .ensure_loaded(&pool.inner, EngineLoadTrigger::Request)
+            .await
+            .expect_err("draining model must reject new requests");
+
+        assert!(format!("{error:#}").contains("currently unloading"));
+    }
+
+    #[test]
+    fn registry_restore_default_model_preserves_previous_default_after_failed_dynamic_load() {
+        let mut registry = EngineRegistry::empty(None).expect("registry");
+        registry.upsert_model(model("alpha"), true).expect("alpha");
+        let previous_default = registry.default_model().map(str::to_string);
+
+        registry.upsert_model(model("beta"), true).expect("beta");
+        assert_eq!(registry.default_model(), Some("beta"));
+
+        registry.remove_model("beta");
+        registry
+            .restore_default_model(previous_default)
+            .expect("restore default");
+
+        assert_eq!(registry.default_model(), Some("alpha"));
+    }
+
+    #[test]
+    fn registry_restore_default_model_can_restore_ambiguous_no_default_state() {
+        let mut registry = EngineRegistry::empty(None).expect("registry");
+        registry.upsert_model(model("alpha"), false).expect("alpha");
+        registry.restore_default_model(None).expect("clear default");
+        registry.upsert_model(model("beta"), true).expect("beta");
+        assert_eq!(registry.default_model(), Some("beta"));
+
+        registry.remove_model("beta");
+        registry
+            .restore_default_model(None)
+            .expect("restore no default");
+
+        assert_eq!(registry.default_model(), None);
+        assert_eq!(
+            registry.resolve_model_id(None).expect("single model"),
+            "alpha"
+        );
+    }
+
+    #[test]
     fn eviction_candidate_selection_uses_lru_order() {
         let chosen = super::select_lru_eviction_candidate(vec![
             super::EvictionCandidate {
@@ -2067,6 +3042,49 @@ mod tests {
         ]);
 
         assert_eq!(chosen.as_deref(), Some("oldest"));
+    }
+
+    #[test]
+    fn model_ttl_candidates_require_loaded_idle_expired_models() {
+        let candidates = super::select_model_ttl_unload_candidates(
+            vec![
+                ModelTtlCandidate {
+                    id: "expired".to_string(),
+                    state: EngineRuntimeState::Loaded,
+                    active_requests: 0,
+                    last_used_unix_ms: Some(1_000),
+                },
+                ModelTtlCandidate {
+                    id: "active".to_string(),
+                    state: EngineRuntimeState::Loaded,
+                    active_requests: 1,
+                    last_used_unix_ms: Some(1_000),
+                },
+                ModelTtlCandidate {
+                    id: "fresh".to_string(),
+                    state: EngineRuntimeState::Loaded,
+                    active_requests: 0,
+                    last_used_unix_ms: Some(9_000),
+                },
+                ModelTtlCandidate {
+                    id: "unloaded".to_string(),
+                    state: EngineRuntimeState::Unloaded,
+                    active_requests: 0,
+                    last_used_unix_ms: Some(1_000),
+                },
+            ],
+            10_000,
+            Duration::from_secs(5),
+        );
+
+        assert_eq!(candidates, vec!["expired"]);
+    }
+
+    #[test]
+    fn model_ttl_unload_reason_serializes_as_ttl() {
+        let value = serde_json::to_value(super::EngineUnloadReason::Ttl).expect("ttl reason");
+
+        assert_eq!(value, serde_json::json!("ttl"));
     }
 
     #[test]

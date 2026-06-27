@@ -33,30 +33,62 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         self.menu = menu
 
         let config = configStore.load()
-        let localModels = scanner.scan(loadedModel: config.lastModel)
+        let localModels = scanner.scan(loadedModels: Set(config.restoredModelReferences))
         let launchPlan = launchPlanner.plan(config: config, localModels: localModels)
-        if let model = launchPlan.backendModelReference {
+        if !localModels.isEmpty || !launchPlan.backendModelReferences.isEmpty {
             do {
-                try backend.start(modelReference: model)
-                let resolvedModel = scanner.resolveModelPath(for: model) ?? model
+                try backend.start()
+                let models = launchPlan.backendModelReferences
+                let defaultModel = config.defaultModelReference
+                let localModelsToRegister = localModels
                 Task {
                     do {
                         let client = BackendAPIClient(host: config.host, port: config.port)
                         try await client.waitUntilReady()
-                        _ = try await client.loadModel(
-                            model: model,
-                            modelDir: resolvedModel,
-                            setDefault: true,
-                            maxCacheCap: ModelLoadParameters.maxCacheCap(
-                                for: model,
-                                scanner: self.scanner,
-                                parameterStore: self.parameterStore
-                            ),
-                            reloadWhenIdle: false,
-                            samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
+                        await LocalModelBackendRegistrar.register(
+                            localModels: localModelsToRegister,
+                            defaultModel: defaultModel,
+                            scanner: self.scanner,
+                            parameterStore: self.parameterStore,
+                            client: client
                         )
+                        var latestResponse: BackendModelAdminResponse?
+                        for model in models {
+                            do {
+                                let resolvedModel = self.scanner.resolveModelPath(for: model) ?? model
+                                let setDefault = model == defaultModel || defaultModel == nil && model == models.first
+                                latestResponse = try await client.loadModel(
+                                    model: model,
+                                    modelDir: resolvedModel,
+                                    setDefault: setDefault,
+                                    maxCacheCap: ModelLoadParameters.maxCacheCap(
+                                        for: model,
+                                        scanner: self.scanner,
+                                        parameterStore: self.parameterStore
+                                    ),
+                                    reloadWhenIdle: false,
+                                    samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
+                                )
+                            } catch {
+                                IronMLXAppLogger.error("Failed to restore ironmlx model on app launch: \(model): \(error)")
+                            }
+                        }
+                        if let loadedModels = latestResponse?.loadedModels {
+                            await MainActor.run {
+                                var updatedConfig = self.configStore.load()
+                                updatedConfig.replaceLoadedModels(
+                                    loadedModels.map(\.id),
+                                    defaultModel: Self.defaultModelForLaunchRestore(
+                                        config: updatedConfig,
+                                        backendLoadedModels: loadedModels
+                                    )
+                                )
+                                self.configStore.save(updatedConfig)
+                                NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
+                            }
+                        }
                     } catch {
-                        IronMLXAppLogger.error("Failed to load ironmlx model on app launch: \(error)")
+                        IronMLXAppLogger.error("Failed to restore ironmlx models on app launch: \(error)")
                     }
                 }
             } catch {
@@ -76,5 +108,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationWillTerminate(_ notification: Notification) {
         IronMLXAppLogger.info("Application will terminate")
         backend.stopForAppQuit()
+    }
+
+    nonisolated static func defaultModelForLaunchRestore(
+        config: AppConfig,
+        backendLoadedModels: [BackendLoadedModelInfo]
+    ) -> String? {
+        config.defaultModelReference ?? backendLoadedModels.first(where: \.isDefault)?.id
     }
 }

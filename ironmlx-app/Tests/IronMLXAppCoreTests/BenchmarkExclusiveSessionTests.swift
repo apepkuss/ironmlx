@@ -141,8 +141,10 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
         BackendModelAdminResponse(
             success: true,
             status: status,
+            code: nil,
             model: nil,
             loadedModels: [],
+            warningCode: nil,
             warning: nil,
             error: nil
         )

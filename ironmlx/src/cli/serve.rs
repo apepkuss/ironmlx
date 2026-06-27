@@ -1,7 +1,7 @@
 //! `ironmlx serve` — boot HTTP server with OpenAI + Anthropic compatibility.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use clap::Args;
@@ -41,6 +41,18 @@ pub struct ServeArgs {
     /// JSON manifest describing one or more model engines for runtime routing.
     #[arg(long = "model-manifest", conflicts_with = "model")]
     pub model_manifest: Option<PathBuf>,
+
+    /// Maximum number of models that may stay loaded in App / dynamic EnginePool mode.
+    #[arg(
+        long = "max-loaded-models",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub max_loaded_models: Option<usize>,
+
+    /// Automatically unload loaded lazy models after this many idle minutes.
+    /// Pass `0` to disable automatic unloading.
+    #[arg(long = "model-ttl-minutes")]
+    pub model_ttl_minutes: Option<u64>,
 
     /// Bind port.
     #[arg(long, default_value_t = 8080)]
@@ -219,7 +231,7 @@ fn resolve_ssd_prefix_cache_max_bytes(args: &ServeArgs) -> Result<Option<usize>>
         .map(Some)
 }
 
-fn resolve_engine_paged_prefix_cache_settings(
+pub(crate) fn resolve_engine_paged_prefix_cache_settings(
     args: &ServeArgs,
 ) -> Result<Option<server::engine::EnginePagedPrefixCacheSettings>> {
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
@@ -255,6 +267,20 @@ pub(crate) fn resolve_prefix_lru_cache_config(
         bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
     }
     crate::core::cache::PrefixLruCacheConfig::new(max_bytes).map(Some)
+}
+
+pub(crate) fn resolve_model_ttl(args: &ServeArgs) -> Result<Option<Duration>> {
+    let Some(minutes) = args.model_ttl_minutes else {
+        return Ok(None);
+    };
+    if minutes == 0 {
+        return Ok(None);
+    }
+    minutes
+        .checked_mul(60)
+        .map(Duration::from_secs)
+        .context("--model-ttl-minutes exceeds supported duration")
+        .map(Some)
 }
 
 pub(crate) fn resolve_active_kv_offload_config(
@@ -1010,6 +1036,7 @@ fn build_engine_model_config_for_pool(
             default: model.default,
             scheduler_runtime_profile: default_scheduler_runtime_profile(),
             mtp,
+            sampling_defaults: server::SamplingDefaults::default(),
         });
     }
     if !model.path.exists() {
@@ -1039,6 +1066,7 @@ fn build_engine_model_config_for_pool(
         default: model.default,
         scheduler_runtime_profile,
         mtp,
+        sampling_defaults: server::SamplingDefaults::default(),
     })
 }
 
@@ -1078,6 +1106,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     }
     let paged_prefix_cache = resolve_engine_paged_prefix_cache_settings(&args)?;
     let active_kv_offload = resolve_active_kv_offload_config(&args)?;
+    let model_ttl = resolve_model_ttl(&args)?;
     let runtime_config = server::engine::EnginePoolRuntimeConfig {
         host: args.host,
         port: args.port,
@@ -1085,6 +1114,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
         scheduler_autotune_report: args.scheduler_autotune_report,
         paged_prefix_cache,
         prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
+        model_ttl,
         active_kv_offload,
     };
     let config = server::engine::EnginePoolConfig {
@@ -1417,7 +1447,7 @@ mod scheduler_profile_tests {
     use super::{
         build_engine_model_config_for_pool, check_loaded_scheduler_profile_health,
         load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
-        resolve_active_kv_offload_config, resolve_paged_prefix_cache_config,
+        resolve_active_kv_offload_config, resolve_model_ttl, resolve_paged_prefix_cache_config,
         resolve_prefix_lru_cache_config, resolve_scheduler_runtime_profile,
         resolve_scheduler_serve_config, resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel,
         SchedulerServeConfig, ServeArgs,
@@ -1463,6 +1493,7 @@ mod scheduler_profile_tests {
         ServeArgs {
             model: Some("/tmp/model".to_string()),
             model_manifest: None,
+            max_loaded_models: None,
             port: 8080,
             host: "127.0.0.1".to_string(),
             prefill_chunk_size: None,
@@ -1482,6 +1513,7 @@ mod scheduler_profile_tests {
             paged_prefix_cache_max_pages: None,
             ssd_prefix_cache_max_gb: None,
             prefix_lru_cache_max_bytes: None,
+            model_ttl_minutes: None,
             active_kv_offload: false,
             active_kv_offload_dir: None,
         }
@@ -1575,6 +1607,26 @@ mod scheduler_profile_tests {
 
         assert!(cfg.enabled);
         assert_eq!(cfg.root, root);
+    }
+
+    #[test]
+    fn serve_model_ttl_minutes_resolves_positive_duration() {
+        let mut args = base_args();
+        args.model_ttl_minutes = Some(30);
+
+        let ttl = resolve_model_ttl(&args).expect("model ttl");
+
+        assert_eq!(ttl, Some(std::time::Duration::from_secs(30 * 60)));
+    }
+
+    #[test]
+    fn serve_model_ttl_minutes_zero_disables_ttl() {
+        let mut args = base_args();
+        args.model_ttl_minutes = Some(0);
+
+        let ttl = resolve_model_ttl(&args).expect("model ttl");
+
+        assert_eq!(ttl, None);
     }
 
     #[test]

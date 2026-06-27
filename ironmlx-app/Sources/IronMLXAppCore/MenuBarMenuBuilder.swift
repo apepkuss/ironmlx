@@ -31,6 +31,20 @@ public struct MenuBarMenuSnapshot: Equatable {
 
 @MainActor
 public enum MenuBarMenuBuilder {
+    nonisolated static func snapshotModelNames(
+        cached: [String]?,
+        config: AppConfig,
+        state: BackendProcessState
+    ) -> [String] {
+        guard state == .running || state == .starting else {
+            return []
+        }
+        if let cached {
+            return cached
+        }
+        return config.restoredModelReferences
+    }
+
     nonisolated static func modelNames(from loadedModels: [BackendLoadedModelInfo], fallback: String? = nil) -> [String] {
         var seen = Set<String>()
         var names: [String] = []

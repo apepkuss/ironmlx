@@ -37,7 +37,7 @@ enum Command {
     /// Select a scheduler/autotune profile from offline calibration results.
     SchedulerAutotune(scheduler_autotune::SchedulerAutotuneArgs),
     /// Boot an OpenAI/Anthropic-compatible HTTP server (single-stream).
-    Serve(serve::ServeArgs),
+    Serve(Box<serve::ServeArgs>),
 }
 
 impl Cli {
@@ -46,7 +46,7 @@ impl Cli {
             Command::Info(args) => info::run(args),
             Command::Generate(args) => generate::run(args),
             Command::SchedulerAutotune(args) => scheduler_autotune::run(args),
-            Command::Serve(args) => serve::run(args),
+            Command::Serve(args) => serve::run(*args),
         }
     }
 }

@@ -15,6 +15,7 @@ public struct BackendLaunchOptions: Equatable {
     public static let defaultPagedPrefixCacheDirectory = "~/.ironmlx/cache/paged_prefix_cache"
     public static let automaticHotCacheLimitBytes = 8 * bytesPerGigabyte
     public static let defaultColdCacheLimitGB = 10
+    public static let defaultModelTtlMinutes = 30
 
     public var prefillChunkSize: Int?
     public var bMax: Int?
@@ -29,6 +30,8 @@ public struct BackendLaunchOptions: Equatable {
     public var prefixLruCacheMaxBytes: Int?
     public var ssdPrefixCacheMaxGB: Int?
     public var activeKvOffload: Bool
+    public var maxLoadedModels: Int?
+    public var modelTtlMinutes: Int?
 
     public init(
         prefillChunkSize: Int? = nil,
@@ -43,7 +46,9 @@ public struct BackendLaunchOptions: Equatable {
         pagedPrefixCacheDir: String? = nil,
         prefixLruCacheMaxBytes: Int? = nil,
         ssdPrefixCacheMaxGB: Int? = nil,
-        activeKvOffload: Bool = false
+        activeKvOffload: Bool = false,
+        maxLoadedModels: Int? = nil,
+        modelTtlMinutes: Int? = nil
     ) {
         self.prefillChunkSize = prefillChunkSize
         self.bMax = bMax
@@ -58,6 +63,8 @@ public struct BackendLaunchOptions: Equatable {
         self.prefixLruCacheMaxBytes = prefixLruCacheMaxBytes
         self.ssdPrefixCacheMaxGB = ssdPrefixCacheMaxGB
         self.activeKvOffload = activeKvOffload
+        self.maxLoadedModels = maxLoadedModels
+        self.modelTtlMinutes = modelTtlMinutes
     }
 
     public init(
@@ -87,7 +94,9 @@ public struct BackendLaunchOptions: Equatable {
             pagedPrefixCacheDir: prefixCacheDir,
             prefixLruCacheMaxBytes: prefixLruCacheMaxBytes,
             ssdPrefixCacheMaxGB: ssdPrefixCacheMaxGB,
-            activeKvOffload: config.activeKvOffload == true
+            activeKvOffload: config.activeKvOffload == true,
+            maxLoadedModels: config.maxModels,
+            modelTtlMinutes: config.modelTtlMinutes ?? Self.defaultModelTtlMinutes
         )
     }
 
@@ -185,6 +194,8 @@ public struct BackendLaunchConfiguration: Equatable {
         }
         appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
         appendIntegerFlag("--ssd-prefix-cache-max-gb", options.ssdPrefixCacheMaxGB, to: &arguments)
+        appendIntegerFlag("--max-loaded-models", options.maxLoadedModels, to: &arguments)
+        appendIntegerFlag("--model-ttl-minutes", options.modelTtlMinutes, to: &arguments)
         if let kvQuant = options.kvQuant {
             arguments += ["--kv-quant", kvQuant]
         }

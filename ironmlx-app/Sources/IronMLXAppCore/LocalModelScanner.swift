@@ -1,6 +1,6 @@
 import Foundation
 
-public struct LocalModel: Codable, Equatable {
+public struct LocalModel: Codable, Equatable, Sendable {
     public var id: String
     public var repoID: String
     public var source: String
@@ -46,7 +46,7 @@ public struct LocalModel: Codable, Equatable {
     }
 }
 
-public struct LocalModelScanner {
+public struct LocalModelScanner: Sendable {
     public var rootURL: URL
 
     public init(rootURL: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ironmlx", isDirectory: true)) {

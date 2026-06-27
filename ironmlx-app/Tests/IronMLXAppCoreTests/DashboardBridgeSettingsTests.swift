@@ -56,3 +56,37 @@ import Testing
 
     #expect(config.activeKvOffload == true)
 }
+
+@Test func dashboardLoadDoesNotMakeSecondModelDefaultUnlessUserSelectedIt() {
+    let config = AppConfig(
+        defaultModel: "mlx-community/Existing-4bit",
+        loadedModels: ["mlx-community/Existing-4bit"]
+    )
+
+    let shouldSetDefault = DashboardBridge.shouldSetDefaultWhenLoadingModel(
+        "mlx-community/New-4bit",
+        config: config,
+        currentLoadedModelCount: 1
+    )
+
+    #expect(shouldSetDefault == false)
+}
+
+@Test func dashboardLoadMakesModelDefaultWhenItIsTheOnlyLoadedModelOrExplicitDefault() {
+    let firstModelConfig = AppConfig()
+    let explicitDefaultConfig = AppConfig(
+        defaultModel: "mlx-community/New-4bit",
+        loadedModels: ["mlx-community/Existing-4bit"]
+    )
+
+    #expect(DashboardBridge.shouldSetDefaultWhenLoadingModel(
+        "mlx-community/New-4bit",
+        config: firstModelConfig,
+        currentLoadedModelCount: 0
+    ))
+    #expect(DashboardBridge.shouldSetDefaultWhenLoadingModel(
+        "mlx-community/New-4bit",
+        config: explicitDefaultConfig,
+        currentLoadedModelCount: 1
+    ))
+}

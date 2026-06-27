@@ -9,7 +9,8 @@ import Testing
       "host": "127.0.0.1",
       "port": 9068,
       "auto_start": false,
-      "last_model": "mlx-community/Qwen3-0.6B-4bit",
+      "default_model": "mlx-community/Qwen3-0.6B-4bit",
+      "loaded_models": ["mlx-community/Other-4bit", "mlx-community/Qwen3-0.6B-4bit"],
       "language": "zh",
       "theme": "dark",
       "log_level": "debug",
@@ -26,7 +27,9 @@ import Testing
 
     let config = try JSONDecoder().decode(AppConfig.self, from: Data(json.utf8))
 
-    #expect(config.lastModel == "mlx-community/Qwen3-0.6B-4bit")
+    #expect(config.defaultModel == "mlx-community/Qwen3-0.6B-4bit")
+    #expect(config.loadedModels == ["mlx-community/Other-4bit", "mlx-community/Qwen3-0.6B-4bit"])
+    #expect(config.restoredModelReferences == ["mlx-community/Qwen3-0.6B-4bit", "mlx-community/Other-4bit"])
     #expect(config.language == "zh")
     #expect(config.logLevel == "debug")
     #expect(config.maxSequences == 6)
@@ -79,4 +82,69 @@ import Testing
     #expect(object["top_p"] as? Double == 0.8)
     #expect(object["top_k"] as? Int == 40)
     #expect(object["repetition_penalty"] as? Double == 1.1)
+}
+
+@Test func restoredModelReferencesExcludeUnloadedDefaultModel() {
+    let config = AppConfig(
+        defaultModel: "mlx-community/Default-4bit",
+        loadedModels: [
+            "mlx-community/Other-4bit",
+            "mlx-community/Third-4bit",
+        ]
+    )
+
+    #expect(config.defaultModelReference == "mlx-community/Default-4bit")
+    #expect(config.restoredModelReferences == [
+        "mlx-community/Other-4bit",
+        "mlx-community/Third-4bit",
+    ])
+}
+
+@Test func appLaunchRestoreKeepsUnloadedDefaultModelPreference() {
+    let config = AppConfig(defaultModel: "mlx-community/Default-4bit")
+    let backendLoadedModels = [
+        BackendLoadedModelInfo(
+            id: "mlx-community/Other-4bit",
+            model: "mlx-community/Other-4bit",
+            path: "/models/other",
+            architecture: "llm",
+            isDefault: true,
+            maxPositionEmbeddings: 4096
+        ),
+        BackendLoadedModelInfo(
+            id: "mlx-community/Third-4bit",
+            model: "mlx-community/Third-4bit",
+            path: "/models/third",
+            architecture: "llm",
+            isDefault: false,
+            maxPositionEmbeddings: 4096
+        ),
+    ]
+
+    let defaultModel = AppDelegate.defaultModelForLaunchRestore(
+        config: config,
+        backendLoadedModels: backendLoadedModels
+    )
+
+    #expect(defaultModel == "mlx-community/Default-4bit")
+}
+
+@Test func appLaunchRestoreUsesBackendDefaultWhenNoDefaultPreferenceExists() {
+    let backendLoadedModels = [
+        BackendLoadedModelInfo(
+            id: "mlx-community/Other-4bit",
+            model: "mlx-community/Other-4bit",
+            path: "/models/other",
+            architecture: "llm",
+            isDefault: true,
+            maxPositionEmbeddings: 4096
+        ),
+    ]
+
+    let defaultModel = AppDelegate.defaultModelForLaunchRestore(
+        config: AppConfig(),
+        backendLoadedModels: backendLoadedModels
+    )
+
+    #expect(defaultModel == "mlx-community/Other-4bit")
 }

@@ -4,7 +4,7 @@ import Foundation
 public protocol BackendProcessManaging: AnyObject {
     var isRunning: Bool { get }
 
-    func start(modelReference: String) throws
+    func start() throws
     func stop()
 }
 
@@ -12,6 +12,13 @@ extension BackendProcessManager: BackendProcessManaging {}
 
 public protocol BackendModelLoading: Sendable {
     func waitUntilReady(timeout: TimeInterval) async throws
+    func registerModel(
+        model: String,
+        modelDir: String,
+        setDefault: Bool,
+        maxCacheCap: Int?,
+        samplingDefaults: BackendSamplingDefaults
+    ) async throws -> BackendModelAdminResponse
     func loadModel(model: String, modelDir: String, setDefault: Bool, maxCacheCap: Int?) async throws -> BackendModelAdminResponse
     func loadModel(
         model: String,
@@ -48,6 +55,9 @@ public struct BackendRestartResult: Codable, Equatable {
     public var port: UInt16
     public var model: String?
     public var modelLoaded: Bool
+    public var loadedModels: [String]
+    public var failedModels: [String]
+    public var errorCode: String?
     public var error: String?
 
     public init(
@@ -56,6 +66,9 @@ public struct BackendRestartResult: Codable, Equatable {
         port: UInt16,
         model: String? = nil,
         modelLoaded: Bool = false,
+        loadedModels: [String] = [],
+        failedModels: [String] = [],
+        errorCode: String? = nil,
         error: String? = nil
     ) {
         self.success = success
@@ -63,6 +76,9 @@ public struct BackendRestartResult: Codable, Equatable {
         self.port = port
         self.model = model
         self.modelLoaded = modelLoaded
+        self.loadedModels = loadedModels
+        self.failedModels = failedModels
+        self.errorCode = errorCode
         self.error = error
     }
 
@@ -72,6 +88,9 @@ public struct BackendRestartResult: Codable, Equatable {
         case port
         case model
         case modelLoaded = "model_loaded"
+        case loadedModels = "loaded_models"
+        case failedModels = "failed_models"
+        case errorCode = "code"
         case error
     }
 }
@@ -102,9 +121,9 @@ public struct BackendRestartCoordinator {
     ) async -> BackendRestartResult {
         backend.stop()
 
-        guard let model = config.lastModel?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !model.isEmpty
-        else {
+        let models = config.restoredModelReferences
+        let localModels = scanner.scan(loadedModels: Set(models))
+        guard !models.isEmpty || !localModels.isEmpty else {
             return BackendRestartResult(
                 success: true,
                 status: "restarted",
@@ -113,57 +132,106 @@ public struct BackendRestartCoordinator {
         }
 
         do {
-            try backend.start(modelReference: model)
+            try backend.start()
             let client = clientFactory(config.host, config.port)
             try await client.waitUntilReady(timeout: 5.0)
-            let resolvedModel = scanner.resolveModelPath(for: model) ?? model
-            let maxCacheCap = ModelLoadParameters.maxCacheCap(
-                for: model,
+            await LocalModelBackendRegistrar.register(
+                localModels: localModels,
+                defaultModel: config.defaultModelReference,
                 scanner: scanner,
-                parameterStore: parameterStore
+                parameterStore: parameterStore,
+                client: client
             )
-            _ = try await client.loadModel(
-                model: model,
-                modelDir: resolvedModel,
-                setDefault: true,
-                maxCacheCap: maxCacheCap,
-                reloadWhenIdle: false,
-                samplingDefaults: parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
-            )
+            var loadedModels: [String] = []
+            var failedModels: [String] = []
+            var lastError: String?
+            var lastErrorCode: String?
+            for model in models {
+                do {
+                    let resolvedModel = scanner.resolveModelPath(for: model) ?? model
+                    let maxCacheCap = ModelLoadParameters.maxCacheCap(
+                        for: model,
+                        scanner: scanner,
+                        parameterStore: parameterStore
+                    )
+                    _ = try await client.loadModel(
+                        model: model,
+                        modelDir: resolvedModel,
+                        setDefault: model == config.defaultModelReference
+                            || config.defaultModelReference == nil && loadedModels.isEmpty,
+                        maxCacheCap: maxCacheCap,
+                        reloadWhenIdle: false,
+                        samplingDefaults: parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
+                    )
+                    loadedModels.append(model)
+                } catch {
+                    let details = Self.errorDetails(from: error)
+                    failedModels.append(model)
+                    lastError = details.message
+                    lastErrorCode = details.code
+                    IronMLXAppLogger.error("Failed to restore model after backend restart: \(model): \(details.message)")
+                }
+            }
+            if loadedModels.isEmpty, let lastError {
+                return BackendRestartResult(
+                    success: false,
+                    status: "model_load_failed",
+                    port: config.port,
+                    model: models.first,
+                    modelLoaded: false,
+                    loadedModels: loadedModels,
+                    failedModels: failedModels,
+                    errorCode: lastErrorCode,
+                    error: lastError
+                )
+            }
             return BackendRestartResult(
                 success: true,
-                status: "model_loaded",
+                status: loadedModels.isEmpty ? "restarted" : "models_loaded",
                 port: config.port,
-                model: model,
-                modelLoaded: true
+                model: config.defaultModelReference ?? loadedModels.first,
+                modelLoaded: !loadedModels.isEmpty,
+                loadedModels: loadedModels,
+                failedModels: failedModels,
+                errorCode: failedModels.isEmpty ? nil : lastErrorCode,
+                error: failedModels.isEmpty ? nil : lastError
             )
         } catch {
-            let message = Self.errorMessage(from: error)
-            IronMLXAppLogger.error("Failed to restart backend and load default model: \(message)")
+            let details = Self.errorDetails(from: error)
+            IronMLXAppLogger.error("Failed to restart backend and restore models: \(details.message)")
             return BackendRestartResult(
                 success: false,
                 status: "model_load_failed",
                 port: config.port,
-                model: model,
+                model: models.first,
                 modelLoaded: false,
-                error: message
+                loadedModels: [],
+                failedModels: models,
+                errorCode: details.code,
+                error: details.message
             )
         }
     }
 
-    private static func errorMessage(from error: Error) -> String {
+    private static func errorDetails(from error: Error) -> BackendErrorDetails {
         if case BackendAPIError.serverResponse(statusCode: _, body: let body) = error,
            let body,
            let data = body.data(using: .utf8),
            let payload = try? JSONDecoder().decode(BackendErrorPayload.self, from: data),
            let message = payload.error?.trimmingCharacters(in: .whitespacesAndNewlines),
            !message.isEmpty {
-            return message
+            return BackendErrorDetails(message: message, code: payload.code)
         }
-        return error.localizedDescription
+        return BackendErrorDetails(message: error.localizedDescription, code: nil)
+    }
+
+    private struct BackendErrorDetails {
+        var message: String
+        var code: String?
     }
 
     private struct BackendErrorPayload: Decodable {
         var error: String?
+        var code: String?
     }
 }

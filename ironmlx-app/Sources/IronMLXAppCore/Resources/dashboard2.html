@@ -2354,7 +2354,7 @@
         <span class="badge badge-restart" data-i18n="badge_restart">restart</span>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_total">Memory Limit (Total)</div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Total memory limit for the server process (model + KV Cache + overhead). Exceeding this triggers LRU model eviction. Set 0 for auto-detect.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_total">Memory Limit (Total)</div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Total memory limit for the server process (model + KV Cache + overhead). In App mode this acts as a guardrail; load failures are reported instead of automatically unloading loaded models. Set 0 for auto-detect.</div></div>
         <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-total-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24" id="cfg-mem-total"><span class="slider-value">Auto (24GB)</span></div></div>
       </div>
       <div class="settings-row">
@@ -2427,15 +2427,11 @@
         <div class="settings-row-right"><input type="number" value="1" style="min-width:80px;" id="cfg-max-sequences"></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="max_models">Max Loaded Models</div><div class="settings-row-desc" data-i18n="max_models_desc">Maximum number of models kept loaded in GPU memory simultaneously. Exceeding triggers LRU eviction of the least-recently-used non-pinned model. Keep this low (1–2) on 16–32 GB machines.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="max_models">Max Concurrent Loaded Models</div><div class="settings-row-desc" data-i18n="max_models_desc">Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.</div></div>
         <div class="settings-row-right"><input type="number" min="1" max="16" value="3" style="min-width:80px;" id="cfg-max-models"></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="init_cache_blocks">Initial Cache Blocks</div><div class="settings-row-desc" data-i18n="init_cache_blocks_desc">Number of pre-allocated KV cache block slots. 0 = auto-calculate from hot cache limit.</div></div>
-        <div class="settings-row-right"><input type="number" value="0" style="min-width:80px;" id="cfg-init-cache-blocks"></div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="model_ttl">Model Auto-Unload (TTL)</div><div class="settings-row-desc" data-i18n="model_ttl_desc">Automatically unload idle non-pinned models after this many minutes. 0 = disabled.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="model_ttl">Model Auto-Unload (TTL)</div><div class="settings-row-desc" data-i18n="model_ttl_desc">Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.</div></div>
         <div class="settings-row-right"><input type="number" min="0" max="1440" value="30" style="min-width:80px;" id="cfg-model-ttl"> <span style="font-size:12px;color:var(--text-secondary);" data-i18n="minutes">minutes</span></div>
       </div>
     </div>
@@ -2746,8 +2742,15 @@
       err_backend_unreachable: "Cannot reach the backend: {detail}",
       err_backend_no_response: "Backend gave no response. Is the server running?",
       err_backend_load_error: "Backend refused to load the model: {detail}",
+      err_model_required: "Select a model before continuing.",
+      err_model_directory_not_found: "The model directory does not exist. Download the model again or choose a valid local model.",
+      err_invalid_max_cache_cap: "MAX TOKENS must be greater than or equal to 1.",
+      err_model_not_loaded: "The model is not loaded. Load it first, then try again.",
+      err_model_not_registered: "The model is not registered. Make sure it is downloaded and appears in Model Management.",
       err_all_models_pinned: "All loaded models are pinned. Unload a pinned model before loading another.",
       err_memory_pressure: "GPU memory is too high to load a new model right now. Unload an existing model or free memory and retry.",
+      err_gpu_memory_insufficient: "Not enough available GPU memory to safely load this model. Unload one or more unused loaded models to free GPU memory, then try again.",
+      err_max_loaded_models_reached: "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.",
       err_memory_budget_exceeded: "Memory budget is insufficient. Current Max Sequences (Max Sequences={max_sequences}) and this model's MAX TOKENS ({max_cache_cap}) exceed the available budget. Lower Max Sequences in Settings, or open Models → Model Management → Parameters and lower MAX TOKENS for this model, then retry.",
       err_cache_init_failed: "Could not initialize the on-disk KV cache: {detail}",
       err_model_path_not_found: "Model not found locally: \"{name}\". Download it first from HuggingFace / ModelScope or check the repo ID.",
@@ -2763,6 +2766,8 @@
       err_callback_malformed: "Internal error: callback payload could not be parsed. The button has been reset.",
       err_backend_unload_error: "Backend refused to unload the model: {detail}",
       err_openclaw_script_failed: "Failed to run the OpenClaw install script: {detail}",
+      warn_default_scheduler_profile_used: "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with Scheduler Profile for better model-specific scheduling.",
+      warn_model_reload_deferred: "The model is processing requests. New parameters will be applied automatically after the model becomes idle.",
       err_benchmark_oom: "Insufficient GPU memory for {batch_size}x batch (pp{pp}). Estimated need: {need_mb}MB, available: {avail_mb}MB. Try reducing batch size or prompt length.",
       err_benchmark_active_requests: "Benchmark cannot start while requests are running or queued. Active: {active_requests}, queued: {queued_requests}.",
       err_benchmark_already_running: "A benchmark session is already running.",
@@ -2812,19 +2817,18 @@
       all_interfaces: "all interfaces (0.0.0.0)",
       appearance: "Appearance", interface_language: "Language", theme_mode: "Theme Mode", theme_light: "Light", theme_dark: "Dark", theme_system: "System",
       resource_mgmt: "Resource Management",
-      mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Total memory limit for the server process (model + KV Cache + overhead). Exceeding this triggers LRU model eviction. Set 0 for auto-detect.",
+      mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Total memory limit for the server process (model + KV Cache + overhead). In App mode this acts as a guardrail; load failures are reported instead of automatically unloading loaded models. Set 0 for auto-detect.",
       mem_limit_model: "Memory Limit (Model Only)", mem_limit_model_desc: "Max memory for loaded models. Set 0 for no limit.",
       hot_cache: "Hot Cache Limit (Memory Cache)", hot_cache_desc: "In-memory cache for frequently accessed prefixes. Auto mode estimates a conservative size from system unified memory, capped at 8GB.",
       cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Maximum disk usage for the SSD Prefix Cache. The upper limit is adjusted from available disk space.",
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
       active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Use SSD-backed residency for active KV Cache when requests need to be parked and restored.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, and MLA.", active_kv_offload_help_not_applicable: "Not applicable: GatedDelta/Linear and MTP speculative side cache.",
-      kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload idle non-pinned models after this many minutes. 0 = disabled.", minutes: "minutes",
+      kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
-      max_models: "Max Loaded Models", max_models_desc: "Maximum number of models kept loaded in GPU memory simultaneously. Exceeding triggers LRU eviction of the least-recently-used non-pinned model. Keep this low (1–2) on 16–32 GB machines.",
+      max_models: "Max Concurrent Loaded Models", max_models_desc: "Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.",
       completion_batch: "Completion Batch Size", completion_batch_desc: "Batch size for the token generation phase.",
-      init_cache_blocks: "Initial Cache Blocks", init_cache_blocks_desc: "Number of pre-allocated KV cache block slots. 0 = auto-calculate from hot cache limit.",
       save_settings: "Save Settings",
       settings_saved: "Settings saved successfully.",
       settings_unsaved_restart: "You have unsaved changes requiring a restart. Click \"Save Settings\" at the bottom to apply.",
@@ -2992,8 +2996,15 @@
       err_backend_unreachable: "无法连接到后端：{detail}",
       err_backend_no_response: "后端无响应，请确认服务是否正在运行。",
       err_backend_load_error: "后端拒绝加载模型：{detail}",
+      err_model_required: "请先选择一个模型。",
+      err_model_directory_not_found: "模型目录不存在。请重新下载模型，或选择有效的本地模型。",
+      err_invalid_max_cache_cap: "MAX TOKENS 必须大于或等于 1。",
+      err_model_not_loaded: "该模型尚未加载。请先加载模型后再重试。",
+      err_model_not_registered: "该模型尚未注册。请先确认模型已下载，并已出现在模型管理列表中。",
       err_all_models_pinned: "所有已加载的模型都被固定，无法自动释放空间。请先取消固定后再加载。",
       err_memory_pressure: "GPU 显存压力过高，暂时无法加载新模型。请先卸载已加载的模型或释放显存后重试。",
+      err_gpu_memory_insufficient: "当前可用 GPU 内存不足，无法安全加载该模型。请先卸载暂不使用的已加载模型，释放显存后再重试。",
+      err_max_loaded_models_reached: "已达到最大同时加载模型数，无法加载新模型。请先卸载暂不使用的已加载模型，再重试。",
       err_memory_budget_exceeded: "内存预算不足。当前最大序列数（最大序列数={max_sequences}）和该模型的 MAX TOKENS（{max_cache_cap}）会超过可用预算。请在【设置】中调低「最大序列数」，或打开【模型】→【模型管理】→【参数】的模型参数设置并调低 MAX TOKENS，然后重试。",
       err_cache_init_failed: "本地 KV 缓存初始化失败：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，请先从 HuggingFace 或 ModelScope 下载，或检查 Repo ID 是否正确。",
@@ -3009,6 +3020,8 @@
       err_callback_malformed: "内部错误：回调数据无法解析。按钮已重置。",
       err_backend_unload_error: "后端拒绝卸载模型：{detail}",
       err_openclaw_script_failed: "运行 OpenClaw 安装脚本失败：{detail}",
+      warn_default_scheduler_profile_used: "未找到该模型匹配的 scheduler profile，已使用默认调度配置运行。建议通过 Scheduler Profile 为该模型生成专用 profile，以获得更合适的模型调度参数。",
+      warn_model_reload_deferred: "模型正在处理请求，新参数将在该模型空闲后自动重新加载。",
       err_benchmark_oom: "GPU 显存不足以跑 {batch_size}x batch (pp{pp})。预估需要 {need_mb}MB，可用 {avail_mb}MB。请减小批大小或 prompt 长度。",
       err_benchmark_active_requests: "当前仍有推理请求正在执行或排队，无法启动基准测试。活跃：{active_requests}，排队：{queued_requests}。",
       err_benchmark_already_running: "已有一个基准测试会话正在运行。",
@@ -3058,19 +3071,18 @@
       all_interfaces: "所有接口 (0.0.0.0)",
       appearance: "外观", interface_language: "界面语言", theme_mode: "主题模式", theme_light: "浅色", theme_dark: "暗色", theme_system: "系统",
       resource_mgmt: "资源管理",
-      mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "服务器进程的总内存限制（模型 + KV Cache + 开销）。超过此限制将触发 LRU 模型驱逐。设为 0 则自动计算。",
+      mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "服务器进程的总内存限制（模型 + KV Cache + 开销）。在 App 模式下，这是资源保护边界；加载失败会提示用户处理，不会自动卸载已加载模型。设为 0 则自动计算。",
       mem_limit_model: "内存限制（仅模型）", mem_limit_model_desc: "已加载模型的最大内存限制。设为 0 则不限制。",
       hot_cache: "热缓存限制（内存缓存）", hot_cache_desc: "用于频繁访问的前缀缓存，减少重复请求的处理开销。自动模式会根据系统统一内存保守估算容量，上限为 8GB。",
       cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用，最大值会根据磁盘可用空间动态调整。如需禁用，请关闭【启用缓存】。",
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
       active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。需要暂停并恢复请求时，将活跃 KV Cache 临时驻留到本地 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不适用：GatedDelta/Linear、MTP speculative side cache。",
-      kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "闲置超过指定分钟数后自动卸载非固定模型。0 = 不启用。", minutes: "分钟",
+      kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
-      max_models: "最大加载模型数", max_models_desc: "同时保留在 GPU 内存中的模型数量上限。超过则按 LRU 淘汰最久未使用的非固定模型。16–32 GB 设备建议设为 1–2。",
+      max_models: "最大同时加载模型数", max_models_desc: "App 同时保持加载状态的模型数量上限。达到上限后，新模型不会自动替换旧模型；请先手动卸载暂不使用的模型，再加载新模型。",
       completion_batch: "补全批大小", completion_batch_desc: "Token 生成阶段的批处理大小。",
-      init_cache_blocks: "初始缓存块数", init_cache_blocks_desc: "预分配的 KV 缓存块槽位数。0 = 根据热缓存限制自动计算。",
       save_settings: "保存设置",
       settings_saved: "设置已保存。",
       settings_unsaved_restart: "有尚未保存且需要重启的改动，请点击底部「保存设置」以生效。",
@@ -3226,8 +3238,15 @@
       err_backend_unreachable: "無法連線到後端：{detail}",
       err_backend_no_response: "後端無回應，請確認服務是否正在執行。",
       err_backend_load_error: "後端拒絕載入模型：{detail}",
+      err_model_required: "請先選擇一個模型。",
+      err_model_directory_not_found: "模型目錄不存在。請重新下載模型，或選擇有效的本地模型。",
+      err_invalid_max_cache_cap: "MAX TOKENS 必須大於或等於 1。",
+      err_model_not_loaded: "該模型尚未載入。請先載入模型後再重試。",
+      err_model_not_registered: "該模型尚未註冊。請先確認模型已下載，並已出現在模型管理列表中。",
       err_all_models_pinned: "所有已載入的模型都被釘選，無法自動釋出空間。請先取消釘選後再載入。",
       err_memory_pressure: "GPU 顯存壓力過高，暫時無法載入新模型。請先卸載已載入的模型或釋出顯存後重試。",
+      err_gpu_memory_insufficient: "目前可用 GPU 記憶體不足，無法安全載入此模型。請先卸載暫不使用的已載入模型，釋放顯示記憶體後再重試。",
+      err_max_loaded_models_reached: "已達到最大同時載入模型數，無法載入新模型。請先卸載暫不使用的已載入模型，再重試。",
       err_memory_budget_exceeded: "記憶體預算不足。目前最大序列數（最大序列數={max_sequences}）和此模型的 MAX TOKENS（{max_cache_cap}）會超過可用預算。請在【設定】中調低「最大序列數」，或開啟【模型】→【模型管理】→【參數】的模型參數設定並調低 MAX TOKENS，然後重試。",
       err_cache_init_failed: "本地 KV 快取初始化失敗：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，請先從 HuggingFace 或 ModelScope 下載，或檢查 Repo ID 是否正確。",
@@ -3243,6 +3262,8 @@
       err_callback_malformed: "內部錯誤：回呼資料無法解析。按鈕已重設。",
       err_backend_unload_error: "後端拒絕卸載模型：{detail}",
       err_openclaw_script_failed: "執行 OpenClaw 安裝指令稿失敗：{detail}",
+      warn_default_scheduler_profile_used: "未找到此模型匹配的 scheduler profile，已使用預設調度設定執行。建議透過 Scheduler Profile 為此模型產生專用 profile，以取得更合適的模型調度參數。",
+      warn_model_reload_deferred: "模型正在處理請求，新參數將在該模型閒置後自動重新載入。",
       err_benchmark_oom: "GPU 記憶體不足以執行 {batch_size}x batch (pp{pp})。預估需要 {need_mb}MB，可用 {avail_mb}MB。請減少批次大小或 prompt 長度。",
       bench_server_unavailable: "伺服器不可用，可能正在重新啟動，請稍後再試。",
       model_deleted: "模型已成功刪除。",
@@ -3287,7 +3308,7 @@
       all_interfaces: "所有介面 (0.0.0.0)",
       appearance: "外觀", interface_language: "介面語言", theme_mode: "主題模式", theme_light: "淺色", theme_dark: "暗色", theme_system: "系統",
       resource_mgmt: "資源管理",
-      mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "伺服器程序的總記憶體限制（模型 + KV Cache + 額外開銷）。超過此限制將觸發 LRU 模型驅逐。設為 0 則自動計算。",
+      mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "伺服器程序的總記憶體限制（模型 + KV Cache + 額外開銷）。在 App 模式下，這是資源保護邊界；載入失敗會提示使用者處理，不會自動卸載已載入模型。設為 0 則自動計算。",
       mem_limit_model: "記憶體限制（僅模型）", mem_limit_model_desc: "已載入模型的最大記憶體限制。設為 0 則不限制。",
       hot_cache: "熱快取限制（記憶體快取）", hot_cache_desc: "用於頻繁存取的前綴快取，減少重複請求的處理開銷。自動模式會根據系統統一記憶體保守估算容量，上限為 8GB。",
       cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用，最大值會根據磁碟可用空間動態調整。如需停用，請關閉【啟用快取】。",
@@ -3296,9 +3317,9 @@
       active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。需要暫停並恢復請求時，將活躍 KV Cache 暫時駐留到本地 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不適用：GatedDelta/Linear、MTP speculative side cache。",
       advanced: "進階", batch_processing: "批次處理",
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
-      max_models: "最大載入模型數", max_models_desc: "同時保留在 GPU 記憶體中的模型數量上限。超過則按 LRU 淘汰最久未使用的非釘選模型。16–32 GB 裝置建議設為 1–2。",
+      max_models: "最大同時載入模型數", max_models_desc: "App 同時保持載入狀態的模型數量上限。達到上限後，新模型不會自動替換舊模型；請先手動卸載暫不使用的模型，再載入新模型。",
       completion_batch: "補全批次大小", completion_batch_desc: "Token 生成階段的批次處理大小。",
-      init_cache_blocks: "初始快取區塊數", init_cache_blocks_desc: "預先分配的 KV 快取區塊槽位數。0 = 根據熱快取限制自動計算。", model_ttl: "模型自動卸載 (TTL)", model_ttl_desc: "閒置超過指定分鐘數後自動卸載非固定模型。0 = 不啟用。", minutes: "分鐘",
+      model_ttl: "模型自動卸載 (TTL)", model_ttl_desc: "已載入模型閒置超過指定分鐘數後自動卸載。0 = 不啟用；預設模型偏好會保留。", minutes: "分鐘",
       save_settings: "儲存設定",
       settings_saved: "設定已儲存。",
       settings_unsaved_restart: "有尚未儲存且需要重啟的改動，請點擊底部「儲存設定」以生效。",
@@ -3454,8 +3475,15 @@
       err_backend_unreachable: "バックエンドに接続できません：{detail}",
       err_backend_no_response: "バックエンドから応答がありません。サーバーが動作しているか確認してください。",
       err_backend_load_error: "バックエンドがモデルの読み込みを拒否しました：{detail}",
+      err_model_required: "先にモデルを選択してください。",
+      err_model_directory_not_found: "モデルディレクトリが存在しません。モデルを再ダウンロードするか、有効なローカルモデルを選択してください。",
+      err_invalid_max_cache_cap: "MAX TOKENS は 1 以上にしてください。",
+      err_model_not_loaded: "このモデルは読み込まれていません。先に読み込んでから再試行してください。",
+      err_model_not_registered: "このモデルは登録されていません。ダウンロード済みで、モデル管理一覧に表示されていることを確認してください。",
       err_all_models_pinned: "読み込み済みのモデルがすべてピン留めされており、自動で空きを確保できません。先にピンを解除してください。",
       err_memory_pressure: "GPU メモリが逼迫しているため、新しいモデルを読み込めません。既存のモデルを解放するなどしてから再度お試しください。",
+      err_gpu_memory_insufficient: "利用可能な GPU メモリが不足しているため、このモデルを安全に読み込めません。使用していない読み込み済みモデルをアンロードして GPU メモリを解放してから再試行してください。",
+      err_max_loaded_models_reached: "最大同時ロードモデル数に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルを手動でアンロードしてから再試行してください。",
       err_memory_budget_exceeded: "メモリ予算が不足しています。現在の最大シーケンス数（最大シーケンス数={max_sequences}）とこのモデルの MAX TOKENS（{max_cache_cap}）では利用可能な予算を超えます。設定で最大シーケンス数を下げるか、モデル → モデル管理 → パラメータでこのモデルの MAX TOKENS を下げてから再試行してください。",
       err_cache_init_failed: "ローカル KV キャッシュの初期化に失敗しました：{detail}",
       err_model_path_not_found: "モデル \"{name}\" が見つかりません。HuggingFace または ModelScope からダウンロードするか、Repo ID を確認してください。",
@@ -3471,6 +3499,8 @@
       err_callback_malformed: "内部エラー：コールバックの内容を解析できませんでした。ボタンをリセットしました。",
       err_backend_unload_error: "バックエンドがモデルのアンロードを拒否しました：{detail}",
       err_openclaw_script_failed: "OpenClaw インストールスクリプトの実行に失敗しました：{detail}",
+      warn_default_scheduler_profile_used: "このモデルに一致する scheduler profile が見つかりませんでした。デフォルトのスケジューラ設定で実行しています。モデルに合わせたスケジューリングのため、Scheduler Profile で専用 profile を生成してください。",
+      warn_model_reload_deferred: "モデルはリクエストを処理中です。新しいパラメータはモデルがアイドル状態になった後に自動で適用されます。",
       err_benchmark_oom: "{batch_size}x batch (pp{pp}) を実行するための GPU メモリが不足しています。必要：約 {need_mb}MB、利用可能：{avail_mb}MB。バッチサイズまたは prompt 長を減らしてください。",
       bench_server_unavailable: "サーバーが利用できません。再起動中の可能性があります。しばらくしてから再試行してください。",
       model_deleted: "モデルが正常に削除されました。",
@@ -3515,7 +3545,7 @@
       all_interfaces: "全インターフェース (0.0.0.0)",
       appearance: "外観", interface_language: "インターフェース言語", theme_mode: "テーマモード", theme_light: "ライト", theme_dark: "ダーク", theme_system: "システム",
       resource_mgmt: "リソース管理",
-      mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "サーバープロセスの合計メモリ制限（モデル + KV Cache + オーバーヘッド）。超過するとLRUモデル退避がトリガーされます。0で自動検出。",
+      mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "サーバープロセスの合計メモリ制限（モデル + KV Cache + オーバーヘッド）。App モードではリソース保護の上限として扱い、読み込み失敗を通知し、読み込み済みモデルを自動的にはアンロードしません。0で自動検出。",
       mem_limit_model: "メモリ制限（モデルのみ）", mem_limit_model_desc: "ロード済みモデルの最大メモリ制限。0で制限なし。",
       hot_cache: "ホットキャッシュ制限（メモリキャッシュ）", hot_cache_desc: "頻繁に利用されるプレフィックスキャッシュです。自動モードではシステム統合メモリから控えめに容量を見積もり、上限は8GBです。",
       cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。上限はディスク空き容量に応じて調整されます。無効にするにはキャッシュをオフにします。",
@@ -3524,9 +3554,9 @@
       active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。リクエストの一時停止と復元が必要な場合、Active KV Cache を一時的にローカル SSD に退避します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "非対象: GatedDelta/Linear、MTP speculative side cache。",
       advanced: "詳細設定", batch_processing: "バッチ処理",
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
-      max_models: "最大ロードモデル数", max_models_desc: "GPU メモリに同時に保持するモデル数の上限。超過すると最も長く未使用（ピン留めなし）のモデルを LRU で解放します。16–32 GB 環境では 1–2 を推奨。",
+      max_models: "最大同時ロードモデル数", max_models_desc: "App が同時に読み込み済みとして保持するモデル数の上限。上限に達すると新しいモデルの読み込みは拒否され、既存の読み込み済みモデルは自動的に置き換えられません。不要なモデルを手動でアンロードしてから読み込んでください。",
       completion_batch: "補完バッチサイズ", completion_batch_desc: "トークン生成フェーズのバッチサイズ。",
-      init_cache_blocks: "初期キャッシュブロック数", init_cache_blocks_desc: "事前割り当てするKVキャッシュブロックスロット数。0 = ホットキャッシュ制限から自動計算。", model_ttl: "モデル自動アンロード (TTL)", model_ttl_desc: "指定した分数アイドル状態が続いた非固定モデルを自動的にアンロードします。0 = 無効。", minutes: "分",
+      model_ttl: "モデル自動アンロード (TTL)", model_ttl_desc: "読み込み済みモデルが指定した分数アイドル状態のままなら自動的にアンロードします。0 = 無効。デフォルトモデル設定は保持されます。", minutes: "分",
       save_settings: "設定を保存",
       settings_saved: "設定が保存されました。",
       settings_unsaved_restart: "再起動が必要な未保存の変更があります。下部の「設定を保存」をクリックして適用してください。",
@@ -3682,8 +3712,15 @@
       err_backend_unreachable: "백엔드에 연결할 수 없습니다: {detail}",
       err_backend_no_response: "백엔드가 응답하지 않습니다. 서버가 실행 중인지 확인하세요.",
       err_backend_load_error: "백엔드가 모델 로드를 거부했습니다: {detail}",
+      err_model_required: "먼저 모델을 선택하세요.",
+      err_model_directory_not_found: "모델 디렉터리가 존재하지 않습니다. 모델을 다시 다운로드하거나 유효한 로컬 모델을 선택하세요.",
+      err_invalid_max_cache_cap: "MAX TOKENS는 1 이상이어야 합니다.",
+      err_model_not_loaded: "이 모델은 로드되어 있지 않습니다. 먼저 로드한 뒤 다시 시도하세요.",
+      err_model_not_registered: "이 모델은 등록되어 있지 않습니다. 모델이 다운로드되어 있고 모델 관리 목록에 표시되는지 확인하세요.",
       err_all_models_pinned: "로드된 모든 모델이 고정되어 자동으로 공간을 확보할 수 없습니다. 먼저 고정을 해제해 주세요.",
       err_memory_pressure: "GPU 메모리 사용량이 높아 새 모델을 로드할 수 없습니다. 기존 모델을 언로드하거나 메모리를 확보한 후 다시 시도해 주세요.",
+      err_gpu_memory_insufficient: "사용 가능한 GPU 메모리가 부족하여 이 모델을 안전하게 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하여 GPU 메모리를 확보한 뒤 다시 시도하세요.",
+      err_max_loaded_models_reached: "최대 동시 로드 모델 수에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 먼저 언로드한 뒤 다시 시도하세요.",
       err_memory_budget_exceeded: "메모리 예산이 부족합니다. 현재 최대 시퀀스 수(최대 시퀀스 수={max_sequences})와 이 모델의 MAX TOKENS({max_cache_cap})가 사용 가능한 예산을 초과합니다. 설정에서 최대 시퀀스 수를 낮추거나 모델 → 모델 관리 → 파라미터에서 이 모델의 MAX TOKENS를 낮춘 뒤 다시 시도해 주세요.",
       err_cache_init_failed: "로컬 KV 캐시 초기화에 실패했습니다: {detail}",
       err_model_path_not_found: "모델 \"{name}\"을 찾을 수 없습니다. HuggingFace 또는 ModelScope에서 먼저 다운로드하거나 Repo ID를 확인하세요.",
@@ -3699,6 +3736,8 @@
       err_callback_malformed: "내부 오류: 콜백 데이터를 파싱할 수 없습니다. 버튼이 초기화되었습니다.",
       err_backend_unload_error: "백엔드가 모델 언로드를 거부했습니다: {detail}",
       err_openclaw_script_failed: "OpenClaw 설치 스크립트 실행에 실패했습니다: {detail}",
+      warn_default_scheduler_profile_used: "이 모델에 맞는 scheduler profile을 찾지 못했습니다. 기본 스케줄러 설정으로 실행 중입니다. 모델에 맞는 스케줄링을 위해 Scheduler Profile에서 전용 profile을 생성하세요.",
+      warn_model_reload_deferred: "모델이 요청을 처리 중입니다. 새 파라미터는 모델이 유휴 상태가 된 뒤 자동으로 적용됩니다.",
       err_benchmark_oom: "{batch_size}x batch (pp{pp})를 실행하기에 GPU 메모리가 부족합니다. 예상: {need_mb}MB, 가용: {avail_mb}MB. 배치 크기 또는 prompt 길이를 줄여 주세요.",
       bench_server_unavailable: "서버를 사용할 수 없습니다. 재시작 중일 수 있습니다. 잠시 후 다시 시도하세요.",
       model_deleted: "모델이 성공적으로 삭제되었습니다.",
@@ -3743,7 +3782,7 @@
       all_interfaces: "모든 인터페이스 (0.0.0.0)",
       appearance: "외관", interface_language: "인터페이스 언어", theme_mode: "테마 모드", theme_light: "라이트", theme_dark: "다크", theme_system: "시스템",
       resource_mgmt: "리소스 관리",
-      mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "서버 프로세스의 총 메모리 제한 (모델 + KV Cache + 오버헤드). 초과 시 LRU 모델 제거가 트리거됩니다. 0으로 자동 감지.",
+      mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "서버 프로세스의 총 메모리 제한 (모델 + KV Cache + 오버헤드). App 모드에서는 리소스 보호 한계로 동작하며, 로드 실패를 알리고 이미 로드된 모델을 자동으로 언로드하지 않습니다. 0으로 자동 감지.",
       mem_limit_model: "메모리 제한 (모델만)", mem_limit_model_desc: "로드된 모델의 최대 메모리 제한. 0으로 제한 없음.",
       hot_cache: "핫 캐시 제한 (메모리 캐시)", hot_cache_desc: "자주 사용하는 프리픽스 캐시입니다. 자동 모드는 시스템 통합 메모리를 기준으로 보수적으로 용량을 산정하며 상한은 8GB입니다.",
       cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다. 상한은 디스크 여유 공간에 따라 조정됩니다. 비활성화하려면 캐시 활성화를 끄세요.",
@@ -3752,9 +3791,9 @@
       active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 요청을 일시 중지하고 복원해야 할 때 Active KV Cache를 로컬 SSD에 임시 저장합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA.", active_kv_offload_help_not_applicable: "비대상: GatedDelta/Linear, MTP speculative side cache.",
       advanced: "고급", batch_processing: "배치 처리",
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
-      max_models: "최대 로드 모델 수", max_models_desc: "GPU 메모리에 동시에 보관하는 모델 수 상한. 초과 시 가장 오래 사용되지 않은 비고정 모델을 LRU 방식으로 해제합니다. 16–32 GB 환경에서는 1–2 권장.",
+      max_models: "최대 동시 로드 모델 수", max_models_desc: "App 이 동시에 로드 상태로 유지하는 모델 수의 상한입니다. 상한에 도달하면 새 모델 로드는 거부되고 기존 로드 모델은 자동으로 교체되지 않습니다. 사용하지 않는 모델을 수동으로 언로드한 뒤 다시 로드하세요.",
       completion_batch: "완성 배치 크기", completion_batch_desc: "토큰 생성 단계의 배치 크기.",
-      init_cache_blocks: "초기 캐시 블록 수", init_cache_blocks_desc: "사전 할당할 KV 캐시 블록 슬롯 수. 0 = 핫 캐시 제한에서 자동 계산.", model_ttl: "모델 자동 언로드 (TTL)", model_ttl_desc: "지정된 시간(분) 동안 유휴 상태인 비고정 모델을 자동으로 언로드합니다. 0 = 비활성화.", minutes: "분",
+      model_ttl: "모델 자동 언로드 (TTL)", model_ttl_desc: "로드된 모델이 지정된 시간(분) 동안 유휴 상태이면 자동으로 언로드합니다. 0 = 비활성화. 기본 모델 설정은 유지됩니다.", minutes: "분",
       save_settings: "설정 저장",
       settings_saved: "설정이 저장되었습니다.",
       settings_unsaved_restart: "재시작이 필요한 저장되지 않은 변경사항이 있습니다. 하단의 \"설정 저장\"을 클릭하여 적용하세요.",
@@ -4137,7 +4176,7 @@
     }
     if (result.success) {
       if (result.warning) {
-        showToast(result.warning, 'info');
+        showToast(localizeWarningResult(result), 'info');
       }
       // Single source of truth: re-render from backend state
       syncModelList();
@@ -4191,6 +4230,17 @@
       }
     }
     return localizeBackendErrorMessage(result.error);
+  }
+
+  function localizeWarningResult(result) {
+    const dict = I18N[currentLang] || I18N.en;
+    if (result.warning_code) {
+      const key = 'warn_' + result.warning_code;
+      if (dict[key]) {
+        return dict[key].replace(/\{(\w+)\}/g, (m, k) => (k in result) ? result[k] : m);
+      }
+    }
+    return result.warning || dict.download_generic_failed || 'Operation completed with warnings.';
   }
 
   function localizeBackendErrorMessage(message) {
@@ -4336,7 +4386,7 @@
       } else if (result.status === 'reloaded') {
         showToast(dict.params_reloaded || 'Model parameters applied. The model has been reloaded.', 'success');
       } else if (result.warning) {
-        showToast(result.warning, 'info');
+        showToast(localizeWarningResult(result), 'info');
       }
       syncModelList();
     } else if (result.error) {
@@ -5925,7 +5975,6 @@
     }
     setNumberInput('cfg-max-sequences', appConfig.max_sequences, 1);
     setNumberInput('cfg-max-models', appConfig.max_models, 3);
-    setNumberInput('cfg-init-cache-blocks', appConfig.init_cache_blocks, 0);
     setNumberInput('cfg-model-ttl', appConfig.model_ttl_minutes, 30);
     setSelectInput('cfg-distributed-backend', appConfig.distributed_backend, 'auto');
     setSelectInput('cfg-parallel-mode', appConfig.parallel_mode, 'auto');
@@ -5963,7 +6012,6 @@
       kv_quant: normalizeKVQuantValue(document.getElementById('cfg-kv-quant').value),
       max_sequences: Math.max(1, numberInputValue('cfg-max-sequences', 1)),
       max_models: Math.max(1, numberInputValue('cfg-max-models', 3)),
-      init_cache_blocks: Math.max(0, numberInputValue('cfg-init-cache-blocks', 0)),
       model_ttl_minutes: Math.max(0, numberInputValue('cfg-model-ttl', 0)),
       distributed_backend: (document.getElementById('cfg-distributed-backend') || {}).value || 'auto',
       parallel_mode: (document.getElementById('cfg-parallel-mode') || {}).value || 'auto'
@@ -6009,7 +6057,6 @@
     'cfg-hot-cache', 'cfg-hot-cache-auto',
     'cfg-cold-cache',
     'cfg-max-sequences', 'cfg-max-models',
-    'cfg-init-cache-blocks',
     'cfg-cache-enable', 'cfg-cache-dir', 'cfg-active-kv-offload',
     'cfg-kv-quant', 'cfg-model-ttl',
     'cfg-distributed-backend', 'cfg-parallel-mode'
@@ -6083,8 +6130,8 @@
     }
     const dict = I18N[currentLang] || I18N.en;
     if (result.success === false) {
-      const detail = result.error || 'Unknown error';
-      const msg = (dict.server_restart_model_failed || 'Server restarted, but the default model could not be loaded: {detail}').replace('{detail}', localizeBackendErrorMessage(detail));
+      const detail = localizeErrorResult(result);
+      const msg = (dict.server_restart_model_failed || 'Server restarted, but the default model could not be loaded: {detail}').replace('{detail}', detail);
       showToast(msg, 'warn', 10000);
     } else if (result.model_loaded) {
       showToast(dict.server_restarted_model_loaded || 'Server has been restarted and the default model is loaded.', 'success');

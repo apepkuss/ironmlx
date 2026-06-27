@@ -78,6 +78,31 @@ import Testing
 }
 
 @MainActor
+@Test func menuBarMenuRendersMultipleLoadedModels() {
+    let menu = MenuBarMenuBuilder.makeMenu(
+        snapshot: MenuBarMenuSnapshot(
+            state: .running,
+            modelNames: [
+                "mlx-community/Qwen3.5-35B-A3B-4bit",
+                "mlx-community/Qwen3.5-4B-MLX-4bit",
+            ],
+            openClawInstalled: false,
+            openClawGatewayConfigured: false,
+            ironHermesInstalled: false,
+            updatesEnabled: false,
+            language: "zh-Hans"
+        ),
+        target: nil
+    )
+
+    #expect(menuTitles(menu).prefix(3) == [
+        "服务器运行中",
+        "Qwen3.5-35B-A3B-4bit",
+        "Qwen3.5-4B-MLX-4bit",
+    ])
+}
+
+@MainActor
 @Test func menuBarMenuUsesSimplifiedChineseForDashboardLanguagePreference() {
     let menu = MenuBarMenuBuilder.makeMenu(
         snapshot: MenuBarMenuSnapshot(
@@ -138,6 +163,41 @@ import Testing
         "-",
         "終了",
     ])
+}
+
+@Test func menuBarSnapshotModelNamesFallBackToPersistedLoadedModels() {
+    let names = MenuBarMenuBuilder.snapshotModelNames(
+        cached: nil,
+        config: AppConfig(
+            defaultModel: "mlx-community/Qwen3.5-35B-A3B-4bit",
+            loadedModels: [
+                "mlx-community/Qwen3.5-4B-MLX-4bit",
+                "mlx-community/Qwen3.5-35B-A3B-4bit",
+            ]
+        ),
+        state: .running
+    )
+
+    #expect(names == [
+        "mlx-community/Qwen3.5-35B-A3B-4bit",
+        "mlx-community/Qwen3.5-4B-MLX-4bit",
+    ])
+}
+
+@Test func menuBarSnapshotModelNamesUseConfirmedEmptyBackendList() {
+    let names = MenuBarMenuBuilder.snapshotModelNames(
+        cached: [],
+        config: AppConfig(
+            defaultModel: "mlx-community/Qwen3.5-35B-A3B-4bit",
+            loadedModels: [
+                "mlx-community/Qwen3.5-4B-MLX-4bit",
+                "mlx-community/Qwen3.5-35B-A3B-4bit",
+            ]
+        ),
+        state: .running
+    )
+
+    #expect(names == [])
 }
 
 @Test func menuBarModelNamesPreferBackendLoadedModelsInOrder() {

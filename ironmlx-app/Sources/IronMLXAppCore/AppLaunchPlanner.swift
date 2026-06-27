@@ -8,14 +8,14 @@ public enum DashboardInitialRoute: String, Equatable {
 }
 
 public struct AppLaunchPlan: Equatable {
-    public var backendModelReference: String?
+    public var backendModelReferences: [String]
     public var dashboardRoute: DashboardInitialRoute
 
     public init(
-        backendModelReference: String?,
+        backendModelReferences: [String],
         dashboardRoute: DashboardInitialRoute
     ) {
-        self.backendModelReference = backendModelReference
+        self.backendModelReferences = backendModelReferences
         self.dashboardRoute = dashboardRoute
     }
 }
@@ -24,23 +24,23 @@ public struct AppLaunchPlanner {
     public init() {}
 
     public func plan(config: AppConfig, localModels: [LocalModel]) -> AppLaunchPlan {
-        if let model = config.lastModel?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !model.isEmpty {
+        let models = config.restoredModelReferences
+        if !models.isEmpty {
             return AppLaunchPlan(
-                backendModelReference: model,
+                backendModelReferences: models,
                 dashboardRoute: .status
             )
         }
 
         if localModels.isEmpty {
             return AppLaunchPlan(
-                backendModelReference: nil,
+                backendModelReferences: [],
                 dashboardRoute: .onboarding
             )
         }
 
         return AppLaunchPlan(
-            backendModelReference: nil,
+            backendModelReferences: [],
             dashboardRoute: .modelsManage
         )
     }

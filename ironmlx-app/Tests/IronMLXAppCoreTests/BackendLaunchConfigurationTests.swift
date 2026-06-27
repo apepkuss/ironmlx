@@ -84,6 +84,50 @@ import Testing
     #expect(!config.arguments.contains("--b-max"))
 }
 
+@Test func serveArgumentsIncludeMaxLoadedModelsForEnginePoolCapacity() {
+    let options = BackendLaunchOptions(config: AppConfig(maxModels: 3))
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: options
+    )
+
+    #expect(config.arguments.contains("--max-loaded-models"))
+    #expect(config.arguments.contains("3"))
+}
+
+@Test func serveArgumentsIncludeModelTTLWhenEnabled() {
+    let options = BackendLaunchOptions(config: AppConfig(modelTtlMinutes: 30))
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: options
+    )
+
+    #expect(config.arguments.contains("--model-ttl-minutes"))
+    #expect(config.arguments.contains("30"))
+}
+
+@Test func backendLaunchOptionsUseDefaultModelTTLForAppMode() {
+    let options = BackendLaunchOptions(config: AppConfig())
+
+    #expect(options.modelTtlMinutes == BackendLaunchOptions.defaultModelTtlMinutes)
+}
+
+@Test func serveArgumentsOmitModelTTLWhenDisabled() {
+    let options = BackendLaunchOptions(config: AppConfig(modelTtlMinutes: 0))
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: options
+    )
+
+    #expect(!config.arguments.contains("--model-ttl-minutes"))
+}
+
 @Test func serveArgumentsIncludePersistedKVQuantSetting() {
     let options = BackendLaunchOptions(config: AppConfig(cacheEnable: false, kvQuant: "turbo4"))
     let config = BackendLaunchConfiguration(

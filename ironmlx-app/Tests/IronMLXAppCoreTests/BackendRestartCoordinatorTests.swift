@@ -3,7 +3,7 @@ import Testing
 
 @testable import IronMLXAppCore
 
-@Test @MainActor func restartDefaultModelLoadsPersistedDefaultModel() async throws {
+@Test @MainActor func restartDefaultModelRegistersUnloadedDefaultWithoutLoading() async throws {
     let (root, snapshot) = try restartModelRoot(repoID: "mlx-community/Tiny-4bit")
     let backend = FakeRestartBackend()
     let loader = FakeRestartModelLoader()
@@ -14,21 +14,22 @@ import Testing
     )
 
     let result = await coordinator.restartDefaultModel(
-        config: AppConfig(port: 9068, lastModel: "mlx-community/Tiny-4bit"),
+        config: AppConfig(port: 9068, defaultModel: "mlx-community/Tiny-4bit"),
         backend: backend
     )
 
     #expect(result.success)
-    #expect(result.modelLoaded)
+    #expect(!result.modelLoaded)
     #expect(result.model == "mlx-community/Tiny-4bit")
+    #expect(result.loadedModels == [])
     #expect(backend.calls == [
         "stop",
-        "start:mlx-community/Tiny-4bit",
+        "start",
     ])
     let loaderCalls = await loader.calls
     #expect(loaderCalls == [
         "waitUntilReady",
-        "load:mlx-community/Tiny-4bit:\(snapshot.path):true:nil",
+        "register:mlx-community/Tiny-4bit:\(snapshot.path):true:nil",
     ], "\(loaderCalls)")
 }
 
@@ -48,7 +49,11 @@ import Testing
     )
 
     let result = await coordinator.restartDefaultModel(
-        config: AppConfig(port: 9068, lastModel: "mlx-community/Tiny-4bit"),
+        config: AppConfig(
+            port: 9068,
+            defaultModel: "mlx-community/Tiny-4bit",
+            loadedModels: ["mlx-community/Tiny-4bit"]
+        ),
         backend: backend
     )
 
@@ -56,11 +61,118 @@ import Testing
     #expect(!result.modelLoaded)
     #expect(result.model == "mlx-community/Tiny-4bit")
     #expect(result.error == "memory budget exceeded")
-    #expect(await loader.calls.count == 2)
+    #expect(result.failedModels == ["mlx-community/Tiny-4bit"])
+    #expect(await loader.calls.count == 3)
 }
 
-private func restartModelRoot(repoID: String) throws -> (root: URL, snapshot: URL) {
-    let root = try restartTemporaryDirectory()
+@Test @MainActor func restartDefaultModelPreservesBackendErrorCode() async throws {
+    let (root, _) = try restartModelRoot(repoID: "mlx-community/Tiny-4bit")
+    let backend = FakeRestartBackend()
+    let loader = FakeRestartModelLoader(
+        loadError: BackendAPIError.serverResponse(
+            statusCode: 503,
+            body: #"{"success":false,"status":"error","code":"max_loaded_models_reached","error":"Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model."}"#
+        )
+    )
+    let coordinator = BackendRestartCoordinator(
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        clientFactory: { _, _ in loader }
+    )
+
+    let result = await coordinator.restartDefaultModel(
+        config: AppConfig(
+            port: 9068,
+            defaultModel: "mlx-community/Tiny-4bit",
+            loadedModels: ["mlx-community/Tiny-4bit"]
+        ),
+        backend: backend
+    )
+
+    #expect(result.errorCode == "max_loaded_models_reached")
+    #expect(result.error == "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.")
+}
+
+@Test @MainActor func restartDefaultModelRestoresMultipleLoadedModels() async throws {
+    let (root, firstSnapshot) = try restartModelRoot(repoID: "mlx-community/First-4bit")
+    let (_, secondSnapshot) = try restartModelRoot(repoID: "mlx-community/Second-4bit", root: root)
+    let backend = FakeRestartBackend()
+    let loader = FakeRestartModelLoader()
+    let coordinator = BackendRestartCoordinator(
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        clientFactory: { _, _ in loader }
+    )
+
+    let result = await coordinator.restartDefaultModel(
+        config: AppConfig(
+            port: 9068,
+            defaultModel: "mlx-community/Second-4bit",
+            loadedModels: [
+                "mlx-community/First-4bit",
+                "mlx-community/Second-4bit",
+            ]
+        ),
+        backend: backend
+    )
+
+    #expect(result.success)
+    #expect(result.modelLoaded)
+    #expect(result.model == "mlx-community/Second-4bit")
+    #expect(result.loadedModels == [
+        "mlx-community/Second-4bit",
+        "mlx-community/First-4bit",
+    ])
+    #expect(backend.calls == [
+        "stop",
+        "start",
+    ])
+    let loaderCalls = await loader.calls
+    #expect(loaderCalls == [
+        "waitUntilReady",
+        "register:mlx-community/First-4bit:\(firstSnapshot.path):false:nil",
+        "register:mlx-community/Second-4bit:\(secondSnapshot.path):true:nil",
+        "load:mlx-community/Second-4bit:\(secondSnapshot.path):true:nil",
+        "load:mlx-community/First-4bit:\(firstSnapshot.path):false:nil",
+    ], "\(loaderCalls)")
+}
+
+@Test @MainActor func restartDefaultModelRegistersLocalModelsWithoutLoadingWhenNoRestoredModel() async throws {
+    let (root, snapshot) = try restartModelRoot(repoID: "mlx-community/Tiny-4bit")
+    let backend = FakeRestartBackend()
+    let loader = FakeRestartModelLoader()
+    let coordinator = BackendRestartCoordinator(
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        clientFactory: { _, _ in loader }
+    )
+
+    let result = await coordinator.restartDefaultModel(
+        config: AppConfig(port: 9068),
+        backend: backend
+    )
+
+    #expect(result.success)
+    #expect(!result.modelLoaded)
+    #expect(result.loadedModels.isEmpty)
+    #expect(backend.calls == [
+        "stop",
+        "start",
+    ])
+    let loaderCalls = await loader.calls
+    #expect(loaderCalls == [
+        "waitUntilReady",
+        "register:mlx-community/Tiny-4bit:\(snapshot.path):false:nil",
+    ], "\(loaderCalls)")
+}
+
+private func restartModelRoot(repoID: String, root existingRoot: URL? = nil) throws -> (root: URL, snapshot: URL) {
+    let root: URL
+    if let existingRoot {
+        root = existingRoot
+    } else {
+        root = try restartTemporaryDirectory()
+    }
     let snapshot = root
         .appendingPathComponent("models", isDirectory: true)
         .appendingPathComponent("models--" + repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
@@ -84,8 +196,8 @@ private final class FakeRestartBackend: BackendProcessManaging {
     private(set) var calls: [String] = []
     private(set) var isRunning: Bool = false
 
-    func start(modelReference: String) throws {
-        calls.append("start:\(modelReference)")
+    func start() throws {
+        calls.append("start")
         isRunning = true
     }
 
@@ -107,6 +219,26 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         calls.append("waitUntilReady")
     }
 
+    func registerModel(
+        model: String,
+        modelDir: String,
+        setDefault: Bool,
+        maxCacheCap: Int?,
+        samplingDefaults: BackendSamplingDefaults
+    ) async throws -> BackendModelAdminResponse {
+        calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil")")
+        return BackendModelAdminResponse(
+            success: true,
+            status: "registered",
+            code: nil,
+            model: model,
+            loadedModels: [],
+            warningCode: nil,
+            warning: nil,
+            error: nil
+        )
+    }
+
     func loadModel(
         model: String,
         modelDir: String,
@@ -120,6 +252,7 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         return BackendModelAdminResponse(
             success: true,
             status: "loaded",
+            code: nil,
             model: model,
             loadedModels: [
                 BackendLoadedModelInfo(
@@ -131,6 +264,7 @@ private actor FakeRestartModelLoader: BackendModelLoading {
                     maxPositionEmbeddings: 4096
                 ),
             ],
+            warningCode: nil,
             warning: nil,
             error: nil
         )

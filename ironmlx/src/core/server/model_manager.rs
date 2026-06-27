@@ -14,145 +14,156 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::cli::serve::{
-    read_model_type, resolve_active_kv_offload_config, resolve_paged_prefix_cache_config,
-    resolve_prefix_lru_cache_config, resolve_scheduler_for_model, ResolvedSchedulerRuntime,
+    read_model_type, resolve_active_kv_offload_config, resolve_engine_paged_prefix_cache_settings,
+    resolve_model_ttl, resolve_scheduler_for_model, ResolvedSchedulerRuntime,
     SchedulerProfileSource, ServeArgs,
 };
-use crate::core::{Loader, Tokenizer};
 use crate::models::ModelArchitecture;
 use crate::Result;
 
+use super::engine::{
+    EngineLoadPolicy, EngineLoadedModelInfo, EngineModelConfig, EnginePoolRuntimeConfig,
+    EnginePoolState, EngineRegistryError, EngineRuntimeState,
+};
 use super::health::{
     classify_status, system_free_ram_bytes, HealthSnapshot, HealthStatus, MemoryInfo, ModelInfo,
     MtpHealthInfo, SchedulerInfo,
 };
-use super::{
-    anthropic, build_plain_app_state, openai, AppState, SamplingDefaults, VisionInputConfig,
-};
+use super::{anthropic, openai, SamplingDefaults};
 
+const MODEL_REQUIRED_CODE: &str = "model_required";
+const MODEL_REQUIRED_MESSAGE: &str = "Model is required.";
+const MODEL_DIRECTORY_NOT_FOUND_CODE: &str = "model_directory_not_found";
+const INVALID_MAX_CACHE_CAP_CODE: &str = "invalid_max_cache_cap";
+const INVALID_MAX_CACHE_CAP_MESSAGE: &str = "MAX TOKENS must be greater than or equal to 1.";
+const MODEL_NOT_LOADED_CODE: &str = "model_not_loaded";
+const MODEL_NOT_REGISTERED_CODE: &str = "model_not_registered";
+const BACKEND_UNLOAD_ERROR_CODE: &str = "backend_unload_error";
+const GPU_MEMORY_INSUFFICIENT_CODE: &str = "gpu_memory_insufficient";
 const GPU_MEMORY_INSUFFICIENT_MESSAGE: &str =
-    "当前可用 GPU 内存不足，无法安全加载该模型。请先卸载暂不使用的已加载模型，释放显存后再重试。";
+    "Not enough available GPU memory to safely load this model. Unload one or more unused loaded models to free GPU memory, then try again.";
+const MAX_LOADED_MODELS_REACHED_CODE: &str = "max_loaded_models_reached";
+const MAX_LOADED_MODELS_REACHED_MESSAGE: &str =
+    "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.";
+const DEFAULT_PROFILE_WARNING_CODE: &str = "default_scheduler_profile_used";
 const DEFAULT_PROFILE_WARNING: &str =
-    "未找到该模型匹配的 scheduler profile，已使用默认调度配置运行。后续可通过 scheduler-autotune 为该模型生成专用 profile。";
+    "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with scheduler-autotune for better model-specific scheduling.";
+const MODEL_RELOAD_DEFERRED_WARNING_CODE: &str = "model_reload_deferred";
+const MODEL_RELOAD_DEFERRED_WARNING: &str =
+    "The model is processing requests. New parameters will be applied automatically after the model becomes idle.";
 
 #[derive(Clone)]
 pub struct ModelManager {
-    registry: Arc<RwLock<ModelRegistry<LoadedModelRuntime>>>,
     pending_reloads: Arc<RwLock<HashMap<String, PendingModelReload>>>,
+    pool: EnginePoolState,
     serve_args: ServeArgs,
     start_time: Instant,
 }
 
 impl ModelManager {
-    pub fn new(serve_args: ServeArgs) -> Self {
-        Self {
-            registry: Arc::new(RwLock::new(ModelRegistry::default())),
+    pub fn new(serve_args: ServeArgs) -> Result<Self> {
+        let runtime = engine_runtime_config(&serve_args)?;
+        let pool = EnginePoolState::new_dynamic(runtime, serve_args.max_loaded_models)?;
+        Ok(Self {
             pending_reloads: Arc::new(RwLock::new(HashMap::new())),
+            pool,
             serve_args,
             start_time: Instant::now(),
-        }
+        })
     }
 
-    async fn resolve_runtime(
-        &self,
-        requested_model: Option<&str>,
-    ) -> std::result::Result<Arc<LoadedModelRuntime>, ModelResolveError> {
-        self.registry.read().await.resolve(requested_model)
+    fn start_model_ttl_sweeper(&self) {
+        self.pool.start_model_ttl_sweeper();
     }
 
     async fn load_model(
         &self,
         request: LoadModelRequest,
     ) -> std::result::Result<AdminModelResponse, AdminError> {
-        let model_reference = request
-            .model
-            .as_deref()
-            .or(request.model_dir.as_deref())
-            .or(request.repo_id.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| AdminError::bad_request("model is required"))?
-            .to_string();
-        let model_dir_value = request
-            .model_dir
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| model_reference.clone());
-        let model_dir = PathBuf::from(&model_dir_value);
-        if !model_dir.exists() {
-            return Err(AdminError::bad_request(format!(
-                "model directory does not exist: {}",
-                model_dir.display()
-            )));
+        let parsed = ParsedLoadModelRequest::new(request)?;
+        let reload = PendingModelReload {
+            model_reference: parsed.model_reference.clone(),
+            model_dir: parsed.model_dir.clone(),
+            max_cache_cap_override: parsed.max_cache_cap_override,
+            sampling_defaults_override: parsed.sampling_defaults,
+            set_default: parsed.set_default,
+        };
+
+        let already_loaded = self.pool.is_model_loaded(&parsed.model_reference).await;
+        if already_loaded && !parsed.reload_when_idle {
+            return Ok(AdminModelResponse::ok(
+                "already_loaded",
+                Some(parsed.model_reference),
+                self.list_loaded().await,
+                None,
+            ));
+        }
+        if already_loaded
+            && self
+                .pool
+                .pending_requests(&parsed.model_reference)
+                .await
+                .is_some_and(|requests| requests > 0)
+        {
+            self.schedule_reload_when_idle(reload).await;
+            return Ok(AdminModelResponse::ok(
+                "reload_deferred",
+                Some(parsed.model_reference),
+                self.list_loaded().await,
+                Some(AdminWarning::new(
+                    MODEL_RELOAD_DEFERRED_WARNING_CODE,
+                    MODEL_RELOAD_DEFERRED_WARNING,
+                )),
+            ));
         }
 
-        let max_cache_cap_override = match request.max_cache_cap {
-            Some(0) => return Err(AdminError::bad_request("max_cache_cap must be >= 1")),
-            value => value,
-        };
-        let set_default = request.set_default.unwrap_or(true);
-        let reload = PendingModelReload {
-            model_reference: model_reference.clone(),
-            model_dir: model_dir.clone(),
-            max_cache_cap_override,
-            sampling_defaults_override: request.sampling_defaults,
-            set_default,
-        };
-        let reload_when_idle = request.reload_when_idle.unwrap_or(false);
-
-        let already_loaded = {
-            let registry = self.registry.read().await;
-            let already_loaded = registry.contains(&model_reference);
-            if already_loaded && !reload_when_idle {
-                let loaded_models = registry.list();
-                return Ok(AdminModelResponse::ok(
-                    "already_loaded",
-                    Some(model_reference),
-                    loaded_models,
-                    None,
-                ));
-            }
-            if already_loaded
-                && registry
-                    .pending_requests(&model_reference)
-                    .is_some_and(|requests| requests > 0)
-            {
-                let loaded_models = registry.list();
-                drop(registry);
-                self.schedule_reload_when_idle(reload).await;
-                return Ok(AdminModelResponse::ok(
-                    "reload_deferred",
-                    Some(model_reference),
-                    loaded_models,
-                    Some("模型正在处理请求，新参数将在该模型空闲后自动重新加载。".to_string()),
-                ));
-            }
-            already_loaded
-        };
-
-        if already_loaded && reload_when_idle {
+        if already_loaded && parsed.reload_when_idle {
             return self.reload_model_now(reload).await;
         }
 
         ensure_gpu_memory_headroom()?;
-        let load = load_runtime(
+        let load = build_engine_model_config(
             &self.serve_args,
-            model_reference.clone(),
-            &model_dir,
-            max_cache_cap_override,
-            request.sampling_defaults,
+            parsed.model_reference.clone(),
+            &parsed.model_dir,
+            parsed.max_cache_cap_override,
+            parsed.sampling_defaults,
         )
-        .await
         .map_err(AdminError::from_load_error)?;
-        let mut registry = self.registry.write().await;
-        registry.insert(model_reference.clone(), load.runtime, set_default);
-        let loaded_models = registry.list();
+        self.pool
+            .reload_dynamic_model(load.config, parsed.set_default)
+            .await
+            .map_err(AdminError::from_load_error)?;
+        let loaded_models = self.list_loaded().await;
         Ok(AdminModelResponse::ok(
             "loaded",
-            Some(model_reference),
+            Some(parsed.model_reference),
             loaded_models,
+            load.warning,
+        ))
+    }
+
+    async fn register_model(
+        &self,
+        request: LoadModelRequest,
+    ) -> std::result::Result<AdminModelResponse, AdminError> {
+        let parsed = ParsedLoadModelRequest::new(request)?;
+        let load = build_engine_model_config(
+            &self.serve_args,
+            parsed.model_reference.clone(),
+            &parsed.model_dir,
+            parsed.max_cache_cap_override,
+            parsed.sampling_defaults,
+        )
+        .map_err(AdminError::from_load_error)?;
+        self.pool
+            .register_dynamic_model(load.config, parsed.set_default)
+            .await
+            .map_err(AdminError::from_load_error)?;
+        Ok(AdminModelResponse::ok(
+            "registered",
+            Some(parsed.model_reference),
+            self.list_loaded().await,
             load.warning,
         ))
     }
@@ -166,14 +177,20 @@ impl ModelManager {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let mut registry = self.registry.write().await;
-        let removed = model.as_deref().and_then(|model| registry.remove(model));
-        let status = if removed.is_some() {
-            "unloaded"
-        } else {
-            "not_loaded"
+        let status = match model.as_deref() {
+            Some(model) => match self.pool.unload_dynamic_model(model).await {
+                Ok(result) => match result.state {
+                    EngineRuntimeState::Draining => "unload_deferred",
+                    _ => "unloaded",
+                },
+                Err(error) => {
+                    let error = AdminError::from_control_error(error);
+                    return AdminModelResponse::from_error(error.message, error.code);
+                }
+            },
+            None => "not_loaded",
         };
-        AdminModelResponse::ok(status, model, registry.list(), None)
+        AdminModelResponse::ok(status, model, self.list_loaded().await, None)
     }
 
     async fn set_default_model(
@@ -182,92 +199,89 @@ impl ModelManager {
     ) -> std::result::Result<AdminModelResponse, AdminError> {
         let model = request.model.trim();
         if model.is_empty() {
-            return Err(AdminError::bad_request("model is required"));
+            return Err(AdminError::model_required());
         }
-        let mut registry = self.registry.write().await;
-        registry
-            .set_default(model)
-            .map_err(|_| AdminError::not_found(format!("model is not loaded: {model}")))?;
+        if !self.pool.is_model_registered(model).await {
+            return Err(AdminError::model_not_registered(model));
+        }
+        self.pool
+            .set_default_model(model)
+            .await
+            .map_err(|_| AdminError::model_not_registered(model))?;
         Ok(AdminModelResponse::ok(
             "default_set",
             Some(model.to_string()),
-            registry.list(),
+            self.list_loaded().await,
             None,
         ))
     }
 
     async fn list_loaded(&self) -> Vec<LoadedModelInfo> {
-        self.registry.read().await.list()
+        self.pool
+            .loaded_model_infos()
+            .await
+            .into_iter()
+            .map(LoadedModelInfo::from)
+            .collect()
     }
 
     async fn health_snapshot(&self) -> HealthSnapshot {
-        let snapshots = self
-            .registry
-            .read()
-            .await
-            .models
-            .values()
-            .map(|runtime| runtime.health_snapshot())
-            .collect::<Vec<_>>();
+        let snapshots = self.pool.loaded_causal_health_snapshots().await;
         aggregate_health(self.start_time, snapshots)
+    }
+
+    async fn openai(&self, req: openai::ChatRequest) -> Response {
+        match self.pool.app_openai_chat_completions(req).await {
+            Ok(response) => response,
+            Err(error) => resolve_error_response(error),
+        }
+    }
+
+    async fn anthropic(&self, req: anthropic::MessagesRequest) -> Response {
+        match self.pool.app_anthropic_messages(req).await {
+            Ok(response) => response,
+            Err(error) => resolve_error_response(error),
+        }
     }
 
     async fn reload_model_now(
         &self,
         reload: PendingModelReload,
     ) -> std::result::Result<AdminModelResponse, AdminError> {
-        let removed = {
-            let mut registry = self.registry.write().await;
-            if registry
-                .pending_requests(&reload.model_reference)
-                .is_some_and(|requests| requests > 0)
-            {
-                drop(registry);
-                self.schedule_reload_when_idle(reload.clone()).await;
-                let loaded_models = self.registry.read().await.list();
-                return Ok(AdminModelResponse::ok(
-                    "reload_deferred",
-                    Some(reload.model_reference),
-                    loaded_models,
-                    Some("模型正在处理请求，新参数将在该模型空闲后自动重新加载。".to_string()),
-                ));
-            }
-            registry.remove(&reload.model_reference)
-        };
-        if removed.is_none() {
-            return Err(AdminError::not_found(format!(
-                "model is not loaded: {}",
-                reload.model_reference
-            )));
+        if self
+            .pool
+            .pending_requests(&reload.model_reference)
+            .await
+            .is_some_and(|requests| requests > 0)
+        {
+            self.schedule_reload_when_idle(reload.clone()).await;
+            return Ok(AdminModelResponse::ok(
+                "reload_deferred",
+                Some(reload.model_reference),
+                self.list_loaded().await,
+                Some(AdminWarning::new(
+                    MODEL_RELOAD_DEFERRED_WARNING_CODE,
+                    MODEL_RELOAD_DEFERRED_WARNING,
+                )),
+            ));
+        }
+        if !self.pool.is_model_loaded(&reload.model_reference).await {
+            return Err(AdminError::model_not_loaded(&reload.model_reference));
         }
 
-        let removed = removed.expect("removed runtime checked above");
-        let load = match load_runtime(
+        let load = build_engine_model_config(
             &self.serve_args,
             reload.model_reference.clone(),
             &reload.model_dir,
             reload.max_cache_cap_override,
             reload.sampling_defaults_override,
         )
-        .await
-        {
-            Ok(load) => load,
-            Err(error) => {
-                self.registry.write().await.insert_existing(
-                    reload.model_reference.clone(),
-                    removed,
-                    reload.set_default,
-                );
-                return Err(AdminError::from_load_error(error));
-            }
-        };
-        let mut registry = self.registry.write().await;
-        registry.insert(
-            reload.model_reference.clone(),
-            load.runtime,
-            reload.set_default,
-        );
-        let loaded_models = registry.list();
+        .map_err(AdminError::from_load_error)?;
+        self.pool
+            .reload_dynamic_model(load.config, reload.set_default)
+            .await
+            .map_err(AdminError::from_load_error)?;
+        let loaded_models = self.list_loaded().await;
         Ok(AdminModelResponse::ok(
             "reloaded",
             Some(reload.model_reference),
@@ -282,8 +296,8 @@ impl ModelManager {
             .write()
             .await
             .insert(model_reference.clone(), reload);
-        let registry = self.registry.clone();
         let pending_reloads = self.pending_reloads.clone();
+        let pool = self.pool.clone();
         let serve_args = self.serve_args.clone();
 
         tokio::spawn(async move {
@@ -293,10 +307,9 @@ impl ModelManager {
                 if !still_pending {
                     return;
                 }
-                let busy = registry
-                    .read()
-                    .await
+                let busy = pool
                     .pending_requests(&model_reference)
+                    .await
                     .is_some_and(|requests| requests > 0);
                 if busy {
                     continue;
@@ -305,51 +318,40 @@ impl ModelManager {
                 let Some(reload) = reload else {
                     return;
                 };
-                let removed = {
-                    let mut registry = registry.write().await;
-                    if registry
-                        .pending_requests(&model_reference)
-                        .is_some_and(|requests| requests > 0)
-                    {
-                        pending_reloads
-                            .write()
-                            .await
-                            .insert(model_reference.clone(), reload);
-                        continue;
-                    }
-                    registry.remove(&model_reference)
-                };
-                if removed.is_none() {
-                    return;
+                if pool
+                    .pending_requests(&model_reference)
+                    .await
+                    .is_some_and(|requests| requests > 0)
+                {
+                    pending_reloads
+                        .write()
+                        .await
+                        .insert(model_reference.clone(), reload);
+                    continue;
                 }
-                let removed = removed.expect("removed runtime checked above");
-                match load_runtime(
+                let load = build_engine_model_config(
                     &serve_args,
                     reload.model_reference.clone(),
                     &reload.model_dir,
                     reload.max_cache_cap_override,
                     reload.sampling_defaults_override,
-                )
-                .await
-                {
+                );
+                match load {
                     Ok(load) => {
-                        registry.write().await.insert(
-                            reload.model_reference,
-                            load.runtime,
-                            reload.set_default,
-                        );
+                        if let Err(error) = pool
+                            .reload_dynamic_model(load.config, reload.set_default)
+                            .await
+                        {
+                            tracing::error!(
+                                "failed to reload model {} after idle: {error:#}",
+                                reload.model_reference
+                            );
+                        }
                     }
-                    Err(error) => {
-                        registry.write().await.insert_existing(
-                            reload.model_reference.clone(),
-                            removed,
-                            reload.set_default,
-                        );
-                        tracing::error!(
-                            "failed to reload model {} after idle: {error:#}",
-                            reload.model_reference
-                        );
-                    }
+                    Err(error) => tracing::error!(
+                        "failed to build reload config for model {} after idle: {error:#}",
+                        reload.model_reference
+                    ),
                 }
                 return;
             }
@@ -366,274 +368,78 @@ struct PendingModelReload {
     set_default: bool,
 }
 
-struct ModelRegistry<T> {
-    models: HashMap<String, Arc<T>>,
-    default_model: Option<String>,
+struct EngineModelLoad {
+    config: EngineModelConfig,
+    warning: Option<AdminWarning>,
 }
 
-impl<T> Default for ModelRegistry<T> {
-    fn default() -> Self {
-        Self {
-            models: HashMap::new(),
-            default_model: None,
-        }
-    }
+struct ParsedLoadModelRequest {
+    model_reference: String,
+    model_dir: PathBuf,
+    max_cache_cap_override: Option<usize>,
+    sampling_defaults: SamplingDefaults,
+    set_default: bool,
+    reload_when_idle: bool,
 }
 
-impl<T> ModelRegistry<T>
-where
-    T: RuntimeInfo,
-{
-    fn insert(&mut self, id: String, runtime: T, set_default: bool) -> Arc<T> {
-        let runtime = Arc::new(runtime);
-        self.models.insert(id.clone(), runtime.clone());
-        if set_default || self.default_model.is_none() {
-            self.default_model = Some(id);
-        }
-        runtime
-    }
-
-    fn insert_existing(&mut self, id: String, runtime: Arc<T>, set_default: bool) {
-        self.models.insert(id.clone(), runtime);
-        if set_default || self.default_model.is_none() {
-            self.default_model = Some(id);
-        }
-    }
-
-    fn contains(&self, id: &str) -> bool {
-        self.models.contains_key(id)
-    }
-
-    fn remove(&mut self, id: &str) -> Option<Arc<T>> {
-        let removed = self.models.remove(id);
-        if self.default_model.as_deref() == Some(id) {
-            self.default_model = None;
-        }
-        removed
-    }
-
-    fn set_default(&mut self, id: &str) -> std::result::Result<(), ()> {
-        if !self.models.contains_key(id) {
-            return Err(());
-        }
-        self.default_model = Some(id.to_string());
-        Ok(())
-    }
-
-    fn resolve(
-        &self,
-        requested_model: Option<&str>,
-    ) -> std::result::Result<Arc<T>, ModelResolveError> {
-        if let Some(requested) = requested_model
+impl ParsedLoadModelRequest {
+    fn new(request: LoadModelRequest) -> std::result::Result<Self, AdminError> {
+        let model_reference = request
+            .model
+            .as_deref()
+            .or(request.model_dir.as_deref())
+            .or(request.repo_id.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
-            return self
-                .models
-                .get(requested)
-                .cloned()
-                .ok_or_else(|| ModelResolveError::NotLoaded(requested.to_string()));
-        }
-        let default_model = self
-            .default_model
+            .ok_or_else(AdminError::model_required)?
+            .to_string();
+        let model_dir_value = request
+            .model_dir
             .as_deref()
-            .ok_or(ModelResolveError::NoDefault)?;
-        self.models
-            .get(default_model)
-            .cloned()
-            .ok_or_else(|| ModelResolveError::NotLoaded(default_model.to_string()))
-    }
-
-    fn list(&self) -> Vec<LoadedModelInfo> {
-        let mut models = self
-            .models
-            .iter()
-            .map(|(id, runtime)| LoadedModelInfo {
-                id: id.clone(),
-                model: id.clone(),
-                path: runtime.model_path().to_string(),
-                architecture: runtime.architecture().to_string(),
-                is_default: self.default_model.as_deref() == Some(id.as_str()),
-                max_position_embeddings: runtime.max_position_embeddings(),
-            })
-            .collect::<Vec<_>>();
-        models.sort_by(|a, b| a.id.cmp(&b.id));
-        models
-    }
-
-    fn pending_requests(&self, id: &str) -> Option<usize> {
-        self.models
-            .get(id)
-            .map(|runtime| runtime.pending_requests())
-    }
-}
-
-trait RuntimeInfo {
-    fn model_path(&self) -> &str;
-    fn architecture(&self) -> &'static str;
-    fn max_position_embeddings(&self) -> i32;
-    fn pending_requests(&self) -> usize {
-        0
-    }
-}
-
-#[derive(Debug)]
-enum ModelResolveError {
-    NoDefault,
-    NotLoaded(String),
-}
-
-#[allow(clippy::large_enum_variant)]
-enum LoadedModelRuntime {
-    Qwen35Dense {
-        path: String,
-        state: AppState<crate::models::Qwen35Model>,
-    },
-    Qwen35Moe {
-        path: String,
-        state: AppState<crate::models::Qwen35MoeModel>,
-    },
-    Gemma4 {
-        path: String,
-        state: AppState<crate::models::Gemma4Model>,
-    },
-    Glm4MoeLite {
-        path: String,
-        state: AppState<crate::models::Glm4MoeLiteModel>,
-    },
-    Llama {
-        path: String,
-        state: AppState<crate::models::LlamaModel>,
-    },
-    MiniCpmV46 {
-        path: String,
-        state: AppState<crate::models::MiniCpmV46Model>,
-    },
-}
-
-impl LoadedModelRuntime {
-    async fn openai(&self, req: openai::ChatRequest) -> Response {
-        match self {
-            Self::Qwen35Dense { state, .. } => {
-                openai::chat_completions_with_state(state.clone(), req).await
-            }
-            Self::Qwen35Moe { state, .. } => {
-                openai::chat_completions_with_state(state.clone(), req).await
-            }
-            Self::Gemma4 { state, .. } => {
-                openai::chat_completions_with_state(state.clone(), req).await
-            }
-            Self::Glm4MoeLite { state, .. } => {
-                openai::chat_completions_with_state(state.clone(), req).await
-            }
-            Self::Llama { state, .. } => {
-                openai::chat_completions_with_state(state.clone(), req).await
-            }
-            Self::MiniCpmV46 { state, .. } => {
-                openai::chat_completions_with_state(state.clone(), req).await
-            }
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| model_reference.clone());
+        let model_dir = PathBuf::from(&model_dir_value);
+        if !model_dir.exists() {
+            return Err(AdminError::model_directory_not_found(&model_dir));
         }
-    }
 
-    async fn anthropic(&self, req: anthropic::MessagesRequest) -> Response {
-        match self {
-            Self::Qwen35Dense { state, .. } => {
-                anthropic::messages_with_state(state.clone(), req).await
-            }
-            Self::Qwen35Moe { state, .. } => {
-                anthropic::messages_with_state(state.clone(), req).await
-            }
-            Self::Gemma4 { state, .. } => anthropic::messages_with_state(state.clone(), req).await,
-            Self::Glm4MoeLite { state, .. } => {
-                anthropic::messages_with_state(state.clone(), req).await
-            }
-            Self::Llama { state, .. } => anthropic::messages_with_state(state.clone(), req).await,
-            Self::MiniCpmV46 { state, .. } => {
-                anthropic::messages_with_state(state.clone(), req).await
-            }
-        }
-    }
-
-    fn health_snapshot(&self) -> HealthSnapshot {
-        match self {
-            Self::Qwen35Dense { state, .. } => state.health_collector.snapshot(),
-            Self::Qwen35Moe { state, .. } => state.health_collector.snapshot(),
-            Self::Gemma4 { state, .. } => state.health_collector.snapshot(),
-            Self::Glm4MoeLite { state, .. } => state.health_collector.snapshot(),
-            Self::Llama { state, .. } => state.health_collector.snapshot(),
-            Self::MiniCpmV46 { state, .. } => state.health_collector.snapshot(),
-        }
-    }
-
-    fn pending_requests(&self) -> usize {
-        match self {
-            Self::Qwen35Dense { state, .. } => runtime_pending_requests(state),
-            Self::Qwen35Moe { state, .. } => runtime_pending_requests(state),
-            Self::Gemma4 { state, .. } => runtime_pending_requests(state),
-            Self::Glm4MoeLite { state, .. } => runtime_pending_requests(state),
-            Self::Llama { state, .. } => runtime_pending_requests(state),
-            Self::MiniCpmV46 { state, .. } => runtime_pending_requests(state),
-        }
+        let max_cache_cap_override = match request.max_cache_cap {
+            Some(0) => return Err(AdminError::invalid_max_cache_cap()),
+            value => value,
+        };
+        Ok(Self {
+            model_reference,
+            model_dir,
+            max_cache_cap_override,
+            sampling_defaults: request.sampling_defaults,
+            set_default: request.set_default.unwrap_or(false),
+            reload_when_idle: request.reload_when_idle.unwrap_or(false),
+        })
     }
 }
 
-fn runtime_pending_requests<M>(state: &AppState<M>) -> usize
-where
-    M: crate::core::model::Model + crate::core::scheduler::DenseVlMethods + Send + 'static,
-{
-    let snapshot = state.health_collector.snapshot();
-    let model_locked = usize::from(state.model.try_lock().is_err());
-    snapshot
-        .scheduler
-        .b_active
-        .saturating_add(snapshot.scheduler.b_queued)
-        .saturating_add(model_locked)
+fn engine_runtime_config(args: &ServeArgs) -> Result<EnginePoolRuntimeConfig> {
+    Ok(EnginePoolRuntimeConfig {
+        host: args.host.clone(),
+        port: args.port,
+        kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
+        scheduler_autotune_report: args.scheduler_autotune_report,
+        paged_prefix_cache: resolve_engine_paged_prefix_cache_settings(args)?,
+        prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
+        model_ttl: resolve_model_ttl(args)?,
+        active_kv_offload: resolve_active_kv_offload_config(args)?,
+    })
 }
 
-impl RuntimeInfo for LoadedModelRuntime {
-    fn model_path(&self) -> &str {
-        match self {
-            Self::Qwen35Dense { path, .. }
-            | Self::Qwen35Moe { path, .. }
-            | Self::Gemma4 { path, .. }
-            | Self::Glm4MoeLite { path, .. }
-            | Self::Llama { path, .. }
-            | Self::MiniCpmV46 { path, .. } => path,
-        }
-    }
-
-    fn architecture(&self) -> &'static str {
-        match self {
-            Self::Qwen35Dense { .. } => "qwen3_5",
-            Self::Qwen35Moe { .. } => "qwen3_5_moe",
-            Self::Gemma4 { .. } => "gemma4",
-            Self::Glm4MoeLite { .. } => "glm4_moe_lite",
-            Self::Llama { .. } => "llama",
-            Self::MiniCpmV46 { .. } => "minicpmv4_6",
-        }
-    }
-
-    fn max_position_embeddings(&self) -> i32 {
-        self.health_snapshot().model.max_position_embeddings
-    }
-
-    fn pending_requests(&self) -> usize {
-        self.pending_requests()
-    }
-}
-
-struct RuntimeLoad {
-    runtime: LoadedModelRuntime,
-    warning: Option<String>,
-}
-
-async fn load_runtime(
+fn build_engine_model_config(
     args: &ServeArgs,
     model_id: String,
     model_dir: &Path,
     max_cache_cap_override: Option<usize>,
     sampling_defaults_override: SamplingDefaults,
-) -> Result<RuntimeLoad> {
+) -> Result<EngineModelLoad> {
     let resolved = apply_load_request_scheduler_overrides(
         resolve_scheduler_for_model(args, model_dir)?,
         max_cache_cap_override,
@@ -641,192 +447,32 @@ async fn load_runtime(
     let sampling_defaults = read_generation_sampling_defaults(model_dir)?
         .merge_with_override(sampling_defaults_override);
     let warning = match resolved.profile_source {
-        None if args.scheduler_profile.is_none() => Some(DEFAULT_PROFILE_WARNING.to_string()),
+        None if args.scheduler_profile.is_none() => Some(AdminWarning::new(
+            DEFAULT_PROFILE_WARNING_CODE,
+            DEFAULT_PROFILE_WARNING,
+        )),
         Some(SchedulerProfileSource::Explicit | SchedulerProfileSource::Store) | None => None,
     };
     let model_type = read_model_type(model_dir)?;
     let architecture = ModelArchitecture::from_model_type(&model_type)?;
-    let loader = Loader::open_multimodal(model_dir).context("Loader::open_multimodal")?;
-    let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
-    let vision_input = match architecture {
-        ModelArchitecture::Gemma4 => {
-            let cfg = crate::models::gemma4::Gemma4Config::from_loader(&loader)
-                .context("Gemma4Config::from_loader")?;
-            cfg.vision_config
-                .map(|vision_config| VisionInputConfig::Gemma4 { vision_config })
-        }
-        ModelArchitecture::MiniCpmV46 => Some(VisionInputConfig::MiniCpmV46 {
-            spatial_merge_size: 4,
-        }),
-        _ => None,
-    };
-    let path = model_dir.to_string_lossy().into_owned();
-    let config = resolved.scheduler_config;
-    let profile = resolved.scheduler_runtime_profile;
-    let report = args.scheduler_autotune_report;
-    let kv_cache_turboquant_bits = args.kv_quant.turboquant_bits();
-    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, config, &model_id)?;
-    let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
-    let active_kv_offload = resolve_active_kv_offload_config(args)?;
-    let runtime = match architecture {
-        ModelArchitecture::Qwen35Dense => {
-            let model = crate::models::Qwen35Model::from_loader(&loader)
-                .context("Qwen35Model::from_loader")?;
-            let state = build_plain_app_state(
-                model,
-                tokenizer,
-                model_id,
-                config.prefill_chunk_size,
-                config.b_max,
-                config.admission_deadline_ms,
-                config.admission_queue_max,
-                config.max_cache_cap,
-                config.decode_cadence_mid_chunk_cap,
-                kv_cache_turboquant_bits,
-                profile,
-                report,
-                vision_input,
-                paged_prefix_cache.clone(),
-                prefix_lru_cache,
-                active_kv_offload.clone(),
-            )
-            .await?
-            .with_sampling_defaults(sampling_defaults);
-            LoadedModelRuntime::Qwen35Dense { path, state }
-        }
-        ModelArchitecture::Qwen35Moe => {
-            let model = crate::models::Qwen35MoeModel::from_loader(&loader)
-                .context("Qwen35MoeModel::from_loader")?;
-            let state = build_plain_app_state(
-                model,
-                tokenizer,
-                model_id,
-                config.prefill_chunk_size,
-                config.b_max,
-                config.admission_deadline_ms,
-                config.admission_queue_max,
-                config.max_cache_cap,
-                config.decode_cadence_mid_chunk_cap,
-                kv_cache_turboquant_bits,
-                profile,
-                report,
-                vision_input,
-                paged_prefix_cache.clone(),
-                prefix_lru_cache,
-                active_kv_offload.clone(),
-            )
-            .await?
-            .with_sampling_defaults(sampling_defaults);
-            LoadedModelRuntime::Qwen35Moe { path, state }
-        }
-        ModelArchitecture::Gemma4 => {
-            let model = crate::models::Gemma4Model::from_loader(&loader)
-                .context("Gemma4Model::from_loader")?;
-            let state = build_plain_app_state(
-                model,
-                tokenizer,
-                model_id,
-                config.prefill_chunk_size,
-                config.b_max,
-                config.admission_deadline_ms,
-                config.admission_queue_max,
-                config.max_cache_cap,
-                config.decode_cadence_mid_chunk_cap,
-                kv_cache_turboquant_bits,
-                profile,
-                report,
-                vision_input,
-                paged_prefix_cache.clone(),
-                prefix_lru_cache,
-                active_kv_offload.clone(),
-            )
-            .await?
-            .with_sampling_defaults(sampling_defaults);
-            LoadedModelRuntime::Gemma4 { path, state }
-        }
-        ModelArchitecture::Glm4MoeLite => {
-            let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
-                .context("Glm4MoeLiteModel::from_loader")?;
-            let state = build_plain_app_state(
-                model,
-                tokenizer,
-                model_id,
-                config.prefill_chunk_size,
-                config.b_max,
-                config.admission_deadline_ms,
-                config.admission_queue_max,
-                config.max_cache_cap,
-                config.decode_cadence_mid_chunk_cap,
-                kv_cache_turboquant_bits,
-                profile,
-                report,
-                None,
-                paged_prefix_cache.clone(),
-                prefix_lru_cache,
-                active_kv_offload.clone(),
-            )
-            .await?
-            .with_sampling_defaults(sampling_defaults);
-            LoadedModelRuntime::Glm4MoeLite { path, state }
-        }
-        ModelArchitecture::Llama => {
-            let model = crate::models::LlamaModel::from_loader(&loader)
-                .context("LlamaModel::from_loader")?;
-            let state = build_plain_app_state(
-                model,
-                tokenizer,
-                model_id,
-                config.prefill_chunk_size,
-                config.b_max,
-                config.admission_deadline_ms,
-                config.admission_queue_max,
-                config.max_cache_cap,
-                config.decode_cadence_mid_chunk_cap,
-                kv_cache_turboquant_bits,
-                profile,
-                report,
-                None,
-                paged_prefix_cache.clone(),
-                prefix_lru_cache,
-                active_kv_offload.clone(),
-            )
-            .await?
-            .with_sampling_defaults(sampling_defaults);
-            LoadedModelRuntime::Llama { path, state }
-        }
-        ModelArchitecture::MiniCpmV46 => {
-            let model = crate::models::minicpmv4_6::model_from_loader(&loader)
-                .context("minicpmv4_6::model_from_loader")?;
-            let state = build_plain_app_state(
-                model,
-                tokenizer,
-                model_id,
-                config.prefill_chunk_size,
-                config.b_max,
-                config.admission_deadline_ms,
-                config.admission_queue_max,
-                config.max_cache_cap,
-                config.decode_cadence_mid_chunk_cap,
-                kv_cache_turboquant_bits,
-                profile,
-                report,
-                vision_input,
-                paged_prefix_cache,
-                prefix_lru_cache,
-                active_kv_offload,
-            )
-            .await?
-            .with_sampling_defaults(sampling_defaults);
-            LoadedModelRuntime::MiniCpmV46 { path, state }
-        }
-        ModelArchitecture::DiffusionGemma => {
-            anyhow::bail!(
-                "DiffusionGemma is not supported by app model manager hot-load mode; \
-                 use `ironmlx serve --model <path>` for the dedicated DiffusionGemma server lane"
-            );
-        }
-    };
-    Ok(RuntimeLoad { runtime, warning })
+    if architecture == ModelArchitecture::DiffusionGemma {
+        anyhow::bail!(
+            "DiffusionGemma is not supported by app model manager hot-load mode; \
+             use `ironmlx serve --model <path>` for the dedicated DiffusionGemma server lane"
+        );
+    }
+    Ok(EngineModelLoad {
+        config: EngineModelConfig {
+            id: model_id,
+            path: model_dir.to_path_buf(),
+            load_policy: EngineLoadPolicy::Lazy,
+            default: false,
+            scheduler_runtime_profile: resolved.scheduler_runtime_profile,
+            mtp: None,
+            sampling_defaults,
+        },
+        warning,
+    })
 }
 
 fn read_generation_sampling_defaults(model_dir: &Path) -> Result<SamplingDefaults> {
@@ -882,13 +528,15 @@ fn apply_load_request_scheduler_overrides(
 pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
     let host = args.host.clone();
     let port = args.port;
-    let manager = ModelManager::new(args);
+    let manager = ModelManager::new(args)?;
+    manager.start_model_ttl_sweeper();
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(app_healthz_handler))
         .route("/v1/chat/completions", post(app_openai_handler))
         .route("/v1/messages", post(app_anthropic_handler))
         .route("/admin/api/models/loaded", get(list_loaded_handler))
+        .route("/admin/api/models/register", post(register_model_handler))
         .route("/admin/api/models/load", post(load_model_handler))
         .route("/admin/api/models/unload", post(unload_model_handler))
         .route("/admin/api/models/default", post(set_default_model_handler))
@@ -909,22 +557,14 @@ async fn app_openai_handler(
     State(manager): State<ModelManager>,
     Json(req): Json<openai::ChatRequest>,
 ) -> Response {
-    let runtime = match manager.resolve_runtime(req.model.as_deref()).await {
-        Ok(runtime) => runtime,
-        Err(error) => return resolve_error_response(error),
-    };
-    runtime.openai(req).await
+    manager.openai(req).await
 }
 
 async fn app_anthropic_handler(
     State(manager): State<ModelManager>,
     Json(req): Json<anthropic::MessagesRequest>,
 ) -> Response {
-    let runtime = match manager.resolve_runtime(req.model.as_deref()).await {
-        Ok(runtime) => runtime,
-        Err(error) => return resolve_error_response(error),
-    };
-    runtime.anthropic(req).await
+    manager.anthropic(req).await
 }
 
 async fn app_healthz_handler(State(manager): State<ModelManager>) -> Json<HealthSnapshot> {
@@ -940,6 +580,16 @@ async fn load_model_handler(
     Json(request): Json<LoadModelRequest>,
 ) -> Response {
     match manager.load_model(request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn register_model_handler(
+    State(manager): State<ModelManager>,
+    Json(request): Json<LoadModelRequest>,
+) -> Response {
+    match manager.register_model(request).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
     }
@@ -962,19 +612,21 @@ async fn set_default_model_handler(
     }
 }
 
-fn resolve_error_response(error: ModelResolveError) -> Response {
-    match error {
-        ModelResolveError::NoDefault => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "No default model is loaded. Load a model or specify an already loaded model in the request.",
-        )
-            .into_response(),
-        ModelResolveError::NotLoaded(model) => (
-            StatusCode::NOT_FOUND,
-            format!("model is not loaded: {model}"),
-        )
-            .into_response(),
+fn resolve_error_response(error: anyhow::Error) -> Response {
+    if let Some(registry) = error.downcast_ref::<EngineRegistryError>() {
+        return match registry {
+            EngineRegistryError::UnknownModel { id } => {
+                (StatusCode::NOT_FOUND, format!("model is not registered: {id}")).into_response()
+            }
+            EngineRegistryError::AmbiguousDefault => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "No default model is loaded. Load a model or specify an already loaded model in the request.",
+            )
+                .into_response(),
+            _ => (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+        };
     }
+    (StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1006,8 +658,12 @@ struct AdminModelResponse {
     success: bool,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     loaded_models: Vec<LoadedModelInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1019,26 +675,45 @@ impl AdminModelResponse {
         status: &'static str,
         model: Option<String>,
         loaded_models: Vec<LoadedModelInfo>,
-        warning: Option<String>,
+        warning: Option<AdminWarning>,
     ) -> Self {
         Self {
             success: true,
             status,
+            code: None,
             model,
             loaded_models,
-            warning,
+            warning_code: warning.as_ref().map(|warning| warning.code),
+            warning: warning.map(|warning| warning.message),
             error: None,
         }
     }
 
-    fn error(message: String) -> Self {
+    fn from_error(message: String, code: Option<&'static str>) -> Self {
         Self {
             success: false,
             status: "error",
+            code,
             model: None,
             loaded_models: Vec::new(),
+            warning_code: None,
             warning: None,
             error: Some(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AdminWarning {
+    code: &'static str,
+    message: String,
+}
+
+impl AdminWarning {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
         }
     }
 }
@@ -1054,48 +729,124 @@ struct LoadedModelInfo {
     max_position_embeddings: i32,
 }
 
+impl From<EngineLoadedModelInfo> for LoadedModelInfo {
+    fn from(info: EngineLoadedModelInfo) -> Self {
+        Self {
+            id: info.id.clone(),
+            model: info.id,
+            path: info.path,
+            architecture: info.architecture,
+            is_default: info.is_default,
+            max_position_embeddings: info.max_position_embeddings,
+        }
+    }
+}
+
 struct AdminError {
     status: StatusCode,
     message: String,
+    code: Option<&'static str>,
 }
 
 impl AdminError {
-    fn bad_request(message: impl Into<String>) -> Self {
+    fn model_required() -> Self {
+        Self::bad_request_with_code(MODEL_REQUIRED_MESSAGE, Some(MODEL_REQUIRED_CODE))
+    }
+
+    fn model_directory_not_found(path: &Path) -> Self {
+        Self::bad_request_with_code(
+            format!("Model directory does not exist: {}", path.display()),
+            Some(MODEL_DIRECTORY_NOT_FOUND_CODE),
+        )
+    }
+
+    fn invalid_max_cache_cap() -> Self {
+        Self::bad_request_with_code(
+            INVALID_MAX_CACHE_CAP_MESSAGE,
+            Some(INVALID_MAX_CACHE_CAP_CODE),
+        )
+    }
+
+    fn model_not_loaded(model: &str) -> Self {
+        Self::not_found_with_code(
+            format!("Model is not loaded: {model}"),
+            Some(MODEL_NOT_LOADED_CODE),
+        )
+    }
+
+    fn model_not_registered(model: &str) -> Self {
+        Self::not_found_with_code(
+            format!("Model is not registered: {model}"),
+            Some(MODEL_NOT_REGISTERED_CODE),
+        )
+    }
+
+    fn bad_request_with_code(message: impl Into<String>, code: Option<&'static str>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            code,
         }
     }
 
-    fn not_found(message: impl Into<String>) -> Self {
+    fn not_found_with_code(message: impl Into<String>, code: Option<&'static str>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            code,
         }
     }
 
-    fn service_unavailable(message: impl Into<String>) -> Self {
+    fn service_unavailable_with_code(
+        message: impl Into<String>,
+        code: Option<&'static str>,
+    ) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
+            code,
         }
+    }
+
+    fn from_control_error(error: anyhow::Error) -> Self {
+        if let Some(
+            EngineRegistryError::UnknownModel { id } | EngineRegistryError::ModelDisabled { id },
+        ) = error.downcast_ref::<EngineRegistryError>()
+        {
+            return Self::model_not_loaded(id);
+        }
+        Self::bad_request_with_code(format!("{error:#}"), Some(BACKEND_UNLOAD_ERROR_CODE))
     }
 
     fn from_load_error(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
         if likely_gpu_memory_error(&message) {
-            return Self::service_unavailable(GPU_MEMORY_INSUFFICIENT_MESSAGE);
+            return Self::service_unavailable_with_code(
+                GPU_MEMORY_INSUFFICIENT_MESSAGE,
+                Some(GPU_MEMORY_INSUFFICIENT_CODE),
+            );
+        }
+        if likely_engine_pool_capacity_error(&message) {
+            return Self::service_unavailable_with_code(
+                MAX_LOADED_MODELS_REACHED_MESSAGE,
+                Some(MAX_LOADED_MODELS_REACHED_CODE),
+            );
         }
         Self {
             status: StatusCode::BAD_REQUEST,
             message,
+            code: None,
         }
     }
 }
 
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
-        (self.status, Json(AdminModelResponse::error(self.message))).into_response()
+        (
+            self.status,
+            Json(AdminModelResponse::from_error(self.message, self.code)),
+        )
+            .into_response()
     }
 }
 
@@ -1103,8 +854,9 @@ fn ensure_gpu_memory_headroom() -> std::result::Result<(), AdminError> {
     let memory = mlx::memory::snapshot();
     if let Some(max_recommended) = memory.max_recommended_bytes {
         if max_recommended > 0 && memory.active_bytes >= max_recommended {
-            return Err(AdminError::service_unavailable(
+            return Err(AdminError::service_unavailable_with_code(
                 GPU_MEMORY_INSUFFICIENT_MESSAGE,
+                Some(GPU_MEMORY_INSUFFICIENT_CODE),
             ));
         }
     }
@@ -1117,6 +869,13 @@ fn likely_gpu_memory_error(message: &str) -> bool {
         || lower.contains("oom")
         || lower.contains("failed to allocate")
         || lower.contains("memory allocation")
+        || lower.contains("memory budget")
+}
+
+fn likely_engine_pool_capacity_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("engine pool capacity reached")
 }
 
 fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> HealthSnapshot {
@@ -1215,70 +974,6 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
 mod tests {
     use super::*;
 
-    #[derive(Debug)]
-    struct TestRuntime {
-        path: String,
-    }
-
-    impl RuntimeInfo for TestRuntime {
-        fn model_path(&self) -> &str {
-            &self.path
-        }
-
-        fn architecture(&self) -> &'static str {
-            "test"
-        }
-
-        fn max_position_embeddings(&self) -> i32 {
-            4096
-        }
-    }
-
-    #[test]
-    fn registry_switches_default_for_new_resolves_without_dropping_old_arc() {
-        let mut registry = ModelRegistry::default();
-        let old = registry.insert(
-            "old".to_string(),
-            TestRuntime {
-                path: "/models/old".to_string(),
-            },
-            true,
-        );
-        registry.insert(
-            "new".to_string(),
-            TestRuntime {
-                path: "/models/new".to_string(),
-            },
-            true,
-        );
-
-        let resolved = registry.resolve(None).expect("default runtime");
-
-        assert_eq!(resolved.model_path(), "/models/new");
-        assert_eq!(old.model_path(), "/models/old");
-    }
-
-    #[test]
-    fn registry_unload_removes_future_resolves_but_existing_arc_survives() {
-        let mut registry = ModelRegistry::default();
-        let existing = registry.insert(
-            "model".to_string(),
-            TestRuntime {
-                path: "/models/model".to_string(),
-            },
-            true,
-        );
-
-        let removed = registry.remove("model").expect("removed runtime");
-
-        assert!(matches!(
-            registry.resolve(Some("model")),
-            Err(ModelResolveError::NotLoaded(_))
-        ));
-        assert_eq!(existing.model_path(), "/models/model");
-        assert_eq!(removed.model_path(), "/models/model");
-    }
-
     #[test]
     fn load_model_request_accepts_per_model_max_cache_cap() {
         let request: LoadModelRequest = serde_json::from_value(serde_json::json!({
@@ -1310,6 +1005,89 @@ mod tests {
         assert_eq!(request.sampling_defaults.top_p, Some(0.8));
         assert_eq!(request.sampling_defaults.top_k, Some(40));
         assert_eq!(request.sampling_defaults.repetition_penalty, Some(1.1));
+    }
+
+    #[test]
+    fn load_model_request_does_not_default_to_default_takeover() {
+        let request: LoadModelRequest = serde_json::from_value(serde_json::json!({
+            "model": "mlx-community/New-4bit",
+            "model_dir": "/models/new"
+        }))
+        .expect("load request");
+
+        assert!(!request.set_default.unwrap_or(false));
+    }
+
+    #[test]
+    fn load_error_maps_engine_pool_capacity_reached() {
+        let error = AdminError::from_load_error(anyhow::anyhow!(
+            "engine pool capacity reached: max_loaded_models=3, unload an existing model before loading `delta`"
+        ));
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message, MAX_LOADED_MODELS_REACHED_MESSAGE);
+        assert_eq!(error.code, Some(MAX_LOADED_MODELS_REACHED_CODE));
+        assert!(error
+            .message
+            .contains("Maximum concurrent loaded models reached"));
+    }
+
+    #[test]
+    fn load_error_serializes_engine_pool_capacity_code() {
+        let error = AdminError::from_load_error(anyhow::anyhow!(
+            "engine pool capacity reached: max_loaded_models=3, unload an existing model before loading `delta`"
+        ));
+        let response = AdminModelResponse::from_error(error.message, error.code);
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(value["success"], false);
+        assert_eq!(value["code"], "max_loaded_models_reached");
+        assert_eq!(value["error"], MAX_LOADED_MODELS_REACHED_MESSAGE);
+    }
+
+    #[test]
+    fn admin_response_serializes_warning_code() {
+        let response = AdminModelResponse::ok(
+            "loaded",
+            Some("mlx-community/Tiny-4bit".to_string()),
+            Vec::new(),
+            Some(AdminWarning::new(
+                DEFAULT_PROFILE_WARNING_CODE,
+                DEFAULT_PROFILE_WARNING,
+            )),
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(value["success"], true);
+        assert_eq!(value["warning_code"], "default_scheduler_profile_used");
+        assert_eq!(value["warning"], DEFAULT_PROFILE_WARNING);
+    }
+
+    #[test]
+    fn admin_model_required_error_serializes_code() {
+        let error = AdminError::model_required();
+        let response = AdminModelResponse::from_error(error.message, error.code);
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(value["success"], false);
+        assert_eq!(value["code"], "model_required");
+        assert_eq!(value["error"], MODEL_REQUIRED_MESSAGE);
+    }
+
+    #[test]
+    fn unload_unknown_model_error_serializes_model_not_loaded_code() {
+        let error = AdminError::from_control_error(
+            EngineRegistryError::UnknownModel {
+                id: "missing".to_string(),
+            }
+            .into(),
+        );
+        let response = AdminModelResponse::from_error(error.message, error.code);
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(value["success"], false);
+        assert_eq!(value["code"], "model_not_loaded");
+        assert_eq!(value["error"], "Model is not loaded: missing");
     }
 
     #[test]

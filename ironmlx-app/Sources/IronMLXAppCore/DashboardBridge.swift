@@ -96,7 +96,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             updateConfig { $0.theme = value == "system" ? nil : value }
         case "setDefaultModel":
             let model = stringBody(body).trimmingCharacters(in: .whitespacesAndNewlines)
-            updateConfig { $0.lastModel = model }
+            updateConfig { $0.defaultModel = model }
             setBackendDefaultModelIfLoaded(model)
         case "deleteModels":
             deleteModels(json: stringBody(body))
@@ -283,7 +283,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         Task {
             do {
                 try await MainActor.run {
-                    try self.backend.start(modelReference: target.model)
+                    try self.backend.start()
                 }
                 try await client.waitUntilReady()
                 let result = try await benchmarkSessionCoordinator.prepare(
@@ -362,7 +362,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let json = try Self.jsonString(result)
                 await MainActor.run {
                     if result.status != "not_active" {
-                        self.updateConfig { $0.lastModel = result.defaultModel }
+                        self.updateConfig {
+                            $0.replaceLoadedModels(result.restoredModels, defaultModel: result.defaultModel)
+                        }
+                        NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
                     }
                     self.sendFetchResult(path: path, jsonString: json)
                     self.sendScannedModels()
@@ -461,6 +464,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let result = try deletionService.deleteModels(modelIDs)
             let resultJSON = (try? Self.jsonString(result)) ?? "{}"
             let defaultSync = result.clearedDefault ? "window.__DEFAULT_MODEL__ = '';" : ""
+            syncLoadedModels()
             sendJavaScript("\(defaultSync)onModelsDeleted(\(Self.jsStringLiteral(resultJSON)))")
         } catch {
             sendJavaScript(
@@ -490,20 +494,28 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         Task {
             do {
                 try await MainActor.run {
-                    try self.backend.start(modelReference: model)
+                    try self.backend.start()
                 }
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 try await client.waitUntilReady()
+                await self.registerLocalModels(config: config, client: client)
+                let loadedModels = try await client.fetchLoadedModels()
+                let setDefault = Self.shouldSetDefaultWhenLoadingModel(
+                    model,
+                    config: config,
+                    currentLoadedModelCount: loadedModels.count
+                )
                 let response = try await client.loadModel(
                     model: model,
                     modelDir: resolvedModel,
-                    setDefault: true,
+                    setDefault: setDefault,
                     maxCacheCap: maxCacheCap,
                     reloadWhenIdle: false,
                     samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {
+                    self.persistBackendLoadedModels(response.loadedModels)
                     self.deliverModelOperationResult(jsonString: json, callback: callback)
                     self.sendScannedModels()
                 }
@@ -530,6 +542,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let response = try await client.unloadModel(model: model, modelDir: resolvedModel)
                 let json = try Self.jsonString(response)
                 await MainActor.run {
+                    self.persistBackendLoadedModels(response.loadedModels)
                     self.deliverModelOperationResult(jsonString: json, callback: callback)
                     self.sendScannedModels()
                 }
@@ -541,6 +554,20 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    nonisolated static func shouldSetDefaultWhenLoadingModel(
+        _ model: String,
+        config: AppConfig,
+        currentLoadedModelCount: Int
+    ) -> Bool {
+        guard let model = AppConfig.normalizedModelReference(model) else {
+            return false
+        }
+        if config.defaultModelReference == model {
+            return true
+        }
+        return currentLoadedModelCount == 0
+    }
+
     private func restartBackend() {
         let config = configStore.load()
         Task {
@@ -550,6 +577,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             )
             let json = (try? Self.jsonString(result)) ?? "{\"success\":false,\"status\":\"restart_failed\"}"
             await MainActor.run {
+                if result.success {
+                    self.updateConfig {
+                        $0.replaceLoadedModels(result.loadedModels, defaultModel: result.model)
+                    }
+                    NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
+                }
                 self.sendJavaScript("onServerRestarted(\(Self.jsStringLiteral(json)))")
                 self.sendScannedModels()
             }
@@ -610,7 +643,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         config.maxSequences = intValue(object, "max_sequences") ?? config.maxSequences
         config.bMax = nil
         config.maxModels = intValue(object, "max_models") ?? config.maxModels
-        config.initCacheBlocks = intValue(object, "init_cache_blocks") ?? config.initCacheBlocks
         config.modelTtlMinutes = intValue(object, "model_ttl_minutes") ?? config.modelTtlMinutes
         config.distributedBackend = stringValue(object, "distributed_backend") ?? config.distributedBackend
         config.parallelMode = stringValue(object, "parallel_mode") ?? config.parallelMode
@@ -694,7 +726,25 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         Task {
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
-                _ = try await client.setDefaultModel(model)
+                let response: BackendModelAdminResponse
+                if let resolvedModel = self.scanner.resolveModelPath(for: model) {
+                    response = try await client.registerModel(
+                        model: model,
+                        modelDir: resolvedModel,
+                        setDefault: true,
+                        maxCacheCap: ModelLoadParameters.maxCacheCap(
+                            for: model,
+                            scanner: self.scanner,
+                            parameterStore: self.parameterStore
+                        ),
+                        samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
+                    )
+                } else {
+                    response = try await client.setDefaultModel(model)
+                }
+                await MainActor.run {
+                    self.persistBackendLoadedModels(response.loadedModels, preferredDefaultModel: model)
+                }
             } catch {
                 IronMLXAppLogger.error("Failed to set backend default model: \(error)")
             }
@@ -744,6 +794,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {
+                    self.persistBackendLoadedModels(response.loadedModels)
                     self.sendJavaScript("onModelParamsReloaded(\(Self.jsStringLiteral(json)))")
                     self.sendScannedModels()
                 }
@@ -751,8 +802,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let response = BackendModelAdminResponse(
                     success: false,
                     status: "error",
+                    code: nil,
                     model: nil,
                     loadedModels: [],
+                    warningCode: nil,
                     warning: nil,
                     error: error.localizedDescription
                 )
@@ -781,31 +834,85 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 let models = try await client.fetchLoadedModels()
+                syncPersistedLoadedModelsIfNeeded(models)
                 for model in models {
                     loaded.insert(model.id)
                     loaded.insert(model.model)
                     loaded.insert(model.path)
                 }
+                return loaded
             } catch {
                 IronMLXAppLogger.error("Failed to fetch loaded models: \(error)")
             }
         }
-        if loaded.isEmpty, let lastModel = config.lastModel {
-            loaded.insert(lastModel)
+        for model in config.restoredModelReferences {
+            loaded.insert(model)
         }
         return loaded
+    }
+
+    private func syncPersistedLoadedModelsIfNeeded(_ models: [BackendLoadedModelInfo]) {
+        let backendLoaded = AppConfig.normalizedModelReferences(models.map(\.id))
+        let config = configStore.load()
+        let persistedLoaded = AppConfig.normalizedModelReferences(config.loadedModels ?? [])
+        let backendDefault = AppConfig.normalizedModelReference(models.first(where: \.isDefault)?.id)
+        let defaultChanged = backendDefault != nil && backendDefault != config.defaultModelReference
+        guard Set(backendLoaded) != Set(persistedLoaded) || defaultChanged else {
+            return
+        }
+        persistBackendLoadedModels(models)
+    }
+
+    private func persistBackendLoadedModels(
+        _ models: [BackendLoadedModelInfo],
+        preferredDefaultModel: String? = nil
+    ) {
+        let loaded = models.map(\.id)
+        let backendDefault = models.first(where: \.isDefault)?.id
+        let currentDefault = configStore.load().defaultModelReference
+        let defaultModel = backendDefault ?? preferredDefaultModel ?? currentDefault
+        updateConfig {
+            $0.replaceLoadedModels(loaded, defaultModel: backendDefault)
+            if let defaultModel {
+                $0.defaultModel = defaultModel
+            }
+        }
+        NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
+        if let defaultModel {
+            sendJavaScript("window.__DEFAULT_MODEL__ = \(Self.jsStringLiteral(defaultModel));")
+        }
     }
 
     private func sendScannedModels() {
         Task {
             let loadedModels = await self.loadedModelReferences()
             let models = self.scanner.scan(loadedModels: loadedModels)
+            let config = self.configStore.load()
+            if self.backend.isRunning {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                await self.registerLocalModels(models: models, config: config, client: client)
+            }
             let json = (try? Self.jsonString(models)) ?? "[]"
             await MainActor.run {
                 self.sendModelParameters()
                 self.sendJavaScript("onLocalModelsScanned(\(Self.jsStringLiteral(json)))")
             }
         }
+    }
+
+    private func registerLocalModels(
+        models: [LocalModel]? = nil,
+        config: AppConfig,
+        client: BackendAPIClient
+    ) async {
+        let localModels = models ?? scanner.scan(loadedModels: [])
+        await LocalModelBackendRegistrar.register(
+            localModels: localModels,
+            defaultModel: config.defaultModelReference,
+            scanner: scanner,
+            parameterStore: parameterStore,
+            client: client
+        )
     }
 
     private func sendModelParameters() {

@@ -32,15 +32,12 @@ public final class BackendProcessManager {
         process?.isRunning == true
     }
 
-    public func start(modelReference: String) throws {
-        guard !modelReference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw BackendProcessError.missingModel
-        }
+    public func start() throws {
         if isRunning {
             return
         }
 
-        var config = configStore.load()
+        let config = configStore.load()
         let executable = BackendBinaryResolver.resolve()
         let options = BackendLaunchOptions(config: config)
         if let validationError = options.validationError {
@@ -76,8 +73,6 @@ public final class BackendProcessManager {
             try nextProcess.run()
             process = nextProcess
             state = .running
-            config.lastModel = modelReference
-            configStore.save(config)
         } catch {
             state = .failed
             lastError = error.localizedDescription
@@ -110,14 +105,11 @@ public final class BackendProcessManager {
     }
 }
 
-public enum BackendProcessError: LocalizedError {
-    case missingModel
+@frozen public enum BackendProcessError: LocalizedError {
     case invalidLaunchConfiguration(BackendLaunchValidationError)
 
     public var errorDescription: String? {
         switch self {
-        case .missingModel:
-            return "No model is configured."
         case .invalidLaunchConfiguration(let error):
             return error.message
         }

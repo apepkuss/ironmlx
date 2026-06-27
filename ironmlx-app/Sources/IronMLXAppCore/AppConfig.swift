@@ -3,7 +3,8 @@ import Foundation
 public struct AppConfig: Codable, Equatable {
     public var host: String
     public var port: UInt16
-    public var lastModel: String?
+    public var defaultModel: String?
+    public var loadedModels: [String]?
     public var language: String
     public var theme: String?
     public var logLevel: String?
@@ -20,7 +21,6 @@ public struct AppConfig: Codable, Equatable {
     public var activeKvOffload: Bool?
     public var maxSequences: Int?
     public var maxModels: Int?
-    public var initCacheBlocks: Int?
     public var modelTtlMinutes: Int?
     public var distributedBackend: String?
     public var parallelMode: String?
@@ -36,7 +36,8 @@ public struct AppConfig: Codable, Equatable {
     public init(
         host: String = "127.0.0.1",
         port: UInt16 = 9068,
-        lastModel: String? = nil,
+        defaultModel: String? = nil,
+        loadedModels: [String]? = nil,
         language: String = "en",
         theme: String? = nil,
         logLevel: String? = nil,
@@ -53,7 +54,6 @@ public struct AppConfig: Codable, Equatable {
         activeKvOffload: Bool? = nil,
         maxSequences: Int? = nil,
         maxModels: Int? = nil,
-        initCacheBlocks: Int? = nil,
         modelTtlMinutes: Int? = nil,
         distributedBackend: String? = nil,
         parallelMode: String? = nil,
@@ -68,7 +68,8 @@ public struct AppConfig: Codable, Equatable {
     ) {
         self.host = host
         self.port = port
-        self.lastModel = lastModel
+        self.defaultModel = defaultModel
+        self.loadedModels = loadedModels
         self.language = language
         self.theme = theme
         self.logLevel = logLevel
@@ -85,7 +86,6 @@ public struct AppConfig: Codable, Equatable {
         self.activeKvOffload = activeKvOffload
         self.maxSequences = maxSequences
         self.maxModels = maxModels
-        self.initCacheBlocks = initCacheBlocks
         self.modelTtlMinutes = modelTtlMinutes
         self.distributedBackend = distributedBackend
         self.parallelMode = parallelMode
@@ -102,7 +102,8 @@ public struct AppConfig: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case host
         case port
-        case lastModel = "last_model"
+        case defaultModel = "default_model"
+        case loadedModels = "loaded_models"
         case language
         case theme
         case logLevel = "log_level"
@@ -119,7 +120,6 @@ public struct AppConfig: Codable, Equatable {
         case activeKvOffload = "active_kv_offload"
         case maxSequences = "max_sequences"
         case maxModels = "max_models"
-        case initCacheBlocks = "init_cache_blocks"
         case modelTtlMinutes = "model_ttl_minutes"
         case distributedBackend = "distributed_backend"
         case parallelMode = "parallel_mode"
@@ -131,6 +131,82 @@ public struct AppConfig: Codable, Equatable {
         case decodeCadenceMidChunkCap = "decode_cadence_mid_chunk_cap"
         case schedulerProfile = "scheduler_profile"
         case schedulerAutotuneReport = "scheduler_autotune_report"
+    }
+}
+
+public extension AppConfig {
+    var defaultModelReference: String? {
+        Self.normalizedModelReference(defaultModel)
+    }
+
+    var restoredModelReferences: [String] {
+        var references = Self.normalizedModelReferences(loadedModels ?? [])
+        if let defaultModelReference,
+           let index = references.firstIndex(of: defaultModelReference) {
+            if index != references.startIndex {
+                references.remove(at: index)
+                references.insert(defaultModelReference, at: 0)
+            }
+        }
+        return references
+    }
+
+    mutating func recordLoadedModel(_ model: String, setDefault: Bool) {
+        guard let model = Self.normalizedModelReference(model) else {
+            return
+        }
+        var references = Self.normalizedModelReferences(loadedModels ?? [])
+        if !references.contains(model) {
+            references.append(model)
+        }
+        loadedModels = references
+        if setDefault {
+            defaultModel = model
+        }
+    }
+
+    mutating func recordUnloadedModel(_ model: String) {
+        guard let model = Self.normalizedModelReference(model) else {
+            return
+        }
+        let references = Self.normalizedModelReferences(loadedModels ?? [])
+            .filter { $0 != model }
+        loadedModels = references
+    }
+
+    mutating func replaceLoadedModels(_ models: [String], defaultModel: String?) {
+        let references = Self.normalizedModelReferences(models)
+        loadedModels = references
+        if let defaultModel = Self.normalizedModelReference(defaultModel) {
+            self.defaultModel = defaultModel
+        } else if let existingDefault = defaultModelReference {
+            self.defaultModel = existingDefault
+        } else {
+            self.defaultModel = references.first
+        }
+    }
+
+    static func normalizedModelReference(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func normalizedModelReferences(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var references: [String] = []
+        for value in values {
+            guard let reference = normalizedModelReference(value),
+                  !seen.contains(reference)
+            else {
+                continue
+            }
+            seen.insert(reference)
+            references.append(reference)
+        }
+        return references
     }
 }
 

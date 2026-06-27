@@ -3,13 +3,13 @@ import Testing
 
 @testable import IronMLXAppCore
 
-@Test func restoresLastModelRegardlessOfPersistedAutoStartFlag() throws {
+@Test func doesNotRestoreUnloadedDefaultModelAsLoadedModel() throws {
     let json = """
     {
       "host": "127.0.0.1",
       "port": 9068,
       "auto_start": false,
-      "last_model": "  mlx-community/Qwen3-0.6B-4bit  ",
+      "default_model": "  mlx-community/Qwen3-0.6B-4bit  ",
       "language": "en"
     }
     """
@@ -17,14 +17,32 @@ import Testing
 
     let plan = AppLaunchPlanner().plan(config: config, localModels: [])
 
-    #expect(plan.backendModelReference == "mlx-community/Qwen3-0.6B-4bit")
+    #expect(plan.backendModelReferences == [])
+    #expect(plan.dashboardRoute == .onboarding)
+}
+
+@Test func restoresPersistedLoadedModelsWithDefaultFirst() {
+    let config = AppConfig(
+        defaultModel: "mlx-community/Default-4bit",
+        loadedModels: [
+            "mlx-community/Other-4bit",
+            "mlx-community/Default-4bit",
+        ]
+    )
+
+    let plan = AppLaunchPlanner().plan(config: config, localModels: [])
+
+    #expect(plan.backendModelReferences == [
+        "mlx-community/Default-4bit",
+        "mlx-community/Other-4bit",
+    ])
     #expect(plan.dashboardRoute == .status)
 }
 
 @Test func showsOnboardingWhenNoDefaultModelAndNoDownloadedModelsExist() {
     let plan = AppLaunchPlanner().plan(config: AppConfig(), localModels: [])
 
-    #expect(plan.backendModelReference == nil)
+    #expect(plan.backendModelReferences == [])
     #expect(plan.dashboardRoute == .onboarding)
 }
 
@@ -38,6 +56,6 @@ import Testing
 
     let plan = AppLaunchPlanner().plan(config: AppConfig(), localModels: [localModel])
 
-    #expect(plan.backendModelReference == nil)
+    #expect(plan.backendModelReferences == [])
     #expect(plan.dashboardRoute == .modelsManage)
 }

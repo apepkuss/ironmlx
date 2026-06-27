@@ -239,8 +239,21 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "setNumberInput('cfg-max-sequences', appConfig.max_sequences, 1)"))
     #expect(dashboardHTML(html, contains: "numberInputValue('cfg-max-sequences', 1)"))
     #expect(dashboardHTML(html, contains: "setNumberInput('cfg-max-models', appConfig.max_models, 3)"))
-    #expect(dashboardHTML(html, contains: "setNumberInput('cfg-init-cache-blocks', appConfig.init_cache_blocks, 0)"))
+    #expect(!dashboardHTML(html, contains: "cfg-init-cache-blocks"))
+    #expect(!dashboardHTML(html, contains: "init_cache_blocks"))
     #expect(dashboardHTML(html, contains: "setNumberInput('cfg-model-ttl', appConfig.model_ttl_minutes, 30)"))
+}
+
+@Test func dashboardMaxModelsCopyDescribesExplicitLoadedModelLimit() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "最大同时加载模型数"))
+    #expect(dashboardHTML(html, contains: "达到上限后，新模型不会自动替换旧模型"))
+    #expect(!dashboardHTML(html, contains: "按 LRU 淘汰"))
+    #expect(!dashboardHTML(html, contains: "LRU eviction"))
 }
 
 @Test func dashboardHotCacheDescriptionUsesUnifiedMemoryAutoPolicy() throws {
@@ -291,7 +304,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
 
     #expect(dashboardHTML(html, contains: "function localizeBackendErrorMessage(message)"))
     #expect(dashboardHTML(html, contains: "err_memory_budget_exceeded"))
-    #expect(dashboardHTML(html, contains: "localizeBackendErrorMessage(detail)"))
+    #expect(dashboardHTML(html, contains: "localizeErrorResult(result)"))
     #expect(dashboardHTML(html, contains: "内存预算不足"))
     #expect(dashboardHTML(html, contains: "模型参数设置"))
     #expect(dashboardHTML(html, contains: "MAX TOKENS"))
@@ -299,4 +312,52 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(!dashboardHTML(html, contains: "b_max={b_max}"))
     #expect(!dashboardHTML(html, contains: "b_max="))
     #expect(!dashboardHTML(html, contains: "请调低「最大序列数」或 Max Cache Cap"))
+}
+
+@Test func dashboardLocalizesMaxLoadedModelsErrorCode() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "err_max_loaded_models_reached"))
+    #expect(dashboardHTML(html, contains: "err_gpu_memory_insufficient"))
+    #expect(dashboardHTML(html, contains: "Maximum concurrent loaded models reached"))
+    #expect(dashboardHTML(html, contains: "已达到最大同时加载模型数"))
+    #expect(dashboardHTML(html, contains: "已達到最大同時載入模型數"))
+    #expect(dashboardHTML(html, contains: "最大同時ロードモデル数に達しました"))
+    #expect(dashboardHTML(html, contains: "최대 동시 로드 모델 수에 도달했습니다"))
+    #expect(dashboardHTML(html, contains: "localizeErrorResult(result)"))
+}
+
+@Test func dashboardLocalizesBackendWarningCodes() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "function localizeWarningResult(result)"))
+    #expect(dashboardHTML(html, contains: "warn_default_scheduler_profile_used"))
+    #expect(dashboardHTML(html, contains: "warn_model_reload_deferred"))
+    #expect(dashboardHTML(html, contains: "未找到该模型匹配的 scheduler profile"))
+    #expect(dashboardHTML(html, contains: "showToast(localizeWarningResult(result), 'info')"))
+}
+
+@Test func dashboardLocalizesBackendAdminErrorCodes() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    let expectedKeys = [
+        "err_model_required",
+        "err_model_directory_not_found",
+        "err_invalid_max_cache_cap",
+        "err_model_not_loaded",
+        "err_model_not_registered",
+        "err_backend_unload_error",
+    ]
+    for expectedKey in expectedKeys {
+        #expect(dashboardHTML(html, contains: expectedKey), "\(expectedKey) should be localized")
+    }
 }
