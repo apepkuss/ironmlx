@@ -66,6 +66,28 @@ fn qwen_declared_model_types_map_to_execution_architectures() {
 }
 
 #[test]
+fn gemma4_unified_declared_model_type_maps_to_gemma4_execution_architecture() {
+    let gemma4_unified = json!({
+        "model_type": "gemma4_unified",
+        "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+        "text_config": {
+            "model_type": "gemma4_unified_text",
+            "enable_moe_block": false,
+            "num_hidden_layers": 48
+        },
+        "vision_config": {
+            "model_type": "gemma4_unified_vision",
+            "num_soft_tokens": 280
+        },
+        "image_token_id": 258880
+    });
+    assert_eq!(
+        ModelArchitecture::from_config_value(&gemma4_unified).unwrap(),
+        ModelArchitecture::Gemma4
+    );
+}
+
+#[test]
 fn llama_declared_model_type_maps_to_execution_architecture() {
     // MiniCPM5-1B ships `model_type = "llama"` (architectures =
     // ["LlamaForCausalLM"]); it is a standard GQA dense Llama checkpoint.
@@ -138,6 +160,6 @@ fn unsupported_model_type_reports_supported_architectures() {
 
     assert_eq!(
         err.to_string(),
-        "unsupported model_type: qwen2_vl (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma')"
+        "unsupported model_type: qwen2_vl (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', 'gemma4_unified', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma')"
     );
 }

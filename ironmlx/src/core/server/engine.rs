@@ -3251,26 +3251,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_pool_state_rejects_enabled_unsupported_model_type_before_lazy_load() {
+    async fn engine_pool_state_accepts_gemma4_unified_model_type_before_lazy_load() {
         let model_dir = write_minimal_model_config("gemma4_unified");
         let config = EnginePoolConfig {
-            default_model: Some("unsupported".to_string()),
+            default_model: Some("gemma4-unified".to_string()),
             max_loaded_models: Some(1),
             models: vec![model_config(
-                "unsupported",
+                "gemma4-unified",
                 &model_dir,
                 EngineLoadPolicy::Lazy,
             )],
         };
 
-        let err = match EnginePoolState::new(config, runtime_config()).await {
-            Ok(_) => panic!("unsupported enabled model_type must fail during EnginePool startup"),
-            Err(error) => error,
-        };
-
-        assert!(
-            format!("{err:#}").contains("unsupported model_type: gemma4_unified"),
-            "unexpected error: {err:#}"
-        );
+        EnginePoolState::new(config, runtime_config())
+            .await
+            .expect("gemma4_unified lazy model type should be accepted");
     }
 }

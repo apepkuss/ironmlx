@@ -133,6 +133,7 @@ impl Gemma4TextModel {
             per_row_lens,
             cache,
             target,
+            None,
         )?;
         profile::eval(
             "gemma4_text_forward_embeddings_breakdown_total",
@@ -151,6 +152,7 @@ impl Gemma4TextModel {
         per_row_lens: Option<&[i32]>,
         mut cache: Option<&mut [LayerCache]>,
         target: StreamOrDevice,
+        mut layer_last_trace: Option<&mut Vec<Array>>,
     ) -> Result<Array> {
         let dims_borrow = hidden.shape();
         let dims = dims_borrow.as_slice();
@@ -268,6 +270,7 @@ impl Gemma4TextModel {
                 shared,
                 cache_cell,
                 target,
+                None,
             )?;
             profile::eval_layer(
                 "gemma4_text_layer_total",
@@ -278,12 +281,97 @@ impl Gemma4TextModel {
                 profile,
             )?;
             x = next;
+            if let Some(trace) = layer_last_trace.as_deref_mut() {
+                trace.push(slice_last_token(&x, target)?);
+            }
             intermediates[idx] = Some(kv);
         }
         let t0 = Instant::now();
         let out = self.norm.forward_on(&x, target)?;
         profile::eval("gemma4_text_final_norm", &[&out], t0, profile)?;
         Ok(out)
+    }
+
+    #[doc(hidden)]
+    pub fn forward_layer_last_trace_on(
+        &self,
+        input_ids: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Vec<Array>> {
+        let target = target.into();
+        if input_ids.ndim() != 2 {
+            return Err(anyhow!(
+                "Gemma4TextModel::forward_layer_last_trace_on: input_ids must be rank-2 [B,S], got rank {}",
+                input_ids.ndim()
+            ));
+        }
+        let hidden = self.embed_on(input_ids, target)?;
+        let per_layer_inputs = self.per_layer_inputs_on(input_ids, &hidden, target)?;
+        let mut trace = Vec::with_capacity(self.layers.len());
+        let _ = self.forward_post_embedding_on(
+            &hidden,
+            per_layer_inputs.as_ref(),
+            None,
+            None,
+            target,
+            Some(&mut trace),
+        )?;
+        Ok(trace)
+    }
+
+    #[doc(hidden)]
+    pub fn forward_text_layer0_stage_last_trace_on(
+        &self,
+        input_ids: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Vec<Array>> {
+        let target = target.into();
+        if input_ids.ndim() != 2 {
+            return Err(anyhow!(
+                "Gemma4TextModel::forward_text_layer0_stage_last_trace_on: input_ids must be rank-2 [B,S], got rank {}",
+                input_ids.ndim()
+            ));
+        }
+        let hidden = self.embed_on(input_ids, target)?;
+        let mut trace = Vec::with_capacity(10);
+        trace.push(slice_last_token(&hidden, target)?);
+        let seq = hidden.shape().as_slice()[1];
+        let lens = vec![seq; hidden.shape().as_slice()[0] as usize];
+        let offsets = RopeOffsets::from_values(vec![0; hidden.shape().as_slice()[0] as usize])?;
+        let mask = if seq > self.cfg.sliding_window {
+            Some(build_attention_mask(
+                offsets.values(),
+                &lens,
+                seq,
+                Some(self.cfg.sliding_window),
+                Dtype::Bfloat16,
+                target,
+            )?)
+        } else {
+            None
+        };
+        let per_layer_inputs = self.per_layer_inputs_on(input_ids, &hidden, target)?;
+        let pli = match per_layer_inputs.as_ref() {
+            Some(all) => Some(slice_per_layer_input(
+                all,
+                0,
+                self.cfg.hidden_size_per_layer_input,
+                target,
+            )?),
+            None => None,
+        };
+        let _ = self.layers[0].forward_on(
+            &hidden,
+            mask.as_ref(),
+            pli.as_ref(),
+            None,
+            &offsets,
+            None,
+            None,
+            target,
+            Some(&mut trace),
+        )?;
+        Ok(trace)
     }
 
     fn per_layer_inputs_on(
@@ -385,6 +473,25 @@ fn slice_per_layer_input(
         target,
     )?
     .reshape_on((s[0], s[1], hidden_size_per_layer_input), target)?)
+}
+
+fn slice_last_token(hidden: &Array, target: StreamOrDevice) -> Result<Array> {
+    let shape = hidden.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 3 {
+        return Err(anyhow!(
+            "Gemma4TextModel: expected hidden [B,S,H], got {dims:?}"
+        ));
+    }
+    let (b, s, h) = (dims[0], dims[1], dims[2]);
+    Ok(mlx::ops::indexing::slice_strided_on(
+        hidden,
+        &[0_i32, s - 1, 0][..],
+        &[b, s, h][..],
+        &[1_i32, 1, 1][..],
+        target,
+    )?
+    .reshape_on((b, h), target)?)
 }
 
 fn build_attention_mask(

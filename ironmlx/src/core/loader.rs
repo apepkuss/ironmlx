@@ -257,14 +257,15 @@ impl Loader {
     ) -> Result<()> {
         let is_qwen35 = is_qwen35_offset_gamma_model(config_raw);
 
-        // 0. Drop non-text tower keys unless caller explicitly requests the
-        //    vision path. Audio is not supported by any ironmlx path yet, so it
-        //    is always discarded before conv/norm detection.
+        // 0. Drop non-text tower/embedder keys unless caller explicitly
+        //    requests the vision path. Audio is not supported by any ironmlx
+        //    path yet, so it is always discarded before conv/norm detection.
         if keep_vision_tower {
             weights.retain(|k, _| !k.starts_with("audio_tower.") && !k.starts_with("embed_audio."));
         } else {
             weights.retain(|k, _| {
                 !k.starts_with("vision_tower.")
+                    && !k.starts_with("vision_embedder.")
                     && !k.starts_with("audio_tower.")
                     && !k.starts_with("embed_vision.")
                     && !k.starts_with("embed_audio.")
@@ -670,6 +671,9 @@ mod tests {
     fn gemma4_text_config() -> serde_json::Value {
         serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}})
     }
+    fn gemma4_unified_text_config() -> serde_json::Value {
+        serde_json::json!({"model_type": "gemma4_unified", "text_config": {"model_type": "gemma4_unified_text"}})
+    }
     fn tied_text_config() -> serde_json::Value {
         serde_json::json!({"text_config": {"tie_word_embeddings": true}})
     }
@@ -994,6 +998,86 @@ mod tests {
         assert!(
             w.contains_key("model.embed_tokens.weight"),
             "plain model.* key must be preserved"
+        );
+    }
+
+    #[test]
+    fn sanitize_drops_unified_vision_embedder_keys_only_for_text_only() {
+        let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+
+        let mut text_only: HashMap<String, Array> = HashMap::new();
+        text_only.insert("vision_embedder.patch_dense.weight".into(), arr.clone());
+        text_only.insert("vision_embedder.patch_ln1.weight".into(), arr.clone());
+        text_only.insert(
+            "embed_vision.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        text_only.insert(
+            "language_model.model.embed_tokens.weight".into(),
+            arr.clone(),
+        );
+
+        Loader::sanitize(&mut text_only, &gemma4_unified_text_config(), false).unwrap();
+
+        assert!(
+            !text_only.contains_key("vision_embedder.patch_dense.weight"),
+            "text-only Gemma4 unified load must drop vision_embedder.*"
+        );
+        assert!(
+            !text_only.contains_key("vision_embedder.patch_ln1.weight"),
+            "text-only Gemma4 unified load must drop all vision_embedder.*"
+        );
+        assert!(
+            !text_only.contains_key("embed_vision.embedding_projection.weight"),
+            "text-only Gemma4 unified load must drop embed_vision.*"
+        );
+        assert!(
+            text_only.contains_key("model.embed_tokens.weight"),
+            "language_model. text prefix should still be stripped"
+        );
+
+        let mut multimodal: HashMap<String, Array> = HashMap::new();
+        multimodal.insert("vision_embedder.patch_dense.weight".into(), arr.clone());
+        multimodal.insert("vision_embedder.patch_ln1.weight".into(), arr.clone());
+        multimodal.insert(
+            "embed_vision.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        multimodal.insert("audio_tower.depthwise_conv1d.weight".into(), arr.clone());
+        multimodal.insert(
+            "embed_audio.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        multimodal.insert(
+            "language_model.model.embed_tokens.weight".into(),
+            arr.clone(),
+        );
+
+        Loader::sanitize(&mut multimodal, &gemma4_unified_text_config(), true).unwrap();
+
+        assert!(
+            multimodal.contains_key("vision_embedder.patch_dense.weight"),
+            "multimodal Gemma4 unified load must keep vision_embedder.*"
+        );
+        assert!(
+            multimodal.contains_key("vision_embedder.patch_ln1.weight"),
+            "multimodal Gemma4 unified load must keep all vision_embedder.*"
+        );
+        assert!(
+            multimodal.contains_key("embed_vision.embedding_projection.weight"),
+            "multimodal Gemma4 unified load must keep embed_vision.*"
+        );
+        assert!(
+            !multimodal.contains_key("audio_tower.depthwise_conv1d.weight"),
+            "audio tower keys remain unsupported and must be dropped"
+        );
+        assert!(
+            !multimodal.contains_key("embed_audio.embedding_projection.weight"),
+            "audio embedder keys remain unsupported and must be dropped"
+        );
+        assert!(
+            multimodal.contains_key("model.embed_tokens.weight"),
+            "language_model. text prefix should still be stripped"
         );
     }
 

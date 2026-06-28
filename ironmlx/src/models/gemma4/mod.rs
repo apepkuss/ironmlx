@@ -1,8 +1,8 @@
 //! Gemma4 Dense model support.
 //!
-//! Scope: `model_type=gemma4` with `text_config.enable_moe_block=false`.
-//! Vision supports image + text prompts. Audio/video and Gemma4 MoE are
-//! intentionally out of scope.
+//! Scope: `model_type=gemma4` and `model_type=gemma4_unified` with
+//! `text_config.enable_moe_block=false`. Vision supports image + text prompts.
+//! Audio/video and Gemma4 MoE are intentionally out of scope.
 
 mod attention;
 mod config;

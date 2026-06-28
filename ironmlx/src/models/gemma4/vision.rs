@@ -3,7 +3,7 @@ use mlx::{Array, Dtype, StreamOrDevice};
 use std::time::Instant;
 
 use crate::core::Loader;
-use crate::nn::{Linear, RmsNorm};
+use crate::nn::{LayerNorm, Linear, RmsNorm};
 use crate::Result;
 
 use super::config::Gemma4VisionConfig;
@@ -81,6 +81,163 @@ impl MultimodalEmbedder {
         let x = rms_norm_no_scale_on(x, self.eps, target)?;
         self.projection.forward_on(&x, target)
     }
+}
+
+pub struct Gemma4UnifiedVisionEmbedder {
+    patch_ln1: LayerNorm,
+    patch_dense: Linear,
+    patch_ln2: LayerNorm,
+    pos_embedding: Array,
+    pos_norm: LayerNorm,
+    mm_posemb_size: i32,
+    mm_embed_dim: i32,
+    patch_dim: i32,
+}
+
+impl Gemma4UnifiedVisionEmbedder {
+    pub fn from_loader(loader: &Loader, cfg: &Gemma4VisionConfig) -> Result<Self> {
+        let model_patch = cfg.model_patch_size();
+        let patch_dim = model_patch
+            .checked_mul(model_patch)
+            .and_then(|v| v.checked_mul(3))
+            .ok_or_else(|| anyhow!("Gemma4 unified vision patch dimension overflow"))?;
+        Ok(Self {
+            patch_ln1: LayerNorm::from_loader(
+                loader,
+                "vision_embedder.patch_ln1",
+                cfg.rms_norm_eps,
+            )?,
+            patch_dense: Linear::from_loader(loader, "vision_embedder.patch_dense")?,
+            patch_ln2: LayerNorm::from_loader(
+                loader,
+                "vision_embedder.patch_ln2",
+                cfg.rms_norm_eps,
+            )?,
+            pos_embedding: loader.tensor("vision_embedder.pos_embedding")?.clone(),
+            pos_norm: LayerNorm::from_loader(loader, "vision_embedder.pos_norm", cfg.rms_norm_eps)?,
+            mm_posemb_size: cfg.mm_posemb_size,
+            mm_embed_dim: cfg.mm_embed_dim,
+            patch_dim,
+        })
+    }
+
+    pub fn forward_on(
+        &self,
+        pixel_values: &Array,
+        position_ids: &[(i32, i32)],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let shape = pixel_values.shape();
+        let dims = shape.as_slice();
+        if dims.len() != 3 || dims[0] != 1 || dims[2] != self.patch_dim {
+            return Err(anyhow!(
+                "Gemma4UnifiedVisionEmbedder expects [1,N,{}], got {dims:?}",
+                self.patch_dim
+            ));
+        }
+        let n = dims[1];
+        if position_ids.len() != n as usize {
+            return Err(anyhow!(
+                "Gemma4UnifiedVisionEmbedder position_ids len {} != patches {n}",
+                position_ids.len()
+            ));
+        }
+
+        let mut hidden = self.patch_ln1.forward_on(pixel_values, target)?;
+        hidden = self.patch_dense.forward_on(&hidden, target)?;
+        hidden = self.patch_ln2.forward_on(&hidden, target)?;
+        let pos_embs = self.factorized_pos_embs_on(position_ids, target)?;
+        hidden = &hidden + &pos_embs;
+        self.pos_norm.forward_on(&hidden, target)
+    }
+
+    fn factorized_pos_embs_on(
+        &self,
+        position_ids: &[(i32, i32)],
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let table_shape = self.pos_embedding.shape();
+        let table_dims = table_shape.as_slice();
+        if table_dims != [self.mm_posemb_size, 2, self.mm_embed_dim] {
+            return Err(anyhow!(
+                "Gemma4UnifiedVisionEmbedder pos_embedding shape {:?} != [{},2,{}]",
+                table_dims,
+                self.mm_posemb_size,
+                self.mm_embed_dim
+            ));
+        }
+        let n = i32::try_from(position_ids.len())
+            .context("Gemma4 unified position_ids length overflow")?;
+        let pos_x: Vec<u32> = position_ids
+            .iter()
+            .map(|(x, _)| (*x).max(0) as u32)
+            .collect();
+        let pos_y: Vec<u32> = position_ids
+            .iter()
+            .map(|(_, y)| (*y).max(0) as u32)
+            .collect();
+        let valid: Vec<f32> = position_ids
+            .iter()
+            .map(|(x, y)| if *x >= 0 && *y >= 0 { 1.0 } else { 0.0 })
+            .collect();
+
+        let x_table = mlx::ops::indexing::slice_strided_on(
+            &self.pos_embedding,
+            &[0_i32, 0, 0][..],
+            &[self.mm_posemb_size, 1, self.mm_embed_dim][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?
+        .reshape_on((self.mm_posemb_size, self.mm_embed_dim), target)?;
+        let y_table = mlx::ops::indexing::slice_strided_on(
+            &self.pos_embedding,
+            &[0_i32, 1, 0][..],
+            &[self.mm_posemb_size, 2, self.mm_embed_dim][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?
+        .reshape_on((self.mm_posemb_size, self.mm_embed_dim), target)?;
+        let pos_x_arr: Array = (pos_x.as_slice(), &[1_i32, n][..]).try_into()?;
+        let pos_y_arr: Array = (pos_y.as_slice(), &[1_i32, n][..]).try_into()?;
+        let x_emb = mlx::ops::take_on(&x_table, &pos_x_arr, 0, target)?;
+        let y_emb = mlx::ops::take_on(&y_table, &pos_y_arr, 0, target)?;
+        let valid_arr: Array = (valid.as_slice(), &[1_i32, n, 1][..]).try_into()?;
+        let valid_arr = mlx::ops::cast::astype_on(&valid_arr, self.pos_embedding.dtype(), target)?;
+        Ok(&(&x_emb + &y_emb) * &valid_arr)
+    }
+}
+
+pub fn unified_position_ids_for_grid(
+    grid_h: i32,
+    grid_w: i32,
+    cfg: &Gemma4VisionConfig,
+) -> Result<Vec<(i32, i32)>> {
+    let k = cfg.pooling_kernel_size;
+    if k <= 0 || grid_h <= 0 || grid_w <= 0 || grid_h % k != 0 || grid_w % k != 0 {
+        return Err(anyhow!(
+            "Gemma4 unified position ids require positive grid_h/grid_w divisible by pooling kernel {k}, got {grid_h}x{grid_w}"
+        ));
+    }
+    let soft_h = grid_h / k;
+    let soft_w = grid_w / k;
+    let valid = soft_h * soft_w;
+    if valid > cfg.default_output_length {
+        return Err(anyhow!(
+            "Gemma4 unified position ids valid tokens {valid} exceed max {}",
+            cfg.default_output_length
+        ));
+    }
+    let mut positions = Vec::with_capacity(cfg.default_output_length as usize);
+    for y in 0..soft_h {
+        for x in 0..soft_w {
+            positions.push((x, y));
+        }
+    }
+    while positions.len() < cfg.default_output_length as usize {
+        positions.push((-1, -1));
+    }
+    Ok(positions)
 }
 
 struct VisionPatchEmbedder {
@@ -707,6 +864,20 @@ mod tests {
         .unwrap()
     }
 
+    fn unified_cfg() -> Gemma4VisionConfig {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "gemma4_unified_vision",
+            "mm_embed_dim": 3840,
+            "mm_posemb_size": 1120,
+            "model_patch_size": 48,
+            "num_soft_tokens": 280,
+            "output_proj_dims": 3840,
+            "patch_size": 16,
+            "pooling_kernel_size": 3
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn patch_positions_track_real_patches() {
         let cfg = cfg();
@@ -715,5 +886,15 @@ mod tests {
         assert_eq!(pos_y.len(), 9);
         assert_eq!(positions.len(), 9);
         assert_eq!(padding.iter().filter(|&&p| !p).count(), 9);
+    }
+
+    #[test]
+    fn unified_position_ids_follow_merged_patch_grid_then_padding() {
+        let cfg = unified_cfg();
+        let positions = unified_position_ids_for_grid(6, 6, &cfg).unwrap();
+
+        assert_eq!(&positions[..4], &[(0, 0), (1, 0), (0, 1), (1, 1)]);
+        assert_eq!(positions.len(), 280);
+        assert!(positions[4..].iter().all(|pos| *pos == (-1, -1)));
     }
 }

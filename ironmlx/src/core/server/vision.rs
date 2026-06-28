@@ -320,6 +320,10 @@ mod tests {
             pooling_kernel_size: 3,
             use_clipped_linears: false,
             standardize: false,
+            mm_embed_dim: 0,
+            mm_posemb_size: 0,
+            model_patch_size: 0,
+            output_proj_dims: 0,
         };
         let (tok_id, merge) =
             derive_image_token_and_merge(&VisionInputConfig::Gemma4 { vision_config }, &tok);
@@ -348,6 +352,10 @@ mod tests {
             pooling_kernel_size: 5,
             use_clipped_linears: false,
             standardize: false,
+            mm_embed_dim: 0,
+            mm_posemb_size: 0,
+            model_patch_size: 0,
+            output_proj_dims: 0,
         };
         let (tok_id, merge) = derive_image_token_and_merge(
             &VisionInputConfig::DiffusionGemma {
