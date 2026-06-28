@@ -29,7 +29,7 @@ use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::core::server::vision::{DecodedMessage, DecodedPart};
 
-use super::AppState;
+use super::{AppState, SamplingDefaults};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -123,6 +123,10 @@ pub struct MessagesRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<i32>,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
 }
 
 fn default_max_tokens() -> usize {
@@ -166,16 +170,26 @@ fn gen_msg_id() -> String {
     format!("msg_{}", now_unix())
 }
 
-fn build_sampler(req: &MessagesRequest) -> Sampler {
+fn build_sampler(req: &MessagesRequest, defaults: SamplingDefaults) -> Sampler {
     let mut s = Sampler::greedy();
-    if let Some(t) = req.temperature {
+    if let Some(t) = req.temperature.or(defaults.temperature) {
         if t > 0.0 {
             s = s.with_temperature(t);
         }
     }
-    if let Some(p) = req.top_p {
-        if p < 1.0 {
+    if let Some(p) = req.top_p.or(defaults.top_p) {
+        if p > 0.0 && p <= 1.0 {
             s = s.with_top_p(p);
+        }
+    }
+    if let Some(k) = req.top_k.or(defaults.top_k) {
+        if k > 0 {
+            s = s.with_top_k(k);
+        }
+    }
+    if let Some(penalty) = req.repetition_penalty.or(defaults.repetition_penalty) {
+        if penalty > 0.0 && penalty != 1.0 {
+            s = s.with_repetition_penalty(penalty);
         }
     }
     s
@@ -250,11 +264,18 @@ pub async fn messages<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    messages_with_state(state, req).await
+}
+
+pub(crate) async fn messages_with_state<M>(state: AppState<M>, req: MessagesRequest) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     // Extract fields before partially moving req.messages.
     let max_tokens = req.max_tokens;
     let stream = req.stream;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
-    let sampler = build_sampler(&req);
+    let sampler = build_sampler(&req, state.sampling_defaults);
 
     // Decode Anthropic wire format -> neutral DecodedMessage (base64 -> bytes).
     let decoded = match decode_anthropic_messages(req.messages) {
@@ -843,6 +864,54 @@ mod tests {
         assert!(s.contains("\"stop_reason\":\"end_turn\""));
         assert!(s.contains("\"input_tokens\":3"));
         assert!(s.contains("\"output_tokens\":1"));
+    }
+
+    #[test]
+    fn build_sampler_uses_model_defaults_when_request_omits_sampling_params() {
+        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "max_tokens": 8
+        }))
+        .expect("messages request");
+        let defaults = super::super::SamplingDefaults {
+            temperature: Some(0.7),
+            top_p: Some(0.8),
+            top_k: Some(40),
+            repetition_penalty: Some(1.1),
+        };
+
+        let sampler = build_sampler(&req, defaults);
+
+        assert_eq!(sampler.temperature, 0.7);
+        assert_eq!(sampler.top_p, Some(0.8));
+        assert_eq!(sampler.top_k, Some(40));
+        assert_eq!(sampler.repetition_penalty, Some(1.1));
+    }
+
+    #[test]
+    fn build_sampler_prefers_request_values_over_model_defaults() {
+        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "max_tokens": 8,
+            "temperature": 0.2,
+            "top_p": 0.6,
+            "top_k": 16,
+            "repetition_penalty": 1.05
+        }))
+        .expect("messages request");
+        let defaults = super::super::SamplingDefaults {
+            temperature: Some(0.7),
+            top_p: Some(0.8),
+            top_k: Some(40),
+            repetition_penalty: Some(1.1),
+        };
+
+        let sampler = build_sampler(&req, defaults);
+
+        assert_eq!(sampler.temperature, 0.2);
+        assert_eq!(sampler.top_p, Some(0.6));
+        assert_eq!(sampler.top_k, Some(16));
+        assert_eq!(sampler.repetition_penalty, Some(1.05));
     }
 
     mod wire_tests {

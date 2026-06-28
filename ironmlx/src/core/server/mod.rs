@@ -9,9 +9,12 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::{routing::get, routing::post, Router};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits};
+use crate::core::cache::{
+    ActiveKvOffloadConfig, PagedPrefixCacheConfig, PrefixLruCacheConfig, TurboQuantKVBits,
+};
 use crate::core::model::Model;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
@@ -27,9 +30,31 @@ pub mod chat_format;
 pub mod diffusion_gemma;
 pub mod engine;
 pub mod health;
+pub mod model_manager;
 pub(crate) mod openai;
 pub mod scheduler_actor;
 pub mod vision;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct SamplingDefaults {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<i32>,
+    pub repetition_penalty: Option<f32>,
+}
+
+impl SamplingDefaults {
+    pub fn merge_with_override(self, override_defaults: Self) -> Self {
+        Self {
+            temperature: override_defaults.temperature.or(self.temperature),
+            top_p: override_defaults.top_p.or(self.top_p),
+            top_k: override_defaults.top_k.or(self.top_k),
+            repetition_penalty: override_defaults
+                .repetition_penalty
+                .or(self.repetition_penalty),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub enum VisionInputConfig {
@@ -89,6 +114,12 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// Runtime scheduler profile. Base config is applied at boot; rules may
     /// select request-level chunk/cadence settings after tokenization.
     pub scheduler_runtime_profile: Arc<SchedulerAutotuneRuntimeProfile>,
+    /// Model-level default sampling configuration. Request-level sampling
+    /// fields still take precedence.
+    pub sampling_defaults: SamplingDefaults,
+    /// Loaded model weight bytes captured once at load time so EnginePool
+    /// guardrails do not need to lock the model later.
+    pub model_weight_bytes: usize,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
@@ -111,6 +142,8 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             admission_queue_max: self.admission_queue_max,
             effective_cap_max: self.effective_cap_max,
             scheduler_runtime_profile: self.scheduler_runtime_profile.clone(),
+            sampling_defaults: self.sampling_defaults,
+            model_weight_bytes: self.model_weight_bytes,
             kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
             health_collector: self.health_collector.clone(),
         }
@@ -118,6 +151,11 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
 }
 
 impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
+    pub(crate) fn with_sampling_defaults(mut self, sampling_defaults: SamplingDefaults) -> Self {
+        self.sampling_defaults = sampling_defaults;
+        self
+    }
+
     pub(crate) fn scheduler_request_config(
         &self,
         prompt_len: usize,
@@ -171,6 +209,7 @@ where
 struct PlainSchedulerActorSpawner {
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
 }
 
 impl<M> SchedulerActorSpawner<M> for PlainSchedulerActorSpawner
@@ -192,6 +231,22 @@ where
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
         if let Some(config) = self.paged_prefix_cache {
+            if self.active_kv_offload.enabled {
+                return Ok(
+                    scheduler_actor::spawn_scheduler_actor_with_paged_prefix_cache_and_active_kv(
+                        model,
+                        b_max,
+                        admission_deadline,
+                        admission_queue_max,
+                        effective_cap_max,
+                        decode_cadence_mid_chunk_cap,
+                        meta,
+                        config,
+                        self.prefix_lru_cache,
+                        self.active_kv_offload,
+                    )?,
+                );
+            }
             Ok(
                 scheduler_actor::spawn_scheduler_actor_with_paged_prefix_cache(
                     model,
@@ -203,6 +258,19 @@ where
                     meta,
                     config,
                     self.prefix_lru_cache,
+                )?,
+            )
+        } else if self.active_kv_offload.enabled {
+            Ok(
+                scheduler_actor::spawn_scheduler_actor_with_active_kv_offload(
+                    model,
+                    b_max,
+                    admission_deadline,
+                    admission_queue_max,
+                    effective_cap_max,
+                    decode_cadence_mid_chunk_cap,
+                    meta,
+                    self.active_kv_offload,
                 )?,
             )
         } else {
@@ -224,6 +292,7 @@ struct MtpSchedulerActorSpawner<H> {
     mtp_draft_tokens: usize,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
 }
 
 impl<M> SchedulerActorSpawner<M> for MtpSchedulerActorSpawner<M::MtpHead>
@@ -245,19 +314,38 @@ where
         decode_cadence_mid_chunk_cap: usize,
         meta: crate::core::memory_budget::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
-        Ok(scheduler_actor::spawn_scheduler_actor_with_mtp(
-            model,
-            self.mtp,
-            self.mtp_draft_tokens,
-            b_max,
-            admission_deadline,
-            admission_queue_max,
-            effective_cap_max,
-            decode_cadence_mid_chunk_cap,
-            meta,
-            self.paged_prefix_cache,
-            self.prefix_lru_cache,
-        )?)
+        if self.active_kv_offload.enabled {
+            Ok(
+                scheduler_actor::spawn_scheduler_actor_with_mtp_and_active_kv(
+                    model,
+                    self.mtp,
+                    self.mtp_draft_tokens,
+                    b_max,
+                    admission_deadline,
+                    admission_queue_max,
+                    effective_cap_max,
+                    decode_cadence_mid_chunk_cap,
+                    meta,
+                    self.paged_prefix_cache,
+                    self.prefix_lru_cache,
+                    self.active_kv_offload,
+                )?,
+            )
+        } else {
+            Ok(scheduler_actor::spawn_scheduler_actor_with_mtp(
+                model,
+                self.mtp,
+                self.mtp_draft_tokens,
+                b_max,
+                admission_deadline,
+                admission_queue_max,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                meta,
+                self.paged_prefix_cache,
+                self.prefix_lru_cache,
+            )?)
+        }
     }
 }
 
@@ -277,6 +365,7 @@ pub async fn serve<M>(
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
@@ -304,6 +393,7 @@ where
         PlainSchedulerActorSpawner {
             paged_prefix_cache,
             prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -327,6 +417,7 @@ pub async fn serve_with_mtp<M>(
     kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
@@ -357,6 +448,7 @@ where
             mtp_draft_tokens,
             paged_prefix_cache,
             prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -379,6 +471,8 @@ pub(crate) async fn build_plain_app_state<M>(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    loaded_model_weight_bytes: Option<usize>,
+    active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<AppState<M>>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -397,10 +491,12 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
+        loaded_model_weight_bytes,
         None,
         PlainSchedulerActorSpawner {
             paged_prefix_cache,
             prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -425,6 +521,8 @@ pub(crate) async fn build_mtp_app_state<M>(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    loaded_model_weight_bytes: Option<usize>,
+    active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<AppState<M>>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
@@ -444,12 +542,14 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
+        loaded_model_weight_bytes,
         Some(mtp_draft_tokens),
         MtpSchedulerActorSpawner {
             mtp,
             mtp_draft_tokens,
             paged_prefix_cache,
             prefix_lru_cache,
+            active_kv_offload,
         },
     )
     .await
@@ -470,6 +570,7 @@ async fn build_app_state<M, S>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
+    loaded_model_weight_bytes: Option<usize>,
     mtp_health_draft_tokens: Option<usize>,
     scheduler_actor_spawner: S,
 ) -> Result<AppState<M>>
@@ -484,10 +585,11 @@ where
     // inside a single async lock guard so serve<M>() doesn't need a concrete
     // model-specific `config()` method. `blocking_lock` would panic here because
     // `serve` runs inside a Tokio runtime (tests S5 of 3d / 3f-T4 caught this).
-    let meta = {
+    let mut meta = {
         let guard = model.lock().await;
         guard.model_meta()
     };
+    meta.weight_bytes = effective_model_weight_bytes(meta.weight_bytes, loaded_model_weight_bytes);
     let model_max_context: usize = meta.max_position_embeddings.max(0) as usize;
     let effective_cap_max = max_cache_cap.min(model_max_context);
     if max_cache_cap > model_max_context {
@@ -569,9 +671,20 @@ where
         admission_queue_max,
         effective_cap_max, // 3f
         scheduler_runtime_profile: Arc::new(scheduler_runtime_profile),
+        sampling_defaults: SamplingDefaults::default(),
+        model_weight_bytes: meta.weight_bytes,
         kv_cache_turboquant_bits,
         health_collector,
     })
+}
+
+fn effective_model_weight_bytes(
+    meta_weight_bytes: usize,
+    loaded_weight_bytes: Option<usize>,
+) -> usize {
+    loaded_weight_bytes
+        .unwrap_or(meta_weight_bytes)
+        .max(meta_weight_bytes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -612,6 +725,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
+        None,
         mtp_health_draft_tokens,
         scheduler_actor_spawner,
     )
@@ -655,6 +769,7 @@ fn build_health_collector(
         kv_cache_active_bytes: scheduler_handle.kv_cache_active_bytes.clone(),
         kv_cache_soft_limit_bytes: scheduler_handle.kv_cache_soft_limit_bytes,
         mtp,
+        active_kv_offload: scheduler_handle.active_kv_offload.clone(),
     })
 }
 
@@ -680,6 +795,17 @@ mod tests {
     use tokio::time::sleep;
 
     use crate::nn::LayerCache;
+
+    #[test]
+    fn effective_model_weight_bytes_uses_loaded_tensor_bytes_when_larger() {
+        assert_eq!(effective_model_weight_bytes(1_024, Some(4_096)), 4_096);
+    }
+
+    #[test]
+    fn effective_model_weight_bytes_keeps_meta_estimate_when_larger_or_absent() {
+        assert_eq!(effective_model_weight_bytes(4_096, Some(1_024)), 4_096);
+        assert_eq!(effective_model_weight_bytes(4_096, None), 4_096);
+    }
 
     struct DefaultRouteModel;
     struct LimitedRouteModel;
@@ -835,6 +961,9 @@ mod tests {
             memory_budget_exceeded_count: Arc::new(AtomicU64::new(0)),
             kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),
             kv_cache_soft_limit_bytes: 1,
+            active_kv_offload: crate::core::cache::ActiveKvOffloadSharedStats::new(
+                &crate::core::cache::ActiveKvOffloadConfig::disabled(),
+            ),
         }
     }
 

@@ -8,8 +8,8 @@ mod info;
 mod kv_quant;
 mod scheduler_autotune;
 mod scheduler_autotune_calibrate;
-mod scheduler_profile_store;
-mod serve;
+pub(crate) mod scheduler_profile_store;
+pub(crate) mod serve;
 
 pub(crate) use kv_quant::KvQuantArg;
 
@@ -37,7 +37,7 @@ enum Command {
     /// Select a scheduler/autotune profile from offline calibration results.
     SchedulerAutotune(scheduler_autotune::SchedulerAutotuneArgs),
     /// Boot an OpenAI/Anthropic-compatible HTTP server (single-stream).
-    Serve(serve::ServeArgs),
+    Serve(Box<serve::ServeArgs>),
 }
 
 impl Cli {
@@ -46,7 +46,7 @@ impl Cli {
             Command::Info(args) => info::run(args),
             Command::Generate(args) => generate::run(args),
             Command::SchedulerAutotune(args) => scheduler_autotune::run(args),
-            Command::Serve(args) => serve::run(args),
+            Command::Serve(args) => serve::run(*args),
         }
     }
 }
@@ -469,6 +469,77 @@ mod tests {
     }
 
     #[test]
+    fn serve_subcommand_parses_ssd_prefix_cache_max_gb() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--paged-prefix-cache-dir",
+            "/tmp/prefix-cache",
+            "--ssd-prefix-cache-max-gb",
+            "10",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.ssd_prefix_cache_max_gb, Some(10));
+                assert_eq!(args.paged_prefix_cache_max_pages, None);
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_subcommand_parses_active_kv_offload() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--active-kv-offload",
+            "--active-kv-offload-dir",
+            "/tmp/active-kv",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert!(args.active_kv_offload);
+                assert_eq!(
+                    args.active_kv_offload_dir
+                        .as_ref()
+                        .expect("active kv offload dir")
+                        .to_string_lossy(),
+                    "/tmp/active-kv"
+                );
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_subcommand_parses_memory_limits() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--memory-limit-total-gb",
+            "64",
+            "--memory-limit-model-gb",
+            "40",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.memory_limit_total_gb, Some(64));
+                assert_eq!(args.memory_limit_model_gb, Some(40));
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn serve_subcommand_accepts_default_paged_prefix_cache_dir() {
         let cli = Cli::try_parse_from([
             "ironmlx",
@@ -488,6 +559,19 @@ mod tests {
                         .to_string_lossy(),
                     "~/.ironmlx/cache/paged_prefix_cache"
                 );
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_subcommand_allows_app_daemon_without_model() {
+        let cli = Cli::parse_from(["ironmlx", "serve", "--port", "9068"]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.model, None);
+                assert_eq!(args.port, 9068);
             }
             other => panic!("expected Serve command, got {other:?}"),
         }

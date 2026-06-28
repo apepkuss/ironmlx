@@ -68,6 +68,7 @@ async fn boot_server(port: u16) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             /* kv_cache_turboquant_bits */ None,
             /* paged_prefix_cache */ None,
             /* prefix_lru_cache */ None,
+            /* active_kv_offload */ ironmlx::core::cache::ActiveKvOffloadConfig::disabled(),
             scheduler_profile(),
             /* scheduler_autotune_report */ false,
             /* vision_input_override */ None,

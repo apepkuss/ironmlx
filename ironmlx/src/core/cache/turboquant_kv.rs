@@ -51,6 +51,10 @@ impl TurboQuantKVBits {
     pub fn value_bits(self) -> u8 {
         self.value_bits
     }
+
+    pub fn cache_profile(self) -> String {
+        format!("turboquant-k{}v{}", self.key_bits, self.value_bits)
+    }
 }
 
 impl fmt::Display for TurboQuantKVBits {
@@ -78,6 +82,14 @@ pub struct TurboQuantKVCache {
     k_norms: Option<Array>,
     v_packed: Option<Array>,
     v_norms: Option<Array>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TurboQuantPrefixLayer {
+    pub k_packed: Array,
+    pub k_norms: Array,
+    pub v_packed: Array,
+    pub v_norms: Array,
 }
 
 impl TurboQuantKVCache {
@@ -885,6 +897,295 @@ impl TurboQuantKVCache {
         Ok(())
     }
 
+    pub fn prefix_layer_for_row_on(
+        &self,
+        offsets: &[i32],
+        row: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(TurboQuantPrefixLayer, i32)> {
+        if offsets.len() != self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::prefix_layer_for_row_on: offsets.len()={} != batch={}",
+                offsets.len(),
+                self.batch,
+            );
+        }
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::prefix_layer_for_row_on: row {} >= batch {}",
+                row,
+                self.batch,
+            );
+        }
+        let cached_len = offsets[row];
+        if cached_len < 0 || cached_len > self.capacity() {
+            anyhow::bail!(
+                "TurboQuantKVCache::prefix_layer_for_row_on: row {row} cached_len {cached_len} outside [0, {}]",
+                self.capacity()
+            );
+        }
+        let target = target.into();
+        if cached_len == 0 {
+            return Ok((
+                TurboQuantPrefixLayer {
+                    k_packed: Array::zeros_on(
+                        (1_i32, self.n_kv_heads, 0_i32, self.packed_head_dim),
+                        Dtype::Uint32,
+                        target,
+                    )?,
+                    k_norms: Array::zeros_on(
+                        (1_i32, self.n_kv_heads, 0_i32),
+                        Dtype::Float32,
+                        target,
+                    )?,
+                    v_packed: Array::zeros_on(
+                        (1_i32, self.n_kv_heads, 0_i32, self.packed_v_head_dim),
+                        Dtype::Uint32,
+                        target,
+                    )?,
+                    v_norms: Array::zeros_on(
+                        (1_i32, self.n_kv_heads, 0_i32),
+                        Dtype::Float32,
+                        target,
+                    )?,
+                },
+                0,
+            ));
+        }
+
+        let row = row as i32;
+        let k_packed = self.k_packed.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("TurboQuantKVCache::prefix_layer_for_row_on: missing K")
+        })?;
+        let k_norms = self.k_norms.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("TurboQuantKVCache::prefix_layer_for_row_on: missing K norms")
+        })?;
+        let v_packed = self.v_packed.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("TurboQuantKVCache::prefix_layer_for_row_on: missing V")
+        })?;
+        let v_norms = self.v_norms.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("TurboQuantKVCache::prefix_layer_for_row_on: missing V norms")
+        })?;
+
+        Ok((
+            TurboQuantPrefixLayer {
+                k_packed: slice_strided_on(
+                    k_packed,
+                    [row, 0, 0, 0],
+                    [row + 1, self.n_kv_heads, cached_len, self.packed_head_dim],
+                    [1_i32, 1, 1, 1],
+                    target,
+                )?,
+                k_norms: slice_strided_on(
+                    k_norms,
+                    [row, 0, 0],
+                    [row + 1, self.n_kv_heads, cached_len],
+                    [1_i32, 1, 1],
+                    target,
+                )?,
+                v_packed: slice_strided_on(
+                    v_packed,
+                    [row, 0, 0, 0],
+                    [row + 1, self.n_kv_heads, cached_len, self.packed_v_head_dim],
+                    [1_i32, 1, 1, 1],
+                    target,
+                )?,
+                v_norms: slice_strided_on(
+                    v_norms,
+                    [row, 0, 0],
+                    [row + 1, self.n_kv_heads, cached_len],
+                    [1_i32, 1, 1],
+                    target,
+                )?,
+            },
+            cached_len,
+        ))
+    }
+
+    pub fn restore_packed_prefix_for_row_on(
+        &mut self,
+        layer: &TurboQuantPrefixLayer,
+        offsets: &mut [i32],
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        if offsets.len() != self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_packed_prefix_for_row_on: offsets.len()={} != batch={}",
+                offsets.len(),
+                self.batch,
+            );
+        }
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_packed_prefix_for_row_on: row {} >= batch {}",
+                row,
+                self.batch,
+            );
+        }
+        if offsets[row] != 0 {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_packed_prefix_for_row_on: row {row} offset {} must be 0 before prefix restore",
+                offsets[row],
+            );
+        }
+        if cached_len < 0 || cached_len > self.cap {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_packed_prefix_for_row_on: cached_len {cached_len} outside [0, {}]",
+                self.cap
+            );
+        }
+        self.validate_prefix_layer(layer, cached_len)?;
+        if cached_len == 0 {
+            offsets[row] = 0;
+            return Ok(());
+        }
+
+        let target = target.into();
+        if cached_len > self.capacity() {
+            let target_capacity =
+                ((cached_len + self.step - 1) / self.step * self.step).min(self.cap);
+            self.grow_to(target_capacity, offsets, target)?;
+        }
+        self.update_key_value_arrays(
+            PackedWrite {
+                k_packed: &layer.k_packed,
+                k_norms: &layer.k_norms,
+                v_packed: &layer.v_packed,
+                v_norms: &layer.v_norms,
+            },
+            PackedWriteRange {
+                row: row as i32,
+                off: 0,
+                end: cached_len,
+            },
+            target,
+        )?;
+        offsets[row] = cached_len;
+        Ok(())
+    }
+
+    pub fn restore_dense_prefix_for_row_on(
+        &mut self,
+        k: &Array,
+        v: &Array,
+        offsets: &mut [i32],
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        validate_dense_shape("k", k, self.head_dim)?;
+        validate_dense_shape("v", v, self.v_head_dim)?;
+        if offsets.len() != self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_dense_prefix_for_row_on: offsets.len()={} != batch={}",
+                offsets.len(),
+                self.batch,
+            );
+        }
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_dense_prefix_for_row_on: row {} >= batch {}",
+                row,
+                self.batch,
+            );
+        }
+        if offsets[row] != 0 {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_dense_prefix_for_row_on: row {row} offset {} must be 0 before prefix restore",
+                offsets[row],
+            );
+        }
+        if cached_len < 0 || cached_len > self.cap {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_dense_prefix_for_row_on: cached_len {cached_len} outside [0, {}]",
+                self.cap
+            );
+        }
+        let k_shape = k.shape();
+        let k_shape = k_shape.as_slice();
+        if k_shape != [1_i32, self.n_kv_heads, cached_len, self.head_dim] {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_dense_prefix_for_row_on: K shape {:?} incompatible with [1,{},{cached_len},{}]",
+                k_shape,
+                self.n_kv_heads,
+                self.head_dim
+            );
+        }
+        let v_shape = v.shape();
+        let v_shape = v_shape.as_slice();
+        if v_shape != [1_i32, self.n_kv_heads, cached_len, self.v_head_dim] {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_dense_prefix_for_row_on: V shape {:?} incompatible with [1,{},{cached_len},{}]",
+                v_shape,
+                self.n_kv_heads,
+                self.v_head_dim
+            );
+        }
+        if cached_len == 0 {
+            offsets[row] = 0;
+            return Ok(());
+        }
+
+        let target = target.into();
+        if cached_len > self.capacity() {
+            let target_capacity =
+                ((cached_len + self.step - 1) / self.step * self.step).min(self.cap);
+            self.grow_to(target_capacity, offsets, target)?;
+        }
+        let (k_packed, k_norms) = mlx::fast::turbo_quantize_on(
+            k,
+            &self.k_signs,
+            &self.k_codebook,
+            self.bits.key_bits(),
+            target,
+        )?;
+        let (v_packed, v_norms) = mlx::fast::turbo_quantize_on(
+            v,
+            &self.v_signs,
+            &self.v_codebook,
+            self.bits.value_bits(),
+            target,
+        )?;
+        self.update_key_value_arrays(
+            PackedWrite {
+                k_packed: &k_packed,
+                k_norms: &k_norms,
+                v_packed: &v_packed,
+                v_norms: &v_norms,
+            },
+            PackedWriteRange {
+                row: row as i32,
+                off: 0,
+                end: cached_len,
+            },
+            target,
+        )?;
+        offsets[row] = cached_len;
+        Ok(())
+    }
+
+    fn validate_prefix_layer(&self, layer: &TurboQuantPrefixLayer, cached_len: i32) -> Result<()> {
+        validate_packed_rank4(
+            "K",
+            &layer.k_packed,
+            self.n_kv_heads,
+            cached_len,
+            self.packed_head_dim,
+        )?;
+        validate_norm_rank3("K norms", &layer.k_norms, self.n_kv_heads, cached_len)?;
+        validate_packed_rank4(
+            "V",
+            &layer.v_packed,
+            self.n_kv_heads,
+            cached_len,
+            self.packed_v_head_dim,
+        )?;
+        validate_norm_rank3("V norms", &layer.v_norms, self.n_kv_heads, cached_len)?;
+        Ok(())
+    }
+
     fn write_per_row(
         &mut self,
         k: &Array,
@@ -1241,6 +1542,48 @@ fn validate_dense_batch_heads(name: &str, arr: &Array, batch: i32, n_kv_heads: i
             "TurboQuantKVCache: {name} shape batch/heads [{}, {}] != expected [{batch}, {n_kv_heads}]",
             dims[0],
             dims[1]
+        );
+    }
+    Ok(())
+}
+
+fn validate_packed_rank4(
+    name: &str,
+    arr: &Array,
+    n_kv_heads: i32,
+    cached_len: i32,
+    packed_dim: i32,
+) -> Result<()> {
+    if arr.dtype() != Dtype::Uint32 {
+        anyhow::bail!(
+            "TurboQuantKVCache::restore_packed_prefix_for_row_on: {name} dtype {} != Uint32",
+            arr.dtype()
+        );
+    }
+    let shape = arr.shape();
+    let dims = shape.as_slice();
+    if dims != [1_i32, n_kv_heads, cached_len, packed_dim] {
+        anyhow::bail!(
+            "TurboQuantKVCache::restore_packed_prefix_for_row_on: {name} shape {:?} incompatible with [1,{n_kv_heads},{cached_len},{packed_dim}]",
+            dims
+        );
+    }
+    Ok(())
+}
+
+fn validate_norm_rank3(name: &str, arr: &Array, n_kv_heads: i32, cached_len: i32) -> Result<()> {
+    if arr.dtype() != Dtype::Float32 {
+        anyhow::bail!(
+            "TurboQuantKVCache::restore_packed_prefix_for_row_on: {name} dtype {} != Float32",
+            arr.dtype()
+        );
+    }
+    let shape = arr.shape();
+    let dims = shape.as_slice();
+    if dims != [1_i32, n_kv_heads, cached_len] {
+        anyhow::bail!(
+            "TurboQuantKVCache::restore_packed_prefix_for_row_on: {name} shape {:?} incompatible with [1,{n_kv_heads},{cached_len}]",
+            dims
         );
     }
     Ok(())

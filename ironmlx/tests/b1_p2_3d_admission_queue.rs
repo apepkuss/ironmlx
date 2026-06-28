@@ -441,6 +441,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
             None,  // kv_cache_turboquant_bits
             None,  // paged_prefix_cache
             None,  // prefix_lru_cache
+            ironmlx::core::cache::ActiveKvOffloadConfig::disabled(),
             scheduler_profile,
             false, // scheduler_autotune_report
             None,  // vision_input_override

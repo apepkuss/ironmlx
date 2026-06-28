@@ -220,9 +220,9 @@ impl Attention {
                         &lens_owned
                     }
                 };
-                if let Some(out) = c.try_update_and_attend_decode_on(
-                    &q, &k, &v, lens_ref, self.scale, mask, target,
-                )? {
+                if let Some(out) =
+                    c.try_update_and_attend_on(&q, &k, &v, lens_ref, self.scale, mask, target)?
+                {
                     out
                 } else {
                     let (k_full, v_full) =

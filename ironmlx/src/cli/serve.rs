@@ -1,7 +1,7 @@
 //! `ironmlx serve` — boot HTTP server with OpenAI + Anthropic compatibility.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use clap::Args;
@@ -10,6 +10,7 @@ use super::scheduler_profile_store::{
     detect_scheduler_profile_hardware_label, SchedulerProfileStore,
 };
 use super::KvQuantArg;
+use crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
 use crate::core::scheduler::DenseVlMethods;
 use crate::core::scheduler_autotune::{
     evaluate_scheduler_autotune_profile_health, SchedulerAutotuneProfileConfig,
@@ -28,21 +29,46 @@ const DEFAULT_ADMISSION_QUEUE_MAX: usize = 32;
 const DEFAULT_MAX_CACHE_CAP: usize = 32768;
 const DEFAULT_DECODE_CADENCE_MID_CHUNK_CAP: usize = 256;
 const DEFAULT_PAGED_PREFIX_CACHE_DIR: &str = "~/.ironmlx/cache/paged_prefix_cache";
+const BYTES_PER_GIB: usize = 1024 * 1024 * 1024;
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct ServeArgs {
     /// Local directory containing config.json + model.safetensors + tokenizer.json.
     /// HF repo-id resolution is deferred to a future phase; pass a local path for now.
-    #[arg(
-        long,
-        required_unless_present = "model_manifest",
-        conflicts_with = "model_manifest"
-    )]
+    #[arg(long, conflicts_with = "model_manifest")]
     pub model: Option<String>,
 
     /// JSON manifest describing one or more model engines for runtime routing.
     #[arg(long = "model-manifest", conflicts_with = "model")]
     pub model_manifest: Option<PathBuf>,
+
+    /// Maximum number of models that may stay loaded in App / dynamic EnginePool mode.
+    #[arg(
+        long = "max-loaded-models",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub max_loaded_models: Option<usize>,
+
+    /// Automatically unload loaded lazy models after this many idle minutes.
+    /// Pass `0` to disable automatic unloading.
+    #[arg(long = "model-ttl-minutes")]
+    pub model_ttl_minutes: Option<u64>,
+
+    /// Total MLX active memory guardrail in GiB for App / EnginePool mode.
+    /// If omitted, no explicit total memory limit is applied.
+    #[arg(
+        long = "memory-limit-total-gb",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub memory_limit_total_gb: Option<usize>,
+
+    /// Loaded model weight guardrail in GiB for App / EnginePool mode.
+    /// If omitted, no explicit model-only memory limit is applied.
+    #[arg(
+        long = "memory-limit-model-gb",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub memory_limit_model_gb: Option<usize>,
 
     /// Bind port.
     #[arg(long, default_value_t = 8080)]
@@ -63,10 +89,13 @@ pub struct ServeArgs {
     /// Maximum concurrent in-flight requests (Scheduler slot count).
     /// Requests beyond this limit go to the admission queue. Default `1`
     /// optimizes single-request prefill / decode by avoiding [B,T_max]-padded
-    /// MoE compute when only one slot is occupied; pass `--b-max N > 1` to
+    /// MoE compute when only one slot is occupied; pass `--max-sequences N > 1` to
     /// enable concurrent multi-request batching. `0` rejected at startup
     /// because Scheduler with zero slots cannot admit any request.
-    #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    #[arg(
+        long = "max-sequences",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
     pub b_max: Option<usize>,
 
     /// Admission-window deadline in milliseconds. After the first
@@ -107,7 +136,7 @@ pub struct ServeArgs {
     pub scheduler_autotune_report: bool,
 
     /// Optional local MTP model directory. When set, MTP is enabled only for
-    /// greedy Qwen dense/MoE scheduler requests.
+    /// Qwen dense/MoE text requests served with --max-sequences 1.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
 
@@ -118,12 +147,14 @@ pub struct ServeArgs {
 
     /// KV cache quantization used by attention reads: none, turbo3, turbo4, or k3v4.
     #[arg(long = "kv-quant", value_enum, default_value = "none")]
-    pub kv_quant: KvQuantArg,
+    pub(crate) kv_quant: KvQuantArg,
 
-    /// Enable paged SSD prefix cache under this directory. This also switches
-    /// full-attention KV caches to paged storage and decode to the paged
-    /// attention kernel when supported. When passed without a value, defaults
-    /// to ~/.ironmlx/cache/paged_prefix_cache.
+    /// Enable paged SSD prefix cache under this directory. Without --kv-quant,
+    /// this also switches full-attention KV caches to paged storage and decode
+    /// to the paged attention kernel when supported. With TurboQuant, runtime
+    /// K/V stays quantized while prefix cache entries are persisted as packed
+    /// TurboQuant tensors. When passed without a value, defaults to
+    /// ~/.ironmlx/cache/paged_prefix_cache.
     #[arg(
         long = "paged-prefix-cache-dir",
         num_args = 0..=1,
@@ -132,7 +163,7 @@ pub struct ServeArgs {
     pub paged_prefix_cache_dir: Option<PathBuf>,
 
     /// Tokens per physical K/V page for --paged-prefix-cache-dir.
-    #[arg(long = "paged-prefix-cache-block-size", default_value_t = 16)]
+    #[arg(long = "paged-prefix-cache-block-size", default_value_t = DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE)]
     pub paged_prefix_cache_block_size: i32,
 
     /// Maximum physical pages per full-attention layer cache. If omitted,
@@ -140,14 +171,31 @@ pub struct ServeArgs {
     #[arg(long = "paged-prefix-cache-max-pages")]
     pub paged_prefix_cache_max_pages: Option<i32>,
 
+    /// Maximum SSD prefix cache directory size in GiB. If omitted, the SSD
+    /// directory is not pruned by size.
+    #[arg(long = "ssd-prefix-cache-max-gb")]
+    pub ssd_prefix_cache_max_gb: Option<usize>,
+
     /// Maximum bytes for the in-process cross-request prefix LRU cache. Disabled
     /// by default; initial support requires --paged-prefix-cache-dir so L1 can
     /// share the same paged prefix cache key and restore semantics.
     #[arg(long = "prefix-lru-cache-max-bytes")]
     pub prefix_lru_cache_max_bytes: Option<usize>,
+
+    /// Enable experimental Active KV Cache offload. Eligible decode requests may
+    /// still be parked to SSD when the scheduler is full; paged full-attention
+    /// KV caches also use transparent hot/cold page residency so older decode
+    /// pages can be offloaded and streamed back in chunks during attention.
+    #[arg(long = "active-kv-offload", default_value_t = false)]
+    pub active_kv_offload: bool,
+
+    /// Directory used by --active-kv-offload for temporary request KV payloads.
+    /// Defaults to ~/.ironmlx/cache/active_kv_offload when offload is enabled.
+    #[arg(long = "active-kv-offload-dir")]
+    pub active_kv_offload_dir: Option<PathBuf>,
 }
 
-fn resolve_paged_prefix_cache_config(
+pub(crate) fn resolve_paged_prefix_cache_config(
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
     model_id: &str,
@@ -155,9 +203,6 @@ fn resolve_paged_prefix_cache_config(
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
     };
-    if args.kv_quant.turboquant_bits().is_some() {
-        bail!("--paged-prefix-cache-dir is mutually exclusive with --kv-quant");
-    }
     let root = expand_home_path(root)?;
     let block_size = args.paged_prefix_cache_block_size;
     if block_size <= 0 {
@@ -178,24 +223,49 @@ fn resolve_paged_prefix_cache_config(
             i32::try_from(pages).context("derived paged prefix cache max_pages exceeds i32")?
         }
     };
-    crate::core::cache::PagedPrefixCacheConfig::new(
+    let max_disk_bytes = resolve_ssd_prefix_cache_max_bytes(args)?;
+    crate::core::cache::PagedPrefixCacheConfig::new_with_max_disk_bytes(
         root,
         model_id.to_string(),
         block_size,
         max_pages,
+        max_disk_bytes,
     )
     .map(Some)
 }
 
-fn resolve_engine_paged_prefix_cache_settings(
+fn resolve_ssd_prefix_cache_max_bytes(args: &ServeArgs) -> Result<Option<usize>> {
+    let Some(max_gb) = args.ssd_prefix_cache_max_gb else {
+        return Ok(None);
+    };
+    if max_gb == 0 {
+        bail!("--ssd-prefix-cache-max-gb must be > 0");
+    }
+    max_gb
+        .checked_mul(BYTES_PER_GIB)
+        .context("--ssd-prefix-cache-max-gb exceeds usize bytes")
+        .map(Some)
+}
+
+pub(crate) fn resolve_memory_limit_bytes(
+    limit_gb: Option<usize>,
+    flag_name: &str,
+) -> Result<Option<usize>> {
+    let Some(limit_gb) = limit_gb else {
+        return Ok(None);
+    };
+    limit_gb
+        .checked_mul(BYTES_PER_GIB)
+        .with_context(|| format!("{flag_name} exceeds usize bytes"))
+        .map(Some)
+}
+
+pub(crate) fn resolve_engine_paged_prefix_cache_settings(
     args: &ServeArgs,
 ) -> Result<Option<server::engine::EnginePagedPrefixCacheSettings>> {
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
     };
-    if args.kv_quant.turboquant_bits().is_some() {
-        bail!("--paged-prefix-cache-dir is mutually exclusive with --kv-quant");
-    }
     let root = expand_home_path(root)?;
     let block_size = args.paged_prefix_cache_block_size;
     if block_size <= 0 {
@@ -206,14 +276,16 @@ fn resolve_engine_paged_prefix_cache_settings(
             bail!("--paged-prefix-cache-max-pages must be > 0");
         }
     }
+    let max_disk_bytes = resolve_ssd_prefix_cache_max_bytes(args)?;
     Ok(Some(server::engine::EnginePagedPrefixCacheSettings {
         root,
         block_size,
         max_pages: args.paged_prefix_cache_max_pages,
+        max_disk_bytes,
     }))
 }
 
-fn resolve_prefix_lru_cache_config(
+pub(crate) fn resolve_prefix_lru_cache_config(
     args: &ServeArgs,
     paged_prefix_cache: Option<&crate::core::cache::PagedPrefixCacheConfig>,
 ) -> Result<Option<crate::core::cache::PrefixLruCacheConfig>> {
@@ -224,6 +296,33 @@ fn resolve_prefix_lru_cache_config(
         bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
     }
     crate::core::cache::PrefixLruCacheConfig::new(max_bytes).map(Some)
+}
+
+pub(crate) fn resolve_model_ttl(args: &ServeArgs) -> Result<Option<Duration>> {
+    let Some(minutes) = args.model_ttl_minutes else {
+        return Ok(None);
+    };
+    if minutes == 0 {
+        return Ok(None);
+    }
+    minutes
+        .checked_mul(60)
+        .map(Duration::from_secs)
+        .context("--model-ttl-minutes exceeds supported duration")
+        .map(Some)
+}
+
+pub(crate) fn resolve_active_kv_offload_config(
+    args: &ServeArgs,
+) -> Result<crate::core::cache::ActiveKvOffloadConfig> {
+    if !args.active_kv_offload {
+        return Ok(crate::core::cache::ActiveKvOffloadConfig::disabled());
+    }
+    let root = match args.active_kv_offload_dir.as_ref() {
+        Some(root) => expand_home_path(root)?,
+        None => crate::core::cache::default_active_kv_offload_dir(),
+    };
+    Ok(crate::core::cache::ActiveKvOffloadConfig::enabled(root))
 }
 
 fn expand_home_path(path: &Path) -> Result<PathBuf> {
@@ -241,13 +340,13 @@ fn expand_home_path(path: &Path) -> Result<PathBuf> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SchedulerServeConfig {
-    prefill_chunk_size: usize,
-    b_max: usize,
-    admission_deadline_ms: u64,
-    admission_queue_max: usize,
-    max_cache_cap: usize,
-    decode_cadence_mid_chunk_cap: usize,
+pub(crate) struct SchedulerServeConfig {
+    pub(crate) prefill_chunk_size: usize,
+    pub(crate) b_max: usize,
+    pub(crate) admission_deadline_ms: u64,
+    pub(crate) admission_queue_max: usize,
+    pub(crate) max_cache_cap: usize,
+    pub(crate) decode_cadence_mid_chunk_cap: usize,
 }
 
 impl Default for SchedulerServeConfig {
@@ -316,6 +415,19 @@ struct SchedulerProfileLoad {
     path: PathBuf,
     profile: SchedulerAutotuneRuntimeProfile,
     auto_loaded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchedulerProfileSource {
+    Explicit,
+    Store,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResolvedSchedulerRuntime {
+    pub(crate) scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    pub(crate) scheduler_config: SchedulerServeConfig,
+    pub(crate) profile_source: Option<SchedulerProfileSource>,
 }
 
 fn load_scheduler_profile_for_model(
@@ -585,6 +697,116 @@ fn resolve_scheduler_serve_config(
     })
 }
 
+pub(crate) fn resolve_scheduler_for_model(
+    args: &ServeArgs,
+    model_dir: &Path,
+) -> Result<ResolvedSchedulerRuntime> {
+    let scheduler_profile_store = if args.scheduler_profile.is_none() {
+        match SchedulerProfileStore::default() {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::warn!(
+                    "ironmlx serve: scheduler profile store disabled error={:#}; using CLI/default scheduler config",
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let scheduler_profile_hardware_label = detect_scheduler_profile_hardware_label();
+    let mut scheduler_profile_load = load_scheduler_profile_for_model(
+        args,
+        model_dir,
+        scheduler_profile_store.as_ref(),
+        &scheduler_profile_hardware_label,
+    )?;
+    let scheduler_profile_model_name = scheduler_profile_model_name(model_dir)?;
+    let mut discard_auto_profile = false;
+    if let Some(load) = scheduler_profile_load.as_ref() {
+        match check_loaded_scheduler_profile_health(
+            &load.profile,
+            &scheduler_profile_model_name,
+            &scheduler_profile_hardware_label,
+            unix_time_ms(),
+        ) {
+            Ok(report) => log_scheduler_profile_health(&load.path, &report),
+            Err(error) if load.auto_loaded => {
+                tracing::warn!(
+                    "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
+                    load.path.display(),
+                    scheduler_profile_model_name,
+                    scheduler_profile_hardware_label,
+                    error
+                );
+                discard_auto_profile = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if discard_auto_profile {
+        scheduler_profile_load = None;
+    }
+    let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
+        args,
+        scheduler_profile_load.as_ref().map(|load| &load.profile),
+    )?;
+    if scheduler_profile_load.is_none() && args.scheduler_profile.is_none() {
+        match scheduler_profile_store.as_ref() {
+            Some(store) => tracing::info!(
+                "ironmlx serve: no matching scheduler profile found store={} model={} hardware_label={}; using CLI/default scheduler config",
+                store.root().display(),
+                model_dir.display(),
+                scheduler_profile_hardware_label
+            ),
+            None => tracing::info!(
+                "ironmlx serve: no scheduler profile store available model={} hardware_label={}; using CLI/default scheduler config",
+                model_dir.display(),
+                scheduler_profile_hardware_label
+            ),
+        }
+    }
+    let scheduler_config = SchedulerServeConfig {
+        prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
+        b_max: scheduler_runtime_profile.config.b_max,
+        admission_deadline_ms: scheduler_runtime_profile.config.admission_deadline_ms,
+        admission_queue_max: scheduler_runtime_profile.config.admission_queue_max,
+        max_cache_cap: scheduler_runtime_profile.config.max_cache_cap,
+        decode_cadence_mid_chunk_cap: scheduler_runtime_profile
+            .config
+            .decode_cadence_mid_chunk_cap,
+    };
+    if let Some(load) = &scheduler_profile_load {
+        let source = if load.auto_loaded {
+            "store"
+        } else {
+            "explicit"
+        };
+        tracing::info!(
+            "ironmlx serve: scheduler profile applied source={} path={} model_name={} hardware_label={} rules={}",
+            source,
+            load.path.display(),
+            load.profile.model_name,
+            load.profile.hardware_label,
+            scheduler_runtime_profile.rules.len()
+        );
+    }
+    let profile_source = scheduler_profile_load.as_ref().map(|load| {
+        if load.auto_loaded {
+            SchedulerProfileSource::Store
+        } else {
+            SchedulerProfileSource::Explicit
+        }
+    });
+
+    Ok(ResolvedSchedulerRuntime {
+        scheduler_runtime_profile,
+        scheduler_config,
+        profile_source,
+    })
+}
+
 /// Generic serve helper — shared by all model types that satisfy the
 /// `SchedulerActor<M>` / `AppState<M>` bounds.
 ///
@@ -599,12 +821,12 @@ fn log_scheduler_mode(scheduler_config: SchedulerServeConfig) {
     if scheduler_config.b_max == 1 {
         tracing::info!(
             "ironmlx serve: b_max=1 (single-request optimized mode; \
-             pass --b-max N > 1 to enable concurrent multi-request batching)"
+             pass --max-sequences N > 1 to enable concurrent multi-request batching)"
         );
     } else {
         tracing::info!(
             "ironmlx serve: b_max={} (multi-request batching enabled; \
-             pass --b-max 1 to switch to single-request optimized mode)",
+             pass --max-sequences 1 to switch to single-request optimized mode)",
             scheduler_config.b_max,
         );
     }
@@ -639,6 +861,7 @@ where
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
+    let active_kv_offload = resolve_active_kv_offload_config(args)?;
     if let Some(config) = &paged_prefix_cache {
         tracing::info!(
             "ironmlx serve: paged SSD prefix cache enabled dir={} block_size={} max_pages={}",
@@ -669,6 +892,7 @@ where
         args.kv_quant.turboquant_bits(),
         paged_prefix_cache,
         prefix_lru_cache,
+        active_kv_offload,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
@@ -704,6 +928,7 @@ where
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
+    let active_kv_offload = resolve_active_kv_offload_config(args)?;
     if let Some(config) = &prefix_lru_cache {
         tracing::info!(
             "ironmlx serve: prefix LRU cache enabled max_bytes={}",
@@ -728,6 +953,7 @@ where
         args.kv_quant.turboquant_bits(),
         paged_prefix_cache,
         prefix_lru_cache,
+        active_kv_offload,
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
@@ -738,6 +964,7 @@ fn serve_with_diffusion_gemma_model(
     model: crate::models::DiffusionGemmaModel,
     tokenizer: Tokenizer,
     generation_config: crate::models::DiffusionGemmaGenerationConfig,
+    model_weight_bytes: usize,
     args: &ServeArgs,
     vision_input: server::VisionInputConfig,
 ) -> Result<()> {
@@ -748,13 +975,14 @@ fn serve_with_diffusion_gemma_model(
         tokenizer,
         generation_config,
         model_id,
+        model_weight_bytes,
         &args.host,
         args.port,
         vision_input,
     ))
 }
 
-fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
+pub(crate) fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
     let config_path = model_dir.join("config.json");
     let raw = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
@@ -839,6 +1067,7 @@ fn build_engine_model_config_for_pool(
             default: model.default,
             scheduler_runtime_profile: default_scheduler_runtime_profile(),
             mtp,
+            sampling_defaults: server::SamplingDefaults::default(),
         });
     }
     if !model.path.exists() {
@@ -868,6 +1097,7 @@ fn build_engine_model_config_for_pool(
         default: model.default,
         scheduler_runtime_profile,
         mtp,
+        sampling_defaults: server::SamplingDefaults::default(),
     })
 }
 
@@ -906,6 +1136,8 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
         )?);
     }
     let paged_prefix_cache = resolve_engine_paged_prefix_cache_settings(&args)?;
+    let active_kv_offload = resolve_active_kv_offload_config(&args)?;
+    let model_ttl = resolve_model_ttl(&args)?;
     let runtime_config = server::engine::EnginePoolRuntimeConfig {
         host: args.host,
         port: args.port,
@@ -913,6 +1145,18 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
         scheduler_autotune_report: args.scheduler_autotune_report,
         paged_prefix_cache,
         prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
+        model_ttl,
+        memory_limits: server::engine::EnginePoolMemoryLimits {
+            total_memory_limit_bytes: resolve_memory_limit_bytes(
+                args.memory_limit_total_gb,
+                "--memory-limit-total-gb",
+            )?,
+            model_memory_limit_bytes: resolve_memory_limit_bytes(
+                args.memory_limit_model_gb,
+                "--memory-limit-model-gb",
+            )?,
+        },
+        active_kv_offload,
     };
     let config = server::engine::EnginePoolConfig {
         default_model: manifest.default_model,
@@ -923,13 +1167,29 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     runtime.block_on(server::engine::serve_engine_pool(config, runtime_config))
 }
 
+fn run_app_daemon(args: ServeArgs) -> Result<()> {
+    tracing::info!(
+        "ironmlx serve: starting app daemon mode on {}:{}",
+        args.host,
+        args.port
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("tokio::Runtime::new")?;
+    runtime.block_on(server::model_manager::serve_app_daemon(args))
+}
+
 pub fn run(args: ServeArgs) -> Result<()> {
     if let Some(manifest_path) = args.model_manifest.clone() {
         return run_engine_pool(args, &manifest_path);
     }
 
-    let model_arg = single_model_id(&args)?;
-    let model_dir = PathBuf::from(&model_arg);
+    let Some(model_arg) = args.model.as_deref() else {
+        return run_app_daemon(args);
+    };
+
+    let model_dir = PathBuf::from(model_arg);
     if !model_dir.exists() {
         return Err(anyhow::anyhow!(
             "--model must point to a local directory (got '{}'); HF hub auto-download is deferred",
@@ -1194,10 +1454,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
                     .context("DiffusionGemmaGenerationConfig::from_loader")?;
             let model = crate::models::DiffusionGemmaModel::from_loader(&loader)
                 .context("DiffusionGemmaModel::from_loader")?;
+            let model_weight_bytes = loader.loaded_tensor_bytes();
             serve_with_diffusion_gemma_model(
                 model,
                 tokenizer,
                 generation_config,
+                model_weight_bytes,
                 &args,
                 server::VisionInputConfig::DiffusionGemma {
                     vision_config,
@@ -1213,7 +1475,10 @@ mod scheduler_profile_tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use clap::Parser;
+
     use crate::cli::scheduler_profile_store::SchedulerProfileStore;
+    use crate::cli::Command;
     use crate::core::scheduler_autotune::{
         SchedulerAutotuneProfileConfig, SchedulerAutotuneProfileHealthStatus,
         SchedulerAutotuneRuntimeProfile, SchedulerAutotuneRuntimeRule,
@@ -1225,9 +1490,11 @@ mod scheduler_profile_tests {
     use super::{
         build_engine_model_config_for_pool, check_loaded_scheduler_profile_health,
         load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
+        resolve_active_kv_offload_config, resolve_memory_limit_bytes, resolve_model_ttl,
         resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
         resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
         resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel, SchedulerServeConfig, ServeArgs,
+        BYTES_PER_GIB,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -1270,6 +1537,9 @@ mod scheduler_profile_tests {
         ServeArgs {
             model: Some("/tmp/model".to_string()),
             model_manifest: None,
+            max_loaded_models: None,
+            memory_limit_total_gb: None,
+            memory_limit_model_gb: None,
             port: 8080,
             host: "127.0.0.1".to_string(),
             prefill_chunk_size: None,
@@ -1284,10 +1554,27 @@ mod scheduler_profile_tests {
             mtp_draft_tokens: None,
             kv_quant: KvQuantArg::None,
             paged_prefix_cache_dir: None,
-            paged_prefix_cache_block_size: 16,
+            paged_prefix_cache_block_size:
+                crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
             paged_prefix_cache_max_pages: None,
+            ssd_prefix_cache_max_gb: None,
             prefix_lru_cache_max_bytes: None,
+            model_ttl_minutes: None,
+            active_kv_offload: false,
+            active_kv_offload_dir: None,
         }
+    }
+
+    #[test]
+    fn memory_limit_gigabytes_resolve_to_bytes() {
+        assert_eq!(
+            resolve_memory_limit_bytes(Some(2), "--memory-limit-total-gb").unwrap(),
+            Some(2 * BYTES_PER_GIB)
+        );
+        assert_eq!(
+            resolve_memory_limit_bytes(None, "--memory-limit-total-gb").unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1338,6 +1625,66 @@ mod scheduler_profile_tests {
 
         assert_eq!(cfg.model_id, "manifest-alpha");
         std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn serve_active_kv_offload_disabled_by_default() {
+        let args = base_args();
+
+        let cfg = resolve_active_kv_offload_config(&args).expect("active kv config");
+
+        assert!(!cfg.enabled);
+        assert_eq!(
+            cfg.root,
+            crate::core::cache::default_active_kv_offload_dir()
+        );
+    }
+
+    #[test]
+    fn serve_active_kv_offload_uses_default_dir_when_enabled() {
+        let mut args = base_args();
+        args.active_kv_offload = true;
+
+        let cfg = resolve_active_kv_offload_config(&args).expect("active kv config");
+
+        assert!(cfg.enabled);
+        assert_eq!(
+            cfg.root,
+            crate::core::cache::default_active_kv_offload_dir()
+        );
+    }
+
+    #[test]
+    fn serve_active_kv_offload_uses_custom_dir() {
+        let root = unique_temp_dir("serve-active-kv-root");
+        let mut args = base_args();
+        args.active_kv_offload = true;
+        args.active_kv_offload_dir = Some(root.clone());
+
+        let cfg = resolve_active_kv_offload_config(&args).expect("active kv config");
+
+        assert!(cfg.enabled);
+        assert_eq!(cfg.root, root);
+    }
+
+    #[test]
+    fn serve_model_ttl_minutes_resolves_positive_duration() {
+        let mut args = base_args();
+        args.model_ttl_minutes = Some(30);
+
+        let ttl = resolve_model_ttl(&args).expect("model ttl");
+
+        assert_eq!(ttl, Some(std::time::Duration::from_secs(30 * 60)));
+    }
+
+    #[test]
+    fn serve_model_ttl_minutes_zero_disables_ttl() {
+        let mut args = base_args();
+        args.model_ttl_minutes = Some(0);
+
+        let ttl = resolve_model_ttl(&args).expect("model ttl");
+
+        assert_eq!(ttl, None);
     }
 
     #[test]
@@ -1499,6 +1846,51 @@ mod scheduler_profile_tests {
     }
 
     #[test]
+    fn serve_accepts_max_sequences_cli_arg() {
+        let cli = crate::cli::Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--max-sequences",
+            "4",
+        ]);
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(args.b_max, Some(4));
+    }
+
+    #[test]
+    fn serve_paged_prefix_block_size_defaults_to_capacity_friendly_page_size() {
+        let cli = crate::cli::Cli::parse_from(["ironmlx", "serve", "--model", "/tmp/model"]);
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(
+            args.paged_prefix_cache_block_size,
+            crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE
+        );
+    }
+
+    #[test]
+    fn serve_rejects_internal_b_max_cli_arg() {
+        let err = crate::cli::Cli::try_parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--b-max",
+            "4",
+        ])
+        .expect_err("--b-max must not be accepted as a public CLI flag");
+
+        assert!(err.to_string().contains("unexpected argument '--b-max'"));
+    }
+
+    #[test]
     fn serve_mtp_config_accepts_qwen_single_request_window() {
         let temp_dir = unique_temp_dir("serve-mtp-ok");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
@@ -1619,6 +2011,76 @@ mod scheduler_profile_tests {
             .join("cache")
             .join("paged_prefix_cache");
         assert_eq!(cfg.root, expected);
+    }
+
+    #[test]
+    fn serve_paged_prefix_cache_accepts_ssd_max_gb() {
+        let prefix_dir = unique_temp_dir("serve-prefix-ssd-max-gb");
+        let mut args = base_args();
+        args.paged_prefix_cache_dir = Some(prefix_dir.clone());
+        args.ssd_prefix_cache_max_gb = Some(10);
+
+        let cfg = resolve_paged_prefix_cache_config(
+            &args,
+            SchedulerServeConfig {
+                b_max: 2,
+                max_cache_cap: 128,
+                ..SchedulerServeConfig::default()
+            },
+            "/tmp/model",
+        )
+        .expect("prefix config")
+        .expect("enabled");
+
+        assert_eq!(cfg.max_disk_bytes, Some(10 * 1024 * 1024 * 1024));
+        std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn serve_paged_prefix_cache_accepts_turboquant() {
+        let prefix_dir = unique_temp_dir("serve-prefix-kv-quant");
+        let mut args = base_args();
+        args.paged_prefix_cache_dir = Some(prefix_dir.clone());
+        args.kv_quant = KvQuantArg::K3V4;
+
+        let cfg = resolve_paged_prefix_cache_config(
+            &args,
+            SchedulerServeConfig {
+                b_max: 2,
+                max_cache_cap: 128,
+                ..SchedulerServeConfig::default()
+            },
+            "/tmp/model",
+        )
+        .expect("paged prefix cache should allow TurboQuant")
+        .expect("paged prefix cache enabled");
+
+        assert_eq!(cfg.model_id, "/tmp/model");
+        std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn serve_paged_prefix_cache_rejects_zero_ssd_max_gb() {
+        let prefix_dir = unique_temp_dir("serve-prefix-ssd-max-gb-zero");
+        let mut args = base_args();
+        args.paged_prefix_cache_dir = Some(prefix_dir.clone());
+        args.ssd_prefix_cache_max_gb = Some(0);
+
+        let err = resolve_paged_prefix_cache_config(
+            &args,
+            SchedulerServeConfig {
+                b_max: 2,
+                max_cache_cap: 128,
+                ..SchedulerServeConfig::default()
+            },
+            "/tmp/model",
+        )
+        .expect_err("zero SSD prefix cache limit");
+
+        assert!(err
+            .to_string()
+            .contains("--ssd-prefix-cache-max-gb must be > 0"));
+        std::fs::remove_dir_all(prefix_dir).ok();
     }
 
     #[test]

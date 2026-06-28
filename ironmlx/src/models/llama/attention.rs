@@ -124,15 +124,9 @@ impl LlamaAttention {
 
         // Write post-RoPE K/V into the cache. Decode-time TurboQuant caches
         // can answer SDPA directly from packed K/V.
-        let out = if let Some(out) = cache.try_update_and_attend_decode_on(
-            &q,
-            &k,
-            &v,
-            per_row_lens,
-            self.scale,
-            mask,
-            target,
-        )? {
+        let out = if let Some(out) =
+            cache.try_update_and_attend_on(&q, &k, &v, per_row_lens, self.scale, mask, target)?
+        {
             out
         } else {
             let (k_full, v_full) =

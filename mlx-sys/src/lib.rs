@@ -13,6 +13,7 @@ pub use bridge::compile;
 pub use bridge::conv;
 pub use bridge::fast;
 pub use bridge::io;
+pub use bridge::memory;
 pub use bridge::metal;
 pub use bridge::quantization;
 pub use bridge::random;

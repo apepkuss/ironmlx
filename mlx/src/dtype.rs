@@ -30,6 +30,15 @@ pub enum Dtype {
 }
 
 impl Dtype {
+    pub fn byte_size(self) -> usize {
+        match self {
+            Dtype::Bool | Dtype::Uint8 | Dtype::Int8 => 1,
+            Dtype::Uint16 | Dtype::Int16 | Dtype::Float16 | Dtype::Bfloat16 => 2,
+            Dtype::Uint32 | Dtype::Int32 | Dtype::Float32 => 4,
+            Dtype::Uint64 | Dtype::Int64 | Dtype::Float64 | Dtype::Complex64 => 8,
+        }
+    }
+
     pub(crate) fn as_u8(self) -> u8 {
         self as u8
     }
@@ -97,5 +106,23 @@ mod tests {
         assert_eq!(format!("{}", Dtype::Int32), "i32");
         assert_eq!(format!("{}", Dtype::Uint32), "u32");
         assert_eq!(format!("{}", Dtype::Complex64), "complex64");
+    }
+
+    #[test]
+    fn byte_size_matches_storage_width() {
+        assert_eq!(Dtype::Bool.byte_size(), 1);
+        assert_eq!(Dtype::Uint8.byte_size(), 1);
+        assert_eq!(Dtype::Int8.byte_size(), 1);
+        assert_eq!(Dtype::Uint16.byte_size(), 2);
+        assert_eq!(Dtype::Int16.byte_size(), 2);
+        assert_eq!(Dtype::Float16.byte_size(), 2);
+        assert_eq!(Dtype::Bfloat16.byte_size(), 2);
+        assert_eq!(Dtype::Uint32.byte_size(), 4);
+        assert_eq!(Dtype::Int32.byte_size(), 4);
+        assert_eq!(Dtype::Float32.byte_size(), 4);
+        assert_eq!(Dtype::Uint64.byte_size(), 8);
+        assert_eq!(Dtype::Int64.byte_size(), 8);
+        assert_eq!(Dtype::Float64.byte_size(), 8);
+        assert_eq!(Dtype::Complex64.byte_size(), 8);
     }
 }

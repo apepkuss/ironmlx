@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use mlx::{Array, Dtype};
@@ -9,14 +10,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 5;
 const META_FILE: &str = "meta.json";
 const PAYLOAD_FILE: &str = "payload.safetensors";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrefixLayerKind {
+    FullDense,
     FullPaged,
+    FullTurboQuantPacked,
     Linear,
     Mla,
 }
@@ -45,11 +48,32 @@ pub struct PrefixLayerSpec {
 impl PrefixLayerSpec {
     pub fn from_payload(payload: &PrefixLayerPayload) -> Self {
         match payload {
+            PrefixLayerPayload::FullDense { k, v } => Self {
+                kind: PrefixLayerKind::FullDense,
+                tensors: vec![
+                    PrefixTensorSpec::from_array(k),
+                    PrefixTensorSpec::from_array(v),
+                ],
+            },
             PrefixLayerPayload::FullPaged { k_pages, v_pages } => Self {
                 kind: PrefixLayerKind::FullPaged,
                 tensors: vec![
                     PrefixTensorSpec::from_array(k_pages),
                     PrefixTensorSpec::from_array(v_pages),
+                ],
+            },
+            PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed,
+                k_norms,
+                v_packed,
+                v_norms,
+            } => Self {
+                kind: PrefixLayerKind::FullTurboQuantPacked,
+                tensors: vec![
+                    PrefixTensorSpec::from_array(k_packed),
+                    PrefixTensorSpec::from_array(k_norms),
+                    PrefixTensorSpec::from_array(v_packed),
+                    PrefixTensorSpec::from_array(v_norms),
                 ],
             },
             PrefixLayerPayload::Linear {
@@ -95,6 +119,7 @@ pub struct PagedPrefixKeySpec {
     pub cached_len: i32,
     pub fingerprint: Option<String>,
     pub block_size: i32,
+    pub kv_cache_profile: Option<String>,
     pub main_layers: Vec<PrefixLayerSpec>,
     pub mtp_layers: Vec<PrefixMtpLayerSpec>,
     pub mtp_last_hidden: Option<PrefixTensorSpec>,
@@ -108,9 +133,19 @@ pub struct PagedPrefixLayer {
 
 #[derive(Debug, Clone)]
 pub enum PrefixLayerPayload {
+    FullDense {
+        k: Array,
+        v: Array,
+    },
     FullPaged {
         k_pages: Array,
         v_pages: Array,
+    },
+    FullTurboQuantPacked {
+        k_packed: Array,
+        k_norms: Array,
+        v_packed: Array,
+        v_norms: Array,
     },
     Linear {
         conv_state: Array,
@@ -139,6 +174,7 @@ pub struct PagedPrefixEntry {
 pub struct PagedPrefixEntryStats {
     pub cached_len: i32,
     pub main_layers: usize,
+    pub full_dense_layers: usize,
     pub full_paged_layers: usize,
     pub linear_layers: usize,
     pub mla_layers: usize,
@@ -178,6 +214,14 @@ impl PagedPrefixEntry {
         };
         for layer in &self.main_layers {
             match layer {
+                PrefixLayerPayload::FullDense { k, v } => {
+                    stats.full_dense_layers += 1;
+                    stats.tensor_count += 2;
+                    stats.payload_bytes = stats
+                        .payload_bytes
+                        .saturating_add(tensor_payload_bytes(k))
+                        .saturating_add(tensor_payload_bytes(v));
+                }
                 PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
                     stats.full_paged_layers += 1;
                     stats.full_paged_pages += first_dim_usize(k_pages);
@@ -186,6 +230,20 @@ impl PagedPrefixEntry {
                         .payload_bytes
                         .saturating_add(tensor_payload_bytes(k_pages))
                         .saturating_add(tensor_payload_bytes(v_pages));
+                }
+                PrefixLayerPayload::FullTurboQuantPacked {
+                    k_packed,
+                    k_norms,
+                    v_packed,
+                    v_norms,
+                } => {
+                    stats.tensor_count += 4;
+                    stats.payload_bytes = stats
+                        .payload_bytes
+                        .saturating_add(tensor_payload_bytes(k_packed))
+                        .saturating_add(tensor_payload_bytes(k_norms))
+                        .saturating_add(tensor_payload_bytes(v_packed))
+                        .saturating_add(tensor_payload_bytes(v_norms));
                 }
                 PrefixLayerPayload::Linear {
                     conv_state,
@@ -228,6 +286,7 @@ impl PagedPrefixEntry {
 #[derive(Debug, Clone)]
 pub struct PagedPrefixStore {
     root: PathBuf,
+    max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,12 +308,15 @@ pub struct PagedPrefixLoadResult {
     pub stats: Option<PagedPrefixEntryStats>,
 }
 
+pub const DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE: i32 = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagedPrefixCacheConfig {
     pub root: PathBuf,
     pub model_id: String,
     pub block_size: i32,
     pub max_pages: i32,
+    pub max_disk_bytes: Option<usize>,
 }
 
 impl PagedPrefixCacheConfig {
@@ -264,18 +326,29 @@ impl PagedPrefixCacheConfig {
         block_size: i32,
         max_pages: i32,
     ) -> Result<Self> {
+        Self::new_with_max_disk_bytes(root, model_id, block_size, max_pages, None)
+    }
+
+    pub fn new_with_max_disk_bytes(
+        root: impl AsRef<Path>,
+        model_id: impl Into<String>,
+        block_size: i32,
+        max_pages: i32,
+        max_disk_bytes: Option<usize>,
+    ) -> Result<Self> {
         let config = Self {
             root: root.as_ref().to_path_buf(),
             model_id: model_id.into(),
             block_size,
             max_pages,
+            max_disk_bytes,
         };
         config.validate()?;
         Ok(config)
     }
 
     pub fn store(&self) -> PagedPrefixStore {
-        PagedPrefixStore::new(&self.root)
+        PagedPrefixStore::new(&self.root).with_optional_max_bytes(self.max_disk_bytes)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -293,6 +366,9 @@ impl PagedPrefixCacheConfig {
                 "PagedPrefixCacheConfig: max_pages must be > 0, got {}",
                 self.max_pages
             );
+        }
+        if self.max_disk_bytes == Some(0) {
+            anyhow::bail!("PagedPrefixCacheConfig: max_disk_bytes must be > 0");
         }
         Ok(())
     }
@@ -526,6 +602,7 @@ struct KeyMaterial<'a> {
     cached_len: i32,
     fingerprint: Option<&'a str>,
     block_size: i32,
+    kv_cache_profile: Option<&'a str>,
     main_layers: Vec<LayerSpecMetadata>,
     mtp_layers: Vec<MtpLayerSpecMetadata>,
     mtp_last_hidden: Option<TensorSpecMetadata>,
@@ -541,6 +618,7 @@ struct PrefixMetadata {
     cached_len: i32,
     fingerprint_hash: Option<String>,
     block_size: i32,
+    kv_cache_profile: Option<String>,
     main_layers: Vec<LayerSpecMetadata>,
     mtp_layers: Vec<MtpLayerSpecMetadata>,
     mtp_last_hidden: Option<TensorSpecMetadata>,
@@ -550,7 +628,18 @@ impl PagedPrefixStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            max_bytes: None,
         }
+    }
+
+    pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
+    fn with_optional_max_bytes(mut self, max_bytes: Option<usize>) -> Self {
+        self.max_bytes = max_bytes;
+        self
     }
 
     pub fn key_for(spec: &PagedPrefixKeySpec) -> String {
@@ -561,6 +650,7 @@ impl PagedPrefixStore {
             cached_len: spec.cached_len,
             fingerprint: spec.fingerprint.as_deref(),
             block_size: spec.block_size,
+            kv_cache_profile: spec.kv_cache_profile.as_deref(),
             main_layers: layer_metadata(&spec.main_layers),
             mtp_layers: mtp_layer_metadata(&spec.mtp_layers),
             mtp_last_hidden: spec.mtp_last_hidden.as_ref().map(tensor_metadata),
@@ -573,6 +663,15 @@ impl PagedPrefixStore {
     pub fn save(&self, spec: &PagedPrefixKeySpec, entry: &PagedPrefixEntry) -> Result<String> {
         self.validate_spec(spec)?;
         self.validate_entry(spec, entry)?;
+
+        if let Some(max_bytes) = self.max_bytes {
+            let payload_bytes = entry.observability_stats(spec.cached_len).payload_bytes;
+            if payload_bytes > max_bytes {
+                anyhow::bail!(
+                    "PagedPrefixStore: entry payload_bytes {payload_bytes} exceeds max_bytes {max_bytes}"
+                );
+            }
+        }
 
         let key = Self::key_for(spec);
         let metadata = metadata_for(spec, &key)?;
@@ -623,6 +722,9 @@ impl PagedPrefixStore {
                 final_dir.display()
             )
         })?;
+        if let Some(max_bytes) = self.max_bytes {
+            self.evict_to_disk_capacity(&key, max_bytes)?;
+        }
         Ok(key)
     }
 
@@ -802,6 +904,79 @@ impl PagedPrefixStore {
         Ok(actual_metadata == metadata_for(spec, key)?)
     }
 
+    fn evict_to_disk_capacity(&self, keep_key: &str, max_bytes: usize) -> Result<()> {
+        let mut entries = self.disk_entries()?;
+        let mut total_bytes = entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
+        if total_bytes <= max_bytes as u64 {
+            return Ok(());
+        }
+
+        entries.sort_by(|left, right| {
+            left.modified
+                .cmp(&right.modified)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        for entry in entries {
+            if entry.key == keep_key {
+                continue;
+            }
+            fs::remove_dir_all(&entry.path)
+                .with_context(|| format!("evict prefix cache entry {}", entry.path.display()))?;
+            total_bytes = total_bytes.saturating_sub(entry.bytes);
+            if total_bytes <= max_bytes as u64 {
+                break;
+            }
+        }
+
+        if total_bytes > max_bytes as u64 {
+            anyhow::bail!(
+                "PagedPrefixStore: retained entry exceeds max_bytes {max_bytes}; total_bytes={total_bytes}"
+            );
+        }
+        Ok(())
+    }
+
+    fn disk_entries(&self) -> Result<Vec<PrefixDiskEntry>> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read prefix cache root {}", self.root.display()));
+            }
+        };
+        let mut result = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("read prefix cache root {}", self.root.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("read prefix cache entry type {}", path.display()))?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if key.starts_with(".tmp-") {
+                continue;
+            }
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("read prefix cache metadata {}", path.display()))?;
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            let bytes = directory_disk_bytes(&path)?;
+            result.push(PrefixDiskEntry {
+                key,
+                path,
+                bytes,
+                modified,
+            });
+        }
+        Ok(result)
+    }
+
     fn validate_spec(&self, spec: &PagedPrefixKeySpec) -> Result<()> {
         if spec.model_id.is_empty() {
             anyhow::bail!("PagedPrefixStore: model_id must not be empty");
@@ -832,6 +1007,13 @@ impl PagedPrefixStore {
         {
             anyhow::bail!("PagedPrefixStore: fingerprint must not be empty when present");
         }
+        if spec
+            .kv_cache_profile
+            .as_ref()
+            .is_some_and(|profile| profile.is_empty())
+        {
+            anyhow::bail!("PagedPrefixStore: kv_cache_profile must not be empty when present");
+        }
         if spec.main_layers.is_empty() && spec.mtp_layers.is_empty() {
             anyhow::bail!("PagedPrefixStore: entry must contain at least one cache layer");
         }
@@ -842,7 +1024,7 @@ impl PagedPrefixStore {
             anyhow::bail!("PagedPrefixStore: mtp_layers require mtp_last_hidden");
         }
         for (idx, layer) in spec.main_layers.iter().enumerate() {
-            validate_layer_spec(idx, layer, spec.block_size)?;
+            validate_layer_spec(idx, layer, spec.block_size, spec.cached_len)?;
         }
         for (idx, layer) in spec.mtp_layers.iter().enumerate() {
             validate_tensor_spec(&format!("mtp layer {idx} K"), &layer.k)?;
@@ -900,32 +1082,144 @@ impl PagedPrefixStore {
     }
 }
 
-fn validate_layer_spec(idx: usize, spec: &PrefixLayerSpec, block_size: i32) -> Result<()> {
-    if spec.tensors.len() != 2 {
+#[derive(Debug)]
+struct PrefixDiskEntry {
+    key: String,
+    path: PathBuf,
+    bytes: u64,
+    modified: SystemTime,
+}
+
+fn directory_disk_bytes(path: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    for entry in
+        fs::read_dir(path).with_context(|| format!("read prefix cache entry {}", path.display()))?
+    {
+        let entry = entry.with_context(|| format!("read prefix cache entry {}", path.display()))?;
+        let metadata = entry.metadata().with_context(|| {
+            format!(
+                "read prefix cache entry metadata {}",
+                entry.path().display()
+            )
+        })?;
+        if metadata.is_dir() {
+            total = total.saturating_add(directory_disk_bytes(&entry.path())?);
+        } else {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
+fn validate_layer_spec(
+    idx: usize,
+    spec: &PrefixLayerSpec,
+    block_size: i32,
+    cached_len: i32,
+) -> Result<()> {
+    for (tensor_idx, tensor) in spec.tensors.iter().enumerate() {
+        validate_tensor_spec(&format!("layer {idx} tensor {tensor_idx}"), tensor)?;
+    }
+    match spec.kind {
+        PrefixLayerKind::FullDense => {
+            require_tensor_count(idx, spec, 2)?;
+            for (name, tensor) in ["K", "V"].iter().zip(spec.tensors.iter()) {
+                let dims = tensor.shape.as_slice();
+                if dims.len() != 4
+                    || dims[0] != 1
+                    || dims[1] <= 0
+                    || dims[2] != cached_len
+                    || dims[3] <= 0
+                {
+                    anyhow::bail!(
+                        "PagedPrefixStore: FullDense layer {idx} {name} shape {:?} incompatible with [1,heads,{cached_len},dim]",
+                        dims
+                    );
+                }
+            }
+        }
+        PrefixLayerKind::FullPaged => {
+            require_tensor_count(idx, spec, 2)?;
+            for (name, tensor) in ["K", "V"].iter().zip(spec.tensors.iter()) {
+                let dims = tensor.shape.as_slice();
+                if dims.len() != 4
+                    || dims[0] < 0
+                    || dims[1] <= 0
+                    || dims[2] != block_size
+                    || dims[3] <= 0
+                {
+                    anyhow::bail!(
+                        "PagedPrefixStore: FullPaged layer {idx} {name} shape {:?} incompatible with [pages,heads,{block_size},dim]",
+                        dims
+                    );
+                }
+            }
+        }
+        PrefixLayerKind::FullTurboQuantPacked => {
+            require_tensor_count(idx, spec, 4)?;
+            validate_turboquant_packed_spec(idx, "K packed", &spec.tensors[0], cached_len)?;
+            validate_turboquant_norm_spec(idx, "K norms", &spec.tensors[1], cached_len)?;
+            validate_turboquant_packed_spec(idx, "V packed", &spec.tensors[2], cached_len)?;
+            validate_turboquant_norm_spec(idx, "V norms", &spec.tensors[3], cached_len)?;
+        }
+        PrefixLayerKind::Linear | PrefixLayerKind::Mla => {
+            require_tensor_count(idx, spec, 2)?;
+        }
+    }
+    Ok(())
+}
+
+fn require_tensor_count(idx: usize, spec: &PrefixLayerSpec, expected: usize) -> Result<()> {
+    if spec.tensors.len() != expected {
         anyhow::bail!(
-            "PagedPrefixStore: layer {idx} kind {:?} must describe exactly 2 tensors, got {}",
+            "PagedPrefixStore: layer {idx} kind {:?} must describe exactly {expected} tensors, got {}",
             spec.kind,
             spec.tensors.len()
         );
     }
-    for (tensor_idx, tensor) in spec.tensors.iter().enumerate() {
-        validate_tensor_spec(&format!("layer {idx} tensor {tensor_idx}"), tensor)?;
+    Ok(())
+}
+
+fn validate_turboquant_packed_spec(
+    idx: usize,
+    name: &str,
+    tensor: &PrefixTensorSpec,
+    cached_len: i32,
+) -> Result<()> {
+    if tensor.dtype != Dtype::Uint32 {
+        anyhow::bail!(
+            "PagedPrefixStore: FullTurboQuantPacked layer {idx} {name} dtype {} != Uint32",
+            tensor.dtype
+        );
     }
-    if spec.kind == PrefixLayerKind::FullPaged {
-        for (name, tensor) in ["K", "V"].iter().zip(spec.tensors.iter()) {
-            let dims = tensor.shape.as_slice();
-            if dims.len() != 4
-                || dims[0] < 0
-                || dims[1] <= 0
-                || dims[2] != block_size
-                || dims[3] <= 0
-            {
-                anyhow::bail!(
-                    "PagedPrefixStore: FullPaged layer {idx} {name} shape {:?} incompatible with [pages,heads,{block_size},dim]",
-                    dims
-                );
-            }
-        }
+    let dims = tensor.shape.as_slice();
+    if dims.len() != 4 || dims[0] != 1 || dims[1] <= 0 || dims[2] != cached_len || dims[3] <= 0 {
+        anyhow::bail!(
+            "PagedPrefixStore: FullTurboQuantPacked layer {idx} {name} shape {:?} incompatible with [1,heads,{cached_len},packed_dim]",
+            dims
+        );
+    }
+    Ok(())
+}
+
+fn validate_turboquant_norm_spec(
+    idx: usize,
+    name: &str,
+    tensor: &PrefixTensorSpec,
+    cached_len: i32,
+) -> Result<()> {
+    if tensor.dtype != Dtype::Float32 {
+        anyhow::bail!(
+            "PagedPrefixStore: FullTurboQuantPacked layer {idx} {name} dtype {} != Float32",
+            tensor.dtype
+        );
+    }
+    let dims = tensor.shape.as_slice();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] <= 0 || dims[2] != cached_len {
+        anyhow::bail!(
+            "PagedPrefixStore: FullTurboQuantPacked layer {idx} {name} shape {:?} incompatible with [1,heads,{cached_len}]",
+            dims
+        );
     }
     Ok(())
 }
@@ -946,9 +1240,43 @@ fn validate_layer_payload(
     payload: &PrefixLayerPayload,
 ) -> Result<()> {
     match (spec.kind, payload) {
+        (PrefixLayerKind::FullDense, PrefixLayerPayload::FullDense { k, v }) => {
+            validate_tensor_payload(&format!("layer {idx} dense K"), &spec.tensors[0], k)?;
+            validate_tensor_payload(&format!("layer {idx} dense V"), &spec.tensors[1], v)?;
+        }
         (PrefixLayerKind::FullPaged, PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
             validate_tensor_payload(&format!("layer {idx} full K"), &spec.tensors[0], k_pages)?;
             validate_tensor_payload(&format!("layer {idx} full V"), &spec.tensors[1], v_pages)?;
+        }
+        (
+            PrefixLayerKind::FullTurboQuantPacked,
+            PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed,
+                k_norms,
+                v_packed,
+                v_norms,
+            },
+        ) => {
+            validate_tensor_payload(
+                &format!("layer {idx} TurboQuant K packed"),
+                &spec.tensors[0],
+                k_packed,
+            )?;
+            validate_tensor_payload(
+                &format!("layer {idx} TurboQuant K norms"),
+                &spec.tensors[1],
+                k_norms,
+            )?;
+            validate_tensor_payload(
+                &format!("layer {idx} TurboQuant V packed"),
+                &spec.tensors[2],
+                v_packed,
+            )?;
+            validate_tensor_payload(
+                &format!("layer {idx} TurboQuant V norms"),
+                &spec.tensors[3],
+                v_norms,
+            )?;
         }
         (
             PrefixLayerKind::Linear,
@@ -1012,6 +1340,7 @@ fn metadata_for(spec: &PagedPrefixKeySpec, key: &str) -> Result<PrefixMetadata> 
             .as_ref()
             .map(|fingerprint| stable_hex_hash(fingerprint)),
         block_size: spec.block_size,
+        kv_cache_profile: spec.kv_cache_profile.clone(),
         main_layers: layer_metadata(&spec.main_layers),
         mtp_layers: mtp_layer_metadata(&spec.mtp_layers),
         mtp_last_hidden: spec.mtp_last_hidden.as_ref().map(tensor_metadata),
@@ -1053,9 +1382,24 @@ fn tensor_metadata(spec: &PrefixTensorSpec) -> TensorSpecMetadata {
 fn insert_entry_tensors(entry: &PagedPrefixEntry, tensors: &mut HashMap<String, Array>) {
     for (idx, layer) in entry.main_layers.iter().enumerate() {
         match layer {
+            PrefixLayerPayload::FullDense { k, v } => {
+                tensors.insert(main_dense_k_name(idx), k.clone());
+                tensors.insert(main_dense_v_name(idx), v.clone());
+            }
             PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
                 tensors.insert(main_full_k_name(idx), k_pages.clone());
                 tensors.insert(main_full_v_name(idx), v_pages.clone());
+            }
+            PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed,
+                k_norms,
+                v_packed,
+                v_norms,
+            } => {
+                tensors.insert(main_turboquant_k_packed_name(idx), k_packed.clone());
+                tensors.insert(main_turboquant_k_norms_name(idx), k_norms.clone());
+                tensors.insert(main_turboquant_v_packed_name(idx), v_packed.clone());
+                tensors.insert(main_turboquant_v_norms_name(idx), v_norms.clone());
             }
             PrefixLayerPayload::Linear {
                 conv_state,
@@ -1086,9 +1430,19 @@ fn entry_from_tensors(
     let mut main_layers = Vec::with_capacity(spec.main_layers.len());
     for (idx, layer_spec) in spec.main_layers.iter().enumerate() {
         let layer = match layer_spec.kind {
+            PrefixLayerKind::FullDense => PrefixLayerPayload::FullDense {
+                k: take_tensor(tensors, main_dense_k_name(idx))?,
+                v: take_tensor(tensors, main_dense_v_name(idx))?,
+            },
             PrefixLayerKind::FullPaged => PrefixLayerPayload::FullPaged {
                 k_pages: take_tensor(tensors, main_full_k_name(idx))?,
                 v_pages: take_tensor(tensors, main_full_v_name(idx))?,
+            },
+            PrefixLayerKind::FullTurboQuantPacked => PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed: take_tensor(tensors, main_turboquant_k_packed_name(idx))?,
+                k_norms: take_tensor(tensors, main_turboquant_k_norms_name(idx))?,
+                v_packed: take_tensor(tensors, main_turboquant_v_packed_name(idx))?,
+                v_norms: take_tensor(tensors, main_turboquant_v_norms_name(idx))?,
             },
             PrefixLayerKind::Linear => PrefixLayerPayload::Linear {
                 conv_state: take_tensor(tensors, main_linear_conv_name(idx))?,
@@ -1164,12 +1518,36 @@ fn dtype_size_bytes(dtype: Dtype) -> usize {
     }
 }
 
+fn main_dense_k_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_dense_k")
+}
+
+fn main_dense_v_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_dense_v")
+}
+
 fn main_full_k_name(layer_idx: usize) -> String {
     format!("main_{layer_idx:04}_full_k_pages")
 }
 
 fn main_full_v_name(layer_idx: usize) -> String {
     format!("main_{layer_idx:04}_full_v_pages")
+}
+
+fn main_turboquant_k_packed_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_turboquant_k_packed")
+}
+
+fn main_turboquant_k_norms_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_turboquant_k_norms")
+}
+
+fn main_turboquant_v_packed_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_turboquant_v_packed")
+}
+
+fn main_turboquant_v_norms_name(layer_idx: usize) -> String {
+    format!("main_{layer_idx:04}_turboquant_v_norms")
 }
 
 fn main_linear_conv_name(layer_idx: usize) -> String {
@@ -1239,6 +1617,7 @@ mod tests {
             cached_len,
             fingerprint: fingerprint.map(ToOwned::to_owned),
             block_size: 2,
+            kv_cache_profile: None,
             main_layers,
             mtp_layers,
             mtp_last_hidden,
@@ -1382,6 +1761,81 @@ mod tests {
         assert_eq!(stats.full_paged_layers, 1);
         assert_eq!(stats.full_paged_pages, 1);
         assert_eq!(stats.payload_bytes, 32);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_roundtrips_turboquant_packed_payload() {
+        let root = temp_root("prefix-store-turboquant-packed");
+        let store = PagedPrefixStore::new(&root);
+        let k_packed: Array = (
+            &[1_u32, 2, 3, 4, 5, 6, 7, 8][..],
+            (1_i32, 2_i32, 4_i32, 1_i32),
+        )
+            .try_into()
+            .unwrap();
+        let k_norms: Array = (
+            &[0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8][..],
+            (1_i32, 2_i32, 4_i32),
+        )
+            .try_into()
+            .unwrap();
+        let v_packed: Array = (
+            &[11_u32, 12, 13, 14, 15, 16, 17, 18][..],
+            (1_i32, 2_i32, 4_i32, 1_i32),
+        )
+            .try_into()
+            .unwrap();
+        let v_norms: Array = (
+            &[1.1_f32, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8][..],
+            (1_i32, 2_i32, 4_i32),
+        )
+            .try_into()
+            .unwrap();
+        let entry = PagedPrefixEntry {
+            main_layers: vec![PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed: k_packed.clone(),
+                k_norms: k_norms.clone(),
+                v_packed: v_packed.clone(),
+                v_norms: v_norms.clone(),
+            }],
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+        };
+        let mut wanted = spec(
+            vec![1, 2, 3, 4],
+            4,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        wanted.kv_cache_profile = Some("turboquant-k3v4".to_owned());
+
+        let key = store.save(&wanted, &entry).expect("save packed payload");
+        let hit = store.load_observed(&wanted).expect("hit load");
+
+        assert_eq!(hit.key, key);
+        assert_eq!(hit.status, PagedPrefixLoadStatus::Hit);
+        let stats = hit.stats.expect("hit stats");
+        assert_eq!(stats.tensor_count, 4);
+        assert_eq!(stats.payload_bytes, 128);
+        let loaded = hit.entry.expect("hit entry");
+        let PrefixLayerPayload::FullTurboQuantPacked {
+            k_packed,
+            k_norms,
+            v_packed,
+            v_norms,
+        } = &loaded.main_layers[0]
+        else {
+            panic!("expected TurboQuant packed payload");
+        };
+        assert_eq!(k_packed.shape().as_slice(), &[1, 2, 4, 1]);
+        assert_eq!(k_norms.shape().as_slice(), &[1, 2, 4]);
+        assert_eq!(v_packed.dtype(), Dtype::Uint32);
+        assert_eq!(v_norms.dtype(), Dtype::Float32);
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1545,6 +1999,47 @@ mod tests {
             Vec::<i32>::new()
         );
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn directory_size(path: &std::path::Path) -> u64 {
+        let mut total = 0_u64;
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let metadata = entry.metadata().unwrap();
+            if metadata.is_dir() {
+                total += directory_size(&entry.path());
+            } else {
+                total += metadata.len();
+            }
+        }
+        total
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_evicts_old_entries_to_ssd_capacity() {
+        let root = temp_root("prefix-store-ssd-capacity");
+        let entry1 = single_full_paged_entry(1.0);
+        let entry2 = single_full_paged_entry(2.0);
+        let spec1 = spec(vec![1, 2], 2, None, entry1.main_layer_specs(), vec![], None);
+        let spec2 = spec(vec![3, 4], 2, None, entry2.main_layer_specs(), vec![], None);
+
+        let unlimited = PagedPrefixStore::new(&root);
+        let key1 = unlimited.save(&spec1, &entry1).expect("save first entry");
+        let first_entry_bytes = directory_size(&root.join(&key1));
+        let limited = PagedPrefixStore::new(&root).with_max_bytes(first_entry_bytes as usize + 1);
+        let key2 = limited.save(&spec2, &entry2).expect("save second entry");
+
+        assert!(
+            !root.join(&key1).exists(),
+            "oldest entry should be evicted when the SSD cache exceeds its limit"
+        );
+        assert!(root.join(&key2).exists(), "newly saved entry should remain");
+        assert!(
+            directory_size(&root) <= first_entry_bytes + 1,
+            "SSD cache directory should stay within the configured capacity"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

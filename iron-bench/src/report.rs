@@ -3,7 +3,7 @@
 use crate::runner::{CellResult, RunOutcome};
 
 const EARLY_ITL_WINDOW: usize = 8;
-const AUTOTUNE_SCHEMA_VERSION: u32 = 3;
+const AUTOTUNE_SCHEMA_VERSION: u32 = 4;
 
 /// Aggregated per-cell statistics across N timed runs.
 #[derive(Debug, Clone)]
@@ -1550,7 +1550,7 @@ mod tests {
         let raw = render_autotune_json_sequential(&[cell], &options);
         let json: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
 
-        assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["schema_version"], 4);
         assert_eq!(json["model_name"], "GLM-4.7-flash-4bit");
         assert_eq!(json["hardware_label"], "m3-max");
 
