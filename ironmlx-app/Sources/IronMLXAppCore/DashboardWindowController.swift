@@ -11,6 +11,7 @@ public final class DashboardWindowController {
         .resizable,
     ]
     public static let dashboardWindowCollectionBehavior: NSWindow.CollectionBehavior = [.fullScreenPrimary]
+    public static let dashboardWindowTitleVisibility: NSWindow.TitleVisibility = .hidden
 
     private let configStore: AppConfigStore
     private let backend: BackendProcessManager
@@ -65,6 +66,7 @@ public final class DashboardWindowController {
             defer: false
         )
         window.title = "ironmlx"
+        window.titleVisibility = Self.dashboardWindowTitleVisibility
         window.collectionBehavior = Self.dashboardWindowCollectionBehavior
         window.center()
         window.contentView = webView

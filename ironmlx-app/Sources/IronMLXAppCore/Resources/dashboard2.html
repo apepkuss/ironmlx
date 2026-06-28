@@ -741,6 +741,26 @@
     text-align: right;
   }
 
+  .settings-control-column {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+  }
+
+  .settings-control-main {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .settings-inline-hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    line-height: 1.35;
+    text-align: right;
+  }
+
   /* ── Toast ── */
   .toast {
     position: fixed;
@@ -2354,12 +2374,12 @@
         <span class="badge badge-restart" data-i18n="badge_restart">restart</span>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_total">Memory Limit (Total)</div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Total memory limit for the server process (model + KV Cache + overhead). In App mode this acts as a guardrail; load failures are reported instead of automatically unloading loaded models. Set 0 for auto-detect.</div></div>
-        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-total-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24" id="cfg-mem-total"><span class="slider-value">Auto (24GB)</span></div></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_total">Memory Limit (Total)</div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.</div></div>
+        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-total-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24" id="cfg-mem-total"><span class="slider-value" data-i18n="auto">Auto</span></div></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_model">Memory Limit (Model Only)</div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Max memory for loaded models. Set 0 for no limit.</div></div>
-        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="22" id="cfg-mem-model"><span class="slider-value">Auto (22GB)</span></div></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="mem_limit_model">Memory Limit (Model Only)</div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Limits total memory used by loaded model weights. Set 0 for no limit.</div></div>
+        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="22" id="cfg-mem-model"><span class="slider-value" data-i18n="auto">Auto</span></div></div>
       </div>
     </div>
 
@@ -2377,11 +2397,35 @@
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" checked id="cfg-cache-enable"><span class="toggle-slider"></span></label></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="hot_cache">Hot Cache Limit (Memory Cache)</div><div class="settings-row-desc" data-i18n="hot_cache_desc">In-memory cache for frequently accessed prefixes. Auto mode estimates a conservative size from system unified memory, capped at 8GB.</div></div>
-        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-hot-cache-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="64" value="8" id="cfg-hot-cache"><span class="slider-value">Auto (8GB)</span></div></div>
+        <div class="settings-row-left">
+          <div class="settings-row-label">
+            <span data-i18n="hot_cache">Hot Cache Limit (Memory Cache)</span>
+            <span class="profile-help">
+              <button type="button" class="profile-help-trigger" aria-describedby="hot-cache-help-tooltip" aria-label="Hot cache help">?</button>
+              <span class="profile-help-tooltip" id="hot-cache-help-tooltip" role="tooltip">
+                <span class="profile-help-tooltip-title" data-i18n="hot_cache_help_title">How hot cache works</span>
+                <span class="profile-help-tooltip-body" data-i18n="hot_cache_help_body">Caches frequently used prefixes in memory to reduce repeated request work. Auto mode estimates a conservative limit from system unified memory, capped at 8GB; manual mode sets the memory cache limit. It follows the Enable Cache switch. Save settings and restart the service to apply changes.</span>
+              </span>
+            </span>
+          </div>
+          <div class="settings-row-desc" data-i18n="hot_cache_desc">In-memory prefix cache for frequent requests.</div>
+        </div>
+        <div class="settings-row-right"><div class="settings-control-column"><div class="settings-control-main"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-hot-cache-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="64" value="8" id="cfg-hot-cache"><span class="slider-value" data-i18n="auto">Auto</span></div></div><div class="settings-inline-hint" id="cfg-hot-cache-auto-hint" data-i18n="hot_cache_auto_hint">Current auto estimate: {value} GB</div></div></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="cold_cache">Cold Cache Limit (SSD Cache)</div><div class="settings-row-desc" data-i18n="cold_cache_desc">Maximum disk usage for the SSD Prefix Cache. The upper limit is adjusted from available disk space.</div></div>
+        <div class="settings-row-left">
+          <div class="settings-row-label">
+            <span data-i18n="cold_cache">Cold Cache Limit (SSD Cache)</span>
+            <span class="profile-help">
+              <button type="button" class="profile-help-trigger" aria-describedby="cold-cache-help-tooltip" aria-label="Cold cache help">?</button>
+              <span class="profile-help-tooltip" id="cold-cache-help-tooltip" role="tooltip">
+                <span class="profile-help-tooltip-title" data-i18n="cold_cache_help_title">How SSD cache works</span>
+                <span class="profile-help-tooltip-body" data-i18n="cold_cache_help_body">Persists Prefix Cache data on local SSD to reduce prefill work for repeated long prefixes. The maximum value is adjusted from available disk space. It follows the Enable Cache switch; turn off Enable Cache to disable it. Save settings and restart the service to apply changes.</span>
+              </span>
+            </span>
+          </div>
+          <div class="settings-row-desc" data-i18n="cold_cache_desc">Limits SSD Prefix Cache disk usage.</div>
+        </div>
         <div class="settings-row-right"><div class="slider-row"><input type="range" min="1" max="10" value="10" id="cfg-cold-cache"><span class="slider-value">10GB</span></div></div>
       </div>
       <div class="settings-row">
@@ -2681,7 +2725,7 @@
       server_crash_recovered: "Server has been restarted successfully.",
       server_crash_failed: "Server restart failed: {detail}",
       status_subtitle: "Server status and resource usage overview.",
-      endpoints_title: "Server Endpoints", endpoints_local: "Local (this Mac only)", endpoints_lan: "LAN",
+      endpoints_title: "Server Endpoints", endpoints_listen: "Listening", endpoints_reachable: "Reachable endpoints", endpoints_local: "Local (this Mac only)", endpoints_lan: "LAN",
       endpoints_hint_local: "Only this Mac can reach the server. To allow LAN access, set Host to \"all interfaces (0.0.0.0)\" in Settings and restart.",
       endpoints_hint_lan: "⚠ This server has no authentication. Enable only on trusted networks (home / office Wi-Fi).",
       endpoints_unavailable: "Server endpoint info unavailable (backend not reachable).",
@@ -2725,7 +2769,7 @@
       clear: "Clear",
       openclaw_install_failed: "Installation failed: {reason}",
       unknown_error: "Unknown error",
-      hot_cache_auto_label: "Auto ({value} GB)",
+      hot_cache_auto_hint: "Current auto estimate: {value} GB",
       no_limit: "No limit",
       gpu_max_label: "(Max: {value})",
       cluster_invite_status: "Invite status: {status}",
@@ -2751,6 +2795,8 @@
       err_memory_pressure: "GPU memory is too high to load a new model right now. Unload an existing model or free memory and retry.",
       err_gpu_memory_insufficient: "Not enough available GPU memory to safely load this model. Unload one or more unused loaded models to free GPU memory, then try again.",
       err_max_loaded_models_reached: "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.",
+      err_model_memory_limit_exceeded: "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.",
+      err_total_memory_limit_exceeded: "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.",
       err_memory_budget_exceeded: "Memory budget is insufficient. Current Max Sequences (Max Sequences={max_sequences}) and this model's MAX TOKENS ({max_cache_cap}) exceed the available budget. Lower Max Sequences in Settings, or open Models → Model Management → Parameters and lower MAX TOKENS for this model, then retry.",
       err_cache_init_failed: "Could not initialize the on-disk KV cache: {detail}",
       err_model_path_not_found: "Model not found locally: \"{name}\". Download it first from HuggingFace / ModelScope or check the repo ID.",
@@ -2817,10 +2863,10 @@
       all_interfaces: "all interfaces (0.0.0.0)",
       appearance: "Appearance", interface_language: "Language", theme_mode: "Theme Mode", theme_light: "Light", theme_dark: "Dark", theme_system: "System",
       resource_mgmt: "Resource Management",
-      mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Total memory limit for the server process (model + KV Cache + overhead). In App mode this acts as a guardrail; load failures are reported instead of automatically unloading loaded models. Set 0 for auto-detect.",
-      mem_limit_model: "Memory Limit (Model Only)", mem_limit_model_desc: "Max memory for loaded models. Set 0 for no limit.",
-      hot_cache: "Hot Cache Limit (Memory Cache)", hot_cache_desc: "In-memory cache for frequently accessed prefixes. Auto mode estimates a conservative size from system unified memory, capped at 8GB.",
-      cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Maximum disk usage for the SSD Prefix Cache. The upper limit is adjusted from available disk space.",
+      mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.",
+      mem_limit_model: "Memory Limit (Model Only)", mem_limit_model_desc: "Limits total memory used by loaded model weights. Set 0 for no limit.",
+      hot_cache: "Hot Cache Limit (Memory Cache)", hot_cache_desc: "In-memory prefix cache for frequent requests.", hot_cache_help_title: "How hot cache works", hot_cache_help_body: "Caches frequently used prefixes in memory to reduce repeated request work. Auto mode estimates a conservative limit from system unified memory, capped at 8GB; manual mode sets the memory cache limit. It follows the Enable Cache switch. Save settings and restart the service to apply changes.",
+      cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Limits SSD Prefix Cache disk usage.", cold_cache_help_title: "How SSD cache works", cold_cache_help_body: "Persists Prefix Cache data on local SSD to reduce prefill work for repeated long prefixes. The maximum value is adjusted from available disk space. It follows the Enable Cache switch; turn off Enable Cache to disable it. Save settings and restart the service to apply changes.",
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
       active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Use SSD-backed residency for active KV Cache when requests need to be parked and restored.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, and MLA.", active_kv_offload_help_not_applicable: "Not applicable: GatedDelta/Linear and MTP speculative side cache.",
@@ -2935,7 +2981,7 @@
       server_crash_recovered: "服务已成功重启。",
       server_crash_failed: "服务重启失败：{detail}",
       status_subtitle: "服务器状态与资源使用概览。",
-      endpoints_title: "服务端点", endpoints_local: "本机（仅当前 Mac）", endpoints_lan: "局域网",
+      endpoints_title: "服务端点", endpoints_listen: "监听", endpoints_reachable: "可访问端点", endpoints_local: "本机（仅当前 Mac）", endpoints_lan: "局域网",
       endpoints_hint_local: "仅当前 Mac 可访问服务。若需局域网访问，请在设置中将 Host 改为「所有接口 (0.0.0.0)」并重启。",
       endpoints_hint_lan: "⚠ 服务当前无认证，请仅在可信网络（家 / 办公室 Wi-Fi）开启。",
       endpoints_unavailable: "无法获取服务端点信息（后端不可达）。",
@@ -2979,7 +3025,7 @@
       clear: "清空",
       openclaw_install_failed: "安装失败：{reason}",
       unknown_error: "未知错误",
-      hot_cache_auto_label: "自动（{value} GB）",
+      hot_cache_auto_hint: "当前自动估算值：{value} GB",
       no_limit: "不限制",
       gpu_max_label: "（上限：{value}）",
       cluster_invite_status: "邀请状态：{status}",
@@ -3005,6 +3051,8 @@
       err_memory_pressure: "GPU 显存压力过高，暂时无法加载新模型。请先卸载已加载的模型或释放显存后重试。",
       err_gpu_memory_insufficient: "当前可用 GPU 内存不足，无法安全加载该模型。请先卸载暂不使用的已加载模型，释放显存后再重试。",
       err_max_loaded_models_reached: "已达到最大同时加载模型数，无法加载新模型。请先卸载暂不使用的已加载模型，再重试。",
+      err_model_memory_limit_exceeded: "已达到模型内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（仅模型）」/切换为自动后重试。",
+      err_total_memory_limit_exceeded: "已达到总内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（总量）」/切换为自动后重试。",
       err_memory_budget_exceeded: "内存预算不足。当前最大序列数（最大序列数={max_sequences}）和该模型的 MAX TOKENS（{max_cache_cap}）会超过可用预算。请在【设置】中调低「最大序列数」，或打开【模型】→【模型管理】→【参数】的模型参数设置并调低 MAX TOKENS，然后重试。",
       err_cache_init_failed: "本地 KV 缓存初始化失败：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，请先从 HuggingFace 或 ModelScope 下载，或检查 Repo ID 是否正确。",
@@ -3071,10 +3119,10 @@
       all_interfaces: "所有接口 (0.0.0.0)",
       appearance: "外观", interface_language: "界面语言", theme_mode: "主题模式", theme_light: "浅色", theme_dark: "暗色", theme_system: "系统",
       resource_mgmt: "资源管理",
-      mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "服务器进程的总内存限制（模型 + KV Cache + 开销）。在 App 模式下，这是资源保护边界；加载失败会提示用户处理，不会自动卸载已加载模型。设为 0 则自动计算。",
-      mem_limit_model: "内存限制（仅模型）", mem_limit_model_desc: "已加载模型的最大内存限制。设为 0 则不限制。",
-      hot_cache: "热缓存限制（内存缓存）", hot_cache_desc: "用于频繁访问的前缀缓存，减少重复请求的处理开销。自动模式会根据系统统一内存保守估算容量，上限为 8GB。",
-      cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用，最大值会根据磁盘可用空间动态调整。如需禁用，请关闭【启用缓存】。",
+      mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "限制后端服务可使用的总内存，包括模型、KV Cache 和运行时开销。设为 0 表示自动。",
+      mem_limit_model: "内存限制（仅模型）", mem_limit_model_desc: "限制已加载模型权重占用的总内存。设为 0 表示不限制。",
+      hot_cache: "热缓存限制（内存缓存）", hot_cache_desc: "用于频繁访问的前缀缓存。", hot_cache_help_title: "热缓存的作用", hot_cache_help_body: "缓存常用前缀，减少重复请求的处理开销。自动模式会按系统统一内存保守估算容量，上限为 8GB；手动模式可指定内存缓存上限。该缓存受【启用缓存】总开关控制。保存设置并重启服务后生效。",
+      cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用。", cold_cache_help_title: "SSD 缓存的作用", cold_cache_help_body: "将 Prefix Cache 数据持久化到本地 SSD，降低重复长前缀请求的预填充成本。最大值会根据当前磁盘可用空间动态调整。该缓存受【启用缓存】总开关控制；如需禁用，请关闭【启用缓存】。保存设置并重启服务后生效。",
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
       active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。需要暂停并恢复请求时，将活跃 KV Cache 临时驻留到本地 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不适用：GatedDelta/Linear、MTP speculative side cache。",
@@ -3189,7 +3237,7 @@
       server_crash_recovered: "服務已成功重啟。",
       server_crash_failed: "服務重啟失敗：{detail}",
       status_subtitle: "伺服器狀態與資源使用概覽。",
-      endpoints_title: "服務端點", endpoints_local: "本機（僅目前 Mac）", endpoints_lan: "區域網路",
+      endpoints_title: "服務端點", endpoints_listen: "監聽", endpoints_reachable: "可存取端點", endpoints_local: "本機（僅目前 Mac）", endpoints_lan: "區域網路",
       endpoints_hint_local: "僅目前 Mac 可存取服務。若需區域網路存取，請在設定中將 Host 改為「所有介面 (0.0.0.0)」並重啟。",
       endpoints_hint_lan: "⚠ 服務目前無驗證，請僅在可信網路（家 / 辦公室 Wi-Fi）啟用。",
       endpoints_unavailable: "無法取得服務端點資訊（後端不可達）。",
@@ -3221,7 +3269,7 @@
       clear: "清空",
       openclaw_install_failed: "安裝失敗：{reason}",
       unknown_error: "未知錯誤",
-      hot_cache_auto_label: "自動（{value} GB）",
+      hot_cache_auto_hint: "目前自動估算值：{value} GB",
       no_limit: "不限制",
       gpu_max_label: "（上限：{value}）",
       cluster_invite_status: "邀請狀態：{status}",
@@ -3247,6 +3295,8 @@
       err_memory_pressure: "GPU 顯存壓力過高，暫時無法載入新模型。請先卸載已載入的模型或釋出顯存後重試。",
       err_gpu_memory_insufficient: "目前可用 GPU 記憶體不足，無法安全載入此模型。請先卸載暫不使用的已載入模型，釋放顯示記憶體後再重試。",
       err_max_loaded_models_reached: "已達到最大同時載入模型數，無法載入新模型。請先卸載暫不使用的已載入模型，再重試。",
+      err_model_memory_limit_exceeded: "已達到模型記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（僅模型）」/切換為自動後重試。",
+      err_total_memory_limit_exceeded: "已達到總記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（總量）」/切換為自動後重試。",
       err_memory_budget_exceeded: "記憶體預算不足。目前最大序列數（最大序列數={max_sequences}）和此模型的 MAX TOKENS（{max_cache_cap}）會超過可用預算。請在【設定】中調低「最大序列數」，或開啟【模型】→【模型管理】→【參數】的模型參數設定並調低 MAX TOKENS，然後重試。",
       err_cache_init_failed: "本地 KV 快取初始化失敗：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，請先從 HuggingFace 或 ModelScope 下載，或檢查 Repo ID 是否正確。",
@@ -3308,10 +3358,10 @@
       all_interfaces: "所有介面 (0.0.0.0)",
       appearance: "外觀", interface_language: "介面語言", theme_mode: "主題模式", theme_light: "淺色", theme_dark: "暗色", theme_system: "系統",
       resource_mgmt: "資源管理",
-      mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "伺服器程序的總記憶體限制（模型 + KV Cache + 額外開銷）。在 App 模式下，這是資源保護邊界；載入失敗會提示使用者處理，不會自動卸載已載入模型。設為 0 則自動計算。",
-      mem_limit_model: "記憶體限制（僅模型）", mem_limit_model_desc: "已載入模型的最大記憶體限制。設為 0 則不限制。",
-      hot_cache: "熱快取限制（記憶體快取）", hot_cache_desc: "用於頻繁存取的前綴快取，減少重複請求的處理開銷。自動模式會根據系統統一記憶體保守估算容量，上限為 8GB。",
-      cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用，最大值會根據磁碟可用空間動態調整。如需停用，請關閉【啟用快取】。",
+      mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "限制後端服務可使用的總記憶體，包括模型、KV Cache 和執行階段開銷。設為 0 表示自動。",
+      mem_limit_model: "記憶體限制（僅模型）", mem_limit_model_desc: "限制已載入模型權重占用的總記憶體。設為 0 表示不限制。",
+      hot_cache: "熱快取限制（記憶體快取）", hot_cache_desc: "用於頻繁存取的前綴快取。", hot_cache_help_title: "熱快取的作用", hot_cache_help_body: "快取常用前綴，減少重複請求的處理開銷。自動模式會依系統統一記憶體保守估算容量，上限為 8GB；手動模式可指定記憶體快取上限。此快取受【啟用快取】總開關控制。儲存設定並重啟服務後生效。",
+      cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用。", cold_cache_help_title: "SSD 快取的作用", cold_cache_help_body: "將 Prefix Cache 資料持久化到本地 SSD，降低重複長前綴請求的預填充成本。最大值會根據目前磁碟可用空間動態調整。此快取受【啟用快取】總開關控制；如需停用，請關閉【啟用快取】。儲存設定並重啟服務後生效。",
       auto: "自動",
       cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
       active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。需要暫停並恢復請求時，將活躍 KV Cache 暫時駐留到本地 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "不適用：GatedDelta/Linear、MTP speculative side cache。",
@@ -3426,7 +3476,7 @@
       server_crash_recovered: "サーバーが正常に再起動しました。",
       server_crash_failed: "サーバーの再起動に失敗しました：{detail}",
       status_subtitle: "サーバーステータスとリソース使用状況の概要。",
-      endpoints_title: "サーバーエンドポイント", endpoints_local: "ローカル（この Mac のみ）", endpoints_lan: "LAN",
+      endpoints_title: "サーバーエンドポイント", endpoints_listen: "待受", endpoints_reachable: "アクセス可能なエンドポイント", endpoints_local: "ローカル（この Mac のみ）", endpoints_lan: "LAN",
       endpoints_hint_local: "この Mac からのみアクセス可能です。LAN アクセスを許可するには、設定で Host を「すべてのインターフェース (0.0.0.0)」に変更して再起動してください。",
       endpoints_hint_lan: "⚠ このサーバーには認証がありません。信頼できるネットワーク（自宅 / 職場 Wi-Fi）でのみ有効にしてください。",
       endpoints_unavailable: "サーバーエンドポイント情報を取得できません（バックエンド未到達）。",
@@ -3458,7 +3508,7 @@
       clear: "クリア",
       openclaw_install_failed: "インストールに失敗しました：{reason}",
       unknown_error: "不明なエラー",
-      hot_cache_auto_label: "自動（{value} GB）",
+      hot_cache_auto_hint: "現在の自動見積もり：{value} GB",
       no_limit: "制限なし",
       gpu_max_label: "（上限：{value}）",
       cluster_invite_status: "招待ステータス：{status}",
@@ -3484,6 +3534,8 @@
       err_memory_pressure: "GPU メモリが逼迫しているため、新しいモデルを読み込めません。既存のモデルを解放するなどしてから再度お試しください。",
       err_gpu_memory_insufficient: "利用可能な GPU メモリが不足しているため、このモデルを安全に読み込めません。使用していない読み込み済みモデルをアンロードして GPU メモリを解放してから再試行してください。",
       err_max_loaded_models_reached: "最大同時ロードモデル数に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルを手動でアンロードしてから再試行してください。",
+      err_model_memory_limit_exceeded: "モデルメモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Model Only)」を上げる/Auto にしてから再試行してください。",
+      err_total_memory_limit_exceeded: "総メモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Total)」を上げる/Auto にしてから再試行してください。",
       err_memory_budget_exceeded: "メモリ予算が不足しています。現在の最大シーケンス数（最大シーケンス数={max_sequences}）とこのモデルの MAX TOKENS（{max_cache_cap}）では利用可能な予算を超えます。設定で最大シーケンス数を下げるか、モデル → モデル管理 → パラメータでこのモデルの MAX TOKENS を下げてから再試行してください。",
       err_cache_init_failed: "ローカル KV キャッシュの初期化に失敗しました：{detail}",
       err_model_path_not_found: "モデル \"{name}\" が見つかりません。HuggingFace または ModelScope からダウンロードするか、Repo ID を確認してください。",
@@ -3545,10 +3597,10 @@
       all_interfaces: "全インターフェース (0.0.0.0)",
       appearance: "外観", interface_language: "インターフェース言語", theme_mode: "テーマモード", theme_light: "ライト", theme_dark: "ダーク", theme_system: "システム",
       resource_mgmt: "リソース管理",
-      mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "サーバープロセスの合計メモリ制限（モデル + KV Cache + オーバーヘッド）。App モードではリソース保護の上限として扱い、読み込み失敗を通知し、読み込み済みモデルを自動的にはアンロードしません。0で自動検出。",
-      mem_limit_model: "メモリ制限（モデルのみ）", mem_limit_model_desc: "ロード済みモデルの最大メモリ制限。0で制限なし。",
-      hot_cache: "ホットキャッシュ制限（メモリキャッシュ）", hot_cache_desc: "頻繁に利用されるプレフィックスキャッシュです。自動モードではシステム統合メモリから控えめに容量を見積もり、上限は8GBです。",
-      cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。上限はディスク空き容量に応じて調整されます。無効にするにはキャッシュをオフにします。",
+      mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "バックエンドサービスが使用できる総メモリを制限します（モデル、KV Cache、ランタイムオーバーヘッドを含む）。0で自動。",
+      mem_limit_model: "メモリ制限（モデルのみ）", mem_limit_model_desc: "ロード済みモデル重みが使用する総メモリを制限します。0で制限なし。",
+      hot_cache: "ホットキャッシュ制限（メモリキャッシュ）", hot_cache_desc: "頻繁に利用されるプレフィックスキャッシュです。", hot_cache_help_title: "ホットキャッシュの役割", hot_cache_help_body: "よく使われるプレフィックスをメモリに保持し、繰り返しリクエストの処理コストを減らします。自動モードではシステム統合メモリから控えめに容量を見積もり、上限は8GBです。手動モードではメモリキャッシュ上限を指定できます。このキャッシュはキャッシュ有効化スイッチに従います。設定を保存し、サービスを再起動すると反映されます。",
+      cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。", cold_cache_help_title: "SSD キャッシュの役割", cold_cache_help_body: "Prefix Cache データをローカル SSD に永続化し、繰り返される長いプレフィックスのプリフィルコストを減らします。最大値は現在のディスク空き容量に応じて調整されます。このキャッシュはキャッシュ有効化スイッチに従います。無効にするにはキャッシュをオフにしてください。設定を保存し、サービスを再起動すると反映されます。",
       auto: "自動",
       cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
       active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。リクエストの一時停止と復元が必要な場合、Active KV Cache を一時的にローカル SSD に退避します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA。", active_kv_offload_help_not_applicable: "非対象: GatedDelta/Linear、MTP speculative side cache。",
@@ -3663,7 +3715,7 @@
       server_crash_recovered: "서버가 성공적으로 재시작되었습니다.",
       server_crash_failed: "서버 재시작 실패: {detail}",
       status_subtitle: "서버 상태 및 리소스 사용 개요.",
-      endpoints_title: "서버 엔드포인트", endpoints_local: "로컬 (이 Mac만)", endpoints_lan: "LAN",
+      endpoints_title: "서버 엔드포인트", endpoints_listen: "수신", endpoints_reachable: "접근 가능한 엔드포인트", endpoints_local: "로컬 (이 Mac만)", endpoints_lan: "LAN",
       endpoints_hint_local: "이 Mac에서만 서버에 접근할 수 있습니다. LAN 접근을 허용하려면 설정에서 Host를 \"모든 인터페이스 (0.0.0.0)\"로 변경한 후 재시작하세요.",
       endpoints_hint_lan: "⚠ 이 서버는 인증이 없습니다. 신뢰할 수 있는 네트워크(가정 / 사무실 Wi-Fi)에서만 사용하세요.",
       endpoints_unavailable: "서버 엔드포인트 정보를 가져올 수 없습니다 (백엔드 연결 불가).",
@@ -3695,7 +3747,7 @@
       clear: "비우기",
       openclaw_install_failed: "설치 실패: {reason}",
       unknown_error: "알 수 없는 오류",
-      hot_cache_auto_label: "자동 ({value} GB)",
+      hot_cache_auto_hint: "현재 자동 추정값: {value} GB",
       no_limit: "제한 없음",
       gpu_max_label: "(상한: {value})",
       cluster_invite_status: "초대 상태: {status}",
@@ -3721,6 +3773,8 @@
       err_memory_pressure: "GPU 메모리 사용량이 높아 새 모델을 로드할 수 없습니다. 기존 모델을 언로드하거나 메모리를 확보한 후 다시 시도해 주세요.",
       err_gpu_memory_insufficient: "사용 가능한 GPU 메모리가 부족하여 이 모델을 안전하게 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하여 GPU 메모리를 확보한 뒤 다시 시도하세요.",
       err_max_loaded_models_reached: "최대 동시 로드 모델 수에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 먼저 언로드한 뒤 다시 시도하세요.",
+      err_model_memory_limit_exceeded: "모델 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Model Only)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
+      err_total_memory_limit_exceeded: "총 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Total)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
       err_memory_budget_exceeded: "메모리 예산이 부족합니다. 현재 최대 시퀀스 수(최대 시퀀스 수={max_sequences})와 이 모델의 MAX TOKENS({max_cache_cap})가 사용 가능한 예산을 초과합니다. 설정에서 최대 시퀀스 수를 낮추거나 모델 → 모델 관리 → 파라미터에서 이 모델의 MAX TOKENS를 낮춘 뒤 다시 시도해 주세요.",
       err_cache_init_failed: "로컬 KV 캐시 초기화에 실패했습니다: {detail}",
       err_model_path_not_found: "모델 \"{name}\"을 찾을 수 없습니다. HuggingFace 또는 ModelScope에서 먼저 다운로드하거나 Repo ID를 확인하세요.",
@@ -3782,10 +3836,10 @@
       all_interfaces: "모든 인터페이스 (0.0.0.0)",
       appearance: "외관", interface_language: "인터페이스 언어", theme_mode: "테마 모드", theme_light: "라이트", theme_dark: "다크", theme_system: "시스템",
       resource_mgmt: "리소스 관리",
-      mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "서버 프로세스의 총 메모리 제한 (모델 + KV Cache + 오버헤드). App 모드에서는 리소스 보호 한계로 동작하며, 로드 실패를 알리고 이미 로드된 모델을 자동으로 언로드하지 않습니다. 0으로 자동 감지.",
-      mem_limit_model: "메모리 제한 (모델만)", mem_limit_model_desc: "로드된 모델의 최대 메모리 제한. 0으로 제한 없음.",
-      hot_cache: "핫 캐시 제한 (메모리 캐시)", hot_cache_desc: "자주 사용하는 프리픽스 캐시입니다. 자동 모드는 시스템 통합 메모리를 기준으로 보수적으로 용량을 산정하며 상한은 8GB입니다.",
-      cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다. 상한은 디스크 여유 공간에 따라 조정됩니다. 비활성화하려면 캐시 활성화를 끄세요.",
+      mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "백엔드 서비스가 사용할 수 있는 총 메모리를 제한합니다(모델, KV Cache, 런타임 오버헤드 포함). 0은 자동입니다.",
+      mem_limit_model: "메모리 제한 (모델만)", mem_limit_model_desc: "로드된 모델 가중치가 사용하는 총 메모리를 제한합니다. 0은 제한 없음입니다.",
+      hot_cache: "핫 캐시 제한 (메모리 캐시)", hot_cache_desc: "자주 사용하는 프리픽스 캐시입니다.", hot_cache_help_title: "핫 캐시 역할", hot_cache_help_body: "자주 사용하는 프리픽스를 메모리에 캐시해 반복 요청 처리 비용을 줄입니다. 자동 모드는 시스템 통합 메모리를 기준으로 보수적으로 용량을 산정하며 상한은 8GB입니다. 수동 모드에서는 메모리 캐시 한도를 지정할 수 있습니다. 이 캐시는 캐시 활성화 스위치를 따릅니다. 설정을 저장하고 서비스를 재시작하면 적용됩니다.",
+      cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다.", cold_cache_help_title: "SSD 캐시 역할", cold_cache_help_body: "Prefix Cache 데이터를 로컬 SSD에 영구 저장해 반복되는 긴 프리픽스 요청의 프리필 비용을 줄입니다. 최대값은 현재 디스크 여유 공간에 따라 조정됩니다. 이 캐시는 캐시 활성화 스위치를 따르며, 비활성화하려면 캐시 활성화를 끄세요. 설정을 저장하고 서비스를 재시작하면 적용됩니다.",
       auto: "자동",
       cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
       active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 요청을 일시 중지하고 복원해야 할 때 Active KV Cache를 로컬 SSD에 임시 저장합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA.", active_kv_offload_help_not_applicable: "비대상: GatedDelta/Linear, MTP speculative side cache.",
@@ -5753,6 +5807,8 @@
       return;
     }
     const rows = [];
+    const listenAddress = data.host + ':' + data.port;
+    rows.push(buildEndpointSectionHeader(dict.endpoints_reachable || 'Reachable endpoints'));
     // Loopback row (always reachable on this Mac).
     const localUrl = 'http://' + data.loopback + ':' + data.port + '/v1';
     rows.push(buildEndpointRow('🖥️', dict.endpoints_local || 'Local (this Mac only)', localUrl));
@@ -5770,13 +5826,18 @@
       btn.onclick = () => copyToClipboard(btn.getAttribute('data-url'), btn);
     });
     // Hint text: depends on whether backend is bound wildcard or loopback-only.
+    const listenText = (dict.endpoints_listen || 'Listening') + ': ' + listenAddress;
     if (data.host === '0.0.0.0' || data.host === '::') {
-      hint.textContent = dict.endpoints_hint_lan || '⚠ This server has no authentication. Enable only on trusted networks (home / office Wi-Fi).';
+      hint.innerHTML = '<span>' + (dict.endpoints_hint_lan || '⚠ This server has no authentication. Enable only on trusted networks (home / office Wi-Fi).') + '</span><br><span style="color:var(--text-tertiary);">' + listenText + '</span>';
       hint.style.color = 'var(--orange, #ff9500)';
     } else {
-      hint.textContent = dict.endpoints_hint_local || 'Only this Mac can reach the server. To allow LAN access, set Host to "all interfaces (0.0.0.0)" in Settings and restart.';
+      hint.innerHTML = '<span>' + (dict.endpoints_hint_local || 'Only this Mac can reach the server. To allow LAN access, set Host to "all interfaces (0.0.0.0)" in Settings and restart.') + '</span><br><span style="color:var(--text-tertiary);">' + listenText + '</span>';
       hint.style.color = 'var(--text-secondary)';
     }
+  }
+
+  function buildEndpointSectionHeader(label) {
+    return `<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin:2px 0 -2px;">${label}</div>`;
   }
 
   function buildEndpointRow(icon, label, url) {
@@ -5878,6 +5939,13 @@
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
+  function manualNumberInputValue(id, fallback) {
+    const el = document.getElementById(id);
+    const raw = el && el.dataset && el.dataset.manualValue !== undefined ? el.dataset.manualValue : (el ? el.value : undefined);
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
   function checkedInputValue(id, fallback) {
     const el = document.getElementById(id);
     return el ? !!el.checked : !!fallback;
@@ -5958,7 +6026,7 @@
     setCheckboxInput('cfg-mem-total-auto', appConfig.mem_total_auto, true);
     setNumberInput('cfg-mem-total', appConfig.mem_total, 24);
     setCheckboxInput('cfg-mem-model-auto', appConfig.mem_model_auto, true);
-    setNumberInput('cfg-mem-model', appConfig.mem_model, 22);
+    setNumberInput('cfg-mem-model', appConfig.mem_model ?? appConfig.mem_limit_model, 22);
     const hotCacheAuto = appConfig.hot_cache === undefined || appConfig.hot_cache === null ? true : appConfig.hot_cache === 0;
     const autoHotCacheSliderValue = Math.max(0, Math.round(autoHotCacheGigabytes()));
     setCheckboxInput('cfg-hot-cache-auto', hotCacheAuto, true);
@@ -6002,8 +6070,9 @@
       mem_limit_total: memTotalAuto ? 0 : numberInputValue('cfg-mem-total', 0),
       mem_limit_model: memModelAuto ? 0 : numberInputValue('cfg-mem-model', 0),
       mem_total_auto: memTotalAuto,
-      mem_total: numberInputValue('cfg-mem-total', 0),
+      mem_total: manualNumberInputValue('cfg-mem-total', 0),
       mem_model_auto: memModelAuto,
+      mem_model: manualNumberInputValue('cfg-mem-model', 0),
       hot_cache: checkedInputValue('cfg-hot-cache-auto', true) ? 0 : numberInputValue('cfg-hot-cache', 0),
       cold_cache: coldCache,
       cache_enable: checkedInputValue('cfg-cache-enable', true),
@@ -6631,19 +6700,51 @@
     const slider = document.getElementById(sliderId);
     const auto = document.getElementById(autoId);
     const label = slider.parentElement.querySelector('.slider-value');
+    const autoHint = sliderId === 'cfg-hot-cache' ? document.getElementById('cfg-hot-cache-auto-hint') : null;
+    const usesVisualAutoZero = true;
+
+    function rememberManualValue() {
+      slider.dataset.manualValue = slider.value;
+    }
+
+    function restoreManualValue() {
+      if (slider.dataset.manualValue !== undefined) {
+        slider.value = slider.dataset.manualValue;
+      }
+    }
+
+    function updateAutoHint(show) {
+      if (!autoHint) return;
+      if (!show) {
+        autoHint.style.display = 'none';
+        return;
+      }
+      const dict = I18N[currentLang] || I18N.en;
+      const autoValue = formatGigabytes(autoHotCacheGigabytes());
+      autoHint.textContent = (dict.hot_cache_auto_hint || 'Current auto estimate: {value} GB').replace('{value}', autoValue);
+      autoHint.style.display = '';
+    }
+
     function update() {
       const dict = I18N[currentLang] || I18N.en;
-      const v = parseInt(slider.value) || 0;
       if (auto.checked) {
-        const autoValue = sliderId === 'cfg-hot-cache' ? formatGigabytes(autoHotCacheGigabytes()) : String(v);
-        label.textContent = (dict.hot_cache_auto_label || 'Auto ({value} GB)').replace('{value}', autoValue);
+        if (slider.value !== '0') rememberManualValue();
+        slider.value = '0';
+        label.textContent = dict.auto || 'Auto';
+        updateAutoHint(true);
         slider.disabled = true;
       } else {
+        if (usesVisualAutoZero && slider.value === '0') restoreManualValue();
+        updateAutoHint(false);
+        const v = parseInt(slider.value) || 0;
         label.textContent = v === 0 ? (dict.no_limit || 'No limit') : v + ' GB';
         slider.disabled = false;
       }
     }
-    slider.addEventListener('input', update);
+    slider.addEventListener('input', function() {
+      if (usesVisualAutoZero && !auto.checked) rememberManualValue();
+      update();
+    });
     auto.addEventListener('change', update);
     update();
   }

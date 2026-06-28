@@ -15,8 +15,8 @@ use tokio::sync::RwLock;
 
 use crate::cli::serve::{
     read_model_type, resolve_active_kv_offload_config, resolve_engine_paged_prefix_cache_settings,
-    resolve_model_ttl, resolve_scheduler_for_model, ResolvedSchedulerRuntime,
-    SchedulerProfileSource, ServeArgs,
+    resolve_memory_limit_bytes, resolve_model_ttl, resolve_scheduler_for_model,
+    ResolvedSchedulerRuntime, SchedulerProfileSource, ServeArgs,
 };
 use crate::models::ModelArchitecture;
 use crate::Result;
@@ -45,6 +45,12 @@ const GPU_MEMORY_INSUFFICIENT_MESSAGE: &str =
 const MAX_LOADED_MODELS_REACHED_CODE: &str = "max_loaded_models_reached";
 const MAX_LOADED_MODELS_REACHED_MESSAGE: &str =
     "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.";
+const MODEL_MEMORY_LIMIT_EXCEEDED_CODE: &str = "model_memory_limit_exceeded";
+const MODEL_MEMORY_LIMIT_EXCEEDED_MESSAGE: &str =
+    "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.";
+const TOTAL_MEMORY_LIMIT_EXCEEDED_CODE: &str = "total_memory_limit_exceeded";
+const TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE: &str =
+    "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.";
 const DEFAULT_PROFILE_WARNING_CODE: &str = "default_scheduler_profile_used";
 const DEFAULT_PROFILE_WARNING: &str =
     "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with scheduler-autotune for better model-specific scheduling.";
@@ -429,6 +435,16 @@ fn engine_runtime_config(args: &ServeArgs) -> Result<EnginePoolRuntimeConfig> {
         paged_prefix_cache: resolve_engine_paged_prefix_cache_settings(args)?,
         prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
         model_ttl: resolve_model_ttl(args)?,
+        memory_limits: super::engine::EnginePoolMemoryLimits {
+            total_memory_limit_bytes: resolve_memory_limit_bytes(
+                args.memory_limit_total_gb,
+                "--memory-limit-total-gb",
+            )?,
+            model_memory_limit_bytes: resolve_memory_limit_bytes(
+                args.memory_limit_model_gb,
+                "--memory-limit-model-gb",
+            )?,
+        },
         active_kv_offload: resolve_active_kv_offload_config(args)?,
     })
 }
@@ -820,6 +836,18 @@ impl AdminError {
 
     fn from_load_error(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
+        if likely_engine_pool_model_memory_limit_error(&message) {
+            return Self::service_unavailable_with_code(
+                MODEL_MEMORY_LIMIT_EXCEEDED_MESSAGE,
+                Some(MODEL_MEMORY_LIMIT_EXCEEDED_CODE),
+            );
+        }
+        if likely_engine_pool_total_memory_limit_error(&message) {
+            return Self::service_unavailable_with_code(
+                TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE,
+                Some(TOTAL_MEMORY_LIMIT_EXCEEDED_CODE),
+            );
+        }
         if likely_gpu_memory_error(&message) {
             return Self::service_unavailable_with_code(
                 GPU_MEMORY_INSUFFICIENT_MESSAGE,
@@ -876,6 +904,18 @@ fn likely_engine_pool_capacity_error(message: &str) -> bool {
     message
         .to_ascii_lowercase()
         .contains("engine pool capacity reached")
+}
+
+fn likely_engine_pool_model_memory_limit_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("engine pool model memory limit exceeded")
+}
+
+fn likely_engine_pool_total_memory_limit_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("engine pool total memory limit exceeded")
 }
 
 fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> HealthSnapshot {
@@ -1030,6 +1070,28 @@ mod tests {
         assert!(error
             .message
             .contains("Maximum concurrent loaded models reached"));
+    }
+
+    #[test]
+    fn load_error_maps_model_memory_limit_exceeded() {
+        let error = AdminError::from_load_error(anyhow::anyhow!(
+            "engine pool model memory limit exceeded: loaded_model_bytes=42949672960 > limit=32212254720"
+        ));
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message, MODEL_MEMORY_LIMIT_EXCEEDED_MESSAGE);
+        assert_eq!(error.code, Some(MODEL_MEMORY_LIMIT_EXCEEDED_CODE));
+    }
+
+    #[test]
+    fn load_error_maps_total_memory_limit_exceeded() {
+        let error = AdminError::from_load_error(anyhow::anyhow!(
+            "engine pool total memory limit exceeded: mlx_active_bytes=68719476736 > limit=64424509440"
+        ));
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message, TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE);
+        assert_eq!(error.code, Some(TOTAL_MEMORY_LIMIT_EXCEEDED_CODE));
     }
 
     #[test]

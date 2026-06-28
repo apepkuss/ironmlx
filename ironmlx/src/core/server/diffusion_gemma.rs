@@ -41,6 +41,7 @@ pub struct DiffusionGemmaAppState {
     pub tokenizer: Arc<Tokenizer>,
     pub generation_config: DiffusionGemmaGenerationConfig,
     pub model_id: String,
+    pub model_weight_bytes: usize,
     pub vision_input: VisionInputConfig,
     pub lane: Arc<DiffusionGemmaLane>,
 }
@@ -1059,11 +1060,13 @@ pub async fn anthropic_messages(
     Json(envelope).into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_diffusion_gemma(
     model: DiffusionGemmaModel,
     tokenizer: Tokenizer,
     generation_config: DiffusionGemmaGenerationConfig,
     model_id: String,
+    model_weight_bytes: usize,
     host: &str,
     port: u16,
     vision_input: VisionInputConfig,
@@ -1073,6 +1076,7 @@ pub async fn serve_diffusion_gemma(
         tokenizer,
         generation_config,
         model_id,
+        model_weight_bytes,
         vision_input,
     );
     let app = Router::new()
@@ -1098,6 +1102,7 @@ pub(crate) fn build_diffusion_gemma_app_state(
     tokenizer: Tokenizer,
     generation_config: DiffusionGemmaGenerationConfig,
     model_id: String,
+    model_weight_bytes: usize,
     vision_input: VisionInputConfig,
 ) -> DiffusionGemmaAppState {
     DiffusionGemmaAppState {
@@ -1105,6 +1110,7 @@ pub(crate) fn build_diffusion_gemma_app_state(
         tokenizer: Arc::new(tokenizer),
         generation_config,
         model_id,
+        model_weight_bytes,
         vision_input,
         lane: Arc::new(DiffusionGemmaLane::new(
             DEFAULT_DIFFUSION_GEMMA_QUEUE_CAPACITY,

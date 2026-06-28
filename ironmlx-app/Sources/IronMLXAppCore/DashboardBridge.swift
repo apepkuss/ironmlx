@@ -634,6 +634,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         config.memTotalAuto = boolValue(object, "mem_total_auto") ?? config.memTotalAuto
         config.memTotal = intValue(object, "mem_total") ?? config.memTotal
         config.memModelAuto = boolValue(object, "mem_model_auto") ?? config.memModelAuto
+        config.memModel = intValue(object, "mem_model") ?? config.memModel
         config.hotCache = intValue(object, "hot_cache") ?? config.hotCache
         config.coldCache = intValue(object, "cold_cache") ?? config.coldCache
         config.cacheEnable = boolValue(object, "cache_enable") ?? config.cacheEnable

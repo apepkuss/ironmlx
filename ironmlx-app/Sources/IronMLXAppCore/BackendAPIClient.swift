@@ -19,8 +19,16 @@ public struct BackendAPIClient: Sendable {
     public var port: UInt16
 
     public init(host: String, port: UInt16) {
-        self.host = host
+        self.host = Self.connectableHost(for: host)
         self.port = port
+    }
+
+    public static func connectableHost(for host: String) -> String {
+        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized == "0.0.0.0" || normalized == "::" || normalized == "[::]" {
+            return "127.0.0.1"
+        }
+        return host
     }
 
     public func fetchData(path: String) async throws -> Data {

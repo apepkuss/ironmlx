@@ -13,6 +13,7 @@ public struct AppConfig: Codable, Equatable {
     public var memTotalAuto: Bool?
     public var memTotal: Int?
     public var memModelAuto: Bool?
+    public var memModel: Int?
     public var hotCache: Int?
     public var coldCache: Int?
     public var cacheEnable: Bool?
@@ -46,6 +47,7 @@ public struct AppConfig: Codable, Equatable {
         memTotalAuto: Bool? = nil,
         memTotal: Int? = nil,
         memModelAuto: Bool? = nil,
+        memModel: Int? = nil,
         hotCache: Int? = nil,
         coldCache: Int? = nil,
         cacheEnable: Bool? = nil,
@@ -78,6 +80,7 @@ public struct AppConfig: Codable, Equatable {
         self.memTotalAuto = memTotalAuto
         self.memTotal = memTotal
         self.memModelAuto = memModelAuto
+        self.memModel = memModel
         self.hotCache = hotCache
         self.coldCache = coldCache
         self.cacheEnable = cacheEnable
@@ -112,6 +115,7 @@ public struct AppConfig: Codable, Equatable {
         case memTotalAuto = "mem_total_auto"
         case memTotal = "mem_total"
         case memModelAuto = "mem_model_auto"
+        case memModel = "mem_model"
         case hotCache = "hot_cache"
         case coldCache = "cold_cache"
         case cacheEnable = "cache_enable"

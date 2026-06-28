@@ -108,6 +108,27 @@ import Testing
     #expect(html.contains("updateActiveKvStatus(data.active_kv_offload)"))
 }
 
+@Test func dashboardEndpointCardShowsBindAddressAsSecondaryHint() throws {
+    let testFile = URL(fileURLWithPath: #filePath)
+    let packageRoot = testFile
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let htmlURL = packageRoot
+        .appendingPathComponent("Sources/IronMLXAppCore/Resources/dashboard2.html")
+    let html = try String(contentsOf: htmlURL, encoding: .utf8)
+
+    #expect(html.contains("endpoints_listen"))
+    #expect(html.contains("endpoints_reachable"))
+    #expect(html.contains("监听"))
+    #expect(html.contains("可访问端点"))
+    #expect(html.contains("const listenAddress = data.host + ':' + data.port"))
+    #expect(html.contains("const listenText = (dict.endpoints_listen || 'Listening') + ': ' + listenAddress"))
+    #expect(html.contains("hint.innerHTML ="))
+    #expect(html.contains("rows.push(buildEndpointSectionHeader"))
+    #expect(!html.contains("buildEndpointListenRow"))
+}
+
 @Test func dashboardActiveKVHelpWarningUsesGrayDefaultAndOrangeHover() throws {
     let testFile = URL(fileURLWithPath: #filePath)
     let packageRoot = testFile

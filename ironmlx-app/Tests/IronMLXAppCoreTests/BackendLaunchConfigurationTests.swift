@@ -97,6 +97,38 @@ import Testing
     #expect(config.arguments.contains("3"))
 }
 
+@Test func serveArgumentsIncludeConfiguredMemoryLimits() {
+    let options = BackendLaunchOptions(
+        config: AppConfig(memLimitTotal: 64, memLimitModel: 40)
+    )
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: options
+    )
+
+    #expect(config.arguments.contains("--memory-limit-total-gb"))
+    #expect(config.arguments.contains("64"))
+    #expect(config.arguments.contains("--memory-limit-model-gb"))
+    #expect(config.arguments.contains("40"))
+}
+
+@Test func serveArgumentsOmitAutomaticMemoryLimits() {
+    let options = BackendLaunchOptions(
+        config: AppConfig(memLimitTotal: 0, memLimitModel: 0)
+    )
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: options
+    )
+
+    #expect(!config.arguments.contains("--memory-limit-total-gb"))
+    #expect(!config.arguments.contains("--memory-limit-model-gb"))
+}
+
 @Test func serveArgumentsIncludeModelTTLWhenEnabled() {
     let options = BackendLaunchOptions(config: AppConfig(modelTtlMinutes: 30))
     let config = BackendLaunchConfiguration(

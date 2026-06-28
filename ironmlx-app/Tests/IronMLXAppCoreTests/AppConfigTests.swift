@@ -14,6 +14,12 @@ import Testing
       "language": "zh",
       "theme": "dark",
       "log_level": "debug",
+      "mem_limit_total": 64,
+      "mem_limit_model": 40,
+      "mem_total_auto": false,
+      "mem_total": 64,
+      "mem_model_auto": false,
+      "mem_model": 40,
       "max_sequences": 6,
       "prefill_chunk_size": 1024,
       "admission_deadline_ms": 9,
@@ -32,6 +38,12 @@ import Testing
     #expect(config.restoredModelReferences == ["mlx-community/Qwen3-0.6B-4bit", "mlx-community/Other-4bit"])
     #expect(config.language == "zh")
     #expect(config.logLevel == "debug")
+    #expect(config.memLimitTotal == 64)
+    #expect(config.memLimitModel == 40)
+    #expect(config.memTotalAuto == false)
+    #expect(config.memTotal == 64)
+    #expect(config.memModelAuto == false)
+    #expect(config.memModel == 40)
     #expect(config.maxSequences == 6)
     #expect(config.prefillChunkSize == 1024)
     #expect(config.admissionDeadlineMs == 9)

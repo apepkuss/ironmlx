@@ -484,7 +484,42 @@ pub struct EnginePoolRuntimeConfig {
     pub paged_prefix_cache: Option<EnginePagedPrefixCacheSettings>,
     pub prefix_lru_cache_max_bytes: Option<usize>,
     pub model_ttl: Option<Duration>,
+    pub memory_limits: EnginePoolMemoryLimits,
     pub active_kv_offload: ActiveKvOffloadConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EnginePoolMemoryLimits {
+    pub total_memory_limit_bytes: Option<usize>,
+    pub model_memory_limit_bytes: Option<usize>,
+}
+
+impl EnginePoolMemoryLimits {
+    pub fn check_model_memory_limit(
+        &self,
+        model_id: &str,
+        loaded_model_bytes: usize,
+    ) -> Result<()> {
+        if let Some(limit) = self.model_memory_limit_bytes {
+            if loaded_model_bytes > limit {
+                bail!(
+                    "engine pool model memory limit exceeded: model={model_id} loaded_model_bytes={loaded_model_bytes} > limit={limit}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_total_memory_limit(&self, model_id: &str, mlx_active_bytes: usize) -> Result<()> {
+        if let Some(limit) = self.total_memory_limit_bytes {
+            if mlx_active_bytes > limit {
+                bail!(
+                    "engine pool total memory limit exceeded: model={model_id} mlx_active_bytes={mlx_active_bytes} > limit={limit}"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 impl EnginePoolRuntimeConfig {
@@ -1428,6 +1463,48 @@ impl EnginePoolInner {
         loaded
     }
 
+    async fn check_memory_limits_after_load(
+        &self,
+        target_id: &str,
+        engine: &EngineVariant,
+    ) -> Result<()> {
+        let loaded_model_bytes = self
+            .loaded_model_weight_bytes_excluding(target_id)
+            .await
+            .saturating_add(engine.model_weight_bytes());
+        self.runtime
+            .memory_limits
+            .check_model_memory_limit(target_id, loaded_model_bytes)?;
+
+        let mlx_active_bytes = mlx::memory::snapshot().active_bytes;
+        self.runtime
+            .memory_limits
+            .check_total_memory_limit(target_id, mlx_active_bytes)?;
+        Ok(())
+    }
+
+    async fn loaded_model_weight_bytes_excluding(&self, exclude_id: &str) -> usize {
+        let slots_snapshot = self.slots.lock().await.clone();
+        let mut total = 0usize;
+        for (id, slot) in slots_snapshot {
+            if id == exclude_id {
+                continue;
+            }
+            let engine = {
+                let state = slot.state.lock().await;
+                match &*state {
+                    EngineSlotState::Loaded { engine, .. } => Some(engine.clone()),
+                    EngineSlotState::Draining { .. } => None,
+                    _ => None,
+                }
+            };
+            if let Some(engine) = engine {
+                total = total.saturating_add(engine.model_weight_bytes());
+            }
+        }
+        total
+    }
+
     async fn evict_lru_idle_engine(&self, target_id: &str) -> Result<bool> {
         let mut candidates = Vec::new();
         let slots_snapshot = self.slots.lock().await.clone();
@@ -1627,6 +1704,20 @@ impl EngineSlot {
             let result = load_engine_variant(&self.model, &self.runtime).await;
             match result {
                 Ok(engine) => {
+                    if let Err(error) = pool
+                        .check_memory_limits_after_load(&self.model.id, &engine)
+                        .await
+                    {
+                        let message = format!("{error:#}");
+                        let mut state = self.state.lock().await;
+                        *state = EngineSlotState::Failed {
+                            last_error: message,
+                            failed_unix_ms: unix_time_ms(),
+                            load_attempts,
+                        };
+                        self.notify.notify_waiters();
+                        return Err(error);
+                    }
                     let engine = Arc::new(engine);
                     let now = unix_time_ms();
                     let mut state = self.state.lock().await;
@@ -1932,6 +2023,19 @@ impl EngineVariant {
         }
     }
 
+    fn model_weight_bytes(&self) -> usize {
+        match self {
+            Self::Qwen35(state) => state.model_weight_bytes,
+            Self::Qwen35Moe(state) => state.model_weight_bytes,
+            Self::Qwen36Moe(state) => state.model_weight_bytes,
+            Self::Gemma4(state) => state.model_weight_bytes,
+            Self::Glm4MoeLite(state) => state.model_weight_bytes,
+            Self::Llama(state) => state.model_weight_bytes,
+            Self::MiniCpmV46(state) => state.model_weight_bytes,
+            Self::DiffusionGemma(state) => state.model_weight_bytes,
+        }
+    }
+
     fn pending_requests(&self) -> usize {
         match self {
             Self::Qwen35(state) => causal_pending_requests(state),
@@ -2010,6 +2114,7 @@ async fn load_engine_variant(
 ) -> Result<EngineVariant> {
     let loader = Loader::open_multimodal(&model.path)
         .with_context(|| format!("Loader::open_multimodal {}", model.path.display()))?;
+    let base_model_weight_bytes = loader.loaded_tensor_bytes();
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
     let model_type = loader
         .config_raw_value()
@@ -2031,6 +2136,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
+                base_model_weight_bytes,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 mtp_config,
@@ -2047,6 +2153,7 @@ async fn load_engine_variant(
                     tokenizer,
                     model,
                     runtime,
+                    base_model_weight_bytes,
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
@@ -2061,6 +2168,7 @@ async fn load_engine_variant(
                     tokenizer,
                     model,
                     runtime,
+                    base_model_weight_bytes,
                     paged_prefix_cache,
                     prefix_lru_cache,
                     mtp_config,
@@ -2081,6 +2189,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
+                base_model_weight_bytes,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 vision_input,
@@ -2096,6 +2205,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
+                base_model_weight_bytes,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 None,
@@ -2110,6 +2220,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
+                base_model_weight_bytes,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 None,
@@ -2125,6 +2236,7 @@ async fn load_engine_variant(
                 tokenizer,
                 model,
                 runtime,
+                base_model_weight_bytes,
                 paged_prefix_cache,
                 prefix_lru_cache,
                 Some(VisionInputConfig::MiniCpmV46 {
@@ -2157,6 +2269,7 @@ async fn load_engine_variant(
                 tokenizer,
                 generation_config,
                 model.id.clone(),
+                base_model_weight_bytes,
                 VisionInputConfig::DiffusionGemma {
                     vision_config,
                     image_token_id,
@@ -2173,6 +2286,7 @@ async fn build_qwen35_engine(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
+    loaded_model_weight_bytes: usize,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
@@ -2184,6 +2298,7 @@ async fn build_qwen35_engine(
             tokenizer,
             model,
             runtime,
+            loaded_model_weight_bytes,
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
@@ -2197,6 +2312,7 @@ async fn build_qwen35_engine(
             tokenizer,
             model,
             runtime,
+            loaded_model_weight_bytes,
             paged_prefix_cache,
             prefix_lru_cache,
             vision_input,
@@ -2212,6 +2328,7 @@ async fn build_qwen35_moe_engine(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
+    loaded_model_weight_bytes: usize,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
@@ -2223,6 +2340,7 @@ async fn build_qwen35_moe_engine(
             tokenizer,
             model,
             runtime,
+            loaded_model_weight_bytes,
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
@@ -2236,6 +2354,7 @@ async fn build_qwen35_moe_engine(
             tokenizer,
             model,
             runtime,
+            loaded_model_weight_bytes,
             paged_prefix_cache,
             prefix_lru_cache,
             vision_input,
@@ -2251,6 +2370,7 @@ async fn build_qwen36_moe_engine(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
+    loaded_model_weight_bytes: usize,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: Option<ResolvedEngineMtpConfig>,
@@ -2262,6 +2382,7 @@ async fn build_qwen36_moe_engine(
             tokenizer,
             model,
             runtime,
+            loaded_model_weight_bytes,
             paged_prefix_cache,
             prefix_lru_cache,
             mtp_config,
@@ -2275,6 +2396,7 @@ async fn build_qwen36_moe_engine(
             tokenizer,
             model,
             runtime,
+            loaded_model_weight_bytes,
             paged_prefix_cache,
             prefix_lru_cache,
             vision_input,
@@ -2284,11 +2406,13 @@ async fn build_qwen36_moe_engine(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_plain_causal_state<M>(
     model_impl: M,
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
+    loaded_model_weight_bytes: usize,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     vision_input: Option<VisionInputConfig>,
@@ -2313,6 +2437,7 @@ where
         vision_input,
         paged_prefix_cache,
         prefix_lru_cache,
+        Some(loaded_model_weight_bytes),
         runtime.active_kv_offload.clone(),
     )
     .await?;
@@ -2325,6 +2450,7 @@ async fn build_mtp_causal_state<M>(
     tokenizer: Tokenizer,
     model: &EngineModelConfig,
     runtime: &EnginePoolRuntimeConfig,
+    loaded_model_weight_bytes: usize,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     mtp_config: ResolvedEngineMtpConfig,
@@ -2336,6 +2462,8 @@ where
 {
     let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)
         .with_context(|| format!("Loader::open_mtp {}", mtp_config.model_dir.display()))?;
+    let total_model_weight_bytes =
+        loaded_model_weight_bytes.saturating_add(mtp_loader.loaded_tensor_bytes());
     let mtp = model_impl
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
@@ -2358,6 +2486,7 @@ where
         vision_input,
         paged_prefix_cache,
         prefix_lru_cache,
+        Some(total_model_weight_bytes),
         runtime.active_kv_offload.clone(),
     )
     .await?;
@@ -2603,9 +2732,9 @@ mod tests {
     use super::{
         decide_engine_pool_capacity, unix_time_ms, EngineLoadPolicy, EngineLoadTrigger,
         EngineModelConfig, EngineModelManifest, EnginePoolCapacityDecision,
-        EnginePoolCapacityPolicy, EnginePoolConfig, EnginePoolManifest, EnginePoolRuntimeConfig,
-        EnginePoolState, EngineRegistry, EngineRegistryError, EngineRuntimeState, EngineSlot,
-        EngineSlotState, ModelTtlCandidate,
+        EnginePoolCapacityPolicy, EnginePoolConfig, EnginePoolManifest, EnginePoolMemoryLimits,
+        EnginePoolRuntimeConfig, EnginePoolState, EngineRegistry, EngineRegistryError,
+        EngineRuntimeState, EngineSlot, EngineSlotState, ModelTtlCandidate,
     };
     use tokio::sync::{Mutex, Notify};
 
@@ -2652,6 +2781,7 @@ mod tests {
             paged_prefix_cache: None,
             prefix_lru_cache_max_bytes: None,
             model_ttl: None,
+            memory_limits: EnginePoolMemoryLimits::default(),
             active_kv_offload: crate::core::cache::ActiveKvOffloadConfig::disabled(),
         }
     }
@@ -2901,6 +3031,34 @@ mod tests {
             decide_engine_pool_capacity(EnginePoolCapacityPolicy::Reject, 3, 2),
             EnginePoolCapacityDecision::Continue
         );
+    }
+
+    #[test]
+    fn engine_pool_model_memory_limit_rejects_weight_sum_above_limit() {
+        let limits = super::EnginePoolMemoryLimits {
+            total_memory_limit_bytes: None,
+            model_memory_limit_bytes: Some(10),
+        };
+
+        let error = limits
+            .check_model_memory_limit("alpha", 11)
+            .expect_err("model bytes above limit must fail");
+
+        assert!(format!("{error:#}").contains("engine pool model memory limit exceeded"));
+    }
+
+    #[test]
+    fn engine_pool_total_memory_limit_rejects_active_bytes_above_limit() {
+        let limits = super::EnginePoolMemoryLimits {
+            total_memory_limit_bytes: Some(10),
+            model_memory_limit_bytes: None,
+        };
+
+        let error = limits
+            .check_total_memory_limit("alpha", 11)
+            .expect_err("active bytes above limit must fail");
+
+        assert!(format!("{error:#}").contains("engine pool total memory limit exceeded"));
     }
 
     #[tokio::test]

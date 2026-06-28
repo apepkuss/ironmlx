@@ -518,6 +518,28 @@ mod tests {
     }
 
     #[test]
+    fn serve_subcommand_parses_memory_limits() {
+        let cli = Cli::parse_from([
+            "ironmlx",
+            "serve",
+            "--model",
+            "/tmp/model",
+            "--memory-limit-total-gb",
+            "64",
+            "--memory-limit-model-gb",
+            "40",
+        ]);
+
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.memory_limit_total_gb, Some(64));
+                assert_eq!(args.memory_limit_model_gb, Some(40));
+            }
+            other => panic!("expected Serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn serve_subcommand_accepts_default_paged_prefix_cache_dir() {
         let cli = Cli::try_parse_from([
             "ironmlx",

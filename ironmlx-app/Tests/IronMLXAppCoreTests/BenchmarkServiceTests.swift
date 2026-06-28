@@ -57,6 +57,26 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     ])
 }
 
+@Test func benchmarkPlanUsesLoopbackTargetForWildcardBindHost() {
+    let request = BenchmarkRequest(
+        model: "mlx-community/Tiny-4bit",
+        modelPath: "/tmp/Tiny-4bit/snapshot",
+        promptTokens: 1024,
+        maxTokens: 128,
+        batchSize: 1
+    )
+    let plan = BenchmarkPlan(
+        ironBenchURL: URL(fileURLWithPath: "/tmp/iron-bench"),
+        request: request,
+        host: "0.0.0.0",
+        port: 9068
+    )
+
+    #expect(plan.arguments.prefix(2) == [
+        "--target", "ironmlx=http://127.0.0.1:9068",
+    ])
+}
+
 @Test func benchmarkResultParsesSequentialIronBenchJson() throws {
     let json = """
     {
@@ -268,6 +288,61 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(!dashboardHTML(html, contains: "GPU 内存 / 4"))
 }
 
+@Test func dashboardMemoryLimitAutoLabelDoesNotShowSliderValue() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "label.textContent = dict.auto || 'Auto'"))
+    #expect(dashboardHTML(html, contains: "sliderId === 'cfg-hot-cache'"))
+    #expect(!dashboardHTML(html, contains: "Auto (24GB)"))
+    #expect(!dashboardHTML(html, contains: "Auto (22GB)"))
+}
+
+@Test func dashboardMemoryLimitAutoSlidersMoveToZeroAndRestoreManualValue() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "const usesVisualAutoZero = true"))
+    #expect(dashboardHTML(html, contains: "slider.dataset.manualValue = slider.value"))
+    #expect(dashboardHTML(html, contains: "slider.value = '0'"))
+    #expect(dashboardHTML(html, contains: "slider.value = slider.dataset.manualValue"))
+}
+
+@Test func dashboardHotCacheAutoModeShowsAutoLabelAndSeparateEstimate() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "hot_cache_auto_hint"))
+    #expect(dashboardHTML(html, contains: "settings-control-main"))
+    #expect(dashboardHTML(html, contains: "当前自动估算值：{value} GB"))
+    #expect(dashboardHTML(html, contains: "label.textContent = dict.auto || 'Auto'"))
+    #expect(!dashboardHTML(html, contains: "hot_cache_auto_label"))
+    #expect(!dashboardHTML(html, contains: "Auto ({value} GB)"))
+    #expect(!dashboardHTML(html, contains: "自动（{value} GB）"))
+}
+
+@Test func dashboardCacheLimitDescriptionsUseHelpTooltips() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"aria-label="Hot cache help""#))
+    #expect(dashboardHTML(html, contains: #"aria-label="Cold cache help""#))
+    #expect(dashboardHTML(html, contains: #"data-i18n="hot_cache_help_title""#))
+    #expect(dashboardHTML(html, contains: #"data-i18n="hot_cache_help_body""#))
+    #expect(dashboardHTML(html, contains: #"data-i18n="cold_cache_help_title""#))
+    #expect(dashboardHTML(html, contains: #"data-i18n="cold_cache_help_body""#))
+    #expect(dashboardHTML(html, contains: #"hot_cache_desc: "用于频繁访问的前缀缓存。""#))
+    #expect(dashboardHTML(html, contains: #"cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用。""#))
+}
+
 @Test func dashboardColdCacheUsesPositiveSsdLimit() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
@@ -322,8 +397,12 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
 
     #expect(dashboardHTML(html, contains: "err_max_loaded_models_reached"))
     #expect(dashboardHTML(html, contains: "err_gpu_memory_insufficient"))
+    #expect(dashboardHTML(html, contains: "err_model_memory_limit_exceeded"))
+    #expect(dashboardHTML(html, contains: "err_total_memory_limit_exceeded"))
     #expect(dashboardHTML(html, contains: "Maximum concurrent loaded models reached"))
     #expect(dashboardHTML(html, contains: "已达到最大同时加载模型数"))
+    #expect(dashboardHTML(html, contains: "已达到模型内存限制"))
+    #expect(dashboardHTML(html, contains: "已达到总内存限制"))
     #expect(dashboardHTML(html, contains: "已達到最大同時載入模型數"))
     #expect(dashboardHTML(html, contains: "最大同時ロードモデル数に達しました"))
     #expect(dashboardHTML(html, contains: "최대 동시 로드 모델 수에 도달했습니다"))

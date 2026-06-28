@@ -330,6 +330,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
                 ),
         }),
         sampling_defaults: ironmlx::core::server::SamplingDefaults::default(),
+        model_weight_bytes: meta.weight_bytes,
         kv_cache_turboquant_bits: None,
         health_collector,
     };

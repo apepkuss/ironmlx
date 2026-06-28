@@ -54,6 +54,22 @@ pub struct ServeArgs {
     #[arg(long = "model-ttl-minutes")]
     pub model_ttl_minutes: Option<u64>,
 
+    /// Total MLX active memory guardrail in GiB for App / EnginePool mode.
+    /// If omitted, no explicit total memory limit is applied.
+    #[arg(
+        long = "memory-limit-total-gb",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub memory_limit_total_gb: Option<usize>,
+
+    /// Loaded model weight guardrail in GiB for App / EnginePool mode.
+    /// If omitted, no explicit model-only memory limit is applied.
+    #[arg(
+        long = "memory-limit-model-gb",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub memory_limit_model_gb: Option<usize>,
+
     /// Bind port.
     #[arg(long, default_value_t = 8080)]
     pub port: u16,
@@ -228,6 +244,19 @@ fn resolve_ssd_prefix_cache_max_bytes(args: &ServeArgs) -> Result<Option<usize>>
     max_gb
         .checked_mul(BYTES_PER_GIB)
         .context("--ssd-prefix-cache-max-gb exceeds usize bytes")
+        .map(Some)
+}
+
+pub(crate) fn resolve_memory_limit_bytes(
+    limit_gb: Option<usize>,
+    flag_name: &str,
+) -> Result<Option<usize>> {
+    let Some(limit_gb) = limit_gb else {
+        return Ok(None);
+    };
+    limit_gb
+        .checked_mul(BYTES_PER_GIB)
+        .with_context(|| format!("{flag_name} exceeds usize bytes"))
         .map(Some)
 }
 
@@ -935,6 +964,7 @@ fn serve_with_diffusion_gemma_model(
     model: crate::models::DiffusionGemmaModel,
     tokenizer: Tokenizer,
     generation_config: crate::models::DiffusionGemmaGenerationConfig,
+    model_weight_bytes: usize,
     args: &ServeArgs,
     vision_input: server::VisionInputConfig,
 ) -> Result<()> {
@@ -945,6 +975,7 @@ fn serve_with_diffusion_gemma_model(
         tokenizer,
         generation_config,
         model_id,
+        model_weight_bytes,
         &args.host,
         args.port,
         vision_input,
@@ -1115,6 +1146,16 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
         paged_prefix_cache,
         prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
         model_ttl,
+        memory_limits: server::engine::EnginePoolMemoryLimits {
+            total_memory_limit_bytes: resolve_memory_limit_bytes(
+                args.memory_limit_total_gb,
+                "--memory-limit-total-gb",
+            )?,
+            model_memory_limit_bytes: resolve_memory_limit_bytes(
+                args.memory_limit_model_gb,
+                "--memory-limit-model-gb",
+            )?,
+        },
         active_kv_offload,
     };
     let config = server::engine::EnginePoolConfig {
@@ -1413,10 +1454,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
                     .context("DiffusionGemmaGenerationConfig::from_loader")?;
             let model = crate::models::DiffusionGemmaModel::from_loader(&loader)
                 .context("DiffusionGemmaModel::from_loader")?;
+            let model_weight_bytes = loader.loaded_tensor_bytes();
             serve_with_diffusion_gemma_model(
                 model,
                 tokenizer,
                 generation_config,
+                model_weight_bytes,
                 &args,
                 server::VisionInputConfig::DiffusionGemma {
                     vision_config,
@@ -1447,10 +1490,11 @@ mod scheduler_profile_tests {
     use super::{
         build_engine_model_config_for_pool, check_loaded_scheduler_profile_health,
         load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
-        resolve_active_kv_offload_config, resolve_model_ttl, resolve_paged_prefix_cache_config,
-        resolve_prefix_lru_cache_config, resolve_scheduler_runtime_profile,
-        resolve_scheduler_serve_config, resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel,
-        SchedulerServeConfig, ServeArgs,
+        resolve_active_kv_offload_config, resolve_memory_limit_bytes, resolve_model_ttl,
+        resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
+        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
+        resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel, SchedulerServeConfig, ServeArgs,
+        BYTES_PER_GIB,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -1494,6 +1538,8 @@ mod scheduler_profile_tests {
             model: Some("/tmp/model".to_string()),
             model_manifest: None,
             max_loaded_models: None,
+            memory_limit_total_gb: None,
+            memory_limit_model_gb: None,
             port: 8080,
             host: "127.0.0.1".to_string(),
             prefill_chunk_size: None,
@@ -1517,6 +1563,18 @@ mod scheduler_profile_tests {
             active_kv_offload: false,
             active_kv_offload_dir: None,
         }
+    }
+
+    #[test]
+    fn memory_limit_gigabytes_resolve_to_bytes() {
+        assert_eq!(
+            resolve_memory_limit_bytes(Some(2), "--memory-limit-total-gb").unwrap(),
+            Some(2 * BYTES_PER_GIB)
+        );
+        assert_eq!(
+            resolve_memory_limit_bytes(None, "--memory-limit-total-gb").unwrap(),
+            None
+        );
     }
 
     #[test]

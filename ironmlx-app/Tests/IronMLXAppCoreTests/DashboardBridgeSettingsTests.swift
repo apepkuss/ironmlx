@@ -57,6 +57,37 @@ import Testing
     #expect(config.activeKvOffload == true)
 }
 
+@MainActor
+@Test func dashboardSettingsPayloadParsesMemoryLimits() throws {
+    let existing = AppConfig(
+        memLimitTotal: nil,
+        memLimitModel: nil,
+        memTotalAuto: true,
+        memTotal: 24,
+        memModelAuto: true,
+        memModel: 22
+    )
+    let json = """
+    {
+      "mem_limit_total": 64,
+      "mem_limit_model": 40,
+      "mem_total_auto": false,
+      "mem_total": 64,
+      "mem_model_auto": false,
+      "mem_model": 40
+    }
+    """
+
+    let config = try DashboardBridge.config(applyingSettingsJSON: json, to: existing)
+
+    #expect(config.memLimitTotal == 64)
+    #expect(config.memLimitModel == 40)
+    #expect(config.memTotalAuto == false)
+    #expect(config.memTotal == 64)
+    #expect(config.memModelAuto == false)
+    #expect(config.memModel == 40)
+}
+
 @Test func dashboardLoadDoesNotMakeSecondModelDefaultUnlessUserSelectedIt() {
     let config = AppConfig(
         defaultModel: "mlx-community/Existing-4bit",

@@ -117,6 +117,9 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     /// Model-level default sampling configuration. Request-level sampling
     /// fields still take precedence.
     pub sampling_defaults: SamplingDefaults,
+    /// Loaded model weight bytes captured once at load time so EnginePool
+    /// guardrails do not need to lock the model later.
+    pub model_weight_bytes: usize,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
@@ -140,6 +143,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             effective_cap_max: self.effective_cap_max,
             scheduler_runtime_profile: self.scheduler_runtime_profile.clone(),
             sampling_defaults: self.sampling_defaults,
+            model_weight_bytes: self.model_weight_bytes,
             kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
             health_collector: self.health_collector.clone(),
         }
@@ -467,6 +471,7 @@ pub(crate) async fn build_plain_app_state<M>(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    loaded_model_weight_bytes: Option<usize>,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<AppState<M>>
 where
@@ -486,6 +491,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
+        loaded_model_weight_bytes,
         None,
         PlainSchedulerActorSpawner {
             paged_prefix_cache,
@@ -515,6 +521,7 @@ pub(crate) async fn build_mtp_app_state<M>(
     vision_input_override: Option<VisionInputConfig>,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    loaded_model_weight_bytes: Option<usize>,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<AppState<M>>
 where
@@ -535,6 +542,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
+        loaded_model_weight_bytes,
         Some(mtp_draft_tokens),
         MtpSchedulerActorSpawner {
             mtp,
@@ -562,6 +570,7 @@ async fn build_app_state<M, S>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
+    loaded_model_weight_bytes: Option<usize>,
     mtp_health_draft_tokens: Option<usize>,
     scheduler_actor_spawner: S,
 ) -> Result<AppState<M>>
@@ -576,10 +585,11 @@ where
     // inside a single async lock guard so serve<M>() doesn't need a concrete
     // model-specific `config()` method. `blocking_lock` would panic here because
     // `serve` runs inside a Tokio runtime (tests S5 of 3d / 3f-T4 caught this).
-    let meta = {
+    let mut meta = {
         let guard = model.lock().await;
         guard.model_meta()
     };
+    meta.weight_bytes = effective_model_weight_bytes(meta.weight_bytes, loaded_model_weight_bytes);
     let model_max_context: usize = meta.max_position_embeddings.max(0) as usize;
     let effective_cap_max = max_cache_cap.min(model_max_context);
     if max_cache_cap > model_max_context {
@@ -662,9 +672,19 @@ where
         effective_cap_max, // 3f
         scheduler_runtime_profile: Arc::new(scheduler_runtime_profile),
         sampling_defaults: SamplingDefaults::default(),
+        model_weight_bytes: meta.weight_bytes,
         kv_cache_turboquant_bits,
         health_collector,
     })
+}
+
+fn effective_model_weight_bytes(
+    meta_weight_bytes: usize,
+    loaded_weight_bytes: Option<usize>,
+) -> usize {
+    loaded_weight_bytes
+        .unwrap_or(meta_weight_bytes)
+        .max(meta_weight_bytes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -705,6 +725,7 @@ where
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
+        None,
         mtp_health_draft_tokens,
         scheduler_actor_spawner,
     )
@@ -774,6 +795,17 @@ mod tests {
     use tokio::time::sleep;
 
     use crate::nn::LayerCache;
+
+    #[test]
+    fn effective_model_weight_bytes_uses_loaded_tensor_bytes_when_larger() {
+        assert_eq!(effective_model_weight_bytes(1_024, Some(4_096)), 4_096);
+    }
+
+    #[test]
+    fn effective_model_weight_bytes_keeps_meta_estimate_when_larger_or_absent() {
+        assert_eq!(effective_model_weight_bytes(4_096, Some(1_024)), 4_096);
+        assert_eq!(effective_model_weight_bytes(4_096, None), 4_096);
+    }
 
     struct DefaultRouteModel;
     struct LimitedRouteModel;

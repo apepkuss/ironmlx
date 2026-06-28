@@ -42,8 +42,9 @@ public struct BenchmarkPlan: Equatable, Sendable {
         durationSeconds: Int = 10
     ) {
         self.processURL = ironBenchURL
+        let targetHost = BackendAPIClient.connectableHost(for: host)
         var arguments = [
-            "--target", "ironmlx=http://\(host):\(port)",
+            "--target", "ironmlx=http://\(targetHost):\(port)",
             "--model-dir", request.modelPath,
             "--model", request.model,
             "--prompt-len", String(request.promptTokens),

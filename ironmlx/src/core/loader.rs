@@ -207,6 +207,11 @@ impl Loader {
         self.tensors.keys().map(|s| s.as_str())
     }
 
+    /// Total storage bytes of the sanitized, eagerly loaded tensors.
+    pub(crate) fn loaded_tensor_bytes(&self) -> usize {
+        tensor_storage_bytes(&self.tensors)
+    }
+
     /// Quantization metadata, or None if model is not quantized.
     pub fn quant_meta(&self) -> Option<QuantMeta> {
         self.quant
@@ -381,6 +386,12 @@ impl Loader {
     pub fn model_dir(&self) -> &Path {
         &self.model_dir
     }
+}
+
+fn tensor_storage_bytes(tensors: &HashMap<String, Array>) -> usize {
+    tensors.values().fold(0usize, |total, tensor| {
+        total.saturating_add(tensor.size().saturating_mul(tensor.dtype().byte_size()))
+    })
 }
 
 fn quant_config_value(config_raw: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -757,6 +768,19 @@ mod tests {
         assert!(!w.contains_key("lm_head.scales"));
         // embed_tokens preserved.
         assert!(w.contains_key("model.embed_tokens.weight"));
+    }
+
+    #[test]
+    fn tensor_storage_bytes_sums_real_loaded_tensor_buffers() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let f32_arr = Array::zeros((2_i32, 3), mlx::Dtype::Float32).unwrap();
+        let bf16_arr = Array::zeros((5_i32,), mlx::Dtype::Bfloat16).unwrap();
+        let u8_arr = Array::zeros((7_i32,), mlx::Dtype::Uint8).unwrap();
+        w.insert("model.f32.weight".into(), f32_arr);
+        w.insert("model.bf16.weight".into(), bf16_arr);
+        w.insert("model.u8.weight".into(), u8_arr);
+
+        assert_eq!(super::tensor_storage_bytes(&w), 6 * 4 + 5 * 2 + 7);
     }
 
     #[test]

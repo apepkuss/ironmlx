@@ -8,6 +8,7 @@ import Testing
     #expect(DashboardWindowController.dashboardWindowStyleMask.contains(.resizable))
     #expect(!DashboardWindowController.dashboardWindowStyleMask.contains(.fullScreen))
     #expect(DashboardWindowController.dashboardWindowCollectionBehavior.contains(.fullScreenPrimary))
+    #expect(DashboardWindowController.dashboardWindowTitleVisibility == .hidden)
 }
 
 @MainActor
