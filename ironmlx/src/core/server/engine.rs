@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -401,6 +401,7 @@ pub struct EngineModelConfig {
     pub path: PathBuf,
     pub load_policy: EngineLoadPolicy,
     pub default: bool,
+    pub pinned: bool,
     pub scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     pub mtp: Option<EngineMtpSettings>,
     pub sampling_defaults: SamplingDefaults,
@@ -576,7 +577,10 @@ pub(crate) struct EngineLoadedModelInfo {
     pub path: String,
     pub architecture: String,
     pub is_default: bool,
+    pub pinned: bool,
     pub max_position_embeddings: i32,
+    pub mtp_model_dir: Option<String>,
+    pub mtp_draft_tokens: Option<usize>,
 }
 
 struct EnginePoolInner {
@@ -591,6 +595,7 @@ struct EngineSlot {
     model: EngineModelConfig,
     runtime: EnginePoolRuntimeConfig,
     active_requests: Arc<AtomicUsize>,
+    pinned: AtomicBool,
     state: Mutex<EngineSlotState>,
     notify: Notify,
 }
@@ -691,6 +696,7 @@ struct ModelTtlCandidate {
     id: String,
     state: EngineRuntimeState,
     active_requests: usize,
+    pinned: bool,
     last_used_unix_ms: Option<u64>,
 }
 
@@ -715,6 +721,7 @@ fn select_model_ttl_unload_candidates(
         .filter(|candidate| {
             candidate.state == EngineRuntimeState::Loaded
                 && candidate.active_requests == 0
+                && !candidate.pinned
                 && candidate
                     .last_used_unix_ms
                     .is_some_and(|last_used| now_unix_ms.saturating_sub(last_used) >= ttl_ms)
@@ -907,6 +914,7 @@ impl EnginePoolState {
                 model: model.clone(),
                 runtime: runtime.clone(),
                 active_requests: Arc::new(AtomicUsize::new(0)),
+                pinned: AtomicBool::new(model.pinned),
                 state: Mutex::new(EngineSlotState::Unloaded {
                     reason: EngineUnloadReason::Startup,
                     last_error: None,
@@ -1116,6 +1124,7 @@ impl EnginePoolState {
             model: model.clone(),
             runtime: self.inner.runtime.clone(),
             active_requests: Arc::new(AtomicUsize::new(0)),
+            pinned: AtomicBool::new(model.pinned),
             state: Mutex::new(EngineSlotState::Unloaded {
                 reason: EngineUnloadReason::Startup,
                 last_error: None,
@@ -1185,12 +1194,16 @@ impl EnginePoolState {
             .map(str::to_string);
         let existing_slot = self.inner.slots.lock().await.get(&model_id).cloned();
         let slot = match existing_slot {
-            Some(existing) if existing.is_loaded_or_loading().await => existing,
+            Some(existing) if existing.is_loaded_or_loading().await => {
+                existing.set_pinned(model.pinned);
+                existing
+            }
             _ => {
                 let slot = Arc::new(EngineSlot {
                     model: model.clone(),
                     runtime: self.inner.runtime.clone(),
                     active_requests: Arc::new(AtomicUsize::new(0)),
+                    pinned: AtomicBool::new(model.pinned),
                     state: Mutex::new(EngineSlotState::Unloaded {
                         reason: EngineUnloadReason::Startup,
                         last_error: None,
@@ -1236,6 +1249,32 @@ impl EnginePoolState {
                 .with_context(|| format!("missing engine slot `{model_id}`"))?
         };
         slot.unload().await?;
+        Ok(slot.control_result().await)
+    }
+
+    pub(crate) async fn set_model_pinned(
+        &self,
+        requested: &str,
+        pinned: bool,
+    ) -> Result<EngineModelControlResult> {
+        let model_id = self
+            .inner
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(requested))?
+            .to_string();
+        let slot = {
+            let slots = self.inner.slots.lock().await;
+            slots
+                .get(&model_id)
+                .cloned()
+                .with_context(|| format!("missing engine slot `{model_id}`"))?
+        };
+        if !slot.is_loaded().await {
+            bail!("engine model `{model_id}` is not loaded");
+        }
+        slot.set_pinned(pinned);
         Ok(slot.control_result().await)
     }
 
@@ -1296,6 +1335,13 @@ impl EnginePoolState {
                 architecture: engine.architecture().to_string(),
                 is_default: default_model.as_deref() == Some(id.as_str()),
                 max_position_embeddings: health.max_position_embeddings(),
+                pinned: slot.is_pinned(),
+                mtp_model_dir: slot
+                    .model
+                    .mtp
+                    .as_ref()
+                    .map(|mtp| mtp.model_dir.to_string_lossy().into_owned()),
+                mtp_draft_tokens: slot.model.mtp.as_ref().and_then(|mtp| mtp.draft_tokens),
             });
         }
         models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1386,6 +1432,7 @@ impl EnginePoolState {
                 models.push(EngineModelHealth {
                     id: model.id.clone(),
                     load_policy: model.load_policy,
+                    pinned: false,
                     state: EngineRuntimeState::Missing,
                     unload_reason: None,
                     last_error: Some("engine slot missing".to_string()),
@@ -1509,7 +1556,10 @@ impl EnginePoolInner {
         let mut candidates = Vec::new();
         let slots_snapshot = self.slots.lock().await.clone();
         for (id, slot) in &slots_snapshot {
-            if id == target_id || slot.model.load_policy == EngineLoadPolicy::Preload {
+            if id == target_id
+                || slot.model.load_policy == EngineLoadPolicy::Preload
+                || slot.is_pinned()
+            {
                 continue;
             }
             let guard = slot.state.lock().await;
@@ -1540,7 +1590,10 @@ impl EnginePoolInner {
         let EngineSlotState::Loaded { engine, .. } = &*guard else {
             return Ok(false);
         };
-        if slot.active_requests.load(Ordering::SeqCst) != 0 || Arc::strong_count(engine) != 1 {
+        if slot.is_pinned()
+            || slot.active_requests.load(Ordering::SeqCst) != 0
+            || Arc::strong_count(engine) != 1
+        {
             return Ok(false);
         }
         *guard = EngineSlotState::Unloaded {
@@ -1560,6 +1613,14 @@ impl EnginePoolInner {
 }
 
 impl EngineSlot {
+    fn is_pinned(&self) -> bool {
+        self.pinned.load(Ordering::SeqCst)
+    }
+
+    fn set_pinned(&self, pinned: bool) {
+        self.pinned.store(pinned, Ordering::SeqCst);
+    }
+
     async fn is_loaded_or_loading(&self) -> bool {
         matches!(
             &*self.state.lock().await,
@@ -1567,6 +1628,10 @@ impl EngineSlot {
                 | EngineSlotState::Loading { .. }
                 | EngineSlotState::Draining { .. }
         )
+    }
+
+    async fn is_loaded(&self) -> bool {
+        matches!(&*self.state.lock().await, EngineSlotState::Loaded { .. })
     }
 
     async fn ensure_loaded(
@@ -1762,12 +1827,14 @@ impl EngineSlot {
             id: id.to_string(),
             state: snapshot.state,
             active_requests: self.active_requests.load(Ordering::SeqCst),
+            pinned: self.is_pinned(),
             last_used_unix_ms: snapshot.last_used_unix_ms,
         }
     }
 
     async fn unload_if_ttl_expired(&self, now_unix_ms: u64, ttl: Duration) -> bool {
         if self.model.load_policy == EngineLoadPolicy::Preload
+            || self.is_pinned()
             || self.active_requests.load(Ordering::SeqCst) > 0
         {
             return false;
@@ -1900,6 +1967,7 @@ impl EngineSlot {
         EngineModelControlResult {
             id: self.model.id.clone(),
             load_policy: self.model.load_policy,
+            pinned: self.is_pinned(),
             state: snapshot.state,
             unload_reason: snapshot.unload_reason,
             last_error: snapshot.last_error,
@@ -1922,6 +1990,7 @@ impl EngineSlot {
         EngineModelHealth {
             id: self.model.id.clone(),
             load_policy: self.model.load_policy,
+            pinned: self.is_pinned(),
             state: snapshot.state,
             unload_reason: snapshot.unload_reason,
             last_error: snapshot.last_error,
@@ -2654,6 +2723,7 @@ struct OpenAiModelInfo {
 pub(crate) struct EngineModelControlResult {
     pub(crate) id: String,
     load_policy: EngineLoadPolicy,
+    pinned: bool,
     pub(crate) state: EngineRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     unload_reason: Option<EngineUnloadReason>,
@@ -2678,6 +2748,7 @@ struct EnginePoolHealth {
 struct EngineModelHealth {
     id: String,
     load_policy: EngineLoadPolicy,
+    pinned: bool,
     state: EngineRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     unload_reason: Option<EngineUnloadReason>,
@@ -2792,6 +2863,7 @@ mod tests {
             path: path.to_path_buf(),
             load_policy,
             default: false,
+            pinned: false,
             scheduler_runtime_profile: runtime_profile(),
             mtp: None,
             sampling_defaults: SamplingDefaults::default(),
@@ -3129,6 +3201,7 @@ mod tests {
             model: model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
             runtime: runtime_config(),
             active_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+            pinned: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(EngineSlotState::Draining {
                 started_unix_ms: unix_time_ms(),
                 load_attempts: 1,
@@ -3210,24 +3283,35 @@ mod tests {
                     id: "expired".to_string(),
                     state: EngineRuntimeState::Loaded,
                     active_requests: 0,
+                    pinned: false,
                     last_used_unix_ms: Some(1_000),
                 },
                 ModelTtlCandidate {
                     id: "active".to_string(),
                     state: EngineRuntimeState::Loaded,
                     active_requests: 1,
+                    pinned: false,
+                    last_used_unix_ms: Some(1_000),
+                },
+                ModelTtlCandidate {
+                    id: "pinned".to_string(),
+                    state: EngineRuntimeState::Loaded,
+                    active_requests: 0,
+                    pinned: true,
                     last_used_unix_ms: Some(1_000),
                 },
                 ModelTtlCandidate {
                     id: "fresh".to_string(),
                     state: EngineRuntimeState::Loaded,
                     active_requests: 0,
+                    pinned: false,
                     last_used_unix_ms: Some(9_000),
                 },
                 ModelTtlCandidate {
                     id: "unloaded".to_string(),
                     state: EngineRuntimeState::Unloaded,
                     active_requests: 0,
+                    pinned: false,
                     last_used_unix_ms: Some(1_000),
                 },
             ],

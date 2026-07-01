@@ -33,7 +33,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         self.menu = menu
 
         let config = configStore.load()
-        let localModels = scanner.scan(loadedModels: Set(config.restoredModelReferences))
+        let pinnedModels = Set(config.pinnedModelReferences)
+        let localModels = scanner.scan(
+            loadedModels: Set(config.restoredModelReferences),
+            pinnedModels: pinnedModels,
+            mtpEnabledModels: []
+        )
         let launchPlan = launchPlanner.plan(config: config, localModels: localModels)
         if !localModels.isEmpty || !launchPlan.backendModelReferences.isEmpty {
             do {
@@ -57,6 +62,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                             do {
                                 let resolvedModel = self.scanner.resolveModelPath(for: model) ?? model
                                 let setDefault = model == defaultModel || defaultModel == nil && model == models.first
+                                let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(
+                                    for: model,
+                                    useMtp: nil,
+                                    scanner: self.scanner,
+                                    parameterStore: self.parameterStore
+                                )
                                 latestResponse = try await client.loadModel(
                                     model: model,
                                     modelDir: resolvedModel,
@@ -66,6 +77,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                                         scanner: self.scanner,
                                         parameterStore: self.parameterStore
                                     ),
+                                    pinned: pinnedModels.contains(model),
+                                    mtpModelDir: mtpRuntime?.modelDir,
+                                    mtpDraftTokens: mtpRuntime?.draftTokens,
                                     reloadWhenIdle: false,
                                     samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                                 )
@@ -83,6 +97,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                                         backendLoadedModels: loadedModels
                                     )
                                 )
+                                updatedConfig.replacePinnedModels(loadedModels.filter(\.pinned).map(\.id))
                                 self.configStore.save(updatedConfig)
                                 NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
                             }

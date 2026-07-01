@@ -10,6 +10,9 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     public var topP: String?
     public var topK: String?
     public var repeatPenalty: String?
+    public var mtpEnabled: Bool?
+    public var mtpModelID: String?
+    public var mtpDraftTokens: String?
 
     public init(
         modelID: String,
@@ -20,7 +23,10 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         temperature: String? = nil,
         topP: String? = nil,
         topK: String? = nil,
-        repeatPenalty: String? = nil
+        repeatPenalty: String? = nil,
+        mtpEnabled: Bool? = nil,
+        mtpModelID: String? = nil,
+        mtpDraftTokens: String? = nil
     ) {
         self.modelID = modelID
         self.alias = alias
@@ -31,6 +37,9 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         self.topP = topP
         self.topK = topK
         self.repeatPenalty = repeatPenalty
+        self.mtpEnabled = mtpEnabled
+        self.mtpModelID = mtpModelID
+        self.mtpDraftTokens = mtpDraftTokens
     }
 
     public var maxCacheCap: Int? {
@@ -49,6 +58,10 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         )
     }
 
+    public var mtpDraftTokensValue: Int? {
+        positiveInt(mtpDraftTokens)
+    }
+
     enum CodingKeys: String, CodingKey {
         case modelID = "model_id"
         case alias
@@ -59,6 +72,9 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         case topP = "top_p"
         case topK = "top_k"
         case repeatPenalty = "repeat_penalty"
+        case mtpEnabled = "mtp_enabled"
+        case mtpModelID = "mtp_model_id"
+        case mtpDraftTokens = "mtp_draft_tokens"
     }
 
     private func positiveInt(_ value: String?) -> Int? {
@@ -127,6 +143,31 @@ public final class ModelParameterStore: @unchecked Sendable {
             return
         }
         var all = try loadAll()
+        all[key] = parameters
+        try fileManager.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try JSONEncoder.prettyIronMLX.encode(all)
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func recordMtpLoadPreference(
+        modelID: String,
+        enabled: Bool,
+        mtpModelID: String?
+    ) throws {
+        let key = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            return
+        }
+        var all = try loadAll()
+        var parameters = all[key] ?? ModelParameters(modelID: key)
+        parameters.mtpEnabled = enabled
+        let selectedMtp = mtpModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if enabled, let selectedMtp, !selectedMtp.isEmpty {
+            parameters.mtpModelID = selectedMtp
+        }
         all[key] = parameters
         try fileManager.createDirectory(
             at: url.deletingLastPathComponent(),

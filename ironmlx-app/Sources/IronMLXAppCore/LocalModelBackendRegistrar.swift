@@ -18,6 +18,12 @@ public enum LocalModelBackendRegistrar {
                 continue
             }
             do {
+                let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(
+                    for: model.id,
+                    useMtp: nil,
+                    scanner: scanner,
+                    parameterStore: parameterStore
+                )
                 _ = try await client.registerModel(
                     model: model.id,
                     modelDir: modelDir,
@@ -27,6 +33,9 @@ public enum LocalModelBackendRegistrar {
                         scanner: scanner,
                         parameterStore: parameterStore
                     ),
+                    pinned: model.pinned,
+                    mtpModelDir: mtpRuntime?.modelDir,
+                    mtpDraftTokens: mtpRuntime?.draftTokens,
                     samplingDefaults: parameterStore.parameters(for: model.id)?.samplingDefaults ?? .empty
                 )
             } catch {

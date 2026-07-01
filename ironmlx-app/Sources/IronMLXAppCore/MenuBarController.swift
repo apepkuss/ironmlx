@@ -18,6 +18,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private let dashboard: DashboardWindowController
     private let restartCoordinator: BackendRestartCoordinator
     private let fileManager: FileManager
+    private let notificationCenter: NotificationCenter
     private var loadedModelNames: [String]?
     private var isRefreshingLoadedModelNames = false
     private var menuStateOverride: BackendProcessState?
@@ -29,7 +30,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         dashboard: DashboardWindowController,
         scanner: LocalModelScanner = LocalModelScanner(),
         restartCoordinator: BackendRestartCoordinator? = nil,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        notificationCenter: NotificationCenter = .default
     ) {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.configStore = configStore
@@ -41,6 +43,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             parameterStore: parameterStore
         )
         self.fileManager = fileManager
+        self.notificationCenter = notificationCenter
         super.init()
         observeLanguageChanges()
         observeLoadedModelChanges()
@@ -53,6 +56,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         MainActor.assumeIsolated {
             refreshTimer?.invalidate()
         }
+        notificationCenter.removeObserver(self)
     }
 
     @discardableResult
@@ -100,6 +104,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         menuStateOverride = nil
         backend.stop()
         loadedModelNames = []
+        notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
         rebuildMenu()
     }
 
@@ -149,7 +154,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func observeLanguageChanges() {
-        NotificationCenter.default.addObserver(
+        notificationCenter.addObserver(
             self,
             selector: #selector(menuLanguageDidChange(_:)),
             name: .ironMLXMenuLanguageDidChange,
@@ -158,7 +163,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func observeLoadedModelChanges() {
-        NotificationCenter.default.addObserver(
+        notificationCenter.addObserver(
             self,
             selector: #selector(loadedModelsDidChange(_:)),
             name: .ironMLXLoadedModelsDidChange,
@@ -225,16 +230,22 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func persistLoadedModelsIfNeeded(_ models: [BackendLoadedModelInfo]) {
         let loaded = AppConfig.normalizedModelReferences(models.map(\.id))
+        let pinned = AppConfig.normalizedModelReferences(models.filter(\.pinned).map(\.id))
         let backendDefault = AppConfig.normalizedModelReference(models.first(where: \.isDefault)?.id)
         var config = configStore.load()
         let persistedLoaded = AppConfig.normalizedModelReferences(config.loadedModels ?? [])
+        let persistedPinned = config.pinnedModelReferences
         let defaultChanged = backendDefault != nil && backendDefault != config.defaultModelReference
-        guard Set(loaded) != Set(persistedLoaded) || defaultChanged else {
+        guard Set(loaded) != Set(persistedLoaded)
+            || Set(pinned) != Set(persistedPinned)
+            || defaultChanged
+        else {
             return
         }
         config.replaceLoadedModels(loaded, defaultModel: backendDefault)
+        config.replacePinnedModels(pinned)
         configStore.save(config)
-        NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
+        notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
     }
 
     private func restartConfiguredBackendFromMenu() {
@@ -252,7 +263,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                     updatedConfig.replaceLoadedModels(result.loadedModels, defaultModel: result.model)
                     self.configStore.save(updatedConfig)
                     self.loadedModelNames = result.loadedModels
-                    NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
+                    self.notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
                     IronMLXAppLogger.info(
                         "Restarted ironmlx backend from menu: status=\(result.status) loaded_models=\(result.loadedModels.count)"
                     )

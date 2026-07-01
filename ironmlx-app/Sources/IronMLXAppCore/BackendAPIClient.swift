@@ -2,15 +2,23 @@ import Foundation
 
 public protocol BackendModelManaging: Sendable {
     func fetchHealthz() async throws -> HealthzSnapshot
-    func loadModel(model: String, modelDir: String, setDefault: Bool, maxCacheCap: Int?) async throws -> BackendModelAdminResponse
+    func loadModel(
+        model: String,
+        modelDir: String,
+        setDefault: Bool,
+        maxCacheCap: Int?,
+        pinned: Bool
+    ) async throws -> BackendModelAdminResponse
     func unloadModel(model: String, modelDir: String?) async throws -> BackendModelAdminResponse
     func setDefaultModel(_ model: String) async throws -> BackendModelAdminResponse
+    func pinModel(model: String) async throws -> BackendModelAdminResponse
+    func unpinModel(model: String) async throws -> BackendModelAdminResponse
     func fetchLoadedModels() async throws -> [BackendLoadedModelInfo]
 }
 
 public extension BackendModelManaging {
     func loadModel(model: String, modelDir: String, setDefault: Bool) async throws -> BackendModelAdminResponse {
-        try await loadModel(model: model, modelDir: modelDir, setDefault: setDefault, maxCacheCap: nil)
+        try await loadModel(model: model, modelDir: modelDir, setDefault: setDefault, maxCacheCap: nil, pinned: false)
     }
 }
 
@@ -82,13 +90,15 @@ public struct BackendAPIClient: Sendable {
         model: String,
         modelDir: String,
         setDefault: Bool = true,
-        maxCacheCap: Int? = nil
+        maxCacheCap: Int? = nil,
+        pinned: Bool = false
     ) async throws -> BackendModelAdminResponse {
         try await loadModel(
             model: model,
             modelDir: modelDir,
             setDefault: setDefault,
             maxCacheCap: maxCacheCap,
+            pinned: pinned,
             reloadWhenIdle: false,
             samplingDefaults: .empty
         )
@@ -99,6 +109,9 @@ public struct BackendAPIClient: Sendable {
         modelDir: String,
         setDefault: Bool = true,
         maxCacheCap: Int? = nil,
+        pinned: Bool = false,
+        mtpModelDir: String? = nil,
+        mtpDraftTokens: Int? = nil,
         reloadWhenIdle: Bool,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
@@ -107,6 +120,9 @@ public struct BackendAPIClient: Sendable {
             modelDir: modelDir,
             setDefault: setDefault,
             maxCacheCap: maxCacheCap,
+            pinned: pinned,
+            mtpModelDir: mtpModelDir,
+            mtpDraftTokens: mtpDraftTokens,
             reloadWhenIdle: reloadWhenIdle,
             samplingDefaults: samplingDefaults
         )
@@ -119,6 +135,9 @@ public struct BackendAPIClient: Sendable {
         modelDir: String,
         setDefault: Bool = false,
         maxCacheCap: Int? = nil,
+        pinned: Bool = false,
+        mtpModelDir: String? = nil,
+        mtpDraftTokens: Int? = nil,
         samplingDefaults: BackendSamplingDefaults = .empty
     ) async throws -> BackendModelAdminResponse {
         let request = BackendLoadModelRequest(
@@ -126,6 +145,9 @@ public struct BackendAPIClient: Sendable {
             modelDir: modelDir,
             setDefault: setDefault,
             maxCacheCap: maxCacheCap,
+            pinned: pinned,
+            mtpModelDir: mtpModelDir,
+            mtpDraftTokens: mtpDraftTokens,
             samplingDefaults: samplingDefaults
         )
         let data = try await postJSON(path: "/admin/api/models/register", body: request)
@@ -135,6 +157,18 @@ public struct BackendAPIClient: Sendable {
     public func unloadModel(model: String, modelDir: String? = nil) async throws -> BackendModelAdminResponse {
         let request = BackendUnloadModelRequest(model: model, modelDir: modelDir)
         let data = try await postJSON(path: "/admin/api/models/unload", body: request)
+        return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
+    }
+
+    public func pinModel(model: String) async throws -> BackendModelAdminResponse {
+        let request = BackendPinModelRequest(model: model)
+        let data = try await postJSON(path: "/admin/api/models/pin", body: request)
+        return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
+    }
+
+    public func unpinModel(model: String) async throws -> BackendModelAdminResponse {
+        let request = BackendPinModelRequest(model: model)
+        let data = try await postJSON(path: "/admin/api/models/unpin", body: request)
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
     }
 
@@ -173,6 +207,9 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
     public var modelDir: String
     public var setDefault: Bool
     public var maxCacheCap: Int?
+    public var pinned: Bool?
+    public var mtpModelDir: String?
+    public var mtpDraftTokens: Int?
     public var reloadWhenIdle: Bool?
     public var temperature: Double?
     public var topP: Double?
@@ -184,6 +221,9 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         case modelDir = "model_dir"
         case setDefault = "set_default"
         case maxCacheCap = "max_cache_cap"
+        case pinned
+        case mtpModelDir = "mtp_model_dir"
+        case mtpDraftTokens = "mtp_draft_tokens"
         case reloadWhenIdle = "reload_when_idle"
         case temperature
         case topP = "top_p"
@@ -196,6 +236,9 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int? = nil,
+        pinned: Bool? = nil,
+        mtpModelDir: String? = nil,
+        mtpDraftTokens: Int? = nil,
         reloadWhenIdle: Bool? = nil,
         samplingDefaults: BackendSamplingDefaults = .empty
     ) {
@@ -203,6 +246,9 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         self.modelDir = modelDir
         self.setDefault = setDefault
         self.maxCacheCap = maxCacheCap
+        self.pinned = pinned
+        self.mtpModelDir = mtpModelDir
+        self.mtpDraftTokens = mtpDraftTokens
         self.reloadWhenIdle = reloadWhenIdle
         self.temperature = samplingDefaults.temperature
         self.topP = samplingDefaults.topP
@@ -253,6 +299,10 @@ public struct BackendSetDefaultModelRequest: Codable, Equatable, Sendable {
     public var model: String
 }
 
+public struct BackendPinModelRequest: Codable, Equatable, Sendable {
+    public var model: String
+}
+
 public struct BackendModelAdminResponse: Codable, Equatable, Sendable {
     public var success: Bool
     public var status: String
@@ -282,6 +332,34 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var architecture: String
     public var isDefault: Bool
     public var maxPositionEmbeddings: Int
+    public var pinned: Bool
+    public var mtpEnabled: Bool
+    public var mtpModelDir: String?
+    public var mtpDraftTokens: Int?
+
+    public init(
+        id: String,
+        model: String,
+        path: String,
+        architecture: String,
+        isDefault: Bool,
+        maxPositionEmbeddings: Int,
+        pinned: Bool = false,
+        mtpEnabled: Bool = false,
+        mtpModelDir: String? = nil,
+        mtpDraftTokens: Int? = nil
+    ) {
+        self.id = id
+        self.model = model
+        self.path = path
+        self.architecture = architecture
+        self.isDefault = isDefault
+        self.maxPositionEmbeddings = maxPositionEmbeddings
+        self.pinned = pinned
+        self.mtpEnabled = mtpEnabled
+        self.mtpModelDir = mtpModelDir
+        self.mtpDraftTokens = mtpDraftTokens
+    }
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -290,5 +368,23 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         case architecture
         case isDefault = "default"
         case maxPositionEmbeddings = "max_position_embeddings"
+        case pinned
+        case mtpEnabled = "mtp_enabled"
+        case mtpModelDir = "mtp_model_dir"
+        case mtpDraftTokens = "mtp_draft_tokens"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.model = try container.decode(String.self, forKey: .model)
+        self.path = try container.decode(String.self, forKey: .path)
+        self.architecture = try container.decode(String.self, forKey: .architecture)
+        self.isDefault = try container.decode(Bool.self, forKey: .isDefault)
+        self.maxPositionEmbeddings = try container.decode(Int.self, forKey: .maxPositionEmbeddings)
+        self.pinned = try container.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
+        self.mtpEnabled = try container.decodeIfPresent(Bool.self, forKey: .mtpEnabled) ?? false
+        self.mtpModelDir = try container.decodeIfPresent(String.self, forKey: .mtpModelDir)
+        self.mtpDraftTokens = try container.decodeIfPresent(Int.self, forKey: .mtpDraftTokens)
     }
 }

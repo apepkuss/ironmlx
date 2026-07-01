@@ -42,11 +42,62 @@ import Testing
         "fetchHealthz",
         "fetchLoadedModels",
         "unload:mlx-community/Old-4bit:/models/old",
-        "load:mlx-community/New-4bit:/models/new:true",
+        "load:mlx-community/New-4bit:/models/new:true:false",
         "setDefault:mlx-community/New-4bit",
     ])
     #expect(await client.loadedIDs == ["mlx-community/New-4bit"])
     #expect(await client.defaultID == "mlx-community/New-4bit")
+}
+
+@Test func benchmarkExclusivePrepareKeepsPinnedNonTargetModelsLoaded() async throws {
+    let client = MockBenchmarkModelClient(
+        health: healthSnapshot(active: 0, queued: 0),
+        loadedModels: [
+            loadedModel("mlx-community/Pinned-4bit", path: "/models/pinned", isDefault: true, pinned: true),
+            loadedModel("mlx-community/Old-4bit", path: "/models/old", isDefault: false),
+            loadedModel("mlx-community/New-4bit", path: "/models/new", isDefault: false),
+        ]
+    )
+    let coordinator = BenchmarkExclusiveSessionCoordinator()
+
+    let preflight = try await coordinator.preflight(
+        client: client,
+        targetModel: "mlx-community/New-4bit"
+    )
+    #expect(preflight.nonTargetModels == ["mlx-community/Old-4bit"])
+    #expect(preflight.willUnloadCount == 1)
+
+    let prepared = try await coordinator.prepare(
+        client: client,
+        targetModel: "mlx-community/New-4bit",
+        targetModelPath: "/models/new"
+    )
+
+    #expect(prepared.unloadedModels == ["mlx-community/Old-4bit"])
+    #expect(await client.loadedIDs == [
+        "mlx-community/New-4bit",
+        "mlx-community/Pinned-4bit",
+    ])
+    #expect(await client.pinnedIDs == ["mlx-community/Pinned-4bit"])
+}
+
+@Test func benchmarkExclusivePreparePreservesPinnedTargetModel() async throws {
+    let client = MockBenchmarkModelClient(
+        health: healthSnapshot(active: 0, queued: 0),
+        loadedModels: [
+            loadedModel("mlx-community/Target-4bit", path: "/models/target", isDefault: false, pinned: true),
+        ]
+    )
+    let coordinator = BenchmarkExclusiveSessionCoordinator()
+
+    _ = try await coordinator.prepare(
+        client: client,
+        targetModel: "mlx-community/Target-4bit",
+        targetModelPath: "/models/target"
+    )
+
+    #expect(await client.pinnedIDs == ["mlx-community/Target-4bit"])
+    #expect(await client.calls.contains("load:mlx-community/Target-4bit:/models/target:true:true"))
 }
 
 @Test func benchmarkExclusiveRestoreRestoresLoadedModelsAndDefaultModel() async throws {
@@ -88,6 +139,13 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
         loadedModelsByID.keys.sorted()
     }
 
+    var pinnedIDs: [String] {
+        loadedModelsByID.values
+            .filter(\.pinned)
+            .map(\.id)
+            .sorted()
+    }
+
     var defaultID: String? {
         defaultModelID
     }
@@ -112,10 +170,11 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
         model: String,
         modelDir: String,
         setDefault: Bool,
-        maxCacheCap: Int?
+        maxCacheCap: Int?,
+        pinned: Bool
     ) async throws -> BackendModelAdminResponse {
-        calls.append("load:\(model):\(modelDir):\(setDefault)")
-        loadedModelsByID[model] = loadedModel(model, path: modelDir, isDefault: setDefault)
+        calls.append("load:\(model):\(modelDir):\(setDefault):\(pinned)")
+        loadedModelsByID[model] = loadedModel(model, path: modelDir, isDefault: setDefault, pinned: pinned)
         if setDefault {
             defaultModelID = model
         }
@@ -137,6 +196,24 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
         return adminResponse(status: "default_set")
     }
 
+    func pinModel(model: String) async throws -> BackendModelAdminResponse {
+        calls.append("pin:\(model)")
+        if var existing = loadedModelsByID[model] {
+            existing.pinned = true
+            loadedModelsByID[model] = existing
+        }
+        return adminResponse(status: "pinned")
+    }
+
+    func unpinModel(model: String) async throws -> BackendModelAdminResponse {
+        calls.append("unpin:\(model)")
+        if var existing = loadedModelsByID[model] {
+            existing.pinned = false
+            loadedModelsByID[model] = existing
+        }
+        return adminResponse(status: "unpinned")
+    }
+
     private func adminResponse(status: String) -> BackendModelAdminResponse {
         BackendModelAdminResponse(
             success: true,
@@ -154,7 +231,8 @@ private actor MockBenchmarkModelClient: BackendModelManaging {
 private func loadedModel(
     _ id: String,
     path: String? = nil,
-    isDefault: Bool
+    isDefault: Bool,
+    pinned: Bool = false
 ) -> BackendLoadedModelInfo {
     BackendLoadedModelInfo(
         id: id,
@@ -162,7 +240,8 @@ private func loadedModel(
         path: path ?? "/models/\(id.replacingOccurrences(of: "/", with: "-"))",
         architecture: "qwen",
         isDefault: isDefault,
-        maxPositionEmbeddings: 32768
+        maxPositionEmbeddings: 32768,
+        pinned: pinned
     )
 }
 

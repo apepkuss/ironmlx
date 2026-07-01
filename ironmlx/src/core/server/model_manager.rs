@@ -18,7 +18,9 @@ use crate::cli::serve::{
     resolve_memory_limit_bytes, resolve_model_ttl, resolve_scheduler_for_model,
     ResolvedSchedulerRuntime, SchedulerProfileSource, ServeArgs,
 };
-use crate::models::ModelArchitecture;
+use crate::core::sampler::Sampler;
+use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig};
+use crate::models::{ModelArchitecture, Qwen35Config, Qwen35MoeConfig};
 use crate::Result;
 
 use super::engine::{
@@ -57,6 +59,18 @@ const DEFAULT_PROFILE_WARNING: &str =
 const MODEL_RELOAD_DEFERRED_WARNING_CODE: &str = "model_reload_deferred";
 const MODEL_RELOAD_DEFERRED_WARNING: &str =
     "The model is processing requests. New parameters will be applied automatically after the model becomes idle.";
+const MTP_MODEL_DIR_REQUIRED_CODE: &str = "mtp_model_dir_required";
+const MTP_MODEL_DIR_REQUIRED_MESSAGE: &str = "MTP draft tokens require an MTP model directory.";
+const MTP_OK_CODE: &str = "ok";
+const MTP_BASE_MODEL_NOT_FOUND_CODE: &str = "mtp_base_model_not_found";
+const MTP_MODEL_NOT_FOUND_CODE: &str = "mtp_model_not_found";
+const MTP_UNSUPPORTED_ARCHITECTURE_CODE: &str = "mtp_unsupported_architecture";
+const MTP_INVALID_MODEL_TYPE_CODE: &str = "mtp_invalid_model_type";
+const MTP_INVALID_CONFIG_CODE: &str = "mtp_invalid_config";
+const MTP_INVALID_DRAFT_TOKENS_CODE: &str = "mtp_invalid_draft_tokens";
+const MTP_INCOMPATIBLE_CODE: &str = "mtp_incompatible";
+const MTP_INCOMPATIBLE_MESSAGE: &str =
+    "MTP weights are not compatible with this model. Load the model without MTP or choose matching MTP weights.";
 
 #[derive(Clone)]
 pub struct ModelManager {
@@ -92,6 +106,8 @@ impl ModelManager {
             model_dir: parsed.model_dir.clone(),
             max_cache_cap_override: parsed.max_cache_cap_override,
             sampling_defaults_override: parsed.sampling_defaults,
+            mtp: parsed.mtp.clone(),
+            pinned: parsed.pinned,
             set_default: parsed.set_default,
         };
 
@@ -134,6 +150,8 @@ impl ModelManager {
             &parsed.model_dir,
             parsed.max_cache_cap_override,
             parsed.sampling_defaults,
+            parsed.mtp,
+            parsed.pinned,
         )
         .map_err(AdminError::from_load_error)?;
         self.pool
@@ -160,6 +178,8 @@ impl ModelManager {
             &parsed.model_dir,
             parsed.max_cache_cap_override,
             parsed.sampling_defaults,
+            parsed.mtp,
+            parsed.pinned,
         )
         .map_err(AdminError::from_load_error)?;
         self.pool
@@ -197,6 +217,30 @@ impl ModelManager {
             None => "not_loaded",
         };
         AdminModelResponse::ok(status, model, self.list_loaded().await, None)
+    }
+
+    async fn set_model_pinned(
+        &self,
+        request: PinModelRequest,
+        pinned: bool,
+    ) -> std::result::Result<AdminModelResponse, AdminError> {
+        let model = request.model.trim();
+        if model.is_empty() {
+            return Err(AdminError::model_required());
+        }
+        if !self.pool.is_model_loaded(model).await {
+            return Err(AdminError::model_not_loaded(model));
+        }
+        self.pool
+            .set_model_pinned(model, pinned)
+            .await
+            .map_err(AdminError::from_control_error)?;
+        Ok(AdminModelResponse::ok(
+            if pinned { "pinned" } else { "unpinned" },
+            Some(model.to_string()),
+            self.list_loaded().await,
+            None,
+        ))
     }
 
     async fn set_default_model(
@@ -281,6 +325,8 @@ impl ModelManager {
             &reload.model_dir,
             reload.max_cache_cap_override,
             reload.sampling_defaults_override,
+            reload.mtp.clone(),
+            reload.pinned,
         )
         .map_err(AdminError::from_load_error)?;
         self.pool
@@ -341,6 +387,8 @@ impl ModelManager {
                     &reload.model_dir,
                     reload.max_cache_cap_override,
                     reload.sampling_defaults_override,
+                    reload.mtp.clone(),
+                    reload.pinned,
                 );
                 match load {
                     Ok(load) => {
@@ -371,6 +419,8 @@ struct PendingModelReload {
     model_dir: PathBuf,
     max_cache_cap_override: Option<usize>,
     sampling_defaults_override: SamplingDefaults,
+    mtp: Option<super::engine::EngineMtpSettings>,
+    pinned: bool,
     set_default: bool,
 }
 
@@ -384,6 +434,8 @@ struct ParsedLoadModelRequest {
     model_dir: PathBuf,
     max_cache_cap_override: Option<usize>,
     sampling_defaults: SamplingDefaults,
+    mtp: Option<super::engine::EngineMtpSettings>,
+    pinned: bool,
     set_default: bool,
     reload_when_idle: bool,
 }
@@ -415,11 +467,33 @@ impl ParsedLoadModelRequest {
             Some(0) => return Err(AdminError::invalid_max_cache_cap()),
             value => value,
         };
+        let mtp = match (
+            request
+                .mtp_model_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            request.mtp_draft_tokens,
+        ) {
+            (Some(model_dir), draft_tokens) => Some(super::engine::EngineMtpSettings {
+                model_dir: PathBuf::from(model_dir),
+                draft_tokens,
+            }),
+            (None, Some(_)) => {
+                return Err(AdminError::bad_request_with_code(
+                    MTP_MODEL_DIR_REQUIRED_MESSAGE,
+                    Some(MTP_MODEL_DIR_REQUIRED_CODE),
+                ));
+            }
+            (None, None) => None,
+        };
         Ok(Self {
             model_reference,
             model_dir,
             max_cache_cap_override,
             sampling_defaults: request.sampling_defaults,
+            mtp,
+            pinned: request.pinned.unwrap_or(false),
             set_default: request.set_default.unwrap_or(false),
             reload_when_idle: request.reload_when_idle.unwrap_or(false),
         })
@@ -455,6 +529,8 @@ fn build_engine_model_config(
     model_dir: &Path,
     max_cache_cap_override: Option<usize>,
     sampling_defaults_override: SamplingDefaults,
+    mtp: Option<super::engine::EngineMtpSettings>,
+    pinned: bool,
 ) -> Result<EngineModelLoad> {
     let resolved = apply_load_request_scheduler_overrides(
         resolve_scheduler_for_model(args, model_dir)?,
@@ -477,14 +553,25 @@ fn build_engine_model_config(
              use `ironmlx serve --model <path>` for the dedicated DiffusionGemma server lane"
         );
     }
+    if let Some(settings) = mtp.as_ref() {
+        let validation = validate_mtp_pair(model_dir, &settings.model_dir, settings.draft_tokens)?;
+        if !validation.compatible {
+            anyhow::bail!(
+                "MTP validation failed: {}: {}",
+                validation.reason_code,
+                validation.message
+            );
+        }
+    }
     Ok(EngineModelLoad {
         config: EngineModelConfig {
             id: model_id,
             path: model_dir.to_path_buf(),
             load_policy: EngineLoadPolicy::Lazy,
             default: false,
+            pinned,
             scheduler_runtime_profile: resolved.scheduler_runtime_profile,
-            mtp: None,
+            mtp,
             sampling_defaults,
         },
         warning,
@@ -506,6 +593,172 @@ fn read_generation_sampling_defaults(model_dir: &Path) -> Result<SamplingDefault
         top_k: json_number_as_i32(json.get("top_k")),
         repetition_penalty: json_number_as_f32(json.get("repetition_penalty")),
     })
+}
+
+fn validate_mtp_pair(
+    model_dir: &Path,
+    mtp_model_dir: &Path,
+    mtp_draft_tokens: Option<usize>,
+) -> Result<MtpValidationResponse> {
+    if !model_dir.is_dir() {
+        return Ok(MtpValidationResponse::not_compatible(
+            MTP_BASE_MODEL_NOT_FOUND_CODE,
+            format!(
+                "Base model directory does not exist: {}",
+                model_dir.display()
+            ),
+            None,
+        ));
+    }
+    if !mtp_model_dir.is_dir() {
+        return Ok(MtpValidationResponse::not_compatible(
+            MTP_MODEL_NOT_FOUND_CODE,
+            format!(
+                "MTP model directory does not exist: {}",
+                mtp_model_dir.display()
+            ),
+            None,
+        ));
+    }
+
+    let base_raw = read_config_json(model_dir)?;
+    let model_type = base_raw
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let architecture = match ModelArchitecture::from_model_type(model_type) {
+        Ok(architecture) => architecture,
+        Err(error) => {
+            return Ok(MtpValidationResponse::not_compatible(
+                MTP_UNSUPPORTED_ARCHITECTURE_CODE,
+                format!("{error:#}"),
+                None,
+            ));
+        }
+    };
+    match architecture {
+        ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => {}
+        _ => {
+            return Ok(MtpValidationResponse::not_compatible(
+                MTP_UNSUPPORTED_ARCHITECTURE_CODE,
+                "MTP currently supports Qwen dense/MoE models only.",
+                None,
+            ));
+        }
+    }
+
+    let mtp_raw = read_config_json(mtp_model_dir)?;
+    let mtp_model_type = mtp_raw
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if mtp_model_type != "qwen3_5_mtp" {
+        return Ok(MtpValidationResponse::not_compatible(
+            MTP_INVALID_MODEL_TYPE_CODE,
+            format!("Expected MTP model_type=qwen3_5_mtp, got {mtp_model_type}"),
+            None,
+        ));
+    }
+
+    match architecture {
+        ModelArchitecture::Qwen35Dense => {
+            if let Some(response) = validate_qwen35_dense_mtp_config(&base_raw, &mtp_raw)? {
+                return Ok(response);
+            }
+        }
+        ModelArchitecture::Qwen35Moe => {
+            if let Some(response) = validate_qwen35_moe_mtp_config(&base_raw, &mtp_raw)? {
+                return Ok(response);
+            }
+        }
+        _ => unreachable!("MTP architecture was filtered above"),
+    }
+
+    let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
+        &base_raw,
+        mtp_draft_tokens
+            .map(MtpDraftTokensArg::Explicit)
+            .unwrap_or(MtpDraftTokensArg::Omitted),
+    );
+    if let Err(error) = MtpSpeculativeConfig::new(draft_tokens, Sampler::greedy()) {
+        return Ok(MtpValidationResponse::not_compatible(
+            MTP_INVALID_DRAFT_TOKENS_CODE,
+            format!("{error:#}"),
+            Some(draft_tokens),
+        ));
+    }
+    Ok(MtpValidationResponse::compatible(draft_tokens))
+}
+
+fn validate_qwen35_dense_mtp_config(
+    base_raw: &serde_json::Value,
+    mtp_raw: &serde_json::Value,
+) -> Result<Option<MtpValidationResponse>> {
+    let base_cfg = qwen35_config_from_raw(base_raw)?;
+    let mtp_cfg = qwen35_config_from_raw(mtp_raw)?;
+    if let Err(error) = mtp_cfg.mtp_config() {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INVALID_CONFIG_CODE,
+            format!("{error:#}"),
+            None,
+        )));
+    }
+    if let Err(error) = base_cfg.ensure_mtp_compatible(&mtp_cfg) {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INCOMPATIBLE_CODE,
+            format!("{error:#}"),
+            None,
+        )));
+    }
+    Ok(None)
+}
+
+fn validate_qwen35_moe_mtp_config(
+    base_raw: &serde_json::Value,
+    mtp_raw: &serde_json::Value,
+) -> Result<Option<MtpValidationResponse>> {
+    let base_cfg = qwen35_moe_config_from_raw(base_raw)?;
+    let mtp_cfg = qwen35_moe_config_from_raw(mtp_raw)?;
+    if let Err(error) = mtp_cfg.mtp_config() {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INVALID_CONFIG_CODE,
+            format!("{error:#}"),
+            None,
+        )));
+    }
+    if let Err(error) = base_cfg.ensure_mtp_compatible(&mtp_cfg) {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INCOMPATIBLE_CODE,
+            format!("{error:#}"),
+            None,
+        )));
+    }
+    Ok(None)
+}
+
+fn read_config_json(model_dir: &Path) -> Result<serde_json::Value> {
+    let path = model_dir.join("config.json");
+    let data = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_slice(&data).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn qwen35_config_from_raw(raw: &serde_json::Value) -> Result<Qwen35Config> {
+    let text_config = raw
+        .get("text_config")
+        .ok_or_else(|| anyhow::anyhow!("config.json missing text_config field"))?;
+    let mut cfg: Qwen35Config = serde_json::from_value(text_config.clone())
+        .context("failed to deserialize Qwen35Config from text_config")?;
+    if let Some(vision_config) = raw.get("vision_config") {
+        cfg.vision_config = Some(
+            serde_json::from_value(vision_config.clone())
+                .context("failed to deserialize VisionConfig")?,
+        );
+    }
+    Ok(cfg)
+}
+
+fn qwen35_moe_config_from_raw(raw: &serde_json::Value) -> Result<Qwen35MoeConfig> {
+    Qwen35MoeConfig::from_raw_config_value(raw)
 }
 
 fn json_number_as_f32(value: Option<&serde_json::Value>) -> Option<f32> {
@@ -554,7 +807,10 @@ pub async fn serve_app_daemon(args: ServeArgs) -> Result<()> {
         .route("/admin/api/models/loaded", get(list_loaded_handler))
         .route("/admin/api/models/register", post(register_model_handler))
         .route("/admin/api/models/load", post(load_model_handler))
+        .route("/admin/api/models/mtp/validate", post(validate_mtp_handler))
         .route("/admin/api/models/unload", post(unload_model_handler))
+        .route("/admin/api/models/pin", post(pin_model_handler))
+        .route("/admin/api/models/unpin", post(unpin_model_handler))
         .route("/admin/api/models/default", post(set_default_model_handler))
         .with_state(manager);
 
@@ -611,11 +867,52 @@ async fn register_model_handler(
     }
 }
 
+async fn validate_mtp_handler(Json(request): Json<MtpValidationRequest>) -> Response {
+    let base = request
+        .model_dir
+        .or(request.model_path)
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let mtp = request.mtp_model_dir.map(PathBuf::from).unwrap_or_default();
+    match validate_mtp_pair(&base, &mtp, request.mtp_draft_tokens) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(MtpValidationResponse::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                format!("{error:#}"),
+                None,
+            )),
+        )
+            .into_response(),
+    }
+}
+
 async fn unload_model_handler(
     State(manager): State<ModelManager>,
     Json(request): Json<UnloadModelRequest>,
 ) -> Json<AdminModelResponse> {
     Json(manager.unload_model(request).await)
+}
+
+async fn pin_model_handler(
+    State(manager): State<ModelManager>,
+    Json(request): Json<PinModelRequest>,
+) -> Response {
+    match manager.set_model_pinned(request, true).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn unpin_model_handler(
+    State(manager): State<ModelManager>,
+    Json(request): Json<PinModelRequest>,
+) -> Response {
+    match manager.set_model_pinned(request, false).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 async fn set_default_model_handler(
@@ -652,9 +949,52 @@ struct LoadModelRequest {
     repo_id: Option<String>,
     set_default: Option<bool>,
     max_cache_cap: Option<usize>,
+    pinned: Option<bool>,
+    mtp_model_dir: Option<String>,
+    mtp_draft_tokens: Option<usize>,
     reload_when_idle: Option<bool>,
     #[serde(flatten)]
     sampling_defaults: SamplingDefaults,
+}
+
+#[derive(Debug, Deserialize)]
+struct MtpValidationRequest {
+    model_dir: Option<String>,
+    model_path: Option<String>,
+    mtp_model_dir: Option<String>,
+    mtp_draft_tokens: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct MtpValidationResponse {
+    compatible: bool,
+    reason_code: &'static str,
+    message: String,
+    draft_tokens: Option<usize>,
+}
+
+impl MtpValidationResponse {
+    fn compatible(draft_tokens: usize) -> Self {
+        Self {
+            compatible: true,
+            reason_code: MTP_OK_CODE,
+            message: "MTP weights are compatible with this model.".to_string(),
+            draft_tokens: Some(draft_tokens),
+        }
+    }
+
+    fn not_compatible(
+        reason_code: &'static str,
+        message: impl Into<String>,
+        draft_tokens: Option<usize>,
+    ) -> Self {
+        Self {
+            compatible: false,
+            reason_code,
+            message: message.into(),
+            draft_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -662,6 +1002,11 @@ struct UnloadModelRequest {
     model: Option<String>,
     model_dir: Option<String>,
     repo_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PinModelRequest {
+    model: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -742,7 +1087,13 @@ struct LoadedModelInfo {
     architecture: String,
     #[serde(rename = "default")]
     is_default: bool,
+    pinned: bool,
     max_position_embeddings: i32,
+    mtp_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mtp_model_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mtp_draft_tokens: Option<usize>,
 }
 
 impl From<EngineLoadedModelInfo> for LoadedModelInfo {
@@ -753,7 +1104,11 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             path: info.path,
             architecture: info.architecture,
             is_default: info.is_default,
+            pinned: info.pinned,
             max_position_embeddings: info.max_position_embeddings,
+            mtp_enabled: info.mtp_model_dir.is_some(),
+            mtp_model_dir: info.mtp_model_dir,
+            mtp_draft_tokens: info.mtp_draft_tokens,
         }
     }
 }
@@ -836,6 +1191,14 @@ impl AdminError {
 
     fn from_load_error(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
+        if let Some(code) = mtp_error_code_from_message(&message) {
+            let user_message = if code == MTP_MODEL_DIR_REQUIRED_CODE {
+                MTP_MODEL_DIR_REQUIRED_MESSAGE
+            } else {
+                MTP_INCOMPATIBLE_MESSAGE
+            };
+            return Self::bad_request_with_code(user_message, Some(code));
+        }
         if likely_engine_pool_model_memory_limit_error(&message) {
             return Self::service_unavailable_with_code(
                 MODEL_MEMORY_LIMIT_EXCEEDED_MESSAGE,
@@ -866,6 +1229,21 @@ impl AdminError {
             code: None,
         }
     }
+}
+
+fn mtp_error_code_from_message(message: &str) -> Option<&'static str> {
+    [
+        MTP_MODEL_DIR_REQUIRED_CODE,
+        MTP_BASE_MODEL_NOT_FOUND_CODE,
+        MTP_MODEL_NOT_FOUND_CODE,
+        MTP_UNSUPPORTED_ARCHITECTURE_CODE,
+        MTP_INVALID_MODEL_TYPE_CODE,
+        MTP_INVALID_CONFIG_CODE,
+        MTP_INVALID_DRAFT_TOKENS_CODE,
+        MTP_INCOMPATIBLE_CODE,
+    ]
+    .into_iter()
+    .find(|code| message.contains(code))
 }
 
 impl IntoResponse for AdminError {
@@ -1020,11 +1398,13 @@ mod tests {
             "model": "mlx-community/LongContext-4bit",
             "model_dir": "/models/long",
             "set_default": true,
-            "max_cache_cap": 65536
+            "max_cache_cap": 65536,
+            "pinned": true
         }))
         .expect("load request");
 
         assert_eq!(request.max_cache_cap, Some(65536));
+        assert_eq!(request.pinned, Some(true));
     }
 
     #[test]
@@ -1045,6 +1425,70 @@ mod tests {
         assert_eq!(request.sampling_defaults.top_p, Some(0.8));
         assert_eq!(request.sampling_defaults.top_k, Some(40));
         assert_eq!(request.sampling_defaults.repetition_penalty, Some(1.1));
+    }
+
+    #[test]
+    fn load_model_request_accepts_mtp_settings() {
+        let request: LoadModelRequest = serde_json::from_value(serde_json::json!({
+            "model": "mlx-community/Qwen3.5-4B-MLX-4bit",
+            "model_dir": "/models/qwen",
+            "mtp_model_dir": "/models/qwen-mtp",
+            "mtp_draft_tokens": 2
+        }))
+        .expect("load request");
+
+        assert_eq!(request.mtp_model_dir.as_deref(), Some("/models/qwen-mtp"));
+        assert_eq!(request.mtp_draft_tokens, Some(2));
+    }
+
+    #[test]
+    fn mtp_validation_accepts_compatible_qwen_pair_without_loading_weights() {
+        let root = unique_temp_dir("mtp-validation-compatible");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(&base, &qwen35_config("qwen3_5", 0, 2560));
+        write_config(&mtp, &qwen35_config("qwen3_5_mtp", 1, 2560));
+
+        let response = validate_mtp_pair(&base, &mtp, Some(2)).expect("validate");
+
+        assert!(response.compatible);
+        assert_eq!(response.reason_code, "ok");
+        assert_eq!(response.draft_tokens, Some(2));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mtp_validation_rejects_mismatched_qwen_pair_with_stable_reason_code() {
+        let root = unique_temp_dir("mtp-validation-mismatch");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(&base, &qwen35_config("qwen3_5", 0, 2560));
+        write_config(&mtp, &qwen35_config("qwen3_5_mtp", 1, 4096));
+
+        let response = validate_mtp_pair(&base, &mtp, None).expect("validate");
+
+        assert!(!response.compatible);
+        assert_eq!(response.reason_code, MTP_INCOMPATIBLE_CODE);
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mtp_validation_accepts_compatible_qwen_moe_pair_without_dense_intermediate_size() {
+        let root = unique_temp_dir("mtp-validation-moe-compatible");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(&base, &qwen35_moe_config("qwen3_5_moe", 0, 2048, 512));
+        write_config(&mtp, &qwen35_moe_config("qwen3_5_mtp", 1, 2048, 512));
+
+        let response = validate_mtp_pair(&base, &mtp, Some(2)).expect("validate");
+
+        assert!(response.compatible, "response={response:?}");
+        assert_eq!(response.reason_code, "ok");
+        assert_eq!(response.draft_tokens, Some(2));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
@@ -1150,6 +1594,87 @@ mod tests {
         assert_eq!(value["success"], false);
         assert_eq!(value["code"], "model_not_loaded");
         assert_eq!(value["error"], "Model is not loaded: missing");
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ironmlx-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
+
+    fn write_config(dir: &Path, config: &str) {
+        std::fs::create_dir_all(dir).expect("temp model dir");
+        std::fs::write(dir.join("config.json"), config).expect("write config");
+    }
+
+    fn qwen35_config(model_type: &str, mtp_layers: i32, hidden_size: i32) -> String {
+        format!(
+            r#"{{
+                "model_type": "{model_type}",
+                "text_config": {{
+                    "hidden_size": {hidden_size},
+                    "intermediate_size": 9728,
+                    "num_hidden_layers": 36,
+                    "num_attention_heads": 16,
+                    "num_key_value_heads": 8,
+                    "head_dim": 256,
+                    "vocab_size": 151936,
+                    "rms_norm_eps": 0.000001,
+                    "attention_bias": false,
+                    "tie_word_embeddings": false,
+                    "full_attention_interval": 4,
+                    "linear_num_value_heads": 16,
+                    "linear_num_key_heads": 16,
+                    "linear_key_head_dim": 128,
+                    "linear_value_head_dim": 128,
+                    "linear_conv_kernel_dim": 4,
+                    "mtp_num_hidden_layers": {mtp_layers},
+                    "max_position_embeddings": 262144
+                }}
+            }}"#
+        )
+    }
+
+    fn qwen35_moe_config(
+        model_type: &str,
+        mtp_layers: i32,
+        hidden_size: i32,
+        moe_intermediate_size: i32,
+    ) -> String {
+        format!(
+            r#"{{
+                "model_type": "{model_type}",
+                "text_config": {{
+                    "model_type": "qwen3_5_moe_text",
+                    "hidden_size": {hidden_size},
+                    "num_hidden_layers": 40,
+                    "num_attention_heads": 16,
+                    "num_key_value_heads": 2,
+                    "head_dim": 256,
+                    "vocab_size": 248320,
+                    "rms_norm_eps": 0.000001,
+                    "attention_bias": false,
+                    "tie_word_embeddings": false,
+                    "full_attention_interval": 4,
+                    "linear_num_value_heads": 32,
+                    "linear_num_key_heads": 16,
+                    "linear_key_head_dim": 128,
+                    "linear_value_head_dim": 128,
+                    "linear_conv_kernel_dim": 4,
+                    "num_experts": 256,
+                    "num_experts_per_tok": 8,
+                    "moe_intermediate_size": {moe_intermediate_size},
+                    "shared_expert_intermediate_size": {moe_intermediate_size},
+                    "mtp_num_hidden_layers": {mtp_layers},
+                    "max_position_embeddings": 262144
+                }}
+            }}"#
+        )
     }
 
     #[test]

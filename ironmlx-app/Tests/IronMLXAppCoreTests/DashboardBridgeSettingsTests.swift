@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WebKit
 
 @testable import IronMLXAppCore
 
@@ -120,4 +121,70 @@ import Testing
         config: explicitDefaultConfig,
         currentLoadedModelCount: 1
     ))
+}
+
+@MainActor
+@Test func dashboardBridgeRefreshesModelListWhenLoadedModelsNotificationArrives() async throws {
+    let root = try dashboardBridgeNotificationModelRoot(repoID: "mlx-community/Tiny-4bit")
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(loadedModels: ["mlx-community/Tiny-4bit"]))
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let backend = BackendProcessManager(
+        configStore: configStore,
+        scanner: LocalModelScanner(rootURL: root)
+    )
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: backend,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        notificationCenter: notificationCenter
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: bridge)
+    #expect(await webView.waitForScript(containing: "onLocalModelsScanned") == false)
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    #expect(await webView.waitForScript(containing: "onLocalModelsScanned"))
+}
+
+private func dashboardBridgeNotificationModelRoot(repoID: String) throws -> URL {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-dashboard-bridge-notification-\(UUID().uuidString)", isDirectory: true)
+    let snapshot = root
+        .appendingPathComponent("models", isDirectory: true)
+        .appendingPathComponent("models--" + repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
+        .appendingPathComponent("snapshots", isDirectory: true)
+        .appendingPathComponent("main", isDirectory: true)
+    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+    try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
+    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    return root
+}
+
+@MainActor
+private final class CapturingDashboardWebView: WKWebView {
+    private var scripts: [String] = []
+
+    override func evaluateJavaScript(
+        _ javaScriptString: String,
+        completionHandler: (@MainActor @Sendable (Any?, (any Error)?) -> Void)? = nil
+    ) {
+        scripts.append(javaScriptString)
+        completionHandler?(nil, nil)
+    }
+
+    func waitForScript(containing needle: String, timeoutSeconds: TimeInterval = 0.4) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if scripts.contains(where: { $0.contains(needle) }) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return false
+    }
 }

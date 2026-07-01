@@ -11,6 +11,7 @@ import Testing
       "auto_start": false,
       "default_model": "mlx-community/Qwen3-0.6B-4bit",
       "loaded_models": ["mlx-community/Other-4bit", "mlx-community/Qwen3-0.6B-4bit"],
+      "pinned_models": ["mlx-community/Qwen3-0.6B-4bit"],
       "language": "zh",
       "theme": "dark",
       "log_level": "debug",
@@ -35,6 +36,7 @@ import Testing
 
     #expect(config.defaultModel == "mlx-community/Qwen3-0.6B-4bit")
     #expect(config.loadedModels == ["mlx-community/Other-4bit", "mlx-community/Qwen3-0.6B-4bit"])
+    #expect(config.pinnedModels == ["mlx-community/Qwen3-0.6B-4bit"])
     #expect(config.restoredModelReferences == ["mlx-community/Qwen3-0.6B-4bit", "mlx-community/Other-4bit"])
     #expect(config.language == "zh")
     #expect(config.logLevel == "debug")
@@ -54,12 +56,35 @@ import Testing
     #expect(config.schedulerAutotuneReport == true)
 }
 
+@Test func appConfigPersistsPinnedModelsAndClearsManualUnload() {
+    var config = AppConfig(
+        loadedModels: [
+            "mlx-community/Alpha-4bit",
+            "mlx-community/Beta-4bit",
+        ],
+        pinnedModels: ["mlx-community/Alpha-4bit"]
+    )
+
+    #expect(config.pinnedModelReferences == ["mlx-community/Alpha-4bit"])
+    config.recordPinnedModel("mlx-community/Beta-4bit", pinned: true)
+    #expect(config.pinnedModelReferences == [
+        "mlx-community/Alpha-4bit",
+        "mlx-community/Beta-4bit",
+    ])
+
+    config.recordUnloadedModel("mlx-community/Alpha-4bit")
+
+    #expect(config.loadedModels == ["mlx-community/Beta-4bit"])
+    #expect(config.pinnedModelReferences == ["mlx-community/Beta-4bit"])
+}
+
 @Test func backendLoadModelRequestEncodesOptionalMaxCacheCap() throws {
     let request = BackendLoadModelRequest(
         model: "mlx-community/LongContext-4bit",
         modelDir: "/models/long",
         setDefault: true,
-        maxCacheCap: 65536
+        maxCacheCap: 65536,
+        pinned: true
     )
 
     let data = try JSONEncoder().encode(request)
@@ -69,6 +94,7 @@ import Testing
     #expect(object["model_dir"] as? String == "/models/long")
     #expect(object["set_default"] as? Bool == true)
     #expect(object["max_cache_cap"] as? Int == 65536)
+    #expect(object["pinned"] as? Bool == true)
 }
 
 @Test func backendLoadModelRequestEncodesIdleReloadAndSamplingDefaults() throws {
@@ -94,6 +120,24 @@ import Testing
     #expect(object["top_p"] as? Double == 0.8)
     #expect(object["top_k"] as? Int == 40)
     #expect(object["repetition_penalty"] as? Double == 1.1)
+}
+
+@Test func backendLoadedModelInfoDecodesPinnedState() throws {
+    let data = Data("""
+    {
+      "id": "mlx-community/Pinned-4bit",
+      "model": "mlx-community/Pinned-4bit",
+      "path": "/models/pinned",
+      "architecture": "llm",
+      "default": false,
+      "max_position_embeddings": 4096,
+      "pinned": true
+    }
+    """.utf8)
+
+    let info = try JSONDecoder().decode(BackendLoadedModelInfo.self, from: data)
+
+    #expect(info.pinned)
 }
 
 @Test func restoredModelReferencesExcludeUnloadedDefaultModel() {

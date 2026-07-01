@@ -12,6 +12,8 @@ public final class DashboardWindowController {
     ]
     public static let dashboardWindowCollectionBehavior: NSWindow.CollectionBehavior = [.fullScreenPrimary]
     public static let dashboardWindowTitleVisibility: NSWindow.TitleVisibility = .hidden
+    public static let dashboardVisibleActivationPolicy: NSApplication.ActivationPolicy = .regular
+    public static let dashboardHiddenActivationPolicy: NSApplication.ActivationPolicy = .accessory
 
     private let configStore: AppConfigStore
     private let backend: BackendProcessManager
@@ -28,6 +30,7 @@ public final class DashboardWindowController {
     public func show(route: DashboardInitialRoute = .status) {
         if let window {
             windowDelegate?.cancelPendingHideAfterFullScreenExit()
+            Self.applyVisibleActivationPolicy()
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             apply(route: route)
@@ -80,6 +83,9 @@ public final class DashboardWindowController {
             },
             hideWindow: { [weak window] in
                 window?.orderOut(nil)
+            },
+            restoreAccessoryActivation: {
+                Self.applyHiddenActivationPolicy()
             }
         )
         window.delegate = windowDelegate
@@ -93,8 +99,17 @@ public final class DashboardWindowController {
             webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
         }
 
+        Self.applyVisibleActivationPolicy()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private static func applyVisibleActivationPolicy() {
+        NSApp.setActivationPolicy(dashboardVisibleActivationPolicy)
+    }
+
+    private static func applyHiddenActivationPolicy() {
+        NSApp.setActivationPolicy(dashboardHiddenActivationPolicy)
     }
 
     public static func bootstrapScript(config: AppConfig, route: DashboardInitialRoute) throws -> String {
@@ -216,16 +231,19 @@ final class DashboardWindowDelegate: NSObject, NSWindowDelegate {
     private let isFullScreen: () -> Bool
     private let exitFullScreen: () -> Void
     private let hideWindow: () -> Void
+    private let restoreAccessoryActivation: () -> Void
     private var shouldHideAfterFullScreenExit = false
 
     init(
         isFullScreen: @escaping () -> Bool,
         exitFullScreen: @escaping () -> Void,
-        hideWindow: @escaping () -> Void
+        hideWindow: @escaping () -> Void,
+        restoreAccessoryActivation: @escaping () -> Void = {}
     ) {
         self.isFullScreen = isFullScreen
         self.exitFullScreen = exitFullScreen
         self.hideWindow = hideWindow
+        self.restoreAccessoryActivation = restoreAccessoryActivation
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -233,7 +251,7 @@ final class DashboardWindowDelegate: NSObject, NSWindowDelegate {
             shouldHideAfterFullScreenExit = true
             exitFullScreen()
         } else {
-            hideWindow()
+            hideDashboardWindow()
         }
         return false
     }
@@ -243,10 +261,15 @@ final class DashboardWindowDelegate: NSObject, NSWindowDelegate {
             return
         }
         shouldHideAfterFullScreenExit = false
-        hideWindow()
+        hideDashboardWindow()
     }
 
     func cancelPendingHideAfterFullScreenExit() {
         shouldHideAfterFullScreenExit = false
+    }
+
+    private func hideDashboardWindow() {
+        hideWindow()
+        restoreAccessoryActivation()
     }
 }

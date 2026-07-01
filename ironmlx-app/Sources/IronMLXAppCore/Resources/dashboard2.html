@@ -16,6 +16,7 @@
     --accent: #007aff;
     --green: #34c759;
     --green-bg: #34c759;
+    --warning: #ff9500;
     --sidebar-w: 200px;
     --radius: 10px;
   }
@@ -32,6 +33,7 @@
       --accent: #0a84ff;
       --green: #30d158;
       --green-bg: #30d158;
+      --warning: #ff9f0a;
     }
   }
 
@@ -650,6 +652,26 @@
     border: 1px solid #28a745;
   }
 
+  .badge-mtp {
+    margin-left: 4px;
+    background: rgba(0, 122, 255, 0.10);
+    color: var(--accent);
+    border: 1px solid rgba(0, 122, 255, 0.28);
+    vertical-align: middle;
+  }
+
+  .badge-mtp-enabled {
+    background: rgba(52, 199, 89, 0.12);
+    color: var(--green);
+    border-color: rgba(52, 199, 89, 0.34);
+  }
+
+  .badge-mtp-warning {
+    background: #fff3cd;
+    color: #856404;
+    border-color: #ffc107;
+  }
+
   @media (prefers-color-scheme: dark) {
     .badge-live {
       background: #0a3d1a;
@@ -1028,7 +1050,7 @@
   }
 
   .data-table th {
-    text-align: left;
+    text-align: center;
     font-weight: 500;
     font-size: 12px;
     color: var(--text-secondary);
@@ -1048,9 +1070,20 @@
   }
   .data-table th:first-child,
   .data-table td:first-child {
-    width: 32px !important;
-    min-width: 32px;
-    max-width: 32px;
+    width: 44px !important;
+    min-width: 44px;
+    max-width: 44px;
+    overflow: visible;
+    text-overflow: clip;
+    text-align: center;
+  }
+  .data-table th:nth-child(3),
+  .data-table td:nth-child(3),
+  .data-table th:nth-child(6),
+  .data-table td:nth-child(6),
+  .data-table th:nth-child(7),
+  .data-table td:nth-child(7) {
+    text-align: center;
   }
   .data-table th:last-child,
   .data-table td:last-child {
@@ -1089,6 +1122,14 @@
     align-items: center;
     gap: 8px;
     font-weight: 500;
+    min-width: 0;
+  }
+
+  .data-table .model-name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .status-dot {
@@ -1101,6 +1142,9 @@
 
   .status-dot.ready { background: var(--green); }
   .status-dot.loaded { background: var(--accent); }
+  .status-dot.model-ready { background: var(--accent); }
+  .status-dot.model-loaded { background: var(--green); }
+  .status-dot.model-busy { background: var(--warning); }
 
   .action-btn {
     font-size: 11px;
@@ -1123,6 +1167,29 @@
   }
   .action-unload:hover { opacity: 0.85; }
   .action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .action-load-select {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 80px;
+    min-width: 80px;
+    height: 24px;
+    padding: 3px 6px;
+    border: none;
+    border-radius: 4px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 500;
+    text-align: center;
+    text-align-last: center;
+    cursor: pointer;
+  }
+  .action-load-select:hover { opacity: 0.85; }
+  .action-load-select:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
@@ -1705,13 +1772,13 @@
         <div class="data-table-wrapper">
         <table class="data-table" id="model-table">
           <colgroup>
-            <col class="col-fixed" style="width:32px; min-width:32px; max-width:32px;">
-            <col style="width:30%;">
-            <col style="width:8%;">
+            <col class="col-select" style="width:44px; min-width:44px; max-width:44px;">
+            <col class="col-model" style="width:40%;">
+            <col class="col-type" style="width:6%;">
             <col style="width:10%;">
             <col style="width:10%;">
-            <col style="width:8%;">
-            <col style="width:7%;">
+            <col class="col-default" style="width:6%;">
+            <col class="col-params" style="width:6%;">
             <col class="col-fixed" style="width:110px; min-width:110px; max-width:110px;">
             <col class="col-fixed" style="width:48px; min-width:48px; max-width:48px;">
           </colgroup>
@@ -2674,6 +2741,25 @@
         <div class="modal-field"><label>TOP K</label><input type="text" placeholder="-1" id="modal-top-k"></div>
         <div class="modal-field"><label>REPEAT PENALTY</label><input type="text" placeholder="1.0" id="modal-repeat-penalty"></div>
       </div>
+      <div style="margin-top:14px;border-top:0.5px solid var(--border);padding-top:14px;">
+        <div class="modal-row" style="align-items:center;">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text);">
+            <input type="checkbox" id="modal-mtp-enabled" style="accent-color:var(--accent);">
+            <span data-i18n="mtp_acceleration">MTP Acceleration</span>
+          </label>
+          <span id="modal-mtp-status" style="font-size:12px;color:var(--text-secondary);"></span>
+        </div>
+        <div class="modal-row">
+          <div class="modal-field" style="flex:2;">
+            <label data-i18n="mtp_weights">MTP Weights</label>
+            <select id="modal-mtp-model"></select>
+          </div>
+          <div class="modal-field">
+            <label data-i18n="mtp_draft_tokens">Draft Tokens</label>
+            <input type="text" placeholder="Auto" id="modal-mtp-draft-tokens">
+          </div>
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn-cancel" onclick="closeParamsModal()" data-i18n="cancel">Cancel</button>
@@ -2734,12 +2820,19 @@
       active_kv_status: "Active KV Offload", active_kv_enabled: "On", active_kv_disabled: "Off", active_kv_parked: "parked {value}", active_kv_swaps: "swaps {out}/{in}", active_kv_errors: "errors {value}",
       gpu_memory: "GPU Memory", requests: "Requests", active_mem: "Active", peak_mem: "Peak", cache_mem: "Cache", stopped: "Stopped",
       models_subtitle: "Manage and download models.", model_manager: "Model Manager", model_download: "Model Download",
-      col_model: "Model \u25B2", col_type: "Type", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Ready",
+      col_model: "Model \u25B2", col_type: "Type", col_size: "Size", col_status: "Status", col_pinned: "Pinned", col_default: "Default", col_params: "Params", status_ready: "Not loaded",
       batch_delete: "Batch Delete", cancel: "Cancel", selected_count: "{n} selected",
       confirm_delete_single: 'Delete model "{name}"? This cannot be undone.',
       confirm_delete_batch: "Delete {n} selected models? This cannot be undone.",
       col_actions: "Actions", status_loaded: "Loaded", action_load: "Load", action_unload: "Unload",
-      action_loading: "Loading...", action_unloading: "Unloading...",
+      status_loading: "Loading...", status_unloading: "Unloading...",
+      action_loading: "Loading...", action_unloading: "Unloading...", action_load_model_only: "Model only", action_load_mtp: "Model + MTP",
+      pin_model_tooltip: "Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.",
+      unpin_model_tooltip: "Pinned loaded model: click to unpin and restore TTL and automatic release policies.",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP incompatible",
+      mtp_badge_available_title: "Compatible MTP weights are available.", mtp_badge_enabled_title: "This model is loaded with MTP acceleration.", mtp_badge_incompatible_title: "MTP weights were found but are not compatible with this model.",
+      mtp_acceleration: "MTP Acceleration", mtp_weights: "MTP Weights", mtp_draft_tokens: "Draft Tokens",
+      mtp_status_available: "MTP available", mtp_status_incompatible: "MTP weights are incompatible", mtp_status_unavailable: "No compatible MTP weights",
       model_exists_locally: "Model \"{name}\" already exists locally.",
       menu_start_needs_model: "No default model is set. Download a model and choose it as the default; IronMLX will start the backend automatically.",
       model_download_complete: "Model \"{name}\" downloaded successfully.",
@@ -2752,7 +2845,7 @@
       bench_preflight: "Checking benchmark readiness...",
       bench_confirm_title: "Run benchmark?",
       bench_confirm_point_1: "1. Benchmark will run in exclusive mode.",
-      bench_confirm_point_2: "2. If no requests are being processed, non-test models will be temporarily unloaded to free GPU memory.",
+      bench_confirm_point_2: "2. If no requests are being processed, unpinned non-test models will be temporarily unloaded to free GPU memory.",
       bench_confirm_point_3: "3. The test model will be loaded and used for this benchmark.",
       bench_confirm_point_4: "4. During the test, Dashboard will stay on the Benchmark page and model-management operations will be unavailable.",
       bench_confirm_point_5: "5. When the test ends, fails, or is cancelled, the previously loaded models and default model will be restored automatically.",
@@ -2797,6 +2890,14 @@
       err_max_loaded_models_reached: "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.",
       err_model_memory_limit_exceeded: "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.",
       err_total_memory_limit_exceeded: "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.",
+      err_mtp_model_dir_required: "Select local MTP weights before enabling MTP acceleration.",
+      err_mtp_base_model_not_found: "The base model directory does not exist. Re-download the model and try again.",
+      err_mtp_model_not_found: "The selected MTP weights are not available locally. Re-download the MTP weights or choose another one.",
+      err_mtp_unsupported_architecture: "MTP acceleration currently supports Qwen dense/MoE models only.",
+      err_mtp_invalid_model_type: "The selected weights are not valid Qwen MTP weights.",
+      err_mtp_invalid_config: "The MTP weights config is invalid. Re-download the weights or choose another one.",
+      err_mtp_invalid_draft_tokens: "MTP Draft Tokens must be a valid positive value.",
+      err_mtp_incompatible: "The selected MTP weights are not compatible with this base model. Choose matching MTP weights and try again.",
       err_memory_budget_exceeded: "Memory budget is insufficient. Current Max Sequences (Max Sequences={max_sequences}) and this model's MAX TOKENS ({max_cache_cap}) exceed the available budget. Lower Max Sequences in Settings, or open Models → Model Management → Parameters and lower MAX TOKENS for this model, then retry.",
       err_cache_init_failed: "Could not initialize the on-disk KV cache: {detail}",
       err_model_path_not_found: "Model not found locally: \"{name}\". Download it first from HuggingFace / ModelScope or check the repo ID.",
@@ -2884,6 +2985,7 @@
       params_reload_deferred: "Model parameters saved. The model is processing requests and will reload automatically when it becomes idle.",
       params_invalid_max_tokens: "Max Tokens must be a positive integer.",
       params_max_tokens_exceeds_context: "Max Tokens cannot exceed the model context window ({context}).",
+      params_invalid_mtp_draft_tokens: "MTP Draft Tokens must be a positive integer, or empty for Auto.",
       restart_confirm: "Some settings require a server restart to take effect. Restart now?",
       server_restarted: "Server has been restarted successfully.",
       server_restarted_model_loaded: "Server has been restarted and the default model is loaded.",
@@ -2990,12 +3092,19 @@
       active_kv_status: "Active KV 分层卸载", active_kv_enabled: "开启", active_kv_disabled: "关闭", active_kv_parked: "暂停 {value}", active_kv_swaps: "换出/换入 {out}/{in}", active_kv_errors: "错误 {value}",
       gpu_memory: "GPU 内存", requests: "请求数", active_mem: "活跃", peak_mem: "峰值", cache_mem: "缓存", stopped: "已停止",
       models_subtitle: "管理和下载模型。", model_manager: "模型管理", model_download: "模型下载",
-      col_model: "模型 \u25B2", col_type: "类型", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "就绪",
+      col_model: "模型 \u25B2", col_type: "类型", col_size: "大小", col_status: "状态", col_pinned: "固定", col_default: "默认", col_params: "参数", status_ready: "未加载",
       batch_delete: "批量删除", cancel: "取消", selected_count: "已选 {n} 个",
       confirm_delete_single: '确定删除模型 "{name}"？此操作不可恢复。',
       confirm_delete_batch: "确定删除 {n} 个模型？此操作不可恢复。",
       col_actions: "操作", status_loaded: "已加载", action_load: "加载", action_unload: "卸载",
-      action_loading: "加载中...", action_unloading: "卸载中...",
+      status_loading: "加载中...", status_unloading: "卸载中...",
+      action_loading: "加载中...", action_unloading: "卸载中...", action_load_model_only: "仅模型", action_load_mtp: "模型+MTP",
+      pin_model_tooltip: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
+      unpin_model_tooltip: "已固定加载：点击取消固定，恢复 TTL 和自动释放策略。",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP 不兼容",
+      mtp_badge_available_title: "已发现兼容的 MTP 权重。", mtp_badge_enabled_title: "该模型已使用 MTP 加速加载。", mtp_badge_incompatible_title: "已发现 MTP 权重，但与该模型不兼容。",
+      mtp_acceleration: "MTP 加速", mtp_weights: "MTP 权重", mtp_draft_tokens: "Draft Tokens",
+      mtp_status_available: "MTP 可用", mtp_status_incompatible: "MTP 权重不兼容", mtp_status_unavailable: "未发现兼容的 MTP 权重",
       model_exists_locally: "模型 \"{name}\" 已存在于本地。",
       menu_start_needs_model: "尚未设置默认模型。请先下载一个模型并设为默认模型，IronMLX 会自动启动后端。",
       model_download_complete: "模型 \"{name}\" 下载完成。",
@@ -3008,7 +3117,7 @@
       bench_preflight: "正在检查基准测试准备状态…",
       bench_confirm_title: "运行基准测试？",
       bench_confirm_point_1: "1. 基准测试将以独占方式运行。",
-      bench_confirm_point_2: "2. 如果当前没有处理中的 requests，会临时卸载非测试模型以释放 GPU 内存。",
+      bench_confirm_point_2: "2. 如果当前没有处理中的 requests，会临时卸载未固定的非测试模型以释放 GPU 内存。",
       bench_confirm_point_3: "3. 测试模型会被加载并用于本次 benchmark。",
       bench_confirm_point_4: "4. 测试期间 Dashboard 会保持在基准测试页面，不能切换到其他页面或执行模型管理操作。",
       bench_confirm_point_5: "5. 测试结束、失败或取消后，会自动恢复测试前已加载的模型和默认模型。",
@@ -3053,6 +3162,14 @@
       err_max_loaded_models_reached: "已达到最大同时加载模型数，无法加载新模型。请先卸载暂不使用的已加载模型，再重试。",
       err_model_memory_limit_exceeded: "已达到模型内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（仅模型）」/切换为自动后重试。",
       err_total_memory_limit_exceeded: "已达到总内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（总量）」/切换为自动后重试。",
+      err_mtp_model_dir_required: "请先选择本地 MTP 权重，再启用 MTP 加速。",
+      err_mtp_base_model_not_found: "基础模型目录不存在。请重新下载模型后再试。",
+      err_mtp_model_not_found: "选择的 MTP 权重在本地不可用。请重新下载 MTP 权重，或选择其他权重。",
+      err_mtp_unsupported_architecture: "当前 MTP 加速仅支持 Qwen dense/MoE 模型。",
+      err_mtp_invalid_model_type: "选择的权重不是有效的 Qwen MTP 权重。",
+      err_mtp_invalid_config: "MTP 权重的配置文件无效。请重新下载权重，或选择其他权重。",
+      err_mtp_invalid_draft_tokens: "MTP Draft Tokens 必须是有效的正数。",
+      err_mtp_incompatible: "选择的 MTP 权重与当前基础模型不兼容。请选择匹配的 MTP 权重后重试。",
       err_memory_budget_exceeded: "内存预算不足。当前最大序列数（最大序列数={max_sequences}）和该模型的 MAX TOKENS（{max_cache_cap}）会超过可用预算。请在【设置】中调低「最大序列数」，或打开【模型】→【模型管理】→【参数】的模型参数设置并调低 MAX TOKENS，然后重试。",
       err_cache_init_failed: "本地 KV 缓存初始化失败：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，请先从 HuggingFace 或 ModelScope 下载，或检查 Repo ID 是否正确。",
@@ -3140,6 +3257,7 @@
       params_reload_deferred: "模型参数已保存。该模型正在处理请求，将在空闲后自动重新加载。",
       params_invalid_max_tokens: "单请求最大 Token 数必须是正整数。",
       params_max_tokens_exceeds_context: "单请求最大 Token 数不能超过模型上下文窗口（{context}）。",
+      params_invalid_mtp_draft_tokens: "MTP Draft Tokens 必须是正整数；留空则使用自动值。",
       restart_confirm: "部分设置需要重启服务才能生效。是否立即重启？",
       server_restarted: "服务已重启成功。",
       server_restarted_model_loaded: "服务已重启，默认模型已加载。",
@@ -3246,12 +3364,19 @@
       active_kv_status: "Active KV 分層卸載", active_kv_enabled: "開啟", active_kv_disabled: "關閉", active_kv_parked: "暫停 {value}", active_kv_swaps: "換出/換入 {out}/{in}", active_kv_errors: "錯誤 {value}",
       gpu_memory: "GPU 記憶體", requests: "請求數", active_mem: "活躍", peak_mem: "峰值", cache_mem: "快取", stopped: "已停止",
       models_subtitle: "管理和下載模型。", model_manager: "模型管理", model_download: "模型下載",
-      col_model: "模型 \u25B2", col_type: "類型", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "就緒",
+      col_model: "模型 \u25B2", col_type: "類型", col_size: "大小", col_status: "狀態", col_pinned: "固定", col_default: "預設", col_params: "參數", status_ready: "未載入",
       batch_delete: "批量刪除", cancel: "取消", selected_count: "已選 {n} 個",
       confirm_delete_single: '確定刪除模型 "{name}"？此操作不可復原。',
       confirm_delete_batch: "確定刪除 {n} 個模型？此操作不可復原。",
       col_actions: "操作", status_loaded: "已載入", action_load: "載入", action_unload: "卸載",
-      action_loading: "載入中...", action_unloading: "卸載中...",
+      status_loading: "載入中...", status_unloading: "卸載中...",
+      action_loading: "載入中...", action_unloading: "卸載中...", action_load_model_only: "僅模型", action_load_mtp: "模型+MTP",
+      pin_model_tooltip: "固定載入：不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
+      unpin_model_tooltip: "已固定載入：點擊取消固定，恢復 TTL 和自動釋放策略。",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP 不相容",
+      mtp_badge_available_title: "已發現相容的 MTP 權重。", mtp_badge_enabled_title: "此模型已使用 MTP 加速載入。", mtp_badge_incompatible_title: "已發現 MTP 權重，但與此模型不相容。",
+      mtp_acceleration: "MTP 加速", mtp_weights: "MTP 權重", mtp_draft_tokens: "Draft Tokens",
+      mtp_status_available: "MTP 可用", mtp_status_incompatible: "MTP 權重不相容", mtp_status_unavailable: "未發現相容的 MTP 權重",
       model_exists_locally: "模型 \"{name}\" 已存在於本地。",
       menu_start_needs_model: "尚未設定預設模型。請先下載一個模型並設為預設模型，IronMLX 會自動啟動後端。",
       model_download_complete: "模型 \"{name}\" 下載完成。",
@@ -3297,6 +3422,14 @@
       err_max_loaded_models_reached: "已達到最大同時載入模型數，無法載入新模型。請先卸載暫不使用的已載入模型，再重試。",
       err_model_memory_limit_exceeded: "已達到模型記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（僅模型）」/切換為自動後重試。",
       err_total_memory_limit_exceeded: "已達到總記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（總量）」/切換為自動後重試。",
+      err_mtp_model_dir_required: "請先選擇本機 MTP 權重，再啟用 MTP 加速。",
+      err_mtp_base_model_not_found: "基礎模型目錄不存在。請重新下載模型後再試。",
+      err_mtp_model_not_found: "選擇的 MTP 權重在本機不可用。請重新下載 MTP 權重，或選擇其他權重。",
+      err_mtp_unsupported_architecture: "目前 MTP 加速僅支援 Qwen dense/MoE 模型。",
+      err_mtp_invalid_model_type: "選擇的權重不是有效的 Qwen MTP 權重。",
+      err_mtp_invalid_config: "MTP 權重的設定檔無效。請重新下載權重，或選擇其他權重。",
+      err_mtp_invalid_draft_tokens: "MTP Draft Tokens 必須是有效的正數。",
+      err_mtp_incompatible: "選擇的 MTP 權重與目前基礎模型不相容。請選擇匹配的 MTP 權重後重試。",
       err_memory_budget_exceeded: "記憶體預算不足。目前最大序列數（最大序列數={max_sequences}）和此模型的 MAX TOKENS（{max_cache_cap}）會超過可用預算。請在【設定】中調低「最大序列數」，或開啟【模型】→【模型管理】→【參數】的模型參數設定並調低 MAX TOKENS，然後重試。",
       err_cache_init_failed: "本地 KV 快取初始化失敗：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，請先從 HuggingFace 或 ModelScope 下載，或檢查 Repo ID 是否正確。",
@@ -3379,6 +3512,7 @@
       params_reload_deferred: "模型參數已儲存。該模型正在處理請求，將在空閒後自動重新載入。",
       params_invalid_max_tokens: "單請求最大 Token 數必須是正整數。",
       params_max_tokens_exceeds_context: "單請求最大 Token 數不能超過模型上下文視窗（{context}）。",
+      params_invalid_mtp_draft_tokens: "MTP Draft Tokens 必須是正整數；留空則使用自動值。",
       restart_confirm: "部分設定需要重啟服務才能生效。是否立即重啟？",
       server_restarted: "服務已重啟成功。",
       server_restarted_model_loaded: "服務已重啟，預設模型已載入。",
@@ -3485,12 +3619,19 @@
       active_kv_status: "Active KV オフロード", active_kv_enabled: "オン", active_kv_disabled: "オフ", active_kv_parked: "一時停止 {value}", active_kv_swaps: "退避/復元 {out}/{in}", active_kv_errors: "エラー {value}",
       gpu_memory: "GPU メモリ", requests: "リクエスト", active_mem: "アクティブ", peak_mem: "ピーク", cache_mem: "キャッシュ", stopped: "停止中",
       models_subtitle: "モデルの管理とダウンロード。", model_manager: "モデル管理", model_download: "モデルダウンロード",
-      col_model: "モデル \u25B2", col_type: "タイプ", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "準備完了",
+      col_model: "モデル \u25B2", col_type: "タイプ", col_size: "サイズ", col_status: "ステータス", col_pinned: "固定", col_default: "デフォルト", col_params: "パラメータ", status_ready: "未ロード",
       batch_delete: "一括削除", cancel: "キャンセル", selected_count: "{n} 件選択中",
       confirm_delete_single: 'モデル "{name}" を削除しますか？この操作は元に戻せません。',
       confirm_delete_batch: "{n} 件のモデルを削除しますか？この操作は元に戻せません。",
       col_actions: "アクション", status_loaded: "ロード済み", action_load: "ロード", action_unload: "アンロード",
-      action_loading: "ロード中...", action_unloading: "アンロード中...",
+      status_loading: "ロード中...", status_unloading: "アンロード中...",
+      action_loading: "ロード中...", action_unloading: "アンロード中...", action_load_model_only: "モデルのみ", action_load_mtp: "モデル+MTP",
+      pin_model_tooltip: "固定ロード：TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
+      unpin_model_tooltip: "固定ロード中：クリックすると固定を解除し、TTL と自動解放の対象に戻します。",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP 非互換",
+      mtp_badge_available_title: "互換性のある MTP ウェイトが見つかりました。", mtp_badge_enabled_title: "このモデルは MTP アクセラレーション付きでロードされています。", mtp_badge_incompatible_title: "MTP ウェイトは見つかりましたが、このモデルとは互換性がありません。",
+      mtp_acceleration: "MTP アクセラレーション", mtp_weights: "MTP ウェイト", mtp_draft_tokens: "Draft Tokens",
+      mtp_status_available: "MTP 利用可", mtp_status_incompatible: "MTP ウェイトは非互換です", mtp_status_unavailable: "互換性のある MTP ウェイトはありません",
       model_exists_locally: "モデル \"{name}\" はローカルに既に存在します。",
       menu_start_needs_model: "デフォルトモデルが設定されていません。モデルをダウンロードしてデフォルトに設定すると、IronMLX がバックエンドを自動起動します。",
       model_download_complete: "モデル \"{name}\" のダウンロードが完了しました。",
@@ -3536,6 +3677,14 @@
       err_max_loaded_models_reached: "最大同時ロードモデル数に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルを手動でアンロードしてから再試行してください。",
       err_model_memory_limit_exceeded: "モデルメモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Model Only)」を上げる/Auto にしてから再試行してください。",
       err_total_memory_limit_exceeded: "総メモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Total)」を上げる/Auto にしてから再試行してください。",
+      err_mtp_model_dir_required: "MTP アクセラレーションを有効にする前に、ローカル MTP ウェイトを選択してください。",
+      err_mtp_base_model_not_found: "ベースモデルのディレクトリが存在しません。モデルを再ダウンロードしてから再試行してください。",
+      err_mtp_model_not_found: "選択した MTP ウェイトはローカルで利用できません。MTP ウェイトを再ダウンロードするか、別のウェイトを選択してください。",
+      err_mtp_unsupported_architecture: "MTP アクセラレーションは現在 Qwen dense/MoE モデルのみ対応しています。",
+      err_mtp_invalid_model_type: "選択したウェイトは有効な Qwen MTP ウェイトではありません。",
+      err_mtp_invalid_config: "MTP ウェイトの config が無効です。再ダウンロードするか、別のウェイトを選択してください。",
+      err_mtp_invalid_draft_tokens: "MTP Draft Tokens は有効な正の値にしてください。",
+      err_mtp_incompatible: "選択した MTP ウェイトはこのベースモデルと互換性がありません。対応する MTP ウェイトを選択してから再試行してください。",
       err_memory_budget_exceeded: "メモリ予算が不足しています。現在の最大シーケンス数（最大シーケンス数={max_sequences}）とこのモデルの MAX TOKENS（{max_cache_cap}）では利用可能な予算を超えます。設定で最大シーケンス数を下げるか、モデル → モデル管理 → パラメータでこのモデルの MAX TOKENS を下げてから再試行してください。",
       err_cache_init_failed: "ローカル KV キャッシュの初期化に失敗しました：{detail}",
       err_model_path_not_found: "モデル \"{name}\" が見つかりません。HuggingFace または ModelScope からダウンロードするか、Repo ID を確認してください。",
@@ -3618,6 +3767,7 @@
       params_reload_deferred: "モデルパラメータを保存しました。モデルはリクエスト処理中のため、アイドル状態になった後に自動で再読み込みします。",
       params_invalid_max_tokens: "リクエスト最大 Token 数は正の整数にしてください。",
       params_max_tokens_exceeds_context: "リクエスト最大 Token 数はモデルのコンテキスト長（{context}）を超えられません。",
+      params_invalid_mtp_draft_tokens: "MTP Draft Tokens は正の整数にしてください。空欄の場合は自動値を使用します。",
       restart_confirm: "一部の設定はサーバーの再起動が必要です。今すぐ再起動しますか？",
       server_restarted: "サーバーが正常に再起動されました。",
       server_restarted_model_loaded: "サーバーが再起動され、デフォルトモデルが読み込まれました。",
@@ -3724,12 +3874,19 @@
       active_kv_status: "Active KV 오프로드", active_kv_enabled: "켜짐", active_kv_disabled: "꺼짐", active_kv_parked: "일시 중지 {value}", active_kv_swaps: "내보내기/복원 {out}/{in}", active_kv_errors: "오류 {value}",
       gpu_memory: "GPU 메모리", requests: "요청", active_mem: "활성", peak_mem: "피크", cache_mem: "캐시", stopped: "중지됨",
       models_subtitle: "모델 관리 및 다운로드.", model_manager: "모델 관리", model_download: "모델 다운로드",
-      col_model: "모델 \u25B2", col_type: "유형", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "준비됨",
+      col_model: "모델 \u25B2", col_type: "유형", col_size: "크기", col_status: "상태", col_pinned: "고정", col_default: "기본", col_params: "매개변수", status_ready: "로드 안 됨",
       batch_delete: "일괄 삭제", cancel: "취소", selected_count: "{n}개 선택됨",
       confirm_delete_single: '모델 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
       confirm_delete_batch: "{n}개의 모델을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
       col_actions: "작업", status_loaded: "로드됨", action_load: "로드", action_unload: "언로드",
-      action_loading: "로딩 중...", action_unloading: "언로드 중...",
+      status_loading: "로딩 중...", status_unloading: "언로드 중...",
+      action_loading: "로딩 중...", action_unloading: "언로드 중...", action_load_model_only: "모델만", action_load_mtp: "모델+MTP",
+      pin_model_tooltip: "고정 로드: TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
+      unpin_model_tooltip: "고정 로드됨: 클릭하면 고정을 해제하고 TTL 및 자동 해제 정책을 다시 적용합니다.",
+      mtp_badge_available: "MTP", mtp_badge_enabled: "MTP", mtp_badge_incompatible: "MTP 비호환",
+      mtp_badge_available_title: "호환되는 MTP 가중치를 찾았습니다.", mtp_badge_enabled_title: "이 모델은 MTP 가속으로 로드되었습니다.", mtp_badge_incompatible_title: "MTP 가중치를 찾았지만 이 모델과 호환되지 않습니다.",
+      mtp_acceleration: "MTP 가속", mtp_weights: "MTP 가중치", mtp_draft_tokens: "Draft Tokens",
+      mtp_status_available: "MTP 사용 가능", mtp_status_incompatible: "MTP 가중치가 호환되지 않습니다", mtp_status_unavailable: "호환되는 MTP 가중치 없음",
       model_exists_locally: "모델 \"{name}\"이(가) 이미 로컬에 존재합니다.",
       menu_start_needs_model: "기본 모델이 설정되어 있지 않습니다. 모델을 다운로드하고 기본값으로 선택하면 IronMLX가 백엔드를 자동으로 시작합니다.",
       model_download_complete: "모델 \"{name}\" 다운로드가 완료되었습니다.",
@@ -3775,6 +3932,14 @@
       err_max_loaded_models_reached: "최대 동시 로드 모델 수에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 먼저 언로드한 뒤 다시 시도하세요.",
       err_model_memory_limit_exceeded: "모델 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Model Only)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
       err_total_memory_limit_exceeded: "총 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Total)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
+      err_mtp_model_dir_required: "MTP 가속을 켜기 전에 로컬 MTP 가중치를 선택하세요.",
+      err_mtp_base_model_not_found: "기본 모델 디렉터리가 존재하지 않습니다. 모델을 다시 다운로드한 뒤 시도하세요.",
+      err_mtp_model_not_found: "선택한 MTP 가중치를 로컬에서 사용할 수 없습니다. MTP 가중치를 다시 다운로드하거나 다른 가중치를 선택하세요.",
+      err_mtp_unsupported_architecture: "MTP 가속은 현재 Qwen dense/MoE 모델만 지원합니다.",
+      err_mtp_invalid_model_type: "선택한 가중치는 유효한 Qwen MTP 가중치가 아닙니다.",
+      err_mtp_invalid_config: "MTP 가중치 config가 유효하지 않습니다. 다시 다운로드하거나 다른 가중치를 선택하세요.",
+      err_mtp_invalid_draft_tokens: "MTP Draft Tokens는 유효한 양수여야 합니다.",
+      err_mtp_incompatible: "선택한 MTP 가중치는 이 기본 모델과 호환되지 않습니다. 일치하는 MTP 가중치를 선택한 뒤 다시 시도하세요.",
       err_memory_budget_exceeded: "메모리 예산이 부족합니다. 현재 최대 시퀀스 수(최대 시퀀스 수={max_sequences})와 이 모델의 MAX TOKENS({max_cache_cap})가 사용 가능한 예산을 초과합니다. 설정에서 최대 시퀀스 수를 낮추거나 모델 → 모델 관리 → 파라미터에서 이 모델의 MAX TOKENS를 낮춘 뒤 다시 시도해 주세요.",
       err_cache_init_failed: "로컬 KV 캐시 초기화에 실패했습니다: {detail}",
       err_model_path_not_found: "모델 \"{name}\"을 찾을 수 없습니다. HuggingFace 또는 ModelScope에서 먼저 다운로드하거나 Repo ID를 확인하세요.",
@@ -3857,6 +4022,7 @@
       params_reload_deferred: "모델 매개변수가 저장되었습니다. 모델이 요청을 처리 중이므로 유휴 상태가 되면 자동으로 다시 로드됩니다.",
       params_invalid_max_tokens: "단일 요청 최대 Token 수는 양의 정수여야 합니다.",
       params_max_tokens_exceeds_context: "단일 요청 최대 Token 수는 모델 컨텍스트 창({context})을 초과할 수 없습니다.",
+      params_invalid_mtp_draft_tokens: "MTP Draft Tokens는 양의 정수여야 합니다. 비워 두면 자동값을 사용합니다.",
       restart_confirm: "일부 설정은 서버를 다시 시작해야 적용됩니다. 지금 다시 시작하시겠습니까?",
       server_restarted: "서버가 성공적으로 다시 시작되었습니다.",
       server_restarted_model_loaded: "서버가 다시 시작되었고 기본 모델이 로드되었습니다.",
@@ -4097,6 +4263,18 @@
 
   // ── Model Load / Unload ──
   window.__PENDING_PIN__ = null;
+  function escapeAttr(value) {
+    return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function pinTooltip(pinned) {
+    const dict = I18N[currentLang] || I18N.en;
+    if (pinned) {
+      return dict.unpin_model_tooltip || 'Pinned loaded model: click to unpin and restore TTL and automatic release policies.';
+    }
+    return dict.pin_model_tooltip || 'Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.';
+  }
+
   function togglePin(modelId, btn) {
     const isPinned = btn.classList.contains('pinned');
     const action = isPinned ? 'unpin' : 'pin';
@@ -4189,23 +4367,74 @@
     if (isLoaded) {
       unloadModel(modelId, btn);
     } else {
-      loadModel(modelId, btn);
+      loadModel(modelId, btn, false);
     }
   }
 
-  function loadModel(modelId, btn) {
-    const dict = I18N[currentLang] || I18N.en;
-    btn.disabled = true;
-    btn.textContent = dict.action_loading || 'Loading...';
-    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadModel) {
-      window.webkit.messageHandlers.loadModel.postMessage(modelId);
+  function markModelActionLoading(control, text) {
+    control.disabled = true;
+    if (control.tagName === 'SELECT') {
+      let loadingOption = control.querySelector('option[value="loading"]');
+      if (!loadingOption) {
+        loadingOption = document.createElement('option');
+        loadingOption.value = 'loading';
+        control.appendChild(loadingOption);
+      }
+      loadingOption.textContent = text;
+      control.value = 'loading';
+      return;
     }
+    control.textContent = text;
+  }
+
+  function updateModelStatusForAction(control, dotClass, text) {
+    const row = control && control.closest ? control.closest('tr') : null;
+    const statusCell = row ? row.querySelector('.model-status-cell') : null;
+    if (!statusCell) return;
+    const dot = statusCell.querySelector('.status-dot');
+    const label = statusCell.querySelector('.model-status-text');
+    if (dot) dot.className = 'status-dot ' + dotClass;
+    if (label) label.textContent = text;
+  }
+
+  function loadModel(modelId, btn, useMtp, mtpModelId) {
+    const dict = I18N[currentLang] || I18N.en;
+    markModelActionLoading(btn, dict.action_loading || 'Loading...');
+    updateModelStatusForAction(btn, 'model-busy', dict.status_loading || 'Loading...');
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadModel) {
+      window.webkit.messageHandlers.loadModel.postMessage(JSON.stringify({
+        model: modelId,
+        use_mtp: !!useMtp,
+        mtp_model_id: mtpModelId || ''
+      }));
+    }
+  }
+
+  function loadModelWithMtp(modelId, btn) {
+    const local = window.__LOCAL_MODELS__[modelId] || {};
+    const candidates = (local.mtp && local.mtp.candidates) || [];
+    const saved = window.__MODEL_PARAMS__[modelId] || {};
+    const selected = saved.mtp_model_id || (candidates[0] && candidates[0].id) || '';
+    loadModel(modelId, btn, true, selected);
+  }
+
+  function handleModelLoadChoice(modelId, control) {
+    if (control.value === 'normal') {
+      loadModel(modelId, control, false);
+      return;
+    }
+    if (control.value === 'mtp') {
+      loadModelWithMtp(modelId, control);
+      return;
+    }
+    control.value = '';
   }
 
   function unloadModel(modelId, btn) {
     const dict = I18N[currentLang] || I18N.en;
     btn.disabled = true;
     btn.textContent = dict.action_unloading || 'Unloading...';
+    updateModelStatusForAction(btn, 'model-busy', dict.status_unloading || 'Unloading...');
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.unloadModel) {
       window.webkit.messageHandlers.unloadModel.postMessage(modelId);
     }
@@ -4370,8 +4599,39 @@
     document.getElementById('modal-top-k').value = saved.top_k || generationDefaults.top_k || '';
     document.getElementById('modal-repeat-penalty').value = saved.repeat_penalty || generationDefaults.repetition_penalty || '';
     document.getElementById('modal-model-type').value = saved.model_type || 'auto';
+    renderMtpParams(local, saved);
     document.getElementById('model-params-modal').classList.add('open');
     applyI18n(currentLang);
+  }
+
+  function renderMtpParams(local, saved) {
+    const dict = I18N[currentLang] || I18N.en;
+    const mtp = local.mtp || {};
+    const candidates = mtp.candidates || [];
+    const select = document.getElementById('modal-mtp-model');
+    const checkbox = document.getElementById('modal-mtp-enabled');
+    const draft = document.getElementById('modal-mtp-draft-tokens');
+    const status = document.getElementById('modal-mtp-status');
+    select.innerHTML = '';
+    candidates.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.id;
+      select.appendChild(opt);
+    });
+    const hasCandidates = candidates.length > 0;
+    checkbox.disabled = !hasCandidates;
+    select.disabled = !hasCandidates;
+    draft.disabled = !hasCandidates;
+    checkbox.checked = !!saved.mtp_enabled && hasCandidates;
+    if (saved.mtp_model_id && hasCandidates) select.value = saved.mtp_model_id;
+    else if (hasCandidates) select.value = candidates[0].id;
+    draft.value = saved.mtp_draft_tokens || '';
+    status.textContent = hasCandidates
+      ? (dict.mtp_status_available || 'MTP available')
+      : (mtp.status === 'incompatible'
+        ? (dict.mtp_status_incompatible || 'MTP weights are incompatible')
+        : (dict.mtp_status_unavailable || 'No compatible MTP weights'));
   }
   function closeParamsModal() {
     document.getElementById('model-params-modal').classList.remove('open');
@@ -4397,6 +4657,11 @@
       );
       return;
     }
+    const mtpDraftTokensText = document.getElementById('modal-mtp-draft-tokens').value;
+    if (mtpDraftTokensText.trim() && !parsePositiveInteger(mtpDraftTokensText)) {
+      showToast(dict.params_invalid_mtp_draft_tokens || 'MTP Draft Tokens must be a positive integer, or empty for Auto.', 'warn');
+      return;
+    }
     const params = {
       model_id: modelId,
       alias: document.getElementById('modal-alias-input').value,
@@ -4406,7 +4671,10 @@
       temperature: document.getElementById('modal-temperature').value,
       top_p: document.getElementById('modal-top-p').value,
       top_k: document.getElementById('modal-top-k').value,
-      repeat_penalty: document.getElementById('modal-repeat-penalty').value
+      repeat_penalty: document.getElementById('modal-repeat-penalty').value,
+      mtp_enabled: document.getElementById('modal-mtp-enabled').checked,
+      mtp_model_id: document.getElementById('modal-mtp-model').value,
+      mtp_draft_tokens: mtpDraftTokensText
     };
     // Save locally
     window.__MODEL_PARAMS__[modelId] = params;
@@ -4792,6 +5060,37 @@
     return mb.toFixed(0) + ' MB';
   }
 
+  function renderMtpBadge(model) {
+    const dict = I18N[currentLang] || I18N.en;
+    const mtp = model.mtp || {};
+    if (mtp.enabled) {
+      return ' <span class="badge badge-mtp badge-mtp-enabled" title="' + (dict.mtp_badge_enabled_title || 'Loaded with MTP acceleration') + '">' + (dict.mtp_badge_enabled || 'MTP') + '</span>';
+    }
+    if (mtp.status === 'available') {
+      return ' <span class="badge badge-mtp" title="' + (dict.mtp_badge_available_title || 'Compatible MTP weights are available') + '">' + (dict.mtp_badge_available || 'MTP available') + '</span>';
+    }
+    if (mtp.status === 'incompatible') {
+      return ' <span class="badge badge-mtp badge-mtp-warning" title="' + (dict.mtp_badge_incompatible_title || 'MTP weights were found but are not compatible with this model') + '">' + (dict.mtp_badge_incompatible || 'MTP incompatible') + '</span>';
+    }
+    return '';
+  }
+
+  function renderModelLoadActions(model, escapedSq, escaped, actionClass, actionText, isLoaded) {
+    if (isLoaded) {
+      return '<button class="action-btn ' + actionClass + '" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '">' + actionText + '</button>';
+    }
+    const mtp = model.mtp || {};
+    const canUseMtp = mtp.status === 'available' && (mtp.candidates || []).length > 0;
+    const base = '<button class="action-btn action-load" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '">' + actionText + '</button>';
+    if (!canUseMtp) return base;
+    const dict = I18N[currentLang] || I18N.en;
+    return '<select class="action-load-select action-load" onchange="handleModelLoadChoice(\'' + escapedSq + '\', this)" data-model="' + escaped + '">'
+      + '<option value="" selected disabled hidden>' + actionText + '</option>'
+      + '<option value="normal">' + (dict.action_load_model_only || 'Load model only') + '</option>'
+      + '<option value="mtp">' + (dict.action_load_mtp || 'Load + MTP') + '</option>'
+      + '</select>';
+  }
+
   // Called from Rust with local model scan results
   function onLocalModelsScanned(jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
@@ -4803,13 +5102,13 @@
     const tbody = document.querySelector('#tab-models-manage tbody');
     if (tbody && models.length > 0) {
       tbody.innerHTML = '';
-      models.forEach(m => {
+      models.filter(m => (m.type || 'llm') !== 'mtp').forEach(m => {
         const displayName = m.id;
         const isDefault = (m.id === defaultModel);
         const isLoaded = m.loaded;
         const escaped = m.id.replace(/"/g, '&quot;');
         const escapedSq = m.id.replace(/'/g, "\\'");
-        const statusDot = isLoaded ? 'loaded' : 'ready';
+        const statusDot = isLoaded ? 'model-loaded' : 'model-ready';
         const statusText = isLoaded ? (dict.status_loaded || 'Loaded') : (dict.status_ready || 'Ready');
         const actionClass = isLoaded ? 'action-unload' : 'action-load';
         const actionText = isLoaded ? (dict.action_unload || 'Unload') : (dict.action_load || 'Load');
@@ -4818,15 +5117,15 @@
         const hfIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.8;" title="HuggingFace"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>';
         var sourceIcon = m.source === 'ms' ? msIcon : hfIcon;
         tr.innerHTML = '<td><input type="checkbox" class="model-checkbox" value="' + escaped + '" onchange="updateModelSelection()" style="accent-color:var(--accent);"></td>'
-          + '<td><div class="model-name">' + sourceIcon + ' ' + displayName
-          + (isLoaded ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '" title="' + (m.pinned ? 'Unpin' : 'Pin') + '" style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
+          + '<td><div class="model-name">' + sourceIcon + '<span class="model-name-text">' + displayName + '</span>' + renderMtpBadge(m)
+          + (isLoaded ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '" title="' + escapeAttr(pinTooltip(m.pinned)) + '" style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
           + '</div></td>'
           + '<td>' + (m.type || 'llm') + '</td>'
           + '<td>' + formatSize(m.size_mb) + '</td>'
-          + '<td><span class="status-dot ' + statusDot + '"></span> <span>' + statusText + '</span></td>'
+          + '<td class="model-status-cell"><span class="status-dot ' + statusDot + '"></span> <span class="model-status-text">' + statusText + '</span></td>'
           + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
           + '<td><button class="icon-btn" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
-          + '<td><button class="action-btn ' + actionClass + '" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '">' + actionText + '</button></td>'
+          + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
           + '<td><button class="icon-btn" onclick="deleteSingleModel(\'' + escapedSq + '\')" title="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="#e53e3e" stroke-width="1.5" stroke-linecap="round"/></svg></button></td>';
         tbody.appendChild(tr);
       });
@@ -6668,7 +6967,7 @@
           window.__PENDING_PIN__ = null;
           const nowPinned = data.pinned;
           pp.btn.classList.toggle('pinned', nowPinned);
-          pp.btn.title = nowPinned ? 'Unpin' : 'Pin';
+          pp.btn.title = pinTooltip(nowPinned);
           pp.btn.style.opacity = nowPinned ? '1' : '0.4';
         }
       }

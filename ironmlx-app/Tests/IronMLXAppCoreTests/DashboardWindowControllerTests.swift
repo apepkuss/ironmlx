@@ -12,6 +12,12 @@ import Testing
 }
 
 @MainActor
+@Test func dashboardWindowUsesRegularActivationPolicyWhileVisibleAndAccessoryWhenHidden() {
+    #expect(DashboardWindowController.dashboardVisibleActivationPolicy == .regular)
+    #expect(DashboardWindowController.dashboardHiddenActivationPolicy == .accessory)
+}
+
+@MainActor
 @Test func dashboardWindowDelegateHidesRegularWindowInsteadOfClosing() {
     var hideWindowCalls = 0
     var exitFullScreenCalls = 0
@@ -33,14 +39,38 @@ import Testing
 }
 
 @MainActor
+@Test func dashboardWindowDelegateRestoresAccessoryActivationWhenHidingRegularWindow() {
+    var hideWindowCalls = 0
+    var restoreAccessoryActivationCalls = 0
+    let delegate = DashboardWindowDelegate(
+        isFullScreen: { false },
+        exitFullScreen: {},
+        hideWindow: { hideWindowCalls += 1 },
+        restoreAccessoryActivation: { restoreAccessoryActivationCalls += 1 }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+        styleMask: DashboardWindowController.dashboardWindowStyleMask,
+        backing: .buffered,
+        defer: true
+    )
+
+    #expect(!delegate.windowShouldClose(window))
+    #expect(hideWindowCalls == 1)
+    #expect(restoreAccessoryActivationCalls == 1)
+}
+
+@MainActor
 @Test func dashboardWindowDelegateExitsFullScreenBeforeHiding() {
     var isFullScreen = true
     var hideWindowCalls = 0
     var exitFullScreenCalls = 0
+    var restoreAccessoryActivationCalls = 0
     let delegate = DashboardWindowDelegate(
         isFullScreen: { isFullScreen },
         exitFullScreen: { exitFullScreenCalls += 1 },
-        hideWindow: { hideWindowCalls += 1 }
+        hideWindow: { hideWindowCalls += 1 },
+        restoreAccessoryActivation: { restoreAccessoryActivationCalls += 1 }
     )
     let window = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
@@ -52,12 +82,14 @@ import Testing
     #expect(!delegate.windowShouldClose(window))
     #expect(exitFullScreenCalls == 1)
     #expect(hideWindowCalls == 0)
+    #expect(restoreAccessoryActivationCalls == 0)
 
     isFullScreen = false
     delegate.windowDidExitFullScreen(
         Notification(name: NSWindow.didExitFullScreenNotification, object: window)
     )
     #expect(hideWindowCalls == 1)
+    #expect(restoreAccessoryActivationCalls == 1)
 }
 
 @MainActor
