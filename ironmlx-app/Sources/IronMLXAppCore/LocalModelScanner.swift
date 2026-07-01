@@ -85,6 +85,7 @@ private extension LocalModel {
 
 private struct MtpCompatibilitySignature: Equatable {
     var supportsMtp: Bool
+    var family: String
     var hiddenSize: Int?
     var intermediateSize: Int?
     var moeIntermediateSize: Int?
@@ -105,9 +106,12 @@ private struct MtpCompatibilitySignature: Equatable {
     var linearKeyHeadDim: Int
     var linearValueHeadDim: Int
     var linearConvKernelDim: Int
+    var hasSlidingAttention: Bool
+    var hasFullAttention: Bool
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.hiddenSize == rhs.hiddenSize
+        lhs.family == rhs.family
+            && lhs.hiddenSize == rhs.hiddenSize
             && lhs.intermediateSize == rhs.intermediateSize
             && lhs.moeIntermediateSize == rhs.moeIntermediateSize
             && lhs.sharedExpertIntermediateSize == rhs.sharedExpertIntermediateSize
@@ -127,6 +131,37 @@ private struct MtpCompatibilitySignature: Equatable {
             && lhs.linearKeyHeadDim == rhs.linearKeyHeadDim
             && lhs.linearValueHeadDim == rhs.linearValueHeadDim
             && lhs.linearConvKernelDim == rhs.linearConvKernelDim
+            && lhs.hasSlidingAttention == rhs.hasSlidingAttention
+            && lhs.hasFullAttention == rhs.hasFullAttention
+    }
+
+    func isMtpCandidateCompatible(withBase base: Self) -> Bool {
+        guard base.supportsMtp, !supportsMtp else {
+            return false
+        }
+        return family == base.family
+            && hiddenSize == base.hiddenSize
+            && intermediateSize == base.intermediateSize
+            && moeIntermediateSize == base.moeIntermediateSize
+            && sharedExpertIntermediateSize == base.sharedExpertIntermediateSize
+            && numExperts == base.numExperts
+            && numExpertsPerTok == base.numExpertsPerTok
+            && normTopkProb == base.normTopkProb
+            && numAttentionHeads == base.numAttentionHeads
+            && numKeyValueHeads == base.numKeyValueHeads
+            && headDim == base.headDim
+            && vocabSize == base.vocabSize
+            && rmsNormEps == base.rmsNormEps
+            && attentionBias == base.attentionBias
+            && tieWordEmbeddings == base.tieWordEmbeddings
+            && fullAttentionInterval == base.fullAttentionInterval
+            && linearNumValueHeads == base.linearNumValueHeads
+            && linearNumKeyHeads == base.linearNumKeyHeads
+            && linearKeyHeadDim == base.linearKeyHeadDim
+            && linearValueHeadDim == base.linearValueHeadDim
+            && linearConvKernelDim == base.linearConvKernelDim
+            && (!base.hasSlidingAttention || hasSlidingAttention)
+            && (!base.hasFullAttention || hasFullAttention)
     }
 }
 
@@ -231,9 +266,9 @@ public struct LocalModelScanner: Sendable {
             .filter { $0.kind == .base }
             .map { artifact in
                 var model = artifact.model
-                if artifact.signature?.supportsMtp == true {
+                if let baseSignature = artifact.signature, baseSignature.supportsMtp {
                     let compatible = mtpArtifacts
-                        .filter { $0.signature == artifact.signature }
+                        .filter { $0.signature?.isMtpCandidateCompatible(withBase: baseSignature) == true }
                         .map(\.mtpCandidate)
                         .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
                     let incompatible = mtpCandidates
@@ -346,18 +381,32 @@ public struct LocalModelScanner: Sendable {
         guard let modelType = config?["model_type"] as? String else {
             return .base
         }
-        return modelType == "qwen3_5_mtp" ? .mtp : .base
+        switch modelType {
+        case "qwen3_5_mtp", "gemma4_assistant", "gemma4_unified_assistant":
+            return .mtp
+        default:
+            return .base
+        }
     }
 
     private func mtpCompatibilitySignature(_ config: [String: Any]?) -> MtpCompatibilitySignature? {
         guard let config,
               let modelType = config["model_type"] as? String,
-              modelType == "qwen3_5" || modelType == "qwen3_5_moe" || modelType == "qwen3_5_mtp",
               let text = config["text_config"] as? [String: Any] else {
+            return nil
+        }
+        if modelType == "gemma4"
+            || modelType == "gemma4_unified"
+            || modelType == "gemma4_assistant"
+            || modelType == "gemma4_unified_assistant" {
+            return gemma4MtpCompatibilitySignature(config, modelType: modelType, text: text)
+        }
+        guard modelType == "qwen3_5" || modelType == "qwen3_5_moe" || modelType == "qwen3_5_mtp" else {
             return nil
         }
         return MtpCompatibilitySignature(
             supportsMtp: modelType == "qwen3_5" || modelType == "qwen3_5_moe",
+            family: qwenMtpFamily(modelType: modelType, text: text),
             hiddenSize: intValue(text["hidden_size"]),
             intermediateSize: intValue(text["intermediate_size"]),
             moeIntermediateSize: intValue(text["moe_intermediate_size"]),
@@ -377,7 +426,65 @@ public struct LocalModelScanner: Sendable {
             linearNumKeyHeads: intValue(text["linear_num_key_heads"]) ?? 0,
             linearKeyHeadDim: intValue(text["linear_key_head_dim"]) ?? 0,
             linearValueHeadDim: intValue(text["linear_value_head_dim"]) ?? 0,
-            linearConvKernelDim: intValue(text["linear_conv_kernel_dim"]) ?? 0
+            linearConvKernelDim: intValue(text["linear_conv_kernel_dim"]) ?? 0,
+            hasSlidingAttention: false,
+            hasFullAttention: false
+        )
+    }
+
+    private func qwenMtpFamily(modelType: String, text: [String: Any]) -> String {
+        if modelType == "qwen3_5_moe" || intValue(text["num_experts"]) != nil {
+            return "qwen3_5_moe"
+        }
+        return "qwen3_5"
+    }
+
+    private func gemma4MtpCompatibilitySignature(
+        _ config: [String: Any],
+        modelType: String,
+        text: [String: Any]
+    ) -> MtpCompatibilitySignature? {
+        let isAssistant = modelType == "gemma4_assistant" || modelType == "gemma4_unified_assistant"
+        if isAssistant {
+            guard intValue(text["num_kv_shared_layers"]) == intValue(text["num_hidden_layers"]) else {
+                return nil
+            }
+        }
+        let family: String
+        switch modelType {
+        case "gemma4", "gemma4_assistant":
+            family = "gemma4"
+        case "gemma4_unified", "gemma4_unified_assistant":
+            family = "gemma4_unified"
+        default:
+            return nil
+        }
+        let layerTypes = stringArray(text["layer_types"])
+        return MtpCompatibilitySignature(
+            supportsMtp: !isAssistant,
+            family: family,
+            hiddenSize: isAssistant ? intValue(config["backbone_hidden_size"]) : intValue(text["hidden_size"]),
+            intermediateSize: nil,
+            moeIntermediateSize: nil,
+            sharedExpertIntermediateSize: nil,
+            numExperts: nil,
+            numExpertsPerTok: nil,
+            normTopkProb: true,
+            numAttentionHeads: nil,
+            numKeyValueHeads: nil,
+            headDim: nil,
+            vocabSize: intValue(text["vocab_size"]),
+            rmsNormEps: nil,
+            attentionBias: false,
+            tieWordEmbeddings: boolValue(text["tie_word_embeddings"]) ?? boolValue(config["tie_word_embeddings"]) ?? true,
+            fullAttentionInterval: nil,
+            linearNumValueHeads: 0,
+            linearNumKeyHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelDim: 0,
+            hasSlidingAttention: layerTypes.contains("sliding_attention"),
+            hasFullAttention: layerTypes.contains("full_attention")
         )
     }
 
@@ -469,6 +576,10 @@ public struct LocalModelScanner: Sendable {
             }
         }
         return nil
+    }
+
+    private func stringArray(_ value: Any?) -> [String] {
+        value as? [String] ?? []
     }
 
     private func positiveDouble(_ value: Any?) -> Double? {

@@ -145,6 +145,27 @@ import Testing
     #expect(model.mtp?.candidates.map(\.id) == ["mlx-community/Qwen3.6-35B-A3B-MTP-4bit"])
 }
 
+@Test func localModelScannerAttachesCompatibleGemma4AssistantWeights() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/gemma-4-e4b-it-4bit",
+        configJSON: gemma4BaseConfig(modelType: "gemma4", textModelType: "gemma4_text", hiddenSize: 2560)
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/gemma-4-E4B-it-qat-assistant-4bit",
+        configJSON: gemma4AssistantConfig(modelType: "gemma4_assistant", textModelType: "gemma4_text", backboneHiddenSize: 2560)
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(model.id == "mlx-community/gemma-4-e4b-it-4bit")
+    #expect(model.type == "llm")
+    #expect(model.mtp?.status == "available")
+    #expect(model.mtp?.candidates.map(\.id) == ["mlx-community/gemma-4-E4B-it-qat-assistant-4bit"])
+}
+
 @Test func localModelScannerMarksQwenModelIncompatibleWhenOnlyMismatchedMtpExists() throws {
     let root = try temporaryDirectory()
     _ = try writeSnapshot(
@@ -253,6 +274,85 @@ private func qwen35MoeConfig(
         "shared_expert_intermediate_size": \(moeIntermediateSize),
         "mtp_num_hidden_layers": \(mtpLayers),
         "max_position_embeddings": 262144
+      }
+    }
+    """
+}
+
+private func gemma4BaseConfig(
+    modelType: String,
+    textModelType: String,
+    hiddenSize: Int
+) -> String {
+    """
+    {
+      "model_type": "\(modelType)",
+      "text_config": {
+        "model_type": "\(textModelType)",
+        "hidden_size": \(hiddenSize),
+        "num_hidden_layers": 42,
+        "intermediate_size": 10240,
+        "num_attention_heads": 8,
+        "head_dim": 256,
+        "global_head_dim": 512,
+        "vocab_size": 262144,
+        "vocab_size_per_layer_input": 262144,
+        "num_key_value_heads": 2,
+        "num_kv_shared_layers": 18,
+        "hidden_size_per_layer_input": 256,
+        "layer_types": [
+          "sliding_attention", "sliding_attention", "sliding_attention",
+          "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention",
+          "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention",
+          "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention",
+          "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention",
+          "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention",
+          "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention",
+          "sliding_attention", "sliding_attention", "full_attention"
+        ],
+        "tie_word_embeddings": true,
+        "max_position_embeddings": 131072
+      }
+    }
+    """
+}
+
+private func gemma4AssistantConfig(
+    modelType: String,
+    textModelType: String,
+    backboneHiddenSize: Int
+) -> String {
+    """
+    {
+      "model_type": "\(modelType)",
+      "backbone_hidden_size": \(backboneHiddenSize),
+      "use_ordered_embeddings": true,
+      "num_centroids": 2048,
+      "centroid_intermediate_top_k": 32,
+      "tie_word_embeddings": true,
+      "text_config": {
+        "model_type": "\(textModelType)",
+        "hidden_size": 256,
+        "num_hidden_layers": 4,
+        "intermediate_size": 2048,
+        "num_attention_heads": 4,
+        "head_dim": 256,
+        "global_head_dim": 512,
+        "vocab_size": 262144,
+        "num_key_value_heads": 2,
+        "num_kv_shared_layers": 4,
+        "hidden_size_per_layer_input": 0,
+        "layer_types": [
+          "sliding_attention", "sliding_attention",
+          "sliding_attention", "full_attention"
+        ],
+        "tie_word_embeddings": true
       }
     }
     """

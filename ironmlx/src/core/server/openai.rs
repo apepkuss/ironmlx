@@ -29,8 +29,9 @@ use crate::core::server::chat_format::{ChatMessage, Content, ContentPart};
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::core::server::vision::{expand_decoded_messages, DecodedMessage, DecodedPart};
 use crate::core::server::VisionInputConfig;
+use crate::core::speculative::MtpSpeculativeConfig;
 
-use super::{AppState, SamplingDefaults};
+use super::{AppState, Gemma4DrafterAppState, SamplingDefaults};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -421,6 +422,272 @@ where
             serve_via_gs_unary(state, request, model_label, prompt_tokens).await
         }
     }
+}
+
+pub(crate) async fn gemma4_drafter_chat_completions(
+    State(state): State<Gemma4DrafterAppState>,
+    Json(req): Json<ChatRequest>,
+) -> Response {
+    chat_completions_with_gemma4_drafter_state(state, req).await
+}
+
+pub(crate) async fn chat_completions_with_gemma4_drafter_state(
+    state: Gemma4DrafterAppState,
+    req: ChatRequest,
+) -> Response {
+    let stream = req.stream;
+    let max_tokens = req.max_tokens;
+    let model_label = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.base.model_id.clone());
+    let sampler = build_sampler(&req, state.base.sampling_defaults);
+    let cfg = match MtpSpeculativeConfig::new(state.mtp_draft_tokens, sampler) {
+        Ok(cfg) => cfg,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+    };
+    let chat_template_kwargs = req.chat_template_kwargs;
+    let http_client = reqwest::Client::new();
+
+    let (image_token_id, spatial_merge_size) =
+        crate::core::server::vision::derive_image_token_and_merge(
+            &state.base.vision_input,
+            &state.base.tokenizer,
+        );
+    let (flat_messages, pixel_values, image_grid_thw) =
+        match expand_image_parts_in_messages(req.messages, &http_client, &state.base.vision_input)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("image decode/preprocess: {e}"),
+                )
+                    .into_response();
+            }
+        };
+    let image_grid_thw_opt = if image_grid_thw.is_empty() {
+        None
+    } else {
+        Some(image_grid_thw)
+    };
+    let prompt_ids = match render_and_encode(
+        &state.base.tokenizer,
+        &flat_messages,
+        chat_template_kwargs.as_ref(),
+    ) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("chat template / tokenize: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let prompt_len = prompt_ids.len();
+    let total_tokens = prompt_len.saturating_add(max_tokens);
+    if total_tokens > state.base.effective_cap_max {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "request too large: prompt_len + max_tokens = {total_tokens}, max = {}",
+                state.base.effective_cap_max
+            ),
+        )
+            .into_response();
+    }
+    let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
+    let stop_token_ids = state.base.tokenizer.eos_token_ids().to_vec();
+    let prompt_tokens = prompt_len as u32;
+    let request = GenerateRequest {
+        prompt_ids,
+        max_new_tokens: max_tokens,
+        sampler,
+        stop_token_ids,
+        prefill_chunk_size: scheduler_config.prefill_chunk_size,
+        decode_cadence_mid_chunk_cap: scheduler_config.decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits: state.base.kv_cache_turboquant_bits,
+        pixel_values,
+        image_grid_thw: image_grid_thw_opt,
+        image_spatial_merge_size: spatial_merge_size,
+        image_token_id,
+    };
+
+    if stream {
+        serve_via_gemma4_drafter_stream(state, request, cfg, model_label).await
+    } else {
+        serve_via_gemma4_drafter_unary(state, request, cfg, model_label, prompt_tokens).await
+    }
+}
+
+async fn serve_via_gemma4_drafter_stream(
+    state: Gemma4DrafterAppState,
+    request: GenerateRequest,
+    cfg: MtpSpeculativeConfig,
+    model_id: String,
+) -> Response {
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let id = gen_id();
+    let id_for_task = id.clone();
+    let model_id_for_task = model_id.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let model_guard = state.base.model.blocking_lock();
+        let drafter_guard = state.drafter.blocking_lock();
+        let tokenizer = &*state.base.tokenizer;
+        let stream_result = crate::models::gemma4::Gemma4DrafterGenerationStream::new(
+            &model_guard,
+            &drafter_guard,
+            tokenizer,
+            request,
+            cfg,
+        );
+        let mut stream = match stream_result {
+            Ok(s) => {
+                state.health_counters.record_prefill();
+                s
+            }
+            Err(e) => {
+                let _ = tx.blocking_send(Ok(format_sse_error(&e)));
+                return;
+            }
+        };
+
+        let role_chunk = ChunkResponse {
+            id: id_for_task.clone(),
+            object: "chat.completion.chunk",
+            created: now_unix(),
+            model: model_id_for_task.clone(),
+            choices: vec![Choice {
+                index: 0,
+                delta: DeltaRole {
+                    role: "assistant",
+                    content: String::new(),
+                },
+                finish_reason: None,
+            }],
+        };
+        if tx.blocking_send(Ok(format_sse_data(&role_chunk))).is_err() {
+            state.health_counters.record_stats(stream.stats());
+            return;
+        }
+
+        loop {
+            match stream.next_token() {
+                Ok(Some(ev)) => {
+                    let chunk = ChunkResponse {
+                        id: id_for_task.clone(),
+                        object: "chat.completion.chunk",
+                        created: now_unix(),
+                        model: model_id_for_task.clone(),
+                        choices: vec![Choice {
+                            index: 0,
+                            delta: DeltaContent { content: &ev.text },
+                            finish_reason: ev.finish_reason,
+                        }],
+                    };
+                    if tx.blocking_send(Ok(format_sse_data(&chunk))).is_err() {
+                        state.health_counters.record_stats(stream.stats());
+                        return;
+                    }
+                    if ev.finish_reason.is_some() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = tx.blocking_send(Ok(format_sse_error(&e)));
+                    break;
+                }
+            }
+        }
+        state.health_counters.record_stats(stream.stats());
+        let _ = tx.blocking_send(Ok(Bytes::from_static(b"data: [DONE]\n\n")));
+    });
+
+    let stream = ReceiverStream::new(rx);
+    let body = Body::from_stream(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(body)
+        .unwrap()
+}
+
+async fn serve_via_gemma4_drafter_unary(
+    state: Gemma4DrafterAppState,
+    request: GenerateRequest,
+    cfg: MtpSpeculativeConfig,
+    model_id: String,
+    prompt_tokens: u32,
+) -> Response {
+    let id = gen_id();
+    let result = tokio::task::spawn_blocking(
+        move || -> std::result::Result<(String, &'static str, u32), String> {
+            let model_guard = state.base.model.blocking_lock();
+            let drafter_guard = state.drafter.blocking_lock();
+            let tokenizer = &*state.base.tokenizer;
+            let mut stream = crate::models::gemma4::Gemma4DrafterGenerationStream::new(
+                &model_guard,
+                &drafter_guard,
+                tokenizer,
+                request,
+                cfg,
+            )
+            .map_err(|e| e.to_string())?;
+            state.health_counters.record_prefill();
+            let mut buf = String::new();
+            let mut finish: &'static str = "stop";
+            let mut completion_tokens: u32 = 0;
+            while let Some(ev) = stream.next_token().map_err(|e| e.to_string())? {
+                buf.push_str(&ev.text);
+                completion_tokens += 1;
+                if let Some(reason) = ev.finish_reason {
+                    finish = reason;
+                    break;
+                }
+            }
+            state.health_counters.record_stats(stream.stats());
+            Ok((buf, finish, completion_tokens))
+        },
+    )
+    .await;
+
+    let (content, finish, completion_tokens) = match result {
+        Ok(Ok(t)) => t,
+        Ok(Err(msg)) => return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("join error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let resp = CompletionResponse {
+        id,
+        object: "chat.completion",
+        created: now_unix(),
+        model: model_id,
+        choices: vec![CompletionChoice {
+            index: 0,
+            message: CompletionMessage {
+                role: "assistant",
+                content,
+            },
+            finish_reason: finish,
+        }],
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
+    };
+    Json(resp).into_response()
 }
 
 async fn serve_via_gs_stream<M>(

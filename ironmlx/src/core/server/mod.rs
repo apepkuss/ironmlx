@@ -4,10 +4,10 @@
 //! waiting for the lock (P4 contract — multi-stream scheduler is P8b).
 
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use axum::{routing::get, routing::post, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -21,7 +21,7 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeRequest,
 };
-use crate::core::speculative::MtpSpeculativeModel;
+use crate::core::speculative::{MtpSpeculativeModel, MtpSpeculativeStats};
 use crate::core::tokenizer::Tokenizer;
 use crate::Result;
 
@@ -169,6 +169,58 @@ impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
                 max_new_tokens,
                 effective_concurrency: active.saturating_add(queued).saturating_add(1),
             })
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Gemma4DrafterHealthCounters {
+    prefill_count: Arc<AtomicU64>,
+    step_count: Arc<AtomicU64>,
+    fallback_prefill_count: Arc<AtomicU64>,
+    drafted_tokens: Arc<AtomicU64>,
+    accepted_draft_tokens: Arc<AtomicU64>,
+}
+
+impl Gemma4DrafterHealthCounters {
+    fn mtp_health_config(&self, draft_tokens: usize) -> health::MtpHealthConfig {
+        health::MtpHealthConfig::enabled(
+            draft_tokens,
+            self.prefill_count.clone(),
+            self.step_count.clone(),
+            self.fallback_prefill_count.clone(),
+            self.drafted_tokens.clone(),
+            self.accepted_draft_tokens.clone(),
+        )
+    }
+
+    pub(crate) fn record_prefill(&self) {
+        self.prefill_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_stats(&self, stats: MtpSpeculativeStats) {
+        self.step_count
+            .fetch_add(stats.windows as u64, Ordering::Relaxed);
+        self.fallback_prefill_count
+            .fetch_add(stats.rollback_count as u64, Ordering::Relaxed);
+        self.drafted_tokens
+            .fetch_add(stats.drafted_tokens as u64, Ordering::Relaxed);
+        self.accepted_draft_tokens
+            .fetch_add(stats.accepted_draft_tokens as u64, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct Gemma4DrafterAppState {
+    pub(crate) base: AppState<crate::models::Gemma4Model>,
+    pub(crate) drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    pub(crate) mtp_draft_tokens: usize,
+    pub(crate) health_counters: Gemma4DrafterHealthCounters,
+}
+
+impl Gemma4DrafterAppState {
+    pub(crate) fn with_sampling_defaults(mut self, sampling_defaults: SamplingDefaults) -> Self {
+        self.base = self.base.with_sampling_defaults(sampling_defaults);
+        self
     }
 }
 
@@ -455,6 +507,74 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn serve_with_gemma4_drafter(
+    model: crate::models::Gemma4Model,
+    drafter: crate::models::gemma4::Gemma4AssistantModel,
+    mtp_draft_tokens: usize,
+    tokenizer: Tokenizer,
+    model_id: String,
+    host: &str,
+    port: u16,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    vision_input_override: Option<VisionInputConfig>,
+    loaded_model_weight_bytes: Option<usize>,
+) -> Result<()> {
+    let state = build_gemma4_drafter_app_state(
+        model,
+        drafter,
+        mtp_draft_tokens,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        vision_input_override,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        loaded_model_weight_bytes,
+        active_kv_offload,
+    )
+    .await?;
+
+    let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/healthz", get(gemma4_drafter_healthz_handler))
+        .route(
+            "/v1/chat/completions",
+            post(openai::gemma4_drafter_chat_completions),
+        )
+        .route("/v1/messages", post(anthropic::gemma4_drafter_messages))
+        .with_state(state);
+
+    let addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .with_context(|| format!("parsing socket addr {host}:{port}"))?;
+    tracing::info!("ironmlx Gemma4 drafter server listening on http://{addr}");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding {addr}"))?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_plain_app_state<M>(
     model: M,
     tokenizer: Tokenizer,
@@ -553,6 +673,82 @@ where
         },
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_gemma4_drafter_app_state(
+    model: crate::models::Gemma4Model,
+    drafter: crate::models::gemma4::Gemma4AssistantModel,
+    mtp_draft_tokens: usize,
+    tokenizer: Tokenizer,
+    model_id: String,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    scheduler_autotune_report: bool,
+    vision_input_override: Option<VisionInputConfig>,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    loaded_model_weight_bytes: Option<usize>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<Gemma4DrafterAppState> {
+    if b_max != 1 {
+        bail!("Gemma4 drafter serving currently requires b_max=1");
+    }
+    if paged_prefix_cache.is_some() {
+        bail!("Gemma4 drafter serving does not support paged prefix cache yet");
+    }
+    if prefix_lru_cache.is_some() {
+        bail!("Gemma4 drafter serving does not support prefix LRU cache yet");
+    }
+    if active_kv_offload.enabled {
+        bail!("Gemma4 drafter serving does not support active KV offload yet");
+    }
+    let counters = Gemma4DrafterHealthCounters::default();
+    let mut base = build_plain_app_state(
+        model,
+        tokenizer,
+        model_id.clone(),
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        admission_queue_max,
+        max_cache_cap,
+        decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits,
+        scheduler_runtime_profile,
+        scheduler_autotune_report,
+        vision_input_override,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        loaded_model_weight_bytes,
+        active_kv_offload,
+    )
+    .await?;
+    let model_max_context = {
+        let guard = base.model.lock().await;
+        guard.model_meta().max_position_embeddings.max(0) as usize
+    };
+    base.health_collector = build_health_collector(
+        model_id,
+        model_max_context,
+        b_max,
+        admission_queue_max,
+        &base.scheduler_handle,
+        counters.mtp_health_config(mtp_draft_tokens),
+    );
+
+    Ok(Gemma4DrafterAppState {
+        base,
+        drafter: Arc::new(Mutex::new(drafter)),
+        mtp_draft_tokens,
+        health_counters: counters,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -782,6 +978,12 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     axum::Json(state.health_collector.snapshot())
+}
+
+async fn gemma4_drafter_healthz_handler(
+    axum::extract::State(state): axum::extract::State<Gemma4DrafterAppState>,
+) -> axum::Json<health::HealthSnapshot> {
+    axum::Json(state.base.health_collector.snapshot())
 }
 
 #[cfg(test)]

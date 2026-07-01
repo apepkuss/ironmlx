@@ -737,6 +737,22 @@ fn add_mtp_stats(dst: &mut MtpSpeculativeStats, src: MtpSpeculativeStats) {
     dst.accepted_draft_tokens = dst
         .accepted_draft_tokens
         .saturating_add(src.accepted_draft_tokens);
+    if dst.draft_attempts_by_position.len() < src.draft_attempts_by_position.len() {
+        dst.draft_attempts_by_position
+            .resize(src.draft_attempts_by_position.len(), 0);
+    }
+    for (idx, value) in src.draft_attempts_by_position.into_iter().enumerate() {
+        dst.draft_attempts_by_position[idx] =
+            dst.draft_attempts_by_position[idx].saturating_add(value);
+    }
+    if dst.draft_accepts_by_position.len() < src.draft_accepts_by_position.len() {
+        dst.draft_accepts_by_position
+            .resize(src.draft_accepts_by_position.len(), 0);
+    }
+    for (idx, value) in src.draft_accepts_by_position.into_iter().enumerate() {
+        dst.draft_accepts_by_position[idx] =
+            dst.draft_accepts_by_position[idx].saturating_add(value);
+    }
     dst.rollback_count = dst.rollback_count.saturating_add(src.rollback_count);
     dst.mtp_cache_reuse_count = dst
         .mtp_cache_reuse_count
@@ -3766,7 +3782,7 @@ impl<M: Model> Scheduler<M> {
     }
 
     pub fn mtp_stats(&self) -> Option<MtpSpeculativeStats> {
-        self.mtp_state.as_ref().map(|state| state.stats)
+        self.mtp_state.as_ref().map(|state| state.stats.clone())
     }
 
     pub fn prefill_admitted_mtp_single(
@@ -4699,6 +4715,7 @@ impl<M: Model> Scheduler<M> {
         stats.windows += 1;
         stats.drafted_tokens += draft_tokens.len();
         stats.accepted_draft_tokens += resolution.accepted_draft_len;
+        stats.record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {
             stats.rollback_count += 1;
         }

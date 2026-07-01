@@ -10,7 +10,7 @@ use crate::Result;
 
 use super::config::Gemma4Config;
 use super::ops::logit_softcap_on;
-use super::text_model::Gemma4TextModel;
+use super::text_model::{Gemma4TextForwardOutput, Gemma4TextModel};
 use super::vision::{
     unified_position_ids_for_grid, Gemma4UnifiedVisionEmbedder, MultimodalEmbedder, VisionModel,
 };
@@ -218,6 +218,23 @@ impl Gemma4Model {
         self.text.config()
     }
 
+    pub fn embed_on(&self, input_ids: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
+        self.text.embed_on(input_ids, target)
+    }
+
+    pub fn project_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let logits = self.text.as_output_on(hidden, target)?;
+        match self.config().final_logit_softcapping {
+            Some(softcap) => logit_softcap_on(&logits, softcap, target),
+            None => Ok(logits),
+        }
+    }
+
     fn slice_last_and_project(
         &self,
         hidden: &Array,
@@ -238,11 +255,7 @@ impl Gemma4Model {
             )?,
             _ => hidden.clone(),
         };
-        let logits = self.text.as_output_on(&last_hidden, target)?;
-        match self.config().final_logit_softcapping {
-            Some(softcap) => logit_softcap_on(&logits, softcap, target),
-            None => Ok(logits),
-        }
+        self.project_hidden_on(&last_hidden, target)
     }
 
     pub fn forward_on(
@@ -286,6 +299,30 @@ impl Gemma4Model {
             ));
         }
         Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_text_hidden_with_shared_kv_on(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Gemma4TextForwardOutput> {
+        let target = target.into();
+        let _ = position_ids;
+        let _ = decode_mask;
+        self.reject_multimodal_tokens(input_ids)?;
+        let hidden = self.text.embed_on(input_ids, target)?;
+        self.text.forward_embeddings_with_shared_kv_on(
+            &hidden,
+            input_ids,
+            per_row_lens,
+            cache,
+            target,
+        )
     }
 
     fn approx_weight_bytes(&self) -> usize {
@@ -394,6 +431,32 @@ impl Gemma4Model {
         image_token_id: i32,
         target: StreamOrDevice,
     ) -> Result<Array> {
+        Ok(self
+            .forward_vl_hidden_with_shared_kv_on(
+                input_ids,
+                _position_ids,
+                per_row_lens,
+                _decode_mask,
+                cache,
+                vision_embeds_slice,
+                image_token_id,
+                target,
+            )?
+            .hidden)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_vl_hidden_with_shared_kv_on(
+        &self,
+        input_ids: &Array,
+        _position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        _decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: StreamOrDevice,
+    ) -> Result<Gemma4TextForwardOutput> {
         let profile = vl_profile_enabled();
         let total_t0 = Instant::now();
         let t0 = Instant::now();
@@ -432,7 +495,7 @@ impl Gemma4Model {
             );
         }
         let t0 = Instant::now();
-        let hidden = self.text.forward_embeddings_on(
+        let out = self.text.forward_embeddings_with_shared_kv_on(
             &hidden,
             &per_layer_ids,
             per_row_lens,
@@ -441,7 +504,7 @@ impl Gemma4Model {
         )?;
         vl_profile_eval(
             "forward_vl_text_forward_embeddings",
-            &[&hidden],
+            &[&out.hidden],
             t0,
             profile,
         )?;
@@ -451,7 +514,7 @@ impl Gemma4Model {
                 total_t0.elapsed().as_secs_f64() * 1000.0
             );
         }
-        Ok(hidden)
+        Ok(out)
     }
 
     fn compute_unified_vision_embeds(

@@ -135,8 +135,8 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = false)]
     pub scheduler_autotune_report: bool,
 
-    /// Optional local MTP model directory. When set, MTP is enabled only for
-    /// Qwen dense/MoE text requests served with --max-sequences 1.
+    /// Optional local MTP/drafter model directory. When set, greedy speculative
+    /// decoding is enabled for supported Qwen and Gemma4 models.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
 
@@ -624,15 +624,19 @@ fn resolve_serve_mtp_config(
     args: &ServeArgs,
     architecture: crate::models::ModelArchitecture,
     raw_config: &serde_json::Value,
-    _scheduler_config: SchedulerServeConfig,
+    scheduler_config: SchedulerServeConfig,
 ) -> Result<Option<ServeMtpConfig>> {
     let Some(model_dir) = args.mtp_model_dir.as_ref() else {
         return Ok(None);
     };
     match architecture {
         crate::models::ModelArchitecture::Qwen35Dense
-        | crate::models::ModelArchitecture::Qwen35Moe => {}
-        _ => bail!("ironmlx serve --mtp-model-dir currently supports Qwen dense/MoE models only"),
+        | crate::models::ModelArchitecture::Qwen35Moe
+        | crate::models::ModelArchitecture::Gemma4 => {}
+        _ => bail!("ironmlx serve --mtp-model-dir currently supports Qwen/Gemma4 models only"),
+    }
+    if architecture == crate::models::ModelArchitecture::Gemma4 && scheduler_config.b_max != 1 {
+        bail!("ironmlx serve Gemma4 --mtp-model-dir currently requires --max-sequences 1");
     }
     if !model_dir.exists() {
         bail!(
@@ -957,6 +961,90 @@ where
         scheduler_runtime_profile,
         args.scheduler_autotune_report,
         vision_input,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_with_gemma4_drafter_model(
+    model: crate::models::Gemma4Model,
+    tokenizer: Tokenizer,
+    model_dir: &Path,
+    base_model_weight_bytes: usize,
+    mtp_config: ServeMtpConfig,
+    args: &ServeArgs,
+    scheduler_config: SchedulerServeConfig,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    vision_input: Option<server::VisionInputConfig>,
+) -> Result<()> {
+    log_scheduler_mode(scheduler_config);
+    tracing::info!(
+        "ironmlx serve: Gemma4 drafter enabled model_dir={} draft_tokens={}",
+        mtp_config.model_dir.display(),
+        mtp_config.draft_tokens
+    );
+
+    let validation = server::model_manager::validate_mtp_pair(
+        model_dir,
+        &mtp_config.model_dir,
+        Some(mtp_config.draft_tokens),
+    )?;
+    if !validation.compatible {
+        bail!(
+            "Gemma4 drafter validation failed: {}: {}",
+            validation.reason_code,
+            validation.message
+        );
+    }
+
+    let drafter_loader = Loader::open_gemma4_drafter(&mtp_config.model_dir).with_context(|| {
+        format!(
+            "Loader::open_gemma4_drafter {}",
+            mtp_config.model_dir.display()
+        )
+    })?;
+    let total_model_weight_bytes =
+        base_model_weight_bytes.saturating_add(drafter_loader.loaded_tensor_bytes());
+    let drafter = crate::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
+        .with_context(|| {
+            format!(
+                "loading Gemma4 assistant drafter from {}",
+                mtp_config.model_dir.display()
+            )
+        })?;
+
+    let model_id = single_model_id(args)?;
+    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
+    let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
+    let active_kv_offload = resolve_active_kv_offload_config(args)?;
+    if let Some(config) = &prefix_lru_cache {
+        tracing::info!(
+            "ironmlx serve: prefix LRU cache enabled max_bytes={}",
+            config.max_bytes
+        );
+    }
+    let runtime = serve_runtime()?;
+    runtime.block_on(server::serve_with_gemma4_drafter(
+        model,
+        drafter,
+        mtp_config.draft_tokens,
+        tokenizer,
+        model_id,
+        &args.host,
+        args.port,
+        scheduler_config.prefill_chunk_size,
+        scheduler_config.b_max,
+        scheduler_config.admission_deadline_ms,
+        scheduler_config.admission_queue_max,
+        scheduler_config.max_cache_cap,
+        scheduler_config.decode_cadence_mid_chunk_cap,
+        args.kv_quant.turboquant_bits(),
+        paged_prefix_cache,
+        prefix_lru_cache,
+        active_kv_offload,
+        scheduler_runtime_profile,
+        args.scheduler_autotune_report,
+        vision_input,
+        Some(total_model_weight_bytes),
     ))
 }
 
@@ -1397,14 +1485,28 @@ pub fn run(args: ServeArgs) -> Result<()> {
         crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
-            serve_with_model(
-                model,
-                tokenizer,
-                &args,
-                scheduler_config,
-                scheduler_runtime_profile,
-                vision_input,
-            )
+            if let Some(mtp_config) = mtp_config.clone() {
+                serve_with_gemma4_drafter_model(
+                    model,
+                    tokenizer,
+                    &model_dir,
+                    loader.loaded_tensor_bytes(),
+                    mtp_config,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                )
+            } else {
+                serve_with_model(
+                    model,
+                    tokenizer,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                )
+            }
         }
         crate::models::ModelArchitecture::Glm4MoeLite => {
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
@@ -1965,6 +2067,53 @@ mod scheduler_profile_tests {
     }
 
     #[test]
+    fn serve_mtp_config_accepts_gemma4_drafter() {
+        let temp_dir = unique_temp_dir("serve-mtp-gemma4");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+        args.mtp_draft_tokens = Some(3);
+
+        let cfg = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Gemma4,
+            &serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}}),
+            SchedulerServeConfig {
+                b_max: 1,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("resolve")
+        .expect("enabled");
+
+        assert_eq!(cfg.model_dir, temp_dir);
+        assert_eq!(cfg.draft_tokens, 3);
+        std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_mtp_config_rejects_gemma4_batched_scheduler() {
+        let temp_dir = unique_temp_dir("serve-mtp-gemma4-batched");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+
+        let err = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Gemma4,
+            &serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}}),
+            SchedulerServeConfig {
+                b_max: 2,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect_err("Gemma4 drafter must reject b_max > 1");
+
+        assert!(err.to_string().contains("--max-sequences 1"));
+        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
+    #[test]
     fn serve_paged_prefix_cache_accepts_mtp_config() {
         let temp_dir = unique_temp_dir("serve-mtp-prefix");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
@@ -2148,8 +2297,8 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_mtp_config_rejects_non_qwen_architecture() {
-        let temp_dir = unique_temp_dir("serve-mtp-non-qwen");
+    fn serve_mtp_config_rejects_non_qwen_or_gemma4_architecture() {
+        let temp_dir = unique_temp_dir("serve-mtp-non-qwen-gemma4");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
         let mut args = base_args();
         args.mtp_model_dir = Some(temp_dir.clone());
@@ -2163,9 +2312,9 @@ mod scheduler_profile_tests {
                 ..SchedulerServeConfig::default()
             },
         )
-        .expect_err("non-Qwen must be rejected");
+        .expect_err("non-Qwen/Gemma4 must be rejected");
 
-        assert!(err.to_string().contains("Qwen"));
+        assert!(err.to_string().contains("Qwen/Gemma4"));
         std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 

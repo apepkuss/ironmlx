@@ -8,6 +8,7 @@ mod attention;
 mod config;
 mod cross_modal;
 mod decoder_layer;
+pub(crate) mod drafter;
 pub mod image_processor;
 mod mlp;
 mod model;
@@ -18,7 +19,38 @@ mod text_model;
 pub(crate) mod vision;
 
 pub use config::{
-    Gemma4Config, Gemma4LayerKind, Gemma4RopeParams, Gemma4TextConfig, Gemma4VisionConfig,
+    Gemma4AssistantConfig, Gemma4Config, Gemma4LayerKind, Gemma4RopeParams, Gemma4TextConfig,
+    Gemma4VisionConfig,
 };
+pub use drafter::{Gemma4AssistantModel, Gemma4DrafterGenerationStream, Gemma4DrafterTraceWindow};
 pub use model::Gemma4Model;
 pub use text_model::Gemma4TextModel;
+
+#[cfg(test)]
+mod tests {
+    use mlx::Dtype;
+
+    #[test]
+    fn drafter_sliding_mask_is_bidirectional() {
+        let mask = super::drafter::build_bidirectional_swa_mask_for_test(
+            2,
+            4,
+            6,
+            3,
+            None,
+            0,
+            Dtype::Float32,
+        )
+        .unwrap()
+        .expect("window requires a mask");
+        let values: Vec<f32> = mask.to_vec().unwrap();
+        let k_len = 6usize;
+        let at = |q: usize, k: usize| values[q * k_len + k];
+
+        assert!(at(0, 0).is_infinite() && at(0, 0).is_sign_negative());
+        assert_eq!(at(0, 2), 0.0);
+        assert_eq!(at(0, 5), 0.0);
+        assert_eq!(at(1, 3), 0.0);
+        assert_eq!(at(1, 5), 0.0);
+    }
+}

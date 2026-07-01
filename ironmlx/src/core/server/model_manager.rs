@@ -20,7 +20,9 @@ use crate::cli::serve::{
 };
 use crate::core::sampler::Sampler;
 use crate::core::speculative::{MtpDraftTokensArg, MtpSpeculativeConfig};
-use crate::models::{ModelArchitecture, Qwen35Config, Qwen35MoeConfig};
+use crate::models::{
+    Gemma4AssistantConfig, Gemma4Config, ModelArchitecture, Qwen35Config, Qwen35MoeConfig,
+};
 use crate::Result;
 
 use super::engine::{
@@ -595,7 +597,7 @@ fn read_generation_sampling_defaults(model_dir: &Path) -> Result<SamplingDefault
     })
 }
 
-fn validate_mtp_pair(
+pub(crate) fn validate_mtp_pair(
     model_dir: &Path,
     mtp_model_dir: &Path,
     mtp_draft_tokens: Option<usize>,
@@ -637,11 +639,13 @@ fn validate_mtp_pair(
         }
     };
     match architecture {
-        ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => {}
+        ModelArchitecture::Qwen35Dense
+        | ModelArchitecture::Qwen35Moe
+        | ModelArchitecture::Gemma4 => {}
         _ => {
             return Ok(MtpValidationResponse::not_compatible(
                 MTP_UNSUPPORTED_ARCHITECTURE_CODE,
-                "MTP currently supports Qwen dense/MoE models only.",
+                "MTP currently supports Qwen/Gemma4 models only.",
                 None,
             ));
         }
@@ -652,10 +656,27 @@ fn validate_mtp_pair(
         .get("model_type")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if mtp_model_type != "qwen3_5_mtp" {
+    let valid_mtp_type = match architecture {
+        ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => {
+            mtp_model_type == "qwen3_5_mtp"
+        }
+        ModelArchitecture::Gemma4 => {
+            matches!(
+                mtp_model_type,
+                "gemma4_assistant" | "gemma4_unified_assistant"
+            )
+        }
+        _ => unreachable!("MTP architecture was filtered above"),
+    };
+    if !valid_mtp_type {
+        let expected = match architecture {
+            ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => "qwen3_5_mtp",
+            ModelArchitecture::Gemma4 => "gemma4_assistant or gemma4_unified_assistant",
+            _ => unreachable!("MTP architecture was filtered above"),
+        };
         return Ok(MtpValidationResponse::not_compatible(
             MTP_INVALID_MODEL_TYPE_CODE,
-            format!("Expected MTP model_type=qwen3_5_mtp, got {mtp_model_type}"),
+            format!("Expected MTP model_type={expected}, got {mtp_model_type}"),
             None,
         ));
     }
@@ -668,6 +689,11 @@ fn validate_mtp_pair(
         }
         ModelArchitecture::Qwen35Moe => {
             if let Some(response) = validate_qwen35_moe_mtp_config(&base_raw, &mtp_raw)? {
+                return Ok(response);
+            }
+        }
+        ModelArchitecture::Gemma4 => {
+            if let Some(response) = validate_gemma4_assistant_mtp_config(&base_raw, &mtp_raw)? {
                 return Ok(response);
             }
         }
@@ -730,6 +756,98 @@ fn validate_qwen35_moe_mtp_config(
         return Ok(Some(MtpValidationResponse::not_compatible(
             MTP_INCOMPATIBLE_CODE,
             format!("{error:#}"),
+            None,
+        )));
+    }
+    Ok(None)
+}
+
+fn validate_gemma4_assistant_mtp_config(
+    base_raw: &serde_json::Value,
+    mtp_raw: &serde_json::Value,
+) -> Result<Option<MtpValidationResponse>> {
+    let mut base_cfg: Gemma4Config =
+        serde_json::from_value(base_raw.clone()).context("failed to deserialize Gemma4Config")?;
+    if let Err(error) = base_cfg.validate_and_finalize() {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INVALID_CONFIG_CODE,
+            format!("{error:#}"),
+            None,
+        )));
+    }
+    let mut mtp_cfg: Gemma4AssistantConfig = serde_json::from_value(mtp_raw.clone())
+        .context("failed to deserialize Gemma4AssistantConfig")?;
+    if let Err(error) = mtp_cfg.validate_and_finalize() {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INVALID_CONFIG_CODE,
+            format!("{error:#}"),
+            None,
+        )));
+    }
+    let expected_assistant_type = match base_cfg.model_type.as_str() {
+        "gemma4" => "gemma4_assistant",
+        "gemma4_unified" => "gemma4_unified_assistant",
+        _ => unreachable!("Gemma4Config validation filtered model type"),
+    };
+    if mtp_cfg.model_type != expected_assistant_type {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INCOMPATIBLE_CODE,
+            format!(
+                "Gemma4 base model_type={} requires assistant model_type={expected_assistant_type}, got {}",
+                base_cfg.model_type, mtp_cfg.model_type
+            ),
+            None,
+        )));
+    }
+    if mtp_cfg.backbone_hidden_size != base_cfg.text_config.hidden_size {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INCOMPATIBLE_CODE,
+            format!(
+                "Gemma4 assistant backbone_hidden_size={} must match base hidden_size={}",
+                mtp_cfg.backbone_hidden_size, base_cfg.text_config.hidden_size
+            ),
+            None,
+        )));
+    }
+    if mtp_cfg.text_config.vocab_size != base_cfg.text_config.vocab_size {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INCOMPATIBLE_CODE,
+            format!(
+                "Gemma4 assistant vocab_size={} must match base vocab_size={}",
+                mtp_cfg.text_config.vocab_size, base_cfg.text_config.vocab_size
+            ),
+            None,
+        )));
+    }
+    if !mtp_cfg.text_config.all_layers_share_external_kv() {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INCOMPATIBLE_CODE,
+            "Gemma4 assistant must share K/V for every drafter layer".to_owned(),
+            None,
+        )));
+    }
+
+    let mut base_has_sliding = false;
+    let mut base_has_full = false;
+    for idx in 0..base_cfg.text_config.num_hidden_layers as usize {
+        match base_cfg.text_config.layer_kind(idx) {
+            crate::models::gemma4::Gemma4LayerKind::Sliding => base_has_sliding = true,
+            crate::models::gemma4::Gemma4LayerKind::Full => base_has_full = true,
+        }
+    }
+    let mut assistant_has_sliding = false;
+    let mut assistant_has_full = false;
+    for idx in 0..mtp_cfg.text_config.num_hidden_layers as usize {
+        match mtp_cfg.text_config.layer_kind(idx) {
+            crate::models::gemma4::Gemma4LayerKind::Sliding => assistant_has_sliding = true,
+            crate::models::gemma4::Gemma4LayerKind::Full => assistant_has_full = true,
+        }
+    }
+    if (base_has_sliding && !assistant_has_sliding) || (base_has_full && !assistant_has_full) {
+        return Ok(Some(MtpValidationResponse::not_compatible(
+            MTP_INCOMPATIBLE_CODE,
+            "Gemma4 assistant layer_types must cover every layer type used by the base model"
+                .to_owned(),
             None,
         )));
     }
@@ -966,10 +1084,10 @@ struct MtpValidationRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct MtpValidationResponse {
-    compatible: bool,
-    reason_code: &'static str,
-    message: String,
+pub(crate) struct MtpValidationResponse {
+    pub(crate) compatible: bool,
+    pub(crate) reason_code: &'static str,
+    pub(crate) message: String,
     draft_tokens: Option<usize>,
 }
 
@@ -1492,6 +1610,45 @@ mod tests {
     }
 
     #[test]
+    fn mtp_validation_accepts_compatible_gemma4_assistant_pair() {
+        let root = unique_temp_dir("mtp-validation-gemma4-compatible");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(&base, &gemma4_base_config("gemma4", "gemma4_text", 2560));
+        write_config(
+            &mtp,
+            &gemma4_assistant_config("gemma4_assistant", "gemma4_text", 2560),
+        );
+
+        let response = validate_mtp_pair(&base, &mtp, Some(3)).expect("validate");
+
+        assert!(response.compatible, "response={response:?}");
+        assert_eq!(response.reason_code, "ok");
+        assert_eq!(response.draft_tokens, Some(3));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mtp_validation_rejects_gemma4_assistant_backbone_mismatch() {
+        let root = unique_temp_dir("mtp-validation-gemma4-mismatch");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(&base, &gemma4_base_config("gemma4", "gemma4_text", 2560));
+        write_config(
+            &mtp,
+            &gemma4_assistant_config("gemma4_assistant", "gemma4_text", 3840),
+        );
+
+        let response = validate_mtp_pair(&base, &mtp, None).expect("validate");
+
+        assert!(!response.compatible);
+        assert_eq!(response.reason_code, MTP_INCOMPATIBLE_CODE);
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn load_model_request_does_not_default_to_default_takeover() {
         let request: LoadModelRequest = serde_json::from_value(serde_json::json!({
             "model": "mlx-community/New-4bit",
@@ -1635,6 +1792,80 @@ mod tests {
                     "linear_conv_kernel_dim": 4,
                     "mtp_num_hidden_layers": {mtp_layers},
                     "max_position_embeddings": 262144
+                }}
+            }}"#
+        )
+    }
+
+    fn gemma4_base_config(model_type: &str, text_model_type: &str, hidden_size: i32) -> String {
+        format!(
+            r#"{{
+                "model_type": "{model_type}",
+                "text_config": {{
+                    "model_type": "{text_model_type}",
+                    "hidden_size": {hidden_size},
+                    "num_hidden_layers": 42,
+                    "intermediate_size": 10240,
+                    "num_attention_heads": 8,
+                    "head_dim": 256,
+                    "global_head_dim": 512,
+                    "vocab_size": 262144,
+                    "vocab_size_per_layer_input": 262144,
+                    "num_key_value_heads": 2,
+                    "num_kv_shared_layers": 18,
+                    "hidden_size_per_layer_input": 256,
+                    "layer_types": [
+                        "sliding_attention", "sliding_attention", "sliding_attention",
+                        "sliding_attention", "sliding_attention", "full_attention",
+                        "sliding_attention", "sliding_attention", "sliding_attention",
+                        "sliding_attention", "sliding_attention", "full_attention",
+                        "sliding_attention", "sliding_attention", "sliding_attention",
+                        "sliding_attention", "sliding_attention", "full_attention",
+                        "sliding_attention", "sliding_attention", "sliding_attention",
+                        "sliding_attention", "sliding_attention", "full_attention",
+                        "sliding_attention", "sliding_attention", "sliding_attention",
+                        "sliding_attention", "sliding_attention", "full_attention",
+                        "sliding_attention", "sliding_attention", "sliding_attention",
+                        "sliding_attention", "sliding_attention", "full_attention",
+                        "sliding_attention", "sliding_attention", "sliding_attention",
+                        "sliding_attention", "sliding_attention", "full_attention"
+                    ],
+                    "tie_word_embeddings": true
+                }}
+            }}"#
+        )
+    }
+
+    fn gemma4_assistant_config(
+        model_type: &str,
+        text_model_type: &str,
+        backbone_hidden_size: i32,
+    ) -> String {
+        format!(
+            r#"{{
+                "model_type": "{model_type}",
+                "backbone_hidden_size": {backbone_hidden_size},
+                "use_ordered_embeddings": true,
+                "num_centroids": 2048,
+                "centroid_intermediate_top_k": 32,
+                "tie_word_embeddings": true,
+                "text_config": {{
+                    "model_type": "{text_model_type}",
+                    "hidden_size": 256,
+                    "num_hidden_layers": 4,
+                    "intermediate_size": 2048,
+                    "num_attention_heads": 4,
+                    "head_dim": 256,
+                    "global_head_dim": 512,
+                    "vocab_size": 262144,
+                    "num_key_value_heads": 2,
+                    "num_kv_shared_layers": 4,
+                    "hidden_size_per_layer_input": 0,
+                    "layer_types": [
+                        "sliding_attention", "sliding_attention",
+                        "sliding_attention", "full_attention"
+                    ],
+                    "tie_word_embeddings": true
                 }}
             }}"#
         )

@@ -41,7 +41,7 @@ pub struct Gemma4Attention {
     projection: Gemma4AttentionProjection,
     o_proj: Linear,
     q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    k_norm: Option<RmsNorm>,
     rope: Gemma4Rope,
     n_heads: i32,
     n_kv_heads: i32,
@@ -49,6 +49,7 @@ pub struct Gemma4Attention {
     rms_norm_eps: f32,
     layer_idx: usize,
     layer_kind: Gemma4LayerKind,
+    sliding_window: i32,
 }
 
 impl Gemma4AttentionProjection {
@@ -264,11 +265,30 @@ impl Gemma4Attention {
         cfg: &Gemma4TextConfig,
         layer_idx: usize,
     ) -> Result<Self> {
+        let owns_kv = cfg.previous_kv_layer(layer_idx) == layer_idx;
+        Self::from_loader_with_owns_kv(loader, prefix, cfg, layer_idx, owns_kv)
+    }
+
+    pub fn from_loader_kv_shared_only(
+        loader: &Loader,
+        prefix: &str,
+        cfg: &Gemma4TextConfig,
+        layer_idx: usize,
+    ) -> Result<Self> {
+        Self::from_loader_with_owns_kv(loader, prefix, cfg, layer_idx, false)
+    }
+
+    fn from_loader_with_owns_kv(
+        loader: &Loader,
+        prefix: &str,
+        cfg: &Gemma4TextConfig,
+        layer_idx: usize,
+        owns_kv: bool,
+    ) -> Result<Self> {
         let kind = cfg.layer_kind(layer_idx);
         let head_dim = cfg.head_dim_for_layer(layer_idx);
         let n_kv_heads = cfg.kv_heads_for_layer(layer_idx);
         let use_k_eq_v = kind == Gemma4LayerKind::Full && cfg.attention_k_eq_v;
-        let owns_kv = cfg.previous_kv_layer(layer_idx) == layer_idx;
         let rope = Gemma4Rope::new(head_dim, cfg.rope_traditional, cfg.rope_params_for(kind))?;
         Ok(Self {
             projection: Gemma4AttentionProjection::from_loader(
@@ -277,7 +297,15 @@ impl Gemma4Attention {
             o_proj: Linear::from_loader(loader, &format!("{prefix}.o_proj"))
                 .with_context(|| format!("loading Gemma4 o_proj `{prefix}`"))?,
             q_norm: RmsNorm::from_loader(loader, &format!("{prefix}.q_norm"), cfg.rms_norm_eps)?,
-            k_norm: RmsNorm::from_loader(loader, &format!("{prefix}.k_norm"), cfg.rms_norm_eps)?,
+            k_norm: if owns_kv {
+                Some(RmsNorm::from_loader(
+                    loader,
+                    &format!("{prefix}.k_norm"),
+                    cfg.rms_norm_eps,
+                )?)
+            } else {
+                None
+            },
             rope,
             n_heads: cfg.num_attention_heads,
             n_kv_heads,
@@ -285,6 +313,7 @@ impl Gemma4Attention {
             rms_norm_eps: cfg.rms_norm_eps,
             layer_idx,
             layer_kind: kind,
+            sliding_window: cfg.sliding_window,
         })
     }
 
@@ -372,16 +401,22 @@ impl Gemma4Attention {
                 )?;
 
                 let t0 = Instant::now();
+                let k_norm = self.k_norm.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "Gemma4Attention: k_norm missing for K/V-owning layer {}",
+                        self.layer_idx
+                    )
+                })?;
                 let k = match self.decode_default_rope_on(
                     &raw_k,
-                    &self.k_norm,
+                    k_norm,
                     self.n_kv_heads,
                     offsets,
                     target,
                 )? {
                     Some(k) => k,
                     None => {
-                        let k = self.k_norm.forward_on(&raw_k, target)?;
+                        let k = k_norm.forward_on(&raw_k, target)?;
                         let k = k.transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
                         self.rope.apply_on(&k, offsets, target)?
                     }
@@ -442,6 +477,8 @@ impl Gemma4Attention {
             t0,
             profile,
         )?;
+        let (kv, sliced_mask) = self.sliding_attention_view_on(&kv, mask, seq, target)?;
+        let mask = sliced_mask.as_ref().or(mask);
 
         let t0 = Instant::now();
         let out = if let Some(out) = paged_decode_out {
@@ -491,6 +528,32 @@ impl Gemma4Attention {
         Ok((out, kv))
     }
 
+    fn sliding_attention_view_on(
+        &self,
+        kv: &SharedKv,
+        mask: Option<&Array>,
+        query_len: i32,
+        target: StreamOrDevice,
+    ) -> Result<(SharedKv, Option<Array>)> {
+        if self.layer_kind != Gemma4LayerKind::Sliding {
+            return Ok((kv.clone(), None));
+        }
+        if kv.keys.shape().as_slice()[0] != 1 {
+            return Ok((kv.clone(), None));
+        }
+        let kv_len = kv.keys.shape().as_slice()[2];
+        let view_len = sliding_attention_view_len(kv_len, query_len, self.sliding_window);
+        if view_len >= kv_len {
+            return Ok((kv.clone(), None));
+        }
+        let sliced = slice_shared_kv_tail_on(kv, view_len, target)?;
+        let sliced_mask = match mask {
+            Some(mask) => Some(slice_attention_mask_tail_on(mask, view_len, target)?),
+            None => None,
+        };
+        Ok((sliced, sliced_mask))
+    }
+
     fn decode_default_rope_on(
         &self,
         x: &Array,
@@ -515,5 +578,87 @@ impl Gemma4Attention {
             head_dim: self.head_dim,
         };
         rms_norm_default_rope_decode_on(x, params, target)
+    }
+}
+
+fn sliding_attention_view_len(kv_len: i32, query_len: i32, window: i32) -> i32 {
+    if kv_len <= 0 {
+        return 0;
+    }
+    if query_len <= 0 || window <= 0 {
+        return kv_len;
+    }
+    let keep = window.saturating_add(query_len).saturating_sub(1);
+    kv_len.min(keep.max(1))
+}
+
+fn slice_shared_kv_tail_on(
+    kv: &SharedKv,
+    keep_len: i32,
+    target: StreamOrDevice,
+) -> Result<SharedKv> {
+    let keys_shape = kv.keys.shape();
+    let keys_dims = keys_shape.as_slice();
+    let values_shape = kv.values.shape();
+    let values_dims = values_shape.as_slice();
+    let kv_len = keys_dims[2];
+    if keep_len >= kv_len {
+        return Ok(kv.clone());
+    }
+    let start = kv_len - keep_len;
+    let keys = mlx::ops::indexing::slice_strided_on(
+        &kv.keys,
+        &[0_i32, 0, start, 0][..],
+        &[keys_dims[0], keys_dims[1], kv_len, keys_dims[3]][..],
+        &[1_i32, 1, 1, 1][..],
+        target,
+    )?;
+    let values = mlx::ops::indexing::slice_strided_on(
+        &kv.values,
+        &[0_i32, 0, start, 0][..],
+        &[values_dims[0], values_dims[1], kv_len, values_dims[3]][..],
+        &[1_i32, 1, 1, 1][..],
+        target,
+    )?;
+    Ok(SharedKv { keys, values })
+}
+
+fn slice_attention_mask_tail_on(
+    mask: &Array,
+    keep_len: i32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let shape = mask.shape();
+    let dims = shape.as_slice();
+    if dims.is_empty() {
+        return Err(anyhow!("Gemma4 attention mask must have rank >= 1"));
+    }
+    let k_axis = dims.len() - 1;
+    let k_len = dims[k_axis];
+    if keep_len >= k_len {
+        return Ok(mask.clone());
+    }
+    let mut start = vec![0_i32; dims.len()];
+    let stop = dims.to_vec();
+    let strides = vec![1_i32; dims.len()];
+    start[k_axis] = k_len - keep_len;
+    Ok(mlx::ops::indexing::slice_strided_on(
+        mask,
+        start.as_slice(),
+        stop.as_slice(),
+        strides.as_slice(),
+        target,
+    )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sliding_attention_view_len;
+
+    #[test]
+    fn sliding_attention_view_keeps_window_plus_query_minus_one() {
+        assert_eq!(sliding_attention_view_len(20_400, 2_048, 1_024), 3_071);
+        assert_eq!(sliding_attention_view_len(20_400, 1, 1_024), 1_024);
+        assert_eq!(sliding_attention_view_len(512, 2_048, 1_024), 512);
     }
 }

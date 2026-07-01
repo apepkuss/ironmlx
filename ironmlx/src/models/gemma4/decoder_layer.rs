@@ -35,6 +35,25 @@ impl Gemma4DecoderLayer {
         cfg: &Gemma4TextConfig,
         layer_idx: usize,
     ) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, layer_idx, false)
+    }
+
+    pub fn from_loader_kv_shared_only(
+        loader: &Loader,
+        prefix: &str,
+        cfg: &Gemma4TextConfig,
+        layer_idx: usize,
+    ) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, layer_idx, true)
+    }
+
+    fn from_loader_impl(
+        loader: &Loader,
+        prefix: &str,
+        cfg: &Gemma4TextConfig,
+        layer_idx: usize,
+        kv_shared_only: bool,
+    ) -> Result<Self> {
         let layer_kind = cfg.layer_kind(layer_idx);
         let mlp_intermediate =
             if cfg.use_double_wide_mlp && layer_idx >= cfg.first_kv_shared_layer_idx() {
@@ -49,12 +68,21 @@ impl Gemma4DecoderLayer {
                 &format!("{prefix}.input_layernorm"),
                 cfg.rms_norm_eps,
             )?,
-            self_attn: Gemma4Attention::from_loader(
-                loader,
-                &format!("{prefix}.self_attn"),
-                cfg,
-                layer_idx,
-            )?,
+            self_attn: if kv_shared_only {
+                Gemma4Attention::from_loader_kv_shared_only(
+                    loader,
+                    &format!("{prefix}.self_attn"),
+                    cfg,
+                    layer_idx,
+                )?
+            } else {
+                Gemma4Attention::from_loader(
+                    loader,
+                    &format!("{prefix}.self_attn"),
+                    cfg,
+                    layer_idx,
+                )?
+            },
             post_attention_layernorm: RmsNorm::from_loader(
                 loader,
                 &format!("{prefix}.post_attention_layernorm"),

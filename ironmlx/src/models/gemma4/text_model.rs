@@ -12,6 +12,38 @@ use super::decoder_layer::Gemma4DecoderLayer;
 use super::profile;
 use super::rope::RopeOffsets;
 
+#[derive(Clone, Default)]
+pub struct Gemma4SharedKvStates {
+    sliding: Option<SharedKv>,
+    full: Option<SharedKv>,
+}
+
+pub struct Gemma4TextForwardOutput {
+    pub hidden: Array,
+    pub shared_kv: Gemma4SharedKvStates,
+}
+
+impl Gemma4SharedKvStates {
+    pub fn insert(&mut self, kind: Gemma4LayerKind, kv: SharedKv) {
+        match kind {
+            Gemma4LayerKind::Sliding => self.sliding = Some(kv),
+            Gemma4LayerKind::Full => self.full = Some(kv),
+        }
+    }
+
+    pub fn get(&self, kind: Gemma4LayerKind) -> Option<&SharedKv> {
+        match kind {
+            Gemma4LayerKind::Sliding => self.sliding.as_ref(),
+            Gemma4LayerKind::Full => self.full.as_ref(),
+        }
+    }
+
+    pub fn require(&self, kind: Gemma4LayerKind) -> Result<&SharedKv> {
+        self.get(kind)
+            .ok_or_else(|| anyhow!("Gemma4 shared K/V missing {:?}", kind))
+    }
+}
+
 pub struct Gemma4TextModel {
     embed_tokens: Embedding,
     embed_tokens_per_layer: Option<Embedding>,
@@ -24,6 +56,18 @@ pub struct Gemma4TextModel {
 
 impl Gemma4TextModel {
     pub fn from_loader(loader: &Loader, cfg: Gemma4TextConfig) -> Result<Self> {
+        Self::from_loader_impl(loader, cfg, false)
+    }
+
+    pub fn from_loader_external_shared_kv(loader: &Loader, cfg: Gemma4TextConfig) -> Result<Self> {
+        Self::from_loader_impl(loader, cfg, true)
+    }
+
+    fn from_loader_impl(
+        loader: &Loader,
+        cfg: Gemma4TextConfig,
+        kv_shared_only: bool,
+    ) -> Result<Self> {
         let embed_tokens = Embedding::from_loader(loader, "model.embed_tokens")?;
         let has_per_layer = cfg.hidden_size_per_layer_input > 0;
         let embed_tokens_per_layer = if has_per_layer {
@@ -54,12 +98,16 @@ impl Gemma4TextModel {
 
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers as usize);
         for i in 0..cfg.num_hidden_layers as usize {
-            layers.push(Gemma4DecoderLayer::from_loader(
-                loader,
-                &format!("model.layers.{i}"),
-                &cfg,
-                i,
-            )?);
+            layers.push(if kv_shared_only {
+                Gemma4DecoderLayer::from_loader_kv_shared_only(
+                    loader,
+                    &format!("model.layers.{i}"),
+                    &cfg,
+                    i,
+                )?
+            } else {
+                Gemma4DecoderLayer::from_loader(loader, &format!("model.layers.{i}"), &cfg, i)?
+            });
         }
         let norm = RmsNorm::from_loader(loader, "model.norm", cfg.rms_norm_eps)?;
         Ok(Self {
@@ -85,6 +133,13 @@ impl Gemma4TextModel {
 
     pub fn as_output_on(&self, hidden: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         self.embed_tokens.as_output_on(hidden, target)
+    }
+
+    pub(crate) fn dense_embedding_weight_on(
+        &self,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        self.embed_tokens.dense_weight_on(target)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -145,7 +200,50 @@ impl Gemma4TextModel {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_embeddings_with_shared_kv_on(
+        &self,
+        hidden: &Array,
+        per_layer_token_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Gemma4TextForwardOutput> {
+        let target = target.into();
+        let per_layer_inputs = self.per_layer_inputs_on(per_layer_token_ids, hidden, target)?;
+        self.forward_post_embedding_with_shared_kv_on(
+            hidden,
+            per_layer_inputs.as_ref(),
+            per_row_lens,
+            cache,
+            target,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn forward_post_embedding_on(
+        &self,
+        hidden: &Array,
+        per_layer_inputs: Option<&Array>,
+        per_row_lens: Option<&[i32]>,
+        cache: Option<&mut [LayerCache]>,
+        target: StreamOrDevice,
+        layer_last_trace: Option<&mut Vec<Array>>,
+    ) -> Result<Array> {
+        Ok(self
+            .forward_post_embedding_with_shared_kv_on(
+                hidden,
+                per_layer_inputs,
+                per_row_lens,
+                cache,
+                target,
+                layer_last_trace,
+            )?
+            .hidden)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_post_embedding_with_shared_kv_on(
         &self,
         hidden: &Array,
         per_layer_inputs: Option<&Array>,
@@ -153,7 +251,7 @@ impl Gemma4TextModel {
         mut cache: Option<&mut [LayerCache]>,
         target: StreamOrDevice,
         mut layer_last_trace: Option<&mut Vec<Array>>,
-    ) -> Result<Array> {
+    ) -> Result<Gemma4TextForwardOutput> {
         let dims_borrow = hidden.shape();
         let dims = dims_borrow.as_slice();
         let (batch, seq) = (dims[0], dims[1]);
@@ -223,6 +321,7 @@ impl Gemma4TextModel {
 
         let mut x = hidden.clone();
         let mut intermediates: Vec<Option<SharedKv>> = vec![None; self.layers.len()];
+        let mut shared_kv = Gemma4SharedKvStates::default();
         for (idx, layer) in self.layers.iter().enumerate() {
             let layer_kind = self.cfg.layer_kind(idx);
             let mask = match layer_kind {
@@ -284,12 +383,38 @@ impl Gemma4TextModel {
             if let Some(trace) = layer_last_trace.as_deref_mut() {
                 trace.push(slice_last_token(&x, target)?);
             }
+            shared_kv.insert(layer_kind, kv.clone());
             intermediates[idx] = Some(kv);
         }
         let t0 = Instant::now();
         let out = self.norm.forward_on(&x, target)?;
         profile::eval("gemma4_text_final_norm", &[&out], t0, profile)?;
-        Ok(out)
+        Ok(Gemma4TextForwardOutput {
+            hidden: out,
+            shared_kv,
+        })
+    }
+
+    pub(crate) fn forward_external_shared_kv_on(
+        &self,
+        hidden: &Array,
+        shared_kv: &Gemma4SharedKvStates,
+        masks: &super::drafter::Gemma4DrafterMasks,
+        position: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let offsets = RopeOffsets::from_values(vec![position])?;
+        let mut x = hidden.clone();
+        for (idx, layer) in self.layers.iter().enumerate() {
+            let layer_kind = self.cfg.layer_kind(idx);
+            let mask = masks.get(layer_kind);
+            let kv = shared_kv.require(layer_kind)?;
+            let (next, _) =
+                layer.forward_on(&x, mask, None, None, &offsets, Some(kv), None, target, None)?;
+            x = next;
+        }
+        self.norm.forward_on(&x, target)
     }
 
     #[doc(hidden)]
