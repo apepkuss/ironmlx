@@ -2173,14 +2173,6 @@ fn resolve_engine_mtp_config(
             model.id
         ),
     }
-    if architecture == ModelArchitecture::Gemma4
-        && model.scheduler_runtime_profile.config.b_max != 1
-    {
-        bail!(
-            "engine model `{}` Gemma4 MTP currently requires scheduler b_max=1",
-            model.id
-        );
-    }
     if !settings.model_dir.exists() {
         bail!(
             "engine model `{}` mtp_model_dir must point to a local directory (got '{}')",

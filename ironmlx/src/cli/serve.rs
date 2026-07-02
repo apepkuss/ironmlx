@@ -624,7 +624,7 @@ fn resolve_serve_mtp_config(
     args: &ServeArgs,
     architecture: crate::models::ModelArchitecture,
     raw_config: &serde_json::Value,
-    scheduler_config: SchedulerServeConfig,
+    _scheduler_config: SchedulerServeConfig,
 ) -> Result<Option<ServeMtpConfig>> {
     let Some(model_dir) = args.mtp_model_dir.as_ref() else {
         return Ok(None);
@@ -634,9 +634,6 @@ fn resolve_serve_mtp_config(
         | crate::models::ModelArchitecture::Qwen35Moe
         | crate::models::ModelArchitecture::Gemma4 => {}
         _ => bail!("ironmlx serve --mtp-model-dir currently supports Qwen/Gemma4 models only"),
-    }
-    if architecture == crate::models::ModelArchitecture::Gemma4 && scheduler_config.b_max != 1 {
-        bail!("ironmlx serve Gemma4 --mtp-model-dir currently requires --max-sequences 1");
     }
     if !model_dir.exists() {
         bail!(
@@ -2092,13 +2089,13 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_mtp_config_rejects_gemma4_batched_scheduler() {
+    fn serve_mtp_config_accepts_gemma4_batched_scheduler() {
         let temp_dir = unique_temp_dir("serve-mtp-gemma4-batched");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
         let mut args = base_args();
         args.mtp_model_dir = Some(temp_dir.clone());
 
-        let err = resolve_serve_mtp_config(
+        let cfg = resolve_serve_mtp_config(
             &args,
             crate::models::ModelArchitecture::Gemma4,
             &serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}}),
@@ -2107,10 +2104,11 @@ mod scheduler_profile_tests {
                 ..SchedulerServeConfig::default()
             },
         )
-        .expect_err("Gemma4 drafter must reject b_max > 1");
+        .expect("resolve")
+        .expect("enabled");
 
-        assert!(err.to_string().contains("--max-sequences 1"));
-        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+        assert_eq!(cfg.model_dir, temp_dir);
+        std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
     }
 
     #[test]

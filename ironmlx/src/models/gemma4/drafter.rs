@@ -197,6 +197,18 @@ impl Gemma4DrafterPrefixCache {
         })
     }
 
+    pub(crate) fn new_with_shared_prefix_lru(
+        config: Option<PagedPrefixCacheConfig>,
+        prefix_lru_cache: Option<Gemma4DrafterPrefixLruHandle>,
+        active_kv: Option<Gemma4DrafterActiveKvRuntime>,
+    ) -> Self {
+        Self {
+            config,
+            prefix_lru_cache,
+            active_kv,
+        }
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.config.is_some()
     }
@@ -298,7 +310,7 @@ impl Gemma4DrafterPrefixCache {
         active_kv.stats.set_residency_summary(summary);
     }
 
-    fn try_restore(
+    pub(crate) fn try_restore(
         &self,
         model: &Gemma4Model,
         cache: &mut [LayerCache],
@@ -391,7 +403,7 @@ impl Gemma4DrafterPrefixCache {
         Ok(None)
     }
 
-    fn try_save(
+    pub(crate) fn try_save(
         &self,
         model: &Gemma4Model,
         cache: &[LayerCache],
@@ -488,10 +500,10 @@ impl Gemma4DrafterPrefixCache {
     }
 }
 
-struct Gemma4DrafterPrefixRestore {
-    cached_len: i32,
-    last_hidden: Array,
-    shared_kv: Gemma4SharedKvStates,
+pub(crate) struct Gemma4DrafterPrefixRestore {
+    pub(crate) cached_len: i32,
+    pub(crate) last_hidden: Array,
+    pub(crate) shared_kv: Gemma4SharedKvStates,
 }
 
 fn gemma4_drafter_last_hidden_spec(dtype: Dtype, hidden_size: i32) -> PrefixTensorSpec {
@@ -652,7 +664,7 @@ fn gemma4_cache_row_cached_len(cache: &[LayerCache], row: usize) -> Result<Optio
     Ok(None)
 }
 
-fn gemma4_shared_kv_from_cache_on(
+pub(crate) fn gemma4_shared_kv_from_cache_on(
     cfg: &Gemma4TextConfig,
     cache: &[LayerCache],
     target: impl Into<StreamOrDevice>,
@@ -1405,7 +1417,7 @@ fn kv_len(kv: &super::attention::SharedKv) -> Result<i32> {
     Ok(dims[2])
 }
 
-fn draft_position_for_shared_kv(kv_valid_len: i32) -> i32 {
+pub(crate) fn draft_position_for_shared_kv(kv_valid_len: i32) -> i32 {
     (kv_valid_len - 1).max(0)
 }
 

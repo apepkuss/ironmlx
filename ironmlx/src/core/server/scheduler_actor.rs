@@ -241,6 +241,10 @@ trait SchedulerActorMtpMode<M>
 where
     M: Model + DenseVlMethods,
 {
+    fn allow_rolling_mid_admit(&self) -> bool {
+        true
+    }
+
     fn prefill_admitted(
         &mut self,
         sched: &mut Scheduler<M>,
@@ -263,11 +267,31 @@ struct SchedulerActorMtp<H> {
     cfg: MtpSpeculativeConfig,
 }
 
+struct SchedulerActorGemma4Drafter {
+    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    cfg: MtpSpeculativeConfig,
+}
+
 impl<H> SchedulerActorMtp<H> {
     fn new(mtp: H, mtp_draft_tokens: usize) -> Self {
         debug_assert!(mtp_draft_tokens > 0);
         Self {
             mtp,
+            cfg: MtpSpeculativeConfig {
+                max_draft_tokens: mtp_draft_tokens,
+            },
+        }
+    }
+}
+
+impl SchedulerActorGemma4Drafter {
+    fn new(
+        drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+        mtp_draft_tokens: usize,
+    ) -> Self {
+        debug_assert!(mtp_draft_tokens > 0);
+        Self {
+            drafter,
             cfg: MtpSpeculativeConfig {
                 max_draft_tokens: mtp_draft_tokens,
             },
@@ -331,6 +355,49 @@ where
             counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
             let events = sched.step_mtp_batch(model, &self.mtp)?;
             counters.store_stats(sched.mtp_stats());
+            Ok(events)
+        } else {
+            sched.step(model)
+        }
+    }
+}
+
+impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4Drafter {
+    fn allow_rolling_mid_admit(&self) -> bool {
+        false
+    }
+
+    fn prefill_admitted(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        if sched.mtp_batch_active_greedy_eligible() {
+            counters.mtp_prefill_count.fetch_add(1, Ordering::Relaxed);
+            let drafter = self.drafter.blocking_lock();
+            let events = sched.prefill_admitted_gemma4_drafter_batch(model, &drafter, self.cfg)?;
+            counters.store_stats(sched.gemma4_drafter_stats());
+            Ok(events)
+        } else {
+            counters
+                .mtp_prefill_fallback_count
+                .fetch_add(1, Ordering::Relaxed);
+            sched.prefill_admitted(model)
+        }
+    }
+
+    fn step(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<Vec<StepEvent>> {
+        if sched.gemma4_drafter_stats().is_some() {
+            counters.mtp_step_count.fetch_add(1, Ordering::Relaxed);
+            let drafter = self.drafter.blocking_lock();
+            let events = sched.step_gemma4_drafter_batch(model, &drafter)?;
+            counters.store_stats(sched.gemma4_drafter_stats());
             Ok(events)
         } else {
             sched.step(model)
@@ -638,6 +705,65 @@ where
     spawn_scheduler_actor_with_mode(
         model,
         SchedulerActorMtp::new(mtp, mtp_draft_tokens),
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        active_kv_offload,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_scheduler_actor_with_gemma4_drafter(
+    model: Arc<Mutex<crate::models::Gemma4Model>>,
+    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    mtp_draft_tokens: usize,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorGemma4Drafter::new(drafter, mtp_draft_tokens),
+        b_max,
+        admission_deadline,
+        admission_queue_max,
+        effective_cap_max,
+        decode_cadence_mid_chunk_cap,
+        meta,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        ActiveKvOffloadConfig::disabled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
+    model: Arc<Mutex<crate::models::Gemma4Model>>,
+    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    mtp_draft_tokens: usize,
+    b_max: usize,
+    admission_deadline: Duration,
+    admission_queue_max: usize,
+    effective_cap_max: usize,
+    decode_cadence_mid_chunk_cap: usize,
+    meta: crate::core::memory_budget::ModelMeta,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError> {
+    spawn_scheduler_actor_with_mode(
+        model,
+        SchedulerActorGemma4Drafter::new(drafter, mtp_draft_tokens),
         b_max,
         admission_deadline,
         admission_queue_max,
@@ -1061,7 +1187,15 @@ fn driver_loop<M, A>(
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
-                    if !can_start_rolling_mid_admit_for_command::<M>(
+                    if !mtp_mode.allow_rolling_mid_admit() {
+                        enqueue_or_reject(
+                            cmd,
+                            &mut admission_queue,
+                            admission_queue_max,
+                            &queue_depth_peak,
+                            &queue_rejected,
+                        );
+                    } else if !can_start_rolling_mid_admit_for_command::<M>(
                         &cmd,
                         sched.active_count(),
                         b_max,
@@ -1196,7 +1330,8 @@ fn driver_loop<M, A>(
                             // for one bounded mid-admit. Further queued
                             // requests wait for the next decode turn so
                             // active streams keep making progress.
-                            if in_flight_mid_admit.is_none()
+                            if mtp_mode.allow_rolling_mid_admit()
+                                && in_flight_mid_admit.is_none()
                                 && !admission_queue.is_empty()
                                 && sched.active_count() >= b_max
                             {
@@ -1207,7 +1342,8 @@ fn driver_loop<M, A>(
                                     &active_kv_stats,
                                 );
                             }
-                            if in_flight_mid_admit.is_none()
+                            if mtp_mode.allow_rolling_mid_admit()
+                                && in_flight_mid_admit.is_none()
                                 && drain_admission_queue(
                                     &mut admission_queue,
                                     &mut in_flight_mid_admit,

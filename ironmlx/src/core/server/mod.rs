@@ -4,10 +4,10 @@
 //! waiting for the lock (P4 contract — multi-stream scheduler is P8b).
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use axum::{routing::get, routing::post, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -21,7 +21,7 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeRequest,
 };
-use crate::core::speculative::{MtpSpeculativeModel, MtpSpeculativeStats};
+use crate::core::speculative::MtpSpeculativeModel;
 use crate::core::tokenizer::Tokenizer;
 use crate::Result;
 
@@ -172,50 +172,10 @@ impl<M: Model + DenseVlMethods + Send + 'static> AppState<M> {
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct Gemma4DrafterHealthCounters {
-    prefill_count: Arc<AtomicU64>,
-    step_count: Arc<AtomicU64>,
-    fallback_prefill_count: Arc<AtomicU64>,
-    drafted_tokens: Arc<AtomicU64>,
-    accepted_draft_tokens: Arc<AtomicU64>,
-}
-
-impl Gemma4DrafterHealthCounters {
-    fn mtp_health_config(&self, draft_tokens: usize) -> health::MtpHealthConfig {
-        health::MtpHealthConfig::enabled(
-            draft_tokens,
-            self.prefill_count.clone(),
-            self.step_count.clone(),
-            self.fallback_prefill_count.clone(),
-            self.drafted_tokens.clone(),
-            self.accepted_draft_tokens.clone(),
-        )
-    }
-
-    pub(crate) fn record_prefill(&self) {
-        self.prefill_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn record_stats(&self, stats: MtpSpeculativeStats) {
-        self.step_count
-            .fetch_add(stats.windows as u64, Ordering::Relaxed);
-        self.fallback_prefill_count
-            .fetch_add(stats.rollback_count as u64, Ordering::Relaxed);
-        self.drafted_tokens
-            .fetch_add(stats.drafted_tokens as u64, Ordering::Relaxed);
-        self.accepted_draft_tokens
-            .fetch_add(stats.accepted_draft_tokens as u64, Ordering::Relaxed);
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct Gemma4DrafterAppState {
     pub(crate) base: AppState<crate::models::Gemma4Model>,
-    pub(crate) drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
-    pub(crate) prefix_cache: crate::models::gemma4::Gemma4DrafterPrefixCache,
     pub(crate) mtp_draft_tokens: usize,
-    pub(crate) health_counters: Gemma4DrafterHealthCounters,
 }
 
 impl Gemma4DrafterAppState {
@@ -346,6 +306,64 @@ struct MtpSchedulerActorSpawner<H> {
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     active_kv_offload: ActiveKvOffloadConfig,
+}
+
+struct Gemma4DrafterSchedulerActorSpawner {
+    drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    mtp_draft_tokens: usize,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    active_kv_offload: ActiveKvOffloadConfig,
+}
+
+impl SchedulerActorSpawner<crate::models::Gemma4Model> for Gemma4DrafterSchedulerActorSpawner {
+    fn paged_prefix_cache_enabled(&self) -> bool {
+        self.paged_prefix_cache.is_some()
+    }
+
+    fn spawn(
+        self,
+        model: Arc<Mutex<crate::models::Gemma4Model>>,
+        b_max: usize,
+        admission_deadline: std::time::Duration,
+        admission_queue_max: usize,
+        effective_cap_max: usize,
+        decode_cadence_mid_chunk_cap: usize,
+        meta: crate::core::memory_budget::ModelMeta,
+    ) -> Result<scheduler_actor::SchedulerActorHandle> {
+        if self.active_kv_offload.enabled {
+            Ok(
+                scheduler_actor::spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
+                    model,
+                    self.drafter,
+                    self.mtp_draft_tokens,
+                    b_max,
+                    admission_deadline,
+                    admission_queue_max,
+                    effective_cap_max,
+                    decode_cadence_mid_chunk_cap,
+                    meta,
+                    self.paged_prefix_cache,
+                    self.prefix_lru_cache,
+                    self.active_kv_offload,
+                )?,
+            )
+        } else {
+            Ok(scheduler_actor::spawn_scheduler_actor_with_gemma4_drafter(
+                model,
+                self.drafter,
+                self.mtp_draft_tokens,
+                b_max,
+                admission_deadline,
+                admission_queue_max,
+                effective_cap_max,
+                decode_cadence_mid_chunk_cap,
+                meta,
+                self.paged_prefix_cache,
+                self.prefix_lru_cache,
+            )?)
+        }
+    }
 }
 
 impl<M> SchedulerActorSpawner<M> for MtpSchedulerActorSpawner<M::MtpHead>
@@ -698,14 +716,8 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     loaded_model_weight_bytes: Option<usize>,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<Gemma4DrafterAppState> {
-    if b_max != 1 {
-        bail!("Gemma4 drafter serving currently requires b_max=1");
-    }
-    let prefix_cache_config = paged_prefix_cache.clone();
-    let prefix_lru_cache_config = prefix_lru_cache;
-    let active_kv_for_prefix_cache = active_kv_offload.clone();
-    let counters = Gemma4DrafterHealthCounters::default();
-    let mut base = build_plain_app_state(
+    let drafter = Arc::new(Mutex::new(drafter));
+    let base = build_app_state(
         model,
         tokenizer,
         model_id.clone(),
@@ -719,47 +731,21 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
-        paged_prefix_cache,
-        prefix_lru_cache_config,
         loaded_model_weight_bytes,
-        active_kv_offload,
+        Some(mtp_draft_tokens),
+        Gemma4DrafterSchedulerActorSpawner {
+            drafter,
+            mtp_draft_tokens,
+            paged_prefix_cache,
+            prefix_lru_cache,
+            active_kv_offload,
+        },
     )
     .await?;
-    let active_kv_runtime = {
-        let guard = base.model.lock().await;
-        let meta = guard.model_meta();
-        crate::models::gemma4::Gemma4DrafterActiveKvRuntime::new(
-            active_kv_for_prefix_cache,
-            base.scheduler_handle.active_kv_offload.clone(),
-            base.scheduler_handle.kv_cache_soft_limit_bytes,
-            crate::core::memory_budget::kv_bytes_per_token(&meta),
-        )
-    };
-    let prefix_cache = crate::models::gemma4::Gemma4DrafterPrefixCache::new(
-        prefix_cache_config,
-        prefix_lru_cache,
-        active_kv_runtime,
-    )?;
-    base.paged_prefix_cache_enabled = prefix_cache.is_enabled();
-    let model_max_context = {
-        let guard = base.model.lock().await;
-        guard.model_meta().max_position_embeddings.max(0) as usize
-    };
-    base.health_collector = build_health_collector(
-        model_id,
-        model_max_context,
-        b_max,
-        admission_queue_max,
-        &base.scheduler_handle,
-        counters.mtp_health_config(mtp_draft_tokens),
-    );
 
     Ok(Gemma4DrafterAppState {
         base,
-        drafter: Arc::new(Mutex::new(drafter)),
-        prefix_cache,
         mtp_draft_tokens,
-        health_counters: counters,
     })
 }
 

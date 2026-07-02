@@ -106,6 +106,19 @@ struct SchedulerMtpState {
     stats: MtpSpeculativeStats,
 }
 
+struct SchedulerGemma4DrafterRowState {
+    pending_tokens: VecDeque<u32>,
+    last_hidden: Array,
+    shared_kv: crate::models::gemma4::Gemma4SharedKvStates,
+    adaptive_draft_tokens: usize,
+}
+
+struct SchedulerGemma4DrafterState {
+    cfg: MtpSpeculativeConfig,
+    rows: HashMap<usize, SchedulerGemma4DrafterRowState>,
+    stats: MtpSpeculativeStats,
+}
+
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
 /// (per P5 spec §3.1 — VL methods stay inherent / extension-trait-only).
 ///
@@ -2794,6 +2807,8 @@ pub struct Scheduler<M: Model> {
     dummy_position_ids: Option<Array>,
     /// Optional row-scoped MTP runtime state for active speculative rows.
     mtp_state: Option<SchedulerMtpState>,
+    /// Optional row-scoped Gemma4 assistant-drafter runtime state.
+    gemma4_drafter_state: Option<SchedulerGemma4DrafterState>,
     poisoned: bool,
     /// Upper bound on `prompt_len + max_new_tokens` per request, computed
     /// at boot as `min(cli_max_cache_cap, model.config.max_position_embeddings)`.
@@ -2840,6 +2855,10 @@ impl<M: Model> std::fmt::Debug for Scheduler<M> {
             .field("cache_rows", &self.cache_rows)
             .field("has_dummy_position_ids", &self.dummy_position_ids.is_some())
             .field("has_mtp_state", &self.mtp_state.is_some())
+            .field(
+                "has_gemma4_drafter_state",
+                &self.gemma4_drafter_state.is_some(),
+            )
             .field("has_prefix_lru_cache", &self.prefix_lru_cache.is_some())
             .field("has_active_kv_store", &self.active_kv_store.is_some())
             .field("poisoned", &self.poisoned)
@@ -2914,6 +2933,7 @@ impl<M: Model> Scheduler<M> {
             cache_rows: Vec::new(),
             dummy_position_ids: None,
             mtp_state: None,
+            gemma4_drafter_state: None,
             poisoned: false,
             effective_cap_max,
             prng_state,
@@ -3028,6 +3048,10 @@ impl<M: Model> Scheduler<M> {
             .mtp_state
             .as_ref()
             .is_some_and(|mtp_state| mtp_state.rows.contains_key(&row_idx))
+            || self
+                .gemma4_drafter_state
+                .as_ref()
+                .is_some_and(|state| state.rows.contains_key(&row_idx))
         {
             return Ok(None);
         }
@@ -3433,6 +3457,7 @@ impl<M: Model> Scheduler<M> {
         //   Idle / Finished: no transition
         if self.active_count() == 0 {
             self.mtp_state = None;
+            self.gemma4_drafter_state = None;
             if self.phase == Phase::Admitting {
                 self.phase = Phase::Idle;
             } else if self.phase == Phase::Decoding {
@@ -3478,6 +3503,44 @@ impl<M: Model> Scheduler<M> {
         self.slots
             .iter_mut()
             .find_map(|s| s.as_mut().filter(|r| r.id == id))
+    }
+
+    fn emit_pending_token_for_row(
+        &mut self,
+        row_idx: usize,
+        pending_tokens: &mut VecDeque<u32>,
+    ) -> Result<StepEvent> {
+        let token = pending_tokens
+            .pop_front()
+            .ok_or_else(|| anyhow!("emit_pending_token_for_row: pending token queue is empty"))?;
+        self.emit_token_for_row(row_idx, token)
+    }
+
+    fn emit_token_for_row(&mut self, row_idx: usize, token: u32) -> Result<StepEvent> {
+        let state = self
+            .slots
+            .get_mut(row_idx)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| anyhow!("emit_token_for_row: row {row_idx} slot absent"))?;
+        if state.finished {
+            return Err(anyhow!(
+                "emit_token_for_row: row {row_idx} already finished"
+            ));
+        }
+        state.generated_tokens.push(token);
+        state.real_len += 1;
+        if state.stop_token_ids.contains(&token) {
+            state.finished = true;
+            state.finish_reason = Some("stop");
+        } else if state.generated_tokens.len() >= state.max_new_tokens {
+            state.finished = true;
+            state.finish_reason = Some("length");
+        }
+        Ok(StepEvent {
+            id: state.id,
+            token,
+            finish_reason: state.finish_reason,
+        })
     }
 
     /// `row_idx` of every occupied slot, in slot order. Used by 3b to
@@ -3779,6 +3842,7 @@ impl<M: Model> Scheduler<M> {
         self.cache = None;
         self.cache_rows.clear();
         self.mtp_state = None;
+        self.gemma4_drafter_state = None;
         self.phase = Phase::Idle;
         self.poisoned = false;
         Ok(())
@@ -3786,6 +3850,12 @@ impl<M: Model> Scheduler<M> {
 
     pub fn mtp_stats(&self) -> Option<MtpSpeculativeStats> {
         self.mtp_state.as_ref().map(|state| state.stats.clone())
+    }
+
+    pub fn gemma4_drafter_stats(&self) -> Option<MtpSpeculativeStats> {
+        self.gemma4_drafter_state
+            .as_ref()
+            .map(|state| state.stats.clone())
     }
 
     pub fn prefill_admitted_mtp_single(
@@ -6346,6 +6416,1068 @@ impl<M: Model> Scheduler<M> {
     }
 }
 
+impl Scheduler<crate::models::Gemma4Model> {
+    pub fn prefill_admitted_gemma4_drafter_batch(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        cfg: MtpSpeculativeConfig,
+    ) -> Result<Vec<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        match self.prefill_admitted_gemma4_drafter_batch_inner(model, drafter, cfg) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                if !matches!(self.phase, Phase::Decoding | Phase::Finished) {
+                    self.phase = Phase::Finished;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    pub fn step_gemma4_drafter_batch(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+    ) -> Result<Vec<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        match self.step_gemma4_drafter_batch_inner(model, drafter) {
+            Ok(events) => Ok(events),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn prefill_admitted_gemma4_drafter_batch_inner(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        cfg: MtpSpeculativeConfig,
+    ) -> Result<Vec<StepEvent>> {
+        match self.phase {
+            Phase::Idle | Phase::Admitting => {}
+            Phase::Decoding | Phase::Finished => {
+                return Err(anyhow!(
+                    "prefill_admitted_gemma4_drafter_batch illegal in {:?} phase: call evict_all first",
+                    self.phase
+                ));
+            }
+        }
+        if self.cache.is_some() {
+            return Err(anyhow!(
+                "prefill_admitted_gemma4_drafter_batch: cache already allocated before prefill"
+            ));
+        }
+
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| slot.as_ref().map(|_| row))
+            .collect();
+        if active_rows.is_empty() {
+            return Err(anyhow!(
+                "prefill_admitted_gemma4_drafter_batch requires at least one admitted request"
+            ));
+        }
+        if active_rows.len() == 1 {
+            return self.prefill_admitted_gemma4_drafter_single(model, drafter, cfg);
+        }
+        for &row_idx in &active_rows {
+            let state = self.slots[row_idx]
+                .as_ref()
+                .expect("active row implies slot is Some");
+            if state.finished || !state.generated_tokens.is_empty() {
+                return Err(anyhow!(
+                    "prefill_admitted_gemma4_drafter_batch requires fresh admitted rows"
+                ));
+            }
+            if state.prompt_ids.is_empty() {
+                return Err(anyhow!(
+                    "prefill_admitted_gemma4_drafter_batch: prompt_ids cannot be empty"
+                ));
+            }
+            MtpSpeculativeConfig::new(cfg.max_draft_tokens, state.sampler)?;
+        }
+
+        let mut temp_rows = Vec::with_capacity(active_rows.len());
+        let mut row_states = HashMap::with_capacity(active_rows.len());
+        let mut stats = MtpSpeculativeStats::default();
+        let mut events = Vec::with_capacity(active_rows.len());
+        let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
+        let dtype = model.cache_dtype();
+
+        for &row_idx in &active_rows {
+            let mut temp = self.temp_gemma4_drafter_scheduler_for_row(row_idx)?;
+            let event = temp
+                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg)
+                .map_err(|err| {
+                    anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: {err:#}")
+                })?;
+            let temp_cache = temp.cache.take().ok_or_else(|| {
+                anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: temp cache absent")
+            })?;
+            let (cap, _) = cache_cap_and_dtype(&temp_cache)?;
+            final_cap = final_cap.max(cap);
+            let mut temp_state = temp.gemma4_drafter_state.take().ok_or_else(|| {
+                anyhow!(
+                    "prefill_admitted_gemma4_drafter_batch row {row_idx}: temp drafter state absent"
+                )
+            })?;
+            add_mtp_stats(&mut stats, temp_state.stats);
+            let row_state = temp_state.rows.remove(&0).ok_or_else(|| {
+                anyhow!(
+                    "prefill_admitted_gemma4_drafter_batch row {row_idx}: temp row state absent"
+                )
+            })?;
+            row_states.insert(row_idx, row_state);
+            let temp_slot = temp.slots[0].as_ref().ok_or_else(|| {
+                anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: temp slot absent")
+            })?;
+            let slot = self.slots[row_idx]
+                .as_mut()
+                .expect("active row implies slot is Some");
+            slot.generated_tokens = temp_slot.generated_tokens.clone();
+            slot.real_len = temp_slot.real_len;
+            slot.finished = temp_slot.finished;
+            slot.finish_reason = temp_slot.finish_reason;
+            temp_rows.push((row_idx, temp_cache));
+            events.extend(event);
+        }
+
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&active_rows)?;
+        let mut final_cache = self.make_model_cache(
+            model,
+            active_rows.len() as i32,
+            final_cap,
+            dtype,
+            turboquant_bits,
+        )?;
+        for (dst_row, &slot_row) in active_rows.iter().enumerate() {
+            let (_, temp_cache) = temp_rows
+                .iter()
+                .find(|(row, _)| *row == slot_row)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "prefill_admitted_gemma4_drafter_batch: missing temp cache for slot row {slot_row}"
+                    )
+                })?;
+            adopt_cache_row_layers(
+                &mut final_cache,
+                temp_cache,
+                dst_row,
+                0,
+                "prefill_admitted_gemma4_drafter_batch",
+            )?;
+        }
+
+        let all_finished = active_rows.iter().all(|&row| {
+            self.slots[row]
+                .as_ref()
+                .expect("active row implies slot is Some")
+                .finished
+        });
+        self.cache = Some(final_cache);
+        self.cache_rows = active_rows;
+        self.phase = if all_finished {
+            Phase::Finished
+        } else {
+            Phase::Decoding
+        };
+        self.gemma4_drafter_state = Some(SchedulerGemma4DrafterState {
+            cfg,
+            rows: row_states,
+            stats,
+        });
+        self.refresh_active_kv_residency_stats();
+
+        Ok(events)
+    }
+
+    fn prefill_admitted_gemma4_drafter_single(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        cfg: MtpSpeculativeConfig,
+    ) -> Result<Vec<StepEvent>> {
+        match self.phase {
+            Phase::Idle | Phase::Admitting => {}
+            Phase::Decoding | Phase::Finished => {
+                return Err(anyhow!(
+                    "prefill_admitted_gemma4_drafter_single illegal in {:?} phase: call evict_all first",
+                    self.phase
+                ));
+            }
+        }
+
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| slot.as_ref().map(|_| row))
+            .collect();
+        if active_rows.len() != 1 {
+            return Err(anyhow!(
+                "prefill_admitted_gemma4_drafter_single requires exactly one admitted request, got {}",
+                active_rows.len()
+            ));
+        }
+        let row_idx = active_rows[0];
+        let (
+            id,
+            prompt_ids,
+            max_new_tokens,
+            sampler,
+            stop_token_ids,
+            prefill_chunk_size,
+            pixel_values,
+            image_grid_thw,
+            image_spatial_merge_size,
+            image_token_id,
+        ) = {
+            let state = self.slots[row_idx]
+                .as_ref()
+                .expect("active row implies slot is Some");
+            (
+                state.id,
+                state.prompt_ids.clone(),
+                state.max_new_tokens,
+                state.sampler,
+                state.stop_token_ids.clone(),
+                state.prefill_chunk_size,
+                state.pixel_values.clone(),
+                state.image_grid_thw.clone(),
+                state.image_spatial_merge_size,
+                state.image_token_id,
+            )
+        };
+        if prompt_ids.is_empty() {
+            return Err(anyhow!(
+                "prefill_admitted_gemma4_drafter_single: prompt_ids cannot be empty"
+            ));
+        }
+        if pixel_values.is_none() && image_grid_thw.is_some() {
+            return Err(anyhow!(
+                "prefill_admitted_gemma4_drafter_single: image_grid_thw present but pixel_values is None"
+            ));
+        }
+        MtpSpeculativeConfig::new(cfg.max_draft_tokens, sampler)?;
+
+        let prompt_len = prompt_ids.len();
+        let cap =
+            (prompt_len.saturating_add(max_new_tokens) as i32).max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+        let dtype = model.cache_dtype();
+        if self.cache.is_some() {
+            return Err(anyhow!(
+                "prefill_admitted_gemma4_drafter_single: cache already allocated before prefill"
+            ));
+        }
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
+        self.cache = Some(self.make_model_cache(model, 1, cap, dtype, turboquant_bits)?);
+        self.cache_rows = vec![row_idx];
+
+        let prefix_cache = self.gemma4_drafter_prefix_cache();
+        let is_vl = pixel_values.is_some();
+        let prefix_fingerprint = if prefix_cache.is_enabled() {
+            paged_prefix_fingerprint_for_request(
+                pixel_values.as_deref(),
+                image_grid_thw.as_deref(),
+                image_token_id,
+                image_spatial_merge_size,
+            )?
+        } else {
+            None
+        };
+        let dummy_position_ids = if model.requires_position_ids() {
+            None
+        } else {
+            Some(self.reusable_dummy_position_ids()?)
+        };
+        let prompt_len_i32 = prompt_len as i32;
+        let mut pos = 0_i32;
+        let mut image_pad_consumed = 0usize;
+        let mut stats = MtpSpeculativeStats::default();
+        let mut vision_embeds_full = None;
+        let position_ids_full = if is_vl && dummy_position_ids.is_none() {
+            let grids = image_grid_thw.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "prefill_admitted_gemma4_drafter_single: pixel_values present but image_grid_thw is None"
+                )
+            })?;
+            if model.vl_positions_sequential() {
+                Some(build_position_ids(0, prompt_len_i32)?)
+            } else {
+                let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&id| id as i32).collect();
+                Some(build_position_ids_vl(
+                    &prompt_ids_i32,
+                    grids,
+                    image_token_id,
+                    image_spatial_merge_size,
+                )?)
+            }
+        } else {
+            None
+        };
+        let mut last_prompt_hidden = None;
+        let mut last_shared_kv = None;
+
+        if let Some(restored) = {
+            let cache = self
+                .cache
+                .as_mut()
+                .ok_or_else(|| anyhow!("prefill_admitted_gemma4_drafter_single: cache absent"))?;
+            prefix_cache.try_restore(
+                model,
+                cache.as_mut_slice(),
+                &prompt_ids,
+                prefix_fingerprint.as_deref(),
+            )?
+        } {
+            pos = restored.cached_len;
+            image_pad_consumed = count_image_pad(&prompt_ids[..pos as usize], image_token_id);
+            last_prompt_hidden = Some(restored.last_hidden);
+            last_shared_kv = Some(restored.shared_kv);
+            self.refresh_active_kv_residency_stats();
+        }
+
+        while pos < prompt_len_i32 {
+            let remaining = prompt_len_i32 - pos;
+            let mut n = if prefill_chunk_size == 0 {
+                remaining
+            } else {
+                remaining.min(prefill_chunk_size.max(1))
+            };
+            if n <= 0 {
+                return Err(anyhow!(
+                    "prefill_admitted_gemma4_drafter_single: invalid prefill chunk length {n}"
+                ));
+            }
+            if is_vl && prefill_chunk_size != 0 {
+                let adjusted_end =
+                    extend_vl_chunk_end_for_image_pad(&prompt_ids, image_token_id, pos, pos + n);
+                n = adjusted_end - pos;
+            }
+
+            let chunk_ids = &prompt_ids[pos as usize..(pos as usize + n as usize)];
+            let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
+            let chunk_pos_ids = match (dummy_position_ids.as_ref(), position_ids_full.as_ref()) {
+                (Some(dummy), _) => dummy.clone(),
+                (None, Some(full)) => slice_pos_ids_axis2(full, pos, pos + n)?,
+                (None, None) => build_position_ids(pos, n)?,
+            };
+
+            let forward_start = Instant::now();
+            let out = if is_vl {
+                let image_tokens = count_image_pad(chunk_ids, image_token_id);
+                if image_tokens > 0 && vision_embeds_full.is_none() {
+                    let pv = pixel_values.as_deref().ok_or_else(|| {
+                        anyhow!(
+                            "prefill_admitted_gemma4_drafter_single: image tokens without pixel_values"
+                        )
+                    })?;
+                    let grids = image_grid_thw.as_deref().ok_or_else(|| {
+                        anyhow!(
+                            "prefill_admitted_gemma4_drafter_single: image tokens without image_grid_thw"
+                        )
+                    })?;
+                    vision_embeds_full = Some(model.compute_vision_embeds(
+                        pv,
+                        grids,
+                        mlx::StreamOrDevice::default(),
+                    )?);
+                }
+                let vision_slice = match vision_embeds_full.as_ref() {
+                    Some(embeds) if image_tokens > 0 => Some(slice_vision_embeds_rows(
+                        embeds,
+                        image_pad_consumed,
+                        image_pad_consumed + image_tokens,
+                    )?),
+                    _ => None,
+                };
+                image_pad_consumed += image_tokens;
+                let cache = self.cache.as_mut().ok_or_else(|| {
+                    anyhow!("prefill_admitted_gemma4_drafter_single: cache absent")
+                })?;
+                model.forward_vl_hidden_with_shared_kv_on(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None,
+                    None,
+                    Some(cache.as_mut_slice()),
+                    vision_slice.as_ref(),
+                    image_token_id,
+                    mlx::StreamOrDevice::default(),
+                )?
+            } else {
+                let cache = self.cache.as_mut().ok_or_else(|| {
+                    anyhow!("prefill_admitted_gemma4_drafter_single: cache absent")
+                })?;
+                model.forward_text_hidden_with_shared_kv_on(
+                    &chunk_arr,
+                    &chunk_pos_ids,
+                    None,
+                    None,
+                    Some(cache.as_mut_slice()),
+                    mlx::StreamOrDevice::default(),
+                )?
+            };
+            add_elapsed_us(&mut stats.verify_forward_us, forward_start);
+            let chunk_last_hidden = slice_hidden_position(&out.hidden, n - 1)?;
+            let new_pos = pos + n;
+            if let Some(cache) = self.cache.as_ref() {
+                match prefix_cache.try_save(
+                    model,
+                    cache,
+                    &chunk_last_hidden,
+                    &prompt_ids[..new_pos as usize],
+                    prefix_fingerprint.as_deref(),
+                ) {
+                    Ok(Some(key)) => {
+                        tracing::debug!("paged SSD prefix cache Gemma4 drafter saved: key={key}");
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            "paged SSD prefix cache Gemma4 drafter save skipped: {err:#}"
+                        );
+                    }
+                }
+            }
+            self.refresh_active_kv_residency_stats();
+            if new_pos == prompt_len_i32 {
+                last_prompt_hidden = Some(chunk_last_hidden);
+                last_shared_kv = Some(out.shared_kv);
+            } else {
+                mlx::transforms::eval(&[&out.hidden])?;
+            }
+            pos = new_pos;
+        }
+
+        let last_prompt_hidden = last_prompt_hidden.ok_or_else(|| {
+            anyhow!("prefill_admitted_gemma4_drafter_single produced no prompt hidden")
+        })?;
+        let shared_kv = last_shared_kv.ok_or_else(|| {
+            anyhow!("prefill_admitted_gemma4_drafter_single produced no shared KV")
+        })?;
+        let projection_start = Instant::now();
+        let first_logits =
+            model.project_hidden_on(&last_prompt_hidden, mlx::StreamOrDevice::default())?;
+        add_elapsed_us(&mut stats.projection_us, projection_start);
+        let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
+        let sampling_start = Instant::now();
+        let first_tokens =
+            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?;
+        add_elapsed_us(&mut stats.sampling_us, sampling_start);
+        self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
+        let first_token = *first_tokens.first().ok_or_else(|| {
+            anyhow!("prefill_admitted_gemma4_drafter_single produced no first token")
+        })?;
+
+        let finish_reason = {
+            let state = self.slots[row_idx]
+                .as_mut()
+                .expect("active row implies slot is Some");
+            state.generated_tokens.push(first_token);
+            state.real_len += 1;
+            if stop_token_ids.contains(&first_token) {
+                state.finished = true;
+                state.finish_reason = Some("stop");
+            } else if state.generated_tokens.len() >= state.max_new_tokens {
+                state.finished = true;
+                state.finish_reason = Some("length");
+            }
+            state.finish_reason
+        };
+
+        self.phase = if finish_reason.is_some() {
+            Phase::Finished
+        } else {
+            Phase::Decoding
+        };
+        self.gemma4_drafter_state = Some(SchedulerGemma4DrafterState {
+            cfg,
+            rows: HashMap::from([(
+                row_idx,
+                SchedulerGemma4DrafterRowState {
+                    pending_tokens: VecDeque::new(),
+                    last_hidden: last_prompt_hidden,
+                    shared_kv,
+                    adaptive_draft_tokens: cfg.max_draft_tokens,
+                },
+            )]),
+            stats,
+        });
+
+        if finish_reason.is_none() {
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+        }
+
+        Ok(vec![StepEvent {
+            id,
+            token: first_token,
+            finish_reason,
+        }])
+    }
+
+    fn step_gemma4_drafter_batch_inner(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+    ) -> Result<Vec<StepEvent>> {
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "step_gemma4_drafter_batch illegal in {:?} phase: call prefill_admitted_gemma4_drafter_batch first",
+                self.phase
+            ));
+        }
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| matches!(slot, Some(state) if !state.finished).then_some(row))
+            .collect();
+        if active_rows.is_empty() {
+            self.phase = Phase::Finished;
+            return Ok(Vec::new());
+        }
+        if active_rows.len() == 1 && self.cache_rows.as_slice() == active_rows.as_slice() {
+            return self.step_gemma4_drafter_single(model, drafter);
+        }
+
+        let mut drafter_state = self
+            .gemma4_drafter_state
+            .take()
+            .ok_or_else(|| anyhow!("step_gemma4_drafter_batch: drafter state absent"))?;
+        let cfg = drafter_state.cfg;
+        let mut events = Vec::with_capacity(active_rows.len());
+
+        for row_idx in active_rows {
+            let row_state = drafter_state
+                .rows
+                .remove(&row_idx)
+                .ok_or_else(|| anyhow!("step_gemma4_drafter_batch: row {row_idx} state absent"))?;
+            if !row_state.pending_tokens.is_empty() {
+                let mut row_state = row_state;
+                let event =
+                    self.emit_pending_token_for_row(row_idx, &mut row_state.pending_tokens)?;
+                let should_fill_next_window =
+                    event.finish_reason.is_none() && row_state.pending_tokens.is_empty();
+                events.push(event);
+
+                if should_fill_next_window {
+                    let mut temp = self.build_temp_gemma4_drafter_step_scheduler(
+                        model,
+                        row_idx,
+                        cfg,
+                        drafter_state.stats,
+                        row_state,
+                    )?;
+                    temp.fill_gemma4_drafter_window_single(0, model, drafter)
+                        .map_err(|err| {
+                            anyhow!(
+                                "step_gemma4_drafter_batch row {row_idx} refill window: {err:#}"
+                            )
+                        })?;
+                    let (row_state, stats) =
+                        self.install_temp_gemma4_drafter_step_result(model, row_idx, temp)?;
+                    drafter_state.stats = stats;
+                    drafter_state.rows.insert(row_idx, row_state);
+                } else {
+                    drafter_state.rows.insert(row_idx, row_state);
+                }
+                continue;
+            }
+
+            let mut temp = self.build_temp_gemma4_drafter_step_scheduler(
+                model,
+                row_idx,
+                cfg,
+                drafter_state.stats,
+                row_state,
+            )?;
+            let row_events = temp
+                .step_gemma4_drafter_single(model, drafter)
+                .map_err(|err| anyhow!("step_gemma4_drafter_batch row {row_idx}: {err:#}"))?;
+            let (row_state, stats) =
+                self.install_temp_gemma4_drafter_step_result(model, row_idx, temp)?;
+            drafter_state.stats = stats;
+            drafter_state.rows.insert(row_idx, row_state);
+            events.extend(row_events);
+        }
+
+        let any_unfinished = self
+            .slots
+            .iter()
+            .any(|slot| matches!(slot, Some(state) if !state.finished));
+        self.phase = if any_unfinished {
+            Phase::Decoding
+        } else {
+            Phase::Finished
+        };
+        self.gemma4_drafter_state = Some(drafter_state);
+        self.refresh_active_kv_residency_stats();
+
+        Ok(events)
+    }
+
+    fn step_gemma4_drafter_single(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+    ) -> Result<Vec<StepEvent>> {
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "step_gemma4_drafter_single illegal in {:?} phase: call prefill_admitted_gemma4_drafter_single first",
+                self.phase
+            ));
+        }
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| matches!(slot, Some(state) if !state.finished).then_some(row))
+            .collect();
+        if active_rows.len() != 1 {
+            return Err(anyhow!(
+                "step_gemma4_drafter_single requires exactly one unfinished row, got {}",
+                active_rows.len()
+            ));
+        }
+        let row_idx = active_rows[0];
+        if self.cache_rows.as_slice() != active_rows.as_slice() {
+            return Err(anyhow!(
+                "step_gemma4_drafter_single requires single-row cache layout for row {row_idx}, got {:?}",
+                self.cache_rows
+            ));
+        }
+        if self
+            .gemma4_drafter_state
+            .as_ref()
+            .ok_or_else(|| anyhow!("step_gemma4_drafter_single: drafter state absent"))?
+            .rows
+            .get(&row_idx)
+            .ok_or_else(|| anyhow!("step_gemma4_drafter_single: row state absent"))?
+            .pending_tokens
+            .is_empty()
+        {
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+        }
+
+        let token = {
+            let drafter_state = self
+                .gemma4_drafter_state
+                .as_mut()
+                .ok_or_else(|| anyhow!("step_gemma4_drafter_single: drafter state absent"))?;
+            drafter_state
+                .rows
+                .get_mut(&row_idx)
+                .ok_or_else(|| anyhow!("step_gemma4_drafter_single: row state absent"))?
+                .pending_tokens
+                .pop_front()
+                .ok_or_else(|| {
+                    anyhow!("step_gemma4_drafter_single: pending token queue is empty")
+                })?
+        };
+
+        let event = self.emit_token_for_row(row_idx, token)?;
+        let finish_reason = event.finish_reason;
+
+        if finish_reason.is_some() {
+            self.phase = Phase::Finished;
+        } else if self
+            .gemma4_drafter_state
+            .as_ref()
+            .and_then(|state| state.rows.get(&row_idx))
+            .is_some_and(|state| state.pending_tokens.is_empty())
+        {
+            self.fill_gemma4_drafter_window_single(row_idx, model, drafter)?;
+        }
+
+        Ok(vec![event])
+    }
+
+    fn fill_gemma4_drafter_window_single(
+        &mut self,
+        row_idx: usize,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+    ) -> Result<()> {
+        let mut drafter_state = self
+            .gemma4_drafter_state
+            .take()
+            .ok_or_else(|| anyhow!("fill_gemma4_drafter_window_single: drafter state absent"))?;
+        let mut row_state = drafter_state.rows.remove(&row_idx).ok_or_else(|| {
+            anyhow!("fill_gemma4_drafter_window_single: row {row_idx} state absent")
+        })?;
+        let result = self.fill_gemma4_drafter_window_single_with_state(
+            row_idx,
+            drafter_state.cfg,
+            &mut drafter_state.stats,
+            &mut row_state,
+            model,
+            drafter,
+        );
+        drafter_state.rows.insert(row_idx, row_state);
+        self.gemma4_drafter_state = Some(drafter_state);
+        result
+    }
+
+    fn fill_gemma4_drafter_window_single_with_state(
+        &mut self,
+        row_idx: usize,
+        cfg: MtpSpeculativeConfig,
+        stats: &mut MtpSpeculativeStats,
+        row_state: &mut SchedulerGemma4DrafterRowState,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+    ) -> Result<()> {
+        let (prompt_ids, generated_tokens, max_new_tokens, sampler, stop_token_ids) = {
+            let state = self.slots[row_idx]
+                .as_ref()
+                .ok_or_else(|| anyhow!("fill_gemma4_drafter_window_single: row slot absent"))?;
+            (
+                state.prompt_ids.clone(),
+                state.generated_tokens.clone(),
+                state.max_new_tokens,
+                state.sampler,
+                state.stop_token_ids.clone(),
+            )
+        };
+        let emitted = generated_tokens.len();
+        let remaining = max_new_tokens.saturating_sub(emitted);
+        if remaining == 0 {
+            return Ok(());
+        }
+        let current_token = *generated_tokens
+            .last()
+            .ok_or_else(|| anyhow!("fill_gemma4_drafter_window_single: no current token"))?;
+        let mut history = Vec::with_capacity(prompt_ids.len() + generated_tokens.len());
+        history.extend_from_slice(&prompt_ids);
+        history.extend_from_slice(&generated_tokens);
+
+        let draft_budget = row_state
+            .adaptive_draft_tokens
+            .clamp(1, cfg.max_draft_tokens)
+            .min(remaining);
+        let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
+        let draft_tokens = self.draft_gemma4_drafter_tokens_single(
+            stats,
+            row_state,
+            model,
+            drafter,
+            current_token,
+            draft_budget,
+            &history,
+            sampler,
+            &mut compact_prng,
+        )?;
+        let verify_input = verify_input(current_token, &draft_tokens);
+        let verify_start_pos = (history.len() - 1) as i32;
+        let verify_pos_ids =
+            self.gemma4_drafter_position_ids(model, verify_start_pos, verify_input.len() as i32)?;
+        let verify_arr: Array =
+            (&verify_input[..], &[1_i32, verify_input.len() as i32][..]).try_into()?;
+
+        let base_snapshot = {
+            let cache = self
+                .cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("fill_gemma4_drafter_window_single: main cache absent"))?;
+            cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
+        };
+        let verify_forward_start = Instant::now();
+        let verified = {
+            let cache = self
+                .cache
+                .as_mut()
+                .ok_or_else(|| anyhow!("fill_gemma4_drafter_window_single: main cache absent"))?;
+            model.forward_text_hidden_with_shared_kv_on(
+                &verify_arr,
+                &verify_pos_ids,
+                None,
+                None,
+                Some(cache.as_mut_slice()),
+                mlx::StreamOrDevice::default(),
+            )?
+        };
+        self.refresh_active_kv_residency_stats();
+        add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
+        let projection_start = Instant::now();
+        let verified_logits =
+            model.project_hidden_on(&verified.hidden, mlx::StreamOrDevice::default())?;
+        add_elapsed_us(&mut stats.projection_us, projection_start);
+        let sampling_start = Instant::now();
+        let verified_tokens =
+            sample_logits_positions(&verified_logits, sampler, &history, &mut compact_prng)?;
+        add_elapsed_us(&mut stats.sampling_us, sampling_start);
+        self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
+
+        let resolution = resolve_speculative_tokens(&draft_tokens, &verified_tokens)?;
+        stats.windows += 1;
+        stats.drafted_tokens += draft_tokens.len();
+        stats.accepted_draft_tokens += resolution.accepted_draft_len;
+        stats.record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
+        if resolution.needs_rollback {
+            stats.rollback_count += 1;
+        }
+        adjust_mtp_draft_budget(
+            cfg.max_draft_tokens,
+            &mut row_state.adaptive_draft_tokens,
+            draft_tokens.len(),
+            resolution.accepted_draft_len,
+            stats,
+        );
+
+        let (accepted_last_hidden, accepted_shared_kv) = if resolution.needs_rollback {
+            let rollback_start = Instant::now();
+            {
+                let cache = self.cache.as_mut().ok_or_else(|| {
+                    anyhow!("fill_gemma4_drafter_window_single: main cache absent")
+                })?;
+                restore_layer_cache(cache.as_mut_slice(), &base_snapshot)?;
+            }
+            self.refresh_active_kv_residency_stats();
+            add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
+            let replay_len = resolution.accepted_verify_input_len;
+            let replay_input = &verify_input[..replay_len];
+            let replay_arr: Array = (replay_input, &[1_i32, replay_len as i32][..]).try_into()?;
+            let replay_pos_ids =
+                self.gemma4_drafter_position_ids(model, verify_start_pos, replay_len as i32)?;
+            let replay_forward_start = Instant::now();
+            let replay = {
+                let cache = self.cache.as_mut().ok_or_else(|| {
+                    anyhow!("fill_gemma4_drafter_window_single: main cache absent")
+                })?;
+                model.forward_text_hidden_with_shared_kv_on(
+                    &replay_arr,
+                    &replay_pos_ids,
+                    None,
+                    None,
+                    Some(cache.as_mut_slice()),
+                    mlx::StreamOrDevice::default(),
+                )?
+            };
+            self.refresh_active_kv_residency_stats();
+            add_elapsed_us(&mut stats.verify_forward_us, replay_forward_start);
+            (
+                slice_hidden_position(&replay.hidden, replay_len as i32 - 1)?,
+                replay.shared_kv,
+            )
+        } else {
+            (
+                slice_hidden_position(
+                    &verified.hidden,
+                    resolution.accepted_verify_input_len as i32 - 1,
+                )?,
+                verified.shared_kv,
+            )
+        };
+        row_state.last_hidden = accepted_last_hidden;
+        row_state.shared_kv = accepted_shared_kv;
+
+        let mut tokens_to_append = resolution.tokens_to_append;
+        if let Some(stop_idx) = tokens_to_append
+            .iter()
+            .position(|token| stop_token_ids.contains(token))
+        {
+            tokens_to_append.truncate(stop_idx + 1);
+        }
+        tokens_to_append.truncate(remaining);
+        row_state.pending_tokens.extend(tokens_to_append);
+        self.refresh_active_kv_residency_stats();
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draft_gemma4_drafter_tokens_single(
+        &mut self,
+        stats: &mut MtpSpeculativeStats,
+        row_state: &mut SchedulerGemma4DrafterRowState,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+        current_token: u32,
+        draft_budget: usize,
+        history: &[u32],
+        sampler: Sampler,
+        prng_state: &mut Array,
+    ) -> Result<Vec<u32>> {
+        let mut draft_tokens = Vec::with_capacity(draft_budget);
+        let mut draft_history = history.to_vec();
+        let mut input_hidden = row_state.last_hidden.clone();
+        let mut input_token = current_token;
+        let kv_valid_len = (history.len() - 1) as i32;
+        let draft_position = crate::models::gemma4::draft_position_for_shared_kv(kv_valid_len);
+
+        for _ in 0..draft_budget {
+            let token_arr: Array = (&[input_token][..], &[1_i32, 1_i32][..]).try_into()?;
+            let token_embed = model.embed_on(&token_arr, mlx::StreamOrDevice::default())?;
+            let inputs_embeds = mlx::ops::shape::concatenate_on(
+                &[&token_embed, &input_hidden],
+                2,
+                mlx::StreamOrDevice::default(),
+            )?;
+            let draft_forward_start = Instant::now();
+            let output = drafter.forward_on(
+                &inputs_embeds,
+                &row_state.shared_kv,
+                draft_position,
+                kv_valid_len,
+                mlx::StreamOrDevice::default(),
+            )?;
+            add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
+            let sampling_start = Instant::now();
+            let sampled =
+                sample_logits_positions(&output.logits, sampler, &draft_history, prng_state)?;
+            add_elapsed_us(&mut stats.sampling_us, sampling_start);
+            let next_token = *sampled
+                .first()
+                .ok_or_else(|| anyhow!("Gemma4 drafter produced no token"))?;
+            draft_tokens.push(next_token);
+            draft_history.push(next_token);
+            input_hidden = output.hidden_states;
+            input_token = next_token;
+        }
+
+        Ok(draft_tokens)
+    }
+
+    fn gemma4_drafter_position_ids(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        start_pos: i32,
+        len: i32,
+    ) -> Result<Array> {
+        if model.requires_position_ids() {
+            build_position_ids(start_pos, len)
+        } else {
+            self.reusable_dummy_position_ids()
+        }
+    }
+
+    fn gemma4_drafter_prefix_cache(&self) -> crate::models::gemma4::Gemma4DrafterPrefixCache {
+        crate::models::gemma4::Gemma4DrafterPrefixCache::new_with_shared_prefix_lru(
+            self.paged_prefix_cache.clone(),
+            self.prefix_lru_cache.clone(),
+            None,
+        )
+    }
+
+    fn temp_gemma4_drafter_scheduler_for_row(
+        &self,
+        row_idx: usize,
+    ) -> Result<Scheduler<crate::models::Gemma4Model>> {
+        let state = self.slots[row_idx]
+            .as_ref()
+            .ok_or_else(|| anyhow!("temp_gemma4_drafter_scheduler_for_row: row slot absent"))?;
+        let mut temp =
+            Scheduler::<crate::models::Gemma4Model>::new(1, self.effective_cap_max, self.meta)
+                .map_err(anyhow::Error::from)?;
+        if let Some(config) = self.paged_prefix_cache.as_ref() {
+            temp.enable_paged_prefix_cache(config.clone())?;
+        }
+        if let Some(prefix_lru_cache) = self.prefix_lru_cache.as_ref() {
+            temp.share_prefix_lru_cache(Arc::clone(prefix_lru_cache));
+        }
+        if let Some(stats) = self.active_kv_stats.as_ref() {
+            temp.enable_active_kv_offload(self.active_kv_config.clone(), stats.clone())?;
+        }
+        let temp_id = temp.admit(generate_request_from_state(state)?)?;
+        {
+            let temp_state = temp.slots[0].as_mut().ok_or_else(|| {
+                anyhow!("temp_gemma4_drafter_scheduler_for_row: temp slot absent")
+            })?;
+            temp_state.id = state.id;
+            temp_state.generated_tokens = state.generated_tokens.clone();
+            temp_state.real_len = state.real_len;
+            temp_state.finished = state.finished;
+            temp_state.finish_reason = state.finish_reason;
+        }
+        anyhow::ensure!(
+            temp_id == RequestId(0),
+            "temp_gemma4_drafter_scheduler_for_row: unexpected temp id {}",
+            temp_id.0
+        );
+        Ok(temp)
+    }
+
+    fn install_temp_gemma4_drafter_step_result(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        row_idx: usize,
+        mut temp: Scheduler<crate::models::Gemma4Model>,
+    ) -> Result<(SchedulerGemma4DrafterRowState, MtpSpeculativeStats)> {
+        let temp_cache = temp
+            .cache
+            .take()
+            .ok_or_else(|| anyhow!("install_temp_gemma4_drafter_step_result: temp cache absent"))?;
+        self.install_cache_with_temp_row(model, &temp_cache, row_idx)?;
+        let temp_slot = temp.slots[0]
+            .as_ref()
+            .ok_or_else(|| anyhow!("install_temp_gemma4_drafter_step_result: temp slot absent"))?;
+        let slot = self.slots[row_idx]
+            .as_mut()
+            .ok_or_else(|| anyhow!("install_temp_gemma4_drafter_step_result: row slot absent"))?;
+        slot.generated_tokens = temp_slot.generated_tokens.clone();
+        slot.real_len = temp_slot.real_len;
+        slot.finished = temp_slot.finished;
+        slot.finish_reason = temp_slot.finish_reason;
+
+        let mut drafter_state = temp.gemma4_drafter_state.take().ok_or_else(|| {
+            anyhow!("install_temp_gemma4_drafter_step_result: temp drafter state absent")
+        })?;
+        let row_state = drafter_state.rows.remove(&0).ok_or_else(|| {
+            anyhow!("install_temp_gemma4_drafter_step_result: temp row state absent")
+        })?;
+        Ok((row_state, drafter_state.stats))
+    }
+
+    fn build_temp_gemma4_drafter_step_scheduler(
+        &mut self,
+        model: &crate::models::Gemma4Model,
+        row_idx: usize,
+        cfg: MtpSpeculativeConfig,
+        stats: MtpSpeculativeStats,
+        row_state: SchedulerGemma4DrafterRowState,
+    ) -> Result<Scheduler<crate::models::Gemma4Model>> {
+        let mut temp = self.temp_gemma4_drafter_scheduler_for_row(row_idx)?;
+        let cache = self.cache.as_ref().ok_or_else(|| {
+            anyhow!("build_temp_gemma4_drafter_step_scheduler: main cache absent")
+        })?;
+        let compact_row = self
+            .cache_rows
+            .iter()
+            .position(|&row| row == row_idx)
+            .ok_or_else(|| {
+                anyhow!(
+                    "build_temp_gemma4_drafter_step_scheduler: slot row {row_idx} missing from layout {:?}",
+                    self.cache_rows
+                )
+            })?;
+        let (cap, dtype) = cache_cap_and_dtype(cache)?;
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
+        let mut temp_cache = self.make_model_cache(model, 1, cap, dtype, turboquant_bits)?;
+        adopt_cache_row_layers(
+            &mut temp_cache,
+            cache,
+            0,
+            compact_row,
+            "build_temp_gemma4_drafter_step_scheduler",
+        )?;
+        temp.cache = Some(temp_cache);
+        temp.cache_rows = vec![0];
+        temp.phase = Phase::Decoding;
+        temp.gemma4_drafter_state = Some(SchedulerGemma4DrafterState {
+            cfg,
+            rows: HashMap::from([(0, row_state)]),
+            stats,
+        });
+        Ok(temp)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8148,6 +9280,66 @@ mod tests {
         );
         assert_eq!(s.get(id0).unwrap().generated_tokens, vec![3, 4, 5]);
         assert_eq!(s.get(id1).unwrap().generated_tokens, vec![3, 6, 7]);
+    }
+
+    #[test]
+    fn pending_token_fast_path_updates_slot_state() {
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
+        let mut req = mk_req(vec![1, 2, 3]);
+        req.stop_token_ids = vec![99];
+        req.max_new_tokens = 3;
+        let id = s.admit(req).expect("admit row");
+        let mut pending_tokens = VecDeque::from([42, 43]);
+
+        let event = s
+            .emit_pending_token_for_row(0, &mut pending_tokens)
+            .expect("emit pending token");
+
+        assert_eq!(
+            event,
+            StepEvent {
+                id,
+                token: 42,
+                finish_reason: None
+            }
+        );
+        assert_eq!(pending_tokens, VecDeque::from([43]));
+        let state = s.get(id).expect("row state");
+        assert_eq!(state.generated_tokens, vec![42]);
+        assert_eq!(state.real_len, 4);
+        assert!(!state.finished);
+        assert!(state.finish_reason.is_none());
+    }
+
+    #[test]
+    fn pending_token_fast_path_marks_length_without_dropping_remaining_queue() {
+        let mut s = TestScheduler::new(2, 32768, crate::core::memory_budget::test_meta_qwen35())
+            .expect("scheduler startup");
+        let mut req = mk_req(vec![1, 2, 3]);
+        req.stop_token_ids = vec![99];
+        req.max_new_tokens = 1;
+        let id = s.admit(req).expect("admit row");
+        let mut pending_tokens = VecDeque::from([42, 43]);
+
+        let event = s
+            .emit_pending_token_for_row(0, &mut pending_tokens)
+            .expect("emit pending token");
+
+        assert_eq!(
+            event,
+            StepEvent {
+                id,
+                token: 42,
+                finish_reason: Some("length")
+            }
+        );
+        assert_eq!(pending_tokens, VecDeque::from([43]));
+        let state = s.get(id).expect("row state");
+        assert_eq!(state.generated_tokens, vec![42]);
+        assert_eq!(state.real_len, 4);
+        assert!(state.finished);
+        assert_eq!(state.finish_reason, Some("length"));
     }
 
     #[test]
