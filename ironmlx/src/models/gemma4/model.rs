@@ -218,6 +218,10 @@ impl Gemma4Model {
         self.text.config()
     }
 
+    pub fn hidden_dtype(&self) -> Dtype {
+        self.text.hidden_dtype()
+    }
+
     pub fn embed_on(&self, input_ids: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         self.text.embed_on(input_ids, target)
     }

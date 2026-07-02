@@ -304,6 +304,7 @@ impl ActiveKvOffloadStore {
             main_layers: entry.main_layer_specs(),
             mtp_layers: entry.mtp_layer_specs(),
             mtp_last_hidden: entry.mtp_last_hidden_spec(),
+            gemma4_drafter_last_hidden: entry.gemma4_drafter_last_hidden_spec(),
         };
         let key = self.store.save(&spec, entry)?;
         let path = self.root.join(&key);

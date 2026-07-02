@@ -22,7 +22,10 @@ pub use config::{
     Gemma4AssistantConfig, Gemma4Config, Gemma4LayerKind, Gemma4RopeParams, Gemma4TextConfig,
     Gemma4VisionConfig,
 };
-pub use drafter::{Gemma4AssistantModel, Gemma4DrafterGenerationStream, Gemma4DrafterTraceWindow};
+pub use drafter::{
+    Gemma4AssistantModel, Gemma4DrafterGenerationStream, Gemma4DrafterPrefixCache,
+    Gemma4DrafterTraceWindow,
+};
 pub use model::Gemma4Model;
 pub use text_model::Gemma4TextModel;
 

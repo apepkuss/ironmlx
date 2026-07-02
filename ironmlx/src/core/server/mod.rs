@@ -213,6 +213,7 @@ impl Gemma4DrafterHealthCounters {
 pub(crate) struct Gemma4DrafterAppState {
     pub(crate) base: AppState<crate::models::Gemma4Model>,
     pub(crate) drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
+    pub(crate) prefix_cache: crate::models::gemma4::Gemma4DrafterPrefixCache,
     pub(crate) mtp_draft_tokens: usize,
     pub(crate) health_counters: Gemma4DrafterHealthCounters,
 }
@@ -700,15 +701,12 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     if b_max != 1 {
         bail!("Gemma4 drafter serving currently requires b_max=1");
     }
-    if paged_prefix_cache.is_some() {
-        bail!("Gemma4 drafter serving does not support paged prefix cache yet");
-    }
-    if prefix_lru_cache.is_some() {
-        bail!("Gemma4 drafter serving does not support prefix LRU cache yet");
-    }
     if active_kv_offload.enabled {
         bail!("Gemma4 drafter serving does not support active KV offload yet");
     }
+    let prefix_cache =
+        crate::models::gemma4::Gemma4DrafterPrefixCache::new(paged_prefix_cache, prefix_lru_cache)?;
+    let prefix_cache_enabled = prefix_cache.is_enabled();
     let counters = Gemma4DrafterHealthCounters::default();
     let mut base = build_plain_app_state(
         model,
@@ -724,12 +722,13 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
-        paged_prefix_cache,
-        prefix_lru_cache,
+        None,
+        None,
         loaded_model_weight_bytes,
         active_kv_offload,
     )
     .await?;
+    base.paged_prefix_cache_enabled = prefix_cache_enabled;
     let model_max_context = {
         let guard = base.model.lock().await;
         guard.model_meta().max_position_embeddings.max(0) as usize
@@ -746,6 +745,7 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     Ok(Gemma4DrafterAppState {
         base,
         drafter: Arc::new(Mutex::new(drafter)),
+        prefix_cache,
         mtp_draft_tokens,
         health_counters: counters,
     })

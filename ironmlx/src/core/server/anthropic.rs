@@ -508,26 +508,28 @@ async fn serve_via_gemma4_drafter_stream(
         let model_guard = state.base.model.blocking_lock();
         let drafter_guard = state.drafter.blocking_lock();
         let tokenizer = &*state.base.tokenizer;
-        let mut stream = match crate::models::gemma4::Gemma4DrafterGenerationStream::new(
-            &model_guard,
-            &drafter_guard,
-            tokenizer,
-            request,
-            cfg,
-        ) {
-            Ok(s) => {
-                state.health_counters.record_prefill();
-                s
-            }
-            Err(e) => {
-                let payload = serde_json::json!({
-                    "type": "error",
-                    "error": {"message": e.to_string()}
-                });
-                let _ = tx.blocking_send(Ok(format_event("error", &payload)));
-                return;
-            }
-        };
+        let mut stream =
+            match crate::models::gemma4::Gemma4DrafterGenerationStream::new_with_prefix_cache(
+                &model_guard,
+                &drafter_guard,
+                tokenizer,
+                request,
+                cfg,
+                state.prefix_cache.clone(),
+            ) {
+                Ok(s) => {
+                    state.health_counters.record_prefill();
+                    s
+                }
+                Err(e) => {
+                    let payload = serde_json::json!({
+                        "type": "error",
+                        "error": {"message": e.to_string()}
+                    });
+                    let _ = tx.blocking_send(Ok(format_event("error", &payload)));
+                    return;
+                }
+            };
 
         let mut output_tokens: u32 = 0;
         let mut stop_reason: &'static str = "end_turn";
@@ -606,14 +608,16 @@ async fn serve_via_gemma4_drafter_unary(
             let model_guard = state.base.model.blocking_lock();
             let drafter_guard = state.drafter.blocking_lock();
             let tokenizer = &*state.base.tokenizer;
-            let mut stream = crate::models::gemma4::Gemma4DrafterGenerationStream::new(
-                &model_guard,
-                &drafter_guard,
-                tokenizer,
-                request,
-                cfg,
-            )
-            .map_err(|e| e.to_string())?;
+            let mut stream =
+                crate::models::gemma4::Gemma4DrafterGenerationStream::new_with_prefix_cache(
+                    &model_guard,
+                    &drafter_guard,
+                    tokenizer,
+                    request,
+                    cfg,
+                    state.prefix_cache.clone(),
+                )
+                .map_err(|e| e.to_string())?;
             state.health_counters.record_prefill();
             let mut buf = String::new();
             let mut finish: &'static str = "end_turn";

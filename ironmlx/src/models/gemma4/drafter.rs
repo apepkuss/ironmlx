@@ -1,14 +1,20 @@
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
 
+use crate::core::cache::{
+    PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixLoadStatus,
+    PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertStatus,
+    PrefixTensorSpec,
+};
 use crate::core::generate::{
     build_position_ids, build_position_ids_vl, count_image_pad, extend_vl_chunk_end_for_image_pad,
     slice_pos_ids_axis2, slice_vision_embeds_rows, GenerateEvent, GenerateRequest,
 };
-use crate::core::scheduler::DenseVlMethods;
+use crate::core::scheduler::{paged_prefix_fingerprint_for_request, DenseVlMethods};
 use crate::core::speculative::{
     add_elapsed_us, adjust_mtp_draft_budget, resolve_speculative_tokens, restore_layer_cache,
     sample_logits_positions, slice_hidden_position, verify_input, MtpSpeculativeConfig,
@@ -16,10 +22,15 @@ use crate::core::speculative::{
 };
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::core::{Loader, Model};
-use crate::nn::{enable_turboquant_kv_caches, LayerCache, LayerCacheSnapshot, Linear};
+use crate::nn::{
+    enable_paged_kv_caches, enable_turboquant_kv_caches, prefix_entry_for_row,
+    prefix_key_spec_for_caches, restore_prefix_entry_for_row, LayerCache, LayerCacheSnapshot,
+    Linear,
+};
 use crate::Result;
 
-use super::config::{Gemma4AssistantConfig, Gemma4LayerKind};
+use super::attention::SharedKv;
+use super::config::{Gemma4AssistantConfig, Gemma4LayerKind, Gemma4TextConfig};
 use super::model::Gemma4Model;
 use super::text_model::{Gemma4SharedKvStates, Gemma4TextModel};
 
@@ -123,6 +134,497 @@ impl Gemma4AssistantModel {
     }
 }
 
+type Gemma4DrafterPrefixLruHandle = Arc<Mutex<PrefixLruCache>>;
+
+#[derive(Clone, Default)]
+pub struct Gemma4DrafterPrefixCache {
+    config: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<Gemma4DrafterPrefixLruHandle>,
+}
+
+impl Gemma4DrafterPrefixCache {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    pub fn new(
+        config: Option<PagedPrefixCacheConfig>,
+        prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    ) -> Result<Self> {
+        if prefix_lru_cache.is_some() && config.is_none() {
+            return Err(anyhow!(
+                "Gemma4 drafter prefix LRU cache requires paged prefix cache"
+            ));
+        }
+        let prefix_lru_cache = prefix_lru_cache
+            .map(PrefixLruCache::new)
+            .transpose()?
+            .map(|cache| Arc::new(Mutex::new(cache)));
+        Ok(Self {
+            config,
+            prefix_lru_cache,
+        })
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.config.is_some()
+    }
+
+    fn config(&self) -> Option<&PagedPrefixCacheConfig> {
+        self.config.as_ref()
+    }
+
+    fn prefix_lru_cache(&self) -> Option<&Gemma4DrafterPrefixLruHandle> {
+        self.prefix_lru_cache.as_ref()
+    }
+
+    fn enable_runtime_cache_storage(
+        &self,
+        cache: &mut [LayerCache],
+        turboquant_bits: Option<crate::core::cache::TurboQuantKVBits>,
+    ) -> Result<()> {
+        if let Some(bits) = turboquant_bits {
+            enable_turboquant_kv_caches(cache, bits)?;
+        } else if let Some(config) = self.config() {
+            enable_paged_kv_caches(cache, config.block_size, config.max_pages)?;
+        }
+        Ok(())
+    }
+
+    fn try_restore(
+        &self,
+        model: &Gemma4Model,
+        cache: &mut [LayerCache],
+        prompt_ids: &[u32],
+        fingerprint: Option<&str>,
+    ) -> Result<Option<Gemma4DrafterPrefixRestore>> {
+        let Some(config) = self.config() else {
+            return Ok(None);
+        };
+        if prompt_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let store = config.store();
+        for (restore_len, cached_len) in gemma4_drafter_prefix_restore_candidates(
+            &store,
+            self.prefix_lru_cache(),
+            prompt_ids.len(),
+        )? {
+            let Some(mut spec) = prefix_key_spec_for_caches(
+                &config.model_id,
+                &prompt_ids[..restore_len],
+                cached_len,
+                fingerprint,
+                config.block_size,
+                cache,
+            )?
+            else {
+                return Ok(None);
+            };
+            spec.gemma4_drafter_last_hidden = Some(gemma4_drafter_last_hidden_spec(
+                model.hidden_dtype(),
+                model.config().hidden_size,
+            ));
+
+            if let Some((key, entry, stats, load_us)) =
+                gemma4_drafter_try_load_prefix_lru_entry(self.prefix_lru_cache(), &spec)?
+            {
+                restore_prefix_entry_for_row(cache, &entry, 0, cached_len)?;
+                let last_hidden = entry
+                    .gemma4_drafter_last_hidden
+                    .ok_or_else(|| anyhow!("Gemma4 drafter prefix LRU hit missing last_hidden"))?;
+                let shared_kv = gemma4_shared_kv_from_cache_on(model.config(), cache, ())?;
+                log_gemma4_drafter_prefix_hit("prefix LRU hit", &key, restore_len, stats, load_us);
+                return Ok(Some(Gemma4DrafterPrefixRestore {
+                    cached_len,
+                    last_hidden,
+                    shared_kv,
+                }));
+            }
+
+            let load_start = Instant::now();
+            let observed = store.load_observed(&spec)?;
+            let load_us = load_start.elapsed().as_micros();
+            if observed.status != PagedPrefixLoadStatus::Hit {
+                tracing::trace!(
+                    "paged SSD prefix cache Gemma4 drafter miss: tokens={} key={} status={:?} load_us={}",
+                    restore_len,
+                    observed.key,
+                    observed.status,
+                    load_us
+                );
+                continue;
+            }
+            let key = observed.key;
+            let stats = observed
+                .stats
+                .unwrap_or_else(|| gemma4_empty_prefix_stats(cached_len));
+            let entry = observed
+                .entry
+                .ok_or_else(|| anyhow!("paged prefix Gemma4 drafter hit without entry"))?;
+            gemma4_drafter_try_insert_prefix_lru_entry(
+                self.prefix_lru_cache(),
+                spec,
+                entry.clone(),
+            )?;
+            restore_prefix_entry_for_row(cache, &entry, 0, cached_len)?;
+            let last_hidden = entry
+                .gemma4_drafter_last_hidden
+                .ok_or_else(|| anyhow!("paged prefix Gemma4 drafter hit missing last_hidden"))?;
+            let shared_kv = gemma4_shared_kv_from_cache_on(model.config(), cache, ())?;
+            log_gemma4_drafter_prefix_hit("paged SSD hit", &key, restore_len, stats, load_us);
+            return Ok(Some(Gemma4DrafterPrefixRestore {
+                cached_len,
+                last_hidden,
+                shared_kv,
+            }));
+        }
+
+        Ok(None)
+    }
+
+    fn try_save(
+        &self,
+        model: &Gemma4Model,
+        cache: &[LayerCache],
+        last_hidden: &Array,
+        prompt_ids: &[u32],
+        fingerprint: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(config) = self.config() else {
+            return Ok(None);
+        };
+        if prompt_ids.is_empty() {
+            return Ok(None);
+        }
+        let Some(cached_len) = gemma4_cache_row_cached_len(cache, 0)? else {
+            return Ok(None);
+        };
+        if cached_len == 0 {
+            return Ok(None);
+        }
+        if cached_len != prompt_ids.len() as i32 {
+            return Err(anyhow!(
+                "Gemma4 drafter prefix save: cache cached_len {cached_len} != token length {}",
+                prompt_ids.len()
+            ));
+        }
+        let Some(mut spec) = prefix_key_spec_for_caches(
+            &config.model_id,
+            prompt_ids,
+            cached_len,
+            fingerprint,
+            config.block_size,
+            cache,
+        )?
+        else {
+            return Ok(None);
+        };
+        let actual_last_hidden_spec = PrefixTensorSpec::from_array(last_hidden);
+        let expected_last_hidden_spec =
+            gemma4_drafter_last_hidden_spec(model.hidden_dtype(), model.config().hidden_size);
+        spec.gemma4_drafter_last_hidden = Some(actual_last_hidden_spec.clone());
+        if actual_last_hidden_spec != expected_last_hidden_spec {
+            return Err(anyhow!(
+                "Gemma4 drafter prefix save: last_hidden spec {actual_last_hidden_spec:?} does not match expected {expected_last_hidden_spec:?}"
+            ));
+        }
+
+        let Some((mut entry, entry_cached_len)) = prefix_entry_for_row(cache, 0)? else {
+            return Ok(None);
+        };
+        if entry_cached_len != cached_len {
+            return Err(anyhow!(
+                "Gemma4 drafter prefix save: entry cached_len {entry_cached_len} != cache {cached_len}"
+            ));
+        }
+        entry.gemma4_drafter_last_hidden = Some(last_hidden.clone());
+        spec.gemma4_drafter_last_hidden = entry.gemma4_drafter_last_hidden_spec();
+        let stats = entry.observability_stats(cached_len);
+
+        gemma4_drafter_try_insert_prefix_lru_entry(
+            self.prefix_lru_cache(),
+            spec.clone(),
+            entry.clone(),
+        )?;
+        let store = config.store();
+        if let Some(key) = store.matching_entry_key(&spec)? {
+            tracing::trace!(
+                "paged SSD prefix cache Gemma4 drafter save skipped: tokens={} key={} status=already_present",
+                prompt_ids.len(),
+                key
+            );
+            return Ok(None);
+        }
+        let save_start = Instant::now();
+        let (key, saved) = store.save_if_absent(&spec, &entry)?;
+        let save_us = save_start.elapsed().as_micros();
+        if !saved {
+            tracing::trace!(
+                "paged SSD prefix cache Gemma4 drafter save skipped: tokens={} key={} status=already_present",
+                prompt_ids.len(),
+                key
+            );
+            return Ok(None);
+        }
+        tracing::debug!(
+            "paged SSD prefix cache Gemma4 drafter saved: key={} tokens={} cached_len={} payload_bytes={} tensors={} save_us={}",
+            key,
+            prompt_ids.len(),
+            stats.cached_len,
+            stats.payload_bytes,
+            stats.tensor_count,
+            save_us
+        );
+        Ok(Some(key))
+    }
+}
+
+struct Gemma4DrafterPrefixRestore {
+    cached_len: i32,
+    last_hidden: Array,
+    shared_kv: Gemma4SharedKvStates,
+}
+
+fn gemma4_drafter_last_hidden_spec(dtype: Dtype, hidden_size: i32) -> PrefixTensorSpec {
+    PrefixTensorSpec {
+        dtype,
+        shape: vec![1_i32, 1_i32, hidden_size],
+    }
+}
+
+fn gemma4_empty_prefix_stats(cached_len: i32) -> PagedPrefixEntryStats {
+    PagedPrefixEntryStats {
+        cached_len,
+        ..PagedPrefixEntryStats::default()
+    }
+}
+
+fn gemma4_drafter_prefix_restore_candidates(
+    store: &PagedPrefixStore,
+    prefix_lru_cache: Option<&Gemma4DrafterPrefixLruHandle>,
+    prompt_len: usize,
+) -> Result<Vec<(usize, i32)>> {
+    if prompt_len == 0 {
+        return Ok(Vec::new());
+    }
+    let max_cached_len = i32::try_from(prompt_len)
+        .map_err(|_| anyhow!("Gemma4 drafter prefix restore length exceeds i32"))?;
+    let mut cached_lengths = Vec::new();
+    if let Some(prefix_lru_cache) = prefix_lru_cache {
+        cached_lengths.extend(
+            gemma4_lock_prefix_lru_cache(prefix_lru_cache)?
+                .cached_lengths_descending(max_cached_len as usize),
+        );
+    }
+    cached_lengths.extend(store.cached_lengths_descending(max_cached_len)?);
+    cached_lengths.sort_unstable_by(|a, b| b.cmp(a));
+    cached_lengths.dedup();
+
+    let mut candidates = Vec::with_capacity(cached_lengths.len());
+    for cached_len in cached_lengths {
+        if cached_len <= 0 {
+            continue;
+        }
+        let restore_len = usize::try_from(cached_len)
+            .map_err(|_| anyhow!("Gemma4 drafter cached length must be positive"))?;
+        candidates.push((restore_len, cached_len));
+    }
+    Ok(candidates)
+}
+
+fn gemma4_lock_prefix_lru_cache(
+    prefix_lru_cache: &Gemma4DrafterPrefixLruHandle,
+) -> Result<MutexGuard<'_, PrefixLruCache>> {
+    prefix_lru_cache
+        .lock()
+        .map_err(|_| anyhow!("Gemma4 drafter prefix LRU cache lock poisoned"))
+}
+
+fn gemma4_drafter_try_load_prefix_lru_entry(
+    prefix_lru_cache: Option<&Gemma4DrafterPrefixLruHandle>,
+    spec: &crate::core::cache::PagedPrefixKeySpec,
+) -> Result<Option<(String, PagedPrefixEntry, PagedPrefixEntryStats, u128)>> {
+    let Some(prefix_lru_cache) = prefix_lru_cache else {
+        return Ok(None);
+    };
+    let load_start = Instant::now();
+    let observed = gemma4_lock_prefix_lru_cache(prefix_lru_cache)?.load_observed(spec)?;
+    let load_us = load_start.elapsed().as_micros();
+    if observed.status != PagedPrefixLoadStatus::Hit {
+        tracing::trace!(
+            "Gemma4 drafter prefix LRU miss: key={} status={:?} load_us={}",
+            observed.key,
+            observed.status,
+            load_us
+        );
+        return Ok(None);
+    }
+    let key = observed.key;
+    let stats = observed
+        .stats
+        .unwrap_or_else(|| gemma4_empty_prefix_stats(spec.cached_len));
+    let entry = observed
+        .entry
+        .ok_or_else(|| anyhow!("Gemma4 drafter prefix LRU observed hit without entry"))?;
+    Ok(Some((key, entry, stats, load_us)))
+}
+
+fn gemma4_drafter_try_insert_prefix_lru_entry(
+    prefix_lru_cache: Option<&Gemma4DrafterPrefixLruHandle>,
+    spec: crate::core::cache::PagedPrefixKeySpec,
+    entry: PagedPrefixEntry,
+) -> Result<Option<String>> {
+    let Some(prefix_lru_cache) = prefix_lru_cache else {
+        return Ok(None);
+    };
+    let save_start = Instant::now();
+    let result = gemma4_lock_prefix_lru_cache(prefix_lru_cache)?.insert(spec, entry)?;
+    let save_us = save_start.elapsed().as_micros();
+    match result.status {
+        PrefixLruInsertStatus::Stored | PrefixLruInsertStatus::Replaced => {
+            tracing::debug!(
+                "Gemma4 drafter prefix LRU {}: key={} cached_len={} payload_bytes={} tensors={} save_us={}",
+                match result.status {
+                    PrefixLruInsertStatus::Stored => "saved",
+                    PrefixLruInsertStatus::Replaced => "updated",
+                    PrefixLruInsertStatus::SkippedOversized => unreachable!(),
+                },
+                result.key,
+                result.stats.cached_len,
+                result.stats.payload_bytes,
+                result.stats.tensor_count,
+                save_us
+            );
+            Ok(Some(result.key))
+        }
+        PrefixLruInsertStatus::SkippedOversized => {
+            tracing::trace!(
+                "Gemma4 drafter prefix LRU save skipped: key={} status=oversized payload_bytes={} max_bytes={}",
+                result.key,
+                result.stats.payload_bytes,
+                gemma4_lock_prefix_lru_cache(prefix_lru_cache)?.max_bytes()
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn log_gemma4_drafter_prefix_hit(
+    source: &'static str,
+    key: &str,
+    tokens: usize,
+    stats: PagedPrefixEntryStats,
+    load_us: u128,
+) {
+    tracing::debug!(
+        "Gemma4 drafter prefix cache {}: key={} tokens={} cached_len={} payload_bytes={} tensors={} load_us={}",
+        source,
+        key,
+        tokens,
+        stats.cached_len,
+        stats.payload_bytes,
+        stats.tensor_count,
+        load_us
+    );
+}
+
+fn gemma4_cache_row_cached_len(cache: &[LayerCache], row: usize) -> Result<Option<i32>> {
+    for layer in cache {
+        if let LayerCache::Full(kv) = layer {
+            let cached_len = *kv.offsets().get(row).ok_or_else(|| {
+                anyhow!(
+                    "Gemma4 drafter prefix cache row {row} out of range for batch {}",
+                    kv.offsets().len()
+                )
+            })?;
+            return Ok(Some(cached_len));
+        }
+    }
+    Ok(None)
+}
+
+fn gemma4_shared_kv_from_cache_on(
+    cfg: &Gemma4TextConfig,
+    cache: &[LayerCache],
+    target: impl Into<StreamOrDevice>,
+) -> Result<Gemma4SharedKvStates> {
+    let target = target.into();
+    let first_cache_layer = cfg.first_kv_shared_layer_idx();
+    if cache.len() != first_cache_layer {
+        return Err(anyhow!(
+            "Gemma4 drafter shared KV restore: cache.len()={} != cache-bearing layers {}",
+            cache.len(),
+            first_cache_layer
+        ));
+    }
+    if first_cache_layer == 0 {
+        return Err(anyhow!(
+            "Gemma4 drafter shared KV restore: target model has no cache-bearing layers"
+        ));
+    }
+
+    let mut states = Gemma4SharedKvStates::default();
+    let mut restored_len: Option<i32> = None;
+    for (idx, layer) in cache.iter().enumerate() {
+        let LayerCache::Full(kv) = layer else {
+            return Err(anyhow!(
+                "Gemma4 drafter shared KV restore: layer {idx} is not a Full KV cache"
+            ));
+        };
+        let layer_len = *kv.offsets().first().ok_or_else(|| {
+            anyhow!("Gemma4 drafter shared KV restore: layer {idx} has empty offsets")
+        })?;
+        if layer_len <= 0 {
+            return Err(anyhow!(
+                "Gemma4 drafter shared KV restore: layer {idx} cached_len must be > 0"
+            ));
+        }
+        if let Some(expected) = restored_len {
+            if layer_len != expected {
+                return Err(anyhow!(
+                    "Gemma4 drafter shared KV restore: layer {idx} cached_len {layer_len} != layer0 {expected}"
+                ));
+            }
+        } else {
+            restored_len = Some(layer_len);
+        }
+
+        let (keys, values) = if kv.paged().is_some() {
+            kv.materialize_current_paged_prefix_on(target)?
+        } else {
+            let (keys, values, dense_len) = kv.dense_prefix_layer_for_row_on(0, target)?;
+            if dense_len != layer_len {
+                return Err(anyhow!(
+                    "Gemma4 drafter shared KV restore: layer {idx} dense_len {dense_len} != offset {layer_len}"
+                ));
+            }
+            (keys, values)
+        };
+        if keys.shape().as_slice().first().copied() != Some(1)
+            || values.shape().as_slice().first().copied() != Some(1)
+        {
+            return Err(anyhow!(
+                "Gemma4 drafter shared KV restore: layer {idx} restored batch must be 1"
+            ));
+        }
+        states.insert(cfg.layer_kind(idx), SharedKv { keys, values });
+    }
+
+    for idx in 0..cfg.num_hidden_layers as usize {
+        let kind = cfg.layer_kind(idx);
+        if states.get(kind).is_none() {
+            return Err(anyhow!(
+                "Gemma4 drafter shared KV restore: missing {:?} shared KV state",
+                kind
+            ));
+        }
+    }
+
+    Ok(states)
+}
+
 pub struct Gemma4DrafterGenerationStream<'m> {
     model: &'m Gemma4Model,
     drafter: &'m Gemma4AssistantModel,
@@ -162,6 +664,24 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         request: GenerateRequest,
         cfg: MtpSpeculativeConfig,
     ) -> Result<Self> {
+        Self::new_with_prefix_cache(
+            model,
+            drafter,
+            tokenizer,
+            request,
+            cfg,
+            Gemma4DrafterPrefixCache::disabled(),
+        )
+    }
+
+    pub fn new_with_prefix_cache(
+        model: &'m Gemma4Model,
+        drafter: &'m Gemma4AssistantModel,
+        tokenizer: &'m Tokenizer,
+        request: GenerateRequest,
+        cfg: MtpSpeculativeConfig,
+        prefix_cache: Gemma4DrafterPrefixCache,
+    ) -> Result<Self> {
         if request.prompt_ids.is_empty() {
             return Err(anyhow!(
                 "Gemma4DrafterGenerationStream::new: prompt_ids cannot be empty"
@@ -188,9 +708,7 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = model.cache_dtype();
         let mut cache = model.make_cache(1, cap, dtype)?;
-        if let Some(bits) = request.kv_cache_turboquant_bits {
-            enable_turboquant_kv_caches(&mut cache, bits)?;
-        }
+        prefix_cache.enable_runtime_cache_storage(&mut cache, request.kv_cache_turboquant_bits)?;
         let dummy_position_ids = if model.requires_position_ids() {
             None
         } else {
@@ -202,6 +720,16 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let prompt_len_i32 = prompt_len as i32;
         let mut image_pad_consumed = 0usize;
         let is_vl = request.pixel_values.is_some();
+        let prefix_fingerprint = if prefix_cache.is_enabled() {
+            paged_prefix_fingerprint_for_request(
+                request.pixel_values.as_deref(),
+                request.image_grid_thw.as_deref(),
+                request.image_token_id,
+                request.image_spatial_merge_size,
+            )?
+        } else {
+            None
+        };
         let mut vision_embeds_full = None;
         let position_ids_full = if is_vl && dummy_position_ids.is_none() {
             let grids = request.image_grid_thw.as_deref().ok_or_else(|| {
@@ -224,6 +752,19 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         };
         let mut last_prompt_hidden = None;
         let mut last_shared_kv = None;
+
+        if let Some(restored) = prefix_cache.try_restore(
+            model,
+            &mut cache,
+            &request.prompt_ids,
+            prefix_fingerprint.as_deref(),
+        )? {
+            pos = restored.cached_len;
+            image_pad_consumed =
+                count_image_pad(&request.prompt_ids[..pos as usize], request.image_token_id);
+            last_prompt_hidden = Some(restored.last_hidden);
+            last_shared_kv = Some(restored.shared_kv);
+        }
 
         while pos < prompt_len_i32 {
             let remaining = prompt_len_i32 - pos;
@@ -301,13 +842,29 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             };
             add_elapsed_us(&mut stats.verify_forward_us, forward_start);
             let chunk_last_hidden = slice_hidden_position(&out.hidden, n - 1)?;
-            if pos + n == prompt_len_i32 {
+            let new_pos = pos + n;
+            match prefix_cache.try_save(
+                model,
+                &cache,
+                &chunk_last_hidden,
+                &request.prompt_ids[..new_pos as usize],
+                prefix_fingerprint.as_deref(),
+            ) {
+                Ok(Some(key)) => {
+                    tracing::debug!("paged SSD prefix cache Gemma4 drafter saved: key={key}");
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!("paged SSD prefix cache Gemma4 drafter save skipped: {err:#}");
+                }
+            }
+            if new_pos == prompt_len_i32 {
                 last_prompt_hidden = Some(chunk_last_hidden);
                 last_shared_kv = Some(out.shared_kv);
             } else {
                 mlx::transforms::eval(&[&out.hidden])?;
             }
-            pos += n;
+            pos = new_pos;
         }
 
         let last_prompt_hidden = last_prompt_hidden
@@ -752,13 +1309,119 @@ pub(crate) fn build_bidirectional_swa_mask_for_test(
 
 #[cfg(test)]
 mod tests {
-    use super::draft_position_for_shared_kv;
+    use super::*;
+    use crate::core::cache::KVCache;
 
     #[test]
     fn draft_position_uses_previous_target_hidden_position() {
         assert_eq!(draft_position_for_shared_kv(0), 0);
         assert_eq!(draft_position_for_shared_kv(1), 0);
         assert_eq!(draft_position_for_shared_kv(20_400), 20_399);
+    }
+
+    fn shared_kv_restore_config() -> Gemma4TextConfig {
+        let mut cfg: crate::models::gemma4::Gemma4Config =
+            serde_json::from_value(serde_json::json!({
+                    "model_type": "gemma4",
+                    "text_config": {
+                        "hidden_size": 16,
+                        "num_hidden_layers": 4,
+                        "intermediate_size": 32,
+                        "num_attention_heads": 4,
+                        "head_dim": 4,
+                        "vocab_size": 128,
+                        "num_key_value_heads": 2,
+                        "num_kv_shared_layers": 2,
+                        "hidden_size_per_layer_input": 0,
+                        "layer_types": [
+                            "sliding_attention",
+                            "full_attention",
+                            "sliding_attention",
+                            "full_attention"
+                        ],
+                        "tie_word_embeddings": true
+                    }
+            }))
+            .unwrap();
+        cfg.validate_and_finalize().unwrap();
+        cfg.text_config
+    }
+
+    fn paged_layer_cache(seed: f32) -> LayerCache {
+        let mut kv = KVCache::new(1, 2, 4, 4, Dtype::Float32, 8).with_step(4);
+        kv.enable_paged(2, 16).unwrap();
+        let k_values: Vec<f32> = (0..24).map(|idx| seed + idx as f32).collect();
+        let v_values: Vec<f32> = (0..24).map(|idx| seed + 100.0 + idx as f32).collect();
+        let k: Array = (&k_values[..], &[1_i32, 2, 3, 4][..]).try_into().unwrap();
+        let v: Array = (&v_values[..], &[1_i32, 2, 3, 4][..]).try_into().unwrap();
+        kv.update_and_fetch(&k, &v, &[3]).unwrap();
+        LayerCache::Full(kv)
+    }
+
+    #[test]
+    fn shared_kv_restore_materializes_gemma4_paged_cache_by_layer_kind() {
+        let cfg = shared_kv_restore_config();
+        let cache = vec![paged_layer_cache(1.0), paged_layer_cache(1000.0)];
+
+        let restored = gemma4_shared_kv_from_cache_on(&cfg, &cache, ()).unwrap();
+        let sliding = restored.require(Gemma4LayerKind::Sliding).unwrap();
+        let full = restored.require(Gemma4LayerKind::Full).unwrap();
+
+        assert_eq!(sliding.keys.shape().as_slice(), &[1_i32, 2, 3, 4]);
+        assert_eq!(full.keys.shape().as_slice(), &[1_i32, 2, 3, 4]);
+        assert_eq!(sliding.keys.to_vec::<f32>().unwrap()[0], 1.0);
+        assert_eq!(sliding.values.to_vec::<f32>().unwrap()[0], 101.0);
+        assert_eq!(full.keys.to_vec::<f32>().unwrap()[0], 1000.0);
+        assert_eq!(full.values.to_vec::<f32>().unwrap()[0], 1100.0);
+    }
+
+    #[test]
+    fn shared_kv_restore_rejects_wrong_cache_layer_count() {
+        let cfg = shared_kv_restore_config();
+        let cache = vec![paged_layer_cache(1.0)];
+
+        let err = match gemma4_shared_kv_from_cache_on(&cfg, &cache, ()) {
+            Ok(_) => panic!("layer count mismatch should fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("cache.len()=1"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn prefix_cache_rejects_lru_without_paged_prefix_config() {
+        let err = match Gemma4DrafterPrefixCache::new(
+            None,
+            Some(PrefixLruCacheConfig::new(1024).unwrap()),
+        ) {
+            Ok(_) => panic!("LRU without prefix store should fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("requires paged prefix cache"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn prefix_cache_accepts_paged_prefix_and_lru_configs() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-gemma4-drafter-prefix-cache-test-{}",
+            std::process::id()
+        ));
+        let config = PagedPrefixCacheConfig::new(root, "gemma4-test", 2, 16).unwrap();
+        let cache = Gemma4DrafterPrefixCache::new(
+            Some(config),
+            Some(PrefixLruCacheConfig::new(1024 * 1024).unwrap()),
+        )
+        .unwrap();
+
+        assert!(cache.is_enabled());
+        assert!(cache.prefix_lru_cache().is_some());
     }
 }
 

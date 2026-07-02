@@ -544,6 +544,7 @@ fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
 fn active_kv_entry_supported(entry: &PagedPrefixEntry) -> bool {
     entry.mtp_layers.is_empty()
         && entry.mtp_last_hidden.is_none()
+        && entry.gemma4_drafter_last_hidden.is_none()
         && entry.main_layers.iter().all(|layer| {
             matches!(
                 layer,
@@ -779,7 +780,7 @@ fn add_mtp_stats(dst: &mut MtpSpeculativeStats, src: MtpSpeculativeStats) {
         .saturating_add(src.mtp_cache_restore_us);
 }
 
-fn paged_prefix_fingerprint_for_request(
+pub(crate) fn paged_prefix_fingerprint_for_request(
     pixel_values: Option<&[Array]>,
     image_grid_thw: Option<&[(i32, i32, i32)]>,
     image_token_id: i32,

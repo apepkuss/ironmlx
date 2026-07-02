@@ -125,6 +125,10 @@ impl Gemma4TextModel {
         &self.cfg
     }
 
+    pub fn hidden_dtype(&self) -> Dtype {
+        Dtype::Float32
+    }
+
     pub fn embed_on(&self, input_ids: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
         let h = self.embed_tokens.forward_on(input_ids, target)?;

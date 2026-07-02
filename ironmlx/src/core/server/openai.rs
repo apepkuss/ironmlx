@@ -537,13 +537,15 @@ async fn serve_via_gemma4_drafter_stream(
         let model_guard = state.base.model.blocking_lock();
         let drafter_guard = state.drafter.blocking_lock();
         let tokenizer = &*state.base.tokenizer;
-        let stream_result = crate::models::gemma4::Gemma4DrafterGenerationStream::new(
-            &model_guard,
-            &drafter_guard,
-            tokenizer,
-            request,
-            cfg,
-        );
+        let stream_result =
+            crate::models::gemma4::Gemma4DrafterGenerationStream::new_with_prefix_cache(
+                &model_guard,
+                &drafter_guard,
+                tokenizer,
+                request,
+                cfg,
+                state.prefix_cache.clone(),
+            );
         let mut stream = match stream_result {
             Ok(s) => {
                 state.health_counters.record_prefill();
@@ -630,14 +632,16 @@ async fn serve_via_gemma4_drafter_unary(
             let model_guard = state.base.model.blocking_lock();
             let drafter_guard = state.drafter.blocking_lock();
             let tokenizer = &*state.base.tokenizer;
-            let mut stream = crate::models::gemma4::Gemma4DrafterGenerationStream::new(
-                &model_guard,
-                &drafter_guard,
-                tokenizer,
-                request,
-                cfg,
-            )
-            .map_err(|e| e.to_string())?;
+            let mut stream =
+                crate::models::gemma4::Gemma4DrafterGenerationStream::new_with_prefix_cache(
+                    &model_guard,
+                    &drafter_guard,
+                    tokenizer,
+                    request,
+                    cfg,
+                    state.prefix_cache.clone(),
+                )
+                .map_err(|e| e.to_string())?;
             state.health_counters.record_prefill();
             let mut buf = String::new();
             let mut finish: &'static str = "stop";

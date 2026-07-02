@@ -544,13 +544,11 @@ impl Gemma4Attention {
         let kv_len = kv.keys.shape().as_slice()[2];
         let view_len = sliding_attention_view_len(kv_len, query_len, self.sliding_window);
         if view_len >= kv_len {
-            return Ok((kv.clone(), None));
+            let aligned_mask = align_attention_mask_tail_on(mask, kv_len, target)?;
+            return Ok((kv.clone(), aligned_mask));
         }
         let sliced = slice_shared_kv_tail_on(kv, view_len, target)?;
-        let sliced_mask = match mask {
-            Some(mask) => Some(slice_attention_mask_tail_on(mask, view_len, target)?),
-            None => None,
-        };
+        let sliced_mask = align_attention_mask_tail_on(mask, view_len, target)?;
         Ok((sliced, sliced_mask))
     }
 
@@ -635,7 +633,12 @@ fn slice_attention_mask_tail_on(
     }
     let k_axis = dims.len() - 1;
     let k_len = dims[k_axis];
-    if keep_len >= k_len {
+    if keep_len > k_len {
+        return Err(anyhow!(
+            "Gemma4 attention mask K length {k_len} shorter than requested keep_len {keep_len}"
+        ));
+    }
+    if keep_len == k_len {
         return Ok(mask.clone());
     }
     let mut start = vec![0_i32; dims.len()];
@@ -651,14 +654,48 @@ fn slice_attention_mask_tail_on(
     )?)
 }
 
+fn align_attention_mask_tail_on(
+    mask: Option<&Array>,
+    keep_len: i32,
+    target: StreamOrDevice,
+) -> Result<Option<Array>> {
+    match mask {
+        Some(mask) => Ok(Some(slice_attention_mask_tail_on(mask, keep_len, target)?)),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sliding_attention_view_len;
+    use super::{align_attention_mask_tail_on, sliding_attention_view_len};
+    use mlx::{Array, Dtype};
 
     #[test]
     fn sliding_attention_view_keeps_window_plus_query_minus_one() {
         assert_eq!(sliding_attention_view_len(20_400, 2_048, 1_024), 3_071);
         assert_eq!(sliding_attention_view_len(20_400, 1, 1_024), 1_024);
         assert_eq!(sliding_attention_view_len(512, 2_048, 1_024), 512);
+    }
+
+    #[test]
+    fn sliding_attention_mask_aligns_to_already_sliced_kv() {
+        let mask = Array::zeros((1_i32, 1_i32, 3_i32, 5_504_i32), Dtype::Float32).unwrap();
+        let aligned = align_attention_mask_tail_on(Some(&mask), 514, ().into())
+            .unwrap()
+            .expect("aligned mask");
+
+        assert_eq!(aligned.shape().as_slice(), &[1_i32, 1, 3, 514]);
+    }
+
+    #[test]
+    fn sliding_attention_mask_rejects_shorter_than_kv() {
+        let mask = Array::zeros((1_i32, 1_i32, 3_i32, 10_i32), Dtype::Float32).unwrap();
+        let err = align_attention_mask_tail_on(Some(&mask), 11, ().into())
+            .expect_err("short mask must fail");
+
+        assert!(
+            err.to_string().contains("shorter than requested"),
+            "unexpected error: {err:#}"
+        );
     }
 }
