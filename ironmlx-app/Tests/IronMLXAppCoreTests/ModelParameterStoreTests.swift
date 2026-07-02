@@ -157,13 +157,14 @@ import Testing
     let maxCacheCap = ModelLoadParameters.maxCacheCap(
         for: "mlx-community/LongContext-4bit",
         scanner: LocalModelScanner(rootURL: root),
-        parameterStore: store
+        parameterStore: store,
+        activeKvOffloadEnabled: false
     )
 
     #expect(maxCacheCap == 65536)
 }
 
-@Test func modelLoadParametersDefaultToModelContextWindowWhenNoSavedMaxTokensExist() throws {
+@Test func modelLoadParametersUseSafeDefaultForLongContextWithoutActiveKvOffload() throws {
     let root = try temporaryDirectory()
     let snapshot = root
         .appendingPathComponent("models", isDirectory: true)
@@ -178,7 +179,30 @@ import Testing
     let maxCacheCap = ModelLoadParameters.maxCacheCap(
         for: "mlx-community/LongContext-4bit",
         scanner: LocalModelScanner(rootURL: root),
-        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        activeKvOffloadEnabled: false
+    )
+
+    #expect(maxCacheCap == 32768)
+}
+
+@Test func modelLoadParametersAllowFullLongContextWithActiveKvOffload() throws {
+    let root = try temporaryDirectory()
+    let snapshot = root
+        .appendingPathComponent("models", isDirectory: true)
+        .appendingPathComponent("models--mlx-community--LongContext-4bit", isDirectory: true)
+        .appendingPathComponent("snapshots", isDirectory: true)
+        .appendingPathComponent("main", isDirectory: true)
+    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+    try Data(#"{"max_position_embeddings":262144}"#.utf8)
+        .write(to: snapshot.appendingPathComponent("config.json"))
+    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+
+    let maxCacheCap = ModelLoadParameters.maxCacheCap(
+        for: "mlx-community/LongContext-4bit",
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        activeKvOffloadEnabled: true
     )
 
     #expect(maxCacheCap == 262144)

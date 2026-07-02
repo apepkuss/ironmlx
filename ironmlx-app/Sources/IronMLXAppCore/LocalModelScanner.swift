@@ -9,6 +9,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
     public var loaded: Bool
     public var pinned: Bool
     public var maxPositionEmbeddings: Int?
+    public var effectiveMaxTokens: Int?
     public var generationDefaults: BackendSamplingDefaults?
     public var mtp: LocalModelMtpInfo?
 
@@ -21,6 +22,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         loaded: Bool = false,
         pinned: Bool = false,
         maxPositionEmbeddings: Int? = nil,
+        effectiveMaxTokens: Int? = nil,
         generationDefaults: BackendSamplingDefaults? = nil,
         mtp: LocalModelMtpInfo? = nil
     ) {
@@ -32,6 +34,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.loaded = loaded
         self.pinned = pinned
         self.maxPositionEmbeddings = maxPositionEmbeddings
+        self.effectiveMaxTokens = effectiveMaxTokens
         self.generationDefaults = generationDefaults
         self.mtp = mtp
     }
@@ -45,6 +48,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case loaded
         case pinned
         case maxPositionEmbeddings = "max_position_embeddings"
+        case effectiveMaxTokens = "effective_max_tokens"
         case generationDefaults = "generation_defaults"
         case mtp
     }

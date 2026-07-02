@@ -863,7 +863,7 @@ enum EngineVariant {
     Qwen35Moe(AppState<Qwen35MoeModel>),
     Qwen36Moe(AppState<Qwen36MoeModel>),
     Gemma4(AppState<Gemma4Model>),
-    Gemma4Drafter(Gemma4DrafterAppState),
+    Gemma4Drafter(Box<Gemma4DrafterAppState>),
     Glm4MoeLite(AppState<Glm4MoeLiteModel>),
     Llama(AppState<LlamaModel>),
     MiniCpmV46(AppState<MiniCpmV46Model>),
@@ -2019,7 +2019,8 @@ impl EngineVariant {
             }
             Self::Gemma4(state) => openai::chat_completions(State(state.clone()), Json(req)).await,
             Self::Gemma4Drafter(state) => {
-                openai::gemma4_drafter_chat_completions(State(state.clone()), Json(req)).await
+                openai::gemma4_drafter_chat_completions(State(state.as_ref().clone()), Json(req))
+                    .await
             }
             Self::Glm4MoeLite(state) => {
                 openai::chat_completions(State(state.clone()), Json(req)).await
@@ -2041,7 +2042,7 @@ impl EngineVariant {
             Self::Qwen36Moe(state) => anthropic::messages(State(state.clone()), Json(req)).await,
             Self::Gemma4(state) => anthropic::messages(State(state.clone()), Json(req)).await,
             Self::Gemma4Drafter(state) => {
-                anthropic::gemma4_drafter_messages(State(state.clone()), Json(req)).await
+                anthropic::gemma4_drafter_messages(State(state.as_ref().clone()), Json(req)).await
             }
             Self::Glm4MoeLite(state) => anthropic::messages(State(state.clone()), Json(req)).await,
             Self::Llama(state) => anthropic::messages(State(state.clone()), Json(req)).await,
@@ -2303,7 +2304,7 @@ async fn load_engine_variant(
                     vision_input,
                 )
                 .await?;
-                Ok(EngineVariant::Gemma4Drafter(state))
+                Ok(EngineVariant::Gemma4Drafter(Box::new(state)))
             } else {
                 let state = build_plain_causal_state(
                     model_impl,

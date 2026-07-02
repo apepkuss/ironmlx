@@ -246,48 +246,56 @@ private func loadedModel(
 }
 
 private func healthSnapshot(active: Int, queued: Int) -> HealthzSnapshot {
-    HealthzSnapshot(
+    let model = HealthzSnapshot.ModelInfo(name: "test", maxPositionEmbeddings: 32768)
+    let scheduler = HealthzSnapshot.SchedulerInfo(
+        bMax: 4,
+        bActive: active,
+        bQueued: queued,
+        queueMax: 32,
+        admissionQueueFullCount: 0,
+        memoryBudgetExceededCount: 0
+    )
+    let memory = HealthzSnapshot.MemoryInfo(
+        totalRamBytes: 64 * 1024 * 1024 * 1024,
+        freeRamBytes: 32 * 1024 * 1024 * 1024,
+        kvCacheActiveBytes: 0,
+        kvCacheSoftLimitBytes: 0,
+        kvCacheLogicalCapTokens: 32768,
+        kvCacheResidentCapTokens: 32768,
+        kvCacheBudgetPolicy: "full_resident",
+        mlxTotalBytes: nil,
+        mlxMaxRecommendedBytes: nil,
+        mlxActiveBytes: 0,
+        mlxCacheBytes: 0,
+        mlxPeakBytes: 0,
+        mlxMemoryLimitBytes: 0
+    )
+    let activeKvOffload = HealthzSnapshot.ActiveKvOffloadInfo(
+        enabled: false,
+        mode: "disabled",
+        storageDir: nil,
+        residentPages: 0,
+        offloadedPages: 0,
+        loadingPages: 0,
+        dirtyPages: 0,
+        parkedRequests: 0,
+        offloadedBytes: 0,
+        swapOutCount: 0,
+        swapInCount: 0,
+        swapErrorCount: 0,
+        lastSwapOutUs: 0,
+        lastSwapInUs: 0,
+        supportedCacheKinds: [],
+        notApplicableCacheKinds: []
+    )
+
+    return HealthzSnapshot(
         status: "healthy",
         uptimeSecs: 10,
-        model: .init(name: "test", maxPositionEmbeddings: 32768),
-        scheduler: .init(
-            bMax: 4,
-            bActive: active,
-            bQueued: queued,
-            queueMax: 32,
-            admissionQueueFullCount: 0,
-            memoryBudgetExceededCount: 0
-        ),
-        memory: .init(
-            totalRamBytes: 64 * 1024 * 1024 * 1024,
-            freeRamBytes: 32 * 1024 * 1024 * 1024,
-            kvCacheActiveBytes: 0,
-            kvCacheSoftLimitBytes: 0,
-            mlxTotalBytes: nil,
-            mlxMaxRecommendedBytes: nil,
-            mlxActiveBytes: 0,
-            mlxCacheBytes: 0,
-            mlxPeakBytes: 0,
-            mlxMemoryLimitBytes: 0
-        ),
-        activeKvOffload: .init(
-            enabled: false,
-            mode: "disabled",
-            storageDir: nil,
-            residentPages: 0,
-            offloadedPages: 0,
-            loadingPages: 0,
-            dirtyPages: 0,
-            parkedRequests: 0,
-            offloadedBytes: 0,
-            swapOutCount: 0,
-            swapInCount: 0,
-            swapErrorCount: 0,
-            lastSwapOutUs: 0,
-            lastSwapInUs: 0,
-            supportedCacheKinds: [],
-            notApplicableCacheKinds: []
-        ),
+        model: model,
+        scheduler: scheduler,
+        memory: memory,
+        activeKvOffload: activeKvOffload,
         deviceName: "Apple Test",
         version: "test"
     )

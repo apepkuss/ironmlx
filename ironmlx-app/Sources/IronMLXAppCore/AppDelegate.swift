@@ -55,6 +55,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                             defaultModel: defaultModel,
                             scanner: self.scanner,
                             parameterStore: self.parameterStore,
+                            activeKvOffloadEnabled: config.activeKvOffload == true,
                             client: client
                         )
                         var latestResponse: BackendModelAdminResponse?
@@ -75,7 +76,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                                     maxCacheCap: ModelLoadParameters.maxCacheCap(
                                         for: model,
                                         scanner: self.scanner,
-                                        parameterStore: self.parameterStore
+                                        parameterStore: self.parameterStore,
+                                        activeKvOffloadEnabled: config.activeKvOffload == true
                                     ),
                                     pinned: pinnedModels.contains(model),
                                     mtpModelDir: mtpRuntime?.modelDir,

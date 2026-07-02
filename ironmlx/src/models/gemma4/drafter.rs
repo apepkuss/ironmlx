@@ -6,9 +6,10 @@ use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::cache::{
-    PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats, PagedPrefixLoadStatus,
-    PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertStatus,
-    PrefixTensorSpec,
+    ActiveKvOffloadConfig, ActiveKvOffloadSharedStats, ActiveKvResidencySummary,
+    PagedKvHotColdConfig, PagedPrefixCacheConfig, PagedPrefixEntry, PagedPrefixEntryStats,
+    PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig,
+    PrefixLruInsertStatus, PrefixTensorSpec, TurboQuantKVBits,
 };
 use crate::core::generate::{
     build_position_ids, build_position_ids_vl, count_image_pad, extend_vl_chunk_end_for_image_pad,
@@ -23,9 +24,9 @@ use crate::core::speculative::{
 use crate::core::tokenizer::{DecodeStream, Tokenizer};
 use crate::core::{Loader, Model};
 use crate::nn::{
-    enable_paged_kv_caches, enable_turboquant_kv_caches, prefix_entry_for_row,
-    prefix_key_spec_for_caches, restore_prefix_entry_for_row, LayerCache, LayerCacheSnapshot,
-    Linear,
+    enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
+    prefix_entry_for_row, prefix_key_spec_for_caches, restore_prefix_entry_for_row, LayerCache,
+    LayerCacheSnapshot, Linear,
 };
 use crate::Result;
 
@@ -136,10 +137,38 @@ impl Gemma4AssistantModel {
 
 type Gemma4DrafterPrefixLruHandle = Arc<Mutex<PrefixLruCache>>;
 
+#[derive(Clone)]
+pub struct Gemma4DrafterActiveKvRuntime {
+    config: ActiveKvOffloadConfig,
+    stats: ActiveKvOffloadSharedStats,
+    soft_limit_bytes: usize,
+    bytes_per_token: usize,
+}
+
+impl Gemma4DrafterActiveKvRuntime {
+    pub fn new(
+        config: ActiveKvOffloadConfig,
+        stats: ActiveKvOffloadSharedStats,
+        soft_limit_bytes: usize,
+        bytes_per_token: usize,
+    ) -> Option<Self> {
+        if !config.enabled {
+            return None;
+        }
+        Some(Self {
+            config,
+            stats,
+            soft_limit_bytes,
+            bytes_per_token,
+        })
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Gemma4DrafterPrefixCache {
     config: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<Gemma4DrafterPrefixLruHandle>,
+    active_kv: Option<Gemma4DrafterActiveKvRuntime>,
 }
 
 impl Gemma4DrafterPrefixCache {
@@ -150,6 +179,7 @@ impl Gemma4DrafterPrefixCache {
     pub fn new(
         config: Option<PagedPrefixCacheConfig>,
         prefix_lru_cache: Option<PrefixLruCacheConfig>,
+        active_kv: Option<Gemma4DrafterActiveKvRuntime>,
     ) -> Result<Self> {
         if prefix_lru_cache.is_some() && config.is_none() {
             return Err(anyhow!(
@@ -163,6 +193,7 @@ impl Gemma4DrafterPrefixCache {
         Ok(Self {
             config,
             prefix_lru_cache,
+            active_kv,
         })
     }
 
@@ -181,14 +212,90 @@ impl Gemma4DrafterPrefixCache {
     fn enable_runtime_cache_storage(
         &self,
         cache: &mut [LayerCache],
-        turboquant_bits: Option<crate::core::cache::TurboQuantKVBits>,
+        turboquant_bits: Option<TurboQuantKVBits>,
+        cache_cap: i32,
+        batch: i32,
     ) -> Result<()> {
         if let Some(bits) = turboquant_bits {
             enable_turboquant_kv_caches(cache, bits)?;
         } else if let Some(config) = self.config() {
             enable_paged_kv_caches(cache, config.block_size, config.max_pages)?;
+            self.enable_active_kv_hot_cold_tiering(cache, config, cache_cap, batch)?;
         }
+        self.refresh_active_kv_residency_stats(cache);
         Ok(())
+    }
+
+    fn enable_active_kv_hot_cold_tiering(
+        &self,
+        cache: &mut [LayerCache],
+        config: &PagedPrefixCacheConfig,
+        cache_cap: i32,
+        batch: i32,
+    ) -> Result<()> {
+        let Some(active_kv) = self.active_kv.as_ref() else {
+            return Ok(());
+        };
+        let hot_window_pages = active_kv
+            .config
+            .hot_window_pages_override
+            .unwrap_or_else(|| {
+                crate::core::scheduler::active_kv_hot_window_pages_for_budget(
+                    config.block_size,
+                    cache_cap,
+                    batch,
+                    active_kv.soft_limit_bytes,
+                    active_kv.bytes_per_token,
+                )
+            });
+        let chunk_pages = active_kv.config.chunk_pages_override.unwrap_or_else(|| {
+            crate::core::scheduler::active_kv_chunk_pages_for_budget(
+                config.block_size,
+                cache_cap,
+                batch,
+                active_kv.soft_limit_bytes,
+                active_kv.bytes_per_token,
+                hot_window_pages,
+            )
+        });
+        let hot_cold = PagedKvHotColdConfig::new(
+            active_kv.config.root.clone(),
+            hot_window_pages,
+            chunk_pages,
+        )?;
+        enable_paged_hot_cold_tiering_caches(cache, hot_cold)
+    }
+
+    fn refresh_active_kv_residency_stats(&self, cache: &[LayerCache]) {
+        let Some(active_kv) = self.active_kv.as_ref() else {
+            return;
+        };
+        let mut summary = ActiveKvResidencySummary::default();
+        for layer in cache {
+            let LayerCache::Full(kv) = layer else {
+                continue;
+            };
+            let Some(layer_summary) = kv.paged_hot_cold_summary() else {
+                continue;
+            };
+            summary.resident_pages += layer_summary.resident_pages;
+            summary.offloaded_pages += layer_summary.offloaded_pages;
+            summary.loading_pages += layer_summary.loading_pages;
+            summary.dirty_pages += layer_summary.dirty_pages;
+            summary.offloaded_bytes = summary
+                .offloaded_bytes
+                .saturating_add(layer_summary.offloaded_bytes);
+            summary.swap_out_count = summary
+                .swap_out_count
+                .saturating_add(layer_summary.swap_out_count);
+            summary.swap_in_count = summary
+                .swap_in_count
+                .saturating_add(layer_summary.swap_in_count);
+            summary.stream_read_count = summary
+                .stream_read_count
+                .saturating_add(layer_summary.stream_read_count);
+        }
+        active_kv.stats.set_residency_summary(summary);
     }
 
     fn try_restore(
@@ -628,6 +735,7 @@ fn gemma4_shared_kv_from_cache_on(
 pub struct Gemma4DrafterGenerationStream<'m> {
     model: &'m Gemma4Model,
     drafter: &'m Gemma4AssistantModel,
+    prefix_cache: Gemma4DrafterPrefixCache,
     cache: Vec<LayerCache>,
     history: Vec<u32>,
     request: GenerateRequest,
@@ -708,7 +816,12 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             .max(crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let dtype = model.cache_dtype();
         let mut cache = model.make_cache(1, cap, dtype)?;
-        prefix_cache.enable_runtime_cache_storage(&mut cache, request.kv_cache_turboquant_bits)?;
+        prefix_cache.enable_runtime_cache_storage(
+            &mut cache,
+            request.kv_cache_turboquant_bits,
+            cap,
+            1,
+        )?;
         let dummy_position_ids = if model.requires_position_ids() {
             None
         } else {
@@ -764,6 +877,7 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
                 count_image_pad(&request.prompt_ids[..pos as usize], request.image_token_id);
             last_prompt_hidden = Some(restored.last_hidden);
             last_shared_kv = Some(restored.shared_kv);
+            prefix_cache.refresh_active_kv_residency_stats(&cache);
         }
 
         while pos < prompt_len_i32 {
@@ -858,6 +972,7 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
                     tracing::warn!("paged SSD prefix cache Gemma4 drafter save skipped: {err:#}");
                 }
             }
+            prefix_cache.refresh_active_kv_residency_stats(&cache);
             if new_pos == prompt_len_i32 {
                 last_prompt_hidden = Some(chunk_last_hidden);
                 last_shared_kv = Some(out.shared_kv);
@@ -895,6 +1010,7 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         Ok(Self {
             model,
             drafter,
+            prefix_cache,
             cache,
             history,
             request,
@@ -997,6 +1113,8 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             Some(&mut self.cache),
             (),
         )?;
+        self.prefix_cache
+            .refresh_active_kv_residency_stats(&self.cache);
         add_elapsed_us(&mut self.stats.verify_forward_us, verify_forward_start);
         let projection_start = Instant::now();
         let verified_logits = self.model.project_hidden_on(&verified.hidden, ())?;
@@ -1039,6 +1157,8 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let (accepted_last_hidden, accepted_shared_kv) = if resolution.needs_rollback {
             let rollback_start = Instant::now();
             restore_layer_cache(&mut self.cache, &base_snapshot)?;
+            self.prefix_cache
+                .refresh_active_kv_residency_stats(&self.cache);
             add_elapsed_us(&mut self.stats.main_rollback_us, rollback_start);
             let replay_len = resolution.accepted_verify_input_len;
             let replay_input = &verify_input[..replay_len];
@@ -1053,6 +1173,8 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
                 Some(&mut self.cache),
                 (),
             )?;
+            self.prefix_cache
+                .refresh_active_kv_residency_stats(&self.cache);
             add_elapsed_us(&mut self.stats.verify_forward_us, replay_forward_start);
             (
                 slice_hidden_position(&replay.hidden, replay_len as i32 - 1)?,
@@ -1082,6 +1204,8 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             self.history.push(token);
             self.pending_tokens.push_back(token);
         }
+        self.prefix_cache
+            .refresh_active_kv_residency_stats(&self.cache);
         Ok(())
     }
 
@@ -1396,6 +1520,7 @@ mod tests {
         let err = match Gemma4DrafterPrefixCache::new(
             None,
             Some(PrefixLruCacheConfig::new(1024).unwrap()),
+            None,
         ) {
             Ok(_) => panic!("LRU without prefix store should fail"),
             Err(err) => err,
@@ -1417,11 +1542,42 @@ mod tests {
         let cache = Gemma4DrafterPrefixCache::new(
             Some(config),
             Some(PrefixLruCacheConfig::new(1024 * 1024).unwrap()),
+            None,
         )
         .unwrap();
 
         assert!(cache.is_enabled());
         assert!(cache.prefix_lru_cache().is_some());
+    }
+
+    #[test]
+    fn prefix_cache_active_kv_enables_paged_hot_cold_runtime_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-gemma4-drafter-active-kv-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            PagedPrefixCacheConfig::new(root.join("prefix"), "gemma4-test", 2, 16).unwrap();
+        let active_config = ActiveKvOffloadConfig::enabled(root.join("active"))
+            .with_hot_window_pages_override(Some(1))
+            .with_chunk_pages_override(Some(1));
+        let stats = ActiveKvOffloadSharedStats::new(&active_config);
+        let active = Gemma4DrafterActiveKvRuntime::new(active_config, stats.clone(), 1024, 1);
+        let prefix_cache = Gemma4DrafterPrefixCache::new(Some(config), None, active).unwrap();
+
+        let mut cache = vec![LayerCache::Full(
+            KVCache::new(1, 2, 4, 4, Dtype::Float32, 8).with_step(4),
+        )];
+        prefix_cache
+            .enable_runtime_cache_storage(&mut cache, None, 8, 1)
+            .unwrap();
+
+        let LayerCache::Full(kv) = &cache[0] else {
+            panic!("expected full cache")
+        };
+        assert!(kv.paged().is_some());
+        assert!(kv.paged_hot_cold_summary().is_some());
+        assert!(stats.snapshot().enabled);
     }
 }
 

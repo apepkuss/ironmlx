@@ -7,6 +7,7 @@ public enum LocalModelBackendRegistrar {
         defaultModel: String?,
         scanner: LocalModelScanner,
         parameterStore: ModelParameterStore,
+        activeKvOffloadEnabled: Bool,
         client: any BackendModelLoading
     ) async -> [String] {
         let defaultModel = AppConfig.normalizedModelReference(defaultModel)
@@ -31,7 +32,8 @@ public enum LocalModelBackendRegistrar {
                     maxCacheCap: ModelLoadParameters.maxCacheCap(
                         for: model.id,
                         scanner: scanner,
-                        parameterStore: parameterStore
+                        parameterStore: parameterStore,
+                        activeKvOffloadEnabled: activeKvOffloadEnabled
                     ),
                     pinned: model.pinned,
                     mtpModelDir: mtpRuntime?.modelDir,

@@ -701,12 +701,9 @@ pub(crate) async fn build_gemma4_drafter_app_state(
     if b_max != 1 {
         bail!("Gemma4 drafter serving currently requires b_max=1");
     }
-    if active_kv_offload.enabled {
-        bail!("Gemma4 drafter serving does not support active KV offload yet");
-    }
-    let prefix_cache =
-        crate::models::gemma4::Gemma4DrafterPrefixCache::new(paged_prefix_cache, prefix_lru_cache)?;
-    let prefix_cache_enabled = prefix_cache.is_enabled();
+    let prefix_cache_config = paged_prefix_cache.clone();
+    let prefix_lru_cache_config = prefix_lru_cache;
+    let active_kv_for_prefix_cache = active_kv_offload.clone();
     let counters = Gemma4DrafterHealthCounters::default();
     let mut base = build_plain_app_state(
         model,
@@ -722,13 +719,28 @@ pub(crate) async fn build_gemma4_drafter_app_state(
         scheduler_runtime_profile,
         scheduler_autotune_report,
         vision_input_override,
-        None,
-        None,
+        paged_prefix_cache,
+        prefix_lru_cache_config,
         loaded_model_weight_bytes,
         active_kv_offload,
     )
     .await?;
-    base.paged_prefix_cache_enabled = prefix_cache_enabled;
+    let active_kv_runtime = {
+        let guard = base.model.lock().await;
+        let meta = guard.model_meta();
+        crate::models::gemma4::Gemma4DrafterActiveKvRuntime::new(
+            active_kv_for_prefix_cache,
+            base.scheduler_handle.active_kv_offload.clone(),
+            base.scheduler_handle.kv_cache_soft_limit_bytes,
+            crate::core::memory_budget::kv_bytes_per_token(&meta),
+        )
+    };
+    let prefix_cache = crate::models::gemma4::Gemma4DrafterPrefixCache::new(
+        prefix_cache_config,
+        prefix_lru_cache,
+        active_kv_runtime,
+    )?;
+    base.paged_prefix_cache_enabled = prefix_cache.is_enabled();
     let model_max_context = {
         let guard = base.model.lock().await;
         guard.model_meta().max_position_embeddings.max(0) as usize
@@ -964,6 +976,9 @@ fn build_health_collector(
         memory_budget_exceeded_count: scheduler_handle.memory_budget_exceeded_count.clone(),
         kv_cache_active_bytes: scheduler_handle.kv_cache_active_bytes.clone(),
         kv_cache_soft_limit_bytes: scheduler_handle.kv_cache_soft_limit_bytes,
+        kv_cache_logical_cap_tokens: scheduler_handle.kv_cache_logical_cap_tokens,
+        kv_cache_resident_cap_tokens: scheduler_handle.kv_cache_resident_cap_tokens,
+        kv_cache_budget_policy: scheduler_handle.kv_cache_budget_policy.to_string(),
         mtp,
         active_kv_offload: scheduler_handle.active_kv_offload.clone(),
     })
@@ -1163,6 +1178,9 @@ mod tests {
             memory_budget_exceeded_count: Arc::new(AtomicU64::new(0)),
             kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),
             kv_cache_soft_limit_bytes: 1,
+            kv_cache_logical_cap_tokens: 1,
+            kv_cache_resident_cap_tokens: 1,
+            kv_cache_budget_policy: "full_resident",
             active_kv_offload: crate::core::cache::ActiveKvOffloadSharedStats::new(
                 &crate::core::cache::ActiveKvOffloadConfig::disabled(),
             ),

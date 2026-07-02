@@ -129,6 +129,7 @@ public struct BackendRestartCoordinator {
                 defaultModel: config.defaultModelReference,
                 scanner: scanner,
                 parameterStore: parameterStore,
+                activeKvOffloadEnabled: config.activeKvOffload == true,
                 client: client
             )
             var loadedModels: [String] = []
@@ -141,7 +142,8 @@ public struct BackendRestartCoordinator {
                     let maxCacheCap = ModelLoadParameters.maxCacheCap(
                         for: model,
                         scanner: scanner,
-                        parameterStore: parameterStore
+                        parameterStore: parameterStore,
+                        activeKvOffloadEnabled: config.activeKvOffload == true
                     )
                     let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(
                         for: model,

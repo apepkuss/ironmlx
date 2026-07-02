@@ -71,6 +71,34 @@ fn fresh_prefill_batch_limit_for_command<M: Model>(cmd: &SchedulerCommand, b_max
     fresh_prefill_batch_limit_for_request::<M>(request, b_max)
 }
 
+fn startup_budget_policy(
+    effective_cap_max: usize,
+    paged_prefix_cache: Option<&PagedPrefixCacheConfig>,
+    active_kv_offload: &ActiveKvOffloadConfig,
+) -> crate::core::memory_budget::KvBudgetPolicy {
+    if !active_kv_offload.enabled {
+        return crate::core::memory_budget::KvBudgetPolicy::FullResident;
+    }
+    let Some(paged_prefix_cache) = paged_prefix_cache else {
+        return crate::core::memory_budget::KvBudgetPolicy::FullResident;
+    };
+
+    let block_size_i32 = paged_prefix_cache.block_size.max(1);
+    let hot_window_pages_i32 = active_kv_offload
+        .hot_window_pages_override
+        .unwrap_or_else(|| {
+            crate::core::scheduler::default_active_kv_hot_window_pages(block_size_i32)
+        })
+        .max(1);
+    let block_size = usize::try_from(block_size_i32).unwrap_or(1);
+    let hot_window_pages = usize::try_from(hot_window_pages_i32).unwrap_or(1);
+    let resident_cap = hot_window_pages
+        .saturating_mul(block_size)
+        .min(effective_cap_max.max(1));
+
+    crate::core::memory_budget::KvBudgetPolicy::active_kv_offload(resident_cap)
+}
+
 /// Event yielded by the rolling decode loop. Either a new admit command
 /// arrived (mid-batch admit), a decode step is due, or the cmd_rx channel
 /// was closed (shutdown).
@@ -410,6 +438,12 @@ pub struct SchedulerActorHandle {
     pub kv_cache_active_bytes: Arc<AtomicUsize>,
     /// KV cache soft limit in bytes (computed at startup; static for lifetime).
     pub kv_cache_soft_limit_bytes: usize,
+    /// Logical per-request KV cache cap in tokens.
+    pub kv_cache_logical_cap_tokens: usize,
+    /// Hot-resident per-request KV cache cap charged to memory budget.
+    pub kv_cache_resident_cap_tokens: usize,
+    /// Budget policy name used by startup and runtime KV admission.
+    pub kv_cache_budget_policy: &'static str,
     /// Shared Active KV offload metrics and runtime status.
     pub active_kv_offload: ActiveKvOffloadSharedStats,
 }
@@ -637,8 +671,17 @@ where
     // ── Step 1: Budget validation on the calling thread. ──────────────────
     // No Scheduler / Array is allocated here — just pure arithmetic + RAM
     // check. Returns Err early if the budget is too tight.
-    let budget_state =
-        crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?;
+    let budget_policy = startup_budget_policy(
+        effective_cap_max,
+        paged_prefix_cache.as_ref(),
+        &active_kv_offload,
+    );
+    let budget_state = crate::core::memory_budget::validate_startup_budget_with_policy(
+        b_max,
+        effective_cap_max,
+        &meta,
+        budget_policy,
+    )?;
 
     // ── Step 2: Shared atomics created on the calling thread. ─────────────
     // Cloned for both the handle (returned to caller) and the driver thread.
@@ -657,6 +700,9 @@ where
     // Healthz observables cloned from BudgetState (Arc<AtomicUsize> inside).
     let kv_cache_active_bytes = budget_state.shared_active();
     let kv_cache_soft_limit_bytes = budget_state.soft_limit();
+    let kv_cache_logical_cap_tokens = budget_state.logical_cap();
+    let kv_cache_resident_cap_tokens = budget_state.resident_cap();
+    let kv_cache_budget_policy = budget_state.policy().name();
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let admit_count = Arc::new(AtomicU64::new(0));
@@ -761,6 +807,9 @@ where
         memory_budget_exceeded_count,
         kv_cache_active_bytes,
         kv_cache_soft_limit_bytes,
+        kv_cache_logical_cap_tokens,
+        kv_cache_resident_cap_tokens,
+        kv_cache_budget_policy,
         active_kv_offload: active_kv_stats,
     })
 }
@@ -2605,6 +2654,34 @@ mod tests {
         assert_eq!(handle.mtp_prefill_count.load(Ordering::Relaxed), 0);
         drop(handle);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_actor_with_paged_prefix_and_active_kv_accepts_large_logical_cap() {
+        crate::core::memory_budget::with_total_ram_bytes_for_test("137438953472", || {
+            let prefix_root = unique_temp_dir("actor-gemma4-prefix");
+            let active_kv_root = unique_temp_dir("actor-gemma4-active-kv");
+            let config = PagedPrefixCacheConfig::new(&prefix_root, "fake-gemma4", 128, 4096)
+                .expect("prefix config");
+            let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
+            let handle = spawn_scheduler_actor_with_paged_prefix_cache_and_active_kv(
+                model,
+                1,
+                Duration::from_millis(1),
+                1,
+                262_144,
+                256,
+                crate::core::memory_budget::test_meta_gemma4_12b(),
+                config,
+                None,
+                ActiveKvOffloadConfig::enabled(active_kv_root.clone()),
+            )
+            .expect("active KV + paged prefix should allow 256K logical Gemma4 cap");
+
+            drop(handle);
+            std::fs::remove_dir_all(prefix_root).ok();
+            std::fs::remove_dir_all(active_kv_root).ok();
+        });
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

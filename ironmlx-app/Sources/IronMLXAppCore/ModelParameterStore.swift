@@ -194,15 +194,49 @@ public final class ModelParameterStore: @unchecked Sendable {
 }
 
 public enum ModelLoadParameters {
+    public static let conservativeLongContextCap = 32_768
+
     public static func maxCacheCap(
         for modelReference: String,
         scanner: LocalModelScanner,
-        parameterStore: ModelParameterStore
+        parameterStore: ModelParameterStore,
+        activeKvOffloadEnabled: Bool
     ) -> Int? {
-        if let saved = parameterStore.parameters(for: modelReference)?.maxCacheCap {
-            return saved
+        effectiveMaxCacheCap(
+            savedMaxCacheCap: parameterStore.parameters(for: modelReference)?.maxCacheCap,
+            contextWindow: scanner.maxPositionEmbeddings(for: modelReference),
+            activeKvOffloadEnabled: activeKvOffloadEnabled
+        )
+    }
+
+    public static func effectiveMaxCacheCap(
+        savedMaxCacheCap: Int?,
+        contextWindow: Int?,
+        activeKvOffloadEnabled: Bool
+    ) -> Int? {
+        if let savedMaxCacheCap {
+            return savedMaxCacheCap
         }
-        return scanner.maxPositionEmbeddings(for: modelReference)
+        guard let contextWindow else {
+            return nil
+        }
+        return defaultMaxCacheCap(
+            contextWindow: contextWindow,
+            activeKvOffloadEnabled: activeKvOffloadEnabled
+        )
+    }
+
+    public static func defaultMaxCacheCap(
+        contextWindow: Int,
+        activeKvOffloadEnabled: Bool
+    ) -> Int {
+        guard contextWindow > 0 else {
+            return conservativeLongContextCap
+        }
+        guard !activeKvOffloadEnabled else {
+            return contextWindow
+        }
+        return min(contextWindow, conservativeLongContextCap)
     }
 }
 

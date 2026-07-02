@@ -54,6 +54,9 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
         public var freeRamBytes: UInt64
         public var kvCacheActiveBytes: UInt64
         public var kvCacheSoftLimitBytes: UInt64
+        public var kvCacheLogicalCapTokens: Int
+        public var kvCacheResidentCapTokens: Int
+        public var kvCacheBudgetPolicy: String
         public var mlxTotalBytes: UInt64?
         public var mlxMaxRecommendedBytes: UInt64?
         public var mlxActiveBytes: UInt64
@@ -66,6 +69,9 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
             case freeRamBytes = "free_ram_bytes"
             case kvCacheActiveBytes = "kv_cache_active_bytes"
             case kvCacheSoftLimitBytes = "kv_cache_soft_limit_bytes"
+            case kvCacheLogicalCapTokens = "kv_cache_logical_cap_tokens"
+            case kvCacheResidentCapTokens = "kv_cache_resident_cap_tokens"
+            case kvCacheBudgetPolicy = "kv_cache_budget_policy"
             case mlxTotalBytes = "mlx_total_bytes"
             case mlxMaxRecommendedBytes = "mlx_max_recommended_bytes"
             case mlxActiveBytes = "mlx_active_bytes"

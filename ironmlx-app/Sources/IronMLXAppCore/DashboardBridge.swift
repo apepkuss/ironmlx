@@ -514,7 +514,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let maxCacheCap = ModelLoadParameters.maxCacheCap(
             for: model,
             scanner: scanner,
-            parameterStore: parameterStore
+            parameterStore: parameterStore,
+            activeKvOffloadEnabled: config.activeKvOffload == true
         )
         let mtpRuntime: ModelMtpRuntime?
         do {
@@ -859,7 +860,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         maxCacheCap: ModelLoadParameters.maxCacheCap(
                             for: model,
                             scanner: self.scanner,
-                            parameterStore: self.parameterStore
+                            parameterStore: self.parameterStore,
+                            activeKvOffloadEnabled: config.activeKvOffload == true
                         ),
                         pinned: config.pinnedModelReferences.contains(model),
                         mtpModelDir: mtpRuntime?.modelDir,
@@ -1051,15 +1053,34 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 mtpEnabledModels: state.mtpEnabledModels
             )
             let config = self.configStore.load()
+            let dashboardModels = self.modelsWithEffectiveMaxTokens(
+                models,
+                activeKvOffloadEnabled: config.activeKvOffload == true
+            )
             if self.backend.isRunning {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 await self.registerLocalModels(models: models, config: config, client: client)
             }
-            let json = (try? Self.jsonString(models)) ?? "[]"
+            let json = (try? Self.jsonString(dashboardModels)) ?? "[]"
             await MainActor.run {
                 self.sendModelParameters()
                 self.sendJavaScript("onLocalModelsScanned(\(Self.jsStringLiteral(json)))")
             }
+        }
+    }
+
+    private func modelsWithEffectiveMaxTokens(
+        _ models: [LocalModel],
+        activeKvOffloadEnabled: Bool
+    ) -> [LocalModel] {
+        models.map { model in
+            var model = model
+            model.effectiveMaxTokens = ModelLoadParameters.effectiveMaxCacheCap(
+                savedMaxCacheCap: parameterStore.parameters(for: model.id)?.maxCacheCap,
+                contextWindow: model.maxPositionEmbeddings,
+                activeKvOffloadEnabled: activeKvOffloadEnabled
+            )
+            return model
         }
     }
 
@@ -1075,6 +1096,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             defaultModel: config.defaultModelReference,
             scanner: scanner,
             parameterStore: parameterStore,
+            activeKvOffloadEnabled: config.activeKvOffload == true,
             client: client
         )
     }

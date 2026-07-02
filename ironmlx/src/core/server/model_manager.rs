@@ -55,6 +55,9 @@ const MODEL_MEMORY_LIMIT_EXCEEDED_MESSAGE: &str =
 const TOTAL_MEMORY_LIMIT_EXCEEDED_CODE: &str = "total_memory_limit_exceeded";
 const TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE: &str =
     "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.";
+const KV_MEMORY_BUDGET_EXCEEDED_CODE: &str = "kv_memory_budget_exceeded";
+const KV_MEMORY_BUDGET_EXCEEDED_MESSAGE: &str =
+    "KV cache memory budget exceeded. Enable Active KV offload with paged prefix cache for long context, or lower MAX TOKENS, max_cache_cap, or b_max, then try again.";
 const DEFAULT_PROFILE_WARNING_CODE: &str = "default_scheduler_profile_used";
 const DEFAULT_PROFILE_WARNING: &str =
     "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with scheduler-autotune for better model-specific scheduling.";
@@ -1329,6 +1332,12 @@ impl AdminError {
                 Some(TOTAL_MEMORY_LIMIT_EXCEEDED_CODE),
             );
         }
+        if likely_memory_budget_error(&message) {
+            return Self::service_unavailable_with_code(
+                KV_MEMORY_BUDGET_EXCEEDED_MESSAGE,
+                Some(KV_MEMORY_BUDGET_EXCEEDED_CODE),
+            );
+        }
         if likely_gpu_memory_error(&message) {
             return Self::service_unavailable_with_code(
                 GPU_MEMORY_INSUFFICIENT_MESSAGE,
@@ -1393,7 +1402,10 @@ fn likely_gpu_memory_error(message: &str) -> bool {
         || lower.contains("oom")
         || lower.contains("failed to allocate")
         || lower.contains("memory allocation")
-        || lower.contains("memory budget")
+}
+
+fn likely_memory_budget_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("memory budget")
 }
 
 fn likely_engine_pool_capacity_error(message: &str) -> bool {
@@ -1428,6 +1440,16 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     let mut memory_budget_exceeded_count = 0;
     let mut kv_cache_active_bytes = 0;
     let mut kv_cache_soft_limit_bytes = 0;
+    let mut kv_cache_logical_cap_tokens = 0;
+    let mut kv_cache_resident_cap_tokens = 0;
+    let mut kv_cache_budget_policies: Vec<String> = Vec::new();
+    let mut mtp_enabled = false;
+    let mut mtp_draft_token_values: Vec<usize> = Vec::new();
+    let mut mtp_prefill_count = 0;
+    let mut mtp_step_count = 0;
+    let mut mtp_fallback_prefill_count = 0;
+    let mut mtp_drafted_tokens = 0;
+    let mut mtp_accepted_draft_tokens = 0;
     let mut active_kv_snapshots = Vec::new();
 
     for snapshot in snapshots {
@@ -1444,11 +1466,38 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         memory_budget_exceeded_count += snapshot.scheduler.memory_budget_exceeded_count;
         kv_cache_active_bytes += snapshot.memory.kv_cache_active_bytes;
         kv_cache_soft_limit_bytes += snapshot.memory.kv_cache_soft_limit_bytes;
+        kv_cache_logical_cap_tokens =
+            kv_cache_logical_cap_tokens.max(snapshot.memory.kv_cache_logical_cap_tokens);
+        kv_cache_resident_cap_tokens =
+            kv_cache_resident_cap_tokens.max(snapshot.memory.kv_cache_resident_cap_tokens);
+        if !snapshot.memory.kv_cache_budget_policy.is_empty()
+            && !kv_cache_budget_policies.contains(&snapshot.memory.kv_cache_budget_policy)
+        {
+            kv_cache_budget_policies.push(snapshot.memory.kv_cache_budget_policy);
+        }
+        if snapshot.mtp.enabled {
+            mtp_enabled = true;
+            if let Some(draft_tokens) = snapshot.mtp.draft_tokens {
+                if !mtp_draft_token_values.contains(&draft_tokens) {
+                    mtp_draft_token_values.push(draft_tokens);
+                }
+            }
+        }
+        mtp_prefill_count += snapshot.mtp.prefill_count;
+        mtp_step_count += snapshot.mtp.step_count;
+        mtp_fallback_prefill_count += snapshot.mtp.fallback_prefill_count;
+        mtp_drafted_tokens += snapshot.mtp.drafted_tokens;
+        mtp_accepted_draft_tokens += snapshot.mtp.accepted_draft_tokens;
         active_kv_snapshots.push(snapshot.active_kv_offload);
     }
 
     let active_kv_offload =
         crate::core::cache::ActiveKvOffloadHealth::aggregate(active_kv_snapshots);
+    let mtp_draft_tokens = if mtp_enabled && mtp_draft_token_values.len() == 1 {
+        mtp_draft_token_values.first().copied()
+    } else {
+        None
+    };
 
     let mut status = match classify_status(
         b_queued,
@@ -1484,6 +1533,9 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             free_ram_bytes,
             kv_cache_active_bytes,
             kv_cache_soft_limit_bytes,
+            kv_cache_logical_cap_tokens,
+            kv_cache_resident_cap_tokens,
+            kv_cache_budget_policy: kv_cache_budget_policies.join(","),
             mlx_total_bytes: mlx_memory.total_bytes,
             mlx_max_recommended_bytes: mlx_memory.max_recommended_bytes,
             mlx_active_bytes: mlx_memory.active_bytes,
@@ -1492,13 +1544,13 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
         },
         mtp: MtpHealthInfo {
-            enabled: false,
-            draft_tokens: None,
-            prefill_count: 0,
-            step_count: 0,
-            fallback_prefill_count: 0,
-            drafted_tokens: 0,
-            accepted_draft_tokens: 0,
+            enabled: mtp_enabled,
+            draft_tokens: mtp_draft_tokens,
+            prefill_count: mtp_prefill_count,
+            step_count: mtp_step_count,
+            fallback_prefill_count: mtp_fallback_prefill_count,
+            drafted_tokens: mtp_drafted_tokens,
+            accepted_draft_tokens: mtp_accepted_draft_tokens,
         },
         active_kv_offload,
         device_name: mlx_memory.device_name,
@@ -1557,6 +1609,63 @@ mod tests {
 
         assert_eq!(request.mtp_model_dir.as_deref(), Some("/models/qwen-mtp"));
         assert_eq!(request.mtp_draft_tokens, Some(2));
+    }
+
+    #[test]
+    fn aggregate_health_reports_loaded_mtp_state() {
+        let snapshot = HealthSnapshot {
+            status: HealthStatus::Healthy,
+            uptime_secs: 0,
+            model: ModelInfo {
+                name: "gemma4".to_string(),
+                max_position_embeddings: 262_144,
+            },
+            scheduler: SchedulerInfo {
+                b_max: 1,
+                b_active: 0,
+                b_queued: 0,
+                queue_max: 32,
+                admission_queue_full_count: 0,
+                memory_budget_exceeded_count: 0,
+            },
+            memory: MemoryInfo {
+                total_ram_bytes: 0,
+                free_ram_bytes: 0,
+                kv_cache_active_bytes: 0,
+                kv_cache_soft_limit_bytes: 1024,
+                kv_cache_logical_cap_tokens: 262_144,
+                kv_cache_resident_cap_tokens: 1024,
+                kv_cache_budget_policy: "active_kv_offload".to_string(),
+                mlx_total_bytes: None,
+                mlx_max_recommended_bytes: None,
+                mlx_active_bytes: 0,
+                mlx_cache_bytes: 0,
+                mlx_peak_bytes: 0,
+                mlx_memory_limit_bytes: 0,
+            },
+            mtp: MtpHealthInfo {
+                enabled: true,
+                draft_tokens: Some(2),
+                prefill_count: 3,
+                step_count: 5,
+                fallback_prefill_count: 7,
+                drafted_tokens: 11,
+                accepted_draft_tokens: 13,
+            },
+            active_kv_offload: crate::core::cache::ActiveKvOffloadHealth::disabled(),
+            device_name: None,
+            version: "test",
+        };
+
+        let aggregated = aggregate_health(Instant::now(), vec![snapshot]);
+
+        assert!(aggregated.mtp.enabled);
+        assert_eq!(aggregated.mtp.draft_tokens, Some(2));
+        assert_eq!(aggregated.mtp.prefill_count, 3);
+        assert_eq!(aggregated.mtp.step_count, 5);
+        assert_eq!(aggregated.mtp.fallback_prefill_count, 7);
+        assert_eq!(aggregated.mtp.drafted_tokens, 11);
+        assert_eq!(aggregated.mtp.accepted_draft_tokens, 13);
     }
 
     #[test]
@@ -1693,6 +1802,18 @@ mod tests {
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.message, TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE);
         assert_eq!(error.code, Some(TOTAL_MEMORY_LIMIT_EXCEEDED_CODE));
+    }
+
+    #[test]
+    fn load_error_maps_memory_budget_to_actionable_code() {
+        let error = AdminError::from_load_error(anyhow::anyhow!(
+            "memory budget exceeded: b_max=1 × resident_cap=262144 × 786432 bytes/token = 206158430208 bytes > available 126701535232 (logical cap 262144, policy full_resident). Lower --b-max or --max-cache-cap."
+        ));
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, Some("kv_memory_budget_exceeded"));
+        assert!(error.message.contains("Active KV offload"));
+        assert!(error.message.contains("MAX TOKENS"));
     }
 
     #[test]

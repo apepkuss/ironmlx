@@ -557,7 +557,7 @@ fn active_kv_entry_supported(entry: &PagedPrefixEntry) -> bool {
 }
 
 #[allow(clippy::manual_div_ceil)]
-fn default_active_kv_hot_window_pages(block_size: i32) -> i32 {
+pub(crate) fn default_active_kv_hot_window_pages(block_size: i32) -> i32 {
     let block_size = block_size.max(1);
     ((1024 + block_size - 1) / block_size).max(2)
 }
@@ -585,7 +585,7 @@ fn active_kv_budget_pages_for(
 }
 
 #[allow(clippy::manual_div_ceil)]
-fn active_kv_hot_window_pages_for_budget(
+pub(crate) fn active_kv_hot_window_pages_for_budget(
     block_size: i32,
     cache_cap: i32,
     batch: i32,
@@ -619,7 +619,7 @@ fn default_active_kv_chunk_pages(block_size: i32) -> i32 {
 }
 
 #[allow(clippy::manual_div_ceil)]
-fn active_kv_chunk_pages_for_budget(
+pub(crate) fn active_kv_chunk_pages_for_budget(
     block_size: i32,
     cache_cap: i32,
     batch: i32,
@@ -3356,7 +3356,9 @@ impl<M: Model> Scheduler<M> {
 
         // B1-p2.5: memory budget admission gate.
         let row_cap = req.prompt_ids.len().saturating_add(req.max_new_tokens);
-        let requested_bytes = crate::core::memory_budget::kv_cache_bytes(1, row_cap, &self.meta);
+        let charged_cap = self.budget_state.resident_charge_cap(row_cap);
+        let requested_bytes =
+            crate::core::memory_budget::kv_cache_bytes(1, charged_cap, &self.meta);
         if let Err((active, requested, soft_limit)) = self.budget_state.try_admit(requested_bytes) {
             self.memory_budget_exceeded_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -6443,6 +6445,40 @@ mod tests {
         assert_eq!(
             active_kv_chunk_pages_for_budget(128, cache_cap, 1, soft_limit, bytes_per_token, 32,),
             1
+        );
+    }
+
+    #[test]
+    fn admit_under_offload_policy_charges_resident_cap() {
+        let meta = crate::core::memory_budget::test_meta_qwen35();
+        let resident_cap = 1_024;
+        let policy = crate::core::memory_budget::KvBudgetPolicy::active_kv_offload(resident_cap);
+        let budget_state = crate::core::memory_budget::BudgetState::with_caps(
+            crate::core::memory_budget::kv_cache_bytes(1, 1_500, &meta),
+            262_144,
+            resident_cap,
+            policy,
+        );
+        let memory_budget_exceeded_count =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut scheduler = Scheduler::<RecordingPrefillModel>::new_with_state(
+            1,
+            262_144,
+            budget_state,
+            memory_budget_exceeded_count,
+            meta,
+        )
+        .expect("scheduler startup");
+        let mut request = mk_req(vec![1; 4_096]);
+        request.max_new_tokens = 4_096;
+
+        scheduler
+            .admit(request)
+            .expect("long logical request should fit resident budget");
+
+        assert_eq!(
+            scheduler.budget_state.active_bytes(),
+            crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta)
         );
     }
 

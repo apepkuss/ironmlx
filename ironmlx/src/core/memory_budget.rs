@@ -42,6 +42,34 @@ impl ModelMeta {
 pub const SAFETY_MARGIN_BYTES: usize = 2 * 1024 * 1024 * 1024;
 pub const SOFT_LIMIT_FRAC: f64 = 0.85;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvBudgetPolicy {
+    FullResident,
+    ActiveKvOffload { resident_cap: usize },
+}
+
+impl KvBudgetPolicy {
+    pub fn active_kv_offload(resident_cap: usize) -> Self {
+        Self::ActiveKvOffload {
+            resident_cap: resident_cap.max(1),
+        }
+    }
+
+    pub fn resident_cap(self, logical_cap: usize) -> usize {
+        match self {
+            Self::FullResident => logical_cap,
+            Self::ActiveKvOffload { resident_cap } => resident_cap.min(logical_cap).max(1),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::FullResident => "full_resident",
+            Self::ActiveKvOffload { .. } => "active_kv_offload",
+        }
+    }
+}
+
 pub fn kv_bytes_per_token(meta: &ModelMeta) -> usize {
     (meta.num_hidden_layers as usize)
         * (meta.num_key_value_heads as usize)
@@ -96,14 +124,16 @@ pub fn available_budget_bytes(meta: &ModelMeta) -> usize {
 
 #[derive(Debug, Error)]
 #[error(
-    "memory budget exceeded: b_max={b_max} × effective_cap_max={cap} × \
+    "memory budget exceeded: b_max={b_max} × resident_cap={resident_cap} × \
      {bytes_per_token} bytes/token = {requested_bytes} bytes > available {available_bytes} \
-     (total RAM {total_ram_bytes} - model {model_weight_bytes} - safety margin 2147483648). \
+     (logical cap {cap}, policy {policy}, total RAM {total_ram_bytes} - model {model_weight_bytes} - safety margin 2147483648). \
      Lower --b-max or --max-cache-cap."
 )]
 pub struct MemoryBudgetError {
     pub b_max: usize,
     pub cap: usize,
+    pub resident_cap: usize,
+    pub policy: &'static str,
     pub bytes_per_token: usize,
     pub requested_bytes: usize,
     pub available_bytes: usize,
@@ -115,13 +145,47 @@ pub struct MemoryBudgetError {
 pub struct BudgetState {
     soft_limit: usize,
     active: Arc<AtomicUsize>,
+    logical_cap: usize,
+    resident_cap: usize,
+    policy: KvBudgetPolicy,
 }
 
 impl BudgetState {
     pub fn new(total_budget: usize) -> Self {
+        Self::with_caps(
+            total_budget,
+            usize::MAX,
+            usize::MAX,
+            KvBudgetPolicy::FullResident,
+        )
+    }
+
+    pub fn with_caps(
+        total_budget: usize,
+        logical_cap: usize,
+        resident_cap: usize,
+        policy: KvBudgetPolicy,
+    ) -> Self {
+        Self::with_soft_limit(
+            ((total_budget as f64) * SOFT_LIMIT_FRAC) as usize,
+            logical_cap,
+            resident_cap,
+            policy,
+        )
+    }
+
+    pub fn with_soft_limit(
+        soft_limit: usize,
+        logical_cap: usize,
+        resident_cap: usize,
+        policy: KvBudgetPolicy,
+    ) -> Self {
         Self {
-            soft_limit: ((total_budget as f64) * SOFT_LIMIT_FRAC) as usize,
+            soft_limit,
             active: Arc::new(AtomicUsize::new(0)),
+            logical_cap,
+            resident_cap,
+            policy,
         }
     }
 
@@ -135,6 +199,22 @@ impl BudgetState {
 
     pub fn shared_active(&self) -> Arc<AtomicUsize> {
         self.active.clone()
+    }
+
+    pub fn logical_cap(&self) -> usize {
+        self.logical_cap
+    }
+
+    pub fn resident_cap(&self) -> usize {
+        self.resident_cap
+    }
+
+    pub fn policy(&self) -> KvBudgetPolicy {
+        self.policy
+    }
+
+    pub fn resident_charge_cap(&self, requested_cap: usize) -> usize {
+        requested_cap.min(self.resident_cap)
     }
 
     /// 试图把 `requested` 加到 active；若加后超 soft_limit 则返回 Err。
@@ -157,13 +237,32 @@ pub fn validate_startup_budget(
     effective_cap_max: usize,
     meta: &ModelMeta,
 ) -> Result<BudgetState, MemoryBudgetError> {
+    validate_startup_budget_with_policy(
+        b_max,
+        effective_cap_max,
+        meta,
+        KvBudgetPolicy::FullResident,
+    )
+}
+
+pub fn validate_startup_budget_with_policy(
+    b_max: usize,
+    effective_cap_max: usize,
+    meta: &ModelMeta,
+    policy: KvBudgetPolicy,
+) -> Result<BudgetState, MemoryBudgetError> {
     let bytes_per_token = kv_bytes_per_token(meta);
-    let requested = b_max * effective_cap_max * bytes_per_token;
+    let resident_cap = policy.resident_cap(effective_cap_max);
+    let requested = b_max
+        .saturating_mul(resident_cap)
+        .saturating_mul(bytes_per_token);
     let available = available_budget_bytes(meta);
     if requested > available {
         return Err(MemoryBudgetError {
             b_max,
             cap: effective_cap_max,
+            resident_cap,
+            policy: policy.name(),
             bytes_per_token,
             requested_bytes: requested,
             available_bytes: available,
@@ -171,7 +270,19 @@ pub fn validate_startup_budget(
             model_weight_bytes: meta.weight_bytes,
         });
     }
-    Ok(BudgetState::new(requested))
+
+    let soft_limit = match policy {
+        KvBudgetPolicy::FullResident => {
+            (((available as f64) * SOFT_LIMIT_FRAC) as usize).max(requested)
+        }
+        KvBudgetPolicy::ActiveKvOffload { .. } => requested,
+    };
+    Ok(BudgetState::with_soft_limit(
+        soft_limit,
+        effective_cap_max,
+        resident_cap,
+        policy,
+    ))
 }
 
 /// Realistic Qwen3.5-4B-like ModelMeta for tests.
@@ -214,31 +325,51 @@ pub fn test_meta_qwen35_moe() -> ModelMeta {
     }
 }
 
+#[doc(hidden)]
+pub fn test_meta_gemma4_12b() -> ModelMeta {
+    ModelMeta {
+        num_hidden_layers: 48,
+        num_attention_heads: 16,
+        num_key_value_heads: 8,
+        hidden_size: 3840,
+        head_dim: Some(512),
+        weight_bytes: 8 * 1024 * 1024 * 1024,
+        max_position_embeddings: 262144,
+        spatial_merge_size: 3,
+    }
+}
+
+#[cfg(test)]
+#[doc(hidden)]
+pub fn with_total_ram_bytes_for_test<T>(bytes: &str, f: impl FnOnce() -> T) -> T {
+    let _guard = total_ram_env_lock_for_test()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", bytes);
+
+    struct ClearTotalRamEnv;
+    impl Drop for ClearTotalRamEnv {
+        fn drop(&mut self) {
+            std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
+        }
+    }
+    let _clear = ClearTotalRamEnv;
+
+    f()
+}
+
+#[cfg(test)]
+fn total_ram_env_lock_for_test() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn total_ram_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn with_total_ram_bytes<T>(bytes: &str, f: impl FnOnce() -> T) -> T {
-        let _guard = total_ram_env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::env::set_var("IRONMLX_TOTAL_RAM_BYTES", bytes);
-
-        struct ClearTotalRamEnv;
-        impl Drop for ClearTotalRamEnv {
-            fn drop(&mut self) {
-                std::env::remove_var("IRONMLX_TOTAL_RAM_BYTES");
-            }
-        }
-        let _clear = ClearTotalRamEnv;
-
-        f()
+        with_total_ram_bytes_for_test(bytes, f)
     }
 
     fn meta() -> ModelMeta {
@@ -320,6 +451,58 @@ mod tests {
                 .expect_err("16GB host cannot fit 17GB MoE weights");
             let msg = format!("{err}");
             assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
+        });
+    }
+
+    #[test]
+    fn startup_budget_without_offload_rejects_large_logical_cap() {
+        let meta = test_meta_gemma4_12b();
+        with_total_ram_bytes("137438953472", || {
+            let error = validate_startup_budget(1, 262_144, &meta)
+                .expect_err("full-resident 256K cache should exceed budget");
+            assert_eq!(error.cap, 262_144);
+            assert_eq!(error.resident_cap, 262_144);
+            assert_eq!(error.policy, "full_resident");
+        });
+    }
+
+    #[test]
+    fn startup_budget_with_offload_charges_hot_resident_cap() {
+        let meta = test_meta_gemma4_12b();
+        let policy = KvBudgetPolicy::active_kv_offload(8_192);
+        with_total_ram_bytes("137438953472", || {
+            let state = validate_startup_budget_with_policy(1, 262_144, &meta, policy)
+                .expect("offload hot window should fit");
+            assert_eq!(state.logical_cap(), 262_144);
+            assert_eq!(state.resident_cap(), 8_192);
+            assert_eq!(state.policy(), policy);
+            assert!(state.soft_limit() > 0);
+        });
+    }
+
+    #[test]
+    fn startup_budget_soft_limit_allows_configured_full_resident_cap() {
+        let meta = test_meta_qwen35();
+        with_total_ram_bytes("34359738368", || {
+            let state = validate_startup_budget(1, 32_768, &meta)
+                .expect("configured full resident cap should fit");
+            let configured_bytes = kv_cache_bytes(1, 32_768, &meta);
+            assert!(
+                state.soft_limit() >= configured_bytes,
+                "runtime soft limit must allow the startup-validated full-resident cap"
+            );
+        });
+    }
+
+    #[test]
+    fn startup_budget_with_offload_soft_limit_allows_resident_budget() {
+        let meta = test_meta_gemma4_12b();
+        let policy = KvBudgetPolicy::active_kv_offload(8_192);
+        with_total_ram_bytes("137438953472", || {
+            let state = validate_startup_budget_with_policy(1, 262_144, &meta, policy)
+                .expect("offload hot window should fit");
+            let resident_bytes = kv_cache_bytes(1, 8_192, &meta);
+            assert_eq!(state.soft_limit(), resident_bytes);
         });
     }
 }

@@ -479,11 +479,13 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
 
     #expect(dashboardHTML(html, contains: "function localizeBackendErrorMessage(message)"))
     #expect(dashboardHTML(html, contains: "err_memory_budget_exceeded"))
+    #expect(dashboardHTML(html, contains: "err_kv_memory_budget_exceeded"))
     #expect(dashboardHTML(html, contains: "localizeErrorResult(result)"))
     #expect(dashboardHTML(html, contains: "内存预算不足"))
-    #expect(dashboardHTML(html, contains: "模型参数设置"))
+    #expect(dashboardHTML(html, contains: "活跃 KV Cache 分层卸载"))
+    #expect(dashboardHTML(html, contains: "logical cap"))
     #expect(dashboardHTML(html, contains: "MAX TOKENS"))
-    #expect(dashboardHTML(html, contains: "最大序列数={max_sequences}"))
+    #expect(dashboardHTML(html, contains: "最大序列数（{max_sequences}）"))
     #expect(!dashboardHTML(html, contains: "b_max={b_max}"))
     #expect(!dashboardHTML(html, contains: "b_max="))
     #expect(!dashboardHTML(html, contains: "请调低「最大序列数」或 Max Cache Cap"))
@@ -535,6 +537,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
         "err_model_not_loaded",
         "err_model_not_registered",
         "err_backend_unload_error",
+        "err_kv_memory_budget_exceeded",
         "err_mtp_model_dir_required",
         "err_mtp_base_model_not_found",
         "err_mtp_model_not_found",

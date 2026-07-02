@@ -42,6 +42,9 @@ pub struct MemoryInfo {
     pub free_ram_bytes: usize,
     pub kv_cache_active_bytes: usize,
     pub kv_cache_soft_limit_bytes: usize,
+    pub kv_cache_logical_cap_tokens: usize,
+    pub kv_cache_resident_cap_tokens: usize,
+    pub kv_cache_budget_policy: String,
     pub mlx_total_bytes: Option<usize>,
     pub mlx_max_recommended_bytes: Option<usize>,
     pub mlx_active_bytes: usize,
@@ -142,6 +145,9 @@ pub struct SchedulerHealthCollector {
     pub memory_budget_exceeded_count: Arc<AtomicU64>,
     pub kv_cache_active_bytes: Arc<AtomicUsize>,
     pub kv_cache_soft_limit_bytes: usize,
+    pub kv_cache_logical_cap_tokens: usize,
+    pub kv_cache_resident_cap_tokens: usize,
+    pub kv_cache_budget_policy: String,
     pub mtp: MtpHealthConfig,
     pub active_kv_offload: ActiveKvOffloadSharedStats,
 }
@@ -190,6 +196,9 @@ impl SchedulerHealthCollector {
                 free_ram_bytes,
                 kv_cache_active_bytes: kv_active,
                 kv_cache_soft_limit_bytes: self.kv_cache_soft_limit_bytes,
+                kv_cache_logical_cap_tokens: self.kv_cache_logical_cap_tokens,
+                kv_cache_resident_cap_tokens: self.kv_cache_resident_cap_tokens,
+                kv_cache_budget_policy: self.kv_cache_budget_policy.clone(),
                 mlx_total_bytes: mlx_memory.total_bytes,
                 mlx_max_recommended_bytes: mlx_memory.max_recommended_bytes,
                 mlx_active_bytes: mlx_memory.active_bytes,
@@ -324,9 +333,21 @@ mod tests {
             memory_budget_exceeded_count: Arc::new(AtomicU64::new(0)),
             kv_cache_active_bytes: Arc::new(AtomicUsize::new(0)),
             kv_cache_soft_limit_bytes: 1,
+            kv_cache_logical_cap_tokens: 262_144,
+            kv_cache_resident_cap_tokens: 1_024,
+            kv_cache_budget_policy: "active_kv_offload".to_string(),
             mtp,
             active_kv_offload,
         }
+    }
+
+    #[test]
+    fn snapshot_memory_reports_budget_policy_and_caps() {
+        let snapshot = test_collector(MtpHealthConfig::disabled()).snapshot();
+
+        assert_eq!(snapshot.memory.kv_cache_logical_cap_tokens, 262_144);
+        assert_eq!(snapshot.memory.kv_cache_resident_cap_tokens, 1_024);
+        assert_eq!(snapshot.memory.kv_cache_budget_policy, "active_kv_offload");
     }
 
     #[test]
@@ -426,6 +447,9 @@ mod tests {
                 free_ram_bytes: 32,
                 kv_cache_active_bytes: 16,
                 kv_cache_soft_limit_bytes: 24,
+                kv_cache_logical_cap_tokens: 128,
+                kv_cache_resident_cap_tokens: 64,
+                kv_cache_budget_policy: "full_resident".to_string(),
                 mlx_total_bytes: Some(55),
                 mlx_max_recommended_bytes: Some(66),
                 mlx_active_bytes: 11,
@@ -454,6 +478,9 @@ mod tests {
         assert_eq!(value["memory"]["mlx_cache_bytes"], 22);
         assert_eq!(value["memory"]["mlx_peak_bytes"], 33);
         assert_eq!(value["memory"]["mlx_memory_limit_bytes"], 44);
+        assert_eq!(value["memory"]["kv_cache_logical_cap_tokens"], 128);
+        assert_eq!(value["memory"]["kv_cache_resident_cap_tokens"], 64);
+        assert_eq!(value["memory"]["kv_cache_budget_policy"], "full_resident");
         assert_eq!(value["device_name"], "Apple Test GPU");
     }
 }

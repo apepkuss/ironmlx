@@ -25,6 +25,9 @@ import Testing
         "free_ram_bytes": 34359738368,
         "kv_cache_active_bytes": 1048576,
         "kv_cache_soft_limit_bytes": 2097152,
+        "kv_cache_logical_cap_tokens": 262144,
+        "kv_cache_resident_cap_tokens": 1024,
+        "kv_cache_budget_policy": "active_kv_offload",
         "mlx_total_bytes": 51539607552,
         "mlx_max_recommended_bytes": 38654705664,
         "mlx_active_bytes": 1073741824,
@@ -66,6 +69,9 @@ import Testing
     #expect(legacy.memory.peakMB == 2048)
     #expect(legacy.memory.totalMB == 49152)
     #expect(legacy.memory.maxMB == 36864)
+    #expect(snapshot.memory.kvCacheLogicalCapTokens == 262144)
+    #expect(snapshot.memory.kvCacheResidentCapTokens == 1024)
+    #expect(snapshot.memory.kvCacheBudgetPolicy == "active_kv_offload")
     #expect(legacy.activeKvOffload.enabled == true)
     #expect(legacy.activeKvOffload.parkedRequests == 1)
     #expect(legacy.activeKvOffload.swapOutCount == 4)
