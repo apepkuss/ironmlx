@@ -3201,6 +3201,26 @@ impl<M: Model> Scheduler<M> {
         self.active_kv_store.is_some()
     }
 
+    fn temp_scheduler_with_parent_budget<T>(&self) -> Result<Scheduler<T>>
+    where
+        T: Model,
+    {
+        let budget_state = crate::core::memory_budget::BudgetState::with_caps(
+            self.budget_state.soft_limit(),
+            self.budget_state.logical_cap(),
+            self.budget_state.resident_cap(),
+            self.budget_state.policy(),
+        );
+        Scheduler::<T>::new_with_state(
+            1,
+            self.effective_cap_max,
+            budget_state,
+            self.memory_budget_exceeded_count.clone(),
+            self.meta,
+        )
+        .map_err(anyhow::Error::from)
+    }
+
     pub fn refresh_active_kv_residency_stats(&self) {
         let Some(stats) = self.active_kv_stats.as_ref() else {
             return;
@@ -4622,8 +4642,7 @@ impl<M: Model> Scheduler<M> {
         let state = self.slots[row_idx]
             .as_ref()
             .ok_or_else(|| anyhow!("temp_mtp_scheduler_for_row: row slot absent"))?;
-        let mut temp = Scheduler::<M>::new(1, self.effective_cap_max, self.meta)
-            .map_err(anyhow::Error::from)?;
+        let mut temp = self.temp_scheduler_with_parent_budget::<M>()?;
         if let Some(config) = self.paged_prefix_cache.as_ref() {
             temp.enable_paged_prefix_cache(config.clone())?;
         }
@@ -7967,9 +7986,7 @@ impl Scheduler<crate::models::Gemma4Model> {
         let state = self.slots[row_idx]
             .as_ref()
             .ok_or_else(|| anyhow!("temp_gemma4_drafter_scheduler_for_row: row slot absent"))?;
-        let mut temp =
-            Scheduler::<crate::models::Gemma4Model>::new(1, self.effective_cap_max, self.meta)
-                .map_err(anyhow::Error::from)?;
+        let mut temp = self.temp_scheduler_with_parent_budget::<crate::models::Gemma4Model>()?;
         if let Some(config) = self.paged_prefix_cache.as_ref() {
             temp.enable_paged_prefix_cache(config.clone())?;
         }
@@ -8170,6 +8187,53 @@ mod tests {
             scheduler.budget_state.active_bytes(),
             crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta)
         );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn gemma4_drafter_temp_scheduler_preserves_active_kv_budget_policy() {
+        crate::core::memory_budget::with_total_ram_bytes_for_test("137438953472", || {
+            let meta = crate::core::memory_budget::test_meta_gemma4_12b();
+            let resident_cap = 1_024;
+            let policy =
+                crate::core::memory_budget::KvBudgetPolicy::active_kv_offload(resident_cap);
+            let budget_state = crate::core::memory_budget::BudgetState::with_caps(
+                crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta),
+                262_144,
+                resident_cap,
+                policy,
+            );
+            let memory_budget_exceeded_count =
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let mut scheduler = Scheduler::<crate::models::Gemma4Model>::new_with_state(
+                1,
+                262_144,
+                budget_state,
+                memory_budget_exceeded_count,
+                meta,
+            )
+            .expect("parent scheduler startup");
+            let root = std::env::temp_dir().join(format!(
+                "ironmlx-gemma4-drafter-temp-budget-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            let config = crate::core::cache::ActiveKvOffloadConfig::enabled(root.clone());
+            let stats = crate::core::cache::ActiveKvOffloadSharedStats::new(&config);
+            scheduler
+                .enable_active_kv_offload(config, stats)
+                .expect("enable active KV offload");
+            scheduler
+                .admit(mk_req(vec![1, 2, 3, 4]))
+                .expect("admit request");
+
+            let temp = scheduler
+                .temp_gemma4_drafter_scheduler_for_row(0)
+                .expect("temp scheduler should use resident offload budget");
+
+            assert_eq!(temp.budget_state.policy().name(), "active_kv_offload");
+            assert_eq!(temp.budget_state.resident_cap(), resident_cap);
+            std::fs::remove_dir_all(root).ok();
+        });
     }
 
     /// Helper: build a minimal `GenerateRequest` for tests. Uses
@@ -9201,6 +9265,43 @@ mod tests {
             .expect("row 0 MTP state")
             .mtp_cache
             .offset()
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_temp_scheduler_preserves_active_kv_budget_policy() {
+        crate::core::memory_budget::with_total_ram_bytes_for_test("17179869184", || {
+            let meta = crate::core::memory_budget::test_meta_qwen35();
+            let resident_cap = 1_024;
+            let policy =
+                crate::core::memory_budget::KvBudgetPolicy::active_kv_offload(resident_cap);
+            let budget_state = crate::core::memory_budget::BudgetState::with_caps(
+                crate::core::memory_budget::kv_cache_bytes(1, resident_cap, &meta),
+                262_144,
+                resident_cap,
+                policy,
+            );
+            let memory_budget_exceeded_count =
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new_with_state(
+                1,
+                262_144,
+                budget_state,
+                memory_budget_exceeded_count,
+                meta,
+            )
+            .expect("parent scheduler startup");
+            scheduler
+                .admit(mtp_req(vec![1, 2, 3, 4], 16))
+                .expect("admit request");
+
+            let temp = scheduler
+                .temp_mtp_scheduler_for_row(0)
+                .expect("temp MTP scheduler should use resident offload budget");
+
+            assert_eq!(temp.budget_state.policy().name(), "active_kv_offload");
+            assert_eq!(temp.budget_state.resident_cap(), resident_cap);
+        });
     }
 
     #[test]
