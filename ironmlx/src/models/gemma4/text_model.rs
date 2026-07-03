@@ -421,6 +421,42 @@ impl Gemma4TextModel {
         self.norm.forward_on(&x, target)
     }
 
+    pub(crate) fn forward_external_shared_kv_batched_on(
+        &self,
+        hidden: &Array,
+        shared_kv: &Gemma4SharedKvStates,
+        masks: &super::drafter::Gemma4DrafterMasks,
+        positions: &[i32],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let dims_borrow = hidden.shape();
+        let dims = dims_borrow.as_slice();
+        if dims.len() != 3 {
+            return Err(anyhow!(
+                "Gemma4TextModel::forward_external_shared_kv_batched_on: expected hidden [B,S,H], got {dims:?}"
+            ));
+        }
+        if positions.len() != dims[0] as usize {
+            return Err(anyhow!(
+                "Gemma4TextModel::forward_external_shared_kv_batched_on: positions.len()={} != batch={}",
+                positions.len(),
+                dims[0]
+            ));
+        }
+        let offsets = RopeOffsets::from_values(positions.to_vec())?;
+        let mut x = hidden.clone();
+        for (idx, layer) in self.layers.iter().enumerate() {
+            let layer_kind = self.cfg.layer_kind(idx);
+            let mask = masks.get(layer_kind);
+            let kv = shared_kv.require(layer_kind)?;
+            let (next, _) =
+                layer.forward_on(&x, mask, None, None, &offsets, Some(kv), None, target, None)?;
+            x = next;
+        }
+        self.norm.forward_on(&x, target)
+    }
+
     #[doc(hidden)]
     pub fn forward_layer_last_trace_on(
         &self,

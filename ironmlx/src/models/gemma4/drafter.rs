@@ -54,6 +54,21 @@ pub struct Gemma4DrafterStepOutput {
     pub logits: Array,
 }
 
+struct BatchedSharedKvStates {
+    states: Gemma4SharedKvStates,
+    sliding_lens: Option<Vec<i32>>,
+    full_lens: Option<Vec<i32>>,
+}
+
+impl BatchedSharedKvStates {
+    fn lens(&self, kind: Gemma4LayerKind) -> Option<&[i32]> {
+        match kind {
+            Gemma4LayerKind::Sliding => self.sliding_lens.as_deref(),
+            Gemma4LayerKind::Full => self.full_lens.as_deref(),
+        }
+    }
+}
+
 pub struct Gemma4AssistantModel {
     cfg: Gemma4AssistantConfig,
     text: Gemma4TextModel,
@@ -116,6 +131,74 @@ impl Gemma4AssistantModel {
         let h = self
             .text
             .forward_external_shared_kv_on(&h, shared_kv, &masks, position, target)?;
+        let hidden_states = self.post_projection.forward_on(&h, target)?;
+        let logits = match self.masked_embedding.as_ref() {
+            Some(masked) => {
+                let weight = self.text_embedding_dense_weight_on(target)?;
+                masked.forward_on(&h, &weight, target)?
+            }
+            None => self.text.as_output_on(&h, target)?,
+        };
+        Ok(Gemma4DrafterStepOutput {
+            hidden_states,
+            logits,
+        })
+    }
+
+    pub(crate) fn forward_batched_on(
+        &self,
+        inputs_embeds: &Array,
+        shared_kv_rows: &[&Gemma4SharedKvStates],
+        positions: &[i32],
+        kv_valid_lens: &[i32],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Gemma4DrafterStepOutput> {
+        let target = target.into();
+        let h = self.pre_projection.forward_on(inputs_embeds, target)?;
+        let shape = h.shape();
+        let dims = shape.as_slice();
+        if dims.len() != 3 {
+            return Err(anyhow!(
+                "Gemma4AssistantModel::forward_batched_on: expected hidden [B,S,H], got {dims:?}"
+            ));
+        }
+        let batch = dims[0] as usize;
+        if shared_kv_rows.len() != batch {
+            return Err(anyhow!(
+                "Gemma4AssistantModel::forward_batched_on: shared rows {} != batch {batch}",
+                shared_kv_rows.len()
+            ));
+        }
+        if positions.len() != batch {
+            return Err(anyhow!(
+                "Gemma4AssistantModel::forward_batched_on: positions.len()={} != batch {batch}",
+                positions.len()
+            ));
+        }
+        if kv_valid_lens.len() != batch {
+            return Err(anyhow!(
+                "Gemma4AssistantModel::forward_batched_on: kv_valid_lens.len()={} != batch {batch}",
+                kv_valid_lens.len()
+            ));
+        }
+
+        let batched_shared = stack_shared_kv_rows_on(shared_kv_rows, target)?;
+        let masks = make_drafter_masks_batched(
+            &batched_shared,
+            dims[1],
+            positions,
+            self.cfg.text_config.sliding_window,
+            h.dtype(),
+            kv_valid_lens,
+            target,
+        )?;
+        let h = self.text.forward_external_shared_kv_batched_on(
+            &h,
+            &batched_shared.states,
+            &masks,
+            positions,
+            target,
+        )?;
         let hidden_states = self.post_projection.forward_on(&h, target)?;
         let logits = match self.masked_embedding.as_ref() {
             Some(masked) => {
@@ -1408,6 +1491,236 @@ fn make_drafter_masks(
     Ok(Gemma4DrafterMasks { sliding, full })
 }
 
+fn stack_shared_kv_rows_on(
+    rows: &[&Gemma4SharedKvStates],
+    target: StreamOrDevice,
+) -> Result<BatchedSharedKvStates> {
+    let sliding = stack_shared_kv_kind_on(rows, Gemma4LayerKind::Sliding, target)?;
+    let full = stack_shared_kv_kind_on(rows, Gemma4LayerKind::Full, target)?;
+    let mut states = Gemma4SharedKvStates::default();
+    let sliding_lens = match sliding {
+        Some((kv, lens)) => {
+            states.insert(Gemma4LayerKind::Sliding, kv);
+            Some(lens)
+        }
+        None => None,
+    };
+    let full_lens = match full {
+        Some((kv, lens)) => {
+            states.insert(Gemma4LayerKind::Full, kv);
+            Some(lens)
+        }
+        None => None,
+    };
+    Ok(BatchedSharedKvStates {
+        states,
+        sliding_lens,
+        full_lens,
+    })
+}
+
+fn stack_shared_kv_kind_on(
+    rows: &[&Gemma4SharedKvStates],
+    kind: Gemma4LayerKind,
+    target: StreamOrDevice,
+) -> Result<Option<(SharedKv, Vec<i32>)>> {
+    if rows.is_empty() {
+        return Err(anyhow!("Gemma4 drafter batched shared KV: empty rows"));
+    }
+    let mut present = Vec::new();
+    for (idx, row) in rows.iter().enumerate() {
+        if let Some(kv) = row.get(kind) {
+            present.push((idx, kv));
+        }
+    }
+    if present.is_empty() {
+        return Ok(None);
+    }
+    if present.len() != rows.len() {
+        return Err(anyhow!(
+            "Gemma4 drafter batched shared KV: mixed presence for {kind:?}: {} of {} rows",
+            present.len(),
+            rows.len()
+        ));
+    }
+
+    let first = present[0].1;
+    let first_keys_shape = first.keys.shape();
+    let first_keys_dims = first_keys_shape.as_slice();
+    let first_values_shape = first.values.shape();
+    let first_values_dims = first_values_shape.as_slice();
+    validate_shared_kv_dims(kind, 0, first_keys_dims, first_values_dims)?;
+    let batch = first_keys_dims[0];
+    let heads = first_keys_dims[1];
+    let width = first_keys_dims[3];
+    let value_width = first_values_dims[3];
+    let key_dtype = first.keys.dtype();
+    let value_dtype = first.values.dtype();
+    if batch != 1 {
+        return Err(anyhow!(
+            "Gemma4 drafter batched shared KV: expected row KV batch=1 for {kind:?}, got {batch}"
+        ));
+    }
+
+    let mut lens = Vec::with_capacity(rows.len());
+    let mut max_len = 0_i32;
+    for (idx, kv) in &present {
+        let key_shape = kv.keys.shape();
+        let key_dims = key_shape.as_slice();
+        let value_shape = kv.values.shape();
+        let value_dims = value_shape.as_slice();
+        validate_shared_kv_dims(kind, *idx, key_dims, value_dims)?;
+        if key_dims[0] != 1
+            || key_dims[1] != heads
+            || key_dims[3] != width
+            || value_dims[1] != heads
+            || value_dims[3] != value_width
+        {
+            return Err(anyhow!(
+                "Gemma4 drafter batched shared KV: incompatible {kind:?} row {idx} shapes keys={key_dims:?} values={value_dims:?}; expected heads={heads}, key_width={width}, value_width={value_width}"
+            ));
+        }
+        if kv.keys.dtype() != key_dtype || kv.values.dtype() != value_dtype {
+            return Err(anyhow!(
+                "Gemma4 drafter batched shared KV: dtype mismatch for {kind:?} row {idx}"
+            ));
+        }
+        let len = key_dims[2];
+        lens.push(len);
+        max_len = max_len.max(len);
+    }
+
+    let mut key_rows = Vec::with_capacity(present.len());
+    let mut value_rows = Vec::with_capacity(present.len());
+    for (_, kv) in present {
+        key_rows.push(pad_shared_kv_axis2_on(&kv.keys, max_len, target)?);
+        value_rows.push(pad_shared_kv_axis2_on(&kv.values, max_len, target)?);
+    }
+    let key_refs = key_rows.iter().collect::<Vec<_>>();
+    let value_refs = value_rows.iter().collect::<Vec<_>>();
+    let keys = mlx::ops::shape::concatenate_on(&key_refs[..], 0, target)?;
+    let values = mlx::ops::shape::concatenate_on(&value_refs[..], 0, target)?;
+    Ok(Some((SharedKv { keys, values }, lens)))
+}
+
+fn validate_shared_kv_dims(
+    kind: Gemma4LayerKind,
+    row: usize,
+    key_dims: &[i32],
+    value_dims: &[i32],
+) -> Result<()> {
+    if key_dims.len() != 4 || value_dims.len() != 4 {
+        return Err(anyhow!(
+            "Gemma4 drafter batched shared KV: expected rank-4 {kind:?} row {row}, got keys={key_dims:?} values={value_dims:?}"
+        ));
+    }
+    if key_dims[0] != value_dims[0] || key_dims[1] != value_dims[1] || key_dims[2] != value_dims[2]
+    {
+        return Err(anyhow!(
+            "Gemma4 drafter batched shared KV: K/V shape mismatch for {kind:?} row {row}: keys={key_dims:?} values={value_dims:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn pad_shared_kv_axis2_on(kv: &Array, target_len: i32, target: StreamOrDevice) -> Result<Array> {
+    let shape = kv.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 4 {
+        return Err(anyhow!(
+            "Gemma4 drafter batched shared KV: expected rank-4 row, got {dims:?}"
+        ));
+    }
+    if dims[2] > target_len {
+        return Err(anyhow!(
+            "Gemma4 drafter batched shared KV: row len {} exceeds target len {target_len}",
+            dims[2]
+        ));
+    }
+    if dims[2] == target_len {
+        return Ok(kv.clone());
+    }
+    let pad = Array::zeros_on(
+        (dims[0], dims[1], target_len - dims[2], dims[3]),
+        kv.dtype(),
+        target,
+    )?;
+    mlx::ops::shape::concatenate_on(&[kv, &pad][..], 2, target).map_err(Into::into)
+}
+
+fn make_drafter_masks_batched(
+    shared_kv: &BatchedSharedKvStates,
+    query_len: i32,
+    query_offsets: &[i32],
+    sliding_window: i32,
+    dtype: Dtype,
+    kv_valid_lens: &[i32],
+    target: StreamOrDevice,
+) -> Result<Gemma4DrafterMasks> {
+    if query_offsets.len() != kv_valid_lens.len() {
+        return Err(anyhow!(
+            "Gemma4 drafter batched masks: query_offsets.len()={} != kv_valid_lens.len()={}",
+            query_offsets.len(),
+            kv_valid_lens.len()
+        ));
+    }
+    let sliding = match shared_kv.states.get(Gemma4LayerKind::Sliding) {
+        Some(kv) => {
+            let padded_len = kv_len(kv)?;
+            let lens = shared_kv
+                .lens(Gemma4LayerKind::Sliding)
+                .ok_or_else(|| anyhow!("Gemma4 drafter batched masks: missing sliding lens"))?;
+            let key_offsets = vec![0_i32; lens.len()];
+            let local_query_offsets = query_offsets
+                .iter()
+                .zip(lens.iter())
+                .map(|(offset, len)| (*offset).min(*len))
+                .collect::<Vec<_>>();
+            let local_valid_lens = kv_valid_lens
+                .iter()
+                .zip(lens.iter())
+                .map(|(valid, len)| (*valid).min(*len))
+                .collect::<Vec<_>>();
+            bidirectional_swa_mask_batched_on(
+                query_len,
+                &local_query_offsets,
+                lens,
+                padded_len,
+                sliding_window,
+                &local_valid_lens,
+                &key_offsets,
+                dtype,
+                target,
+            )?
+        }
+        None => None,
+    };
+    let full = match shared_kv.states.get(Gemma4LayerKind::Full) {
+        Some(kv) => {
+            let padded_len = kv_len(kv)?;
+            let lens = shared_kv
+                .lens(Gemma4LayerKind::Full)
+                .ok_or_else(|| anyhow!("Gemma4 drafter batched masks: missing full lens"))?;
+            let key_offsets = lens
+                .iter()
+                .zip(kv_valid_lens.iter())
+                .map(|(len, valid)| (*valid - *len).max(0))
+                .collect::<Vec<_>>();
+            bidirectional_full_mask_batched_on(
+                query_len,
+                lens,
+                padded_len,
+                kv_valid_lens,
+                &key_offsets,
+                dtype,
+                target,
+            )?
+        }
+        None => None,
+    };
+    Ok(Gemma4DrafterMasks { sliding, full })
+}
+
 fn kv_len(kv: &super::attention::SharedKv) -> Result<i32> {
     let shape = kv.keys.shape();
     let dims = shape.as_slice();
@@ -1419,6 +1732,96 @@ fn kv_len(kv: &super::attention::SharedKv) -> Result<i32> {
 
 pub(crate) fn draft_position_for_shared_kv(kv_valid_len: i32) -> i32 {
     (kv_valid_len - 1).max(0)
+}
+
+pub(crate) fn shared_kv_row_for_drafter_on(
+    states: &Gemma4SharedKvStates,
+    row_idx: usize,
+    kv_valid_len: i32,
+    sliding_window: i32,
+    query_len: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Gemma4SharedKvStates> {
+    let target = target.into();
+    if kv_valid_len <= 0 {
+        return Err(anyhow!(
+            "Gemma4 drafter shared KV row slice: kv_valid_len must be > 0, got {kv_valid_len}"
+        ));
+    }
+    let mut out = Gemma4SharedKvStates::default();
+    if let Some(kv) = states.get(Gemma4LayerKind::Sliding) {
+        let keep = sliding_attention_view_len_for_drafter(kv_valid_len, query_len, sliding_window);
+        let start = kv_valid_len - keep;
+        out.insert(
+            Gemma4LayerKind::Sliding,
+            slice_shared_kv_row_range_on(kv, row_idx, start, kv_valid_len, target)?,
+        );
+    }
+    if let Some(kv) = states.get(Gemma4LayerKind::Full) {
+        out.insert(
+            Gemma4LayerKind::Full,
+            slice_shared_kv_row_range_on(kv, row_idx, 0, kv_valid_len, target)?,
+        );
+    }
+    Ok(out)
+}
+
+fn sliding_attention_view_len_for_drafter(kv_len: i32, query_len: i32, window: i32) -> i32 {
+    if kv_len <= 0 {
+        return 0;
+    }
+    if query_len <= 0 || window <= 0 {
+        return kv_len;
+    }
+    let keep = window.saturating_add(query_len).saturating_sub(1);
+    kv_len.min(keep.max(1))
+}
+
+fn slice_shared_kv_row_range_on(
+    kv: &SharedKv,
+    row_idx: usize,
+    start: i32,
+    end: i32,
+    target: StreamOrDevice,
+) -> Result<SharedKv> {
+    if start < 0 || end <= start {
+        return Err(anyhow!(
+            "Gemma4 drafter shared KV row slice: invalid range {start}..{end}"
+        ));
+    }
+    let keys_shape = kv.keys.shape();
+    let keys_dims = keys_shape.as_slice();
+    let values_shape = kv.values.shape();
+    let values_dims = values_shape.as_slice();
+    validate_shared_kv_dims(Gemma4LayerKind::Full, row_idx, keys_dims, values_dims)?;
+    if row_idx as i32 >= keys_dims[0] {
+        return Err(anyhow!(
+            "Gemma4 drafter shared KV row slice: row {row_idx} >= batch {}",
+            keys_dims[0]
+        ));
+    }
+    if end > keys_dims[2] {
+        return Err(anyhow!(
+            "Gemma4 drafter shared KV row slice: end {end} > kv len {}",
+            keys_dims[2]
+        ));
+    }
+    let row = row_idx as i32;
+    let keys = mlx::ops::indexing::slice_strided_on(
+        &kv.keys,
+        &[row, 0, start, 0][..],
+        &[row + 1, keys_dims[1], end, keys_dims[3]][..],
+        &[1_i32, 1, 1, 1][..],
+        target,
+    )?;
+    let values = mlx::ops::indexing::slice_strided_on(
+        &kv.values,
+        &[row, 0, start, 0][..],
+        &[row + 1, values_dims[1], end, values_dims[3]][..],
+        &[1_i32, 1, 1, 1][..],
+        target,
+    )?;
+    Ok(SharedKv { keys, values })
 }
 
 #[cfg(test)]
@@ -1441,6 +1844,41 @@ pub(crate) fn build_bidirectional_swa_mask_for_test(
         dtype,
         ().into(),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_bidirectional_swa_mask_batched_for_test(
+    query_len: i32,
+    query_offsets: &[i32],
+    kv_lens: &[i32],
+    padded_kv_len: i32,
+    window: i32,
+    kv_valid_lens: &[i32],
+    key_offsets: &[i32],
+    dtype: Dtype,
+    target: StreamOrDevice,
+) -> Result<Option<Array>> {
+    bidirectional_swa_mask_batched_on(
+        query_len,
+        query_offsets,
+        kv_lens,
+        padded_kv_len,
+        window,
+        kv_valid_lens,
+        key_offsets,
+        dtype,
+        target,
+    )
+}
+
+#[cfg(test)]
+fn stack_shared_kv_kind_for_test(
+    rows: &[&Gemma4SharedKvStates],
+    kind: Gemma4LayerKind,
+    target: StreamOrDevice,
+) -> Result<Option<(SharedKv, Vec<i32>)>> {
+    stack_shared_kv_kind_on(rows, kind, target)
 }
 
 #[cfg(test)]
@@ -1591,6 +2029,120 @@ mod tests {
         assert!(kv.paged_hot_cold_summary().is_some());
         assert!(stats.snapshot().enabled);
     }
+
+    #[test]
+    fn batched_swa_mask_handles_per_row_padding_and_window() {
+        let mask = build_bidirectional_swa_mask_batched_for_test(
+            2,
+            &[4, 2],
+            &[5, 3],
+            5,
+            2,
+            &[5, 3],
+            &[0, 0],
+            Dtype::Float32,
+            ().into(),
+        )
+        .expect("batched swa mask")
+        .expect("ragged rows require explicit mask");
+        assert_eq!(mask.shape().as_slice(), &[2, 1, 2, 5]);
+        let values: Vec<f32> = mask.to_vec().expect("mask host values");
+        let at = |row: usize, q: usize, k: usize| values[((row * 2 + q) * 5) + k];
+
+        assert!(at(0, 0, 2).is_infinite() && at(0, 0, 2).is_sign_negative());
+        assert_eq!(at(0, 0, 3), 0.0);
+        assert_eq!(at(0, 0, 4), 0.0);
+        assert!(at(0, 1, 3).is_infinite() && at(0, 1, 3).is_sign_negative());
+        assert_eq!(at(0, 1, 4), 0.0);
+
+        assert_eq!(at(1, 0, 1), 0.0);
+        assert_eq!(at(1, 0, 2), 0.0);
+        assert!(at(1, 0, 3).is_infinite() && at(1, 0, 3).is_sign_negative());
+        assert_eq!(at(1, 1, 2), 0.0);
+        assert!(at(1, 1, 4).is_infinite() && at(1, 1, 4).is_sign_negative());
+    }
+
+    #[test]
+    fn stack_shared_kv_states_pads_rows_to_common_length() {
+        let keys0: Array = (&[1.0_f32, 2.0][..], &[1_i32, 1, 2, 1][..])
+            .try_into()
+            .expect("keys0");
+        let values0: Array = (&[10.0_f32, 20.0][..], &[1_i32, 1, 2, 1][..])
+            .try_into()
+            .expect("values0");
+        let keys1: Array = (&[3.0_f32, 4.0, 5.0][..], &[1_i32, 1, 3, 1][..])
+            .try_into()
+            .expect("keys1");
+        let values1: Array = (&[30.0_f32, 40.0, 50.0][..], &[1_i32, 1, 3, 1][..])
+            .try_into()
+            .expect("values1");
+        let mut row0 = Gemma4SharedKvStates::default();
+        row0.insert(
+            Gemma4LayerKind::Full,
+            SharedKv {
+                keys: keys0,
+                values: values0,
+            },
+        );
+        let mut row1 = Gemma4SharedKvStates::default();
+        row1.insert(
+            Gemma4LayerKind::Full,
+            SharedKv {
+                keys: keys1,
+                values: values1,
+            },
+        );
+
+        let (stacked, lens) =
+            stack_shared_kv_kind_for_test(&[&row0, &row1], Gemma4LayerKind::Full, ().into())
+                .expect("stack full shared kv")
+                .expect("full kv present");
+
+        assert_eq!(lens, vec![2, 3]);
+        assert_eq!(stacked.keys.shape().as_slice(), &[2, 1, 3, 1]);
+        assert_eq!(stacked.values.shape().as_slice(), &[2, 1, 3, 1]);
+        let keys: Vec<f32> = stacked.keys.to_vec().expect("stacked keys");
+        let values: Vec<f32> = stacked.values.to_vec().expect("stacked values");
+        assert_eq!(keys, vec![1.0, 2.0, 0.0, 3.0, 4.0, 5.0]);
+        assert_eq!(values, vec![10.0, 20.0, 0.0, 30.0, 40.0, 50.0]);
+    }
+
+    #[test]
+    fn batched_swa_mask_uses_tail_local_offsets_for_long_context() {
+        let keys: Array = (&[0.0_f32; 5][..], &[1_i32, 1, 5, 1][..])
+            .try_into()
+            .expect("keys");
+        let values: Array = (&[0.0_f32; 5][..], &[1_i32, 1, 5, 1][..])
+            .try_into()
+            .expect("values");
+        let mut states = Gemma4SharedKvStates::default();
+        states.insert(Gemma4LayerKind::Sliding, SharedKv { keys, values });
+        let batched = BatchedSharedKvStates {
+            states,
+            sliding_lens: Some(vec![5]),
+            full_lens: None,
+        };
+
+        let masks =
+            make_drafter_masks_batched(&batched, 2, &[99], 4, Dtype::Float32, &[100], ().into())
+                .expect("batched masks");
+        let mask = masks
+            .get(Gemma4LayerKind::Sliding)
+            .expect("long tail requires explicit mask");
+        let values: Vec<f32> = mask.to_vec().expect("mask host values");
+        assert_eq!(mask.shape().as_slice(), &[1, 1, 2, 5]);
+
+        assert!(values[0].is_infinite() && values[0].is_sign_negative());
+        assert!(values[1].is_infinite() && values[1].is_sign_negative());
+        assert_eq!(values[2], 0.0);
+        assert_eq!(values[3], 0.0);
+        assert_eq!(values[4], 0.0);
+        assert!(values[5].is_infinite() && values[5].is_sign_negative());
+        assert!(values[6].is_infinite() && values[6].is_sign_negative());
+        assert!(values[7].is_infinite() && values[7].is_sign_negative());
+        assert_eq!(values[8], 0.0);
+        assert_eq!(values[9], 0.0);
+    }
 }
 
 fn bidirectional_full_mask_on(
@@ -1617,6 +2169,55 @@ fn bidirectional_full_mask_on(
         }
     }
     let arr: Array = (&flat[..], &[1_i32, 1, query_len, kv_len][..]).try_into()?;
+    Ok(Some(mlx::ops::cast::astype_on(&arr, dtype, target)?))
+}
+
+fn bidirectional_full_mask_batched_on(
+    query_len: i32,
+    kv_lens: &[i32],
+    padded_kv_len: i32,
+    kv_valid_lens: &[i32],
+    key_offsets: &[i32],
+    dtype: Dtype,
+    target: StreamOrDevice,
+) -> Result<Option<Array>> {
+    validate_batched_mask_args(
+        "full",
+        query_len,
+        kv_lens,
+        padded_kv_len,
+        Some(kv_valid_lens),
+        key_offsets,
+    )?;
+    let needs_mask = kv_lens
+        .iter()
+        .zip(kv_valid_lens.iter())
+        .zip(key_offsets.iter())
+        .any(|((len, valid), key_offset)| *len != padded_kv_len || *key_offset + *len > *valid);
+    if !needs_mask {
+        return Ok(None);
+    }
+
+    let batch = kv_lens.len();
+    let mut flat = vec![f32::NEG_INFINITY; batch * query_len as usize * padded_kv_len as usize];
+    for row in 0..batch {
+        let len = kv_lens[row];
+        let valid_len = kv_valid_lens[row];
+        let key_offset = key_offsets[row];
+        for q in 0..query_len {
+            let base = (row * query_len as usize + q as usize) * padded_kv_len as usize;
+            for k in 0..len {
+                if key_offset + k < valid_len {
+                    flat[base + k as usize] = 0.0;
+                }
+            }
+        }
+    }
+    let arr: Array = (
+        &flat[..],
+        &[batch as i32, 1_i32, query_len, padded_kv_len][..],
+    )
+        .try_into()?;
     Ok(Some(mlx::ops::cast::astype_on(&arr, dtype, target)?))
 }
 
@@ -1659,4 +2260,134 @@ fn bidirectional_swa_mask_on(
     }
     let arr: Array = (&flat[..], &[1_i32, 1, query_len, kv_len][..]).try_into()?;
     Ok(Some(mlx::ops::cast::astype_on(&arr, dtype, target)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bidirectional_swa_mask_batched_on(
+    query_len: i32,
+    query_offsets: &[i32],
+    kv_lens: &[i32],
+    padded_kv_len: i32,
+    window: i32,
+    kv_valid_lens: &[i32],
+    key_offsets: &[i32],
+    dtype: Dtype,
+    target: StreamOrDevice,
+) -> Result<Option<Array>> {
+    validate_batched_mask_args(
+        "sliding",
+        query_len,
+        kv_lens,
+        padded_kv_len,
+        Some(kv_valid_lens),
+        key_offsets,
+    )?;
+    if query_offsets.len() != kv_lens.len() {
+        return Err(anyhow!(
+            "Gemma4 drafter sliding batched mask: query_offsets.len()={} != batch={}",
+            query_offsets.len(),
+            kv_lens.len()
+        ));
+    }
+    if window <= 0 {
+        return Err(anyhow!(
+            "Gemma4 drafter sliding batched mask: invalid window {window}"
+        ));
+    }
+
+    let needs_mask = (0..kv_lens.len()).any(|row| {
+        let len = kv_lens[row];
+        let query_offset = query_offsets[row];
+        let key_offset = key_offsets[row];
+        len != padded_kv_len
+            || len > window
+            || query_offset - key_offset >= window
+            || key_offset + len - (query_offset + query_len) >= window
+            || key_offset + len > kv_valid_lens[row]
+    });
+    if !needs_mask {
+        return Ok(None);
+    }
+
+    let batch = kv_lens.len();
+    let mut flat = vec![f32::NEG_INFINITY; batch * query_len as usize * padded_kv_len as usize];
+    for row in 0..batch {
+        let len = kv_lens[row];
+        let query_offset = query_offsets[row];
+        let key_offset = key_offsets[row];
+        let valid_len = kv_valid_lens[row];
+        for q in 0..query_len {
+            let q_abs = query_offset + q;
+            let base = (row * query_len as usize + q as usize) * padded_kv_len as usize;
+            for k in 0..len {
+                let k_abs = key_offset + k;
+                let dist = q_abs - k_abs;
+                if dist > -window && dist < window && k_abs < valid_len {
+                    flat[base + k as usize] = 0.0;
+                }
+            }
+        }
+    }
+    let arr: Array = (
+        &flat[..],
+        &[batch as i32, 1_i32, query_len, padded_kv_len][..],
+    )
+        .try_into()?;
+    Ok(Some(mlx::ops::cast::astype_on(&arr, dtype, target)?))
+}
+
+fn validate_batched_mask_args(
+    label: &str,
+    query_len: i32,
+    kv_lens: &[i32],
+    padded_kv_len: i32,
+    kv_valid_lens: Option<&[i32]>,
+    key_offsets: &[i32],
+) -> Result<()> {
+    if query_len <= 0 || padded_kv_len <= 0 {
+        return Err(anyhow!(
+            "Gemma4 drafter {label} batched mask: query_len={query_len} padded_kv_len={padded_kv_len}"
+        ));
+    }
+    if kv_lens.is_empty() {
+        return Err(anyhow!("Gemma4 drafter {label} batched mask: empty batch"));
+    }
+    if key_offsets.len() != kv_lens.len() {
+        return Err(anyhow!(
+            "Gemma4 drafter {label} batched mask: key_offsets.len()={} != batch={}",
+            key_offsets.len(),
+            kv_lens.len()
+        ));
+    }
+    if let Some(valid_lens) = kv_valid_lens {
+        if valid_lens.len() != kv_lens.len() {
+            return Err(anyhow!(
+                "Gemma4 drafter {label} batched mask: kv_valid_lens.len()={} != batch={}",
+                valid_lens.len(),
+                kv_lens.len()
+            ));
+        }
+    }
+    for (row, len) in kv_lens.iter().copied().enumerate() {
+        if len <= 0 || len > padded_kv_len {
+            return Err(anyhow!(
+                "Gemma4 drafter {label} batched mask: invalid row {row} len {len} with padded len {padded_kv_len}"
+            ));
+        }
+        if key_offsets[row] < 0 {
+            return Err(anyhow!(
+                "Gemma4 drafter {label} batched mask: negative row {row} key offset {}",
+                key_offsets[row]
+            ));
+        }
+        if let Some(valid_lens) = kv_valid_lens {
+            if valid_lens[row] < 0 {
+                return Err(anyhow!(
+                    "Gemma4 drafter {label} batched mask: negative row {row} valid len {}",
+                    valid_lens[row]
+                ));
+            }
+        }
+    }
+    Ok(())
 }

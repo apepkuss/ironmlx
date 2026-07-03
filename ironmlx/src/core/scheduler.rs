@@ -81,11 +81,12 @@ use crate::core::speculative::{
     commit_mtp_cache_hidden_tail, resolve_speculative_tokens, restore_layer_cache,
     sample_logits_positions, slice_hidden_position, verify_input, zero_hidden_like_position,
     MtpDraftResult, MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats,
+    SpeculativeResolution,
 };
 use crate::nn::{
     enable_paged_hot_cold_tiering_caches, enable_paged_kv_caches, enable_turboquant_kv_caches,
     prefix_entry_for_row, prefix_key_spec_for_caches, restore_prefix_entry_for_row,
-    restore_prefix_entry_for_rows, LayerCache,
+    restore_prefix_entry_for_rows, LayerCache, LayerCacheSnapshot,
 };
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
@@ -117,6 +118,22 @@ struct SchedulerGemma4DrafterState {
     cfg: MtpSpeculativeConfig,
     rows: HashMap<usize, SchedulerGemma4DrafterRowState>,
     stats: MtpSpeculativeStats,
+}
+
+struct Gemma4DrafterBatchedFillContext {
+    row_idx: usize,
+    current_token: u32,
+    stop_token_ids: Vec<u32>,
+    remaining: usize,
+    draft_budget: usize,
+    kv_valid_len: i32,
+    draft_position: i32,
+    shared_kv: crate::models::gemma4::Gemma4SharedKvStates,
+    input_hidden: Array,
+    input_token: u32,
+    draft_history: Vec<u32>,
+    draft_tokens: Vec<u32>,
+    verify_input: Vec<u32>,
 }
 
 /// Extension trait for VL-capable models, intentionally NOT part of `core::Model`
@@ -552,6 +569,206 @@ fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
     linear_cap
         .map(|cap| (cap, Dtype::Bfloat16))
         .ok_or_else(|| anyhow!("cache_cap_and_dtype: cache has no layers"))
+}
+
+fn restore_layer_cache_compact_rows(
+    cache: &mut [LayerCache],
+    snapshots: &[LayerCacheSnapshot],
+    compact_rows: &[usize],
+) -> Result<()> {
+    if cache.len() != snapshots.len() {
+        return Err(anyhow!(
+            "restore_layer_cache_compact_rows: cache.len()={} != snapshots.len()={}",
+            cache.len(),
+            snapshots.len()
+        ));
+    }
+    if compact_rows.is_empty() {
+        return Ok(());
+    }
+
+    for (layer_idx, (layer, snapshot)) in cache.iter_mut().zip(snapshots.iter()).enumerate() {
+        match (layer, snapshot) {
+            (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) => {
+                let mut offsets = kv.offsets().to_vec();
+                for &row in compact_rows {
+                    let saved_offset = *saved.offsets().get(row).ok_or_else(|| {
+                        anyhow!(
+                            "restore_layer_cache_compact_rows: row {row} out of saved offsets for layer {layer_idx}"
+                        )
+                    })?;
+                    let live = offsets.get_mut(row).ok_or_else(|| {
+                        anyhow!(
+                            "restore_layer_cache_compact_rows: row {row} out of live offsets for layer {layer_idx}"
+                        )
+                    })?;
+                    *live = saved_offset;
+                }
+                kv.restore_offsets(&offsets)?;
+            }
+            (LayerCache::Full(_), _) => {
+                return Err(anyhow!(
+                    "restore_layer_cache_compact_rows: snapshot type mismatch for full layer {layer_idx}"
+                ));
+            }
+            _ => {
+                return Err(anyhow!(
+                    "restore_layer_cache_compact_rows: Gemma4 drafter batched rollback only supports Full KV layers, layer {layer_idx}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_gemma4_drafter_batched_verify_input(
+    active_rows: &[usize],
+    contexts: &[Gemma4DrafterBatchedFillContext],
+    cache_row_for_ctx: &[usize],
+    max_len: usize,
+) -> Result<(Array, Vec<i32>)> {
+    let b = active_rows.len();
+    if b == 0 || max_len == 0 {
+        return Err(anyhow!(
+            "build_gemma4_drafter_batched_verify_input: empty batch b={b} max_len={max_len}"
+        ));
+    }
+    if contexts.len() != cache_row_for_ctx.len() {
+        return Err(anyhow!(
+            "build_gemma4_drafter_batched_verify_input: contexts.len()={} != cache_row_for_ctx.len()={}",
+            contexts.len(),
+            cache_row_for_ctx.len()
+        ));
+    }
+    let mut flat = vec![0_u32; b * max_len];
+    let mut lens = vec![0_i32; b];
+    for (ctx, &compact_row) in contexts.iter().zip(cache_row_for_ctx.iter()) {
+        if compact_row >= b {
+            return Err(anyhow!(
+                "build_gemma4_drafter_batched_verify_input: compact row {compact_row} >= batch {b}"
+            ));
+        }
+        let input_len = ctx.verify_input.len();
+        if input_len == 0 || input_len > max_len {
+            return Err(anyhow!(
+                "build_gemma4_drafter_batched_verify_input: row {} input_len={input_len} max_len={max_len}",
+                ctx.row_idx
+            ));
+        }
+        let start = compact_row * max_len;
+        flat[start..start + input_len].copy_from_slice(&ctx.verify_input);
+        lens[compact_row] = input_len as i32;
+    }
+    let arr: Array = (&flat[..], &[b as i32, max_len as i32][..]).try_into()?;
+    Ok((arr, lens))
+}
+
+fn build_gemma4_drafter_batched_replay_input(
+    active_rows: &[usize],
+    contexts: &[Gemma4DrafterBatchedFillContext],
+    cache_row_for_ctx: &[usize],
+    mismatch_ctx_indices: &[(usize, SpeculativeResolution)],
+    max_len: usize,
+) -> Result<(Array, Vec<i32>)> {
+    let b = active_rows.len();
+    if b == 0 || max_len == 0 {
+        return Err(anyhow!(
+            "build_gemma4_drafter_batched_replay_input: empty batch b={b} max_len={max_len}"
+        ));
+    }
+    let mut flat = vec![0_u32; b * max_len];
+    let mut lens = vec![0_i32; b];
+    for (ctx_idx, resolution) in mismatch_ctx_indices {
+        let ctx = contexts.get(*ctx_idx).ok_or_else(|| {
+            anyhow!("build_gemma4_drafter_batched_replay_input: ctx_idx {ctx_idx} out of range")
+        })?;
+        let compact_row = *cache_row_for_ctx.get(*ctx_idx).ok_or_else(|| {
+            anyhow!(
+                "build_gemma4_drafter_batched_replay_input: cache row for ctx_idx {ctx_idx} missing"
+            )
+        })?;
+        if compact_row >= b {
+            return Err(anyhow!(
+                "build_gemma4_drafter_batched_replay_input: compact row {compact_row} >= batch {b}"
+            ));
+        }
+        let input_len = resolution.accepted_verify_input_len;
+        if input_len == 0 || input_len > max_len || input_len > ctx.verify_input.len() {
+            return Err(anyhow!(
+                "build_gemma4_drafter_batched_replay_input: row {} replay input_len={input_len} max_len={max_len} verify_len={}",
+                ctx.row_idx,
+                ctx.verify_input.len()
+            ));
+        }
+        let start = compact_row * max_len;
+        flat[start..start + input_len].copy_from_slice(&ctx.verify_input[..input_len]);
+        lens[compact_row] = input_len as i32;
+    }
+    let arr: Array = (&flat[..], &[b as i32, max_len as i32][..]).try_into()?;
+    Ok((arr, lens))
+}
+
+fn slice_hidden_row_position(
+    hidden: &Array,
+    row_idx: usize,
+    pos: usize,
+    target: mlx::StreamOrDevice,
+) -> Result<Array> {
+    let shape = hidden.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 3 {
+        return Err(anyhow!(
+            "slice_hidden_row_position: expected hidden [B,S,H], got {dims:?}"
+        ));
+    }
+    if row_idx as i32 >= dims[0] || pos as i32 >= dims[1] {
+        return Err(anyhow!(
+            "slice_hidden_row_position: row={row_idx} pos={pos} out of shape {dims:?}"
+        ));
+    }
+    mlx::ops::indexing::slice_strided_on(
+        hidden,
+        &[row_idx as i32, pos as i32, 0_i32][..],
+        &[row_idx as i32 + 1, pos as i32 + 1, dims[2]][..],
+        &[1_i32, 1, 1][..],
+        target,
+    )
+    .map_err(Into::into)
+}
+
+fn row_tokens_from_flat(
+    flat: &[u32],
+    row_idx: usize,
+    row_stride: usize,
+    len: usize,
+) -> Result<Vec<u32>> {
+    let start = row_idx.checked_mul(row_stride).ok_or_else(|| {
+        anyhow!("row_tokens_from_flat: row_idx={row_idx} row_stride={row_stride} overflow")
+    })?;
+    let end = start + len;
+    if row_stride < len || end > flat.len() {
+        return Err(anyhow!(
+            "row_tokens_from_flat: row={row_idx} stride={row_stride} len={len} flat_len={}",
+            flat.len()
+        ));
+    }
+    Ok(flat[start..end].to_vec())
+}
+
+fn append_resolved_gemma4_tokens(
+    row_state: &mut SchedulerGemma4DrafterRowState,
+    ctx: &Gemma4DrafterBatchedFillContext,
+    resolution: SpeculativeResolution,
+) {
+    let mut tokens_to_append = resolution.tokens_to_append;
+    if let Some(stop_idx) = tokens_to_append
+        .iter()
+        .position(|token| ctx.stop_token_ids.contains(token))
+    {
+        tokens_to_append.truncate(stop_idx + 1);
+    }
+    tokens_to_append.truncate(ctx.remaining);
+    row_state.pending_tokens.extend(tokens_to_append);
 }
 
 fn active_kv_entry_supported(entry: &PagedPrefixEntry) -> bool {
@@ -3505,6 +3722,7 @@ impl<M: Model> Scheduler<M> {
             .find_map(|s| s.as_mut().filter(|r| r.id == id))
     }
 
+    #[cfg(test)]
     fn emit_pending_token_for_row(
         &mut self,
         row_idx: usize,
@@ -6952,61 +7170,66 @@ impl Scheduler<crate::models::Gemma4Model> {
             .take()
             .ok_or_else(|| anyhow!("step_gemma4_drafter_batch: drafter state absent"))?;
         let cfg = drafter_state.cfg;
+
+        let rows_needing_prefill = active_rows
+            .iter()
+            .copied()
+            .filter(|row_idx| {
+                drafter_state
+                    .rows
+                    .get(row_idx)
+                    .is_some_and(|row| row.pending_tokens.is_empty())
+            })
+            .collect::<Vec<_>>();
+        self.fill_gemma4_drafter_windows_batched(
+            &rows_needing_prefill,
+            cfg,
+            &mut drafter_state.stats,
+            &mut drafter_state.rows,
+            model,
+            drafter,
+        )?;
+
         let mut events = Vec::with_capacity(active_rows.len());
 
-        for row_idx in active_rows {
-            let row_state = drafter_state
+        for row_idx in active_rows.iter().copied() {
+            let token = drafter_state
                 .rows
-                .remove(&row_idx)
-                .ok_or_else(|| anyhow!("step_gemma4_drafter_batch: row {row_idx} state absent"))?;
-            if !row_state.pending_tokens.is_empty() {
-                let mut row_state = row_state;
-                let event =
-                    self.emit_pending_token_for_row(row_idx, &mut row_state.pending_tokens)?;
-                let should_fill_next_window =
-                    event.finish_reason.is_none() && row_state.pending_tokens.is_empty();
-                events.push(event);
-
-                if should_fill_next_window {
-                    let mut temp = self.build_temp_gemma4_drafter_step_scheduler(
-                        model,
-                        row_idx,
-                        cfg,
-                        drafter_state.stats,
-                        row_state,
-                    )?;
-                    temp.fill_gemma4_drafter_window_single(0, model, drafter)
-                        .map_err(|err| {
-                            anyhow!(
-                                "step_gemma4_drafter_batch row {row_idx} refill window: {err:#}"
-                            )
-                        })?;
-                    let (row_state, stats) =
-                        self.install_temp_gemma4_drafter_step_result(model, row_idx, temp)?;
-                    drafter_state.stats = stats;
-                    drafter_state.rows.insert(row_idx, row_state);
-                } else {
-                    drafter_state.rows.insert(row_idx, row_state);
-                }
-                continue;
-            }
-
-            let mut temp = self.build_temp_gemma4_drafter_step_scheduler(
-                model,
-                row_idx,
-                cfg,
-                drafter_state.stats,
-                row_state,
-            )?;
-            let row_events = temp
-                .step_gemma4_drafter_single(model, drafter)
-                .map_err(|err| anyhow!("step_gemma4_drafter_batch row {row_idx}: {err:#}"))?;
-            let (row_state, stats) =
-                self.install_temp_gemma4_drafter_step_result(model, row_idx, temp)?;
-            drafter_state.stats = stats;
-            drafter_state.rows.insert(row_idx, row_state);
-            events.extend(row_events);
+                .get_mut(&row_idx)
+                .ok_or_else(|| anyhow!("step_gemma4_drafter_batch: row {row_idx} state absent"))?
+                .pending_tokens
+                .pop_front()
+                .ok_or_else(|| {
+                    anyhow!("step_gemma4_drafter_batch: row {row_idx} pending token queue is empty")
+                })?;
+            events.push(self.emit_token_for_row(row_idx, token)?);
         }
+
+        let rows_needing_postfill = events
+            .iter()
+            .filter(|event| event.finish_reason.is_none())
+            .filter_map(|event| {
+                self.slots.iter().enumerate().find_map(|(row_idx, slot)| {
+                    slot.as_ref()
+                        .filter(|state| state.id == event.id)
+                        .map(|_| row_idx)
+                })
+            })
+            .filter(|row_idx| {
+                drafter_state
+                    .rows
+                    .get(row_idx)
+                    .is_some_and(|row| row.pending_tokens.is_empty())
+            })
+            .collect::<Vec<_>>();
+        self.fill_gemma4_drafter_windows_batched(
+            &rows_needing_postfill,
+            cfg,
+            &mut drafter_state.stats,
+            &mut drafter_state.rows,
+            model,
+            drafter,
+        )?;
 
         let any_unfinished = self
             .slots
@@ -7021,6 +7244,378 @@ impl Scheduler<crate::models::Gemma4Model> {
         self.refresh_active_kv_residency_stats();
 
         Ok(events)
+    }
+
+    fn fill_gemma4_drafter_windows_batched(
+        &mut self,
+        rows_to_fill: &[usize],
+        cfg: MtpSpeculativeConfig,
+        stats: &mut MtpSpeculativeStats,
+        row_states: &mut HashMap<usize, SchedulerGemma4DrafterRowState>,
+        model: &crate::models::Gemma4Model,
+        drafter: &crate::models::gemma4::Gemma4AssistantModel,
+    ) -> Result<()> {
+        if rows_to_fill.is_empty() {
+            return Ok(());
+        }
+        if model.requires_position_ids() {
+            return Err(anyhow!(
+                "fill_gemma4_drafter_windows_batched: Gemma4 drafter batched decode requires model-derived positions"
+            ));
+        }
+
+        let mut contexts = Vec::with_capacity(rows_to_fill.len());
+        for &row_idx in rows_to_fill {
+            let slot = self.slots[row_idx].as_ref().ok_or_else(|| {
+                anyhow!("fill_gemma4_drafter_windows_batched: row {row_idx} slot absent")
+            })?;
+            if slot.finished {
+                continue;
+            }
+            let emitted = slot.generated_tokens.len();
+            let remaining = slot.max_new_tokens.saturating_sub(emitted);
+            if remaining == 0 {
+                continue;
+            }
+            let current_token = *slot.generated_tokens.last().ok_or_else(|| {
+                anyhow!("fill_gemma4_drafter_windows_batched: row {row_idx} has no current token")
+            })?;
+            let row_state = row_states.get(&row_idx).ok_or_else(|| {
+                anyhow!("fill_gemma4_drafter_windows_batched: row {row_idx} state absent")
+            })?;
+            let draft_budget = row_state
+                .adaptive_draft_tokens
+                .clamp(1, cfg.max_draft_tokens)
+                .min(remaining);
+            let mut history =
+                Vec::with_capacity(slot.prompt_ids.len() + slot.generated_tokens.len());
+            history.extend_from_slice(&slot.prompt_ids);
+            history.extend_from_slice(&slot.generated_tokens);
+            let kv_valid_len = (history.len() - 1) as i32;
+            contexts.push(Gemma4DrafterBatchedFillContext {
+                row_idx,
+                current_token,
+                stop_token_ids: slot.stop_token_ids.clone(),
+                remaining,
+                draft_budget,
+                kv_valid_len,
+                draft_position: crate::models::gemma4::draft_position_for_shared_kv(kv_valid_len),
+                shared_kv: row_state.shared_kv.clone(),
+                input_hidden: row_state.last_hidden.clone(),
+                input_token: current_token,
+                draft_history: history,
+                draft_tokens: Vec::with_capacity(draft_budget),
+                verify_input: Vec::new(),
+            });
+        }
+        if contexts.is_empty() {
+            return Ok(());
+        }
+
+        let max_draft_budget = contexts
+            .iter()
+            .map(|ctx| ctx.draft_budget)
+            .max()
+            .unwrap_or(0);
+        for offset in 0..max_draft_budget {
+            let active_indices = contexts
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, ctx)| (offset < ctx.draft_budget).then_some(idx))
+                .collect::<Vec<_>>();
+            if active_indices.is_empty() {
+                continue;
+            }
+
+            let tokens = active_indices
+                .iter()
+                .map(|&idx| contexts[idx].input_token)
+                .collect::<Vec<_>>();
+            let token_arr: Array = (&tokens[..], &[tokens.len() as i32, 1_i32][..]).try_into()?;
+            let token_embed = model.embed_on(&token_arr, mlx::StreamOrDevice::default())?;
+            let hidden_rows = active_indices
+                .iter()
+                .map(|&idx| &contexts[idx].input_hidden)
+                .collect::<Vec<_>>();
+            let hidden = mlx::ops::shape::concatenate_on(
+                &hidden_rows[..],
+                0,
+                mlx::StreamOrDevice::default(),
+            )?;
+            let inputs_embeds = mlx::ops::shape::concatenate_on(
+                &[&token_embed, &hidden],
+                2,
+                mlx::StreamOrDevice::default(),
+            )?;
+            let shared_rows = active_indices
+                .iter()
+                .map(|&idx| &contexts[idx].shared_kv)
+                .collect::<Vec<_>>();
+            let positions = active_indices
+                .iter()
+                .map(|&idx| contexts[idx].draft_position)
+                .collect::<Vec<_>>();
+            let kv_valid_lens = active_indices
+                .iter()
+                .map(|&idx| contexts[idx].kv_valid_len)
+                .collect::<Vec<_>>();
+
+            let draft_forward_start = Instant::now();
+            let output = drafter.forward_batched_on(
+                &inputs_embeds,
+                &shared_rows[..],
+                &positions,
+                &kv_valid_lens,
+                mlx::StreamOrDevice::default(),
+            )?;
+            add_elapsed_us(&mut stats.draft_forward_us, draft_forward_start);
+
+            let sampling_start = Instant::now();
+            let sampled_arr = mlx::ops::reduction::argmax(&output.logits, -1, false)?;
+            let sampled: Vec<u32> = sampled_arr.to_vec()?;
+            add_elapsed_us(&mut stats.sampling_us, sampling_start);
+            if sampled.len() != active_indices.len() {
+                return Err(anyhow!(
+                    "fill_gemma4_drafter_windows_batched: sampled {} tokens for {} rows",
+                    sampled.len(),
+                    active_indices.len()
+                ));
+            }
+            for (compact_idx, &ctx_idx) in active_indices.iter().enumerate() {
+                let next_token = sampled[compact_idx];
+                let ctx = &mut contexts[ctx_idx];
+                ctx.draft_tokens.push(next_token);
+                ctx.draft_history.push(next_token);
+                ctx.input_token = next_token;
+                ctx.input_hidden = slice_hidden_row_position(
+                    &output.hidden_states,
+                    compact_idx,
+                    0,
+                    mlx::StreamOrDevice::default(),
+                )?;
+            }
+        }
+
+        for ctx in &mut contexts {
+            ctx.verify_input = verify_input(ctx.current_token, &ctx.draft_tokens);
+        }
+
+        let active_rows = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| matches!(slot, Some(state) if !state.finished).then_some(row))
+            .collect::<Vec<_>>();
+        self.rebuild_cache_layout(model, &active_rows)?;
+        let cache_row_for_ctx = contexts
+            .iter()
+            .map(|ctx| {
+                self.cache_rows
+                    .iter()
+                    .position(|&row| row == ctx.row_idx)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "fill_gemma4_drafter_windows_batched: row {} missing from cache layout {:?}",
+                            ctx.row_idx,
+                            self.cache_rows
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let max_verify_len = contexts
+            .iter()
+            .map(|ctx| ctx.verify_input.len())
+            .max()
+            .unwrap_or(0);
+        if max_verify_len == 0 {
+            return Ok(());
+        }
+
+        let base_snapshot = {
+            let cache = self
+                .cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("fill_gemma4_drafter_windows_batched: main cache absent"))?;
+            cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>()
+        };
+        let (verify_arr, verify_lens) = build_gemma4_drafter_batched_verify_input(
+            &active_rows,
+            &contexts,
+            &cache_row_for_ctx,
+            max_verify_len,
+        )?;
+        let verify_pos_ids = self.reusable_dummy_position_ids()?;
+        let verify_forward_start = Instant::now();
+        let verified = {
+            let cache = self
+                .cache
+                .as_mut()
+                .ok_or_else(|| anyhow!("fill_gemma4_drafter_windows_batched: main cache absent"))?;
+            model.forward_text_hidden_with_shared_kv_on(
+                &verify_arr,
+                &verify_pos_ids,
+                Some(&verify_lens),
+                None,
+                Some(cache.as_mut_slice()),
+                mlx::StreamOrDevice::default(),
+            )?
+        };
+        self.refresh_active_kv_residency_stats();
+        add_elapsed_us(&mut stats.verify_forward_us, verify_forward_start);
+
+        let projection_start = Instant::now();
+        let verified_logits =
+            model.project_hidden_on(&verified.hidden, mlx::StreamOrDevice::default())?;
+        add_elapsed_us(&mut stats.projection_us, projection_start);
+        let sampling_start = Instant::now();
+        let verified_ids = mlx::ops::reduction::argmax(&verified_logits, -1, false)?;
+        let verified_tokens_flat: Vec<u32> = verified_ids.to_vec()?;
+        add_elapsed_us(&mut stats.sampling_us, sampling_start);
+
+        let mut mismatch_ctx_indices = Vec::new();
+        let mut full_accept_ctx_indices = Vec::new();
+        for (ctx_idx, ctx) in contexts.iter().enumerate() {
+            let compact_row = cache_row_for_ctx[ctx_idx];
+            let verify_len = ctx.verify_input.len();
+            let verified_tokens = row_tokens_from_flat(
+                &verified_tokens_flat,
+                compact_row,
+                max_verify_len,
+                verify_len,
+            )?;
+            let resolution = resolve_speculative_tokens(&ctx.draft_tokens, &verified_tokens)?;
+            stats.windows += 1;
+            stats.drafted_tokens += ctx.draft_tokens.len();
+            stats.accepted_draft_tokens += resolution.accepted_draft_len;
+            stats.record_window_acceptance(ctx.draft_tokens.len(), resolution.accepted_draft_len);
+            if resolution.needs_rollback {
+                stats.rollback_count += 1;
+                mismatch_ctx_indices.push((ctx_idx, resolution));
+            } else {
+                full_accept_ctx_indices.push((ctx_idx, resolution));
+            }
+        }
+
+        for (ctx_idx, resolution) in &full_accept_ctx_indices {
+            let ctx = &contexts[*ctx_idx];
+            let compact_row = cache_row_for_ctx[*ctx_idx];
+            let accepted_len = resolution.accepted_verify_input_len;
+            let row_state = row_states.get_mut(&ctx.row_idx).ok_or_else(|| {
+                anyhow!(
+                    "fill_gemma4_drafter_windows_batched: row {} state absent after verify",
+                    ctx.row_idx
+                )
+            })?;
+            adjust_mtp_draft_budget(
+                cfg.max_draft_tokens,
+                &mut row_state.adaptive_draft_tokens,
+                ctx.draft_tokens.len(),
+                resolution.accepted_draft_len,
+                stats,
+            );
+            row_state.last_hidden = slice_hidden_row_position(
+                &verified.hidden,
+                compact_row,
+                accepted_len - 1,
+                mlx::StreamOrDevice::default(),
+            )?;
+            row_state.shared_kv = crate::models::gemma4::shared_kv_row_for_drafter_on(
+                &verified.shared_kv,
+                compact_row,
+                ctx.kv_valid_len + accepted_len as i32,
+                model.config().sliding_window,
+                accepted_len as i32,
+                mlx::StreamOrDevice::default(),
+            )?;
+            append_resolved_gemma4_tokens(row_state, ctx, resolution.clone());
+        }
+
+        if !mismatch_ctx_indices.is_empty() {
+            let mismatch_rows = mismatch_ctx_indices
+                .iter()
+                .map(|(ctx_idx, _)| cache_row_for_ctx[*ctx_idx])
+                .collect::<Vec<_>>();
+            let rollback_start = Instant::now();
+            {
+                let cache = self.cache.as_mut().ok_or_else(|| {
+                    anyhow!("fill_gemma4_drafter_windows_batched: main cache absent")
+                })?;
+                restore_layer_cache_compact_rows(
+                    cache.as_mut_slice(),
+                    &base_snapshot,
+                    &mismatch_rows,
+                )?;
+            }
+            self.refresh_active_kv_residency_stats();
+            add_elapsed_us(&mut stats.main_rollback_us, rollback_start);
+
+            let max_replay_len = mismatch_ctx_indices
+                .iter()
+                .map(|(_, resolution)| resolution.accepted_verify_input_len)
+                .max()
+                .unwrap_or(0);
+            let (replay_arr, replay_lens) = build_gemma4_drafter_batched_replay_input(
+                &active_rows,
+                &contexts,
+                &cache_row_for_ctx,
+                &mismatch_ctx_indices,
+                max_replay_len,
+            )?;
+            let replay_pos_ids = self.reusable_dummy_position_ids()?;
+            let replay_forward_start = Instant::now();
+            let replay = {
+                let cache = self.cache.as_mut().ok_or_else(|| {
+                    anyhow!("fill_gemma4_drafter_windows_batched: main cache absent")
+                })?;
+                model.forward_text_hidden_with_shared_kv_on(
+                    &replay_arr,
+                    &replay_pos_ids,
+                    Some(&replay_lens),
+                    None,
+                    Some(cache.as_mut_slice()),
+                    mlx::StreamOrDevice::default(),
+                )?
+            };
+            self.refresh_active_kv_residency_stats();
+            add_elapsed_us(&mut stats.verify_forward_us, replay_forward_start);
+
+            for (ctx_idx, resolution) in mismatch_ctx_indices {
+                let ctx = &contexts[ctx_idx];
+                let compact_row = cache_row_for_ctx[ctx_idx];
+                let accepted_len = resolution.accepted_verify_input_len;
+                let row_state = row_states.get_mut(&ctx.row_idx).ok_or_else(|| {
+                    anyhow!(
+                        "fill_gemma4_drafter_windows_batched: row {} state absent after replay",
+                        ctx.row_idx
+                    )
+                })?;
+                adjust_mtp_draft_budget(
+                    cfg.max_draft_tokens,
+                    &mut row_state.adaptive_draft_tokens,
+                    ctx.draft_tokens.len(),
+                    resolution.accepted_draft_len,
+                    stats,
+                );
+                row_state.last_hidden = slice_hidden_row_position(
+                    &replay.hidden,
+                    compact_row,
+                    accepted_len - 1,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                row_state.shared_kv = crate::models::gemma4::shared_kv_row_for_drafter_on(
+                    &replay.shared_kv,
+                    compact_row,
+                    ctx.kv_valid_len + accepted_len as i32,
+                    model.config().sliding_window,
+                    accepted_len as i32,
+                    mlx::StreamOrDevice::default(),
+                )?;
+                append_resolved_gemma4_tokens(row_state, ctx, resolution);
+            }
+        }
+
+        self.refresh_active_kv_residency_stats();
+        Ok(())
     }
 
     fn step_gemma4_drafter_single(
@@ -7402,80 +7997,6 @@ impl Scheduler<crate::models::Gemma4Model> {
         );
         Ok(temp)
     }
-
-    fn install_temp_gemma4_drafter_step_result(
-        &mut self,
-        model: &crate::models::Gemma4Model,
-        row_idx: usize,
-        mut temp: Scheduler<crate::models::Gemma4Model>,
-    ) -> Result<(SchedulerGemma4DrafterRowState, MtpSpeculativeStats)> {
-        let temp_cache = temp
-            .cache
-            .take()
-            .ok_or_else(|| anyhow!("install_temp_gemma4_drafter_step_result: temp cache absent"))?;
-        self.install_cache_with_temp_row(model, &temp_cache, row_idx)?;
-        let temp_slot = temp.slots[0]
-            .as_ref()
-            .ok_or_else(|| anyhow!("install_temp_gemma4_drafter_step_result: temp slot absent"))?;
-        let slot = self.slots[row_idx]
-            .as_mut()
-            .ok_or_else(|| anyhow!("install_temp_gemma4_drafter_step_result: row slot absent"))?;
-        slot.generated_tokens = temp_slot.generated_tokens.clone();
-        slot.real_len = temp_slot.real_len;
-        slot.finished = temp_slot.finished;
-        slot.finish_reason = temp_slot.finish_reason;
-
-        let mut drafter_state = temp.gemma4_drafter_state.take().ok_or_else(|| {
-            anyhow!("install_temp_gemma4_drafter_step_result: temp drafter state absent")
-        })?;
-        let row_state = drafter_state.rows.remove(&0).ok_or_else(|| {
-            anyhow!("install_temp_gemma4_drafter_step_result: temp row state absent")
-        })?;
-        Ok((row_state, drafter_state.stats))
-    }
-
-    fn build_temp_gemma4_drafter_step_scheduler(
-        &mut self,
-        model: &crate::models::Gemma4Model,
-        row_idx: usize,
-        cfg: MtpSpeculativeConfig,
-        stats: MtpSpeculativeStats,
-        row_state: SchedulerGemma4DrafterRowState,
-    ) -> Result<Scheduler<crate::models::Gemma4Model>> {
-        let mut temp = self.temp_gemma4_drafter_scheduler_for_row(row_idx)?;
-        let cache = self.cache.as_ref().ok_or_else(|| {
-            anyhow!("build_temp_gemma4_drafter_step_scheduler: main cache absent")
-        })?;
-        let compact_row = self
-            .cache_rows
-            .iter()
-            .position(|&row| row == row_idx)
-            .ok_or_else(|| {
-                anyhow!(
-                    "build_temp_gemma4_drafter_step_scheduler: slot row {row_idx} missing from layout {:?}",
-                    self.cache_rows
-                )
-            })?;
-        let (cap, dtype) = cache_cap_and_dtype(cache)?;
-        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
-        let mut temp_cache = self.make_model_cache(model, 1, cap, dtype, turboquant_bits)?;
-        adopt_cache_row_layers(
-            &mut temp_cache,
-            cache,
-            0,
-            compact_row,
-            "build_temp_gemma4_drafter_step_scheduler",
-        )?;
-        temp.cache = Some(temp_cache);
-        temp.cache_rows = vec![0];
-        temp.phase = Phase::Decoding;
-        temp.gemma4_drafter_state = Some(SchedulerGemma4DrafterState {
-            cfg,
-            rows: HashMap::from([(0, row_state)]),
-            stats,
-        });
-        Ok(temp)
-    }
 }
 
 #[cfg(test)]
@@ -7483,7 +8004,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use crate::core::cache::MtpCache;
+    use crate::core::cache::{KVCache, MtpCache};
     use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel};
     use crate::nn::MtpStepOutput;
     use serial_test::serial;
@@ -7491,6 +8012,43 @@ mod tests {
     /// Concrete scheduler type for unit tests — pinned to `Qwen35Model` so
     /// `Scheduler::new` calls don't need turbofish at every site.
     type TestScheduler = Scheduler<crate::models::qwen3_5::Qwen35Model>;
+
+    #[test]
+    fn restore_layer_cache_compact_rows_only_selected_offsets() {
+        let mut cache = vec![LayerCache::Full(
+            KVCache::new(2, 1, 1, 1, Dtype::Float32, 8).with_step(4),
+        )];
+        let k1: Array = (&[1.0_f32, 2.0, 3.0, 4.0][..], &[2_i32, 1, 2, 1][..])
+            .try_into()
+            .expect("k1");
+        let v1: Array = (&[10.0_f32, 20.0, 30.0, 40.0][..], &[2_i32, 1, 2, 1][..])
+            .try_into()
+            .expect("v1");
+        let k2: Array = (&[5.0_f32, 6.0, 7.0, 8.0][..], &[2_i32, 1, 2, 1][..])
+            .try_into()
+            .expect("k2");
+        let v2: Array = (&[50.0_f32, 60.0, 70.0, 80.0][..], &[2_i32, 1, 2, 1][..])
+            .try_into()
+            .expect("v2");
+
+        let LayerCache::Full(kv) = &mut cache[0] else {
+            panic!("full cache");
+        };
+        kv.update_and_fetch(&k1, &v1, &[2, 2])
+            .expect("first update");
+        let snapshot = cache.iter().map(LayerCache::snapshot).collect::<Vec<_>>();
+        let LayerCache::Full(kv) = &mut cache[0] else {
+            panic!("full cache");
+        };
+        kv.update_and_fetch(&k2, &v2, &[2, 2])
+            .expect("second update");
+
+        restore_layer_cache_compact_rows(&mut cache, &snapshot, &[1]).expect("row restore");
+        let LayerCache::Full(kv) = &cache[0] else {
+            panic!("full cache");
+        };
+        assert_eq!(kv.offsets(), &[4, 2]);
+    }
 
     #[test]
     fn active_kv_default_streaming_chunk_targets_two_thousand_tokens_with_page_bound() {
