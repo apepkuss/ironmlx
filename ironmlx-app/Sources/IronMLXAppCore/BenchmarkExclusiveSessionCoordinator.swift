@@ -14,7 +14,7 @@ public actor BenchmarkExclusiveSessionCoordinator {
 
         let loadedModels = try await client.fetchLoadedModels()
         let nonTargetModels = loadedModels
-            .filter { !matches(model: $0, targetModel: targetModel) }
+            .filter { !$0.pinned && !matches(model: $0, targetModel: targetModel) }
             .map(\.id)
             .sorted()
         let loadedIDs = loadedModels.map(\.id).sorted()
@@ -44,6 +44,9 @@ public actor BenchmarkExclusiveSessionCoordinator {
         try ensureIdle(health)
 
         let loadedModels = try await client.fetchLoadedModels()
+        let targetWasPinned = loadedModels.first {
+            matches(model: $0, targetModel: targetModel, targetModelPath: targetModelPath)
+        }?.pinned ?? false
         let snapshot = BenchmarkExclusiveSession(
             targetModel: targetModel,
             targetModelPath: targetModelPath,
@@ -53,7 +56,7 @@ public actor BenchmarkExclusiveSessionCoordinator {
         session = snapshot
 
         let nonTargetModels = loadedModels
-            .filter { !matches(model: $0, targetModel: targetModel, targetModelPath: targetModelPath) }
+            .filter { !$0.pinned && !matches(model: $0, targetModel: targetModel, targetModelPath: targetModelPath) }
             .sorted { $0.id < $1.id }
         var unloaded: [String] = []
 
@@ -63,7 +66,13 @@ public actor BenchmarkExclusiveSessionCoordinator {
                 unloaded.append(model.id)
             }
 
-            _ = try await client.loadModel(model: targetModel, modelDir: targetModelPath, setDefault: true)
+            _ = try await client.loadModel(
+                model: targetModel,
+                modelDir: targetModelPath,
+                setDefault: true,
+                maxCacheCap: nil,
+                pinned: targetWasPinned
+            )
             _ = try await client.setDefaultModel(targetModel)
 
             return BenchmarkExclusivePrepareResult(
@@ -109,7 +118,7 @@ public actor BenchmarkExclusiveSessionCoordinator {
         var restored: [String] = []
         var warnings: [String] = []
 
-        for model in currentByID.values.sorted(by: { $0.id < $1.id }) where snapshotByID[model.id] == nil {
+        for model in currentByID.values.sorted(by: { $0.id < $1.id }) where snapshotByID[model.id] == nil && !model.pinned {
             do {
                 _ = try await client.unloadModel(model: model.id, modelDir: model.path)
                 unloaded.append(model.id)
@@ -121,7 +130,13 @@ public actor BenchmarkExclusiveSessionCoordinator {
 
         for model in activeSession.loadedModels.sorted(by: { $0.id < $1.id }) where currentByID[model.id] == nil {
             do {
-                _ = try await client.loadModel(model: model.id, modelDir: model.path, setDefault: false)
+                _ = try await client.loadModel(
+                    model: model.id,
+                    modelDir: model.path,
+                    setDefault: false,
+                    maxCacheCap: nil,
+                    pinned: model.pinned
+                )
                 restored.append(model.id)
                 currentByID[model.id] = model.backendInfo(isDefault: false)
             } catch {
@@ -259,6 +274,7 @@ private struct BenchmarkLoadedModelSnapshot: Equatable, Sendable {
     var path: String
     var architecture: String
     var isDefault: Bool
+    var pinned: Bool
     var maxPositionEmbeddings: Int
 
     init(_ model: BackendLoadedModelInfo) {
@@ -267,6 +283,7 @@ private struct BenchmarkLoadedModelSnapshot: Equatable, Sendable {
         self.path = model.path
         self.architecture = model.architecture
         self.isDefault = model.isDefault
+        self.pinned = model.pinned
         self.maxPositionEmbeddings = model.maxPositionEmbeddings
     }
 
@@ -277,7 +294,8 @@ private struct BenchmarkLoadedModelSnapshot: Equatable, Sendable {
             path: path,
             architecture: architecture,
             isDefault: isDefault,
-            maxPositionEmbeddings: maxPositionEmbeddings
+            maxPositionEmbeddings: maxPositionEmbeddings,
+            pinned: pinned
         )
     }
 }

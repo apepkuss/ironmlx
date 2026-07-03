@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const META_FILE: &str = "meta.json";
 const PAYLOAD_FILE: &str = "payload.safetensors";
 
@@ -123,6 +123,7 @@ pub struct PagedPrefixKeySpec {
     pub main_layers: Vec<PrefixLayerSpec>,
     pub mtp_layers: Vec<PrefixMtpLayerSpec>,
     pub mtp_last_hidden: Option<PrefixTensorSpec>,
+    pub gemma4_drafter_last_hidden: Option<PrefixTensorSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +169,7 @@ pub struct PagedPrefixEntry {
     pub main_layers: Vec<PrefixLayerPayload>,
     pub mtp_layers: Vec<PrefixMtpLayerPayload>,
     pub mtp_last_hidden: Option<Array>,
+    pub gemma4_drafter_last_hidden: Option<Array>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -201,6 +203,12 @@ impl PagedPrefixEntry {
 
     pub fn mtp_last_hidden_spec(&self) -> Option<PrefixTensorSpec> {
         self.mtp_last_hidden
+            .as_ref()
+            .map(PrefixTensorSpec::from_array)
+    }
+
+    pub fn gemma4_drafter_last_hidden_spec(&self) -> Option<PrefixTensorSpec> {
+        self.gemma4_drafter_last_hidden
             .as_ref()
             .map(PrefixTensorSpec::from_array)
     }
@@ -274,6 +282,12 @@ impl PagedPrefixEntry {
                 .saturating_add(tensor_payload_bytes(&layer.v));
         }
         if let Some(last_hidden) = &self.mtp_last_hidden {
+            stats.tensor_count += 1;
+            stats.payload_bytes = stats
+                .payload_bytes
+                .saturating_add(tensor_payload_bytes(last_hidden));
+        }
+        if let Some(last_hidden) = &self.gemma4_drafter_last_hidden {
             stats.tensor_count += 1;
             stats.payload_bytes = stats
                 .payload_bytes
@@ -606,6 +620,7 @@ struct KeyMaterial<'a> {
     main_layers: Vec<LayerSpecMetadata>,
     mtp_layers: Vec<MtpLayerSpecMetadata>,
     mtp_last_hidden: Option<TensorSpecMetadata>,
+    gemma4_drafter_last_hidden: Option<TensorSpecMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -622,6 +637,7 @@ struct PrefixMetadata {
     main_layers: Vec<LayerSpecMetadata>,
     mtp_layers: Vec<MtpLayerSpecMetadata>,
     mtp_last_hidden: Option<TensorSpecMetadata>,
+    gemma4_drafter_last_hidden: Option<TensorSpecMetadata>,
 }
 
 impl PagedPrefixStore {
@@ -654,6 +670,10 @@ impl PagedPrefixStore {
             main_layers: layer_metadata(&spec.main_layers),
             mtp_layers: mtp_layer_metadata(&spec.mtp_layers),
             mtp_last_hidden: spec.mtp_last_hidden.as_ref().map(tensor_metadata),
+            gemma4_drafter_last_hidden: spec
+                .gemma4_drafter_last_hidden
+                .as_ref()
+                .map(tensor_metadata),
         };
         let json = serde_json::to_string(&material)
             .expect("PagedPrefixStore::key_for serializes fixed metadata");
@@ -1033,6 +1053,9 @@ impl PagedPrefixStore {
         if let Some(last_hidden) = &spec.mtp_last_hidden {
             validate_tensor_spec("mtp last_hidden", last_hidden)?;
         }
+        if let Some(last_hidden) = &spec.gemma4_drafter_last_hidden {
+            validate_tensor_spec("Gemma4 drafter last_hidden", last_hidden)?;
+        }
         Ok(())
     }
 
@@ -1076,6 +1099,21 @@ impl PagedPrefixStore {
             (Some(_), None) => anyhow::bail!("PagedPrefixStore: missing mtp_last_hidden payload"),
             (None, Some(_)) => {
                 anyhow::bail!("PagedPrefixStore: unexpected mtp_last_hidden payload")
+            }
+        }
+        match (
+            &spec.gemma4_drafter_last_hidden,
+            &entry.gemma4_drafter_last_hidden,
+        ) {
+            (Some(tensor_spec), Some(payload)) => {
+                validate_tensor_payload("Gemma4 drafter last_hidden", tensor_spec, payload)?;
+            }
+            (None, None) => {}
+            (Some(_), None) => {
+                anyhow::bail!("PagedPrefixStore: missing Gemma4 drafter last_hidden payload")
+            }
+            (None, Some(_)) => {
+                anyhow::bail!("PagedPrefixStore: unexpected Gemma4 drafter last_hidden payload")
             }
         }
         Ok(())
@@ -1344,6 +1382,10 @@ fn metadata_for(spec: &PagedPrefixKeySpec, key: &str) -> Result<PrefixMetadata> 
         main_layers: layer_metadata(&spec.main_layers),
         mtp_layers: mtp_layer_metadata(&spec.mtp_layers),
         mtp_last_hidden: spec.mtp_last_hidden.as_ref().map(tensor_metadata),
+        gemma4_drafter_last_hidden: spec
+            .gemma4_drafter_last_hidden
+            .as_ref()
+            .map(tensor_metadata),
     })
 }
 
@@ -1421,6 +1463,9 @@ fn insert_entry_tensors(entry: &PagedPrefixEntry, tensors: &mut HashMap<String, 
     if let Some(last_hidden) = &entry.mtp_last_hidden {
         tensors.insert(mtp_last_hidden_name(), last_hidden.clone());
     }
+    if let Some(last_hidden) = &entry.gemma4_drafter_last_hidden {
+        tensors.insert(gemma4_drafter_last_hidden_name(), last_hidden.clone());
+    }
 }
 
 fn entry_from_tensors(
@@ -1469,11 +1514,17 @@ fn entry_from_tensors(
     } else {
         None
     };
+    let gemma4_drafter_last_hidden = if spec.gemma4_drafter_last_hidden.is_some() {
+        Some(take_tensor(tensors, gemma4_drafter_last_hidden_name())?)
+    } else {
+        None
+    };
 
     Ok(PagedPrefixEntry {
         main_layers,
         mtp_layers,
         mtp_last_hidden,
+        gemma4_drafter_last_hidden,
     })
 }
 
@@ -1578,6 +1629,10 @@ fn mtp_last_hidden_name() -> String {
     "mtp_last_hidden".to_owned()
 }
 
+fn gemma4_drafter_last_hidden_name() -> String {
+    "gemma4_drafter_last_hidden".to_owned()
+}
+
 fn stable_hex_hash(value: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in value.as_bytes() {
@@ -1621,6 +1676,7 @@ mod tests {
             main_layers,
             mtp_layers,
             mtp_last_hidden,
+            gemma4_drafter_last_hidden: None,
         }
     }
 
@@ -1707,6 +1763,7 @@ mod tests {
             ],
             mtp_layers: vec![PrefixMtpLayerPayload { k: mtp_k, v: mtp_v }],
             mtp_last_hidden: Some(mtp_last_hidden),
+            gemma4_drafter_last_hidden: None,
         };
 
         let stats = entry.observability_stats(3);
@@ -1743,6 +1800,7 @@ mod tests {
             }],
             mtp_layers: vec![],
             mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
         let missed = store.load_observed(&wanted).expect("miss load");
@@ -1802,6 +1860,7 @@ mod tests {
             }],
             mtp_layers: vec![],
             mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
         };
         let mut wanted = spec(
             vec![1, 2, 3, 4],
@@ -1856,7 +1915,58 @@ mod tests {
             main_layers: vec![PrefixLayerPayload::FullPaged { k_pages, v_pages }],
             mtp_layers: vec![],
             mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
         }
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_round_trips_gemma4_drafter_last_hidden_without_mtp_layers() {
+        let root = temp_root("prefix-store-gemma4-drafter-hidden");
+        let store = PagedPrefixStore::new(&root);
+        let mut entry = single_full_paged_entry(1.0);
+        let hidden: Array = (&[0.25_f32, 0.5, 0.75, 1.0][..], (1_i32, 1_i32, 4_i32))
+            .try_into()
+            .unwrap();
+        entry.gemma4_drafter_last_hidden = Some(hidden);
+        let mut wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
+        wanted.gemma4_drafter_last_hidden = entry.gemma4_drafter_last_hidden_spec();
+
+        let key = store.save(&wanted, &entry).expect("save drafter prefix");
+        let loaded = store
+            .load(&wanted)
+            .expect("load drafter prefix")
+            .expect("prefix hit");
+
+        assert_eq!(key, PagedPrefixStore::key_for(&wanted));
+        assert_eq!(
+            loaded
+                .gemma4_drafter_last_hidden
+                .expect("loaded hidden")
+                .shape()
+                .as_slice(),
+            &[1, 1, 4]
+        );
+        assert!(loaded.mtp_layers.is_empty());
+        assert!(loaded.mtp_last_hidden.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_key_distinguishes_gemma4_drafter_hidden_from_plain_prefix() {
+        let entry = single_full_paged_entry(2.0);
+        let plain = spec(vec![9, 8], 2, None, entry.main_layer_specs(), vec![], None);
+        let mut drafter = plain.clone();
+        drafter.gemma4_drafter_last_hidden = Some(PrefixTensorSpec {
+            dtype: Dtype::Float32,
+            shape: vec![1, 1, 4],
+        });
+
+        assert_ne!(
+            PagedPrefixStore::key_for(&plain),
+            PagedPrefixStore::key_for(&drafter)
+        );
     }
 
     #[test]
@@ -1968,6 +2078,7 @@ mod tests {
             }],
             mtp_layers: vec![],
             mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
         };
 
         let len2 = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
@@ -2064,6 +2175,7 @@ mod tests {
             }],
             mtp_layers: vec![],
             mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
 
@@ -2104,6 +2216,7 @@ mod tests {
             }],
             mtp_layers: vec![],
             mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
         let key = store.save(&wanted, &entry).expect("save");
@@ -2179,6 +2292,7 @@ mod tests {
                 v: mtp_v.clone(),
             }],
             mtp_last_hidden: Some(mtp_last_hidden.clone()),
+            gemma4_drafter_last_hidden: None,
         };
         let spec = spec(
             vec![1, 2, 3],
@@ -2266,6 +2380,7 @@ mod tests {
             }],
             mtp_layers: vec![],
             mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
         let key = store.save(&wanted, &entry).expect("save");

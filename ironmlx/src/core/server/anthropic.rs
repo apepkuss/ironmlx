@@ -28,8 +28,9 @@ use crate::core::scheduler::DenseVlMethods;
 use crate::core::server::chat_format::render_and_encode;
 use crate::core::server::scheduler_actor::{AdmitReply, SchedulerCommand};
 use crate::core::server::vision::{DecodedMessage, DecodedPart};
+use crate::core::speculative::MtpSpeculativeConfig;
 
-use super::{AppState, SamplingDefaults};
+use super::{AppState, Gemma4DrafterAppState, SamplingDefaults};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -358,6 +359,105 @@ where
         MessagesRoute::GenerationStreamUnary => {
             serve_via_gs_unary(state, request, model_label, input_tokens).await
         }
+    }
+}
+
+pub(crate) async fn gemma4_drafter_messages(
+    State(state): State<Gemma4DrafterAppState>,
+    Json(req): Json<MessagesRequest>,
+) -> Response {
+    messages_with_gemma4_drafter_state(state, req).await
+}
+
+pub(crate) async fn messages_with_gemma4_drafter_state(
+    state: Gemma4DrafterAppState,
+    req: MessagesRequest,
+) -> Response {
+    let max_tokens = req.max_tokens;
+    let stream = req.stream;
+    let model_label = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.base.model_id.clone());
+    let sampler = build_sampler(&req, state.base.sampling_defaults);
+    let _cfg = match MtpSpeculativeConfig::new(state.mtp_draft_tokens, sampler) {
+        Ok(cfg) => cfg,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+    };
+
+    let decoded = match decode_anthropic_messages(req.messages) {
+        Ok(d) => d,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("image decode: {e}")).into_response();
+        }
+    };
+    let (flat_messages, pixel_values, image_grid_thw) =
+        match crate::core::server::vision::expand_decoded_messages(
+            decoded,
+            &state.base.vision_input,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("image decode/preprocess: {e}"),
+                )
+                    .into_response();
+            }
+        };
+    let image_grid_thw_opt = if image_grid_thw.is_empty() {
+        None
+    } else {
+        Some(image_grid_thw)
+    };
+    let (image_token_id, image_spatial_merge_size) =
+        crate::core::server::vision::derive_image_token_and_merge(
+            &state.base.vision_input,
+            &state.base.tokenizer,
+        );
+    let prompt_ids = match render_and_encode(&state.base.tokenizer, &flat_messages, None) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("chat template / tokenize: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let input_tokens = prompt_ids.len() as u32;
+    let prompt_len = prompt_ids.len();
+    let total_tokens = prompt_len.saturating_add(max_tokens);
+    if total_tokens > state.base.effective_cap_max {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "request too large: prompt_len + max_tokens = {total_tokens}, max = {}",
+                state.base.effective_cap_max
+            ),
+        )
+            .into_response();
+    }
+    let scheduler_config = state.base.scheduler_request_config(prompt_len, max_tokens);
+    let stop_token_ids = state.base.tokenizer.eos_token_ids().to_vec();
+    let request = GenerateRequest {
+        prompt_ids,
+        max_new_tokens: max_tokens,
+        sampler,
+        stop_token_ids,
+        prefill_chunk_size: scheduler_config.prefill_chunk_size,
+        decode_cadence_mid_chunk_cap: scheduler_config.decode_cadence_mid_chunk_cap,
+        kv_cache_turboquant_bits: state.base.kv_cache_turboquant_bits,
+        pixel_values,
+        image_grid_thw: image_grid_thw_opt,
+        image_spatial_merge_size,
+        image_token_id,
+    };
+
+    if stream {
+        serve_via_scheduler_stream(state.base, request, model_label, input_tokens).await
+    } else {
+        serve_via_scheduler_unary(state.base, request, model_label, input_tokens).await
     }
 }
 

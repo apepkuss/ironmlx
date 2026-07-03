@@ -18,6 +18,7 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeProfileMetadata, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
+use crate::core::server::adaptive_admission::GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX;
 use crate::core::speculative::MtpSpeculativeModel;
 use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
@@ -135,8 +136,8 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = false)]
     pub scheduler_autotune_report: bool,
 
-    /// Optional local MTP model directory. When set, MTP is enabled only for
-    /// Qwen dense/MoE text requests served with --max-sequences 1.
+    /// Optional local MTP/drafter model directory. When set, greedy speculative
+    /// decoding is enabled for supported Qwen and Gemma4 models.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
 
@@ -430,6 +431,41 @@ pub(crate) struct ResolvedSchedulerRuntime {
     pub(crate) profile_source: Option<SchedulerProfileSource>,
 }
 
+pub(crate) fn apply_gemma4_drafter_adaptive_scheduler_defaults(
+    args: &ServeArgs,
+    architecture: crate::models::ModelArchitecture,
+    mtp_enabled: bool,
+    resolved: &mut ResolvedSchedulerRuntime,
+) -> bool {
+    let explicit_scheduler_profile = args.scheduler_profile.is_some()
+        || resolved.profile_source == Some(SchedulerProfileSource::Explicit);
+    if architecture != crate::models::ModelArchitecture::Gemma4
+        || !mtp_enabled
+        || args.b_max.is_some()
+        || explicit_scheduler_profile
+    {
+        return false;
+    }
+
+    let target = GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX;
+    let mut changed = false;
+    if resolved.scheduler_config.b_max < target {
+        resolved.scheduler_config.b_max = target;
+        changed = true;
+    }
+    if resolved.scheduler_runtime_profile.config.b_max < target {
+        resolved.scheduler_runtime_profile.config.b_max = target;
+        changed = true;
+    }
+    for rule in &mut resolved.scheduler_runtime_profile.rules {
+        if rule.config.b_max < target {
+            rule.config.b_max = target;
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn load_scheduler_profile_for_model(
     args: &ServeArgs,
     model_dir: &Path,
@@ -631,8 +667,9 @@ fn resolve_serve_mtp_config(
     };
     match architecture {
         crate::models::ModelArchitecture::Qwen35Dense
-        | crate::models::ModelArchitecture::Qwen35Moe => {}
-        _ => bail!("ironmlx serve --mtp-model-dir currently supports Qwen dense/MoE models only"),
+        | crate::models::ModelArchitecture::Qwen35Moe
+        | crate::models::ModelArchitecture::Gemma4 => {}
+        _ => bail!("ironmlx serve --mtp-model-dir currently supports Qwen/Gemma4 models only"),
     }
     if !model_dir.exists() {
         bail!(
@@ -960,6 +997,90 @@ where
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn serve_with_gemma4_drafter_model(
+    model: crate::models::Gemma4Model,
+    tokenizer: Tokenizer,
+    model_dir: &Path,
+    base_model_weight_bytes: usize,
+    mtp_config: ServeMtpConfig,
+    args: &ServeArgs,
+    scheduler_config: SchedulerServeConfig,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    vision_input: Option<server::VisionInputConfig>,
+) -> Result<()> {
+    log_scheduler_mode(scheduler_config);
+    tracing::info!(
+        "ironmlx serve: Gemma4 drafter enabled model_dir={} draft_tokens={}",
+        mtp_config.model_dir.display(),
+        mtp_config.draft_tokens
+    );
+
+    let validation = server::model_manager::validate_mtp_pair(
+        model_dir,
+        &mtp_config.model_dir,
+        Some(mtp_config.draft_tokens),
+    )?;
+    if !validation.compatible {
+        bail!(
+            "Gemma4 drafter validation failed: {}: {}",
+            validation.reason_code,
+            validation.message
+        );
+    }
+
+    let drafter_loader = Loader::open_gemma4_drafter(&mtp_config.model_dir).with_context(|| {
+        format!(
+            "Loader::open_gemma4_drafter {}",
+            mtp_config.model_dir.display()
+        )
+    })?;
+    let total_model_weight_bytes =
+        base_model_weight_bytes.saturating_add(drafter_loader.loaded_tensor_bytes());
+    let drafter = crate::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
+        .with_context(|| {
+            format!(
+                "loading Gemma4 assistant drafter from {}",
+                mtp_config.model_dir.display()
+            )
+        })?;
+
+    let model_id = single_model_id(args)?;
+    let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
+    let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
+    let active_kv_offload = resolve_active_kv_offload_config(args)?;
+    if let Some(config) = &prefix_lru_cache {
+        tracing::info!(
+            "ironmlx serve: prefix LRU cache enabled max_bytes={}",
+            config.max_bytes
+        );
+    }
+    let runtime = serve_runtime()?;
+    runtime.block_on(server::serve_with_gemma4_drafter(
+        model,
+        drafter,
+        mtp_config.draft_tokens,
+        tokenizer,
+        model_id,
+        &args.host,
+        args.port,
+        scheduler_config.prefill_chunk_size,
+        scheduler_config.b_max,
+        scheduler_config.admission_deadline_ms,
+        scheduler_config.admission_queue_max,
+        scheduler_config.max_cache_cap,
+        scheduler_config.decode_cadence_mid_chunk_cap,
+        args.kv_quant.turboquant_bits(),
+        paged_prefix_cache,
+        prefix_lru_cache,
+        active_kv_offload,
+        scheduler_runtime_profile,
+        args.scheduler_autotune_report,
+        vision_input,
+        Some(total_model_weight_bytes),
+    ))
+}
+
 fn serve_with_diffusion_gemma_model(
     model: crate::models::DiffusionGemmaModel,
     tokenizer: Tokenizer,
@@ -1007,7 +1128,7 @@ fn resolve_engine_pool_scheduler_profile(
     manifest_profile: Option<&Path>,
     store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
-) -> Result<SchedulerAutotuneRuntimeProfile> {
+) -> Result<ResolvedSchedulerRuntime> {
     let explicit_profile = manifest_profile.or(args.scheduler_profile.as_deref());
     let mut scheduler_profile_load = load_scheduler_profile_for_model_with_explicit(
         explicit_profile,
@@ -1041,10 +1162,32 @@ fn resolve_engine_pool_scheduler_profile(
     if discard_auto_profile {
         scheduler_profile_load = None;
     }
-    resolve_scheduler_runtime_profile(
+    let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
         args,
         scheduler_profile_load.as_ref().map(|load| &load.profile),
-    )
+    )?;
+    let scheduler_config = SchedulerServeConfig {
+        prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
+        b_max: scheduler_runtime_profile.config.b_max,
+        admission_deadline_ms: scheduler_runtime_profile.config.admission_deadline_ms,
+        admission_queue_max: scheduler_runtime_profile.config.admission_queue_max,
+        max_cache_cap: scheduler_runtime_profile.config.max_cache_cap,
+        decode_cadence_mid_chunk_cap: scheduler_runtime_profile
+            .config
+            .decode_cadence_mid_chunk_cap,
+    };
+    let profile_source = scheduler_profile_load.as_ref().map(|load| {
+        if load.auto_loaded {
+            SchedulerProfileSource::Store
+        } else {
+            SchedulerProfileSource::Explicit
+        }
+    });
+    Ok(ResolvedSchedulerRuntime {
+        scheduler_runtime_profile,
+        scheduler_config,
+        profile_source,
+    })
 }
 
 fn build_engine_model_config_for_pool(
@@ -1065,6 +1208,7 @@ fn build_engine_model_config_for_pool(
             path: model.path,
             load_policy: model.load_policy,
             default: model.default,
+            pinned: false,
             scheduler_runtime_profile: default_scheduler_runtime_profile(),
             mtp,
             sampling_defaults: server::SamplingDefaults::default(),
@@ -1083,19 +1227,34 @@ fn build_engine_model_config_for_pool(
             model.id
         );
     }
-    let scheduler_runtime_profile = resolve_engine_pool_scheduler_profile(
+    let mut resolved = resolve_engine_pool_scheduler_profile(
         args,
         &model.path,
         model.scheduler_profile.as_deref(),
         scheduler_profile_store,
         hardware_label,
     )?;
+    let model_type = read_model_type(&model.path)?;
+    let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
+    if apply_gemma4_drafter_adaptive_scheduler_defaults(
+        args,
+        architecture,
+        mtp.is_some(),
+        &mut resolved,
+    ) {
+        tracing::info!(
+            "ironmlx serve: Gemma4 drafter adaptive scheduler default applied manifest_model={} b_max={}",
+            model.id,
+            resolved.scheduler_config.b_max
+        );
+    }
     Ok(server::engine::EngineModelConfig {
         id: model.id,
         path: model.path,
         load_policy: model.load_policy,
         default: model.default,
-        scheduler_runtime_profile,
+        pinned: false,
+        scheduler_runtime_profile: resolved.scheduler_runtime_profile,
         mtp,
         sampling_defaults: server::SamplingDefaults::default(),
     })
@@ -1288,6 +1447,13 @@ pub fn run(args: ServeArgs) -> Result<()> {
             scheduler_runtime_profile.rules.len()
         );
     }
+    let profile_source = scheduler_profile_load.as_ref().map(|load| {
+        if load.auto_loaded {
+            SchedulerProfileSource::Store
+        } else {
+            SchedulerProfileSource::Explicit
+        }
+    });
 
     let model_type = read_model_type(&model_dir)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
@@ -1299,6 +1465,27 @@ pub fn run(args: ServeArgs) -> Result<()> {
         loader.config_raw_value(),
         scheduler_config,
     )?;
+    let mut resolved_scheduler = ResolvedSchedulerRuntime {
+        scheduler_runtime_profile,
+        scheduler_config,
+        profile_source,
+    };
+    if apply_gemma4_drafter_adaptive_scheduler_defaults(
+        &args,
+        architecture,
+        mtp_config.is_some(),
+        &mut resolved_scheduler,
+    ) {
+        tracing::info!(
+            "ironmlx serve: Gemma4 drafter adaptive scheduler default applied b_max={}",
+            resolved_scheduler.scheduler_config.b_max
+        );
+    }
+    let ResolvedSchedulerRuntime {
+        scheduler_runtime_profile,
+        scheduler_config,
+        ..
+    } = resolved_scheduler;
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
     let vision_input = match architecture {
         crate::models::ModelArchitecture::Gemma4 => {
@@ -1395,14 +1582,28 @@ pub fn run(args: ServeArgs) -> Result<()> {
         crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
-            serve_with_model(
-                model,
-                tokenizer,
-                &args,
-                scheduler_config,
-                scheduler_runtime_profile,
-                vision_input,
-            )
+            if let Some(mtp_config) = mtp_config.clone() {
+                serve_with_gemma4_drafter_model(
+                    model,
+                    tokenizer,
+                    &model_dir,
+                    loader.loaded_tensor_bytes(),
+                    mtp_config,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                )
+            } else {
+                serve_with_model(
+                    model,
+                    tokenizer,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                )
+            }
         }
         crate::models::ModelArchitecture::Glm4MoeLite => {
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
@@ -1488,13 +1689,14 @@ mod scheduler_profile_tests {
     use crate::core::server::engine::{EngineLoadPolicy, EngineModelManifest};
 
     use super::{
-        build_engine_model_config_for_pool, check_loaded_scheduler_profile_health,
+        apply_gemma4_drafter_adaptive_scheduler_defaults, build_engine_model_config_for_pool,
+        check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
         load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
         resolve_active_kv_offload_config, resolve_memory_limit_bytes, resolve_model_ttl,
         resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
         resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
-        resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel, SchedulerServeConfig, ServeArgs,
-        BYTES_PER_GIB,
+        resolve_serve_mtp_config, KvQuantArg, QwenMoeServeModel, ResolvedSchedulerRuntime,
+        SchedulerProfileSource, SchedulerServeConfig, ServeArgs, BYTES_PER_GIB,
     };
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
@@ -1709,6 +1911,36 @@ mod scheduler_profile_tests {
         assert_eq!(config.load_policy, EngineLoadPolicy::Disabled);
     }
 
+    #[test]
+    fn serve_engine_pool_gemma4_drafter_default_scheduler_uses_bmax_four() {
+        let temp_dir = unique_temp_dir("serve-engine-pool-gemma4-drafter");
+        let model_dir = temp_dir.join("gemma4-base");
+        let mtp_dir = temp_dir.join("gemma4-assistant");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::create_dir_all(&mtp_dir).expect("create mtp dir");
+        std::fs::write(
+            model_dir.join("config.json"),
+            r#"{"model_type":"gemma4","text_config":{"model_type":"gemma4_text"}}"#,
+        )
+        .expect("write config");
+        let args = base_args();
+        let manifest_model = EngineModelManifest {
+            id: "gemma4-manifest".to_string(),
+            path: model_dir,
+            load_policy: EngineLoadPolicy::Lazy,
+            default: true,
+            scheduler_profile: None,
+            mtp_model_dir: Some(mtp_dir),
+            mtp_draft_tokens: Some(2),
+        };
+
+        let config = build_engine_model_config_for_pool(&args, manifest_model, None, "test-host")
+            .expect("build manifest model config");
+
+        assert_eq!(config.scheduler_runtime_profile.config.b_max, 4);
+        std::fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
     fn qwen36_dense_27b_raw_config() -> serde_json::Value {
         serde_json::json!({
             "model_type": "qwen3_5",
@@ -1838,6 +2070,132 @@ mod scheduler_profile_tests {
     }
 
     #[test]
+    fn gemma4_drafter_default_scheduler_uses_bmax_four_when_unconfigured() {
+        let args = base_args();
+        let mut resolved = ResolvedSchedulerRuntime {
+            scheduler_runtime_profile: default_scheduler_runtime_profile(),
+            scheduler_config: SchedulerServeConfig::default(),
+            profile_source: None,
+        };
+
+        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+            &args,
+            crate::models::ModelArchitecture::Gemma4,
+            true,
+            &mut resolved,
+        );
+
+        assert!(changed, "Gemma4 drafter defaults should enable b_max=4");
+        assert_eq!(resolved.scheduler_config.b_max, 4);
+        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 4);
+    }
+
+    #[test]
+    fn gemma4_drafter_default_scheduler_preserves_explicit_max_sequences() {
+        let args = ServeArgs {
+            b_max: Some(1),
+            ..base_args()
+        };
+        let mut resolved = ResolvedSchedulerRuntime {
+            scheduler_runtime_profile: resolve_scheduler_runtime_profile(&args, None)
+                .expect("resolved profile"),
+            scheduler_config: SchedulerServeConfig {
+                b_max: 1,
+                ..SchedulerServeConfig::default()
+            },
+            profile_source: None,
+        };
+
+        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+            &args,
+            crate::models::ModelArchitecture::Gemma4,
+            true,
+            &mut resolved,
+        );
+
+        assert!(!changed, "explicit --max-sequences must be respected");
+        assert_eq!(resolved.scheduler_config.b_max, 1);
+        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 1);
+    }
+
+    #[test]
+    fn gemma4_drafter_default_scheduler_uplifts_loaded_store_profile() {
+        let args = base_args();
+        let mut resolved = ResolvedSchedulerRuntime {
+            scheduler_runtime_profile: runtime_profile(),
+            scheduler_config: SchedulerServeConfig {
+                b_max: 2,
+                ..SchedulerServeConfig::default()
+            },
+            profile_source: Some(SchedulerProfileSource::Store),
+        };
+
+        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+            &args,
+            crate::models::ModelArchitecture::Gemma4,
+            true,
+            &mut resolved,
+        );
+
+        assert!(
+            changed,
+            "auto-loaded store profiles should use the adaptive default"
+        );
+        assert_eq!(resolved.scheduler_config.b_max, 4);
+        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 4);
+        assert_eq!(resolved.scheduler_runtime_profile.rules[0].config.b_max, 4);
+    }
+
+    #[test]
+    fn gemma4_drafter_default_scheduler_preserves_explicit_profile() {
+        let args = ServeArgs {
+            scheduler_profile: Some(PathBuf::from("/tmp/profile.json")),
+            ..base_args()
+        };
+        let mut resolved = ResolvedSchedulerRuntime {
+            scheduler_runtime_profile: runtime_profile(),
+            scheduler_config: SchedulerServeConfig {
+                b_max: 2,
+                ..SchedulerServeConfig::default()
+            },
+            profile_source: Some(SchedulerProfileSource::Explicit),
+        };
+
+        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+            &args,
+            crate::models::ModelArchitecture::Gemma4,
+            true,
+            &mut resolved,
+        );
+
+        assert!(!changed, "explicit scheduler profiles must be respected");
+        assert_eq!(resolved.scheduler_config.b_max, 2);
+        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 2);
+        assert_eq!(resolved.scheduler_runtime_profile.rules[0].config.b_max, 2);
+    }
+
+    #[test]
+    fn qwen_mtp_default_scheduler_keeps_global_bmax_default() {
+        let args = base_args();
+        let mut resolved = ResolvedSchedulerRuntime {
+            scheduler_runtime_profile: default_scheduler_runtime_profile(),
+            scheduler_config: SchedulerServeConfig::default(),
+            profile_source: None,
+        };
+
+        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+            &args,
+            crate::models::ModelArchitecture::Qwen35Dense,
+            true,
+            &mut resolved,
+        );
+
+        assert!(!changed, "Qwen MTP should keep the existing global default");
+        assert_eq!(resolved.scheduler_config.b_max, 1);
+        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 1);
+    }
+
+    #[test]
     fn serve_mtp_args_default_off() {
         let args = base_args();
 
@@ -1950,6 +2308,54 @@ mod scheduler_profile_tests {
             &args,
             crate::models::ModelArchitecture::Qwen35Dense,
             &serde_json::json!({"model_type": "qwen3_5", "text_config": {}}),
+            SchedulerServeConfig {
+                b_max: 2,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("resolve")
+        .expect("enabled");
+
+        assert_eq!(cfg.model_dir, temp_dir);
+        std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_mtp_config_accepts_gemma4_drafter() {
+        let temp_dir = unique_temp_dir("serve-mtp-gemma4");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+        args.mtp_draft_tokens = Some(3);
+
+        let cfg = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Gemma4,
+            &serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}}),
+            SchedulerServeConfig {
+                b_max: 1,
+                ..SchedulerServeConfig::default()
+            },
+        )
+        .expect("resolve")
+        .expect("enabled");
+
+        assert_eq!(cfg.model_dir, temp_dir);
+        assert_eq!(cfg.draft_tokens, 3);
+        std::fs::remove_dir_all(cfg.model_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn serve_mtp_config_accepts_gemma4_batched_scheduler() {
+        let temp_dir = unique_temp_dir("serve-mtp-gemma4-batched");
+        std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
+        let mut args = base_args();
+        args.mtp_model_dir = Some(temp_dir.clone());
+
+        let cfg = resolve_serve_mtp_config(
+            &args,
+            crate::models::ModelArchitecture::Gemma4,
+            &serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}}),
             SchedulerServeConfig {
                 b_max: 2,
                 ..SchedulerServeConfig::default()
@@ -2146,8 +2552,8 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_mtp_config_rejects_non_qwen_architecture() {
-        let temp_dir = unique_temp_dir("serve-mtp-non-qwen");
+    fn serve_mtp_config_rejects_non_qwen_or_gemma4_architecture() {
+        let temp_dir = unique_temp_dir("serve-mtp-non-qwen-gemma4");
         std::fs::create_dir_all(&temp_dir).expect("create mtp dir");
         let mut args = base_args();
         args.mtp_model_dir = Some(temp_dir.clone());
@@ -2161,9 +2567,9 @@ mod scheduler_profile_tests {
                 ..SchedulerServeConfig::default()
             },
         )
-        .expect_err("non-Qwen must be rejected");
+        .expect_err("non-Qwen/Gemma4 must be rejected");
 
-        assert!(err.to_string().contains("Qwen"));
+        assert!(err.to_string().contains("Qwen/Gemma4"));
         std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 

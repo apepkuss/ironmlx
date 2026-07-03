@@ -35,6 +35,25 @@ impl Gemma4DecoderLayer {
         cfg: &Gemma4TextConfig,
         layer_idx: usize,
     ) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, layer_idx, false)
+    }
+
+    pub fn from_loader_kv_shared_only(
+        loader: &Loader,
+        prefix: &str,
+        cfg: &Gemma4TextConfig,
+        layer_idx: usize,
+    ) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, layer_idx, true)
+    }
+
+    fn from_loader_impl(
+        loader: &Loader,
+        prefix: &str,
+        cfg: &Gemma4TextConfig,
+        layer_idx: usize,
+        kv_shared_only: bool,
+    ) -> Result<Self> {
         let layer_kind = cfg.layer_kind(layer_idx);
         let mlp_intermediate =
             if cfg.use_double_wide_mlp && layer_idx >= cfg.first_kv_shared_layer_idx() {
@@ -49,12 +68,21 @@ impl Gemma4DecoderLayer {
                 &format!("{prefix}.input_layernorm"),
                 cfg.rms_norm_eps,
             )?,
-            self_attn: Gemma4Attention::from_loader(
-                loader,
-                &format!("{prefix}.self_attn"),
-                cfg,
-                layer_idx,
-            )?,
+            self_attn: if kv_shared_only {
+                Gemma4Attention::from_loader_kv_shared_only(
+                    loader,
+                    &format!("{prefix}.self_attn"),
+                    cfg,
+                    layer_idx,
+                )?
+            } else {
+                Gemma4Attention::from_loader(
+                    loader,
+                    &format!("{prefix}.self_attn"),
+                    cfg,
+                    layer_idx,
+                )?
+            },
             post_attention_layernorm: RmsNorm::from_loader(
                 loader,
                 &format!("{prefix}.post_attention_layernorm"),
@@ -119,6 +147,7 @@ impl Gemma4DecoderLayer {
         shared_kv: Option<&SharedKv>,
         cache: Option<&mut LayerCache>,
         target: impl Into<StreamOrDevice>,
+        mut stage_trace: Option<&mut Vec<Array>>,
     ) -> Result<(Array, SharedKv)> {
         let target = target.into();
         let profile = profile::vl_layer_enabled();
@@ -126,6 +155,7 @@ impl Gemma4DecoderLayer {
         let residual = x.clone();
         let t0 = Instant::now();
         let h = self.input_layernorm.forward_on(x, target)?;
+        push_last(&mut stage_trace, &h, target)?;
         profile::eval_layer(
             "gemma4_text_layer_input_norm",
             self.layer_idx,
@@ -158,6 +188,7 @@ impl Gemma4DecoderLayer {
             kv_cache,
             target,
         )?;
+        push_last(&mut stage_trace, &attn, target)?;
         profile::eval_layer(
             "gemma4_text_layer_attention",
             self.layer_idx,
@@ -168,7 +199,9 @@ impl Gemma4DecoderLayer {
         )?;
         let t0 = Instant::now();
         let attn = self.post_attention_layernorm.forward_on(&attn, target)?;
+        push_last(&mut stage_trace, &attn, target)?;
         let mut h = &residual + &attn;
+        push_last(&mut stage_trace, &h, target)?;
         profile::eval_layer(
             "gemma4_text_layer_attention_residual",
             self.layer_idx,
@@ -181,9 +214,13 @@ impl Gemma4DecoderLayer {
         let residual = h.clone();
         let t0 = Instant::now();
         let ffn = self.pre_feedforward_layernorm.forward_on(&h, target)?;
+        push_last(&mut stage_trace, &ffn, target)?;
         let ffn = self.mlp.forward_on(&ffn, target)?;
+        push_last(&mut stage_trace, &ffn, target)?;
         let ffn = self.post_feedforward_layernorm.forward_on(&ffn, target)?;
+        push_last(&mut stage_trace, &ffn, target)?;
         h = &residual + &ffn;
+        push_last(&mut stage_trace, &h, target)?;
         profile::eval_layer(
             "gemma4_text_layer_ffn",
             self.layer_idx,
@@ -223,6 +260,7 @@ impl Gemma4DecoderLayer {
         }
 
         h = &h * &self.layer_scalar;
+        push_last(&mut stage_trace, &h, target)?;
         profile::eval_layer(
             "gemma4_text_layer_decoder_total",
             self.layer_idx,
@@ -233,4 +271,34 @@ impl Gemma4DecoderLayer {
         )?;
         Ok((h, kv))
     }
+}
+
+fn push_last(
+    trace: &mut Option<&mut Vec<Array>>,
+    hidden: &Array,
+    target: StreamOrDevice,
+) -> Result<()> {
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.push(slice_last_token(hidden, target)?);
+    }
+    Ok(())
+}
+
+fn slice_last_token(hidden: &Array, target: StreamOrDevice) -> Result<Array> {
+    let shape = hidden.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 3 {
+        return Err(anyhow!(
+            "Gemma4DecoderLayer: expected hidden [B,S,H], got {dims:?}"
+        ));
+    }
+    let (b, s, h) = (dims[0], dims[1], dims[2]);
+    Ok(mlx::ops::indexing::slice_strided_on(
+        hidden,
+        &[0_i32, s - 1, 0][..],
+        &[b, s, h][..],
+        &[1_i32, 1, 1][..],
+        target,
+    )?
+    .reshape_on((b, h), target)?)
 }

@@ -50,6 +50,73 @@ import Testing
     #expect(params.samplingDefaults.repetitionPenalty == 1.1)
 }
 
+@Test func modelParameterStorePersistsMtpRuntimePreference() throws {
+    let root = try temporaryDirectory()
+    let url = root.appendingPathComponent("model_params.json")
+    let store = ModelParameterStore(url: url)
+    let params = ModelParameters(
+        modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        mtpEnabled: true,
+        mtpModelID: "mlx-community/Qwen3.5-4B-MTP-4bit",
+        mtpDraftTokens: "2"
+    )
+
+    try store.save(params)
+
+    let loaded = try ModelParameterStore(url: url).loadAll()
+    #expect(loaded["mlx-community/Qwen3.5-4B-MLX-4bit"]?.mtpEnabled == true)
+    #expect(loaded["mlx-community/Qwen3.5-4B-MLX-4bit"]?.mtpModelID == "mlx-community/Qwen3.5-4B-MTP-4bit")
+    #expect(loaded["mlx-community/Qwen3.5-4B-MLX-4bit"]?.mtpDraftTokensValue == 2)
+}
+
+@Test func modelParameterStoreRecordsMtpLoadPreferenceAndPreservesExistingParameters() throws {
+    let root = try temporaryDirectory()
+    let url = root.appendingPathComponent("model_params.json")
+    let store = ModelParameterStore(url: url)
+    try store.save(ModelParameters(
+        modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        maxTokens: "32768",
+        temperature: "0.7",
+        mtpDraftTokens: "3"
+    ))
+
+    try store.recordMtpLoadPreference(
+        modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        enabled: true,
+        mtpModelID: "mlx-community/Qwen3.5-4B-MTP-4bit"
+    )
+
+    let loaded = try ModelParameterStore(url: url).loadAll()
+    let params = try #require(loaded["mlx-community/Qwen3.5-4B-MLX-4bit"])
+    #expect(params.maxTokens == "32768")
+    #expect(params.temperature == "0.7")
+    #expect(params.mtpEnabled == true)
+    #expect(params.mtpModelID == "mlx-community/Qwen3.5-4B-MTP-4bit")
+    #expect(params.mtpDraftTokens == "3")
+}
+
+@Test func modelParameterStoreRecordsModelOnlyLoadPreferenceWithoutClearingMtpSelection() throws {
+    let root = try temporaryDirectory()
+    let url = root.appendingPathComponent("model_params.json")
+    let store = ModelParameterStore(url: url)
+    try store.save(ModelParameters(
+        modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        mtpEnabled: true,
+        mtpModelID: "mlx-community/Qwen3.5-4B-MTP-4bit"
+    ))
+
+    try store.recordMtpLoadPreference(
+        modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        enabled: false,
+        mtpModelID: nil
+    )
+
+    let loaded = try ModelParameterStore(url: url).loadAll()
+    let params = try #require(loaded["mlx-community/Qwen3.5-4B-MLX-4bit"])
+    #expect(params.mtpEnabled == false)
+    #expect(params.mtpModelID == "mlx-community/Qwen3.5-4B-MTP-4bit")
+}
+
 @Test func localModelScannerReadsGenerationConfigSamplingDefaults() throws {
     let root = try temporaryDirectory()
     let snapshot = root
@@ -90,13 +157,14 @@ import Testing
     let maxCacheCap = ModelLoadParameters.maxCacheCap(
         for: "mlx-community/LongContext-4bit",
         scanner: LocalModelScanner(rootURL: root),
-        parameterStore: store
+        parameterStore: store,
+        activeKvOffloadEnabled: false
     )
 
     #expect(maxCacheCap == 65536)
 }
 
-@Test func modelLoadParametersDefaultToModelContextWindowWhenNoSavedMaxTokensExist() throws {
+@Test func modelLoadParametersUseSafeDefaultForLongContextWithoutActiveKvOffload() throws {
     let root = try temporaryDirectory()
     let snapshot = root
         .appendingPathComponent("models", isDirectory: true)
@@ -111,7 +179,30 @@ import Testing
     let maxCacheCap = ModelLoadParameters.maxCacheCap(
         for: "mlx-community/LongContext-4bit",
         scanner: LocalModelScanner(rootURL: root),
-        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        activeKvOffloadEnabled: false
+    )
+
+    #expect(maxCacheCap == 32768)
+}
+
+@Test func modelLoadParametersAllowFullLongContextWithActiveKvOffload() throws {
+    let root = try temporaryDirectory()
+    let snapshot = root
+        .appendingPathComponent("models", isDirectory: true)
+        .appendingPathComponent("models--mlx-community--LongContext-4bit", isDirectory: true)
+        .appendingPathComponent("snapshots", isDirectory: true)
+        .appendingPathComponent("main", isDirectory: true)
+    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+    try Data(#"{"max_position_embeddings":262144}"#.utf8)
+        .write(to: snapshot.appendingPathComponent("config.json"))
+    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+
+    let maxCacheCap = ModelLoadParameters.maxCacheCap(
+        for: "mlx-community/LongContext-4bit",
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        activeKvOffloadEnabled: true
     )
 
     #expect(maxCacheCap == 262144)

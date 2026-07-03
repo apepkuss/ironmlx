@@ -55,6 +55,7 @@ pub fn default_mtp_draft_tokens_for_config(raw_config: &serde_json::Value) -> us
         .and_then(serde_json::Value::as_i64);
 
     match (model_type, hidden_size, layers, experts, experts_per_tok) {
+        ("gemma4" | "gemma4_unified", _, _, _, _) => 2,
         ("qwen3_5", Some(5120), Some(64), None, None) => 2,
         ("qwen3_5_moe", Some(2048), Some(40), Some(256), Some(8)) => 2,
         _ => 1,
@@ -78,7 +79,7 @@ impl MtpSpeculativeConfig {
 }
 
 /// Runtime counters collected by [`MtpTextGenerationStream`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MtpSpeculativeStats {
     /// Speculative windows verified by the main model.
     pub windows: usize,
@@ -86,6 +87,10 @@ pub struct MtpSpeculativeStats {
     pub drafted_tokens: usize,
     /// Draft tokens accepted before mismatch.
     pub accepted_draft_tokens: usize,
+    /// Draft windows that attempted each zero-based draft position.
+    pub draft_attempts_by_position: Vec<usize>,
+    /// Draft windows that accepted each zero-based draft position.
+    pub draft_accepts_by_position: Vec<usize>,
     /// Windows that required main-cache rollback and accepted-prefix replay.
     pub rollback_count: usize,
     /// Windows that reused the temporary draft MTP cache after full acceptance.
@@ -110,6 +115,33 @@ pub struct MtpSpeculativeStats {
     pub mtp_cache_commit_us: u64,
     /// Microseconds spent restoring the MTP KV cache after temporary draft.
     pub mtp_cache_restore_us: u64,
+}
+
+impl MtpSpeculativeStats {
+    pub fn record_window_acceptance(
+        &mut self,
+        attempted_draft_tokens: usize,
+        accepted_draft_tokens: usize,
+    ) {
+        if attempted_draft_tokens == 0 {
+            return;
+        }
+        let accepted = accepted_draft_tokens.min(attempted_draft_tokens);
+        if self.draft_attempts_by_position.len() < attempted_draft_tokens {
+            self.draft_attempts_by_position
+                .resize(attempted_draft_tokens, 0);
+            self.draft_accepts_by_position
+                .resize(attempted_draft_tokens, 0);
+        }
+        for idx in 0..attempted_draft_tokens {
+            self.draft_attempts_by_position[idx] =
+                self.draft_attempts_by_position[idx].saturating_add(1);
+            if idx < accepted {
+                self.draft_accepts_by_position[idx] =
+                    self.draft_accepts_by_position[idx].saturating_add(1);
+            }
+        }
+    }
 }
 
 /// Narrow model capability required by single-request MTP speculative decoding.
@@ -861,7 +893,7 @@ where
 
     /// Return cumulative speculative-window counters for this stream.
     pub fn stats(&self) -> MtpSpeculativeStats {
-        self.stats
+        self.stats.clone()
     }
 
     /// Pull the next generated token event.
@@ -953,6 +985,8 @@ where
         self.stats.windows += 1;
         self.stats.drafted_tokens += draft_tokens.len();
         self.stats.accepted_draft_tokens += resolution.accepted_draft_len;
+        self.stats
+            .record_window_acceptance(draft_tokens.len(), resolution.accepted_draft_len);
         if resolution.needs_rollback {
             self.stats.rollback_count += 1;
         }
@@ -1255,6 +1289,26 @@ mod tests {
     }
 
     #[test]
+    fn mtp_policy_defaults_gemma4_to_d2() {
+        for model_type in ["gemma4", "gemma4_unified"] {
+            let raw = serde_json::json!({
+                "model_type": model_type,
+                "text_config": {
+                    "model_type": "gemma4_text",
+                    "hidden_size": 3584,
+                    "num_hidden_layers": 34
+                }
+            });
+
+            assert_eq!(default_mtp_draft_tokens_for_config(&raw), 2);
+            assert_eq!(
+                resolve_mtp_draft_tokens(&raw, MtpDraftTokensArg::Omitted),
+                2
+            );
+        }
+    }
+
+    #[test]
     fn mtp_policy_preserves_explicit_value() {
         let raw = serde_json::json!({
             "model_type": "qwen3_5",
@@ -1269,5 +1323,17 @@ mod tests {
             resolve_mtp_draft_tokens(&raw, MtpDraftTokensArg::Explicit(1)),
             1
         );
+    }
+
+    #[test]
+    fn mtp_stats_tracks_attempts_and_accepts_by_draft_position() {
+        let mut stats = MtpSpeculativeStats::default();
+
+        stats.record_window_acceptance(4, 0);
+        stats.record_window_acceptance(4, 2);
+        stats.record_window_acceptance(2, 2);
+
+        assert_eq!(stats.draft_attempts_by_position, vec![3, 3, 2, 2]);
+        assert_eq!(stats.draft_accepts_by_position, vec![2, 2, 0, 0]);
     }
 }

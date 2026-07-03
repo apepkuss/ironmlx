@@ -73,11 +73,17 @@ fn default_max_position_embeddings() -> i32 {
 pub struct Gemma4VisionConfig {
     #[serde(default = "default_vision_model_type")]
     pub model_type: String,
+    #[serde(default)]
     pub hidden_size: i32,
+    #[serde(default)]
     pub intermediate_size: i32,
+    #[serde(default)]
     pub num_hidden_layers: i32,
+    #[serde(default)]
     pub num_attention_heads: i32,
+    #[serde(default)]
     pub num_key_value_heads: i32,
+    #[serde(default)]
     pub head_dim: i32,
     #[serde(default)]
     pub global_head_dim: Option<i32>,
@@ -95,7 +101,7 @@ pub struct Gemma4VisionConfig {
     pub layer_types: Option<Vec<String>>,
     #[serde(default)]
     pub rope_parameters: Option<Gemma4VisionRopeParams>,
-    #[serde(default = "default_vision_output_length")]
+    #[serde(default = "default_vision_output_length", alias = "num_soft_tokens")]
     pub default_output_length: i32,
     #[serde(default = "default_patch_size")]
     pub patch_size: i32,
@@ -107,6 +113,14 @@ pub struct Gemma4VisionConfig {
     pub use_clipped_linears: bool,
     #[serde(default)]
     pub standardize: bool,
+    #[serde(default)]
+    pub mm_embed_dim: i32,
+    #[serde(default)]
+    pub mm_posemb_size: i32,
+    #[serde(default)]
+    pub model_patch_size: i32,
+    #[serde(default)]
+    pub output_proj_dims: i32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -225,8 +239,30 @@ pub struct Gemma4Config {
     pub vision_soft_tokens_per_image: i32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct Gemma4AssistantConfig {
+    #[serde(default = "default_assistant_model_type")]
+    pub model_type: String,
+    pub text_config: Gemma4TextConfig,
+    pub backbone_hidden_size: i32,
+    #[serde(default)]
+    pub architectures: Vec<String>,
+    #[serde(default)]
+    pub use_ordered_embeddings: bool,
+    #[serde(default)]
+    pub num_centroids: Option<i32>,
+    #[serde(default)]
+    pub centroid_intermediate_top_k: Option<i32>,
+    #[serde(default = "default_true")]
+    pub tie_word_embeddings: bool,
+}
+
 fn default_model_type() -> String {
     "gemma4".to_owned()
+}
+
+fn default_assistant_model_type() -> String {
+    "gemma4_assistant".to_owned()
 }
 
 impl Gemma4Config {
@@ -236,26 +272,131 @@ impl Gemma4Config {
         Ok(cfg)
     }
 
-    fn validate_and_finalize(&mut self) -> Result<()> {
-        if self.model_type != "gemma4" {
+    pub(crate) fn validate_and_finalize(&mut self) -> Result<()> {
+        if !matches!(self.model_type.as_str(), "gemma4" | "gemma4_unified") {
             return Err(anyhow!(
-                "Gemma4Config: expected model_type=gemma4, got `{}`",
+                "Gemma4Config: expected model_type=gemma4 or gemma4_unified, got `{}`",
                 self.model_type
             ));
         }
+        match self.model_type.as_str() {
+            "gemma4" if self.text_config.model_type != "gemma4_text" => {
+                return Err(anyhow!(
+                    "Gemma4Config: model_type=gemma4 requires text_config.model_type=gemma4_text, got `{}`",
+                    self.text_config.model_type
+                ));
+            }
+            "gemma4_unified" if self.text_config.model_type != "gemma4_unified_text" => {
+                return Err(anyhow!(
+                    "Gemma4Config: model_type=gemma4_unified requires text_config.model_type=gemma4_unified_text, got `{}`",
+                    self.text_config.model_type
+                ));
+            }
+            _ => {}
+        }
         self.text_config.validate_and_finalize()?;
         if let Some(vc) = &self.vision_config {
+            match self.model_type.as_str() {
+                "gemma4" if vc.model_type != "gemma4_vision" => {
+                    return Err(anyhow!(
+                        "Gemma4Config: model_type=gemma4 requires vision_config.model_type=gemma4_vision, got `{}`",
+                        vc.model_type
+                    ));
+                }
+                "gemma4_unified" if vc.model_type != "gemma4_unified_vision" => {
+                    return Err(anyhow!(
+                        "Gemma4Config: model_type=gemma4_unified requires vision_config.model_type=gemma4_unified_vision, got `{}`",
+                        vc.model_type
+                    ));
+                }
+                _ => {}
+            }
             vc.validate()?;
+            self.vision_soft_tokens_per_image = vc.default_output_length;
         }
+        Ok(())
+    }
+}
+
+impl Gemma4AssistantConfig {
+    pub fn from_loader(loader: &Loader) -> Result<Self> {
+        let mut cfg: Gemma4AssistantConfig =
+            loader.config().context("parsing Gemma4AssistantConfig")?;
+        cfg.validate_and_finalize()?;
+        Ok(cfg)
+    }
+
+    pub(crate) fn validate_and_finalize(&mut self) -> Result<()> {
+        if !matches!(
+            self.model_type.as_str(),
+            "gemma4_assistant" | "gemma4_unified_assistant"
+        ) {
+            return Err(anyhow!(
+                "Gemma4AssistantConfig: expected model_type=gemma4_assistant or gemma4_unified_assistant, got `{}`",
+                self.model_type
+            ));
+        }
+        match self.model_type.as_str() {
+            "gemma4_assistant" if self.text_config.model_type != "gemma4_text" => {
+                return Err(anyhow!(
+                    "Gemma4AssistantConfig: model_type=gemma4_assistant requires text_config.model_type=gemma4_text, got `{}`",
+                    self.text_config.model_type
+                ));
+            }
+            "gemma4_unified_assistant" if self.text_config.model_type != "gemma4_unified_text" => {
+                return Err(anyhow!(
+                    "Gemma4AssistantConfig: model_type=gemma4_unified_assistant requires text_config.model_type=gemma4_unified_text, got `{}`",
+                    self.text_config.model_type
+                ));
+            }
+            _ => {}
+        }
+        if self.backbone_hidden_size <= 0 {
+            return Err(anyhow!(
+                "Gemma4AssistantConfig: backbone_hidden_size must be > 0, got {}",
+                self.backbone_hidden_size
+            ));
+        }
+        if !self.tie_word_embeddings || !self.text_config.tie_word_embeddings {
+            return Err(anyhow!(
+                "Gemma4AssistantConfig: assistant checkpoints must use tied word embeddings"
+            ));
+        }
+        if self.text_config.hidden_size_per_layer_input != 0 {
+            return Err(anyhow!(
+                "Gemma4AssistantConfig: assistant hidden_size_per_layer_input must be 0"
+            ));
+        }
+        if self.text_config.num_kv_shared_layers != self.text_config.num_hidden_layers {
+            return Err(anyhow!(
+                "Gemma4AssistantConfig: assistant num_kv_shared_layers must equal num_hidden_layers"
+            ));
+        }
+        if self.use_ordered_embeddings {
+            if self.num_centroids.unwrap_or(0) <= 0 {
+                return Err(anyhow!(
+                    "Gemma4AssistantConfig: ordered embeddings require num_centroids > 0"
+                ));
+            }
+            if self.centroid_intermediate_top_k.unwrap_or(0) <= 0 {
+                return Err(anyhow!(
+                    "Gemma4AssistantConfig: ordered embeddings require centroid_intermediate_top_k > 0"
+                ));
+            }
+        }
+        self.text_config.validate_and_finalize_for_assistant()?;
         Ok(())
     }
 }
 
 impl Gemma4VisionConfig {
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.is_unified() {
+            return self.validate_unified();
+        }
         if self.model_type != "gemma4_vision" {
             return Err(anyhow!(
-                "Gemma4VisionConfig: expected model_type=gemma4_vision, got `{}`",
+                "Gemma4VisionConfig: expected model_type=gemma4_vision or gemma4_unified_vision, got `{}`",
                 self.model_type
             ));
         }
@@ -297,6 +438,45 @@ impl Gemma4VisionConfig {
         Ok(())
     }
 
+    fn validate_unified(&self) -> Result<()> {
+        if self.patch_size <= 0 || self.pooling_kernel_size <= 0 {
+            return Err(anyhow!(
+                "Gemma4UnifiedVisionConfig: patch_size and pooling_kernel_size must be positive"
+            ));
+        }
+        if self.default_output_length <= 0 {
+            return Err(anyhow!(
+                "Gemma4UnifiedVisionConfig: num_soft_tokens/default_output_length must be positive"
+            ));
+        }
+        if self.mm_embed_dim <= 0 || self.mm_posemb_size <= 0 || self.output_proj_dims <= 0 {
+            return Err(anyhow!(
+                "Gemma4UnifiedVisionConfig: mm_embed_dim/mm_posemb_size/output_proj_dims must be positive"
+            ));
+        }
+        let derived = self.patch_size * self.pooling_kernel_size;
+        let configured = self.model_patch_size();
+        if configured != derived {
+            return Err(anyhow!(
+                "Gemma4UnifiedVisionConfig: model_patch_size={} must equal patch_size*pooling_kernel_size={derived}",
+                configured
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_unified(&self) -> bool {
+        self.model_type == "gemma4_unified_vision"
+    }
+
+    pub fn model_patch_size(&self) -> i32 {
+        if self.model_patch_size > 0 {
+            self.model_patch_size
+        } else {
+            self.patch_size * self.pooling_kernel_size
+        }
+    }
+
     pub fn rope_theta(&self) -> f32 {
         self.rope_parameters
             .as_ref()
@@ -311,9 +491,20 @@ impl Gemma4VisionConfig {
 
 impl Gemma4TextConfig {
     fn validate_and_finalize(&mut self) -> Result<()> {
-        if self.model_type != "gemma4_text" {
+        self.validate_and_finalize_impl(false)
+    }
+
+    fn validate_and_finalize_for_assistant(&mut self) -> Result<()> {
+        self.validate_and_finalize_impl(true)
+    }
+
+    fn validate_and_finalize_impl(&mut self, assistant: bool) -> Result<()> {
+        if !matches!(
+            self.model_type.as_str(),
+            "gemma4_text" | "gemma4_unified_text"
+        ) {
             return Err(anyhow!(
-                "Gemma4TextConfig: expected text_config.model_type=gemma4_text, got `{}`",
+                "Gemma4TextConfig: expected text_config.model_type=gemma4_text or gemma4_unified_text, got `{}`",
                 self.model_type
             ));
         }
@@ -335,9 +526,14 @@ impl Gemma4TextConfig {
                 self.num_hidden_layers
             ));
         }
-        if self.num_kv_shared_layers < 0 || self.num_kv_shared_layers >= self.num_hidden_layers {
+        let invalid_kv_shared = if assistant {
+            self.num_kv_shared_layers < 0 || self.num_kv_shared_layers > self.num_hidden_layers
+        } else {
+            self.num_kv_shared_layers < 0 || self.num_kv_shared_layers >= self.num_hidden_layers
+        };
+        if invalid_kv_shared {
             return Err(anyhow!(
-                "Gemma4TextConfig: num_kv_shared_layers={} out of [0, {})",
+                "Gemma4TextConfig: num_kv_shared_layers={} out of supported range for num_hidden_layers={}",
                 self.num_kv_shared_layers,
                 self.num_hidden_layers
             ));
@@ -388,7 +584,7 @@ impl Gemma4TextConfig {
         let n = self.num_hidden_layers as usize;
         let first_shared = self.first_kv_shared_layer_idx();
         let mut previous: Vec<usize> = (0..n).collect();
-        if first_shared >= n {
+        if first_shared == 0 || first_shared >= n {
             return Ok(previous);
         }
 
@@ -416,6 +612,10 @@ impl Gemma4TextConfig {
 
     pub fn previous_kv_layer(&self, layer_idx: usize) -> usize {
         self.previous_kvs[layer_idx]
+    }
+
+    pub fn all_layers_share_external_kv(&self) -> bool {
+        self.num_kv_shared_layers == self.num_hidden_layers
     }
 
     pub fn rope_params_for(&self, kind: Gemma4LayerKind) -> &Gemma4RopeParams {
@@ -476,6 +676,149 @@ mod tests {
         cfg
     }
 
+    fn unified_12b_like() -> Gemma4Config {
+        let layer_types = (0..48)
+            .map(|i| {
+                if (i + 1) % 6 == 0 {
+                    "full_attention"
+                } else {
+                    "sliding_attention"
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut cfg: Gemma4Config = serde_json::from_value(serde_json::json!({
+            "model_type": "gemma4_unified",
+            "image_token_id": 258880,
+            "audio_token_id": 258881,
+            "boi_token_id": 255999,
+            "eoi_token_id": 258882,
+            "text_config": {
+                "model_type": "gemma4_unified_text",
+                "hidden_size": 3840,
+                "num_hidden_layers": 48,
+                "intermediate_size": 15360,
+                "num_attention_heads": 16,
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "vocab_size": 262144,
+                "vocab_size_per_layer_input": 262144,
+                "num_key_value_heads": 8,
+                "num_global_key_value_heads": 1,
+                "num_kv_shared_layers": 0,
+                "hidden_size_per_layer_input": 0,
+                "attention_k_eq_v": true,
+                "enable_moe_block": false,
+                "num_experts": null,
+                "top_k_experts": null,
+                "use_double_wide_mlp": false,
+                "tie_word_embeddings": true,
+                "final_logit_softcapping": 30.0,
+                "sliding_window": 1024,
+                "max_position_embeddings": 262144,
+                "layer_types": layer_types,
+                "rope_parameters": {
+                    "full_attention": {
+                        "partial_rotary_factor": 0.25,
+                        "rope_theta": 1000000.0,
+                        "rope_type": "proportional"
+                    },
+                    "sliding_attention": {
+                        "rope_theta": 10000.0,
+                        "rope_type": "default"
+                    }
+                }
+            },
+            "vision_config": {
+                "model_type": "gemma4_unified_vision",
+                "mm_embed_dim": 3840,
+                "mm_posemb_size": 1120,
+                "model_patch_size": 48,
+                "num_soft_tokens": 280,
+                "output_proj_dims": 3840,
+                "patch_size": 16,
+                "pooling_kernel_size": 3,
+                "rms_norm_eps": 0.000001
+            }
+        }))
+        .unwrap();
+        cfg.validate_and_finalize().unwrap();
+        cfg
+    }
+
+    fn e4b_assistant_like() -> Gemma4AssistantConfig {
+        let mut cfg: Gemma4AssistantConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "gemma4_assistant",
+            "architectures": ["Gemma4AssistantForCausalLM"],
+            "backbone_hidden_size": 2560,
+            "use_ordered_embeddings": true,
+            "num_centroids": 2048,
+            "centroid_intermediate_top_k": 32,
+            "tie_word_embeddings": true,
+            "text_config": {
+                "model_type": "gemma4_text",
+                "hidden_size": 256,
+                "num_hidden_layers": 4,
+                "intermediate_size": 2048,
+                "num_attention_heads": 4,
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "vocab_size": 262144,
+                "num_key_value_heads": 2,
+                "num_kv_shared_layers": 4,
+                "hidden_size_per_layer_input": 0,
+                "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention"],
+                "tie_word_embeddings": true
+            }
+        }))
+        .unwrap();
+        cfg.validate_and_finalize().unwrap();
+        cfg
+    }
+
+    #[test]
+    fn e4b_assistant_config_accepts_all_external_shared_kv_layers() {
+        let cfg = e4b_assistant_like();
+
+        assert_eq!(cfg.model_type, "gemma4_assistant");
+        assert_eq!(cfg.backbone_hidden_size, 2560);
+        assert_eq!(cfg.text_config.first_kv_shared_layer_idx(), 0);
+        assert!(cfg.text_config.all_layers_share_external_kv());
+        assert_eq!(cfg.text_config.previous_kv_layer(0), 0);
+        assert_eq!(cfg.text_config.layer_kind(3), Gemma4LayerKind::Full);
+    }
+
+    #[test]
+    fn unified_assistant_config_accepts_gemma4_unified_assistant_type() {
+        let mut cfg: Gemma4AssistantConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "gemma4_unified_assistant",
+            "backbone_hidden_size": 3840,
+            "tie_word_embeddings": true,
+            "text_config": {
+                "model_type": "gemma4_unified_text",
+                "hidden_size": 1024,
+                "num_hidden_layers": 4,
+                "intermediate_size": 8192,
+                "num_attention_heads": 16,
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "vocab_size": 262144,
+                "num_key_value_heads": 8,
+                "num_global_key_value_heads": 1,
+                "num_kv_shared_layers": 4,
+                "hidden_size_per_layer_input": 0,
+                "attention_k_eq_v": true,
+                "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention"],
+                "tie_word_embeddings": true
+            }
+        }))
+        .unwrap();
+
+        cfg.validate_and_finalize().unwrap();
+
+        assert_eq!(cfg.model_type, "gemma4_unified_assistant");
+        assert!(cfg.text_config.all_layers_share_external_kv());
+    }
+
     #[test]
     fn e4b_previous_kv_mapping_by_layer_type() {
         let cfg = e4b_like();
@@ -485,5 +828,27 @@ mod tests {
         assert_eq!(cfg.previous_kv_layer(41), 23);
         assert_eq!(cfg.head_dim_for_layer(0), 256);
         assert_eq!(cfg.head_dim_for_layer(5), 512);
+    }
+
+    #[test]
+    fn unified_12b_dense_config_parses_text_and_vision() {
+        let cfg = unified_12b_like();
+
+        assert_eq!(cfg.model_type, "gemma4_unified");
+        assert_eq!(cfg.vision_soft_tokens_per_image, 280);
+        assert_eq!(cfg.text_config.first_kv_shared_layer_idx(), 48);
+        assert_eq!(cfg.text_config.previous_kv_layer(47), 47);
+        assert_eq!(cfg.text_config.head_dim_for_layer(5), 512);
+        assert_eq!(cfg.text_config.kv_heads_for_layer(5), 1);
+        assert_eq!(cfg.text_config.kv_heads_for_layer(0), 8);
+
+        let vision = cfg.vision_config.as_ref().expect("vision config");
+        assert!(vision.is_unified());
+        assert_eq!(vision.default_output_length, 280);
+        assert_eq!(vision.max_patches(), 2520);
+        assert_eq!(vision.model_patch_size(), 48);
+        assert_eq!(vision.mm_embed_dim, 3840);
+        assert_eq!(vision.mm_posemb_size, 1120);
+        assert_eq!(vision.output_proj_dims, 3840);
     }
 }

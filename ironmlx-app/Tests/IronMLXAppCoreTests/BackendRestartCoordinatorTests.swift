@@ -29,7 +29,7 @@ import Testing
     let loaderCalls = await loader.calls
     #expect(loaderCalls == [
         "waitUntilReady",
-        "register:mlx-community/Tiny-4bit:\(snapshot.path):true:nil",
+        "register:mlx-community/Tiny-4bit:\(snapshot.path):true:nil:false:nil:nil",
     ], "\(loaderCalls)")
 }
 
@@ -130,10 +130,10 @@ import Testing
     let loaderCalls = await loader.calls
     #expect(loaderCalls == [
         "waitUntilReady",
-        "register:mlx-community/First-4bit:\(firstSnapshot.path):false:nil",
-        "register:mlx-community/Second-4bit:\(secondSnapshot.path):true:nil",
-        "load:mlx-community/Second-4bit:\(secondSnapshot.path):true:nil",
-        "load:mlx-community/First-4bit:\(firstSnapshot.path):false:nil",
+        "register:mlx-community/First-4bit:\(firstSnapshot.path):false:nil:false:nil:nil",
+        "register:mlx-community/Second-4bit:\(secondSnapshot.path):true:nil:false:nil:nil",
+        "load:mlx-community/Second-4bit:\(secondSnapshot.path):true:nil:false:nil:nil",
+        "load:mlx-community/First-4bit:\(firstSnapshot.path):false:nil:false:nil:nil",
     ], "\(loaderCalls)")
 }
 
@@ -162,7 +162,7 @@ import Testing
     let loaderCalls = await loader.calls
     #expect(loaderCalls == [
         "waitUntilReady",
-        "register:mlx-community/Tiny-4bit:\(snapshot.path):false:nil",
+        "register:mlx-community/Tiny-4bit:\(snapshot.path):false:nil:false:nil:nil",
     ], "\(loaderCalls)")
 }
 
@@ -224,9 +224,12 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int?,
+        pinned: Bool,
+        mtpModelDir: String?,
+        mtpDraftTokens: Int?,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
-        calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil")")
+        calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
         return BackendModelAdminResponse(
             success: true,
             status: "registered",
@@ -243,9 +246,14 @@ private actor FakeRestartModelLoader: BackendModelLoading {
         model: String,
         modelDir: String,
         setDefault: Bool,
-        maxCacheCap: Int?
+        maxCacheCap: Int?,
+        pinned: Bool,
+        mtpModelDir: String?,
+        mtpDraftTokens: Int?,
+        reloadWhenIdle: Bool,
+        samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
-        calls.append("load:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil")")
+        calls.append("load:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
         if let loadError {
             throw loadError
         }
@@ -261,7 +269,8 @@ private actor FakeRestartModelLoader: BackendModelLoading {
                     path: modelDir,
                     architecture: "llm",
                     isDefault: true,
-                    maxPositionEmbeddings: 4096
+                    maxPositionEmbeddings: 4096,
+                    pinned: pinned
                 ),
             ],
             warningCode: nil,

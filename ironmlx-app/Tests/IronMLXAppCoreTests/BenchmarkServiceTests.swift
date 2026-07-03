@@ -343,6 +343,106 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: #"cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用。""#))
 }
 
+@Test func dashboardModelManagementShowsMtpAvailabilityAndLoadAction() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "mtp_badge_available"))
+    #expect(dashboardHTML(html, contains: "mtp_badge_enabled"))
+    #expect(dashboardHTML(html, contains: "mtp_badge_incompatible"))
+    #expect(dashboardHTML(html, contains: #"mtp_badge_available: "MTP""#))
+    #expect(dashboardHTML(html, contains: #"mtp_badge_enabled: "MTP""#))
+    #expect(dashboardHTML(html, contains: "action_load_mtp"))
+    #expect(dashboardHTML(html, contains: "action_load_model_only"))
+    #expect(dashboardHTML(html, contains: #"action_load_model_only: "仅模型""#))
+    #expect(dashboardHTML(html, contains: #"action_load_mtp: "模型+MTP""#))
+    #expect(dashboardHTML(html, contains: "handleModelLoadChoice"))
+    #expect(dashboardHTML(html, contains: "action-load-select"))
+    #expect(dashboardHTML(html, contains: "-webkit-appearance: none"))
+    #expect(dashboardHTML(html, contains: "text-align-last: center"))
+    #expect(dashboardHTML(html, contains: #"<option value="" selected disabled hidden>"#))
+    #expect(dashboardHTML(html, contains: "loadModelWithMtp"))
+    #expect(dashboardHTML(html, contains: "renderMtpBadge"))
+    #expect(!dashboardHTML(html, contains: "model-action-group"))
+}
+
+@Test func dashboardPinTooltipExplainsFixedLoadingBehavior() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: "pin_model_tooltip"))
+    #expect(dashboardHTML(html, contains: "unpin_model_tooltip"))
+    #expect(dashboardHTML(html, contains: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。"))
+    #expect(dashboardHTML(html, contains: "已固定加载：点击取消固定，恢复 TTL 和自动释放策略。"))
+    #expect(dashboardHTML(html, contains: "pinTooltip(m.pinned)"))
+    #expect(dashboardHTML(html, contains: "pinTooltip(nowPinned)"))
+    #expect(!dashboardHTML(html, contains: #"title="' + (m.pinned ? 'Unpin' : 'Pin') + '""#))
+    #expect(!dashboardHTML(html, contains: "pp.btn.title = nowPinned ? 'Unpin' : 'Pin'"))
+}
+
+@Test func dashboardModelStatusColumnUsesLifecycleColorsAndPendingStates() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #".status-dot.model-ready { background: var(--accent); }"#))
+    #expect(dashboardHTML(html, contains: #".status-dot.model-loaded { background: var(--green); }"#))
+    #expect(dashboardHTML(html, contains: #".status-dot.model-busy { background: var(--warning); }"#))
+    #expect(dashboardHTML(html, contains: #"status_ready: "未加载""#))
+    #expect(dashboardHTML(html, contains: "status_loading"))
+    #expect(dashboardHTML(html, contains: "status_unloading"))
+    #expect(dashboardHTML(html, contains: "updateModelStatusForAction(btn, 'model-busy', dict.status_loading"))
+    #expect(dashboardHTML(html, contains: "updateModelStatusForAction(btn, 'model-busy', dict.status_unloading"))
+}
+
+@Test func dashboardModelTablePrioritizesModelColumnWidth() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"class="col-model" style="width:40%;""#))
+    #expect(dashboardHTML(html, contains: #"class="col-type" style="width:6%;""#))
+    #expect(dashboardHTML(html, contains: #"class="col-default" style="width:6%;""#))
+    #expect(dashboardHTML(html, contains: #"class="col-params" style="width:6%;""#))
+    #expect(dashboardHTML(html, contains: #"class="col-select" style="width:44px; min-width:44px; max-width:44px;""#))
+    #expect(dashboardHTML(html, contains: #"""
+  .data-table th {
+    text-align: center;
+"""#))
+    #expect(dashboardHTML(html, contains: #".data-table th:first-child,"#))
+    #expect(dashboardHTML(html, contains: #"text-overflow: clip;"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(3),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(3),"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(6),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(6),"#))
+    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(7),"#))
+    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(7)"#))
+    #expect(dashboardHTML(html, contains: #"text-align: center;"#))
+    #expect(dashboardHTML(html, contains: #".data-table .model-name-text"#))
+    #expect(dashboardHTML(html, contains: #"min-width: 0;"#))
+    #expect(dashboardHTML(html, contains: #"text-overflow: ellipsis;"#))
+}
+
+@Test func dashboardModelParamsModalIncludesMtpRuntimeControls() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(dashboardHTML(html, contains: #"id="modal-mtp-enabled""#))
+    #expect(dashboardHTML(html, contains: #"id="modal-mtp-model""#))
+    #expect(dashboardHTML(html, contains: #"id="modal-mtp-draft-tokens""#))
+    #expect(dashboardHTML(html, contains: "mtp_enabled"))
+    #expect(dashboardHTML(html, contains: "mtp_model_id"))
+    #expect(dashboardHTML(html, contains: "mtp_draft_tokens"))
+}
+
 @Test func dashboardColdCacheUsesPositiveSsdLimit() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
@@ -379,11 +479,13 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
 
     #expect(dashboardHTML(html, contains: "function localizeBackendErrorMessage(message)"))
     #expect(dashboardHTML(html, contains: "err_memory_budget_exceeded"))
+    #expect(dashboardHTML(html, contains: "err_kv_memory_budget_exceeded"))
     #expect(dashboardHTML(html, contains: "localizeErrorResult(result)"))
     #expect(dashboardHTML(html, contains: "内存预算不足"))
-    #expect(dashboardHTML(html, contains: "模型参数设置"))
+    #expect(dashboardHTML(html, contains: "活跃 KV Cache 分层卸载"))
+    #expect(dashboardHTML(html, contains: "logical cap"))
     #expect(dashboardHTML(html, contains: "MAX TOKENS"))
-    #expect(dashboardHTML(html, contains: "最大序列数={max_sequences}"))
+    #expect(dashboardHTML(html, contains: "最大序列数（{max_sequences}）"))
     #expect(!dashboardHTML(html, contains: "b_max={b_max}"))
     #expect(!dashboardHTML(html, contains: "b_max="))
     #expect(!dashboardHTML(html, contains: "请调低「最大序列数」或 Max Cache Cap"))
@@ -435,6 +537,15 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
         "err_model_not_loaded",
         "err_model_not_registered",
         "err_backend_unload_error",
+        "err_kv_memory_budget_exceeded",
+        "err_mtp_model_dir_required",
+        "err_mtp_base_model_not_found",
+        "err_mtp_model_not_found",
+        "err_mtp_unsupported_architecture",
+        "err_mtp_invalid_model_type",
+        "err_mtp_invalid_config",
+        "err_mtp_invalid_draft_tokens",
+        "err_mtp_incompatible",
     ]
     for expectedKey in expectedKeys {
         #expect(dashboardHTML(html, contains: expectedKey), "\(expectedKey) should be localized")

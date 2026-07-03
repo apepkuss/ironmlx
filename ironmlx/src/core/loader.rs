@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{anyhow, Context};
-use mlx::Array;
+use mlx::{Array, Dtype};
 use serde::Deserialize;
 
 use crate::Result;
@@ -73,6 +73,7 @@ pub struct Loader {
 enum SanitizeMode {
     Text { keep_vision_tower: bool },
     Mtp,
+    Gemma4Drafter,
 }
 
 impl Loader {
@@ -109,6 +110,16 @@ impl Loader {
     /// root paths such as `fc.weight`, `layers.0.*`, and `norm.weight`.
     pub fn open_mtp(model_dir: &Path) -> Result<Self> {
         Self::open_impl(model_dir, SanitizeMode::Mtp)
+    }
+
+    /// Open a standalone Gemma4 assistant/drafter checkpoint.
+    ///
+    /// Gemma4 assistant repositories are independent models that consume the
+    /// base Gemma4 model's shared K/V states. They use root tensors such as
+    /// `pre_projection.*`, `post_projection.*`, `masked_embedding.*`, and a
+    /// small `model.*` drafter backbone.
+    pub fn open_gemma4_drafter(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(model_dir, SanitizeMode::Gemma4Drafter)
     }
 
     fn open_impl(model_dir: &Path, sanitize_mode: SanitizeMode) -> Result<Self> {
@@ -156,6 +167,9 @@ impl Loader {
                 Self::sanitize(&mut tensors, &config_raw, keep_vision_tower)?;
             }
             SanitizeMode::Mtp => Self::sanitize_mtp(&mut tensors, &config_raw)?,
+            SanitizeMode::Gemma4Drafter => {
+                Self::sanitize_gemma4_drafter(&mut tensors, &config_raw)?
+            }
         }
 
         // Eagerly evaluate all tensors on the loading thread so that no lazy
@@ -257,14 +271,15 @@ impl Loader {
     ) -> Result<()> {
         let is_qwen35 = is_qwen35_offset_gamma_model(config_raw);
 
-        // 0. Drop non-text tower keys unless caller explicitly requests the
-        //    vision path. Audio is not supported by any ironmlx path yet, so it
-        //    is always discarded before conv/norm detection.
+        // 0. Drop non-text tower/embedder keys unless caller explicitly
+        //    requests the vision path. Audio is not supported by any ironmlx
+        //    path yet, so it is always discarded before conv/norm detection.
         if keep_vision_tower {
             weights.retain(|k, _| !k.starts_with("audio_tower.") && !k.starts_with("embed_audio."));
         } else {
             weights.retain(|k, _| {
                 !k.starts_with("vision_tower.")
+                    && !k.starts_with("vision_embedder.")
                     && !k.starts_with("audio_tower.")
                     && !k.starts_with("embed_vision.")
                     && !k.starts_with("embed_audio.")
@@ -375,6 +390,54 @@ impl Loader {
                 "norm.weight",
             ],
         )
+    }
+
+    /// Sanitize a standalone Gemma4 assistant/drafter checkpoint.
+    fn sanitize_gemma4_drafter(
+        weights: &mut HashMap<String, Array>,
+        config_raw: &serde_json::Value,
+    ) -> Result<()> {
+        let model_type = config_raw
+            .get("model_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Gemma4 drafter config.json missing model_type"))?;
+        if !matches!(model_type, "gemma4_assistant" | "gemma4_unified_assistant") {
+            return Err(anyhow!(
+                "Loader::open_gemma4_drafter expected model_type=gemma4_assistant or gemma4_unified_assistant, got {model_type}"
+            ));
+        }
+
+        weights.retain(|k, _| {
+            !k.starts_with("vision_tower.")
+                && !k.starts_with("vision_embedder.")
+                && !k.starts_with("audio_tower.")
+                && !k.starts_with("embed_vision.")
+                && !k.starts_with("embed_audio.")
+                && !k.starts_with("vit_merger.")
+                && !k.starts_with("merger.")
+        });
+
+        let tie = config_raw
+            .get("text_config")
+            .and_then(|tc| tc.get("tie_word_embeddings"))
+            .and_then(|v| v.as_bool())
+            .or_else(|| {
+                config_raw
+                    .get("tie_word_embeddings")
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        if tie {
+            weights.remove("lm_head.weight");
+            weights.remove("lm_head.scales");
+            weights.remove("lm_head.biases");
+        }
+
+        if let Some(ordering) = weights.remove("masked_embedding.token_ordering") {
+            let ordering = mlx::ops::cast::astype(&ordering, Dtype::Int32)?;
+            weights.insert("masked_embedding.token_ordering".to_owned(), ordering);
+        }
+        Ok(())
     }
 
     /// Tokenizer config (chat template, eos token, etc.).
@@ -670,6 +733,9 @@ mod tests {
     fn gemma4_text_config() -> serde_json::Value {
         serde_json::json!({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}})
     }
+    fn gemma4_unified_text_config() -> serde_json::Value {
+        serde_json::json!({"model_type": "gemma4_unified", "text_config": {"model_type": "gemma4_unified_text"}})
+    }
     fn tied_text_config() -> serde_json::Value {
         serde_json::json!({"text_config": {"tie_word_embeddings": true}})
     }
@@ -738,6 +804,58 @@ mod tests {
                 assert!((x - 1.25).abs() < 1e-6, "{key} should be shifted, got {x}");
             }
         }
+    }
+
+    #[test]
+    fn sanitize_gemma4_drafter_preserves_assistant_roots_and_casts_ordering() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+        let weight: Array = (&[1.0_f32; 8][..], &[2_i32, 4][..]).try_into().unwrap();
+        let ordering: Array = (&[3_i64, 1, 2][..], &[3_i32][..]).try_into().unwrap();
+        w.insert("pre_projection.weight".to_owned(), weight.clone());
+        w.insert("post_projection.weight".to_owned(), weight.clone());
+        w.insert("model.embed_tokens.weight".to_owned(), weight.clone());
+        w.insert(
+            "masked_embedding.embedding.weight".to_owned(),
+            weight.clone(),
+        );
+        w.insert("masked_embedding.token_ordering".to_owned(), ordering);
+        w.insert("lm_head.weight".to_owned(), weight.clone());
+        w.insert(
+            "vision_tower.patch_embedder.input_proj.weight".to_owned(),
+            weight,
+        );
+
+        Loader::sanitize_gemma4_drafter(
+            &mut w,
+            &serde_json::json!({
+                "model_type": "gemma4_assistant",
+                "tie_word_embeddings": true,
+                "text_config": {"tie_word_embeddings": true}
+            }),
+        )
+        .unwrap();
+
+        assert!(w.contains_key("pre_projection.weight"));
+        assert!(w.contains_key("post_projection.weight"));
+        assert!(w.contains_key("model.embed_tokens.weight"));
+        assert!(w.contains_key("masked_embedding.embedding.weight"));
+        assert!(!w.contains_key("lm_head.weight"));
+        assert!(!w.contains_key("vision_tower.patch_embedder.input_proj.weight"));
+        assert_eq!(
+            w.get("masked_embedding.token_ordering").unwrap().dtype(),
+            mlx::Dtype::Int32
+        );
+    }
+
+    #[test]
+    fn sanitize_gemma4_drafter_rejects_non_assistant_model_type() {
+        let mut w: HashMap<String, Array> = HashMap::new();
+
+        let err =
+            Loader::sanitize_gemma4_drafter(&mut w, &serde_json::json!({"model_type": "gemma4"}))
+                .expect_err("base Gemma4 is not a drafter checkpoint");
+
+        assert!(err.to_string().contains("gemma4_assistant"));
     }
 
     #[test]
@@ -994,6 +1112,86 @@ mod tests {
         assert!(
             w.contains_key("model.embed_tokens.weight"),
             "plain model.* key must be preserved"
+        );
+    }
+
+    #[test]
+    fn sanitize_drops_unified_vision_embedder_keys_only_for_text_only() {
+        let arr: Array = (&[1.0_f32; 4][..], (4_i32,)).try_into().unwrap();
+
+        let mut text_only: HashMap<String, Array> = HashMap::new();
+        text_only.insert("vision_embedder.patch_dense.weight".into(), arr.clone());
+        text_only.insert("vision_embedder.patch_ln1.weight".into(), arr.clone());
+        text_only.insert(
+            "embed_vision.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        text_only.insert(
+            "language_model.model.embed_tokens.weight".into(),
+            arr.clone(),
+        );
+
+        Loader::sanitize(&mut text_only, &gemma4_unified_text_config(), false).unwrap();
+
+        assert!(
+            !text_only.contains_key("vision_embedder.patch_dense.weight"),
+            "text-only Gemma4 unified load must drop vision_embedder.*"
+        );
+        assert!(
+            !text_only.contains_key("vision_embedder.patch_ln1.weight"),
+            "text-only Gemma4 unified load must drop all vision_embedder.*"
+        );
+        assert!(
+            !text_only.contains_key("embed_vision.embedding_projection.weight"),
+            "text-only Gemma4 unified load must drop embed_vision.*"
+        );
+        assert!(
+            text_only.contains_key("model.embed_tokens.weight"),
+            "language_model. text prefix should still be stripped"
+        );
+
+        let mut multimodal: HashMap<String, Array> = HashMap::new();
+        multimodal.insert("vision_embedder.patch_dense.weight".into(), arr.clone());
+        multimodal.insert("vision_embedder.patch_ln1.weight".into(), arr.clone());
+        multimodal.insert(
+            "embed_vision.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        multimodal.insert("audio_tower.depthwise_conv1d.weight".into(), arr.clone());
+        multimodal.insert(
+            "embed_audio.embedding_projection.weight".into(),
+            arr.clone(),
+        );
+        multimodal.insert(
+            "language_model.model.embed_tokens.weight".into(),
+            arr.clone(),
+        );
+
+        Loader::sanitize(&mut multimodal, &gemma4_unified_text_config(), true).unwrap();
+
+        assert!(
+            multimodal.contains_key("vision_embedder.patch_dense.weight"),
+            "multimodal Gemma4 unified load must keep vision_embedder.*"
+        );
+        assert!(
+            multimodal.contains_key("vision_embedder.patch_ln1.weight"),
+            "multimodal Gemma4 unified load must keep all vision_embedder.*"
+        );
+        assert!(
+            multimodal.contains_key("embed_vision.embedding_projection.weight"),
+            "multimodal Gemma4 unified load must keep embed_vision.*"
+        );
+        assert!(
+            !multimodal.contains_key("audio_tower.depthwise_conv1d.weight"),
+            "audio tower keys remain unsupported and must be dropped"
+        );
+        assert!(
+            !multimodal.contains_key("embed_audio.embedding_projection.weight"),
+            "audio embedder keys remain unsupported and must be dropped"
+        );
+        assert!(
+            multimodal.contains_key("model.embed_tokens.weight"),
+            "language_model. text prefix should still be stripped"
         );
     }
 

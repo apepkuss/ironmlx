@@ -5,6 +5,7 @@ public struct AppConfig: Codable, Equatable {
     public var port: UInt16
     public var defaultModel: String?
     public var loadedModels: [String]?
+    public var pinnedModels: [String]?
     public var language: String
     public var theme: String?
     public var logLevel: String?
@@ -39,6 +40,7 @@ public struct AppConfig: Codable, Equatable {
         port: UInt16 = 9068,
         defaultModel: String? = nil,
         loadedModels: [String]? = nil,
+        pinnedModels: [String]? = nil,
         language: String = "en",
         theme: String? = nil,
         logLevel: String? = nil,
@@ -72,6 +74,7 @@ public struct AppConfig: Codable, Equatable {
         self.port = port
         self.defaultModel = defaultModel
         self.loadedModels = loadedModels
+        self.pinnedModels = pinnedModels
         self.language = language
         self.theme = theme
         self.logLevel = logLevel
@@ -107,6 +110,7 @@ public struct AppConfig: Codable, Equatable {
         case port
         case defaultModel = "default_model"
         case loadedModels = "loaded_models"
+        case pinnedModels = "pinned_models"
         case language
         case theme
         case logLevel = "log_level"
@@ -155,6 +159,12 @@ public extension AppConfig {
         return references
     }
 
+    var pinnedModelReferences: [String] {
+        let loaded = Set(restoredModelReferences)
+        return Self.normalizedModelReferences(pinnedModels ?? [])
+            .filter { loaded.contains($0) }
+    }
+
     mutating func recordLoadedModel(_ model: String, setDefault: Bool) {
         guard let model = Self.normalizedModelReference(model) else {
             return
@@ -176,11 +186,15 @@ public extension AppConfig {
         let references = Self.normalizedModelReferences(loadedModels ?? [])
             .filter { $0 != model }
         loadedModels = references
+        pinnedModels = Self.normalizedModelReferences(pinnedModels ?? [])
+            .filter { $0 != model && references.contains($0) }
     }
 
     mutating func replaceLoadedModels(_ models: [String], defaultModel: String?) {
         let references = Self.normalizedModelReferences(models)
         loadedModels = references
+        pinnedModels = Self.normalizedModelReferences(pinnedModels ?? [])
+            .filter { references.contains($0) }
         if let defaultModel = Self.normalizedModelReference(defaultModel) {
             self.defaultModel = defaultModel
         } else if let existingDefault = defaultModelReference {
@@ -188,6 +202,30 @@ public extension AppConfig {
         } else {
             self.defaultModel = references.first
         }
+    }
+
+    mutating func replacePinnedModels(_ models: [String]) {
+        let loaded = Set(restoredModelReferences)
+        pinnedModels = Self.normalizedModelReferences(models)
+            .filter { loaded.contains($0) }
+    }
+
+    mutating func recordPinnedModel(_ model: String, pinned: Bool) {
+        guard let model = Self.normalizedModelReference(model) else {
+            return
+        }
+        var references = Self.normalizedModelReferences(pinnedModels ?? [])
+        if pinned {
+            guard restoredModelReferences.contains(model) else {
+                return
+            }
+            if !references.contains(model) {
+                references.append(model)
+            }
+        } else {
+            references.removeAll { $0 == model }
+        }
+        pinnedModels = references
     }
 
     static func normalizedModelReference(_ value: String?) -> String? {

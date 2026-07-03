@@ -384,6 +384,7 @@ pub fn prefix_key_spec_for_caches(
         main_layers,
         mtp_layers: vec![],
         mtp_last_hidden: None,
+        gemma4_drafter_last_hidden: None,
     }))
 }
 
@@ -483,6 +484,7 @@ pub fn prefix_entry_for_row(
             main_layers: layers,
             mtp_layers: vec![],
             mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
         },
         cached_len.unwrap_or(0),
     )))
@@ -732,6 +734,7 @@ pub fn paged_prefix_key_spec_for_full_caches(
         main_layers,
         mtp_layers: vec![],
         mtp_last_hidden: None,
+        gemma4_drafter_last_hidden: None,
     }))
 }
 
@@ -760,6 +763,7 @@ pub fn paged_prefix_layers_for_row(
         main_layers: layers,
         mtp_layers: vec![],
         mtp_last_hidden: None,
+        gemma4_drafter_last_hidden: None,
     }))
 }
 
@@ -776,8 +780,11 @@ pub fn restore_paged_prefix_layers_for_row(
             entry.main_layers.len()
         );
     }
-    if !entry.mtp_layers.is_empty() || entry.mtp_last_hidden.is_some() {
-        anyhow::bail!("restore_paged_prefix_layers_for_row: unexpected MTP payload");
+    if !entry.mtp_layers.is_empty()
+        || entry.mtp_last_hidden.is_some()
+        || entry.gemma4_drafter_last_hidden.is_some()
+    {
+        anyhow::bail!("restore_paged_prefix_layers_for_row: unexpected auxiliary payload");
     }
     for (cache, layer) in caches.iter_mut().zip(entry.main_layers.iter()) {
         let LayerCache::Full(kv) = cache else {

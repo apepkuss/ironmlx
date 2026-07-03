@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WebKit
 
 @testable import IronMLXAppCore
 
@@ -120,4 +121,146 @@ import Testing
         config: explicitDefaultConfig,
         currentLoadedModelCount: 1
     ))
+}
+
+@MainActor
+@Test func dashboardBridgeRefreshesModelListWhenLoadedModelsNotificationArrives() async throws {
+    let root = try dashboardBridgeNotificationModelRoot(repoID: "mlx-community/Tiny-4bit")
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(loadedModels: ["mlx-community/Tiny-4bit"]))
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let backend = BackendProcessManager(
+        configStore: configStore,
+        scanner: LocalModelScanner(rootURL: root)
+    )
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: backend,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        notificationCenter: notificationCenter
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: bridge)
+    #expect(await webView.waitForScript(containing: "onLocalModelsScanned") == false)
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    #expect(await webView.waitForScript(containing: "onLocalModelsScanned"))
+}
+
+@MainActor
+@Test func dashboardScannedModelsExposeEffectiveMaxTokensUsedForLoad() async throws {
+    let root = try dashboardBridgeNotificationModelRoot(
+        repoID: "mlx-community/LongContext-4bit",
+        configJSON: #"{"max_position_embeddings":262144}"#
+    )
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(activeKvOffload: false))
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: BackendProcessManager(
+            configStore: configStore,
+            scanner: LocalModelScanner(rootURL: root)
+        ),
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        notificationCenter: notificationCenter
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    let payload = try decodedJavaScriptStringArgument(from: script, functionName: "onLocalModelsScanned")
+    let data = try #require(payload.data(using: .utf8))
+    let models = try #require(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+    let model = try #require(models.first)
+    #expect(model["effective_max_tokens"] as? Int == 32768)
+    withExtendedLifetime(bridge) {}
+}
+
+@Test func dashboardModelParamsUseLanguageInvariantCapacityLabels() throws {
+    let html = try String(
+        contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
+        encoding: .utf8
+    )
+
+    #expect(html.contains(#"<label data-i18n="context_size">CONTEXT SIZE</label>"#))
+    #expect(html.contains(#"context_size: "CONTEXT SIZE""#))
+    #expect(!html.contains("上下文大小"))
+    #expect(!html.contains("コンテキストサイズ"))
+    #expect(!html.contains("컨텍스트 크기"))
+    #expect(html.contains(#"<label data-i18n="single_request_max_tokens">MAX TOKENS</label>"#))
+    #expect(html.contains(#"single_request_max_tokens: "MAX TOKENS""#))
+    #expect(!html.contains("单请求最大 Token 数"))
+    #expect(!html.contains("單請求最大 Token 數"))
+    #expect(!html.contains("リクエスト最大 Token 数"))
+    #expect(!html.contains("단일 요청 최대 Token 수"))
+}
+
+private func dashboardBridgeNotificationModelRoot(repoID: String) throws -> URL {
+    try dashboardBridgeNotificationModelRoot(repoID: repoID, configJSON: "{}")
+}
+
+private func dashboardBridgeNotificationModelRoot(repoID: String, configJSON: String) throws -> URL {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ironmlx-dashboard-bridge-notification-\(UUID().uuidString)", isDirectory: true)
+    let snapshot = root
+        .appendingPathComponent("models", isDirectory: true)
+        .appendingPathComponent("models--" + repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
+        .appendingPathComponent("snapshots", isDirectory: true)
+        .appendingPathComponent("main", isDirectory: true)
+    try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+    try Data(configJSON.utf8).write(to: snapshot.appendingPathComponent("config.json"))
+    try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    return root
+}
+
+private func decodedJavaScriptStringArgument(from script: String, functionName: String) throws -> String {
+    let prefix = "\(functionName)("
+    guard script.hasPrefix(prefix), script.hasSuffix(")") else {
+        throw CocoaError(.coderInvalidValue)
+    }
+    let literal = String(script.dropFirst(prefix.count).dropLast())
+    return try JSONDecoder().decode(String.self, from: Data(literal.utf8))
+}
+
+@MainActor
+private final class CapturingDashboardWebView: WKWebView {
+    private var scripts: [String] = []
+
+    override func evaluateJavaScript(
+        _ javaScriptString: String,
+        completionHandler: (@MainActor @Sendable (Any?, (any Error)?) -> Void)? = nil
+    ) {
+        scripts.append(javaScriptString)
+        completionHandler?(nil, nil)
+    }
+
+    func waitForScript(containing needle: String, timeoutSeconds: TimeInterval = 0.4) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if scripts.contains(where: { $0.contains(needle) }) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return false
+    }
+
+    func script(containing needle: String, timeoutSeconds: TimeInterval = 0.4) async -> String? {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if let script = scripts.first(where: { $0.contains(needle) }) {
+                return script
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return nil
+    }
 }

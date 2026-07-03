@@ -63,8 +63,8 @@ pub struct GenerateArgs {
     #[arg(long, default_value_t = 2048)]
     pub prefill_chunk_size: usize,
 
-    /// MTP model directory. When set, generation uses the Qwen MTP head for
-    /// greedy speculative decoding on Qwen text and Qwen VL requests.
+    /// MTP/drafter model directory. When set, generation uses Qwen MTP heads or
+    /// Gemma4 assistant drafter weights for greedy speculative decoding.
     #[arg(long = "mtp-model-dir")]
     pub mtp_model_dir: Option<PathBuf>,
 
@@ -304,9 +304,10 @@ fn ensure_mtp_generation_supported(
     }
     match architecture {
         crate::models::ModelArchitecture::Qwen35Dense
-        | crate::models::ModelArchitecture::Qwen35Moe => Ok(()),
+        | crate::models::ModelArchitecture::Qwen35Moe
+        | crate::models::ModelArchitecture::Gemma4 => Ok(()),
         _ => Err(anyhow!(
-            "--mtp-model-dir currently supports Qwen dense/MoE generation only"
+            "--mtp-model-dir currently supports Qwen/Gemma4 generation only"
         )),
     }
 }
@@ -524,6 +525,40 @@ where
     }
 }
 
+fn run_generation_with_gemma4_drafter_model(
+    model: &crate::models::Gemma4Model,
+    tokenizer: &Tokenizer,
+    loader: &Loader,
+    model_type: &str,
+    args: &GenerateArgs,
+) -> Result<()> {
+    let request = build_generate_request(model, tokenizer, loader, model_type, args)?;
+    let mtp_dir = args.mtp_model_dir.as_ref().ok_or_else(|| {
+        anyhow!("run_generation_with_gemma4_drafter_model called without --mtp-model-dir")
+    })?;
+    if !mtp_dir.exists() {
+        return Err(anyhow!(
+            "--mtp-model-dir must point to a local directory (got '{}')",
+            mtp_dir.display()
+        ));
+    }
+    let drafter_loader =
+        Loader::open_gemma4_drafter(mtp_dir).context("Loader::open_gemma4_drafter")?;
+    let drafter = crate::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
+        .context("Gemma4AssistantModel::from_loader")?;
+    let draft_tokens = resolve_mtp_draft_tokens(
+        loader.config_raw_value(),
+        args.mtp_draft_tokens
+            .map(MtpDraftTokensArg::Explicit)
+            .unwrap_or(MtpDraftTokensArg::Omitted),
+    );
+    let cfg = MtpSpeculativeConfig::new(draft_tokens, request.sampler)?;
+    let mut stream = crate::models::gemma4::Gemma4DrafterGenerationStream::new(
+        model, &drafter, tokenizer, request, cfg,
+    )?;
+    write_generation_events(|| stream.next_token())
+}
+
 fn run_diffusion_gemma_generation(
     model: &crate::models::DiffusionGemmaModel,
     tokenizer: &Tokenizer,
@@ -656,7 +691,13 @@ pub fn run(args: GenerateArgs) -> Result<()> {
         crate::models::ModelArchitecture::Gemma4 => {
             let model = crate::models::Gemma4Model::from_loader(&loader)
                 .context("Gemma4Model::from_loader")?;
-            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+            if args.mtp_model_dir.is_some() {
+                run_generation_with_gemma4_drafter_model(
+                    &model, &tokenizer, &loader, model_type, &args,
+                )
+            } else {
+                run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+            }
         }
         crate::models::ModelArchitecture::Glm4MoeLite => {
             let model = crate::models::Glm4MoeLiteModel::from_loader(&loader)
@@ -777,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn mtp_support_policy_allows_qwen_text_and_vl_and_rejects_other_architectures() {
+    fn mtp_support_policy_allows_qwen_and_gemma4_text_and_vl() {
         let mut args =
             GenerateTestCli::parse_from(["test", "--model", "/tmp/model", "--prompt", "hello"])
                 .args;
@@ -814,11 +855,23 @@ mod tests {
             &args
         )
         .is_ok());
+        assert!(ensure_mtp_generation_supported(
+            crate::models::ModelArchitecture::Gemma4,
+            false,
+            &args
+        )
+        .is_ok());
+        assert!(ensure_mtp_generation_supported(
+            crate::models::ModelArchitecture::Gemma4,
+            true,
+            &args
+        )
+        .is_ok());
 
         let arch_err =
-            ensure_mtp_generation_supported(crate::models::ModelArchitecture::Gemma4, false, &args)
+            ensure_mtp_generation_supported(crate::models::ModelArchitecture::Llama, false, &args)
                 .unwrap_err();
-        assert!(arch_err.to_string().contains("Qwen"));
+        assert!(arch_err.to_string().contains("Qwen/Gemma4"));
     }
 
     #[test]

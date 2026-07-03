@@ -10,12 +10,15 @@ use crate::Result;
 
 use super::config::Gemma4Config;
 use super::ops::logit_softcap_on;
-use super::text_model::Gemma4TextModel;
-use super::vision::{MultimodalEmbedder, VisionModel};
+use super::text_model::{Gemma4TextForwardOutput, Gemma4TextModel};
+use super::vision::{
+    unified_position_ids_for_grid, Gemma4UnifiedVisionEmbedder, MultimodalEmbedder, VisionModel,
+};
 
 pub struct Gemma4Model {
     text: Gemma4TextModel,
     vision: Option<VisionModel>,
+    unified_vision: Option<Gemma4UnifiedVisionEmbedder>,
     embed_vision: Option<MultimodalEmbedder>,
     vision_config: Option<super::config::Gemma4VisionConfig>,
     vision_soft_tokens_per_image: i32,
@@ -147,8 +150,12 @@ impl Gemma4Model {
         let image_token_id = cfg.image_token_id;
         let audio_token_id = cfg.audio_token_id;
         let vision_config = cfg.vision_config.clone();
+        let mut unified_vision = None;
         let vision = if let Some(vc) = vision_config.as_ref() {
-            if loader.contains("vision_tower.patch_embedder.input_proj.weight") {
+            if vc.is_unified() && loader.contains("vision_embedder.patch_dense.weight") {
+                unified_vision = Some(Gemma4UnifiedVisionEmbedder::from_loader(loader, vc)?);
+                None
+            } else if loader.contains("vision_tower.patch_embedder.input_proj.weight") {
                 Some(VisionModel::from_loader(loader, vc.clone())?)
             } else {
                 None
@@ -156,7 +163,7 @@ impl Gemma4Model {
         } else {
             None
         };
-        let embed_vision = if vision.is_some() {
+        let embed_vision = if vision.is_some() || unified_vision.is_some() {
             Some(MultimodalEmbedder::from_loader(
                 loader,
                 "embed_vision",
@@ -173,6 +180,7 @@ impl Gemma4Model {
         Ok(Self {
             text,
             vision,
+            unified_vision,
             embed_vision,
             vision_config,
             vision_soft_tokens_per_image,
@@ -185,8 +193,50 @@ impl Gemma4Model {
         &self.text
     }
 
+    #[doc(hidden)]
+    pub fn forward_text_layer_last_trace_on(
+        &self,
+        input_ids: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Vec<Array>> {
+        self.reject_multimodal_tokens(input_ids)?;
+        self.text.forward_layer_last_trace_on(input_ids, target)
+    }
+
+    #[doc(hidden)]
+    pub fn forward_text_layer0_stage_last_trace_on(
+        &self,
+        input_ids: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Vec<Array>> {
+        self.reject_multimodal_tokens(input_ids)?;
+        self.text
+            .forward_text_layer0_stage_last_trace_on(input_ids, target)
+    }
+
     pub fn config(&self) -> &super::config::Gemma4TextConfig {
         self.text.config()
+    }
+
+    pub fn hidden_dtype(&self) -> Dtype {
+        self.text.hidden_dtype()
+    }
+
+    pub fn embed_on(&self, input_ids: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
+        self.text.embed_on(input_ids, target)
+    }
+
+    pub fn project_hidden_on(
+        &self,
+        hidden: &Array,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let logits = self.text.as_output_on(hidden, target)?;
+        match self.config().final_logit_softcapping {
+            Some(softcap) => logit_softcap_on(&logits, softcap, target),
+            None => Ok(logits),
+        }
     }
 
     fn slice_last_and_project(
@@ -209,11 +259,7 @@ impl Gemma4Model {
             )?,
             _ => hidden.clone(),
         };
-        let logits = self.text.as_output_on(&last_hidden, target)?;
-        match self.config().final_logit_softcapping {
-            Some(softcap) => logit_softcap_on(&logits, softcap, target),
-            None => Ok(logits),
-        }
+        self.project_hidden_on(&last_hidden, target)
     }
 
     pub fn forward_on(
@@ -257,6 +303,30 @@ impl Gemma4Model {
             ));
         }
         Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_text_hidden_with_shared_kv_on(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Gemma4TextForwardOutput> {
+        let target = target.into();
+        let _ = position_ids;
+        let _ = decode_mask;
+        self.reject_multimodal_tokens(input_ids)?;
+        let hidden = self.text.embed_on(input_ids, target)?;
+        self.text.forward_embeddings_with_shared_kv_on(
+            &hidden,
+            input_ids,
+            per_row_lens,
+            cache,
+            target,
+        )
     }
 
     fn approx_weight_bytes(&self) -> usize {
@@ -315,14 +385,14 @@ impl Gemma4Model {
         if let Some(image_id) = self.image_token_id {
             if ids.contains(&image_id) {
                 return Err(anyhow!(
-                    "Gemma4Model: image token {image_id} encountered, but Gemma4 vision/audio is out of scope for this Dense text-only task"
+                    "Gemma4Model: image token {image_id} encountered on text-only forward path; use the VL path with image inputs"
                 ));
             }
         }
         if let Some(audio_id) = self.audio_token_id {
             if ids.contains(&audio_id) {
                 return Err(anyhow!(
-                    "Gemma4Model: audio token {audio_id} encountered, but Gemma4 vision/audio is out of scope for this Dense text-only task"
+                    "Gemma4Model: audio token {audio_id} encountered, but Gemma4 audio is unsupported"
                 ));
             }
         }
@@ -365,6 +435,32 @@ impl Gemma4Model {
         image_token_id: i32,
         target: StreamOrDevice,
     ) -> Result<Array> {
+        Ok(self
+            .forward_vl_hidden_with_shared_kv_on(
+                input_ids,
+                _position_ids,
+                per_row_lens,
+                _decode_mask,
+                cache,
+                vision_embeds_slice,
+                image_token_id,
+                target,
+            )?
+            .hidden)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_vl_hidden_with_shared_kv_on(
+        &self,
+        input_ids: &Array,
+        _position_ids: &Array,
+        per_row_lens: Option<&[i32]>,
+        _decode_mask: Option<&Array>,
+        cache: Option<&mut [LayerCache]>,
+        vision_embeds_slice: Option<&Array>,
+        image_token_id: i32,
+        target: StreamOrDevice,
+    ) -> Result<Gemma4TextForwardOutput> {
         let profile = vl_profile_enabled();
         let total_t0 = Instant::now();
         let t0 = Instant::now();
@@ -403,7 +499,7 @@ impl Gemma4Model {
             );
         }
         let t0 = Instant::now();
-        let hidden = self.text.forward_embeddings_on(
+        let out = self.text.forward_embeddings_with_shared_kv_on(
             &hidden,
             &per_layer_ids,
             per_row_lens,
@@ -412,7 +508,7 @@ impl Gemma4Model {
         )?;
         vl_profile_eval(
             "forward_vl_text_forward_embeddings",
-            &[&hidden],
+            &[&out.hidden],
             t0,
             profile,
         )?;
@@ -422,7 +518,89 @@ impl Gemma4Model {
                 total_t0.elapsed().as_secs_f64() * 1000.0
             );
         }
-        Ok(hidden)
+        Ok(out)
+    }
+
+    fn compute_unified_vision_embeds(
+        &self,
+        pixel_values: &[Array],
+        grid_thw: &[(i32, i32, i32)],
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let target: StreamOrDevice = target;
+        let profile = vl_profile_enabled();
+        let total_t0 = Instant::now();
+        let vision = self
+            .unified_vision
+            .as_ref()
+            .ok_or_else(|| anyhow!("Gemma4Model has no unified vision_embedder"))?;
+        let embed_vision = self
+            .embed_vision
+            .as_ref()
+            .ok_or_else(|| anyhow!("Gemma4Model has no embed_vision projection"))?;
+        let cfg = self
+            .vision_config
+            .as_ref()
+            .ok_or_else(|| anyhow!("Gemma4Model has no vision_config"))?;
+        let mut per_image = Vec::with_capacity(pixel_values.len());
+        for (idx, (pv, &(t, gh, gw))) in pixel_values.iter().zip(grid_thw.iter()).enumerate() {
+            if t != 1 {
+                return Err(anyhow!(
+                    "Gemma4 unified vision currently expects image grid temporal dimension 1, got {t}"
+                ));
+            }
+            let positions = unified_position_ids_for_grid(gh, gw, cfg)?;
+            let valid_count = (gh / cfg.pooling_kernel_size) * (gw / cfg.pooling_kernel_size);
+            let t0 = Instant::now();
+            let features = vision.forward_on(pv, &positions, target)?;
+            vl_profile_eval("compute_unified_vision_embedder", &[&features], t0, profile)?;
+            let t0 = Instant::now();
+            let projected = embed_vision.forward_on(&features, target)?;
+            vl_profile_eval(
+                "compute_unified_embed_vision_projection",
+                &[&projected],
+                t0,
+                profile,
+            )?;
+            let shape = projected.shape();
+            let dims = shape.as_slice();
+            if dims.len() != 3 || dims[0] != 1 || dims[1] != cfg.default_output_length {
+                return Err(anyhow!(
+                    "Gemma4Model::compute_unified_vision_embeds image {idx}: expected projected [1,{},H], got {dims:?}",
+                    cfg.default_output_length
+                ));
+            }
+            if valid_count <= 0 || valid_count > dims[1] {
+                return Err(anyhow!(
+                    "Gemma4Model::compute_unified_vision_embeds image {idx}: valid_count {valid_count} out of range for projected length {}",
+                    dims[1]
+                ));
+            }
+            let hidden = dims[2];
+            let sliced = mlx::ops::indexing::slice_strided_on(
+                &projected,
+                &[0_i32, 0, 0][..],
+                &[1_i32, valid_count, hidden][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?;
+            let out = sliced.reshape_on((valid_count, hidden), target)?;
+            per_image.push(out);
+        }
+
+        let out = if per_image.len() == 1 {
+            per_image.pop().expect("len checked")
+        } else {
+            let refs: Vec<&Array> = per_image.iter().collect();
+            mlx::ops::shape::concatenate_on(&refs, 0, target)?
+        };
+        if profile {
+            tracing::info!(
+                "[gemma4-vl-profile] compute_unified_vision_embeds_total_ms={:.3}",
+                total_t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(out)
     }
 }
 
@@ -628,6 +806,9 @@ impl crate::core::scheduler::DenseVlMethods for Gemma4Model {
                 pixel_values.len(),
                 grid_thw.len()
             ));
+        }
+        if self.unified_vision.is_some() {
+            return self.compute_unified_vision_embeds(pixel_values, grid_thw, target);
         }
         let vision = self.vision.as_ref().ok_or_else(|| {
             anyhow!("Gemma4Model has no vision_tower; use Loader::open_multimodal")

@@ -19,9 +19,13 @@ use ironmlx::core::speculative::{
     MtpSpeculativeStats, MtpTextGenerationStream,
 };
 use ironmlx::core::{GenerateRequest, GenerationStream, Loader, Model, Sampler, Scheduler};
+use ironmlx::models::gemma4::{
+    Gemma4AssistantModel, Gemma4DrafterGenerationStream, Gemma4DrafterTraceWindow,
+};
 use ironmlx::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF;
 use ironmlx::models::{
-    Glm4MoeLiteModel, LlamaModel, ModelArchitecture, Qwen35Model, Qwen35MoeModel, Qwen36MoeModel,
+    Gemma4Model, Glm4MoeLiteModel, LlamaModel, ModelArchitecture, Qwen35Model, Qwen35MoeModel,
+    Qwen36MoeModel,
 };
 use ironmlx::Tokenizer;
 use serde::Serialize;
@@ -54,6 +58,10 @@ struct Args {
     /// picks a model-aware default from local benchmark policy.
     #[arg(long)]
     mtp_draft_tokens: Option<usize>,
+
+    /// Record the first N Gemma4 drafter speculative windows into JSON.
+    #[arg(long, default_value_t = 0)]
+    mtp_trace_windows: usize,
 
     /// Number of generated tokens per request.
     #[arg(long, default_value_t = 16)]
@@ -179,6 +187,7 @@ struct Meta {
     model_dir: String,
     mtp_model_dir: Option<String>,
     mtp_draft_tokens: Option<usize>,
+    mtp_trace_windows: usize,
     prompt_file: String,
     prompt_tokens: usize,
     max_tokens: usize,
@@ -228,6 +237,8 @@ struct Record {
     finish_reason: Option<&'static str>,
     valid: bool,
     mtp_stats: Option<MtpRecordStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mtp_trace: Option<Vec<MtpTraceWindowRecord>>,
     active_kv_stats: Option<ActiveKvRecordStats>,
 }
 
@@ -241,6 +252,8 @@ struct MtpRecordStats {
     windows: usize,
     drafted_tokens: usize,
     accepted_draft_tokens: usize,
+    draft_attempts_by_position: Vec<usize>,
+    draft_accepts_by_position: Vec<usize>,
     rollback_count: usize,
     mtp_cache_reuse_count: usize,
     mtp_cache_reused_tokens: usize,
@@ -254,6 +267,27 @@ struct MtpRecordStats {
     main_rollback_us: u64,
     mtp_cache_commit_us: u64,
     mtp_cache_restore_us: u64,
+}
+
+#[derive(Serialize)]
+struct MtpTraceWindowRecord {
+    history_len: usize,
+    verify_start_pos: i32,
+    draft_tokens: Vec<u32>,
+    verified_tokens: Vec<u32>,
+    accepted_draft_len: usize,
+}
+
+impl From<Gemma4DrafterTraceWindow> for MtpTraceWindowRecord {
+    fn from(window: Gemma4DrafterTraceWindow) -> Self {
+        Self {
+            history_len: window.history_len,
+            verify_start_pos: window.verify_start_pos,
+            draft_tokens: window.draft_tokens,
+            verified_tokens: window.verified_tokens,
+            accepted_draft_len: window.accepted_draft_len,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -323,6 +357,7 @@ struct RecordInput {
     finish_reason: Option<&'static str>,
     max_tokens: usize,
     mtp_stats: Option<MtpRecordStats>,
+    mtp_trace: Option<Vec<MtpTraceWindowRecord>>,
     active_kv_stats: Option<ActiveKvRecordStats>,
 }
 
@@ -332,6 +367,8 @@ impl From<MtpSpeculativeStats> for MtpRecordStats {
             windows: stats.windows,
             drafted_tokens: stats.drafted_tokens,
             accepted_draft_tokens: stats.accepted_draft_tokens,
+            draft_attempts_by_position: stats.draft_attempts_by_position,
+            draft_accepts_by_position: stats.draft_accepts_by_position,
             rollback_count: stats.rollback_count,
             mtp_cache_reuse_count: stats.mtp_cache_reuse_count,
             mtp_cache_reused_tokens: stats.mtp_cache_reused_tokens,
@@ -403,9 +440,17 @@ fn main() -> Result<()> {
             let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
             run_for_model(&model, &tokenizer, &args, load_ms)
         }
-        ModelArchitecture::Gemma4 => Err(anyhow!(
-            "unsupported model_type: gemma4 (expected 'qwen3_5', 'qwen3_5_moe', or 'glm4_moe_lite')"
-        )),
+        ModelArchitecture::Gemma4 => {
+            let model = Gemma4Model::from_loader(&loader).context("Gemma4Model::from_loader")?;
+            let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+            run_for_gemma4_model(
+                &model,
+                &tokenizer,
+                &args,
+                loader.config_raw_value(),
+                load_ms,
+            )
+        }
         ModelArchitecture::Llama => {
             let model = LlamaModel::from_loader(&loader).context("LlamaModel::from_loader")?;
             let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
@@ -682,6 +727,7 @@ where
             model_dir: args.model.display().to_string(),
             mtp_model_dir: None,
             mtp_draft_tokens: None,
+            mtp_trace_windows: args.mtp_trace_windows,
             prompt_file: args.prompt_file.display().to_string(),
             prompt_tokens: prompt_ids.len(),
             max_tokens: args.max_tokens,
@@ -813,6 +859,136 @@ where
                 .as_ref()
                 .map(|dir| dir.display().to_string()),
             mtp_draft_tokens,
+            mtp_trace_windows: args.mtp_trace_windows,
+            prompt_file: args.prompt_file.display().to_string(),
+            prompt_tokens: prompt_ids.len(),
+            max_tokens: args.max_tokens,
+            prefill_chunk_size: args.prefill_chunk_size,
+            kv_quant: args.kv_quant,
+            paged_prefix_cache_dir: scheduler_features
+                .paged_prefix_cache
+                .as_ref()
+                .map(|config| config.root.display().to_string()),
+            paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
+            paged_prefix_cache_max_pages: scheduler_features
+                .paged_prefix_cache
+                .as_ref()
+                .map(|config| config.max_pages),
+            active_kv_offload: scheduler_features.active_kv_offload.enabled,
+            active_kv_offload_dir: scheduler_features.active_kv_offload.enabled.then(|| {
+                scheduler_features
+                    .active_kv_offload
+                    .root
+                    .display()
+                    .to_string()
+            }),
+            active_kv_hot_window_pages: scheduler_features
+                .active_kv_offload
+                .hot_window_pages_override,
+            active_kv_chunk_pages: scheduler_features.active_kv_offload.chunk_pages_override,
+            b_max: args.b_max,
+            effective_cap_max,
+            warmup_runs: args.warmup_runs,
+            measured_runs: args.runs,
+            load_ms,
+        },
+        summary: summarize(&records),
+        warmups,
+        records,
+    };
+
+    std::fs::write(&args.out, serde_json::to_string_pretty(&output)? + "\n")
+        .with_context(|| format!("writing {}", args.out.display()))?;
+    Ok(())
+}
+
+fn run_for_gemma4_model(
+    model: &Gemma4Model,
+    tokenizer: &Tokenizer,
+    args: &Args,
+    raw_config: &serde_json::Value,
+    load_ms: f64,
+) -> Result<()> {
+    let rendered_prompt = std::fs::read_to_string(&args.prompt_file)
+        .with_context(|| format!("reading {}", args.prompt_file.display()))?;
+    let prompt_ids = tokenizer.encode(&rendered_prompt, false)?;
+    if prompt_ids.is_empty() {
+        return Err(anyhow!("prompt_file encoded to zero tokens"));
+    }
+
+    let effective_cap_max = args.effective_cap_max.unwrap_or_else(|| {
+        prompt_ids
+            .len()
+            .saturating_add(args.max_tokens)
+            .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF as usize)
+    });
+    let scheduler_features = resolve_scheduler_features(args, effective_cap_max)?;
+    let scheduler_config = SchedulerBenchConfig {
+        features: &scheduler_features,
+        effective_cap_max,
+    };
+
+    let mtp_draft_tokens = args.mtp_model_dir.as_ref().map(|_| {
+        resolve_mtp_draft_tokens(
+            raw_config,
+            args.mtp_draft_tokens
+                .map(MtpDraftTokensArg::Explicit)
+                .unwrap_or(MtpDraftTokensArg::Omitted),
+        )
+    });
+
+    let drafter = if args.mtp_model_dir.is_some() {
+        let mtp_dir = args
+            .mtp_model_dir
+            .as_ref()
+            .ok_or_else(|| anyhow!("--mtp-model-dir is required for Gemma4 drafter benchmarks"))?;
+        let drafter_loader =
+            Loader::open_gemma4_drafter(mtp_dir).context("Loader::open_gemma4_drafter")?;
+        Some(
+            Gemma4AssistantModel::from_loader(&drafter_loader)
+                .context("Gemma4AssistantModel::from_loader")?,
+        )
+    } else {
+        None
+    };
+
+    let mut warmups = Vec::with_capacity(args.warmup_runs);
+    for _ in 0..args.warmup_runs {
+        warmups.push(run_once_gemma4(
+            model,
+            drafter.as_ref(),
+            tokenizer,
+            &prompt_ids,
+            args,
+            scheduler_config,
+            mtp_draft_tokens,
+        )?);
+    }
+
+    let mut records = Vec::with_capacity(args.runs);
+    for _ in 0..args.runs {
+        records.push(run_once_gemma4(
+            model,
+            drafter.as_ref(),
+            tokenizer,
+            &prompt_ids,
+            args,
+            scheduler_config,
+            mtp_draft_tokens,
+        )?);
+    }
+
+    let output = BenchOutput {
+        meta: Meta {
+            backend: "ironmlx-core",
+            mode: args.mode,
+            model_dir: args.model.display().to_string(),
+            mtp_model_dir: args
+                .mtp_model_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string()),
+            mtp_draft_tokens,
+            mtp_trace_windows: args.mtp_trace_windows,
             prompt_file: args.prompt_file.display().to_string(),
             prompt_tokens: prompt_ids.len(),
             max_tokens: args.max_tokens,
@@ -914,6 +1090,42 @@ where
     }
 }
 
+fn run_once_gemma4(
+    model: &Gemma4Model,
+    drafter: Option<&Gemma4AssistantModel>,
+    tokenizer: &Tokenizer,
+    prompt_ids: &[u32],
+    args: &Args,
+    scheduler_config: SchedulerBenchConfig<'_>,
+    mtp_draft_tokens: Option<usize>,
+) -> Result<Record> {
+    match args.mode {
+        BenchMode::Gs => run_generation_stream(model, tokenizer, prompt_ids, args),
+        BenchMode::Mtp => {
+            let drafter =
+                drafter.ok_or_else(|| anyhow!("mtp-text mode requires a loaded Gemma4 drafter"))?;
+            let mtp_draft_tokens = mtp_draft_tokens
+                .ok_or_else(|| anyhow!("Gemma4 drafter run missing resolved draft tokens"))?;
+            run_gemma4_drafter_generation_stream(
+                model,
+                drafter,
+                tokenizer,
+                prompt_ids,
+                args,
+                mtp_draft_tokens,
+            )
+        }
+        BenchMode::Scheduler => {
+            if drafter.is_some() {
+                return Err(anyhow!(
+                    "scheduler-text with --mtp-model-dir is not supported for Gemma4 in ironmlx-core-bench; use mtp-text"
+                ));
+            }
+            run_scheduler(model, tokenizer, prompt_ids, args, scheduler_config)
+        }
+    }
+}
+
 fn run_generation_stream<M>(
     model: &M,
     tokenizer: &Tokenizer,
@@ -956,6 +1168,7 @@ where
         finish_reason,
         max_tokens: args.max_tokens,
         mtp_stats: None,
+        mtp_trace: None,
         active_kv_stats: None,
     }))
 }
@@ -1012,6 +1225,7 @@ where
         finish_reason,
         max_tokens: args.max_tokens,
         mtp_stats: None,
+        mtp_trace: None,
         active_kv_stats: active_kv_stats
             .as_ref()
             .map(|stats| ActiveKvRecordStats::from(stats.snapshot())),
@@ -1064,6 +1278,65 @@ where
         finish_reason,
         max_tokens: args.max_tokens,
         mtp_stats: Some(mtp_stats),
+        mtp_trace: None,
+        active_kv_stats: None,
+    }))
+}
+
+fn run_gemma4_drafter_generation_stream(
+    model: &Gemma4Model,
+    drafter: &Gemma4AssistantModel,
+    tokenizer: &Tokenizer,
+    prompt_ids: &[u32],
+    args: &Args,
+    mtp_draft_tokens: usize,
+) -> Result<Record> {
+    let request = make_request(model, tokenizer, prompt_ids, args);
+    let cfg = MtpSpeculativeConfig::new(mtp_draft_tokens, request.sampler)?;
+    let started = Instant::now();
+    let mut stream = Gemma4DrafterGenerationStream::new(model, drafter, tokenizer, request, cfg)?;
+    stream.set_trace_window_limit(args.mtp_trace_windows);
+    let mut first_ms = None;
+    let mut generated_token_ids = Vec::with_capacity(args.max_tokens);
+    let mut generated_text = String::new();
+    let mut finish_reason = None;
+
+    while let Some(event) = stream.next_token()? {
+        if first_ms.is_none() {
+            first_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        generated_token_ids.push(event.token);
+        generated_text.push_str(&event.text);
+        finish_reason = event.finish_reason;
+        if finish_reason.is_some() {
+            break;
+        }
+    }
+    mlx::transforms::synchronize()?;
+    let e2e_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let ttft_ms =
+        first_ms.ok_or_else(|| anyhow!("Gemma4 drafter generation stream produced no tokens"))?;
+    let mtp_stats = stream.stats().into();
+    let mtp_trace = (!stream.trace_windows().is_empty()).then(|| {
+        stream
+            .trace_windows()
+            .iter()
+            .cloned()
+            .map(MtpTraceWindowRecord::from)
+            .collect()
+    });
+    Ok(make_record(RecordInput {
+        mode: args.mode,
+        ttft_ms,
+        e2e_ms,
+        generated: GeneratedOutput {
+            token_ids: generated_token_ids,
+            text: generated_text,
+        },
+        finish_reason,
+        max_tokens: args.max_tokens,
+        mtp_stats: Some(mtp_stats),
+        mtp_trace,
         active_kv_stats: None,
     }))
 }
@@ -1127,6 +1400,7 @@ where
         finish_reason,
         max_tokens: args.max_tokens,
         mtp_stats: Some(mtp_stats),
+        mtp_trace: None,
         active_kv_stats: active_kv_stats
             .as_ref()
             .map(|stats| ActiveKvRecordStats::from(stats.snapshot())),
@@ -1194,6 +1468,7 @@ fn make_record(input: RecordInput) -> Record {
         finish_reason,
         max_tokens,
         mtp_stats,
+        mtp_trace,
         active_kv_stats,
     } = input;
     let decode_time_ms = (e2e_ms - ttft_ms).max(0.0);
@@ -1215,6 +1490,7 @@ fn make_record(input: RecordInput) -> Record {
         finish_reason,
         valid: finish_reason == Some("length") && generated_tokens >= max_tokens,
         mtp_stats,
+        mtp_trace,
         active_kv_stats,
     }
 }
@@ -1337,6 +1613,26 @@ mod tests {
     }
 
     #[test]
+    fn mtp_trace_windows_parse_explicit_value() {
+        let args = parse_args(&[
+            "ironmlx-core-bench",
+            "--model",
+            "/tmp/model",
+            "--prompt-file",
+            "/tmp/prompt.txt",
+            "--mode",
+            "mtp-text",
+            "--mtp-model-dir",
+            "/tmp/mtp",
+            "--mtp-trace-windows",
+            "4",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        assert_eq!(args.mtp_trace_windows, 4);
+    }
+
+    #[test]
     fn kv_quant_parses_k3v4_for_core_bench() {
         let args = parse_args(&[
             "ironmlx-core-bench",
@@ -1355,6 +1651,18 @@ mod tests {
             args.kv_quant.turboquant_bits(),
             Some(TurboQuantKVBits::K3V4)
         );
+    }
+
+    #[test]
+    fn mtp_record_stats_preserves_position_buckets() {
+        let mut stats = MtpSpeculativeStats::default();
+        stats.record_window_acceptance(3, 1);
+        stats.record_window_acceptance(2, 2);
+
+        let record = MtpRecordStats::from(stats);
+
+        assert_eq!(record.draft_attempts_by_position, vec![2, 2, 1]);
+        assert_eq!(record.draft_accepts_by_position, vec![2, 1, 0]);
     }
 
     #[test]
@@ -1663,6 +1971,8 @@ mod tests {
                 windows: 1,
                 drafted_tokens: 2,
                 accepted_draft_tokens: 1,
+                draft_attempts_by_position: vec![1, 1],
+                draft_accepts_by_position: vec![1, 0],
                 rollback_count: 1,
                 mtp_cache_reuse_count: 0,
                 mtp_cache_reused_tokens: 0,
@@ -1677,6 +1987,7 @@ mod tests {
                 mtp_cache_commit_us: 0,
                 mtp_cache_restore_us: 0,
             }),
+            mtp_trace: None,
             active_kv_stats: None,
         });
 

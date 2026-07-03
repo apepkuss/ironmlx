@@ -10,16 +10,16 @@ import Testing
         .appendingPathComponent("config", isDirectory: true)
         .appendingPathComponent("app_config.json")
     let configStore = AppConfigStore(url: configURL)
-    configStore.save(AppConfig(port: 9068))
+    configStore.save(AppConfig(port: 19068))
 
     let backend = FakeMenuRestartBackend()
-    backend.isRunning = true
     let scanner = LocalModelScanner(rootURL: root)
     let coordinator = BackendRestartCoordinator(
         scanner: scanner,
         parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
         clientFactory: { _, _ in FakeMenuRestartLoader() }
     )
+    let notificationCenter = NotificationCenter()
     let dashboardBackend = BackendProcessManager(configStore: configStore, scanner: scanner)
     let dashboard = DashboardWindowController(configStore: configStore, backend: dashboardBackend)
     let controller = MenuBarController(
@@ -27,9 +27,11 @@ import Testing
         backend: backend,
         dashboard: dashboard,
         scanner: scanner,
-        restartCoordinator: coordinator
+        restartCoordinator: coordinator,
+        notificationCenter: notificationCenter
     )
 
+    backend.isRunning = true
     controller.restartServer(NSMenuItem())
 
     let snapshot = controller.rebuildMenu()
@@ -42,10 +44,9 @@ import Testing
         .appendingPathComponent("config", isDirectory: true)
         .appendingPathComponent("app_config.json")
     let configStore = AppConfigStore(url: configURL)
-    configStore.save(AppConfig(port: 9068))
+    configStore.save(AppConfig(port: 19068))
 
     let backend = FakeMenuRestartBackend()
-    backend.isRunning = true
     let loader = FakeMenuRestartLoader()
     let scanner = LocalModelScanner(rootURL: root)
     let coordinator = BackendRestartCoordinator(
@@ -53,6 +54,7 @@ import Testing
         parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
         clientFactory: { _, _ in loader }
     )
+    let notificationCenter = NotificationCenter()
     let dashboardBackend = BackendProcessManager(configStore: configStore, scanner: scanner)
     let dashboard = DashboardWindowController(configStore: configStore, backend: dashboardBackend)
     let controller = MenuBarController(
@@ -60,19 +62,67 @@ import Testing
         backend: backend,
         dashboard: dashboard,
         scanner: scanner,
-        restartCoordinator: coordinator
+        restartCoordinator: coordinator,
+        notificationCenter: notificationCenter
     )
 
+    backend.isRunning = true
     controller.restartServer(NSMenuItem())
 
     try await waitForMenuRestart {
-        await loader.calls.contains("register:mlx-community/Tiny-4bit:\(snapshot.path):false:nil")
+        await loader.calls.contains("register:mlx-community/Tiny-4bit:\(snapshot.path):false:nil:false:nil:nil")
     }
     #expect(backend.calls == [
         "stop",
         "start",
     ])
     #expect(configStore.load().loadedModels == [])
+}
+
+@Test @MainActor func menuBarStopServerNotifiesDashboardToRefreshLoadedModelState() async throws {
+    let (root, _) = try menuRestartModelRoot(repoID: "mlx-community/Tiny-4bit")
+    let configURL = root
+        .appendingPathComponent("config", isDirectory: true)
+        .appendingPathComponent("app_config.json")
+    let configStore = AppConfigStore(url: configURL)
+    configStore.save(AppConfig(port: 9068, loadedModels: ["mlx-community/Tiny-4bit"]))
+    let backend = FakeMenuRestartBackend()
+    backend.isRunning = true
+    let scanner = LocalModelScanner(rootURL: root)
+    let notificationCenter = NotificationCenter()
+    let dashboardBackend = BackendProcessManager(configStore: configStore, scanner: scanner)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: dashboardBackend)
+    let controller = MenuBarController(
+        configStore: configStore,
+        backend: backend,
+        dashboard: dashboard,
+        scanner: scanner,
+        notificationCenter: notificationCenter
+    )
+    let probe = MenuLoadedModelsNotificationProbe()
+    notificationCenter.addObserver(
+        probe,
+        selector: #selector(MenuLoadedModelsNotificationProbe.loadedModelsDidChange(_:)),
+        name: .ironMLXLoadedModelsDidChange,
+        object: controller
+    )
+    defer {
+        notificationCenter.removeObserver(probe)
+    }
+
+    controller.stopServer(NSMenuItem())
+
+    #expect(probe.notified)
+    #expect(backend.calls == ["stop"])
+}
+
+@MainActor
+private final class MenuLoadedModelsNotificationProbe: NSObject {
+    private(set) var notified = false
+
+    @objc func loadedModelsDidChange(_ notification: Notification) {
+        notified = true
+    }
 }
 
 private func menuRestartModelRoot(repoID: String) throws -> (root: URL, snapshot: URL) {
@@ -141,9 +191,12 @@ private actor FakeMenuRestartLoader: BackendModelLoading {
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int?,
+        pinned: Bool,
+        mtpModelDir: String?,
+        mtpDraftTokens: Int?,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
-        calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil")")
+        calls.append("register:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
         return BackendModelAdminResponse(
             success: true,
             status: "registered",
@@ -160,9 +213,14 @@ private actor FakeMenuRestartLoader: BackendModelLoading {
         model: String,
         modelDir: String,
         setDefault: Bool,
-        maxCacheCap: Int?
+        maxCacheCap: Int?,
+        pinned: Bool,
+        mtpModelDir: String?,
+        mtpDraftTokens: Int?,
+        reloadWhenIdle: Bool,
+        samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse {
-        calls.append("load:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil")")
+        calls.append("load:\(model):\(modelDir):\(setDefault):\(maxCacheCap.map(String.init) ?? "nil"):\(pinned):\(mtpModelDir ?? "nil"):\(mtpDraftTokens.map(String.init) ?? "nil")")
         return BackendModelAdminResponse(
             success: true,
             status: "loaded",
@@ -175,7 +233,8 @@ private actor FakeMenuRestartLoader: BackendModelLoading {
                     path: modelDir,
                     architecture: "llm",
                     isDefault: true,
-                    maxPositionEmbeddings: 4096
+                    maxPositionEmbeddings: 4096,
+                    pinned: pinned
                 ),
             ],
             warningCode: nil,

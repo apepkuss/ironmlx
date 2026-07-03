@@ -1,0 +1,8 @@
+__pycache__/
+case_*_input_ids.npy
+case_*_expected.json
+case_*_expected_after_append_logits.npy
+case_*_expected_layer_last_hiddens.npy
+case_*_expected_layer0_stage_last_hiddens.npy
+case_*_expected_drafter_first_logits.npy
+case_*_expected_drafter_round.json

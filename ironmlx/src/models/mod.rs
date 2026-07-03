@@ -40,7 +40,7 @@ pub use diffusion_gemma::{
     DiffusionGemmaConfig, DiffusionGemmaGenerateEvent, DiffusionGemmaGenerationConfig,
     DiffusionGemmaModel, DiffusionGemmaTextConfig,
 };
-pub use gemma4::{Gemma4Config, Gemma4Model, Gemma4TextConfig};
+pub use gemma4::{Gemma4AssistantConfig, Gemma4Config, Gemma4Model, Gemma4TextConfig};
 pub use glm4_moe_lite::{Glm4MoeLiteConfig, Glm4MoeLiteModel};
 pub use llama::{LlamaConfig, LlamaModel};
 pub use minicpmv4_6::MiniCpmV46Model;

@@ -231,7 +231,7 @@ fn qembedding_decode_on(
     let Some(biases) = biases else {
         return Ok(None);
     };
-    if group_size != 64 || bits != 4 || tokens.shape().numel() != 1 {
+    if group_size != 64 || bits != 4 {
         return Ok(None);
     }
 
@@ -258,6 +258,19 @@ fn qembedding_decode_on(
     let mut out_dims = tokens.shape().as_slice().to_vec();
     out_dims.push(dim);
     let out_shape = Shape::from(out_dims);
+    let token_count = i32::try_from(tokens.shape().numel()).map_err(|_| {
+        anyhow!(
+            "Embedding quantized decode input too large: {} tokens",
+            tokens.shape().numel()
+        )
+    })?;
+    if token_count == 0 {
+        return Ok(Some(Array::zeros_on(
+            out_shape,
+            output_dtype,
+            target.into(),
+        )?));
+    }
     let target = target.into();
     let kernel = qembedding_decode_kernel()?;
     let mut outputs = kernel
@@ -265,12 +278,13 @@ fn qembedding_decode_on(
         .inputs(&[tokens, weight, scales, biases])
         .output_shapes(&[out_shape])
         .output_dtypes(&[output_dtype])
-        .grid(dim, 1, 1)
-        .threadgroup(256.min(dim), 1, 1)
+        .grid(token_count * dim, 1, 1)
+        .threadgroup(256.min(token_count * dim), 1, 1)
         .stream(target)
         .template_int("PACKED_DIM", packed_dim)
         .template_int("GROUPS", dim / group_size)
         .template_int("DIM", dim)
+        .template_int("TOKEN_COUNT", token_count)
         .dispatch()?;
     Ok(Some(outputs.take_at(0)?))
 }
@@ -282,19 +296,21 @@ fn qembedding_decode_kernel() -> Result<&'static MetalKernel> {
     }
 
     let source = r#"
-        uint d = thread_position_in_grid.x;
-        if (d >= DIM) {
+        uint elem = thread_position_in_grid.x;
+        if (elem >= TOKEN_COUNT * DIM) {
             return;
         }
 
-        uint token = uint(tokens[0]);
+        uint token_idx = elem / DIM;
+        uint d = elem - token_idx * DIM;
+        uint token = uint(tokens[token_idx]);
         uint packed_idx = d >> 3;
         uint shift = (d & 7u) << 2;
         uint q = (w[token * PACKED_DIM + packed_idx] >> shift) & 0x0fu;
         uint group = d >> 6;
         uint sb = token * GROUPS + group;
         float y = float(scales[sb]) * float(q) + float(biases[sb]);
-        out[d] = static_cast<__typeof__(*out)>(y);
+        out[elem] = static_cast<__typeof__(*out)>(y);
     "#;
 
     let kernel = MetalKernel::builder("ironmlx_qembedding_decode_4bit_gs64")
@@ -381,7 +397,11 @@ mod tests {
         assert_eq!(logits.to_vec::<f32>().expect("to_vec"), vec![2.0, 3.0, 5.0]);
     }
 
-    fn assert_quantized_single_token_matches_dequantize(raw_dtype: Dtype) {
+    fn assert_quantized_tokens_match_dequantize(
+        raw_dtype: Dtype,
+        token_values: &[u32],
+        token_shape: &[i32],
+    ) {
         let vocab = 4_i32;
         let dim = 64_i32;
         let group_size = 64_i32;
@@ -397,7 +417,7 @@ mod tests {
         let weight = q[0].clone();
         let scales = q[1].clone();
         let biases = q[2].clone();
-        let tokens: Array = (&[2_u32][..], &[1_i32, 1][..]).try_into().unwrap();
+        let tokens: Array = (token_values, token_shape).try_into().unwrap();
 
         let weight_rows = weight.take(&tokens, 0).unwrap();
         let scales_rows = scales.take(&tokens, 0).unwrap();
@@ -433,25 +453,18 @@ mod tests {
     #[test]
     #[serial(mlx_metal)]
     fn quantized_single_token_forward_matches_dequantize_bfloat16() {
-        assert_quantized_single_token_matches_dequantize(Dtype::Bfloat16);
+        assert_quantized_tokens_match_dequantize(Dtype::Bfloat16, &[2], &[1, 1]);
     }
 
     #[test]
     #[serial(mlx_metal)]
     fn quantized_single_token_forward_matches_dequantize_float32() {
-        assert_quantized_single_token_matches_dequantize(Dtype::Float32);
+        assert_quantized_tokens_match_dequantize(Dtype::Float32, &[2], &[1, 1]);
     }
 
     #[test]
     #[serial(mlx_metal)]
-    fn quantized_decode_rejects_multi_token_input() {
-        let tokens: Array = (&[1_u32, 2][..], &[2_i32][..]).try_into().unwrap();
-        let weight = Array::zeros((4_i32, 8_i32), Dtype::Uint32).unwrap();
-        let scales = Array::zeros((4_i32, 1_i32), Dtype::Float32).unwrap();
-        let biases = Array::zeros((4_i32, 1_i32), Dtype::Float32).unwrap();
-
-        let got =
-            qembedding_decode_on(&tokens, &weight, &scales, Some(&biases), 64, 4, ()).unwrap();
-        assert!(got.is_none());
+    fn quantized_multi_token_forward_matches_dequantize_float32() {
+        assert_quantized_tokens_match_dequantize(Dtype::Float32, &[1, 2, 3, 0], &[2, 2]);
     }
 }

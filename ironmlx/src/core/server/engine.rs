@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -34,7 +34,8 @@ use crate::models::{
 use crate::Result;
 
 use super::{
-    anthropic, diffusion_gemma, health, openai, AppState, SamplingDefaults, VisionInputConfig,
+    anthropic, diffusion_gemma, health, openai, AppState, Gemma4DrafterAppState, SamplingDefaults,
+    VisionInputConfig,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,6 +402,7 @@ pub struct EngineModelConfig {
     pub path: PathBuf,
     pub load_policy: EngineLoadPolicy,
     pub default: bool,
+    pub pinned: bool,
     pub scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     pub mtp: Option<EngineMtpSettings>,
     pub sampling_defaults: SamplingDefaults,
@@ -576,7 +578,10 @@ pub(crate) struct EngineLoadedModelInfo {
     pub path: String,
     pub architecture: String,
     pub is_default: bool,
+    pub pinned: bool,
     pub max_position_embeddings: i32,
+    pub mtp_model_dir: Option<String>,
+    pub mtp_draft_tokens: Option<usize>,
 }
 
 struct EnginePoolInner {
@@ -591,6 +596,7 @@ struct EngineSlot {
     model: EngineModelConfig,
     runtime: EnginePoolRuntimeConfig,
     active_requests: Arc<AtomicUsize>,
+    pinned: AtomicBool,
     state: Mutex<EngineSlotState>,
     notify: Notify,
 }
@@ -691,6 +697,7 @@ struct ModelTtlCandidate {
     id: String,
     state: EngineRuntimeState,
     active_requests: usize,
+    pinned: bool,
     last_used_unix_ms: Option<u64>,
 }
 
@@ -715,6 +722,7 @@ fn select_model_ttl_unload_candidates(
         .filter(|candidate| {
             candidate.state == EngineRuntimeState::Loaded
                 && candidate.active_requests == 0
+                && !candidate.pinned
                 && candidate
                     .last_used_unix_ms
                     .is_some_and(|last_used| now_unix_ms.saturating_sub(last_used) >= ttl_ms)
@@ -855,6 +863,7 @@ enum EngineVariant {
     Qwen35Moe(AppState<Qwen35MoeModel>),
     Qwen36Moe(AppState<Qwen36MoeModel>),
     Gemma4(AppState<Gemma4Model>),
+    Gemma4Drafter(Box<Gemma4DrafterAppState>),
     Glm4MoeLite(AppState<Glm4MoeLiteModel>),
     Llama(AppState<LlamaModel>),
     MiniCpmV46(AppState<MiniCpmV46Model>),
@@ -907,6 +916,7 @@ impl EnginePoolState {
                 model: model.clone(),
                 runtime: runtime.clone(),
                 active_requests: Arc::new(AtomicUsize::new(0)),
+                pinned: AtomicBool::new(model.pinned),
                 state: Mutex::new(EngineSlotState::Unloaded {
                     reason: EngineUnloadReason::Startup,
                     last_error: None,
@@ -1116,6 +1126,7 @@ impl EnginePoolState {
             model: model.clone(),
             runtime: self.inner.runtime.clone(),
             active_requests: Arc::new(AtomicUsize::new(0)),
+            pinned: AtomicBool::new(model.pinned),
             state: Mutex::new(EngineSlotState::Unloaded {
                 reason: EngineUnloadReason::Startup,
                 last_error: None,
@@ -1185,12 +1196,16 @@ impl EnginePoolState {
             .map(str::to_string);
         let existing_slot = self.inner.slots.lock().await.get(&model_id).cloned();
         let slot = match existing_slot {
-            Some(existing) if existing.is_loaded_or_loading().await => existing,
+            Some(existing) if existing.is_loaded_or_loading().await => {
+                existing.set_pinned(model.pinned);
+                existing
+            }
             _ => {
                 let slot = Arc::new(EngineSlot {
                     model: model.clone(),
                     runtime: self.inner.runtime.clone(),
                     active_requests: Arc::new(AtomicUsize::new(0)),
+                    pinned: AtomicBool::new(model.pinned),
                     state: Mutex::new(EngineSlotState::Unloaded {
                         reason: EngineUnloadReason::Startup,
                         last_error: None,
@@ -1236,6 +1251,32 @@ impl EnginePoolState {
                 .with_context(|| format!("missing engine slot `{model_id}`"))?
         };
         slot.unload().await?;
+        Ok(slot.control_result().await)
+    }
+
+    pub(crate) async fn set_model_pinned(
+        &self,
+        requested: &str,
+        pinned: bool,
+    ) -> Result<EngineModelControlResult> {
+        let model_id = self
+            .inner
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(requested))?
+            .to_string();
+        let slot = {
+            let slots = self.inner.slots.lock().await;
+            slots
+                .get(&model_id)
+                .cloned()
+                .with_context(|| format!("missing engine slot `{model_id}`"))?
+        };
+        if !slot.is_loaded().await {
+            bail!("engine model `{model_id}` is not loaded");
+        }
+        slot.set_pinned(pinned);
         Ok(slot.control_result().await)
     }
 
@@ -1296,6 +1337,13 @@ impl EnginePoolState {
                 architecture: engine.architecture().to_string(),
                 is_default: default_model.as_deref() == Some(id.as_str()),
                 max_position_embeddings: health.max_position_embeddings(),
+                pinned: slot.is_pinned(),
+                mtp_model_dir: slot
+                    .model
+                    .mtp
+                    .as_ref()
+                    .map(|mtp| mtp.model_dir.to_string_lossy().into_owned()),
+                mtp_draft_tokens: slot.model.mtp.as_ref().and_then(|mtp| mtp.draft_tokens),
             });
         }
         models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1386,6 +1434,7 @@ impl EnginePoolState {
                 models.push(EngineModelHealth {
                     id: model.id.clone(),
                     load_policy: model.load_policy,
+                    pinned: false,
                     state: EngineRuntimeState::Missing,
                     unload_reason: None,
                     last_error: Some("engine slot missing".to_string()),
@@ -1509,7 +1558,10 @@ impl EnginePoolInner {
         let mut candidates = Vec::new();
         let slots_snapshot = self.slots.lock().await.clone();
         for (id, slot) in &slots_snapshot {
-            if id == target_id || slot.model.load_policy == EngineLoadPolicy::Preload {
+            if id == target_id
+                || slot.model.load_policy == EngineLoadPolicy::Preload
+                || slot.is_pinned()
+            {
                 continue;
             }
             let guard = slot.state.lock().await;
@@ -1540,7 +1592,10 @@ impl EnginePoolInner {
         let EngineSlotState::Loaded { engine, .. } = &*guard else {
             return Ok(false);
         };
-        if slot.active_requests.load(Ordering::SeqCst) != 0 || Arc::strong_count(engine) != 1 {
+        if slot.is_pinned()
+            || slot.active_requests.load(Ordering::SeqCst) != 0
+            || Arc::strong_count(engine) != 1
+        {
             return Ok(false);
         }
         *guard = EngineSlotState::Unloaded {
@@ -1560,6 +1615,14 @@ impl EnginePoolInner {
 }
 
 impl EngineSlot {
+    fn is_pinned(&self) -> bool {
+        self.pinned.load(Ordering::SeqCst)
+    }
+
+    fn set_pinned(&self, pinned: bool) {
+        self.pinned.store(pinned, Ordering::SeqCst);
+    }
+
     async fn is_loaded_or_loading(&self) -> bool {
         matches!(
             &*self.state.lock().await,
@@ -1567,6 +1630,10 @@ impl EngineSlot {
                 | EngineSlotState::Loading { .. }
                 | EngineSlotState::Draining { .. }
         )
+    }
+
+    async fn is_loaded(&self) -> bool {
+        matches!(&*self.state.lock().await, EngineSlotState::Loaded { .. })
     }
 
     async fn ensure_loaded(
@@ -1762,12 +1829,14 @@ impl EngineSlot {
             id: id.to_string(),
             state: snapshot.state,
             active_requests: self.active_requests.load(Ordering::SeqCst),
+            pinned: self.is_pinned(),
             last_used_unix_ms: snapshot.last_used_unix_ms,
         }
     }
 
     async fn unload_if_ttl_expired(&self, now_unix_ms: u64, ttl: Duration) -> bool {
         if self.model.load_policy == EngineLoadPolicy::Preload
+            || self.is_pinned()
             || self.active_requests.load(Ordering::SeqCst) > 0
         {
             return false;
@@ -1900,6 +1969,7 @@ impl EngineSlot {
         EngineModelControlResult {
             id: self.model.id.clone(),
             load_policy: self.model.load_policy,
+            pinned: self.is_pinned(),
             state: snapshot.state,
             unload_reason: snapshot.unload_reason,
             last_error: snapshot.last_error,
@@ -1922,6 +1992,7 @@ impl EngineSlot {
         EngineModelHealth {
             id: self.model.id.clone(),
             load_policy: self.model.load_policy,
+            pinned: self.is_pinned(),
             state: snapshot.state,
             unload_reason: snapshot.unload_reason,
             last_error: snapshot.last_error,
@@ -1947,6 +2018,10 @@ impl EngineVariant {
                 openai::chat_completions(State(state.clone()), Json(req)).await
             }
             Self::Gemma4(state) => openai::chat_completions(State(state.clone()), Json(req)).await,
+            Self::Gemma4Drafter(state) => {
+                openai::gemma4_drafter_chat_completions(State(state.as_ref().clone()), Json(req))
+                    .await
+            }
             Self::Glm4MoeLite(state) => {
                 openai::chat_completions(State(state.clone()), Json(req)).await
             }
@@ -1966,6 +2041,9 @@ impl EngineVariant {
             Self::Qwen35Moe(state) => anthropic::messages(State(state.clone()), Json(req)).await,
             Self::Qwen36Moe(state) => anthropic::messages(State(state.clone()), Json(req)).await,
             Self::Gemma4(state) => anthropic::messages(State(state.clone()), Json(req)).await,
+            Self::Gemma4Drafter(state) => {
+                anthropic::gemma4_drafter_messages(State(state.as_ref().clone()), Json(req)).await
+            }
             Self::Glm4MoeLite(state) => anthropic::messages(State(state.clone()), Json(req)).await,
             Self::Llama(state) => anthropic::messages(State(state.clone()), Json(req)).await,
             Self::MiniCpmV46(state) => anthropic::messages(State(state.clone()), Json(req)).await,
@@ -1988,6 +2066,9 @@ impl EngineVariant {
             }
             Self::Gemma4(state) => {
                 LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
+            }
+            Self::Gemma4Drafter(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.base.health_collector.snapshot()))
             }
             Self::Glm4MoeLite(state) => {
                 LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
@@ -2016,6 +2097,7 @@ impl EngineVariant {
             Self::Qwen35Moe(_) => "qwen3_5_moe",
             Self::Qwen36Moe(_) => "qwen3_6_moe",
             Self::Gemma4(_) => "gemma4",
+            Self::Gemma4Drafter(_) => "gemma4",
             Self::Glm4MoeLite(_) => "glm4_moe_lite",
             Self::Llama(_) => "llama",
             Self::MiniCpmV46(_) => "minicpmv4_6",
@@ -2029,6 +2111,7 @@ impl EngineVariant {
             Self::Qwen35Moe(state) => state.model_weight_bytes,
             Self::Qwen36Moe(state) => state.model_weight_bytes,
             Self::Gemma4(state) => state.model_weight_bytes,
+            Self::Gemma4Drafter(state) => state.base.model_weight_bytes,
             Self::Glm4MoeLite(state) => state.model_weight_bytes,
             Self::Llama(state) => state.model_weight_bytes,
             Self::MiniCpmV46(state) => state.model_weight_bytes,
@@ -2042,6 +2125,7 @@ impl EngineVariant {
             Self::Qwen35Moe(state) => causal_pending_requests(state),
             Self::Qwen36Moe(state) => causal_pending_requests(state),
             Self::Gemma4(state) => causal_pending_requests(state),
+            Self::Gemma4Drafter(state) => causal_pending_requests(&state.base),
             Self::Glm4MoeLite(state) => causal_pending_requests(state),
             Self::Llama(state) => causal_pending_requests(state),
             Self::MiniCpmV46(state) => causal_pending_requests(state),
@@ -2081,9 +2165,11 @@ fn resolve_engine_mtp_config(
         return Ok(None);
     };
     match architecture {
-        ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => {}
+        ModelArchitecture::Qwen35Dense
+        | ModelArchitecture::Qwen35Moe
+        | ModelArchitecture::Gemma4 => {}
         _ => bail!(
-            "engine model `{}` configures MTP for a non-Qwen architecture",
+            "engine model `{}` configures MTP for a non-Qwen/Gemma4 architecture",
             model.id
         ),
     }
@@ -2092,6 +2178,19 @@ fn resolve_engine_mtp_config(
             "engine model `{}` mtp_model_dir must point to a local directory (got '{}')",
             model.id,
             settings.model_dir.display()
+        );
+    }
+    let validation = super::model_manager::validate_mtp_pair(
+        &model.path,
+        &settings.model_dir,
+        settings.draft_tokens,
+    )?;
+    if !validation.compatible {
+        bail!(
+            "engine model `{}` MTP validation failed: {}: {}",
+            model.id,
+            validation.reason_code,
+            validation.message
         );
     }
     let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
@@ -2184,18 +2283,34 @@ async fn load_engine_variant(
                 .map(|vision_config| VisionInputConfig::Gemma4 { vision_config });
             let model_impl =
                 Gemma4Model::from_loader(&loader).context("Gemma4Model::from_loader")?;
-            let state = build_plain_causal_state(
-                model_impl,
-                tokenizer,
-                model,
-                runtime,
-                base_model_weight_bytes,
-                paged_prefix_cache,
-                prefix_lru_cache,
-                vision_input,
-            )
-            .await?;
-            Ok(EngineVariant::Gemma4(state))
+            if let Some(mtp_config) = mtp_config {
+                let state = build_gemma4_drafter_causal_state(
+                    model_impl,
+                    tokenizer,
+                    model,
+                    runtime,
+                    base_model_weight_bytes,
+                    paged_prefix_cache,
+                    prefix_lru_cache,
+                    mtp_config,
+                    vision_input,
+                )
+                .await?;
+                Ok(EngineVariant::Gemma4Drafter(Box::new(state)))
+            } else {
+                let state = build_plain_causal_state(
+                    model_impl,
+                    tokenizer,
+                    model,
+                    runtime,
+                    base_model_weight_bytes,
+                    paged_prefix_cache,
+                    prefix_lru_cache,
+                    vision_input,
+                )
+                .await?;
+                Ok(EngineVariant::Gemma4(state))
+            }
         }
         ModelArchitecture::Glm4MoeLite => {
             let model_impl =
@@ -2493,6 +2608,59 @@ where
     Ok(state.with_sampling_defaults(model.sampling_defaults))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn build_gemma4_drafter_causal_state(
+    model_impl: Gemma4Model,
+    tokenizer: Tokenizer,
+    model: &EngineModelConfig,
+    runtime: &EnginePoolRuntimeConfig,
+    loaded_model_weight_bytes: usize,
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    mtp_config: ResolvedEngineMtpConfig,
+    vision_input: Option<VisionInputConfig>,
+) -> Result<Gemma4DrafterAppState> {
+    let drafter_loader = Loader::open_gemma4_drafter(&mtp_config.model_dir).with_context(|| {
+        format!(
+            "Loader::open_gemma4_drafter {}",
+            mtp_config.model_dir.display()
+        )
+    })?;
+    let total_model_weight_bytes =
+        loaded_model_weight_bytes.saturating_add(drafter_loader.loaded_tensor_bytes());
+    let drafter = crate::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
+        .with_context(|| {
+            format!(
+                "loading Gemma4 assistant drafter from {}",
+                mtp_config.model_dir.display()
+            )
+        })?;
+    let profile = model.scheduler_runtime_profile.clone();
+    let state = super::build_gemma4_drafter_app_state(
+        model_impl,
+        drafter,
+        mtp_config.draft_tokens,
+        tokenizer,
+        model.id.clone(),
+        profile.config.prefill_chunk_size,
+        profile.config.b_max,
+        profile.config.admission_deadline_ms,
+        profile.config.admission_queue_max,
+        profile.config.max_cache_cap,
+        profile.config.decode_cadence_mid_chunk_cap,
+        runtime.kv_cache_turboquant_bits,
+        profile,
+        runtime.scheduler_autotune_report,
+        vision_input,
+        paged_prefix_cache,
+        prefix_lru_cache,
+        Some(total_model_weight_bytes),
+        runtime.active_kv_offload.clone(),
+    )
+    .await?;
+    Ok(state.with_sampling_defaults(model.sampling_defaults))
+}
+
 pub async fn serve_engine_pool(
     config: EnginePoolConfig,
     runtime: EnginePoolRuntimeConfig,
@@ -2654,6 +2822,7 @@ struct OpenAiModelInfo {
 pub(crate) struct EngineModelControlResult {
     pub(crate) id: String,
     load_policy: EngineLoadPolicy,
+    pinned: bool,
     pub(crate) state: EngineRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     unload_reason: Option<EngineUnloadReason>,
@@ -2678,6 +2847,7 @@ struct EnginePoolHealth {
 struct EngineModelHealth {
     id: String,
     load_policy: EngineLoadPolicy,
+    pinned: bool,
     state: EngineRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     unload_reason: Option<EngineUnloadReason>,
@@ -2792,6 +2962,7 @@ mod tests {
             path: path.to_path_buf(),
             load_policy,
             default: false,
+            pinned: false,
             scheduler_runtime_profile: runtime_profile(),
             mtp: None,
             sampling_defaults: SamplingDefaults::default(),
@@ -3129,6 +3300,7 @@ mod tests {
             model: model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
             runtime: runtime_config(),
             active_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+            pinned: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(EngineSlotState::Draining {
                 started_unix_ms: unix_time_ms(),
                 load_attempts: 1,
@@ -3210,24 +3382,35 @@ mod tests {
                     id: "expired".to_string(),
                     state: EngineRuntimeState::Loaded,
                     active_requests: 0,
+                    pinned: false,
                     last_used_unix_ms: Some(1_000),
                 },
                 ModelTtlCandidate {
                     id: "active".to_string(),
                     state: EngineRuntimeState::Loaded,
                     active_requests: 1,
+                    pinned: false,
+                    last_used_unix_ms: Some(1_000),
+                },
+                ModelTtlCandidate {
+                    id: "pinned".to_string(),
+                    state: EngineRuntimeState::Loaded,
+                    active_requests: 0,
+                    pinned: true,
                     last_used_unix_ms: Some(1_000),
                 },
                 ModelTtlCandidate {
                     id: "fresh".to_string(),
                     state: EngineRuntimeState::Loaded,
                     active_requests: 0,
+                    pinned: false,
                     last_used_unix_ms: Some(9_000),
                 },
                 ModelTtlCandidate {
                     id: "unloaded".to_string(),
                     state: EngineRuntimeState::Unloaded,
                     active_requests: 0,
+                    pinned: false,
                     last_used_unix_ms: Some(1_000),
                 },
             ],
@@ -3251,26 +3434,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_pool_state_rejects_enabled_unsupported_model_type_before_lazy_load() {
+    async fn engine_pool_state_accepts_gemma4_unified_model_type_before_lazy_load() {
         let model_dir = write_minimal_model_config("gemma4_unified");
         let config = EnginePoolConfig {
-            default_model: Some("unsupported".to_string()),
+            default_model: Some("gemma4-unified".to_string()),
             max_loaded_models: Some(1),
             models: vec![model_config(
-                "unsupported",
+                "gemma4-unified",
                 &model_dir,
                 EngineLoadPolicy::Lazy,
             )],
         };
 
-        let err = match EnginePoolState::new(config, runtime_config()).await {
-            Ok(_) => panic!("unsupported enabled model_type must fail during EnginePool startup"),
-            Err(error) => error,
-        };
-
-        assert!(
-            format!("{err:#}").contains("unsupported model_type: gemma4_unified"),
-            "unexpected error: {err:#}"
-        );
+        EnginePoolState::new(config, runtime_config())
+            .await
+            .expect("gemma4_unified lazy model type should be accepted");
     }
 }

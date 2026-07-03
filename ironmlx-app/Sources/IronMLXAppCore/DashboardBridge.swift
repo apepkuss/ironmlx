@@ -15,6 +15,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator
     private let restartCoordinator: BackendRestartCoordinator
     private let parameterStore: ModelParameterStore
+    private let notificationCenter: NotificationCenter
 
     public init(
         webView: WKWebView,
@@ -27,7 +28,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         benchmarkService: BenchmarkService = BenchmarkService(),
         benchmarkSessionCoordinator: BenchmarkExclusiveSessionCoordinator = BenchmarkExclusiveSessionCoordinator(),
         restartCoordinator: BackendRestartCoordinator? = nil,
-        parameterStore: ModelParameterStore = .shared
+        parameterStore: ModelParameterStore = .shared,
+        notificationCenter: NotificationCenter = .default
     ) {
         self.webView = webView
         self.configStore = configStore
@@ -39,11 +41,22 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.benchmarkService = benchmarkService
         self.benchmarkSessionCoordinator = benchmarkSessionCoordinator
         self.parameterStore = parameterStore
+        self.notificationCenter = notificationCenter
         self.restartCoordinator = restartCoordinator ?? BackendRestartCoordinator(
             scanner: scanner,
             parameterStore: parameterStore
         )
         super.init()
+        notificationCenter.addObserver(
+            self,
+            selector: #selector(loadedModelsDidChange(_:)),
+            name: .ironMLXLoadedModelsDidChange,
+            object: nil
+        )
+    }
+
+    deinit {
+        notificationCenter.removeObserver(self)
     }
 
     public static let handlerNames = [
@@ -105,7 +118,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         case "restartServer":
             restartBackend()
         case "loadModel", "forceLoadModel":
-            loadBackendModel(modelReference: stringBody(body), callback: .modelLoaded)
+            loadBackendModel(instruction: Self.modelLoadInstruction(from: body), callback: .modelLoaded)
         case "unloadModel":
             unloadBackendModel(modelReference: stringBody(body), callback: .modelUnloaded)
         case "downloadModel":
@@ -164,8 +177,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendFetchResult(path: path, jsonString: (try? Self.jsonString(payload)) ?? "null")
         case "/admin/api/models/local":
             Task {
-                let loadedModels = await self.loadedModelReferences()
-                let models = self.scanner.scan(loadedModels: loadedModels)
+                let state = await self.loadedModelState()
+                let models = self.scanner.scan(
+                    loadedModels: state.references,
+                    pinnedModels: state.pinnedModels,
+                    mtpEnabledModels: state.mtpEnabledModels
+                )
                 let benchmarkModels = models.map {
                     BenchmarkModel(repoID: $0.repoID, loaded: $0.loaded)
                 }
@@ -201,10 +218,17 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             if let model = payload.body["model"]?.stringValue
                 ?? payload.body["model_dir"]?.stringValue
                 ?? payload.body["repo_id"]?.stringValue {
-                loadBackendModel(modelReference: model, callback: .fetch(path: payload.path))
+                loadBackendModel(
+                    instruction: ModelLoadInstruction(modelReference: model, useMtp: nil, mtpModelID: nil),
+                    callback: .fetch(path: payload.path)
+                )
             } else {
                 sendFetchResult(path: payload.path, jsonString: "null")
             }
+        case "/v1/models/pin":
+            setBackendPinnedModel(payload: payload, pinned: true)
+        case "/v1/models/unpin":
+            setBackendPinnedModel(payload: payload, pinned: false)
         case "/admin/api/models/ms/download":
             if let repoID = payload.body["repo_id"]?.stringValue {
                 startModelScopeDownload(repoID: repoID, path: payload.path)
@@ -365,7 +389,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         self.updateConfig {
                             $0.replaceLoadedModels(result.restoredModels, defaultModel: result.defaultModel)
                         }
-                        NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
+                        notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
                     }
                     self.sendFetchResult(path: path, jsonString: json)
                     self.sendScannedModels()
@@ -478,19 +502,34 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         sendJavaScript("onDownloadComplete(\(Self.jsStringLiteral(json)))")
     }
 
-    private func loadBackendModel(modelReference: String, callback: ModelOperationCallback) {
-        let model = modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func loadBackendModel(instruction: ModelLoadInstruction, callback: ModelOperationCallback) {
+        let model = instruction.modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
             deliverModelOperationResult(error: "No model is configured.", callback: callback)
             return
         }
         let config = configStore.load()
+        let pinned = config.pinnedModelReferences.contains(model)
         let resolvedModel = scanner.resolveModelPath(for: model) ?? model
         let maxCacheCap = ModelLoadParameters.maxCacheCap(
             for: model,
             scanner: scanner,
-            parameterStore: parameterStore
+            parameterStore: parameterStore,
+            activeKvOffloadEnabled: config.activeKvOffload == true
         )
+        let mtpRuntime: ModelMtpRuntime?
+        do {
+            mtpRuntime = try ModelMtpRuntimeResolver.runtime(
+                for: model,
+                useMtp: instruction.useMtp,
+                explicitMtpModelID: instruction.mtpModelID,
+                scanner: scanner,
+                parameterStore: parameterStore
+            )
+        } catch {
+            deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+            return
+        }
         Task {
             do {
                 try await MainActor.run {
@@ -510,11 +549,19 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     modelDir: resolvedModel,
                     setDefault: setDefault,
                     maxCacheCap: maxCacheCap,
+                    pinned: pinned,
+                    mtpModelDir: mtpRuntime?.modelDir,
+                    mtpDraftTokens: mtpRuntime?.draftTokens,
                     reloadWhenIdle: false,
                     samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {
+                    self.persistMtpLoadPreferenceIfRequested(
+                        model: model,
+                        instruction: instruction,
+                        mtpRuntime: mtpRuntime
+                    )
                     self.persistBackendLoadedModels(response.loadedModels)
                     self.deliverModelOperationResult(jsonString: json, callback: callback)
                     self.sendScannedModels()
@@ -554,6 +601,58 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func setBackendPinnedModel(payload: APIPostPayload, pinned: Bool) {
+        guard let model = payload.body["model"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !model.isEmpty
+        else {
+            sendFetchResult(
+                path: payload.path,
+                jsonString: "{\"success\":false,\"status\":\"error\",\"error\":\"missing model\"}"
+            )
+            return
+        }
+        let config = configStore.load()
+        Task {
+            do {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                try await client.waitUntilReady()
+                let response = pinned
+                    ? try await client.pinModel(model: model)
+                    : try await client.unpinModel(model: model)
+                let modelID = Self.loadedModelID(matching: model, in: response.loadedModels) ?? model
+                let json = try Self.jsonString(
+                    PinModelBridgeResponse(
+                        success: response.success,
+                        status: response.success ? "ok" : response.status,
+                        model: modelID,
+                        pinned: pinned,
+                        loadedModels: response.loadedModels,
+                        error: response.error
+                    )
+                )
+                await MainActor.run {
+                    if response.success {
+                        self.persistBackendLoadedModels(response.loadedModels)
+                        self.updateConfig { $0.recordPinnedModel(modelID, pinned: pinned) }
+                    }
+                    self.sendFetchResult(path: payload.path, jsonString: json)
+                    self.sendScannedModels()
+                }
+            } catch {
+                let errorJSON = self.backendErrorJSON(error)
+                await MainActor.run {
+                    self.sendFetchResult(path: payload.path, jsonString: errorJSON)
+                }
+            }
+        }
+    }
+
+    private static func loadedModelID(matching model: String, in loadedModels: [BackendLoadedModelInfo]) -> String? {
+        loadedModels.first { candidate in
+            candidate.id == model || candidate.model == model || candidate.path == model
+        }?.id
+    }
+
     nonisolated static func shouldSetDefaultWhenLoadingModel(
         _ model: String,
         config: AppConfig,
@@ -566,6 +665,25 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return true
         }
         return currentLoadedModelCount == 0
+    }
+
+    private func persistMtpLoadPreferenceIfRequested(
+        model: String,
+        instruction: ModelLoadInstruction,
+        mtpRuntime: ModelMtpRuntime?
+    ) {
+        guard let useMtp = instruction.useMtp else {
+            return
+        }
+        do {
+            try parameterStore.recordMtpLoadPreference(
+                modelID: model,
+                enabled: useMtp,
+                mtpModelID: mtpRuntime?.modelID ?? instruction.mtpModelID
+            )
+        } catch {
+            IronMLXAppLogger.error("Failed to persist MTP load preference for \(model): \(error)")
+        }
     }
 
     private func restartBackend() {
@@ -581,7 +699,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     self.updateConfig {
                         $0.replaceLoadedModels(result.loadedModels, defaultModel: result.model)
                     }
-                    NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
+                    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
                 }
                 self.sendJavaScript("onServerRestarted(\(Self.jsStringLiteral(json)))")
                 self.sendScannedModels()
@@ -729,6 +847,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 let response: BackendModelAdminResponse
                 if let resolvedModel = self.scanner.resolveModelPath(for: model) {
+                    let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(
+                        for: model,
+                        useMtp: nil,
+                        scanner: self.scanner,
+                        parameterStore: self.parameterStore
+                    )
                     response = try await client.registerModel(
                         model: model,
                         modelDir: resolvedModel,
@@ -736,8 +860,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         maxCacheCap: ModelLoadParameters.maxCacheCap(
                             for: model,
                             scanner: self.scanner,
-                            parameterStore: self.parameterStore
+                            parameterStore: self.parameterStore,
+                            activeKvOffloadEnabled: config.activeKvOffload == true
                         ),
+                        pinned: config.pinnedModelReferences.contains(model),
+                        mtpModelDir: mtpRuntime?.modelDir,
+                        mtpDraftTokens: mtpRuntime?.draftTokens,
                         samplingDefaults: self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                     )
                 } else {
@@ -785,11 +913,20 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     return
                 }
                 let resolvedModel = scanner.resolveModelPath(for: model) ?? loaded.path
+                let mtpRuntime = try ModelMtpRuntimeResolver.runtime(
+                    for: model,
+                    useMtp: nil,
+                    scanner: scanner,
+                    parameterStore: parameterStore
+                )
                 let response = try await client.loadModel(
                     model: model,
                     modelDir: resolvedModel,
                     setDefault: loaded.isDefault,
                     maxCacheCap: parameters.maxCacheCap,
+                    pinned: loaded.pinned,
+                    mtpModelDir: mtpRuntime?.modelDir,
+                    mtpDraftTokens: mtpRuntime?.draftTokens,
                     reloadWhenIdle: true,
                     samplingDefaults: parameters.samplingDefaults
                 )
@@ -829,8 +966,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func loadedModelReferences() async -> Set<String> {
+        await loadedModelState().references
+    }
+
+    private func loadedModelState() async -> (references: Set<String>, pinnedModels: Set<String>, mtpEnabledModels: Set<String>) {
         let config = configStore.load()
         var loaded = Set<String>()
+        var pinned = Set<String>()
+        var mtpEnabled = Set<String>()
         if backend.isRunning {
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
@@ -840,8 +983,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     loaded.insert(model.id)
                     loaded.insert(model.model)
                     loaded.insert(model.path)
+                    if model.pinned {
+                        pinned.insert(model.id)
+                        pinned.insert(model.model)
+                        pinned.insert(model.path)
+                    }
+                    if model.mtpEnabled {
+                        mtpEnabled.insert(model.id)
+                    }
                 }
-                return loaded
+                return (loaded, pinned, mtpEnabled)
             } catch {
                 IronMLXAppLogger.error("Failed to fetch loaded models: \(error)")
             }
@@ -849,16 +1000,24 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         for model in config.restoredModelReferences {
             loaded.insert(model)
         }
-        return loaded
+        for model in config.pinnedModelReferences {
+            pinned.insert(model)
+        }
+        return (loaded, pinned, mtpEnabled)
     }
 
     private func syncPersistedLoadedModelsIfNeeded(_ models: [BackendLoadedModelInfo]) {
         let backendLoaded = AppConfig.normalizedModelReferences(models.map(\.id))
+        let backendPinned = AppConfig.normalizedModelReferences(models.filter(\.pinned).map(\.id))
         let config = configStore.load()
         let persistedLoaded = AppConfig.normalizedModelReferences(config.loadedModels ?? [])
+        let persistedPinned = config.pinnedModelReferences
         let backendDefault = AppConfig.normalizedModelReference(models.first(where: \.isDefault)?.id)
         let defaultChanged = backendDefault != nil && backendDefault != config.defaultModelReference
-        guard Set(backendLoaded) != Set(persistedLoaded) || defaultChanged else {
+        guard Set(backendLoaded) != Set(persistedLoaded)
+            || Set(backendPinned) != Set(persistedPinned)
+            || defaultChanged
+        else {
             return
         }
         persistBackendLoadedModels(models)
@@ -874,11 +1033,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let defaultModel = backendDefault ?? preferredDefaultModel ?? currentDefault
         updateConfig {
             $0.replaceLoadedModels(loaded, defaultModel: backendDefault)
+            $0.replacePinnedModels(models.filter(\.pinned).map(\.id))
             if let defaultModel {
                 $0.defaultModel = defaultModel
             }
         }
-        NotificationCenter.default.post(name: .ironMLXLoadedModelsDidChange, object: self)
+        notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
         if let defaultModel {
             sendJavaScript("window.__DEFAULT_MODEL__ = \(Self.jsStringLiteral(defaultModel));")
         }
@@ -886,18 +1046,41 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     private func sendScannedModels() {
         Task {
-            let loadedModels = await self.loadedModelReferences()
-            let models = self.scanner.scan(loadedModels: loadedModels)
+            let state = await self.loadedModelState()
+            let models = self.scanner.scan(
+                loadedModels: state.references,
+                pinnedModels: state.pinnedModels,
+                mtpEnabledModels: state.mtpEnabledModels
+            )
             let config = self.configStore.load()
+            let dashboardModels = self.modelsWithEffectiveMaxTokens(
+                models,
+                activeKvOffloadEnabled: config.activeKvOffload == true
+            )
             if self.backend.isRunning {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 await self.registerLocalModels(models: models, config: config, client: client)
             }
-            let json = (try? Self.jsonString(models)) ?? "[]"
+            let json = (try? Self.jsonString(dashboardModels)) ?? "[]"
             await MainActor.run {
                 self.sendModelParameters()
                 self.sendJavaScript("onLocalModelsScanned(\(Self.jsStringLiteral(json)))")
             }
+        }
+    }
+
+    private func modelsWithEffectiveMaxTokens(
+        _ models: [LocalModel],
+        activeKvOffloadEnabled: Bool
+    ) -> [LocalModel] {
+        models.map { model in
+            var model = model
+            model.effectiveMaxTokens = ModelLoadParameters.effectiveMaxCacheCap(
+                savedMaxCacheCap: parameterStore.parameters(for: model.id)?.maxCacheCap,
+                contextWindow: model.maxPositionEmbeddings,
+                activeKvOffloadEnabled: activeKvOffloadEnabled
+            )
+            return model
         }
     }
 
@@ -906,12 +1089,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         config: AppConfig,
         client: BackendAPIClient
     ) async {
-        let localModels = models ?? scanner.scan(loadedModels: [])
+        let configPinned = Set(config.pinnedModelReferences)
+        let localModels = models ?? scanner.scan(loadedModels: [], pinnedModels: configPinned, mtpEnabledModels: [])
         await LocalModelBackendRegistrar.register(
             localModels: localModels,
             defaultModel: config.defaultModelReference,
             scanner: scanner,
             parameterStore: parameterStore,
+            activeKvOffloadEnabled: config.activeKvOffload == true,
             client: client
         )
     }
@@ -947,6 +1132,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         deliverModelOperationResult(error: error.localizedDescription, callback: callback)
+    }
+
+    private func backendErrorJSON(_ error: Error) -> String {
+        if case BackendAPIError.serverResponse(statusCode: _, body: let body) = error,
+           let body,
+           !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return body
+        }
+        let payload = BridgeErrorResponse(success: false, status: "error", error: error.localizedDescription)
+        return (try? Self.jsonString(payload)) ?? "{\"success\":false,\"status\":\"error\"}"
     }
 
     private func sendAppLogs() {
@@ -1057,7 +1252,15 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func notifyMenuLanguageDidChange() {
-        NotificationCenter.default.post(name: .ironMLXMenuLanguageDidChange, object: self)
+        notificationCenter.post(name: .ironMLXMenuLanguageDidChange, object: self)
+    }
+
+    @objc private func loadedModelsDidChange(_ notification: Notification) {
+        if let object = notification.object as AnyObject?,
+           object === self {
+            return
+        }
+        sendScannedModels()
     }
 
     private func logText(from file: IronMLXLogFile) -> String {
@@ -1133,6 +1336,28 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         return String(describing: body)
     }
 
+    private static func modelLoadInstruction(from body: Any) -> ModelLoadInstruction {
+        if let dictionary = body as? [String: Any] {
+            return ModelLoadInstruction(
+                modelReference: stringValue(dictionary, "model")
+                    ?? stringValue(dictionary, "model_id")
+                    ?? "",
+                useMtp: boolValue(dictionary, "use_mtp"),
+                mtpModelID: stringValue(dictionary, "mtp_model_id")
+            )
+        }
+        let text = body as? String ?? String(describing: body)
+        if let data = text.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(ModelLoadInstructionPayload.self, from: data) {
+            return ModelLoadInstruction(
+                modelReference: decoded.model,
+                useMtp: decoded.useMtp,
+                mtpModelID: decoded.mtpModelID
+            )
+        }
+        return ModelLoadInstruction(modelReference: text, useMtp: nil, mtpModelID: nil)
+    }
+
     private struct BenchmarkModel: Codable {
         var repoID: String
         var loaded: Bool
@@ -1150,10 +1375,46 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         case none
     }
 
+    private struct ModelLoadInstruction {
+        var modelReference: String
+        var useMtp: Bool?
+        var mtpModelID: String?
+    }
+
+    private struct ModelLoadInstructionPayload: Decodable {
+        var model: String
+        var useMtp: Bool?
+        var mtpModelID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case model
+            case useMtp = "use_mtp"
+            case mtpModelID = "mtp_model_id"
+        }
+    }
+
     private struct BridgeErrorResponse: Encodable {
         var success: Bool
         var status: String
         var error: String
+    }
+
+    private struct PinModelBridgeResponse: Encodable {
+        var success: Bool
+        var status: String
+        var model: String
+        var pinned: Bool
+        var loadedModels: [BackendLoadedModelInfo]
+        var error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case success
+            case status
+            case model
+            case pinned
+            case loadedModels = "loaded_models"
+            case error
+        }
     }
 
     private struct HuggingFaceDownloadPayload: Decodable {

@@ -17,34 +17,22 @@ public protocol BackendModelLoading: Sendable {
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int?,
+        pinned: Bool,
+        mtpModelDir: String?,
+        mtpDraftTokens: Int?,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse
-    func loadModel(model: String, modelDir: String, setDefault: Bool, maxCacheCap: Int?) async throws -> BackendModelAdminResponse
     func loadModel(
         model: String,
         modelDir: String,
         setDefault: Bool,
         maxCacheCap: Int?,
+        pinned: Bool,
+        mtpModelDir: String?,
+        mtpDraftTokens: Int?,
         reloadWhenIdle: Bool,
         samplingDefaults: BackendSamplingDefaults
     ) async throws -> BackendModelAdminResponse
-}
-
-public extension BackendModelLoading {
-    func loadModel(model: String, modelDir: String, setDefault: Bool) async throws -> BackendModelAdminResponse {
-        try await loadModel(model: model, modelDir: modelDir, setDefault: setDefault, maxCacheCap: nil)
-    }
-
-    func loadModel(
-        model: String,
-        modelDir: String,
-        setDefault: Bool,
-        maxCacheCap: Int?,
-        reloadWhenIdle: Bool,
-        samplingDefaults: BackendSamplingDefaults
-    ) async throws -> BackendModelAdminResponse {
-        try await loadModel(model: model, modelDir: modelDir, setDefault: setDefault, maxCacheCap: maxCacheCap)
-    }
 }
 
 extension BackendAPIClient: BackendModelLoading {}
@@ -122,7 +110,8 @@ public struct BackendRestartCoordinator {
         backend.stop()
 
         let models = config.restoredModelReferences
-        let localModels = scanner.scan(loadedModels: Set(models))
+        let pinnedModels = Set(config.pinnedModelReferences)
+        let localModels = scanner.scan(loadedModels: Set(models), pinnedModels: pinnedModels, mtpEnabledModels: [])
         guard !models.isEmpty || !localModels.isEmpty else {
             return BackendRestartResult(
                 success: true,
@@ -140,6 +129,7 @@ public struct BackendRestartCoordinator {
                 defaultModel: config.defaultModelReference,
                 scanner: scanner,
                 parameterStore: parameterStore,
+                activeKvOffloadEnabled: config.activeKvOffload == true,
                 client: client
             )
             var loadedModels: [String] = []
@@ -152,6 +142,13 @@ public struct BackendRestartCoordinator {
                     let maxCacheCap = ModelLoadParameters.maxCacheCap(
                         for: model,
                         scanner: scanner,
+                        parameterStore: parameterStore,
+                        activeKvOffloadEnabled: config.activeKvOffload == true
+                    )
+                    let mtpRuntime = try? ModelMtpRuntimeResolver.runtime(
+                        for: model,
+                        useMtp: nil,
+                        scanner: scanner,
                         parameterStore: parameterStore
                     )
                     _ = try await client.loadModel(
@@ -160,6 +157,9 @@ public struct BackendRestartCoordinator {
                         setDefault: model == config.defaultModelReference
                             || config.defaultModelReference == nil && loadedModels.isEmpty,
                         maxCacheCap: maxCacheCap,
+                        pinned: pinnedModels.contains(model),
+                        mtpModelDir: mtpRuntime?.modelDir,
+                        mtpDraftTokens: mtpRuntime?.draftTokens,
                         reloadWhenIdle: false,
                         samplingDefaults: parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
                     )
