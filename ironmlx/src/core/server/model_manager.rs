@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::cli::serve::{
-    read_model_type, resolve_active_kv_offload_config, resolve_engine_paged_prefix_cache_settings,
+    apply_gemma4_drafter_adaptive_scheduler_defaults, read_model_type,
+    resolve_active_kv_offload_config, resolve_engine_paged_prefix_cache_settings,
     resolve_memory_limit_bytes, resolve_model_ttl, resolve_scheduler_for_model,
     ResolvedSchedulerRuntime, SchedulerProfileSource, ServeArgs,
 };
@@ -537,7 +538,7 @@ fn build_engine_model_config(
     mtp: Option<super::engine::EngineMtpSettings>,
     pinned: bool,
 ) -> Result<EngineModelLoad> {
-    let resolved = apply_load_request_scheduler_overrides(
+    let mut resolved = apply_load_request_scheduler_overrides(
         resolve_scheduler_for_model(args, model_dir)?,
         max_cache_cap_override,
     );
@@ -567,6 +568,18 @@ fn build_engine_model_config(
                 validation.message
             );
         }
+    }
+    if apply_gemma4_drafter_adaptive_scheduler_defaults(
+        args,
+        architecture,
+        mtp.is_some(),
+        &mut resolved,
+    ) {
+        tracing::info!(
+            "ironmlx app: Gemma4 drafter adaptive scheduler default applied model_id={} b_max={}",
+            model_id,
+            resolved.scheduler_config.b_max
+        );
     }
     Ok(EngineModelLoad {
         config: EngineModelConfig {
@@ -1612,6 +1625,36 @@ mod tests {
     }
 
     #[test]
+    fn app_dynamic_gemma4_drafter_default_scheduler_uses_bmax_four() {
+        let root = unique_temp_dir("app-gemma4-drafter-default-bmax");
+        let base = root.join("base");
+        let mtp = root.join("mtp");
+        write_config(&base, &gemma4_base_config("gemma4", "gemma4_text", 2560));
+        write_config(
+            &mtp,
+            &gemma4_assistant_config("gemma4_assistant", "gemma4_text", 2560),
+        );
+        let args = serve_args();
+
+        let load = build_engine_model_config(
+            &args,
+            "gemma4-test".to_string(),
+            &base,
+            None,
+            SamplingDefaults::default(),
+            Some(crate::core::server::engine::EngineMtpSettings {
+                model_dir: mtp,
+                draft_tokens: Some(2),
+            }),
+            false,
+        )
+        .expect("build app dynamic model config");
+
+        assert_eq!(load.config.scheduler_runtime_profile.config.b_max, 4);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn aggregate_health_reports_loaded_mtp_state() {
         let snapshot = HealthSnapshot {
             status: HealthStatus::Healthy,
@@ -1883,6 +1926,38 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ))
+    }
+
+    fn serve_args() -> ServeArgs {
+        ServeArgs {
+            model: None,
+            model_manifest: None,
+            max_loaded_models: None,
+            memory_limit_total_gb: None,
+            memory_limit_model_gb: None,
+            port: 8080,
+            host: "127.0.0.1".to_string(),
+            prefill_chunk_size: None,
+            b_max: None,
+            admission_deadline_ms: None,
+            admission_queue_max: None,
+            max_cache_cap: None,
+            decode_cadence_mid_chunk_cap: None,
+            scheduler_profile: None,
+            scheduler_autotune_report: false,
+            mtp_model_dir: None,
+            mtp_draft_tokens: None,
+            kv_quant: crate::cli::KvQuantArg::None,
+            paged_prefix_cache_dir: None,
+            paged_prefix_cache_block_size:
+                crate::core::cache::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
+            paged_prefix_cache_max_pages: None,
+            ssd_prefix_cache_max_gb: None,
+            prefix_lru_cache_max_bytes: None,
+            model_ttl_minutes: None,
+            active_kv_offload: false,
+            active_kv_offload_dir: None,
+        }
     }
 
     fn write_config(dir: &Path, config: &str) {

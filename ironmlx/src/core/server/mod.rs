@@ -25,6 +25,7 @@ use crate::core::speculative::MtpSpeculativeModel;
 use crate::core::tokenizer::Tokenizer;
 use crate::Result;
 
+pub(crate) mod adaptive_admission;
 pub mod anthropic;
 pub mod chat_format;
 pub mod diffusion_gemma;

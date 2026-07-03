@@ -10,6 +10,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -28,6 +29,11 @@ DEFAULT_MAX_CACHE_CAP = 262144
 DEFAULT_MTP_DRAFT_TOKENS = 2
 DEFAULT_PROMPT_LENS = (2048, 24576)
 BYTES_PER_MIB = 1024 * 1024
+ROLLING_ACTIVE_GT_ONE_RE = re.compile(r"active_(?:before|after)=[2-9]\d*")
+ROLLING_DECODE_ERROR_PATTERNS = (
+    "event=decode_step_error",
+    "[SchedulerActor] step error",
+)
 
 
 @dataclass(frozen=True)
@@ -230,6 +236,18 @@ def assert_health_delta(
     errors = validate_health_delta(variant, before, after)
     if errors:
         raise AssertionError("; ".join(errors))
+
+
+def assert_rolling_mid_admit_profile(log_text: str) -> None:
+    for pattern in ROLLING_DECODE_ERROR_PATTERNS:
+        if pattern in log_text:
+            raise AssertionError("Gemma4 drafter adaptive run hit decode step errors")
+    if "event=mid_begin" not in log_text:
+        raise AssertionError("Gemma4 drafter adaptive run did not start rolling mid-admit")
+    if "event=mid_finalize" not in log_text:
+        raise AssertionError("Gemma4 drafter adaptive run did not finalize rolling mid-admit")
+    if not ROLLING_ACTIVE_GT_ONE_RE.search(log_text):
+        raise AssertionError("Gemma4 drafter adaptive run never exceeded active_count=1")
 
 
 def validate_health_delta(

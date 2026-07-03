@@ -1734,47 +1734,26 @@ pub(crate) fn draft_position_for_shared_kv(kv_valid_len: i32) -> i32 {
     (kv_valid_len - 1).max(0)
 }
 
-pub(crate) fn shared_kv_row_for_drafter_on(
+pub(crate) fn shared_kv_row_view_on(
     states: &Gemma4SharedKvStates,
     row_idx: usize,
-    kv_valid_len: i32,
-    sliding_window: i32,
-    query_len: i32,
     target: impl Into<StreamOrDevice>,
 ) -> Result<Gemma4SharedKvStates> {
     let target = target.into();
-    if kv_valid_len <= 0 {
-        return Err(anyhow!(
-            "Gemma4 drafter shared KV row slice: kv_valid_len must be > 0, got {kv_valid_len}"
-        ));
-    }
     let mut out = Gemma4SharedKvStates::default();
-    if let Some(kv) = states.get(Gemma4LayerKind::Sliding) {
-        let keep = sliding_attention_view_len_for_drafter(kv_valid_len, query_len, sliding_window);
-        let start = kv_valid_len - keep;
-        out.insert(
-            Gemma4LayerKind::Sliding,
-            slice_shared_kv_row_range_on(kv, row_idx, start, kv_valid_len, target)?,
-        );
-    }
-    if let Some(kv) = states.get(Gemma4LayerKind::Full) {
-        out.insert(
-            Gemma4LayerKind::Full,
-            slice_shared_kv_row_range_on(kv, row_idx, 0, kv_valid_len, target)?,
-        );
+    for kind in [Gemma4LayerKind::Sliding, Gemma4LayerKind::Full] {
+        if let Some(kv) = states.get(kind) {
+            let len = kv_len(kv)?;
+            if len <= 0 {
+                continue;
+            }
+            out.insert(
+                kind,
+                slice_shared_kv_row_range_on(kv, row_idx, 0, len, target)?,
+            );
+        }
     }
     Ok(out)
-}
-
-fn sliding_attention_view_len_for_drafter(kv_len: i32, query_len: i32, window: i32) -> i32 {
-    if kv_len <= 0 {
-        return 0;
-    }
-    if query_len <= 0 || window <= 0 {
-        return kv_len;
-    }
-    let keep = window.saturating_add(query_len).saturating_sub(1);
-    kv_len.min(keep.max(1))
 }
 
 fn slice_shared_kv_row_range_on(

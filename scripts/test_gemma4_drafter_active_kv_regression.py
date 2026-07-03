@@ -191,6 +191,41 @@ class Gemma4DrafterActiveKvRegressionTests(unittest.TestCase):
         ):
             self.module.assert_health_delta(variant, before, after)
 
+    def test_rolling_mid_admit_profile_accepts_mid_admit_and_batched_active_count(self):
+        self.module.assert_rolling_mid_admit_profile(
+            "\n".join(
+                [
+                    "[chunked-rolling-profile] event=mid_begin active_before=1 active_after=2",
+                    "[chunked-rolling-profile] event=mid_chunk active_count=2",
+                    "[chunked-rolling-profile] event=mid_finalize active_before=2 active_after=2",
+                ]
+            )
+        )
+
+    def test_rolling_mid_admit_profile_rejects_b1_like_queue_only_run(self):
+        log_text = "\n".join(
+            [
+                "[chunked-rolling-profile] event=fresh_prefill active_count=1 fresh_batch_limit=1",
+                "[chunked-rolling-profile] event=queue_enqueue queue_len=3",
+                "[chunked-rolling-profile] event=decode_step active_before=1 active_after=1",
+            ]
+        )
+
+        with self.assertRaisesRegex(AssertionError, "did not start rolling mid-admit"):
+            self.module.assert_rolling_mid_admit_profile(log_text)
+
+    def test_rolling_mid_admit_profile_rejects_decode_step_errors(self):
+        log_text = "\n".join(
+            [
+                "[chunked-rolling-profile] event=mid_begin active_before=1 active_after=2",
+                "[chunked-rolling-profile] event=decode_step_error active_before=2 active_after=2",
+                "[chunked-rolling-profile] event=mid_finalize active_before=2 active_after=2",
+            ]
+        )
+
+        with self.assertRaisesRegex(AssertionError, "hit decode step errors"):
+            self.module.assert_rolling_mid_admit_profile(log_text)
+
     def test_summary_payload_records_concurrent_metrics_and_health(self):
         variant = self.module.RegressionVariant(
             name="e4b_b4",

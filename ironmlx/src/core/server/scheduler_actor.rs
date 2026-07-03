@@ -32,8 +32,10 @@ use crate::core::cache::{
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::scheduler::{
-    ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Phase, RequestId, Scheduler, StepEvent,
+    ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle, Phase,
+    RequestId, Scheduler, StepEvent,
 };
+use crate::core::server::adaptive_admission::{AdaptiveAdmissionPolicy, AdmissionRequestShape};
 use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats};
 use crate::Result;
 
@@ -62,13 +64,26 @@ struct PendingAdmit {
 fn fresh_prefill_batch_limit_for_request<M: Model>(
     request: &GenerateRequest,
     b_max: usize,
+    adaptive_policy: AdaptiveAdmissionPolicy,
 ) -> usize {
-    M::fresh_prefill_batch_limit(request.prompt_ids.len(), b_max).clamp(1, b_max)
+    let model_limit = M::fresh_prefill_batch_limit(request.prompt_ids.len(), b_max).clamp(1, b_max);
+    adaptive_policy.fresh_batch_limit(admission_request_shape(request), model_limit, b_max)
 }
 
-fn fresh_prefill_batch_limit_for_command<M: Model>(cmd: &SchedulerCommand, b_max: usize) -> usize {
+fn fresh_prefill_batch_limit_for_command<M: Model>(
+    cmd: &SchedulerCommand,
+    b_max: usize,
+    adaptive_policy: AdaptiveAdmissionPolicy,
+) -> usize {
     let SchedulerCommand::Admit { request, .. } = cmd;
-    fresh_prefill_batch_limit_for_request::<M>(request, b_max)
+    fresh_prefill_batch_limit_for_request::<M>(request, b_max, adaptive_policy)
+}
+
+fn admission_request_shape(request: &GenerateRequest) -> AdmissionRequestShape {
+    AdmissionRequestShape {
+        prompt_len: request.prompt_ids.len(),
+        prefill_chunk_size: request.prefill_chunk_size,
+    }
 }
 
 fn startup_budget_policy(
@@ -241,9 +256,23 @@ trait SchedulerActorMtpMode<M>
 where
     M: Model + DenseVlMethods,
 {
+    type MidAdmitHandle: Send + 'static;
+
     fn allow_rolling_mid_admit(&self) -> bool {
         true
     }
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId;
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32;
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32;
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32;
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32);
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize;
 
     fn prefill_admitted(
         &mut self,
@@ -258,6 +287,28 @@ where
         model: &M,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<Vec<StepEvent>>;
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle>;
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool>;
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: Self::MidAdmitHandle,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)>;
 }
 
 struct SchedulerActorNoMtp;
@@ -270,6 +321,11 @@ struct SchedulerActorMtp<H> {
 struct SchedulerActorGemma4Drafter {
     drafter: Arc<Mutex<crate::models::gemma4::Gemma4AssistantModel>>,
     cfg: MtpSpeculativeConfig,
+}
+
+enum SchedulerActorGemma4DrafterMidAdmitHandle {
+    Generic(AdmitMidHandle),
+    Drafter(Box<Gemma4DrafterAdmitMidHandle>),
 }
 
 impl<H> SchedulerActorMtp<H> {
@@ -303,6 +359,32 @@ impl<M> SchedulerActorMtpMode<M> for SchedulerActorNoMtp
 where
     M: Model + DenseVlMethods,
 {
+    type MidAdmitHandle = AdmitMidHandle;
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        handle.request_id
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.chunk_start
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.prompt_len
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.chunk_size
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        handle.chunk_size = chunk_size;
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        handle.decode_cadence_mid_chunk_cap
+    }
+
     fn prefill_admitted(
         &mut self,
         sched: &mut Scheduler<M>,
@@ -320,12 +402,66 @@ where
     ) -> Result<Vec<StepEvent>> {
         sched.step(model)
     }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        sched.admit_mid_begin(request, model)
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        sched.admit_mid_chunk(handle, model)
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: Self::MidAdmitHandle,
+        _counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        sched.admit_mid_finalize(handle, model)
+    }
 }
 
 impl<M> SchedulerActorMtpMode<M> for SchedulerActorMtp<M::MtpHead>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel,
 {
+    type MidAdmitHandle = AdmitMidHandle;
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        handle.request_id
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.chunk_start
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.prompt_len
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        handle.chunk_size
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        handle.chunk_size = chunk_size;
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        handle.decode_cadence_mid_chunk_cap
+    }
+
     fn prefill_admitted(
         &mut self,
         sched: &mut Scheduler<M>,
@@ -360,11 +496,87 @@ where
             sched.step(model)
         }
     }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        sched.admit_mid_begin(request, model)
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        sched.admit_mid_chunk(handle, model)
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<M>,
+        model: &M,
+        handle: Self::MidAdmitHandle,
+        _counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        sched.admit_mid_finalize(handle, model)
+    }
 }
 
 impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4Drafter {
-    fn allow_rolling_mid_admit(&self) -> bool {
-        false
+    type MidAdmitHandle = SchedulerActorGemma4DrafterMidAdmitHandle;
+
+    fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+        match handle {
+            SchedulerActorGemma4DrafterMidAdmitHandle::Generic(handle) => handle.request_id,
+            SchedulerActorGemma4DrafterMidAdmitHandle::Drafter(handle) => handle.request_id,
+        }
+    }
+
+    fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+        match handle {
+            SchedulerActorGemma4DrafterMidAdmitHandle::Generic(handle) => handle.chunk_start,
+            SchedulerActorGemma4DrafterMidAdmitHandle::Drafter(handle) => handle.chunk_start,
+        }
+    }
+
+    fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+        match handle {
+            SchedulerActorGemma4DrafterMidAdmitHandle::Generic(handle) => handle.prompt_len,
+            SchedulerActorGemma4DrafterMidAdmitHandle::Drafter(handle) => handle.prompt_len,
+        }
+    }
+
+    fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+        match handle {
+            SchedulerActorGemma4DrafterMidAdmitHandle::Generic(handle) => handle.chunk_size,
+            SchedulerActorGemma4DrafterMidAdmitHandle::Drafter(handle) => handle.chunk_size,
+        }
+    }
+
+    fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+        match handle {
+            SchedulerActorGemma4DrafterMidAdmitHandle::Generic(handle) => {
+                handle.chunk_size = chunk_size;
+            }
+            SchedulerActorGemma4DrafterMidAdmitHandle::Drafter(handle) => {
+                handle.chunk_size = chunk_size;
+            }
+        }
+    }
+
+    fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+        match handle {
+            SchedulerActorGemma4DrafterMidAdmitHandle::Generic(handle) => {
+                handle.decode_cadence_mid_chunk_cap
+            }
+            SchedulerActorGemma4DrafterMidAdmitHandle::Drafter(handle) => {
+                handle.decode_cadence_mid_chunk_cap
+            }
+        }
     }
 
     fn prefill_admitted(
@@ -401,6 +613,59 @@ impl SchedulerActorMtpMode<crate::models::Gemma4Model> for SchedulerActorGemma4D
             Ok(events)
         } else {
             sched.step(model)
+        }
+    }
+
+    fn begin_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        request: GenerateRequest,
+    ) -> Result<Self::MidAdmitHandle> {
+        if sched.gemma4_drafter_stats().is_some() {
+            sched
+                .admit_mid_begin_gemma4_drafter(request, model)
+                .map(Box::new)
+                .map(SchedulerActorGemma4DrafterMidAdmitHandle::Drafter)
+        } else {
+            sched
+                .admit_mid_begin(request, model)
+                .map(SchedulerActorGemma4DrafterMidAdmitHandle::Generic)
+        }
+    }
+
+    fn advance_mid_admit_chunk(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        handle: &mut Self::MidAdmitHandle,
+    ) -> Result<bool> {
+        match handle {
+            SchedulerActorGemma4DrafterMidAdmitHandle::Generic(handle) => {
+                sched.admit_mid_chunk(handle, model)
+            }
+            SchedulerActorGemma4DrafterMidAdmitHandle::Drafter(handle) => {
+                sched.admit_mid_chunk_gemma4_drafter(handle.as_mut(), model)
+            }
+        }
+    }
+
+    fn finalize_mid_admit(
+        &mut self,
+        sched: &mut Scheduler<crate::models::Gemma4Model>,
+        model: &crate::models::Gemma4Model,
+        handle: Self::MidAdmitHandle,
+        counters: &SchedulerActorMtpCounters,
+    ) -> Result<(RequestId, StepEvent)> {
+        match handle {
+            SchedulerActorGemma4DrafterMidAdmitHandle::Generic(handle) => {
+                sched.admit_mid_finalize(handle, model)
+            }
+            SchedulerActorGemma4DrafterMidAdmitHandle::Drafter(handle) => {
+                let result = sched.admit_mid_finalize_gemma4_drafter(*handle, model);
+                counters.store_stats(sched.gemma4_drafter_stats());
+                result
+            }
         }
     }
 }
@@ -556,6 +821,7 @@ where
         meta,
         None,
         None,
+        AdaptiveAdmissionPolicy::disabled(),
         ActiveKvOffloadConfig::disabled(),
     )
 }
@@ -585,6 +851,7 @@ where
         meta,
         None,
         None,
+        AdaptiveAdmissionPolicy::disabled(),
         active_kv_offload,
     )
 }
@@ -615,6 +882,7 @@ where
         meta,
         Some(paged_prefix_cache),
         prefix_lru_cache,
+        AdaptiveAdmissionPolicy::disabled(),
         ActiveKvOffloadConfig::disabled(),
     )
 }
@@ -646,6 +914,7 @@ where
         meta,
         Some(paged_prefix_cache),
         prefix_lru_cache,
+        AdaptiveAdmissionPolicy::disabled(),
         active_kv_offload,
     )
 }
@@ -679,6 +948,7 @@ where
         meta,
         paged_prefix_cache,
         prefix_lru_cache,
+        AdaptiveAdmissionPolicy::disabled(),
         ActiveKvOffloadConfig::disabled(),
     )
 }
@@ -713,6 +983,7 @@ where
         meta,
         paged_prefix_cache,
         prefix_lru_cache,
+        AdaptiveAdmissionPolicy::disabled(),
         active_kv_offload,
     )
 }
@@ -742,6 +1013,7 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter(
         meta,
         paged_prefix_cache,
         prefix_lru_cache,
+        AdaptiveAdmissionPolicy::gemma4_drafter(),
         ActiveKvOffloadConfig::disabled(),
     )
 }
@@ -772,6 +1044,7 @@ pub fn spawn_scheduler_actor_with_gemma4_drafter_and_active_kv(
         meta,
         paged_prefix_cache,
         prefix_lru_cache,
+        AdaptiveAdmissionPolicy::gemma4_drafter(),
         active_kv_offload,
     )
 }
@@ -788,6 +1061,7 @@ fn spawn_scheduler_actor_with_mode<M, A>(
     meta: crate::core::memory_budget::ModelMeta,
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
+    adaptive_policy: AdaptiveAdmissionPolicy,
     active_kv_offload: ActiveKvOffloadConfig,
 ) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
 where
@@ -910,6 +1184,7 @@ where
             b_active_for_task,
             b_queued_for_task,
             decode_cadence_mid_chunk_cap,
+            adaptive_policy,
         );
     });
 
@@ -958,6 +1233,7 @@ fn driver_loop<M, A>(
     b_active: Arc<AtomicU64>,
     b_queued: Arc<AtomicU64>,
     decode_cadence_mid_chunk_cap: usize,
+    adaptive_policy: AdaptiveAdmissionPolicy,
 ) where
     M: Model + DenseVlMethods + Send + 'static,
     A: SchedulerActorMtpMode<M>,
@@ -969,7 +1245,7 @@ fn driver_loop<M, A>(
     let b_max = sched.b_max();
     let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
     let mut admission_queue: VecDeque<PendingAdmit> = VecDeque::new();
-    let mut in_flight_mid_admit: Option<AdmitMidHandle> = None;
+    let mut in_flight_mid_admit: Option<A::MidAdmitHandle> = None;
     let mut parked_active_kv: VecDeque<ActiveKvParkedRequest> = VecDeque::new();
     let rt = tokio::runtime::Handle::current();
 
@@ -1012,7 +1288,8 @@ fn driver_loop<M, A>(
             );
             return; // cmd_rx closed; all senders dropped.
         };
-        let fresh_batch_limit = fresh_prefill_batch_limit_for_command::<M>(&first_cmd, b_max);
+        let fresh_batch_limit =
+            fresh_prefill_batch_limit_for_command::<M>(&first_cmd, b_max, adaptive_policy);
         handle_admit(first_cmd, &mut sched, &mut event_txs, &admit_count);
 
         if sched.active_count() == 0 {
@@ -1138,6 +1415,7 @@ fn driver_loop<M, A>(
                     b_max,
                     admission_queue_max,
                     admission_deadline,
+                    adaptive_policy,
                     &rt,
                 ) {
                     RollingControl::ContinueRolling => {
@@ -1199,12 +1477,14 @@ fn driver_loop<M, A>(
                         &cmd,
                         sched.active_count(),
                         b_max,
+                        adaptive_policy,
                     ) {
                         let mut pending_cmd = Some(cmd);
                         let can_start_after_park = can_start_rolling_mid_admit_for_command::<M>(
                             pending_cmd.as_ref().expect("pending command present"),
                             sched.active_count().saturating_sub(1),
                             b_max,
+                            adaptive_policy,
                         );
                         if in_flight_mid_admit.is_none()
                             && can_start_after_park
@@ -1231,6 +1511,8 @@ fn driver_loop<M, A>(
                                 &mut event_txs,
                                 &admit_count,
                                 &model,
+                                &mut mtp_mode,
+                                &mtp_counters,
                                 MidAdmitProfileContext {
                                     source: RollingMidAdmitSource::Direct,
                                     queue_wait_ms: None,
@@ -1258,6 +1540,8 @@ fn driver_loop<M, A>(
                         &mut event_txs,
                         &admit_count,
                         &model,
+                        &mut mtp_mode,
+                        &mtp_counters,
                         MidAdmitProfileContext {
                             source: RollingMidAdmitSource::Direct,
                             queue_wait_ms: None,
@@ -1275,6 +1559,8 @@ fn driver_loop<M, A>(
                         &mut event_txs,
                         &admit_count,
                         &model,
+                        &mut mtp_mode,
+                        &mtp_counters,
                         admission_queue.len(),
                         decode_cadence_mid_chunk_cap,
                     ) {
@@ -1351,8 +1637,11 @@ fn driver_loop<M, A>(
                                     &mut event_txs,
                                     &admit_count,
                                     &model,
+                                    &mut mtp_mode,
+                                    &mtp_counters,
                                     b_max,
                                     decode_cadence_mid_chunk_cap,
+                                    adaptive_policy,
                                 )
                             {
                                 admission_policy.record_admission_work();
@@ -1444,6 +1733,7 @@ fn driver_loop<M, A>(
                     b_max,
                     admission_queue_max,
                     admission_deadline,
+                    adaptive_policy,
                     &rt,
                 ) {
                     RollingControl::ContinueRolling => {
@@ -1573,40 +1863,45 @@ fn handle_admit<M>(
     }
 }
 
-fn uses_multi_chunk_prefill(request: &GenerateRequest) -> bool {
-    request.prefill_chunk_size > 0 && request.prompt_ids.len() > request.prefill_chunk_size
-}
-
 fn can_start_rolling_mid_admit_for_request<M: Model>(
     request: &GenerateRequest,
     active_count: usize,
     b_max: usize,
+    adaptive_policy: AdaptiveAdmissionPolicy,
 ) -> bool {
     if active_count >= b_max {
         return false;
     }
-    let rolling_limit = fresh_prefill_batch_limit_for_request::<M>(request, b_max);
-    active_count < rolling_limit || uses_multi_chunk_prefill(request)
+    let model_limit = M::fresh_prefill_batch_limit(request.prompt_ids.len(), b_max).clamp(1, b_max);
+    adaptive_policy.can_start_rolling_mid_admit(
+        admission_request_shape(request),
+        active_count,
+        model_limit,
+        b_max,
+    )
 }
 
 fn can_start_rolling_mid_admit_for_command<M: Model>(
     cmd: &SchedulerCommand,
     active_count: usize,
     b_max: usize,
+    adaptive_policy: AdaptiveAdmissionPolicy,
 ) -> bool {
     let SchedulerCommand::Admit { request, .. } = cmd;
-    can_start_rolling_mid_admit_for_request::<M>(request, active_count, b_max)
+    can_start_rolling_mid_admit_for_request::<M>(request, active_count, b_max, adaptive_policy)
 }
 
-fn begin_mid_admit<M>(
+fn begin_mid_admit<M, A>(
     cmd: SchedulerCommand,
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     model: &Arc<Mutex<M>>,
+    mtp_mode: &mut A,
     profile_context: MidAdmitProfileContext,
-) -> Option<AdmitMidHandle>
+) -> Option<A::MidAdmitHandle>
 where
     M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
 {
     let SchedulerCommand::Admit { request, reply_tx } = cmd;
     let admit_profile = rolling_profile_enabled().then(|| {
@@ -1622,7 +1917,7 @@ where
     // Phase 1: begin.
     let handle = {
         let m = model.blocking_lock();
-        match sched.admit_mid_begin(request, &m) {
+        match mtp_mode.begin_mid_admit(sched, &m, request) {
             Ok(h) => h,
             Err(e) => {
                 let _ = reply_tx.send(Err(e));
@@ -1631,7 +1926,7 @@ where
         }
     };
     let begin_end = admit_profile.map(|_| Instant::now());
-    let id = handle.request_id;
+    let id = A::mid_admit_request_id(&handle);
     if let (Some((prompt_len, prefill_chunk_size, active_before, begin_start)), Some(begin_end)) =
         (admit_profile, begin_end)
     {
@@ -1667,23 +1962,27 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_mid_admit_one_chunk<M>(
+fn start_mid_admit_one_chunk<M, A>(
     cmd: SchedulerCommand,
-    in_flight_mid_admit: &mut Option<AdmitMidHandle>,
+    in_flight_mid_admit: &mut Option<A::MidAdmitHandle>,
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
+    mtp_mode: &mut A,
+    mtp_counters: &SchedulerActorMtpCounters,
     profile_context: MidAdmitProfileContext,
     decode_cadence_mid_chunk_cap: usize,
 ) -> bool
 where
     M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
 {
     if in_flight_mid_admit.is_some() {
         return false;
     }
-    let Some(handle) = begin_mid_admit(cmd, sched, event_txs, model, profile_context) else {
+    let Some(handle) = begin_mid_admit(cmd, sched, event_txs, model, mtp_mode, profile_context)
+    else {
         return false;
     };
     *in_flight_mid_admit = Some(handle);
@@ -1693,40 +1992,46 @@ where
         event_txs,
         admit_count,
         model,
+        mtp_mode,
+        mtp_counters,
         profile_context.queue_len,
         decode_cadence_mid_chunk_cap,
     )
 }
 
-fn advance_mid_admit_one_chunk<M>(
-    in_flight_mid_admit: &mut Option<AdmitMidHandle>,
+#[allow(clippy::too_many_arguments)]
+fn advance_mid_admit_one_chunk<M, A>(
+    in_flight_mid_admit: &mut Option<A::MidAdmitHandle>,
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
+    mtp_mode: &mut A,
+    mtp_counters: &SchedulerActorMtpCounters,
     queue_len: usize,
     decode_cadence_mid_chunk_cap: usize,
 ) -> bool
 where
     M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
 {
     let Some(mut handle) = in_flight_mid_admit.take() else {
         return false;
     };
-    let id = handle.request_id;
+    let id = A::mid_admit_request_id(&handle);
     let active_count_before_chunk = sched.active_count();
-    let requested_chunk_size = handle.chunk_size;
+    let requested_chunk_size = A::mid_admit_chunk_size(&handle);
     let effective_chunk_size = cadence_protected_mid_chunk_size(
         requested_chunk_size,
         active_count_before_chunk,
-        handle.decode_cadence_mid_chunk_cap,
+        A::mid_admit_decode_cadence_mid_chunk_cap(&handle),
     );
     debug_assert!(decode_cadence_mid_chunk_cap > 0);
-    handle.chunk_size = effective_chunk_size;
+    A::set_mid_admit_chunk_size(&mut handle, effective_chunk_size);
     let chunk_profile = rolling_profile_enabled().then(|| {
         (
-            handle.chunk_start,
-            handle.prompt_len,
+            A::mid_admit_chunk_start(&handle),
+            A::mid_admit_prompt_len(&handle),
             effective_chunk_size,
             active_count_before_chunk,
             Instant::now(),
@@ -1735,9 +2040,9 @@ where
 
     let chunk_result = {
         let m = model.blocking_lock();
-        sched.admit_mid_chunk(&mut handle, &m)
+        mtp_mode.advance_mid_admit_chunk(sched, &m, &mut handle)
     };
-    handle.chunk_size = requested_chunk_size;
+    A::set_mid_admit_chunk_size(&mut handle, requested_chunk_size);
     let is_last = match chunk_result {
         Ok(b) => b,
         Err(e) => {
@@ -1745,7 +2050,7 @@ where
                 chunk_profile
             {
                 let chunk_end_time = Instant::now();
-                let chunk_end = handle.chunk_start;
+                let chunk_end = A::mid_admit_chunk_start(&handle);
                 tracing::info!(
                     "[chunked-rolling-profile] event=mid_chunk_error t_ms={:.3} request_id={} chunk_start={} chunk_end={} chunk_len={} prompt_len={} chunk_size={} active_count={} queue_len={} elapsed_ms={:.3}",
                     rolling_profile_t_ms(chunk_end_time),
@@ -1768,7 +2073,7 @@ where
     };
     if let Some((chunk_start, prompt_len, chunk_size, active_count, chunk_timer)) = chunk_profile {
         let chunk_end_time = Instant::now();
-        let chunk_end = handle.chunk_start;
+        let chunk_end = A::mid_admit_chunk_start(&handle);
         tracing::info!(
             "[chunked-rolling-profile] event=mid_chunk t_ms={:.3} request_id={} chunk_start={} chunk_end={} chunk_len={} prompt_len={} chunk_size={} is_last={} active_count={} queue_len={} elapsed_ms={:.3}",
             rolling_profile_t_ms(chunk_end_time),
@@ -1793,7 +2098,7 @@ where
     let finalize_profile =
         rolling_profile_enabled().then(|| (sched.active_count(), Instant::now()));
     let m = model.blocking_lock();
-    match sched.admit_mid_finalize(handle, &m) {
+    match mtp_mode.finalize_mid_admit(sched, &m, handle, mtp_counters) {
         Ok((_id, first_event)) => {
             admit_count.fetch_add(1, Ordering::Relaxed);
             if let Some((active_before, finalize_timer)) = finalize_profile {
@@ -1894,18 +2199,22 @@ fn enqueue_or_reject(
 /// queued entries via `evict_all` + fresh `prefill_admitted`. Return
 /// early here so we do not call `admit_mid` in an illegal phase.
 #[allow(clippy::too_many_arguments)]
-fn drain_admission_queue<M>(
+fn drain_admission_queue<M, A>(
     queue: &mut VecDeque<PendingAdmit>,
-    in_flight_mid_admit: &mut Option<AdmitMidHandle>,
+    in_flight_mid_admit: &mut Option<A::MidAdmitHandle>,
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
     admit_count: &Arc<AtomicU64>,
     model: &Arc<Mutex<M>>,
+    mtp_mode: &mut A,
+    mtp_counters: &SchedulerActorMtpCounters,
     b_max: usize,
     decode_cadence_mid_chunk_cap: usize,
+    adaptive_policy: AdaptiveAdmissionPolicy,
 ) -> bool
 where
     M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
 {
     // admit_mid is only legal in Decoding phase.
     if sched.phase() != Phase::Decoding {
@@ -1925,6 +2234,7 @@ where
             &pending.request,
             sched.active_count(),
             b_max,
+            adaptive_policy,
         ) {
             return false;
         }
@@ -1957,6 +2267,8 @@ where
             event_txs,
             admit_count,
             model,
+            mtp_mode,
+            mtp_counters,
             MidAdmitProfileContext {
                 source: RollingMidAdmitSource::Queue,
                 queue_wait_ms,
@@ -2190,6 +2502,7 @@ fn drive_empty_scheduler_handoff<M, A>(
     b_max: usize,
     admission_queue_max: usize,
     admission_deadline: Duration,
+    adaptive_policy: AdaptiveAdmissionPolicy,
     rt: &tokio::runtime::Handle,
 ) -> RollingControl
 where
@@ -2245,7 +2558,8 @@ where
         let pending = admission_queue
             .pop_front()
             .expect("queue non-empty checked");
-        let fresh_batch_limit = fresh_prefill_batch_limit_for_request::<M>(&pending.request, b_max);
+        let fresh_batch_limit =
+            fresh_prefill_batch_limit_for_request::<M>(&pending.request, b_max, adaptive_policy);
         handle_admit(
             SchedulerCommand::Admit {
                 request: pending.request,
@@ -2333,7 +2647,8 @@ where
     // Queue empty + no active rows — same logic as pre-3d.
     match cmd_rx.try_recv() {
         Ok(cmd) => {
-            let fresh_batch_limit = fresh_prefill_batch_limit_for_command::<M>(&cmd, b_max);
+            let fresh_batch_limit =
+                fresh_prefill_batch_limit_for_command::<M>(&cmd, b_max, adaptive_policy);
             if sched.phase() == Phase::Decoding {
                 if let Err(evict_err) = sched.evict_all() {
                     tracing::warn!(
@@ -2759,6 +3074,16 @@ mod tests {
         )
     }
 
+    fn test_mtp_counters() -> SchedulerActorMtpCounters {
+        SchedulerActorMtpCounters::new(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        )
+    }
+
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3073,6 +3398,34 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_gemma4_drafter_fresh_limit_starts_long_chunked_request_alone() {
+        let mut request = mk_req(11);
+        request.prompt_ids = (0..4096).collect();
+        request.prefill_chunk_size = 2048;
+
+        let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
+            &request,
+            4,
+            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::gemma4_drafter(),
+        );
+
+        assert_eq!(limit, 1);
+    }
+
+    #[test]
+    fn adaptive_gemma4_drafter_fresh_limit_keeps_short_request_latency_cap() {
+        let request = mk_req(11);
+
+        let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
+            &request,
+            4,
+            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::gemma4_drafter(),
+        );
+
+        assert_eq!(limit, 2);
+    }
+
+    #[test]
     fn drain_admission_queue_limits_successful_mid_admit_to_one_per_turn() {
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel));
         let mut sched = Scheduler::<SchedulerActorFakeModel>::new(
@@ -3095,6 +3448,8 @@ mod tests {
         let mut queue = VecDeque::from([pending_1, pending_2, pending_3]);
         let mut event_txs = HashMap::new();
         let admit_count = Arc::new(AtomicU64::new(0));
+        let mut mtp_mode = SchedulerActorNoMtp;
+        let mtp_counters = test_mtp_counters();
         let mut in_flight_mid_admit = None;
 
         let did_admit = drain_admission_queue(
@@ -3104,8 +3459,11 @@ mod tests {
             &mut event_txs,
             &admit_count,
             &model,
+            &mut mtp_mode,
+            &mtp_counters,
             4,
             256,
+            AdaptiveAdmissionPolicy::disabled(),
         );
 
         assert!(did_admit, "expected one queued request to be admitted");
@@ -3146,6 +3504,8 @@ mod tests {
         let mut queue = VecDeque::from([pending_1, pending_2]);
         let mut event_txs = HashMap::new();
         let admit_count = Arc::new(AtomicU64::new(0));
+        let mut mtp_mode = SchedulerActorNoMtp;
+        let mtp_counters = test_mtp_counters();
         let mut in_flight_mid_admit = None;
 
         let did_admit = drain_admission_queue(
@@ -3155,8 +3515,11 @@ mod tests {
             &mut event_txs,
             &admit_count,
             &model,
+            &mut mtp_mode,
+            &mtp_counters,
             4,
             256,
+            AdaptiveAdmissionPolicy::disabled(),
         );
 
         assert!(
@@ -3203,6 +3566,8 @@ mod tests {
         }]);
         let mut event_txs = HashMap::new();
         let admit_count = Arc::new(AtomicU64::new(0));
+        let mut mtp_mode = SchedulerActorNoMtp;
+        let mtp_counters = test_mtp_counters();
         let mut in_flight_mid_admit = None;
 
         let did_admit = drain_admission_queue(
@@ -3212,8 +3577,11 @@ mod tests {
             &mut event_txs,
             &admit_count,
             &model,
+            &mut mtp_mode,
+            &mtp_counters,
             4,
             256,
+            AdaptiveAdmissionPolicy::disabled(),
         );
 
         assert!(
@@ -3264,6 +3632,8 @@ mod tests {
         }]);
         let mut event_txs = HashMap::new();
         let admit_count = Arc::new(AtomicU64::new(0));
+        let mut mtp_mode = SchedulerActorNoMtp;
+        let mtp_counters = test_mtp_counters();
         let mut in_flight_mid_admit = None;
 
         let did_admit = drain_admission_queue(
@@ -3273,8 +3643,11 @@ mod tests {
             &mut event_txs,
             &admit_count,
             &model,
+            &mut mtp_mode,
+            &mtp_counters,
             4,
             384,
+            AdaptiveAdmissionPolicy::disabled(),
         );
 
         assert!(did_admit, "chunked queued request should start");

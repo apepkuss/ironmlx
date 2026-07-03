@@ -1,0 +1,9 @@
+timestamp	2026-07-03-233000
+root	/Users/xin/workspace/ironmlx-backend-gemma4-adaptive-admission
+dev_root	/Users/xin/workspace/ironmlx-backend
+adaptive_commit	11407a6ae15f91b8970dcd8f697a67f33faf933e
+adaptive_dirty	yes
+dev_commit	1505a2c6b66fbea6c1485d3f67d505813d4b05a9
+model	/Users/xin/.ironmlx/models/models--mlx-community--gemma-4-e4b-it-4bit/snapshots/deb1db712068b1c9f83fb1c97f08c1204b9459a1
+drafter	/Users/xin/.ironmlx/models/models--mlx-community--gemma-4-E4B-it-qat-assistant-4bit/snapshots/dac8da1a066d5e00bc085e281fa73f2d5ec2fbe0
+shape	concurrent=4 max_tokens=64 duration=90s warmup=0 max_cache_cap=65536

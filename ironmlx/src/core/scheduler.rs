@@ -396,6 +396,34 @@ pub struct AdmitMidHandle {
     pub(crate) last_logits: Option<Array>,
 }
 
+/// Gemma4 drafter variant of [`AdmitMidHandle`].
+///
+/// The ordinary mid-admit path only needs final logits to sample the new row's
+/// first token. Gemma4 drafter also needs the final prompt hidden state and
+/// shared KV state so subsequent speculative windows can draft for the
+/// mid-admitted row without falling back to plain decode.
+#[doc(hidden)]
+pub struct Gemma4DrafterAdmitMidHandle {
+    pub request_id: RequestId,
+    pub(crate) row_idx: usize,
+    pub(crate) prompt_ids: Vec<u32>,
+    pub(crate) prompt_len: i32,
+    pub(crate) chunk_size: i32,
+    pub(crate) decode_cadence_mid_chunk_cap: usize,
+    pub(crate) chunk_start: i32,
+    pub(crate) temp_cache: Vec<crate::nn::LayerCache>,
+    pub(crate) prefix_fingerprint: Option<String>,
+    pub(crate) is_vl: bool,
+    pub(crate) image_token_id: i32,
+    pub(crate) dummy_position_ids: Option<Array>,
+    pub(crate) position_ids_full: Option<Array>,
+    pub(crate) vision_embeds_full: Option<Array>,
+    pub(crate) image_pad_consumed: usize,
+    pub(crate) last_prompt_hidden: Option<Array>,
+    pub(crate) last_shared_kv: Option<crate::models::gemma4::Gemma4SharedKvStates>,
+    pub(crate) stats: MtpSpeculativeStats,
+}
+
 /// All per-request state the scheduler tracks. Pre-allocated at admit time
 /// and held until eviction.
 ///
@@ -3688,6 +3716,7 @@ impl<M: Model> Scheduler<M> {
         if let Some(state) = self.slots[row_idx].take() {
             self.budget_state.release(state.kv_bytes_admitted);
         }
+        self.drop_speculative_row_state(row_idx);
         // Phase transitions on evict:
         //   Admitting + active_count==0 -> Idle (pre-3c-3 behavior)
         //   Decoding  + active_count==0 -> Finished (NEW in 3c-3)
@@ -3702,6 +3731,15 @@ impl<M: Model> Scheduler<M> {
             }
         }
         Ok(())
+    }
+
+    fn drop_speculative_row_state(&mut self, row_idx: usize) {
+        if let Some(mtp_state) = self.mtp_state.as_mut() {
+            mtp_state.rows.remove(&row_idx);
+        }
+        if let Some(drafter_state) = self.gemma4_drafter_state.as_mut() {
+            drafter_state.rows.remove(&row_idx);
+        }
     }
 
     /// Number of occupied slots.
@@ -6617,15 +6655,20 @@ impl<M: Model> Scheduler<M> {
         event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<S>>,
     ) -> Vec<RequestId> {
         let mut evicted: Vec<RequestId> = Vec::new();
-        for slot in self.slots.iter_mut() {
+        let mut evicted_rows: Vec<usize> = Vec::new();
+        for (row_idx, slot) in self.slots.iter_mut().enumerate() {
             if slot.as_ref().is_some_and(|s| s.finished) {
                 // B1-p2.5: release budget on slot clear.
                 if let Some(state) = slot.take() {
                     event_txs.remove(&state.id);
                     evicted.push(state.id);
+                    evicted_rows.push(row_idx);
                     self.budget_state.release(state.kv_bytes_admitted);
                 }
             }
+        }
+        for row_idx in evicted_rows {
+            self.drop_speculative_row_state(row_idx);
         }
         if self.phase == Phase::Decoding && self.active_count() == 0 {
             self.phase = Phase::Finished;
@@ -6654,6 +6697,420 @@ impl<M: Model> Scheduler<M> {
 }
 
 impl Scheduler<crate::models::Gemma4Model> {
+    pub fn admit_mid_begin_gemma4_drafter(
+        &mut self,
+        req: GenerateRequest,
+        model: &crate::models::Gemma4Model,
+    ) -> Result<Gemma4DrafterAdmitMidHandle> {
+        self.ensure_not_poisoned()?;
+        if self.phase != Phase::Decoding {
+            return Err(anyhow!(
+                "admit_mid_begin_gemma4_drafter illegal in {:?} phase: only Decoding",
+                self.phase
+            ));
+        }
+        let id = self.admit(req)?;
+        let row_idx = self
+            .slots
+            .iter()
+            .position(|slot| matches!(slot, Some(state) if state.id == id))
+            .expect("admit inserted request id");
+
+        match self.admit_mid_begin_gemma4_drafter_inner(id, row_idx, model) {
+            Ok(handle) => Ok(handle),
+            Err(err) => {
+                let _ = self.evict(id);
+                Err(err)
+            }
+        }
+    }
+
+    fn admit_mid_begin_gemma4_drafter_inner(
+        &mut self,
+        id: RequestId,
+        row_idx: usize,
+        model: &crate::models::Gemma4Model,
+    ) -> Result<Gemma4DrafterAdmitMidHandle> {
+        let (
+            prompt_ids,
+            prompt_len_usz,
+            max_new_tokens,
+            pixel_values,
+            image_grid_thw,
+            image_token_id,
+            image_spatial_merge_size,
+            prefill_chunk_size,
+            decode_cadence_mid_chunk_cap,
+        ) = {
+            let state = self.slots[row_idx]
+                .as_ref()
+                .ok_or_else(|| anyhow!("admit_mid_begin_gemma4_drafter: row slot absent"))?;
+            (
+                state.prompt_ids.clone(),
+                state.prompt_ids.len(),
+                state.max_new_tokens,
+                state.pixel_values.clone(),
+                state.image_grid_thw.clone(),
+                state.image_token_id,
+                state.image_spatial_merge_size,
+                state.prefill_chunk_size,
+                state.decode_cadence_mid_chunk_cap,
+            )
+        };
+        if prompt_ids.is_empty() {
+            return Err(anyhow!(
+                "admit_mid_begin_gemma4_drafter: prompt_ids cannot be empty"
+            ));
+        }
+        if pixel_values.is_none() && image_grid_thw.is_some() {
+            return Err(anyhow!(
+                "admit_mid_begin_gemma4_drafter: image_grid_thw present but pixel_values is None"
+            ));
+        }
+
+        let prompt_len = prompt_len_usz as i32;
+        let max_new_i32 = i32::try_from(max_new_tokens).unwrap_or(i32::MAX);
+        let cap_for_temp = prompt_len
+            .saturating_add(max_new_i32)
+            .max(prompt_len)
+            .max(MIN_KV_CACHE_CAP_FOR_GPU_PERF);
+        let dtype = {
+            let main_cache = self
+                .cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("admit_mid_begin_gemma4_drafter: main cache absent"))?;
+            main_cache
+                .iter()
+                .find_map(|cache| match cache {
+                    LayerCache::Full(kv) => Some(kv.dtype()),
+                    LayerCache::Mla(mla) => Some(mla.dtype()),
+                    _ => None,
+                })
+                .unwrap_or(Dtype::Bfloat16)
+        };
+        let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
+        let mut temp_cache =
+            self.make_model_cache(model, 1, cap_for_temp, dtype, turboquant_bits)?;
+
+        let prefix_cache = self.gemma4_drafter_prefix_cache();
+        let is_vl = pixel_values.is_some();
+        let prefix_fingerprint = if prefix_cache.is_enabled() {
+            paged_prefix_fingerprint_for_request(
+                pixel_values.as_deref(),
+                image_grid_thw.as_deref(),
+                image_token_id,
+                image_spatial_merge_size,
+            )?
+        } else {
+            None
+        };
+        let mut chunk_start = 0_i32;
+        let mut image_pad_consumed = 0usize;
+        let mut last_prompt_hidden = None;
+        let mut last_shared_kv = None;
+        if let Some(restored) = prefix_cache.try_restore(
+            model,
+            &mut temp_cache,
+            &prompt_ids,
+            prefix_fingerprint.as_deref(),
+        )? {
+            chunk_start = restored.cached_len;
+            image_pad_consumed =
+                count_image_pad(&prompt_ids[..chunk_start as usize], image_token_id);
+            last_prompt_hidden = Some(restored.last_hidden);
+            last_shared_kv = Some(restored.shared_kv);
+            self.refresh_active_kv_residency_stats();
+        }
+
+        let dummy_position_ids = if model.requires_position_ids() {
+            None
+        } else {
+            Some(self.reusable_dummy_position_ids()?)
+        };
+        let position_ids_full = if is_vl && dummy_position_ids.is_none() {
+            let grids = image_grid_thw.as_deref().ok_or_else(|| {
+                anyhow!("admit_mid_begin_gemma4_drafter: pixel_values present but image_grid_thw is None")
+            })?;
+            if model.vl_positions_sequential() {
+                Some(build_position_ids(0, prompt_len)?)
+            } else {
+                let prompt_ids_i32: Vec<i32> = prompt_ids.iter().map(|&id| id as i32).collect();
+                Some(build_position_ids_vl(
+                    &prompt_ids_i32,
+                    grids,
+                    image_token_id,
+                    image_spatial_merge_size,
+                )?)
+            }
+        } else {
+            None
+        };
+
+        let vision_embeds_full = if is_vl {
+            let pv = pixel_values
+                .as_deref()
+                .ok_or_else(|| anyhow!("admit_mid_begin_gemma4_drafter: pixel_values absent"))?;
+            let grids = image_grid_thw.as_deref().ok_or_else(|| {
+                anyhow!("admit_mid_begin_gemma4_drafter: pixel_values present but image_grid_thw is None")
+            })?;
+            Some(model.compute_vision_embeds(pv, grids, mlx::StreamOrDevice::default())?)
+        } else {
+            None
+        };
+
+        let chunk_size = if prefill_chunk_size == 0 {
+            prompt_len.max(1)
+        } else {
+            prefill_chunk_size.max(1)
+        };
+
+        Ok(Gemma4DrafterAdmitMidHandle {
+            request_id: id,
+            row_idx,
+            prompt_ids,
+            prompt_len,
+            chunk_size,
+            decode_cadence_mid_chunk_cap,
+            chunk_start,
+            temp_cache,
+            prefix_fingerprint,
+            is_vl,
+            image_token_id,
+            dummy_position_ids,
+            position_ids_full,
+            vision_embeds_full,
+            image_pad_consumed,
+            last_prompt_hidden,
+            last_shared_kv,
+            stats: MtpSpeculativeStats::default(),
+        })
+    }
+
+    pub fn admit_mid_chunk_gemma4_drafter(
+        &mut self,
+        handle: &mut Gemma4DrafterAdmitMidHandle,
+        model: &crate::models::Gemma4Model,
+    ) -> Result<bool> {
+        self.ensure_not_poisoned()?;
+        if handle.chunk_start >= handle.prompt_len {
+            anyhow::ensure!(
+                handle.last_prompt_hidden.is_some() && handle.last_shared_kv.is_some(),
+                "admit_mid_chunk_gemma4_drafter: restored full prompt without drafter state"
+            );
+            return Ok(true);
+        }
+
+        let base_chunk_end = handle
+            .chunk_start
+            .saturating_add(handle.chunk_size)
+            .min(handle.prompt_len);
+        let chunk_end = if handle.is_vl {
+            extend_vl_chunk_end_for_image_pad(
+                &handle.prompt_ids,
+                handle.image_token_id,
+                handle.chunk_start,
+                base_chunk_end,
+            )
+        } else {
+            base_chunk_end
+        };
+        let is_last = chunk_end == handle.prompt_len;
+        let chunk_len = chunk_end - handle.chunk_start;
+        if chunk_len <= 0 {
+            return Err(anyhow!(
+                "admit_mid_chunk_gemma4_drafter: chunk_len <= 0 (chunk_start={}, chunk_end={})",
+                handle.chunk_start,
+                chunk_end
+            ));
+        }
+
+        let chunk_ids = &handle.prompt_ids[handle.chunk_start as usize..chunk_end as usize];
+        let chunk_arr: Array = (chunk_ids, &[1_i32, chunk_len][..]).try_into()?;
+        let chunk_pos_ids = match (
+            handle.dummy_position_ids.as_ref(),
+            handle.position_ids_full.as_ref(),
+        ) {
+            (Some(dummy), _) => dummy.clone(),
+            (None, Some(full)) => slice_pos_ids_axis2(full, handle.chunk_start, chunk_end)?,
+            (None, None) => build_position_ids(handle.chunk_start, chunk_len)?,
+        };
+
+        let forward_start = Instant::now();
+        let out = if handle.is_vl {
+            let image_tokens = count_image_pad(chunk_ids, handle.image_token_id);
+            let image_rows_start = handle.image_pad_consumed;
+            let vision_slice = match handle.vision_embeds_full.as_ref() {
+                Some(embeds) if image_tokens > 0 => {
+                    let slice = slice_vision_embeds_rows(
+                        embeds,
+                        image_rows_start,
+                        image_rows_start + image_tokens,
+                    )?;
+                    handle.image_pad_consumed += image_tokens;
+                    Some(slice)
+                }
+                _ => None,
+            };
+            log_vl_chunk_composition(
+                "scheduler-gemma4-drafter-mid",
+                handle.chunk_start..chunk_end,
+                is_last,
+                chunk_ids,
+                handle.image_token_id,
+                image_rows_start..image_rows_start + image_tokens,
+            );
+            model.forward_vl_hidden_with_shared_kv_on(
+                &chunk_arr,
+                &chunk_pos_ids,
+                None,
+                None,
+                Some(handle.temp_cache.as_mut_slice()),
+                vision_slice.as_ref(),
+                handle.image_token_id,
+                mlx::StreamOrDevice::default(),
+            )?
+        } else {
+            model.forward_text_hidden_with_shared_kv_on(
+                &chunk_arr,
+                &chunk_pos_ids,
+                None,
+                None,
+                Some(handle.temp_cache.as_mut_slice()),
+                mlx::StreamOrDevice::default(),
+            )?
+        };
+        add_elapsed_us(&mut handle.stats.verify_forward_us, forward_start);
+
+        let chunk_last_hidden = slice_hidden_position(&out.hidden, chunk_len - 1)?;
+        let new_pos = chunk_end;
+        let prefix_cache = self.gemma4_drafter_prefix_cache();
+        match prefix_cache.try_save(
+            model,
+            &handle.temp_cache,
+            &chunk_last_hidden,
+            &handle.prompt_ids[..new_pos as usize],
+            handle.prefix_fingerprint.as_deref(),
+        ) {
+            Ok(Some(key)) => {
+                tracing::debug!("paged SSD prefix cache Gemma4 drafter mid-admit saved: key={key}");
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(
+                    "paged SSD prefix cache Gemma4 drafter mid-admit save skipped: {err:#}"
+                );
+            }
+        }
+        self.refresh_active_kv_residency_stats();
+        handle.last_prompt_hidden = Some(chunk_last_hidden);
+        handle.last_shared_kv = Some(out.shared_kv);
+        handle.chunk_start = chunk_end;
+        Ok(is_last)
+    }
+
+    pub fn admit_mid_finalize_gemma4_drafter(
+        &mut self,
+        handle: Gemma4DrafterAdmitMidHandle,
+        model: &crate::models::Gemma4Model,
+    ) -> Result<(RequestId, StepEvent)> {
+        self.ensure_not_poisoned()?;
+        let Gemma4DrafterAdmitMidHandle {
+            request_id: id,
+            row_idx,
+            prompt_ids,
+            temp_cache,
+            last_prompt_hidden,
+            last_shared_kv,
+            mut stats,
+            ..
+        } = handle;
+
+        let last_prompt_hidden = last_prompt_hidden.ok_or_else(|| {
+            anyhow!("admit_mid_finalize_gemma4_drafter: last_prompt_hidden absent")
+        })?;
+        let shared_kv = last_shared_kv
+            .ok_or_else(|| anyhow!("admit_mid_finalize_gemma4_drafter: shared KV absent"))?;
+
+        self.install_cache_with_temp_row(model, &temp_cache, row_idx)?;
+
+        let (sampler, stop_token_ids, max_new_tokens) = {
+            let state = self.slots[row_idx]
+                .as_ref()
+                .ok_or_else(|| anyhow!("admit_mid_finalize_gemma4_drafter: row slot absent"))?;
+            (
+                state.sampler,
+                state.stop_token_ids.clone(),
+                state.max_new_tokens,
+            )
+        };
+        let projection_start = Instant::now();
+        let first_logits =
+            model.project_hidden_on(&last_prompt_hidden, mlx::StreamOrDevice::default())?;
+        add_elapsed_us(&mut stats.projection_us, projection_start);
+        let mut compact_prng = self.compact_prng_state_for_rows(&[row_idx])?;
+        let sampling_start = Instant::now();
+        let first_tokens =
+            sample_logits_positions(&first_logits, sampler, &prompt_ids, &mut compact_prng)?;
+        add_elapsed_us(&mut stats.sampling_us, sampling_start);
+        self.scatter_prng_state_from_rows(&[row_idx], &compact_prng)?;
+        let first_token = *first_tokens
+            .first()
+            .ok_or_else(|| anyhow!("admit_mid_finalize_gemma4_drafter produced no first token"))?;
+
+        let finish_reason = {
+            let state = self.slots[row_idx]
+                .as_mut()
+                .ok_or_else(|| anyhow!("admit_mid_finalize_gemma4_drafter: row slot absent"))?;
+            state.generated_tokens.push(first_token);
+            state.real_len += 1;
+            if stop_token_ids.contains(&first_token) {
+                state.finished = true;
+                state.finish_reason = Some("stop");
+            } else if state.generated_tokens.len() >= max_new_tokens {
+                state.finished = true;
+                state.finish_reason = Some("length");
+            }
+            state.finish_reason
+        };
+
+        let mut drafter_state = self
+            .gemma4_drafter_state
+            .take()
+            .ok_or_else(|| anyhow!("admit_mid_finalize_gemma4_drafter: drafter state absent"))?;
+        add_mtp_stats(&mut drafter_state.stats, stats);
+        if finish_reason.is_none() {
+            drafter_state.rows.insert(
+                row_idx,
+                SchedulerGemma4DrafterRowState {
+                    pending_tokens: VecDeque::new(),
+                    last_hidden: last_prompt_hidden,
+                    shared_kv,
+                    adaptive_draft_tokens: drafter_state.cfg.max_draft_tokens,
+                },
+            );
+        }
+        self.gemma4_drafter_state = Some(drafter_state);
+        let any_unfinished = self
+            .slots
+            .iter()
+            .any(|slot| matches!(slot, Some(state) if !state.finished));
+        self.phase = if any_unfinished {
+            Phase::Decoding
+        } else {
+            Phase::Finished
+        };
+        self.refresh_active_kv_residency_stats();
+
+        Ok((
+            id,
+            StepEvent {
+                id,
+                token: first_token,
+                finish_reason,
+            },
+        ))
+    }
+
     pub fn prefill_admitted_gemma4_drafter_batch(
         &mut self,
         model: &crate::models::Gemma4Model,
@@ -7170,25 +7627,41 @@ impl Scheduler<crate::models::Gemma4Model> {
                 self.phase
             ));
         }
-        let active_rows: Vec<usize> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(row, slot)| matches!(slot, Some(state) if !state.finished).then_some(row))
-            .collect();
-        if active_rows.is_empty() {
-            self.phase = Phase::Finished;
-            return Ok(Vec::new());
-        }
-        if active_rows.len() == 1 && self.cache_rows.as_slice() == active_rows.as_slice() {
-            return self.step_gemma4_drafter_single(model, drafter);
-        }
-
         let mut drafter_state = self
             .gemma4_drafter_state
             .take()
             .ok_or_else(|| anyhow!("step_gemma4_drafter_batch: drafter state absent"))?;
         let cfg = drafter_state.cfg;
+        let active_rows: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(row, slot)| {
+                (matches!(slot, Some(state) if !state.finished)
+                    && drafter_state.rows.contains_key(&row))
+                .then_some(row)
+            })
+            .collect();
+        if active_rows.is_empty() {
+            let any_unfinished = self
+                .slots
+                .iter()
+                .any(|slot| matches!(slot, Some(state) if !state.finished));
+            self.phase = if any_unfinished {
+                Phase::Decoding
+            } else {
+                Phase::Finished
+            };
+            self.gemma4_drafter_state = Some(drafter_state);
+            return Ok(Vec::new());
+        }
+        if active_rows.len() == 1
+            && self.active_count() == 1
+            && self.cache_rows.as_slice() == active_rows.as_slice()
+        {
+            self.gemma4_drafter_state = Some(drafter_state);
+            return self.step_gemma4_drafter_single(model, drafter);
+        }
 
         let rows_needing_prefill = active_rows
             .iter()
@@ -7423,7 +7896,10 @@ impl Scheduler<crate::models::Gemma4Model> {
             .slots
             .iter()
             .enumerate()
-            .filter_map(|(row, slot)| matches!(slot, Some(state) if !state.finished).then_some(row))
+            .filter_map(|(row, slot)| {
+                (matches!(slot, Some(state) if !state.finished) && row_states.contains_key(&row))
+                    .then_some(row)
+            })
             .collect::<Vec<_>>();
         self.rebuild_cache_layout(model, &active_rows)?;
         let cache_row_for_ctx = contexts
@@ -7538,12 +8014,9 @@ impl Scheduler<crate::models::Gemma4Model> {
                 accepted_len - 1,
                 mlx::StreamOrDevice::default(),
             )?;
-            row_state.shared_kv = crate::models::gemma4::shared_kv_row_for_drafter_on(
+            row_state.shared_kv = crate::models::gemma4::shared_kv_row_view_on(
                 &verified.shared_kv,
                 compact_row,
-                ctx.kv_valid_len + accepted_len as i32,
-                model.config().sliding_window,
-                accepted_len as i32,
                 mlx::StreamOrDevice::default(),
             )?;
             append_resolved_gemma4_tokens(row_state, ctx, resolution.clone());
@@ -7621,12 +8094,9 @@ impl Scheduler<crate::models::Gemma4Model> {
                     accepted_len - 1,
                     mlx::StreamOrDevice::default(),
                 )?;
-                row_state.shared_kv = crate::models::gemma4::shared_kv_row_for_drafter_on(
+                row_state.shared_kv = crate::models::gemma4::shared_kv_row_view_on(
                     &replay.shared_kv,
                     compact_row,
-                    ctx.kv_valid_len + accepted_len as i32,
-                    model.config().sliding_window,
-                    accepted_len as i32,
                     mlx::StreamOrDevice::default(),
                 )?;
                 append_resolved_gemma4_tokens(row_state, ctx, resolution);
@@ -11392,6 +11862,133 @@ mod tests {
         assert!(
             !event_txs.contains_key(&id_a),
             "id_a's event channel must be dropped"
+        );
+    }
+
+    #[test]
+    fn scheduler_gc_finished_rows_removes_gemma4_drafter_row_state_for_evicted_slots() {
+        use std::collections::HashMap;
+        use tokio::sync::mpsc;
+
+        let mut s = Scheduler::<crate::models::Gemma4Model>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_gemma4_12b(),
+        )
+        .expect("scheduler startup");
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        let id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
+        s.force_phase(Phase::Decoding);
+
+        s.gemma4_drafter_state = Some(SchedulerGemma4DrafterState {
+            cfg: MtpSpeculativeConfig::new(2, Sampler::greedy()).expect("mtp config"),
+            rows: HashMap::from([
+                (
+                    0,
+                    SchedulerGemma4DrafterRowState {
+                        pending_tokens: VecDeque::new(),
+                        last_hidden: (&[1.0_f32][..], &[1_i32, 1, 1][..])
+                            .try_into()
+                            .expect("last_hidden row 0"),
+                        shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
+                        adaptive_draft_tokens: 2,
+                    },
+                ),
+                (
+                    1,
+                    SchedulerGemma4DrafterRowState {
+                        pending_tokens: VecDeque::new(),
+                        last_hidden: (&[2.0_f32][..], &[1_i32, 1, 1][..])
+                            .try_into()
+                            .expect("last_hidden row 1"),
+                        shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
+                        adaptive_draft_tokens: 2,
+                    },
+                ),
+            ]),
+            stats: MtpSpeculativeStats::default(),
+        });
+
+        s.get_mut(id_a).unwrap().finished = true;
+        s.get_mut(id_a).unwrap().finish_reason = Some("length");
+
+        let mut event_txs: HashMap<RequestId, mpsc::UnboundedSender<StepEvent>> = HashMap::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel::<StepEvent>();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel::<StepEvent>();
+        event_txs.insert(id_a, tx_a);
+        event_txs.insert(id_b, tx_b);
+
+        let evicted = s.gc_finished_rows(&mut event_txs);
+
+        assert_eq!(evicted, vec![id_a], "only id_a should be evicted");
+        let drafter_state = s
+            .gemma4_drafter_state
+            .as_ref()
+            .expect("remaining active row keeps drafter state");
+        assert!(
+            !drafter_state.rows.contains_key(&0),
+            "evicted row 0 drafter state must be dropped"
+        );
+        assert!(
+            drafter_state.rows.contains_key(&1),
+            "active row 1 drafter state must remain"
+        );
+    }
+
+    #[test]
+    fn scheduler_evict_removes_gemma4_drafter_row_state_for_evicted_slot() {
+        let mut s = Scheduler::<crate::models::Gemma4Model>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_gemma4_12b(),
+        )
+        .expect("scheduler startup");
+        let id_a = s.admit(mk_req(vec![1, 2, 3])).expect("admit a");
+        let _id_b = s.admit(mk_req(vec![4, 5, 6])).expect("admit b");
+        s.force_phase(Phase::Decoding);
+
+        s.gemma4_drafter_state = Some(SchedulerGemma4DrafterState {
+            cfg: MtpSpeculativeConfig::new(2, Sampler::greedy()).expect("mtp config"),
+            rows: HashMap::from([
+                (
+                    0,
+                    SchedulerGemma4DrafterRowState {
+                        pending_tokens: VecDeque::new(),
+                        last_hidden: (&[1.0_f32][..], &[1_i32, 1, 1][..])
+                            .try_into()
+                            .expect("last_hidden row 0"),
+                        shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
+                        adaptive_draft_tokens: 2,
+                    },
+                ),
+                (
+                    1,
+                    SchedulerGemma4DrafterRowState {
+                        pending_tokens: VecDeque::new(),
+                        last_hidden: (&[2.0_f32][..], &[1_i32, 1, 1][..])
+                            .try_into()
+                            .expect("last_hidden row 1"),
+                        shared_kv: crate::models::gemma4::Gemma4SharedKvStates::default(),
+                        adaptive_draft_tokens: 2,
+                    },
+                ),
+            ]),
+            stats: MtpSpeculativeStats::default(),
+        });
+
+        s.evict(id_a).expect("evict id_a");
+
+        let drafter_state = s
+            .gemma4_drafter_state
+            .as_ref()
+            .expect("remaining active row keeps drafter state");
+        assert!(
+            !drafter_state.rows.contains_key(&0),
+            "evicted row 0 drafter state must be dropped"
+        );
+        assert!(
+            drafter_state.rows.contains_key(&1),
+            "active row 1 drafter state must remain"
         );
     }
 
