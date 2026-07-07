@@ -112,6 +112,63 @@ impl MtpCache {
         Ok(())
     }
 
+    /// Trim one row to `snapshot.offset + accepted_len` in every MTP layer.
+    ///
+    /// Speculative draft forwards already wrote the kept MTP inputs into this
+    /// cache. On mismatch, callers can keep that accepted prefix by moving only
+    /// logical offsets back, leaving stale rejected entries above the offset.
+    pub fn trim_row_to_snapshot_prefix_len(
+        &mut self,
+        snapshot: &MtpCacheSnapshot,
+        row: usize,
+        accepted_len: usize,
+    ) -> Result<()> {
+        if snapshot.layers.len() != self.layers.len() {
+            return Err(anyhow!(
+                "MtpCache::trim_row_to_snapshot_prefix_len: snapshot layers {} != cache layers {}",
+                snapshot.layers.len(),
+                self.layers.len()
+            ));
+        }
+        let accepted_len = i32::try_from(accepted_len).map_err(|_| {
+            anyhow!(
+                "MtpCache::trim_row_to_snapshot_prefix_len: accepted_len {accepted_len} exceeds i32"
+            )
+        })?;
+        for (idx, (layer, layer_snapshot)) in self
+            .layers
+            .iter_mut()
+            .zip(snapshot.layers.iter())
+            .enumerate()
+        {
+            let base = *layer_snapshot.offsets().get(row).ok_or_else(|| {
+                anyhow!(
+                    "MtpCache::trim_row_to_snapshot_prefix_len: row {row} out of snapshot offsets for layer {idx}"
+                )
+            })?;
+            let mut offsets = layer.offsets().to_vec();
+            let live = offsets.get_mut(row).ok_or_else(|| {
+                anyhow!(
+                    "MtpCache::trim_row_to_snapshot_prefix_len: row {row} out of live offsets for layer {idx}"
+                )
+            })?;
+            let target = base.checked_add(accepted_len).ok_or_else(|| {
+                anyhow!(
+                    "MtpCache::trim_row_to_snapshot_prefix_len: base {base} + accepted_len {accepted_len} overflow"
+                )
+            })?;
+            if target > *live {
+                return Err(anyhow!(
+                    "MtpCache::trim_row_to_snapshot_prefix_len: target offset {target} exceeds live offset {} for row {row} layer {idx}",
+                    *live
+                ));
+            }
+            *live = target;
+            layer.restore_offsets(&offsets)?;
+        }
+        Ok(())
+    }
+
     pub fn adopt_row_from(&mut self, src: &MtpCache, dst_row: usize, src_row: usize) -> Result<()> {
         if self.layers.len() != src.layers.len() {
             return Err(anyhow!(
@@ -252,6 +309,25 @@ mod tests {
         cache.restore(&snapshot).expect("restore mtp snapshot");
         assert_eq!(cache.layer(0).offsets(), &[4]);
         assert_eq!(cache.layer(1).offsets(), &[4]);
+    }
+
+    #[test]
+    fn mtp_cache_trim_row_to_snapshot_prefix_len_keeps_accepted_prefix() {
+        let mut cache = make_cache(2);
+        let k4: mlx::Array = mlx::Array::zeros((1, 2, 4, 8), Dtype::Bfloat16).unwrap();
+        let v4: mlx::Array = mlx::Array::zeros((1, 2, 4, 8), Dtype::Bfloat16).unwrap();
+        cache.layer_mut(0).update_and_fetch(&k4, &v4, &[4]).unwrap();
+        cache.layer_mut(1).update_and_fetch(&k4, &v4, &[4]).unwrap();
+        let snapshot = cache.snapshot();
+        cache.layer_mut(0).update_and_fetch(&k4, &v4, &[4]).unwrap();
+        cache.layer_mut(1).update_and_fetch(&k4, &v4, &[4]).unwrap();
+
+        cache
+            .trim_row_to_snapshot_prefix_len(&snapshot, 0, 2)
+            .expect("trim accepted prefix");
+
+        assert_eq!(cache.layer(0).offsets(), &[6]);
+        assert_eq!(cache.layer(1).offsets(), &[6]);
     }
 
     #[test]
