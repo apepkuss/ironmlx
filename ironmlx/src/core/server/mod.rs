@@ -21,7 +21,7 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileConfig, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeRequest,
 };
-use crate::core::speculative::MtpSpeculativeModel;
+use crate::core::speculative::{effective_mtp_draft_tokens_for_paged_prefix, MtpSpeculativeModel};
 use crate::core::tokenizer::Tokenizer;
 use crate::Result;
 
@@ -123,6 +123,8 @@ pub struct AppState<M: Model + DenseVlMethods + Send + 'static> {
     pub model_weight_bytes: usize,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
+    /// True when this state owns a scheduler-backed MTP head.
+    pub mtp_enabled: bool,
     /// Health snapshot collector for `/healthz`. Holds shared Arc atomics
     /// wired to the SchedulerActor driver loop + BudgetState. B1-p2.5 G3.
     pub health_collector: Arc<health::SchedulerHealthCollector>,
@@ -146,6 +148,7 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for AppState<M> {
             sampling_defaults: self.sampling_defaults,
             model_weight_bytes: self.model_weight_bytes,
             kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
+            mtp_enabled: self.mtp_enabled,
             health_collector: self.health_collector.clone(),
         }
     }
@@ -191,7 +194,11 @@ pub(crate) fn should_route_to_scheduler<M: Model>(
     prefill_chunk_size: usize,
     b_max: usize,
     paged_prefix_cache_enabled: bool,
+    force_scheduler: bool,
 ) -> bool {
+    if force_scheduler {
+        return true;
+    }
     if paged_prefix_cache_enabled {
         return true;
     }
@@ -668,6 +675,8 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
+    let effective_mtp_draft_tokens =
+        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
     build_app_state(
         model,
         tokenizer,
@@ -683,10 +692,10 @@ where
         scheduler_autotune_report,
         vision_input_override,
         loaded_model_weight_bytes,
-        Some(mtp_draft_tokens),
+        Some(effective_mtp_draft_tokens),
         MtpSchedulerActorSpawner {
             mtp,
-            mtp_draft_tokens,
+            mtp_draft_tokens: effective_mtp_draft_tokens,
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
@@ -841,6 +850,14 @@ where
                 scheduler_handle.mtp_fallback_prefill_count.clone(),
                 scheduler_handle.mtp_drafted_tokens.clone(),
                 scheduler_handle.mtp_accepted_draft_tokens.clone(),
+                scheduler_handle.mtp_windows.clone(),
+                scheduler_handle.mtp_draft_forward_us.clone(),
+                scheduler_handle.mtp_verify_forward_us.clone(),
+                scheduler_handle.mtp_projection_us.clone(),
+                scheduler_handle.mtp_sampling_us.clone(),
+                scheduler_handle.mtp_main_rollback_us.clone(),
+                scheduler_handle.mtp_cache_commit_us.clone(),
+                scheduler_handle.mtp_cache_restore_us.clone(),
             )
         })
         .unwrap_or_else(health::MtpHealthConfig::disabled);
@@ -869,6 +886,7 @@ where
         sampling_defaults: SamplingDefaults::default(),
         model_weight_bytes: meta.weight_bytes,
         kv_cache_turboquant_bits,
+        mtp_enabled: mtp_health_draft_tokens.is_some(),
         health_collector,
     })
 }
@@ -1126,21 +1144,28 @@ mod tests {
     #[test]
     fn route_keeps_unlimited_model_long_prompt_on_generation_stream() {
         assert!(!should_route_to_scheduler::<DefaultRouteModel>(
-            4096, 2048, 4, false
+            4096, 2048, 4, false, false,
         ));
     }
 
     #[test]
     fn route_uses_scheduler_for_model_limited_chunked_long_prompt() {
         assert!(should_route_to_scheduler::<LimitedRouteModel>(
-            4096, 2048, 4, false
+            4096, 2048, 4, false, false,
         ));
     }
 
     #[test]
     fn route_uses_scheduler_for_long_prompt_when_paged_prefix_cache_enabled() {
         assert!(should_route_to_scheduler::<DefaultRouteModel>(
-            4096, 2048, 4, true,
+            4096, 2048, 4, true, false,
+        ));
+    }
+
+    #[test]
+    fn route_uses_scheduler_for_long_prompt_when_mtp_forces_scheduler() {
+        assert!(should_route_to_scheduler::<DefaultRouteModel>(
+            4096, 2048, 1, false, true,
         ));
     }
 
@@ -1159,6 +1184,14 @@ mod tests {
             mtp_fallback_prefill_count: Arc::new(AtomicU64::new(0)),
             mtp_drafted_tokens: Arc::new(AtomicU64::new(0)),
             mtp_accepted_draft_tokens: Arc::new(AtomicU64::new(0)),
+            mtp_windows: Arc::new(AtomicU64::new(0)),
+            mtp_draft_forward_us: Arc::new(AtomicU64::new(0)),
+            mtp_verify_forward_us: Arc::new(AtomicU64::new(0)),
+            mtp_projection_us: Arc::new(AtomicU64::new(0)),
+            mtp_sampling_us: Arc::new(AtomicU64::new(0)),
+            mtp_main_rollback_us: Arc::new(AtomicU64::new(0)),
+            mtp_cache_commit_us: Arc::new(AtomicU64::new(0)),
+            mtp_cache_restore_us: Arc::new(AtomicU64::new(0)),
             b_active: Arc::new(AtomicU64::new(0)),
             b_queued: Arc::new(AtomicU64::new(0)),
             admission_queue_full_count: queue_rejected,
@@ -1208,6 +1241,14 @@ mod tests {
         handle
             .mtp_accepted_draft_tokens
             .store(13, Ordering::Relaxed);
+        handle.mtp_windows.store(17, Ordering::Relaxed);
+        handle.mtp_draft_forward_us.store(19, Ordering::Relaxed);
+        handle.mtp_verify_forward_us.store(23, Ordering::Relaxed);
+        handle.mtp_projection_us.store(29, Ordering::Relaxed);
+        handle.mtp_sampling_us.store(31, Ordering::Relaxed);
+        handle.mtp_main_rollback_us.store(37, Ordering::Relaxed);
+        handle.mtp_cache_commit_us.store(41, Ordering::Relaxed);
+        handle.mtp_cache_restore_us.store(43, Ordering::Relaxed);
         let collector = build_health_collector(
             "test-model".to_string(),
             4096,
@@ -1221,6 +1262,14 @@ mod tests {
                 handle.mtp_fallback_prefill_count.clone(),
                 handle.mtp_drafted_tokens.clone(),
                 handle.mtp_accepted_draft_tokens.clone(),
+                handle.mtp_windows.clone(),
+                handle.mtp_draft_forward_us.clone(),
+                handle.mtp_verify_forward_us.clone(),
+                handle.mtp_projection_us.clone(),
+                handle.mtp_sampling_us.clone(),
+                handle.mtp_main_rollback_us.clone(),
+                handle.mtp_cache_commit_us.clone(),
+                handle.mtp_cache_restore_us.clone(),
             ),
         );
         let snapshot = collector.snapshot();
@@ -1232,6 +1281,14 @@ mod tests {
         assert_eq!(snapshot.mtp.fallback_prefill_count, 7);
         assert_eq!(snapshot.mtp.drafted_tokens, 11);
         assert_eq!(snapshot.mtp.accepted_draft_tokens, 13);
+        assert_eq!(snapshot.mtp.windows, 17);
+        assert_eq!(snapshot.mtp.draft_forward_us, 19);
+        assert_eq!(snapshot.mtp.verify_forward_us, 23);
+        assert_eq!(snapshot.mtp.projection_us, 29);
+        assert_eq!(snapshot.mtp.sampling_us, 31);
+        assert_eq!(snapshot.mtp.main_rollback_us, 37);
+        assert_eq!(snapshot.mtp.cache_commit_us, 41);
+        assert_eq!(snapshot.mtp.cache_restore_us, 43);
     }
 
     /// Verify two concurrent task acquisitions of the same Mutex serialize.

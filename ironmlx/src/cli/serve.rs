@@ -18,7 +18,9 @@ use crate::core::scheduler_autotune::{
     SchedulerAutotuneProfileHealthStatus, SchedulerAutotuneRuntimeProfile,
     SchedulerAutotuneRuntimeProfileMetadata, SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
 };
-use crate::core::server::adaptive_admission::GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX;
+use crate::core::server::adaptive_admission::{
+    GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX, QWEN_MTP_ADAPTIVE_PHYSICAL_B_MAX,
+};
 use crate::core::speculative::MtpSpeculativeModel;
 use crate::core::{server, Loader, Model, Tokenizer};
 use crate::Result;
@@ -431,7 +433,22 @@ pub(crate) struct ResolvedSchedulerRuntime {
     pub(crate) profile_source: Option<SchedulerProfileSource>,
 }
 
-pub(crate) fn apply_gemma4_drafter_adaptive_scheduler_defaults(
+fn adaptive_mtp_physical_b_max(
+    architecture: crate::models::ModelArchitecture,
+    mtp_enabled: bool,
+) -> Option<usize> {
+    if !mtp_enabled {
+        return None;
+    }
+    match architecture {
+        crate::models::ModelArchitecture::Gemma4 => Some(GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX),
+        crate::models::ModelArchitecture::Qwen35Dense
+        | crate::models::ModelArchitecture::Qwen35Moe => Some(QWEN_MTP_ADAPTIVE_PHYSICAL_B_MAX),
+        _ => None,
+    }
+}
+
+pub(crate) fn apply_adaptive_mtp_scheduler_defaults(
     args: &ServeArgs,
     architecture: crate::models::ModelArchitecture,
     mtp_enabled: bool,
@@ -439,15 +456,13 @@ pub(crate) fn apply_gemma4_drafter_adaptive_scheduler_defaults(
 ) -> bool {
     let explicit_scheduler_profile = args.scheduler_profile.is_some()
         || resolved.profile_source == Some(SchedulerProfileSource::Explicit);
-    if architecture != crate::models::ModelArchitecture::Gemma4
-        || !mtp_enabled
-        || args.b_max.is_some()
-        || explicit_scheduler_profile
-    {
+    let Some(target) = adaptive_mtp_physical_b_max(architecture, mtp_enabled) else {
+        return false;
+    };
+    if args.b_max.is_some() || explicit_scheduler_profile {
         return false;
     }
 
-    let target = GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX;
     let mut changed = false;
     if resolved.scheduler_config.b_max < target {
         resolved.scheduler_config.b_max = target;
@@ -950,11 +965,6 @@ where
     M::MtpHead: Send + 'static,
 {
     log_scheduler_mode(scheduler_config);
-    tracing::info!(
-        "ironmlx serve: MTP enabled model_dir={} draft_tokens={}",
-        mtp_config.model_dir.display(),
-        mtp_config.draft_tokens
-    );
 
     let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)
         .with_context(|| format!("Loader::open_mtp {}", mtp_config.model_dir.display()))?;
@@ -964,6 +974,17 @@ where
 
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
+    let effective_draft_tokens =
+        crate::core::speculative::effective_mtp_draft_tokens_for_paged_prefix(
+            mtp_config.draft_tokens,
+            paged_prefix_cache.is_some(),
+        );
+    tracing::info!(
+        "ironmlx serve: MTP enabled model_dir={} draft_tokens={} requested_draft_tokens={}",
+        mtp_config.model_dir.display(),
+        effective_draft_tokens,
+        mtp_config.draft_tokens
+    );
     let prefix_lru_cache = resolve_prefix_lru_cache_config(args, paged_prefix_cache.as_ref())?;
     let active_kv_offload = resolve_active_kv_offload_config(args)?;
     if let Some(config) = &prefix_lru_cache {
@@ -976,7 +997,7 @@ where
     runtime.block_on(server::serve_with_mtp(
         model,
         mtp,
-        mtp_config.draft_tokens,
+        effective_draft_tokens,
         tokenizer,
         model_id,
         &args.host,
@@ -1236,14 +1257,9 @@ fn build_engine_model_config_for_pool(
     )?;
     let model_type = read_model_type(&model.path)?;
     let architecture = crate::models::ModelArchitecture::from_model_type(&model_type)?;
-    if apply_gemma4_drafter_adaptive_scheduler_defaults(
-        args,
-        architecture,
-        mtp.is_some(),
-        &mut resolved,
-    ) {
+    if apply_adaptive_mtp_scheduler_defaults(args, architecture, mtp.is_some(), &mut resolved) {
         tracing::info!(
-            "ironmlx serve: Gemma4 drafter adaptive scheduler default applied manifest_model={} b_max={}",
+            "ironmlx serve: adaptive MTP scheduler default applied manifest_model={} b_max={}",
             model.id,
             resolved.scheduler_config.b_max
         );
@@ -1470,14 +1486,14 @@ pub fn run(args: ServeArgs) -> Result<()> {
         scheduler_config,
         profile_source,
     };
-    if apply_gemma4_drafter_adaptive_scheduler_defaults(
+    if apply_adaptive_mtp_scheduler_defaults(
         &args,
         architecture,
         mtp_config.is_some(),
         &mut resolved_scheduler,
     ) {
         tracing::info!(
-            "ironmlx serve: Gemma4 drafter adaptive scheduler default applied b_max={}",
+            "ironmlx serve: adaptive MTP scheduler default applied b_max={}",
             resolved_scheduler.scheduler_config.b_max
         );
     }
@@ -1689,7 +1705,7 @@ mod scheduler_profile_tests {
     use crate::core::server::engine::{EngineLoadPolicy, EngineModelManifest};
 
     use super::{
-        apply_gemma4_drafter_adaptive_scheduler_defaults, build_engine_model_config_for_pool,
+        apply_adaptive_mtp_scheduler_defaults, build_engine_model_config_for_pool,
         check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
         load_scheduler_profile_for_model, qwen_moe_serve_model, read_engine_pool_manifest,
         resolve_active_kv_offload_config, resolve_memory_limit_bytes, resolve_model_ttl,
@@ -2078,7 +2094,7 @@ mod scheduler_profile_tests {
             profile_source: None,
         };
 
-        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+        let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
             crate::models::ModelArchitecture::Gemma4,
             true,
@@ -2106,7 +2122,7 @@ mod scheduler_profile_tests {
             profile_source: None,
         };
 
-        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+        let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
             crate::models::ModelArchitecture::Gemma4,
             true,
@@ -2130,7 +2146,7 @@ mod scheduler_profile_tests {
             profile_source: Some(SchedulerProfileSource::Store),
         };
 
-        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+        let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
             crate::models::ModelArchitecture::Gemma4,
             true,
@@ -2161,7 +2177,7 @@ mod scheduler_profile_tests {
             profile_source: Some(SchedulerProfileSource::Explicit),
         };
 
-        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+        let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
             crate::models::ModelArchitecture::Gemma4,
             true,
@@ -2175,7 +2191,7 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn qwen_mtp_default_scheduler_keeps_global_bmax_default() {
+    fn qwen_mtp_default_scheduler_uses_adaptive_bmax_four_when_unconfigured() {
         let args = base_args();
         let mut resolved = ResolvedSchedulerRuntime {
             scheduler_runtime_profile: default_scheduler_runtime_profile(),
@@ -2183,16 +2199,16 @@ mod scheduler_profile_tests {
             profile_source: None,
         };
 
-        let changed = apply_gemma4_drafter_adaptive_scheduler_defaults(
+        let changed = apply_adaptive_mtp_scheduler_defaults(
             &args,
             crate::models::ModelArchitecture::Qwen35Dense,
             true,
             &mut resolved,
         );
 
-        assert!(!changed, "Qwen MTP should keep the existing global default");
-        assert_eq!(resolved.scheduler_config.b_max, 1);
-        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 1);
+        assert!(changed, "Qwen MTP defaults should enable b_max=4");
+        assert_eq!(resolved.scheduler_config.b_max, 4);
+        assert_eq!(resolved.scheduler_runtime_profile.config.b_max, 4);
     }
 
     #[test]

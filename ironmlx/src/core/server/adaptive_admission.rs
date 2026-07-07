@@ -1,6 +1,7 @@
 pub(crate) const GEMMA4_DRAFTER_ADAPTIVE_PHYSICAL_B_MAX: usize = 4;
+pub(crate) const QWEN_MTP_ADAPTIVE_PHYSICAL_B_MAX: usize = 4;
 
-const GEMMA4_DRAFTER_LATENCY_BATCH_LIMIT: usize = 2;
+const ADAPTIVE_LATENCY_BATCH_LIMIT: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AdmissionRequestShape {
@@ -18,6 +19,7 @@ impl AdmissionRequestShape {
 enum AdaptiveAdmissionMode {
     Disabled,
     Gemma4Drafter,
+    QwenMtp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +40,12 @@ impl AdaptiveAdmissionPolicy {
         }
     }
 
+    pub(crate) fn qwen_mtp() -> Self {
+        Self {
+            mode: AdaptiveAdmissionMode::QwenMtp,
+        }
+    }
+
     pub(crate) fn fresh_batch_limit(
         self,
         request: AdmissionRequestShape,
@@ -47,12 +55,12 @@ impl AdaptiveAdmissionPolicy {
         let model_limit = model_limit.clamp(1, b_max.max(1));
         match self.mode {
             AdaptiveAdmissionMode::Disabled => model_limit,
-            AdaptiveAdmissionMode::Gemma4Drafter => {
+            AdaptiveAdmissionMode::Gemma4Drafter | AdaptiveAdmissionMode::QwenMtp => {
                 if request.uses_multi_chunk_prefill() {
                     1
                 } else {
                     model_limit
-                        .min(GEMMA4_DRAFTER_LATENCY_BATCH_LIMIT)
+                        .min(ADAPTIVE_LATENCY_BATCH_LIMIT)
                         .clamp(1, b_max.max(1))
                 }
             }
@@ -75,8 +83,11 @@ impl AdaptiveAdmissionPolicy {
                 active_count < model_limit || request.uses_multi_chunk_prefill()
             }
             AdaptiveAdmissionMode::Gemma4Drafter if request.uses_multi_chunk_prefill() => true,
-            AdaptiveAdmissionMode::Gemma4Drafter => {
-                active_count < model_limit.min(GEMMA4_DRAFTER_LATENCY_BATCH_LIMIT)
+            AdaptiveAdmissionMode::QwenMtp if request.uses_multi_chunk_prefill() => {
+                active_count == 0
+            }
+            AdaptiveAdmissionMode::Gemma4Drafter | AdaptiveAdmissionMode::QwenMtp => {
+                active_count < model_limit.min(ADAPTIVE_LATENCY_BATCH_LIMIT)
             }
         }
     }
@@ -140,6 +151,43 @@ mod tests {
             prefill_chunk_size: 2048,
         };
 
+        assert!(policy.can_start_rolling_mid_admit(request, 1, 4, 4));
+        assert!(!policy.can_start_rolling_mid_admit(request, 2, 4, 4));
+    }
+
+    #[test]
+    fn qwen_mtp_long_chunked_fresh_batch_starts_single_request() {
+        let policy = AdaptiveAdmissionPolicy::qwen_mtp();
+        let request = AdmissionRequestShape {
+            prompt_len: 32_768,
+            prefill_chunk_size: 2048,
+        };
+
+        assert_eq!(policy.fresh_batch_limit(request, 4, 4), 1);
+    }
+
+    #[test]
+    fn qwen_mtp_long_chunked_mid_admit_stays_single_request() {
+        let policy = AdaptiveAdmissionPolicy::qwen_mtp();
+        let request = AdmissionRequestShape {
+            prompt_len: 32_768,
+            prefill_chunk_size: 2048,
+        };
+
+        assert!(policy.can_start_rolling_mid_admit(request, 0, 4, 4));
+        assert!(!policy.can_start_rolling_mid_admit(request, 1, 4, 4));
+        assert!(!policy.can_start_rolling_mid_admit(request, 4, 4, 4));
+    }
+
+    #[test]
+    fn qwen_mtp_short_requests_stay_with_latency_cap() {
+        let policy = AdaptiveAdmissionPolicy::qwen_mtp();
+        let request = AdmissionRequestShape {
+            prompt_len: 512,
+            prefill_chunk_size: 2048,
+        };
+
+        assert_eq!(policy.fresh_batch_limit(request, 4, 4), 2);
         assert!(policy.can_start_rolling_mid_admit(request, 1, 4, 4));
         assert!(!policy.can_start_rolling_mid_admit(request, 2, 4, 4));
     }

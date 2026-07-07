@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -32,11 +32,14 @@ use crate::core::cache::{
 use crate::core::generate::GenerateRequest;
 use crate::core::model::Model;
 use crate::core::scheduler::{
-    ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle, Phase,
-    RequestId, Scheduler, StepEvent,
+    ActiveKvParkedRequest, AdmitMidHandle, DenseVlMethods, Gemma4DrafterAdmitMidHandle,
+    MtpAdmitMidHandle, Phase, RequestId, Scheduler, StepEvent,
 };
 use crate::core::server::adaptive_admission::{AdaptiveAdmissionPolicy, AdmissionRequestShape};
-use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeModel, MtpSpeculativeStats};
+use crate::core::speculative::{
+    effective_mtp_draft_tokens_for_paged_prefix, MtpSpeculativeConfig, MtpSpeculativeModel,
+    MtpSpeculativeStats,
+};
 use crate::Result;
 
 /// Commands accepted by the actor. 3b-2 ships only [`Admit`]; later
@@ -223,15 +226,33 @@ struct SchedulerActorMtpCounters {
     mtp_prefill_fallback_count: Arc<AtomicU64>,
     mtp_drafted_tokens: Arc<AtomicU64>,
     mtp_accepted_draft_tokens: Arc<AtomicU64>,
+    mtp_windows: Arc<AtomicU64>,
+    mtp_draft_forward_us: Arc<AtomicU64>,
+    mtp_verify_forward_us: Arc<AtomicU64>,
+    mtp_projection_us: Arc<AtomicU64>,
+    mtp_sampling_us: Arc<AtomicU64>,
+    mtp_main_rollback_us: Arc<AtomicU64>,
+    mtp_cache_commit_us: Arc<AtomicU64>,
+    mtp_cache_restore_us: Arc<AtomicU64>,
+    published_stats: Arc<StdMutex<Option<MtpSpeculativeStats>>>,
 }
 
 impl SchedulerActorMtpCounters {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         mtp_prefill_count: Arc<AtomicU64>,
         mtp_step_count: Arc<AtomicU64>,
         mtp_prefill_fallback_count: Arc<AtomicU64>,
         mtp_drafted_tokens: Arc<AtomicU64>,
         mtp_accepted_draft_tokens: Arc<AtomicU64>,
+        mtp_windows: Arc<AtomicU64>,
+        mtp_draft_forward_us: Arc<AtomicU64>,
+        mtp_verify_forward_us: Arc<AtomicU64>,
+        mtp_projection_us: Arc<AtomicU64>,
+        mtp_sampling_us: Arc<AtomicU64>,
+        mtp_main_rollback_us: Arc<AtomicU64>,
+        mtp_cache_commit_us: Arc<AtomicU64>,
+        mtp_cache_restore_us: Arc<AtomicU64>,
     ) -> Self {
         Self {
             mtp_prefill_count,
@@ -239,16 +260,63 @@ impl SchedulerActorMtpCounters {
             mtp_prefill_fallback_count,
             mtp_drafted_tokens,
             mtp_accepted_draft_tokens,
+            mtp_windows,
+            mtp_draft_forward_us,
+            mtp_verify_forward_us,
+            mtp_projection_us,
+            mtp_sampling_us,
+            mtp_main_rollback_us,
+            mtp_cache_commit_us,
+            mtp_cache_restore_us,
+            published_stats: Arc::new(StdMutex::new(None)),
         }
     }
 
     fn store_stats(&self, stats: Option<MtpSpeculativeStats>) {
-        if let Some(stats) = stats {
-            self.mtp_drafted_tokens
-                .store(stats.drafted_tokens as u64, Ordering::Relaxed);
-            self.mtp_accepted_draft_tokens
-                .store(stats.accepted_draft_tokens as u64, Ordering::Relaxed);
+        let mut published = self
+            .published_stats
+            .lock()
+            .expect("MTP published stats mutex poisoned");
+        match stats {
+            Some(stats) => {
+                let delta = published
+                    .as_ref()
+                    .map(|before| stats.saturating_delta_since(before))
+                    .unwrap_or_else(|| stats.clone());
+                self.add_stats_delta(&delta);
+                *published = Some(stats);
+            }
+            None => {
+                *published = None;
+            }
         }
+    }
+
+    fn reset_stats_baseline(&self) {
+        self.store_stats(None);
+    }
+
+    fn add_stats_delta(&self, stats: &MtpSpeculativeStats) {
+        self.mtp_windows
+            .fetch_add(stats.windows as u64, Ordering::Relaxed);
+        self.mtp_drafted_tokens
+            .fetch_add(stats.drafted_tokens as u64, Ordering::Relaxed);
+        self.mtp_accepted_draft_tokens
+            .fetch_add(stats.accepted_draft_tokens as u64, Ordering::Relaxed);
+        self.mtp_draft_forward_us
+            .fetch_add(stats.draft_forward_us, Ordering::Relaxed);
+        self.mtp_verify_forward_us
+            .fetch_add(stats.verify_forward_us, Ordering::Relaxed);
+        self.mtp_projection_us
+            .fetch_add(stats.projection_us, Ordering::Relaxed);
+        self.mtp_sampling_us
+            .fetch_add(stats.sampling_us, Ordering::Relaxed);
+        self.mtp_main_rollback_us
+            .fetch_add(stats.main_rollback_us, Ordering::Relaxed);
+        self.mtp_cache_commit_us
+            .fetch_add(stats.mtp_cache_commit_us, Ordering::Relaxed);
+        self.mtp_cache_restore_us
+            .fetch_add(stats.mtp_cache_restore_us, Ordering::Relaxed);
     }
 }
 
@@ -316,6 +384,11 @@ struct SchedulerActorNoMtp;
 struct SchedulerActorMtp<H> {
     mtp: H,
     cfg: MtpSpeculativeConfig,
+}
+
+enum SchedulerActorMtpMidAdmitHandle {
+    Generic(AdmitMidHandle),
+    Mtp(Box<MtpAdmitMidHandle>),
 }
 
 struct SchedulerActorGemma4Drafter {
@@ -436,30 +509,48 @@ impl<M> SchedulerActorMtpMode<M> for SchedulerActorMtp<M::MtpHead>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel,
 {
-    type MidAdmitHandle = AdmitMidHandle;
+    type MidAdmitHandle = SchedulerActorMtpMidAdmitHandle;
 
     fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
-        handle.request_id
+        match handle {
+            SchedulerActorMtpMidAdmitHandle::Generic(handle) => handle.request_id,
+            SchedulerActorMtpMidAdmitHandle::Mtp(handle) => handle.request_id,
+        }
     }
 
     fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
-        handle.chunk_start
+        match handle {
+            SchedulerActorMtpMidAdmitHandle::Generic(handle) => handle.chunk_start,
+            SchedulerActorMtpMidAdmitHandle::Mtp(handle) => handle.chunk_start,
+        }
     }
 
     fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
-        handle.prompt_len
+        match handle {
+            SchedulerActorMtpMidAdmitHandle::Generic(handle) => handle.prompt_len,
+            SchedulerActorMtpMidAdmitHandle::Mtp(handle) => handle.prompt_len,
+        }
     }
 
     fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
-        handle.chunk_size
+        match handle {
+            SchedulerActorMtpMidAdmitHandle::Generic(handle) => handle.chunk_size,
+            SchedulerActorMtpMidAdmitHandle::Mtp(handle) => handle.chunk_size,
+        }
     }
 
     fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
-        handle.chunk_size = chunk_size;
+        match handle {
+            SchedulerActorMtpMidAdmitHandle::Generic(handle) => handle.chunk_size = chunk_size,
+            SchedulerActorMtpMidAdmitHandle::Mtp(handle) => handle.chunk_size = chunk_size,
+        }
     }
 
     fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
-        handle.decode_cadence_mid_chunk_cap
+        match handle {
+            SchedulerActorMtpMidAdmitHandle::Generic(handle) => handle.decode_cadence_mid_chunk_cap,
+            SchedulerActorMtpMidAdmitHandle::Mtp(handle) => handle.decode_cadence_mid_chunk_cap,
+        }
     }
 
     fn prefill_admitted(
@@ -503,7 +594,16 @@ where
         model: &M,
         request: GenerateRequest,
     ) -> Result<Self::MidAdmitHandle> {
-        sched.admit_mid_begin(request, model)
+        if sched.mtp_stats().is_some() {
+            sched
+                .admit_mid_begin_mtp(request, model, &self.mtp, self.cfg)
+                .map(Box::new)
+                .map(SchedulerActorMtpMidAdmitHandle::Mtp)
+        } else {
+            sched
+                .admit_mid_begin(request, model)
+                .map(SchedulerActorMtpMidAdmitHandle::Generic)
+        }
     }
 
     fn advance_mid_admit_chunk(
@@ -512,7 +612,14 @@ where
         model: &M,
         handle: &mut Self::MidAdmitHandle,
     ) -> Result<bool> {
-        sched.admit_mid_chunk(handle, model)
+        match handle {
+            SchedulerActorMtpMidAdmitHandle::Generic(handle) => {
+                sched.admit_mid_chunk(handle, model)
+            }
+            SchedulerActorMtpMidAdmitHandle::Mtp(handle) => {
+                sched.admit_mid_chunk_mtp(handle.as_mut(), model, &self.mtp)
+            }
+        }
     }
 
     fn finalize_mid_admit(
@@ -520,9 +627,18 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         handle: Self::MidAdmitHandle,
-        _counters: &SchedulerActorMtpCounters,
+        counters: &SchedulerActorMtpCounters,
     ) -> Result<(RequestId, StepEvent)> {
-        sched.admit_mid_finalize(handle, model)
+        match handle {
+            SchedulerActorMtpMidAdmitHandle::Generic(handle) => {
+                sched.admit_mid_finalize(handle, model)
+            }
+            SchedulerActorMtpMidAdmitHandle::Mtp(handle) => {
+                let result = sched.admit_mid_finalize_mtp(*handle, model, &self.mtp);
+                counters.store_stats(sched.mtp_stats());
+                result
+            }
+        }
     }
 }
 
@@ -751,6 +867,30 @@ pub struct SchedulerActorHandle {
     /// Latest cumulative scheduler MTP accepted-draft-token count.
     #[doc(hidden)]
     pub mtp_accepted_draft_tokens: Arc<AtomicU64>,
+    /// Latest cumulative scheduler MTP speculative-window count.
+    #[doc(hidden)]
+    pub mtp_windows: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent in MTP draft forward passes.
+    #[doc(hidden)]
+    pub mtp_draft_forward_us: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent in main verifier forward passes.
+    #[doc(hidden)]
+    pub mtp_verify_forward_us: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent projecting verifier hidden states.
+    #[doc(hidden)]
+    pub mtp_projection_us: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent sampling logits.
+    #[doc(hidden)]
+    pub mtp_sampling_us: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent rolling back/replaying main KV.
+    #[doc(hidden)]
+    pub mtp_main_rollback_us: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent committing accepted tokens to MTP KV.
+    #[doc(hidden)]
+    pub mtp_cache_commit_us: Arc<AtomicU64>,
+    /// Latest cumulative microseconds spent restoring temporary MTP KV.
+    #[doc(hidden)]
+    pub mtp_cache_restore_us: Arc<AtomicU64>,
     // ── B1-p2.5 G3: /healthz monitoring atomics ──────────────────────────
     /// Live count of in-flight (active) requests in the scheduler slots.
     /// Updated by driver_loop tail on every rolling iteration.
@@ -937,6 +1077,8 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
+    let mtp_draft_tokens =
+        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
     spawn_scheduler_actor_with_mode(
         model,
         SchedulerActorMtp::new(mtp, mtp_draft_tokens),
@@ -948,7 +1090,7 @@ where
         meta,
         paged_prefix_cache,
         prefix_lru_cache,
-        AdaptiveAdmissionPolicy::disabled(),
+        AdaptiveAdmissionPolicy::qwen_mtp(),
         ActiveKvOffloadConfig::disabled(),
     )
 }
@@ -972,6 +1114,8 @@ where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
+    let mtp_draft_tokens =
+        effective_mtp_draft_tokens_for_paged_prefix(mtp_draft_tokens, paged_prefix_cache.is_some());
     spawn_scheduler_actor_with_mode(
         model,
         SchedulerActorMtp::new(mtp, mtp_draft_tokens),
@@ -983,7 +1127,7 @@ where
         meta,
         paged_prefix_cache,
         prefix_lru_cache,
-        AdaptiveAdmissionPolicy::disabled(),
+        AdaptiveAdmissionPolicy::qwen_mtp(),
         active_kv_offload,
     )
 }
@@ -1115,6 +1259,14 @@ where
     let mtp_fallback_prefill_count = Arc::new(AtomicU64::new(0));
     let mtp_drafted_tokens = Arc::new(AtomicU64::new(0));
     let mtp_accepted_draft_tokens = Arc::new(AtomicU64::new(0));
+    let mtp_windows = Arc::new(AtomicU64::new(0));
+    let mtp_draft_forward_us = Arc::new(AtomicU64::new(0));
+    let mtp_verify_forward_us = Arc::new(AtomicU64::new(0));
+    let mtp_projection_us = Arc::new(AtomicU64::new(0));
+    let mtp_sampling_us = Arc::new(AtomicU64::new(0));
+    let mtp_main_rollback_us = Arc::new(AtomicU64::new(0));
+    let mtp_cache_commit_us = Arc::new(AtomicU64::new(0));
+    let mtp_cache_restore_us = Arc::new(AtomicU64::new(0));
     // B1-p2.5 G3: live b_active / b_queued updated by driver_loop tail.
     let b_active = Arc::new(AtomicU64::new(0));
     let b_queued = Arc::new(AtomicU64::new(0));
@@ -1134,6 +1286,14 @@ where
         mtp_fallback_prefill_count.clone(),
         mtp_drafted_tokens.clone(),
         mtp_accepted_draft_tokens.clone(),
+        mtp_windows.clone(),
+        mtp_draft_forward_us.clone(),
+        mtp_verify_forward_us.clone(),
+        mtp_projection_us.clone(),
+        mtp_sampling_us.clone(),
+        mtp_main_rollback_us.clone(),
+        mtp_cache_commit_us.clone(),
+        mtp_cache_restore_us.clone(),
     );
     let b_active_for_task = b_active.clone();
     let b_queued_for_task = b_queued.clone();
@@ -1200,6 +1360,14 @@ where
         mtp_fallback_prefill_count,
         mtp_drafted_tokens,
         mtp_accepted_draft_tokens,
+        mtp_windows,
+        mtp_draft_forward_us,
+        mtp_verify_forward_us,
+        mtp_projection_us,
+        mtp_sampling_us,
+        mtp_main_rollback_us,
+        mtp_cache_commit_us,
+        mtp_cache_restore_us,
         b_active,
         b_queued,
         // P1.1: alias admission_queue_full_count to queue_rejected Arc —
@@ -1257,7 +1425,9 @@ fn driver_loop<M, A>(
         // (the scheduler would be in an unrecoverable state); terminate
         // cleanly rather than emit ERROR per request.
         if sched.phase() == Phase::Finished {
-            if let Err(e) = finalize_finished_batch_if_any(&mut sched, &mut event_txs) {
+            if let Err(e) =
+                finalize_finished_batch_if_any(&mut sched, &mut event_txs, &mtp_counters)
+            {
                 tracing::error!(
                     "[SchedulerActor] outer-loop finalize failed: {e:?}; \
                      actor cannot reset Finished batch safely — terminating"
@@ -1362,6 +1532,7 @@ fn driver_loop<M, A>(
                          {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                     );
                 }
+                mtp_counters.reset_stats_baseline();
                 cleanup_parked_active_kv_requests(
                     &sched,
                     &mut parked_active_kv,
@@ -1675,6 +1846,7 @@ fn driver_loop<M, A>(
                                      {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                                 );
                             }
+                            mtp_counters.reset_stats_baseline();
                             in_flight_mid_admit = None;
                             cleanup_parked_active_kv_requests(
                                 &sched,
@@ -1755,6 +1927,7 @@ fn driver_loop<M, A>(
                      relying on 3b-1 poison flag to reject subsequent admits"
                 );
             }
+            mtp_counters.reset_stats_baseline();
         }
         in_flight_mid_admit = None;
         cleanup_parked_active_kv_requests(
@@ -2434,6 +2607,7 @@ fn cleanup_parked_active_kv_requests<M>(
 fn finalize_finished_batch_if_any<M: Model>(
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    mtp_counters: &SchedulerActorMtpCounters,
 ) -> Result<bool> {
     if sched.phase() != Phase::Finished {
         return Ok(false);
@@ -2441,6 +2615,7 @@ fn finalize_finished_batch_if_any<M: Model>(
     let evicted_ids: Vec<RequestId> = sched.active().into_iter().map(|state| state.id).collect();
     match sched.evict_all() {
         Ok(()) => {
+            mtp_counters.reset_stats_baseline();
             for id in evicted_ids {
                 event_txs.remove(&id);
             }
@@ -2512,7 +2687,7 @@ where
     // Finalize any Finished batch BEFORE re-admitting. After
     // this, phase is one of {Idle, Decoding}; never Finished. Callers
     // must not separately finalize.
-    match finalize_finished_batch_if_any(sched, event_txs) {
+    match finalize_finished_batch_if_any(sched, event_txs, mtp_counters) {
         Ok(_) => {}
         Err(_e) => {
             cleanup_parked_active_kv_requests(
@@ -2550,6 +2725,7 @@ where
                 event_txs.clear();
                 return RollingControl::ContinueOuter;
             }
+            mtp_counters.reset_stats_baseline();
             // Preserve parked Active KV request event channels. At this point
             // active_count is zero; stale finished-batch channels were already
             // removed by gc/finalize paths.
@@ -2628,6 +2804,7 @@ where
                          {evict_err:?}; rejecting remaining queued admits"
                     );
                 }
+                mtp_counters.reset_stats_baseline();
                 event_txs.clear();
                 while let Some(p) = admission_queue.pop_front() {
                     let _ = p.reply_tx.send(Err(anyhow::anyhow!(
@@ -2660,6 +2837,7 @@ where
                     event_txs.clear();
                     return RollingControl::ContinueOuter;
                 }
+                mtp_counters.reset_stats_baseline();
                 // Preserve parked Active KV request event channels. At this
                 // point active_count is zero; stale finished-batch channels
                 // were already removed by gc/finalize paths.
@@ -2703,6 +2881,7 @@ where
                              {evict_err:?}; relying on 3b-1 poison flag to reject subsequent admits"
                         );
                     }
+                    mtp_counters.reset_stats_baseline();
                     event_txs.clear();
                     return RollingControl::ContinueOuter;
                 }
@@ -2829,11 +3008,12 @@ mod tests {
             &self,
             input_ids: &mlx::Array,
             _position_ids: &mlx::Array,
-            _per_row_lens: Option<&[i32]>,
+            per_row_lens: Option<&[i32]>,
             _decode_mask: Option<&mlx::Array>,
-            _cache: Option<&mut [crate::nn::LayerCache]>,
+            cache: Option<&mut [crate::nn::LayerCache]>,
             _target: mlx::StreamOrDevice,
         ) -> Result<mlx::Array> {
+            write_fake_full_kv(input_ids, per_row_lens, cache)?;
             let shape = input_ids.shape();
             let b = shape.as_slice()[0] as usize;
             let s = shape.as_slice()[1] as usize;
@@ -3081,6 +3261,14 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         )
     }
 
@@ -3248,13 +3436,7 @@ mod tests {
         )
         .expect("scheduler");
         scheduler.admit(mk_req(11)).expect("admit");
-        let counters = SchedulerActorMtpCounters::new(
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-        );
+        let counters = test_mtp_counters();
         let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
 
         let prefill_events = mode
@@ -3273,11 +3455,91 @@ mod tests {
             .expect("mtp step");
         assert_eq!(step_events.len(), 1);
         assert_eq!(counters.mtp_step_count.load(Ordering::Relaxed), 1);
-        assert_eq!(counters.mtp_drafted_tokens.load(Ordering::Relaxed), 1);
+        let drafted = counters.mtp_drafted_tokens.load(Ordering::Relaxed);
+        let accepted = counters.mtp_accepted_draft_tokens.load(Ordering::Relaxed);
+        assert_eq!(drafted, 2);
+        assert!(
+            accepted <= drafted,
+            "accepted draft tokens cannot exceed drafted tokens"
+        );
+    }
+
+    #[test]
+    fn mtp_counters_publish_cumulative_stat_deltas() {
+        let counters = test_mtp_counters();
+        let first = MtpSpeculativeStats {
+            windows: 1,
+            drafted_tokens: 2,
+            accepted_draft_tokens: 1,
+            draft_forward_us: 10,
+            verify_forward_us: 20,
+            projection_us: 30,
+            sampling_us: 40,
+            main_rollback_us: 50,
+            mtp_cache_commit_us: 60,
+            mtp_cache_restore_us: 70,
+            ..MtpSpeculativeStats::default()
+        };
+        counters.store_stats(Some(first));
+
+        let second = MtpSpeculativeStats {
+            windows: 3,
+            drafted_tokens: 6,
+            accepted_draft_tokens: 4,
+            draft_forward_us: 15,
+            verify_forward_us: 35,
+            projection_us: 30,
+            sampling_us: 55,
+            main_rollback_us: 70,
+            mtp_cache_commit_us: 90,
+            mtp_cache_restore_us: 75,
+            ..MtpSpeculativeStats::default()
+        };
+        counters.store_stats(Some(second));
+
+        assert_eq!(counters.mtp_windows.load(Ordering::Relaxed), 3);
+        assert_eq!(counters.mtp_drafted_tokens.load(Ordering::Relaxed), 6);
         assert_eq!(
             counters.mtp_accepted_draft_tokens.load(Ordering::Relaxed),
-            1
+            4
         );
+        assert_eq!(counters.mtp_draft_forward_us.load(Ordering::Relaxed), 15);
+        assert_eq!(counters.mtp_verify_forward_us.load(Ordering::Relaxed), 35);
+        assert_eq!(counters.mtp_projection_us.load(Ordering::Relaxed), 30);
+        assert_eq!(counters.mtp_sampling_us.load(Ordering::Relaxed), 55);
+        assert_eq!(counters.mtp_main_rollback_us.load(Ordering::Relaxed), 70);
+        assert_eq!(counters.mtp_cache_commit_us.load(Ordering::Relaxed), 90);
+        assert_eq!(counters.mtp_cache_restore_us.load(Ordering::Relaxed), 75);
+
+        counters.reset_stats_baseline();
+        let next_batch = MtpSpeculativeStats {
+            windows: 1,
+            drafted_tokens: 3,
+            accepted_draft_tokens: 2,
+            draft_forward_us: 100,
+            verify_forward_us: 200,
+            projection_us: 300,
+            sampling_us: 400,
+            main_rollback_us: 500,
+            mtp_cache_commit_us: 600,
+            mtp_cache_restore_us: 700,
+            ..MtpSpeculativeStats::default()
+        };
+        counters.store_stats(Some(next_batch));
+
+        assert_eq!(counters.mtp_windows.load(Ordering::Relaxed), 4);
+        assert_eq!(counters.mtp_drafted_tokens.load(Ordering::Relaxed), 9);
+        assert_eq!(
+            counters.mtp_accepted_draft_tokens.load(Ordering::Relaxed),
+            6
+        );
+        assert_eq!(counters.mtp_draft_forward_us.load(Ordering::Relaxed), 115);
+        assert_eq!(counters.mtp_verify_forward_us.load(Ordering::Relaxed), 235);
+        assert_eq!(counters.mtp_projection_us.load(Ordering::Relaxed), 330);
+        assert_eq!(counters.mtp_sampling_us.load(Ordering::Relaxed), 455);
+        assert_eq!(counters.mtp_main_rollback_us.load(Ordering::Relaxed), 570);
+        assert_eq!(counters.mtp_cache_commit_us.load(Ordering::Relaxed), 690);
+        assert_eq!(counters.mtp_cache_restore_us.load(Ordering::Relaxed), 775);
     }
 
     #[test]
@@ -3289,13 +3551,7 @@ mod tests {
         )
         .expect("scheduler");
         scheduler.admit(mk_vl_req()).expect("admit");
-        let counters = SchedulerActorMtpCounters::new(
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-        );
+        let counters = test_mtp_counters();
         let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
 
         let prefill_events = mode
@@ -3322,13 +3578,7 @@ mod tests {
         let mut request = mk_req(11);
         request.sampler = Sampler::greedy().with_temperature(0.7);
         scheduler.admit(request).expect("admit");
-        let counters = SchedulerActorMtpCounters::new(
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-        );
+        let counters = test_mtp_counters();
         let mut mode = SchedulerActorMtp::new(SchedulerActorFakeMtpHead, 1);
 
         let prefill_events = mode
@@ -3420,6 +3670,34 @@ mod tests {
             &request,
             4,
             crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::gemma4_drafter(),
+        );
+
+        assert_eq!(limit, 2);
+    }
+
+    #[test]
+    fn adaptive_qwen_mtp_fresh_limit_starts_long_chunked_request_alone() {
+        let mut request = mk_req(11);
+        request.prompt_ids = (0..4096).collect();
+        request.prefill_chunk_size = 2048;
+
+        let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
+            &request,
+            4,
+            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
+        );
+
+        assert_eq!(limit, 1);
+    }
+
+    #[test]
+    fn adaptive_qwen_mtp_fresh_limit_keeps_short_request_latency_cap() {
+        let request = mk_req(11);
+
+        let limit = fresh_prefill_batch_limit_for_request::<SchedulerActorFakeModel>(
+            &request,
+            4,
+            crate::core::server::adaptive_admission::AdaptiveAdmissionPolicy::qwen_mtp(),
         );
 
         assert_eq!(limit, 2);

@@ -112,6 +112,24 @@ impl MtpCache {
         Ok(())
     }
 
+    pub fn adopt_row_from(&mut self, src: &MtpCache, dst_row: usize, src_row: usize) -> Result<()> {
+        if self.layers.len() != src.layers.len() {
+            return Err(anyhow!(
+                "MtpCache::adopt_row_from: source layers {} != destination layers {}",
+                src.layers.len(),
+                self.layers.len()
+            ));
+        }
+        for (idx, (dst_layer, src_layer)) in
+            self.layers.iter_mut().zip(src.layers.iter()).enumerate()
+        {
+            dst_layer
+                .adopt_row_from(src_layer, dst_row, src_row)
+                .map_err(|err| anyhow!("MtpCache::adopt_row_from: layer {idx}: {err:#}"))?;
+        }
+        Ok(())
+    }
+
     pub fn prefix_layers_for_row_on(
         &self,
         row: usize,
@@ -270,6 +288,42 @@ mod tests {
         assert_eq!(
             v_full.to_vec::<f32>().unwrap(),
             vec![10.0, 20.0, 30.0, 40.0]
+        );
+    }
+
+    #[test]
+    fn mtp_cache_adopt_row_from_round_trip() {
+        let mut src = MtpCache::new_with_cap(1, 1, 1, 1, 1, Dtype::Float32, 8).expect("src");
+        let k: mlx::Array = (&[7.0_f32, 8.0][..], (1_i32, 1_i32, 2_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let v: mlx::Array = (&[70.0_f32, 80.0][..], (1_i32, 1_i32, 2_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        src.layer_mut(0)
+            .update_and_fetch(&k, &v, &[2])
+            .expect("fill src");
+
+        let mut dst = MtpCache::new_with_cap(1, 2, 1, 1, 1, Dtype::Float32, 8).expect("dst");
+        dst.adopt_row_from(&src, 1, 0).expect("adopt row");
+        assert_eq!(dst.layer(0).offsets(), &[0, 2]);
+
+        let k_next: mlx::Array = (&[0.0_f32, 9.0][..], (2_i32, 1_i32, 1_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let v_next: mlx::Array = (&[0.0_f32, 90.0][..], (2_i32, 1_i32, 1_i32, 1_i32))
+            .try_into()
+            .unwrap();
+        let (k_full, v_full) = dst
+            .layer_mut(0)
+            .update_and_fetch(&k_next, &v_next, &[0, 1])
+            .expect("append adopted row");
+        assert_eq!(k_full.shape().as_slice(), &[2, 1, 3, 1]);
+        assert_eq!(v_full.shape().as_slice(), &[2, 1, 3, 1]);
+        assert_eq!(k_full.to_vec::<f32>().unwrap()[3..6], [7.0_f32, 8.0, 9.0]);
+        assert_eq!(
+            v_full.to_vec::<f32>().unwrap()[3..6],
+            [70.0_f32, 80.0, 90.0]
         );
     }
 }
