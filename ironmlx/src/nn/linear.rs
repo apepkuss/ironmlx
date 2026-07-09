@@ -10,7 +10,7 @@
 use anyhow::anyhow;
 use mlx::{Array, StreamOrDevice};
 
-use crate::core::Loader;
+use crate::core::{Loader, QuantMode};
 use crate::Result;
 
 /// Linear projection layer. Handles both full-precision and quantized
@@ -27,6 +27,7 @@ pub(crate) struct QuantizedLinearParts<'a> {
     pub(crate) bias: Option<&'a Array>,
     pub(crate) group_size: i32,
     pub(crate) bits: i32,
+    pub(crate) mode: QuantMode,
 }
 
 /// Internal backend variant. Private — callers use [`Linear`].
@@ -48,8 +49,10 @@ enum LinearImpl {
         bias: Option<Array>,
         /// Group size from quantization metadata.
         group_size: i32,
-        /// Bits per quantized weight (4 / 6 / 8).
+        /// Bits per quantized weight (2 / 4 / 8).
         bits: i32,
+        /// Quantization scheme from loader metadata.
+        mode: QuantMode,
     },
 }
 
@@ -83,6 +86,7 @@ impl Linear {
                     bias,
                     group_size: qmeta.group_size,
                     bits: qmeta.bits,
+                    mode: qmeta.mode,
                 },
             })
         } else {
@@ -133,6 +137,28 @@ impl Linear {
         group_size: i32,
         bits: i32,
     ) -> Self {
+        Self::new_quant_with_mode(
+            weight,
+            scales,
+            biases,
+            bias,
+            group_size,
+            bits,
+            QuantMode::Affine,
+        )
+    }
+
+    /// Compose a quantized [`Linear`] with an explicit quantization mode.
+    #[doc(hidden)]
+    pub fn new_quant_with_mode(
+        weight: Array,
+        scales: Array,
+        biases: Option<Array>,
+        bias: Option<Array>,
+        group_size: i32,
+        bits: i32,
+        mode: QuantMode,
+    ) -> Self {
         Self {
             inner: LinearImpl::Quant {
                 weight,
@@ -141,6 +167,7 @@ impl Linear {
                 bias,
                 group_size,
                 bits,
+                mode,
             },
         }
     }
@@ -192,6 +219,7 @@ impl Linear {
                 bias,
                 group_size,
                 bits,
+                mode,
             } => Some(QuantizedLinearParts {
                 weight,
                 scales,
@@ -199,6 +227,7 @@ impl Linear {
                 bias: bias.as_ref(),
                 group_size: *group_size,
                 bits: *bits,
+                mode: *mode,
             }),
         }
     }
@@ -222,6 +251,7 @@ impl Linear {
                 bias,
                 group_size,
                 bits,
+                mode,
             } => {
                 // M-aware dispatch: route through self_qmm only when the
                 // batch×seq dim is large enough that the simdgroup-MMA tile
@@ -259,8 +289,14 @@ impl Linear {
                         s[..s.len() - 1].iter().product()
                     }
                 };
-                let use_self_qmm =
-                    should_dispatch_self_qmm(crate::nn::self_qmm::enabled(), m_total);
+                let use_self_qmm = should_dispatch_self_qmm(
+                    crate::nn::self_qmm::enabled(),
+                    m_total,
+                    *bits,
+                    *group_size,
+                    biases.is_some(),
+                    *mode,
+                );
                 let mut y = if use_self_qmm {
                     // Stage 9 self-quant kernel path. qmm_t_on requires
                     // affine biases (per-group zero-points); Qwen3.5
@@ -270,8 +306,8 @@ impl Linear {
                     // know about.
                     let qbiases = biases.as_ref().expect(
                         "self_qmm requires affine biases (per-group zero-points); \
-                         checkpoint has none — IRONMLX_USE_SELF_QMM=1 only supports \
-                         4-bit affine-quantized weights",
+                        checkpoint has none — IRONMLX_USE_SELF_QMM=1 only supports \
+                         4-bit affine-layout quantized weights",
                     );
                     crate::nn::self_qmm::qmm_t_on(
                         x,
@@ -292,7 +328,7 @@ impl Linear {
                         /* transpose = */ true,
                         Some(*group_size),
                         Some(*bits),
-                        "affine",
+                        mode.mlx_mode(),
                         target,
                     )?
                 };
@@ -309,14 +345,26 @@ impl Linear {
 /// threshold logic is unit-testable without spinning up an MLX runtime.
 ///
 /// Production callers pass `crate::nn::self_qmm::enabled()` as the
-/// `self_qmm_enabled` argument; tests pass an explicit boolean.
+/// `self_qmm_enabled` argument; tests pass explicit values.
 ///
 /// Threshold is `2048` per the P8a Stage 9 acceptance gate test point
 /// plus empirical refutation of the prior `32` threshold (see the
 /// `LinearImpl::Quant` branch comment above for full rationale).
 #[inline]
-fn should_dispatch_self_qmm(self_qmm_enabled: bool, m_total: i32) -> bool {
-    self_qmm_enabled && m_total >= 2048
+fn should_dispatch_self_qmm(
+    self_qmm_enabled: bool,
+    m_total: i32,
+    bits: i32,
+    group_size: i32,
+    has_affine_biases: bool,
+    mode: QuantMode,
+) -> bool {
+    self_qmm_enabled
+        && m_total >= 2048
+        && bits == 4
+        && group_size == 64
+        && has_affine_biases
+        && mode.uses_affine_storage()
 }
 
 #[cfg(test)]
@@ -419,21 +467,279 @@ mod tests {
     #[test]
     fn self_qmm_dispatch_threshold_is_2048_when_env_enabled() {
         // Env disabled → never dispatch self_qmm, regardless of M.
-        assert!(!should_dispatch_self_qmm(false, 1));
-        assert!(!should_dispatch_self_qmm(false, 2048));
-        assert!(!should_dispatch_self_qmm(false, 100_000));
+        assert!(!should_dispatch_self_qmm(
+            false,
+            1,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        ));
+        assert!(!should_dispatch_self_qmm(
+            false,
+            2048,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        ));
+        assert!(!should_dispatch_self_qmm(
+            false,
+            100_000,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        ));
 
         // Env enabled but M below threshold → fall back to MLX qmv path.
-        assert!(!should_dispatch_self_qmm(true, 0));
-        assert!(!should_dispatch_self_qmm(true, 1)); // M=1 decode
-        assert!(!should_dispatch_self_qmm(true, 32)); // prior threshold; now OFF
-        assert!(!should_dispatch_self_qmm(true, 128)); // PP=128 Phase B regression band
-        assert!(!should_dispatch_self_qmm(true, 512)); // PP=512 Phase B regression band
-        assert!(!should_dispatch_self_qmm(true, 2047)); // just below threshold
+        assert!(!should_dispatch_self_qmm(
+            true,
+            0,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        ));
+        assert!(!should_dispatch_self_qmm(
+            true,
+            1,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        )); // M=1 decode
+        assert!(!should_dispatch_self_qmm(
+            true,
+            32,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        )); // prior threshold; now OFF
+        assert!(!should_dispatch_self_qmm(
+            true,
+            128,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        )); // PP=128 Phase B regression band
+        assert!(!should_dispatch_self_qmm(
+            true,
+            512,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        )); // PP=512 Phase B regression band
+        assert!(!should_dispatch_self_qmm(
+            true,
+            2047,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        )); // just below threshold
 
         // Env enabled AND M at-or-above threshold → dispatch self_qmm.
-        assert!(should_dispatch_self_qmm(true, 2048)); // Stage 9 acceptance gate point
-        assert!(should_dispatch_self_qmm(true, 4096));
-        assert!(should_dispatch_self_qmm(true, 16_384));
+        assert!(should_dispatch_self_qmm(
+            true,
+            2048,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        )); // Stage 9 acceptance gate point
+        assert!(should_dispatch_self_qmm(
+            true,
+            4096,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        ));
+        assert!(should_dispatch_self_qmm(
+            true,
+            16_384,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        ));
+    }
+
+    #[test]
+    fn self_qmm_dispatch_requires_4bit_affine_group64_with_biases() {
+        assert!(should_dispatch_self_qmm(
+            true,
+            2048,
+            4,
+            64,
+            true,
+            QuantMode::Affine
+        ));
+        assert!(should_dispatch_self_qmm(
+            true,
+            2048,
+            4,
+            64,
+            true,
+            QuantMode::OptiQ
+        ));
+        assert!(!should_dispatch_self_qmm(
+            true,
+            2048,
+            8,
+            64,
+            true,
+            QuantMode::Affine
+        ));
+        assert!(!should_dispatch_self_qmm(
+            true,
+            2048,
+            2,
+            64,
+            true,
+            QuantMode::Affine
+        ));
+        assert!(!should_dispatch_self_qmm(
+            true,
+            2048,
+            4,
+            128,
+            true,
+            QuantMode::Affine
+        ));
+        assert!(!should_dispatch_self_qmm(
+            true,
+            2048,
+            4,
+            64,
+            false,
+            QuantMode::Affine
+        ));
+    }
+
+    fn assert_quantized_forward_matches_mlx(bits: i32, raw_dtype: mlx::Dtype) {
+        let out = 3_i32;
+        let in_dim = 32_i32;
+        let group_size = 32_i32;
+        let w_data: Vec<f32> = (0..(out * in_dim))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.02)
+            .collect();
+        let x_data: Vec<f32> = (0..(2 * in_dim))
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.03)
+            .collect();
+        let raw_w_f32: Array = (w_data.as_slice(), &[out, in_dim][..]).try_into().unwrap();
+        let x_f32: Array = (x_data.as_slice(), &[2_i32, in_dim][..])
+            .try_into()
+            .unwrap();
+        let raw_w = mlx::ops::cast::astype(&raw_w_f32, raw_dtype).unwrap();
+        let x = mlx::ops::cast::astype(&x_f32, raw_dtype).unwrap();
+        let q = mlx::quantization::quantize(&raw_w, Some(group_size), Some(bits), "affine", None)
+            .unwrap();
+
+        let layer = Linear::new_quant(
+            q[0].clone(),
+            q[1].clone(),
+            Some(q[2].clone()),
+            None,
+            group_size,
+            bits,
+        );
+        let got = layer.forward(&x).unwrap();
+        let expected = mlx::quantization::quantized_matmul(
+            &x,
+            &q[0],
+            &q[1],
+            Some(&q[2]),
+            true,
+            Some(group_size),
+            Some(bits),
+            "affine",
+        )
+        .unwrap();
+
+        let got = mlx::ops::cast::astype(&got, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(got.len(), expected.len());
+        for (idx, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!((g - e).abs() <= 0.001, "idx={idx} got={g} expected={e}");
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn quantized_8bit_forward_matches_mlx_bfloat16() {
+        assert_quantized_forward_matches_mlx(8, mlx::Dtype::Bfloat16);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn quantized_2bit_forward_matches_mlx_float32() {
+        assert_quantized_forward_matches_mlx(2, mlx::Dtype::Float32);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn optiq_quantized_forward_uses_affine_storage() {
+        let out = 3_i32;
+        let in_dim = 32_i32;
+        let group_size = 32_i32;
+        let bits = 4_i32;
+        let w_data: Vec<f32> = (0..(out * in_dim))
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.015)
+            .collect();
+        let x_data: Vec<f32> = (0..(2 * in_dim))
+            .map(|i| ((i % 13) as f32 - 6.0) * 0.025)
+            .collect();
+        let raw_w: Array = (w_data.as_slice(), &[out, in_dim][..]).try_into().unwrap();
+        let x: Array = (x_data.as_slice(), &[2_i32, in_dim][..])
+            .try_into()
+            .unwrap();
+        let q = mlx::quantization::quantize(&raw_w, Some(group_size), Some(bits), "affine", None)
+            .unwrap();
+
+        let layer = Linear::new_quant_with_mode(
+            q[0].clone(),
+            q[1].clone(),
+            Some(q[2].clone()),
+            None,
+            group_size,
+            bits,
+            QuantMode::OptiQ,
+        );
+        let got = layer.forward(&x).unwrap();
+        let expected = mlx::quantization::quantized_matmul(
+            &x,
+            &q[0],
+            &q[1],
+            Some(&q[2]),
+            true,
+            Some(group_size),
+            Some(bits),
+            "affine",
+        )
+        .unwrap();
+
+        let got = mlx::ops::cast::astype(&got, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let expected = mlx::ops::cast::astype(&expected, mlx::Dtype::Float32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(got.len(), expected.len());
+        for (idx, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!((g - e).abs() <= 0.001, "idx={idx} got={g} expected={e}");
+        }
     }
 }

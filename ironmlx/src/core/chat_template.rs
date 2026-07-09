@@ -106,6 +106,36 @@ impl ChatTemplate {
                             let _: () = from_args(args)?;
                             return Ok(Value::from(s.to_lowercase()));
                         }
+                        "split" => {
+                            let (separator, maxsplit): (Option<String>, Option<i64>) =
+                                from_args(args)?;
+                            let max_parts =
+                                maxsplit
+                                    .and_then(|n| if n >= 0 { Some(n as usize + 1) } else { None });
+                            let parts: Vec<String> = match (separator.as_deref(), max_parts) {
+                                (None, None) => {
+                                    s.split_whitespace().map(ToOwned::to_owned).collect()
+                                }
+                                (None, Some(n)) => s
+                                    .split_whitespace()
+                                    .take(n)
+                                    .map(ToOwned::to_owned)
+                                    .collect(),
+                                (Some(""), _) => {
+                                    return Err(minijinja::Error::new(
+                                        minijinja::ErrorKind::InvalidOperation,
+                                        "empty separator",
+                                    ));
+                                }
+                                (Some(separator), None) => {
+                                    s.split(separator).map(ToOwned::to_owned).collect()
+                                }
+                                (Some(separator), Some(n)) => {
+                                    s.splitn(n, separator).map(ToOwned::to_owned).collect()
+                                }
+                            };
+                            return Ok(Value::from_serialize(parts));
+                        }
                         _ => {}
                     }
                 }
@@ -283,6 +313,29 @@ mod tests {
         }];
         let out = t.render(&msgs, false, None).unwrap();
         assert_eq!(out, "user|fallback|true");
+    }
+
+    #[test]
+    fn string_split_method_supports_gemma_strip_thinking_macro() {
+        let src = r#"{%- macro strip_thinking(text) -%}
+    {%- set ns = namespace(result='') -%}
+    {%- for part in text.split('<channel|>') -%}
+        {%- if '<|channel>' in part -%}
+            {%- set ns.result = ns.result + part.split('<|channel>')[0] -%}
+        {%- else -%}
+            {%- set ns.result = ns.result + part -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {{- ns.result | trim -}}
+{%- endmacro -%}
+{{- strip_thinking(messages[0].content) -}}"#;
+        let t = ChatTemplate::new(src).unwrap();
+        let msgs = vec![Message {
+            role: "assistant".into(),
+            content: "plain assistant answer".into(),
+        }];
+        let out = t.render(&msgs, false, None).unwrap();
+        assert_eq!(out, "plain assistant answer");
     }
 
     #[test]

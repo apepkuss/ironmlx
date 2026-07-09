@@ -14,6 +14,7 @@ mod mlp;
 mod model;
 mod ops;
 mod profile;
+mod quant_fusion;
 mod rope;
 mod text_model;
 pub(crate) mod vision;

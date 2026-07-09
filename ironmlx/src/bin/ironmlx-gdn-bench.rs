@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
 use ironmlx::core::cache::GatedDeltaCache;
 use ironmlx::core::Loader;
-use ironmlx::models::Qwen35MoeConfig;
+use ironmlx::models::{ModelArchitecture, Qwen35Config, Qwen35MoeConfig};
 use ironmlx::nn::{AttnKind, GatedDeltaNet, GatedDeltaNetConfig};
 use mlx::{random, Array, Dtype};
 use serde::Serialize;
@@ -82,6 +82,7 @@ struct BenchOutput {
 struct Meta {
     backend: &'static str,
     model_dir: String,
+    model_type: &'static str,
     layer: i32,
     seqs: Vec<i32>,
     warmup_runs: usize,
@@ -124,7 +125,9 @@ fn main() -> Result<()> {
     };
     let load_started = Instant::now();
     let loader = Loader::open(&args.model).context("Loader::open")?;
-    let cfg = Qwen35MoeConfig::from_loader(&loader).context("Qwen35MoeConfig::from_loader")?;
+    let arch = ModelArchitecture::from_config_value(loader.config_raw_value())
+        .context("ModelArchitecture::from_config_value")?;
+    let cfg = load_gdn_bench_config(&loader, arch)?;
     if !matches!(cfg.layer_kind(args.layer), AttnKind::Linear) {
         return Err(anyhow!(
             "layer {} is not a linear-attention GatedDeltaNet layer",
@@ -132,15 +135,7 @@ fn main() -> Result<()> {
         ));
     }
 
-    let gdn_cfg = GatedDeltaNetConfig {
-        hidden_size: cfg.hidden_size,
-        num_v_heads: cfg.linear_num_value_heads,
-        num_k_heads: cfg.linear_num_key_heads,
-        head_k_dim: cfg.linear_key_head_dim,
-        head_v_dim: cfg.linear_value_head_dim,
-        conv_kernel_size: cfg.linear_conv_kernel_dim,
-        rms_norm_eps: cfg.rms_norm_eps,
-    };
+    let gdn_cfg = cfg.gdn_config();
     let prefix = format!("model.layers.{}.linear_attn", args.layer);
     let gdn = GatedDeltaNet::from_loader(&loader, &prefix, gdn_cfg)
         .with_context(|| format!("GatedDeltaNet::from_loader prefix={prefix}"))?;
@@ -177,6 +172,7 @@ fn main() -> Result<()> {
         meta: Meta {
             backend: "ironmlx-gdn",
             model_dir: args.model.display().to_string(),
+            model_type: arch.model_type(),
             layer: args.layer,
             seqs,
             warmup_runs: args.warmup_runs,
@@ -195,6 +191,76 @@ fn main() -> Result<()> {
     std::fs::write(&args.out, serde_json::to_string_pretty(&output)? + "\n")
         .with_context(|| format!("writing {}", args.out.display()))?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct GdnBenchConfig {
+    hidden_size: i32,
+    rms_norm_eps: f32,
+    full_attention_interval: i32,
+    linear_num_value_heads: i32,
+    linear_num_key_heads: i32,
+    linear_key_head_dim: i32,
+    linear_value_head_dim: i32,
+    linear_conv_kernel_dim: i32,
+}
+
+impl GdnBenchConfig {
+    fn layer_kind(self, layer_idx: i32) -> AttnKind {
+        if (layer_idx + 1) % self.full_attention_interval == 0 {
+            AttnKind::Full
+        } else {
+            AttnKind::Linear
+        }
+    }
+
+    fn gdn_config(self) -> GatedDeltaNetConfig {
+        GatedDeltaNetConfig {
+            hidden_size: self.hidden_size,
+            num_v_heads: self.linear_num_value_heads,
+            num_k_heads: self.linear_num_key_heads,
+            head_k_dim: self.linear_key_head_dim,
+            head_v_dim: self.linear_value_head_dim,
+            conv_kernel_size: self.linear_conv_kernel_dim,
+            rms_norm_eps: self.rms_norm_eps,
+        }
+    }
+}
+
+fn load_gdn_bench_config(loader: &Loader, arch: ModelArchitecture) -> Result<GdnBenchConfig> {
+    match arch {
+        ModelArchitecture::Qwen35Dense => {
+            let cfg = Qwen35Config::from_loader(loader).context("Qwen35Config::from_loader")?;
+            Ok(GdnBenchConfig {
+                hidden_size: cfg.hidden_size,
+                rms_norm_eps: cfg.rms_norm_eps,
+                full_attention_interval: cfg.full_attention_interval,
+                linear_num_value_heads: cfg.linear_num_value_heads,
+                linear_num_key_heads: cfg.linear_num_key_heads,
+                linear_key_head_dim: cfg.linear_key_head_dim,
+                linear_value_head_dim: cfg.linear_value_head_dim,
+                linear_conv_kernel_dim: cfg.linear_conv_kernel_dim,
+            })
+        }
+        ModelArchitecture::Qwen35Moe => {
+            let cfg =
+                Qwen35MoeConfig::from_loader(loader).context("Qwen35MoeConfig::from_loader")?;
+            Ok(GdnBenchConfig {
+                hidden_size: cfg.hidden_size,
+                rms_norm_eps: cfg.rms_norm_eps,
+                full_attention_interval: cfg.full_attention_interval,
+                linear_num_value_heads: cfg.linear_num_value_heads,
+                linear_num_key_heads: cfg.linear_num_key_heads,
+                linear_key_head_dim: cfg.linear_key_head_dim,
+                linear_value_head_dim: cfg.linear_value_head_dim,
+                linear_conv_kernel_dim: cfg.linear_conv_kernel_dim,
+            })
+        }
+        other => Err(anyhow!(
+            "ironmlx-gdn-bench supports Qwen3.5 dense/MoE only; got {}",
+            other.model_type()
+        )),
+    }
 }
 
 #[cfg(feature = "p5g-profile")]

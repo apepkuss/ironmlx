@@ -17,6 +17,7 @@ fn sample_entry() -> PagedPrefixEntry {
         main_layers: vec![PrefixLayerPayload::FullPaged { k_pages, v_pages }],
         mtp_layers: Vec::new(),
         mtp_last_hidden: None,
+        gemma4_drafter_last_hidden: None,
     }
 }
 
@@ -27,6 +28,7 @@ fn sample_dense_entry() -> PagedPrefixEntry {
         main_layers: vec![PrefixLayerPayload::FullDense { k, v }],
         mtp_layers: Vec::new(),
         mtp_last_hidden: None,
+        gemma4_drafter_last_hidden: None,
     }
 }
 

@@ -463,6 +463,14 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+        fn array_contiguous(
+            a: &MlxArray,
+            allow_col_major: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
         fn array_broadcast_to(
             a: &MlxArray,
             shape: &[i32],

@@ -1,0 +1,43 @@
+{
+  "error": null,
+  "name": "multi_turn",
+  "ok": true,
+  "turns": [
+    {
+      "content_chars": 28,
+      "elapsed_s": 0.08350391699997317,
+      "finish_reason": "length",
+      "ok": true,
+      "turn": 0,
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 26,
+        "total_tokens": 42
+      }
+    },
+    {
+      "content_chars": 76,
+      "elapsed_s": 0.0876440000000116,
+      "finish_reason": "length",
+      "ok": true,
+      "turn": 1,
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 66,
+        "total_tokens": 82
+      }
+    },
+    {
+      "content_chars": 33,
+      "elapsed_s": 0.09151224999999386,
+      "finish_reason": "length",
+      "ok": true,
+      "turn": 2,
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 106,
+        "total_tokens": 122
+      }
+    }
+  ]
+}

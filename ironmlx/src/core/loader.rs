@@ -16,6 +16,20 @@ use crate::Result;
 pub enum QuantMode {
     /// Affine quantization (scale + offset per group).
     Affine,
+    /// OptiQ mixed-bit quantization backed by MLX affine packed tensors.
+    OptiQ,
+}
+
+impl QuantMode {
+    pub(crate) fn mlx_mode(self) -> &'static str {
+        match self {
+            Self::Affine | Self::OptiQ => "affine",
+        }
+    }
+
+    pub(crate) fn uses_affine_storage(self) -> bool {
+        matches!(self, Self::Affine | Self::OptiQ)
+    }
 }
 
 /// Quantization metadata parsed from `config.json`.
@@ -23,7 +37,7 @@ pub enum QuantMode {
 pub struct QuantMeta {
     /// Group size for per-group quantization parameters.
     pub group_size: i32,
-    /// Bits per quantized weight (4, 6, 8).
+    /// Bits per quantized weight (2, 4, 8).
     pub bits: i32,
     /// Quantization scheme.
     pub mode: QuantMode,
@@ -154,13 +168,24 @@ impl Loader {
             }
         }
 
-        let quant = parse_quant_meta(&config_raw)?;
+        let optiq_metadata = load_optiq_metadata(model_dir)?;
+        let quant = parse_quant_meta_with_optiq(&config_raw, optiq_metadata.as_ref())?;
         let quant_overrides = match quant {
-            Some(global) => parse_quant_overrides(&config_raw, global)?,
+            Some(global) => {
+                parse_quant_overrides_with_optiq(&config_raw, global, optiq_metadata.as_ref())?
+            }
             None => HashMap::new(),
         };
 
         let mut tensors = load_safetensors(model_dir)?;
+        if matches!(
+            sanitize_mode,
+            SanitizeMode::Text {
+                keep_vision_tower: true
+            }
+        ) {
+            load_optiq_vision_sidecar(model_dir, &config_raw, &mut tensors)?;
+        }
 
         match sanitize_mode {
             SanitizeMode::Text { keep_vision_tower } => {
@@ -463,16 +488,47 @@ fn quant_config_value(config_raw: &serde_json::Value) -> Option<&serde_json::Val
         .or_else(|| config_raw.get("quantization_config"))
 }
 
+#[cfg(test)]
 fn parse_quant_meta(config_raw: &serde_json::Value) -> Result<Option<QuantMeta>> {
-    let Some(q) = quant_config_value(config_raw) else {
-        return Ok(None);
-    };
-    Ok(Some(parse_quant_meta_value(q, None, "quantization")?))
+    parse_quant_meta_with_optiq(config_raw, None)
 }
 
+fn parse_quant_meta_with_optiq(
+    config_raw: &serde_json::Value,
+    optiq_metadata: Option<&serde_json::Value>,
+) -> Result<Option<QuantMeta>> {
+    if let Some(metadata) = optiq_metadata {
+        validate_optiq_metadata(metadata)?;
+    }
+    let Some(q) = quant_config_value(config_raw) else {
+        if optiq_metadata.is_some() {
+            return Err(anyhow!(
+                "optiq_metadata.json present but config.json has no quantization metadata"
+            ));
+        }
+        return Ok(None);
+    };
+    let force_mode = optiq_metadata.map(|_| QuantMode::OptiQ);
+    Ok(Some(parse_quant_meta_value_with_mode(
+        q,
+        None,
+        force_mode,
+        "quantization",
+    )?))
+}
+
+#[cfg(test)]
 fn parse_quant_overrides(
     config_raw: &serde_json::Value,
     global: QuantMeta,
+) -> Result<HashMap<String, QuantMeta>> {
+    parse_quant_overrides_with_optiq(config_raw, global, None)
+}
+
+fn parse_quant_overrides_with_optiq(
+    config_raw: &serde_json::Value,
+    global: QuantMeta,
+    optiq_metadata: Option<&serde_json::Value>,
 ) -> Result<HashMap<String, QuantMeta>> {
     let Some(q) = quant_config_value(config_raw) else {
         return Ok(HashMap::new());
@@ -489,17 +545,45 @@ fn parse_quant_overrides(
             continue;
         }
         let prefix = normalize_quant_prefix(key);
-        let meta =
-            parse_quant_meta_value(value, Some(global.mode), &format!("quantization.{key}"))?;
+        let force_mode = (global.mode == QuantMode::OptiQ).then_some(QuantMode::OptiQ);
+        let meta = parse_quant_meta_value_with_mode(
+            value,
+            Some(global.mode),
+            force_mode,
+            &format!("quantization.{key}"),
+        )?;
         overrides.insert(prefix, meta);
+    }
+
+    if let Some(metadata) = optiq_metadata {
+        let per_layer = optiq_per_layer(metadata)?;
+        for (key, value) in per_layer {
+            let prefix = normalize_quant_prefix(key);
+            let meta = parse_quant_meta_value_with_mode(
+                value,
+                Some(global.mode),
+                Some(QuantMode::OptiQ),
+                &format!("optiq_metadata.per_layer.{key}"),
+            )?;
+            if let Some(existing) = overrides.get(&prefix) {
+                if *existing != meta {
+                    return Err(anyhow!(
+                        "quantization.{prefix} conflicts with optiq_metadata.per_layer.{key}: config={existing:?}, optiq_metadata={meta:?}"
+                    ));
+                }
+            } else {
+                overrides.insert(prefix, meta);
+            }
+        }
     }
 
     Ok(overrides)
 }
 
-fn parse_quant_meta_value(
+fn parse_quant_meta_value_with_mode(
     q: &serde_json::Value,
     default_mode: Option<QuantMode>,
+    force_mode: Option<QuantMode>,
     context_name: &str,
 ) -> Result<QuantMeta> {
     let group_size_i64 = q
@@ -514,16 +598,100 @@ fn parse_quant_meta_value(
         .ok_or_else(|| anyhow!("{context_name}.bits missing or non-int"))?;
     let bits =
         i32::try_from(bits_i64).with_context(|| format!("{context_name}.bits out of i32 range"))?;
-    let mode = match q.get("mode").and_then(|m| m.as_str()) {
-        Some("affine") => QuantMode::Affine,
-        Some(other) => return Err(anyhow!("unsupported {context_name}.mode `{other}`")),
-        None => default_mode.unwrap_or(QuantMode::Affine),
+    let mode = match force_mode {
+        Some(QuantMode::OptiQ) => match q.get("mode").and_then(|m| m.as_str()) {
+            Some("affine") | None => QuantMode::OptiQ,
+            Some(other) => {
+                return Err(anyhow!(
+                    "unsupported {context_name}.mode `{other}` for OptiQ affine storage"
+                ));
+            }
+        },
+        Some(QuantMode::Affine) => QuantMode::Affine,
+        None => match q.get("mode").and_then(|m| m.as_str()) {
+            Some("affine") => QuantMode::Affine,
+            Some(other) => return Err(anyhow!("unsupported {context_name}.mode `{other}`")),
+            None => default_mode.unwrap_or(QuantMode::Affine),
+        },
     };
+    validate_quant_meta_bits(mode, bits, context_name)?;
     Ok(QuantMeta {
         group_size,
         bits,
         mode,
     })
+}
+
+fn validate_quant_meta_bits(mode: QuantMode, bits: i32, context_name: &str) -> Result<()> {
+    match mode {
+        QuantMode::Affine | QuantMode::OptiQ if matches!(bits, 2 | 4 | 8) => Ok(()),
+        QuantMode::Affine | QuantMode::OptiQ => Err(anyhow!(
+            "unsupported {context_name}.bits `{bits}` for {mode:?} quantization; supported bits are 2, 4, and 8"
+        )),
+    }
+}
+
+fn load_optiq_metadata(model_dir: &Path) -> Result<Option<serde_json::Value>> {
+    let path = model_dir.join("optiq_metadata.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let metadata: serde_json::Value = serde_json::from_reader(
+        std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", path.display()))?;
+    validate_optiq_metadata(&metadata)?;
+    Ok(Some(metadata))
+}
+
+fn validate_optiq_metadata(metadata: &serde_json::Value) -> Result<()> {
+    let method = metadata
+        .get("method")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("optiq_metadata.method missing or non-string"))?;
+    if method != "optiq_mixed_precision" {
+        return Err(anyhow!("unsupported optiq_metadata.method `{method}`"));
+    }
+    optiq_per_layer(metadata)?;
+    Ok(())
+}
+
+fn optiq_per_layer(
+    metadata: &serde_json::Value,
+) -> Result<&serde_json::Map<String, serde_json::Value>> {
+    metadata
+        .get("per_layer")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow!("optiq_metadata.per_layer missing or non-object"))
+}
+
+fn load_optiq_vision_sidecar(
+    model_dir: &Path,
+    config_raw: &serde_json::Value,
+    tensors: &mut HashMap<String, Array>,
+) -> Result<()> {
+    let Some(sidecar) = config_raw
+        .get("optiq_vision")
+        .and_then(|v| v.get("sidecar"))
+        .and_then(|v| v.as_str())
+    else {
+        return Ok(());
+    };
+    let sidecar_path = model_dir.join(sidecar);
+    let (sidecar_tensors, _meta) = mlx::io::load_safetensors(
+        sidecar_path
+            .to_str()
+            .ok_or_else(|| anyhow!("non-utf8 path: {}", sidecar_path.display()))?,
+    )
+    .map_err(|e| anyhow!("load_safetensors {}: {e}", sidecar_path.display()))?;
+    for (key, tensor) in sidecar_tensors {
+        if tensors.insert(key.clone(), tensor).is_some() {
+            return Err(anyhow!(
+                "optiq vision sidecar `{sidecar}` duplicates tensor key `{key}`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn normalize_quant_prefix(key: &str) -> String {
@@ -617,7 +785,10 @@ fn load_safetensors(model_dir: &Path) -> Result<HashMap<String, Array>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mlx::Array;
     use serde_json::json;
+    use serial_test::serial;
+    use std::collections::HashMap;
 
     #[test]
     fn parse_quant_meta_affine_4bit() {
@@ -627,6 +798,17 @@ mod tests {
         let q = parse_quant_meta(&cfg).unwrap().expect("quant");
         assert_eq!(q.group_size, 64);
         assert_eq!(q.bits, 4);
+        assert_eq!(q.mode, QuantMode::Affine);
+    }
+
+    #[test]
+    fn parse_quant_meta_affine_2bit() {
+        let cfg = json!({
+            "quantization": { "group_size": 64, "bits": 2, "mode": "affine" }
+        });
+        let q = parse_quant_meta(&cfg).unwrap().expect("quant");
+        assert_eq!(q.group_size, 64);
+        assert_eq!(q.bits, 2);
         assert_eq!(q.mode, QuantMode::Affine);
     }
 
@@ -664,6 +846,219 @@ mod tests {
                 mode: QuantMode::Affine,
             }
         );
+    }
+
+    #[test]
+    fn parse_quant_overrides_preserve_mixed_affine_bits() {
+        let cfg = json!({
+            "quantization": {
+                "group_size": 64,
+                "bits": 4,
+                "mode": "affine",
+                "model.layers.0.mlp.down_proj": {
+                    "group_size": 64,
+                    "bits": 2
+                },
+                "model.layers.1.mlp.down_proj": {
+                    "group_size": 128,
+                    "bits": 8
+                }
+            }
+        });
+        let global = parse_quant_meta(&cfg).unwrap().expect("global quant");
+        let overrides = parse_quant_overrides(&cfg, global).unwrap();
+
+        assert_eq!(
+            overrides["model.layers.0.mlp.down_proj"],
+            QuantMeta {
+                group_size: 64,
+                bits: 2,
+                mode: QuantMode::Affine,
+            }
+        );
+        assert_eq!(
+            overrides["model.layers.1.mlp.down_proj"],
+            QuantMeta {
+                group_size: 128,
+                bits: 8,
+                mode: QuantMode::Affine,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_quant_meta_with_optiq_metadata_marks_independent_mode() {
+        let cfg = json!({
+            "quantization": {
+                "group_size": 64,
+                "bits": 4,
+                "mode": "affine",
+                "language_model.model.layers.0.mlp.down_proj": {
+                    "group_size": 64,
+                    "bits": 8
+                }
+            }
+        });
+        let optiq = json!({
+            "method": "optiq_mixed_precision",
+            "per_layer": {
+                "language_model.model.layers.0.mlp.down_proj": {
+                    "group_size": 64,
+                    "bits": 8
+                }
+            }
+        });
+
+        let global = parse_quant_meta_with_optiq(&cfg, Some(&optiq))
+            .unwrap()
+            .expect("global quant");
+        let overrides = parse_quant_overrides_with_optiq(&cfg, global, Some(&optiq)).unwrap();
+
+        assert_eq!(
+            global,
+            QuantMeta {
+                group_size: 64,
+                bits: 4,
+                mode: QuantMode::OptiQ,
+            }
+        );
+        assert_eq!(
+            overrides["model.layers.0.mlp.down_proj"],
+            QuantMeta {
+                group_size: 64,
+                bits: 8,
+                mode: QuantMode::OptiQ,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_quant_overrides_accepts_optiq_per_layer_not_duplicated_in_config() {
+        let cfg = json!({
+            "quantization": { "group_size": 64, "bits": 4, "mode": "affine" }
+        });
+        let optiq = json!({
+            "method": "optiq_mixed_precision",
+            "per_layer": {
+                "language_model.model.layers.3.self_attn.q_proj": {
+                    "group_size": 64,
+                    "bits": 8
+                }
+            }
+        });
+        let global = parse_quant_meta_with_optiq(&cfg, Some(&optiq))
+            .unwrap()
+            .expect("global quant");
+        let overrides = parse_quant_overrides_with_optiq(&cfg, global, Some(&optiq)).unwrap();
+
+        assert_eq!(
+            overrides["model.layers.3.self_attn.q_proj"],
+            QuantMeta {
+                group_size: 64,
+                bits: 8,
+                mode: QuantMode::OptiQ,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_quant_overrides_rejects_conflicting_optiq_per_layer() {
+        let cfg = json!({
+            "quantization": {
+                "group_size": 64,
+                "bits": 4,
+                "mode": "affine",
+                "model.layers.3.self_attn.q_proj": {
+                    "group_size": 64,
+                    "bits": 4
+                }
+            }
+        });
+        let optiq = json!({
+            "method": "optiq_mixed_precision",
+            "per_layer": {
+                "model.layers.3.self_attn.q_proj": {
+                    "group_size": 64,
+                    "bits": 8
+                }
+            }
+        });
+        let global = parse_quant_meta_with_optiq(&cfg, Some(&optiq))
+            .unwrap()
+            .expect("global quant");
+        let err = parse_quant_overrides_with_optiq(&cfg, global, Some(&optiq))
+            .expect_err("conflicting OptiQ metadata should fail");
+        assert!(err.to_string().contains("conflicts with optiq_metadata"));
+    }
+
+    #[test]
+    fn parse_quant_meta_rejects_unknown_optiq_method() {
+        let cfg = json!({
+            "quantization": { "group_size": 64, "bits": 4, "mode": "affine" }
+        });
+        let optiq = json!({
+            "method": "not_optiq",
+            "per_layer": {}
+        });
+        let err = parse_quant_meta_with_optiq(&cfg, Some(&optiq))
+            .expect_err("unknown optiq method should fail");
+        assert!(err
+            .to_string()
+            .contains("unsupported optiq_metadata.method"));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn open_multimodal_loads_optiq_vision_sidecar_but_text_open_does_not() {
+        let dir =
+            std::env::temp_dir().join(format!("ironmlx-optiq-sidecar-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            json!({
+                "model_type": "gemma4",
+                "optiq_vision": {
+                    "sidecar": "optiq_vision.safetensors",
+                    "dtype": "bfloat16",
+                    "n_tensors": 1
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let main_tensor: Array = (&[1.0_f32][..], (1_i32,)).try_into().unwrap();
+        let vision_tensor: Array = (&[2.0_f32][..], (1_i32,)).try_into().unwrap();
+        let mut main = HashMap::new();
+        main.insert(
+            "language_model.model.embed_tokens.weight".to_owned(),
+            main_tensor,
+        );
+        let mut sidecar = HashMap::new();
+        sidecar.insert("vision_tower.patch_embed.weight".to_owned(), vision_tensor);
+        let metadata = HashMap::new();
+        mlx::io::save_safetensors(
+            dir.join("model.safetensors").to_str().unwrap(),
+            &main,
+            &metadata,
+        )
+        .unwrap();
+        mlx::io::save_safetensors(
+            dir.join("optiq_vision.safetensors").to_str().unwrap(),
+            &sidecar,
+            &metadata,
+        )
+        .unwrap();
+
+        let text_loader = Loader::open(&dir).unwrap();
+        assert!(text_loader.contains("model.embed_tokens.weight"));
+        assert!(!text_loader.contains("vision_tower.patch_embed.weight"));
+
+        let multimodal_loader = Loader::open_multimodal(&dir).unwrap();
+        assert!(multimodal_loader.contains("model.embed_tokens.weight"));
+        assert!(multimodal_loader.contains("vision_tower.patch_embed.weight"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -711,6 +1106,18 @@ mod tests {
             "quantization": { "group_size": 64, "bits": 4, "mode": "fp8" }
         });
         assert!(parse_quant_meta(&cfg).is_err());
+    }
+
+    #[test]
+    fn parse_quant_meta_rejects_affine_6bit_for_now() {
+        let cfg = json!({
+            "quantization": { "group_size": 64, "bits": 6, "mode": "affine" }
+        });
+        let err = parse_quant_meta(&cfg).expect_err("6-bit affine should be rejected");
+        assert!(
+            err.to_string().contains("unsupported quantization.bits"),
+            "{err:#}"
+        );
     }
 
     #[test]

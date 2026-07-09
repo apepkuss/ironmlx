@@ -1,0 +1,77 @@
+{
+  "meta": {
+    "backend": "ironmlx-core",
+    "mode": "gs-text",
+    "model_dir": "/Users/xin/.ironmlx/models/models--mlx-community--Qwen3.5-4B-MLX-bf16/snapshots/475632ded9a95863da4e4b235ab9ccbc5d3cc6bf",
+    "mtp_model_dir": null,
+    "mtp_draft_tokens": null,
+    "mtp_trace_windows": 0,
+    "prompt_file": "/tmp/ironmlx-short-prompt.txt",
+    "prompt_tokens": 6,
+    "max_tokens": 8,
+    "prefill_chunk_size": 32768,
+    "kv_quant": "none",
+    "paged_prefix_cache_dir": null,
+    "paged_prefix_cache_block_size": 128,
+    "paged_prefix_cache_max_pages": null,
+    "active_kv_offload": false,
+    "active_kv_offload_dir": null,
+    "active_kv_hot_window_pages": null,
+    "active_kv_chunk_pages": null,
+    "b_max": 2,
+    "effective_cap_max": 256,
+    "warmup_runs": 0,
+    "measured_runs": 1,
+    "load_ms": 424.766125
+  },
+  "summary": {
+    "runs": 1,
+    "valid_runs": 1,
+    "ttft_ms": {
+      "p50": 185.57791600000002,
+      "p95": 185.57791600000002,
+      "mean": 185.57791600000002
+    },
+    "e2e_ms": {
+      "p50": 544.141333,
+      "p95": 544.141333,
+      "mean": 544.141333
+    },
+    "decode_time_ms": {
+      "p50": 358.563417,
+      "p95": 358.563417,
+      "mean": 358.563417
+    },
+    "generation_tps": {
+      "p50": 19.522348538975464,
+      "p95": 19.522348538975464,
+      "mean": 19.522348538975464
+    }
+  },
+  "warmups": [],
+  "records": [
+    {
+      "mode": "gs-text",
+      "ttft_ms": 185.57791600000002,
+      "e2e_ms": 544.141333,
+      "decode_time_ms": 358.563417,
+      "generated_tokens": 8,
+      "generated_token_ids": [
+        40,
+        599,
+        264,
+        3296,
+        883,
+        279,
+        2614,
+        1414
+      ],
+      "generated_text": "I have a question about the following text",
+      "generation_tps": 19.522348538975464,
+      "finish_reason": "length",
+      "valid": true,
+      "mtp_stats": null,
+      "active_kv_stats": null
+    }
+  ]
+}

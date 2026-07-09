@@ -1,0 +1,60 @@
+{
+  "cells": [
+    {
+      "aggregate": {
+        "req_per_sec": 0.2,
+        "tokens_per_sec": 44.733333333333334
+      },
+      "cached_tokens_warning": false,
+      "concurrent": 4,
+      "e2e_s_p95": 58.17286625,
+      "early_itl_ms": {
+        "first_n": 8,
+        "p50": 9.911,
+        "p95": 9.955250000000001,
+        "p99": 9.955250000000001,
+        "sample_count": 6
+      },
+      "finish_reason_summary": "stop=6",
+      "itl_ms": {
+        "p50": 9.474593694300518,
+        "p95": 9.614263620498615,
+        "p99": 9.614263620498615
+      },
+      "n_requests": 6,
+      "per_worker": {
+        "req_count": [
+          1,
+          2,
+          1,
+          2
+        ],
+        "tokens_per_sec": [
+          12.066666666666666,
+          13.3,
+          6.633333333333334,
+          12.733333333333333
+        ]
+      },
+      "pp_target": 32768,
+      "target_name": "ironmlx",
+      "tg_target": 512,
+      "ttft_ms": {
+        "p50": 54054.13375,
+        "p95": 56147.106416,
+        "p99": 56147.106416
+      },
+      "wall_duration_s": 30.0
+    }
+  ],
+  "concurrent": 4,
+  "duration_s": 30,
+  "mode": "concurrent",
+  "targets": [
+    {
+      "name": "ironmlx",
+      "url": "http://127.0.0.1:18824"
+    }
+  ],
+  "warmup_duration_s": 5
+}

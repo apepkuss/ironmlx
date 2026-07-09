@@ -1,0 +1,429 @@
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/array.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/array.h:7:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/array.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/array.h:7:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/compile.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/compile.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/compile.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/compile.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/conv.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/conv.h:6:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/conv.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/conv.h:6:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/stream.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/stream.h:8:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/stream.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/stream.h:8:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/fast.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/fast.h:8:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/fast.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/fast.h:8:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/io.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/io.h:14:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/io.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/io.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/io.h:14:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/io.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/quantization.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/quantization.h:10:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/quantization.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/quantization.h:10:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/random.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/random.h:7:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from target/release/build/mlx-sys-f25182ab0c3c0688/out/cxxbridge/sources/mlx-sys/src/bridge/random.rs.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/random.h:7:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/array.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/array.h:7:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/array.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/array.h:7:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/compile.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/compile.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/compile.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/compile.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/conv.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/conv.h:6:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/conv.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/conv.h:6:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/transforms.cc:3:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/transforms.cc:3:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/stream.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/stream.h:8:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/stream.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/stream.h:8:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/fast.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/fast.h:8:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/fast.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/fast.h:8:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/io.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/io.h:14:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/io.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/io.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/io.h:14:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/io.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/quantization.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/quantization.h:10:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/quantization.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/quantization.h:10:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+warning: mlx-sys@0.0.1: In file included from shim/src/random.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/random.h:7:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                    ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.0.1:       |                                                ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.0.1:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.0.1:       |                               ^
+warning: mlx-sys@0.0.1: In file included from shim/src/random.cc:1:
+warning: mlx-sys@0.0.1: In file included from shim/include/cxx_mlx_shim/random.h:7:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.0.1: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.0.1:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.0.1:       |   ^
+warning: mlx-sys@0.0.1: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.0.1:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.0.1:       |                   ^
+warning: mlx-sys@0.0.1: 4 warnings generated.
+   Compiling iron-bench v0.0.1 (iron-bench)
+    Finished `release` profile [optimized] target(s) in 2.08s

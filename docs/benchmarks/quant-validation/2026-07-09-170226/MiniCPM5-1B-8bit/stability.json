@@ -1,0 +1,67 @@
+{
+  "error": null,
+  "name": "stability",
+  "ok": true,
+  "runs": [
+    {
+      "content_chars": 80,
+      "elapsed_s": 0.08224654200000714,
+      "finish_reason": "length",
+      "ok": true,
+      "run": 0,
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 26,
+        "total_tokens": 42
+      }
+    },
+    {
+      "content_chars": 85,
+      "elapsed_s": 0.08205154200004472,
+      "finish_reason": "length",
+      "ok": true,
+      "run": 1,
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 26,
+        "total_tokens": 42
+      }
+    },
+    {
+      "content_chars": 103,
+      "elapsed_s": 0.082129416999976,
+      "finish_reason": "length",
+      "ok": true,
+      "run": 2,
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 26,
+        "total_tokens": 42
+      }
+    },
+    {
+      "content_chars": 100,
+      "elapsed_s": 0.08387754200003883,
+      "finish_reason": "length",
+      "ok": true,
+      "run": 3,
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 26,
+        "total_tokens": 42
+      }
+    },
+    {
+      "content_chars": 91,
+      "elapsed_s": 0.08279254199999286,
+      "finish_reason": "length",
+      "ok": true,
+      "run": 4,
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 26,
+        "total_tokens": 42
+      }
+    }
+  ]
+}

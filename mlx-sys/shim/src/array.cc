@@ -571,6 +571,14 @@ std::unique_ptr<MlxArray> array_transpose_axes(
   return std::make_unique<MlxArray>(mlx::core::transpose(a, std::move(axes_vec), target));
 }
 
+std::unique_ptr<MlxArray> array_contiguous(
+    const MlxArray& a, bool allow_col_major,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::contiguous(a, allow_col_major, target));
+}
+
 std::unique_ptr<MlxArray> array_broadcast_to(
     const MlxArray& a, rust::Slice<const int32_t> shape,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {

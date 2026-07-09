@@ -294,6 +294,9 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         memory_budget_exceeded_count: handle.memory_budget_exceeded_count.clone(),
         kv_cache_active_bytes: handle.kv_cache_active_bytes.clone(),
         kv_cache_soft_limit_bytes: handle.kv_cache_soft_limit_bytes,
+        kv_cache_logical_cap_tokens: handle.kv_cache_logical_cap_tokens,
+        kv_cache_resident_cap_tokens: handle.kv_cache_resident_cap_tokens,
+        kv_cache_budget_policy: handle.kv_cache_budget_policy.to_string(),
         mtp: ironmlx::core::server::health::MtpHealthConfig::disabled(),
         active_kv_offload: handle.active_kv_offload.clone(),
     });
@@ -332,6 +335,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         sampling_defaults: ironmlx::core::server::SamplingDefaults::default(),
         model_weight_bytes: meta.weight_bytes,
         kv_cache_turboquant_bits: None,
+        mtp_enabled: false,
         health_collector,
     };
 
